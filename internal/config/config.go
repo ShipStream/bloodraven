@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -10,9 +10,9 @@ import (
 
 // Config holds all watcher configuration from environment variables.
 type Config struct {
-	AZ    string
-	DC1   DCConfig
-	DC2   DCConfig
+	AZ  string
+	DC1 DCConfig
+	DC2 DCConfig
 
 	CloudflareAPIToken string
 	CloudflareZoneID   string

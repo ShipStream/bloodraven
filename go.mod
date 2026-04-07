@@ -1,4 +1,4 @@
-module github.com/shipstream/platform/services/mysql-watcher
+module github.com/shipstream/bloodraven
 
 go 1.23.0
 

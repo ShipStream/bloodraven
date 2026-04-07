@@ -1,4 +1,4 @@
-package main
+package platform
 
 import (
 	"encoding/json"
@@ -17,9 +17,9 @@ type WSMessage struct {
 
 // Hub manages websocket connections and broadcasts state changes.
 type Hub struct {
-	mu      sync.RWMutex
-	clients map[*websocket.Conn]struct{}
-	logger  *slog.Logger
+	mu       sync.RWMutex
+	clients  map[*websocket.Conn]struct{}
+	logger   *slog.Logger
 	upgrader websocket.Upgrader
 }
 

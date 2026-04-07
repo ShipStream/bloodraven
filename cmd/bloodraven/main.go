@@ -10,29 +10,36 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	"github.com/shipstream/bloodraven/internal/config"
+	"github.com/shipstream/bloodraven/internal/controller"
+	"github.com/shipstream/bloodraven/internal/metrics"
+	"github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/platform"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	cfg, err := LoadConfig()
+	cfg, err := config.LoadConfig()
 	if err != nil {
 		logger.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
 
 	// MySQL connections
-	dc1MySQL, err := NewMySQLChecker(cfg.DC1.MysqlDSN)
+	dc1MySQL, err := mysql.NewChecker(cfg.DC1.MysqlDSN)
 	if err != nil {
 		logger.Error("failed to connect to dc1 mysql", "error", err)
 		os.Exit(1)
 	}
 	defer dc1MySQL.Close()
 
-	dc2MySQL, err := NewMySQLChecker(cfg.DC2.MysqlDSN)
+	dc2MySQL, err := mysql.NewChecker(cfg.DC2.MysqlDSN)
 	if err != nil {
 		logger.Error("failed to connect to dc2 mysql", "error", err)
 		os.Exit(1)
@@ -51,11 +58,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	tainter := NewNodeTainter(k8sClient, logger)
-	hub := NewHub(logger)
-	dns := NewCloudflareDNS(cfg.CloudflareAPIToken, cfg.CloudflareZoneID, cfg.AZ)
+	// Register metrics
+	metrics.Register(prometheus.DefaultRegisterer)
 
-	w := NewWatcher(cfg, dc1MySQL, dc2MySQL, tainter, hub, dns, logger)
+	tainter := platform.NewNodeTainter(k8sClient, logger)
+	hub := platform.NewHub(logger)
+	dns := platform.NewCloudflareDNS(cfg.CloudflareAPIToken, cfg.CloudflareZoneID, cfg.AZ)
+
+	tm := controller.NewTopologyManager(cfg, dc1MySQL, dc2MySQL, tainter, hub, dns, logger)
 
 	// HTTP server
 	mux := http.NewServeMux()
@@ -64,7 +74,7 @@ func main() {
 		rw.Write([]byte("ok"))
 	})
 	mux.HandleFunc("/readyz", func(rw http.ResponseWriter, r *http.Request) {
-		if w.Ready() {
+		if tm.Ready() {
 			rw.WriteHeader(http.StatusOK)
 			rw.Write([]byte("ok"))
 		} else {
@@ -74,7 +84,7 @@ func main() {
 	})
 	mux.HandleFunc("/status", func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(rw).Encode(w.Status())
+		json.NewEncoder(rw).Encode(tm.Status())
 	})
 	mux.HandleFunc("/ws/status", hub.HandleWS)
 	mux.Handle("/metrics", promhttp.Handler())
@@ -92,13 +102,13 @@ func main() {
 		}
 	}()
 
-	// Start watcher
+	// Start topology manager
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go w.Run(ctx)
+	go tm.Run(ctx)
 
-	logger.Info("mysql-watcher started",
+	logger.Info("bloodraven started",
 		"az", cfg.AZ,
 		"dc1", cfg.DC1.Name,
 		"dc2", cfg.DC2.Name,

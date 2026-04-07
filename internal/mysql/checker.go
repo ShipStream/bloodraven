@@ -1,4 +1,4 @@
-package main
+package mysql
 
 import (
 	"context"
@@ -8,29 +8,29 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// MySQLChecker checks MySQL read_only status.
-type MySQLChecker interface {
+// Checker checks MySQL read_only status.
+type Checker interface {
 	CheckReadOnly(ctx context.Context) (readOnly bool, err error)
 	Promote(ctx context.Context) error
 	Close() error
 }
 
-type mysqlChecker struct {
+type checker struct {
 	db *sql.DB
 }
 
-// NewMySQLChecker creates a checker for the given DSN.
-func NewMySQLChecker(dsn string) (MySQLChecker, error) {
+// NewChecker creates a checker for the given DSN.
+func NewChecker(dsn string) (Checker, error) {
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)
 	}
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
-	return &mysqlChecker{db: db}, nil
+	return &checker{db: db}, nil
 }
 
-func (m *mysqlChecker) CheckReadOnly(ctx context.Context) (bool, error) {
+func (m *checker) CheckReadOnly(ctx context.Context) (bool, error) {
 	var readOnly int
 	err := m.db.QueryRowContext(ctx, "SELECT @@read_only").Scan(&readOnly)
 	if err != nil {
@@ -39,7 +39,7 @@ func (m *mysqlChecker) CheckReadOnly(ctx context.Context) (bool, error) {
 	return readOnly == 1, nil
 }
 
-func (m *mysqlChecker) Promote(ctx context.Context) error {
+func (m *checker) Promote(ctx context.Context) error {
 	stmts := []string{
 		"STOP REPLICA",
 		"RESET REPLICA ALL",
@@ -53,6 +53,6 @@ func (m *mysqlChecker) Promote(ctx context.Context) error {
 	return nil
 }
 
-func (m *mysqlChecker) Close() error {
+func (m *checker) Close() error {
 	return m.db.Close()
 }
