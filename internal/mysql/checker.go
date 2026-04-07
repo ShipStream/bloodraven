@@ -4,15 +4,31 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// Checker checks MySQL read_only status.
+// Checker checks MySQL read_only status and manages replication.
 type Checker interface {
 	CheckReadOnly(ctx context.Context) (readOnly bool, err error)
 	Promote(ctx context.Context) error
 	Close() error
+
+	// Failover hardening methods:
+	SetSuperReadOnly(ctx context.Context, on bool) error
+	StopReplica(ctx context.Context) error
+	ResetReplicaAll(ctx context.Context) error
+	SetReadOnly(ctx context.Context, on bool) error
+	ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error)
+	ChangeReplicationSource(ctx context.Context, opts ReplicationSourceOpts) error
+	StartReplica(ctx context.Context) error
+	WaitForRelayLogDrain(ctx context.Context, timeout time.Duration) error
+
+	// Clone plugin methods:
+	SetCloneDonorList(ctx context.Context, donor string) error
+	CloneInstance(ctx context.Context, user, host, password string, useSSL bool) error
 }
 
 type checker struct {
@@ -55,4 +71,10 @@ func (m *checker) Promote(ctx context.Context) error {
 
 func (m *checker) Close() error {
 	return m.db.Close()
+}
+
+// escapeSingleQuotes escapes single quotes for MySQL string literals
+// used in statements that don't support parameterized queries (e.g. CLONE, CHANGE REPLICATION SOURCE).
+func escapeSingleQuotes(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
 }

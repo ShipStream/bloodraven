@@ -3,132 +3,124 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/shipstream/bloodraven/internal/config"
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/metrics"
-	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		logger.Error("failed to load config", "error", err)
-		os.Exit(1)
-	}
+	scheme := k8sruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
-	// MySQL connections
-	dc1MySQL, err := mysql.NewChecker(cfg.DC1.MysqlDSN)
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme:                 scheme,
+		HealthProbeBindAddress: ":8081",
+		Metrics: metricsserver.Options{
+			BindAddress: ":8080",
+		},
+		LeaderElection:   true,
+		LeaderElectionID: "bloodraven.shipstream.io",
+	})
 	if err != nil {
-		logger.Error("failed to connect to dc1 mysql", "error", err)
-		os.Exit(1)
-	}
-	defer dc1MySQL.Close()
-
-	dc2MySQL, err := mysql.NewChecker(cfg.DC2.MysqlDSN)
-	if err != nil {
-		logger.Error("failed to connect to dc2 mysql", "error", err)
-		os.Exit(1)
-	}
-	defer dc2MySQL.Close()
-
-	// Kubernetes client
-	k8sCfg, err := rest.InClusterConfig()
-	if err != nil {
-		logger.Error("failed to get k8s config", "error", err)
-		os.Exit(1)
-	}
-	k8sClient, err := kubernetes.NewForConfig(k8sCfg)
-	if err != nil {
-		logger.Error("failed to create k8s client", "error", err)
+		logger.Error("unable to start manager", "error", err)
 		os.Exit(1)
 	}
 
 	// Register metrics
 	metrics.Register(prometheus.DefaultRegisterer)
 
-	tainter := platform.NewNodeTainter(k8sClient, logger)
+	// Create the hub for websocket connections
 	hub := platform.NewHub(logger)
-	dns := platform.NewCloudflareDNS(cfg.CloudflareAPIToken, cfg.CloudflareZoneID, cfg.AZ)
 
-	tm := controller.NewTopologyManager(cfg, dc1MySQL, dc2MySQL, tainter, hub, dns, logger)
+	// Create and register the reconciler
+	reconciler := &controller.MysqlReplicaPairReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("bloodraven"),
+	}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create controller", "error", err)
+		os.Exit(1)
+	}
 
-	// HTTP server
+	// Add health/ready probes
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		logger.Error("unable to set up health check", "error", err)
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		logger.Error("unable to set up readyz check", "error", err)
+		os.Exit(1)
+	}
+
+	// Start a separate HTTP server for websocket and status on :8082
+	// (controller-runtime handles metrics on :8080 and probes on :8081)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, r *http.Request) {
-		rw.WriteHeader(http.StatusOK)
-		rw.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/readyz", func(rw http.ResponseWriter, r *http.Request) {
-		if tm.Ready() {
-			rw.WriteHeader(http.StatusOK)
-			rw.Write([]byte("ok"))
-		} else {
-			rw.WriteHeader(http.StatusServiceUnavailable)
-			rw.Write([]byte("not ready"))
-		}
-	})
 	mux.HandleFunc("/status", func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(rw).Encode(tm.Status())
+		json.NewEncoder(rw).Encode(map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("/ws/status", hub.HandleWS)
-	mux.Handle("/metrics", promhttp.Handler())
 
-	srv := &http.Server{
-		Addr:    cfg.ListenAddr,
+	auxSrv := &http.Server{
+		Addr:    ":8082",
 		Handler: mux,
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		logger.Info("starting HTTP server", "addr", cfg.ListenAddr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+	// Add the auxiliary HTTP server as a runnable
+	if err := mgr.Add(runnableFunc(func(ctx context.Context) error {
+		errCh := make(chan error, 1)
+		go func() {
+			logger.Info("starting auxiliary HTTP server", "addr", ":8082")
+			if err := auxSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+			close(errCh)
+		}()
+
+		select {
+		case err := <-errCh:
+			return fmt.Errorf("auxiliary HTTP server failed: %w", err)
+		case <-ctx.Done():
 		}
-	}()
-
-	// Start topology manager
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go tm.Run(ctx)
-
-	logger.Info("bloodraven started",
-		"az", cfg.AZ,
-		"dc1", cfg.DC1.Name,
-		"dc2", cfg.DC2.Name,
-		"poll_interval", cfg.PollInterval,
-	)
-
-	// Wait for shutdown signal or HTTP server error
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-
-	select {
-	case <-sigCh:
-		logger.Info("shutting down")
-	case err := <-errCh:
-		logger.Error("http server error", "error", err)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return auxSrv.Shutdown(shutdownCtx)
+	})); err != nil {
+		logger.Error("unable to add auxiliary server", "error", err)
+		os.Exit(1)
 	}
 
-	cancel()
+	logger.Info("starting bloodraven manager")
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		logger.Error("manager exited with error", "error", err)
+		os.Exit(1)
+	}
+}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-	srv.Shutdown(shutdownCtx)
+// runnableFunc adapts a function to the manager.Runnable interface.
+type runnableFunc func(ctx context.Context) error
+
+func (f runnableFunc) Start(ctx context.Context) error {
+	return f(ctx)
 }

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shipstream/bloodraven/internal/config"
+	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -39,11 +39,40 @@ func (m *mockMySQL) Promote(_ context.Context) error {
 
 func (m *mockMySQL) Close() error { return nil }
 
+func (m *mockMySQL) SetSuperReadOnly(_ context.Context, _ bool) error { return nil }
+func (m *mockMySQL) StopReplica(_ context.Context) error             { return nil }
+func (m *mockMySQL) ResetReplicaAll(_ context.Context) error         { return nil }
+func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.readOnly = on
+	return nil
+}
+func (m *mockMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
+	return nil, nil
+}
+func (m *mockMySQL) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
+	return nil
+}
+func (m *mockMySQL) StartReplica(_ context.Context) error { return nil }
+func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
+	return nil
+}
+func (m *mockMySQL) SetCloneDonorList(_ context.Context, _ string) error { return nil }
+func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool) error {
+	return nil
+}
+
 type failingPromoteMySQL struct {
 	*mockMySQL
 }
 
 func (f *failingPromoteMySQL) Promote(_ context.Context) error {
+	return errors.New("promote failed")
+}
+
+// Override SetReadOnly so the FailoverController.Execute fails during promotion.
+func (f *failingPromoteMySQL) SetReadOnly(_ context.Context, _ bool) error {
 	return errors.New("promote failed")
 }
 
@@ -112,12 +141,12 @@ func (m *mockDNS) getLastIP() string {
 
 // --- Test helpers ---
 
-func testConfig() config.Config {
-	return config.Config{
-		AZ: "lion",
-		DC1: config.DCConfig{Name: "dc1", MysqlDSN: "unused", LBIP: "1.1.1.1"},
-		DC2: config.DCConfig{Name: "dc2", MysqlDSN: "unused", LBIP: "2.2.2.2"},
-		PollInterval:      50 * time.Millisecond,
+func testTopologyConfig() TopologyConfig {
+	return TopologyConfig{
+		AZ:                "lion",
+		DC1:               DCTopologyConfig{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
+		DC2:               DCTopologyConfig{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
+		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
 		RecoveryThreshold: 2,
 	}
@@ -128,11 +157,14 @@ func testLogger() *slog.Logger {
 }
 
 func newTestTopologyManager(dc1, dc2 *mockMySQL) (*TopologyManager, *mockTainter, *mockDNS) {
-	cfg := testConfig()
+	cfg := testTopologyConfig()
 	tainter := newMockTainter()
 	hub := platform.NewHub(testLogger())
 	dns := &mockDNS{}
-	tm := NewTopologyManager(cfg, dc1, dc2, tainter, hub, dns, testLogger())
+	fc := NewFailoverController(testLogger())
+	tm := NewTopologyManager(cfg, dc1, dc2, fc, tainter, hub, dns, testLogger())
+	// Use a very short cooldown for tests so failovers aren't blocked.
+	tm.failoverCooldown = 0
 	return tm, tainter, dns
 }
 
@@ -140,7 +172,7 @@ func newTestTopologyManager(dc1, dc2 *mockMySQL) (*TopologyManager, *mockTainter
 func pollN(tm *TopologyManager, n int) {
 	ctx := context.Background()
 	for i := 0; i < n; i++ {
-		tm.poll(ctx)
+		tm.Poll(ctx)
 	}
 }
 
@@ -187,12 +219,16 @@ func TestFailoverDC1Down(t *testing.T) {
 	if !tainter.isTainted("lion-dc1") {
 		t.Error("dc1 should be tainted after failure")
 	}
-	if dc2.promoted != true {
-		t.Error("dc2 should have been promoted")
+	// FailoverController.Execute sets readOnly=false via SetReadOnly.
+	dc2.mu.Lock()
+	dc2RO := dc2.readOnly
+	dc2.mu.Unlock()
+	if dc2RO {
+		t.Error("dc2 should have been promoted (readOnly should be false)")
 	}
 
 	// DNS flip is deferred until promotion is confirmed.
-	// Promote() sets readOnly=false, but we need RecoveryThreshold polls to confirm.
+	// SetReadOnly(false) sets readOnly=false, but we need RecoveryThreshold polls to confirm.
 	if dns.getLastIP() != "" {
 		t.Error("DNS should not flip before promotion confirmation")
 	}
@@ -217,8 +253,11 @@ func TestPromotionNotRepeated(t *testing.T) {
 	dc1.setError(errors.New("connection refused"))
 	pollN(tm, 3) // reach threshold, triggers promotion
 
-	if dc2.promoted != true {
-		t.Fatal("dc2 should have been promoted")
+	dc2.mu.Lock()
+	dc2RO := dc2.readOnly
+	dc2.mu.Unlock()
+	if dc2RO {
+		t.Fatal("dc2 should have been promoted (readOnly should be false)")
 	}
 
 	// Poll again while dc1 still down, dc2 recovering

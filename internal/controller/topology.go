@@ -6,12 +6,35 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shipstream/bloodraven/internal/config"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
 )
+
+// DCTopologyConfig holds per-DC configuration for the topology manager.
+type DCTopologyConfig struct {
+	Name string
+	Zone string
+	LBIP string
+}
+
+// TopologyConfig holds topology manager configuration, decoupled from config source.
+type TopologyConfig struct {
+	AZ  string
+	DC1 DCTopologyConfig
+	DC2 DCTopologyConfig
+
+	PollInterval      int64 // nanoseconds
+	FailureThreshold  int
+	RecoveryThreshold int
+	FailoverCooldown  int64 // nanoseconds, default 60m
+}
+
+// PollIntervalDuration returns the poll interval as a time.Duration.
+func (c TopologyConfig) PollIntervalDuration() time.Duration {
+	return time.Duration(c.PollInterval)
+}
 
 // dcTracker tracks debounce counters and current state for one DC.
 type dcTracker struct {
@@ -26,13 +49,18 @@ type dcTracker struct {
 
 // TopologyManager is the main control loop.
 type TopologyManager struct {
-	cfg     config.Config
+	cfg     TopologyConfig
 	dc1     dcTracker
 	dc2     dcTracker
 	tainter platform.NodeTainter
 	hub     *platform.Hub
 	dns     platform.DNSUpdater
 	logger  *slog.Logger
+
+	// Failover orchestration.
+	failover         *FailoverController
+	lastFailover     time.Time
+	failoverCooldown time.Duration
 
 	// Promotion state: tracks which DC was promoted and is pending DNS flip.
 	promotedDC string // empty = no pending promotion
@@ -51,27 +79,33 @@ type StatusResponse struct {
 	PollTime string `json:"poll_time"`
 }
 
-func NewTopologyManager(cfg config.Config, dc1MySQL, dc2MySQL mysql.Checker, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
+func NewTopologyManager(cfg TopologyConfig, dc1MySQL, dc2MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
+	cooldown := time.Duration(cfg.FailoverCooldown)
+	if cooldown == 0 {
+		cooldown = 60 * time.Minute
+	}
 	return &TopologyManager{
 		cfg: cfg,
 		dc1: dcTracker{
 			name:  cfg.DC1.Name,
-			zone:  cfg.AZ + "-" + cfg.DC1.Name,
+			zone:  cfg.DC1.Zone,
 			lbIP:  cfg.DC1.LBIP,
 			mysql: dc1MySQL,
 			state: state.StateUnknown,
 		},
 		dc2: dcTracker{
 			name:  cfg.DC2.Name,
-			zone:  cfg.AZ + "-" + cfg.DC2.Name,
+			zone:  cfg.DC2.Zone,
 			lbIP:  cfg.DC2.LBIP,
 			mysql: dc2MySQL,
 			state: state.StateUnknown,
 		},
-		tainter: tainter,
-		hub:     hub,
-		dns:     dns,
-		logger:  logger,
+		failover:         failover,
+		failoverCooldown: cooldown,
+		tainter:          tainter,
+		hub:              hub,
+		dns:              dns,
+		logger:           logger,
 	}
 }
 
@@ -96,23 +130,25 @@ func (tm *TopologyManager) Ready() bool {
 
 // Run starts the polling loop. Blocks until ctx is cancelled.
 func (tm *TopologyManager) Run(ctx context.Context) {
-	ticker := time.NewTicker(tm.cfg.PollInterval)
+	ticker := time.NewTicker(tm.cfg.PollIntervalDuration())
 	defer ticker.Stop()
 
 	// Do an initial poll immediately.
-	tm.poll(ctx)
+	tm.Poll(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tm.poll(ctx)
+			tm.Poll(ctx)
 		}
 	}
 }
 
-func (tm *TopologyManager) poll(ctx context.Context) {
+// Poll executes a single poll cycle: checks both DCs, applies debounce,
+// evaluates transitions, and triggers any necessary actions.
+func (tm *TopologyManager) Poll(ctx context.Context) {
 	// Poll both DCs in parallel.
 	type pollResult struct {
 		readOnly bool
@@ -142,21 +178,28 @@ func (tm *TopologyManager) poll(ctx context.Context) {
 	dc1New := tm.computeState(&tm.dc1, r1.readOnly, r1.err)
 	dc2New := tm.computeState(&tm.dc2, r2.readOnly, r2.err)
 
+	// Read and update states under the lock to avoid races with Status().
+	tm.mu.Lock()
 	dc1Prev := tm.dc1.state
 	dc2Prev := tm.dc2.state
+	if dc1New != dc1Prev {
+		tm.dc1.state = dc1New
+	}
+	if dc2New != dc2Prev {
+		tm.dc2.state = dc2New
+	}
+	tm.mu.Unlock()
 
-	// Apply per-DC transitions.
+	// Apply per-DC transitions (outside the lock — these may do I/O).
 	if dc1New != dc1Prev {
 		tm.logger.Info("state transition", "dc", tm.dc1.name, "from", dc1Prev, "to", dc1New)
 		metrics.StateTransitions.WithLabelValues(tm.dc1.name, dc1Prev.String(), dc1New.String()).Inc()
-		tm.dc1.state = dc1New
 		tm.applyPerDCAction(ctx, &tm.dc1, state.EvalPerDCTransition(dc1Prev, dc1New))
 	}
 
 	if dc2New != dc2Prev {
 		tm.logger.Info("state transition", "dc", tm.dc2.name, "from", dc2Prev, "to", dc2New)
 		metrics.StateTransitions.WithLabelValues(tm.dc2.name, dc2Prev.String(), dc2New.String()).Inc()
-		tm.dc2.state = dc2New
 		tm.applyPerDCAction(ctx, &tm.dc2, state.EvalPerDCTransition(dc2Prev, dc2New))
 	}
 
@@ -245,17 +288,41 @@ func (tm *TopologyManager) applyCrossDCAction(ctx context.Context, action state.
 	}
 
 	if action.PromoteDC != "" && tm.promotedDC == "" {
-		dc := tm.getDC(action.PromoteDC)
-		if dc != nil {
-			tm.logger.Info("promoting DC", "dc", dc.name)
-			if err := dc.mysql.Promote(ctx); err != nil {
-				tm.logger.Error("promotion failed", "dc", dc.name, "error", err)
+		// Check anti-flap cooldown.
+		if !tm.lastFailover.IsZero() && time.Since(tm.lastFailover) < tm.failoverCooldown {
+			tm.logger.Info("failover blocked by anti-flap cooldown",
+				"lastFailover", tm.lastFailover, "cooldown", tm.failoverCooldown)
+			return
+		}
+
+		candidate := tm.getDC(action.PromoteDC)
+		oldPrimaryName := tm.otherDCName(action.PromoteDC)
+		oldPrimary := tm.getDC(oldPrimaryName)
+
+		if candidate != nil {
+			tm.logger.Info("initiating failover", "candidate", candidate.name, "oldPrimary", oldPrimaryName)
+
+			var oldPrimaryChecker mysql.Checker
+			if oldPrimary != nil {
+				oldPrimaryChecker = oldPrimary.mysql
+			}
+
+			if err := tm.failover.Execute(ctx, candidate.mysql, oldPrimaryChecker, candidate.name); err != nil {
+				tm.logger.Error("failover failed", "error", err)
 				return
 			}
 			// DNS flip deferred until next poll confirms read_only=0.
-			tm.promotedDC = dc.name
+			tm.promotedDC = candidate.name
+			tm.lastFailover = time.Now()
 		}
 	}
+}
+
+func (tm *TopologyManager) otherDCName(name string) string {
+	if name == tm.dc1.name {
+		return tm.dc2.name
+	}
+	return tm.dc1.name
 }
 
 func (tm *TopologyManager) getDC(name string) *dcTracker {
