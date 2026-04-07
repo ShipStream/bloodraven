@@ -1,0 +1,124 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+)
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		logger.Error("failed to load config", "error", err)
+		os.Exit(1)
+	}
+
+	// MySQL connections
+	dc1MySQL, err := NewMySQLChecker(cfg.DC1.MysqlDSN)
+	if err != nil {
+		logger.Error("failed to connect to dc1 mysql", "error", err)
+		os.Exit(1)
+	}
+	defer dc1MySQL.Close()
+
+	dc2MySQL, err := NewMySQLChecker(cfg.DC2.MysqlDSN)
+	if err != nil {
+		logger.Error("failed to connect to dc2 mysql", "error", err)
+		os.Exit(1)
+	}
+	defer dc2MySQL.Close()
+
+	// Kubernetes client
+	k8sCfg, err := rest.InClusterConfig()
+	if err != nil {
+		logger.Error("failed to get k8s config", "error", err)
+		os.Exit(1)
+	}
+	k8sClient, err := kubernetes.NewForConfig(k8sCfg)
+	if err != nil {
+		logger.Error("failed to create k8s client", "error", err)
+		os.Exit(1)
+	}
+
+	tainter := NewNodeTainter(k8sClient, logger)
+	hub := NewHub(logger)
+	dns := NewCloudflareDNS(cfg.CloudflareAPIToken, cfg.CloudflareZoneID, cfg.AZ)
+
+	w := NewWatcher(cfg, dc1MySQL, dc2MySQL, tainter, hub, dns, logger)
+
+	// HTTP server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, r *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		rw.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/readyz", func(rw http.ResponseWriter, r *http.Request) {
+		if w.Ready() {
+			rw.WriteHeader(http.StatusOK)
+			rw.Write([]byte("ok"))
+		} else {
+			rw.WriteHeader(http.StatusServiceUnavailable)
+			rw.Write([]byte("not ready"))
+		}
+	})
+	mux.HandleFunc("/status", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(rw).Encode(w.Status())
+	})
+	mux.HandleFunc("/ws/status", hub.HandleWS)
+	mux.Handle("/metrics", promhttp.Handler())
+
+	srv := &http.Server{
+		Addr:    cfg.ListenAddr,
+		Handler: mux,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		logger.Info("starting HTTP server", "addr", cfg.ListenAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+		}
+	}()
+
+	// Start watcher
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go w.Run(ctx)
+
+	logger.Info("mysql-watcher started",
+		"az", cfg.AZ,
+		"dc1", cfg.DC1.Name,
+		"dc2", cfg.DC2.Name,
+		"poll_interval", cfg.PollInterval,
+	)
+
+	// Wait for shutdown signal or HTTP server error
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	select {
+	case <-sigCh:
+		logger.Info("shutting down")
+	case err := <-errCh:
+		logger.Error("http server error", "error", err)
+	}
+
+	cancel()
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	srv.Shutdown(shutdownCtx)
+}
