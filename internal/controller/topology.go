@@ -36,6 +36,21 @@ func (c TopologyConfig) PollIntervalDuration() time.Duration {
 	return time.Duration(c.PollInterval)
 }
 
+// TopologySnapshot captures the topology state at a point in time.
+// It is passed to the StatusCallback after each poll cycle that produces a state change.
+type TopologySnapshot struct {
+	DC1Name            string
+	DC1State           state.DCState
+	DC1LastSeen        time.Time
+	DC2Name            string
+	DC2State           state.DCState
+	DC2LastSeen        time.Time
+	PrimaryDC          string // name of the writable DC, empty if none
+	LastFailover       time.Time
+	LastFailoverTarget string
+	Alert              string // non-empty if a cross-DC alert fired this cycle
+}
+
 // dcTracker tracks debounce counters and current state for one DC.
 type dcTracker struct {
 	name          string
@@ -45,6 +60,7 @@ type dcTracker struct {
 	state         state.DCState
 	failCount     int
 	recoveryCount int
+	lastSeen      time.Time // last successful poll
 }
 
 // TopologyManager is the main control loop.
@@ -58,12 +74,17 @@ type TopologyManager struct {
 	logger  *slog.Logger
 
 	// Failover orchestration.
-	failover         *FailoverController
-	lastFailover     time.Time
-	failoverCooldown time.Duration
+	failover           *FailoverController
+	lastFailover       time.Time
+	lastFailoverTarget string
+	failoverCooldown   time.Duration
 
 	// Promotion state: tracks which DC was promoted and is pending DNS flip.
 	promotedDC string // empty = no pending promotion
+
+	// StatusCallback is invoked after each poll cycle that produces a state change.
+	// The runner sets this to push status updates to the CR.
+	StatusCallback func(TopologySnapshot)
 
 	mu           sync.RWMutex
 	lastPollTime time.Time
@@ -174,6 +195,15 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	metrics.PollLatency.WithLabelValues(tm.dc1.name).Observe(r1.duration.Seconds())
 	metrics.PollLatency.WithLabelValues(tm.dc2.name).Observe(r2.duration.Seconds())
 
+	// Track last successful poll time per DC.
+	now := time.Now()
+	if r1.err == nil {
+		tm.dc1.lastSeen = now
+	}
+	if r2.err == nil {
+		tm.dc2.lastSeen = now
+	}
+
 	// Compute new debounced states.
 	dc1New := tm.computeState(&tm.dc1, r1.readOnly, r1.err)
 	dc2New := tm.computeState(&tm.dc2, r2.readOnly, r2.err)
@@ -219,8 +249,10 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 
 	// Cross-DC evaluation (only on state transitions to avoid repeated actions).
+	var alertMsg string
 	if dc1New != dc1Prev || dc2New != dc2Prev {
 		cross := state.EvalCrossDC(tm.dc1.state, tm.dc2.state, dc1Prev, dc2Prev, tm.dc1.name, tm.dc2.name)
+		alertMsg = cross.Alert
 		tm.applyCrossDCAction(ctx, cross)
 	}
 
@@ -231,6 +263,28 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	tm.mu.Unlock()
 
 	metrics.WSClientCount.Set(float64(tm.hub.ClientCount()))
+
+	// Notify the status callback on any state change.
+	if (dc1New != dc1Prev || dc2New != dc2Prev) && tm.StatusCallback != nil {
+		primaryDC := ""
+		if tm.dc1.state == state.StateWritable {
+			primaryDC = tm.dc1.name
+		} else if tm.dc2.state == state.StateWritable {
+			primaryDC = tm.dc2.name
+		}
+		tm.StatusCallback(TopologySnapshot{
+			DC1Name:            tm.dc1.name,
+			DC1State:           tm.dc1.state,
+			DC1LastSeen:        tm.dc1.lastSeen,
+			DC2Name:            tm.dc2.name,
+			DC2State:           tm.dc2.state,
+			DC2LastSeen:        tm.dc2.lastSeen,
+			PrimaryDC:          primaryDC,
+			LastFailover:       tm.lastFailover,
+			LastFailoverTarget: tm.lastFailoverTarget,
+			Alert:              alertMsg,
+		})
+	}
 }
 
 // computeState applies debounce logic and returns the new state for a DC.
@@ -314,6 +368,7 @@ func (tm *TopologyManager) applyCrossDCAction(ctx context.Context, action state.
 			// DNS flip deferred until next poll confirms read_only=0.
 			tm.promotedDC = candidate.name
 			tm.lastFailover = time.Now()
+			tm.lastFailoverTarget = candidate.name
 		}
 	}
 }

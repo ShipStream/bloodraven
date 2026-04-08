@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -16,6 +17,7 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
+	"github.com/shipstream/bloodraven/internal/state"
 )
 
 // managedTopology tracks a running TopologyManager and its cancellation.
@@ -192,6 +194,11 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, pair *v1alpha1
 	tm := NewTopologyManager(cfg, dc1MySQL, dc2MySQL, failoverCtl, tainter, r.hub, dns,
 		r.logger.With("pair", nn.String()))
 
+	// Set the status callback to update the CR status subresource on state changes.
+	tm.StatusCallback = func(snap TopologySnapshot) {
+		r.updateCRStatus(ctx, nn, snap)
+	}
+
 	tmCtx, cancel := context.WithCancel(ctx)
 
 	r.mu.Lock()
@@ -256,6 +263,101 @@ func (r *TopologyManagerRunner) Ready() bool {
 		}
 	}
 	return false
+}
+
+// updateCRStatus writes topology state to the CR status subresource.
+func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.NamespacedName, snap TopologySnapshot) {
+	var pair v1alpha1.MysqlReplicaPair
+	if err := r.client.Get(ctx, nn, &pair); err != nil {
+		r.logger.Error("get pair for status update", "pair", nn, "error", err)
+		return
+	}
+
+	pair.Status.PrimaryDC = snap.PrimaryDC
+	pair.Status.DC1 = dcInstanceStatusFromSnapshot(snap.DC1State, snap.DC1LastSeen)
+	pair.Status.DC2 = dcInstanceStatusFromSnapshot(snap.DC2State, snap.DC2LastSeen)
+
+	if !snap.LastFailover.IsZero() {
+		t := metav1.NewTime(snap.LastFailover)
+		pair.Status.LastFailover = &t
+	}
+	pair.Status.LastFailoverTarget = snap.LastFailoverTarget
+
+	// Update conditions based on current state.
+	now := metav1.Now()
+	setCondition(&pair.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             conditionBool(snap.DC1State == state.StateWritable || snap.DC2State == state.StateWritable),
+		ObservedGeneration: pair.Generation,
+		LastTransitionTime: now,
+		Reason:             "TopologyPolled",
+		Message:            "At least one DC is writable",
+	})
+
+	if snap.Alert != "" {
+		reason := "Alert"
+		if snap.DC1State == state.StateWritable && snap.DC2State == state.StateWritable {
+			reason = "SplitBrain"
+		} else if snap.DC1State == state.StateReadOnly && snap.DC2State == state.StateReadOnly {
+			reason = "NoPrimary"
+		} else if snap.DC1State == state.StateUnreachable && snap.DC2State == state.StateUnreachable {
+			reason = "TotalLoss"
+		}
+		setCondition(&pair.Status.Conditions, metav1.Condition{
+			Type:               "Degraded",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: pair.Generation,
+			LastTransitionTime: now,
+			Reason:             reason,
+			Message:            snap.Alert,
+		})
+	} else {
+		setCondition(&pair.Status.Conditions, metav1.Condition{
+			Type:               "Degraded",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: pair.Generation,
+			LastTransitionTime: now,
+			Reason:             "Healthy",
+			Message:            "No cross-DC alerts",
+		})
+	}
+
+	if err := r.client.Status().Update(ctx, &pair); err != nil {
+		r.logger.Error("update pair status", "pair", nn, "error", err)
+	}
+}
+
+func dcInstanceStatusFromSnapshot(s state.DCState, lastSeen time.Time) v1alpha1.DCInstanceStatus {
+	status := v1alpha1.DCInstanceStatus{
+		State: s.String(),
+	}
+	if !lastSeen.IsZero() {
+		t := metav1.NewTime(lastSeen)
+		status.LastSeen = &t
+	}
+	return status
+}
+
+func conditionBool(v bool) metav1.ConditionStatus {
+	if v {
+		return metav1.ConditionTrue
+	}
+	return metav1.ConditionFalse
+}
+
+// setCondition sets or updates a condition in the slice, preserving LastTransitionTime
+// if the status has not changed.
+func setCondition(conditions *[]metav1.Condition, c metav1.Condition) {
+	for i, existing := range *conditions {
+		if existing.Type == c.Type {
+			if existing.Status == c.Status {
+				c.LastTransitionTime = existing.LastTransitionTime
+			}
+			(*conditions)[i] = c
+			return
+		}
+	}
+	*conditions = append(*conditions, c)
 }
 
 // buildDCDSN takes a base DSN and replaces the host with the DC service endpoint.
