@@ -189,9 +189,6 @@ type MysqlReplicaPairStatus struct {
 
 	// LastFailoverTarget is the DC that was last promoted during failover.
 	LastFailoverTarget string `json:"lastFailoverTarget,omitempty"`
-
-	// WebsocketClients is the number of connected websocket clients.
-	WebsocketClients int32 `json:"websocketClients,omitempty"`
 }
 
 // DCInstanceStatus describes the observed state of a single DC instance.
