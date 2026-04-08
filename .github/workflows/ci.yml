@@ -18,10 +18,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: false
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+      - name: Run golangci-lint
+        run: golangci-lint run ./...
 
   build:
     name: Build
@@ -102,4 +102,4 @@ jobs:
             echo "One or more jobs failed."
             exit 1
           fi
-          echo "All checks passed."
+          echo "All checks passed.",
