@@ -1,0 +1,80 @@
+name: Trivy Security Scan
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    name: Scan / ${{ matrix.target }} (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: bloodraven
+            image: bloodraven
+            platform: linux/amd64
+            arch: amd64
+          - target: bloodraven
+            image: bloodraven
+            platform: linux/arm64
+            arch: arm64
+          - target: sidecar
+            image: bloodraven-sidecar
+            platform: linux/amd64
+            arch: amd64
+          - target: sidecar
+            image: bloodraven-sidecar
+            platform: linux/arm64
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: |
+          docker buildx build \
+            --platform ${{ matrix.platform }} \
+            --target ${{ matrix.target }} \
+            --tag ${{ matrix.image }}:${{ github.sha }}-${{ matrix.arch }} \
+            --load \
+            .
+
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ matrix.image }}:${{ github.sha }}-${{ matrix.arch }}
+          format: sarif
+          output: trivy-${{ matrix.image }}-${{ matrix.arch }}.sarif
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Run Trivy scan (table output)
+        if: always()
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ matrix.image }}:${{ github.sha }}-${{ matrix.arch }}
+          format: table
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.image }}-${{ matrix.arch }}.sarif
+          category: trivy-${{ matrix.image }}-${{ matrix.arch }}
