@@ -1,4 +1,4 @@
-package e2e
+package component
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -27,14 +28,14 @@ type mockMySQL struct {
 	promoted bool
 
 	// Tracking fields for verification.
-	superReadOnly          bool
-	stoppedReplica         bool
-	resetReplicaAll        bool
-	replicationSourceSet   bool
-	replicaStarted         bool
-	cloneDonorList         string
-	cloneInstanceCalled    bool
-	changeReplicationOpts  mysql.ReplicationSourceOpts
+	superReadOnly         bool
+	stoppedReplica        bool
+	resetReplicaAll       bool
+	replicationSourceSet  bool
+	replicaStarted        bool
+	cloneDonorList        string
+	cloneInstanceCalled   bool
+	changeReplicationOpts mysql.ReplicationSourceOpts
 }
 
 func (m *mockMySQL) CheckReadOnly(_ context.Context) (bool, error) {
@@ -222,6 +223,7 @@ type testHarness struct {
 	dns      *mockDNS
 	hub      *platform.Hub
 	logger   *slog.Logger
+	clock    *clock.FakeClock
 }
 
 func newTestHarness(t *testing.T) *testHarness {
@@ -237,6 +239,7 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 	hub := platform.NewHub(logger)
 	dns := &mockDNS{}
 	fc := controller.NewFailoverController(logger)
+	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
 		AZ: "lion",
@@ -256,7 +259,7 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 		FailoverCooldown:  0, // no cooldown by default
 	}
 
-	tm := controller.NewTopologyManager(cfg, dc1, dc2, fc, tainter, hub, dns, logger)
+	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, tainter, hub, dns, logger, clk)
 
 	return &testHarness{
 		tm:       tm,
@@ -266,6 +269,7 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 		dns:      dns,
 		hub:      hub,
 		logger:   logger,
+		clock:    clk,
 	}
 }
 
@@ -280,6 +284,7 @@ func newTestHarnessWithCooldown(t *testing.T, cooldown time.Duration) *testHarne
 	hub := platform.NewHub(logger)
 	dns := &mockDNS{}
 	fc := controller.NewFailoverController(logger)
+	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
 		AZ: "lion",
@@ -299,7 +304,7 @@ func newTestHarnessWithCooldown(t *testing.T, cooldown time.Duration) *testHarne
 		FailoverCooldown:  int64(cooldown),
 	}
 
-	tm := controller.NewTopologyManager(cfg, dc1, dc2, fc, tainter, hub, dns, logger)
+	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, tainter, hub, dns, logger, clk)
 
 	return &testHarness{
 		tm:       tm,
@@ -309,6 +314,7 @@ func newTestHarnessWithCooldown(t *testing.T, cooldown time.Duration) *testHarne
 		dns:      dns,
 		hub:      hub,
 		logger:   logger,
+		clock:    clk,
 	}
 }
 

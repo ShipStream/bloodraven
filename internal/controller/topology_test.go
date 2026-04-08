@@ -414,6 +414,9 @@ func TestTopologyManagerRunCancellation(t *testing.T) {
 	dc2 := &mockMySQL{readOnly: true}
 	tm, _, _ := newTestTopologyManager(dc1, dc2)
 
+	// Run calls Poll synchronously on start, so after Run returns from
+	// initial poll the manager is ready. We just need to verify it stops
+	// cleanly on cancellation.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -421,14 +424,16 @@ func TestTopologyManagerRunCancellation(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for at least one poll cycle to complete.
+	// Wait for readiness with a timeout. The initial Poll is synchronous
+	// inside Run, so ready should be set almost immediately.
 	deadline := time.After(2 * time.Second)
+	tick := time.NewTicker(1 * time.Millisecond)
+	defer tick.Stop()
 	for !tm.Ready() {
 		select {
 		case <-deadline:
 			t.Fatal("topology manager did not become ready within timeout")
-		default:
-			time.Sleep(5 * time.Millisecond)
+		case <-tick.C:
 		}
 	}
 	cancel()

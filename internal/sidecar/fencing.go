@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/shipstream/bloodraven/internal/clock"
 )
 
 // Fencer abstracts MySQL operations needed by the fencing monitor.
@@ -27,6 +29,7 @@ type FencingMonitor struct {
 	fenced           bool
 	logger           *slog.Logger
 	httpClient       *http.Client
+	clock            clock.Clock
 }
 
 // NewFencingMonitor creates a new FencingMonitor.
@@ -38,6 +41,37 @@ func NewFencingMonitor(
 	leaseTimeout time.Duration,
 	logger *slog.Logger,
 ) *FencingMonitor {
+	return NewFencingMonitorWithClock(mysql, bloodravenAddr, peerAddr, checkInterval, leaseTimeout, logger, clock.RealClock{})
+}
+
+// NewFencingMonitorWithClock creates a FencingMonitor with an injectable clock for testing.
+func NewFencingMonitorWithClock(
+	mysql Fencer,
+	bloodravenAddr string,
+	peerAddr string,
+	checkInterval time.Duration,
+	leaseTimeout time.Duration,
+	logger *slog.Logger,
+	clk clock.Clock,
+) *FencingMonitor {
+	return NewFencingMonitorFull(mysql, bloodravenAddr, peerAddr, checkInterval, leaseTimeout, logger, clk, nil)
+}
+
+// NewFencingMonitorFull creates a FencingMonitor with all injectable dependencies.
+// Pass nil for httpClient to use a default client with a 2s timeout.
+func NewFencingMonitorFull(
+	mysql Fencer,
+	bloodravenAddr string,
+	peerAddr string,
+	checkInterval time.Duration,
+	leaseTimeout time.Duration,
+	logger *slog.Logger,
+	clk clock.Clock,
+	httpClient *http.Client,
+) *FencingMonitor {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 2 * time.Second}
+	}
 	return &FencingMonitor{
 		mysql:          mysql,
 		bloodravenAddr: bloodravenAddr,
@@ -45,30 +79,34 @@ func NewFencingMonitor(
 		checkInterval:  checkInterval,
 		leaseTimeout:   leaseTimeout,
 		logger:         logger,
-		httpClient: &http.Client{
-			Timeout: 2 * time.Second,
-		},
+		clock:          clk,
+		httpClient:     httpClient,
 	}
 }
 
 // Run starts the fencing monitor loop. Blocks until ctx is cancelled.
 func (f *FencingMonitor) Run(ctx context.Context) {
 	// Initialize last-seen times to now (grace period on startup)
-	f.lastBloodravenOK = time.Now()
-	f.lastPeerOK = time.Now()
+	f.lastBloodravenOK = f.clock.Now()
+	f.lastPeerOK = f.clock.Now()
 
-	ticker := time.NewTicker(f.checkInterval)
+	ticker := f.clock.NewTicker(f.checkInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			f.checkBloodraven(ctx)
-			f.checkPeer(ctx)
-			f.evaluate(ctx)
+		case <-ticker.C():
+			f.Check(ctx)
 		}
 	}
+}
+
+// Check performs a single fencing check cycle. Exported for deterministic testing.
+func (f *FencingMonitor) Check(ctx context.Context) {
+	f.checkBloodraven(ctx)
+	f.checkPeer(ctx)
+	f.evaluate(ctx)
 }
 
 func (f *FencingMonitor) checkBloodraven(ctx context.Context) {
@@ -91,7 +129,7 @@ func (f *FencingMonitor) checkBloodraven(ctx context.Context) {
 	resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
-		f.lastBloodravenOK = time.Now()
+		f.lastBloodravenOK = f.clock.Now()
 	}
 }
 
@@ -115,7 +153,7 @@ func (f *FencingMonitor) checkPeer(ctx context.Context) {
 	resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
-		f.lastPeerOK = time.Now()
+		f.lastPeerOK = f.clock.Now()
 	}
 }
 
@@ -136,7 +174,7 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		return
 	}
 
-	now := time.Now()
+	now := f.clock.Now()
 	bloodravenDown := now.Sub(f.lastBloodravenOK) > f.leaseTimeout
 	peerDown := now.Sub(f.lastPeerOK) > f.leaseTimeout
 

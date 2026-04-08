@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -72,6 +73,7 @@ type TopologyManager struct {
 	hub     *platform.Hub
 	dns     platform.DNSUpdater
 	logger  *slog.Logger
+	clock   clock.Clock
 
 	// Failover orchestration.
 	failover           *FailoverController
@@ -101,6 +103,11 @@ type StatusResponse struct {
 }
 
 func NewTopologyManager(cfg TopologyConfig, dc1MySQL, dc2MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
+	return NewTopologyManagerWithClock(cfg, dc1MySQL, dc2MySQL, failover, tainter, hub, dns, logger, clock.RealClock{})
+}
+
+// NewTopologyManagerWithClock creates a TopologyManager with an injectable clock for testing.
+func NewTopologyManagerWithClock(cfg TopologyConfig, dc1MySQL, dc2MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
 	cooldown := time.Duration(cfg.FailoverCooldown)
 	if cooldown == 0 {
 		cooldown = 60 * time.Minute
@@ -127,6 +134,7 @@ func NewTopologyManager(cfg TopologyConfig, dc1MySQL, dc2MySQL mysql.Checker, fa
 		hub:              hub,
 		dns:              dns,
 		logger:           logger,
+		clock:            clk,
 	}
 }
 
@@ -151,7 +159,7 @@ func (tm *TopologyManager) Ready() bool {
 
 // Run starts the polling loop. Blocks until ctx is cancelled.
 func (tm *TopologyManager) Run(ctx context.Context) {
-	ticker := time.NewTicker(tm.cfg.PollIntervalDuration())
+	ticker := tm.clock.NewTicker(tm.cfg.PollIntervalDuration())
 	defer ticker.Stop()
 
 	// Do an initial poll immediately.
@@ -161,7 +169,7 @@ func (tm *TopologyManager) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticker.C():
 			tm.Poll(ctx)
 		}
 	}
@@ -178,11 +186,11 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 
 	pollDC := func(dc *dcTracker) pollResult {
-		start := time.Now()
+		start := tm.clock.Now()
 		pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		ro, err := dc.mysql.CheckReadOnly(pollCtx)
-		return pollResult{readOnly: ro, err: err, duration: time.Since(start)}
+		return pollResult{readOnly: ro, err: err, duration: tm.clock.Since(start)}
 	}
 
 	var r1, r2 pollResult
@@ -196,7 +204,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	metrics.PollLatency.WithLabelValues(tm.dc2.name).Observe(r2.duration.Seconds())
 
 	// Track last successful poll time per DC.
-	now := time.Now()
+	now := tm.clock.Now()
 	if r1.err == nil {
 		tm.dc1.lastSeen = now
 	}
@@ -258,7 +266,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 
 	// Update status.
 	tm.mu.Lock()
-	tm.lastPollTime = time.Now()
+	tm.lastPollTime = tm.clock.Now()
 	tm.ready = true
 	tm.mu.Unlock()
 
@@ -343,7 +351,7 @@ func (tm *TopologyManager) applyCrossDCAction(ctx context.Context, action state.
 
 	if action.PromoteDC != "" && tm.promotedDC == "" {
 		// Check anti-flap cooldown.
-		if !tm.lastFailover.IsZero() && time.Since(tm.lastFailover) < tm.failoverCooldown {
+		if !tm.lastFailover.IsZero() && tm.clock.Since(tm.lastFailover) < tm.failoverCooldown {
 			tm.logger.Info("failover blocked by anti-flap cooldown",
 				"lastFailover", tm.lastFailover, "cooldown", tm.failoverCooldown)
 			return
@@ -367,7 +375,7 @@ func (tm *TopologyManager) applyCrossDCAction(ctx context.Context, action state.
 			}
 			// DNS flip deferred until next poll confirms read_only=0.
 			tm.promotedDC = candidate.name
-			tm.lastFailover = time.Now()
+			tm.lastFailover = tm.clock.Now()
 			tm.lastFailoverTarget = candidate.name
 		}
 	}

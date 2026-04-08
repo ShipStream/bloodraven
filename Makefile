@@ -1,6 +1,6 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar test test-unit test-integration fmt vet lint docker-build
+.PHONY: help generate manifests build build-bloodraven build-sidecar test test-unit test-component test-envtest test-e2e test-integration fmt vet lint docker-build
 
 ##@ General
 
@@ -32,14 +32,27 @@ manifests: ## Generate CRD and RBAC manifests
 
 ##@ Testing
 
-test: ## Run all tests (unit + integration)
-	go test -tags integration ./...
+test: test-unit test-component ## Run fast tests (unit + component) — default PR gate
 
-test-unit: ## Run unit tests only (no network listeners)
-	go test ./...
+test-all: ## Run all tests including integration (network listeners)
+	go test -tags integration -race ./...
 
-test-integration: ## Run integration tests only (network listener tests)
-	go test -tags integration -run . ./internal/platform/ ./test/e2e/
+test-unit: ## Run unit tests only (no network, no listeners, fast)
+	go test -race ./internal/...
+
+test-component: ## Run component tests (cross-package with fakes, no real cluster)
+	go test -race ./test/component/
+
+test-envtest: ## Run envtest controller tests (real API server, no cluster)
+	go test -race -tags envtest ./test/envtest/
+
+test-e2e: ## Run real cluster end-to-end tests (requires kind/k3d — Phase 4, not yet implemented)
+	@echo "Real cluster e2e tests are not yet implemented (Testing 2.0 Phase 4)."
+	@echo "See TESTING_2.0.md for the planned scenarios."
+	@exit 1
+
+test-integration: ## Run integration tests (network listener tests)
+	go test -tags integration -race ./internal/platform/ ./test/component/
 
 ##@ Code Quality
 
