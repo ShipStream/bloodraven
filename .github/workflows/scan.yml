@@ -51,7 +51,7 @@ jobs:
             .
 
       - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ matrix.image }}:${{ github.sha }}-${{ matrix.arch }}
           format: sarif
@@ -63,7 +63,7 @@ jobs:
 
       - name: Run Trivy scan (table output)
         if: always()
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ matrix.image }}:${{ github.sha }}-${{ matrix.arch }}
           format: table
