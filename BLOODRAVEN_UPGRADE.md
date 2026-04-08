@@ -150,11 +150,14 @@ status:
   conditions:
     - type: Ready
       status: "True"
-    - type: FailoverInProgress
+      reason: TopologyPolled
+      message: "At least one DC is writable"
+    - type: Degraded
       status: "False"
+      reason: Healthy
+      message: "No cross-DC alerts"
   lastFailover: "2026-03-15T08:30:00Z"
   lastFailoverTarget: dc1
-  websocketClients: 4
 ```
 
 ### What Bloodraven creates per DC
@@ -239,15 +242,15 @@ New code that handles pod creation, bootstrap, and recovery:
 - **Failover** (extends watcher promotion):
   The watcher already does `STOP REPLICA; RESET REPLICA ALL; SET GLOBAL read_only=0`.
   Bloodraven adds:
-  1. Set CRD condition `FailoverInProgress=True`
+  1. Set CRD condition `Degraded=True` with reason describing the failover trigger
   2. Attempt to fence old primary: `SET GLOBAL super_read_only=ON` (fail silently if unreachable)
   3. Check `SHOW REPLICA STATUS` on candidate — wait for SQL thread to finish relay logs
   4. Existing promotion sequence (STOP REPLICA, RESET REPLICA ALL, SET GLOBAL read_only=0)
   5. Platform actions (taints, WS broadcast) — already handled by per-DC transition logic
   6. DNS flip deferred until promotion confirmed — already implemented
-  7. Update CRD status (new primaryDC), relabel pods
+  7. Update CRD status (new primaryDC, lastFailover, lastFailoverTarget), relabel pods
   8. Anti-flap: block additional failovers for `failoverCooldown` duration
-  9. Clear `FailoverInProgress` after grace period
+  9. Clear `Degraded` condition once topology stabilises
 
 - **Old primary recovery** (new):
   When a previously-unreachable primary comes back:
@@ -545,7 +548,7 @@ with simulated partitions on k3d.
 ### Phase 5: Failover hardening
 
 Add relay log drain before promotion, GTID comparison for candidate selection (matters if we
-ever have 3 nodes), anti-flap cooldown, FailoverInProgress condition, and old-primary-recovery
+ever have 3 nodes), anti-flap cooldown, Degraded condition, and old-primary-recovery
 logic (fence, reconfigure as replica, start replication, catch up).
 
 ### Phase 6: Bootstrap

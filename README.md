@@ -309,12 +309,15 @@ status:
     secondsBehindSource: 0
   lastFailover: "2026-04-01T08:30:00Z"
   lastFailoverTarget: dc2
-  websocketClients: 3
   conditions:
     - type: Ready
       status: "True"
-    - type: FailoverInProgress
+      reason: TopologyPolled
+      message: "At least one DC is writable"
+    - type: Degraded
       status: "False"
+      reason: Healthy
+      message: "No cross-DC alerts"
 ```
 
 ## Kubernetes Resources Created
@@ -378,22 +381,27 @@ If any of the following change, add authentication or origin restrictions:
 ## Development
 
 ```bash
+make help                # Show all available targets
+
 # Build
-make build
+make build               # Both operator and sidecar
+make build-bloodraven    # Operator only
+make build-sidecar       # Sidecar only
+make docker-build        # Docker images for both
 
-# Run tests
-make test
+# Test
+make test                # All tests (unit + integration)
+make test-unit           # Unit tests only (no network listeners)
+make test-integration    # Integration tests only
 
-# Run vet
-make vet
+# Code quality
+make fmt                 # Format Go source files
+make vet                 # Run go vet
+make lint                # Run golangci-lint
 
-# Generate deepcopy and CRD manifests
-make generate
-make manifests
-
-# Docker (multi-stage, named targets)
-docker build --target bloodraven -t bloodraven .
-docker build --target sidecar -t bloodraven-sidecar .
+# Code generation
+make generate            # Regenerate deep copy code
+make manifests           # Generate CRD and RBAC manifests
 ```
 
 ### Dependencies
