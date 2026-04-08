@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -32,7 +33,9 @@ func main() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: ":8081",
 		Metrics: metricsserver.Options{
@@ -43,6 +46,13 @@ func main() {
 	})
 	if err != nil {
 		logger.Error("unable to start manager", "error", err)
+		os.Exit(1)
+	}
+
+	// Create a typed clientset for operations that need it (e.g. node tainting).
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		logger.Error("unable to create clientset", "error", err)
 		os.Exit(1)
 	}
 
@@ -63,6 +73,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create and register the topology manager runner.
+	// This is leader-election-aware: polling and failover only run on the leader.
+	runner := controller.NewTopologyManagerRunner(mgr.GetClient(), clientset, hub, logger)
+	if err := mgr.Add(runner); err != nil {
+		logger.Error("unable to add topology manager runner", "error", err)
+		os.Exit(1)
+	}
+
 	// Add health/ready probes
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		logger.Error("unable to set up health check", "error", err)
@@ -78,7 +96,12 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(rw).Encode(map[string]string{"status": "ok"})
+		statuses := runner.AllStatuses()
+		if len(statuses) == 0 {
+			json.NewEncoder(rw).Encode(map[string]string{"status": "no active pairs"})
+			return
+		}
+		json.NewEncoder(rw).Encode(statuses)
 	})
 	mux.HandleFunc("/ws/status", hub.HandleWS)
 
