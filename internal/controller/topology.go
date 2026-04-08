@@ -373,6 +373,12 @@ func (tm *TopologyManager) applyCrossDCAction(ctx context.Context, action state.
 	}
 }
 
+// SetLastFailoverForTest allows tests to manipulate the cooldown timer
+// without sleeping. This should only be used in tests.
+func (tm *TopologyManager) SetLastFailoverForTest(t time.Time) {
+	tm.lastFailover = t
+}
+
 func (tm *TopologyManager) otherDCName(name string) string {
 	if name == tm.dc1.name {
 		return tm.dc2.name

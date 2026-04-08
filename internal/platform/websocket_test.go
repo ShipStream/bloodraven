@@ -15,6 +15,20 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// waitForClientCount polls hub.ClientCount until it matches want or the deadline expires.
+func waitForClientCount(t *testing.T, hub *Hub, want int) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for hub.ClientCount() != want {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d clients, got %d", want, hub.ClientCount())
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
 func TestHub_BroadcastToClients(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	hub := NewHub(logger)
@@ -38,11 +52,7 @@ func TestHub_BroadcastToClients(t *testing.T) {
 	defer c2.Close()
 
 	// Wait for connections to register
-	time.Sleep(50 * time.Millisecond)
-
-	if hub.ClientCount() != 2 {
-		t.Fatalf("expected 2 clients, got %d", hub.ClientCount())
-	}
+	waitForClientCount(t, hub, 2)
 
 	// Broadcast a message
 	hub.Broadcast(WSMessage{DC: "dc1", Status: "offline"})
@@ -78,15 +88,9 @@ func TestHub_ClientDisconnect(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
-	if hub.ClientCount() != 1 {
-		t.Fatalf("expected 1 client, got %d", hub.ClientCount())
-	}
+	waitForClientCount(t, hub, 1)
 
 	c.Close()
-	time.Sleep(100 * time.Millisecond)
 
-	if hub.ClientCount() != 0 {
-		t.Errorf("expected 0 clients after disconnect, got %d", hub.ClientCount())
-	}
+	waitForClientCount(t, hub, 0)
 }

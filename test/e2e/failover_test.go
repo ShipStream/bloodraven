@@ -170,8 +170,8 @@ func TestFailover_AntiFlap(t *testing.T) {
 		t.Errorf("DNS should not change during cooldown, got %s", h.dns.getLastIP())
 	}
 
-	// Wait past the cooldown.
-	time.Sleep(250 * time.Millisecond)
+	// Expire the cooldown by setting lastFailover to the past.
+	h.tm.SetLastFailoverForTest(time.Now().Add(-time.Second))
 
 	// After cooldown, cross-DC eval only fires on state transitions.
 	// DC2 is already unreachable, DC1 is already read-only -- no transition.

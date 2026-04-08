@@ -12,37 +12,28 @@ import (
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
-// mockSidecarFencer implements the fencer interface used by sidecar.FencingMonitor.
-// Since the sidecar fencer interface is unexported, we test through the exported
-// FencingMonitor API by using NewFencingMonitor with test HTTP servers.
-//
-// For these tests, we exercise the fencing decision matrix by:
-// 1. Creating a FencingMonitor with unreachable addresses (no servers running).
-// 2. Manipulating the internal lastBloodravenOK / lastPeerOK timestamps
-//    is not possible from outside the package, so we use real HTTP servers
-//    or test via the Run method with short intervals.
-//
-// However, the fencing tests in internal/sidecar/fencing_test.go already
-// thoroughly test the evaluate() method using the package-internal access.
-//
-// These E2E tests verify the behaviour through the public interface by running
-// the fencing monitor with real HTTP endpoints.
-
 func sidecarTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-func TestPartition_SidecarSelfFences_WhenIsolated(t *testing.T) {
-	// Start a fencing monitor pointing at non-existent addresses.
-	// Both Bloodraven and peer will be unreachable.
-	// With a very short lease timeout, the monitor should self-fence.
+// waitForFenced polls fm.IsFenced() until it returns the expected value or times out.
+func waitForFenced(t *testing.T, fm *sidecar.FencingMonitor, want bool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for fm.IsFenced() != want {
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for IsFenced()=%v", want)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
 
-	// We need a MySQL endpoint that reports read_only=0 (primary).
-	// We use a real FencingMonitor via its Run() method with short intervals.
+func TestPartition_SidecarSelfFences_WhenIsolated(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Create a mock MySQL sidecar server that returns read_only=0.
 	mysqlSrv := newMockSidecarMySQL(false) // not read-only = primary
 
 	fm := sidecar.NewFencingMonitor(
@@ -57,27 +48,19 @@ func TestPartition_SidecarSelfFences_WhenIsolated(t *testing.T) {
 	go fm.Run(ctx)
 
 	// Wait for the monitor to detect both unreachable and self-fence.
-	// Grace period on startup is leaseTimeout, plus a few check intervals.
-	time.Sleep(300 * time.Millisecond)
+	waitForFenced(t, fm, true, 2*time.Second)
 
-	if !fm.IsFenced() {
-		t.Error("sidecar should self-fence when both Bloodraven and peer are unreachable")
-	}
 	if !mysqlSrv.isSuperReadOnly() {
 		t.Error("sidecar should set super_read_only=ON when self-fencing")
 	}
 }
 
 func TestPartition_SidecarHoldsReady_WhenOnlyBloodravenDown(t *testing.T) {
-	// Bloodraven unreachable, peer reachable.
-	// The sidecar should NOT self-fence.
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	mysqlSrv := newMockSidecarMySQL(false) // primary
 
-	// Start a real HTTP server for the peer.
 	peerAddr := startMockHTTPServer(t, "/peer/ping")
 
 	fm := sidecar.NewFencingMonitor(
@@ -91,7 +74,8 @@ func TestPartition_SidecarHoldsReady_WhenOnlyBloodravenDown(t *testing.T) {
 
 	go fm.Run(ctx)
 
-	// Wait long enough for several checks.
+	// Give the monitor enough time to run several check cycles.
+	// With peer reachable, it should NOT self-fence.
 	time.Sleep(300 * time.Millisecond)
 
 	if fm.IsFenced() {
@@ -100,9 +84,6 @@ func TestPartition_SidecarHoldsReady_WhenOnlyBloodravenDown(t *testing.T) {
 }
 
 func TestPartition_SidecarNeverUnfences(t *testing.T) {
-	// After self-fencing, even if connectivity is restored, the sidecar
-	// should NOT un-fence. Only Bloodraven can restore.
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -120,15 +101,10 @@ func TestPartition_SidecarNeverUnfences(t *testing.T) {
 	go fm.Run(ctx)
 
 	// Wait for self-fencing.
-	time.Sleep(300 * time.Millisecond)
+	waitForFenced(t, fm, true, 2*time.Second)
 
-	if !fm.IsFenced() {
-		t.Fatal("sidecar should have self-fenced")
-	}
-
-	// "Restore" connectivity by stopping and creating a new monitor
-	// is not feasible. Instead, we just verify that IsFenced stays true
-	// after more poll cycles (the fencing monitor never clears the fenced flag).
+	// Verify that IsFenced stays true after more poll cycles
+	// (the fencing monitor never clears the fenced flag).
 	time.Sleep(200 * time.Millisecond)
 
 	if !fm.IsFenced() {
@@ -137,8 +113,6 @@ func TestPartition_SidecarNeverUnfences(t *testing.T) {
 }
 
 func TestPartition_ReplicaDoesNotSelfFence(t *testing.T) {
-	// A read-only replica should never self-fence, even if completely isolated.
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -154,6 +128,8 @@ func TestPartition_ReplicaDoesNotSelfFence(t *testing.T) {
 	)
 
 	go fm.Run(ctx)
+
+	// Give several check cycles; replica should never self-fence.
 	time.Sleep(300 * time.Millisecond)
 
 	if fm.IsFenced() {

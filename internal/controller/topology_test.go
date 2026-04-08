@@ -40,8 +40,8 @@ func (m *mockMySQL) Promote(_ context.Context) error {
 func (m *mockMySQL) Close() error { return nil }
 
 func (m *mockMySQL) SetSuperReadOnly(_ context.Context, _ bool) error { return nil }
-func (m *mockMySQL) StopReplica(_ context.Context) error             { return nil }
-func (m *mockMySQL) ResetReplicaAll(_ context.Context) error         { return nil }
+func (m *mockMySQL) StopReplica(_ context.Context) error              { return nil }
+func (m *mockMySQL) ResetReplicaAll(_ context.Context) error          { return nil }
 func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -421,8 +421,16 @@ func TestTopologyManagerRunCancellation(t *testing.T) {
 		close(done)
 	}()
 
-	// Let it run a few cycles
-	time.Sleep(200 * time.Millisecond)
+	// Wait for at least one poll cycle to complete.
+	deadline := time.After(2 * time.Second)
+	for !tm.Ready() {
+		select {
+		case <-deadline:
+			t.Fatal("topology manager did not become ready within timeout")
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	cancel()
 
 	select {
