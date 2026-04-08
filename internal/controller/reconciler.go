@@ -73,6 +73,32 @@ func (r *MysqlReplicaPairReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		image = defaultMySQLImage
 	}
 
+	// Validate that sidecarImage is explicitly set. Falling back to the MySQL
+	// image is almost always wrong in production since the sidecar binary is
+	// a separate build target (bloodraven-sidecar).
+	if pair.Spec.SidecarImage == "" {
+		r.Recorder.Eventf(&pair, corev1.EventTypeWarning, "MissingSidecarImage",
+			"spec.sidecarImage is not set; falling back to %q which is likely incorrect", image)
+		logger.Info("WARNING: sidecarImage not set, falling back to MySQL image", "image", image)
+	}
+
+	// Validate that the referenced secret contains the expected 'dsn' key.
+	var secret corev1.Secret
+	secretKey := types.NamespacedName{Namespace: pair.Namespace, Name: pair.Spec.SecretName}
+	if err := r.Get(ctx, secretKey, &secret); err != nil {
+		if !errors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("get secret %s: %w", pair.Spec.SecretName, err)
+		}
+		r.Recorder.Eventf(&pair, corev1.EventTypeWarning, "SecretNotFound",
+			"secret %q not found", pair.Spec.SecretName)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if _, ok := secret.Data["dsn"]; !ok {
+		r.Recorder.Eventf(&pair, corev1.EventTypeWarning, "SecretMissingKey",
+			"secret %q does not contain required key 'dsn'", pair.Spec.SecretName)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	// Reconcile ConfigMap
 	if err := r.reconcileConfigMap(ctx, &pair); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile configmap: %w", err)

@@ -84,12 +84,24 @@ func newTestPair() *v1alpha1.MysqlReplicaPair {
 	}
 }
 
+// newTestSecret returns the secret that the reconciler expects to find.
+func newTestSecret() *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mysql-credentials",
+			Namespace: "shared-lion",
+		},
+		Data: map[string][]byte{
+			"dsn": []byte("root:password@tcp(localhost:3306)/mysql"),
+		},
+	}
+}
+
 func newReconciler(objs ...client.Object) (*MysqlReplicaPairReconciler, client.Client) {
 	scheme := testScheme()
-	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlReplicaPair{})
-	if len(objs) > 0 {
-		cb = cb.WithObjects(objs...)
-	}
+	// Always include the test secret so the reconciler's validation passes.
+	allObjs := append([]client.Object{newTestSecret()}, objs...)
+	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).WithObjects(allObjs...)
 	c := cb.Build()
 	r := &MysqlReplicaPairReconciler{
 		Client:   c,
