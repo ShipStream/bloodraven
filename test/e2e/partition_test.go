@@ -1,3 +1,5 @@
+//go:build integration
+
 package e2e
 
 import (
@@ -81,7 +83,7 @@ func TestPartition_SidecarHoldsReady_WhenOnlyBloodravenDown(t *testing.T) {
 	fm := sidecar.NewFencingMonitor(
 		mysqlSrv,
 		"127.0.0.1:19999", // unreachable bloodraven
-		peerAddr,           // reachable peer
+		peerAddr,          // reachable peer
 		50*time.Millisecond,
 		100*time.Millisecond,
 		sidecarTestLogger(),

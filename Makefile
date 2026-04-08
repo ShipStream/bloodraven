@@ -32,14 +32,14 @@ manifests: ## Generate CRD and RBAC manifests
 
 ##@ Testing
 
-test: ## Run all tests
+test: ## Run all tests (unit + integration)
+	go test -tags integration ./...
+
+test-unit: ## Run unit tests only (no network listeners)
 	go test ./...
 
-test-unit: ## Run unit tests only (skip integration tests)
-	go test -short ./...
-
-test-integration: ## Run integration tests only
-	go test -run Integration ./...
+test-integration: ## Run integration tests only (network listener tests)
+	go test -tags integration -run . ./internal/platform/ ./test/e2e/
 
 ##@ Code Quality
 
