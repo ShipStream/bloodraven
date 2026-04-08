@@ -1,0 +1,22 @@
+{{- if .Values.auxiliary.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bloodraven.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "bloodraven.labels" . | nindent 4 }}
+  {{- with .Values.auxiliary.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.auxiliary.service.type }}
+  ports:
+    - name: auxiliary
+      port: {{ .Values.auxiliary.service.port }}
+      targetPort: auxiliary
+      protocol: TCP
+  selector:
+    {{- include "bloodraven.selectorLabels" . | nindent 4 }}
+{{- end }}

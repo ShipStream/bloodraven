@@ -1,0 +1,62 @@
+Bloodraven MySQL operator has been installed.
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+The operator is running with:
+  - Leader election: {{ .Values.leaderElection.enabled }}
+  - Replicas: {{ .Values.replicaCount }}
+
+{{- if .Values.metrics.service.enabled }}
+
+Metrics are available at:
+  {{ include "bloodraven.fullname" . }}-metrics.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.metrics.service.port }}/metrics
+{{- end }}
+
+{{- if .Values.auxiliary.service.enabled }}
+
+Status API and WebSocket:
+  {{ include "bloodraven.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.auxiliary.service.port }}/status
+  {{ include "bloodraven.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.auxiliary.service.port }}/ws/status
+{{- end }}
+
+Next steps:
+  1. Create a Secret with MySQL credentials (ROOT_PASSWORD, REPLICATION_USER, etc.)
+  2. Create a MysqlReplicaPair custom resource:
+
+     kubectl apply -f - <<EOF
+     apiVersion: shipstream.io/v1alpha1
+     kind: MysqlReplicaPair
+     metadata:
+       name: my-pair
+       namespace: {{ .Release.Namespace }}
+     spec:
+       az: us-east-1
+       secretName: mysql-credentials
+       sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:{{ .Chart.AppVersion }}
+       cloudflare:
+         zoneID: <your-zone-id>
+         apiTokenSecretRef:
+           name: cloudflare-api-token
+           key: token
+       dc1:
+         name: dc1
+         zone: us-east-1a
+         lbIP: 10.0.1.1
+         storage:
+           size: 50Gi
+           storageClassName: fast-ssd
+       dc2:
+         name: dc2
+         zone: us-east-1b
+         lbIP: 10.0.2.1
+         storage:
+           size: 50Gi
+           storageClassName: fast-ssd
+     EOF
+
+  3. Monitor the operator:
+     kubectl logs -f deploy/{{ include "bloodraven.fullname" . }} -n {{ .Release.Namespace }}
+
+  4. Check the pair status:
+     kubectl get mysqlreplicapairs -n {{ .Release.Namespace }}

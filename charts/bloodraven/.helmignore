@@ -1,0 +1,9 @@
+.git/
+.gitignore
+*.md
+*.swp
+*.bak
+*.tmp
+*.orig
+.vscode/
+.idea/

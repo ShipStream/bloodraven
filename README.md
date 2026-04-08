@@ -4,6 +4,52 @@ A Kubernetes operator for MySQL async replication pairs across two datacenters. 
 
 Single controller, single source of truth, no coordination problems.
 
+## Installation
+
+### Helm
+
+```bash
+helm install bloodraven charts/bloodraven/ \
+  --namespace shared-az1 \
+  --create-namespace
+```
+
+Override defaults with `--set` or a values file:
+
+```bash
+helm install bloodraven charts/bloodraven/ \
+  --namespace shared-az1 \
+  --set metrics.serviceMonitor.enabled=true \
+  --set image.tag=v0.2.0
+```
+
+The chart installs:
+
+| Resource | Purpose |
+|---|---|
+| CRD (`MysqlReplicaPair`) | Installed from `crds/` before templates |
+| ServiceAccount | Identity for the operator pod |
+| ClusterRole + Binding | RBAC for reconciler, node tainting, leader election |
+| Deployment | Single-replica operator on control-plane nodes |
+| Service (`-metrics`) | Prometheus scrape target (`:8080`) |
+| Service (auxiliary) | Status API + WebSocket for sidecars (`:8082`) |
+| ServiceMonitor | Optional, for Prometheus Operator (`metrics.serviceMonitor.enabled`) |
+
+After installing, create a `MysqlReplicaPair` CR to start managing a MySQL pair -- see [Custom Resource](#custom-resource) below.
+
+### Manual
+
+```bash
+# Build
+make build
+docker build --target bloodraven -t bloodraven .
+docker build --target sidecar -t bloodraven-sidecar .
+
+# Apply CRD and RBAC
+kubectl apply -f config/crd/bases/
+kubectl apply -f config/rbac/
+```
+
 ## Architecture
 
 ```mermaid

@@ -1,0 +1,27 @@
+apiVersion: v2
+name: bloodraven
+description: Bloodraven MySQL operator - automated cross-DC MySQL replication and failover
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - mysql
+  - operator
+  - replication
+  - failover
+  - kubernetes
+
+home: https://github.com/shipstream/bloodraven
+
+sources:
+  - https://github.com/shipstream/bloodraven
+
+maintainers:
+  - name: ShipStream
+    url: https://github.com/shipstream
+
+kubeVersion: ">=1.26.0"
+
+annotations:
+  category: Database

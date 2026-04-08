@@ -1,0 +1,116 @@
+# -- Override the chart name
+nameOverride: ""
+# -- Override the full release name
+fullnameOverride: ""
+
+# -- Number of operator replicas (should be 1; leader election provides safety)
+replicaCount: 1
+
+image:
+  # -- Operator image repository
+  repository: ghcr.io/shipstream/bloodraven
+  # -- Operator image tag (defaults to .Chart.AppVersion)
+  tag: ""
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
+
+serviceAccount:
+  # -- Create a ServiceAccount for the operator
+  create: true
+  # -- Annotations to add to the ServiceAccount
+  annotations: {}
+  # -- Override the ServiceAccount name (defaults to fullname)
+  name: ""
+
+# -- Pod-level annotations
+podAnnotations: {}
+
+# -- Pod-level labels (merged with standard labels)
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# -- Node selector for the operator pod
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+
+# -- Tolerations for the operator pod
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    effect: NoSchedule
+
+# -- Affinity rules for the operator pod
+affinity: {}
+
+# -- Additional environment variables for the operator container
+extraEnv: []
+# - name: LOG_LEVEL
+#   value: "debug"
+
+# -- Additional volume mounts for the operator container
+extraVolumeMounts: []
+
+# -- Additional volumes for the operator pod
+extraVolumes: []
+
+# Leader election ensures safe single-writer semantics.
+leaderElection:
+  # -- Enable leader election (strongly recommended)
+  enabled: true
+
+metrics:
+  service:
+    # -- Create a Service for Prometheus metrics scraping
+    enabled: true
+    # -- Metrics service port
+    port: 8080
+    # -- Annotations for the metrics service
+    annotations: {}
+
+  serviceMonitor:
+    # -- Create a Prometheus ServiceMonitor resource
+    enabled: false
+    # -- Scrape interval
+    interval: 30s
+    # -- Scrape timeout
+    scrapeTimeout: 10s
+    # -- Additional labels for the ServiceMonitor (e.g. release: prometheus)
+    labels: {}
+
+auxiliary:
+  service:
+    # -- Create a Service for the auxiliary HTTP/WebSocket endpoint
+    enabled: true
+    # -- Auxiliary service port (status API + WebSocket)
+    port: 8082
+    # -- Service type
+    type: ClusterIP
+    # -- Annotations for the auxiliary service
+    annotations: {}
+
+# -- Install CRDs. Set to false if CRDs are managed externally.
+installCRDs: true
