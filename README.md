@@ -361,6 +361,20 @@ All metrics use the `bloodraven_` prefix.
 | `:8080` | Sidecar | `/health`, `/status`, `/peer/ping` |
 | `:3306` | MySQL | MySQL protocol |
 
+## Network Assumptions
+
+The auxiliary HTTP server on `:8082` exposes `/ws/status` for Device Hub websocket connections and `/status` for topology state. The current security posture assumes:
+
+- **Internal-only service**: The auxiliary server is exposed as a `ClusterIP` service with no ingress. It is not reachable from outside the cluster.
+- **Trusted cluster boundary**: All workloads in the cluster are trusted. There are no multi-tenant workloads sharing the cluster.
+- **No origin checks**: The websocket upgrader accepts all origins (`CheckOrigin` returns `true`). This is safe because browser-origin protections only matter when the endpoint is reachable from outside the trust boundary.
+
+If any of the following change, add authentication or origin restrictions:
+
+- The websocket endpoint is exposed through an ingress or load balancer.
+- Multi-tenant workloads share the cluster.
+- The hub begins carrying higher-sensitivity data or control actions.
+
 ## Development
 
 ```bash
