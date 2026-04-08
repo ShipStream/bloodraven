@@ -76,5 +76,6 @@ func (m *checker) Close() error {
 // escapeSingleQuotes escapes single quotes for MySQL string literals
 // used in statements that don't support parameterized queries (e.g. CLONE, CHANGE REPLICATION SOURCE).
 func escapeSingleQuotes(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
 	return strings.ReplaceAll(s, "'", "''")
 }

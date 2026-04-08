@@ -26,15 +26,16 @@ import (
 const (
 	defaultMySQLImage = "mysql:9.6"
 
-	labelAppName    = "app.kubernetes.io/name"
-	labelInstance   = "app.kubernetes.io/instance"
-	labelDC         = "shipstream.io/dc"
-	labelRole       = "shipstream.io/role"
-	labelHealthy    = "shipstream.io/healthy"
-	labelManagedBy  = "app.kubernetes.io/managed-by"
-	managerName     = "bloodraven"
+	labelAppName   = "app.kubernetes.io/name"
+	labelInstance  = "app.kubernetes.io/instance"
+	labelDC        = "shipstream.io/dc"
+	labelRole      = "shipstream.io/role"
+	labelHealthy   = "shipstream.io/healthy"
+	labelManagedBy = "app.kubernetes.io/managed-by"
+	managerName    = "bloodraven"
 
-	mysqlPort = 3306
+	mysqlPort   = 3306
+	sidecarPort = 8080
 )
 
 // MysqlReplicaPairReconciler reconciles a MysqlReplicaPair object.
@@ -81,14 +82,15 @@ func (r *MysqlReplicaPairReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	for _, dc := range []struct {
 		spec     v1alpha1.DCInstanceSpec
 		serverID int32
+		peerSpec v1alpha1.DCInstanceSpec
 	}{
-		{pair.Spec.DC1, 101},
-		{pair.Spec.DC2, 102},
+		{pair.Spec.DC1, 101, pair.Spec.DC2},
+		{pair.Spec.DC2, 102, pair.Spec.DC1},
 	} {
 		if err := r.reconcilePVC(ctx, &pair, dc.spec); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile pvc %s: %w", dc.spec.Name, err)
 		}
-		if err := r.reconcileDeployment(ctx, &pair, dc.spec, dc.serverID, image); err != nil {
+		if err := r.reconcileDeployment(ctx, &pair, dc.spec, dc.peerSpec, dc.serverID, image); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", dc.spec.Name, err)
 		}
 		if err := r.reconcileDCService(ctx, &pair, dc.spec); err != nil {
@@ -165,27 +167,27 @@ func (r *MysqlReplicaPairReconciler) reconcileConfigMap(ctx context.Context, pai
 func generateMyCnf(pair *v1alpha1.MysqlReplicaPair) string {
 	// Base config
 	settings := map[string]string{
-		"gtid-mode":                   "ON",
-		"enforce-gtid-consistency":    "ON",
-		"log-bin":                     "/var/lib/mysql/mysql-bin",
-		"log-replica-updates":         "ON",
-		"skip-replica-start":          "ON",
-		"binlog-format":               "ROW",
-		"sync-binlog":                 "1",
-		"binlog-expire-logs-seconds":  "1209600",
-		"plugin-load-add":             "mysql_clone.so",
-		"default-storage-engine":      "InnoDB",
-		"innodb-flush-method":         "O_DIRECT",
+		"gtid-mode":                      "ON",
+		"enforce-gtid-consistency":       "ON",
+		"log-bin":                        "/var/lib/mysql/mysql-bin",
+		"log-replica-updates":            "ON",
+		"skip-replica-start":             "ON",
+		"binlog-format":                  "ROW",
+		"sync-binlog":                    "1",
+		"binlog-expire-logs-seconds":     "1209600",
+		"plugin-load-add":                "mysql_clone.so",
+		"default-storage-engine":         "InnoDB",
+		"innodb-flush-method":            "O_DIRECT",
 		"innodb-flush-log-at-trx-commit": "2",
-		"innodb-file-per-table":       "1",
-		"max-allowed-packet":          "64M",
-		"max-connect-errors":          "1000000",
-		"skip-name-resolve":           "",
-		"skip-host-cache":             "",
-		"max-connections":             "500",
-		"thread-cache-size":           "50",
-		"character-set-server":        "utf8mb4",
-		"collation-server":            "utf8mb4_unicode_ci",
+		"innodb-file-per-table":          "1",
+		"max-allowed-packet":             "64M",
+		"max-connect-errors":             "1000000",
+		"skip-name-resolve":              "",
+		"skip-host-cache":                "",
+		"max-connections":                "500",
+		"thread-cache-size":              "50",
+		"character-set-server":           "utf8mb4",
+		"collation-server":               "utf8mb4_unicode_ci",
 	}
 
 	// Apply TLS settings if configured
@@ -253,7 +255,7 @@ func (r *MysqlReplicaPairReconciler) reconcilePVC(ctx context.Context, pair *v1a
 	return err
 }
 
-func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pair *v1alpha1.MysqlReplicaPair, dc v1alpha1.DCInstanceSpec, serverID int32, image string) error {
+func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pair *v1alpha1.MysqlReplicaPair, dc, peerDC v1alpha1.DCInstanceSpec, serverID int32, image string) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(pair.Name, dc.Name),
@@ -294,6 +296,176 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 
 		configMapName := fmt.Sprintf("mysql-%s-config", pair.Name)
 
+		peerAddress := fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d",
+			pair.Name, peerDC.Name, pair.Namespace, sidecarPort)
+
+		bloodravenAddress := pair.Spec.Sidecar.BloodravenAddress
+		if bloodravenAddress == "" {
+			bloodravenAddress = fmt.Sprintf("bloodraven.%s.svc.cluster.local:8082", pair.Namespace)
+		}
+
+		leaseTimeout := "20s"
+		if pair.Spec.Sidecar.LeaseTimeout != nil {
+			leaseTimeout = pair.Spec.Sidecar.LeaseTimeout.Duration.String()
+		}
+
+		peerCheckInterval := "5s"
+		if pair.Spec.Sidecar.PeerCheckInterval != nil {
+			peerCheckInterval = pair.Spec.Sidecar.PeerCheckInterval.Duration.String()
+		}
+
+		volumeMounts := []corev1.VolumeMount{
+			{Name: "data", MountPath: "/var/lib/mysql"},
+			{Name: "conf", MountPath: "/etc/mysql/conf.d"},
+		}
+		if pair.Spec.TLS != nil {
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      "tls",
+				MountPath: "/etc/mysql/tls",
+				ReadOnly:  true,
+			})
+		}
+
+		sidecarVolumeMounts := []corev1.VolumeMount{}
+		if pair.Spec.TLS != nil {
+			sidecarVolumeMounts = append(sidecarVolumeMounts, corev1.VolumeMount{
+				Name:      "tls",
+				MountPath: "/etc/mysql/tls",
+				ReadOnly:  true,
+			})
+		}
+
+		containers := []corev1.Container{
+			{
+				Name:  "mysql",
+				Image: image,
+				Ports: []corev1.ContainerPort{
+					{
+						Name:          "mysql",
+						ContainerPort: mysqlPort,
+						Protocol:      corev1.ProtocolTCP,
+					},
+				},
+				EnvFrom: []corev1.EnvFromSource{
+					{
+						SecretRef: &corev1.SecretEnvSource{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: pair.Spec.SecretName,
+							},
+						},
+					},
+				},
+				VolumeMounts: volumeMounts,
+				Resources:    dc.Resources,
+				LivenessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						TCPSocket: &corev1.TCPSocketAction{
+							Port: intstr.FromInt32(mysqlPort),
+						},
+					},
+					InitialDelaySeconds: 30,
+					PeriodSeconds:       10,
+				},
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						TCPSocket: &corev1.TCPSocketAction{
+							Port: intstr.FromInt32(mysqlPort),
+						},
+					},
+					InitialDelaySeconds: 5,
+					PeriodSeconds:       5,
+				},
+			},
+			{
+				Name:  "sidecar",
+				Image: sidecarImage,
+				Ports: []corev1.ContainerPort{
+					{
+						Name:          "sidecar",
+						ContainerPort: sidecarPort,
+						Protocol:      corev1.ProtocolTCP,
+					},
+				},
+				Env: []corev1.EnvVar{
+					{Name: "MYSQL_DSN", ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: pair.Spec.SecretName},
+							Key:                  "dsn",
+						},
+					}},
+					{Name: "MY_POD_NAME", ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+					}},
+					{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", sidecarPort)},
+					{Name: "PEER_ADDRESS", Value: peerAddress},
+					{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
+					{Name: "MY_DC", Value: dc.Name},
+					{Name: "PRIMARY_DC", Value: pair.Status.PrimaryDC},
+					{Name: "LEASE_TIMEOUT", Value: leaseTimeout},
+					{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
+				},
+				VolumeMounts: sidecarVolumeMounts,
+				LivenessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/health",
+							Port: intstr.FromInt32(sidecarPort),
+						},
+					},
+					InitialDelaySeconds: 5,
+					PeriodSeconds:       10,
+				},
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/health",
+							Port: intstr.FromInt32(sidecarPort),
+						},
+					},
+					InitialDelaySeconds: 3,
+					PeriodSeconds:       5,
+				},
+			},
+		}
+
+		volumes := []corev1.Volume{
+			{
+				Name: "data",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: resourceName(pair.Name, dc.Name) + "-data",
+					},
+				},
+			},
+			{
+				Name: "conf",
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
+				},
+			},
+			{
+				Name: "config",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: configMapName,
+						},
+					},
+				},
+			},
+		}
+
+		if pair.Spec.TLS != nil {
+			volumes = append(volumes, corev1.Volume{
+				Name: "tls",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: pair.Spec.TLS.SecretName,
+					},
+				},
+			})
+		}
+
 		deploy.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: podLabels,
@@ -305,91 +477,19 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 				InitContainers: []corev1.Container{
 					{
 						Name:  "init",
-						Image: sidecarImage,
+						Image: image,
 						Command: []string{
 							"sh", "-c",
-							fmt.Sprintf("echo '[mysqld]\nserver-id=%d' > /etc/mysql/conf.d/server-id.cnf", serverID),
+							fmt.Sprintf("cp /etc/mysql/config-map/* /etc/mysql/conf.d/ && echo '[mysqld]\\nserver-id=%d' > /etc/mysql/conf.d/server-id.cnf", serverID),
 						},
 						VolumeMounts: []corev1.VolumeMount{
-							{
-								Name:      "conf",
-								MountPath: "/etc/mysql/conf.d",
-							},
+							{Name: "config", MountPath: "/etc/mysql/config-map"},
+							{Name: "conf", MountPath: "/etc/mysql/conf.d"},
 						},
 					},
 				},
-				Containers: []corev1.Container{
-					{
-						Name:  "mysql",
-						Image: image,
-						Ports: []corev1.ContainerPort{
-							{
-								Name:          "mysql",
-								ContainerPort: mysqlPort,
-								Protocol:      corev1.ProtocolTCP,
-							},
-						},
-						EnvFrom: []corev1.EnvFromSource{
-							{
-								SecretRef: &corev1.SecretEnvSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: pair.Spec.SecretName,
-									},
-								},
-							},
-						},
-						VolumeMounts: []corev1.VolumeMount{
-							{
-								Name:      "data",
-								MountPath: "/var/lib/mysql",
-							},
-							{
-								Name:      "config",
-								MountPath: "/etc/mysql/conf.d",
-								ReadOnly:  true,
-							},
-						},
-						Resources: dc.Resources,
-						LivenessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								TCPSocket: &corev1.TCPSocketAction{
-									Port: intstr.FromInt32(mysqlPort),
-								},
-							},
-							InitialDelaySeconds: 30,
-							PeriodSeconds:       10,
-						},
-						ReadinessProbe: &corev1.Probe{
-							ProbeHandler: corev1.ProbeHandler{
-								TCPSocket: &corev1.TCPSocketAction{
-									Port: intstr.FromInt32(mysqlPort),
-								},
-							},
-							InitialDelaySeconds: 5,
-							PeriodSeconds:       5,
-						},
-					},
-				},
-				Volumes: []corev1.Volume{
-					{
-						Name: "data",
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-								ClaimName: resourceName(pair.Name, dc.Name) + "-data",
-							},
-						},
-					},
-					{
-						Name: "config",
-						VolumeSource: corev1.VolumeSource{
-							ConfigMap: &corev1.ConfigMapVolumeSource{
-								LocalObjectReference: corev1.LocalObjectReference{
-									Name: configMapName,
-								},
-							},
-						},
-					},
-				},
+				Containers: containers,
+				Volumes:    volumes,
 			},
 		}
 		return nil
@@ -422,6 +522,12 @@ func (r *MysqlReplicaPairReconciler) reconcileDCService(ctx context.Context, pai
 					Name:       "mysql",
 					Port:       mysqlPort,
 					TargetPort: intstr.FromInt32(mysqlPort),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       "sidecar",
+					Port:       sidecarPort,
+					TargetPort: intstr.FromInt32(sidecarPort),
 					Protocol:   corev1.ProtocolTCP,
 				},
 			},

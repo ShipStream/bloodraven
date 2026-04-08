@@ -107,6 +107,10 @@ type StorageSpec struct {
 type TLSSpec struct {
 	// IssuerRef references a cert-manager Issuer or ClusterIssuer.
 	IssuerRef IssuerRef `json:"issuerRef"`
+
+	// SecretName is the name of the Secret containing the TLS certificates.
+	// cert-manager should be configured to create this secret from the IssuerRef.
+	SecretName string `json:"secretName"`
 }
 
 // IssuerRef is a reference to a cert-manager issuer.
@@ -143,6 +147,10 @@ type SidecarSpec struct {
 
 	// PeerCheckInterval is how often the sidecar checks its peer. Default: 5s
 	PeerCheckInterval *metav1.Duration `json:"peerCheckInterval,omitempty"`
+
+	// BloodravenAddress is the address of the Bloodraven operator health endpoint.
+	// Default: bloodraven.<namespace>.svc.cluster.local:8082
+	BloodravenAddress string `json:"bloodravenAddress,omitempty"`
 }
 
 // MysqlReplicaPairStatus defines the observed state of MysqlReplicaPair.
