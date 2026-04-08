@@ -34,6 +34,7 @@ type MysqlReplicaPairList struct {
 // MysqlReplicaPairSpec defines the desired state of MysqlReplicaPair.
 type MysqlReplicaPairSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.6
+	// +kubebuilder:default="mysql:9.6"
 	Image string `json:"image,omitempty"`
 
 	// SidecarImage is the image used for the sidecar/init container.
@@ -46,12 +47,14 @@ type MysqlReplicaPairSpec struct {
 	DC2 DCInstanceSpec `json:"dc2"`
 
 	// SecretName references the secret containing MySQL credentials.
+	// +kubebuilder:validation:MinLength=1
 	SecretName string `json:"secretName"`
 
 	// TLS configures TLS for the MySQL instances.
 	TLS *TLSSpec `json:"tls,omitempty"`
 
 	// AZ is the availability zone identifier.
+	// +kubebuilder:validation:MinLength=1
 	AZ string `json:"az"`
 
 	// Cloudflare contains the Cloudflare DNS configuration for failover.
@@ -61,9 +64,13 @@ type MysqlReplicaPairSpec struct {
 	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
 
 	// FailureThreshold is how many consecutive failures before marking unreachable. Default: 3
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
 	FailureThreshold int32 `json:"failureThreshold,omitempty"`
 
 	// RecoveryThreshold is how many consecutive successes before marking recovered. Default: 2
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
 	RecoveryThreshold int32 `json:"recoveryThreshold,omitempty"`
 
 	// FailoverCooldown is the minimum time between failovers. Default: 60m
@@ -79,12 +86,15 @@ type MysqlReplicaPairSpec struct {
 // DCInstanceSpec defines the configuration for a single DC instance.
 type DCInstanceSpec struct {
 	// Name is the datacenter name (e.g. "dc1", "dc2").
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// Zone is the Kubernetes topology zone for node selection.
+	// +kubebuilder:validation:MinLength=1
 	Zone string `json:"zone"`
 
 	// LBIP is the load balancer IP for DNS failover.
+	// +kubebuilder:validation:MinLength=1
 	LBIP string `json:"lbIP"`
 
 	// Storage configures the persistent volume for this DC.
@@ -97,6 +107,7 @@ type DCInstanceSpec struct {
 // StorageSpec defines PVC storage configuration.
 type StorageSpec struct {
 	// StorageClassName is the name of the StorageClass.
+	// +kubebuilder:validation:MinLength=1
 	StorageClassName string `json:"storageClassName"`
 
 	// Size is the requested storage size.
@@ -110,15 +121,18 @@ type TLSSpec struct {
 
 	// SecretName is the name of the Secret containing the TLS certificates.
 	// cert-manager should be configured to create this secret from the IssuerRef.
+	// +kubebuilder:validation:MinLength=1
 	SecretName string `json:"secretName"`
 }
 
 // IssuerRef is a reference to a cert-manager issuer.
 type IssuerRef struct {
 	// Name of the issuer.
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// Kind of the issuer (Issuer or ClusterIssuer).
+	// +kubebuilder:validation:Enum=Issuer;ClusterIssuer
 	Kind string `json:"kind"`
 }
 
@@ -128,15 +142,18 @@ type CloudflareSpec struct {
 	APITokenSecretRef SecretKeyRef `json:"apiTokenSecretRef"`
 
 	// ZoneID is the Cloudflare zone ID.
+	// +kubebuilder:validation:MinLength=1
 	ZoneID string `json:"zoneID"`
 }
 
 // SecretKeyRef references a key within a Kubernetes Secret.
 type SecretKeyRef struct {
 	// Name of the Secret.
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
 	// Key within the Secret.
+	// +kubebuilder:validation:MinLength=1
 	Key string `json:"key"`
 }
 
@@ -180,18 +197,19 @@ type MysqlReplicaPairStatus struct {
 // DCInstanceStatus describes the observed state of a single DC instance.
 type DCInstanceStatus struct {
 	// State is the current state: writable, read-only, unreachable, or unknown.
+	// +kubebuilder:validation:Enum=writable;read-only;unreachable;unknown
 	State string `json:"state,omitempty"`
 
 	// LastSeen is the last time this DC was successfully polled.
 	LastSeen *metav1.Time `json:"lastSeen,omitempty"`
 
-	// GtidExecuted is the GTID executed set.
+	// GtidExecuted is the GTID executed set (populated when replication status is enriched).
 	GtidExecuted string `json:"gtidExecuted,omitempty"`
 
-	// Replicating indicates whether replication is running.
+	// Replicating indicates whether replication is running (populated when replication status is enriched).
 	Replicating bool `json:"replicating,omitempty"`
 
-	// SecondsBehindSource is the replication lag in seconds.
+	// SecondsBehindSource is the replication lag in seconds (populated when replication status is enriched).
 	SecondsBehindSource *int64 `json:"secondsBehindSource,omitempty"`
 }
 
