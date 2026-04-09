@@ -24,6 +24,8 @@ import (
 )
 
 const (
+	finalizerName = "shipstream.io/topology-cleanup"
+
 	defaultMySQLImage = "mysql:9.6"
 
 	labelAppName   = "app.kubernetes.io/name"
@@ -43,6 +45,7 @@ type MysqlReplicaPairReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+	Runner   *TopologyManagerRunner
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlreplicapairs,verbs=get;list;watch;create;update;patch;delete
@@ -64,6 +67,33 @@ func (r *MysqlReplicaPairReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// Handle finalizer for clean topology manager shutdown on CR deletion.
+	if !pair.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&pair, finalizerName) {
+			logger.Info("CR being deleted, running finalizer cleanup", "name", pair.Name)
+
+			// Stop the topology manager for this CR.
+			if r.Runner != nil {
+				r.Runner.StopManager(req.NamespacedName)
+			}
+
+			// Remove the finalizer so the CR can be garbage collected.
+			controllerutil.RemoveFinalizer(&pair, finalizerName)
+			if err := r.Update(ctx, &pair); err != nil {
+				return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Ensure the finalizer is present.
+	if !controllerutil.ContainsFinalizer(&pair, finalizerName) {
+		controllerutil.AddFinalizer(&pair, finalizerName)
+		if err := r.Update(ctx, &pair); err != nil {
+			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+		}
 	}
 
 	logger.Info("reconciling MysqlReplicaPair", "name", pair.Name)

@@ -453,6 +453,94 @@ func TestCRConfigToTopologyConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestReconcile_AddsFinalizer(t *testing.T) {
+	pair := newTestPair()
+	r, c := newReconciler(pair)
+	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// Re-fetch the CR and check the finalizer was added.
+	var updated v1alpha1.MysqlReplicaPair
+	if err := c.Get(context.Background(), nn, &updated); err != nil {
+		t.Fatalf("get pair: %v", err)
+	}
+
+	found := false
+	for _, f := range updated.Finalizers {
+		if f == finalizerName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected finalizer %q to be present, got finalizers: %v", finalizerName, updated.Finalizers)
+	}
+}
+
+func TestReconcile_FinalizerCleanup(t *testing.T) {
+	// Simulate a CR being deleted: set DeletionTimestamp and add finalizer.
+	// The fake client requires at least one finalizer when DeletionTimestamp is set,
+	// so we add a second one to keep the object alive after our finalizer is removed.
+	pair := newTestPair()
+	now := metav1.Now()
+	pair.DeletionTimestamp = &now
+	pair.Finalizers = []string{finalizerName, "other-finalizer"}
+
+	r, c := newReconciler(pair)
+	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// Re-fetch the CR and check the finalizer was removed.
+	var updated v1alpha1.MysqlReplicaPair
+	if err := c.Get(context.Background(), nn, &updated); err != nil {
+		t.Fatalf("get pair: %v", err)
+	}
+
+	for _, f := range updated.Finalizers {
+		if f == finalizerName {
+			t.Errorf("expected finalizer %q to be removed, but it's still present", finalizerName)
+		}
+	}
+	// The other finalizer should still be present.
+	found := false
+	for _, f := range updated.Finalizers {
+		if f == "other-finalizer" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected 'other-finalizer' to still be present")
+	}
+}
+
+func TestReconcile_DeletionWithoutFinalizer(t *testing.T) {
+	// CR is being deleted but has no our finalizer -- reconcile should return without error.
+	// The fake client requires at least one finalizer when DeletionTimestamp is set.
+	pair := newTestPair()
+	now := metav1.Now()
+	pair.DeletionTimestamp = &now
+	pair.Finalizers = []string{"some-other-finalizer"}
+
+	r, _ := newReconciler(pair)
+	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if result.Requeue {
+		t.Error("should not requeue on deletion without our finalizer")
+	}
+}
+
 func TestGenerateMyCnf(t *testing.T) {
 	pair := newTestPair()
 	cnf := generateMyCnf(pair)

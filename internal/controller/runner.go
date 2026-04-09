@@ -10,6 +10,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -266,10 +267,29 @@ func (r *TopologyManagerRunner) Ready() bool {
 	return false
 }
 
+// StopManager stops and removes the topology manager for the given NamespacedName.
+// This is called from the reconciler's finalizer handling when a CR is being deleted.
+func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	mt, ok := r.managers[nn]
+	if !ok {
+		r.logger.Info("no topology manager found to stop", "pair", nn)
+		return
+	}
+	r.logger.Info("stopping topology manager via StopManager", "pair", nn)
+	mt.cancel()
+	delete(r.managers, nn)
+}
+
 // updateCRStatus writes topology state to the CR status subresource.
 func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.NamespacedName, snap TopologySnapshot) {
 	var pair v1alpha1.MysqlReplicaPair
 	if err := r.client.Get(ctx, nn, &pair); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.logger.Warn("CR deleted, skipping status update", "pair", nn)
+			return
+		}
 		r.logger.Error("get pair for status update", "pair", nn, "error", err)
 		return
 	}
@@ -332,7 +352,23 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		return
 	}
 
-	if err := r.client.Status().Update(ctx, &pair); err != nil {
+	// Re-fetch the CR to get the latest resourceVersion before updating, to reduce conflicts.
+	var freshPair v1alpha1.MysqlReplicaPair
+	if err := r.client.Get(ctx, nn, &freshPair); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.logger.Warn("CR deleted before status update, skipping", "pair", nn)
+			return
+		}
+		r.logger.Error("re-fetch pair for status update", "pair", nn, "error", err)
+		return
+	}
+	freshPair.Status = pair.Status
+
+	if err := r.client.Status().Update(ctx, &freshPair); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.logger.Warn("CR deleted during status update, skipping", "pair", nn)
+			return
+		}
 		r.logger.Error("update pair status", "pair", nn, "error", err)
 	}
 }
