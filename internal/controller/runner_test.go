@@ -1,13 +1,21 @@
 package controller
 
 import (
+	"context"
+	"log/slog"
+	"os"
 	"testing"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/state"
 )
 
 func TestSetCondition_PreservesLastTransitionTime(t *testing.T) {
@@ -169,5 +177,219 @@ func TestStatusDeepEqual_LastFailoverChange(t *testing.T) {
 
 	if equality.Semantic.DeepEqual(existing, &status) {
 		t.Error("expected status with new LastFailover to be unequal")
+	}
+}
+
+func TestUpdateCRStatus_IsNotFound_NoPanic(t *testing.T) {
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
+		Build()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	runner := &TopologyManagerRunner{
+		client:   c,
+		logger:   logger,
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+
+	nn := types.NamespacedName{Name: "gone-pair", Namespace: "default"}
+	snap := TopologySnapshot{
+		DC1Name:  "dc1",
+		DC1State: state.StateWritable,
+		DC2Name:  "dc2",
+		DC2State: state.StateReadOnly,
+	}
+
+	runner.updateCRStatus(context.Background(), nn, snap)
+}
+
+func TestUpdateCRStatus_ExistingCR(t *testing.T) {
+	pair := newTestPair()
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
+		WithObjects(pair).
+		Build()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	runner := &TopologyManagerRunner{
+		client:   c,
+		logger:   logger,
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+
+	nn := types.NamespacedName{Name: pair.Name, Namespace: pair.Namespace}
+	snap := TopologySnapshot{
+		DC1Name:    "dc1",
+		DC1State:   state.StateWritable,
+		DC2Name:    "dc2",
+		DC2State:   state.StateReadOnly,
+		PrimaryDC:  "dc1",
+	}
+
+	runner.updateCRStatus(context.Background(), nn, snap)
+
+	var updated v1alpha1.MysqlReplicaPair
+	if err := c.Get(context.Background(), nn, &updated); err != nil {
+		t.Fatalf("failed to get pair: %v", err)
+	}
+	if updated.Status.PrimaryDC != "dc1" {
+		t.Errorf("expected PrimaryDC=dc1, got %q", updated.Status.PrimaryDC)
+	}
+}
+
+func TestUpdateCRStatus_DeletedMidUpdate(t *testing.T) {
+	// CR exists when Get is called but is deleted before Status().Update.
+	// Uses SubResourceUpdate interceptor to simulate mid-update deletion.
+	pair := newTestPair()
+	scheme := testScheme()
+
+	deleteCalled := false
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
+		WithObjects(pair).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, underlying client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if !deleteCalled {
+					deleteCalled = true
+					_ = underlying.Delete(ctx, pair)
+				}
+				return underlying.Status().Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	runner := &TopologyManagerRunner{
+		client:   c,
+		logger:   logger,
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+
+	nn := types.NamespacedName{Name: pair.Name, Namespace: pair.Namespace}
+	snap := TopologySnapshot{
+		DC1Name:  "dc1",
+		DC1State: state.StateWritable,
+		DC2Name:  "dc2",
+		DC2State: state.StateReadOnly,
+	}
+
+	// Must not panic even though CR is deleted mid-update.
+	runner.updateCRStatus(context.Background(), nn, snap)
+
+	if !deleteCalled {
+		t.Error("expected interceptor to be called for SubResourceUpdate")
+	}
+}
+
+func TestStopManager(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	runner := &TopologyManagerRunner{
+		logger:   logger,
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+
+	nn := types.NamespacedName{Name: "test-pair", Namespace: "default"}
+	_, cancel := context.WithCancel(context.Background())
+	runner.managers[nn] = &managedTopology{
+		cancel: cancel,
+	}
+
+	if len(runner.managers) != 1 {
+		t.Fatalf("expected 1 manager, got %d", len(runner.managers))
+	}
+
+	runner.StopManager(nn)
+
+	if len(runner.managers) != 0 {
+		t.Errorf("expected 0 managers after StopManager, got %d", len(runner.managers))
+	}
+
+	runner.StopManager(nn)
+}
+
+func TestStopManager_NotFound(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	runner := &TopologyManagerRunner{
+		logger:   logger,
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+
+	nn := types.NamespacedName{Name: "nonexistent", Namespace: "default"}
+	runner.StopManager(nn)
+}
+
+func TestSync_RemovesDeletedCRManagers(t *testing.T) {
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
+		Build()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	runner := &TopologyManagerRunner{
+		client:   c,
+		logger:   logger,
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+
+	nn := types.NamespacedName{Name: "stale-pair", Namespace: "default"}
+	_, cancel := context.WithCancel(context.Background())
+	runner.managers[nn] = &managedTopology{
+		cancel: cancel,
+		cfg:    TopologyConfig{},
+	}
+
+	if err := runner.sync(context.Background()); err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+
+	if len(runner.managers) != 0 {
+		t.Errorf("expected 0 managers after sync, got %d", len(runner.managers))
+	}
+}
+
+func TestUpdateCRStatus_SetsConditions(t *testing.T) {
+	pair := newTestPair()
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
+		WithObjects(pair).
+		Build()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
+	runner := &TopologyManagerRunner{
+		client:   c,
+		logger:   logger,
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+
+	nn := types.NamespacedName{Name: pair.Name, Namespace: pair.Namespace}
+	snap := TopologySnapshot{
+		DC1Name:   "dc1",
+		DC1State:  state.StateWritable,
+		DC2Name:   "dc2",
+		DC2State:  state.StateReadOnly,
+		PrimaryDC: "dc1",
+	}
+
+	runner.updateCRStatus(context.Background(), nn, snap)
+
+	var updated v1alpha1.MysqlReplicaPair
+	if err := c.Get(context.Background(), nn, &updated); err != nil {
+		t.Fatalf("failed to get pair: %v", err)
+	}
+
+	foundReady := false
+	for _, cond := range updated.Status.Conditions {
+		if cond.Type == "Ready" {
+			foundReady = true
+			if cond.Status != metav1.ConditionTrue {
+				t.Errorf("expected Ready=True, got %s", cond.Status)
+			}
+		}
+	}
+	if !foundReady {
+		t.Error("Ready condition not found in status")
 	}
 }

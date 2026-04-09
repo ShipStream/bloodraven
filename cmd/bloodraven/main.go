@@ -62,20 +62,21 @@ func main() {
 	// Create the hub for websocket connections
 	hub := platform.NewHub(logger)
 
+	// Create and register the topology manager runner.
+	// This is leader-election-aware: polling and failover only run on the leader.
+	runner := controller.NewTopologyManagerRunner(mgr.GetClient(), clientset, hub, logger)
+
 	// Create and register the reconciler
 	reconciler := &controller.MysqlReplicaPairReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("bloodraven"),
+		Runner:   runner,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error("unable to create controller", "error", err)
 		os.Exit(1)
 	}
-
-	// Create and register the topology manager runner.
-	// This is leader-election-aware: polling and failover only run on the leader.
-	runner := controller.NewTopologyManagerRunner(mgr.GetClient(), clientset, hub, logger)
 	if err := mgr.Add(runner); err != nil {
 		logger.Error("unable to add topology manager runner", "error", err)
 		os.Exit(1)

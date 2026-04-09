@@ -91,6 +91,7 @@ type TopologyManager struct {
 	mu           sync.RWMutex
 	lastPollTime time.Time
 	ready        bool
+	cancelFunc   context.CancelFunc
 }
 
 // StatusResponse is returned by the /status endpoint.
@@ -159,6 +160,13 @@ func (tm *TopologyManager) Ready() bool {
 
 // Run starts the polling loop. Blocks until ctx is cancelled.
 func (tm *TopologyManager) Run(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	tm.mu.Lock()
+	tm.cancelFunc = cancel
+	tm.mu.Unlock()
+
 	ticker := tm.clock.NewTicker(tm.cfg.PollIntervalDuration())
 	defer ticker.Stop()
 
@@ -392,6 +400,17 @@ func (tm *TopologyManager) otherDCName(name string) string {
 		return tm.dc2.name
 	}
 	return tm.dc1.name
+}
+
+// Stop cancels the TopologyManager's context, causing the Run loop to exit.
+// It is safe to call even if the manager is not running.
+func (tm *TopologyManager) Stop() {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.cancelFunc != nil {
+		tm.cancelFunc()
+		tm.cancelFunc = nil
+	}
 }
 
 func (tm *TopologyManager) getDC(name string) *dcTracker {
