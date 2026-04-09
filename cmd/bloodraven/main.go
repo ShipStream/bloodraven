@@ -67,11 +67,13 @@ func main() {
 	runner := controller.NewTopologyManagerRunner(mgr.GetClient(), clientset, hub, logger)
 
 	// Create and register the reconciler
+	tainter := platform.NewNodeTainter(clientset, logger)
 	reconciler := &controller.MysqlReplicaPairReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("bloodraven"),
 		Runner:   runner,
+		Tainter:  tainter,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error("unable to create controller", "error", err)

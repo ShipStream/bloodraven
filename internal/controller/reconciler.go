@@ -24,10 +24,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/platform"
 )
 
 const (
-	finalizerName = "shipstream.io/topology-cleanup"
+	finalizerName = "shipstream.io/graceful-shutdown"
 
 	defaultMySQLImage = "mysql:9.6"
 
@@ -51,6 +52,7 @@ type MysqlReplicaPairReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 	Runner   *TopologyManagerRunner
+	Tainter  platform.NodeTainter // optional, for taint cleanup during deletion
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlreplicapairs,verbs=get;list;watch;create;update;patch;delete
@@ -74,7 +76,7 @@ func (r *MysqlReplicaPairReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	// Handle finalizer for clean topology manager shutdown on CR deletion.
+	// Handle deletion with finalizer
 	if !pair.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&pair, finalizerName) {
 			logger.Info("CR being deleted, running finalizer cleanup", "name", pair.Name)
@@ -84,7 +86,9 @@ func (r *MysqlReplicaPairReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				r.Runner.StopManager(req.NamespacedName)
 			}
 
-			// Remove the finalizer so the CR can be garbage collected.
+			if err := r.handleDeletion(ctx, &pair); err != nil {
+				return ctrl.Result{}, fmt.Errorf("handle deletion: %w", err)
+			}
 			controllerutil.RemoveFinalizer(&pair, finalizerName)
 			if err := r.Update(ctx, &pair); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
@@ -93,7 +97,7 @@ func (r *MysqlReplicaPairReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
-	// Ensure the finalizer is present.
+	// Ensure finalizer is present.
 	if !controllerutil.ContainsFinalizer(&pair, finalizerName) {
 		controllerutil.AddFinalizer(&pair, finalizerName)
 		if err := r.Update(ctx, &pair); err != nil {
@@ -183,6 +187,35 @@ func (r *MysqlReplicaPairReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Complete(r)
+}
+
+func (r *MysqlReplicaPairReconciler) handleDeletion(ctx context.Context, pair *v1alpha1.MysqlReplicaPair) error {
+	logger := log.FromContext(ctx)
+	logger.Info("starting graceful shutdown", "pair", pair.Name)
+
+	// Record event
+	r.Recorder.Event(pair, corev1.EventTypeNormal, "GracefulShutdown", "Starting graceful shutdown sequence")
+
+	// Remove taints for both DC zones
+	if r.Tainter != nil {
+		for _, zone := range []string{pair.Spec.DC1.Zone, pair.Spec.DC2.Zone} {
+			if err := r.Tainter.SetTaint(ctx, zone, false); err != nil {
+				logger.Error(err, "failed to remove taint during shutdown", "zone", zone)
+				// Continue cleanup despite taint removal failure
+			}
+		}
+	}
+
+	// Log DNS cleanup warning (full cleanup would require knowing the current DNS state)
+	logger.Info("CR deleted — DNS records may need manual cleanup",
+		"az", pair.Spec.AZ,
+		"dc1IP", pair.Spec.DC1.LBIP,
+		"dc2IP", pair.Spec.DC2.LBIP)
+	r.Recorder.Event(pair, corev1.EventTypeWarning, "DNSCleanup",
+		"DNS records may need manual cleanup after CR deletion")
+
+	r.Recorder.Event(pair, corev1.EventTypeNormal, "GracefulShutdown", "Graceful shutdown complete, removing finalizer")
+	return nil
 }
 
 // resourceName returns a deterministic name for a per-DC resource.
@@ -570,6 +603,9 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 				Containers: containers,
 				Volumes:    volumes,
 			},
+		}
+		if pair.Spec.TerminationGracePeriodSeconds != nil {
+			deploy.Spec.Template.Spec.TerminationGracePeriodSeconds = pair.Spec.TerminationGracePeriodSeconds
 		}
 		return nil
 	})
