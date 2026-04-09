@@ -115,7 +115,7 @@ func (m *mockMySQL) SetCloneDonorList(_ context.Context, donor string) error {
 	return nil
 }
 
-func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool) error {
+func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cloneInstanceCalled = true

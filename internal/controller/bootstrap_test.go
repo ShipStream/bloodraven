@@ -18,10 +18,11 @@ type bootstrapMock struct {
 	readOnly        bool
 	checkReadOnlyErr error
 	setDonorErr     error
-	cloneErr        error
-	superReadOnlyErr error
-	changeSourceErr error
-	startReplicaErr error
+	cloneErr            error
+	cloneTimeoutSec     int
+	superReadOnlyErr    error
+	changeSourceErr     error
+	startReplicaErr     error
 }
 
 func (b *bootstrapMock) record(name string) {
@@ -112,10 +113,11 @@ func (b *bootstrapMock) SetCloneDonorList(_ context.Context, donor string) error
 	return b.setDonorErr
 }
 
-func (b *bootstrapMock) CloneInstance(_ context.Context, _, _, _ string, _ bool) error {
+func (b *bootstrapMock) CloneInstance(_ context.Context, _, _, _ string, _ bool, cloneTimeoutSec int) error {
 	b.record("CloneInstance")
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.cloneTimeoutSec = cloneTimeoutSec
 	return b.cloneErr
 }
 
@@ -254,6 +256,62 @@ func TestBootstrapReplica_CloneFails(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error when CloneInstance fails")
+	}
+}
+
+func TestBootstrapReplica_PassesCloneTimeout(t *testing.T) {
+	primary := &bootstrapMock{readOnly: false}
+	replica := &bootstrapMock{readOnly: true}
+	bc := NewBootstrapController(testLogger())
+
+	err := bc.BootstrapReplica(context.Background(), BootstrapOpts{
+		Primary:      primary,
+		Replica:      replica,
+		PrimaryHost:  "primary.example.com",
+		ReplicaDC:    "dc2",
+		ReplUser:     "repl",
+		ReplPassword: "secret",
+		UseSSL:       true,
+		CloneTimeout: 2 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	replica.mu.Lock()
+	got := replica.cloneTimeoutSec
+	replica.mu.Unlock()
+
+	if got != 7200 {
+		t.Errorf("clone timeout seconds: got %d, want 7200", got)
+	}
+}
+
+func TestBootstrapReplica_DefaultCloneTimeout(t *testing.T) {
+	primary := &bootstrapMock{readOnly: false}
+	replica := &bootstrapMock{readOnly: true}
+	bc := NewBootstrapController(testLogger())
+
+	// CloneTimeout of 0 should default to 3600
+	err := bc.BootstrapReplica(context.Background(), BootstrapOpts{
+		Primary:      primary,
+		Replica:      replica,
+		PrimaryHost:  "primary.example.com",
+		ReplicaDC:    "dc2",
+		ReplUser:     "repl",
+		ReplPassword: "secret",
+		CloneTimeout: 0,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	replica.mu.Lock()
+	got := replica.cloneTimeoutSec
+	replica.mu.Unlock()
+
+	if got != 3600 {
+		t.Errorf("default clone timeout seconds: got %d, want 3600", got)
 	}
 }
 

@@ -59,7 +59,7 @@ func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) err
 	return nil
 }
 func (m *mockMySQL) SetCloneDonorList(_ context.Context, _ string) error { return nil }
-func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool) error {
+func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return nil
 }
 

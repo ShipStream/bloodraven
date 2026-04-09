@@ -216,6 +216,13 @@ func generateMyCnf(pair *v1alpha1.MysqlReplicaPair) string {
 		"collation-server":               "utf8mb4_unicode_ci",
 	}
 
+	// Apply clone_ddl_timeout from spec (default 3600s)
+	cloneTimeout := 3600
+	if pair.Spec.CloneTimeout > 0 {
+		cloneTimeout = pair.Spec.CloneTimeout
+	}
+	settings["clone_ddl_timeout"] = fmt.Sprintf("%d", cloneTimeout)
+
 	// Apply TLS settings if configured
 	if pair.Spec.TLS != nil {
 		settings["ssl-ca"] = "/etc/mysql/tls/ca.crt"

@@ -13,7 +13,24 @@ func (m *checker) SetCloneDonorList(ctx context.Context, donor string) error {
 	return nil
 }
 
-func (m *checker) CloneInstance(ctx context.Context, user, host, password string, useSSL bool) error {
+func (m *checker) CloneInstance(ctx context.Context, user, host, password string, useSSL bool, cloneTimeoutSec int) error {
+	if cloneTimeoutSec <= 0 {
+		cloneTimeoutSec = 3600
+	}
+
+	// Set session-level timeouts so MySQL does not kill the connection
+	// independently of the Go context deadline during long-running clones.
+	timeoutStmts := []string{
+		fmt.Sprintf("SET SESSION net_read_timeout = %d", cloneTimeoutSec),
+		fmt.Sprintf("SET SESSION net_write_timeout = %d", cloneTimeoutSec),
+		fmt.Sprintf("SET GLOBAL clone_ddl_timeout = %d", cloneTimeoutSec),
+	}
+	for _, s := range timeoutStmts {
+		if _, err := m.db.ExecContext(ctx, s); err != nil {
+			return fmt.Errorf("set clone timeout (%s): %w", s, err)
+		}
+	}
+
 	stmt := fmt.Sprintf("CLONE INSTANCE FROM '%s'@'%s':3306 IDENTIFIED BY '%s'",
 		escapeSingleQuotes(user), escapeSingleQuotes(host), escapeSingleQuotes(password))
 	if useSSL {

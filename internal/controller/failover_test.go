@@ -109,7 +109,7 @@ func (t *trackingMock) SetCloneDonorList(_ context.Context, donor string) error 
 	return nil
 }
 
-func (t *trackingMock) CloneInstance(_ context.Context, _, _, _ string, _ bool) error {
+func (t *trackingMock) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	t.record("CloneInstance")
 	return nil
 }

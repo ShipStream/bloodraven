@@ -50,7 +50,11 @@ func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts Bootstr
 	b.logger.Info("cloning from primary", "donor", opts.PrimaryHost)
 	cloneCtx, cancel := context.WithTimeout(ctx, opts.CloneTimeout)
 	defer cancel()
-	if err := opts.Replica.CloneInstance(cloneCtx, opts.ReplUser, opts.PrimaryHost, opts.ReplPassword, opts.UseSSL); err != nil {
+	cloneTimeoutSec := int(opts.CloneTimeout.Seconds())
+	if cloneTimeoutSec <= 0 {
+		cloneTimeoutSec = 3600
+	}
+	if err := opts.Replica.CloneInstance(cloneCtx, opts.ReplUser, opts.PrimaryHost, opts.ReplPassword, opts.UseSSL, cloneTimeoutSec); err != nil {
 		return fmt.Errorf("clone instance: %w", err)
 	}
 
