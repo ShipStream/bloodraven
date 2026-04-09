@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -273,6 +274,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		return
 	}
 
+	// Save existing status before modification for comparison.
+	existingStatus := pair.Status.DeepCopy()
+
 	pair.Status.PrimaryDC = snap.PrimaryDC
 	pair.Status.DC1 = dcInstanceStatusFromSnapshot(snap.DC1State, snap.DC1LastSeen)
 	pair.Status.DC2 = dcInstanceStatusFromSnapshot(snap.DC2State, snap.DC2LastSeen)
@@ -320,6 +324,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			Reason:             "Healthy",
 			Message:            "No cross-DC alerts",
 		})
+	}
+
+	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
+	if equality.Semantic.DeepEqual(existingStatus, &pair.Status) {
+		r.logger.Debug("status unchanged, skipping update", "pair", nn)
+		return
 	}
 
 	if err := r.client.Status().Update(ctx, &pair); err != nil {
