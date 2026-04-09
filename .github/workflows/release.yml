@@ -117,12 +117,23 @@ jobs:
           sed -i "s/^version:.*/version: ${VERSION}/" charts/bloodraven/Chart.yaml
           sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/bloodraven/Chart.yaml
 
-      - name: Publish Helm chart via chart-releaser
-        uses: helm/chart-releaser-action@v1.7.0
-        with:
-          charts_dir: charts
-        env:
-          CR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Package Helm chart
+        run: |
+          helm package charts/bloodraven -d .cr-release-packages
+
+      - name: Publish Helm chart to gh-pages
+        run: |
+          git fetch origin gh-pages
+          git worktree add gh-pages-worktree origin/gh-pages
+          mkdir -p gh-pages-worktree/charts
+          cp .cr-release-packages/*.tgz gh-pages-worktree/charts/
+          helm repo index gh-pages-worktree --url https://shipstream.github.io/bloodraven
+          cd gh-pages-worktree
+          git add .
+          git commit -m "Publish chart bloodraven-${GITHUB_REF_NAME#v}"
+          git push origin HEAD:gh-pages
+          cd ..
+          git worktree remove gh-pages-worktree
 
   publish-release:
     name: Publish Release
