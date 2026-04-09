@@ -100,6 +100,17 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v4
 
+      - name: Create gh-pages branch if missing
+        run: |
+          git fetch origin gh-pages || true
+          if ! git rev-parse --verify origin/gh-pages >/dev/null 2>&1; then
+            git checkout --orphan gh-pages
+            git rm -rf .
+            git commit --allow-empty -m "Initialize gh-pages"
+            git push origin gh-pages
+            git checkout -
+          fi
+
       - name: Update Chart version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
