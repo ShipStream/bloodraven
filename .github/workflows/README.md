@@ -14,7 +14,7 @@ Runs the full PR gate suite in parallel:
 
 | Job | Description |
 |---|---|
-| `lint` | Runs `golangci-lint` via `golangci-lint-action` |
+| `lint` | Runs `golangci-lint` (installed via `go install`) |
 | `build` | Compiles `cmd/bloodraven` and `cmd/sidecar` |
 | `test-unit` | `make test-unit` — unit tests under `./internal/...` |
 | `test-component` | `make test-component` — component tests under `./test/component/` |
@@ -34,12 +34,13 @@ Runs the full PR gate suite in parallel:
 
 Steps:
 
-1. **GitHub Release** — Creates a release with auto-generated notes from commits/PRs.
+1. **Draft release** — Creates a draft GitHub Release with auto-generated notes.
 2. **Docker images** — Builds multi-arch (`linux/amd64` + `linux/arm64`) images for both targets:
    - `ghcr.io/shipstream/bloodraven:{version}` and `:latest`
    - `ghcr.io/shipstream/bloodraven-sidecar:{version}` and `:latest`
 3. **Cosign image signing** — Keyless OIDC signing via Sigstore (no secrets required).
 4. **Helm chart** — Updates `Chart.yaml` `version`/`appVersion` from the tag, then publishes to the `gh-pages` branch as a Helm chart repository via `helm/chart-releaser-action`.
+5. **Publish release** — After Docker and Helm jobs both succeed, the draft release is published. If either fails, the release remains in draft state.
 
 #### How to trigger a release
 
