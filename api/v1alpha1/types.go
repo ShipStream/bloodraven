@@ -107,6 +107,17 @@ type MysqlFailoverGroupSpec struct {
 	// PodAnnotations are additional annotations applied to every MySQL pod managed by this failover group.
 	// These are merged with the operator's required annotations; operator annotations take precedence on conflict.
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
+
+	// ServiceTemplate customizes the Services created by the operator (site, primary, and replicas).
+	ServiceTemplate *ServiceTemplate `json:"serviceTemplate,omitempty"`
+
+	// ExtraContainers are additional containers injected into every MySQL pod.
+	// Useful for exporters, log shippers, or other sidecars.
+	ExtraContainers []corev1.Container `json:"extraContainers,omitempty"`
+
+	// ExtraInitContainers are additional init containers injected into every MySQL pod.
+	// These run after the operator's built-in init container.
+	ExtraInitContainers []corev1.Container `json:"extraInitContainers,omitempty"`
 }
 
 // ReplicationSpec configures replication health monitoring.
@@ -196,6 +207,16 @@ type SidecarSpec struct {
 	// BloodravenAddress is the address of the Bloodraven operator health endpoint.
 	// Default: bloodraven.<namespace>.svc.cluster.local:8082
 	BloodravenAddress string `json:"bloodravenAddress,omitempty"`
+}
+
+// ServiceTemplate customizes the Services created by the operator.
+type ServiceTemplate struct {
+	// Type is the Kubernetes Service type. Default: ClusterIP
+	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort
+	Type corev1.ServiceType `json:"type,omitempty"`
+
+	// Annotations are additional annotations applied to every Service managed by this failover group.
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.

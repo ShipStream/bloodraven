@@ -592,7 +592,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				NodeSelector: map[string]string{
 					"topology.kubernetes.io/zone": site.Zone,
 				},
-				InitContainers: []corev1.Container{
+				InitContainers: append([]corev1.Container{
 					{
 						Name:  "init",
 						Image: image,
@@ -605,8 +605,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 							{Name: "conf", MountPath: "/etc/mysql/conf.d"},
 						},
 					},
-				},
-				Containers: containers,
+				}, fg.Spec.ExtraInitContainers...),
+				Containers: append(containers, fg.Spec.ExtraContainers...),
 				Volumes:    volumes,
 			},
 		}
@@ -631,8 +631,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 			return err
 		}
 		svc.Labels = commonLabels(fg.Name, site.Name)
+		applyServiceAnnotations(svc, fg.Spec.ServiceTemplate)
 		svc.Spec = corev1.ServiceSpec{
-			Type: corev1.ServiceTypeClusterIP,
+			Type: serviceType(fg.Spec.ServiceTemplate),
 			Selector: map[string]string{
 				labelAppName:  "mysql",
 				labelInstance: fg.Name,
@@ -676,8 +677,9 @@ func (r *MysqlFailoverGroupReconciler) reconcilePrimaryService(ctx context.Conte
 			labelFailoverGroup: fg.Name,
 			labelManagedBy:     managerName,
 		}
+		applyServiceAnnotations(svc, fg.Spec.ServiceTemplate)
 		svc.Spec = corev1.ServiceSpec{
-			Type: corev1.ServiceTypeClusterIP,
+			Type: serviceType(fg.Spec.ServiceTemplate),
 			Selector: map[string]string{
 				labelInstance: fg.Name,
 				labelRole:     "primary",
@@ -714,8 +716,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileReplicasService(ctx context.Cont
 			labelFailoverGroup: fg.Name,
 			labelManagedBy:     managerName,
 		}
+		applyServiceAnnotations(svc, fg.Spec.ServiceTemplate)
 		svc.Spec = corev1.ServiceSpec{
-			Type: corev1.ServiceTypeClusterIP,
+			Type: serviceType(fg.Spec.ServiceTemplate),
 			Selector: map[string]string{
 				labelInstance: fg.Name,
 				labelRole:     "replica",
@@ -733,6 +736,27 @@ func (r *MysqlFailoverGroupReconciler) reconcileReplicasService(ctx context.Cont
 		return nil
 	})
 	return err
+}
+
+// serviceType returns the configured service type or ClusterIP as default.
+func serviceType(tmpl *v1alpha1.ServiceTemplate) corev1.ServiceType {
+	if tmpl != nil && tmpl.Type != "" {
+		return tmpl.Type
+	}
+	return corev1.ServiceTypeClusterIP
+}
+
+// applyServiceAnnotations merges user-supplied service annotations into the Service.
+func applyServiceAnnotations(svc *corev1.Service, tmpl *v1alpha1.ServiceTemplate) {
+	if tmpl == nil || len(tmpl.Annotations) == 0 {
+		return
+	}
+	if svc.Annotations == nil {
+		svc.Annotations = make(map[string]string, len(tmpl.Annotations))
+	}
+	for k, v := range tmpl.Annotations {
+		svc.Annotations[k] = v
+	}
 }
 
 // syncPodLabels updates pod labels based on the CR status.

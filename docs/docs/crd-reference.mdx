@@ -21,10 +21,15 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 | `pollInterval` | duration | No | `2s` | How often the operator polls each MySQL instance |
 | `failureThreshold` | int | No | `3` | Consecutive failed polls before a site is marked unreachable |
 | `recoveryThreshold` | int | No | `2` | Consecutive successful polls before a site is marked writable |
-| `failoverCooldown` | duration | No | `60m` | Minimum time between automatic failovers |
+| `failoverCooldown` | duration | No | `5m` | Minimum time between automatic failovers |
 | `replication` | ReplicationSpec | No | -- | Replication health settings |
 | `updateStrategy` | string | No | -- | Update strategy. Set to `OrderedUpdate` for zero-downtime rollouts. |
 | `cloneTimeout` | int | No | `3600` | Timeout in seconds for initial data clone operations |
+| `podLabels` | map[string]string | No | -- | Additional labels applied to every MySQL pod. Operator labels take precedence on conflict. |
+| `podAnnotations` | map[string]string | No | -- | Additional annotations applied to every MySQL pod. Operator annotations take precedence on conflict. |
+| `serviceTemplate` | ServiceTemplate | No | -- | Customizes the Services created by the operator |
+| `extraContainers` | []Container | No | -- | Additional containers injected into every MySQL pod (e.g. exporters) |
+| `extraInitContainers` | []Container | No | -- | Additional init containers injected after the operator's built-in init container |
 
 ### SiteSpec
 
@@ -71,6 +76,13 @@ Each entry in `spec.sites` defines one site in the failover group.
 |---|---|---|---|
 | `maxLagSeconds` | int | No | Maximum acceptable replication lag in seconds before the replica is considered unhealthy |
 
+### ServiceTemplate
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | string | No | Kubernetes Service type: `ClusterIP` (default), `LoadBalancer`, or `NodePort` |
+| `annotations` | map[string]string | No | Additional annotations applied to every Service managed by the operator |
+
 ## Full example
 
 ```yaml
@@ -106,11 +118,31 @@ spec:
   pollInterval: 2s
   failureThreshold: 3
   recoveryThreshold: 2
-  failoverCooldown: 60m
+  failoverCooldown: 5m
   replication:
     maxLagSeconds: 300
   updateStrategy: OrderedUpdate
   cloneTimeout: 3600
+  podLabels:
+    cost-center: platform
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9104"
+  serviceTemplate:
+    type: ClusterIP
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+  extraContainers:
+    - name: mysqld-exporter
+      image: prom/mysqld-exporter:latest
+      env:
+        - name: DATA_SOURCE_NAME
+          valueFrom:
+            secretKeyRef:
+              name: mysql-monitor-creds
+              key: dsn
+      ports:
+        - containerPort: 9104
 ```
 
 ## Status
