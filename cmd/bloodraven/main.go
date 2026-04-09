@@ -96,17 +96,7 @@ func main() {
 
 	// Start a separate HTTP server for websocket and status on :8082
 	// (controller-runtime handles metrics on :8080 and probes on :8081)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/status", func(rw http.ResponseWriter, r *http.Request) {
-		rw.Header().Set("Content-Type", "application/json")
-		statuses := runner.AllStatuses()
-		if len(statuses) == 0 {
-			json.NewEncoder(rw).Encode(map[string]string{"status": "no active pairs"})
-			return
-		}
-		json.NewEncoder(rw).Encode(statuses)
-	})
-	mux.HandleFunc("/ws/status", hub.HandleWS)
+	mux := newAuxMux(runner, hub)
 
 	auxSrv := &http.Server{
 		Addr:    ":8082",
@@ -149,4 +139,27 @@ type runnableFunc func(ctx context.Context) error
 
 func (f runnableFunc) Start(ctx context.Context) error {
 	return f(ctx)
+}
+
+func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		_, _ = rw.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/readyz", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		_, _ = rw.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/status", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.Header().Set("Content-Type", "application/json")
+		statuses := runner.AllStatuses()
+		if len(statuses) == 0 {
+			json.NewEncoder(rw).Encode(map[string]string{"status": "no active pairs"})
+			return
+		}
+		json.NewEncoder(rw).Encode(statuses)
+	})
+	mux.HandleFunc("/ws/status", hub.HandleWS)
+	return mux
 }
