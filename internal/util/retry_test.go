@@ -52,9 +52,6 @@ func TestRetryWithBackoff_GivesUpAfterMaxRetries(t *testing.T) {
 	if calls != 3 {
 		t.Fatalf("expected 3 calls, got %d", calls)
 	}
-	if !errors.Is(err, errors.Unwrap(err)) {
-		// Just check the error message contains our wrapping
-	}
 	expected := "failed after 2 retries: persistent error"
 	if err.Error() != expected {
 		t.Fatalf("expected error %q, got %q", expected, err.Error())
