@@ -266,7 +266,7 @@ type FakeDNS struct {
 	Err      error
 }
 
-func (m *FakeDNS) UpdateAZRecord(_ context.Context, ip string) error {
+func (m *FakeDNS) UpdateDNSRecord(_ context.Context, ip string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.Err != nil {

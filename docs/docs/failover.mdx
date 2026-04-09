@@ -75,8 +75,8 @@ When the operator decides to fail over to a candidate site, it executes these st
 6. **Wait for confirmation**
    - The next poll cycle confirms the candidate is in the `writable` state
 
-7. **Flip Cloudflare DNS**
-   - Updates the DNS A-record to point to the candidate site's load balancer IP
+7. **Update DNSEndpoint**
+   - Creates or updates the `DNSEndpoint` CR so that the A-record points to the candidate site's load balancer IP. external-dns syncs this to the configured DNS provider.
 
 8. **Update node taints**
    - Taint old active site nodes: `shipstream.io/db-readonly=true:NoExecute`

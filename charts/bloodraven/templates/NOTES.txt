@@ -21,8 +21,9 @@ Status API and WebSocket:
 {{- end }}
 
 Next steps:
-  1. Create a Secret with MySQL credentials (ROOT_PASSWORD, REPLICATION_USER, etc.)
-  2. Create a MysqlFailoverGroup custom resource:
+  1. Install external-dns with the DNSEndpoint CRD source enabled for your DNS provider.
+  2. Create a Secret with MySQL credentials (ROOT_PASSWORD, REPLICATION_USER, etc.)
+  3. Create a MysqlFailoverGroup custom resource:
 
      kubectl apply -f - <<EOF
      apiVersion: shipstream.io/v1alpha1
@@ -31,14 +32,11 @@ Next steps:
        name: orders
        namespace: {{ .Release.Namespace }}
      spec:
-       az: us-east-1
        secretName: mysql-credentials
        sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:{{ .Chart.AppVersion }}
-       cloudflare:
-         zoneID: <your-zone-id>
-         apiTokenSecretRef:
-           name: cloudflare-api-token
-           key: token
+       dns:
+         hostname: orders.az.example.com
+         ttl: 60
        sites:
          - name: iad
            zone: us-east-1a

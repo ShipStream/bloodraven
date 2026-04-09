@@ -106,15 +106,21 @@ Applications should:
 
 - **Retry** failed write operations with backoff
 - **Expect** `read-only` errors (`Error 1290: The MySQL server is running with the --read-only option`) and retry after a short delay
-- **Not** cache DNS indefinitely -- respect TTLs so that Cloudflare DNS changes take effect
+- **Not** cache DNS indefinitely -- respect TTLs so that DNS changes propagated by external-dns take effect
 
-## External access via Cloudflare DNS
+## External access via DNS
 
-For applications outside the Kubernetes cluster, the operator manages Cloudflare DNS A-records that point to the active site's load balancer IP (`spec.sites[].lbIP`). When a failover occurs, the operator flips the DNS record to the new active site.
+For applications outside the Kubernetes cluster, the operator manages a `DNSEndpoint` CR whose A record points `spec.dns.hostname` to the active site's load balancer IP (`spec.sites[].lbIP`). external-dns watches this CR and syncs it to your configured DNS provider. When a failover occurs, the operator updates the `DNSEndpoint` to point to the new active site.
+
+Applications should CNAME their own DNS names to the failover group's hostname (i.e. `spec.dns.hostname`). For example, if the failover group has `dns.hostname: orders.az.example.com`, an application might create:
+
+```
+orders.myapp.example.com  CNAME  orders.az.example.com
+```
 
 External applications should:
 
-- Use the DNS hostname configured in Cloudflare (not hardcoded IPs)
+- CNAME to the group's `spec.dns.hostname` (not hardcoded IPs)
 - Respect DNS TTLs
 - Implement connection retry logic
 

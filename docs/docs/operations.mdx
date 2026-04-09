@@ -128,11 +128,9 @@ This follows the same update strategy as MySQL image changes.
 2. Update the Kubernetes Secret referenced by `spec.secretName`
 3. Restart the operator to pick up the new credentials (or wait for the Secret to be reloaded, depending on your Secret mounting configuration)
 
-## Rotating the Cloudflare API token
+## DNS provider configuration
 
-1. Generate a new API token in Cloudflare
-2. Update the Secret referenced by `spec.cloudflare.apiTokenSecretRef`
-3. The operator will use the new token on the next DNS operation
+DNS provider credentials and settings are managed entirely by external-dns, not by Bloodraven. To change your DNS provider or rotate provider credentials, update your external-dns deployment configuration. Bloodraven only manages the `DNSEndpoint` CR; external-dns handles syncing it to the actual DNS provider.
 
 ## Maintenance mode
 
@@ -155,7 +153,7 @@ kubectl patch mysqlfailovergroup orders --type merge -p '
 The operator uses a finalizer to ensure graceful cleanup when a `MysqlFailoverGroup` is deleted:
 
 1. Node taints are removed from all sites
-2. DNS records are cleaned up
+2. The `DNSEndpoint` CR is automatically garbage-collected via its owner reference to the `MysqlFailoverGroup`
 3. MySQL pods, Services, and PVCs are deleted
 4. The finalizer is removed and the CR is deleted
 

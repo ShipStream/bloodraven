@@ -126,7 +126,7 @@ type mockDNS struct {
 	err    error
 }
 
-func (m *mockDNS) UpdateAZRecord(_ context.Context, ip string) error {
+func (m *mockDNS) UpdateDNSRecord(_ context.Context, ip string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.err != nil {
@@ -153,8 +153,7 @@ func taintSelector(siteName string) string {
 
 func testTopologyConfig() TopologyConfig {
 	return TopologyConfig{
-		Name: "lion",
-		AZ:   "lion",
+		Name:  "lion",
 		Sites: [2]SiteTopologyConfig{
 			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
 			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},

@@ -65,6 +65,7 @@ type MysqlFailoverGroupReconciler struct {
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=externaldns.k8s.io,resources=dnsendpoints,verbs=get;list;watch;create;update;patch;delete
 
 func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -204,13 +205,9 @@ func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v
 		}
 	}
 
-	// Log DNS cleanup warning (full cleanup would require knowing the current DNS state)
-	logger.Info("CR deleted — DNS records may need manual cleanup",
-		"az", fg.Spec.AZ,
-		"site0IP", fg.Spec.Sites[0].LBIP,
-		"site1IP", fg.Spec.Sites[1].LBIP)
-	r.Recorder.Event(fg, corev1.EventTypeWarning, "DNSCleanup",
-		"DNS records may need manual cleanup after CR deletion")
+	// DNSEndpoint has an owner reference and will be garbage-collected automatically.
+	logger.Info("CR deleted — DNSEndpoint will be garbage-collected",
+		"hostname", fg.Spec.DNS.Hostname)
 
 	r.Recorder.Event(fg, corev1.EventTypeNormal, "GracefulShutdown", "Graceful shutdown complete, removing finalizer")
 	return nil
@@ -871,7 +868,6 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 
 	return TopologyConfig{
 		Name: fg.Name,
-		AZ:   fg.Spec.AZ,
 		Sites: [2]SiteTopologyConfig{
 			{
 				Name: fg.Spec.Sites[0].Name,

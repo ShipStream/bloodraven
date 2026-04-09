@@ -47,13 +47,9 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 				},
 			},
 			SecretName: "mysql-credentials",
-			AZ:         "lion",
-			Cloudflare: v1alpha1.CloudflareSpec{
-				APITokenSecretRef: v1alpha1.SecretKeyRef{
-					Name: "cloudflare-credentials",
-					Key:  "api-token",
-				},
-				ZoneID: "abc123",
+			DNS: v1alpha1.DNSSpec{
+				Hostname: "lion.az.example.com",
+				TTL:      60,
 			},
 			PollInterval:      &metav1.Duration{Duration: 2 * time.Second},
 			FailureThreshold:  3,
@@ -111,8 +107,8 @@ func TestEnvtest_CRCreationAndSchemaAcceptance(t *testing.T) {
 	if fetched.Spec.Sites[1].Name != "dc2" {
 		t.Errorf("expected Sites[1] name 'dc2', got %q", fetched.Spec.Sites[1].Name)
 	}
-	if fetched.Spec.AZ != "lion" {
-		t.Errorf("expected AZ 'lion', got %q", fetched.Spec.AZ)
+	if fetched.Spec.DNS.Hostname != "lion.az.example.com" {
+		t.Errorf("expected DNS hostname 'lion.az.example.com', got %q", fetched.Spec.DNS.Hostname)
 	}
 }
 

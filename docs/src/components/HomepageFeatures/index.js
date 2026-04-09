@@ -8,7 +8,7 @@ const FeatureList = [
     description: (
       <>
         Polls MySQL every 2 seconds. When the primary becomes unreachable,
-        Bloodraven promotes the standby, flips Cloudflare DNS, and migrates
+        Bloodraven promotes the standby, flips DNS via external-dns, and migrates
         workloads via node taints — no human intervention required.
       </>
     ),

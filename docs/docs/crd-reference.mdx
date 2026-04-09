@@ -16,8 +16,7 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 | `sidecarImage` | string | Yes | -- | Bloodraven sidecar container image |
 | `sites` | []SiteSpec | Yes | -- | Exactly two site definitions |
 | `secretName` | string | Yes | -- | Name of the Secret containing MySQL credentials (key: `dsn`) |
-| `az` | string | Yes | -- | Availability zone identifier for DNS record naming |
-| `cloudflare` | CloudflareSpec | Yes | -- | Cloudflare DNS configuration for traffic steering |
+| `dns` | DNSSpec | Yes | -- | DNS configuration for traffic steering via external-dns |
 | `tls` | TLSSpec | No | -- | TLS configuration (cert-manager integration) |
 | `pollInterval` | duration | No | `2s` | How often the operator polls each MySQL instance |
 | `failureThreshold` | int | No | `3` | Consecutive failed polls before a site is marked unreachable |
@@ -45,19 +44,12 @@ Each entry in `spec.sites` defines one site in the failover group.
 | `storageClassName` | string | Yes | Kubernetes StorageClass name |
 | `size` | string | Yes | Storage request size (e.g. `100Gi`) |
 
-### CloudflareSpec
+### DNSSpec
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `zoneID` | string | Yes | Cloudflare zone ID |
-| `apiTokenSecretRef` | SecretKeyRef | Yes | Reference to the Secret containing the Cloudflare API token |
-
-### SecretKeyRef
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | Yes | Secret name |
-| `key` | string | Yes | Key within the Secret |
+| `hostname` | string | Yes | The DNS hostname managed by Bloodraven (e.g. `orders.az.example.com`). On failover, the operator creates/updates a `DNSEndpoint` CR with an A record pointing this hostname to the active site's `lbIP`. Apps should CNAME their DNS to this hostname. |
+| `ttl` | int | No | TTL in seconds for the DNS A record (default: `60`) |
 
 ### TLSSpec
 
@@ -103,12 +95,9 @@ spec:
         storageClassName: fast-ssd
         size: 100Gi
   secretName: mysql-credentials
-  az: orders
-  cloudflare:
-    zoneID: abc123
-    apiTokenSecretRef:
-      name: cloudflare-token
-      key: token
+  dns:
+    hostname: orders.az.example.com
+    ttl: 60
   tls:
     issuerRef:
       name: letsencrypt

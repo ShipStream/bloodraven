@@ -53,10 +53,6 @@ spec:
           spec:
             description: MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
             properties:
-              az:
-                description: AZ is the availability zone identifier.
-                minLength: 1
-                type: string
               cloneTimeout:
                 default: 3600
                 description: |-
@@ -67,33 +63,24 @@ spec:
                   my.cnf). Default: 3600 (1 hour).
                 minimum: 60
                 type: integer
-              cloudflare:
-                description: Cloudflare contains the Cloudflare DNS configuration
-                  for failover.
+              dns:
+                description: DNS configures the external DNS record managed via the
+                  external-dns DNSEndpoint CRD.
                 properties:
-                  apiTokenSecretRef:
-                    description: APITokenSecretRef references the secret containing
-                      the Cloudflare API token.
-                    properties:
-                      key:
-                        description: Key within the Secret.
-                        minLength: 1
-                        type: string
-                      name:
-                        description: Name of the Secret.
-                        minLength: 1
-                        type: string
-                    required:
-                    - key
-                    - name
-                    type: object
-                  zoneID:
-                    description: ZoneID is the Cloudflare zone ID.
+                  hostname:
+                    description: |-
+                      Hostname is the fully-qualified DNS name to update on failover
+                      (e.g. "lion.az.example.com"). Apps should CNAME to this hostname.
                     minLength: 1
                     type: string
+                  ttl:
+                    default: 60
+                    description: 'TTL is the DNS record TTL in seconds. Default: 60'
+                    format: int64
+                    minimum: 1
+                    type: integer
                 required:
-                - apiTokenSecretRef
-                - zoneID
+                - hostname
                 type: object
               failoverCooldown:
                 description: 'FailoverCooldown is the minimum time between failovers.
@@ -315,8 +302,7 @@ spec:
                 - Recreate
                 type: string
             required:
-            - az
-            - cloudflare
+            - dns
             - secretName
             - sites
             type: object

@@ -11,7 +11,7 @@ Bloodraven is a Kubernetes operator for managing MySQL async replication failove
 
 - **Monitors** two MySQL instances (one per site) via a 2-second polling loop with configurable failure and recovery thresholds
 - **Detects** when the active primary becomes unreachable and **promotes** the standby replica to primary
-- **Steers traffic** by flipping Cloudflare DNS records to the new primary's load balancer IP
+- **Steers traffic** by updating a DNSEndpoint CR (consumed by external-dns) to point to the new primary's load balancer IP
 - **Migrates workloads** by tainting nodes at the failed site so Kubernetes evicts application pods
 - **Prevents split-brain** with sidecar self-fencing: if both the operator and peer are unreachable, the sidecar sets `super_read_only=ON` as a safety net
 - **Broadcasts status** over a WebSocket API for dashboards and alerting integrations
@@ -36,12 +36,9 @@ metadata:
   name: orders
 spec:
   secretName: mysql-credentials
-  az: orders
-  cloudflare:
-    zoneID: abc123
-    apiTokenSecretRef:
-      name: cloudflare-token
-      key: token
+  dns:
+    hostname: orders.az.example.com
+    ttl: 60
   sites:
     - name: iad
       zone: us-east-1a

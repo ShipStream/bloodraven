@@ -1,6 +1,6 @@
 # Bloodraven
 
-A Kubernetes operator for MySQL async replication failover groups across two sites. Bloodraven owns the full MySQL lifecycle: pod creation, configuration, health monitoring, automated failover, clone-based bootstrapping, and platform reactions (node taints, Cloudflare DNS, WebSocket broadcasts).
+A Kubernetes operator for MySQL async replication failover groups across two sites. Bloodraven owns the full MySQL lifecycle: pod creation, configuration, health monitoring, automated failover, clone-based bootstrapping, and platform reactions (node taints, DNS failover via external-dns, WebSocket broadcasts).
 
 Single controller, single source of truth, no coordination problems.
 
@@ -35,7 +35,7 @@ graph TB
     end
 
     subgraph "External"
-        CF["Cloudflare DNS<br/>{az}.az.shipstream.app"]
+        CF["DNS (external-dns)<br/>failover A record"]
         DH["Device Hub<br/>WebSocket clients"]
     end
 

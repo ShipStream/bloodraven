@@ -53,12 +53,8 @@ type MysqlFailoverGroupSpec struct {
 	// TLS configures TLS for the MySQL instances.
 	TLS *TLSSpec `json:"tls,omitempty"`
 
-	// AZ is the availability zone identifier.
-	// +kubebuilder:validation:MinLength=1
-	AZ string `json:"az"`
-
-	// Cloudflare contains the Cloudflare DNS configuration for failover.
-	Cloudflare CloudflareSpec `json:"cloudflare"`
+	// DNS configures the external DNS record managed via the external-dns DNSEndpoint CRD.
+	DNS DNSSpec `json:"dns"`
 
 	// PollInterval is how often to poll MySQL instances. Default: 2s
 	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
@@ -166,25 +162,19 @@ type IssuerRef struct {
 	Kind string `json:"kind"`
 }
 
-// CloudflareSpec configures Cloudflare DNS for failover.
-type CloudflareSpec struct {
-	// APITokenSecretRef references the secret containing the Cloudflare API token.
-	APITokenSecretRef SecretKeyRef `json:"apiTokenSecretRef"`
-
-	// ZoneID is the Cloudflare zone ID.
+// DNSSpec configures the external DNS record managed by the operator.
+// Bloodraven creates a DNSEndpoint CR (externaldns.k8s.io/v1alpha1) that
+// external-dns watches and syncs to the configured DNS provider.
+type DNSSpec struct {
+	// Hostname is the fully-qualified DNS name to update on failover
+	// (e.g. "lion.az.example.com"). Apps should CNAME to this hostname.
 	// +kubebuilder:validation:MinLength=1
-	ZoneID string `json:"zoneID"`
-}
+	Hostname string `json:"hostname"`
 
-// SecretKeyRef references a key within a Kubernetes Secret.
-type SecretKeyRef struct {
-	// Name of the Secret.
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-
-	// Key within the Secret.
-	// +kubebuilder:validation:MinLength=1
-	Key string `json:"key"`
+	// TTL is the DNS record TTL in seconds. Default: 60
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=1
+	TTL int64 `json:"ttl,omitempty"`
 }
 
 // SidecarSpec configures the sidecar container behavior.

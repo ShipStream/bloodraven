@@ -71,13 +71,9 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 				},
 			},
 			SecretName: "mysql-credentials",
-			AZ:         "lion",
-			Cloudflare: v1alpha1.CloudflareSpec{
-				APITokenSecretRef: v1alpha1.SecretKeyRef{
-					Name: "cloudflare-credentials",
-					Key:  "api-token",
-				},
-				ZoneID: "abc123",
+			DNS: v1alpha1.DNSSpec{
+				Hostname: "lion.az.example.com",
+				TTL:      60,
 			},
 			PollInterval:      &metav1.Duration{Duration: 2 * time.Second},
 			FailureThreshold:  3,
@@ -418,9 +414,6 @@ func TestCRConfigToTopologyConfig(t *testing.T) {
 	fg := newTestFG()
 	tc := CRConfigToTopologyConfig(fg)
 
-	if tc.AZ != "lion" {
-		t.Errorf("expected AZ 'lion', got %s", tc.AZ)
-	}
 	if tc.Sites[0].Name != "dc1" {
 		t.Errorf("expected Sites[0] name 'dc1', got %s", tc.Sites[0].Name)
 	}

@@ -188,7 +188,7 @@ type mockDNS struct {
 	err    error
 }
 
-func (m *mockDNS) UpdateAZRecord(_ context.Context, ip string) error {
+func (m *mockDNS) UpdateDNSRecord(_ context.Context, ip string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.err != nil {
@@ -242,8 +242,7 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
-		Name: "lion",
-		AZ:   "lion",
+		Name:  "lion",
 		Sites: [2]controller.SiteTopologyConfig{
 			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
 			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
@@ -282,8 +281,7 @@ func newTestHarnessWithCooldown(t *testing.T, cooldown time.Duration) *testHarne
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
-		Name: "lion",
-		AZ:   "lion",
+		Name:  "lion",
 		Sites: [2]controller.SiteTopologyConfig{
 			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
 			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},

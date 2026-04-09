@@ -24,7 +24,6 @@ type SiteTopologyConfig struct {
 // TopologyConfig holds topology manager configuration, decoupled from config source.
 type TopologyConfig struct {
 	Name  string // failover group name (from CR metadata.name)
-	AZ    string
 	Sites [2]SiteTopologyConfig
 
 	PollInterval      int64 // nanoseconds
@@ -256,7 +255,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		site := tm.getSite(tm.promotedSite)
 		if site != nil && site.state == state.StateWritable {
 			tm.logger.Info("promotion confirmed, flipping DNS", "site", site.name, "ip", site.lbIP)
-			if err := tm.dns.UpdateAZRecord(ctx, site.lbIP); err != nil {
+			if err := tm.dns.UpdateDNSRecord(ctx, site.lbIP); err != nil {
 				tm.logger.Error("DNS flip failed", "site", site.name, "error", err)
 			} else {
 				metrics.DNSFlipCount.WithLabelValues(site.name).Inc()

@@ -174,27 +174,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	failoverCtl := NewFailoverController(r.logger.With("fg", nn.String()))
 	tainter := platform.NewNodeTainter(r.clientset, r.logger.With("fg", nn.String()))
 
-	// Read Cloudflare API token.
-	var cfSecret corev1.Secret
-	cfSecretNN := types.NamespacedName{
-		Namespace: fg.Namespace,
-		Name:      fg.Spec.Cloudflare.APITokenSecretRef.Name,
-	}
-	if err := r.client.Get(ctx, cfSecretNN, &cfSecret); err != nil {
-		for i := range siteMySQL {
-			siteMySQL[i].Close()
-		}
-		return fmt.Errorf("get Cloudflare secret %s: %w", cfSecretNN, err)
-	}
-	cfToken := string(cfSecret.Data[fg.Spec.Cloudflare.APITokenSecretRef.Key])
-	if cfToken == "" {
-		for i := range siteMySQL {
-			siteMySQL[i].Close()
-		}
-		return fmt.Errorf("Cloudflare secret %s key %s is empty", cfSecretNN, fg.Spec.Cloudflare.APITokenSecretRef.Key)
-	}
-
-	dns := platform.NewCloudflareDNS(cfToken, fg.Spec.Cloudflare.ZoneID, fg.Spec.AZ)
+	dns := platform.NewDNSEndpointUpdater(r.client, fg.Name, string(fg.UID), fg.Namespace, fg.Name, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL)
 
 	tm := NewTopologyManager(cfg, siteMySQL[0], siteMySQL[1], failoverCtl, tainter, r.hub, dns,
 		r.logger.With("fg", nn.String()))

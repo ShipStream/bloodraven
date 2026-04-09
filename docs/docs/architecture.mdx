@@ -29,11 +29,14 @@ graph TB
         SVC_REP["mysql-orders-replicas (Service)"]
     end
 
-    CF[Cloudflare DNS]
+    DE[DNSEndpoint CR]
+    ED[external-dns]
 
     OP -- "poll every 2s" --> POD_A
     OP -- "poll every 2s" --> POD_B
-    OP -- "flip on failover" --> CF
+    OP -- "create/update on failover" --> DE
+    ED -- "watches" --> DE
+    ED -- "syncs to DNS provider" --> DNS[DNS Provider]
     SVC_PRI -- "selector follows active" --> POD_A
     SVC_REP -- "selector follows healthy replicas" --> POD_B
     SC_A -- "self-fence if isolated" --> POD_A
@@ -49,7 +52,7 @@ The operator runs as a single-replica Deployment. For each `MysqlFailoverGroup`,
 3. Creates a `mysql-<name>-replicas` Service whose selector matches healthy read replicas
 4. Runs a polling loop (default 2s) that connects to each site's MySQL instance and evaluates the replication topology
 5. Applies the [state machine](./failover.mdx#state-machine) logic to decide whether to failover, alert, or do nothing
-6. On failover, executes the [failover sequence](./failover.mdx#failover-sequence) including DNS flips and node tainting
+6. On failover, executes the [failover sequence](./failover.mdx#failover-sequence) including DNSEndpoint updates and node tainting
 
 The operator exposes:
 - **Prometheus metrics** on `:8080/metrics`

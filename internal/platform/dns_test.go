@@ -1,85 +1,84 @@
-//go:build integration
-
 package platform
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestCloudflareDNS_UpdateAZRecord(t *testing.T) {
-	var gotMethod, gotPath string
-	var gotBody cfUpdateRequest
+func TestDNSEndpointUpdater_CreateAndUpdate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	gvk := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpoint"}
+	listGVK := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpointList"}
+	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(listGVK, &unstructured.UnstructuredList{})
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if auth != "Bearer test-token" {
-			t.Errorf("bad auth header: %s", auth)
-		}
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-		if strings.Contains(r.URL.Path, "dns_records") && r.Method == http.MethodGet {
-			// List records
-			json.NewEncoder(w).Encode(cfListResponse{
-				Success: true,
-				Result: []struct {
-					ID string `json:"id"`
-				}{{ID: "record-123"}},
-			})
-			return
-		}
+	dns := NewDNSEndpointUpdater(c, "main", "uid-123", "default", "main", "lion.az.example.com", 60)
 
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"success":true}`))
-	}))
-	defer srv.Close()
+	ctx := context.Background()
 
-	dns := &cloudflareDNS{
-		apiToken: "test-token",
-		zoneID:   "zone-abc",
-		az:       "lion",
-		client:   srv.Client(),
+	// First call: creates the DNSEndpoint.
+	if err := dns.UpdateDNSRecord(ctx, "10.0.1.100"); err != nil {
+		t.Fatalf("first UpdateDNSRecord: %v", err)
 	}
 
-	// Override the base URL by replacing the client's transport
-	origURL := srv.URL
-	dns.client = &http.Client{
-		Transport: &rewriteTransport{base: origURL},
+	// Verify the object was created.
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gvk)
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "bloodraven-main"}, obj); err != nil {
+		t.Fatalf("get DNSEndpoint: %v", err)
 	}
 
-	err := dns.UpdateAZRecord(context.Background(), "1.2.3.4")
-	if err != nil {
-		t.Fatalf("UpdateAZRecord: %v", err)
+	// Check spec.endpoints.
+	spec, ok := obj.Object["spec"].(map[string]interface{})
+	if !ok {
+		t.Fatal("missing spec")
+	}
+	endpoints, ok := spec["endpoints"].([]interface{})
+	if !ok || len(endpoints) != 1 {
+		t.Fatalf("expected 1 endpoint, got %v", endpoints)
+	}
+	ep := endpoints[0].(map[string]interface{})
+	if ep["dnsName"] != "lion.az.example.com" {
+		t.Errorf("dnsName: got %v, want lion.az.example.com", ep["dnsName"])
+	}
+	targets := ep["targets"].([]interface{})
+	if len(targets) != 1 || targets[0] != "10.0.1.100" {
+		t.Errorf("targets: got %v, want [10.0.1.100]", targets)
 	}
 
-	if gotMethod != http.MethodPut {
-		t.Errorf("method: got %s, want PUT", gotMethod)
+	// Check owner reference.
+	owners := obj.GetOwnerReferences()
+	if len(owners) != 1 {
+		t.Fatalf("expected 1 owner ref, got %d", len(owners))
 	}
-	if !strings.Contains(gotPath, "record-123") {
-		t.Errorf("path should contain record ID: %s", gotPath)
+	if owners[0].Name != "main" || owners[0].Kind != "MysqlFailoverGroup" {
+		t.Errorf("owner ref: got %+v", owners[0])
 	}
-	if gotBody.Content != "1.2.3.4" {
-		t.Errorf("content: got %s, want 1.2.3.4", gotBody.Content)
+
+	// Second call: updates the target IP.
+	if err := dns.UpdateDNSRecord(ctx, "10.0.2.200"); err != nil {
+		t.Fatalf("second UpdateDNSRecord: %v", err)
 	}
-	if gotBody.Name != "lion.az.shipstream.app" {
-		t.Errorf("name: got %s, want lion.az.shipstream.app", gotBody.Name)
+
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "bloodraven-main"}, obj); err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	spec = obj.Object["spec"].(map[string]interface{})
+	endpoints = spec["endpoints"].([]interface{})
+	ep = endpoints[0].(map[string]interface{})
+	targets = ep["targets"].([]interface{})
+	if len(targets) != 1 || targets[0] != "10.0.2.200" {
+		t.Errorf("updated targets: got %v, want [10.0.2.200]", targets)
 	}
 }
 
-// rewriteTransport rewrites Cloudflare API URLs to the test server.
-type rewriteTransport struct {
-	base string
-}
-
-func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Rewrite cloudflare URLs to test server
-	req.URL.Scheme = "http"
-	req.URL.Host = strings.TrimPrefix(t.base, "http://")
-	return http.DefaultTransport.RoundTrip(req)
-}
+// Verify the interface is satisfied at compile time.
+var _ DNSUpdater = (*dnsEndpointUpdater)(nil)

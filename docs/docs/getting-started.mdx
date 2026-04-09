@@ -11,7 +11,8 @@ This guide walks through installing Bloodraven and creating your first `MysqlFai
 - Kubernetes 1.27+
 - Helm 3.x
 - Two sets of nodes, each labeled for a different site (see [Placement Contract](./placement-contract.mdx))
-- A Cloudflare zone with an API token that has DNS edit permissions
+- [external-dns](https://github.com/kubernetes-sigs/external-dns) installed and configured for your DNS provider (Cloudflare, Route53, Google Cloud DNS, etc.)
+- The `DNSEndpoint` CRD (`externaldns.k8s.io/v1alpha1`) installed in the cluster
 - (Optional) cert-manager installed if you want automated TLS
 
 ## Install the operator
@@ -34,14 +35,6 @@ Create a Secret containing the MySQL DSN the operator will use to connect to eac
 kubectl create secret generic mysql-credentials \
   -n default \
   --from-literal=dsn='root:yourpassword@tcp(localhost:3306)/'
-```
-
-### Cloudflare API token
-
-```bash
-kubectl create secret generic cloudflare-token \
-  -n default \
-  --from-literal=token='your-cloudflare-api-token'
 ```
 
 ## Label nodes
@@ -90,11 +83,9 @@ spec:
 
   secretName: mysql-credentials
 
-  cloudflare:
-    zoneID: abc123
-    apiTokenSecretRef:
-      name: cloudflare-token
-      key: token
+  dns:
+    hostname: orders.az.example.com
+    ttl: 60
 
   pollInterval: 2s
   failureThreshold: 3
