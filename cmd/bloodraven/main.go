@@ -68,7 +68,7 @@ func main() {
 
 	// Create and register the reconciler
 	tainter := platform.NewNodeTainter(clientset, logger)
-	reconciler := &controller.MysqlReplicaPairReconciler{
+	reconciler := &controller.MysqlFailoverGroupReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorderFor("bloodraven"),
@@ -155,7 +155,7 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub) *htt
 		rw.Header().Set("Content-Type", "application/json")
 		statuses := runner.AllStatuses()
 		if len(statuses) == 0 {
-			json.NewEncoder(rw).Encode(map[string]string{"status": "no active pairs"})
+			json.NewEncoder(rw).Encode(map[string]string{"status": "no active failover groups"})
 			return
 		}
 		json.NewEncoder(rw).Encode(statuses)

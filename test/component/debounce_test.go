@@ -22,8 +22,8 @@ func TestDebounce_SingleBlipNoFailover(t *testing.T) {
 	}
 
 	s := h.tm.Status()
-	if s.DC1State != "writable" {
-		t.Errorf("dc1 should recover to writable, got %s", s.DC1State)
+	if s.Sites[0].State != "writable" {
+		t.Errorf("dc1 should recover to writable, got %s", s.Sites[0].State)
 	}
 }
 
@@ -38,8 +38,8 @@ func TestDebounce_RecoveryRequiresMultiplePolls(t *testing.T) {
 	h.pollN(2)
 
 	s := h.tm.Status()
-	if s.DC1State != "read-only" {
-		t.Fatalf("setup: dc1 should be read-only, got %s", s.DC1State)
+	if s.Sites[0].State != "read-only" {
+		t.Fatalf("setup: dc1 should be read-only, got %s", s.Sites[0].State)
 	}
 
 	// DC1 becomes writable.
@@ -48,15 +48,15 @@ func TestDebounce_RecoveryRequiresMultiplePolls(t *testing.T) {
 	// After 1 poll, DC1 should NOT yet be writable (recovery threshold = 2).
 	h.pollN(1)
 	s = h.tm.Status()
-	if s.DC1State == "writable" {
+	if s.Sites[0].State == "writable" {
 		t.Error("dc1 should not be writable after only 1 recovery poll")
 	}
 
 	// After 2nd poll, DC1 should be writable.
 	h.pollN(1)
 	s = h.tm.Status()
-	if s.DC1State != "writable" {
-		t.Errorf("dc1 should be writable after 2 recovery polls, got %s", s.DC1State)
+	if s.Sites[0].State != "writable" {
+		t.Errorf("dc1 should be writable after 2 recovery polls, got %s", s.Sites[0].State)
 	}
 }
 
@@ -72,7 +72,7 @@ func TestDebounce_FailureRollback(t *testing.T) {
 
 	// Verify no failover yet.
 	s := h.tm.Status()
-	if s.DC1State == "unreachable" {
+	if s.Sites[0].State == "unreachable" {
 		t.Error("dc1 should not be unreachable after only 2 failures (threshold is 3)")
 	}
 
@@ -82,8 +82,8 @@ func TestDebounce_FailureRollback(t *testing.T) {
 
 	// Fail count should have reset; DC1 should be writable.
 	s = h.tm.Status()
-	if s.DC1State != "writable" {
-		t.Errorf("dc1 should recover to writable, got %s", s.DC1State)
+	if s.Sites[0].State != "writable" {
+		t.Errorf("dc1 should recover to writable, got %s", s.Sites[0].State)
 	}
 
 	// No DNS flip should have occurred.
@@ -104,8 +104,8 @@ func TestDebounce_ThresholdExactlyMet(t *testing.T) {
 
 	// DC1 should now be unreachable.
 	s := h.tm.Status()
-	if s.DC1State != "unreachable" {
-		t.Errorf("dc1 should be unreachable after exactly 3 failures, got %s", s.DC1State)
+	if s.Sites[0].State != "unreachable" {
+		t.Errorf("dc1 should be unreachable after exactly 3 failures, got %s", s.Sites[0].State)
 	}
 
 	// Failover should have been initiated.

@@ -30,7 +30,7 @@ type managedTopology struct {
 	cfg    TopologyConfig
 }
 
-// TopologyManagerRunner manages TopologyManager instances for all MysqlReplicaPair resources.
+// TopologyManagerRunner manages TopologyManager instances for all MysqlFailoverGroup resources.
 // It implements manager.Runnable and runs only on the leader-elected instance.
 type TopologyManagerRunner struct {
 	client    client.Client
@@ -59,8 +59,8 @@ func (r *TopologyManagerRunner) NeedLeaderElection() bool {
 	return true
 }
 
-// Start implements manager.Runnable. It discovers MysqlReplicaPair resources,
-// starts a TopologyManager per pair, and re-syncs periodically.
+// Start implements manager.Runnable. It discovers MysqlFailoverGroup resources,
+// starts a TopologyManager per group, and re-syncs periodically.
 func (r *TopologyManagerRunner) Start(ctx context.Context) error {
 	r.logger.Info("topology manager runner starting")
 
@@ -86,22 +86,22 @@ func (r *TopologyManagerRunner) Start(ctx context.Context) error {
 	}
 }
 
-// sync lists all MysqlReplicaPair resources and ensures a topology manager
+// sync lists all MysqlFailoverGroup resources and ensures a topology manager
 // is running for each one. Stale managers are stopped.
 func (r *TopologyManagerRunner) sync(ctx context.Context) error {
-	var pairs v1alpha1.MysqlReplicaPairList
-	if err := r.client.List(ctx, &pairs); err != nil {
-		return fmt.Errorf("list MysqlReplicaPairs: %w", err)
+	var groups v1alpha1.MysqlFailoverGroupList
+	if err := r.client.List(ctx, &groups); err != nil {
+		return fmt.Errorf("list MysqlFailoverGroups: %w", err)
 	}
 
 	seen := make(map[types.NamespacedName]struct{})
 
-	for i := range pairs.Items {
-		pair := &pairs.Items[i]
-		nn := PairNamespacedName(pair)
+	for i := range groups.Items {
+		fg := &groups.Items[i]
+		nn := FailoverGroupNamespacedName(fg)
 		seen[nn] = struct{}{}
 
-		cfg := CRConfigToTopologyConfig(pair)
+		cfg := CRConfigToTopologyConfig(fg)
 
 		r.mu.RLock()
 		existing, ok := r.managers[nn]
@@ -112,12 +112,12 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		}
 
 		if ok {
-			r.logger.Info("config changed, restarting topology manager", "pair", nn)
+			r.logger.Info("config changed, restarting topology manager", "fg", nn)
 			existing.cancel()
 		}
 
-		if err := r.startManager(ctx, pair, cfg); err != nil {
-			r.logger.Error("failed to start topology manager", "pair", nn, "error", err)
+		if err := r.startManager(ctx, fg, cfg); err != nil {
+			r.logger.Error("failed to start topology manager", "fg", nn, "error", err)
 		}
 	}
 
@@ -125,7 +125,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	r.mu.Lock()
 	for nn, mt := range r.managers {
 		if _, ok := seen[nn]; !ok {
-			r.logger.Info("stopping topology manager for deleted pair", "pair", nn)
+			r.logger.Info("stopping topology manager for deleted fg", "fg", nn)
 			mt.cancel()
 			delete(r.managers, nn)
 		}
@@ -135,13 +135,13 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	return nil
 }
 
-// startManager creates and starts a TopologyManager for a single MysqlReplicaPair.
-func (r *TopologyManagerRunner) startManager(ctx context.Context, pair *v1alpha1.MysqlReplicaPair, cfg TopologyConfig) error {
-	nn := PairNamespacedName(pair)
+// startManager creates and starts a TopologyManager for a single MysqlFailoverGroup.
+func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cfg TopologyConfig) error {
+	nn := FailoverGroupNamespacedName(fg)
 
 	// Read the MySQL credentials secret.
 	var secret corev1.Secret
-	secretNN := types.NamespacedName{Namespace: pair.Namespace, Name: pair.Spec.SecretName}
+	secretNN := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.SecretName}
 	if err := r.client.Get(ctx, secretNN, &secret); err != nil {
 		return fmt.Errorf("get secret %s: %w", secretNN, err)
 	}
@@ -151,51 +151,53 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, pair *v1alpha1
 		return fmt.Errorf("secret %s missing 'dsn' key", secretNN)
 	}
 
-	dc1DSN, err := buildDCDSN(string(dsnBytes), pair, pair.Spec.DC1)
-	if err != nil {
-		return fmt.Errorf("build DC1 DSN: %w", err)
-	}
-	dc2DSN, err := buildDCDSN(string(dsnBytes), pair, pair.Spec.DC2)
-	if err != nil {
-		return fmt.Errorf("build DC2 DSN: %w", err)
+	var siteMySQL [2]internalmysql.Checker
+	for i, site := range fg.Spec.Sites {
+		dsn, err := buildSiteDSN(string(dsnBytes), fg, site)
+		if err != nil {
+			// Close any already-created checkers
+			for j := 0; j < i; j++ {
+				siteMySQL[j].Close()
+			}
+			return fmt.Errorf("build site %s DSN: %w", site.Name, err)
+		}
+		checker, err := internalmysql.NewChecker(dsn)
+		if err != nil {
+			for j := 0; j < i; j++ {
+				siteMySQL[j].Close()
+			}
+			return fmt.Errorf("create site %s MySQL checker: %w", site.Name, err)
+		}
+		siteMySQL[i] = checker
 	}
 
-	dc1MySQL, err := internalmysql.NewChecker(dc1DSN)
-	if err != nil {
-		return fmt.Errorf("create DC1 MySQL checker: %w", err)
-	}
-
-	dc2MySQL, err := internalmysql.NewChecker(dc2DSN)
-	if err != nil {
-		dc1MySQL.Close()
-		return fmt.Errorf("create DC2 MySQL checker: %w", err)
-	}
-
-	failoverCtl := NewFailoverController(r.logger.With("pair", nn.String()))
-	tainter := platform.NewNodeTainter(r.clientset, r.logger.With("pair", nn.String()))
+	failoverCtl := NewFailoverController(r.logger.With("fg", nn.String()))
+	tainter := platform.NewNodeTainter(r.clientset, r.logger.With("fg", nn.String()))
 
 	// Read Cloudflare API token.
 	var cfSecret corev1.Secret
 	cfSecretNN := types.NamespacedName{
-		Namespace: pair.Namespace,
-		Name:      pair.Spec.Cloudflare.APITokenSecretRef.Name,
+		Namespace: fg.Namespace,
+		Name:      fg.Spec.Cloudflare.APITokenSecretRef.Name,
 	}
 	if err := r.client.Get(ctx, cfSecretNN, &cfSecret); err != nil {
-		dc1MySQL.Close()
-		dc2MySQL.Close()
+		for i := range siteMySQL {
+			siteMySQL[i].Close()
+		}
 		return fmt.Errorf("get Cloudflare secret %s: %w", cfSecretNN, err)
 	}
-	cfToken := string(cfSecret.Data[pair.Spec.Cloudflare.APITokenSecretRef.Key])
+	cfToken := string(cfSecret.Data[fg.Spec.Cloudflare.APITokenSecretRef.Key])
 	if cfToken == "" {
-		dc1MySQL.Close()
-		dc2MySQL.Close()
-		return fmt.Errorf("Cloudflare secret %s key %s is empty", cfSecretNN, pair.Spec.Cloudflare.APITokenSecretRef.Key)
+		for i := range siteMySQL {
+			siteMySQL[i].Close()
+		}
+		return fmt.Errorf("Cloudflare secret %s key %s is empty", cfSecretNN, fg.Spec.Cloudflare.APITokenSecretRef.Key)
 	}
 
-	dns := platform.NewCloudflareDNS(cfToken, pair.Spec.Cloudflare.ZoneID, pair.Spec.AZ)
+	dns := platform.NewCloudflareDNS(cfToken, fg.Spec.Cloudflare.ZoneID, fg.Spec.AZ)
 
-	tm := NewTopologyManager(cfg, dc1MySQL, dc2MySQL, failoverCtl, tainter, r.hub, dns,
-		r.logger.With("pair", nn.String()))
+	tm := NewTopologyManager(cfg, siteMySQL[0], siteMySQL[1], failoverCtl, tainter, r.hub, dns,
+		r.logger.With("fg", nn.String()))
 
 	// Set the status callback to update the CR status subresource on state changes.
 	tm.StatusCallback = func(snap TopologySnapshot) {
@@ -213,11 +215,12 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, pair *v1alpha1
 	r.mu.Unlock()
 
 	go func() {
-		r.logger.Info("starting topology manager", "pair", nn)
+		r.logger.Info("starting topology manager", "fg", nn)
 		tm.Run(tmCtx)
-		dc1MySQL.Close()
-		dc2MySQL.Close()
-		r.logger.Info("topology manager stopped", "pair", nn)
+		for i := range siteMySQL {
+			siteMySQL[i].Close()
+		}
+		r.logger.Info("topology manager stopped", "fg", nn)
 	}()
 
 	return nil
@@ -228,13 +231,13 @@ func (r *TopologyManagerRunner) stopAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for nn, mt := range r.managers {
-		r.logger.Info("stopping topology manager", "pair", nn)
+		r.logger.Info("stopping topology manager", "fg", nn)
 		mt.cancel()
 	}
 	r.managers = make(map[types.NamespacedName]*managedTopology)
 }
 
-// Status returns the StatusResponse for a named pair.
+// Status returns the StatusResponse for a named failover group.
 func (r *TopologyManagerRunner) Status(nn types.NamespacedName) (StatusResponse, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -275,10 +278,10 @@ func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {
 	defer r.mu.Unlock()
 	mt, ok := r.managers[nn]
 	if !ok {
-		r.logger.Info("no topology manager found to stop", "pair", nn)
+		r.logger.Info("no topology manager found to stop", "fg", nn)
 		return
 	}
-	r.logger.Info("stopping topology manager via StopManager", "pair", nn)
+	r.logger.Info("stopping topology manager via StopManager", "fg", nn)
 	mt.cancel()
 	delete(r.managers, nn)
 }
@@ -286,53 +289,53 @@ func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {
 // updateCRStatus writes topology state to the CR status subresource.
 func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.NamespacedName, snap TopologySnapshot) {
 	// Fetch the CR to get the latest resourceVersion and generation for the status update.
-	var freshPair v1alpha1.MysqlReplicaPair
-	if err := r.client.Get(ctx, nn, &freshPair); err != nil {
+	var freshFG v1alpha1.MysqlFailoverGroup
+	if err := r.client.Get(ctx, nn, &freshFG); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.logger.Warn("CR deleted, skipping status update", "pair", nn)
+			r.logger.Warn("CR deleted, skipping status update", "fg", nn)
 			return
 		}
-		r.logger.Error("get pair for status update", "pair", nn, "error", err)
+		r.logger.Error("get fg for status update", "fg", nn, "error", err)
 		return
 	}
 
 	// Save existing status before modification for comparison.
-	existingStatus := freshPair.Status.DeepCopy()
+	existingStatus := freshFG.Status.DeepCopy()
 
-	freshPair.Status.PrimaryDC = snap.PrimaryDC
-	freshPair.Status.DC1 = dcInstanceStatusFromSnapshot(snap.DC1State, snap.DC1LastSeen, snap.DC1Replication)
-	freshPair.Status.DC2 = dcInstanceStatusFromSnapshot(snap.DC2State, snap.DC2LastSeen, snap.DC2Replication)
+	freshFG.Status.ActiveSite = snap.ActiveSite
+	for i := range freshFG.Status.Sites {
+		freshFG.Status.Sites[i] = siteStatusFromSnapshot(snap.SiteNames[i], snap.SiteStates[i], snap.SiteLastSeen[i], snap.SiteReplication[i])
+	}
 
 	if !snap.LastFailover.IsZero() {
 		t := metav1.NewTime(snap.LastFailover)
-		freshPair.Status.LastFailover = &t
+		freshFG.Status.LastFailover = &t
 	}
-	freshPair.Status.LastFailoverTarget = snap.LastFailoverTarget
+	freshFG.Status.LastFailoverTarget = snap.LastFailoverTarget
 
 	// Evaluate replication health.
-	hasWritable := snap.DC1State == state.StateWritable || snap.DC2State == state.StateWritable
+	hasWritable := snap.SiteStates[0] == state.StateWritable || snap.SiteStates[1] == state.StateWritable
 	replicationHealthy := true
-	if snap.DC1Replication != nil {
-		replicationHealthy = snap.DC1Replication.IORunning && snap.DC1Replication.SQLRunning
-	}
-	if snap.DC2Replication != nil {
-		replicationHealthy = replicationHealthy && snap.DC2Replication.IORunning && snap.DC2Replication.SQLRunning
+	for i := range snap.SiteReplication {
+		if snap.SiteReplication[i] != nil {
+			replicationHealthy = replicationHealthy && snap.SiteReplication[i].IORunning && snap.SiteReplication[i].SQLRunning
+		}
 	}
 
-	// Update conditions using freshPair.Generation so ObservedGeneration reflects
+	// Update conditions using freshFG.Generation so ObservedGeneration reflects
 	// the generation of the object we are actually writing against.
 	now := metav1.Now()
 	readyStatus := hasWritable && replicationHealthy
-	readyMessage := "At least one DC is writable and replication is healthy"
+	readyMessage := "At least one site is writable and replication is healthy"
 	if !hasWritable {
-		readyMessage = "No DC is writable"
+		readyMessage = "No site is writable"
 	} else if !replicationHealthy {
 		readyMessage = "Replication is not healthy"
 	}
-	setCondition(&freshPair.Status.Conditions, metav1.Condition{
+	setCondition(&freshFG.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             conditionBool(readyStatus),
-		ObservedGeneration: freshPair.Generation,
+		ObservedGeneration: freshFG.Generation,
 		LastTransitionTime: now,
 		Reason:             "TopologyPolled",
 		Message:            readyMessage,
@@ -340,98 +343,92 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	if snap.Alert != "" {
 		reason := "Alert"
-		if snap.DC1State == state.StateWritable && snap.DC2State == state.StateWritable {
+		if snap.SiteStates[0] == state.StateWritable && snap.SiteStates[1] == state.StateWritable {
 			reason = "SplitBrain"
-		} else if snap.DC1State == state.StateReadOnly && snap.DC2State == state.StateReadOnly {
+		} else if snap.SiteStates[0] == state.StateReadOnly && snap.SiteStates[1] == state.StateReadOnly {
 			reason = "NoPrimary"
-		} else if snap.DC1State == state.StateUnreachable && snap.DC2State == state.StateUnreachable {
+		} else if snap.SiteStates[0] == state.StateUnreachable && snap.SiteStates[1] == state.StateUnreachable {
 			reason = "TotalLoss"
 		}
-		setCondition(&freshPair.Status.Conditions, metav1.Condition{
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               "Degraded",
 			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshPair.Generation,
+			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
 			Reason:             reason,
 			Message:            snap.Alert,
 		})
 	} else {
-		setCondition(&freshPair.Status.Conditions, metav1.Condition{
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               "Degraded",
 			Status:             metav1.ConditionFalse,
-			ObservedGeneration: freshPair.Generation,
+			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
 			Reason:             "Healthy",
-			Message:            "No cross-DC alerts",
+			Message:            "No cross-site alerts",
 		})
 	}
 
 	// Add replication-specific degraded conditions.
 	maxLagSeconds := int64(300)
-	if freshPair.Spec.Replication != nil && freshPair.Spec.Replication.MaxLagSeconds > 0 {
-		maxLagSeconds = freshPair.Spec.Replication.MaxLagSeconds
+	if freshFG.Spec.Replication != nil && freshFG.Spec.Replication.MaxLagSeconds > 0 {
+		maxLagSeconds = freshFG.Spec.Replication.MaxLagSeconds
 	}
 
-	replChecks := []struct {
-		name string
-		repl *internalmysql.ReplicaStatus
-	}{
-		{snap.DC1Name, snap.DC1Replication},
-		{snap.DC2Name, snap.DC2Replication},
-	}
-
-	for _, rc := range replChecks {
-		if rc.repl == nil {
+	for i := range snap.SiteReplication {
+		repl := snap.SiteReplication[i]
+		if repl == nil {
 			continue
 		}
-		if !rc.repl.IORunning || !rc.repl.SQLRunning {
-			setCondition(&freshPair.Status.Conditions, metav1.Condition{
+		siteName := snap.SiteNames[i]
+		if !repl.IORunning || !repl.SQLRunning {
+			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type:               "Degraded",
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: freshPair.Generation,
+				ObservedGeneration: freshFG.Generation,
 				LastTransitionTime: now,
 				Reason:             "ReplicationBroken",
-				Message:            fmt.Sprintf("Replication IO/SQL thread not running on %s", rc.name),
+				Message:            fmt.Sprintf("Replication IO/SQL thread not running on %s", siteName),
 			})
 		}
-		if rc.repl.SecondsBehindSource != nil && *rc.repl.SecondsBehindSource > maxLagSeconds {
-			setCondition(&freshPair.Status.Conditions, metav1.Condition{
+		if repl.SecondsBehindSource != nil && *repl.SecondsBehindSource > maxLagSeconds {
+			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type:               "Degraded",
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: freshPair.Generation,
+				ObservedGeneration: freshFG.Generation,
 				LastTransitionTime: now,
 				Reason:             "ReplicationLagging",
-				Message:            fmt.Sprintf("Replication lag on %s is %ds (threshold %ds)", rc.name, *rc.repl.SecondsBehindSource, maxLagSeconds),
+				Message:            fmt.Sprintf("Replication lag on %s is %ds (threshold %ds)", siteName, *repl.SecondsBehindSource, maxLagSeconds),
 			})
 		}
-		if rc.repl.LastError != "" {
-			setCondition(&freshPair.Status.Conditions, metav1.Condition{
+		if repl.LastError != "" {
+			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type:               "Degraded",
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: freshPair.Generation,
+				ObservedGeneration: freshFG.Generation,
 				LastTransitionTime: now,
 				Reason:             "ReplicationError",
-				Message:            fmt.Sprintf("Replication error on %s: %s", rc.name, rc.repl.LastError),
+				Message:            fmt.Sprintf("Replication error on %s: %s", siteName, repl.LastError),
 			})
 		}
 	}
 
 	// Update phase tracking.
-	freshPair.Status.UpdatePhase = snap.UpdatePhase
+	freshFG.Status.UpdatePhase = snap.UpdatePhase
 	if snap.UpdatePhase != "" {
-		setCondition(&freshPair.Status.Conditions, metav1.Condition{
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               "Updating",
 			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshPair.Generation,
+			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
 			Reason:             snap.UpdatePhase,
 			Message:            fmt.Sprintf("Ordered update in progress: %s", snap.UpdatePhase),
 		})
 	} else {
-		setCondition(&freshPair.Status.Conditions, metav1.Condition{
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               "Updating",
 			Status:             metav1.ConditionFalse,
-			ObservedGeneration: freshPair.Generation,
+			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
 			Reason:             "NotUpdating",
 			Message:            "No update in progress",
@@ -439,31 +436,32 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
-	if equality.Semantic.DeepEqual(existingStatus, &freshPair.Status) {
-		r.logger.Debug("status unchanged, skipping update", "pair", nn)
+	if equality.Semantic.DeepEqual(existingStatus, &freshFG.Status) {
+		r.logger.Debug("status unchanged, skipping update", "fg", nn)
 		return
 	}
 
 	if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		// Re-fetch the CR to get the latest resource version.
-		var fresh v1alpha1.MysqlReplicaPair
+		var fresh v1alpha1.MysqlFailoverGroup
 		if err := r.client.Get(ctx, nn, &fresh); err != nil {
 			return err
 		}
 		// Apply status changes to the freshly-fetched object.
-		fresh.Status = freshPair.Status
+		fresh.Status = freshFG.Status
 		return r.client.Status().Update(ctx, &fresh)
 	}); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.logger.Warn("CR deleted during status update, skipping", "pair", nn)
+			r.logger.Warn("CR deleted during status update, skipping", "fg", nn)
 			return
 		}
-		r.logger.Error("update pair status", "pair", nn, "error", err)
+		r.logger.Error("update fg status", "fg", nn, "error", err)
 	}
 }
 
-func dcInstanceStatusFromSnapshot(s state.DCState, lastSeen time.Time, repl *internalmysql.ReplicaStatus) v1alpha1.DCInstanceStatus {
-	status := v1alpha1.DCInstanceStatus{
+func siteStatusFromSnapshot(name string, s state.SiteState, lastSeen time.Time, repl *internalmysql.ReplicaStatus) v1alpha1.SiteStatus {
+	status := v1alpha1.SiteStatus{
+		Name:  name,
 		State: s.String(),
 	}
 	if !lastSeen.IsZero() {
@@ -500,12 +498,12 @@ func setCondition(conditions *[]metav1.Condition, c metav1.Condition) {
 	*conditions = append(*conditions, c)
 }
 
-// buildDCDSN takes a base DSN and replaces the host with the DC service endpoint.
-func buildDCDSN(baseDSN string, pair *v1alpha1.MysqlReplicaPair, dc v1alpha1.DCInstanceSpec) (string, error) {
+// buildSiteDSN takes a base DSN and replaces the host with the site service endpoint.
+func buildSiteDSN(baseDSN string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) (string, error) {
 	parsed, err := mysql.ParseDSN(baseDSN)
 	if err != nil {
 		return "", fmt.Errorf("parse DSN: %w", err)
 	}
-	parsed.Addr = fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d", pair.Name, dc.Name, pair.Namespace, mysqlPort)
+	parsed.Addr = fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d", fg.Name, site.Name, fg.Namespace, mysqlPort)
 	return parsed.FormatDSN(), nil
 }

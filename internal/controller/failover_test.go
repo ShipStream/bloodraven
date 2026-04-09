@@ -119,7 +119,7 @@ func TestFailoverExecute_FullSequence(t *testing.T) {
 	oldPrimary := &trackingMock{}
 	fc := NewFailoverController(testLogger())
 
-	err := fc.Execute(context.Background(), candidate, oldPrimary, "dc2")
+	err := fc.Execute(context.Background(), candidate, oldPrimary, "site1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestFailoverExecute_OldPrimaryNil(t *testing.T) {
 	candidate := &trackingMock{readOnly: true}
 	fc := NewFailoverController(testLogger())
 
-	err := fc.Execute(context.Background(), candidate, nil, "dc2")
+	err := fc.Execute(context.Background(), candidate, nil, "site1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestFailoverExecute_DrainTimeout(t *testing.T) {
 	fc := NewFailoverController(testLogger())
 
 	// Should still succeed despite drain timeout.
-	err := fc.Execute(context.Background(), candidate, oldPrimary, "dc2")
+	err := fc.Execute(context.Background(), candidate, oldPrimary, "site1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestFailoverExecute_FenceError(t *testing.T) {
 	fc := NewFailoverController(testLogger())
 
 	// Fence error is ignored, promotion should proceed.
-	err := fc.Execute(context.Background(), candidate, oldPrimary, "dc2")
+	err := fc.Execute(context.Background(), candidate, oldPrimary, "site1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -8,7 +8,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
-// FailoverController orchestrates MySQL failover between DCs.
+// FailoverController orchestrates MySQL failover between sites.
 type FailoverController struct {
 	logger *slog.Logger
 }
@@ -19,7 +19,7 @@ func NewFailoverController(logger *slog.Logger) *FailoverController {
 }
 
 // Execute performs a failover: fences old primary, drains relay logs on candidate, promotes candidate.
-func (f *FailoverController) Execute(ctx context.Context, candidate mysql.Checker, oldPrimary mysql.Checker, candidateDC string) error {
+func (f *FailoverController) Execute(ctx context.Context, candidate mysql.Checker, oldPrimary mysql.Checker, candidateSite string) error {
 	// 1. Fence old primary: SET GLOBAL super_read_only=ON (ignore error if unreachable).
 	if oldPrimary != nil {
 		if err := oldPrimary.SetSuperReadOnly(ctx, true); err != nil {
@@ -56,6 +56,6 @@ func (f *FailoverController) Execute(ctx context.Context, candidate mysql.Checke
 		return err
 	}
 
-	f.logger.Info("failover complete", "promotedDC", candidateDC)
+	f.logger.Info("failover complete", "promotedSite", candidateSite)
 	return nil
 }

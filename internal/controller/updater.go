@@ -23,7 +23,7 @@ const (
 	UpdatePhaseComplete         UpdatePhase = "Complete"
 )
 
-// UpdateController manages ordered rolling updates for a MysqlReplicaPair.
+// UpdateController manages ordered rolling updates for a MysqlFailoverGroup.
 // It ensures updates are applied replica-first, then failover, then old primary,
 // to avoid simultaneous downtime of both DCs.
 type UpdateController struct {
@@ -58,13 +58,13 @@ func (u *UpdateController) Phase() UpdatePhase {
 }
 
 // Execute performs an ordered update. It should be called when a spec drift is detected.
-// primaryDCName and replicaDCName identify which DC is currently primary/replica.
-// replicaChecker and primaryChecker are the MySQL connections for each DC.
-// applyUpdate is a callback that applies the spec change to a specific DC's deployment.
+// activeSiteName and standbySiteName identify which site is currently active/standby.
+// standbyChecker and activeChecker are the MySQL connections for each site.
+// applyUpdate is a callback that applies the spec change to a specific site's deployment.
 func (u *UpdateController) Execute(ctx context.Context,
-	primaryDCName, replicaDCName string,
-	replicaChecker, primaryChecker mysql.Checker,
-	applyUpdate func(ctx context.Context, dcName string) error) error {
+	activeSiteName, standbySiteName string,
+	standbyChecker, activeChecker mysql.Checker,
+	applyUpdate func(ctx context.Context, siteName string) error) error {
 
 	u.mu.Lock()
 	if u.updating {
@@ -81,39 +81,39 @@ func (u *UpdateController) Execute(ctx context.Context,
 		u.mu.Unlock()
 	}()
 
-	// Phase 1: Update replica DC
+	// Phase 1: Update standby site
 	u.setPhase(UpdatePhaseUpdateReplica)
-	u.logger.Info("ordered update: updating replica", "dc", replicaDCName)
-	if err := applyUpdate(ctx, replicaDCName); err != nil {
-		return fmt.Errorf("update replica deployment: %w", err)
+	u.logger.Info("ordered update: updating standby", "site", standbySiteName)
+	if err := applyUpdate(ctx, standbySiteName); err != nil {
+		return fmt.Errorf("update standby deployment: %w", err)
 	}
 
-	// Phase 2: Wait for replica to be ready and replication caught up
+	// Phase 2: Wait for standby to be ready and replication caught up
 	u.setPhase(UpdatePhaseWaitReplica)
-	u.logger.Info("ordered update: waiting for replica to be ready", "dc", replicaDCName)
-	if err := u.waitForReplicaReady(ctx, replicaChecker, 5*time.Minute); err != nil {
-		return fmt.Errorf("wait for replica ready: %w", err)
+	u.logger.Info("ordered update: waiting for standby to be ready", "site", standbySiteName)
+	if err := u.waitForReplicaReady(ctx, standbyChecker, 5*time.Minute); err != nil {
+		return fmt.Errorf("wait for standby ready: %w", err)
 	}
 
-	// Phase 3: Failover to the (now-updated) replica
+	// Phase 3: Failover to the (now-updated) standby
 	u.setPhase(UpdatePhaseFailover)
-	u.logger.Info("ordered update: failing over to updated replica", "dc", replicaDCName)
-	if err := u.failover.Execute(ctx, replicaChecker, primaryChecker, replicaDCName); err != nil {
+	u.logger.Info("ordered update: failing over to updated standby", "site", standbySiteName)
+	if err := u.failover.Execute(ctx, standbyChecker, activeChecker, standbySiteName); err != nil {
 		return fmt.Errorf("failover during update: %w", err)
 	}
 
-	// Phase 4: Update the old primary (now a replica)
+	// Phase 4: Update the old active (now a standby)
 	u.setPhase(UpdatePhaseUpdateOldPrimary)
-	u.logger.Info("ordered update: updating old primary", "dc", primaryDCName)
-	if err := applyUpdate(ctx, primaryDCName); err != nil {
-		return fmt.Errorf("update old primary deployment: %w", err)
+	u.logger.Info("ordered update: updating old active", "site", activeSiteName)
+	if err := applyUpdate(ctx, activeSiteName); err != nil {
+		return fmt.Errorf("update old active deployment: %w", err)
 	}
 
-	// Phase 5: Wait for old primary to be ready
+	// Phase 5: Wait for old active to be ready
 	u.setPhase(UpdatePhaseWaitOldPrimary)
-	u.logger.Info("ordered update: waiting for old primary to be ready", "dc", primaryDCName)
-	if err := u.waitForDCReady(ctx, primaryChecker, 5*time.Minute); err != nil {
-		u.logger.Warn("old primary not ready after update, continuing", "dc", primaryDCName, "error", err)
+	u.logger.Info("ordered update: waiting for old active to be ready", "site", activeSiteName)
+	if err := u.waitForSiteReady(ctx, activeChecker, 5*time.Minute); err != nil {
+		u.logger.Warn("old active not ready after update, continuing", "site", activeSiteName, "error", err)
 	}
 
 	u.setPhase(UpdatePhaseComplete)
@@ -158,8 +158,8 @@ func (u *UpdateController) waitForReplicaReady(ctx context.Context, checker mysq
 	}
 }
 
-// waitForDCReady waits for a DC to be reachable.
-func (u *UpdateController) waitForDCReady(ctx context.Context, checker mysql.Checker, timeout time.Duration) error {
+// waitForSiteReady waits for a site to be reachable.
+func (u *UpdateController) waitForSiteReady(ctx context.Context, checker mysql.Checker, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -171,7 +171,7 @@ func (u *UpdateController) waitForDCReady(ctx context.Context, checker mysql.Che
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for DC to be ready")
+			return fmt.Errorf("timeout waiting for site to be ready")
 		}
 
 		select {

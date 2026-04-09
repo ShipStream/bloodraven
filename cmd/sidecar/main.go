@@ -27,8 +27,8 @@ func main() {
 		"bloodraven_address", cfg.BloodravenAddress,
 		"lease_timeout", cfg.LeaseTimeout,
 		"peer_check_interval", cfg.PeerCheckInterval,
-		"my_dc", cfg.MyDC,
-		"primary_dc", cfg.PrimaryDC,
+		"my_site", cfg.MySite,
+		"active_site", cfg.ActiveSite,
 	)
 
 	mysql, err := sidecar.NewLiveMysqlFromDSN(cfg.MysqlDSN)
@@ -54,7 +54,7 @@ func main() {
 	srv := sidecar.NewServer(mysql, cfg.ListenAddr, logger)
 
 	// Run startup safety net
-	srv.RunSafetyNet(ctx, cfg.MyDC, cfg.PrimaryDC)
+	srv.RunSafetyNet(ctx, cfg.MySite, cfg.ActiveSite)
 
 	// Create the fencing monitor
 	fm := sidecar.NewFencingMonitor(

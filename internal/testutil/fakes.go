@@ -234,24 +234,24 @@ func (m *FakeMySQL) IsReadOnlyVal() bool {
 // FakeTainter implements platform.NodeTainter with state tracking.
 type FakeTainter struct {
 	mu     sync.Mutex
-	Taints map[string]bool // zone -> tainted
+	Taints map[string]bool // selector -> tainted
 }
 
 func NewFakeTainter() *FakeTainter {
 	return &FakeTainter{Taints: make(map[string]bool)}
 }
 
-func (m *FakeTainter) SetTaint(_ context.Context, zone string, taint bool) error {
+func (m *FakeTainter) SetTaint(_ context.Context, selector string, taint bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Taints[zone] = taint
+	m.Taints[selector] = taint
 	return nil
 }
 
-func (m *FakeTainter) IsTainted(zone string) bool {
+func (m *FakeTainter) IsTainted(selector string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.Taints[zone]
+	return m.Taints[selector]
 }
 
 // ---------------------------------------------------------------------------

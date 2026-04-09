@@ -22,13 +22,13 @@ Status API and WebSocket:
 
 Next steps:
   1. Create a Secret with MySQL credentials (ROOT_PASSWORD, REPLICATION_USER, etc.)
-  2. Create a MysqlReplicaPair custom resource:
+  2. Create a MysqlFailoverGroup custom resource:
 
      kubectl apply -f - <<EOF
      apiVersion: shipstream.io/v1alpha1
-     kind: MysqlReplicaPair
+     kind: MysqlFailoverGroup
      metadata:
-       name: my-pair
+       name: orders
        namespace: {{ .Release.Namespace }}
      spec:
        az: us-east-1
@@ -39,24 +39,23 @@ Next steps:
          apiTokenSecretRef:
            name: cloudflare-api-token
            key: token
-       dc1:
-         name: dc1
-         zone: us-east-1a
-         lbIP: 10.0.1.1
-         storage:
-           size: 50Gi
-           storageClassName: fast-ssd
-       dc2:
-         name: dc2
-         zone: us-east-1b
-         lbIP: 10.0.2.1
-         storage:
-           size: 50Gi
-           storageClassName: fast-ssd
+       sites:
+         - name: iad
+           zone: us-east-1a
+           lbIP: 10.0.1.1
+           storage:
+             size: 50Gi
+             storageClassName: fast-ssd
+         - name: pdx
+           zone: us-west-2a
+           lbIP: 10.0.2.1
+           storage:
+             size: 50Gi
+             storageClassName: fast-ssd
      EOF
 
   3. Monitor the operator:
      kubectl logs -f deploy/{{ include "bloodraven.fullname" . }} -n {{ .Release.Namespace }}
 
-  4. Check the pair status:
-     kubectl get mysqlreplicapairs -n {{ .Release.Namespace }}
+  4. Check the failover group status:
+     kubectl get mysqlfailovergroups -n {{ .Release.Namespace }}

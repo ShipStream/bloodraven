@@ -29,7 +29,7 @@ func TestAuxMuxHealthz(t *testing.T) {
 	}
 }
 
-func TestAuxMuxStatusWithoutPairs(t *testing.T) {
+func TestAuxMuxStatusWithoutFailoverGroups(t *testing.T) {
 	hub := platform.NewHub(slog.Default())
 	runner := controller.NewTopologyManagerRunner(nil, nil, hub, slog.Default())
 
@@ -51,7 +51,7 @@ func TestAuxMuxStatusWithoutPairs(t *testing.T) {
 	if err := json.Unmarshal(body, &status); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if status["status"] != "no active pairs" {
-		t.Fatalf("expected no active pairs status, got %#v", status)
+	if status["status"] != "no active failover groups" {
+		t.Fatalf("expected no active failover groups status, got %#v", status)
 	}
 }

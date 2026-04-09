@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -13,8 +14,8 @@ import (
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
-// DCTopologyConfig holds per-DC configuration for the topology manager.
-type DCTopologyConfig struct {
+// SiteTopologyConfig holds per-site configuration for the topology manager.
+type SiteTopologyConfig struct {
 	Name string
 	Zone string
 	LBIP string
@@ -22,9 +23,9 @@ type DCTopologyConfig struct {
 
 // TopologyConfig holds topology manager configuration, decoupled from config source.
 type TopologyConfig struct {
-	AZ  string
-	DC1 DCTopologyConfig
-	DC2 DCTopologyConfig
+	Name  string // failover group name (from CR metadata.name)
+	AZ    string
+	Sites [2]SiteTopologyConfig
 
 	PollInterval      int64 // nanoseconds
 	FailureThreshold  int
@@ -40,28 +41,24 @@ func (c TopologyConfig) PollIntervalDuration() time.Duration {
 // TopologySnapshot captures the topology state at a point in time.
 // It is passed to the StatusCallback after each poll cycle that produces a state change.
 type TopologySnapshot struct {
-	DC1Name            string
-	DC1State           state.DCState
-	DC1LastSeen        time.Time
-	DC1Replication     *mysql.ReplicaStatus // nil if DC1 is primary or unreachable
-	DC2Name            string
-	DC2State           state.DCState
-	DC2LastSeen        time.Time
-	DC2Replication     *mysql.ReplicaStatus // nil if DC2 is primary or unreachable
-	PrimaryDC          string               // name of the writable DC, empty if none
+	SiteNames       [2]string
+	SiteStates      [2]state.SiteState
+	SiteLastSeen    [2]time.Time
+	SiteReplication [2]*mysql.ReplicaStatus // nil if site is primary or unreachable
+	ActiveSite      string                  // name of the writable site, empty if none
 	LastFailover       time.Time
 	LastFailoverTarget string
-	Alert              string // non-empty if a cross-DC alert fired this cycle
+	Alert              string // non-empty if a cross-site alert fired this cycle
 	UpdatePhase        string // non-empty if an ordered update is in progress
 }
 
-// dcTracker tracks debounce counters and current state for one DC.
-type dcTracker struct {
+// siteTracker tracks debounce counters and current state for one site.
+type siteTracker struct {
 	name          string
 	zone          string // topology.kubernetes.io/zone value
 	lbIP          string
 	mysql         mysql.Checker
-	state         state.DCState
+	state         state.SiteState
 	failCount     int
 	recoveryCount int
 	lastSeen      time.Time // last successful poll
@@ -69,9 +66,8 @@ type dcTracker struct {
 
 // TopologyManager is the main control loop.
 type TopologyManager struct {
-	cfg     TopologyConfig
-	dc1     dcTracker
-	dc2     dcTracker
+	cfg   TopologyConfig
+	sites [2]siteTracker
 	tainter platform.NodeTainter
 	hub     *platform.Hub
 	dns     platform.DNSUpdater
@@ -84,8 +80,8 @@ type TopologyManager struct {
 	lastFailoverTarget string
 	failoverCooldown   time.Duration
 
-	// Promotion state: tracks which DC was promoted and is pending DNS flip.
-	promotedDC string // empty = no pending promotion
+	// Promotion state: tracks which site was promoted and is pending DNS flip.
+	promotedSite string // empty = no pending promotion
 
 	// StatusCallback is invoked after each poll cycle that produces a state change.
 	// The runner sets this to push status updates to the CR.
@@ -97,40 +93,45 @@ type TopologyManager struct {
 	cancelFunc   context.CancelFunc
 }
 
-// StatusResponse is returned by the /status endpoint.
-type StatusResponse struct {
-	DC1      string `json:"dc1"`
-	DC1State string `json:"dc1_state"`
-	DC2      string `json:"dc2"`
-	DC2State string `json:"dc2_state"`
-	PollTime string `json:"poll_time"`
+// SiteStatusEntry is a single site's status in the StatusResponse.
+type SiteStatusEntry struct {
+	Name  string `json:"name"`
+	State string `json:"state"`
 }
 
-func NewTopologyManager(cfg TopologyConfig, dc1MySQL, dc2MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
-	return NewTopologyManagerWithClock(cfg, dc1MySQL, dc2MySQL, failover, tainter, hub, dns, logger, clock.RealClock{})
+// StatusResponse is returned by the /status endpoint.
+type StatusResponse struct {
+	Sites    [2]SiteStatusEntry `json:"sites"`
+	PollTime string             `json:"poll_time"`
+}
+
+func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
+	return NewTopologyManagerWithClock(cfg, site0MySQL, site1MySQL, failover, tainter, hub, dns, logger, clock.RealClock{})
 }
 
 // NewTopologyManagerWithClock creates a TopologyManager with an injectable clock for testing.
-func NewTopologyManagerWithClock(cfg TopologyConfig, dc1MySQL, dc2MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
+func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
 	cooldown := time.Duration(cfg.FailoverCooldown)
 	if cooldown == 0 {
 		cooldown = 60 * time.Minute
 	}
 	return &TopologyManager{
 		cfg: cfg,
-		dc1: dcTracker{
-			name:  cfg.DC1.Name,
-			zone:  cfg.DC1.Zone,
-			lbIP:  cfg.DC1.LBIP,
-			mysql: dc1MySQL,
-			state: state.StateUnknown,
-		},
-		dc2: dcTracker{
-			name:  cfg.DC2.Name,
-			zone:  cfg.DC2.Zone,
-			lbIP:  cfg.DC2.LBIP,
-			mysql: dc2MySQL,
-			state: state.StateUnknown,
+		sites: [2]siteTracker{
+			{
+				name:  cfg.Sites[0].Name,
+				zone:  cfg.Sites[0].Zone,
+				lbIP:  cfg.Sites[0].LBIP,
+				mysql: site0MySQL,
+				state: state.StateUnknown,
+			},
+			{
+				name:  cfg.Sites[1].Name,
+				zone:  cfg.Sites[1].Zone,
+				lbIP:  cfg.Sites[1].LBIP,
+				mysql: site1MySQL,
+				state: state.StateUnknown,
+			},
 		},
 		failover:         failover,
 		failoverCooldown: cooldown,
@@ -146,10 +147,10 @@ func (tm *TopologyManager) Status() StatusResponse {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	return StatusResponse{
-		DC1:      tm.dc1.name,
-		DC1State: tm.dc1.state.String(),
-		DC2:      tm.dc2.name,
-		DC2State: tm.dc2.state.String(),
+		Sites: [2]SiteStatusEntry{
+			{Name: tm.sites[0].name, State: tm.sites[0].state.String()},
+			{Name: tm.sites[1].name, State: tm.sites[1].state.String()},
+		},
 		PollTime: tm.lastPollTime.Format(time.RFC3339),
 	}
 }
@@ -186,93 +187,91 @@ func (tm *TopologyManager) Run(ctx context.Context) {
 	}
 }
 
-// Poll executes a single poll cycle: checks both DCs, applies debounce,
+// Poll executes a single poll cycle: checks both sites, applies debounce,
 // evaluates transitions, and triggers any necessary actions.
 func (tm *TopologyManager) Poll(ctx context.Context) {
-	// Poll both DCs in parallel.
+	// Poll both sites in parallel.
 	type pollResult struct {
 		readOnly bool
 		err      error
 		duration time.Duration
 	}
 
-	pollDC := func(dc *dcTracker) pollResult {
+	pollSite := func(site *siteTracker) pollResult {
 		start := tm.clock.Now()
 		pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		ro, err := dc.mysql.CheckReadOnly(pollCtx)
+		ro, err := site.mysql.CheckReadOnly(pollCtx)
 		return pollResult{readOnly: ro, err: err, duration: tm.clock.Since(start)}
 	}
 
-	var r1, r2 pollResult
+	var r [2]pollResult
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); r1 = pollDC(&tm.dc1) }()
-	go func() { defer wg.Done(); r2 = pollDC(&tm.dc2) }()
+	go func() { defer wg.Done(); r[0] = pollSite(&tm.sites[0]) }()
+	go func() { defer wg.Done(); r[1] = pollSite(&tm.sites[1]) }()
 	wg.Wait()
 
-	metrics.PollLatency.WithLabelValues(tm.dc1.name).Observe(r1.duration.Seconds())
-	metrics.PollLatency.WithLabelValues(tm.dc2.name).Observe(r2.duration.Seconds())
+	for i := range tm.sites {
+		metrics.PollLatency.WithLabelValues(tm.sites[i].name).Observe(r[i].duration.Seconds())
+	}
 
-	// Track last successful poll time per DC.
+	// Track last successful poll time per site.
 	now := tm.clock.Now()
-	if r1.err == nil {
-		tm.dc1.lastSeen = now
-	}
-	if r2.err == nil {
-		tm.dc2.lastSeen = now
-	}
-
-	// Compute new debounced states.
-	dc1New := tm.computeState(&tm.dc1, r1.readOnly, r1.err)
-	dc2New := tm.computeState(&tm.dc2, r2.readOnly, r2.err)
-
-	// Read and update states under the lock to avoid races with Status().
-	tm.mu.Lock()
-	dc1Prev := tm.dc1.state
-	dc2Prev := tm.dc2.state
-	if dc1New != dc1Prev {
-		tm.dc1.state = dc1New
-	}
-	if dc2New != dc2Prev {
-		tm.dc2.state = dc2New
-	}
-	tm.mu.Unlock()
-
-	// Apply per-DC transitions (outside the lock — these may do I/O).
-	if dc1New != dc1Prev {
-		tm.logger.Info("state transition", "dc", tm.dc1.name, "from", dc1Prev, "to", dc1New)
-		metrics.StateTransitions.WithLabelValues(tm.dc1.name, dc1Prev.String(), dc1New.String()).Inc()
-		tm.applyPerDCAction(ctx, &tm.dc1, state.EvalPerDCTransition(dc1Prev, dc1New))
-	}
-
-	if dc2New != dc2Prev {
-		tm.logger.Info("state transition", "dc", tm.dc2.name, "from", dc2Prev, "to", dc2New)
-		metrics.StateTransitions.WithLabelValues(tm.dc2.name, dc2Prev.String(), dc2New.String()).Inc()
-		tm.applyPerDCAction(ctx, &tm.dc2, state.EvalPerDCTransition(dc2Prev, dc2New))
-	}
-
-	// Check for pending promotion confirmation: if we promoted a DC and it's
-	// now writable, flip DNS.
-	if tm.promotedDC != "" {
-		dc := tm.getDC(tm.promotedDC)
-		if dc != nil && dc.state == state.StateWritable {
-			tm.logger.Info("promotion confirmed, flipping DNS", "dc", dc.name, "ip", dc.lbIP)
-			if err := tm.dns.UpdateAZRecord(ctx, dc.lbIP); err != nil {
-				tm.logger.Error("DNS flip failed", "dc", dc.name, "error", err)
-			} else {
-				metrics.DNSFlipCount.WithLabelValues(dc.name).Inc()
-			}
-			tm.promotedDC = ""
+	for i := range tm.sites {
+		if r[i].err == nil {
+			tm.sites[i].lastSeen = now
 		}
 	}
 
-	// Cross-DC evaluation (only on state transitions to avoid repeated actions).
+	// Compute new debounced states.
+	var newStates [2]state.SiteState
+	for i := range tm.sites {
+		newStates[i] = tm.computeState(&tm.sites[i], r[i].readOnly, r[i].err)
+	}
+
+	// Read and update states under the lock to avoid races with Status().
+	tm.mu.Lock()
+	var prevStates [2]state.SiteState
+	for i := range tm.sites {
+		prevStates[i] = tm.sites[i].state
+		if newStates[i] != prevStates[i] {
+			tm.sites[i].state = newStates[i]
+		}
+	}
+	tm.mu.Unlock()
+
+	// Apply per-site transitions (outside the lock — these may do I/O).
+	for i := range tm.sites {
+		if newStates[i] != prevStates[i] {
+			tm.logger.Info("state transition", "site", tm.sites[i].name, "from", prevStates[i], "to", newStates[i])
+			metrics.StateTransitions.WithLabelValues(tm.sites[i].name, prevStates[i].String(), newStates[i].String()).Inc()
+			tm.applyPerSiteAction(ctx, &tm.sites[i], state.EvalPerSiteTransition(prevStates[i], newStates[i]))
+		}
+	}
+
+	// Check for pending promotion confirmation: if we promoted a site and it's
+	// now writable, flip DNS.
+	if tm.promotedSite != "" {
+		site := tm.getSite(tm.promotedSite)
+		if site != nil && site.state == state.StateWritable {
+			tm.logger.Info("promotion confirmed, flipping DNS", "site", site.name, "ip", site.lbIP)
+			if err := tm.dns.UpdateAZRecord(ctx, site.lbIP); err != nil {
+				tm.logger.Error("DNS flip failed", "site", site.name, "error", err)
+			} else {
+				metrics.DNSFlipCount.WithLabelValues(site.name).Inc()
+			}
+			tm.promotedSite = ""
+		}
+	}
+
+	// Cross-site evaluation (only on state transitions to avoid repeated actions).
 	var alertMsg string
-	if dc1New != dc1Prev || dc2New != dc2Prev {
-		cross := state.EvalCrossDC(tm.dc1.state, tm.dc2.state, dc1Prev, dc2Prev, tm.dc1.name, tm.dc2.name)
+	anyTransition := newStates[0] != prevStates[0] || newStates[1] != prevStates[1]
+	if anyTransition {
+		cross := state.EvalCrossSite(tm.sites[0].state, tm.sites[1].state, prevStates[0], prevStates[1], tm.sites[0].name, tm.sites[1].name)
 		alertMsg = cross.Alert
-		tm.applyCrossDCAction(ctx, cross)
+		tm.applyCrossSiteAction(ctx, cross)
 	}
 
 	// Update status.
@@ -283,43 +282,33 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 
 	metrics.WSClientCount.Set(float64(tm.hub.ClientCount()))
 
-	// Check replication status on the read-only DC (the replica).
-	var dc1Repl, dc2Repl *mysql.ReplicaStatus
-	if tm.dc1.state == state.StateReadOnly {
-		rs, err := tm.dc1.mysql.ShowReplicaStatus(ctx)
-		if err != nil {
-			tm.logger.Warn("failed to check replica status", "dc", tm.dc1.name, "error", err)
-		} else {
-			dc1Repl = rs
-		}
-	}
-	if tm.dc2.state == state.StateReadOnly {
-		rs, err := tm.dc2.mysql.ShowReplicaStatus(ctx)
-		if err != nil {
-			tm.logger.Warn("failed to check replica status", "dc", tm.dc2.name, "error", err)
-		} else {
-			dc2Repl = rs
+	// Check replication status on the read-only site (the replica).
+	var siteRepl [2]*mysql.ReplicaStatus
+	for i := range tm.sites {
+		if tm.sites[i].state == state.StateReadOnly {
+			rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
+			if err != nil {
+				tm.logger.Warn("failed to check replica status", "site", tm.sites[i].name, "error", err)
+			} else {
+				siteRepl[i] = rs
+			}
 		}
 	}
 
 	// Notify the status callback on any state change.
-	if (dc1New != dc1Prev || dc2New != dc2Prev) && tm.StatusCallback != nil {
-		primaryDC := ""
-		if tm.dc1.state == state.StateWritable {
-			primaryDC = tm.dc1.name
-		} else if tm.dc2.state == state.StateWritable {
-			primaryDC = tm.dc2.name
+	if anyTransition && tm.StatusCallback != nil {
+		activeSite := ""
+		for i := range tm.sites {
+			if tm.sites[i].state == state.StateWritable {
+				activeSite = tm.sites[i].name
+			}
 		}
 		tm.StatusCallback(TopologySnapshot{
-			DC1Name:            tm.dc1.name,
-			DC1State:           tm.dc1.state,
-			DC1LastSeen:        tm.dc1.lastSeen,
-			DC1Replication:     dc1Repl,
-			DC2Name:            tm.dc2.name,
-			DC2State:           tm.dc2.state,
-			DC2LastSeen:        tm.dc2.lastSeen,
-			DC2Replication:     dc2Repl,
-			PrimaryDC:          primaryDC,
+			SiteNames:          [2]string{tm.sites[0].name, tm.sites[1].name},
+			SiteStates:         [2]state.SiteState{tm.sites[0].state, tm.sites[1].state},
+			SiteLastSeen:       [2]time.Time{tm.sites[0].lastSeen, tm.sites[1].lastSeen},
+			SiteReplication:    siteRepl,
+			ActiveSite:         activeSite,
 			LastFailover:       tm.lastFailover,
 			LastFailoverTarget: tm.lastFailoverTarget,
 			Alert:              alertMsg,
@@ -327,61 +316,67 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 }
 
-// computeState applies debounce logic and returns the new state for a DC.
-func (tm *TopologyManager) computeState(dc *dcTracker, readOnly bool, err error) state.DCState {
+// computeState applies debounce logic and returns the new state for a site.
+func (tm *TopologyManager) computeState(site *siteTracker, readOnly bool, err error) state.SiteState {
 	if err != nil {
-		dc.recoveryCount = 0
-		dc.failCount++
-		if dc.failCount >= tm.cfg.FailureThreshold {
+		site.recoveryCount = 0
+		site.failCount++
+		if site.failCount >= tm.cfg.FailureThreshold {
 			return state.StateUnreachable
 		}
-		return dc.state // not enough failures yet, keep current state
+		return site.state // not enough failures yet, keep current state
 	}
 
 	// Successful poll.
-	dc.failCount = 0
+	site.failCount = 0
 
 	if readOnly {
-		dc.recoveryCount = 0
+		site.recoveryCount = 0
 		return state.StateReadOnly
 	}
 
 	// read_only=0 (writable)
-	if dc.state != state.StateWritable {
-		dc.recoveryCount++
-		if dc.recoveryCount >= tm.cfg.RecoveryThreshold {
+	if site.state != state.StateWritable {
+		site.recoveryCount++
+		if site.recoveryCount >= tm.cfg.RecoveryThreshold {
 			return state.StateWritable
 		}
-		return dc.state // not enough recoveries yet
+		return site.state // not enough recoveries yet
 	}
 
 	return state.StateWritable
 }
 
-func (tm *TopologyManager) applyPerDCAction(ctx context.Context, dc *dcTracker, action state.Action) {
+// taintSelector returns the label selector for tainting nodes belonging to a site.
+func (tm *TopologyManager) taintSelector(site *siteTracker) string {
+	return fmt.Sprintf("shipstream.io/failover-group=%s,shipstream.io/site=%s", tm.cfg.Name, site.name)
+}
+
+func (tm *TopologyManager) applyPerSiteAction(ctx context.Context, site *siteTracker, action state.Action) {
 	if action.Taint != nil {
-		if err := tm.tainter.SetTaint(ctx, dc.zone, *action.Taint); err != nil {
-			tm.logger.Error("taint operation failed", "dc", dc.name, "apply", *action.Taint, "error", err)
+		selector := tm.taintSelector(site)
+		if err := tm.tainter.SetTaint(ctx, selector, *action.Taint); err != nil {
+			tm.logger.Error("taint operation failed", "site", site.name, "apply", *action.Taint, "error", err)
 		} else {
 			op := "remove"
 			if *action.Taint {
 				op = "apply"
 			}
-			metrics.TaintOperations.WithLabelValues(dc.name, op).Inc()
+			metrics.TaintOperations.WithLabelValues(site.name, op).Inc()
 		}
 	}
 
 	if action.Broadcast != "" {
-		tm.hub.Broadcast(platform.WSMessage{DC: dc.name, Status: action.Broadcast})
+		tm.hub.Broadcast(platform.WSMessage{Site: site.name, Status: action.Broadcast})
 	}
 }
 
-func (tm *TopologyManager) applyCrossDCAction(ctx context.Context, action state.CrossDCAction) {
+func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action state.CrossSiteAction) {
 	if action.Alert != "" {
 		tm.logger.Warn("ALERT", "message", action.Alert)
 	}
 
-	if action.PromoteDC != "" && tm.promotedDC == "" {
+	if action.PromoteSite != "" && tm.promotedSite == "" {
 		// Check anti-flap cooldown.
 		if !tm.lastFailover.IsZero() && tm.clock.Since(tm.lastFailover) < tm.failoverCooldown {
 			tm.logger.Info("failover blocked by anti-flap cooldown",
@@ -389,9 +384,9 @@ func (tm *TopologyManager) applyCrossDCAction(ctx context.Context, action state.
 			return
 		}
 
-		candidate := tm.getDC(action.PromoteDC)
-		oldPrimaryName := tm.otherDCName(action.PromoteDC)
-		oldPrimary := tm.getDC(oldPrimaryName)
+		candidate := tm.getSite(action.PromoteSite)
+		oldPrimaryName := tm.otherSiteName(action.PromoteSite)
+		oldPrimary := tm.getSite(oldPrimaryName)
 
 		if candidate != nil {
 			tm.logger.Info("initiating failover", "candidate", candidate.name, "oldPrimary", oldPrimaryName)
@@ -406,7 +401,7 @@ func (tm *TopologyManager) applyCrossDCAction(ctx context.Context, action state.
 				return
 			}
 			// DNS flip deferred until next poll confirms read_only=0.
-			tm.promotedDC = candidate.name
+			tm.promotedSite = candidate.name
 			tm.lastFailover = tm.clock.Now()
 			tm.lastFailoverTarget = candidate.name
 		}
@@ -419,11 +414,11 @@ func (tm *TopologyManager) SetLastFailoverForTest(t time.Time) {
 	tm.lastFailover = t
 }
 
-func (tm *TopologyManager) otherDCName(name string) string {
-	if name == tm.dc1.name {
-		return tm.dc2.name
+func (tm *TopologyManager) otherSiteName(name string) string {
+	if name == tm.sites[0].name {
+		return tm.sites[1].name
 	}
-	return tm.dc1.name
+	return tm.sites[0].name
 }
 
 // Stop cancels the TopologyManager's context, causing the Run loop to exit.
@@ -437,12 +432,11 @@ func (tm *TopologyManager) Stop() {
 	}
 }
 
-func (tm *TopologyManager) getDC(name string) *dcTracker {
-	if name == tm.dc1.name {
-		return &tm.dc1
-	}
-	if name == tm.dc2.name {
-		return &tm.dc2
+func (tm *TopologyManager) getSite(name string) *siteTracker {
+	for i := range tm.sites {
+		if tm.sites[i].name == name {
+			return &tm.sites[i]
+		}
 	}
 	return nil
 }

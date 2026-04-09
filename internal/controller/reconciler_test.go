@@ -29,42 +29,44 @@ func testScheme() *runtime.Scheme {
 	return s
 }
 
-func newTestPair() *v1alpha1.MysqlReplicaPair {
-	return &v1alpha1.MysqlReplicaPair{
+func newTestFG() *v1alpha1.MysqlFailoverGroup {
+	return &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "lion",
 			Namespace: "shared-lion",
 			UID:       "test-uid-123",
 		},
-		Spec: v1alpha1.MysqlReplicaPairSpec{
+		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Image: "mysql:9.6",
-			DC1: v1alpha1.DCInstanceSpec{
-				Name: "dc1",
-				Zone: "lion-dc1",
-				LBIP: "203.0.113.1",
-				Storage: v1alpha1.StorageSpec{
-					StorageClassName: "local-dc1",
-					Size:             resource.MustParse("100Gi"),
-				},
-				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("2"),
-						corev1.ResourceMemory: resource.MustParse("8Gi"),
+			Sites: []v1alpha1.SiteSpec{
+				{
+					Name: "dc1",
+					Zone: "lion-dc1",
+					LBIP: "203.0.113.1",
+					Storage: v1alpha1.StorageSpec{
+						StorageClassName: "local-dc1",
+						Size:             resource.MustParse("100Gi"),
+					},
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("2"),
+							corev1.ResourceMemory: resource.MustParse("8Gi"),
+						},
 					},
 				},
-			},
-			DC2: v1alpha1.DCInstanceSpec{
-				Name: "dc2",
-				Zone: "lion-dc2",
-				LBIP: "203.0.113.2",
-				Storage: v1alpha1.StorageSpec{
-					StorageClassName: "local-dc2",
-					Size:             resource.MustParse("100Gi"),
-				},
-				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceCPU:    resource.MustParse("2"),
-						corev1.ResourceMemory: resource.MustParse("8Gi"),
+				{
+					Name: "dc2",
+					Zone: "lion-dc2",
+					LBIP: "203.0.113.2",
+					Storage: v1alpha1.StorageSpec{
+						StorageClassName: "local-dc2",
+						Size:             resource.MustParse("100Gi"),
+					},
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("2"),
+							corev1.ResourceMemory: resource.MustParse("8Gi"),
+						},
 					},
 				},
 			},
@@ -98,13 +100,13 @@ func newTestSecret() *corev1.Secret {
 	}
 }
 
-func newReconciler(objs ...client.Object) (*MysqlReplicaPairReconciler, client.Client) {
+func newReconciler(objs ...client.Object) (*MysqlFailoverGroupReconciler, client.Client) {
 	scheme := testScheme()
 	// Always include the test secret so the reconciler's validation passes.
 	allObjs := append([]client.Object{newTestSecret()}, objs...)
-	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).WithObjects(allObjs...)
+	cb := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(allObjs...)
 	c := cb.Build()
-	r := &MysqlReplicaPairReconciler{
+	r := &MysqlFailoverGroupReconciler{
 		Client:   c,
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(10),
@@ -113,8 +115,8 @@ func newReconciler(objs ...client.Object) (*MysqlReplicaPairReconciler, client.C
 }
 
 func TestReconcile_CreatesConfigMap(t *testing.T) {
-	pair := newTestPair()
-	r, c := newReconciler(pair)
+	fg := newTestFG()
+	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
@@ -144,8 +146,8 @@ func TestReconcile_CreatesConfigMap(t *testing.T) {
 }
 
 func TestReconcile_CreatesPVCs(t *testing.T) {
-	pair := newTestPair()
-	r, c := newReconciler(pair)
+	fg := newTestFG()
+	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
@@ -165,8 +167,8 @@ func TestReconcile_CreatesPVCs(t *testing.T) {
 }
 
 func TestReconcile_CreatesDeployments(t *testing.T) {
-	pair := newTestPair()
-	r, c := newReconciler(pair)
+	fg := newTestFG()
+	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
@@ -215,8 +217,8 @@ func TestReconcile_CreatesDeployments(t *testing.T) {
 }
 
 func TestReconcile_CreatesServices(t *testing.T) {
-	pair := newTestPair()
-	r, c := newReconciler(pair)
+	fg := newTestFG()
+	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
@@ -243,8 +245,8 @@ func TestReconcile_CreatesServices(t *testing.T) {
 }
 
 func TestReconcile_PrimaryServiceSelector(t *testing.T) {
-	pair := newTestPair()
-	r, c := newReconciler(pair)
+	fg := newTestFG()
+	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
@@ -266,8 +268,8 @@ func TestReconcile_PrimaryServiceSelector(t *testing.T) {
 }
 
 func TestReconcile_ReplicasServiceSelector(t *testing.T) {
-	pair := newTestPair()
-	r, c := newReconciler(pair)
+	fg := newTestFG()
+	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
@@ -306,8 +308,8 @@ func TestReconcile_NotFound(t *testing.T) {
 }
 
 func TestReconcile_Idempotent(t *testing.T) {
-	pair := newTestPair()
-	r, _ := newReconciler(pair)
+	fg := newTestFG()
+	r, _ := newReconciler(fg)
 	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
 
 	// First reconcile
@@ -322,14 +324,14 @@ func TestReconcile_Idempotent(t *testing.T) {
 }
 
 func TestReconcile_TLSConfig(t *testing.T) {
-	pair := newTestPair()
-	pair.Spec.TLS = &v1alpha1.TLSSpec{
+	fg := newTestFG()
+	fg.Spec.TLS = &v1alpha1.TLSSpec{
 		IssuerRef: v1alpha1.IssuerRef{
 			Name: "letsencrypt",
 			Kind: "ClusterIssuer",
 		},
 	}
-	r, c := newReconciler(pair)
+	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
@@ -355,12 +357,12 @@ func TestReconcile_TLSConfig(t *testing.T) {
 }
 
 func TestReconcile_MysqlConfOverrides(t *testing.T) {
-	pair := newTestPair()
-	pair.Spec.MysqlConf = map[string]string{
+	fg := newTestFG()
+	fg.Spec.MysqlConf = map[string]string{
 		"max-connections": "1000",
 		"custom-setting":  "value",
 	}
-	r, c := newReconciler(pair)
+	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
@@ -389,9 +391,9 @@ func TestReconcile_MysqlConfOverrides(t *testing.T) {
 }
 
 func TestReconcile_DefaultImage(t *testing.T) {
-	pair := newTestPair()
-	pair.Spec.Image = "" // should default to mysql:9.6
-	r, c := newReconciler(pair)
+	fg := newTestFG()
+	fg.Spec.Image = "" // should default to mysql:9.6
+	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
@@ -413,17 +415,17 @@ func TestReconcile_DefaultImage(t *testing.T) {
 }
 
 func TestCRConfigToTopologyConfig(t *testing.T) {
-	pair := newTestPair()
-	tc := CRConfigToTopologyConfig(pair)
+	fg := newTestFG()
+	tc := CRConfigToTopologyConfig(fg)
 
 	if tc.AZ != "lion" {
 		t.Errorf("expected AZ 'lion', got %s", tc.AZ)
 	}
-	if tc.DC1.Name != "dc1" {
-		t.Errorf("expected DC1 name 'dc1', got %s", tc.DC1.Name)
+	if tc.Sites[0].Name != "dc1" {
+		t.Errorf("expected Sites[0] name 'dc1', got %s", tc.Sites[0].Name)
 	}
-	if tc.DC2.Name != "dc2" {
-		t.Errorf("expected DC2 name 'dc2', got %s", tc.DC2.Name)
+	if tc.Sites[1].Name != "dc2" {
+		t.Errorf("expected Sites[1] name 'dc2', got %s", tc.Sites[1].Name)
 	}
 	if tc.FailureThreshold != 3 {
 		t.Errorf("expected failure threshold 3, got %d", tc.FailureThreshold)
@@ -437,11 +439,11 @@ func TestCRConfigToTopologyConfig(t *testing.T) {
 }
 
 func TestCRConfigToTopologyConfig_Defaults(t *testing.T) {
-	pair := newTestPair()
-	pair.Spec.PollInterval = nil
-	pair.Spec.FailureThreshold = 0
-	pair.Spec.RecoveryThreshold = 0
-	tc := CRConfigToTopologyConfig(pair)
+	fg := newTestFG()
+	fg.Spec.PollInterval = nil
+	fg.Spec.FailureThreshold = 0
+	fg.Spec.RecoveryThreshold = 0
+	tc := CRConfigToTopologyConfig(fg)
 
 	if tc.FailureThreshold != 3 {
 		t.Errorf("expected default failure threshold 3, got %d", tc.FailureThreshold)
@@ -455,8 +457,8 @@ func TestCRConfigToTopologyConfig_Defaults(t *testing.T) {
 }
 
 func TestReconcile_AddsFinalizer(t *testing.T) {
-	pair := newTestPair()
-	r, c := newReconciler(pair)
+	fg := newTestFG()
+	r, c := newReconciler(fg)
 	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn})
@@ -464,9 +466,9 @@ func TestReconcile_AddsFinalizer(t *testing.T) {
 		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	var updated v1alpha1.MysqlReplicaPair
+	var updated v1alpha1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &updated); err != nil {
-		t.Fatalf("get pair: %v", err)
+		t.Fatalf("get fg: %v", err)
 	}
 
 	found := false
@@ -482,20 +484,20 @@ func TestReconcile_AddsFinalizer(t *testing.T) {
 }
 
 func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
-	pair := newTestPair()
-	pair.Finalizers = []string{finalizerName}
+	fg := newTestFG()
+	fg.Finalizers = []string{finalizerName}
 	now := metav1.Now()
-	pair.DeletionTimestamp = &now
+	fg.DeletionTimestamp = &now
 
 	tainter := testutil.NewFakeTainter()
-	tainter.Taints["lion-dc1"] = true
-	tainter.Taints["lion-dc2"] = true
+	tainter.Taints["shipstream.io/failover-group=lion,shipstream.io/site=dc1"] = true
+	tainter.Taints["shipstream.io/failover-group=lion,shipstream.io/site=dc2"] = true
 
 	scheme := testScheme()
-	allObjs := []client.Object{newTestSecret(), pair}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).WithObjects(allObjs...).Build()
+	allObjs := []client.Object{newTestSecret(), fg}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(allObjs...).Build()
 	recorder := record.NewFakeRecorder(10)
-	r := &MysqlReplicaPairReconciler{
+	r := &MysqlFailoverGroupReconciler{
 		Client:   c,
 		Scheme:   scheme,
 		Recorder: recorder,
@@ -508,17 +510,17 @@ func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	// Verify taints were removed for both zones
-	if tainter.IsTainted("lion-dc1") {
-		t.Error("expected taint to be removed for lion-dc1")
+	// Verify taints were removed for both sites
+	if tainter.IsTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
+		t.Error("expected taint to be removed for dc1")
 	}
-	if tainter.IsTainted("lion-dc2") {
-		t.Error("expected taint to be removed for lion-dc2")
+	if tainter.IsTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
+		t.Error("expected taint to be removed for dc2")
 	}
 
 	// After removing the last finalizer on an object with DeletionTimestamp,
 	// the fake client deletes the object, so a NotFound is expected.
-	var fetched v1alpha1.MysqlReplicaPair
+	var fetched v1alpha1.MysqlFailoverGroup
 	err = c.Get(context.Background(), nn, &fetched)
 	if err == nil {
 		for _, f := range fetched.Finalizers {
@@ -530,12 +532,12 @@ func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 }
 
 func TestReconcile_DeletionWithoutFinalizer(t *testing.T) {
-	pair := newTestPair()
+	fg := newTestFG()
 	now := metav1.Now()
-	pair.DeletionTimestamp = &now
-	pair.Finalizers = []string{"some-other-finalizer"}
+	fg.DeletionTimestamp = &now
+	fg.Finalizers = []string{"some-other-finalizer"}
 
-	r, _ := newReconciler(pair)
+	r, _ := newReconciler(fg)
 	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn})
@@ -548,15 +550,15 @@ func TestReconcile_DeletionWithoutFinalizer(t *testing.T) {
 }
 
 func TestReconcile_DeletionWithNilTainter(t *testing.T) {
-	pair := newTestPair()
-	pair.Finalizers = []string{finalizerName}
+	fg := newTestFG()
+	fg.Finalizers = []string{finalizerName}
 	now := metav1.Now()
-	pair.DeletionTimestamp = &now
+	fg.DeletionTimestamp = &now
 
 	scheme := testScheme()
-	allObjs := []client.Object{newTestSecret(), pair}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).WithObjects(allObjs...).Build()
-	r := &MysqlReplicaPairReconciler{
+	allObjs := []client.Object{newTestSecret(), fg}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).WithObjects(allObjs...).Build()
+	r := &MysqlFailoverGroupReconciler{
 		Client:   c,
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(10),
@@ -569,7 +571,7 @@ func TestReconcile_DeletionWithNilTainter(t *testing.T) {
 		t.Fatalf("reconcile should succeed even without tainter: %v", err)
 	}
 
-	var fetched2 v1alpha1.MysqlReplicaPair
+	var fetched2 v1alpha1.MysqlFailoverGroup
 	err = c.Get(context.Background(), nn, &fetched2)
 	if err == nil {
 		for _, f := range fetched2.Finalizers {
@@ -581,10 +583,10 @@ func TestReconcile_DeletionWithNilTainter(t *testing.T) {
 }
 
 func TestReconcile_TerminationGracePeriod(t *testing.T) {
-	pair := newTestPair()
+	fg := newTestFG()
 	gracePeriod := int64(60)
-	pair.Spec.TerminationGracePeriodSeconds = &gracePeriod
-	r, c := newReconciler(pair)
+	fg.Spec.TerminationGracePeriodSeconds = &gracePeriod
+	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
@@ -610,8 +612,8 @@ func TestReconcile_TerminationGracePeriod(t *testing.T) {
 }
 
 func TestGenerateMyCnf(t *testing.T) {
-	pair := newTestPair()
-	cnf := generateMyCnf(pair)
+	fg := newTestFG()
+	cnf := generateMyCnf(fg)
 
 	if !strings.HasPrefix(cnf, "[mysqld]\n") {
 		t.Error("my.cnf should start with [mysqld]")
@@ -632,18 +634,18 @@ func TestGenerateMyCnf(t *testing.T) {
 }
 
 func TestGenerateMyCnf_CloneDDLTimeout_Default(t *testing.T) {
-	pair := newTestPair()
+	fg := newTestFG()
 	// CloneTimeout is zero (not set), should default to 3600
-	cnf := generateMyCnf(pair)
+	cnf := generateMyCnf(fg)
 	if !strings.Contains(cnf, "clone_ddl_timeout=3600") {
 		t.Error("my.cnf should contain clone_ddl_timeout=3600 by default")
 	}
 }
 
 func TestGenerateMyCnf_CloneDDLTimeout_Custom(t *testing.T) {
-	pair := newTestPair()
-	pair.Spec.CloneTimeout = 7200
-	cnf := generateMyCnf(pair)
+	fg := newTestFG()
+	fg.Spec.CloneTimeout = 7200
+	cnf := generateMyCnf(fg)
 	if !strings.Contains(cnf, "clone_ddl_timeout=7200") {
 		t.Errorf("my.cnf should contain clone_ddl_timeout=7200, got:\n%s", cnf)
 	}

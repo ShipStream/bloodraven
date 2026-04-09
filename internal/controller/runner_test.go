@@ -28,7 +28,7 @@ func TestSetCondition_PreservesLastTransitionTime(t *testing.T) {
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: oldTime,
 			Reason:             "TopologyPolled",
-			Message:            "At least one DC is writable",
+			Message:            "At least one site is writable",
 		},
 	}
 
@@ -38,7 +38,7 @@ func TestSetCondition_PreservesLastTransitionTime(t *testing.T) {
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: newTime,
 		Reason:             "TopologyPolled",
-		Message:            "At least one DC is writable",
+		Message:            "At least one site is writable",
 	})
 
 	if !conditions[0].LastTransitionTime.Equal(&oldTime) {
@@ -52,7 +52,7 @@ func TestSetCondition_PreservesLastTransitionTime(t *testing.T) {
 		Status:             metav1.ConditionFalse,
 		LastTransitionTime: newTime,
 		Reason:             "TopologyPolled",
-		Message:            "No DC is writable",
+		Message:            "No site is writable",
 	})
 
 	if !conditions[0].LastTransitionTime.Equal(&newTime) {
@@ -70,7 +70,7 @@ func TestSetCondition_AddsNewCondition(t *testing.T) {
 		Status:             metav1.ConditionFalse,
 		LastTransitionTime: now,
 		Reason:             "Healthy",
-		Message:            "No cross-DC alerts",
+		Message:            "No cross-site alerts",
 	})
 
 	if len(conditions) != 1 {
@@ -85,15 +85,19 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 	now := metav1.Now()
 	lastSeen := metav1.NewTime(time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC))
 
-	status := v1alpha1.MysqlReplicaPairStatus{
-		PrimaryDC: "dc1",
-		DC1: v1alpha1.DCInstanceStatus{
-			State:    "writable",
-			LastSeen: &lastSeen,
-		},
-		DC2: v1alpha1.DCInstanceStatus{
-			State:    "read-only",
-			LastSeen: &lastSeen,
+	status := v1alpha1.MysqlFailoverGroupStatus{
+		ActiveSite: "dc1",
+		Sites: []v1alpha1.SiteStatus{
+			{
+				Name:     "dc1",
+				State:    "writable",
+				LastSeen: &lastSeen,
+			},
+			{
+				Name:     "dc2",
+				State:    "read-only",
+				LastSeen: &lastSeen,
+			},
 		},
 		Conditions: []metav1.Condition{
 			{
@@ -101,7 +105,7 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: now,
 				Reason:             "TopologyPolled",
-				Message:            "At least one DC is writable",
+				Message:            "At least one site is writable",
 			},
 		},
 		LastFailoverTarget: "dc1",
@@ -114,40 +118,44 @@ func TestStatusDeepEqual_IdenticalStatuses(t *testing.T) {
 	}
 }
 
-func TestStatusDeepEqual_DifferentPrimaryDC(t *testing.T) {
-	status := v1alpha1.MysqlReplicaPairStatus{
-		PrimaryDC: "dc1",
-		DC1:       v1alpha1.DCInstanceStatus{State: "writable"},
-		DC2:       v1alpha1.DCInstanceStatus{State: "read-only"},
+func TestStatusDeepEqual_DifferentActiveSite(t *testing.T) {
+	status := v1alpha1.MysqlFailoverGroupStatus{
+		ActiveSite: "dc1",
+		Sites: []v1alpha1.SiteStatus{
+			{Name: "dc1", State: "writable"},
+			{Name: "dc2", State: "read-only"},
+		},
 	}
 
 	existing := status.DeepCopy()
-	status.PrimaryDC = "dc2"
+	status.ActiveSite = "dc2"
 
 	if equality.Semantic.DeepEqual(existing, &status) {
-		t.Error("expected different PrimaryDC to be unequal")
+		t.Error("expected different ActiveSite to be unequal")
 	}
 }
 
-func TestStatusDeepEqual_DifferentDCState(t *testing.T) {
-	status := v1alpha1.MysqlReplicaPairStatus{
-		PrimaryDC: "dc1",
-		DC1:       v1alpha1.DCInstanceStatus{State: "writable"},
-		DC2:       v1alpha1.DCInstanceStatus{State: "read-only"},
+func TestStatusDeepEqual_DifferentSiteState(t *testing.T) {
+	status := v1alpha1.MysqlFailoverGroupStatus{
+		ActiveSite: "dc1",
+		Sites: []v1alpha1.SiteStatus{
+			{Name: "dc1", State: "writable"},
+			{Name: "dc2", State: "read-only"},
+		},
 	}
 
 	existing := status.DeepCopy()
-	status.DC1.State = "unreachable"
+	status.Sites[0].State = "unreachable"
 
 	if equality.Semantic.DeepEqual(existing, &status) {
-		t.Error("expected different DC1 state to be unequal")
+		t.Error("expected different Sites[0] state to be unequal")
 	}
 }
 
 func TestStatusDeepEqual_DifferentConditionStatus(t *testing.T) {
 	now := metav1.Now()
-	status := v1alpha1.MysqlReplicaPairStatus{
-		PrimaryDC: "dc1",
+	status := v1alpha1.MysqlFailoverGroupStatus{
+		ActiveSite: "dc1",
 		Conditions: []metav1.Condition{
 			{
 				Type:               "Ready",
@@ -167,8 +175,8 @@ func TestStatusDeepEqual_DifferentConditionStatus(t *testing.T) {
 }
 
 func TestStatusDeepEqual_LastFailoverChange(t *testing.T) {
-	status := v1alpha1.MysqlReplicaPairStatus{
-		PrimaryDC: "dc1",
+	status := v1alpha1.MysqlFailoverGroupStatus{
+		ActiveSite: "dc1",
 	}
 
 	existing := status.DeepCopy()
@@ -183,7 +191,7 @@ func TestStatusDeepEqual_LastFailoverChange(t *testing.T) {
 func TestUpdateCRStatus_IsNotFound_NoPanic(t *testing.T) {
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
 		Build()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
@@ -193,23 +201,21 @@ func TestUpdateCRStatus_IsNotFound_NoPanic(t *testing.T) {
 		managers: make(map[types.NamespacedName]*managedTopology),
 	}
 
-	nn := types.NamespacedName{Name: "gone-pair", Namespace: "default"}
+	nn := types.NamespacedName{Name: "gone-fg", Namespace: "default"}
 	snap := TopologySnapshot{
-		DC1Name:  "dc1",
-		DC1State: state.StateWritable,
-		DC2Name:  "dc2",
-		DC2State: state.StateReadOnly,
+		SiteNames:  [2]string{"dc1", "dc2"},
+		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
 	}
 
 	runner.updateCRStatus(context.Background(), nn, snap)
 }
 
 func TestUpdateCRStatus_ExistingCR(t *testing.T) {
-	pair := newTestPair()
+	fg := newTestFG()
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
-		WithObjects(pair).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg).
 		Build()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
@@ -219,41 +225,39 @@ func TestUpdateCRStatus_ExistingCR(t *testing.T) {
 		managers: make(map[types.NamespacedName]*managedTopology),
 	}
 
-	nn := types.NamespacedName{Name: pair.Name, Namespace: pair.Namespace}
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	snap := TopologySnapshot{
-		DC1Name:    "dc1",
-		DC1State:   state.StateWritable,
-		DC2Name:    "dc2",
-		DC2State:   state.StateReadOnly,
-		PrimaryDC:  "dc1",
+		SiteNames:  [2]string{"dc1", "dc2"},
+		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+		ActiveSite: "dc1",
 	}
 
 	runner.updateCRStatus(context.Background(), nn, snap)
 
-	var updated v1alpha1.MysqlReplicaPair
+	var updated v1alpha1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &updated); err != nil {
-		t.Fatalf("failed to get pair: %v", err)
+		t.Fatalf("failed to get fg: %v", err)
 	}
-	if updated.Status.PrimaryDC != "dc1" {
-		t.Errorf("expected PrimaryDC=dc1, got %q", updated.Status.PrimaryDC)
+	if updated.Status.ActiveSite != "dc1" {
+		t.Errorf("expected ActiveSite=dc1, got %q", updated.Status.ActiveSite)
 	}
 }
 
 func TestUpdateCRStatus_DeletedMidUpdate(t *testing.T) {
 	// CR exists when Get is called but is deleted before Status().Update.
 	// Uses SubResourceUpdate interceptor to simulate mid-update deletion.
-	pair := newTestPair()
+	fg := newTestFG()
 	scheme := testScheme()
 
 	deleteCalled := false
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
-		WithObjects(pair).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, underlying client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 				if !deleteCalled {
 					deleteCalled = true
-					_ = underlying.Delete(ctx, pair)
+					_ = underlying.Delete(ctx, fg)
 				}
 				return underlying.Status().Update(ctx, obj, opts...)
 			},
@@ -267,12 +271,10 @@ func TestUpdateCRStatus_DeletedMidUpdate(t *testing.T) {
 		managers: make(map[types.NamespacedName]*managedTopology),
 	}
 
-	nn := types.NamespacedName{Name: pair.Name, Namespace: pair.Namespace}
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	snap := TopologySnapshot{
-		DC1Name:  "dc1",
-		DC1State: state.StateWritable,
-		DC2Name:  "dc2",
-		DC2State: state.StateReadOnly,
+		SiteNames:  [2]string{"dc1", "dc2"},
+		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
 	}
 
 	// Must not panic even though CR is deleted mid-update.
@@ -323,7 +325,7 @@ func TestStopManager_NotFound(t *testing.T) {
 func TestSync_RemovesDeletedCRManagers(t *testing.T) {
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
 		Build()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
@@ -350,11 +352,11 @@ func TestSync_RemovesDeletedCRManagers(t *testing.T) {
 }
 
 func TestUpdateCRStatus_SetsConditions(t *testing.T) {
-	pair := newTestPair()
+	fg := newTestFG()
 	scheme := testScheme()
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
-		WithObjects(pair).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg).
 		Build()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
@@ -364,20 +366,18 @@ func TestUpdateCRStatus_SetsConditions(t *testing.T) {
 		managers: make(map[types.NamespacedName]*managedTopology),
 	}
 
-	nn := types.NamespacedName{Name: pair.Name, Namespace: pair.Namespace}
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	snap := TopologySnapshot{
-		DC1Name:   "dc1",
-		DC1State:  state.StateWritable,
-		DC2Name:   "dc2",
-		DC2State:  state.StateReadOnly,
-		PrimaryDC: "dc1",
+		SiteNames:  [2]string{"dc1", "dc2"},
+		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+		ActiveSite: "dc1",
 	}
 
 	runner.updateCRStatus(context.Background(), nn, snap)
 
-	var updated v1alpha1.MysqlReplicaPair
+	var updated v1alpha1.MysqlFailoverGroup
 	if err := c.Get(context.Background(), nn, &updated); err != nil {
-		t.Fatalf("failed to get pair: %v", err)
+		t.Fatalf("failed to get fg: %v", err)
 	}
 
 	foundReady := false

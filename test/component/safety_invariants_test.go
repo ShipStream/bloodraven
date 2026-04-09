@@ -36,8 +36,8 @@ func TestSafetyInvariant_NeverDualPrimary(t *testing.T) {
 
 	// Neither should have been promoted through failover
 	s := h.tm.Status()
-	if s.DC1State != "writable" || s.DC2State != "writable" {
-		t.Errorf("expected both writable (split brain), got dc1=%s dc2=%s", s.DC1State, s.DC2State)
+	if s.Sites[0].State != "writable" || s.Sites[1].State != "writable" {
+		t.Errorf("expected both writable (split brain), got dc1=%s dc2=%s", s.Sites[0].State, s.Sites[1].State)
 	}
 }
 
@@ -181,7 +181,7 @@ func TestSafetyInvariant_TransientFailureNotOutage(t *testing.T) {
 	h.pollN(1)
 
 	s := h.tm.Status()
-	if s.DC1State == "unreachable" {
+	if s.Sites[0].State == "unreachable" {
 		t.Error("SAFETY VIOLATION: single failure marked DC as unreachable before threshold")
 	}
 
@@ -189,7 +189,7 @@ func TestSafetyInvariant_TransientFailureNotOutage(t *testing.T) {
 	h.dc1MySQL.setReadOnly(false)
 	h.pollN(2)
 
-	if h.tm.Status().DC1State != "writable" {
+	if h.tm.Status().Sites[0].State != "writable" {
 		t.Error("DC should recover to writable after transient failure")
 	}
 
@@ -213,7 +213,7 @@ func TestSafetyInvariant_RecoveryRequiresThreshold(t *testing.T) {
 	h.pollN(1)
 
 	s := h.tm.Status()
-	if s.DC1State == "writable" {
+	if s.Sites[0].State == "writable" {
 		t.Error("SAFETY VIOLATION: single writable poll confirmed recovery (threshold not met)")
 	}
 
@@ -221,8 +221,8 @@ func TestSafetyInvariant_RecoveryRequiresThreshold(t *testing.T) {
 	h.pollN(1)
 
 	s = h.tm.Status()
-	if s.DC1State != "writable" {
-		t.Errorf("DC1 should be writable after recovery threshold, got %s", s.DC1State)
+	if s.Sites[0].State != "writable" {
+		t.Errorf("DC1 should be writable after recovery threshold, got %s", s.Sites[0].State)
 	}
 }
 
@@ -266,53 +266,53 @@ func TestSafetyInvariant_FenceBeforePromote(t *testing.T) {
 // Safety Invariant: Cross-DC evaluation produces correct actions.
 // ---------------------------------------------------------------------------
 
-func TestSafetyInvariant_CrossDCMatrix(t *testing.T) {
+func TestSafetyInvariant_CrossSiteMatrix(t *testing.T) {
 	tests := []struct {
-		name      string
-		dc1State  state.DCState
-		dc2State  state.DCState
-		wantPromo string
-		wantAlert string
+		name       string
+		site0State state.SiteState
+		site1State state.SiteState
+		wantPromo  string
+		wantAlert  string
 	}{
 		{
-			name:      "dc1_unreachable_dc2_readonly_promotes_dc2",
-			dc1State:  state.StateUnreachable,
-			dc2State:  state.StateReadOnly,
-			wantPromo: "dc2",
+			name:       "site0_unreachable_site1_readonly_promotes_site1",
+			site0State: state.StateUnreachable,
+			site1State: state.StateReadOnly,
+			wantPromo:  "dc2",
 		},
 		{
-			name:      "dc2_unreachable_dc1_readonly_promotes_dc1",
-			dc1State:  state.StateReadOnly,
-			dc2State:  state.StateUnreachable,
-			wantPromo: "dc1",
+			name:       "site1_unreachable_site0_readonly_promotes_site0",
+			site0State: state.StateReadOnly,
+			site1State: state.StateUnreachable,
+			wantPromo:  "dc1",
 		},
 		{
-			name:      "both_writable_is_split_brain",
-			dc1State:  state.StateWritable,
-			dc2State:  state.StateWritable,
-			wantAlert: "SPLIT BRAIN: both DCs are writable",
+			name:       "both_writable_is_split_brain",
+			site0State: state.StateWritable,
+			site1State: state.StateWritable,
+			wantAlert:  "SPLIT BRAIN: both sites are writable",
 		},
 		{
-			name:      "both_readonly_is_no_primary",
-			dc1State:  state.StateReadOnly,
-			dc2State:  state.StateReadOnly,
-			wantAlert: "NO PRIMARY: both DCs are read-only",
+			name:       "both_readonly_is_no_primary",
+			site0State: state.StateReadOnly,
+			site1State: state.StateReadOnly,
+			wantAlert:  "NO PRIMARY: both sites are read-only",
 		},
 		{
-			name:      "both_unreachable_is_total_loss",
-			dc1State:  state.StateUnreachable,
-			dc2State:  state.StateUnreachable,
-			wantAlert: "TOTAL LOSS: both DCs are unreachable",
+			name:       "both_unreachable_is_total_loss",
+			site0State: state.StateUnreachable,
+			site1State: state.StateUnreachable,
+			wantAlert:  "TOTAL LOSS: both sites are unreachable",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			action := state.EvalCrossDC(tt.dc1State, tt.dc2State,
+			action := state.EvalCrossSite(tt.site0State, tt.site1State,
 				state.StateUnknown, state.StateUnknown, "dc1", "dc2")
 
-			if action.PromoteDC != tt.wantPromo {
-				t.Errorf("PromoteDC: got %q, want %q", action.PromoteDC, tt.wantPromo)
+			if action.PromoteSite != tt.wantPromo {
+				t.Errorf("PromoteSite: got %q, want %q", action.PromoteSite, tt.wantPromo)
 			}
 			if tt.wantAlert != "" && action.Alert != tt.wantAlert {
 				t.Errorf("Alert: got %q, want %q", action.Alert, tt.wantAlert)
@@ -333,11 +333,11 @@ func TestSafetyInvariant_PrimaryServiceSelectorIsCorrect(t *testing.T) {
 	h.pollN(2)
 
 	s := h.tm.Status()
-	if s.DC1State != "writable" {
-		t.Fatalf("expected dc1 writable, got %s", s.DC1State)
+	if s.Sites[0].State != "writable" {
+		t.Fatalf("expected dc1 writable, got %s", s.Sites[0].State)
 	}
-	if s.DC2State != "read-only" {
-		t.Fatalf("expected dc2 read-only, got %s", s.DC2State)
+	if s.Sites[1].State != "read-only" {
+		t.Fatalf("expected dc2 read-only, got %s", s.Sites[1].State)
 	}
 }
 

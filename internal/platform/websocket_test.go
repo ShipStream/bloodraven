@@ -55,7 +55,7 @@ func TestHub_BroadcastToClients(t *testing.T) {
 	waitForClientCount(t, hub, 2)
 
 	// Broadcast a message
-	hub.Broadcast(WSMessage{DC: "dc1", Status: "offline"})
+	hub.Broadcast(WSMessage{Site: "site1", Status: "offline"})
 
 	// Both clients should receive it
 	for i, c := range []*websocket.Conn{c1, c2} {
@@ -68,8 +68,8 @@ func TestHub_BroadcastToClients(t *testing.T) {
 		if err := json.Unmarshal(data, &msg); err != nil {
 			t.Fatalf("client %d unmarshal: %v", i, err)
 		}
-		if msg.DC != "dc1" || msg.Status != "offline" {
-			t.Errorf("client %d: got %+v, want dc1/offline", i, msg)
+		if msg.Site != "site1" || msg.Status != "offline" {
+			t.Errorf("client %d: got %+v, want site1/offline", i, msg)
 		}
 	}
 }

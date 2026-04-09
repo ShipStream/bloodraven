@@ -27,7 +27,7 @@ The chart installs:
 
 | Resource | Purpose |
 |---|---|
-| CRD (`MysqlReplicaPair`) | Installed from `crds/` before templates |
+| CRD (`MysqlFailoverGroup`) | Installed from `crds/` before templates |
 | ServiceAccount | Identity for the operator pod |
 | ClusterRole + Binding | RBAC for reconciler, node tainting, leader election |
 | Deployment | Single-replica operator on control-plane nodes |
@@ -35,7 +35,7 @@ The chart installs:
 | Service (auxiliary) | Status API + WebSocket for sidecars (`:8082`) |
 | ServiceMonitor | Optional, for Prometheus Operator (`metrics.serviceMonitor.enabled`) |
 
-After installing, create a `MysqlReplicaPair` CR to start managing a MySQL pair -- see [Custom Resource](#custom-resource) below.
+After installing, create a `MysqlFailoverGroup` CR to start managing a MySQL pair -- see [Custom Resource](#custom-resource) below.
 
 ### Manual
 
@@ -273,7 +273,7 @@ sequenceDiagram
 
 ```yaml
 apiVersion: shipstream.io/v1alpha1
-kind: MysqlReplicaPair
+kind: MysqlFailoverGroup
 metadata:
   name: main
   namespace: mysql
@@ -281,32 +281,30 @@ spec:
   image: mysql:9.6
   sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:latest
 
-  dc1:
-    name: dc1
-    zone: us-east-1a
-    lbIP: 10.0.1.100
-    storage:
-      storageClassName: gp3-dc1
-      size: 100Gi
-    resources:
-      requests:
-        cpu: "2"
-        memory: 8Gi
-      limits:
-        cpu: "4"
-        memory: 16Gi
-
-  dc2:
-    name: dc2
-    zone: us-east-1b
-    lbIP: 10.0.2.100
-    storage:
-      storageClassName: gp3-dc2
-      size: 100Gi
-    resources:
-      requests:
-        cpu: "2"
-        memory: 8Gi
+  sites:
+    - name: iad
+      zone: us-east-1a
+      lbIP: 10.0.1.100
+      storage:
+        storageClassName: gp3-iad
+        size: 100Gi
+      resources:
+        requests:
+          cpu: "2"
+          memory: 8Gi
+        limits:
+          cpu: "4"
+          memory: 16Gi
+    - name: pdx
+      zone: us-west-2a
+      lbIP: 10.0.2.100
+      storage:
+        storageClassName: gp3-pdx
+        size: 100Gi
+      resources:
+        requests:
+          cpu: "2"
+          memory: 8Gi
 
   secretName: mysql-credentials
   az: lion
@@ -340,35 +338,35 @@ spec:
 
 ```yaml
 status:
-  primaryDC: dc1
-  dc1:
-    state: writable
-    lastSeen: "2026-04-07T12:00:00Z"
-    gtidExecuted: "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-77"
-    replicating: false
-    secondsBehindSource: null
-  dc2:
-    state: read-only
-    lastSeen: "2026-04-07T12:00:00Z"
-    gtidExecuted: "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-77"
-    replicating: true
-    secondsBehindSource: 0
+  activeSite: iad
+  sites:
+    - name: iad
+      state: writable
+      lastSeen: "2026-04-07T12:00:00Z"
+      gtidExecuted: "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-77"
+      replicating: false
+    - name: pdx
+      state: read-only
+      lastSeen: "2026-04-07T12:00:00Z"
+      gtidExecuted: "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-77"
+      replicating: true
+      secondsBehindSource: 0
   lastFailover: "2026-04-01T08:30:00Z"
-  lastFailoverTarget: dc2
+  lastFailoverTarget: pdx
   conditions:
     - type: Ready
       status: "True"
       reason: TopologyPolled
-      message: "At least one DC is writable"
+      message: "At least one site is writable and replication is healthy"
     - type: Degraded
       status: "False"
       reason: Healthy
-      message: "No cross-DC alerts"
+      message: "No cross-site alerts"
 ```
 
 ## Kubernetes Resources Created
 
-Per `MysqlReplicaPair`, the reconciler creates:
+Per `MysqlFailoverGroup`, the reconciler creates:
 
 | Resource | Name | Per-DC | Notes |
 |---|---|---|---|

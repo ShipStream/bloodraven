@@ -1,0 +1,134 @@
+---
+sidebar_position: 6
+---
+
+# App Integration
+
+This page explains how applications connect to a MySQL failover group and handle failover events.
+
+## Connection endpoints
+
+For a `MysqlFailoverGroup` named `orders` in namespace `default`, the operator creates these Services:
+
+| Service | DNS name | Purpose |
+|---|---|---|
+| `mysql-orders-primary` | `mysql-orders-primary.default.svc.cluster.local:3306` | Writes. Always points to the active primary. |
+| `mysql-orders-replicas` | `mysql-orders-replicas.default.svc.cluster.local:3306` | Reads. Points to healthy read replicas. |
+| `mysql-orders-iad` | `mysql-orders-iad.default.svc.cluster.local:3306` | Direct access to the `iad` site instance. |
+| `mysql-orders-pdx` | `mysql-orders-pdx.default.svc.cluster.local:3306` | Direct access to the `pdx` site instance. |
+
+### Recommended connection pattern
+
+For most applications:
+
+```
+# Writes
+mysql-orders-primary.<namespace>.svc.cluster.local:3306
+
+# Reads
+mysql-orders-replicas.<namespace>.svc.cluster.local:3306
+```
+
+The `-primary` Service selector is updated by the operator whenever a failover occurs. Your application does not need to be aware of which site is currently active.
+
+## Failover strategies
+
+Bloodraven supports two strategies for handling application failover. Choose the one that fits your deployment model.
+
+### Strategy 1: Taint-based failover
+
+Best for applications that run on **dedicated nodes per site** and should be fully migrated when the database fails over.
+
+**How it works:**
+
+1. The operator taints nodes at the old active site with `shipstream.io/db-readonly=true:NoExecute`
+2. Kubernetes evicts pods that do not tolerate this taint
+3. Those pods are rescheduled to the new active site's nodes (which have the taint removed)
+
+**Application requirements:**
+
+- Deploy on nodes labeled with `shipstream.io/failover-group=<name>` and `shipstream.io/site=<site>`
+- Do **not** add a toleration for `shipstream.io/db-readonly:NoExecute`
+- Use `mysql-orders-primary` for writes (the Service follows the active site)
+
+**Example pod spec:**
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: order-processor
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: shipstream.io/failover-group
+                operator: In
+                values: ["orders"]
+  containers:
+    - name: app
+      image: myapp:latest
+      env:
+        - name: MYSQL_HOST
+          value: mysql-orders-primary.default.svc.cluster.local
+        - name: MYSQL_PORT
+          value: "3306"
+  # No toleration for shipstream.io/db-readonly -- pod will be evicted on failover
+```
+
+### Strategy 2: Service-based failover
+
+Best for applications that are **deployed independently per site** and only need to follow the database.
+
+**How it works:**
+
+1. Each site's application deployment connects to `mysql-orders-primary` for writes
+2. On failover, the `-primary` Service selector shifts to the new active site
+3. Applications at both sites see the endpoint change through normal Kubernetes Service discovery
+
+**Application requirements:**
+
+- Connect to `mysql-orders-primary` for writes
+- Optionally connect to `mysql-orders-replicas` for reads
+- Handle brief connection errors during failover (seconds, not minutes)
+
+## Handling failover in application code
+
+During a failover, there is a brief window (typically under 10 seconds) where:
+
+1. The old primary becomes read-only
+2. The new primary is being promoted
+3. DNS and Service endpoints are being updated
+
+Applications should:
+
+- **Retry** failed write operations with backoff
+- **Expect** `read-only` errors (`Error 1290: The MySQL server is running with the --read-only option`) and retry after a short delay
+- **Not** cache DNS indefinitely -- respect TTLs so that Cloudflare DNS changes take effect
+
+## External access via Cloudflare DNS
+
+For applications outside the Kubernetes cluster, the operator manages Cloudflare DNS A-records that point to the active site's load balancer IP (`spec.sites[].lbIP`). When a failover occurs, the operator flips the DNS record to the new active site.
+
+External applications should:
+
+- Use the DNS hostname configured in Cloudflare (not hardcoded IPs)
+- Respect DNS TTLs
+- Implement connection retry logic
+
+## Read replicas
+
+The `mysql-orders-replicas` Service selects pods with:
+
+- `shipstream.io/role: replica`
+- `shipstream.io/healthy: yes`
+
+A replica is considered healthy when:
+
+- It is reachable
+- It is replicating (`replicating: true` in status)
+- Its replication lag is within `spec.replication.maxLagSeconds`
+
+If no healthy replicas exist, the Service will have no endpoints. Applications reading from the replicas Service should handle this by falling back to the primary or surfacing an error.

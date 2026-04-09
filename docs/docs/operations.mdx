@@ -1,0 +1,170 @@
+---
+sidebar_position: 9
+---
+
+# Operations
+
+Day-2 operations guide for managing Bloodraven failover groups, including manual intervention, recovery procedures, and maintenance tasks.
+
+## Manual promotion
+
+If you need to force a failover (for example, during planned maintenance), you can manually promote a site by setting the target site's MySQL instance to writable and the current primary to read-only.
+
+**Step 1: Fence the current primary**
+
+```bash
+kubectl exec mysql-orders-iad-0 -c mysql -- \
+  mysql -u root -p -e "SET GLOBAL super_read_only=ON;"
+```
+
+**Step 2: Stop and reset replication on the target**
+
+```bash
+kubectl exec mysql-orders-pdx-0 -c mysql -- \
+  mysql -u root -p -e "STOP REPLICA; RESET REPLICA ALL;"
+```
+
+**Step 3: Promote the target**
+
+```bash
+kubectl exec mysql-orders-pdx-0 -c mysql -- \
+  mysql -u root -p -e "SET GLOBAL read_only=0;"
+```
+
+The operator will detect the state change on its next poll cycle and update Services, DNS, and taints accordingly. No operator restart is required.
+
+:::caution
+Manual promotion bypasses the anti-flap cooldown. Ensure you understand the current replication state before promoting a site -- data loss is possible if the target has not finished applying relay logs.
+:::
+
+## Split-brain recovery
+
+If both sites report `writable` (split brain), the operator will **not** take automatic action. You must resolve this manually:
+
+1. **Identify the authoritative site** -- determine which site has the most recent data by comparing GTID sets:
+
+   ```bash
+   kubectl exec mysql-orders-iad-0 -c mysql -- \
+     mysql -u root -p -e "SELECT @@gtid_executed;"
+
+   kubectl exec mysql-orders-pdx-0 -c mysql -- \
+     mysql -u root -p -e "SELECT @@gtid_executed;"
+   ```
+
+2. **Fence the non-authoritative site**:
+
+   ```bash
+   kubectl exec mysql-orders-pdx-0 -c mysql -- \
+     mysql -u root -p -e "SET GLOBAL super_read_only=ON;"
+   ```
+
+3. **Re-establish replication** from the authoritative site to the fenced site:
+
+   ```bash
+   kubectl exec mysql-orders-pdx-0 -c mysql -- \
+     mysql -u root -p -e "
+       CHANGE REPLICATION SOURCE TO
+         SOURCE_HOST='mysql-orders-iad.default.svc.cluster.local',
+         SOURCE_AUTO_POSITION=1;
+       START REPLICA;
+     "
+   ```
+
+4. The operator will detect the corrected topology and resume normal operation.
+
+:::danger
+Split brain means both sites accepted writes independently. You may need to reconcile conflicting data manually before re-establishing replication. Replication will break if conflicting transactions exist on both sides.
+:::
+
+## Total loss recovery
+
+If both sites are `unreachable`, the operator cannot take any action. Recovery steps:
+
+1. Investigate infrastructure (nodes, network, storage) at both sites
+2. Bring at least one MySQL instance back online
+3. The operator will detect the recovered site and begin normal operation
+4. Once the second site is back, re-establish replication if it does not resume automatically
+
+## Scaling storage
+
+To resize PVCs, update the `spec.sites[].storage.size` field. This requires the StorageClass to support volume expansion (`allowVolumeExpansion: true`).
+
+```yaml
+spec:
+  sites:
+    - name: iad
+      storage:
+        storageClassName: fast-ssd
+        size: 200Gi  # increased from 100Gi
+```
+
+The operator will update the PVC. The underlying volume expansion behavior depends on your storage provider -- some require a pod restart.
+
+## Updating MySQL version
+
+Change `spec.image` to the new version:
+
+```yaml
+spec:
+  image: mysql:9.7
+```
+
+If `updateStrategy: OrderedUpdate` is set, the rollout follows the [ordered update sequence](./failover.mdx#ordered-updates) with zero downtime. Otherwise, both sites are updated simultaneously.
+
+## Updating the sidecar
+
+Change `spec.sidecarImage`:
+
+```yaml
+spec:
+  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:v2.0.0
+```
+
+This follows the same update strategy as MySQL image changes.
+
+## Rotating MySQL credentials
+
+1. Update the password on both MySQL instances directly
+2. Update the Kubernetes Secret referenced by `spec.secretName`
+3. Restart the operator to pick up the new credentials (or wait for the Secret to be reloaded, depending on your Secret mounting configuration)
+
+## Rotating the Cloudflare API token
+
+1. Generate a new API token in Cloudflare
+2. Update the Secret referenced by `spec.cloudflare.apiTokenSecretRef`
+3. The operator will use the new token on the next DNS operation
+
+## Maintenance mode
+
+To prevent automatic failovers during maintenance (e.g., network changes), you can temporarily increase the failover cooldown:
+
+```bash
+kubectl patch mysqlfailovergroup orders --type merge -p '
+  {"spec": {"failoverCooldown": "24h"}}'
+```
+
+Restore it after maintenance:
+
+```bash
+kubectl patch mysqlfailovergroup orders --type merge -p '
+  {"spec": {"failoverCooldown": "60m"}}'
+```
+
+## Deleting a failover group
+
+The operator uses a finalizer to ensure graceful cleanup when a `MysqlFailoverGroup` is deleted:
+
+1. Node taints are removed from all sites
+2. DNS records are cleaned up
+3. MySQL pods, Services, and PVCs are deleted
+4. The finalizer is removed and the CR is deleted
+
+To delete:
+
+```bash
+kubectl delete mysqlfailovergroup orders
+```
+
+:::caution
+PVCs are deleted as part of cleanup. If you need to preserve data, back up the MySQL instances before deleting the failover group.
+:::

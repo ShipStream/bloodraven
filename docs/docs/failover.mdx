@@ -1,0 +1,124 @@
+---
+sidebar_position: 7
+---
+
+# Failover
+
+This page covers the state machine that drives failover decisions, the exact sequence of operations during a failover, the anti-flap cooldown, and ordered updates for zero-downtime rollouts.
+
+## State machine
+
+Each site in a failover group is tracked independently. The possible states are:
+
+| State | Meaning |
+|---|---|
+| `unknown` | Initial state before the first successful poll |
+| `writable` | MySQL is reachable and `read_only=0` |
+| `read-only` | MySQL is reachable and `read_only=1` |
+| `unreachable` | MySQL has failed the configured number of consecutive polls |
+
+### State transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> unknown
+    unknown --> writable: poll OK + read_only=0\n(after recovery threshold)
+    unknown --> read_only: poll OK + read_only=1
+    unknown --> unreachable: poll error\n(after failure threshold)
+    writable --> read_only: poll OK + read_only=1
+    writable --> unreachable: poll error\n(after failure threshold)
+    read_only --> writable: poll OK + read_only=0\n(after recovery threshold)
+    read_only --> unreachable: poll error\n(after failure threshold)
+    unreachable --> writable: poll OK + read_only=0\n(after recovery threshold)
+    unreachable --> read_only: poll OK + read_only=1
+```
+
+**Debouncing:**
+
+- A site transitions to `unreachable` only after **failureThreshold** consecutive failed polls (default: 3). With a 2-second poll interval, this means 6 seconds of downtime before the operator considers the site unreachable.
+- A site transitions to `writable` only after **recoveryThreshold** consecutive successful polls showing `read_only=0` (default: 2). This prevents premature promotion on transient successes.
+- Transitions to `read-only` are immediate (single poll) since this is a safe, non-destructive state.
+
+### Cross-site evaluation
+
+After updating individual site states, the operator evaluates the pair together:
+
+| Site A | Site B | Action |
+|---|---|---|
+| `writable` | `read-only` | **Healthy** -- no action needed |
+| `unreachable` | `read-only` | **Failover** -- promote Site B |
+| `read-only` | `unreachable` | **Failover** -- promote Site A |
+| `writable` | `writable` | **Split brain** -- alert, no automatic action |
+| `read-only` | `read-only` | **No primary** -- alert, no automatic action |
+| `unreachable` | `unreachable` | **Total loss** -- alert, no automatic action |
+
+The operator only takes automatic action for the failover case. All other anomalous states require human investigation.
+
+## Failover sequence
+
+When the operator decides to fail over to a candidate site, it executes these steps in order:
+
+1. **Fence the old primary**: `SET GLOBAL super_read_only=ON`
+   - If the old primary is unreachable, this step is skipped (it is already isolated)
+
+2. **Drain relay logs on the candidate** (30-second timeout)
+   - Waits for the candidate to finish applying any relay log events so that no committed transactions are lost
+
+3. **Stop replication on the candidate**: `STOP REPLICA`
+
+4. **Reset replication on the candidate**: `RESET REPLICA ALL`
+   - Clears all replication configuration so the candidate operates as an independent primary
+
+5. **Promote the candidate**: `SET GLOBAL read_only=0`
+   - Makes the candidate writable
+
+6. **Wait for confirmation**
+   - The next poll cycle confirms the candidate is in the `writable` state
+
+7. **Flip Cloudflare DNS**
+   - Updates the DNS A-record to point to the candidate site's load balancer IP
+
+8. **Update node taints**
+   - Taint old active site nodes: `shipstream.io/db-readonly=true:NoExecute`
+   - Untaint new active site nodes: remove the `shipstream.io/db-readonly` taint
+
+## Anti-flap cooldown
+
+To prevent rapid failover oscillation (e.g., a flapping network link), the operator enforces a cooldown period between automatic failovers. The default is 60 minutes, configurable via `spec.failoverCooldown`.
+
+During the cooldown:
+
+- The operator continues to monitor both sites and update status
+- Automatic failovers are suppressed
+- Manual intervention can still be performed (see [Operations](./operations.mdx))
+
+The cooldown timer resets after each failover. The last failover time is recorded in `status.lastFailover`.
+
+## Ordered updates
+
+When `spec.updateStrategy` is set to `OrderedUpdate`, spec changes (such as a new `image` or resource adjustments) are rolled out with zero downtime:
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant Standby as Standby Site
+    participant Active as Active Site
+
+    Op->>Standby: 1. Update deployment (new image/resources)
+    Op->>Standby: 2. Wait for pod ready
+    Op->>Standby: 3. Wait for replication to catch up
+    Op->>Standby: 4. Failover to standby (now updated)
+    Note over Op,Active: Standby becomes new active
+    Op->>Active: 5. Update old active site deployment
+    Op->>Active: 6. Wait for pod ready
+    Op->>Active: 7. Replication resumes
+    Note over Op,Active: Both sites now updated
+```
+
+This sequence ensures:
+
+- The active primary is never restarted while serving traffic
+- Replication is healthy before each transition
+- At most one site is unavailable at any time
+
+Without `OrderedUpdate`, both sites are updated simultaneously, which may cause brief downtime if both pods restart at the same time.

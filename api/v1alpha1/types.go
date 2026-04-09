@@ -8,31 +8,31 @@ import (
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Primary",type=string,JSONPath=`.status.primaryDC`
-// +kubebuilder:printcolumn:name="DC1",type=string,JSONPath=`.status.dc1.state`
-// +kubebuilder:printcolumn:name="DC2",type=string,JSONPath=`.status.dc2.state`
+// +kubebuilder:printcolumn:name="Active",type=string,JSONPath=`.status.activeSite`
+// +kubebuilder:printcolumn:name="Site-A",type=string,JSONPath=`.status.sites[0].state`
+// +kubebuilder:printcolumn:name="Site-B",type=string,JSONPath=`.status.sites[1].state`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// MysqlReplicaPair is the Schema for the mysqlreplicapairs API.
-type MysqlReplicaPair struct {
+// MysqlFailoverGroup is the Schema for the mysqlfailovergroups API.
+type MysqlFailoverGroup struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   MysqlReplicaPairSpec   `json:"spec,omitempty"`
-	Status MysqlReplicaPairStatus `json:"status,omitempty"`
+	Spec   MysqlFailoverGroupSpec   `json:"spec,omitempty"`
+	Status MysqlFailoverGroupStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 
-// MysqlReplicaPairList contains a list of MysqlReplicaPair.
-type MysqlReplicaPairList struct {
+// MysqlFailoverGroupList contains a list of MysqlFailoverGroup.
+type MysqlFailoverGroupList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []MysqlReplicaPair `json:"items"`
+	Items           []MysqlFailoverGroup `json:"items"`
 }
 
-// MysqlReplicaPairSpec defines the desired state of MysqlReplicaPair.
-type MysqlReplicaPairSpec struct {
+// MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
+type MysqlFailoverGroupSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.6
 	// +kubebuilder:default="mysql:9.6"
 	Image string `json:"image,omitempty"`
@@ -40,11 +40,11 @@ type MysqlReplicaPairSpec struct {
 	// SidecarImage is the image used for the sidecar/init container.
 	SidecarImage string `json:"sidecarImage,omitempty"`
 
-	// DC1 is the first datacenter instance configuration.
-	DC1 DCInstanceSpec `json:"dc1"`
-
-	// DC2 is the second datacenter instance configuration.
-	DC2 DCInstanceSpec `json:"dc2"`
+	// Sites defines the two sites that form this failover group.
+	// Exactly two sites must be specified; either can be active.
+	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=2
+	Sites []SiteSpec `json:"sites"`
 
 	// SecretName references the secret containing MySQL credentials.
 	// +kubebuilder:validation:MinLength=1
@@ -113,9 +113,9 @@ type ReplicationSpec struct {
 	MaxLagSeconds int64 `json:"maxLagSeconds,omitempty"`
 }
 
-// DCInstanceSpec defines the configuration for a single DC instance.
-type DCInstanceSpec struct {
-	// Name is the datacenter name (e.g. "dc1", "dc2").
+// SiteSpec defines the configuration for a single site in the failover group.
+type SiteSpec struct {
+	// Name is the site identifier (e.g. "iad", "pdx").
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
@@ -127,7 +127,7 @@ type DCInstanceSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	LBIP string `json:"lbIP"`
 
-	// Storage configures the persistent volume for this DC.
+	// Storage configures the persistent volume for this site.
 	Storage StorageSpec `json:"storage"`
 
 	// Resources defines the compute resources for the MySQL container.
@@ -200,16 +200,13 @@ type SidecarSpec struct {
 	BloodravenAddress string `json:"bloodravenAddress,omitempty"`
 }
 
-// MysqlReplicaPairStatus defines the observed state of MysqlReplicaPair.
-type MysqlReplicaPairStatus struct {
-	// PrimaryDC is the name of the DC currently acting as primary.
-	PrimaryDC string `json:"primaryDC,omitempty"`
+// MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.
+type MysqlFailoverGroupStatus struct {
+	// ActiveSite is the name of the site currently acting as primary (writable).
+	ActiveSite string `json:"activeSite,omitempty"`
 
-	// DC1 is the observed state of DC1.
-	DC1 DCInstanceStatus `json:"dc1,omitempty"`
-
-	// DC2 is the observed state of DC2.
-	DC2 DCInstanceStatus `json:"dc2,omitempty"`
+	// Sites is the observed state of each site, parallel to spec.sites.
+	Sites []SiteStatus `json:"sites,omitempty"`
 
 	// Conditions represent the latest available observations.
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -217,20 +214,23 @@ type MysqlReplicaPairStatus struct {
 	// LastFailover is the timestamp of the last failover event.
 	LastFailover *metav1.Time `json:"lastFailover,omitempty"`
 
-	// LastFailoverTarget is the DC that was last promoted during failover.
+	// LastFailoverTarget is the site that was last promoted during failover.
 	LastFailoverTarget string `json:"lastFailoverTarget,omitempty"`
 
 	// UpdatePhase indicates the current phase of an ordered update, empty if not updating.
 	UpdatePhase string `json:"updatePhase,omitempty"`
 }
 
-// DCInstanceStatus describes the observed state of a single DC instance.
-type DCInstanceStatus struct {
+// SiteStatus describes the observed state of a single site.
+type SiteStatus struct {
+	// Name is the site identifier, mirrored from spec for convenience.
+	Name string `json:"name,omitempty"`
+
 	// State is the current state: writable, read-only, unreachable, or unknown.
 	// +kubebuilder:validation:Enum=writable;read-only;unreachable;unknown
 	State string `json:"state,omitempty"`
 
-	// LastSeen is the last time this DC was successfully polled.
+	// LastSeen is the last time this site was successfully polled.
 	LastSeen *metav1.Time `json:"lastSeen,omitempty"`
 
 	// GtidExecuted is the GTID executed set (populated when replication status is enriched).
@@ -244,5 +244,5 @@ type DCInstanceStatus struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&MysqlReplicaPair{}, &MysqlReplicaPairList{})
+	SchemeBuilder.Register(&MysqlFailoverGroup{}, &MysqlFailoverGroupList{})
 }

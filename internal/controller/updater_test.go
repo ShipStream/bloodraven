@@ -30,9 +30,9 @@ func TestUpdateController_ExecuteOrder(t *testing.T) {
 
 	var updateOrder []string
 	var mu sync.Mutex
-	applyUpdate := func(_ context.Context, dcName string) error {
+	applyUpdate := func(_ context.Context, siteName string) error {
 		mu.Lock()
-		updateOrder = append(updateOrder, dcName)
+		updateOrder = append(updateOrder, siteName)
 		mu.Unlock()
 		return nil
 	}
@@ -217,8 +217,8 @@ func TestUpdateController_ApplyUpdateError(t *testing.T) {
 
 	uc := NewUpdateController(failoverCtl, logger)
 
-	applyUpdate := func(_ context.Context, dcName string) error {
-		if dcName == "dc2" {
+	applyUpdate := func(_ context.Context, siteName string) error {
+		if siteName == "dc2" {
 			return fmt.Errorf("simulated deploy error")
 		}
 		return nil

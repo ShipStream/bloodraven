@@ -18,30 +18,32 @@ import (
 	"github.com/shipstream/bloodraven/internal/controller"
 )
 
-func newTestPair(namespace string) *v1alpha1.MysqlReplicaPair {
-	return &v1alpha1.MysqlReplicaPair{
+func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
+	return &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "lion",
 			Namespace: namespace,
 		},
-		Spec: v1alpha1.MysqlReplicaPairSpec{
+		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Image: "mysql:9.6",
-			DC1: v1alpha1.DCInstanceSpec{
-				Name: "dc1",
-				Zone: "lion-dc1",
-				LBIP: "203.0.113.1",
-				Storage: v1alpha1.StorageSpec{
-					StorageClassName: "standard",
-					Size:             resource.MustParse("10Gi"),
+			Sites: []v1alpha1.SiteSpec{
+				{
+					Name: "dc1",
+					Zone: "lion-dc1",
+					LBIP: "203.0.113.1",
+					Storage: v1alpha1.StorageSpec{
+						StorageClassName: "standard",
+						Size:             resource.MustParse("10Gi"),
+					},
 				},
-			},
-			DC2: v1alpha1.DCInstanceSpec{
-				Name: "dc2",
-				Zone: "lion-dc2",
-				LBIP: "203.0.113.2",
-				Storage: v1alpha1.StorageSpec{
-					StorageClassName: "standard",
-					Size:             resource.MustParse("10Gi"),
+				{
+					Name: "dc2",
+					Zone: "lion-dc2",
+					LBIP: "203.0.113.2",
+					Storage: v1alpha1.StorageSpec{
+						StorageClassName: "standard",
+						Size:             resource.MustParse("10Gi"),
+					},
 				},
 			},
 			SecretName: "mysql-credentials",
@@ -92,22 +94,22 @@ func TestEnvtest_CRCreationAndSchemaAcceptance(t *testing.T) {
 	ns := "envtest-cr-creation"
 	ensureNamespace(t, ns)
 
-	pair := newTestPair(ns)
-	if err := k8sClient.Create(ctx, pair); err != nil {
-		t.Fatalf("failed to create MysqlReplicaPair: %v", err)
+	fg := newTestFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatalf("failed to create MysqlFailoverGroup: %v", err)
 	}
 
 	// Verify we can read it back
-	var fetched v1alpha1.MysqlReplicaPair
+	var fetched v1alpha1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lion", Namespace: ns}, &fetched); err != nil {
-		t.Fatalf("failed to get MysqlReplicaPair: %v", err)
+		t.Fatalf("failed to get MysqlFailoverGroup: %v", err)
 	}
 
-	if fetched.Spec.DC1.Name != "dc1" {
-		t.Errorf("expected DC1 name 'dc1', got %q", fetched.Spec.DC1.Name)
+	if fetched.Spec.Sites[0].Name != "dc1" {
+		t.Errorf("expected Sites[0] name 'dc1', got %q", fetched.Spec.Sites[0].Name)
 	}
-	if fetched.Spec.DC2.Name != "dc2" {
-		t.Errorf("expected DC2 name 'dc2', got %q", fetched.Spec.DC2.Name)
+	if fetched.Spec.Sites[1].Name != "dc2" {
+		t.Errorf("expected Sites[1] name 'dc2', got %q", fetched.Spec.Sites[1].Name)
 	}
 	if fetched.Spec.AZ != "lion" {
 		t.Errorf("expected AZ 'lion', got %q", fetched.Spec.AZ)
@@ -118,37 +120,39 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 	ns := "envtest-status-write"
 	ensureNamespace(t, ns)
 
-	pair := newTestPair(ns)
-	if err := k8sClient.Create(ctx, pair); err != nil {
-		t.Fatalf("failed to create MysqlReplicaPair: %v", err)
+	fg := newTestFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatalf("failed to create MysqlFailoverGroup: %v", err)
 	}
 
 	// Update status subresource
-	pair.Status.PrimaryDC = "dc1"
-	pair.Status.DC1 = v1alpha1.DCInstanceStatus{State: "writable"}
-	pair.Status.DC2 = v1alpha1.DCInstanceStatus{State: "read-only"}
+	fg.Status.ActiveSite = "dc1"
+	fg.Status.Sites = []v1alpha1.SiteStatus{
+		{Name: "dc1", State: "writable"},
+		{Name: "dc2", State: "read-only"},
+	}
 	now := metav1.Now()
-	pair.Status.LastFailover = &now
-	pair.Status.LastFailoverTarget = "dc1"
+	fg.Status.LastFailover = &now
+	fg.Status.LastFailoverTarget = "dc1"
 
-	if err := k8sClient.Status().Update(ctx, pair); err != nil {
+	if err := k8sClient.Status().Update(ctx, fg); err != nil {
 		t.Fatalf("failed to update status: %v", err)
 	}
 
 	// Read back and verify
-	var fetched v1alpha1.MysqlReplicaPair
+	var fetched v1alpha1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lion", Namespace: ns}, &fetched); err != nil {
-		t.Fatalf("failed to get pair: %v", err)
+		t.Fatalf("failed to get fg: %v", err)
 	}
 
-	if fetched.Status.PrimaryDC != "dc1" {
-		t.Errorf("expected PrimaryDC 'dc1', got %q", fetched.Status.PrimaryDC)
+	if fetched.Status.ActiveSite != "dc1" {
+		t.Errorf("expected ActiveSite 'dc1', got %q", fetched.Status.ActiveSite)
 	}
-	if fetched.Status.DC1.State != "writable" {
-		t.Errorf("expected DC1 state 'writable', got %q", fetched.Status.DC1.State)
+	if fetched.Status.Sites[0].State != "writable" {
+		t.Errorf("expected Sites[0] state 'writable', got %q", fetched.Status.Sites[0].State)
 	}
-	if fetched.Status.DC2.State != "read-only" {
-		t.Errorf("expected DC2 state 'read-only', got %q", fetched.Status.DC2.State)
+	if fetched.Status.Sites[1].State != "read-only" {
+		t.Errorf("expected Sites[1] state 'read-only', got %q", fetched.Status.Sites[1].State)
 	}
 	if fetched.Status.LastFailoverTarget != "dc1" {
 		t.Errorf("expected LastFailoverTarget 'dc1', got %q", fetched.Status.LastFailoverTarget)
@@ -160,13 +164,13 @@ func TestEnvtest_ReconcilerCreatesResources(t *testing.T) {
 	ensureNamespace(t, ns)
 	ensureSecret(t, ns)
 
-	pair := newTestPair(ns)
-	if err := k8sClient.Create(ctx, pair); err != nil {
-		t.Fatalf("failed to create pair: %v", err)
+	fg := newTestFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatalf("failed to create fg: %v", err)
 	}
 
 	// Run the reconciler against the real API server
-	r := &controller.MysqlReplicaPairReconciler{
+	r := &controller.MysqlFailoverGroupReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(10),
@@ -187,7 +191,7 @@ func TestEnvtest_ReconcilerCreatesResources(t *testing.T) {
 		t.Fatalf("ConfigMap not created: %v", err)
 	}
 	if len(cm.OwnerReferences) == 0 {
-		t.Error("ConfigMap should have owner reference to MysqlReplicaPair")
+		t.Error("ConfigMap should have owner reference to MysqlFailoverGroup")
 	} else if cm.OwnerReferences[0].Name != "lion" {
 		t.Errorf("ConfigMap owner ref: got %q, want 'lion'", cm.OwnerReferences[0].Name)
 	}
@@ -247,12 +251,12 @@ func TestEnvtest_ReconcilerIdempotent(t *testing.T) {
 	ensureNamespace(t, ns)
 	ensureSecret(t, ns)
 
-	pair := newTestPair(ns)
-	if err := k8sClient.Create(ctx, pair); err != nil {
-		t.Fatalf("failed to create pair: %v", err)
+	fg := newTestFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatalf("failed to create fg: %v", err)
 	}
 
-	r := &controller.MysqlReplicaPairReconciler{
+	r := &controller.MysqlFailoverGroupReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(10),
@@ -280,12 +284,12 @@ func TestEnvtest_ReconcilerHandlesSpecChange(t *testing.T) {
 	ensureNamespace(t, ns)
 	ensureSecret(t, ns)
 
-	pair := newTestPair(ns)
-	if err := k8sClient.Create(ctx, pair); err != nil {
-		t.Fatalf("failed to create pair: %v", err)
+	fg := newTestFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatalf("failed to create fg: %v", err)
 	}
 
-	r := &controller.MysqlReplicaPairReconciler{
+	r := &controller.MysqlFailoverGroupReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(10),
@@ -298,13 +302,13 @@ func TestEnvtest_ReconcilerHandlesSpecChange(t *testing.T) {
 	}
 
 	// Change the image
-	var fetched v1alpha1.MysqlReplicaPair
+	var fetched v1alpha1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, nn, &fetched); err != nil {
-		t.Fatalf("failed to get pair: %v", err)
+		t.Fatalf("failed to get fg: %v", err)
 	}
 	fetched.Spec.Image = "mysql:8.4"
 	if err := k8sClient.Update(ctx, &fetched); err != nil {
-		t.Fatalf("failed to update pair: %v", err)
+		t.Fatalf("failed to update fg: %v", err)
 	}
 
 	// Re-reconcile should update the deployment
@@ -329,12 +333,12 @@ func TestEnvtest_ReconcilerMissingSecretRequeues(t *testing.T) {
 	ensureNamespace(t, ns)
 	// Intentionally don't create the secret
 
-	pair := newTestPair(ns)
-	if err := k8sClient.Create(ctx, pair); err != nil {
-		t.Fatalf("failed to create pair: %v", err)
+	fg := newTestFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatalf("failed to create fg: %v", err)
 	}
 
-	r := &controller.MysqlReplicaPairReconciler{
+	r := &controller.MysqlFailoverGroupReconciler{
 		Client:   k8sClient,
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(10),
