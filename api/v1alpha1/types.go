@@ -80,9 +80,10 @@ type MysqlReplicaPairSpec struct {
 	Sidecar SidecarSpec `json:"sidecar,omitempty"`
 
 	// CloneTimeout is the timeout in seconds for CLONE INSTANCE operations. It
-	// controls the MySQL session variables net_read_timeout, net_write_timeout,
-	// and clone_ddl_timeout (all set per-session before cloning), as well as
-	// the global my.cnf setting clone_ddl_timeout. Default: 3600 (1 hour).
+	// controls the session variables net_read_timeout and net_write_timeout
+	// (set per-session before cloning) and the global variable clone_ddl_timeout
+	// (GLOBAL-only; set via SET GLOBAL before cloning and also written to
+	// my.cnf). Default: 3600 (1 hour).
 	// +kubebuilder:default=3600
 	// +kubebuilder:validation:Minimum=60
 	CloneTimeout int `json:"cloneTimeout,omitempty"`

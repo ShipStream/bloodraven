@@ -18,12 +18,15 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 		cloneTimeoutSec = 3600
 	}
 
-	// Set session-level timeouts so MySQL does not kill the connection
-	// independently of the Go context deadline during long-running clones.
+	// Set connection-level and global timeouts before cloning.
+	// net_read_timeout and net_write_timeout are session-scoped and prevent the
+	// server from dropping the connection during a long clone transfer.
+	// clone_ddl_timeout is GLOBAL-only (session scope is not supported) and
+	// controls how long the clone waits on conflicting DDL statements.
 	timeoutStmts := []string{
 		fmt.Sprintf("SET SESSION net_read_timeout = %d", cloneTimeoutSec),
 		fmt.Sprintf("SET SESSION net_write_timeout = %d", cloneTimeoutSec),
-		fmt.Sprintf("SET SESSION clone_ddl_timeout = %d", cloneTimeoutSec),
+		fmt.Sprintf("SET GLOBAL clone_ddl_timeout = %d", cloneTimeoutSec),
 	}
 	for _, s := range timeoutStmts {
 		if _, err := m.db.ExecContext(ctx, s); err != nil {
