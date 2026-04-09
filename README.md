@@ -36,14 +36,14 @@ graph TB
 
     subgraph "External"
         CF["DNS (external-dns)<br/>failover A record"]
-        DH["Device Hub<br/>WebSocket clients"]
+        WS["Auxiliary apps<br/>WebSocket clients"]
     end
 
     BR -- "poll read_only" --> M1
     BR -- "poll read_only" --> M2
     BR -- "taint/untaint nodes" --> K8S["Kubernetes API"]
     BR -- "update A record" --> CF
-    BR -- "broadcast online/offline" --> DH
+    BR -- "broadcast online/offline" --> WS
     S1 -- "ping peer" --> S2
     S2 -- "ping peer" --> S1
     S1 -- "heartbeat" --> BR

@@ -9,7 +9,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// WSMessage is the message sent to Device Hub clients.
+// WSMessage is the message sent to WebSocket clients.
 type WSMessage struct {
 	Site   string `json:"site"`
 	Status string `json:"status"` // "online" or "offline"
