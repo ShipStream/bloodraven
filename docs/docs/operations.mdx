@@ -145,7 +145,7 @@ Restore it after maintenance:
 
 ```bash
 kubectl patch mysqlfailovergroup orders --type merge -p '
-  {"spec": {"failoverCooldown": "60m"}}'
+  {"spec": {"failoverCooldown": "30m"}}'
 ```
 
 ## Deleting a failover group

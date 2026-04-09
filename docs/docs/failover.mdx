@@ -84,7 +84,7 @@ When the operator decides to fail over to a candidate site, it executes these st
 
 ## Anti-flap cooldown
 
-To prevent rapid failover oscillation (e.g., a flapping network link), the operator enforces a cooldown period between automatic failovers. The default is 60 minutes, configurable via `spec.failoverCooldown`.
+To prevent rapid failover oscillation (e.g., a flapping network link), the operator enforces a cooldown period between automatic failovers. The default is 5 minutes, configurable via `spec.failoverCooldown`.
 
 During the cooldown:
 

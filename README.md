@@ -101,4 +101,4 @@ make manifests           # Generate CRD and RBAC manifests
 
 **Relay log drain is best-effort.** The 30-second drain timeout is non-fatal. If relay logs can't be fully applied (e.g., SQL thread error), failover proceeds anyway. Data in the relay log may be lost, but the alternative -- blocking failover indefinitely -- is worse for availability.
 
-**Anti-flap cooldown.** After a failover, further failovers are blocked for 60 minutes (configurable). This prevents cascading failovers when infrastructure is unstable.
+**Anti-flap cooldown.** After a failover, further failovers are blocked for 5 minutes by default (configurable via `failoverCooldown`). This prevents cascading failovers when infrastructure is unstable.
