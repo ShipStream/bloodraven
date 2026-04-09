@@ -24,4 +24,4 @@ Add table-driven unit tests beside the code they cover, using the existing `*_te
 Recent history uses short, imperative subjects such as `Upgrade mysql-watcher to Bloodraven MySQL operator`. Keep commit titles concise and action-oriented. PRs should explain the operational impact, note any CRD, failover, or sidecar behavior changes, link the relevant issue, and include logs, manifests, or screenshots when changing observable cluster behavior.
 
 ## Architecture & Configuration Notes
-This project is a Go 1.25 Kubernetes operator built around a single custom resource and two binaries. When changing reconciliation or failover code, also review `README.md` and the design notes in `BLOODRAVEN_UPGRADE.md` so behavior, docs, and generated artifacts stay aligned.
+This project is a Go 1.25 Kubernetes operator built around a single custom resource and two binaries. When making material changes to reconciliation, failover, CRD types, sidecar behavior, or deployment model, update the relevant documentation in `docs/` to keep code and docs aligned.

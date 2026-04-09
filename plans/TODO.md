@@ -211,7 +211,7 @@ Problem:
 Recommended work:
 - After wiring the topology manager and status updates, audit:
   - `README.md`
-  - `BLOODRAVEN_UPGRADE.md`
+  - `docs/`
   - generated manifests
   - sample CRs
 - Mark aspirational features clearly if they are not yet live.
