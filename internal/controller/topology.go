@@ -29,7 +29,7 @@ type TopologyConfig struct {
 	PollInterval      int64 // nanoseconds
 	FailureThreshold  int
 	RecoveryThreshold int
-	FailoverCooldown  int64 // nanoseconds, default 60m
+	FailoverCooldown  int64 // nanoseconds, default 5m
 }
 
 // PollIntervalDuration returns the poll interval as a time.Duration.
@@ -112,7 +112,7 @@ func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker
 func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
 	cooldown := time.Duration(cfg.FailoverCooldown)
 	if cooldown == 0 {
-		cooldown = 60 * time.Minute
+		cooldown = 5 * time.Minute
 	}
 	return &TopologyManager{
 		cfg: cfg,

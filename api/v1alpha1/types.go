@@ -69,7 +69,7 @@ type MysqlFailoverGroupSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	RecoveryThreshold int32 `json:"recoveryThreshold,omitempty"`
 
-	// FailoverCooldown is the minimum time between failovers. Default: 60m
+	// FailoverCooldown is the minimum time between failovers. Default: 5m
 	FailoverCooldown *metav1.Duration `json:"failoverCooldown,omitempty"`
 
 	// Sidecar configures sidecar behavior.
