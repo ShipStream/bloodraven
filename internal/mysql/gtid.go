@@ -61,15 +61,18 @@ func ParseGTIDSet(s string) (GTIDSet, error) {
 			return nil, fmt.Errorf("empty UUID in GTID entry %q", part)
 		}
 
-		// Determine if we have a tag (format: uuid:tag:interval) or not (format: uuid:interval)
-		// A tag is present if we have at least 3 segments and the second segment is not a valid interval
+		// Determine if we have a tag (format: uuid:tag:interval) or not (format: uuid:interval).
+		// Use a strict syntactic check: a segment is an interval if it contains only digits with
+		// an optional single hyphen separator. This avoids conflating a malformed interval (e.g.
+		// "5-3" with start>end, or "1-2-3") with a tag, which would silently skip the bad segment.
 		tagIndex := 1
 		if len(segments) >= 3 {
 			secondSeg := segments[1]
-			if secondSeg != "" {
-				if _, err := parseInterval(secondSeg); err != nil {
-					tagIndex = 2
+			if !isIntervalSegment(secondSeg) {
+				if !isTagSegment(secondSeg) {
+					return nil, fmt.Errorf("invalid segment %q in GTID entry %q: not an interval or valid tag", secondSeg, part)
 				}
+				tagIndex = 2
 			}
 		}
 
@@ -92,6 +95,42 @@ func ParseGTIDSet(s string) (GTIDSet, error) {
 	}
 
 	return result, nil
+}
+
+// isIntervalSegment reports whether s has the syntax of a GTID interval ("N" or "N-M"),
+// consisting only of ASCII digits with an optional single hyphen separator.
+// It does not validate semantics (e.g. start <= end); use parseInterval for that.
+func isIntervalSegment(s string) bool {
+	if s == "" {
+		return false
+	}
+	parts := strings.SplitN(s, "-", 2)
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isTagSegment reports whether s could be a valid GTID tag: non-empty and
+// containing only ASCII letters, digits, and underscores.
+func isTagSegment(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // parseInterval parses "start-end" or "start" (which means start-start).
