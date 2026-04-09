@@ -16,6 +16,15 @@ Bloodraven is a Kubernetes operator for managing MySQL async replication failove
 - **Prevents split-brain** with sidecar self-fencing: if both the operator and peer are unreachable, the sidecar sets `super_read_only=ON` as a safety net
 - **Broadcasts status** over a WebSocket API for dashboards and alerting integrations
 
+:::tip
+**Using an AI agent?** This documentation is available as `llms.txt` and `llms-full.txt` at the site root for consumption by LLM-based tools. Give your agent context with a prompt like:
+
+```
+Read https://bloodraven.readthedocs.io/en/latest/llms-full.txt and help me configure a MysqlFailoverGroup for two sites with async replication and automatic DNS failover.
+```
+
+:::
+
 ## Components
 
 | Component | Description |
@@ -53,15 +62,6 @@ spec:
         size: 50Gi
         storageClassName: gp3
 ```
-
-:::tip
-**Using an AI agent?** This documentation is available as `llms.txt` and `llms-full.txt` at the site root for consumption by LLM-based tools. Give your agent context with a prompt like:
-
-```
-Read https://bloodraven.readthedocs.io/en/latest/llms-full.txt and help me configure a MysqlFailoverGroup for two sites with async replication and automatic DNS failover.
-```
-
-:::
 
 ## Next steps
 
