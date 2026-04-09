@@ -1,0 +1,27 @@
+run:
+  timeout: 5m
+
+linters:
+  enable-all: false
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosimple
+
+issues:
+  exclude-rules:
+    - path: "internal/sidecar/server\\.go"
+      linters: [errcheck]
+    - path: "cmd/bloodraven/main\\.go"
+      linters: [errcheck]
+    - path: "_test\\.go"
+      linters: [unused]
+    - linters: [staticcheck]
+      text: "SA1019:"
+    - path: "internal/mysql/replication\\.go"
+      linters: [staticcheck]
+      text: "SA9003:"
