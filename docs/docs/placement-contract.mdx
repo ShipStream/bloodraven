@@ -82,7 +82,9 @@ node-pdx-orders-1:
 
 ## Scheduling MySQL pods
 
-The operator schedules MySQL pods using node affinity rules derived from the site's `zone` field and the failover group labels. You do not need to manually configure pod affinity -- the operator handles this.
+The operator schedules MySQL pods using the site's `zone` field (via `topology.kubernetes.io/zone` node selector). You do not need to manually configure this placement -- the operator handles it.
+
+The `shipstream.io/failover-group` and `shipstream.io/site` node labels described above are used by the operator to identify which nodes to taint or untaint during failover, not as scheduling constraints for MySQL pods.
 
 ## Multiple failover groups
 

@@ -35,11 +35,26 @@ kind: MysqlFailoverGroup
 metadata:
   name: orders
 spec:
+  secretName: mysql-credentials
+  az: orders
+  cloudflare:
+    zoneID: abc123
+    apiTokenSecretRef:
+      name: cloudflare-token
+      key: token
   sites:
     - name: iad
       zone: us-east-1a
+      lbIP: 10.0.1.1
+      storage:
+        size: 50Gi
+        storageClassName: gp3
     - name: pdx
       zone: us-west-2a
+      lbIP: 10.0.2.1
+      storage:
+        size: 50Gi
+        storageClassName: gp3
 ```
 
 ## Next steps

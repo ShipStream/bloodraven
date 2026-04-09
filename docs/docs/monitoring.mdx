@@ -66,17 +66,17 @@ Recommended alerts:
 groups:
   - name: bloodraven
     rules:
-      # Failover group has no healthy primary
+      # Site has no healthy primary
       - alert: BloodravenNoPrimary
         expr: |
-          count by (failover_group) (
+          count by (site) (
             bloodraven_state_transitions_total{to="writable"}
           ) == 0
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "Failover group {{ $labels.failover_group }} has no writable primary"
+          summary: "Site {{ $labels.site }} has no writable primary"
 
       # High poll latency may indicate network issues
       - alert: BloodravenHighPollLatency
