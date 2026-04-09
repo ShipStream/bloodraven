@@ -22,8 +22,9 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 | `failureThreshold` | int | No | `3` | Consecutive failed polls before a site is marked unreachable |
 | `recoveryThreshold` | int | No | `2` | Consecutive successful polls before a site is marked writable |
 | `failoverCooldown` | duration | No | `5m` | Minimum time between automatic failovers |
+| `mysqlConf` | map[string]string | No | -- | MySQL configuration overrides merged into the generated `my.cnf`. Changes trigger an ordered rolling restart when `updateStrategy: OrderedUpdate` is set. |
 | `replication` | ReplicationSpec | No | -- | Replication health settings |
-| `updateStrategy` | string | No | -- | Update strategy. Set to `OrderedUpdate` for zero-downtime rollouts. |
+| `updateStrategy` | string | No | `OrderedUpdate` | Update strategy. Set to `OrderedUpdate` for zero-downtime rollouts. |
 | `cloneTimeout` | int | No | `3600` | Timeout in seconds for initial data clone operations |
 | `podLabels` | map[string]string | No | -- | Additional labels applied to every MySQL pod. Operator labels take precedence on conflict. |
 | `podAnnotations` | map[string]string | No | -- | Additional annotations applied to every MySQL pod. Operator annotations take precedence on conflict. |
@@ -119,6 +120,11 @@ spec:
   failureThreshold: 3
   recoveryThreshold: 2
   failoverCooldown: 5m
+  mysqlConf:
+    innodb_buffer_pool_size: "8G"
+    max_connections: "500"
+    innodb_flush_log_at_trx_commit: "1"
+    sync_binlog: "1"
   replication:
     maxLagSeconds: 300
   updateStrategy: OrderedUpdate
