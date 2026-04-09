@@ -59,7 +59,7 @@ rules:
 - apiGroups:
   - shipstream.io
   resources:
-  - mysqlreplicapairs
+  - mysqlfailovergroups
   verbs:
   - create
   - delete
@@ -71,13 +71,13 @@ rules:
 - apiGroups:
   - shipstream.io
   resources:
-  - mysqlreplicapairs/finalizers
+  - mysqlfailovergroups/finalizers
   verbs:
   - update
 - apiGroups:
   - shipstream.io
   resources:
-  - mysqlreplicapairs/status
+  - mysqlfailovergroups/status
   verbs:
   - get
   - patch

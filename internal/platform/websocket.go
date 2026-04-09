@@ -11,7 +11,7 @@ import (
 
 // WSMessage is the message sent to Device Hub clients.
 type WSMessage struct {
-	DC     string `json:"dc"`
+	Site   string `json:"site"`
 	Status string `json:"status"` // "online" or "offline"
 }
 

@@ -21,15 +21,15 @@ rules:
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [create, delete, get, list, patch, update, watch]
-  # MysqlReplicaPair CRD
+  # MysqlFailoverGroup CRD
   - apiGroups: [shipstream.io]
-    resources: [mysqlreplicapairs]
+    resources: [mysqlfailovergroups]
     verbs: [create, delete, get, list, patch, update, watch]
   - apiGroups: [shipstream.io]
-    resources: [mysqlreplicapairs/finalizers]
+    resources: [mysqlfailovergroups/finalizers]
     verbs: [update]
   - apiGroups: [shipstream.io]
-    resources: [mysqlreplicapairs/status]
+    resources: [mysqlfailovergroups/status]
     verbs: [get, patch, update]
   # Leader election
   - apiGroups: [coordination.k8s.io]

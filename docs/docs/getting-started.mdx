@@ -1,0 +1,156 @@
+---
+sidebar_position: 3
+---
+
+# Getting Started
+
+This guide walks through installing Bloodraven and creating your first `MysqlFailoverGroup`.
+
+## Prerequisites
+
+- Kubernetes 1.27+
+- Helm 3.x
+- Two sets of nodes, each labeled for a different site (see [Placement Contract](./placement-contract.mdx))
+- A Cloudflare zone with an API token that has DNS edit permissions
+- (Optional) cert-manager installed if you want automated TLS
+
+## Install the operator
+
+```bash
+helm install bloodraven charts/bloodraven \
+  -n bloodraven \
+  --create-namespace
+```
+
+This deploys the `bloodraven` operator Deployment, the `MysqlFailoverGroup` CRD, and the necessary RBAC resources.
+
+## Create secrets
+
+### MySQL credentials
+
+Create a Secret containing the MySQL DSN the operator will use to connect to each instance:
+
+```bash
+kubectl create secret generic mysql-credentials \
+  -n default \
+  --from-literal=dsn='root:yourpassword@tcp(localhost:3306)/'
+```
+
+### Cloudflare API token
+
+```bash
+kubectl create secret generic cloudflare-token \
+  -n default \
+  --from-literal=token='your-cloudflare-api-token'
+```
+
+## Label nodes
+
+The operator needs to know which nodes belong to which site. Label at least one node per site:
+
+```bash
+# Site: iad
+kubectl label node node-iad-1 \
+  shipstream.io/failover-group=orders \
+  shipstream.io/site=iad
+
+# Site: pdx
+kubectl label node node-pdx-1 \
+  shipstream.io/failover-group=orders \
+  shipstream.io/site=pdx
+```
+
+See [Placement Contract](./placement-contract.mdx) for full details on node labeling requirements.
+
+## Create a MysqlFailoverGroup
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: default
+spec:
+  image: mysql:9.6
+  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:latest
+
+  sites:
+    - name: iad
+      zone: us-east-1a
+      lbIP: 10.0.1.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
+    - name: pdx
+      zone: us-west-2a
+      lbIP: 10.0.2.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
+
+  secretName: mysql-credentials
+
+  cloudflare:
+    zoneID: abc123
+    apiTokenSecretRef:
+      name: cloudflare-token
+      key: token
+
+  pollInterval: 2s
+  failureThreshold: 3
+  recoveryThreshold: 2
+  failoverCooldown: 60m
+
+  replication:
+    maxLagSeconds: 300
+
+  updateStrategy: OrderedUpdate
+  cloneTimeout: 3600
+```
+
+Apply it:
+
+```bash
+kubectl apply -f orders-fg.yaml
+```
+
+## Verify
+
+Check the status of the failover group:
+
+```bash
+kubectl get mysqlfailovergroups orders -o yaml
+```
+
+You should see `status.activeSite` set to one of your sites and both sites reporting their state:
+
+```yaml
+status:
+  activeSite: iad
+  sites:
+    - name: iad
+      state: writable
+      replicating: false
+    - name: pdx
+      state: read-only
+      replicating: true
+      secondsBehindSource: 0
+  conditions:
+    - type: Ready
+      status: "True"
+    - type: Degraded
+      status: "False"
+```
+
+You can also query the operator's status API:
+
+```bash
+kubectl port-forward -n bloodraven deploy/bloodraven 8082:8082
+curl http://localhost:8082/status
+```
+
+## Next steps
+
+- [App Integration](./app-integration.mdx) -- Connect your applications to the failover group
+- [Failover](./failover.mdx) -- Understand how failover detection and promotion work
+- [Monitoring](./monitoring.mdx) -- Set up Prometheus metrics and alerting

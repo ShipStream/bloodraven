@@ -161,25 +161,25 @@ func TestStatusReturns503WhenMySQLFails(t *testing.T) {
 	}
 }
 
-func TestSafetyNetSetsSuperReadOnlyOnNonPrimaryDC(t *testing.T) {
+func TestSafetyNetSetsSuperReadOnlyOnNonActiveSite(t *testing.T) {
 	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
 	srv := NewServer(mock, ":0", testLogger())
 
-	srv.RunSafetyNet(context.Background(), "dc2", "dc1")
+	srv.RunSafetyNet(context.Background(), "site2", "site1")
 
 	if !mock.setReadOnlyCalled {
-		t.Error("safety net should set super_read_only on non-primary DC with read_only=OFF")
+		t.Error("safety net should set super_read_only on non-active site with read_only=OFF")
 	}
 }
 
-func TestSafetyNetSkipsPrimaryDC(t *testing.T) {
+func TestSafetyNetSkipsActiveSite(t *testing.T) {
 	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
 	srv := NewServer(mock, ":0", testLogger())
 
-	srv.RunSafetyNet(context.Background(), "dc1", "dc1")
+	srv.RunSafetyNet(context.Background(), "site1", "site1")
 
 	if mock.setReadOnlyCalled {
-		t.Error("safety net should not set super_read_only on primary DC")
+		t.Error("safety net should not set super_read_only on active site")
 	}
 }
 
@@ -187,7 +187,7 @@ func TestSafetyNetSkipsWhenAlreadyReadOnly(t *testing.T) {
 	mock := &mockMysqlQuerier{connectable: true, readOnly: true}
 	srv := NewServer(mock, ":0", testLogger())
 
-	srv.RunSafetyNet(context.Background(), "dc2", "dc1")
+	srv.RunSafetyNet(context.Background(), "site2", "site1")
 
 	if mock.setReadOnlyCalled {
 		t.Error("safety net should not set super_read_only when already read-only")

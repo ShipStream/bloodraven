@@ -94,15 +94,15 @@ func (s *Server) handlePeerPing(w http.ResponseWriter, _ *http.Request) {
 }
 
 // RunSafetyNet checks MySQL state on startup and sets super_read_only=ON
-// if this sidecar is not in the primary DC but MySQL has read_only=OFF.
-func (s *Server) RunSafetyNet(ctx context.Context, myDC, primaryDC string) {
-	if myDC == "" || primaryDC == "" {
-		s.logger.Info("safety net skipped: MY_DC or PRIMARY_DC not set")
+// if this sidecar is not in the active site but MySQL has read_only=OFF.
+func (s *Server) RunSafetyNet(ctx context.Context, mySite, activeSite string) {
+	if mySite == "" || activeSite == "" {
+		s.logger.Info("safety net skipped: MY_SITE or ACTIVE_SITE not set")
 		return
 	}
 
-	if myDC == primaryDC {
-		s.logger.Info("safety net: this is the primary DC, no action needed", "dc", myDC)
+	if mySite == activeSite {
+		s.logger.Info("safety net: this is the active site, no action needed", "site", mySite)
 		return
 	}
 
@@ -113,8 +113,8 @@ func (s *Server) RunSafetyNet(ctx context.Context, myDC, primaryDC string) {
 	}
 
 	if !readOnly {
-		s.logger.Warn("SAFETY NET: non-primary DC has read_only=OFF, setting super_read_only=ON",
-			"my_dc", myDC, "primary_dc", primaryDC)
+		s.logger.Warn("SAFETY NET: standby site has read_only=OFF, setting super_read_only=ON",
+			"my_site", mySite, "active_site", activeSite)
 		if err := s.mysql.SetSuperReadOnly(ctx); err != nil {
 			s.logger.Error("safety net: failed to set super_read_only", "error", err)
 		} else {

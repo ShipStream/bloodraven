@@ -1,0 +1,178 @@
+---
+sidebar_position: 8
+---
+
+# Monitoring
+
+Bloodraven exposes Prometheus metrics, a REST status API, and a WebSocket endpoint for real-time status streaming.
+
+## Prometheus metrics
+
+Metrics are served on `:8080/metrics` in standard Prometheus exposition format.
+
+### Available metrics
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `bloodraven_poll_latency_seconds` | Histogram | `site` | Duration of each MySQL poll |
+| `bloodraven_state_transitions_total` | Counter | `site`, `from`, `to` | Count of state transitions per site |
+| `bloodraven_taint_operations_total` | Counter | `site`, `action` | Count of node taint/untaint operations |
+| `bloodraven_dns_flips_total` | Counter | `site` | Count of Cloudflare DNS record updates |
+| `bloodraven_websocket_clients` | Gauge | -- | Number of currently connected WebSocket clients |
+
+### Scrape configuration
+
+Add a scrape job for the operator:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: bloodraven
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [bloodraven]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        regex: bloodraven
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_container_port_number]
+        regex: "8080"
+        action: keep
+```
+
+Or if using the Prometheus Operator, create a `PodMonitor`:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: bloodraven
+  namespace: bloodraven
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bloodraven
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 15s
+```
+
+### Alerting rules
+
+Recommended alerts:
+
+```yaml
+groups:
+  - name: bloodraven
+    rules:
+      # Failover group has no healthy primary
+      - alert: BloodravenNoPrimary
+        expr: |
+          count by (failover_group) (
+            bloodraven_state_transitions_total{to="writable"}
+          ) == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Failover group {{ $labels.failover_group }} has no writable primary"
+
+      # High poll latency may indicate network issues
+      - alert: BloodravenHighPollLatency
+        expr: |
+          histogram_quantile(0.99, rate(bloodraven_poll_latency_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Poll latency to {{ $labels.site }} exceeds 1 second (p99)"
+
+      # Failover occurred
+      - alert: BloodravenFailoverOccurred
+        expr: increase(bloodraven_dns_flips_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Failover occurred: DNS flipped to {{ $labels.site }}"
+```
+
+## Status API
+
+The operator serves a JSON status API on `:8082`.
+
+### `GET /status`
+
+Returns the current state of all failover groups:
+
+```bash
+curl http://localhost:8082/status
+```
+
+```json
+{
+  "failoverGroups": [
+    {
+      "name": "orders",
+      "namespace": "default",
+      "activeSite": "iad",
+      "sites": [
+        {
+          "name": "iad",
+          "state": "writable",
+          "replicating": false,
+          "lastSeen": "2025-01-01T00:00:00Z"
+        },
+        {
+          "name": "pdx",
+          "state": "read-only",
+          "replicating": true,
+          "secondsBehindSource": 0,
+          "lastSeen": "2025-01-01T00:00:00Z"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### `GET /ws/status`
+
+WebSocket endpoint that streams state changes in real time. Each message is a JSON object with the same structure as the `/status` response, sent whenever the state changes.
+
+```javascript
+const ws = new WebSocket("ws://localhost:8082/ws/status");
+ws.onmessage = (event) => {
+  const status = JSON.parse(event.data);
+  console.log("Active site:", status.failoverGroups[0].activeSite);
+};
+```
+
+## Troubleshooting
+
+### Common conditions
+
+| Symptom | Likely cause | Investigation |
+|---|---|---|
+| `Ready=False`, `Degraded=True` | A site is unreachable or replication is broken | Check `status.sites[].state` and MySQL pod logs |
+| `Ready=False`, both sites `read-only` | No primary exists (may follow a failed failover) | See [Operations: Manual promotion](./operations.mdx#manual-promotion) |
+| `Ready=False`, both sites `writable` | Split brain | See [Operations: Split brain recovery](./operations.mdx#split-brain-recovery) |
+| Repeated failovers | Flapping network or unstable MySQL | Check `bloodraven_state_transitions_total` and consider increasing `failureThreshold` or `failoverCooldown` |
+| High replication lag | Slow network, heavy write load, or undersized replica | Check `status.sites[].secondsBehindSource` and MySQL performance metrics |
+
+### Operator logs
+
+The operator logs structured JSON. Key fields to filter on:
+
+```bash
+kubectl logs -n bloodraven deploy/bloodraven | jq 'select(.msg == "failover")'
+kubectl logs -n bloodraven deploy/bloodraven | jq 'select(.level == "ERROR")'
+```
+
+### Sidecar logs
+
+Check the sidecar container for self-fencing events:
+
+```bash
+kubectl logs mysql-orders-iad-0 -c sidecar | jq 'select(.msg | contains("self-fence"))'
+```

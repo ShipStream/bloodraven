@@ -29,7 +29,7 @@ func NewBootstrapController(logger *slog.Logger) *BootstrapController {
 //     CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1
 //  5. START REPLICA
 func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts BootstrapOpts) error {
-	b.logger.Info("starting bootstrap", "replica", opts.ReplicaDC, "primary", opts.PrimaryHost)
+	b.logger.Info("starting bootstrap", "replica", opts.ReplicaSite, "primary", opts.PrimaryHost)
 
 	// Step 1: Verify primary is writable
 	readOnly, err := opts.Primary.CheckReadOnly(ctx)
@@ -64,7 +64,7 @@ func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts Bootstr
 	// - Reconnecting the mysql.Checker
 	// - Calling SetupReplication() after reconnection
 
-	b.logger.Info("clone completed successfully", "replica", opts.ReplicaDC)
+	b.logger.Info("clone completed successfully", "replica", opts.ReplicaSite)
 	return nil
 }
 
@@ -101,7 +101,7 @@ type BootstrapOpts struct {
 	Primary      mysql.Checker
 	Replica      mysql.Checker
 	PrimaryHost  string        // hostname of the primary MySQL
-	ReplicaDC    string        // name of the replica DC (for logging)
+	ReplicaSite  string        // name of the replica site (for logging)
 	ReplUser     string        // replication user
 	ReplPassword string        // replication password
 	UseSSL       bool

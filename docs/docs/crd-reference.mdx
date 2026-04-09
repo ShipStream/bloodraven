@@ -1,0 +1,182 @@
+---
+sidebar_position: 4
+---
+
+# CRD Reference
+
+Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/v1alpha1`).
+
+## Spec
+
+### Top-level fields
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `image` | string | Yes | -- | MySQL container image (e.g. `mysql:9.6`) |
+| `sidecarImage` | string | Yes | -- | Bloodraven sidecar container image |
+| `sites` | []SiteSpec | Yes | -- | Exactly two site definitions |
+| `secretName` | string | Yes | -- | Name of the Secret containing MySQL credentials (key: `dsn`) |
+| `az` | string | No | -- | Availability zone identifier for DNS record naming |
+| `cloudflare` | CloudflareSpec | No | -- | Cloudflare DNS configuration for traffic steering |
+| `tls` | TLSSpec | No | -- | TLS configuration (cert-manager integration) |
+| `pollInterval` | duration | No | `2s` | How often the operator polls each MySQL instance |
+| `failureThreshold` | int | No | `3` | Consecutive failed polls before a site is marked unreachable |
+| `recoveryThreshold` | int | No | `2` | Consecutive successful polls before a site is marked writable |
+| `failoverCooldown` | duration | No | `60m` | Minimum time between automatic failovers |
+| `replication` | ReplicationSpec | No | -- | Replication health settings |
+| `updateStrategy` | string | No | -- | Update strategy. Set to `OrderedUpdate` for zero-downtime rollouts. |
+| `cloneTimeout` | int | No | `3600` | Timeout in seconds for initial data clone operations |
+
+### SiteSpec
+
+Each entry in `spec.sites` defines one site in the failover group.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | Yes | Unique site identifier (e.g. `iad`, `pdx`). Used in Service names and labels. |
+| `zone` | string | Yes | Availability zone or region for pod scheduling |
+| `lbIP` | string | Yes | Load balancer IP address. Used for DNS A-record steering on failover. |
+| `storage` | StorageSpec | Yes | Persistent storage configuration for this site |
+
+### StorageSpec
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `storageClassName` | string | Yes | Kubernetes StorageClass name |
+| `size` | string | Yes | Storage request size (e.g. `100Gi`) |
+
+### CloudflareSpec
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `zoneID` | string | Yes | Cloudflare zone ID |
+| `apiTokenSecretRef` | SecretKeyRef | Yes | Reference to the Secret containing the Cloudflare API token |
+
+### SecretKeyRef
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | Yes | Secret name |
+| `key` | string | Yes | Key within the Secret |
+
+### TLSSpec
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `issuerRef` | IssuerRef | Yes | cert-manager issuer reference |
+| `secretName` | string | Yes | Name of the TLS Secret to create |
+
+### IssuerRef
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | Yes | Issuer or ClusterIssuer name |
+| `kind` | string | Yes | `Issuer` or `ClusterIssuer` |
+
+### ReplicationSpec
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `maxLagSeconds` | int | No | Maximum acceptable replication lag in seconds before the replica is considered unhealthy |
+
+## Full example
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+spec:
+  image: mysql:9.6
+  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:latest
+  sites:
+    - name: iad
+      zone: us-east-1a
+      lbIP: 10.0.1.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
+    - name: pdx
+      zone: us-west-2a
+      lbIP: 10.0.2.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
+  secretName: mysql-credentials
+  az: orders
+  cloudflare:
+    zoneID: abc123
+    apiTokenSecretRef:
+      name: cloudflare-token
+      key: token
+  tls:
+    issuerRef:
+      name: letsencrypt
+      kind: ClusterIssuer
+    secretName: mysql-tls
+  pollInterval: 2s
+  failureThreshold: 3
+  recoveryThreshold: 2
+  failoverCooldown: 60m
+  replication:
+    maxLagSeconds: 300
+  updateStrategy: OrderedUpdate
+  cloneTimeout: 3600
+```
+
+## Status
+
+The operator writes the following status fields.
+
+### Top-level status
+
+| Field | Type | Description |
+|---|---|---|
+| `activeSite` | string | Name of the site currently serving as primary |
+| `sites` | []SiteStatus | Per-site status |
+| `conditions` | []Condition | Standard Kubernetes conditions |
+| `lastFailover` | timestamp | When the last failover occurred |
+| `lastFailoverTarget` | string | Which site was promoted in the last failover |
+
+### SiteStatus
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Site identifier |
+| `state` | string | Current state: `writable`, `read-only`, `unreachable`, or `unknown` |
+| `lastSeen` | timestamp | Last time the operator successfully polled this site |
+| `replicating` | bool | Whether this site is replicating from another site |
+| `secondsBehindSource` | int | Replication lag in seconds (only set when replicating) |
+| `gtidExecuted` | string | GTID set executed on this site |
+
+### Conditions
+
+| Type | Meaning |
+|---|---|
+| `Ready` | `True` when the failover group has one writable primary and all replicas are healthy |
+| `Degraded` | `True` when replication is broken, lag exceeds `maxLagSeconds`, or a site is unreachable |
+
+### Example status
+
+```yaml
+status:
+  activeSite: iad
+  sites:
+    - name: iad
+      state: writable
+      lastSeen: "2025-01-01T00:00:00Z"
+      replicating: false
+    - name: pdx
+      state: read-only
+      lastSeen: "2025-01-01T00:00:00Z"
+      replicating: true
+      secondsBehindSource: 0
+      gtidExecuted: "uuid:1-100"
+  conditions:
+    - type: Ready
+      status: "True"
+    - type: Degraded
+      status: "False"
+  lastFailover: "2025-01-01T00:00:00Z"
+  lastFailoverTarget: iad
+```

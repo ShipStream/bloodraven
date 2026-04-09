@@ -19,9 +19,11 @@ const (
 	TaintValue = "true"
 )
 
-// NodeTainter manages node taints for DC failover.
+// NodeTainter manages node taints for failover group site failover.
+// The selector parameter is a Kubernetes label selector string, e.g.
+// "shipstream.io/failover-group=orders,shipstream.io/site=iad".
 type NodeTainter interface {
-	SetTaint(ctx context.Context, zone string, taint bool) error
+	SetTaint(ctx context.Context, selector string, taint bool) error
 }
 
 type nodeTainter struct {
@@ -33,12 +35,12 @@ func NewNodeTainter(client kubernetes.Interface, logger *slog.Logger) NodeTainte
 	return &nodeTainter{client: client, logger: logger}
 }
 
-func (t *nodeTainter) SetTaint(ctx context.Context, zone string, taint bool) error {
+func (t *nodeTainter) SetTaint(ctx context.Context, selector string, taint bool) error {
 	nodes, err := t.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("topology.kubernetes.io/zone=%s", zone),
+		LabelSelector: selector,
 	})
 	if err != nil {
-		return fmt.Errorf("list nodes for zone %s: %w", zone, err)
+		return fmt.Errorf("list nodes for selector %s: %w", selector, err)
 	}
 
 	var errs []error

@@ -17,7 +17,7 @@ type Config struct {
 	// ListenAddr is the HTTP listen address (default ":8080").
 	ListenAddr string
 
-	// PeerAddress is the address of the peer sidecar (e.g. "mysql-lion-dc2.shared-lion.svc.cluster.local:8080").
+	// PeerAddress is the address of the peer sidecar (e.g. "mysql-lion-pdx.shared-lion.svc.cluster.local:8080").
 	PeerAddress string
 
 	// BloodravenAddress is the address of Bloodraven's health endpoint.
@@ -29,11 +29,11 @@ type Config struct {
 	// PeerCheckInterval is how often the fencing monitor checks Bloodraven and peer.
 	PeerCheckInterval time.Duration
 
-	// MyDC is the datacenter this sidecar belongs to.
-	MyDC string
+	// MySite is the site this sidecar belongs to.
+	MySite string
 
-	// PrimaryDC is the datacenter that should currently be primary.
-	PrimaryDC string
+	// ActiveSite is the site that should currently be active (writable).
+	ActiveSite string
 }
 
 // ConfigFromEnv reads sidecar configuration from environment variables.
@@ -74,8 +74,8 @@ func ConfigFromEnv() (*Config, error) {
 		peerCheckInterval = d
 	}
 
-	myDC := os.Getenv("MY_DC")
-	primaryDC := os.Getenv("PRIMARY_DC")
+	mySite := os.Getenv("MY_SITE")
+	activeSite := os.Getenv("ACTIVE_SITE")
 
 	return &Config{
 		MysqlDSN:          dsn,
@@ -85,7 +85,7 @@ func ConfigFromEnv() (*Config, error) {
 		BloodravenAddress: bloodravenAddress,
 		LeaseTimeout:      leaseTimeout,
 		PeerCheckInterval: peerCheckInterval,
-		MyDC:              myDC,
-		PrimaryDC:         primaryDC,
+		MySite:            mySite,
+		ActiveSite:        activeSite,
 	}, nil
 }

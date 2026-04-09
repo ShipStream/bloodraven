@@ -2,9 +2,9 @@ package state
 
 import "testing"
 
-func TestDCStateString(t *testing.T) {
+func TestSiteStateString(t *testing.T) {
 	tests := []struct {
-		state DCState
+		state SiteState
 		want  string
 	}{
 		{StateWritable, "writable"},
@@ -14,7 +14,7 @@ func TestDCStateString(t *testing.T) {
 	}
 	for _, tt := range tests {
 		if got := tt.state.String(); got != tt.want {
-			t.Errorf("DCState(%d).String() = %q, want %q", tt.state, got, tt.want)
+			t.Errorf("SiteState(%d).String() = %q, want %q", tt.state, got, tt.want)
 		}
 	}
 }
@@ -31,10 +31,10 @@ func TestShouldTaint(t *testing.T) {
 	}
 }
 
-func TestEvalPerDCTransition(t *testing.T) {
+func TestEvalPerSiteTransition(t *testing.T) {
 	tests := []struct {
 		name      string
-		prev, cur DCState
+		prev, cur SiteState
 		wantTaint *bool
 		wantBC    string
 	}{
@@ -53,7 +53,7 @@ func TestEvalPerDCTransition(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a := EvalPerDCTransition(tt.prev, tt.cur)
+			a := EvalPerSiteTransition(tt.prev, tt.cur)
 			if !boolPtrEq(a.Taint, tt.wantTaint) {
 				t.Errorf("taint: got %v, want %v", fmtBoolPtr(a.Taint), fmtBoolPtr(tt.wantTaint))
 			}

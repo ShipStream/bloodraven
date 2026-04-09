@@ -157,24 +157,24 @@ func (m *mockMySQL) isReadOnly() bool {
 
 type mockTainter struct {
 	mu     sync.Mutex
-	taints map[string]bool // zone -> tainted
+	taints map[string]bool // selector -> tainted
 }
 
 func newMockTainter() *mockTainter {
 	return &mockTainter{taints: make(map[string]bool)}
 }
 
-func (m *mockTainter) SetTaint(_ context.Context, zone string, taint bool) error {
+func (m *mockTainter) SetTaint(_ context.Context, selector string, taint bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.taints[zone] = taint
+	m.taints[selector] = taint
 	return nil
 }
 
-func (m *mockTainter) isTainted(zone string) bool {
+func (m *mockTainter) isTainted(selector string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.taints[zone]
+	return m.taints[selector]
 }
 
 // ---------------------------------------------------------------------------
@@ -242,16 +242,11 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
-		AZ: "lion",
-		DC1: controller.DCTopologyConfig{
-			Name: "dc1",
-			Zone: "lion-dc1",
-			LBIP: "1.1.1.1",
-		},
-		DC2: controller.DCTopologyConfig{
-			Name: "dc2",
-			Zone: "lion-dc2",
-			LBIP: "2.2.2.2",
+		Name: "lion",
+		AZ:   "lion",
+		Sites: [2]controller.SiteTopologyConfig{
+			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
+			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
 		},
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
@@ -287,16 +282,11 @@ func newTestHarnessWithCooldown(t *testing.T, cooldown time.Duration) *testHarne
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
-		AZ: "lion",
-		DC1: controller.DCTopologyConfig{
-			Name: "dc1",
-			Zone: "lion-dc1",
-			LBIP: "1.1.1.1",
-		},
-		DC2: controller.DCTopologyConfig{
-			Name: "dc2",
-			Zone: "lion-dc2",
-			LBIP: "2.2.2.2",
+		Name: "lion",
+		AZ:   "lion",
+		Sites: [2]controller.SiteTopologyConfig{
+			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
+			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
 		},
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,

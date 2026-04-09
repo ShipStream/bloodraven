@@ -1,16 +1,16 @@
 package state
 
-// DCState represents the observed state of a single DC's MySQL instance.
-type DCState int
+// SiteState represents the observed state of a single site's MySQL instance.
+type SiteState int
 
 const (
-	StateUnknown     DCState = iota
-	StateWritable            // read_only=0
-	StateReadOnly            // read_only=1
-	StateUnreachable         // connection failed
+	StateUnknown     SiteState = iota
+	StateWritable              // read_only=0
+	StateReadOnly              // read_only=1
+	StateUnreachable           // connection failed
 )
 
-func (s DCState) String() string {
+func (s SiteState) String() string {
 	switch s {
 	case StateWritable:
 		return "writable"
@@ -23,19 +23,19 @@ func (s DCState) String() string {
 	}
 }
 
-// Action describes what the watcher should do for a given DC on a state transition.
+// Action describes what the watcher should do for a given site on a state transition.
 type Action struct {
 	Taint     *bool  // nil=no change, true=apply, false=remove
 	Broadcast string // "" = no broadcast, "online" or "offline"
 }
 
-// ShouldTaint returns true if the DC's MySQL is not writable (readonly or unreachable).
-func ShouldTaint(state DCState) bool {
+// ShouldTaint returns true if the site's MySQL is not writable (readonly or unreachable).
+func ShouldTaint(state SiteState) bool {
 	return state != StateWritable
 }
 
-// EvalPerDCTransition returns the action for a single DC's state transition.
-func EvalPerDCTransition(prev, curr DCState) Action {
+// EvalPerSiteTransition returns the action for a single site's state transition.
+func EvalPerSiteTransition(prev, curr SiteState) Action {
 	if prev == curr {
 		return Action{}
 	}

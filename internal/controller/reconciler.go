@@ -32,13 +32,14 @@ const (
 
 	defaultMySQLImage = "mysql:9.6"
 
-	labelAppName   = "app.kubernetes.io/name"
-	labelInstance  = "app.kubernetes.io/instance"
-	labelDC        = "shipstream.io/dc"
-	labelRole      = "shipstream.io/role"
-	labelHealthy   = "shipstream.io/healthy"
-	labelManagedBy = "app.kubernetes.io/managed-by"
-	managerName    = "bloodraven"
+	labelAppName       = "app.kubernetes.io/name"
+	labelInstance      = "app.kubernetes.io/instance"
+	labelFailoverGroup = "shipstream.io/failover-group"
+	labelSite          = "shipstream.io/site"
+	labelRole          = "shipstream.io/role"
+	labelHealthy       = "shipstream.io/healthy"
+	labelManagedBy     = "app.kubernetes.io/managed-by"
+	managerName        = "bloodraven"
 
 	specHashAnnotation = "shipstream.io/spec-hash"
 
@@ -46,8 +47,8 @@ const (
 	sidecarPort = 8080
 )
 
-// MysqlReplicaPairReconciler reconciles a MysqlReplicaPair object.
-type MysqlReplicaPairReconciler struct {
+// MysqlFailoverGroupReconciler reconciles a MysqlFailoverGroup object.
+type MysqlFailoverGroupReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
@@ -55,9 +56,9 @@ type MysqlReplicaPairReconciler struct {
 	Tainter  platform.NodeTainter // optional, for taint cleanup during deletion
 }
 
-// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlreplicapairs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlreplicapairs/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlreplicapairs/finalizers,verbs=update
+// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps;services;persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
@@ -65,11 +66,11 @@ type MysqlReplicaPairReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-func (r *MysqlReplicaPairReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var pair v1alpha1.MysqlReplicaPair
-	if err := r.Get(ctx, req.NamespacedName, &pair); err != nil {
+	var fg v1alpha1.MysqlFailoverGroup
+	if err := r.Get(ctx, req.NamespacedName, &fg); err != nil {
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
@@ -77,20 +78,20 @@ func (r *MysqlReplicaPairReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// Handle deletion with finalizer
-	if !pair.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(&pair, finalizerName) {
-			logger.Info("CR being deleted, running finalizer cleanup", "name", pair.Name)
+	if !fg.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&fg, finalizerName) {
+			logger.Info("CR being deleted, running finalizer cleanup", "name", fg.Name)
 
 			// Stop the topology manager for this CR.
 			if r.Runner != nil {
 				r.Runner.StopManager(req.NamespacedName)
 			}
 
-			if err := r.handleDeletion(ctx, &pair); err != nil {
+			if err := r.handleDeletion(ctx, &fg); err != nil {
 				return ctrl.Result{}, fmt.Errorf("handle deletion: %w", err)
 			}
-			controllerutil.RemoveFinalizer(&pair, finalizerName)
-			if err := r.Update(ctx, &pair); err != nil {
+			controllerutil.RemoveFinalizer(&fg, finalizerName)
+			if err := r.Update(ctx, &fg); err != nil {
 				return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 			}
 		}
@@ -98,16 +99,16 @@ func (r *MysqlReplicaPairReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// Ensure finalizer is present.
-	if !controllerutil.ContainsFinalizer(&pair, finalizerName) {
-		controllerutil.AddFinalizer(&pair, finalizerName)
-		if err := r.Update(ctx, &pair); err != nil {
+	if !controllerutil.ContainsFinalizer(&fg, finalizerName) {
+		controllerutil.AddFinalizer(&fg, finalizerName)
+		if err := r.Update(ctx, &fg); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
 	}
 
-	logger.Info("reconciling MysqlReplicaPair", "name", pair.Name)
+	logger.Info("reconciling MysqlFailoverGroup", "name", fg.Name)
 
-	image := pair.Spec.Image
+	image := fg.Spec.Image
 	if image == "" {
 		image = defaultMySQLImage
 	}
@@ -115,73 +116,69 @@ func (r *MysqlReplicaPairReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Validate that sidecarImage is explicitly set. Falling back to the MySQL
 	// image is almost always wrong in production since the sidecar binary is
 	// a separate build target (bloodraven-sidecar).
-	if pair.Spec.SidecarImage == "" {
-		r.Recorder.Eventf(&pair, corev1.EventTypeWarning, "MissingSidecarImage",
+	if fg.Spec.SidecarImage == "" {
+		r.Recorder.Eventf(&fg, corev1.EventTypeWarning, "MissingSidecarImage",
 			"spec.sidecarImage is not set; falling back to %q which is likely incorrect", image)
 		logger.Info("WARNING: sidecarImage not set, falling back to MySQL image", "image", image)
 	}
 
 	// Validate that the referenced secret contains the expected 'dsn' key.
 	var secret corev1.Secret
-	secretKey := types.NamespacedName{Namespace: pair.Namespace, Name: pair.Spec.SecretName}
+	secretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.SecretName}
 	if err := r.Get(ctx, secretKey, &secret); err != nil {
 		if !errors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("get secret %s: %w", pair.Spec.SecretName, err)
+			return ctrl.Result{}, fmt.Errorf("get secret %s: %w", fg.Spec.SecretName, err)
 		}
-		r.Recorder.Eventf(&pair, corev1.EventTypeWarning, "SecretNotFound",
-			"secret %q not found", pair.Spec.SecretName)
+		r.Recorder.Eventf(&fg, corev1.EventTypeWarning, "SecretNotFound",
+			"secret %q not found", fg.Spec.SecretName)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if _, ok := secret.Data["dsn"]; !ok {
-		r.Recorder.Eventf(&pair, corev1.EventTypeWarning, "SecretMissingKey",
-			"secret %q does not contain required key 'dsn'", pair.Spec.SecretName)
+		r.Recorder.Eventf(&fg, corev1.EventTypeWarning, "SecretMissingKey",
+			"secret %q does not contain required key 'dsn'", fg.Spec.SecretName)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Reconcile ConfigMap
-	if err := r.reconcileConfigMap(ctx, &pair); err != nil {
+	if err := r.reconcileConfigMap(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile configmap: %w", err)
 	}
 
-	// Reconcile per-DC resources
-	for _, dc := range []struct {
-		spec     v1alpha1.DCInstanceSpec
-		serverID int32
-		peerSpec v1alpha1.DCInstanceSpec
-	}{
-		{pair.Spec.DC1, 101, pair.Spec.DC2},
-		{pair.Spec.DC2, 102, pair.Spec.DC1},
-	} {
-		if err := r.reconcilePVC(ctx, &pair, dc.spec); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcile pvc %s: %w", dc.spec.Name, err)
+	// Reconcile per-site resources
+	for i, site := range fg.Spec.Sites {
+		serverID := int32(101 + i)
+		peerSite := fg.Spec.Sites[1-i]
+
+		if err := r.reconcilePVC(ctx, &fg, site); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcile pvc %s: %w", site.Name, err)
 		}
-		if err := r.reconcileDeployment(ctx, &pair, dc.spec, dc.peerSpec, dc.serverID, image); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", dc.spec.Name, err)
+		if err := r.reconcileDeployment(ctx, &fg, site, peerSite, serverID, image); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", site.Name, err)
 		}
-		if err := r.reconcileDCService(ctx, &pair, dc.spec); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcile dc service %s: %w", dc.spec.Name, err)
+		if err := r.reconcileSiteService(ctx, &fg, site); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcile site service %s: %w", site.Name, err)
 		}
 	}
 
 	// Reconcile shared services
-	if err := r.reconcilePrimaryService(ctx, &pair); err != nil {
+	if err := r.reconcilePrimaryService(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile primary service: %w", err)
 	}
-	if err := r.reconcileReplicasService(ctx, &pair); err != nil {
+	if err := r.reconcileReplicasService(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile replicas service: %w", err)
 	}
 
 	// Sync pod labels based on status
-	if err := r.syncPodLabels(ctx, &pair); err != nil {
+	if err := r.syncPodLabels(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
 	}
 
 	return ctrl.Result{}, nil
 }
 
-func (r *MysqlReplicaPairReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.MysqlReplicaPair{}).
+		For(&v1alpha1.MysqlFailoverGroup{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
@@ -189,18 +186,19 @@ func (r *MysqlReplicaPairReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *MysqlReplicaPairReconciler) handleDeletion(ctx context.Context, pair *v1alpha1.MysqlReplicaPair) error {
+func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	logger := log.FromContext(ctx)
-	logger.Info("starting graceful shutdown", "pair", pair.Name)
+	logger.Info("starting graceful shutdown", "fg", fg.Name)
 
 	// Record event
-	r.Recorder.Event(pair, corev1.EventTypeNormal, "GracefulShutdown", "Starting graceful shutdown sequence")
+	r.Recorder.Event(fg, corev1.EventTypeNormal, "GracefulShutdown", "Starting graceful shutdown sequence")
 
-	// Remove taints for both DC zones
+	// Remove taints for both site selectors
 	if r.Tainter != nil {
-		for _, zone := range []string{pair.Spec.DC1.Zone, pair.Spec.DC2.Zone} {
-			if err := r.Tainter.SetTaint(ctx, zone, false); err != nil {
-				logger.Error(err, "failed to remove taint during shutdown", "zone", zone)
+		for _, site := range fg.Spec.Sites {
+			selector := fmt.Sprintf("shipstream.io/failover-group=%s,shipstream.io/site=%s", fg.Name, site.Name)
+			if err := r.Tainter.SetTaint(ctx, selector, false); err != nil {
+				logger.Error(err, "failed to remove taint during shutdown", "site", site.Name)
 				// Continue cleanup despite taint removal failure
 			}
 		}
@@ -208,57 +206,59 @@ func (r *MysqlReplicaPairReconciler) handleDeletion(ctx context.Context, pair *v
 
 	// Log DNS cleanup warning (full cleanup would require knowing the current DNS state)
 	logger.Info("CR deleted — DNS records may need manual cleanup",
-		"az", pair.Spec.AZ,
-		"dc1IP", pair.Spec.DC1.LBIP,
-		"dc2IP", pair.Spec.DC2.LBIP)
-	r.Recorder.Event(pair, corev1.EventTypeWarning, "DNSCleanup",
+		"az", fg.Spec.AZ,
+		"site0IP", fg.Spec.Sites[0].LBIP,
+		"site1IP", fg.Spec.Sites[1].LBIP)
+	r.Recorder.Event(fg, corev1.EventTypeWarning, "DNSCleanup",
 		"DNS records may need manual cleanup after CR deletion")
 
-	r.Recorder.Event(pair, corev1.EventTypeNormal, "GracefulShutdown", "Graceful shutdown complete, removing finalizer")
+	r.Recorder.Event(fg, corev1.EventTypeNormal, "GracefulShutdown", "Graceful shutdown complete, removing finalizer")
 	return nil
 }
 
-// resourceName returns a deterministic name for a per-DC resource.
-func resourceName(pairName, dcName string) string {
-	return fmt.Sprintf("mysql-%s-%s", pairName, dcName)
+// resourceName returns a deterministic name for a per-site resource.
+func resourceName(fgName, siteName string) string {
+	return fmt.Sprintf("mysql-%s-%s", fgName, siteName)
 }
 
-// commonLabels returns the labels applied to all resources for a pair/dc.
-func commonLabels(pairName, dcName string) map[string]string {
+// commonLabels returns the labels applied to all resources for a failover group/site.
+func commonLabels(fgName, siteName string) map[string]string {
 	return map[string]string{
-		labelAppName:   "mysql",
-		labelInstance:  pairName,
-		labelDC:        dcName,
-		labelManagedBy: managerName,
+		labelAppName:       "mysql",
+		labelInstance:      fgName,
+		labelFailoverGroup: fgName,
+		labelSite:          siteName,
+		labelManagedBy:     managerName,
 	}
 }
 
-func (r *MysqlReplicaPairReconciler) reconcileConfigMap(ctx context.Context, pair *v1alpha1.MysqlReplicaPair) error {
+func (r *MysqlFailoverGroupReconciler) reconcileConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("mysql-%s-config", pair.Name),
-			Namespace: pair.Namespace,
+			Name:      fmt.Sprintf("mysql-%s-config", fg.Name),
+			Namespace: fg.Namespace,
 		},
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
-		if err := controllerutil.SetControllerReference(pair, cm, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(fg, cm, r.Scheme); err != nil {
 			return err
 		}
 		cm.Labels = map[string]string{
-			labelAppName:   "mysql",
-			labelInstance:  pair.Name,
-			labelManagedBy: managerName,
+			labelAppName:       "mysql",
+			labelInstance:      fg.Name,
+			labelFailoverGroup: fg.Name,
+			labelManagedBy:     managerName,
 		}
 		cm.Data = map[string]string{
-			"my.cnf": generateMyCnf(pair),
+			"my.cnf": generateMyCnf(fg),
 		}
 		return nil
 	})
 	return err
 }
 
-func generateMyCnf(pair *v1alpha1.MysqlReplicaPair) string {
+func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
 	// Base config
 	settings := map[string]string{
 		"gtid-mode":                      "ON",
@@ -286,13 +286,13 @@ func generateMyCnf(pair *v1alpha1.MysqlReplicaPair) string {
 
 	// Apply clone_ddl_timeout from spec (default 3600s)
 	cloneTimeout := 3600
-	if pair.Spec.CloneTimeout > 0 {
-		cloneTimeout = pair.Spec.CloneTimeout
+	if fg.Spec.CloneTimeout > 0 {
+		cloneTimeout = fg.Spec.CloneTimeout
 	}
 	settings["clone_ddl_timeout"] = fmt.Sprintf("%d", cloneTimeout)
 
 	// Apply TLS settings if configured
-	if pair.Spec.TLS != nil {
+	if fg.Spec.TLS != nil {
 		settings["ssl-ca"] = "/etc/mysql/tls/ca.crt"
 		settings["ssl-cert"] = "/etc/mysql/tls/tls.crt"
 		settings["ssl-key"] = "/etc/mysql/tls/tls.key"
@@ -300,7 +300,7 @@ func generateMyCnf(pair *v1alpha1.MysqlReplicaPair) string {
 	}
 
 	// Apply user overrides
-	for k, v := range pair.Spec.MysqlConf {
+	for k, v := range fg.Spec.MysqlConf {
 		settings[k] = v
 	}
 
@@ -325,28 +325,28 @@ func generateMyCnf(pair *v1alpha1.MysqlReplicaPair) string {
 	return b.String()
 }
 
-func (r *MysqlReplicaPairReconciler) reconcilePVC(ctx context.Context, pair *v1alpha1.MysqlReplicaPair, dc v1alpha1.DCInstanceSpec) error {
+func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      resourceName(pair.Name, dc.Name) + "-data",
-			Namespace: pair.Namespace,
+			Name:      resourceName(fg.Name, site.Name) + "-data",
+			Namespace: fg.Namespace,
 		},
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pvc, func() error {
-		if err := controllerutil.SetControllerReference(pair, pvc, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(fg, pvc, r.Scheme); err != nil {
 			return err
 		}
-		pvc.Labels = commonLabels(pair.Name, dc.Name)
+		pvc.Labels = commonLabels(fg.Name, site.Name)
 
 		// Only set spec fields on creation (PVC spec is largely immutable)
 		if pvc.CreationTimestamp.IsZero() {
 			pvc.Spec = corev1.PersistentVolumeClaimSpec{
 				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				StorageClassName: &dc.Storage.StorageClassName,
+				StorageClassName: &site.Storage.StorageClassName,
 				Resources: corev1.VolumeResourceRequirements{
 					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: dc.Storage.Size,
+						corev1.ResourceStorage: site.Storage.Size,
 					},
 				},
 			}
@@ -356,22 +356,22 @@ func (r *MysqlReplicaPairReconciler) reconcilePVC(ctx context.Context, pair *v1a
 	return err
 }
 
-func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pair *v1alpha1.MysqlReplicaPair, dc, peerDC v1alpha1.DCInstanceSpec, serverID int32, image string) error {
+func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site, peerSite v1alpha1.SiteSpec, serverID int32, image string) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      resourceName(pair.Name, dc.Name),
-			Namespace: pair.Namespace,
+			Name:      resourceName(fg.Name, site.Name),
+			Namespace: fg.Namespace,
 		},
 	}
 
-	specHash := computeSpecHash(pair, dc)
+	specHash := computeSpecHash(fg, site)
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
-		if err := controllerutil.SetControllerReference(pair, deploy, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(fg, deploy, r.Scheme); err != nil {
 			return err
 		}
 
-		labels := commonLabels(pair.Name, dc.Name)
+		labels := commonLabels(fg.Name, site.Name)
 		deploy.Labels = labels
 
 		// Store spec hash as annotation for drift detection.
@@ -388,8 +388,8 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 		deploy.Spec.Selector = &metav1.LabelSelector{
 			MatchLabels: map[string]string{
 				labelAppName:  "mysql",
-				labelInstance: pair.Name,
-				labelDC:       dc.Name,
+				labelInstance: fg.Name,
+				labelSite:     site.Name,
 			},
 		}
 
@@ -398,36 +398,36 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 			podLabels[k] = v
 		}
 
-		sidecarImage := pair.Spec.SidecarImage
+		sidecarImage := fg.Spec.SidecarImage
 		if sidecarImage == "" {
 			sidecarImage = image
 		}
 
-		configMapName := fmt.Sprintf("mysql-%s-config", pair.Name)
+		configMapName := fmt.Sprintf("mysql-%s-config", fg.Name)
 
 		peerAddress := fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d",
-			pair.Name, peerDC.Name, pair.Namespace, sidecarPort)
+			fg.Name, peerSite.Name, fg.Namespace, sidecarPort)
 
-		bloodravenAddress := pair.Spec.Sidecar.BloodravenAddress
+		bloodravenAddress := fg.Spec.Sidecar.BloodravenAddress
 		if bloodravenAddress == "" {
-			bloodravenAddress = fmt.Sprintf("bloodraven.%s.svc.cluster.local:8082", pair.Namespace)
+			bloodravenAddress = fmt.Sprintf("bloodraven.%s.svc.cluster.local:8082", fg.Namespace)
 		}
 
 		leaseTimeout := "20s"
-		if pair.Spec.Sidecar.LeaseTimeout != nil {
-			leaseTimeout = pair.Spec.Sidecar.LeaseTimeout.Duration.String()
+		if fg.Spec.Sidecar.LeaseTimeout != nil {
+			leaseTimeout = fg.Spec.Sidecar.LeaseTimeout.Duration.String()
 		}
 
 		peerCheckInterval := "5s"
-		if pair.Spec.Sidecar.PeerCheckInterval != nil {
-			peerCheckInterval = pair.Spec.Sidecar.PeerCheckInterval.Duration.String()
+		if fg.Spec.Sidecar.PeerCheckInterval != nil {
+			peerCheckInterval = fg.Spec.Sidecar.PeerCheckInterval.Duration.String()
 		}
 
 		volumeMounts := []corev1.VolumeMount{
 			{Name: "data", MountPath: "/var/lib/mysql"},
 			{Name: "conf", MountPath: "/etc/mysql/conf.d"},
 		}
-		if pair.Spec.TLS != nil {
+		if fg.Spec.TLS != nil {
 			volumeMounts = append(volumeMounts, corev1.VolumeMount{
 				Name:      "tls",
 				MountPath: "/etc/mysql/tls",
@@ -436,7 +436,7 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 		}
 
 		sidecarVolumeMounts := []corev1.VolumeMount{}
-		if pair.Spec.TLS != nil {
+		if fg.Spec.TLS != nil {
 			sidecarVolumeMounts = append(sidecarVolumeMounts, corev1.VolumeMount{
 				Name:      "tls",
 				MountPath: "/etc/mysql/tls",
@@ -459,13 +459,13 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 					{
 						SecretRef: &corev1.SecretEnvSource{
 							LocalObjectReference: corev1.LocalObjectReference{
-								Name: pair.Spec.SecretName,
+								Name: fg.Spec.SecretName,
 							},
 						},
 					},
 				},
 				VolumeMounts: volumeMounts,
-				Resources:    dc.Resources,
+				Resources:    site.Resources,
 				LivenessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
 						TCPSocket: &corev1.TCPSocketAction{
@@ -498,7 +498,7 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 				Env: []corev1.EnvVar{
 					{Name: "MYSQL_DSN", ValueFrom: &corev1.EnvVarSource{
 						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: pair.Spec.SecretName},
+							LocalObjectReference: corev1.LocalObjectReference{Name: fg.Spec.SecretName},
 							Key:                  "dsn",
 						},
 					}},
@@ -508,8 +508,8 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 					{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", sidecarPort)},
 					{Name: "PEER_ADDRESS", Value: peerAddress},
 					{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
-					{Name: "MY_DC", Value: dc.Name},
-					{Name: "PRIMARY_DC", Value: pair.Status.PrimaryDC},
+					{Name: "MY_SITE", Value: site.Name},
+					{Name: "ACTIVE_SITE", Value: fg.Status.ActiveSite},
 					{Name: "LEASE_TIMEOUT", Value: leaseTimeout},
 					{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
 				},
@@ -542,7 +542,7 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 				Name: "data",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: resourceName(pair.Name, dc.Name) + "-data",
+						ClaimName: resourceName(fg.Name, site.Name) + "-data",
 					},
 				},
 			},
@@ -564,12 +564,12 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 			},
 		}
 
-		if pair.Spec.TLS != nil {
+		if fg.Spec.TLS != nil {
 			volumes = append(volumes, corev1.Volume{
 				Name: "tls",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName: pair.Spec.TLS.SecretName,
+						SecretName: fg.Spec.TLS.SecretName,
 					},
 				},
 			})
@@ -584,7 +584,7 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 			},
 			Spec: corev1.PodSpec{
 				NodeSelector: map[string]string{
-					"topology.kubernetes.io/zone": dc.Zone,
+					"topology.kubernetes.io/zone": site.Zone,
 				},
 				InitContainers: []corev1.Container{
 					{
@@ -604,33 +604,33 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 				Volumes:    volumes,
 			},
 		}
-		if pair.Spec.TerminationGracePeriodSeconds != nil {
-			deploy.Spec.Template.Spec.TerminationGracePeriodSeconds = pair.Spec.TerminationGracePeriodSeconds
+		if fg.Spec.TerminationGracePeriodSeconds != nil {
+			deploy.Spec.Template.Spec.TerminationGracePeriodSeconds = fg.Spec.TerminationGracePeriodSeconds
 		}
 		return nil
 	})
 	return err
 }
 
-func (r *MysqlReplicaPairReconciler) reconcileDCService(ctx context.Context, pair *v1alpha1.MysqlReplicaPair, dc v1alpha1.DCInstanceSpec) error {
+func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      resourceName(pair.Name, dc.Name),
-			Namespace: pair.Namespace,
+			Name:      resourceName(fg.Name, site.Name),
+			Namespace: fg.Namespace,
 		},
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		if err := controllerutil.SetControllerReference(pair, svc, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(fg, svc, r.Scheme); err != nil {
 			return err
 		}
-		svc.Labels = commonLabels(pair.Name, dc.Name)
+		svc.Labels = commonLabels(fg.Name, site.Name)
 		svc.Spec = corev1.ServiceSpec{
 			Type: corev1.ServiceTypeClusterIP,
 			Selector: map[string]string{
 				labelAppName:  "mysql",
-				labelInstance: pair.Name,
-				labelDC:       dc.Name,
+				labelInstance: fg.Name,
+				labelSite:     site.Name,
 			},
 			Ports: []corev1.ServicePort{
 				{
@@ -652,27 +652,28 @@ func (r *MysqlReplicaPairReconciler) reconcileDCService(ctx context.Context, pai
 	return err
 }
 
-func (r *MysqlReplicaPairReconciler) reconcilePrimaryService(ctx context.Context, pair *v1alpha1.MysqlReplicaPair) error {
+func (r *MysqlFailoverGroupReconciler) reconcilePrimaryService(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("mysql-%s-primary", pair.Name),
-			Namespace: pair.Namespace,
+			Name:      fmt.Sprintf("mysql-%s-primary", fg.Name),
+			Namespace: fg.Namespace,
 		},
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		if err := controllerutil.SetControllerReference(pair, svc, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(fg, svc, r.Scheme); err != nil {
 			return err
 		}
 		svc.Labels = map[string]string{
-			labelAppName:   "mysql",
-			labelInstance:  pair.Name,
-			labelManagedBy: managerName,
+			labelAppName:       "mysql",
+			labelInstance:      fg.Name,
+			labelFailoverGroup: fg.Name,
+			labelManagedBy:     managerName,
 		}
 		svc.Spec = corev1.ServiceSpec{
 			Type: corev1.ServiceTypeClusterIP,
 			Selector: map[string]string{
-				labelInstance: pair.Name,
+				labelInstance: fg.Name,
 				labelRole:     "primary",
 			},
 			Ports: []corev1.ServicePort{
@@ -689,27 +690,28 @@ func (r *MysqlReplicaPairReconciler) reconcilePrimaryService(ctx context.Context
 	return err
 }
 
-func (r *MysqlReplicaPairReconciler) reconcileReplicasService(ctx context.Context, pair *v1alpha1.MysqlReplicaPair) error {
+func (r *MysqlFailoverGroupReconciler) reconcileReplicasService(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("mysql-%s-replicas", pair.Name),
-			Namespace: pair.Namespace,
+			Name:      fmt.Sprintf("mysql-%s-replicas", fg.Name),
+			Namespace: fg.Namespace,
 		},
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		if err := controllerutil.SetControllerReference(pair, svc, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(fg, svc, r.Scheme); err != nil {
 			return err
 		}
 		svc.Labels = map[string]string{
-			labelAppName:   "mysql",
-			labelInstance:  pair.Name,
-			labelManagedBy: managerName,
+			labelAppName:       "mysql",
+			labelInstance:      fg.Name,
+			labelFailoverGroup: fg.Name,
+			labelManagedBy:     managerName,
 		}
 		svc.Spec = corev1.ServiceSpec{
 			Type: corev1.ServiceTypeClusterIP,
 			Selector: map[string]string{
-				labelInstance: pair.Name,
+				labelInstance: fg.Name,
 				labelRole:     "replica",
 				labelHealthy:  "yes",
 			},
@@ -729,52 +731,54 @@ func (r *MysqlReplicaPairReconciler) reconcileReplicasService(ctx context.Contex
 
 // syncPodLabels updates pod labels based on the CR status.
 // It updates replicas first, then primary, to prevent dual-primary in Service endpoints.
-func (r *MysqlReplicaPairReconciler) syncPodLabels(ctx context.Context, pair *v1alpha1.MysqlReplicaPair) error {
+func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	logger := log.FromContext(ctx)
 
-	if pair.Status.PrimaryDC == "" {
+	if fg.Status.ActiveSite == "" {
 		return nil
 	}
 
-	// Determine which DC is primary, which is replica
-	dcs := []struct {
-		spec   v1alpha1.DCInstanceSpec
-		status v1alpha1.DCInstanceStatus
+	// Determine which site is primary, which is replica
+	type siteInfo struct {
+		spec   v1alpha1.SiteSpec
+		status v1alpha1.SiteStatus
 		role   string
-	}{
-		{pair.Spec.DC1, pair.Status.DC1, "replica"},
-		{pair.Spec.DC2, pair.Status.DC2, "replica"},
 	}
 
-	if pair.Status.PrimaryDC == pair.Spec.DC1.Name {
-		dcs[0].role = "primary"
-	} else if pair.Status.PrimaryDC == pair.Spec.DC2.Name {
-		dcs[1].role = "primary"
+	sites := []siteInfo{
+		{fg.Spec.Sites[0], fg.Status.Sites[0], "replica"},
+		{fg.Spec.Sites[1], fg.Status.Sites[1], "replica"},
+	}
+
+	for i := range sites {
+		if fg.Status.ActiveSite == fg.Spec.Sites[i].Name {
+			sites[i].role = "primary"
+		}
 	}
 
 	// Sort: replicas first, then primary
-	sort.Slice(dcs, func(i, j int) bool {
-		if dcs[i].role == "replica" && dcs[j].role == "primary" {
+	sort.Slice(sites, func(i, j int) bool {
+		if sites[i].role == "replica" && sites[j].role == "primary" {
 			return true
 		}
 		return false
 	})
 
-	for _, dc := range dcs {
+	for _, si := range sites {
 		pods := &corev1.PodList{}
 		if err := r.List(ctx, pods,
-			client.InNamespace(pair.Namespace),
+			client.InNamespace(fg.Namespace),
 			client.MatchingLabels{
 				labelAppName:  "mysql",
-				labelInstance: pair.Name,
-				labelDC:       dc.spec.Name,
+				labelInstance: fg.Name,
+				labelSite:     si.spec.Name,
 			},
 		); err != nil {
-			return fmt.Errorf("list pods for dc %s: %w", dc.spec.Name, err)
+			return fmt.Errorf("list pods for site %s: %w", si.spec.Name, err)
 		}
 
 		healthy := "no"
-		if dc.status.State == "writable" || dc.status.State == "read-only" {
+		if si.status.State == "writable" || si.status.State == "read-only" {
 			healthy = "yes"
 		}
 
@@ -782,11 +786,11 @@ func (r *MysqlReplicaPairReconciler) syncPodLabels(ctx context.Context, pair *v1
 			pod := &pods.Items[i]
 			needsUpdate := false
 
-			if pod.Labels[labelRole] != dc.role {
+			if pod.Labels[labelRole] != si.role {
 				if pod.Labels == nil {
 					pod.Labels = make(map[string]string)
 				}
-				pod.Labels[labelRole] = dc.role
+				pod.Labels[labelRole] = si.role
 				needsUpdate = true
 			}
 
@@ -799,7 +803,7 @@ func (r *MysqlReplicaPairReconciler) syncPodLabels(ctx context.Context, pair *v1
 			}
 
 			if needsUpdate {
-				logger.Info("updating pod labels", "pod", pod.Name, "role", dc.role, "healthy", healthy)
+				logger.Info("updating pod labels", "pod", pod.Name, "role", si.role, "healthy", healthy)
 				podName := pod.Name
 				podNamespace := pod.Namespace
 				if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
@@ -811,7 +815,7 @@ func (r *MysqlReplicaPairReconciler) syncPodLabels(ctx context.Context, pair *v1
 					if fresh.Labels == nil {
 						fresh.Labels = make(map[string]string)
 					}
-					fresh.Labels[labelRole] = dc.role
+					fresh.Labels[labelRole] = si.role
 					fresh.Labels[labelHealthy] = healthy
 					return r.Update(ctx, &fresh)
 				}); err != nil {
@@ -825,57 +829,60 @@ func (r *MysqlReplicaPairReconciler) syncPodLabels(ctx context.Context, pair *v1
 }
 
 // computeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
-func computeSpecHash(pair *v1alpha1.MysqlReplicaPair, dc v1alpha1.DCInstanceSpec) string {
+func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "image=%s\n", pair.Spec.Image)
-	fmt.Fprintf(h, "sidecar=%s\n", pair.Spec.SidecarImage)
-	fmt.Fprintf(h, "resources=%v\n", dc.Resources)
+	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
+	fmt.Fprintf(h, "sidecar=%s\n", fg.Spec.SidecarImage)
+	fmt.Fprintf(h, "resources=%v\n", site.Resources)
 	// Sort mysqlConf keys for deterministic hash
-	keys := make([]string, 0, len(pair.Spec.MysqlConf))
-	for k := range pair.Spec.MysqlConf {
+	keys := make([]string, 0, len(fg.Spec.MysqlConf))
+	for k := range fg.Spec.MysqlConf {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Fprintf(h, "mysql.%s=%s\n", k, pair.Spec.MysqlConf[k])
+		fmt.Fprintf(h, "mysql.%s=%s\n", k, fg.Spec.MysqlConf[k])
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // CRConfigToTopologyConfig extracts topology manager configuration from a CR.
 // This bridges the CRD spec to the internal config used by TopologyManager.
-func CRConfigToTopologyConfig(pair *v1alpha1.MysqlReplicaPair) TopologyConfig {
+func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 	pollInterval := int64(2 * time.Second)
-	if pair.Spec.PollInterval != nil {
-		pollInterval = int64(pair.Spec.PollInterval.Duration)
+	if fg.Spec.PollInterval != nil {
+		pollInterval = int64(fg.Spec.PollInterval.Duration)
 	}
 
 	failureThreshold := int32(3)
-	if pair.Spec.FailureThreshold > 0 {
-		failureThreshold = pair.Spec.FailureThreshold
+	if fg.Spec.FailureThreshold > 0 {
+		failureThreshold = fg.Spec.FailureThreshold
 	}
 
 	recoveryThreshold := int32(2)
-	if pair.Spec.RecoveryThreshold > 0 {
-		recoveryThreshold = pair.Spec.RecoveryThreshold
+	if fg.Spec.RecoveryThreshold > 0 {
+		recoveryThreshold = fg.Spec.RecoveryThreshold
 	}
 
 	var failoverCooldown int64
-	if pair.Spec.FailoverCooldown != nil {
-		failoverCooldown = int64(pair.Spec.FailoverCooldown.Duration)
+	if fg.Spec.FailoverCooldown != nil {
+		failoverCooldown = int64(fg.Spec.FailoverCooldown.Duration)
 	}
 
 	return TopologyConfig{
-		AZ: pair.Spec.AZ,
-		DC1: DCTopologyConfig{
-			Name: pair.Spec.DC1.Name,
-			Zone: pair.Spec.DC1.Zone,
-			LBIP: pair.Spec.DC1.LBIP,
-		},
-		DC2: DCTopologyConfig{
-			Name: pair.Spec.DC2.Name,
-			Zone: pair.Spec.DC2.Zone,
-			LBIP: pair.Spec.DC2.LBIP,
+		Name: fg.Name,
+		AZ:   fg.Spec.AZ,
+		Sites: [2]SiteTopologyConfig{
+			{
+				Name: fg.Spec.Sites[0].Name,
+				Zone: fg.Spec.Sites[0].Zone,
+				LBIP: fg.Spec.Sites[0].LBIP,
+			},
+			{
+				Name: fg.Spec.Sites[1].Name,
+				Zone: fg.Spec.Sites[1].Zone,
+				LBIP: fg.Spec.Sites[1].LBIP,
+			},
 		},
 		PollInterval:      pollInterval,
 		FailureThreshold:  int(failureThreshold),
@@ -884,10 +891,10 @@ func CRConfigToTopologyConfig(pair *v1alpha1.MysqlReplicaPair) TopologyConfig {
 	}
 }
 
-// StatusFromTopology creates a NamespacedName from a pair for use with the topology manager.
-func PairNamespacedName(pair *v1alpha1.MysqlReplicaPair) types.NamespacedName {
+// FailoverGroupNamespacedName creates a NamespacedName from a failover group.
+func FailoverGroupNamespacedName(fg *v1alpha1.MysqlFailoverGroup) types.NamespacedName {
 	return types.NamespacedName{
-		Namespace: pair.Namespace,
-		Name:      pair.Name,
+		Namespace: fg.Namespace,
+		Name:      fg.Name,
 	}
 }

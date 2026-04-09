@@ -19,18 +19,18 @@ func TestSplitBrain_BothWritable_NoAction(t *testing.T) {
 
 	// Both should be writable (split brain is detected but no automated fix).
 	s := h.tm.Status()
-	if s.DC1State != "writable" {
-		t.Errorf("dc1 state: got %s, want writable", s.DC1State)
+	if s.Sites[0].State != "writable" {
+		t.Errorf("dc1 state: got %s, want writable", s.Sites[0].State)
 	}
-	if s.DC2State != "writable" {
-		t.Errorf("dc2 state: got %s, want writable", s.DC2State)
+	if s.Sites[1].State != "writable" {
+		t.Errorf("dc2 state: got %s, want writable", s.Sites[1].State)
 	}
 
 	// Neither should be tainted (both are writable).
-	if h.tainter.isTainted("lion-dc1") {
+	if h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
 		t.Error("dc1 should not be tainted (writable)")
 	}
-	if h.tainter.isTainted("lion-dc2") {
+	if h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
 		t.Error("dc2 should not be tainted (writable)")
 	}
 }
@@ -45,10 +45,10 @@ func TestDoubleReadOnly_NoPromotion(t *testing.T) {
 	h.pollN(2)
 
 	// Both should be tainted.
-	if !h.tainter.isTainted("lion-dc1") {
+	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
 		t.Error("dc1 should be tainted (read-only)")
 	}
-	if !h.tainter.isTainted("lion-dc2") {
+	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
 		t.Error("dc2 should be tainted (read-only)")
 	}
 
@@ -58,11 +58,11 @@ func TestDoubleReadOnly_NoPromotion(t *testing.T) {
 	}
 
 	s := h.tm.Status()
-	if s.DC1State != "read-only" {
-		t.Errorf("dc1 state: got %s, want read-only", s.DC1State)
+	if s.Sites[0].State != "read-only" {
+		t.Errorf("dc1 state: got %s, want read-only", s.Sites[0].State)
 	}
-	if s.DC2State != "read-only" {
-		t.Errorf("dc2 state: got %s, want read-only", s.DC2State)
+	if s.Sites[1].State != "read-only" {
+		t.Errorf("dc2 state: got %s, want read-only", s.Sites[1].State)
 	}
 }
 
@@ -77,10 +77,10 @@ func TestTotalLoss_BothUnreachable(t *testing.T) {
 	h.pollN(3)
 
 	// Both should be tainted.
-	if !h.tainter.isTainted("lion-dc1") {
+	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
 		t.Error("dc1 should be tainted")
 	}
-	if !h.tainter.isTainted("lion-dc2") {
+	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
 		t.Error("dc2 should be tainted")
 	}
 
@@ -90,11 +90,11 @@ func TestTotalLoss_BothUnreachable(t *testing.T) {
 	}
 
 	s := h.tm.Status()
-	if s.DC1State != "unreachable" {
-		t.Errorf("dc1 state: got %s, want unreachable", s.DC1State)
+	if s.Sites[0].State != "unreachable" {
+		t.Errorf("dc1 state: got %s, want unreachable", s.Sites[0].State)
 	}
-	if s.DC2State != "unreachable" {
-		t.Errorf("dc2 state: got %s, want unreachable", s.DC2State)
+	if s.Sites[1].State != "unreachable" {
+		t.Errorf("dc2 state: got %s, want unreachable", s.Sites[1].State)
 	}
 }
 
@@ -113,15 +113,15 @@ func TestSplitBrain_OneGoesDown(t *testing.T) {
 	h.pollN(3) // failure threshold
 
 	// DC2 should be tainted.
-	if !h.tainter.isTainted("lion-dc2") {
+	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
 		t.Error("dc2 should be tainted after going down")
 	}
 
 	s := h.tm.Status()
-	if s.DC1State != "writable" {
-		t.Errorf("dc1 state: got %s, want writable", s.DC1State)
+	if s.Sites[0].State != "writable" {
+		t.Errorf("dc1 state: got %s, want writable", s.Sites[0].State)
 	}
-	if s.DC2State != "unreachable" {
-		t.Errorf("dc2 state: got %s, want unreachable", s.DC2State)
+	if s.Sites[1].State != "unreachable" {
+		t.Errorf("dc2 state: got %s, want unreachable", s.Sites[1].State)
 	}
 }
