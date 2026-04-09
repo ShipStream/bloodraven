@@ -93,6 +93,11 @@ type MysqlReplicaPairSpec struct {
 
 	// Replication configures replication health monitoring.
 	Replication *ReplicationSpec `json:"replication,omitempty"`
+
+	// UpdateStrategy controls how spec changes are rolled out. Default: OrderedUpdate
+	// +kubebuilder:default="OrderedUpdate"
+	// +kubebuilder:validation:Enum=OrderedUpdate;Recreate
+	UpdateStrategy string `json:"updateStrategy,omitempty"`
 }
 
 // ReplicationSpec configures replication health monitoring.
@@ -209,6 +214,9 @@ type MysqlReplicaPairStatus struct {
 
 	// LastFailoverTarget is the DC that was last promoted during failover.
 	LastFailoverTarget string `json:"lastFailoverTarget,omitempty"`
+
+	// UpdatePhase indicates the current phase of an ordered update, empty if not updating.
+	UpdatePhase string `json:"updatePhase,omitempty"`
 }
 
 // DCInstanceStatus describes the observed state of a single DC instance.
