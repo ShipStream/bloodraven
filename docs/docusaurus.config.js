@@ -39,6 +39,7 @@ const config = {
     ['docusaurus-plugin-llms', {
       generateLLMsTxt: true,
       generateLLMsFullTxt: true,
+      generateMarkdownFiles: true,
     }],
     'docusaurus-markdown-source-plugin',
   ],
