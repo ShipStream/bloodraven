@@ -40,6 +40,7 @@ const config = {
       generateLLMsTxt: true,
       generateLLMsFullTxt: true,
     }],
+    'docusaurus-markdown-source-plugin',
   ],
 
   themes: ['@docusaurus/theme-mermaid'],
