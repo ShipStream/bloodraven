@@ -10,7 +10,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -238,11 +240,24 @@ func TestUpdateCRStatus_ExistingCR(t *testing.T) {
 }
 
 func TestUpdateCRStatus_DeletedMidUpdate(t *testing.T) {
+	// CR exists when Get is called but is deleted before Status().Update.
+	// Uses SubResourceUpdate interceptor to simulate mid-update deletion.
 	pair := newTestPair()
 	scheme := testScheme()
+
+	deleteCalled := false
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).
 		WithObjects(pair).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, underlying client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if !deleteCalled {
+					deleteCalled = true
+					_ = underlying.Delete(ctx, pair)
+				}
+				return underlying.Status().Update(ctx, obj, opts...)
+			},
+		}).
 		Build()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
@@ -253,11 +268,6 @@ func TestUpdateCRStatus_DeletedMidUpdate(t *testing.T) {
 	}
 
 	nn := types.NamespacedName{Name: pair.Name, Namespace: pair.Namespace}
-
-	if err := c.Delete(context.Background(), pair); err != nil {
-		t.Fatalf("failed to delete pair: %v", err)
-	}
-
 	snap := TopologySnapshot{
 		DC1Name:  "dc1",
 		DC1State: state.StateWritable,
@@ -265,7 +275,12 @@ func TestUpdateCRStatus_DeletedMidUpdate(t *testing.T) {
 		DC2State: state.StateReadOnly,
 	}
 
+	// Must not panic even though CR is deleted mid-update.
 	runner.updateCRStatus(context.Background(), nn, snap)
+
+	if !deleteCalled {
+		t.Error("expected interceptor to be called for SubResourceUpdate")
+	}
 }
 
 func TestStopManager(t *testing.T) {

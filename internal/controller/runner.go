@@ -284,8 +284,9 @@ func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {
 
 // updateCRStatus writes topology state to the CR status subresource.
 func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.NamespacedName, snap TopologySnapshot) {
-	var pair v1alpha1.MysqlReplicaPair
-	if err := r.client.Get(ctx, nn, &pair); err != nil {
+	// Fetch the CR to get the latest resourceVersion and generation for the status update.
+	var freshPair v1alpha1.MysqlReplicaPair
+	if err := r.client.Get(ctx, nn, &freshPair); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.logger.Warn("CR deleted, skipping status update", "pair", nn)
 			return
@@ -295,24 +296,25 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	// Save existing status before modification for comparison.
-	existingStatus := pair.Status.DeepCopy()
+	existingStatus := freshPair.Status.DeepCopy()
 
-	pair.Status.PrimaryDC = snap.PrimaryDC
-	pair.Status.DC1 = dcInstanceStatusFromSnapshot(snap.DC1State, snap.DC1LastSeen)
-	pair.Status.DC2 = dcInstanceStatusFromSnapshot(snap.DC2State, snap.DC2LastSeen)
+	freshPair.Status.PrimaryDC = snap.PrimaryDC
+	freshPair.Status.DC1 = dcInstanceStatusFromSnapshot(snap.DC1State, snap.DC1LastSeen)
+	freshPair.Status.DC2 = dcInstanceStatusFromSnapshot(snap.DC2State, snap.DC2LastSeen)
 
 	if !snap.LastFailover.IsZero() {
 		t := metav1.NewTime(snap.LastFailover)
-		pair.Status.LastFailover = &t
+		freshPair.Status.LastFailover = &t
 	}
-	pair.Status.LastFailoverTarget = snap.LastFailoverTarget
+	freshPair.Status.LastFailoverTarget = snap.LastFailoverTarget
 
-	// Update conditions based on current state.
+	// Update conditions using freshPair.Generation so ObservedGeneration reflects
+	// the generation of the object we are actually writing against.
 	now := metav1.Now()
-	setCondition(&pair.Status.Conditions, metav1.Condition{
+	setCondition(&freshPair.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             conditionBool(snap.DC1State == state.StateWritable || snap.DC2State == state.StateWritable),
-		ObservedGeneration: pair.Generation,
+		ObservedGeneration: freshPair.Generation,
 		LastTransitionTime: now,
 		Reason:             "TopologyPolled",
 		Message:            "At least one DC is writable",
@@ -327,19 +329,19 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		} else if snap.DC1State == state.StateUnreachable && snap.DC2State == state.StateUnreachable {
 			reason = "TotalLoss"
 		}
-		setCondition(&pair.Status.Conditions, metav1.Condition{
+		setCondition(&freshPair.Status.Conditions, metav1.Condition{
 			Type:               "Degraded",
 			Status:             metav1.ConditionTrue,
-			ObservedGeneration: pair.Generation,
+			ObservedGeneration: freshPair.Generation,
 			LastTransitionTime: now,
 			Reason:             reason,
 			Message:            snap.Alert,
 		})
 	} else {
-		setCondition(&pair.Status.Conditions, metav1.Condition{
+		setCondition(&freshPair.Status.Conditions, metav1.Condition{
 			Type:               "Degraded",
 			Status:             metav1.ConditionFalse,
-			ObservedGeneration: pair.Generation,
+			ObservedGeneration: freshPair.Generation,
 			LastTransitionTime: now,
 			Reason:             "Healthy",
 			Message:            "No cross-DC alerts",
@@ -347,22 +349,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
-	if equality.Semantic.DeepEqual(existingStatus, &pair.Status) {
+	if equality.Semantic.DeepEqual(existingStatus, &freshPair.Status) {
 		r.logger.Debug("status unchanged, skipping update", "pair", nn)
 		return
 	}
 
-	// Re-fetch the CR to get the latest resourceVersion before updating, to reduce conflicts.
-	var freshPair v1alpha1.MysqlReplicaPair
-	if err := r.client.Get(ctx, nn, &freshPair); err != nil {
-		if apierrors.IsNotFound(err) {
-			r.logger.Warn("CR deleted before status update, skipping", "pair", nn)
-			return
-		}
-		r.logger.Error("re-fetch pair for status update", "pair", nn, "error", err)
-		return
-	}
-	freshPair.Status = pair.Status
 
 	if err := r.client.Status().Update(ctx, &freshPair); err != nil {
 		if apierrors.IsNotFound(err) {
