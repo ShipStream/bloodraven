@@ -81,6 +81,17 @@ type MysqlReplicaPairSpec struct {
 
 	// MysqlConf allows overriding default my.cnf settings.
 	MysqlConf map[string]string `json:"mysqlConf,omitempty"`
+
+	// Replication configures replication health monitoring.
+	Replication *ReplicationSpec `json:"replication,omitempty"`
+}
+
+// ReplicationSpec configures replication health monitoring.
+type ReplicationSpec struct {
+	// MaxLagSeconds is the maximum acceptable replication lag before marking degraded. Default: 300
+	// +kubebuilder:default=300
+	// +kubebuilder:validation:Minimum=0
+	MaxLagSeconds int64 `json:"maxLagSeconds,omitempty"`
 }
 
 // DCInstanceSpec defines the configuration for a single DC instance.
