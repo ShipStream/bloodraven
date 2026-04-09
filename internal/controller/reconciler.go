@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -35,6 +37,8 @@ const (
 	labelHealthy   = "shipstream.io/healthy"
 	labelManagedBy = "app.kubernetes.io/managed-by"
 	managerName    = "bloodraven"
+
+	specHashAnnotation = "shipstream.io/spec-hash"
 
 	mysqlPort   = 3306
 	sidecarPort = 8080
@@ -326,6 +330,8 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 		},
 	}
 
+	specHash := computeSpecHash(pair, dc)
+
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		if err := controllerutil.SetControllerReference(pair, deploy, r.Scheme); err != nil {
 			return err
@@ -333,6 +339,12 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 
 		labels := commonLabels(pair.Name, dc.Name)
 		deploy.Labels = labels
+
+		// Store spec hash as annotation for drift detection.
+		if deploy.Annotations == nil {
+			deploy.Annotations = make(map[string]string)
+		}
+		deploy.Annotations[specHashAnnotation] = specHash
 
 		var replicas int32 = 1
 		deploy.Spec.Replicas = &replicas
@@ -532,6 +544,9 @@ func (r *MysqlReplicaPairReconciler) reconcileDeployment(ctx context.Context, pa
 		deploy.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: podLabels,
+				Annotations: map[string]string{
+					specHashAnnotation: specHash,
+				},
 			},
 			Spec: corev1.PodSpec{
 				NodeSelector: map[string]string{
@@ -756,6 +771,24 @@ func (r *MysqlReplicaPairReconciler) syncPodLabels(ctx context.Context, pair *v1
 	}
 
 	return nil
+}
+
+// computeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
+func computeSpecHash(pair *v1alpha1.MysqlReplicaPair, dc v1alpha1.DCInstanceSpec) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "image=%s\n", pair.Spec.Image)
+	fmt.Fprintf(h, "sidecar=%s\n", pair.Spec.SidecarImage)
+	fmt.Fprintf(h, "resources=%v\n", dc.Resources)
+	// Sort mysqlConf keys for deterministic hash
+	keys := make([]string, 0, len(pair.Spec.MysqlConf))
+	for k := range pair.Spec.MysqlConf {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(h, "mysql.%s=%s\n", k, pair.Spec.MysqlConf[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
 // CRConfigToTopologyConfig extracts topology manager configuration from a CR.

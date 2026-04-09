@@ -415,6 +415,28 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		}
 	}
 
+	// Update phase tracking.
+	freshPair.Status.UpdatePhase = snap.UpdatePhase
+	if snap.UpdatePhase != "" {
+		setCondition(&freshPair.Status.Conditions, metav1.Condition{
+			Type:               "Updating",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: freshPair.Generation,
+			LastTransitionTime: now,
+			Reason:             snap.UpdatePhase,
+			Message:            fmt.Sprintf("Ordered update in progress: %s", snap.UpdatePhase),
+		})
+	} else {
+		setCondition(&freshPair.Status.Conditions, metav1.Condition{
+			Type:               "Updating",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: freshPair.Generation,
+			LastTransitionTime: now,
+			Reason:             "NotUpdating",
+			Message:            "No update in progress",
+		})
+	}
+
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
 	if equality.Semantic.DeepEqual(existingStatus, &freshPair.Status) {
 		r.logger.Debug("status unchanged, skipping update", "pair", nn)

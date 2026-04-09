@@ -390,6 +390,14 @@ spec:
                 - issuerRef
                 - secretName
                 type: object
+              updateStrategy:
+                default: OrderedUpdate
+                description: 'UpdateStrategy controls how spec changes are rolled
+                  out. Default: OrderedUpdate'
+                enum:
+                - OrderedUpdate
+                - Recreate
+                type: string
             required:
             - az
             - cloudflare
@@ -529,6 +537,10 @@ spec:
                 type: string
               primaryDC:
                 description: PrimaryDC is the name of the DC currently acting as primary.
+                type: string
+              updatePhase:
+                description: UpdatePhase indicates the current phase of an ordered
+                  update, empty if not updating.
                 type: string
             type: object
         type: object

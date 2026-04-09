@@ -52,6 +52,7 @@ type TopologySnapshot struct {
 	LastFailover       time.Time
 	LastFailoverTarget string
 	Alert              string // non-empty if a cross-DC alert fired this cycle
+	UpdatePhase        string // non-empty if an ordered update is in progress
 }
 
 // dcTracker tracks debounce counters and current state for one DC.

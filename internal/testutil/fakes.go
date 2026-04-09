@@ -147,7 +147,10 @@ func (m *FakeMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.record("ShowReplicaStatus")
-	return m.ReplicaStatusVal, m.ReplicaStatusErr
+	if m.ReplicaStatusErr != nil {
+		return nil, m.ReplicaStatusErr
+	}
+	return m.ReplicaStatusVal, nil
 }
 
 func (m *FakeMySQL) ChangeReplicationSource(_ context.Context, opts mysql.ReplicationSourceOpts) error {
