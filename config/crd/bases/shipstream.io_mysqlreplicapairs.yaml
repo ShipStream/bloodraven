@@ -325,6 +325,17 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              replication:
+                description: Replication configures replication health monitoring.
+                properties:
+                  maxLagSeconds:
+                    default: 300
+                    description: 'MaxLagSeconds is the maximum acceptable replication
+                      lag before marking degraded. Default: 300'
+                    format: int64
+                    minimum: 0
+                    type: integer
+                type: object
               secretName:
                 description: SecretName references the secret containing MySQL credentials.
                 minLength: 1

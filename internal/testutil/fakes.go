@@ -38,6 +38,10 @@ type FakeMySQL struct {
 	CloneInstanceCalled   bool
 	ChangeReplicationOpts mysql.ReplicationSourceOpts
 
+	// Replication status
+	ReplicaStatusVal *mysql.ReplicaStatus
+	ReplicaStatusErr error
+
 	// Error injection per method
 	FenceErr        error
 	DrainErr        error
@@ -143,7 +147,7 @@ func (m *FakeMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.record("ShowReplicaStatus")
-	return nil, nil
+	return m.ReplicaStatusVal, m.ReplicaStatusErr
 }
 
 func (m *FakeMySQL) ChangeReplicationSource(_ context.Context, opts mysql.ReplicationSourceOpts) error {

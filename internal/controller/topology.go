@@ -43,10 +43,12 @@ type TopologySnapshot struct {
 	DC1Name            string
 	DC1State           state.DCState
 	DC1LastSeen        time.Time
+	DC1Replication     *mysql.ReplicaStatus // nil if DC1 is primary or unreachable
 	DC2Name            string
 	DC2State           state.DCState
 	DC2LastSeen        time.Time
-	PrimaryDC          string // name of the writable DC, empty if none
+	DC2Replication     *mysql.ReplicaStatus // nil if DC2 is primary or unreachable
+	PrimaryDC          string               // name of the writable DC, empty if none
 	LastFailover       time.Time
 	LastFailoverTarget string
 	Alert              string // non-empty if a cross-DC alert fired this cycle
@@ -280,6 +282,25 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 
 	metrics.WSClientCount.Set(float64(tm.hub.ClientCount()))
 
+	// Check replication status on the read-only DC (the replica).
+	var dc1Repl, dc2Repl *mysql.ReplicaStatus
+	if tm.dc1.state == state.StateReadOnly {
+		rs, err := tm.dc1.mysql.ShowReplicaStatus(ctx)
+		if err != nil {
+			tm.logger.Warn("failed to check replica status", "dc", tm.dc1.name, "error", err)
+		} else {
+			dc1Repl = rs
+		}
+	}
+	if tm.dc2.state == state.StateReadOnly {
+		rs, err := tm.dc2.mysql.ShowReplicaStatus(ctx)
+		if err != nil {
+			tm.logger.Warn("failed to check replica status", "dc", tm.dc2.name, "error", err)
+		} else {
+			dc2Repl = rs
+		}
+	}
+
 	// Notify the status callback on any state change.
 	if (dc1New != dc1Prev || dc2New != dc2Prev) && tm.StatusCallback != nil {
 		primaryDC := ""
@@ -292,9 +313,11 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 			DC1Name:            tm.dc1.name,
 			DC1State:           tm.dc1.state,
 			DC1LastSeen:        tm.dc1.lastSeen,
+			DC1Replication:     dc1Repl,
 			DC2Name:            tm.dc2.name,
 			DC2State:           tm.dc2.state,
 			DC2LastSeen:        tm.dc2.lastSeen,
+			DC2Replication:     dc2Repl,
 			PrimaryDC:          primaryDC,
 			LastFailover:       tm.lastFailover,
 			LastFailoverTarget: tm.lastFailoverTarget,

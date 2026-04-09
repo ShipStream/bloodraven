@@ -299,8 +299,8 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	existingStatus := freshPair.Status.DeepCopy()
 
 	freshPair.Status.PrimaryDC = snap.PrimaryDC
-	freshPair.Status.DC1 = dcInstanceStatusFromSnapshot(snap.DC1State, snap.DC1LastSeen)
-	freshPair.Status.DC2 = dcInstanceStatusFromSnapshot(snap.DC2State, snap.DC2LastSeen)
+	freshPair.Status.DC1 = dcInstanceStatusFromSnapshot(snap.DC1State, snap.DC1LastSeen, snap.DC1Replication)
+	freshPair.Status.DC2 = dcInstanceStatusFromSnapshot(snap.DC2State, snap.DC2LastSeen, snap.DC2Replication)
 
 	if !snap.LastFailover.IsZero() {
 		t := metav1.NewTime(snap.LastFailover)
@@ -308,16 +308,33 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 	freshPair.Status.LastFailoverTarget = snap.LastFailoverTarget
 
+	// Evaluate replication health.
+	hasWritable := snap.DC1State == state.StateWritable || snap.DC2State == state.StateWritable
+	replicationHealthy := true
+	if snap.DC1Replication != nil {
+		replicationHealthy = snap.DC1Replication.IORunning && snap.DC1Replication.SQLRunning
+	}
+	if snap.DC2Replication != nil {
+		replicationHealthy = replicationHealthy && snap.DC2Replication.IORunning && snap.DC2Replication.SQLRunning
+	}
+
 	// Update conditions using freshPair.Generation so ObservedGeneration reflects
 	// the generation of the object we are actually writing against.
 	now := metav1.Now()
+	readyStatus := hasWritable && replicationHealthy
+	readyMessage := "At least one DC is writable and replication is healthy"
+	if !hasWritable {
+		readyMessage = "No DC is writable"
+	} else if !replicationHealthy {
+		readyMessage = "Replication is not healthy"
+	}
 	setCondition(&freshPair.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
-		Status:             conditionBool(snap.DC1State == state.StateWritable || snap.DC2State == state.StateWritable),
+		Status:             conditionBool(readyStatus),
 		ObservedGeneration: freshPair.Generation,
 		LastTransitionTime: now,
 		Reason:             "TopologyPolled",
-		Message:            "At least one DC is writable",
+		Message:            readyMessage,
 	})
 
 	if snap.Alert != "" {
@@ -348,12 +365,61 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		})
 	}
 
+	// Add replication-specific degraded conditions.
+	maxLagSeconds := int64(300)
+	if freshPair.Spec.Replication != nil && freshPair.Spec.Replication.MaxLagSeconds > 0 {
+		maxLagSeconds = freshPair.Spec.Replication.MaxLagSeconds
+	}
+
+	replChecks := []struct {
+		name string
+		repl *internalmysql.ReplicaStatus
+	}{
+		{snap.DC1Name, snap.DC1Replication},
+		{snap.DC2Name, snap.DC2Replication},
+	}
+
+	for _, rc := range replChecks {
+		if rc.repl == nil {
+			continue
+		}
+		if !rc.repl.IORunning || !rc.repl.SQLRunning {
+			setCondition(&freshPair.Status.Conditions, metav1.Condition{
+				Type:               "Degraded",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: freshPair.Generation,
+				LastTransitionTime: now,
+				Reason:             "ReplicationBroken",
+				Message:            fmt.Sprintf("Replication IO/SQL thread not running on %s", rc.name),
+			})
+		}
+		if rc.repl.SecondsBehindSource != nil && *rc.repl.SecondsBehindSource > maxLagSeconds {
+			setCondition(&freshPair.Status.Conditions, metav1.Condition{
+				Type:               "Degraded",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: freshPair.Generation,
+				LastTransitionTime: now,
+				Reason:             "ReplicationLagging",
+				Message:            fmt.Sprintf("Replication lag on %s is %ds (threshold %ds)", rc.name, *rc.repl.SecondsBehindSource, maxLagSeconds),
+			})
+		}
+		if rc.repl.LastError != "" {
+			setCondition(&freshPair.Status.Conditions, metav1.Condition{
+				Type:               "Degraded",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: freshPair.Generation,
+				LastTransitionTime: now,
+				Reason:             "ReplicationError",
+				Message:            fmt.Sprintf("Replication error on %s: %s", rc.name, rc.repl.LastError),
+			})
+		}
+	}
+
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
 	if equality.Semantic.DeepEqual(existingStatus, &freshPair.Status) {
 		r.logger.Debug("status unchanged, skipping update", "pair", nn)
 		return
 	}
-
 
 	if err := r.client.Status().Update(ctx, &freshPair); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -364,13 +430,18 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 }
 
-func dcInstanceStatusFromSnapshot(s state.DCState, lastSeen time.Time) v1alpha1.DCInstanceStatus {
+func dcInstanceStatusFromSnapshot(s state.DCState, lastSeen time.Time, repl *internalmysql.ReplicaStatus) v1alpha1.DCInstanceStatus {
 	status := v1alpha1.DCInstanceStatus{
 		State: s.String(),
 	}
 	if !lastSeen.IsZero() {
 		t := metav1.NewTime(lastSeen)
 		status.LastSeen = &t
+	}
+	if repl != nil {
+		status.Replicating = repl.IORunning && repl.SQLRunning
+		status.SecondsBehindSource = repl.SecondsBehindSource
+		status.GtidExecuted = repl.ExecutedGtidSet
 	}
 	return status
 }

@@ -17,10 +17,12 @@ import (
 // --- Mock MySQL ---
 
 type mockMySQL struct {
-	mu       sync.Mutex
-	readOnly bool
-	err      error
-	promoted bool
+	mu               sync.Mutex
+	readOnly         bool
+	err              error
+	promoted         bool
+	replicaStatusVal *mysql.ReplicaStatus
+	replicaStatusErr error
 }
 
 func (m *mockMySQL) CheckReadOnly(_ context.Context) (bool, error) {
@@ -49,7 +51,9 @@ func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
 	return nil
 }
 func (m *mockMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
-	return nil, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.replicaStatusVal, m.replicaStatusErr
 }
 func (m *mockMySQL) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
 	return nil
@@ -442,5 +446,79 @@ func TestTopologyManagerRunCancellation(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("topology manager did not stop after context cancellation")
+	}
+}
+
+func TestPollChecksReplicaStatus(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false}
+	dc2 := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning:  true,
+		SQLRunning: true,
+	}}
+	tm, _, _ := newTestTopologyManager(dc1, dc2)
+
+	var captured TopologySnapshot
+	tm.StatusCallback = func(snap TopologySnapshot) {
+		captured = snap
+	}
+
+	// Need RecoveryThreshold polls for dc1 writable + state change
+	pollN(tm, 2)
+
+	if captured.DC2Replication == nil {
+		t.Fatal("expected DC2 replication status to be populated")
+	}
+	if !captured.DC2Replication.IORunning || !captured.DC2Replication.SQLRunning {
+		t.Error("expected DC2 replication IO and SQL threads running")
+	}
+	if captured.DC1Replication != nil {
+		t.Error("DC1 is primary, should not have replication status")
+	}
+}
+
+func TestReplicationBrokenInSnapshot(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false}
+	dc2 := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning:  true,
+		SQLRunning: false, // SQL thread stopped
+	}}
+	tm, _, _ := newTestTopologyManager(dc1, dc2)
+
+	var captured TopologySnapshot
+	tm.StatusCallback = func(snap TopologySnapshot) {
+		captured = snap
+	}
+
+	pollN(tm, 2)
+
+	if captured.DC2Replication == nil {
+		t.Fatal("expected DC2 replication status to be populated")
+	}
+	if captured.DC2Replication.SQLRunning {
+		t.Error("expected DC2 SQL thread to be stopped")
+	}
+}
+
+func TestReplicationNotCheckedOnWritableDC(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning:  false,
+		SQLRunning: false,
+	}}
+	dc2 := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning:  true,
+		SQLRunning: true,
+	}}
+	tm, _, _ := newTestTopologyManager(dc1, dc2)
+
+	var captured TopologySnapshot
+	tm.StatusCallback = func(snap TopologySnapshot) {
+		captured = snap
+	}
+
+	pollN(tm, 2)
+
+	// DC1 is writable, so its replication should NOT be checked
+	if captured.DC1Replication != nil {
+		t.Error("writable DC should not have replication status checked")
 	}
 }
