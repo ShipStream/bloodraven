@@ -69,7 +69,10 @@ jobs:
       - name: Install setup-envtest
         run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
       - name: Run envtest tests
-        run: make test-envtest
+        run: |
+          KUBEBUILDER_ASSETS=$(setup-envtest use --bin-dir /tmp/envtest-bin -p path)
+          export KUBEBUILDER_ASSETS
+          make test-envtest
 
   generate-check:
     name: Generate Check
@@ -102,4 +105,4 @@ jobs:
             echo "One or more jobs failed."
             exit 1
           fi
-          echo "All checks passed.",
+          echo "All checks passed."
