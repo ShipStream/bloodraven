@@ -16,8 +16,8 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 | `sidecarImage` | string | Yes | -- | Bloodraven sidecar container image |
 | `sites` | []SiteSpec | Yes | -- | Exactly two site definitions |
 | `secretName` | string | Yes | -- | Name of the Secret containing MySQL credentials (key: `dsn`) |
-| `az` | string | No | -- | Availability zone identifier for DNS record naming |
-| `cloudflare` | CloudflareSpec | No | -- | Cloudflare DNS configuration for traffic steering |
+| `az` | string | Yes | -- | Availability zone identifier for DNS record naming |
+| `cloudflare` | CloudflareSpec | Yes | -- | Cloudflare DNS configuration for traffic steering |
 | `tls` | TLSSpec | No | -- | TLS configuration (cert-manager integration) |
 | `pollInterval` | duration | No | `2s` | How often the operator polls each MySQL instance |
 | `failureThreshold` | int | No | `3` | Consecutive failed polls before a site is marked unreachable |
