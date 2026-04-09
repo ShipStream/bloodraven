@@ -23,7 +23,7 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 	timeoutStmts := []string{
 		fmt.Sprintf("SET SESSION net_read_timeout = %d", cloneTimeoutSec),
 		fmt.Sprintf("SET SESSION net_write_timeout = %d", cloneTimeoutSec),
-		fmt.Sprintf("SET GLOBAL clone_ddl_timeout = %d", cloneTimeoutSec),
+		fmt.Sprintf("SET SESSION clone_ddl_timeout = %d", cloneTimeoutSec),
 	}
 	for _, s := range timeoutStmts {
 		if _, err := m.db.ExecContext(ctx, s); err != nil {
