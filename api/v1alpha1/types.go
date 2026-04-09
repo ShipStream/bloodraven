@@ -98,6 +98,11 @@ type MysqlReplicaPairSpec struct {
 	// +kubebuilder:default="OrderedUpdate"
 	// +kubebuilder:validation:Enum=OrderedUpdate;Recreate
 	UpdateStrategy string `json:"updateStrategy,omitempty"`
+
+	// TerminationGracePeriodSeconds is the grace period for MySQL container shutdown. Default: 30
+	// +kubebuilder:default=30
+	// +kubebuilder:validation:Minimum=1
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }
 
 // ReplicationSpec configures replication health monitoring.

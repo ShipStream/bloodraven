@@ -360,6 +360,13 @@ spec:
               sidecarImage:
                 description: SidecarImage is the image used for the sidecar/init container.
                 type: string
+              terminationGracePeriodSeconds:
+                default: 30
+                description: 'TerminationGracePeriodSeconds is the grace period for
+                  MySQL container shutdown. Default: 30'
+                format: int64
+                minimum: 1
+                type: integer
               tls:
                 description: TLS configures TLS for the MySQL instances.
                 properties:

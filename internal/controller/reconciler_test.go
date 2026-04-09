@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/testutil"
 )
 
 func testScheme() *runtime.Scheme {
@@ -463,7 +464,6 @@ func TestReconcile_AddsFinalizer(t *testing.T) {
 		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	// Re-fetch the CR and check the finalizer was added.
 	var updated v1alpha1.MysqlReplicaPair
 	if err := c.Get(context.Background(), nn, &updated); err != nil {
 		t.Fatalf("get pair: %v", err)
@@ -481,49 +481,55 @@ func TestReconcile_AddsFinalizer(t *testing.T) {
 	}
 }
 
-func TestReconcile_FinalizerCleanup(t *testing.T) {
-	// Simulate a CR being deleted: set DeletionTimestamp and add finalizer.
-	// The fake client requires at least one finalizer when DeletionTimestamp is set,
-	// so we add a second one to keep the object alive after our finalizer is removed.
+func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 	pair := newTestPair()
+	pair.Finalizers = []string{finalizerName}
 	now := metav1.Now()
 	pair.DeletionTimestamp = &now
-	pair.Finalizers = []string{finalizerName, "other-finalizer"}
 
-	r, c := newReconciler(pair)
+	tainter := testutil.NewFakeTainter()
+	tainter.Taints["lion-dc1"] = true
+	tainter.Taints["lion-dc2"] = true
+
+	scheme := testScheme()
+	allObjs := []client.Object{newTestSecret(), pair}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).WithObjects(allObjs...).Build()
+	recorder := record.NewFakeRecorder(10)
+	r := &MysqlReplicaPairReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: recorder,
+		Tainter:  tainter,
+	}
+
 	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
-
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn})
 	if err != nil {
 		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	// Re-fetch the CR and check the finalizer was removed.
-	var updated v1alpha1.MysqlReplicaPair
-	if err := c.Get(context.Background(), nn, &updated); err != nil {
-		t.Fatalf("get pair: %v", err)
+	// Verify taints were removed for both zones
+	if tainter.IsTainted("lion-dc1") {
+		t.Error("expected taint to be removed for lion-dc1")
+	}
+	if tainter.IsTainted("lion-dc2") {
+		t.Error("expected taint to be removed for lion-dc2")
 	}
 
-	for _, f := range updated.Finalizers {
-		if f == finalizerName {
-			t.Errorf("expected finalizer %q to be removed, but it's still present", finalizerName)
+	// After removing the last finalizer on an object with DeletionTimestamp,
+	// the fake client deletes the object, so a NotFound is expected.
+	var fetched v1alpha1.MysqlReplicaPair
+	err = c.Get(context.Background(), nn, &fetched)
+	if err == nil {
+		for _, f := range fetched.Finalizers {
+			if f == finalizerName {
+				t.Error("finalizer should have been removed after graceful shutdown")
+			}
 		}
-	}
-	// The other finalizer should still be present.
-	found := false
-	for _, f := range updated.Finalizers {
-		if f == "other-finalizer" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected 'other-finalizer' to still be present")
 	}
 }
 
 func TestReconcile_DeletionWithoutFinalizer(t *testing.T) {
-	// CR is being deleted but has no our finalizer -- reconcile should return without error.
-	// The fake client requires at least one finalizer when DeletionTimestamp is set.
 	pair := newTestPair()
 	now := metav1.Now()
 	pair.DeletionTimestamp = &now
@@ -538,6 +544,68 @@ func TestReconcile_DeletionWithoutFinalizer(t *testing.T) {
 	}
 	if result.Requeue {
 		t.Error("should not requeue on deletion without our finalizer")
+	}
+}
+
+func TestReconcile_DeletionWithNilTainter(t *testing.T) {
+	pair := newTestPair()
+	pair.Finalizers = []string{finalizerName}
+	now := metav1.Now()
+	pair.DeletionTimestamp = &now
+
+	scheme := testScheme()
+	allObjs := []client.Object{newTestSecret(), pair}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlReplicaPair{}).WithObjects(allObjs...).Build()
+	r := &MysqlReplicaPairReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+		Tainter:  nil,
+	}
+
+	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn})
+	if err != nil {
+		t.Fatalf("reconcile should succeed even without tainter: %v", err)
+	}
+
+	var fetched2 v1alpha1.MysqlReplicaPair
+	err = c.Get(context.Background(), nn, &fetched2)
+	if err == nil {
+		for _, f := range fetched2.Finalizers {
+			if f == finalizerName {
+				t.Error("finalizer should have been removed")
+			}
+		}
+	}
+}
+
+func TestReconcile_TerminationGracePeriod(t *testing.T) {
+	pair := newTestPair()
+	gracePeriod := int64(60)
+	pair.Spec.TerminationGracePeriodSeconds = &gracePeriod
+	r, c := newReconciler(pair)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var deploy appsv1.Deployment
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "mysql-lion-dc1", Namespace: "shared-lion",
+	}, &deploy); err != nil {
+		t.Fatalf("deployment not found: %v", err)
+	}
+
+	tgps := deploy.Spec.Template.Spec.TerminationGracePeriodSeconds
+	if tgps == nil {
+		t.Fatal("expected TerminationGracePeriodSeconds to be set")
+	}
+	if *tgps != 60 {
+		t.Errorf("expected TerminationGracePeriodSeconds=60, got %d", *tgps)
 	}
 }
 
