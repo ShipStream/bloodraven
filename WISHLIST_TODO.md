@@ -18,7 +18,7 @@ Tracking implementation progress for items in [bloodraven-wishlist.md](bloodrave
 - [ ] 9. Shared-node support (per-failover-group taint scoping)
 - [x] 10. Per-site extra containers and init containers (`spec.extraContainers`, `spec.extraInitContainers`) — `327b6c5`
 - [x] 11. Pod annotations and labels passthrough (`spec.podLabels`, `spec.podAnnotations`) — `2ee4d22`
-- [ ] 12. PodDisruptionBudget management
+- [x] 12. PodDisruptionBudget management
 - [x] 13. Configurable service types and annotations (`spec.serviceTemplate`) — `327b6c5`
 - [ ] 14. Webhook-based notifications
 

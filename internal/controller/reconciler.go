@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -61,6 +62,7 @@ type MysqlFailoverGroupReconciler struct {
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps;services;persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
@@ -167,6 +169,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	if err := r.reconcileReplicasService(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile replicas service: %w", err)
+	}
+	if err := r.reconcilePDB(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile pdb: %w", err)
 	}
 
 	// Sync pod labels based on status
@@ -730,6 +735,39 @@ func (r *MysqlFailoverGroupReconciler) reconcileReplicasService(ctx context.Cont
 					Port:       mysqlPort,
 					TargetPort: intstr.FromInt32(mysqlPort),
 					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		}
+		return nil
+	})
+	return err
+}
+
+func (r *MysqlFailoverGroupReconciler) reconcilePDB(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	minAvailable := intstr.FromInt32(1)
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("mysql-%s", fg.Name),
+			Namespace: fg.Namespace,
+		},
+	}
+
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pdb, func() error {
+		if err := controllerutil.SetControllerReference(fg, pdb, r.Scheme); err != nil {
+			return err
+		}
+		pdb.Labels = map[string]string{
+			labelAppName:       "mysql",
+			labelInstance:      fg.Name,
+			labelFailoverGroup: fg.Name,
+			labelManagedBy:     managerName,
+		}
+		pdb.Spec = policyv1.PodDisruptionBudgetSpec{
+			MinAvailable: &minAvailable,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					labelAppName:  "mysql",
+					labelInstance: fg.Name,
 				},
 			},
 		}

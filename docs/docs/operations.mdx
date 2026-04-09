@@ -154,7 +154,7 @@ The operator uses a finalizer to ensure graceful cleanup when a `MysqlFailoverGr
 
 1. Node taints are removed from all sites
 2. The `DNSEndpoint` CR is automatically garbage-collected via its owner reference to the `MysqlFailoverGroup`
-3. MySQL pods, Services, and PVCs are deleted
+3. MySQL pods, Services, PVCs, and the PodDisruptionBudget are deleted
 4. The finalizer is removed and the CR is deleted
 
 To delete:

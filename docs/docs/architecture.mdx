@@ -82,6 +82,10 @@ Each `MysqlFailoverGroup` named `orders` produces these Services:
 
 The `-primary` and `-replicas` Services use label selectors that the operator updates when the topology changes. See [App Integration](./app-integration.mdx) for connection details.
 
+## PodDisruptionBudget
+
+Each failover group gets a `PodDisruptionBudget` named `mysql-<name>` with `minAvailable: 1`. This ensures at least one MySQL instance remains running during voluntary disruptions such as node drains and cluster upgrades.
+
 ## Labels
 
 All resources managed by the operator carry a standard set of labels:
