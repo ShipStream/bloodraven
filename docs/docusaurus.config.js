@@ -12,7 +12,7 @@ import {themes as prismThemes} from 'prism-react-renderer';
 const config = {
   title: 'Bloodraven',
   tagline: 'Kubernetes operator for MySQL async replication failover',
-  favicon: 'img/favicon.ico',
+  favicon: 'img/favicon.png',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
   future: {
@@ -70,15 +70,16 @@ const config = {
   themeConfig:
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
-      image: 'img/docusaurus-social-card.jpg',
+      image: 'img/hero.jpg',
       colorMode: {
+        defaultMode: 'dark',
         respectPrefersColorScheme: true,
       },
       navbar: {
         title: 'Bloodraven',
         logo: {
           alt: 'Bloodraven Logo',
-          src: 'img/logo.svg',
+          src: 'img/logo.png',
         },
         items: [
           {
@@ -124,7 +125,7 @@ const config = {
             ],
           },
         ],
-        copyright: `Copyright ${new Date().getFullYear()} ShipStream, Inc.`,
+        copyright: `Copyright ${new Date().getFullYear()} ShipStream, LLC`,
       },
       prism: {
         theme: prismThemes.github,

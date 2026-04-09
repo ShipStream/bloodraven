@@ -282,6 +282,18 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 
 	metrics.WSClientCount.Set(float64(tm.hub.ClientCount()))
 
+	// Emit site state metrics every poll cycle.
+	for i := range tm.sites {
+		currentState := tm.sites[i].state.String()
+		for _, s := range metrics.AllStates {
+			val := 0.0
+			if s == currentState {
+				val = 1.0
+			}
+			metrics.SiteState.WithLabelValues(tm.sites[i].name, s).Set(val)
+		}
+	}
+
 	// Check replication status on the read-only site (the replica).
 	var siteRepl [2]*mysql.ReplicaStatus
 	for i := range tm.sites {
@@ -292,6 +304,33 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 			} else {
 				siteRepl[i] = rs
 			}
+		}
+	}
+
+	// Emit replication metrics.
+	for i := range tm.sites {
+		name := tm.sites[i].name
+		if siteRepl[i] != nil {
+			if siteRepl[i].SecondsBehindSource != nil {
+				metrics.ReplicationLag.WithLabelValues(name).Set(float64(*siteRepl[i].SecondsBehindSource))
+			} else {
+				metrics.ReplicationLag.WithLabelValues(name).Set(-1)
+			}
+			ioVal := 0.0
+			if siteRepl[i].IORunning {
+				ioVal = 1.0
+			}
+			sqlVal := 0.0
+			if siteRepl[i].SQLRunning {
+				sqlVal = 1.0
+			}
+			metrics.ReplicationRunning.WithLabelValues(name, "io").Set(ioVal)
+			metrics.ReplicationRunning.WithLabelValues(name, "sql").Set(sqlVal)
+		} else if tm.sites[i].state == state.StateWritable {
+			// Primary site: clear replication metrics (not a replica).
+			metrics.ReplicationLag.DeleteLabelValues(name)
+			metrics.ReplicationRunning.DeleteLabelValues(name, "io")
+			metrics.ReplicationRunning.DeleteLabelValues(name, "sql")
 		}
 	}
 

@@ -28,9 +28,28 @@ var (
 		Name: "bloodraven_dns_flips_total",
 		Help: "Number of DNS flips per target site.",
 	}, []string{"site"})
+
+	ReplicationLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_replication_lag_seconds",
+		Help: "Replication lag in seconds. Only set for the replica site; -1 if lag is NULL (not replicating).",
+	}, []string{"site"})
+
+	ReplicationRunning = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_replication_running",
+		Help: "Whether a replication thread is running (1=yes, 0=no). Thread label is 'io' or 'sql'.",
+	}, []string{"site", "thread"})
+
+	SiteState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_site_state",
+		Help: "Current site state as a state-set (1 for current state, 0 for others). State label is 'writable', 'read-only', 'unreachable', or 'unknown'.",
+	}, []string{"site", "state"})
 )
+
+// AllStates is the set of possible site states, used to emit the full state-set.
+var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
 
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {
-	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount)
+	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount,
+		ReplicationLag, ReplicationRunning, SiteState)
 }

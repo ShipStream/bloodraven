@@ -4,27 +4,171 @@
  * work well for content-centric websites.
  */
 
-/* You can override the default Infima variables here. */
+/* Bloodraven dark crimson / amber palette */
 :root {
-  --ifm-color-primary: #2e8555;
-  --ifm-color-primary-dark: #29784c;
-  --ifm-color-primary-darker: #277148;
-  --ifm-color-primary-darkest: #205d3b;
-  --ifm-color-primary-light: #33925d;
-  --ifm-color-primary-lighter: #359962;
-  --ifm-color-primary-lightest: #3cad6e;
+  --ifm-color-primary: #9b2c2c;
+  --ifm-color-primary-dark: #8b2727;
+  --ifm-color-primary-darker: #832525;
+  --ifm-color-primary-darkest: #6c1e1e;
+  --ifm-color-primary-light: #ab3131;
+  --ifm-color-primary-lighter: #b33333;
+  --ifm-color-primary-lightest: #c44848;
   --ifm-code-font-size: 95%;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+  --ifm-font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    Oxygen, Ubuntu, Cantarell, sans-serif;
 }
 
-/* For readability concerns, you should choose a lighter palette in dark mode. */
 [data-theme='dark'] {
-  --ifm-color-primary: #25c2a0;
-  --ifm-color-primary-dark: #21af90;
-  --ifm-color-primary-darker: #1fa588;
-  --ifm-color-primary-darkest: #1a8870;
-  --ifm-color-primary-light: #29d5b0;
-  --ifm-color-primary-lighter: #32d8b4;
-  --ifm-color-primary-lightest: #4fddbf;
+  --ifm-color-primary: #e85d5d;
+  --ifm-color-primary-dark: #e44141;
+  --ifm-color-primary-darker: #e23333;
+  --ifm-color-primary-darkest: #ca1a1a;
+  --ifm-color-primary-light: #ec7979;
+  --ifm-color-primary-lighter: #ee8787;
+  --ifm-color-primary-lightest: #f4afaf;
+  --ifm-background-color: #0f0f13;
+  --ifm-background-surface-color: #18181f;
+  --ifm-navbar-background-color: #111117;
+  --ifm-footer-background-color: #0a0a0e;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+/* Hero section with background image */
+.hero-bloodraven {
+  position: relative;
+  min-height: 600px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  overflow: hidden;
+  padding: 4rem 2rem;
+}
+
+.hero-bloodraven::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: url('/img/hero.jpg') center/cover no-repeat;
+  z-index: 0;
+}
+
+.hero-bloodraven::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(10, 10, 14, 0.55) 0%,
+    rgba(10, 10, 14, 0.85) 100%
+  );
+  z-index: 1;
+}
+
+.hero-bloodraven .hero-content {
+  position: relative;
+  z-index: 2;
+  max-width: 700px;
+}
+
+.hero-bloodraven .hero__title {
+  font-size: 3.2rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #fff;
+  margin-bottom: 0.5rem;
+  text-shadow: 0 2px 20px rgba(0, 0, 0, 0.6);
+}
+
+.hero-bloodraven .hero__subtitle {
+  font-size: 1.3rem;
+  color: rgba(255, 255, 255, 0.85);
+  margin-bottom: 2rem;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.5);
+}
+
+.hero-bloodraven .button--hero {
+  background: #c53030;
+  color: #fff;
+  border: none;
+  font-size: 1.1rem;
+  padding: 0.75rem 2rem;
+  border-radius: 8px;
+  font-weight: 600;
+  transition: background 0.2s, transform 0.15s;
+  text-shadow: none;
+}
+
+.hero-bloodraven .button--hero:hover {
+  background: #e53e3e;
+  color: #fff;
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+
+/* Light mode hero overlay is heavier so text stays readable */
+[data-theme='light'] .hero-bloodraven::after {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.45) 0%,
+    rgba(255, 255, 255, 0.80) 100%
+  );
+}
+
+[data-theme='light'] .hero-bloodraven .hero__title {
+  color: #1a1a2e;
+  text-shadow: none;
+}
+
+[data-theme='light'] .hero-bloodraven .hero__subtitle {
+  color: #333;
+  text-shadow: none;
+}
+
+/* Features section */
+.features-section {
+  padding: 3rem 0;
+}
+
+[data-theme='dark'] .features-section {
+  background: #111117;
+}
+
+.feature-card {
+  padding: 1.5rem;
+  border-radius: 12px;
+  height: 100%;
+}
+
+[data-theme='dark'] .feature-card {
+  background: #1a1a24;
+  border: 1px solid #2a2a35;
+}
+
+[data-theme='light'] .feature-card {
+  background: #f8f8fa;
+  border: 1px solid #e2e2e8;
+}
+
+.feature-card h3 {
+  font-size: 1.15rem;
+  margin-bottom: 0.5rem;
+}
+
+.feature-icon {
+  font-size: 1.6rem;
+  margin-bottom: 0.75rem;
+  display: block;
+}
+
+@media screen and (max-width: 996px) {
+  .hero-bloodraven {
+    min-height: 440px;
+    padding: 3rem 1.5rem;
+  }
+
+  .hero-bloodraven .hero__title {
+    font-size: 2.2rem;
+  }
 }

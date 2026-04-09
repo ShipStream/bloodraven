@@ -19,6 +19,9 @@ Metrics are served on `:8080/metrics` in standard Prometheus exposition format.
 | `bloodraven_taint_operations_total` | Counter | `site`, `action` | Count of node taint/untaint operations |
 | `bloodraven_dns_flips_total` | Counter | `site` | Count of Cloudflare DNS record updates |
 | `bloodraven_websocket_clients` | Gauge | -- | Number of currently connected WebSocket clients |
+| `bloodraven_replication_lag_seconds` | Gauge | `site` | Replication lag in seconds on the replica site. `-1` if lag is NULL (not replicating). Only present for replica sites. |
+| `bloodraven_replication_running` | Gauge | `site`, `thread` | Whether a replication thread is running (`1`=yes, `0`=no). Thread is `io` or `sql`. Only present for replica sites. |
+| `bloodraven_site_state` | Gauge | `site`, `state` | Current site state as a state-set: `1` for the current state, `0` for others. State is `writable`, `read-only`, `unreachable`, or `unknown`. |
 
 ### Scrape configuration
 
@@ -95,6 +98,34 @@ groups:
           severity: warning
         annotations:
           summary: "Failover occurred: DNS flipped to {{ $labels.site }}"
+
+      # Replication lag exceeds threshold
+      - alert: BloodravenReplicationLagging
+        expr: bloodraven_replication_lag_seconds > 300
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replication lag on {{ $labels.site }} is {{ $value }}s"
+
+      # Replication thread down
+      - alert: BloodravenReplicationDown
+        expr: bloodraven_replication_running == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Replication {{ $labels.thread }} thread stopped on {{ $labels.site }}"
+
+      # No writable site
+      - alert: BloodravenNoWritableSite
+        expr: |
+          max(bloodraven_site_state{state="writable"}) == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "No site is currently writable"
 ```
 
 ## Status API
@@ -158,7 +189,7 @@ ws.onmessage = (event) => {
 | `Ready=False`, both sites `read-only` | No primary exists (may follow a failed failover) | See [Operations: Manual promotion](./operations.mdx#manual-promotion) |
 | `Ready=False`, both sites `writable` | Split brain | See [Operations: Split brain recovery](./operations.mdx#split-brain-recovery) |
 | Repeated failovers | Flapping network or unstable MySQL | Check `bloodraven_state_transitions_total` and consider increasing `failureThreshold` or `failoverCooldown` |
-| High replication lag | Slow network, heavy write load, or undersized replica | Check `status.sites[].secondsBehindSource` and MySQL performance metrics |
+| High replication lag | Slow network, heavy write load, or undersized replica | Check `bloodraven_replication_lag_seconds` and MySQL performance metrics |
 
 ### Operator logs
 
