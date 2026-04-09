@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	k8sretry "k8s.io/client-go/util/retry"
 )
 
 const (
@@ -42,7 +43,15 @@ func (t *nodeTainter) SetTaint(ctx context.Context, zone string, taint bool) err
 
 	var errs []error
 	for _, node := range nodes.Items {
-		if err := t.patchNodeTaint(ctx, node, taint); err != nil {
+		node := node
+		if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+			// Re-fetch the node to get latest resource version.
+			fresh, err := t.client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("get node %s: %w", node.Name, err)
+			}
+			return t.patchNodeTaint(ctx, *fresh, taint)
+		}); err != nil {
 			errs = append(errs, err)
 		}
 	}

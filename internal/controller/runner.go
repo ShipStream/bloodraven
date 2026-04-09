@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	k8sretry "k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -443,7 +444,16 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		return
 	}
 
-	if err := r.client.Status().Update(ctx, &freshPair); err != nil {
+	if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+		// Re-fetch the CR to get the latest resource version.
+		var fresh v1alpha1.MysqlReplicaPair
+		if err := r.client.Get(ctx, nn, &fresh); err != nil {
+			return err
+		}
+		// Apply status changes to the freshly-fetched object.
+		fresh.Status = freshPair.Status
+		return r.client.Status().Update(ctx, &fresh)
+	}); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.logger.Warn("CR deleted during status update, skipping", "pair", nn)
 			return
