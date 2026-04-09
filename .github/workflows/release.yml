@@ -86,7 +86,7 @@ jobs:
   helm:
     name: Publish Helm Chart
     runs-on: ubuntu-latest
-    needs: draft-release
+    needs: docker
     steps:
       - uses: actions/checkout@v6
         with:
@@ -127,7 +127,7 @@ jobs:
           git worktree add gh-pages-worktree origin/gh-pages
           mkdir -p gh-pages-worktree/charts
           cp .cr-release-packages/*.tgz gh-pages-worktree/charts/
-          helm repo index gh-pages-worktree --url https://shipstream.github.io/bloodraven
+          helm repo index gh-pages-worktree --url https://raw.githubusercontent.com/${{ github.repository }}/gh-pages
           cd gh-pages-worktree
           git add .
           git commit -m "Publish chart bloodraven-${GITHUB_REF_NAME#v}"

@@ -18,7 +18,8 @@ This guide walks through installing Bloodraven and creating your first `MysqlFai
 ## Install the operator
 
 ```bash
-helm install bloodraven charts/bloodraven \
+helm repo add bloodraven https://raw.githubusercontent.com/shipstream/bloodraven/gh-pages
+helm install bloodraven bloodraven/bloodraven \
   -n bloodraven \
   --create-namespace
 ```
