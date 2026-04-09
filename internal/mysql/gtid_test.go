@@ -267,3 +267,18 @@ func TestParseGTIDSet_TaggedGTID_BackwardCompatible(t *testing.T) {
 		}
 	}
 }
+
+func TestParseGTIDSet_MalformedIntervalNotTreatedAsTag(t *testing.T) {
+	// These inputs must return errors, not be silently misparsed as tagged GTID entries.
+	tests := []string{
+		"uuid:5-3:7-9",   // start > end in first interval; must error, not skip as tag
+		"uuid: 1-5:7-9",  // leading whitespace in first interval; must error, not skip as tag
+		"uuid:1-2-3:7-9", // malformed interval (extra hyphen); must error, not skip as tag
+	}
+	for _, input := range tests {
+		_, err := ParseGTIDSet(input)
+		if err == nil {
+			t.Errorf("expected error for %q, got nil", input)
+		}
+	}
+}
