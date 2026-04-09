@@ -14,14 +14,22 @@ linters:
 
 issues:
   exclude-rules:
-    - path: "internal/sidecar/server\\.go"
+    # Ignore unchecked w.Write / json.Encoder.Encode errors in HTTP handlers —
+    # these are fire-and-forget writes where the connection may already be broken.
+    - path: "internal/sidecar/server\.go"
       linters: [errcheck]
-    - path: "cmd/bloodraven/main\\.go"
+    - path: "cmd/bloodraven/main\.go"
       linters: [errcheck]
-    - path: "_test\\.go"
+    # Ignore unchecked writes in test helpers (httptest servers, etc.)
+    - path: ".*_test\.go"
+      linters: [errcheck]
+    # Ignore unused helpers in test files (may be used by upcoming tests).
+    - path: ".*_test\.go"
       linters: [unused]
+    # Ignore deprecation warnings — we track these separately.
     - linters: [staticcheck]
       text: "SA1019:"
-    - path: "internal/mysql/replication\\.go"
+    # Ignore empty branch in replication.go fallback comment block.
+    - path: "internal/mysql/replication\.go"
       linters: [staticcheck]
       text: "SA9003:"
