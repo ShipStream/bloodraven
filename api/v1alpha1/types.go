@@ -99,6 +99,14 @@ type MysqlFailoverGroupSpec struct {
 	// +kubebuilder:default=30
 	// +kubebuilder:validation:Minimum=1
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
+	// PodLabels are additional labels applied to every MySQL pod managed by this failover group.
+	// These are merged with the operator's required labels; operator labels take precedence on conflict.
+	PodLabels map[string]string `json:"podLabels,omitempty"`
+
+	// PodAnnotations are additional annotations applied to every MySQL pod managed by this failover group.
+	// These are merged with the operator's required annotations; operator annotations take precedence on conflict.
+	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
 }
 
 // ReplicationSpec configures replication health monitoring.

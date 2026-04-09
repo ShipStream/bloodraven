@@ -391,6 +391,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 
 		podLabels := make(map[string]string)
+		for k, v := range fg.Spec.PodLabels {
+			podLabels[k] = v
+		}
+		// Operator labels take precedence over user-supplied labels.
 		for k, v := range labels {
 			podLabels[k] = v
 		}
@@ -572,12 +576,17 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			})
 		}
 
+		podAnnotations := make(map[string]string)
+		for k, v := range fg.Spec.PodAnnotations {
+			podAnnotations[k] = v
+		}
+		// Operator annotations take precedence over user-supplied annotations.
+		podAnnotations[specHashAnnotation] = specHash
+
 		deploy.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
-				Labels: podLabels,
-				Annotations: map[string]string{
-					specHashAnnotation: specHash,
-				},
+				Labels:      podLabels,
+				Annotations: podAnnotations,
 			},
 			Spec: corev1.PodSpec{
 				NodeSelector: map[string]string{
