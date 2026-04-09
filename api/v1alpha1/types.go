@@ -95,6 +95,9 @@ type MysqlFailoverGroupSpec struct {
 	// +kubebuilder:validation:Enum=OrderedUpdate;Recreate
 	UpdateStrategy string `json:"updateStrategy,omitempty"`
 
+	// SidecarResources defines the compute resources for the sidecar container.
+	SidecarResources corev1.ResourceRequirements `json:"sidecarResources,omitempty"`
+
 	// TerminationGracePeriodSeconds is the grace period for MySQL container shutdown. Default: 30
 	// +kubebuilder:default=30
 	// +kubebuilder:validation:Minimum=1

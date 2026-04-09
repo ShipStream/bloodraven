@@ -125,6 +125,7 @@ func (in *MysqlFailoverGroupSpec) DeepCopyInto(out *MysqlFailoverGroupSpec) {
 		*out = new(v1.Duration)
 		**out = **in
 	}
+	in.SidecarResources.DeepCopyInto(&out.SidecarResources)
 	in.Sidecar.DeepCopyInto(&out.Sidecar)
 	if in.MysqlConf != nil {
 		in, out := &in.MysqlConf, &out.MysqlConf

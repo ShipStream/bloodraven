@@ -6,7 +6,7 @@ Tracking implementation progress for items in [bloodraven-wishlist.md](bloodrave
 
 - [ ] 1. DNS flip before MySQL promotion (reverse the failover sequence)
 - [x] 2. MySQL configuration management — already implemented as `spec.mysqlConf`, docs added
-- [ ] 3. Container resource requests and limits — `spec.sites[].resources` exists, needs defaults/validation
+- [x] 3. Container resource requests and limits — `spec.sites[].resources` existed, added `spec.sidecarResources`
 - [ ] 4. Multiple MySQL credentials (`spec.credentials`)
 - [ ] 5. Backup and restore (`spec.backup`)
 - [x] 6. Reduce default failover cooldown (60m → 5m) — `8cdcf46`, `3594235`

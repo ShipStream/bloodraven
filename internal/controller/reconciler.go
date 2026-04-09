@@ -520,6 +520,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
 				},
 				VolumeMounts: sidecarVolumeMounts,
+				Resources:    fg.Spec.SidecarResources,
 				LivenessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
 						HTTPGet: &corev1.HTTPGetAction{
@@ -902,6 +903,7 @@ func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) st
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
 	fmt.Fprintf(h, "sidecar=%s\n", fg.Spec.SidecarImage)
 	fmt.Fprintf(h, "resources=%v\n", site.Resources)
+	fmt.Fprintf(h, "sidecarResources=%v\n", fg.Spec.SidecarResources)
 	// Sort mysqlConf keys for deterministic hash
 	keys := make([]string, 0, len(fg.Spec.MysqlConf))
 	for k := range fg.Spec.MysqlConf {

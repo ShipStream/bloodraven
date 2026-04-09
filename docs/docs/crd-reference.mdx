@@ -22,6 +22,7 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 | `failureThreshold` | int | No | `3` | Consecutive failed polls before a site is marked unreachable |
 | `recoveryThreshold` | int | No | `2` | Consecutive successful polls before a site is marked writable |
 | `failoverCooldown` | duration | No | `5m` | Minimum time between automatic failovers |
+| `sidecarResources` | ResourceRequirements | No | -- | Compute resources (requests/limits) for the sidecar container |
 | `mysqlConf` | map[string]string | No | -- | MySQL configuration overrides merged into the generated `my.cnf`. Changes trigger an ordered rolling restart when `updateStrategy: OrderedUpdate` is set. |
 | `replication` | ReplicationSpec | No | -- | Replication health settings |
 | `updateStrategy` | string | No | `OrderedUpdate` | Update strategy. Set to `OrderedUpdate` for zero-downtime rollouts. |
@@ -42,6 +43,7 @@ Each entry in `spec.sites` defines one site in the failover group.
 | `zone` | string | Yes | Availability zone or region for pod scheduling |
 | `lbIP` | string | Yes | Load balancer IP address. Used for DNS A-record steering on failover. |
 | `storage` | StorageSpec | Yes | Persistent storage configuration for this site |
+| `resources` | ResourceRequirements | No | Compute resources (requests/limits) for the MySQL container at this site |
 
 ### StorageSpec
 
@@ -101,13 +103,34 @@ spec:
       storage:
         storageClassName: fast-ssd
         size: 100Gi
+      resources:
+        requests:
+          cpu: "2"
+          memory: "16Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"
     - name: pdx
       zone: us-west-2a
       lbIP: 10.0.2.1
       storage:
         storageClassName: fast-ssd
         size: 100Gi
+      resources:
+        requests:
+          cpu: "2"
+          memory: "16Gi"
+        limits:
+          cpu: "4"
+          memory: "16Gi"
   secretName: mysql-credentials
+  sidecarResources:
+    requests:
+      cpu: "100m"
+      memory: "64Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
   dns:
     hostname: orders.az.example.com
     ttl: 60
