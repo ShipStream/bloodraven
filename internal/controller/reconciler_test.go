@@ -562,3 +562,24 @@ func TestGenerateMyCnf(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateMyCnf_CloneDDLTimeout_Default(t *testing.T) {
+	pair := newTestPair()
+	// CloneTimeout is zero (not set), should default to 3600
+	cnf := generateMyCnf(pair)
+	if !strings.Contains(cnf, "clone_ddl_timeout=3600") {
+		t.Error("my.cnf should contain clone_ddl_timeout=3600 by default")
+	}
+}
+
+func TestGenerateMyCnf_CloneDDLTimeout_Custom(t *testing.T) {
+	pair := newTestPair()
+	pair.Spec.CloneTimeout = 7200
+	cnf := generateMyCnf(pair)
+	if !strings.Contains(cnf, "clone_ddl_timeout=7200") {
+		t.Errorf("my.cnf should contain clone_ddl_timeout=7200, got:\n%s", cnf)
+	}
+	if strings.Contains(cnf, "clone_ddl_timeout=3600") {
+		t.Error("my.cnf should not contain default clone_ddl_timeout=3600 when custom value is set")
+	}
+}

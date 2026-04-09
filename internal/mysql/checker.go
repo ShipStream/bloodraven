@@ -28,7 +28,7 @@ type Checker interface {
 
 	// Clone plugin methods:
 	SetCloneDonorList(ctx context.Context, donor string) error
-	CloneInstance(ctx context.Context, user, host, password string, useSSL bool) error
+	CloneInstance(ctx context.Context, user, host, password string, useSSL bool, cloneTimeoutSec int) error
 }
 
 type checker struct {
