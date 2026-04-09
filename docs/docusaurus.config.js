@@ -35,6 +35,13 @@ const config = {
     mermaid: true,
   },
 
+  plugins: [
+    ['docusaurus-plugin-llms', {
+      generateLLMsTxt: true,
+      generateLLMsFullTxt: true,
+    }],
+  ],
+
   themes: ['@docusaurus/theme-mermaid'],
 
   i18n: {
