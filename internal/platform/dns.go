@@ -16,12 +16,6 @@ type DNSUpdater interface {
 	UpdateDNSRecord(ctx context.Context, ip string) error
 }
 
-var dnsEndpointGVR = schema.GroupVersionResource{
-	Group:    "externaldns.k8s.io",
-	Version:  "v1alpha1",
-	Resource: "dnsendpoints",
-}
-
 type dnsEndpointUpdater struct {
 	client    client.Client
 	ownerRef  metav1.OwnerReference
