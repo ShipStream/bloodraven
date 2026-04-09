@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	k8sretry "k8s.io/client-go/util/retry"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -748,8 +749,22 @@ func (r *MysqlReplicaPairReconciler) syncPodLabels(ctx context.Context, pair *v1
 
 			if needsUpdate {
 				logger.Info("updating pod labels", "pod", pod.Name, "role", dc.role, "healthy", healthy)
-				if err := r.Update(ctx, pod); err != nil {
-					return fmt.Errorf("update pod %s labels: %w", pod.Name, err)
+				podName := pod.Name
+				podNamespace := pod.Namespace
+				if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+					// Re-fetch the pod to get the latest resource version.
+					var fresh corev1.Pod
+					if err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: podNamespace}, &fresh); err != nil {
+						return err
+					}
+					if fresh.Labels == nil {
+						fresh.Labels = make(map[string]string)
+					}
+					fresh.Labels[labelRole] = dc.role
+					fresh.Labels[labelHealthy] = healthy
+					return r.Update(ctx, &fresh)
+				}); err != nil {
+					return fmt.Errorf("update pod %s labels: %w", podName, err)
 				}
 			}
 		}

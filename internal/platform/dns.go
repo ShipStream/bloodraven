@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/shipstream/bloodraven/internal/util"
 )
 
 // DNSUpdater updates DNS records for failover.
@@ -54,34 +57,45 @@ func (c *cloudflareDNS) UpdateAZRecord(ctx context.Context, ip string) error {
 		return err
 	}
 
-	// Update it
-	body := cfUpdateRequest{
-		Type:    "A",
-		Name:    recordName,
-		Content: ip,
-		TTL:     60,
-	}
-	data, _ := json.Marshal(body)
+	// Update with retry for transient errors (5xx, timeouts, connection errors).
+	// Client errors (4xx) are permanent and not retried.
+	return util.RetryWithBackoff(ctx, slog.Default(), 3, 1*time.Second, func() error {
+		body := cfUpdateRequest{
+			Type:    "A",
+			Name:    recordName,
+			Content: ip,
+			TTL:     60,
+		}
+		data, _ := json.Marshal(body)
 
-	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records/%s", c.zoneID, recordID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.apiToken)
-	req.Header.Set("Content-Type", "application/json")
+		url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records/%s", c.zoneID, recordID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(data))
+		if err != nil {
+			return &util.PermanentError{Err: err}
+		}
+		req.Header.Set("Authorization", "Bearer "+c.apiToken)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("cloudflare update: %w", err)
-	}
-	defer resp.Body.Close()
+		resp, err := c.client.Do(req)
+		if err != nil {
+			// Network errors (timeouts, connection refused) are transient.
+			return fmt.Errorf("cloudflare update: %w", err)
+		}
+		defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusOK {
+			return nil
+		}
+
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("cloudflare update failed (%d): %s", resp.StatusCode, respBody)
-	}
-	return nil
+		apiErr := fmt.Errorf("cloudflare update failed (%d): %s", resp.StatusCode, respBody)
+
+		// Only retry on server errors (5xx), not client errors (4xx).
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return &util.PermanentError{Err: apiErr}
+		}
+		return apiErr
+	})
 }
 
 func (c *cloudflareDNS) findRecord(ctx context.Context, name string) (string, error) {
