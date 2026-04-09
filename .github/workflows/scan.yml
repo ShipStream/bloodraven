@@ -50,24 +50,23 @@ jobs:
             --load \
             .
 
-      - name: Run Trivy vulnerability scan
+      - name: Run Trivy vulnerability scan (SARIF)
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ matrix.image }}:${{ github.sha }}-${{ matrix.arch }}
           format: sarif
           output: trivy-${{ matrix.image }}-${{ matrix.arch }}.sarif
-          exit-code: '1'
+          exit-code: '0'
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
 
-      - name: Run Trivy scan (table output)
-        if: always()
+      - name: Run Trivy vulnerability scan (table)
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ matrix.image }}:${{ github.sha }}-${{ matrix.arch }}
           format: table
-          exit-code: '0'
+          exit-code: '1'
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
