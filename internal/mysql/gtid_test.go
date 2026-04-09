@@ -171,3 +171,99 @@ func TestGTIDSet_String_Sorted(t *testing.T) {
 		t.Errorf("String() = %q, want %q", gs.String(), want)
 	}
 }
+
+func TestParseGTIDSet_TaggedGTID(t *testing.T) {
+	gs, err := ParseGTIDSet("3e11fa47-71ca-11e1-9e33-c80aa9429562:mytag:1-5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gs) != 1 {
+		t.Fatalf("expected 1 UUID, got %d", len(gs))
+	}
+	intervals := gs["3e11fa47-71ca-11e1-9e33-c80aa9429562"]
+	if len(intervals) != 1 {
+		t.Fatalf("expected 1 interval, got %d", len(intervals))
+	}
+	if intervals[0].Start != 1 || intervals[0].End != 5 {
+		t.Errorf("expected 1-5, got %d-%d", intervals[0].Start, intervals[0].End)
+	}
+}
+
+func TestParseGTIDSet_TaggedGTID_SingleTransaction(t *testing.T) {
+	gs, err := ParseGTIDSet("uuid1:admin:42")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	intervals := gs["uuid1"]
+	if len(intervals) != 1 {
+		t.Fatalf("expected 1 interval, got %d", len(intervals))
+	}
+	if intervals[0].Start != 42 || intervals[0].End != 42 {
+		t.Errorf("expected 42-42, got %d-%d", intervals[0].Start, intervals[0].End)
+	}
+}
+
+func TestParseGTIDSet_TaggedGTID_MultipleIntervals(t *testing.T) {
+	gs, err := ParseGTIDSet("uuid1:mytag:1-3:7-9")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	intervals := gs["uuid1"]
+	if len(intervals) != 2 {
+		t.Fatalf("expected 2 intervals, got %d", len(intervals))
+	}
+	if intervals[0].Start != 1 || intervals[0].End != 3 {
+		t.Errorf("interval 0: expected 1-3, got %d-%d", intervals[0].Start, intervals[0].End)
+	}
+	if intervals[1].Start != 7 || intervals[1].End != 9 {
+		t.Errorf("interval 1: expected 7-9, got %d-%d", intervals[1].Start, intervals[1].End)
+	}
+}
+
+func TestParseGTIDSet_TaggedGTID_Mixed(t *testing.T) {
+	gs, err := ParseGTIDSet("uuid1:1-5,uuid2:data:1-3:7-9")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gs) != 2 {
+		t.Fatalf("expected 2 UUIDs, got %d", len(gs))
+	}
+
+	if gs["uuid1"][0].Start != 1 || gs["uuid1"][0].End != 5 {
+		t.Errorf("uuid1: expected 1-5, got %d-%d", gs["uuid1"][0].Start, gs["uuid1"][0].End)
+	}
+
+	if len(gs["uuid2"]) != 2 {
+		t.Fatalf("uuid2: expected 2 intervals, got %d", len(gs["uuid2"]))
+	}
+	if gs["uuid2"][0].Start != 1 || gs["uuid2"][0].End != 3 {
+		t.Errorf("uuid2 interval 0: expected 1-3, got %d-%d", gs["uuid2"][0].Start, gs["uuid2"][0].End)
+	}
+	if gs["uuid2"][1].Start != 7 || gs["uuid2"][1].End != 9 {
+		t.Errorf("uuid2 interval 1: expected 7-9, got %d-%d", gs["uuid2"][1].Start, gs["uuid2"][1].End)
+	}
+}
+
+func TestParseGTIDSet_TaggedGTID_BackwardCompatible(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int64
+	}{
+		{"uuid1:1-5", 5},
+		{"uuid1:1-5,uuid2:1-3:7-9", 5 + 3 + 3},
+		{"uuid1:42", 1},
+		{"uuid1:tag:1-5", 5},
+		{"uuid1:admin:42", 1},
+		{"uuid1:data:1-3:7-9", 3 + 3},
+	}
+	for _, tt := range tests {
+		gs, err := ParseGTIDSet(tt.input)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tt.input, err)
+		}
+		got := gs.TransactionCount()
+		if got != tt.want {
+			t.Errorf("TransactionCount(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}

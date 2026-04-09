@@ -18,7 +18,10 @@ type Interval struct {
 
 // ParseGTIDSet parses a MySQL GTID set string like "uuid1:1-5,uuid2:1-3:7-9".
 // Multiple UUIDs are separated by commas. Multiple intervals for the same UUID
-// are separated by colons after the initial uuid:interval.
+// are separated by colons after the initial uuid[:tag]:interval.
+// Supported formats:
+//   - Traditional: uuid:interval[:interval][,uuid:interval[:interval]]...
+//   - Tagged:      uuid:tag:interval[:interval][,uuid:tag:interval[:interval]]...
 func ParseGTIDSet(s string) (GTIDSet, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -29,10 +32,11 @@ func ParseGTIDSet(s string) (GTIDSet, error) {
 
 	// Split by comma to get per-UUID entries. However, a single UUID entry
 	// can look like "uuid:1-5:7-9" (colons separate intervals within one UUID).
+	// With tags, it can look like "uuid:tag:1-5:7-9".
 	// The tricky part: commas separate different UUIDs, and within a UUID entry
-	// colons separate the UUID from its intervals, and intervals from each other.
+	// colons separate the UUID from its (optional) tag, and the tag/intervals from each other.
 	//
-	// MySQL GTID format: uuid:interval[:interval][,uuid:interval[:interval]]...
+	// MySQL GTID format: uuid[:tag]:interval[:interval][,uuid[:tag]:interval[:interval]]...
 	// where interval is either "n" or "n-m".
 
 	// Split by comma first to separate UUID groups. But note that newlines
@@ -46,10 +50,10 @@ func ParseGTIDSet(s string) (GTIDSet, error) {
 			continue
 		}
 
-		// Split by colon: first element is UUID, rest are intervals.
+		// Split by colon: first element is UUID, second might be tag or interval, rest are intervals.
 		segments := strings.Split(part, ":")
 		if len(segments) < 2 {
-			return nil, fmt.Errorf("invalid GTID entry %q: expected uuid:interval", part)
+			return nil, fmt.Errorf("invalid GTID entry %q: expected uuid[:tag]:interval", part)
 		}
 
 		uuid := segments[0]
@@ -57,9 +61,21 @@ func ParseGTIDSet(s string) (GTIDSet, error) {
 			return nil, fmt.Errorf("empty UUID in GTID entry %q", part)
 		}
 
+		// Determine if we have a tag (format: uuid:tag:interval) or not (format: uuid:interval)
+		// A tag is present if we have at least 3 segments and the second segment is not a valid interval
+		tagIndex := 1
+		if len(segments) >= 3 {
+			secondSeg := segments[1]
+			if secondSeg != "" {
+				if _, err := parseInterval(secondSeg); err != nil {
+					tagIndex = 2
+				}
+			}
+		}
+
 		hasInterval := false
-		for _, seg := range segments[1:] {
-			seg = strings.TrimSpace(seg)
+		for i := tagIndex; i < len(segments); i++ {
+			seg := strings.TrimSpace(segments[i])
 			if seg == "" {
 				continue
 			}
