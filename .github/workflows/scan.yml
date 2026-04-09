@@ -73,7 +73,7 @@ jobs:
           severity: 'CRITICAL,HIGH'
 
       - name: Upload SARIF to GitHub Security tab
-        if: always()
+        if: always() && github.event.pull_request.head.repo.full_name == github.repository
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-${{ matrix.image }}-${{ matrix.arch }}.sarif
