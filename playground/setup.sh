@@ -105,7 +105,7 @@ ok "All images built"
 IMAGES=(bloodraven:playground bloodraven-sidecar:playground bloodraven-counter:playground bloodraven-dashboard:playground bloodraven-dns-webhook:playground)
 
 if command -v k3d >/dev/null 2>&1 && k3d cluster list 2>/dev/null | grep -q .; then
-  K3D_CLUSTER=$(k3d cluster list -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['name'])" 2>/dev/null || echo "")
+  K3D_CLUSTER=$(k3d cluster list --no-headers 2>/dev/null | awk 'NR==1 {print $1}' || echo "")
   if [[ -n "$K3D_CLUSTER" ]]; then
     info "Loading images into k3d cluster '$K3D_CLUSTER'..."
     k3d image import "${IMAGES[@]}" -c "$K3D_CLUSTER"

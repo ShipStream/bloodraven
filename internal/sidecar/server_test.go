@@ -3,6 +3,7 @@ package sidecar
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -161,11 +162,37 @@ func TestStatusReturns503WhenMySQLFails(t *testing.T) {
 	}
 }
 
+// fakeOperator returns an httptest.Server that responds to /active-site requests.
+func fakeOperator(activeSite string, statusCode int) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		if statusCode == http.StatusOK {
+			json.NewEncoder(w).Encode(map[string]string{"active_site": activeSite})
+		} else {
+			json.NewEncoder(w).Encode(map[string]string{"error": "test"})
+		}
+	}))
+}
+
+func safetyNetConfig(operatorAddr, mySite string) *Config {
+	return &Config{
+		MySite:            mySite,
+		PodNamespace:      "default",
+		FailoverGroup:     "orders",
+		BloodravenAddress: operatorAddr,
+	}
+}
+
 func TestSafetyNetSetsSuperReadOnlyOnNonActiveSite(t *testing.T) {
+	op := fakeOperator("site1", http.StatusOK)
+	defer op.Close()
+	addr := op.Listener.Addr().String()
+
 	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
 	srv := NewServer(mock, ":0", testLogger())
 
-	srv.RunSafetyNet(context.Background(), "site2", "site1")
+	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
 
 	if !mock.setReadOnlyCalled {
 		t.Error("safety net should set super_read_only on non-active site with read_only=OFF")
@@ -173,10 +200,14 @@ func TestSafetyNetSetsSuperReadOnlyOnNonActiveSite(t *testing.T) {
 }
 
 func TestSafetyNetSkipsActiveSite(t *testing.T) {
+	op := fakeOperator("site1", http.StatusOK)
+	defer op.Close()
+	addr := op.Listener.Addr().String()
+
 	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
 	srv := NewServer(mock, ":0", testLogger())
 
-	srv.RunSafetyNet(context.Background(), "site1", "site1")
+	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site1"))
 
 	if mock.setReadOnlyCalled {
 		t.Error("safety net should not set super_read_only on active site")
@@ -184,23 +215,102 @@ func TestSafetyNetSkipsActiveSite(t *testing.T) {
 }
 
 func TestSafetyNetSkipsWhenAlreadyReadOnly(t *testing.T) {
+	op := fakeOperator("site1", http.StatusOK)
+	defer op.Close()
+	addr := op.Listener.Addr().String()
+
 	mock := &mockMysqlQuerier{connectable: true, readOnly: true}
 	srv := NewServer(mock, ":0", testLogger())
 
-	srv.RunSafetyNet(context.Background(), "site2", "site1")
+	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
 
 	if mock.setReadOnlyCalled {
 		t.Error("safety net should not set super_read_only when already read-only")
 	}
 }
 
-func TestSafetyNetSkipsWhenEnvNotSet(t *testing.T) {
+func TestSafetyNetSkipsMissingIdentity(t *testing.T) {
 	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
 	srv := NewServer(mock, ":0", testLogger())
 
-	srv.RunSafetyNet(context.Background(), "", "")
+	srv.RunSafetyNet(context.Background(), &Config{})
 
 	if mock.setReadOnlyCalled {
-		t.Error("safety net should not set super_read_only when env vars not set")
+		t.Error("safety net should not set super_read_only when identity not configured")
+	}
+}
+
+func TestSafetyNetSkipsOperatorUnavailable(t *testing.T) {
+	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
+	srv := NewServer(mock, ":0", testLogger())
+
+	// Use a bogus address that won't connect.
+	srv.RunSafetyNet(context.Background(), safetyNetConfig("127.0.0.1:1", "site2"))
+
+	if mock.setReadOnlyCalled {
+		t.Error("safety net should not set super_read_only when operator is unreachable")
+	}
+}
+
+func TestSafetyNetSkipsOperator503(t *testing.T) {
+	op := fakeOperator("", http.StatusServiceUnavailable)
+	defer op.Close()
+	addr := op.Listener.Addr().String()
+
+	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
+	srv := NewServer(mock, ":0", testLogger())
+
+	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
+
+	if mock.setReadOnlyCalled {
+		t.Error("safety net should skip when operator returns 503")
+	}
+}
+
+func TestSafetyNetSkipsOperator404(t *testing.T) {
+	op := fakeOperator("", http.StatusNotFound)
+	defer op.Close()
+	addr := op.Listener.Addr().String()
+
+	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
+	srv := NewServer(mock, ":0", testLogger())
+
+	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
+
+	if mock.setReadOnlyCalled {
+		t.Error("safety net should skip when operator returns 404")
+	}
+}
+
+func TestSafetyNetSkipsEmptyActiveSite(t *testing.T) {
+	op := fakeOperator("", http.StatusOK)
+	defer op.Close()
+	addr := op.Listener.Addr().String()
+
+	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
+	srv := NewServer(mock, ":0", testLogger())
+
+	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
+
+	if mock.setReadOnlyCalled {
+		t.Error("safety net should skip when operator returns empty active_site")
+	}
+}
+
+func TestSafetyNetSkipsMalformedJSON(t *testing.T) {
+	op := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "not json")
+	}))
+	defer op.Close()
+	addr := op.Listener.Addr().String()
+
+	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
+	srv := NewServer(mock, ":0", testLogger())
+
+	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
+
+	if mock.setReadOnlyCalled {
+		t.Error("safety net should skip when operator returns malformed JSON")
 	}
 }

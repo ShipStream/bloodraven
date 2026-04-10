@@ -286,6 +286,13 @@ func (r *TopologyManagerRunner) Ready() bool {
 	return false
 }
 
+// SetManagerForTest injects a TopologyManager for testing. Not for production use.
+func (r *TopologyManagerRunner) SetManagerForTest(nn types.NamespacedName, tm *TopologyManager) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.managers[nn] = &managedTopology{tm: tm}
+}
+
 // StopManager stops and removes the topology manager for the given NamespacedName.
 // This is called from the reconciler's finalizer handling when a CR is being deleted.
 func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {

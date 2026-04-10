@@ -9,10 +9,29 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// WSMessage is the message sent to WebSocket clients.
-type WSMessage struct {
-	Site   string `json:"site"`
-	Status string `json:"status"` // "online" or "offline"
+// TopologyMessage is the rich WebSocket broadcast payload describing the
+// current state of a single failover group. It is sent to all connected
+// /ws/status clients on every poll cycle.
+type TopologyMessage struct {
+	Namespace          string         `json:"namespace"`
+	Group              string         `json:"group"`
+	ActiveSite         string         `json:"activeSite"`
+	Sites              []TopologySite `json:"sites"`
+	LastFailover       string         `json:"lastFailover,omitempty"`
+	LastFailoverTarget string         `json:"lastFailoverTarget,omitempty"`
+	Alert              string         `json:"alert,omitempty"`
+	UpdatePhase        string         `json:"updatePhase,omitempty"`
+	PollTime           string         `json:"pollTime"`
+}
+
+// TopologySite is a single site entry inside a TopologyMessage.
+type TopologySite struct {
+	Name                string `json:"name"`
+	State               string `json:"state"`
+	LastSeen            string `json:"lastSeen,omitempty"`
+	Replicating         bool   `json:"replicating"`
+	SecondsBehindSource *int64 `json:"secondsBehindSource,omitempty"`
+	GtidExecuted        string `json:"gtidExecuted,omitempty"`
 }
 
 // Hub manages websocket connections and broadcasts state changes.
@@ -64,8 +83,8 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// Broadcast sends a status message to all connected clients.
-func (h *Hub) Broadcast(msg WSMessage) {
+// Broadcast sends a topology message to all connected clients.
+func (h *Hub) Broadcast(msg TopologyMessage) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		h.logger.Error("marshal ws message", "error", err)

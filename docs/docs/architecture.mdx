@@ -57,7 +57,7 @@ The operator runs as a single-replica Deployment. For each `MysqlFailoverGroup`,
 The operator exposes:
 - **Prometheus metrics** on `:8080/metrics`
 - **Health probes** on an auxiliary port
-- **Status API** on `:8082` (`GET /status`, `GET /ws/status`)
+- **Status API** on `:8082` (`GET /status`, `GET /active-site`, `GET /ws/status`)
 
 ## Sidecar (`bloodraven-sidecar`)
 
@@ -66,6 +66,7 @@ Each MySQL pod includes a sidecar container that:
 - Responds to health and readiness probes
 - Monitors connectivity to both the operator and the peer site
 - **Self-fences** if both the operator and the peer are unreachable: sets `SET GLOBAL super_read_only=ON` on its local MySQL instance to prevent a stale primary from accepting writes during a network partition
+- **Startup safety net**: on boot, queries the operator's `GET /active-site` endpoint to determine the current active site. If this sidecar is on a standby site but MySQL has `read_only=OFF`, it sets `super_read_only=ON` to prevent a stale primary from accepting writes after a pod restart following failover
 
 This self-fencing behavior is a critical safety net. Even if the operator is down, an isolated MySQL instance will not accept writes that could diverge from the other site.
 

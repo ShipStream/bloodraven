@@ -28,7 +28,8 @@ func main() {
 		"lease_timeout", cfg.LeaseTimeout,
 		"peer_check_interval", cfg.PeerCheckInterval,
 		"my_site", cfg.MySite,
-		"active_site", cfg.ActiveSite,
+		"namespace", cfg.PodNamespace,
+		"failover_group", cfg.FailoverGroup,
 	)
 
 	mysql, err := sidecar.NewLiveMysqlFromDSN(cfg.MysqlDSN)
@@ -54,7 +55,7 @@ func main() {
 	srv := sidecar.NewServer(mysql, cfg.ListenAddr, logger)
 
 	// Run startup safety net
-	srv.RunSafetyNet(ctx, cfg.MySite, cfg.ActiveSite)
+	srv.RunSafetyNet(ctx, cfg)
 
 	// Create the fencing monitor
 	fm := sidecar.NewFencingMonitor(

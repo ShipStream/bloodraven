@@ -25,8 +25,9 @@ type SiteTopologyConfig struct {
 
 // TopologyConfig holds topology manager configuration, decoupled from config source.
 type TopologyConfig struct {
-	Name  string // failover group name (from CR metadata.name)
-	Sites [2]SiteTopologyConfig
+	Namespace string // failover group namespace (from CR metadata.namespace)
+	Name      string // failover group name (from CR metadata.name)
+	Sites     [2]SiteTopologyConfig
 
 	// SiteHosts are the MySQL service hostnames (without port) for each site.
 	// Used as the donor/source host for clone and replication setup.
@@ -143,8 +144,9 @@ type SiteStatusEntry struct {
 
 // StatusResponse is returned by the /status endpoint.
 type StatusResponse struct {
-	Sites    [2]SiteStatusEntry `json:"sites"`
-	PollTime string             `json:"poll_time"`
+	ActiveSite string             `json:"active_site"`
+	Sites      [2]SiteStatusEntry `json:"sites"`
+	PollTime   string             `json:"poll_time"`
 }
 
 func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
@@ -187,10 +189,28 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysq
 	}
 }
 
+// activeSiteLocked returns the name of the single writable site, or "" if zero
+// or more than one site is writable. Must be called with tm.mu held.
+func (tm *TopologyManager) activeSiteLocked() string {
+	var name string
+	var count int
+	for i := range tm.sites {
+		if tm.sites[i].state == state.StateWritable {
+			name = tm.sites[i].name
+			count++
+		}
+	}
+	if count == 1 {
+		return name
+	}
+	return ""
+}
+
 func (tm *TopologyManager) Status() StatusResponse {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	return StatusResponse{
+		ActiveSite: tm.activeSiteLocked(),
 		Sites: [2]SiteStatusEntry{
 			{Name: tm.sites[0].name, State: tm.sites[0].state.String()},
 			{Name: tm.sites[1].name, State: tm.sites[1].state.String()},
@@ -378,13 +398,8 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 
 	// Notify the status callback on any state change.
 	if anyTransition && tm.StatusCallback != nil {
-		activeSite := ""
-		for i := range tm.sites {
-			if tm.sites[i].state == state.StateWritable {
-				activeSite = tm.sites[i].name
-			}
-		}
 		tm.mu.RLock()
+		activeSite := tm.activeSiteLocked()
 		bootstrapPhase := string(tm.bootstrapPhase)
 		bootstrapErrStr := ""
 		if tm.bootstrapErr != nil {
@@ -404,6 +419,48 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 			BootstrapError:     bootstrapErrStr,
 		})
 	}
+
+	// Broadcast full topology to WebSocket clients on every poll cycle.
+	tm.broadcastTopology(siteRepl, alertMsg)
+}
+
+// broadcastTopology builds a full TopologyMessage from the current locked
+// state and pushes it to all WebSocket clients. Called at the end of every
+// poll cycle so dashboards get live updates (not just on transitions).
+func (tm *TopologyManager) broadcastTopology(siteRepl [2]*mysql.ReplicaStatus, alertMsg string) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	sites := make([]platform.TopologySite, 0, len(tm.sites))
+	for i := range tm.sites {
+		s := platform.TopologySite{
+			Name:  tm.sites[i].name,
+			State: tm.sites[i].state.String(),
+		}
+		if !tm.sites[i].lastSeen.IsZero() {
+			s.LastSeen = tm.sites[i].lastSeen.Format(time.RFC3339)
+		}
+		if siteRepl[i] != nil {
+			s.Replicating = siteRepl[i].IORunning && siteRepl[i].SQLRunning
+			s.SecondsBehindSource = siteRepl[i].SecondsBehindSource
+			s.GtidExecuted = siteRepl[i].ExecutedGtidSet
+		}
+		sites = append(sites, s)
+	}
+
+	msg := platform.TopologyMessage{
+		Namespace:          tm.cfg.Namespace,
+		Group:              tm.cfg.Name,
+		ActiveSite:         tm.activeSiteLocked(),
+		Sites:              sites,
+		LastFailoverTarget: tm.lastFailoverTarget,
+		Alert:              alertMsg,
+		PollTime:           tm.lastPollTime.Format(time.RFC3339),
+	}
+	if !tm.lastFailover.IsZero() {
+		msg.LastFailover = tm.lastFailover.Format(time.RFC3339)
+	}
+	tm.hub.Broadcast(msg)
 }
 
 // computeState applies debounce logic and returns the new state for a site.
@@ -456,9 +513,6 @@ func (tm *TopologyManager) applyPerSiteAction(ctx context.Context, site *siteTra
 		}
 	}
 
-	if action.Broadcast != "" {
-		tm.hub.Broadcast(platform.WSMessage{Site: site.name, Status: action.Broadcast})
-	}
 }
 
 func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action state.CrossSiteAction) {

@@ -167,17 +167,76 @@ curl http://localhost:8082/status
 }
 ```
 
+### `GET /active-site`
+
+Returns the active (writable) site for a specific failover group. Used by the sidecar's startup safety net.
+
+```bash
+curl "http://localhost:8082/active-site?namespace=default&group=orders"
+```
+
+```json
+{
+  "namespace": "default",
+  "group": "orders",
+  "active_site": "iad"
+}
+```
+
+| Status | Meaning |
+|---|---|
+| `200` | Failover group found. `active_site` may be `""` if no single writable site exists (first boot, split-brain). |
+| `400` | Missing `namespace` or `group` query parameter. |
+| `404` | Failover group not found on this operator instance. |
+| `503` | Operator has no active topology managers (startup race or non-leader replica). |
+
 ### `GET /ws/status`
 
-WebSocket endpoint that streams state changes in real time. Each message is a JSON object with the same structure as the `/status` response, sent whenever the state changes.
+WebSocket endpoint that streams the full topology of each failover group in
+real time. A message is sent at the end of every operator poll cycle (default
+every 2s per group), not only on state transitions, so dashboards can render
+live counters and health indicators.
+
+Each message is a JSON object with camelCase keys:
+
+```json
+{
+  "namespace": "default",
+  "group": "orders",
+  "activeSite": "iad",
+  "sites": [
+    {
+      "name": "iad",
+      "state": "writable",
+      "lastSeen": "2026-04-10T00:00:00Z",
+      "replicating": false
+    },
+    {
+      "name": "pdx",
+      "state": "read-only",
+      "lastSeen": "2026-04-10T00:00:00Z",
+      "replicating": true,
+      "secondsBehindSource": 0,
+      "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-45839"
+    }
+  ],
+  "lastFailover": "2026-04-09T22:10:00Z",
+  "lastFailoverTarget": "iad",
+  "pollTime": "2026-04-10T00:00:00Z"
+}
+```
 
 ```javascript
 const ws = new WebSocket("ws://localhost:8082/ws/status");
 ws.onmessage = (event) => {
-  const status = JSON.parse(event.data);
-  console.log("Active site:", status.failoverGroups[0].activeSite);
+  const msg = JSON.parse(event.data);
+  console.log(`${msg.group}: active=${msg.activeSite}`);
 };
 ```
+
+Note that WebSocket keys are camelCase while the REST `/status` endpoint
+returns snake_case (`active_site`, `poll_time`). REST clients that want to
+share rendering code with a WebSocket consumer should normalize keys.
 
 ## Troubleshooting
 

@@ -3,6 +3,7 @@ package sidecar
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -93,16 +94,34 @@ func (s *Server) handlePeerPing(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("pong"))
 }
 
-// RunSafetyNet checks MySQL state on startup and sets super_read_only=ON
-// if this sidecar is not in the active site but MySQL has read_only=OFF.
-func (s *Server) RunSafetyNet(ctx context.Context, mySite, activeSite string) {
-	if mySite == "" || activeSite == "" {
-		s.logger.Info("safety net skipped: MY_SITE or ACTIVE_SITE not set")
+// activeSiteResponse is the JSON response from the operator's /active-site endpoint.
+type activeSiteResponse struct {
+	ActiveSite string `json:"active_site"`
+}
+
+// RunSafetyNet queries the operator for the active site and sets super_read_only=ON
+// if this sidecar is on a standby site but MySQL has read_only=OFF.
+func (s *Server) RunSafetyNet(ctx context.Context, cfg *Config) {
+	if cfg.MySite == "" || cfg.PodNamespace == "" || cfg.FailoverGroup == "" || cfg.BloodravenAddress == "" {
+		s.logger.Info("safety net skipped: required identity not configured",
+			"my_site", cfg.MySite, "namespace", cfg.PodNamespace,
+			"failover_group", cfg.FailoverGroup, "bloodraven_address", cfg.BloodravenAddress)
 		return
 	}
 
-	if mySite == activeSite {
-		s.logger.Info("safety net: this is the active site, no action needed", "site", mySite)
+	activeSite, err := s.queryActiveSite(ctx, cfg)
+	if err != nil {
+		s.logger.Warn("safety net skipped: could not query active site from operator", "error", err)
+		return
+	}
+
+	if activeSite == "" {
+		s.logger.Info("safety net skipped: no active site reported by operator")
+		return
+	}
+
+	if cfg.MySite == activeSite {
+		s.logger.Info("safety net: this is the active site, no action needed", "site", cfg.MySite)
 		return
 	}
 
@@ -114,11 +133,44 @@ func (s *Server) RunSafetyNet(ctx context.Context, mySite, activeSite string) {
 
 	if !readOnly {
 		s.logger.Warn("SAFETY NET: standby site has read_only=OFF, setting super_read_only=ON",
-			"my_site", mySite, "active_site", activeSite)
+			"my_site", cfg.MySite, "active_site", activeSite)
 		if err := s.mysql.SetSuperReadOnly(ctx); err != nil {
 			s.logger.Error("safety net: failed to set super_read_only", "error", err)
 		} else {
 			s.logger.Info("safety net: super_read_only=ON set successfully")
 		}
+	}
+}
+
+func (s *Server) queryActiveSite(ctx context.Context, cfg *Config) (string, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	url := fmt.Sprintf("http://%s/active-site?namespace=%s&group=%s",
+		cfg.BloodravenAddress, cfg.PodNamespace, cfg.FailoverGroup)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request operator: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var result activeSiteResponse
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return "", fmt.Errorf("decode response: %w", err)
+		}
+		return result.ActiveSite, nil
+	case http.StatusServiceUnavailable:
+		return "", fmt.Errorf("operator not ready (503)")
+	case http.StatusNotFound:
+		return "", fmt.Errorf("failover group %s/%s not found (404)", cfg.PodNamespace, cfg.FailoverGroup)
+	default:
+		return "", fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 }

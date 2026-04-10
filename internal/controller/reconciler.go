@@ -543,9 +543,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					{Name: "PEER_ADDRESS", Value: peerAddress},
 					{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
 					{Name: "MY_SITE", Value: site.Name},
-					// ACTIVE_SITE is intentionally omitted from the deployment spec
-					// to avoid triggering rollouts when the active site changes.
-					// The sidecar's safety net will be skipped (gracefully) on startup.
+					{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
+						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+					}},
+					{Name: "FAILOVER_GROUP", Value: fg.Name},
 					{Name: "LEASE_TIMEOUT", Value: leaseTimeout},
 					{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
 				},
@@ -997,7 +998,8 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 	}
 
 	return TopologyConfig{
-		Name: fg.Name,
+		Namespace: fg.Namespace,
+		Name:      fg.Name,
 		Sites: [2]SiteTopologyConfig{
 			{
 				Name: fg.Spec.Sites[0].Name,

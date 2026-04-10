@@ -36,19 +36,18 @@ func TestEvalPerSiteTransition(t *testing.T) {
 		name      string
 		prev, cur SiteState
 		wantTaint *bool
-		wantBC    string
 	}{
-		{"no change writable", StateWritable, StateWritable, nil, ""},
-		{"no change readonly", StateReadOnly, StateReadOnly, nil, ""},
-		{"writable->readonly", StateWritable, StateReadOnly, boolPtr(true), "offline"},
-		{"writable->unreachable", StateWritable, StateUnreachable, boolPtr(true), "offline"},
-		{"readonly->writable", StateReadOnly, StateWritable, boolPtr(false), "online"},
-		{"unreachable->writable", StateUnreachable, StateWritable, boolPtr(false), "online"},
-		{"readonly->unreachable", StateReadOnly, StateUnreachable, nil, ""},
-		{"unreachable->readonly", StateUnreachable, StateReadOnly, nil, ""},
-		{"unknown->writable", StateUnknown, StateWritable, boolPtr(false), "online"},
-		{"unknown->readonly", StateUnknown, StateReadOnly, boolPtr(true), "offline"},
-		{"unknown->unreachable", StateUnknown, StateUnreachable, boolPtr(true), "offline"},
+		{"no change writable", StateWritable, StateWritable, nil},
+		{"no change readonly", StateReadOnly, StateReadOnly, nil},
+		{"writable->readonly", StateWritable, StateReadOnly, boolPtr(true)},
+		{"writable->unreachable", StateWritable, StateUnreachable, boolPtr(true)},
+		{"readonly->writable", StateReadOnly, StateWritable, boolPtr(false)},
+		{"unreachable->writable", StateUnreachable, StateWritable, boolPtr(false)},
+		{"readonly->unreachable", StateReadOnly, StateUnreachable, nil},
+		{"unreachable->readonly", StateUnreachable, StateReadOnly, nil},
+		{"unknown->writable", StateUnknown, StateWritable, boolPtr(false)},
+		{"unknown->readonly", StateUnknown, StateReadOnly, boolPtr(true)},
+		{"unknown->unreachable", StateUnknown, StateUnreachable, boolPtr(true)},
 	}
 
 	for _, tt := range tests {
@@ -56,9 +55,6 @@ func TestEvalPerSiteTransition(t *testing.T) {
 			a := EvalPerSiteTransition(tt.prev, tt.cur)
 			if !boolPtrEq(a.Taint, tt.wantTaint) {
 				t.Errorf("taint: got %v, want %v", fmtBoolPtr(a.Taint), fmtBoolPtr(tt.wantTaint))
-			}
-			if a.Broadcast != tt.wantBC {
-				t.Errorf("broadcast: got %q, want %q", a.Broadcast, tt.wantBC)
 			}
 		})
 	}

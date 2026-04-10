@@ -115,8 +115,10 @@ function connectWS() {
 }
 
 function handleMessage(msg) {
-  // The operator broadcasts WSMessage with failover group status.
-  // Structure: { group: string, activeSite: string, sites: [...], lastFailover: string }
+  // Expected structure: { namespace, group, activeSite, sites: [...],
+  //   lastFailover, lastFailoverTarget, alert, updatePhase, pollTime }
+  // The operator's /ws/status broadcasts this shape on every poll cycle.
+  // The REST /status fallback uses snake_case and is mapped via normalizeStatus().
   if (msg.sites) {
     renderSites(msg);
     detectChanges(msg);
@@ -296,21 +298,33 @@ function copyCmd(cmd) {
   }
 }
 
-// Also poll the REST status endpoint as a fallback
+// Normalize REST /status JSON (snake_case) to the shape handleMessage expects.
+// The operator returns {active_site, sites, poll_time}; handleMessage reads
+// activeSite/sites/pollTime.
+function normalizeStatus(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  return {
+    activeSite: raw.active_site,
+    sites: raw.sites,
+    pollTime: raw.poll_time,
+  };
+}
+
+// Poll the REST status endpoint as a fallback when the WebSocket isn't
+// connected. The WS broadcast (/ws/status) is the primary source of live
+// topology and fires on every operator poll cycle.
 async function pollStatus() {
   try {
     const r = await fetch('/api/operator/status');
     if (!r.ok) return;
     const data = await r.json();
-    // Adapt REST response to match WS message format.
-    // The operator returns {"namespace/name": {sites: [...], poll_time: "..."}}.
-    // Always process REST data since WebSocket only sends simple site/status msgs.
+    // The operator returns {"namespace/name": {active_site, sites, poll_time}}.
     if (data.sites) {
-      handleMessage(data);
+      handleMessage(normalizeStatus(data));
     } else if (typeof data === 'object') {
       for (const key of Object.keys(data)) {
         if (data[key] && data[key].sites) {
-          handleMessage(data[key]);
+          handleMessage(normalizeStatus(data[key]));
         }
       }
     }
