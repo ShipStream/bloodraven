@@ -530,3 +530,54 @@ func TestReplicationNotCheckedOnWritableSite(t *testing.T) {
 		t.Error("writable site should not have replication status checked")
 	}
 }
+
+func TestAdaptivePollInterval(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	base := tm.cfg.PollIntervalDuration() // 50ms in test config
+
+	// No failures → base interval.
+	if got := tm.adaptivePollInterval(base); got != base {
+		t.Errorf("healthy: expected %v, got %v", base, got)
+	}
+
+	// Failures below threshold → still base interval.
+	tm.sites[0].failCount = tm.cfg.FailureThreshold - 1
+	if got := tm.adaptivePollInterval(base); got != base {
+		t.Errorf("below threshold: expected %v, got %v", base, got)
+	}
+
+	// At threshold → still base (backoff starts after threshold).
+	tm.sites[0].failCount = tm.cfg.FailureThreshold
+	if got := tm.adaptivePollInterval(base); got != base {
+		t.Errorf("at threshold: expected %v, got %v", base, got)
+	}
+
+	// One failure past threshold → 2x base.
+	tm.sites[0].failCount = tm.cfg.FailureThreshold + 1
+	if got := tm.adaptivePollInterval(base); got != 2*base {
+		t.Errorf("threshold+1: expected %v, got %v", 2*base, got)
+	}
+
+	// Two past threshold → 4x base.
+	tm.sites[0].failCount = tm.cfg.FailureThreshold + 2
+	if got := tm.adaptivePollInterval(base); got != 4*base {
+		t.Errorf("threshold+2: expected %v, got %v", 4*base, got)
+	}
+
+	// Capped at 2^maxPollBackoffExponent * base.
+	tm.sites[0].failCount = tm.cfg.FailureThreshold + 100
+	got := tm.adaptivePollInterval(base)
+	maxInterval := base * time.Duration(1<<maxPollBackoffExponent)
+	if got != maxInterval {
+		t.Errorf("cap: expected %v, got %v", maxInterval, got)
+	}
+
+	// Recovery resets interval: clear failures.
+	tm.sites[0].failCount = 0
+	if got := tm.adaptivePollInterval(base); got != base {
+		t.Errorf("after recovery: expected %v, got %v", base, got)
+	}
+}

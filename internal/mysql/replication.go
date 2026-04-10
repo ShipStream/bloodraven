@@ -173,8 +173,8 @@ func (m *checker) StartReplica(ctx context.Context) error {
 
 func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	interval := 500 * time.Millisecond
+	const maxInterval = 4 * time.Second
 
 	for {
 		rs, err := m.ShowReplicaStatus(ctx)
@@ -195,6 +195,11 @@ func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duratio
 			return nil
 		}
 
+		// SQL thread is running but has a permanent error — no point polling further.
+		if rs.LastError != "" {
+			return fmt.Errorf("relay log drain aborted: SQL thread error: %s", rs.LastError)
+		}
+
 		if time.Now().After(deadline) {
 			return fmt.Errorf("relay log drain timed out after %s", timeout)
 		}
@@ -202,7 +207,12 @@ func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duratio
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-time.After(interval):
+		}
+
+		// Exponential backoff: 500ms → 1s → 2s → 4s (cap).
+		if interval < maxInterval {
+			interval *= 2
 		}
 	}
 }
