@@ -57,6 +57,7 @@ type MysqlFailoverGroupSpec struct {
 	DNS DNSSpec `json:"dns"`
 
 	// PollInterval is how often to poll MySQL instances. Default: 2s
+	// +kubebuilder:default=2
 	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
 
 	// FailureThreshold is how many consecutive failures before marking unreachable. Default: 3
@@ -70,6 +71,7 @@ type MysqlFailoverGroupSpec struct {
 	RecoveryThreshold int32 `json:"recoveryThreshold,omitempty"`
 
 	// FailoverCooldown is the minimum time between failovers. Default: 5m
+	// +kubebuilder:default=300
 	FailoverCooldown *metav1.Duration `json:"failoverCooldown,omitempty"`
 
 	// Sidecar configures sidecar behavior.
@@ -202,9 +204,11 @@ type DNSSpec struct {
 // SidecarSpec configures the sidecar container behavior.
 type SidecarSpec struct {
 	// LeaseTimeout is how long before a sidecar lease expires. Default: 20s
+	// +kubebuilder:default=20
 	LeaseTimeout *metav1.Duration `json:"leaseTimeout,omitempty"`
 
 	// PeerCheckInterval is how often the sidecar checks its peer. Default: 5s
+	// +kubebuilder:default=5
 	PeerCheckInterval *metav1.Duration `json:"peerCheckInterval,omitempty"`
 
 	// BloodravenAddress is the address of the Bloodraven operator health endpoint.
