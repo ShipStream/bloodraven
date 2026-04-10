@@ -9,6 +9,7 @@ rules:
   resources:
   - configmaps
   - persistentvolumeclaims
+  - secrets
   - services
   verbs:
   - create
@@ -39,15 +40,26 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - secrets
+  - pods/log
   verbs:
   - get
-  - list
-  - watch
 - apiGroups:
   - apps
   resources:
   - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - cronjobs
+  - jobs
   verbs:
   - create
   - delete
@@ -83,6 +95,7 @@ rules:
 - apiGroups:
   - shipstream.io
   resources:
+  - mysqlbackups
   - mysqlfailovergroups
   verbs:
   - create
@@ -95,12 +108,14 @@ rules:
 - apiGroups:
   - shipstream.io
   resources:
+  - mysqlbackups/finalizers
   - mysqlfailovergroups/finalizers
   verbs:
   - update
 - apiGroups:
   - shipstream.io
   resources:
+  - mysqlbackups/status
   - mysqlfailovergroups/status
   verbs:
   - get

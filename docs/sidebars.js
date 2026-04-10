@@ -12,6 +12,7 @@ const sidebars = {
     'failover',
     'monitoring',
     'operations',
+    'backup-restore',
   ],
 };
 

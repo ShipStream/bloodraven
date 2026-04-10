@@ -1,0 +1,209 @@
+---
+sidebar_position: 10
+---
+
+# Backup and restore
+
+Bloodraven drives scheduled and on-demand MySQL backups using the
+`mysqlsh util.dumpInstance()` / `util.loadDump()` utilities against a
+configurable S3 or PVC destination. Restores are bootstrap-only in v1:
+populate a brand-new `MysqlFailoverGroup` from a previous dump before
+cross-site replication starts.
+
+## Concepts
+
+- **Backup profile** &mdash; a named, reusable configuration living on
+  `MysqlFailoverGroup.spec.backup.profiles[]`. Selects a storage target
+  (S3 or PVC), dump options, and retention.
+- **Backup schedule** &mdash; a cron expression on
+  `MysqlFailoverGroup.spec.backup.schedules[]` that references a profile
+  by name. Each schedule becomes a Kubernetes `CronJob` owned by the
+  operator.
+- **`MysqlBackup` CRD** &mdash; one CR per backup run. Created ad-hoc via
+  `kubectl create` or by the schedule CronJob. Tracks phase, start /
+  completion times, dump location, and size.
+- **Restore** &mdash; `spec.initFromBackup` on the failover group. Gates
+  initial bootstrap on a one-shot `util.loadDump()` into the first site.
+
+## Backup source selection
+
+The reconciler prefers the *replica* site as the dump source so the
+primary is not loaded by long-running backups. It falls back to the
+primary when the replica is unreachable, not replicating, or lagging
+beyond `spec.backup.maxLagSecondsForSource` (default `300`). Override
+per-backup with `spec.sourceSiteOverride` on a `MysqlBackup` CR.
+
+## S3 backup profile
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: orders
+spec:
+  image: mysql:9.6
+  secretName: mysql-credentials
+  # ... sites, dns, sidecar omitted ...
+  backup:
+    image: container-registry.oracle.com/mysql/community-shell:8.0
+    maxLagSecondsForSource: 120
+    profiles:
+      - name: nightly-s3
+        retention: 14
+        storage:
+          type: S3
+          s3:
+            bucket: shipstream-backups
+            prefix: orders
+            region: us-east-1
+            credentialsSecret: s3-backup-creds
+        dump:
+          threads: 8
+          bytesPerChunk: "128M"
+          compression: zstd
+          consistent: true
+    schedules:
+      - name: nightly
+        profileName: nightly-s3
+        schedule: "0 2 * * *"
+```
+
+The referenced `s3-backup-creds` Secret must contain
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally
+`AWS_SESSION_TOKEN` / `AWS_REGION`. The keys are injected into the
+backup Job pod via `envFrom` so `mysqlsh` picks them up natively.
+
+## MinIO or other S3-compatible stores
+
+Set `storage.s3.endpointURL` to the target endpoint (e.g.
+`https://minio.internal:9000`). The reconciler maps this onto
+mysqlsh's `s3EndpointOverride` option.
+
+## PVC-backed profile
+
+```yaml
+backup:
+  profiles:
+    - name: daily-local
+      storage:
+        type: PVC
+        pvc:
+          storageClassName: fast
+          size: 50Gi
+      dump:
+        compression: zstd
+```
+
+If `pvc.claimName` is empty the operator provisions a PVC named
+`mysql-<fg>-backup-<profile>`. Otherwise the user-managed claim is
+mounted read-write into the backup Job.
+
+## One-off backups
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlBackup
+metadata:
+  name: orders-preupgrade
+  namespace: orders
+spec:
+  failoverGroupRef:
+    name: orders
+  profileName: nightly-s3
+  triggeredBy: manual
+```
+
+Inspect with `kubectl get mysqlbackups`. The `Phase`, `Location`, and
+`Size` columns reflect the current state. Failed runs leave a condition
+on `.status.conditions` explaining the reason.
+
+## Restore at bootstrap
+
+To recover a lost failover group from a previous backup, create a
+**new** `MysqlFailoverGroup` that references an existing
+`MysqlBackup` CR in the same namespace:
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: orders
+spec:
+  image: mysql:9.6
+  secretName: mysql-credentials
+  # ... sites etc. ...
+  backup:
+    profiles:
+      - name: nightly-s3
+        storage:
+          type: S3
+          s3:
+            bucket: shipstream-backups
+            prefix: orders
+            credentialsSecret: s3-backup-creds
+  initFromBackup:
+    source:
+      mysqlBackupRef:
+        name: orders-preupgrade
+```
+
+The operator creates the first site's Deployment, waits for its MySQL
+to be Ready, then spawns a `mysql-<fg>-<site>-restore` Job that runs
+`util.loadDump()`. Once the Job reaches `Succeeded`,
+`status.restore.phase = Succeeded` and the normal replication bootstrap
+path populates the second site from the restored primary.
+
+You can also point `initFromBackup.source` directly at an S3 URL or a
+read-only PVC, which is useful when the source backup CR has been
+garbage-collected:
+
+```yaml
+initFromBackup:
+  source:
+    s3:
+      bucket: shipstream-backups
+      prefix: orders/orders-preupgrade
+      credentialsSecret: s3-backup-creds
+```
+
+Restores are one-shot. If the Job fails, inspect the logs, delete the
+Job, and the reconciler will rebuild it on the next pass. Restoring
+into a non-empty data directory is not supported &mdash; `util.loadDump()`
+fails fast with a clear error.
+
+## Retention
+
+Each profile's `retention` field caps the number of `Succeeded`
+`MysqlBackup` CRs kept for that profile. Older successes are deleted
+on the next reconcile after a successful run. A hard-coded cap of 10
+`Failed` CRs per profile prevents unbounded growth from repeated
+failures.
+
+:::note
+Remote S3 artifacts are **not** automatically deleted when a
+`MysqlBackup` CR is pruned. Use an S3 lifecycle rule or a manual
+sweep until artifact cleanup lands in a future release.
+:::
+
+## Required MySQL privileges
+
+Consistent dumps (`dump.consistent: true`, the default) need
+`BACKUP_ADMIN` on the backup user in addition to standard replication
+and dump grants:
+
+```sql
+GRANT RELOAD, LOCK TABLES, PROCESS, REPLICATION CLIENT,
+      SELECT, SHOW VIEW, EVENT, TRIGGER, BACKUP_ADMIN
+      ON *.* TO 'backup'@'%';
+```
+
+Without `BACKUP_ADMIN`, set `dump.consistent: false` on the profile.
+
+## Monitoring
+
+- `kubectl get mysqlbackups -A` &mdash; phase, location, size.
+- `kubectl describe mysqlfailovergroup <name>` &mdash; rollup under
+  `status.backupSchedules[]` and `status.lastBackupTime`.
+- `kubectl logs job/mysqlbackup-<name>` &mdash; live dump progress.

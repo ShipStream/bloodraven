@@ -123,6 +123,18 @@ type MysqlFailoverGroupSpec struct {
 	// ExtraInitContainers are additional init containers injected into every MySQL pod.
 	// These run after the operator's built-in init container.
 	ExtraInitContainers []corev1.Container `json:"extraInitContainers,omitempty"`
+
+	// Backup configures scheduled and on-demand backups for this failover
+	// group. Omit the field to disable backups entirely.
+	// +optional
+	Backup *BackupSpec `json:"backup,omitempty"`
+
+	// InitFromBackup, when set, gates normal bootstrap on a one-shot
+	// restore of the given backup into the initial primary site. The
+	// restore runs once; after success it is skipped on subsequent
+	// reconciles even if this field is still populated.
+	// +optional
+	InitFromBackup *InitFromBackupSpec `json:"initFromBackup,omitempty"`
 }
 
 // ReplicationSpec configures replication health monitoring.
@@ -245,6 +257,21 @@ type MysqlFailoverGroupStatus struct {
 
 	// UpdatePhase indicates the current phase of an ordered update, empty if not updating.
 	UpdatePhase string `json:"updatePhase,omitempty"`
+
+	// Restore tracks an in-flight or completed initFromBackup operation.
+	// +optional
+	Restore *RestoreStatus `json:"restore,omitempty"`
+
+	// BackupSchedules is a per-schedule rollup of the most recent backup
+	// activity for each entry in spec.backup.schedules.
+	// +optional
+	BackupSchedules []BackupScheduleStatus `json:"backupSchedules,omitempty"`
+
+	// LastBackupTime is the completion time of the most recent successful
+	// MysqlBackup across all profiles, regardless of whether it was
+	// scheduled or on-demand.
+	// +optional
+	LastBackupTime *metav1.Time `json:"lastBackupTime,omitempty"`
 }
 
 // SiteStatus describes the observed state of a single site.

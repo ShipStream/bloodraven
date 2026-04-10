@@ -107,7 +107,10 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		existing, ok := r.managers[nn]
 		r.mu.RUnlock()
 
+		suppress := restoreInFlight(fg)
+
 		if ok && existing.cfg == cfg {
+			existing.tm.SetAutoBootstrapSuppressed(suppress)
 			continue
 		}
 
@@ -118,7 +121,15 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		if err := r.startManager(ctx, fg, cfg); err != nil {
 			r.logger.Error("failed to start topology manager", "fg", nn, "error", err)
+			continue
 		}
+		// Apply the suppression flag on the freshly-started manager so the
+		// first poll cycle already respects an in-flight restore.
+		r.mu.RLock()
+		if mt, ok := r.managers[nn]; ok {
+			mt.tm.SetAutoBootstrapSuppressed(suppress)
+		}
+		r.mu.RUnlock()
 	}
 
 	// Stop managers for deleted CRs.

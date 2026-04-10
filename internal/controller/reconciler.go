@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -24,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -69,6 +71,9 @@ type MysqlFailoverGroupReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=externaldns.k8s.io,resources=dnsendpoints,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackups,verbs=get;list;watch;create;update;patch;delete
 
 func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -148,6 +153,12 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile configmap: %w", err)
 	}
 
+	// Reconcile backup assets (shared scripts ConfigMap + owned PVCs for
+	// PVC-backed profiles). No-op when spec.backup is nil.
+	if err := r.reconcileBackupAssets(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile backup assets: %w", err)
+	}
+
 	// Reconcile per-site resources
 	for i, site := range fg.Spec.Sites {
 		serverID := int32(101 + i)
@@ -175,6 +186,28 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile pdb: %w", err)
 	}
 
+	// Drive the one-shot restore Job when spec.initFromBackup is set.
+	// If a restore is still in flight we requeue early and skip pod label
+	// sync; the topology runner separately refuses to clone the replica
+	// until status.restore.phase == Succeeded (see runner.go).
+	restoreRequeue, err := r.reconcileRestoreJob(ctx, &fg)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile restore job: %w", err)
+	}
+	if restoreRequeue > 0 {
+		return ctrl.Result{RequeueAfter: restoreRequeue}, nil
+	}
+
+	// Reconcile scheduled backups (one CronJob per schedule entry).
+	if err := r.reconcileBackupSchedules(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile backup schedules: %w", err)
+	}
+
+	// Roll up backup status (per-schedule LastBackupTime etc).
+	if err := r.updateBackupStatus(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("update backup status: %w", err)
+	}
+
 	// Sync pod labels based on status
 	if err := r.syncPodLabels(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
@@ -190,7 +223,10 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&batchv1.Job{}).
+		Owns(&batchv1.CronJob{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToFailoverGroup)).
+		Watches(&v1alpha1.MysqlBackup{}, handler.EnqueueRequestsFromMapFunc(r.mapBackupToGroup)).
 		Complete(r)
 }
 
@@ -212,6 +248,18 @@ func (r *MysqlFailoverGroupReconciler) secretToFailoverGroup(ctx context.Context
 		}
 	}
 	return requests
+}
+
+// mapBackupToGroup enqueues the MysqlFailoverGroup referenced by a
+// MysqlBackup so that spec.status.backupSchedules[] stays fresh.
+func (r *MysqlFailoverGroupReconciler) mapBackupToGroup(_ context.Context, obj client.Object) []reconcile.Request {
+	backup, ok := obj.(*v1alpha1.MysqlBackup)
+	if !ok || backup.Spec.FailoverGroupRef.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{
+		{NamespacedName: types.NamespacedName{Namespace: backup.Namespace, Name: backup.Spec.FailoverGroupRef.Name}},
+	}
 }
 
 func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {

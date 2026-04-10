@@ -1,0 +1,51 @@
+# Example backup configuration for the playground failover group.
+#
+# Apply with:
+#   kubectl patch mysqlfailovergroup playground -n bloodraven-playground \
+#     --type merge --patch-file playground/manifests/backup-profile.yaml
+#
+# The S3 profile targets a MinIO sidecar expected at minio.bloodraven-playground:9000.
+# The PVC profile provisions a local RWO volume.
+#
+# To trigger a one-off backup:
+#   kubectl apply -f playground/manifests/mysqlbackup-adhoc.yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: playground
+  namespace: bloodraven-playground
+spec:
+  backup:
+    image: container-registry.oracle.com/mysql/community-shell:8.0
+    maxLagSecondsForSource: 60
+    activeDeadlineSeconds: 1800
+    profiles:
+      - name: minio
+        retention: 5
+        storage:
+          type: S3
+          s3:
+            bucket: bloodraven
+            prefix: playground
+            endpointURL: http://minio.bloodraven-playground:9000
+            credentialsSecret: minio-backup-creds
+        dump:
+          threads: 2
+          bytesPerChunk: "64M"
+          compression: zstd
+          consistent: true
+      - name: local-pvc
+        retention: 3
+        storage:
+          type: PVC
+          pvc:
+            storageClassName: playground-fast
+            size: 2Gi
+        dump:
+          threads: 2
+          compression: zstd
+    schedules:
+      - name: every-10min
+        profileName: minio
+        schedule: "*/10 * * * *"
+        concurrencyPolicy: Forbid
