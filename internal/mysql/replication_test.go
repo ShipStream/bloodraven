@@ -83,6 +83,8 @@ func (m *mockCheckerForDrain) WaitForRelayLogDrain(ctx context.Context, timeout 
 	// Mirror the real checker's WaitForRelayLogDrain logic for testing.
 	deadline := time.Now().Add(timeout)
 	interval := 100 * time.Millisecond
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 
 	for {
 		rs, err := m.ShowReplicaStatus(ctx)
@@ -107,11 +109,12 @@ func (m *mockCheckerForDrain) WaitForRelayLogDrain(ctx context.Context, timeout 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 		if interval < 400*time.Millisecond {
 			interval *= 2
 		}
+		timer.Reset(interval)
 	}
 }
 

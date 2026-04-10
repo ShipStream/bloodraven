@@ -176,6 +176,9 @@ func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duratio
 	interval := 500 * time.Millisecond
 	const maxInterval = 4 * time.Second
 
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+
 	for {
 		rs, err := m.ShowReplicaStatus(ctx)
 		if err != nil {
@@ -207,12 +210,13 @@ func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duratio
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 
 		// Exponential backoff: 500ms → 1s → 2s → 4s (cap).
 		if interval < maxInterval {
 			interval *= 2
 		}
+		timer.Reset(interval)
 	}
 }

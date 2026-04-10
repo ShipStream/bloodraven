@@ -207,10 +207,11 @@ func (tm *TopologyManager) Ready() bool {
 }
 
 // Run starts the polling loop. Blocks until ctx is cancelled.
-// maxPollBackoffMultiplier caps the exponential backoff at 16x the base interval
-// (e.g. 2s base → 32s cap). This keeps detection latency reasonable while still
+// maxPollBackoffExponent caps the exponential backoff at 2^4 = 16x the base
+// interval, subject to the 30s hard cap in adaptivePollInterval (e.g. 2s base
+// → 30s effective cap). This keeps detection latency reasonable while still
 // reducing waste when a DC is down for extended periods.
-const maxPollBackoffExponent = 4 // 2^4 = 16x
+const maxPollBackoffExponent = 4
 
 func (tm *TopologyManager) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)

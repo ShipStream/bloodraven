@@ -98,6 +98,8 @@ func (f *FakeClock) Advance(d time.Duration) {
 	for _, ft := range timers {
 		ft.maybeFire(now)
 	}
+
+	f.pruneTimers()
 }
 
 // Set moves the clock to an absolute time and fires tickers/timers.
@@ -117,6 +119,24 @@ func (f *FakeClock) Set(t time.Time) {
 	for _, ft := range timers {
 		ft.maybeFire(now)
 	}
+
+	f.pruneTimers()
+}
+
+// pruneTimers removes fired or stopped timers from the slice.
+func (f *FakeClock) pruneTimers() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	active := f.timers[:0]
+	for _, ft := range f.timers {
+		ft.mu.Lock()
+		inactive := ft.fired || ft.stopped
+		ft.mu.Unlock()
+		if !inactive {
+			active = append(active, ft)
+		}
+	}
+	f.timers = active
 }
 
 func (f *FakeClock) NewTicker(d time.Duration) Ticker {
