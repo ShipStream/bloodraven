@@ -122,6 +122,13 @@ type TopologyManager struct {
 	// The runner sets this to push status updates to the CR.
 	StatusCallback func(TopologySnapshot)
 
+	// BootstrapStatusCallback is invoked from the bootstrap goroutine when the
+	// bootstrap phase changes. Unlike StatusCallback it pushes only the
+	// Bootstrapping condition so that unrelated conditions (Degraded,
+	// ReplicationBroken, Updating, ...) are not inadvertently cleared by a
+	// partially-populated TopologySnapshot during an async bootstrap run.
+	BootstrapStatusCallback func(phase, errMsg string)
+
 	mu           sync.RWMutex
 	lastPollTime time.Time
 	ready        bool
@@ -253,13 +260,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		metrics.PollLatency.WithLabelValues(tm.sites[i].name).Observe(r[i].duration.Seconds())
 	}
 
-	// Track last successful poll time per site.
 	now := tm.clock.Now()
-	for i := range tm.sites {
-		if r[i].err == nil {
-			tm.sites[i].lastSeen = now
-		}
-	}
 
 	// Compute new debounced states.
 	var newStates [2]state.SiteState
@@ -267,10 +268,14 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		newStates[i] = tm.computeState(&tm.sites[i], r[i].readOnly, r[i].err)
 	}
 
-	// Read and update states under the lock to avoid races with Status().
+	// Update lastSeen and state under the lock to avoid races with Status()
+	// and any goroutines that may read siteTracker fields concurrently.
 	tm.mu.Lock()
 	var prevStates [2]state.SiteState
 	for i := range tm.sites {
+		if r[i].err == nil {
+			tm.sites[i].lastSeen = now
+		}
 		prevStates[i] = tm.sites[i].state
 		if newStates[i] != prevStates[i] {
 			tm.sites[i].state = newStates[i]
@@ -473,7 +478,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	}
 
 	// Detect fresh-deploy split-brain and auto-bootstrap the replica.
-	if action.Alert == "SPLIT BRAIN: both sites are writable" && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
+	if action.SplitBrain && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
 		tm.mu.RLock()
 		phase := tm.bootstrapPhase
 		tm.mu.RUnlock()
@@ -608,7 +613,7 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 		"replica", tm.sites[replicaIdx].name,
 		"primaryHost", tm.cfg.SiteHosts[primaryIdx])
 
-	tm.emitBootstrapStatus("")
+	tm.emitBootstrapStatus()
 
 	go func() {
 		err := tm.runBootstrap(ctx, primaryIdx, replicaIdx)
@@ -622,7 +627,7 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 			tm.logger.Info("bootstrap completed successfully")
 		}
 		tm.mu.Unlock()
-		tm.emitBootstrapStatus("")
+		tm.emitBootstrapStatus()
 	}()
 }
 
@@ -662,10 +667,14 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primaryIdx, replica
 	tm.mu.Lock()
 	tm.bootstrapPhase = BootstrapPhaseRestarting
 	tm.mu.Unlock()
-	tm.emitBootstrapStatus("")
+	tm.emitBootstrapStatus()
 
 	waitErr := util.RetryWithBackoff(ctx, tm.logger, 10, 2*time.Second, func() error {
-		_, checkErr := replica.CheckReadOnly(ctx)
+		// Bound each probe so a hung MySQL cannot block the bootstrap goroutine
+		// indefinitely; matches the poll loop's 5s per-attempt budget.
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, checkErr := replica.CheckReadOnly(probeCtx)
 		return checkErr
 	})
 	if waitErr != nil {
@@ -676,7 +685,7 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primaryIdx, replica
 	tm.mu.Lock()
 	tm.bootstrapPhase = BootstrapPhaseSetupRepl
 	tm.mu.Unlock()
-	tm.emitBootstrapStatus("")
+	tm.emitBootstrapStatus()
 
 	if err := tm.bootstrap.SetupReplication(ctx, replica, ReplicationSetupOpts{
 		SourceHost:   primaryHost,
@@ -712,33 +721,21 @@ func isCloneConnectionDrop(err error) bool {
 	return false
 }
 
-// emitBootstrapStatus pushes a TopologySnapshot with the current bootstrap phase
-// to StatusCallback. It is safe to call from the bootstrap goroutine and the
-// poll loop; both take a read lock on tm.mu to read state.
-func (tm *TopologyManager) emitBootstrapStatus(alert string) {
-	if tm.StatusCallback == nil {
+// emitBootstrapStatus notifies the runner that the bootstrap phase changed.
+// It uses a dedicated BootstrapStatusCallback so that only the Bootstrapping
+// condition is updated on the CR — a full TopologySnapshot from this path
+// would lack SiteReplication/UpdatePhase and could inadvertently clear
+// Degraded/Updating conditions that were set by the most recent Poll cycle.
+func (tm *TopologyManager) emitBootstrapStatus() {
+	if tm.BootstrapStatusCallback == nil {
 		return
 	}
 	tm.mu.RLock()
-	snap := TopologySnapshot{
-		SiteNames:          [2]string{tm.sites[0].name, tm.sites[1].name},
-		SiteStates:         [2]state.SiteState{tm.sites[0].state, tm.sites[1].state},
-		SiteLastSeen:       [2]time.Time{tm.sites[0].lastSeen, tm.sites[1].lastSeen},
-		LastFailover:       tm.lastFailover,
-		LastFailoverTarget: tm.lastFailoverTarget,
-		Alert:              alert,
-		BootstrapPhase:     string(tm.bootstrapPhase),
-	}
+	phase := string(tm.bootstrapPhase)
+	errMsg := ""
 	if tm.bootstrapErr != nil {
-		snap.BootstrapError = tm.bootstrapErr.Error()
+		errMsg = tm.bootstrapErr.Error()
 	}
-	activeSite := ""
-	for i := range tm.sites {
-		if tm.sites[i].state == state.StateWritable {
-			activeSite = tm.sites[i].name
-		}
-	}
-	snap.ActiveSite = activeSite
 	tm.mu.RUnlock()
-	tm.StatusCallback(snap)
+	tm.BootstrapStatusCallback(phase, errMsg)
 }

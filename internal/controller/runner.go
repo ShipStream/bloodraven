@@ -176,20 +176,32 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 
 	dns := platform.NewDNSEndpointUpdater(r.client, fg.Name, string(fg.UID), fg.Namespace, fg.Name, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL)
 
-	// Build bootstrap configuration from the secret. If replication credentials
-	// are missing the auto-bootstrap path is disabled and the operator will
-	// only log split-brain alerts as before.
-	bootstrapCtl := NewBootstrapController(r.logger.With("fg", nn.String()))
-	bootstrapCfg := BootstrapConfig{
-		ReplUser:     string(secret.Data["MYSQL_REPLICATION_USER"]),
-		ReplPassword: string(secret.Data["MYSQL_REPLICATION_PASSWORD"]),
-		UseSSL:       fg.Spec.TLS != nil,
-	}
-	if fg.Spec.CloneTimeout > 0 {
-		bootstrapCfg.CloneTimeout = time.Duration(fg.Spec.CloneTimeout) * time.Second
-	}
-	if bootstrapCfg.ReplUser == "" {
-		r.logger.Warn("auto-bootstrap disabled: secret missing MYSQL_REPLICATION_USER", "fg", nn)
+	// Build bootstrap configuration from the secret. Both replication user and
+	// password must be present to enable the auto-bootstrap path; otherwise the
+	// clone/replication setup would fail with invalid credentials. When disabled
+	// we pass a nil controller and empty config to the topology manager so the
+	// bootstrap path is truly gated by valid credentials.
+	replUser := string(secret.Data["MYSQL_REPLICATION_USER"])
+	replPassword := string(secret.Data["MYSQL_REPLICATION_PASSWORD"])
+	var bootstrapCtl *BootstrapController
+	var bootstrapCfg BootstrapConfig
+	switch {
+	case replUser == "" || replPassword == "":
+		missing := "MYSQL_REPLICATION_USER"
+		if replUser != "" {
+			missing = "MYSQL_REPLICATION_PASSWORD"
+		}
+		r.logger.Warn("auto-bootstrap disabled: secret missing replication credentials", "fg", nn, "missing", missing)
+	default:
+		bootstrapCtl = NewBootstrapController(r.logger.With("fg", nn.String()))
+		bootstrapCfg = BootstrapConfig{
+			ReplUser:     replUser,
+			ReplPassword: replPassword,
+			UseSSL:       fg.Spec.TLS != nil,
+		}
+		if fg.Spec.CloneTimeout > 0 {
+			bootstrapCfg.CloneTimeout = time.Duration(fg.Spec.CloneTimeout) * time.Second
+		}
 	}
 
 	tm := NewTopologyManager(cfg, siteMySQL[0], siteMySQL[1], failoverCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
@@ -198,6 +210,13 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// Set the status callback to update the CR status subresource on state changes.
 	tm.StatusCallback = func(snap TopologySnapshot) {
 		r.updateCRStatus(ctx, nn, snap)
+	}
+	// BootstrapStatusCallback updates only the Bootstrapping condition so that
+	// unrelated conditions set by the most recent Poll cycle (Degraded,
+	// ReplicationBroken, Updating, ...) are not clobbered by a partially
+	// populated snapshot from the async bootstrap goroutine.
+	tm.BootstrapStatusCallback = func(phase, errMsg string) {
+		r.updateBootstrappingCondition(ctx, nn, phase, errMsg)
 	}
 
 	tmCtx, cancel := context.WithCancel(ctx)
@@ -414,39 +433,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	// Bootstrapping condition reflects fresh-deploy bootstrap progress.
-	switch snap.BootstrapPhase {
-	case "", string(BootstrapPhaseDone):
-		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Bootstrapping",
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: freshFG.Generation,
-			LastTransitionTime: now,
-			Reason:             "NotBootstrapping",
-			Message:            "No bootstrap in progress",
-		})
-	case string(BootstrapPhaseFailed):
-		msg := "Bootstrap failed"
-		if snap.BootstrapError != "" {
-			msg = fmt.Sprintf("Bootstrap failed: %s", snap.BootstrapError)
-		}
-		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Bootstrapping",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshFG.Generation,
-			LastTransitionTime: now,
-			Reason:             "Failed",
-			Message:            msg,
-		})
-	default:
-		setCondition(&freshFG.Status.Conditions, metav1.Condition{
-			Type:               "Bootstrapping",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: freshFG.Generation,
-			LastTransitionTime: now,
-			Reason:             snap.BootstrapPhase,
-			Message:            fmt.Sprintf("Fresh-deploy bootstrap in progress: %s", snap.BootstrapPhase),
-		})
-	}
+	setBootstrappingCondition(&freshFG.Status.Conditions, freshFG.Generation, now, snap.BootstrapPhase, snap.BootstrapError)
 
 	// Update phase tracking.
 	freshFG.Status.UpdatePhase = snap.UpdatePhase
@@ -491,6 +478,81 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			return
 		}
 		r.logger.Error("update fg status", "fg", nn, "error", err)
+	}
+}
+
+// setBootstrappingCondition writes the Bootstrapping condition based on the
+// current phase. It is shared between the full-status writer (updateCRStatus)
+// and the dedicated bootstrap-only writer (updateBootstrappingCondition) so
+// they stay in sync.
+func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64, now metav1.Time, phase, errMsg string) {
+	switch phase {
+	case "":
+		setCondition(conditions, metav1.Condition{
+			Type:               "Bootstrapping",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: generation,
+			LastTransitionTime: now,
+			Reason:             "NotBootstrapping",
+			Message:            "No bootstrap in progress",
+		})
+	case string(BootstrapPhaseDone):
+		setCondition(conditions, metav1.Condition{
+			Type:               "Bootstrapping",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: generation,
+			LastTransitionTime: now,
+			Reason:             string(BootstrapPhaseDone),
+			Message:            "Fresh-deploy bootstrap completed successfully",
+		})
+	case string(BootstrapPhaseFailed):
+		msg := "Bootstrap failed"
+		if errMsg != "" {
+			msg = fmt.Sprintf("Bootstrap failed: %s", errMsg)
+		}
+		setCondition(conditions, metav1.Condition{
+			Type:               "Bootstrapping",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: generation,
+			LastTransitionTime: now,
+			Reason:             "Failed",
+			Message:            msg,
+		})
+	default:
+		setCondition(conditions, metav1.Condition{
+			Type:               "Bootstrapping",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: generation,
+			LastTransitionTime: now,
+			Reason:             phase,
+			Message:            fmt.Sprintf("Fresh-deploy bootstrap in progress: %s", phase),
+		})
+	}
+}
+
+// updateBootstrappingCondition updates ONLY the Bootstrapping condition on the
+// CR. It is invoked from the bootstrap goroutine on phase transitions; using a
+// dedicated path (rather than updateCRStatus with a partially populated
+// TopologySnapshot) prevents inadvertently clearing unrelated conditions.
+func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context, nn types.NamespacedName, phase, errMsg string) {
+	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+		var fresh v1alpha1.MysqlFailoverGroup
+		if err := r.client.Get(ctx, nn, &fresh); err != nil {
+			return err
+		}
+		before := fresh.Status.DeepCopy()
+		setBootstrappingCondition(&fresh.Status.Conditions, fresh.Generation, metav1.Now(), phase, errMsg)
+		if equality.Semantic.DeepEqual(before, &fresh.Status) {
+			return nil
+		}
+		return r.client.Status().Update(ctx, &fresh)
+	})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			r.logger.Warn("CR deleted during bootstrapping condition update, skipping", "fg", nn)
+			return
+		}
+		r.logger.Error("update bootstrapping condition", "fg", nn, "error", err)
 	}
 }
 
