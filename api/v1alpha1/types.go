@@ -40,6 +40,7 @@ type MysqlFailoverGroupSpec struct {
 	// SidecarImage is the image used for the sidecar/init container.
 	// +kubebuilder:default="ghcr.io/shipstream/bloodraven-sidecar:0.1.6"
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MinLength=1
 	SidecarImage string `json:"sidecarImage,omitempty"`
 
 	// Sites defines the two sites that form this failover group.

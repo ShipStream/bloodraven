@@ -390,6 +390,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 
 		sidecarImage := fg.Spec.SidecarImage
+		if strings.TrimSpace(sidecarImage) == "" {
+			return fmt.Errorf("mysqlfailovergroup %s/%s has empty spec.sidecarImage; set spec.sidecarImage explicitly or update the resource so the CRD default is applied", fg.Namespace, fg.Name)
+		}
 
 		configMapName := fmt.Sprintf("mysql-%s-config", fg.Name)
 
