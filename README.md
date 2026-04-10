@@ -56,6 +56,26 @@ graph TB
 
 See the [Architecture](https://bloodraven.readthedocs.io/en/latest/docs/architecture) and [Failover](https://bloodraven.readthedocs.io/en/latest/docs/failover) docs for the state machine, failover sequences, and split-brain prevention layers.
 
+## Playground
+
+Try Bloodraven locally with a single command. The playground spins up a full two-site MySQL failover group on k3d, kind, or minikube — complete with a real-time dashboard, a counter app for testing writes, DNS visualization, and a chaos monkey for triggering failovers.
+
+```bash
+# Create a local cluster (k3d example)
+k3d cluster create bloodraven --agents 2
+
+# Build and deploy everything
+./playground/setup.sh
+
+# Trigger chaos
+./playground/chaos.sh kill-site iad
+
+# Tear it down
+./playground/teardown.sh
+```
+
+See `playground/` for details.
+
 ## Development
 
 ```bash

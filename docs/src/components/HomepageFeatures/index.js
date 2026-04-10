@@ -66,6 +66,17 @@ const FeatureList = [
       </>
     ),
   },
+  {
+    icon: '\uD83C\uDFAE',
+    title: 'Interactive Playground',
+    description: (
+      <>
+        Spin up a full Bloodraven cluster locally with a single script. Includes a
+        real-time dashboard, counter app, chaos monkey, and DNS visualization — all
+        on k3d, kind, or minikube.
+      </>
+    ),
+  },
 ];
 
 function Feature({icon, title, description}) {

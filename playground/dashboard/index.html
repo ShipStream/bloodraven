@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bloodraven Playground Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; padding: 24px; }
+  h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: 4px; }
+  .subtitle { color: #64748b; font-size: 0.85rem; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .panel { background: #1e293b; border-radius: 12px; padding: 20px; }
+  .panel h2 { font-size: 1rem; color: #94a3b8; margin-bottom: 12px; font-weight: 500; }
+  .site { display: flex; align-items: center; gap: 12px; padding: 12px; background: #0f172a; border-radius: 8px; margin-bottom: 8px; }
+  .site-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .site-dot.writable { background: #22c55e; box-shadow: 0 0 8px rgba(34,197,94,0.4); }
+  .site-dot.read-only { background: #3b82f6; }
+  .site-dot.unreachable { background: #ef4444; box-shadow: 0 0 8px rgba(239,68,68,0.4); animation: pulse 1.5s infinite; }
+  .site-dot.unknown { background: #64748b; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .site-name { font-weight: 600; font-size: 1.1rem; }
+  .site-state { font-size: 0.8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
+  .site-meta { font-size: 0.75rem; color: #64748b; margin-left: auto; text-align: right; line-height: 1.6; }
+  .dns-record { padding: 10px 14px; background: #0f172a; border-radius: 8px; margin-bottom: 6px; font-family: 'SF Mono', Monaco, monospace; font-size: 0.85rem; }
+  .dns-type { color: #a78bfa; margin-right: 8px; }
+  .dns-name { color: #38bdf8; }
+  .dns-arrow { color: #475569; margin: 0 8px; }
+  .dns-target { color: #22c55e; }
+  .dns-ttl { color: #64748b; margin-left: 8px; }
+  .log { background: #0f172a; border-radius: 8px; padding: 12px; max-height: 300px; overflow-y: auto; font-family: 'SF Mono', Monaco, monospace; font-size: 0.8rem; line-height: 1.8; }
+  .log-entry { border-bottom: 1px solid #1e293b; padding: 2px 0; }
+  .log-ts { color: #64748b; margin-right: 8px; }
+  .log-failover { color: #f59e0b; }
+  .log-state { color: #38bdf8; }
+  .ws-status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 8px; }
+  .ws-status.connected { background: #22c55e; }
+  .ws-status.disconnected { background: #ef4444; }
+  .full-width { grid-column: 1 / -1; }
+  .active-badge { display: inline-block; background: #166534; color: #86efac; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; margin-left: 8px; text-transform: uppercase; }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .toolbar button { background: #334155; color: #e2e8f0; border: 1px solid #475569; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; transition: all 0.15s; }
+  .toolbar button:hover { background: #475569; }
+  .toolbar .danger { border-color: #dc2626; color: #fca5a5; }
+  .toolbar .danger:hover { background: #7f1d1d; }
+  .empty { color: #475569; font-style: italic; padding: 12px; }
+</style>
+</head>
+<body>
+<h1>Bloodraven Playground <span class="ws-status" id="wsStatus" title="WebSocket"></span></h1>
+<p class="subtitle">Real-time MySQL failover group dashboard. WebSocket updates from the operator.</p>
+
+<div class="toolbar" id="toolbar">
+  <button onclick="copyCmd('kubectl delete pod -n bloodraven-playground -l shipstream.io/site=iad')">Kill IAD MySQL</button>
+  <button onclick="copyCmd('kubectl delete pod -n bloodraven-playground -l shipstream.io/site=pdx')">Kill PDX MySQL</button>
+  <button class="danger" onclick="copyCmd('kubectl cordon $(kubectl get nodes -l topology.kubernetes.io/zone=zone-iad -o name)')">Cordon IAD Node</button>
+  <button class="danger" onclick="copyCmd('kubectl cordon $(kubectl get nodes -l topology.kubernetes.io/zone=zone-pdx -o name)')">Cordon PDX Node</button>
+  <button onclick="copyCmd('kubectl uncordon $(kubectl get nodes -o name | tr \\'\\n\\' \\' \\')')">Uncordon All</button>
+  <button onclick="copyCmd('kubectl logs -n bloodraven-playground -l app=bloodraven --tail=50 -f')">Operator Logs</button>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>Sites</h2>
+    <div id="sites"><div class="empty">Waiting for data...</div></div>
+  </div>
+  <div class="panel">
+    <h2>DNS Records (external-dns)</h2>
+    <div id="dns"><div class="empty">Waiting for data...</div></div>
+  </div>
+  <div class="panel full-width">
+    <h2>Event Log</h2>
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let ws = null;
+let lastState = {};
+const logEntries = [];
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws/status');
+
+  ws.onopen = () => {
+    $('wsStatus').className = 'ws-status connected';
+    addLog('system', 'WebSocket connected');
+  };
+
+  ws.onclose = () => {
+    $('wsStatus').className = 'ws-status disconnected';
+    addLog('system', 'WebSocket disconnected, reconnecting in 3s...');
+    setTimeout(connectWS, 3000);
+  };
+
+  ws.onerror = () => {
+    ws.close();
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      handleMessage(msg);
+    } catch(e) {
+      console.error('ws parse error:', e);
+    }
+  };
+}
+
+function handleMessage(msg) {
+  // The operator broadcasts WSMessage with failover group status.
+  // Structure: { group: string, activeSite: string, sites: [...], lastFailover: string }
+  if (msg.sites) {
+    renderSites(msg);
+    detectChanges(msg);
+    lastState = msg;
+  }
+}
+
+function renderSites(msg) {
+  let html = '';
+  for (const site of (msg.sites || [])) {
+    const isActive = site.name === msg.activeSite;
+    const stateClass = (site.state || 'unknown').replace('-', '-');
+    html += `
+      <div class="site">
+        <div class="site-dot ${stateClass}"></div>
+        <div>
+          <div class="site-name">${site.name}${isActive ? '<span class="active-badge">active</span>' : ''}</div>
+          <div class="site-state">${site.state || 'unknown'}</div>
+        </div>
+        <div class="site-meta">
+          ${site.gtidExecuted ? 'GTID: ' + site.gtidExecuted.substring(0, 24) + '...<br>' : ''}
+          ${site.replicating ? 'Replicating' : 'Not replicating'}
+          ${site.secondsBehindSource != null ? '<br>Lag: ' + site.secondsBehindSource + 's' : ''}
+          ${site.lastSeen ? '<br>Seen: ' + new Date(site.lastSeen).toLocaleTimeString() : ''}
+        </div>
+      </div>`;
+  }
+  $('sites').innerHTML = html || '<div class="empty">No sites</div>';
+}
+
+function detectChanges(msg) {
+  if (lastState.activeSite && msg.activeSite !== lastState.activeSite) {
+    addLog('failover', `Failover: ${lastState.activeSite} -> ${msg.activeSite}`);
+  }
+  if (lastState.sites) {
+    for (let i = 0; i < (msg.sites || []).length; i++) {
+      const prev = lastState.sites[i];
+      const curr = msg.sites[i];
+      if (prev && curr && prev.state !== curr.state) {
+        addLog('state', `${curr.name}: ${prev.state} -> ${curr.state}`);
+      }
+    }
+  }
+}
+
+function addLog(type, text) {
+  const ts = new Date().toLocaleTimeString();
+  const cls = type === 'failover' ? 'log-failover' : type === 'state' ? 'log-state' : '';
+  logEntries.unshift({ ts, text, cls });
+  if (logEntries.length > 200) logEntries.pop();
+  renderLog();
+}
+
+function renderLog() {
+  $('log').innerHTML = logEntries.map(e =>
+    `<div class="log-entry"><span class="log-ts">${e.ts}</span><span class="${e.cls}">${e.text}</span></div>`
+  ).join('');
+}
+
+// Poll DNS records from the webhook provider
+async function pollDNS() {
+  try {
+    const r = await fetch('/api/dns');
+    if (!r.ok) {
+      $('dns').innerHTML = '<div class="empty">DNS API unavailable (' + r.status + ')</div>';
+      return;
+    }
+    const records = await r.json();
+    renderDNS(records);
+  } catch(e) {
+    $('dns').innerHTML = '<div class="empty">DNS fetch error</div>';
+  }
+}
+
+function renderDNS(records) {
+  if (!records || records.length === 0) {
+    $('dns').innerHTML = '<div class="empty">No DNS records (waiting for external-dns...)</div>';
+    return;
+  }
+  let html = '';
+  for (const rec of records) {
+    const targets = (rec.targets || []).join(', ');
+    html += `
+      <div class="dns-record">
+        <span class="dns-type">${rec.recordType || 'A'}</span>
+        <span class="dns-name">${rec.dnsName}</span>
+        <span class="dns-arrow">-></span>
+        <span class="dns-target">${targets}</span>
+        <span class="dns-ttl">TTL ${rec.recordTTL || '?'}</span>
+      </div>`;
+  }
+  $('dns').innerHTML = html;
+}
+
+// Poll DNS events for the log
+async function pollDNSEvents() {
+  try {
+    const r = await fetch('/api/dns/events');
+    if (!r.ok) return;
+    const events = await r.json();
+    for (const evt of (events || [])) {
+      const key = evt.time + evt.action + evt.record.dnsName;
+      if (!seenDNSEvents.has(key)) {
+        seenDNSEvents.add(key);
+        const targets = (evt.record.targets || []).join(', ');
+        addLog('state', `DNS ${evt.action}: ${evt.record.dnsName} -> ${targets}`);
+      }
+    }
+  } catch(e) { /* ignore */ }
+}
+const seenDNSEvents = new Set();
+
+function copyCmd(cmd) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(cmd).then(() => {
+      addLog('system', 'Copied to clipboard: ' + cmd);
+    }).catch(() => {
+      prompt('Copy this command:', cmd);
+    });
+  } else {
+    // Fallback for non-HTTPS contexts
+    prompt('Copy this command:', cmd);
+    addLog('system', 'Command: ' + cmd);
+  }
+}
+
+// Also poll the REST status endpoint as a fallback
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/operator/status');
+    if (!r.ok) return;
+    const data = await r.json();
+    // Adapt REST response to match WS message format.
+    // The operator returns {"namespace/name": {sites: [...], poll_time: "..."}}.
+    // Always process REST data since WebSocket only sends simple site/status msgs.
+    if (data.sites) {
+      handleMessage(data);
+    } else if (typeof data === 'object') {
+      for (const key of Object.keys(data)) {
+        if (data[key] && data[key].sites) {
+          handleMessage(data[key]);
+        }
+      }
+    }
+  } catch(e) { /* ignore */ }
+}
+
+connectWS();
+pollDNS();
+pollDNSEvents();
+pollStatus();
+setInterval(pollDNS, 3000);
+setInterval(pollDNSEvents, 3000);
+setInterval(pollStatus, 3000);
+</script>
+</body>
+</html>

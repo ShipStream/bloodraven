@@ -1,0 +1,48 @@
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: playground
+  namespace: bloodraven-playground
+spec:
+  image: mysql:9.6
+  sidecarImage: bloodraven-sidecar:playground
+  secretName: mysql-credentials
+  pollInterval: 2s
+  failureThreshold: 3
+  recoveryThreshold: 2
+  failoverCooldown: 30s # short for playground experimentation
+  dns:
+    hostname: playground-db.example.local
+    ttl: 10
+  sites:
+    - name: iad
+      zone: zone-iad
+      lbIP: "10.96.100.10"
+      storage:
+        storageClassName: playground-fast
+        size: 1Gi
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+    - name: pdx
+      zone: zone-pdx
+      lbIP: "10.96.100.20"
+      storage:
+        storageClassName: playground-fast
+        size: 1Gi
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+  sidecar:
+    leaseTimeout: 20s
+    peerCheckInterval: 5s
+  replication:
+    maxLagSeconds: 30
