@@ -3133,7 +3133,7 @@ spec:
                   type: object
                 type: array
               failoverCooldown:
-                default: 300
+                default: 5m
                 description: 'FailoverCooldown is the minimum time between failovers.
                   Default: 5m'
                 type: string
@@ -3168,7 +3168,7 @@ spec:
                   These are merged with the operator's required labels; operator labels take precedence on conflict.
                 type: object
               pollInterval:
-                default: 2
+                default: 2s
                 description: 'PollInterval is how often to poll MySQL instances. Default:
                   2s'
                 type: string
@@ -3221,12 +3221,12 @@ spec:
                       Default: bloodraven.<namespace>.svc.cluster.local:8082
                     type: string
                   leaseTimeout:
-                    default: 20
+                    default: 20s
                     description: 'LeaseTimeout is how long before a sidecar lease
                       expires. Default: 20s'
                     type: string
                   peerCheckInterval:
-                    default: 5
+                    default: 5s
                     description: 'PeerCheckInterval is how often the sidecar checks
                       its peer. Default: 5s'
                     type: string
