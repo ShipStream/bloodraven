@@ -121,6 +121,93 @@ type MysqlFailoverGroupSpec struct {
 	// ExtraInitContainers are additional init containers injected into every MySQL pod.
 	// These run after the operator's built-in init container.
 	ExtraInitContainers []corev1.Container `json:"extraInitContainers,omitempty"`
+
+	// Backup configures automated backups for this failover group.
+	// When set, the operator creates a CronJob that runs on the replica site
+	// and uploads backups to object storage.
+	Backup *BackupSpec `json:"backup,omitempty"`
+}
+
+// BackupSpec configures automated MySQL backups.
+type BackupSpec struct {
+	// Schedule is a cron expression for backup frequency (e.g. "0 */6 * * *").
+	// +kubebuilder:validation:MinLength=9
+	Schedule string `json:"schedule"`
+
+	// Method is the backup tool to use.
+	// +kubebuilder:validation:Enum=xtrabackup;mysqldump
+	// +kubebuilder:default="xtrabackup"
+	Method string `json:"method,omitempty"`
+
+	// Image is the container image for backup jobs. If empty, defaults are
+	// resolved by method: percona/percona-xtrabackup:8.0 for xtrabackup, and
+	// spec.image for mysqldump (which ships with the mysql client).
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Storage configures where backups are stored.
+	Storage BackupStorageSpec `json:"storage"`
+
+	// Retention configures how long backups are kept. If unset, backups are
+	// kept indefinitely (operator does not run cleanup).
+	// +optional
+	Retention *BackupRetentionSpec `json:"retention,omitempty"`
+
+	// PITR enables point-in-time recovery via binlog archiving.
+	// NOTE: not yet implemented; setting this to true will produce a
+	// warning event but otherwise behaves as PITR=false.
+	// +optional
+	PITR bool `json:"pitr,omitempty"`
+
+	// Resources defines compute resources for backup jobs.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// BackupStorageSpec configures backup storage destination.
+type BackupStorageSpec struct {
+	// S3 configures S3-compatible object storage.
+	S3 *S3StorageSpec `json:"s3,omitempty"`
+}
+
+// S3StorageSpec configures S3 backup storage.
+type S3StorageSpec struct {
+	// Bucket is the S3 bucket name.
+	// +kubebuilder:validation:MinLength=1
+	Bucket string `json:"bucket"`
+
+	// Prefix is a Go text/template for the S3 key prefix.
+	// Available template variables: .FailoverGroup, .Site, .Namespace.
+	// Example: "{{ .FailoverGroup }}/{{ .Site }}"
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+
+	// Endpoint is a custom S3 endpoint (e.g. for MinIO).
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Region is the S3 region.
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// SecretName references a Secret containing S3 credentials.
+	// Expected keys: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
+	// +kubebuilder:validation:MinLength=1
+	SecretName string `json:"secretName"`
+}
+
+// BackupRetentionSpec configures backup retention policy. If both Count and
+// Days are set, a backup is deleted when it exceeds either threshold.
+type BackupRetentionSpec struct {
+	// Count is the maximum number of backups to retain. 0 means unlimited.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Count int32 `json:"count,omitempty"`
+
+	// Days is the maximum age in days for retained backups. 0 means unlimited.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Days int32 `json:"days,omitempty"`
 }
 
 // ReplicationSpec configures replication health monitoring.
@@ -241,6 +328,37 @@ type MysqlFailoverGroupStatus struct {
 
 	// UpdatePhase indicates the current phase of an ordered update, empty if not updating.
 	UpdatePhase string `json:"updatePhase,omitempty"`
+
+	// Backup is the observed state of automated backups.
+	// +optional
+	Backup *BackupStatus `json:"backup,omitempty"`
+}
+
+// BackupStatus describes the observed state of backups.
+type BackupStatus struct {
+	// LastBackupTime is when the last backup attempt completed (success or failure).
+	// +optional
+	LastBackupTime *metav1.Time `json:"lastBackupTime,omitempty"`
+
+	// LastSuccessfulBackup is when the last successful backup completed.
+	// +optional
+	LastSuccessfulBackup *metav1.Time `json:"lastSuccessfulBackup,omitempty"`
+
+	// LastBackupSite is the site the last backup was taken from.
+	// +optional
+	LastBackupSite string `json:"lastBackupSite,omitempty"`
+
+	// LastBackupDurationSeconds is how long the last backup took.
+	// +optional
+	LastBackupDurationSeconds *int64 `json:"lastBackupDurationSeconds,omitempty"`
+
+	// LastBackupResult is "Success", "Failure", or "InProgress".
+	// +optional
+	LastBackupResult string `json:"lastBackupResult,omitempty"`
+
+	// LastBackupMessage is a human-readable message for the last backup attempt.
+	// +optional
+	LastBackupMessage string `json:"lastBackupMessage,omitempty"`
 }
 
 // SiteStatus describes the observed state of a single site.

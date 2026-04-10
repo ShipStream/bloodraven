@@ -43,6 +43,27 @@ var (
 		Name: "bloodraven_site_state",
 		Help: "Current site state as a state-set (1 for current state, 0 for others). State label is 'writable', 'read-only', 'unreachable', or 'unknown'.",
 	}, []string{"site", "state"})
+
+	BackupLastSuccessTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_backup_last_success_timestamp_seconds",
+		Help: "Unix timestamp of the last successful backup.",
+	}, []string{"failover_group"})
+
+	BackupLastAttemptTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_backup_last_attempt_timestamp_seconds",
+		Help: "Unix timestamp of the last backup attempt (success or failure).",
+	}, []string{"failover_group"})
+
+	BackupDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "bloodraven_backup_duration_seconds",
+		Help:    "Duration of completed backup operations in seconds.",
+		Buckets: []float64{30, 60, 120, 300, 600, 1200, 1800, 3600, 7200},
+	}, []string{"failover_group", "method"})
+
+	BackupTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_backup_total",
+		Help: "Total number of completed backup attempts, labeled by result ('success' or 'failure').",
+	}, []string{"failover_group", "result"})
 )
 
 // AllStates is the set of possible site states, used to emit the full state-set.
@@ -51,5 +72,6 @@ var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {
 	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount,
-		ReplicationLag, ReplicationRunning, SiteState)
+		ReplicationLag, ReplicationRunning, SiteState,
+		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupDurationSeconds, BackupTotal)
 }

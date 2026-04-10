@@ -21,6 +21,10 @@ rules:
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [create, delete, get, list, patch, update, watch]
+  # Backup CronJobs and Jobs
+  - apiGroups: [batch]
+    resources: [cronjobs, jobs]
+    verbs: [create, delete, get, list, patch, update, watch]
   # MysqlFailoverGroup CRD
   - apiGroups: [shipstream.io]
     resources: [mysqlfailovergroups]

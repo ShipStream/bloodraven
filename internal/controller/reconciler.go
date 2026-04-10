@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -68,6 +69,7 @@ type MysqlFailoverGroupReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=externaldns.k8s.io,resources=dnsendpoints,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=cronjobs;jobs,verbs=get;list;watch;create;update;patch;delete
 
 func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -174,6 +176,11 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile pdb: %w", err)
 	}
 
+	// Reconcile backup (CronJob + status). No-op when spec.backup is nil.
+	if err := r.reconcileBackup(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile backup: %w", err)
+	}
+
 	// Sync pod labels based on status
 	if err := r.syncPodLabels(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
@@ -189,6 +196,7 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&batchv1.CronJob{}).
 		Complete(r)
 }
 
