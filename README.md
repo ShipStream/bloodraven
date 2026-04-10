@@ -74,7 +74,7 @@ k3d cluster create bloodraven --agents 2
 ./playground/teardown.sh
 ```
 
-See `playground/` for details.
+See the [Playground guide](https://bloodraven.readthedocs.io/en/latest/docs/playground) for the full walkthrough.
 
 ## Development
 

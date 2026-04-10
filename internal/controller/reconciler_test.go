@@ -602,6 +602,20 @@ func TestReconcile_TerminationGracePeriod(t *testing.T) {
 	if *tgps != 60 {
 		t.Errorf("expected TerminationGracePeriodSeconds=60, got %d", *tgps)
 	}
+
+	// Verify MySQL container has a pre-stop hook that sets super_read_only.
+	mysqlContainer := deploy.Spec.Template.Spec.Containers[0]
+	if mysqlContainer.Lifecycle == nil || mysqlContainer.Lifecycle.PreStop == nil {
+		t.Fatal("expected MySQL container to have a PreStop lifecycle hook")
+	}
+	hook := mysqlContainer.Lifecycle.PreStop
+	if hook.Exec == nil {
+		t.Fatal("expected PreStop hook to use exec")
+	}
+	cmd := strings.Join(hook.Exec.Command, " ")
+	if !strings.Contains(cmd, "super_read_only") {
+		t.Errorf("expected PreStop command to set super_read_only, got: %s", cmd)
+	}
 }
 
 func TestGenerateMyCnf(t *testing.T) {

@@ -1,0 +1,189 @@
+---
+sidebar_position: 10
+---
+
+# Playground
+
+The playground deploys a fully working Bloodraven setup on your local machine so you can watch failovers happen in real time. It runs inside any multi-node Kubernetes cluster and includes a live dashboard, a counter app that proves data survives failovers, and a simulated DNS pipeline.
+
+No cloud account, no DNS provider, no production infrastructure required.
+
+<img src="/img/playground.png" alt="Bloodraven Playground showing the dashboard and counter app" />
+
+## What you get
+
+- **Two-site MySQL cluster** (IAD + PDX) managed by the Bloodraven operator
+- **Real-time dashboard** showing site health, replication state, DNS records, and an event log
+- **Counter app** that writes to MySQL through the primary service, proving state persists across failovers
+- **Simulated external-dns pipeline** — the operator creates `DNSEndpoint` CRs, external-dns watches them and pushes records to an in-memory webhook provider, and the dashboard displays the results
+- **Chaos tools** for triggering failovers by killing pods, cordoning nodes, or simulating network partitions
+
+## Prerequisites
+
+You need three tools installed:
+
+- **docker** — for building container images
+- **kubectl** — for talking to your cluster
+- **helm** — for deploying the operator
+
+And a local Kubernetes cluster with at least 2 worker nodes. We recommend [k3d](https://k3d.io) because it's fast and lightweight, but kind and minikube work too.
+
+### Create a cluster with k3d (recommended)
+
+```bash
+# Install k3d if you haven't already
+curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+
+# Create a cluster with 2 worker nodes
+k3d cluster create bloodraven --agents 2
+```
+
+That's it. You now have a 3-node cluster (1 server + 2 agents) ready to go.
+
+<details>
+<summary>Using kind or minikube instead</summary>
+
+**kind:**
+
+```bash
+cat <<EOF | kind create cluster --config=-
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+EOF
+```
+
+**minikube:**
+
+```bash
+minikube start --nodes=2 --cpus=2 --memory=2048 --driver=docker
+```
+
+</details>
+
+## Setup
+
+From the root of the repository:
+
+```bash
+./playground/setup.sh
+```
+
+This single script handles everything:
+
+1. Verifies your cluster has at least 2 nodes
+2. Labels nodes to simulate two data center sites (IAD and PDX)
+3. Builds all container images locally
+4. Loads images into your cluster (auto-detects k3d, kind, or minikube)
+5. Installs the CRDs, namespace, RBAC, and operator via Helm
+6. Creates a `MysqlFailoverGroup` with two MySQL sites
+7. Seeds a DNS record so the external-dns pipeline works immediately
+8. Deploys the dashboard and counter app
+
+Setup takes about 2 minutes depending on your machine.
+
+## Access the apps
+
+Use `kubectl port-forward` to access the dashboard and counter app:
+
+```bash
+# Dashboard (real-time cluster visualization)
+kubectl -n bloodraven-playground port-forward svc/dashboard 8091:8091
+
+# Counter app (write-through-failover demo)
+kubectl -n bloodraven-playground port-forward svc/counter-app 8090:8090
+```
+
+Then open [http://localhost:8091](http://localhost:8091) for the dashboard and [http://localhost:8090](http://localhost:8090) for the counter app.
+
+:::tip Remote access
+Add `--address 0.0.0.0` to `port-forward` if you want to reach the apps from another machine (e.g. over Tailscale).
+:::
+
+## Try a failover
+
+The dashboard toolbar has buttons that copy `kubectl` commands to your clipboard. You can also run them directly:
+
+```bash
+# Kill the IAD MySQL pod — the operator will detect the outage and fail over to PDX
+kubectl delete pod -n bloodraven-playground -l shipstream.io/site=iad
+
+# Or cordon the IAD node to simulate a full site outage
+kubectl cordon $(kubectl get nodes -l topology.kubernetes.io/zone=zone-iad -o name)
+```
+
+Watch the dashboard — you'll see the site state change, the health banner update, DNS records flip, and the counter app reconnect to the new primary.
+
+To restore the cordoned node:
+
+```bash
+kubectl uncordon $(kubectl get nodes -o name | tr '\n' ' ')
+```
+
+### Chaos script
+
+For more advanced scenarios, use the chaos script:
+
+```bash
+./playground/chaos.sh kill-site iad      # Kill a site's MySQL pod
+./playground/chaos.sh kill-site pdx
+./playground/chaos.sh cordon iad         # Cordon a site's node
+./playground/chaos.sh network-partition iad  # Simulate a network partition
+./playground/chaos.sh recover            # Undo all chaos
+```
+
+## Dashboard features
+
+The dashboard connects to the operator via WebSocket and polls DNS state every 3 seconds.
+
+- **Health banner** — shows overall cluster health at a glance: Healthy (green), Degraded (amber, e.g. replica not replicating), or critical states like Split Brain or No Primary (red, pulsing)
+- **Site cards** — shows each site's state (writable, read-only, unreachable), GTID position, replication status, and lag
+- **DNS records** — shows what external-dns has published, with a fallback to reading DNSEndpoint CRs directly from the Kubernetes API
+- **Event log** — real-time stream of state transitions, failovers, and DNS changes
+
+## Rebuilding after code changes
+
+When you change Go code in the operator, sidecar, or any playground app, use the rebuild script to update your running cluster:
+
+```bash
+# Rebuild everything
+./playground/rebuild.sh
+
+# Rebuild only specific components
+./playground/rebuild.sh dashboard          # just the dashboard
+./playground/rebuild.sh counter            # just the counter app
+./playground/rebuild.sh operator sidecar   # operator + sidecar
+```
+
+The script builds the Docker images, loads them into your cluster, restarts the affected deployments, and waits for rollout to complete.
+
+Valid component names: `operator`, `sidecar`, `counter`, `dashboard`, `dns-webhook`.
+
+## Useful commands
+
+```bash
+# Check the failover group status
+kubectl -n bloodraven-playground get mysqlfailovergroups
+
+# List all pods
+kubectl -n bloodraven-playground get pods
+
+# Check DNS endpoint CRs
+kubectl -n bloodraven-playground get dnsendpoints
+
+# Follow operator logs
+kubectl -n bloodraven-playground logs -l app.kubernetes.io/name=bloodraven -f
+```
+
+## Teardown
+
+To remove everything and start fresh:
+
+```bash
+./playground/teardown.sh
+```
+
+This deletes the namespace, Helm release, CRDs, and node labels. Your k3d/kind/minikube cluster itself is left intact so you can re-run `setup.sh` without recreating it.

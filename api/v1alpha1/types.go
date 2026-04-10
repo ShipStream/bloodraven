@@ -98,8 +98,8 @@ type MysqlFailoverGroupSpec struct {
 	// SidecarResources defines the compute resources for the sidecar container.
 	SidecarResources corev1.ResourceRequirements `json:"sidecarResources,omitempty"`
 
-	// TerminationGracePeriodSeconds is the grace period for MySQL container shutdown. Default: 30
-	// +kubebuilder:default=30
+	// TerminationGracePeriodSeconds is the grace period for MySQL container shutdown. Default: 60
+	// +kubebuilder:default=60
 	// +kubebuilder:validation:Minimum=1
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 

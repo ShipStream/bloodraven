@@ -3399,9 +3399,9 @@ spec:
                 minItems: 2
                 type: array
               terminationGracePeriodSeconds:
-                default: 30
+                default: 60
                 description: 'TerminationGracePeriodSeconds is the grace period for
-                  MySQL container shutdown. Default: 30'
+                  MySQL container shutdown. Default: 60'
                 format: int64
                 minimum: 1
                 type: integer
