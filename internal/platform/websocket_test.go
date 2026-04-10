@@ -55,7 +55,16 @@ func TestHub_BroadcastToClients(t *testing.T) {
 	waitForClientCount(t, hub, 2)
 
 	// Broadcast a message
-	hub.Broadcast(WSMessage{Site: "site1", Status: "offline"})
+	hub.Broadcast(TopologyMessage{
+		Namespace:  "default",
+		Group:      "orders",
+		ActiveSite: "iad",
+		Sites: []TopologySite{
+			{Name: "iad", State: "writable"},
+			{Name: "pdx", State: "read-only", Replicating: true},
+		},
+		PollTime: "2026-04-10T00:00:00Z",
+	})
 
 	// Both clients should receive it
 	for i, c := range []*websocket.Conn{c1, c2} {
@@ -64,12 +73,12 @@ func TestHub_BroadcastToClients(t *testing.T) {
 		if err != nil {
 			t.Fatalf("client %d read: %v", i, err)
 		}
-		var msg WSMessage
+		var msg TopologyMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			t.Fatalf("client %d unmarshal: %v", i, err)
 		}
-		if msg.Site != "site1" || msg.Status != "offline" {
-			t.Errorf("client %d: got %+v, want site1/offline", i, msg)
+		if msg.Group != "orders" || msg.ActiveSite != "iad" || len(msg.Sites) != 2 {
+			t.Errorf("client %d: got %+v", i, msg)
 		}
 	}
 }

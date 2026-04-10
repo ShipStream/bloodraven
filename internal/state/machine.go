@@ -25,8 +25,7 @@ func (s SiteState) String() string {
 
 // Action describes what the watcher should do for a given site on a state transition.
 type Action struct {
-	Taint     *bool  // nil=no change, true=apply, false=remove
-	Broadcast string // "" = no broadcast, "online" or "offline"
+	Taint *bool // nil=no change, true=apply, false=remove
 }
 
 // ShouldTaint returns true if the site's MySQL is not writable (readonly or unreachable).
@@ -44,16 +43,14 @@ func EvalPerSiteTransition(prev, curr SiteState) Action {
 
 	switch {
 	case curr == StateWritable:
-		// Becoming writable: remove taint, broadcast online
+		// Becoming writable: remove taint.
 		f := false
 		a.Taint = &f
-		a.Broadcast = "online"
 	case curr == StateReadOnly || curr == StateUnreachable:
 		if prev == StateWritable || prev == StateUnknown {
-			// Lost writability: apply taint, broadcast offline
+			// Lost writability: apply taint.
 			t := true
 			a.Taint = &t
-			a.Broadcast = "offline"
 		}
 		// read-only <-> unreachable: no new action (taint already applied)
 	}

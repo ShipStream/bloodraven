@@ -115,10 +115,10 @@ function connectWS() {
 }
 
 function handleMessage(msg) {
-  // Expected structure: { activeSite: string, sites: [...], pollTime: string }
-  // Note: the operator's /ws/status broadcasts a simpler {site, status} shape
-  // that does not carry full topology; those messages are intentionally
-  // ignored here and the REST poller (pollStatus) drives the UI.
+  // Expected structure: { namespace, group, activeSite, sites: [...],
+  //   lastFailover, lastFailoverTarget, alert, updatePhase, pollTime }
+  // The operator's /ws/status broadcasts this shape on every poll cycle.
+  // The REST /status fallback uses snake_case and is mapped via normalizeStatus().
   if (msg.sites) {
     renderSites(msg);
     detectChanges(msg);
@@ -310,9 +310,9 @@ function normalizeStatus(raw) {
   };
 }
 
-// Also poll the REST status endpoint as a fallback. WebSocket broadcasts a
-// simple {site, status} message that does not carry full topology, so REST
-// polling is the real source of truth for the dashboard.
+// Poll the REST status endpoint as a fallback when the WebSocket isn't
+// connected. The WS broadcast (/ws/status) is the primary source of live
+// topology and fires on every operator poll cycle.
 async function pollStatus() {
   try {
     const r = await fetch('/api/operator/status');

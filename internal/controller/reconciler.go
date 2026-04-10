@@ -962,7 +962,8 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 	}
 
 	return TopologyConfig{
-		Name: fg.Name,
+		Namespace: fg.Namespace,
+		Name:      fg.Name,
 		Sites: [2]SiteTopologyConfig{
 			{
 				Name: fg.Spec.Sites[0].Name,
