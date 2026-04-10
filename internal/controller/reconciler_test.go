@@ -684,9 +684,15 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 		t.Fatal("expected spec-hash annotation to be set")
 	}
 
-	// Simulate cert rotation by updating the TLS Secret data.
-	tlsSecret.Data["tls.crt"] = []byte("cert-v2")
-	if err := c.Update(context.Background(), tlsSecret); err != nil {
+	// Simulate cert rotation by fetching a fresh copy and updating.
+	var rotatedSecret corev1.Secret
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "mysql-tls", Namespace: "shared-lion",
+	}, &rotatedSecret); err != nil {
+		t.Fatalf("get TLS secret before update: %v", err)
+	}
+	rotatedSecret.Data["tls.crt"] = []byte("cert-v2")
+	if err := c.Update(context.Background(), &rotatedSecret); err != nil {
 		t.Fatalf("update TLS secret: %v", err)
 	}
 
