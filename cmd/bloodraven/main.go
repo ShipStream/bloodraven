@@ -11,6 +11,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -159,6 +160,33 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub) *htt
 			return
 		}
 		json.NewEncoder(rw).Encode(statuses)
+	})
+	mux.HandleFunc("/active-site", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "application/json")
+		ns := r.URL.Query().Get("namespace")
+		group := r.URL.Query().Get("group")
+		if ns == "" || group == "" {
+			rw.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(rw).Encode(map[string]string{"error": "namespace and group query parameters are required"})
+			return
+		}
+		nn := types.NamespacedName{Namespace: ns, Name: group}
+		status, found := runner.Status(nn)
+		if !found {
+			if len(runner.AllStatuses()) == 0 {
+				rw.WriteHeader(http.StatusServiceUnavailable)
+				json.NewEncoder(rw).Encode(map[string]string{"error": "no active topology managers"})
+				return
+			}
+			rw.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(rw).Encode(map[string]string{"error": "failover group not found"})
+			return
+		}
+		json.NewEncoder(rw).Encode(map[string]string{
+			"namespace":   ns,
+			"group":       group,
+			"active_site": status.ActiveSite,
+		})
 	})
 	mux.HandleFunc("/ws/status", hub.HandleWS)
 	return mux

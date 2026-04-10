@@ -507,6 +507,64 @@ func TestReplicationBrokenInSnapshot(t *testing.T) {
 	}
 }
 
+func TestStatusActiveSiteOneWritable(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	pollN(tm, 2)
+
+	s := tm.Status()
+	if s.ActiveSite != "dc1" {
+		t.Errorf("expected active_site=dc1, got %q", s.ActiveSite)
+	}
+}
+
+func TestStatusActiveSiteBothReadOnly(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	pollN(tm, 2)
+
+	s := tm.Status()
+	if s.ActiveSite != "" {
+		t.Errorf("expected empty active_site when both read-only, got %q", s.ActiveSite)
+	}
+}
+
+func TestStatusActiveSiteBothWritable(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: false}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	pollN(tm, 2)
+
+	s := tm.Status()
+	if s.ActiveSite != "" {
+		t.Errorf("expected empty active_site during split-brain, got %q", s.ActiveSite)
+	}
+}
+
+func TestSnapshotActiveSiteMatchesStatus(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	var captured TopologySnapshot
+	tm.StatusCallback = func(snap TopologySnapshot) {
+		captured = snap
+	}
+
+	pollN(tm, 2)
+
+	s := tm.Status()
+	if captured.ActiveSite != s.ActiveSite {
+		t.Errorf("snapshot active_site=%q does not match status active_site=%q",
+			captured.ActiveSite, s.ActiveSite)
+	}
+}
+
 func TestReplicationNotCheckedOnWritableSite(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false, replicaStatusVal: &mysql.ReplicaStatus{
 		IORunning:  false,

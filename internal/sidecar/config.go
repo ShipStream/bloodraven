@@ -20,7 +20,7 @@ type Config struct {
 	// PeerAddress is the address of the peer sidecar (e.g. "mysql-lion-pdx.shared-lion.svc.cluster.local:8080").
 	PeerAddress string
 
-	// BloodravenAddress is the address of Bloodraven's health endpoint.
+	// BloodravenAddress is the address of the Bloodraven operator's auxiliary HTTP server.
 	BloodravenAddress string
 
 	// LeaseTimeout is how long both Bloodraven and peer must be unreachable before self-fencing.
@@ -32,8 +32,11 @@ type Config struct {
 	// MySite is the site this sidecar belongs to.
 	MySite string
 
-	// ActiveSite is the site that should currently be active (writable).
-	ActiveSite string
+	// PodNamespace is the namespace of the pod.
+	PodNamespace string
+
+	// FailoverGroup is the name of the MysqlFailoverGroup CR this sidecar belongs to.
+	FailoverGroup string
 }
 
 // ConfigFromEnv reads sidecar configuration from environment variables.
@@ -75,7 +78,8 @@ func ConfigFromEnv() (*Config, error) {
 	}
 
 	mySite := os.Getenv("MY_SITE")
-	activeSite := os.Getenv("ACTIVE_SITE")
+	podNamespace := os.Getenv("POD_NAMESPACE")
+	failoverGroup := os.Getenv("FAILOVER_GROUP")
 
 	return &Config{
 		MysqlDSN:          dsn,
@@ -86,6 +90,7 @@ func ConfigFromEnv() (*Config, error) {
 		LeaseTimeout:      leaseTimeout,
 		PeerCheckInterval: peerCheckInterval,
 		MySite:            mySite,
-		ActiveSite:        activeSite,
+		PodNamespace:      podNamespace,
+		FailoverGroup:     failoverGroup,
 	}, nil
 }

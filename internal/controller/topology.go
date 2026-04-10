@@ -100,8 +100,9 @@ type SiteStatusEntry struct {
 
 // StatusResponse is returned by the /status endpoint.
 type StatusResponse struct {
-	Sites    [2]SiteStatusEntry `json:"sites"`
-	PollTime string             `json:"poll_time"`
+	ActiveSite string             `json:"active_site"`
+	Sites      [2]SiteStatusEntry `json:"sites"`
+	PollTime   string             `json:"poll_time"`
 }
 
 func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
@@ -142,10 +143,28 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysq
 	}
 }
 
+// activeSiteLocked returns the name of the single writable site, or "" if zero
+// or more than one site is writable. Must be called with tm.mu held.
+func (tm *TopologyManager) activeSiteLocked() string {
+	var name string
+	var count int
+	for i := range tm.sites {
+		if tm.sites[i].state == state.StateWritable {
+			name = tm.sites[i].name
+			count++
+		}
+	}
+	if count == 1 {
+		return name
+	}
+	return ""
+}
+
 func (tm *TopologyManager) Status() StatusResponse {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	return StatusResponse{
+		ActiveSite: tm.activeSiteLocked(),
 		Sites: [2]SiteStatusEntry{
 			{Name: tm.sites[0].name, State: tm.sites[0].state.String()},
 			{Name: tm.sites[1].name, State: tm.sites[1].state.String()},
@@ -335,18 +354,12 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 
 	// Notify the status callback on any state change.
 	if anyTransition && tm.StatusCallback != nil {
-		activeSite := ""
-		for i := range tm.sites {
-			if tm.sites[i].state == state.StateWritable {
-				activeSite = tm.sites[i].name
-			}
-		}
 		tm.StatusCallback(TopologySnapshot{
 			SiteNames:          [2]string{tm.sites[0].name, tm.sites[1].name},
 			SiteStates:         [2]state.SiteState{tm.sites[0].state, tm.sites[1].state},
 			SiteLastSeen:       [2]time.Time{tm.sites[0].lastSeen, tm.sites[1].lastSeen},
 			SiteReplication:    siteRepl,
-			ActiveSite:         activeSite,
+			ActiveSite:         tm.activeSiteLocked(),
 			LastFailover:       tm.lastFailover,
 			LastFailoverTarget: tm.lastFailoverTarget,
 			Alert:              alertMsg,
