@@ -160,20 +160,7 @@ Acceptance criteria:
 
 ## Priority 4: Operational hardening
 
-### 9. Tighten defaults around images and configuration
-Problem:
-- The reconciler defaults the MySQL image to `mysql:9.6`, and the sidecar image falls back to the MySQL image if unspecified.
-
-Recommended work:
-- Make default image behavior explicit and documented.
-- Consider requiring `sidecarImage` rather than silently reusing the MySQL image unless the image is truly multi-purpose.
-- Validate that secrets include the exact keys the sidecar and MySQL containers require.
-
-Acceptance criteria:
-- Deployments fail early and clearly when configuration is incomplete.
-- There is no ambiguous image selection at runtime.
-
-### 10. Revisit websocket exposure assumptions, but keep this low priority
+### 9. Revisit websocket exposure assumptions, but keep this low priority
 Current conclusion:
 - If `/ws/status` is only reachable as an in-cluster `ClusterIP` service, with no ingress and no untrusted workloads in the cluster, strict origin checks or a token are not necessary right now.
 
@@ -219,11 +206,3 @@ Recommended work:
 Acceptance criteria:
 - A new contributor can trust the docs without reverse-engineering the code.
 
-## Suggested sequence
-
-1. Start topology managers from the production binary.
-2. Write CR status from live topology state.
-3. Fix manifest generation and expand the Makefile.
-4. Add schema defaults/validation.
-5. Refactor tests for deterministic execution.
-6. Tighten configuration validation and document internal-only websocket assumptions.
