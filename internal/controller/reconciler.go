@@ -974,6 +974,10 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 				LBIP: fg.Spec.Sites[1].LBIP,
 			},
 		},
+		SiteHosts: [2]string{
+			fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, fg.Spec.Sites[0].Name, fg.Namespace),
+			fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, fg.Spec.Sites[1].Name, fg.Namespace),
+		},
 		PollInterval:      pollInterval,
 		FailureThreshold:  int(failureThreshold),
 		RecoveryThreshold: int(recoveryThreshold),

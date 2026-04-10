@@ -176,7 +176,23 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 
 	dns := platform.NewDNSEndpointUpdater(r.client, fg.Name, string(fg.UID), fg.Namespace, fg.Name, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL)
 
-	tm := NewTopologyManager(cfg, siteMySQL[0], siteMySQL[1], failoverCtl, tainter, r.hub, dns,
+	// Build bootstrap configuration from the secret. If replication credentials
+	// are missing the auto-bootstrap path is disabled and the operator will
+	// only log split-brain alerts as before.
+	bootstrapCtl := NewBootstrapController(r.logger.With("fg", nn.String()))
+	bootstrapCfg := BootstrapConfig{
+		ReplUser:     string(secret.Data["MYSQL_REPLICATION_USER"]),
+		ReplPassword: string(secret.Data["MYSQL_REPLICATION_PASSWORD"]),
+		UseSSL:       fg.Spec.TLS != nil,
+	}
+	if fg.Spec.CloneTimeout > 0 {
+		bootstrapCfg.CloneTimeout = time.Duration(fg.Spec.CloneTimeout) * time.Second
+	}
+	if bootstrapCfg.ReplUser == "" {
+		r.logger.Warn("auto-bootstrap disabled: secret missing MYSQL_REPLICATION_USER", "fg", nn)
+	}
+
+	tm := NewTopologyManager(cfg, siteMySQL[0], siteMySQL[1], failoverCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
 		r.logger.With("fg", nn.String()))
 
 	// Set the status callback to update the CR status subresource on state changes.
@@ -395,6 +411,41 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				Message:            fmt.Sprintf("Replication error on %s: %s", siteName, repl.LastError),
 			})
 		}
+	}
+
+	// Bootstrapping condition reflects fresh-deploy bootstrap progress.
+	switch snap.BootstrapPhase {
+	case "", string(BootstrapPhaseDone):
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
+			Type:               "Bootstrapping",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: freshFG.Generation,
+			LastTransitionTime: now,
+			Reason:             "NotBootstrapping",
+			Message:            "No bootstrap in progress",
+		})
+	case string(BootstrapPhaseFailed):
+		msg := "Bootstrap failed"
+		if snap.BootstrapError != "" {
+			msg = fmt.Sprintf("Bootstrap failed: %s", snap.BootstrapError)
+		}
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
+			Type:               "Bootstrapping",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: freshFG.Generation,
+			LastTransitionTime: now,
+			Reason:             "Failed",
+			Message:            msg,
+		})
+	default:
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
+			Type:               "Bootstrapping",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: freshFG.Generation,
+			LastTransitionTime: now,
+			Reason:             snap.BootstrapPhase,
+			Message:            fmt.Sprintf("Fresh-deploy bootstrap in progress: %s", snap.BootstrapPhase),
+		})
 	}
 
 	// Update phase tracking.

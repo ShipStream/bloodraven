@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
+	"github.com/shipstream/bloodraven/internal/util"
 )
 
 // SiteTopologyConfig holds per-site configuration for the topology manager.
@@ -26,11 +28,36 @@ type TopologyConfig struct {
 	Name  string // failover group name (from CR metadata.name)
 	Sites [2]SiteTopologyConfig
 
+	// SiteHosts are the MySQL service hostnames (without port) for each site.
+	// Used as the donor/source host for clone and replication setup.
+	SiteHosts [2]string
+
 	PollInterval      int64 // nanoseconds
 	FailureThreshold  int
 	RecoveryThreshold int
 	FailoverCooldown  int64 // nanoseconds, default 5m
 }
+
+// BootstrapConfig holds configuration for auto-bootstrap of fresh-deploy replicas.
+// When ReplUser is empty, auto-bootstrap is disabled.
+type BootstrapConfig struct {
+	ReplUser     string
+	ReplPassword string
+	UseSSL       bool
+	CloneTimeout time.Duration
+}
+
+// BootstrapPhase tracks the lifecycle of an auto-bootstrap operation.
+type BootstrapPhase string
+
+const (
+	BootstrapPhaseNone       BootstrapPhase = ""
+	BootstrapPhaseCloning    BootstrapPhase = "Cloning"
+	BootstrapPhaseRestarting BootstrapPhase = "WaitingForRestart"
+	BootstrapPhaseSetupRepl  BootstrapPhase = "SetupReplication"
+	BootstrapPhaseDone       BootstrapPhase = "Done"
+	BootstrapPhaseFailed     BootstrapPhase = "Failed"
+)
 
 // PollIntervalDuration returns the poll interval as a time.Duration.
 func (c TopologyConfig) PollIntervalDuration() time.Duration {
@@ -49,6 +76,8 @@ type TopologySnapshot struct {
 	LastFailoverTarget string
 	Alert              string // non-empty if a cross-site alert fired this cycle
 	UpdatePhase        string // non-empty if an ordered update is in progress
+	BootstrapPhase     string // non-empty if a fresh-deploy bootstrap is in progress or finished
+	BootstrapError     string // non-empty if bootstrap failed
 }
 
 // siteTracker tracks debounce counters and current state for one site.
@@ -82,6 +111,13 @@ type TopologyManager struct {
 	// Promotion state: tracks which site was promoted and is pending DNS flip.
 	promotedSite string // empty = no pending promotion
 
+	// Bootstrap orchestration. When bootstrap is nil or bootstrapCfg.ReplUser is
+	// empty, auto-bootstrap is disabled. bootstrapPhase/bootstrapErr are protected by mu.
+	bootstrap      *BootstrapController
+	bootstrapCfg   BootstrapConfig
+	bootstrapPhase BootstrapPhase
+	bootstrapErr   error
+
 	// StatusCallback is invoked after each poll cycle that produces a state change.
 	// The runner sets this to push status updates to the CR.
 	StatusCallback func(TopologySnapshot)
@@ -104,12 +140,12 @@ type StatusResponse struct {
 	PollTime string             `json:"poll_time"`
 }
 
-func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
-	return NewTopologyManagerWithClock(cfg, site0MySQL, site1MySQL, failover, tainter, hub, dns, logger, clock.RealClock{})
+func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
+	return NewTopologyManagerWithClock(cfg, site0MySQL, site1MySQL, failover, bootstrap, bootstrapCfg, tainter, hub, dns, logger, clock.RealClock{})
 }
 
 // NewTopologyManagerWithClock creates a TopologyManager with an injectable clock for testing.
-func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
+func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
 	cooldown := time.Duration(cfg.FailoverCooldown)
 	if cooldown == 0 {
 		cooldown = 5 * time.Minute
@@ -134,6 +170,8 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysq
 		},
 		failover:         failover,
 		failoverCooldown: cooldown,
+		bootstrap:        bootstrap,
+		bootstrapCfg:     bootstrapCfg,
 		tainter:          tainter,
 		hub:              hub,
 		dns:              dns,
@@ -341,6 +379,13 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 				activeSite = tm.sites[i].name
 			}
 		}
+		tm.mu.RLock()
+		bootstrapPhase := string(tm.bootstrapPhase)
+		bootstrapErrStr := ""
+		if tm.bootstrapErr != nil {
+			bootstrapErrStr = tm.bootstrapErr.Error()
+		}
+		tm.mu.RUnlock()
 		tm.StatusCallback(TopologySnapshot{
 			SiteNames:          [2]string{tm.sites[0].name, tm.sites[1].name},
 			SiteStates:         [2]state.SiteState{tm.sites[0].state, tm.sites[1].state},
@@ -350,6 +395,8 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 			LastFailover:       tm.lastFailover,
 			LastFailoverTarget: tm.lastFailoverTarget,
 			Alert:              alertMsg,
+			BootstrapPhase:     bootstrapPhase,
+			BootstrapError:     bootstrapErrStr,
 		})
 	}
 }
@@ -412,6 +459,30 @@ func (tm *TopologyManager) applyPerSiteAction(ctx context.Context, site *siteTra
 func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action state.CrossSiteAction) {
 	if action.Alert != "" {
 		tm.logger.Warn("ALERT", "message", action.Alert)
+	}
+
+	// Suppress any cross-site actions while a bootstrap is in progress: the
+	// replica will appear unreachable during the MySQL restart that follows
+	// CLONE INSTANCE, and we do not want to initiate a failover on that signal.
+	if tm.isBootstrapping() {
+		tm.mu.RLock()
+		phase := tm.bootstrapPhase
+		tm.mu.RUnlock()
+		tm.logger.Info("cross-site action suppressed during bootstrap", "phase", phase)
+		return
+	}
+
+	// Detect fresh-deploy split-brain and auto-bootstrap the replica.
+	if action.Alert == "SPLIT BRAIN: both sites are writable" && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
+		tm.mu.RLock()
+		phase := tm.bootstrapPhase
+		tm.mu.RUnlock()
+		if phase == BootstrapPhaseNone || phase == BootstrapPhaseFailed {
+			if tm.isFreshDeploy(ctx) {
+				tm.startBootstrap(ctx)
+				return
+			}
+		}
 	}
 
 	if action.PromoteSite != "" && tm.promotedSite == "" {
@@ -477,4 +548,197 @@ func (tm *TopologyManager) getSite(name string) *siteTracker {
 		}
 	}
 	return nil
+}
+
+// BootstrapPhase returns the current bootstrap phase (empty string if no
+// bootstrap has run). Intended for tests and status reporting.
+func (tm *TopologyManager) BootstrapPhase() BootstrapPhase {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.bootstrapPhase
+}
+
+// isBootstrapping reports whether an auto-bootstrap is currently running.
+func (tm *TopologyManager) isBootstrapping() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	switch tm.bootstrapPhase {
+	case BootstrapPhaseCloning, BootstrapPhaseRestarting, BootstrapPhaseSetupRepl:
+		return true
+	}
+	return false
+}
+
+// isFreshDeploy reports whether both sites are writable AND neither has ever
+// had replication configured. This is the signature of a fresh deployment —
+// as opposed to a "true" split-brain where at least one side previously had
+// replication set up and may now hold diverged writes.
+func (tm *TopologyManager) isFreshDeploy(ctx context.Context) bool {
+	if tm.sites[0].state != state.StateWritable || tm.sites[1].state != state.StateWritable {
+		return false
+	}
+	for i := range tm.sites {
+		rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
+		if err != nil {
+			// Be conservative: if we can't determine replication state, don't bootstrap.
+			tm.logger.Warn("fresh-deploy check: could not read replica status", "site", tm.sites[i].name, "error", err)
+			return false
+		}
+		if rs != nil {
+			// Replication was configured at some point — not a fresh deploy.
+			return false
+		}
+	}
+	return true
+}
+
+// startBootstrap kicks off the async bootstrap goroutine. Caller must hold no locks.
+// Site 0 (first in the spec) is chosen as the primary for fresh-deploy bootstrap.
+func (tm *TopologyManager) startBootstrap(ctx context.Context) {
+	primaryIdx := 0
+	replicaIdx := 1
+
+	tm.mu.Lock()
+	tm.bootstrapPhase = BootstrapPhaseCloning
+	tm.bootstrapErr = nil
+	tm.mu.Unlock()
+
+	tm.logger.Info("starting fresh-deploy bootstrap",
+		"primary", tm.sites[primaryIdx].name,
+		"replica", tm.sites[replicaIdx].name,
+		"primaryHost", tm.cfg.SiteHosts[primaryIdx])
+
+	tm.emitBootstrapStatus("")
+
+	go func() {
+		err := tm.runBootstrap(ctx, primaryIdx, replicaIdx)
+		tm.mu.Lock()
+		if err != nil {
+			tm.bootstrapPhase = BootstrapPhaseFailed
+			tm.bootstrapErr = err
+			tm.logger.Error("bootstrap failed", "error", err)
+		} else {
+			tm.bootstrapPhase = BootstrapPhaseDone
+			tm.logger.Info("bootstrap completed successfully")
+		}
+		tm.mu.Unlock()
+		tm.emitBootstrapStatus("")
+	}()
+}
+
+// runBootstrap performs the clone, waits for the MySQL restart, and sets up replication.
+func (tm *TopologyManager) runBootstrap(ctx context.Context, primaryIdx, replicaIdx int) error {
+	primary := tm.sites[primaryIdx].mysql
+	replica := tm.sites[replicaIdx].mysql
+	primaryHost := tm.cfg.SiteHosts[primaryIdx]
+	if primaryHost == "" {
+		return fmt.Errorf("bootstrap: primary host not configured for site %s", tm.sites[primaryIdx].name)
+	}
+
+	// Phase 1: Clone from primary. MySQL auto-restarts at the end of a
+	// successful clone, which typically causes the in-flight CLONE INSTANCE
+	// query to return a connection error. We treat such errors as potential
+	// success and proceed to the wait phase, where we verify the replica comes
+	// back online. A true clone failure will surface during the wait or the
+	// subsequent SetupReplication call (e.g. GTID set mismatch, missing data).
+	err := tm.bootstrap.BootstrapReplica(ctx, BootstrapOpts{
+		Primary:      primary,
+		Replica:      replica,
+		PrimaryHost:  primaryHost,
+		ReplicaSite:  tm.sites[replicaIdx].name,
+		ReplUser:     tm.bootstrapCfg.ReplUser,
+		ReplPassword: tm.bootstrapCfg.ReplPassword,
+		UseSSL:       tm.bootstrapCfg.UseSSL,
+		CloneTimeout: tm.bootstrapCfg.CloneTimeout,
+	})
+	if err != nil && !isCloneConnectionDrop(err) {
+		return fmt.Errorf("clone: %w", err)
+	}
+	if err != nil {
+		tm.logger.Info("clone returned expected connection drop, waiting for restart", "error", err)
+	}
+
+	// Phase 2: Wait for MySQL to come back online after the post-clone restart.
+	tm.mu.Lock()
+	tm.bootstrapPhase = BootstrapPhaseRestarting
+	tm.mu.Unlock()
+	tm.emitBootstrapStatus("")
+
+	waitErr := util.RetryWithBackoff(ctx, tm.logger, 10, 2*time.Second, func() error {
+		_, checkErr := replica.CheckReadOnly(ctx)
+		return checkErr
+	})
+	if waitErr != nil {
+		return fmt.Errorf("wait for replica restart: %w", waitErr)
+	}
+
+	// Phase 3: Configure and start replication.
+	tm.mu.Lock()
+	tm.bootstrapPhase = BootstrapPhaseSetupRepl
+	tm.mu.Unlock()
+	tm.emitBootstrapStatus("")
+
+	if err := tm.bootstrap.SetupReplication(ctx, replica, ReplicationSetupOpts{
+		SourceHost:   primaryHost,
+		ReplUser:     tm.bootstrapCfg.ReplUser,
+		ReplPassword: tm.bootstrapCfg.ReplPassword,
+		UseSSL:       tm.bootstrapCfg.UseSSL,
+	}); err != nil {
+		return fmt.Errorf("setup replication: %w", err)
+	}
+
+	return nil
+}
+
+// isCloneConnectionDrop reports whether an error from CLONE INSTANCE looks
+// like the expected connection drop caused by the post-clone MySQL restart.
+func isCloneConnectionDrop(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"invalid connection",
+		"connection reset",
+		"broken pipe",
+		"EOF",
+		"bad connection",
+		"Lost connection",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// emitBootstrapStatus pushes a TopologySnapshot with the current bootstrap phase
+// to StatusCallback. It is safe to call from the bootstrap goroutine and the
+// poll loop; both take a read lock on tm.mu to read state.
+func (tm *TopologyManager) emitBootstrapStatus(alert string) {
+	if tm.StatusCallback == nil {
+		return
+	}
+	tm.mu.RLock()
+	snap := TopologySnapshot{
+		SiteNames:          [2]string{tm.sites[0].name, tm.sites[1].name},
+		SiteStates:         [2]state.SiteState{tm.sites[0].state, tm.sites[1].state},
+		SiteLastSeen:       [2]time.Time{tm.sites[0].lastSeen, tm.sites[1].lastSeen},
+		LastFailover:       tm.lastFailover,
+		LastFailoverTarget: tm.lastFailoverTarget,
+		Alert:              alert,
+		BootstrapPhase:     string(tm.bootstrapPhase),
+	}
+	if tm.bootstrapErr != nil {
+		snap.BootstrapError = tm.bootstrapErr.Error()
+	}
+	activeSite := ""
+	for i := range tm.sites {
+		if tm.sites[i].state == state.StateWritable {
+			activeSite = tm.sites[i].name
+		}
+	}
+	snap.ActiveSite = activeSite
+	tm.mu.RUnlock()
+	tm.StatusCallback(snap)
 }

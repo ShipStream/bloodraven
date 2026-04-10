@@ -35,7 +35,12 @@ type mockMySQL struct {
 	replicaStarted        bool
 	cloneDonorList        string
 	cloneInstanceCalled   bool
+	cloneInstanceErr      error
 	changeReplicationOpts mysql.ReplicationSourceOpts
+
+	// replicaStatus is returned from ShowReplicaStatus. nil (default) means
+	// "never had replication configured", which is the fresh-deploy signature.
+	replicaStatus *mysql.ReplicaStatus
 }
 
 func (m *mockMySQL) CheckReadOnly(_ context.Context) (bool, error) {
@@ -86,7 +91,9 @@ func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
 }
 
 func (m *mockMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
-	return nil, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.replicaStatus, nil
 }
 
 func (m *mockMySQL) ChangeReplicationSource(_ context.Context, opts mysql.ReplicationSourceOpts) error {
@@ -119,7 +126,7 @@ func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ i
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cloneInstanceCalled = true
-	return nil
+	return m.cloneInstanceErr
 }
 
 // setReadOnly sets read-only state and clears any error.
@@ -247,13 +254,14 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
 			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
 		},
+		SiteHosts:         [2]string{"mysql-lion-dc1.default.svc.cluster.local", "mysql-lion-dc2.default.svc.cluster.local"},
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
 		RecoveryThreshold: 2,
 		FailoverCooldown:  0, // no cooldown by default
 	}
 
-	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, tainter, hub, dns, logger, clk)
+	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
 
 	return &testHarness{
 		tm:       tm,
@@ -286,13 +294,14 @@ func newTestHarnessWithCooldown(t *testing.T, cooldown time.Duration) *testHarne
 			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
 			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
 		},
+		SiteHosts:         [2]string{"mysql-lion-dc1.default.svc.cluster.local", "mysql-lion-dc2.default.svc.cluster.local"},
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
 		RecoveryThreshold: 2,
 		FailoverCooldown:  int64(cooldown),
 	}
 
-	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, tainter, hub, dns, logger, clk)
+	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
 
 	return &testHarness{
 		tm:       tm,
