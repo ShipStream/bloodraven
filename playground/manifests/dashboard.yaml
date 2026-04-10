@@ -1,0 +1,53 @@
+# Dashboard serves a static HTML page that connects to the operator's
+# websocket endpoint and shows real-time cluster state.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: bloodraven-playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      serviceAccountName: dashboard
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: dashboard
+          image: bloodraven-dashboard:playground
+          env:
+            - name: OPERATOR_URL
+              value: "http://bloodraven.bloodraven-playground.svc.cluster.local:8082"
+          ports:
+            - containerPort: 8091
+              name: http
+          resources:
+            requests:
+              cpu: 25m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: bloodraven-playground
+spec:
+  selector:
+    app: dashboard
+  ports:
+    - port: 8091
+      targetPort: 8091
+      name: http
+  type: NodePort

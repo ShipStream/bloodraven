@@ -283,6 +283,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	existingStatus := freshFG.Status.DeepCopy()
 
 	freshFG.Status.ActiveSite = snap.ActiveSite
+	// Ensure the Sites slice is allocated to match the number of sites.
+	if len(freshFG.Status.Sites) != len(snap.SiteNames) {
+		freshFG.Status.Sites = make([]v1alpha1.SiteStatus, len(snap.SiteNames))
+	}
 	for i := range freshFG.Status.Sites {
 		freshFG.Status.Sites[i] = siteStatusFromSnapshot(snap.SiteNames[i], snap.SiteStates[i], snap.SiteLastSeen[i], snap.SiteReplication[i])
 	}

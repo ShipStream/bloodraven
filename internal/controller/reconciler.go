@@ -268,7 +268,6 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
 		"log-bin":                        "/var/lib/mysql/mysql-bin",
 		"log-replica-updates":            "ON",
 		"skip-replica-start":             "ON",
-		"binlog-format":                  "ROW",
 		"sync-binlog":                    "1",
 		"binlog-expire-logs-seconds":     "1209600",
 		"plugin-load-add":                "mysql_clone.so",
@@ -279,19 +278,14 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
 		"max-allowed-packet":             "64M",
 		"max-connect-errors":             "1000000",
 		"skip-name-resolve":              "",
-		"skip-host-cache":                "",
 		"max-connections":                "500",
 		"thread-cache-size":              "50",
 		"character-set-server":           "utf8mb4",
 		"collation-server":               "utf8mb4_unicode_ci",
 	}
 
-	// Apply clone_ddl_timeout from spec (default 3600s)
-	cloneTimeout := 3600
-	if fg.Spec.CloneTimeout > 0 {
-		cloneTimeout = fg.Spec.CloneTimeout
-	}
-	settings["clone_ddl_timeout"] = fmt.Sprintf("%d", cloneTimeout)
+	// clone_ddl_timeout was removed in MySQL 9.x; only set it for older versions.
+	// TODO: detect MySQL version and conditionally apply clone settings.
 
 	// Apply TLS settings if configured
 	if fg.Spec.TLS != nil {
@@ -515,7 +509,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					{Name: "PEER_ADDRESS", Value: peerAddress},
 					{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
 					{Name: "MY_SITE", Value: site.Name},
-					{Name: "ACTIVE_SITE", Value: fg.Status.ActiveSite},
+					// ACTIVE_SITE is intentionally omitted from the deployment spec
+					// to avoid triggering rollouts when the active site changes.
+					// The sidecar's safety net will be skipped (gracefully) on startup.
 					{Name: "LEASE_TIMEOUT", Value: leaseTimeout},
 					{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
 				},
@@ -597,6 +593,16 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			Spec: corev1.PodSpec{
 				NodeSelector: map[string]string{
 					"topology.kubernetes.io/zone": site.Zone,
+				},
+				// MySQL pods must tolerate the db-readonly taint since they
+				// run on both primary and replica nodes. Only application
+				// pods should be evicted by this taint.
+				Tolerations: []corev1.Toleration{
+					{
+						Key:      platform.TaintKey,
+						Operator: corev1.TolerationOpExists,
+						Effect:   corev1.TaintEffectNoExecute,
+					},
 				},
 				InitContainers: append([]corev1.Container{
 					{
@@ -804,6 +810,11 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 	logger := log.FromContext(ctx)
 
 	if fg.Status.ActiveSite == "" {
+		return nil
+	}
+
+	// Guard: status may not be populated yet
+	if len(fg.Status.Sites) < len(fg.Spec.Sites) {
 		return nil
 	}
 

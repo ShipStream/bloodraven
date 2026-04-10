@@ -1,0 +1,81 @@
+# Simple counter app deployed with taint-based failover tolerations.
+# It connects to MySQL via the failover group DNS hostname and provides
+# an increment button to prove state persists across failover.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: counter-app
+  namespace: bloodraven-playground
+  labels:
+    app: counter-app
+    shipstream.io/failover-group: playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: counter-app
+  template:
+    metadata:
+      labels:
+        app: counter-app
+        shipstream.io/failover-group: playground
+    spec:
+      # The counter app tolerates the readonly taint so it stays scheduled,
+      # but in a real setup you'd want separate read/write deployments.
+      # Here we use it to demonstrate the taint-based eviction flow.
+      # NO toleration for shipstream.io/db-readonly — the pod gets evicted
+      # from the old-primary site and rescheduled to the new-primary site.
+      # Tolerate disk-pressure so playground works on low-disk local clusters.
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: In
+                    values: ["zone-iad", "zone-pdx"]
+      containers:
+        - name: counter
+          image: bloodraven-counter:playground
+          ports:
+            - containerPort: 8090
+              name: http
+          env:
+            - name: MYSQL_DSN
+              # Uses the operator's primary service which tracks the active writable MySQL.
+              value: "root:playground-root-pw@tcp(mysql-playground-primary.bloodraven-playground.svc.cluster.local:3306)/?parseTime=true&timeout=5s"
+            - name: LISTEN_ADDR
+              value: ":8090"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8090
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: counter-app
+  namespace: bloodraven-playground
+spec:
+  selector:
+    app: counter-app
+  ports:
+    - port: 8090
+      targetPort: 8090
+      name: http
+  type: NodePort

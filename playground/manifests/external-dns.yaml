@@ -1,0 +1,109 @@
+# external-dns with a webhook provider — the dns-webhook sidecar receives
+# record changes from external-dns and stores them in memory. The dashboard
+# reads from the dns-webhook API to show DNS records in real time.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: external-dns
+  namespace: bloodraven-playground
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: external-dns-playground
+rules:
+  - apiGroups: ["externaldns.k8s.io"]
+    resources: ["dnsendpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["externaldns.k8s.io"]
+    resources: ["dnsendpoints/status"]
+    verbs: ["update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: external-dns-playground
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: external-dns-playground
+subjects:
+  - kind: ServiceAccount
+    name: external-dns
+    namespace: bloodraven-playground
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-dns
+  namespace: bloodraven-playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: external-dns
+  template:
+    metadata:
+      labels:
+        app: external-dns
+    spec:
+      serviceAccountName: external-dns
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: external-dns
+          image: registry.k8s.io/external-dns/external-dns:v0.15.1
+          args:
+            - --source=crd
+            - --crd-source-apiversion=externaldns.k8s.io/v1alpha1
+            - --crd-source-kind=DNSEndpoint
+            - --provider=webhook
+            - --webhook-provider-url=http://localhost:8888
+            - --log-level=info
+            - --interval=10s
+            - --namespace=bloodraven-playground
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+        - name: dns-webhook
+          image: bloodraven-dns-webhook:playground
+          ports:
+            - containerPort: 8888
+              name: webhook
+            - containerPort: 8889
+              name: api
+          resources:
+            requests:
+              cpu: 25m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8888
+            initialDelaySeconds: 2
+            periodSeconds: 5
+---
+# Service exposing the dns-webhook API port so the dashboard can reach it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dns-webhook
+  namespace: bloodraven-playground
+spec:
+  selector:
+    app: external-dns
+  ports:
+    - port: 8889
+      targetPort: 8889
+      name: api
+  type: ClusterIP

@@ -125,7 +125,6 @@ func (in *MysqlFailoverGroupSpec) DeepCopyInto(out *MysqlFailoverGroupSpec) {
 		*out = new(v1.Duration)
 		**out = **in
 	}
-	in.SidecarResources.DeepCopyInto(&out.SidecarResources)
 	in.Sidecar.DeepCopyInto(&out.Sidecar)
 	if in.MysqlConf != nil {
 		in, out := &in.MysqlConf, &out.MysqlConf
@@ -139,6 +138,7 @@ func (in *MysqlFailoverGroupSpec) DeepCopyInto(out *MysqlFailoverGroupSpec) {
 		*out = new(ReplicationSpec)
 		**out = **in
 	}
+	in.SidecarResources.DeepCopyInto(&out.SidecarResources)
 	if in.TerminationGracePeriodSeconds != nil {
 		in, out := &in.TerminationGracePeriodSeconds, &out.TerminationGracePeriodSeconds
 		*out = new(int64)
