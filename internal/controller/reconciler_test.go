@@ -649,3 +649,77 @@ func TestGenerateMyCnf_NoCloneDDLTimeout(t *testing.T) {
 		t.Error("my.cnf should not contain clone_ddl_timeout (removed in MySQL 9.x)")
 	}
 }
+
+func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.TLS = &v1alpha1.TLSSpec{
+		IssuerRef:  v1alpha1.IssuerRef{Name: "letsencrypt", Kind: "ClusterIssuer"},
+		SecretName: "mysql-tls",
+	}
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "mysql-tls", Namespace: "shared-lion"},
+		Data: map[string][]byte{
+			"tls.crt": []byte("cert-v1"),
+			"tls.key": []byte("key-v1"),
+			"ca.crt":  []byte("ca-v1"),
+		},
+	}
+	r, c := newReconciler(fg, tlsSecret)
+
+	// First reconcile — capture the spec hash.
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
+	}); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var deploy appsv1.Deployment
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "mysql-lion-dc1", Namespace: "shared-lion",
+	}, &deploy); err != nil {
+		t.Fatalf("deployment not found: %v", err)
+	}
+	hashBefore := deploy.Spec.Template.Annotations[specHashAnnotation]
+	if hashBefore == "" {
+		t.Fatal("expected spec-hash annotation to be set")
+	}
+
+	// Simulate cert rotation by updating the TLS Secret data.
+	tlsSecret.Data["tls.crt"] = []byte("cert-v2")
+	if err := c.Update(context.Background(), tlsSecret); err != nil {
+		t.Fatalf("update TLS secret: %v", err)
+	}
+
+	// Reconcile again — hash should change.
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
+	}); err != nil {
+		t.Fatalf("reconcile after cert rotation failed: %v", err)
+	}
+
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "mysql-lion-dc1", Namespace: "shared-lion",
+	}, &deploy); err != nil {
+		t.Fatalf("deployment not found after re-reconcile: %v", err)
+	}
+	hashAfter := deploy.Spec.Template.Annotations[specHashAnnotation]
+	if hashAfter == hashBefore {
+		t.Error("expected spec-hash to change after TLS certificate rotation")
+	}
+}
+
+func TestComputeSpecHash_StableWithoutTLS(t *testing.T) {
+	fg := newTestFG()
+	site := fg.Spec.Sites[0]
+	h1 := computeSpecHash(fg, site, nil)
+	h2 := computeSpecHash(fg, site, nil)
+	if h1 != h2 {
+		t.Errorf("hash should be stable: got %s and %s", h1, h2)
+	}
+
+	// Adding TLS data should change the hash.
+	h3 := computeSpecHash(fg, site, map[string][]byte{"tls.crt": []byte("cert")})
+	if h3 == h1 {
+		t.Error("hash should differ when TLS data is provided")
+	}
+}
