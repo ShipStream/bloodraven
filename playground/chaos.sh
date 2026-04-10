@@ -134,7 +134,47 @@ cmd_network_partition() {
   # Wait for the block to take effect
   kubectl -n "$NAMESPACE" wait --for=condition=ready "pod/$pod_name" --timeout=30s 2>/dev/null || true
   ok "Network partition active on $node (MySQL port 3306 blocked)"
-  echo "  To remove: ./playground/chaos.sh recover"
+  echo "  To remove cleanly: ./playground/chaos.sh recover"
+  echo "  Note: deleting the debug pod alone does not remove the node iptables rules."
+}
+
+# flush_node_iptables runs iptables -F on the given site's node via a fresh
+# privileged hostNetwork pod. Used as a fallback when the original chaos
+# pod has already been deleted but its iptables rules persist on the node.
+flush_node_iptables() {
+  local site="$1"
+  local node
+  node=$(site_node "$site" 2>/dev/null || true)
+  if [[ -z "$node" ]]; then
+    warn "Could not determine node for site $site; skipping iptables cleanup"
+    return 1
+  fi
+
+  local cleanup_pod="chaos-netcleanup-${site}"
+  info "Flushing node iptables for $site via temporary cleanup pod..."
+  kubectl -n "$NAMESPACE" delete pod "$cleanup_pod" --ignore-not-found --wait=false 2>/dev/null || true
+  kubectl -n "$NAMESPACE" run "$cleanup_pod" \
+    --image=alpine \
+    --restart=Never \
+    --overrides='{
+      "spec": {
+        "hostNetwork": true,
+        "nodeName": "'"$node"'",
+        "containers": [{
+          "name": "cleanup",
+          "image": "alpine",
+          "command": ["sh", "-c", "apk add --no-cache iptables >/dev/null 2>&1 && iptables -F && echo CLEANED"],
+          "securityContext": {"privileged": true}
+        }],
+        "tolerations": [{"operator": "Exists"}]
+      }
+    }' 2>/dev/null || {
+    warn "Could not create cleanup pod for $site"
+    return 1
+  }
+  kubectl -n "$NAMESPACE" wait --for=condition=Ready "pod/$cleanup_pod" --timeout=30s 2>/dev/null || true
+  kubectl -n "$NAMESPACE" delete pod "$cleanup_pod" --grace-period=0 --force 2>/dev/null || true
+  ok "iptables flushed for $site"
 }
 
 cmd_recover() {
@@ -143,15 +183,20 @@ cmd_recover() {
   # Uncordon all playground nodes
   cmd_uncordon 2>/dev/null || true
 
-  # Delete any chaos network-block pods (they hold the iptables rules;
-  # deleting them + the hostNetwork setup means rules are cleaned on pod exit)
+  # Clean up any chaos network-block pods. iptables changes live in the node
+  # network namespace and persist even if the original pod is deleted
+  # unexpectedly, so fall back to a fresh cleanup pod when the chaos pod is
+  # already gone.
   for site in iad pdx; do
     local pod_name="chaos-netblock-${site}"
     if kubectl -n "$NAMESPACE" get pod "$pod_name" >/dev/null 2>&1; then
       info "Removing network partition pod for $site..."
-      # First flush iptables via the pod, then delete it
+      # Flush iptables via the existing pod, then delete it.
       kubectl -n "$NAMESPACE" exec "$pod_name" -- sh -c "iptables -F" 2>/dev/null || true
       kubectl -n "$NAMESPACE" delete pod "$pod_name" --grace-period=0 --force 2>/dev/null || true
+    else
+      # Pod is gone but rules may still be on the node — spawn a cleanup pod.
+      flush_node_iptables "$site" || true
     fi
   done
 
