@@ -2,6 +2,8 @@ package mysql
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -78,11 +80,11 @@ func (m *mockCheckerForDrain) ChangeReplicationSource(_ context.Context, _ Repli
 }
 func (m *mockCheckerForDrain) StartReplica(_ context.Context) error { return nil }
 func (m *mockCheckerForDrain) WaitForRelayLogDrain(ctx context.Context, timeout time.Duration) error {
-	// Delegate to the checker's real implementation for testing.
-	// But since this is a mock, we implement the logic inline.
+	// Mirror the real checker's WaitForRelayLogDrain logic for testing.
 	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	interval := 100 * time.Millisecond
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 
 	for {
 		rs, err := m.ShowReplicaStatus(ctx)
@@ -98,14 +100,21 @@ func (m *mockCheckerForDrain) WaitForRelayLogDrain(ctx context.Context, timeout 
 		if rs.SecondsBehindSource != nil && *rs.SecondsBehindSource == 0 {
 			return nil
 		}
+		if rs.LastError != "" {
+			return fmt.Errorf("relay log drain aborted: SQL thread error: %s", rs.LastError)
+		}
 		if time.Now().After(deadline) {
 			return nil // simplified for test
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
 		}
+		if interval < 400*time.Millisecond {
+			interval *= 2
+		}
+		timer.Reset(interval)
 	}
 }
 
@@ -146,5 +155,27 @@ func TestWaitForRelayLogDrain_SQLStopped(t *testing.T) {
 	err := mock.WaitForRelayLogDrain(context.Background(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWaitForRelayLogDrain_EarlyExitOnLastError(t *testing.T) {
+	behind := int64(10)
+	mock := &mockCheckerForDrain{
+		statusResult: &ReplicaStatus{
+			SQLRunning:          true,
+			SecondsBehindSource: &behind,
+			LastError:           "Error 'Duplicate entry' on query",
+		},
+	}
+	err := mock.WaitForRelayLogDrain(context.Background(), 5*time.Second)
+	if err == nil {
+		t.Fatal("expected error for LastError early exit")
+	}
+	if !strings.Contains(err.Error(), "SQL thread error") {
+		t.Errorf("expected SQL thread error message, got: %v", err)
+	}
+	// Should exit after first check, not poll repeatedly.
+	if mock.calls != 1 {
+		t.Errorf("expected 1 call (early exit), got %d", mock.calls)
 	}
 }

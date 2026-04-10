@@ -227,6 +227,12 @@ func (tm *TopologyManager) Ready() bool {
 }
 
 // Run starts the polling loop. Blocks until ctx is cancelled.
+// maxPollBackoffExponent caps the exponential backoff at 2^4 = 16x the base
+// interval, subject to the 30s hard cap in adaptivePollInterval (e.g. 2s base
+// → 30s effective cap). This keeps detection latency reasonable while still
+// reducing waste when a DC is down for extended periods.
+const maxPollBackoffExponent = 4
+
 func (tm *TopologyManager) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -235,20 +241,49 @@ func (tm *TopologyManager) Run(ctx context.Context) {
 	tm.cancelFunc = cancel
 	tm.mu.Unlock()
 
-	ticker := tm.clock.NewTicker(tm.cfg.PollIntervalDuration())
-	defer ticker.Stop()
+	base := tm.cfg.PollIntervalDuration()
 
 	// Do an initial poll immediately.
 	tm.Poll(ctx)
 
 	for {
+		interval := tm.adaptivePollInterval(base)
+		timer := tm.clock.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C():
+		case <-timer.C():
 			tm.Poll(ctx)
 		}
 	}
+}
+
+// adaptivePollInterval returns the next poll interval based on the worst-case
+// failure count across both sites. When both sites are healthy the base interval
+// is used; when either is failing, the interval increases exponentially up to
+// base * 2^maxPollBackoffExponent (capped at 30s).
+func (tm *TopologyManager) adaptivePollInterval(base time.Duration) time.Duration {
+	maxFail := 0
+	for i := range tm.sites {
+		if fc := tm.sites[i].failCount; fc > maxFail {
+			maxFail = fc
+		}
+	}
+	// Only start backing off after the failure threshold is reached (DC is
+	// confirmed unreachable, not just experiencing transient errors).
+	backoffFails := maxFail - tm.cfg.FailureThreshold
+	if backoffFails <= 0 {
+		return base
+	}
+	if backoffFails > maxPollBackoffExponent {
+		backoffFails = maxPollBackoffExponent
+	}
+	interval := base * time.Duration(1<<uint(backoffFails))
+	if cap := 30 * time.Second; interval > cap {
+		return cap
+	}
+	return interval
 }
 
 // Poll executes a single poll cycle: checks both sites, applies debounce,
