@@ -44,6 +44,10 @@
   .toolbar .danger { border-color: #dc2626; color: #fca5a5; }
   .toolbar .danger:hover { background: #7f1d1d; }
   .empty { color: #475569; font-style: italic; padding: 12px; }
+  .health-banner { padding: 10px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 0.85rem; font-weight: 600; }
+  .health-banner.healthy { background: #14532d; color: #86efac; }
+  .health-banner.warning { background: #78350f; color: #fde68a; }
+  .health-banner.critical { background: #7f1d1d; color: #fca5a5; animation: pulse 1.5s infinite; }
 </style>
 </head>
 <body>
@@ -62,10 +66,11 @@
 <div class="grid">
   <div class="panel">
     <h2>Sites</h2>
+    <div id="health"></div>
     <div id="sites"><div class="empty">Waiting for data...</div></div>
   </div>
   <div class="panel">
-    <h2>DNS Records (external-dns)</h2>
+    <h2>DNS Records <span id="dnsSource" style="font-size:0.75rem; color:#64748b"></span></h2>
     <div id="dns"><div class="empty">Waiting for data...</div></div>
   </div>
   <div class="panel full-width">
@@ -120,8 +125,37 @@ function handleMessage(msg) {
 }
 
 function renderSites(msg) {
+  const sites = msg.sites || [];
+  const writableCount = sites.filter(s => s.state === 'writable').length;
+  const unreachableCount = sites.filter(s => s.state === 'unreachable').length;
+
+  let healthClass = 'healthy', healthText = 'Healthy';
+  if (writableCount > 1) {
+    healthClass = 'critical';
+    healthText = 'SPLIT BRAIN \u2014 multiple sites writable';
+  } else if (writableCount === 0 && sites.length > 0) {
+    healthClass = 'critical';
+    healthText = 'NO PRIMARY \u2014 no writable site';
+  } else if (unreachableCount > 0) {
+    healthClass = 'warning';
+    healthText = 'DEGRADED \u2014 ' + unreachableCount + ' site(s) unreachable';
+  } else if (!msg.activeSite && sites.length > 0) {
+    healthClass = 'warning';
+    healthText = 'NO ACTIVE SITE \u2014 awaiting primary election';
+  } else if (sites.length > 0) {
+    const replica = sites.find(s => s.name !== msg.activeSite);
+    if (replica && !replica.replicating) {
+      healthClass = 'warning';
+      healthText = 'DEGRADED \u2014 replica not replicating';
+    }
+  }
+
+  $('health').innerHTML = sites.length > 0
+    ? `<div class="health-banner ${healthClass}">${healthText}</div>`
+    : '';
+
   let html = '';
-  for (const site of (msg.sites || [])) {
+  for (const site of sites) {
     const isActive = site.name === msg.activeSite;
     const stateClass = (site.state || 'unknown').replace('-', '-');
     html += `
@@ -171,26 +205,50 @@ function renderLog() {
   ).join('');
 }
 
-// Poll DNS records from the webhook provider
+// Poll DNS records: try dns-webhook first, fall back to K8s API
 async function pollDNS() {
+  let records = null;
+  let fromK8s = false;
+
+  // Try dns-webhook first (records processed by external-dns)
   try {
     const r = await fetch('/api/dns');
-    if (!r.ok) {
-      $('dns').innerHTML = '<div class="empty">DNS API unavailable (' + r.status + ')</div>';
-      return;
+    if (r.ok) {
+      records = await r.json();
     }
-    const records = await r.json();
-    renderDNS(records);
-  } catch(e) {
-    $('dns').innerHTML = '<div class="empty">DNS fetch error</div>';
+  } catch(e) { /* fall through */ }
+
+  // If empty or failed, try K8s API directly (DNSEndpoint CRs)
+  if (!records || records.length === 0) {
+    try {
+      const r = await fetch('/api/dns/k8s');
+      if (r.ok) {
+        const k8sRecords = await r.json();
+        if (k8sRecords && k8sRecords.length > 0) {
+          records = k8sRecords;
+          fromK8s = true;
+        }
+      }
+    } catch(e) { /* ignore */ }
   }
+
+  renderDNS(records, fromK8s);
 }
 
-function renderDNS(records) {
+function renderDNS(records, fromK8s) {
+  const srcEl = $('dnsSource');
   if (!records || records.length === 0) {
+    if (srcEl) srcEl.textContent = '';
     $('dns').innerHTML = '<div class="empty">No DNS records (waiting for external-dns...)</div>';
     return;
   }
+
+  if (srcEl) {
+    srcEl.textContent = fromK8s ? '(from K8s API \u2014 pending external-dns sync)' : '(from external-dns)';
+    srcEl.style.color = fromK8s ? '#f59e0b' : '#64748b';
+  }
+
+  records.sort((a, b) => (a.dnsName + a.recordType).localeCompare(b.dnsName + b.recordType));
   let html = '';
   for (const rec of records) {
     const targets = (rec.targets || []).join(', ');

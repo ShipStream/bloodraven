@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -18,7 +19,17 @@ import (
 //go:embed index.html
 var staticFS embed.FS
 
-var db *sql.DB
+var (
+	mu    sync.RWMutex
+	db    *sql.DB
+	dbErr error = fmt.Errorf("connecting to MySQL...")
+)
+
+func getDB() (*sql.DB, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+	return db, dbErr
+}
 
 func main() {
 	dsn := os.Getenv("MYSQL_DSN")
@@ -30,42 +41,58 @@ func main() {
 		addr = ":8090"
 	}
 
-	var err error
-	for i := 0; i < 30; i++ {
-		db, err = sql.Open("mysql", dsn)
-		if err == nil {
-			err = db.Ping()
-		}
-		if err == nil {
-			break
-		}
-		log.Printf("waiting for mysql (%d/30): %v", i+1, err)
-		time.Sleep(2 * time.Second)
-	}
-	if err != nil {
-		log.Fatalf("could not connect to mysql after 60s: %v", err)
-	}
-	db.SetMaxOpenConns(5)
-	db.SetConnMaxLifetime(30 * time.Second)
-
-	if err := migrate(); err != nil {
-		log.Fatalf("migration failed: %v", err)
-	}
-	log.Printf("counter-app ready, listening on %s", addr)
+	// Connect to MySQL in the background so the HTTP server starts immediately.
+	go connectLoop(dsn)
 
 	http.HandleFunc("/", serveIndex)
 	http.HandleFunc("/healthz", handleHealthz)
 	http.HandleFunc("/api/counter", handleCounter)
 	http.HandleFunc("/api/increment", handleIncrement)
+
+	log.Printf("counter-app listening on %s (MySQL connecting in background)", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
-func migrate() error {
-	_, err := db.Exec(`CREATE DATABASE IF NOT EXISTS counter_db`)
+func connectLoop(dsn string) {
+	for {
+		conn, err := sql.Open("mysql", dsn)
+		if err == nil {
+			err = conn.Ping()
+		}
+		if err != nil {
+			mu.Lock()
+			dbErr = fmt.Errorf("MySQL unavailable: %v", err)
+			mu.Unlock()
+			log.Printf("waiting for mysql: %v", err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		conn.SetMaxOpenConns(5)
+		conn.SetConnMaxLifetime(30 * time.Second)
+
+		if err := migrate(conn); err != nil {
+			log.Printf("migration failed (will retry): %v", err)
+			conn.Close()
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		mu.Lock()
+		db = conn
+		dbErr = nil
+		mu.Unlock()
+		log.Printf("MySQL connected and migrated")
+		return
+	}
+}
+
+func migrate(conn *sql.DB) error {
+	_, err := conn.Exec(`CREATE DATABASE IF NOT EXISTS counter_db`)
 	if err != nil {
 		return fmt.Errorf("create database: %w", err)
 	}
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS counter_db.counters (
+	_, err = conn.Exec(`CREATE TABLE IF NOT EXISTS counter_db.counters (
 		id INT PRIMARY KEY DEFAULT 1,
 		value BIGINT NOT NULL DEFAULT 0,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -73,7 +100,7 @@ func migrate() error {
 	if err != nil {
 		return fmt.Errorf("create table: %w", err)
 	}
-	_, err = db.Exec(`INSERT IGNORE INTO counter_db.counters (id, value) VALUES (1, 0)`)
+	_, err = conn.Exec(`INSERT IGNORE INTO counter_db.counters (id, value) VALUES (1, 0)`)
 	return err
 }
 
@@ -88,7 +115,12 @@ func serveIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	if err := db.Ping(); err != nil {
+	conn, err := getDB()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if err := conn.Ping(); err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -104,8 +136,14 @@ type counterResponse struct {
 }
 
 func handleCounter(w http.ResponseWriter, _ *http.Request) {
+	conn, err := getDB()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
 	var resp counterResponse
-	err := db.QueryRow(`SELECT value, updated_at FROM counter_db.counters WHERE id = 1`).
+	err = conn.QueryRow(`SELECT value, updated_at FROM counter_db.counters WHERE id = 1`).
 		Scan(&resp.Value, &resp.UpdatedAt)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -114,11 +152,11 @@ func handleCounter(w http.ResponseWriter, _ *http.Request) {
 
 	// Check if the DB is read-only
 	var readOnly string
-	if err := db.QueryRow(`SELECT @@global.read_only`).Scan(&readOnly); err == nil {
+	if err := conn.QueryRow(`SELECT @@global.read_only`).Scan(&readOnly); err == nil {
 		resp.ReadOnly = readOnly == "1"
 	}
 	var host string
-	if err := db.QueryRow(`SELECT @@hostname`).Scan(&host); err == nil {
+	if err := conn.QueryRow(`SELECT @@hostname`).Scan(&host); err == nil {
 		resp.DBHost = host
 	}
 
@@ -131,7 +169,14 @@ func handleIncrement(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	_, err := db.Exec(`UPDATE counter_db.counters SET value = value + 1 WHERE id = 1`)
+
+	conn, err := getDB()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	_, err = conn.Exec(`UPDATE counter_db.counters SET value = value + 1 WHERE id = 1`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

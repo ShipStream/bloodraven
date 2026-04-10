@@ -224,6 +224,9 @@ ok "Operator deployed"
 info "Creating MysqlFailoverGroup CR..."
 kubectl apply -f "$SCRIPT_DIR/manifests/failovergroup.yaml"
 
+info "Seeding DNSEndpoint CR (so external-dns chain works immediately)..."
+kubectl apply -f "$SCRIPT_DIR/manifests/dnsendpoint-seed.yaml"
+
 # ── 10. Deploy counter app and dashboard ─────────────────────────────────
 info "Deploying counter app and dashboard..."
 kubectl apply -f "$SCRIPT_DIR/manifests/counter-app.yaml"

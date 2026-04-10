@@ -1,0 +1,15 @@
+# Seed DNSEndpoint so the external-dns → dns-webhook → dashboard chain works
+# immediately after playground setup. The operator overwrites this via
+# server-side apply (ForceOwnership) when a real failover occurs.
+apiVersion: externaldns.k8s.io/v1alpha1
+kind: DNSEndpoint
+metadata:
+  name: bloodraven-playground
+  namespace: bloodraven-playground
+spec:
+  endpoints:
+    - dnsName: playground-db.example.local
+      recordType: A
+      targets:
+        - "10.96.100.10"
+      recordTTL: 10
