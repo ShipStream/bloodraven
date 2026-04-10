@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,6 +128,106 @@ func TestReconcileRestoreJob_CreatesRestoreJob(t *testing.T) {
 		t.Errorf("want Restore.Running, got %+v", fg.Status.Restore)
 	}
 }
+
+// --- Fixes from Copilot review -----------------------------------------
+
+func TestBuildRestoreJob_S3Source_NormalizesTrailingSlash(t *testing.T) {
+	fg := fgWithBackup()
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
+		Source: v1alpha1.InitFromBackupSource{
+			S3: &v1alpha1.S3Storage{
+				Bucket:            "my-bucket",
+				Prefix:            "dumps/preprod",
+				CredentialsSecret: "s3-creds",
+			},
+		},
+	}
+	r, _ := newReconciler(fg)
+	job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+	if err != nil {
+		t.Fatalf("buildRestoreJob: %v", err)
+	}
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "BLOODRAVEN_INPUT_URL" {
+			if e.Value != "dumps/preprod/" {
+				t.Errorf("expected trailing slash normalization, got %q", e.Value)
+			}
+			return
+		}
+	}
+	t.Fatal("BLOODRAVEN_INPUT_URL env not found")
+}
+
+func TestBuildRestoreJob_MysqlBackupRef_MissingS3Profile_Errors(t *testing.T) {
+	fg := fgWithBackup()
+	// Drop the nightly-s3 profile so the lookup fails.
+	fg.Spec.Backup.Profiles = fg.Spec.Backup.Profiles[1:]
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
+		Source: v1alpha1.InitFromBackupSource{
+			MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"},
+		},
+	}
+	// Seed backup references the now-missing profile.
+	seed := succeededSeedBackup()
+	r, _ := newReconciler(fg, seed)
+
+	_, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+	if err == nil {
+		t.Fatal("expected error for missing S3 profile")
+	}
+	if !strings.Contains(err.Error(), "profile") {
+		t.Errorf("want profile-related error, got %v", err)
+	}
+}
+
+func TestBuildRestoreJob_PVCSource_EmptyClaimName_Errors(t *testing.T) {
+	fg := fgWithBackup()
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
+		Source: v1alpha1.InitFromBackupSource{
+			PVC: &v1alpha1.PVCStorage{SubPath: "dumps"},
+		},
+	}
+	r, _ := newReconciler(fg)
+	_, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+	if err == nil {
+		t.Fatal("expected error for empty claimName")
+	}
+	if !strings.Contains(err.Error(), "claimName is required") {
+		t.Errorf("want claimName error, got %v", err)
+	}
+}
+
+func TestEnsureTrailingSlash(t *testing.T) {
+	cases := map[string]string{
+		"":          "",
+		"foo":       "foo/",
+		"foo/":      "foo/",
+		"s3://b/p":  "s3://b/p/",
+		"s3://b/p/": "s3://b/p/",
+	}
+	for in, want := range cases {
+		if got := ensureTrailingSlash(in); got != want {
+			t.Errorf("ensureTrailingSlash(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestIsS3Location(t *testing.T) {
+	cases := map[string]bool{
+		"":                 false,
+		"/backups/foo/":    false,
+		"pvc://foo":        false,
+		"s3://bucket/key/": true,
+		"lion/seed/":       true,
+	}
+	for in, want := range cases {
+		if got := isS3Location(in); got != want {
+			t.Errorf("isS3Location(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// ------------------------------------------------------------------------
 
 func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
 	fg := fgInitFromMysqlBackup()

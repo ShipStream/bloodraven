@@ -302,6 +302,83 @@ func TestMarshalDumpOptions_DefaultEmpty(t *testing.T) {
 	}
 }
 
+// --- jobPhase: failed-counter fallback + kind parameterization ----------
+
+func TestJobPhase_UsesKindString(t *testing.T) {
+	j := &batchv1.Job{
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}},
+		},
+	}
+	if _, msg := jobPhase(j, "backup"); !strings.Contains(msg, "backup completed") {
+		t.Errorf("backup kind: got %q", msg)
+	}
+	if _, msg := jobPhase(j, "restore"); !strings.Contains(msg, "restore completed") {
+		t.Errorf("restore kind: got %q", msg)
+	}
+}
+
+func TestJobPhase_FailedCounterFallback(t *testing.T) {
+	limit := int32(2)
+	j := &batchv1.Job{
+		Spec:   batchv1.JobSpec{BackoffLimit: &limit},
+		Status: batchv1.JobStatus{Failed: 3}, // past the limit, no conditions yet
+	}
+	phase, msg := jobPhase(j, "backup")
+	if phase != v1alpha1.BackupPhaseFailed {
+		t.Errorf("want Failed, got %s (msg=%s)", phase, msg)
+	}
+	if !strings.Contains(msg, "backoffLimit=2") {
+		t.Errorf("want backoff limit in msg, got %q", msg)
+	}
+}
+
+func TestJobPhase_FailedBelowLimit_StillRunning(t *testing.T) {
+	limit := int32(3)
+	j := &batchv1.Job{
+		Spec:   batchv1.JobSpec{BackoffLimit: &limit},
+		Status: batchv1.JobStatus{Failed: 1},
+	}
+	phase, _ := jobPhase(j, "backup")
+	if phase != "" {
+		t.Errorf("want empty (still running), got %s", phase)
+	}
+}
+
+// --- truncateDNS1123 ----------------------------------------------------
+
+func TestTruncateDNS1123_ShortNameUnchanged(t *testing.T) {
+	if got := truncateDNS1123("mysql-lion-daily"); got != "mysql-lion-daily" {
+		t.Errorf("want unchanged, got %q", got)
+	}
+}
+
+func TestTruncateDNS1123_TrimsTrailingDash(t *testing.T) {
+	if got := truncateDNS1123("abc-"); got != "abc" {
+		t.Errorf("want 'abc', got %q", got)
+	}
+}
+
+func TestTruncateDNS1123_LongNameTruncatedWithHash(t *testing.T) {
+	raw := strings.Repeat("a", 80)
+	got := truncateDNS1123(raw)
+	if len(got) > 63 {
+		t.Errorf("result exceeds 63 chars: %d", len(got))
+	}
+	if !strings.Contains(got, "-") {
+		t.Errorf("want hash suffix, got %q", got)
+	}
+	// Second call with a different name must produce a different result.
+	other := truncateDNS1123(strings.Repeat("a", 79) + "b")
+	if other == got {
+		t.Errorf("different inputs collided: %q", got)
+	}
+	// Must not end in '-'.
+	if strings.HasSuffix(got, "-") {
+		t.Errorf("result ends in '-': %q", got)
+	}
+}
+
 // --- MysqlBackupReconciler end-to-end (fake client) ----------------------
 
 func newBackupReconciler(t *testing.T, objs ...client.Object) (*MysqlBackupReconciler, client.Client) {

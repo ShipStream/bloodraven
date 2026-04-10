@@ -198,7 +198,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Job exists — observe its status.
-	phase, message := jobPhase(&job)
+	phase, message := jobPhase(&job, "backup")
 	if phase == "" {
 		// Still running.
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
@@ -349,12 +349,20 @@ func (r *MysqlBackupReconciler) ensureDerivedCredsSecret(ctx context.Context, fg
 	return err
 }
 
-// jobPhase summarizes a batch/v1 Job status into a MysqlBackup phase.
-// Returns empty phase when the Job is still running.
-func jobPhase(job *batchv1.Job) (v1alpha1.BackupPhase, string) {
+// jobPhase summarizes a batch/v1 Job status into a BackupPhase, using
+// `kind` ("backup" or "restore") to produce an accurate success message
+// for either caller. Returns empty phase when the Job is still running.
+//
+// Both JobComplete and JobFailed conditions are consulted first; when a
+// Job is terminal but the conditions have not yet been set by
+// kube-controller-manager (e.g. during fast local test loops with a
+// fake clientset), we fall back to the numeric Succeeded / Failed
+// counters combined with the Job's activeDeadlineSeconds / backoffLimit
+// to avoid reporting "still running" on a clearly-finished Job.
+func jobPhase(job *batchv1.Job, kind string) (v1alpha1.BackupPhase, string) {
 	for _, c := range job.Status.Conditions {
 		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
-			return v1alpha1.BackupPhaseSucceeded, "backup completed successfully"
+			return v1alpha1.BackupPhaseSucceeded, kind + " completed successfully"
 		}
 		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
 			msg := c.Message
@@ -362,13 +370,25 @@ func jobPhase(job *batchv1.Job) (v1alpha1.BackupPhase, string) {
 				msg = c.Reason
 			}
 			if msg == "" {
-				msg = "job failed"
+				msg = kind + " job failed"
 			}
 			return v1alpha1.BackupPhaseFailed, msg
 		}
 	}
 	if job.Status.Succeeded > 0 {
-		return v1alpha1.BackupPhaseSucceeded, "backup completed successfully"
+		return v1alpha1.BackupPhaseSucceeded, kind + " completed successfully"
+	}
+	// Failed-counter fallback: a Job that has exceeded its backoffLimit
+	// is terminally failed even before kube-controller-manager writes
+	// the JobFailed condition.
+	if job.Status.Failed > 0 {
+		limit := int32(0)
+		if job.Spec.BackoffLimit != nil {
+			limit = *job.Spec.BackoffLimit
+		}
+		if job.Status.Failed > limit {
+			return v1alpha1.BackupPhaseFailed, fmt.Sprintf("%s job failed (%d attempts, backoffLimit=%d)", kind, job.Status.Failed, limit)
+		}
 	}
 	return "", ""
 }

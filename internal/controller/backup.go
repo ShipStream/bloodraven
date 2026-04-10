@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"fmt"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -75,12 +77,35 @@ func ownedBackupPVCName(fgName, profileName string) string {
 }
 
 // truncateDNS1123 truncates a name to 63 characters to fit the DNS-1123
-// label limit that applies to most Kubernetes resource names.
+// label limit and strips trailing non-alphanumeric characters so the
+// result is always a valid Kubernetes resource name. When the raw name
+// exceeds the limit we append a short hash of the original so truncated
+// names that would otherwise collide stay distinct.
 func truncateDNS1123(name string) string {
 	if len(name) <= 63 {
-		return name
+		return trimDNS1123Tail(name)
 	}
-	return name[:63]
+	// Reserve 9 chars for "-" + 8-char hex hash so the truncated body
+	// plus the suffix stay within the 63-char label limit.
+	const reserve = 9
+	sum := sha256.Sum256([]byte(name))
+	suffix := "-" + hex.EncodeToString(sum[:])[:8]
+	body := name[:63-reserve]
+	return trimDNS1123Tail(body) + suffix
+}
+
+// trimDNS1123Tail drops any trailing character that isn't a DNS-1123
+// alphanumeric. This keeps names like "mysql-lion-backup-daily-" (with
+// a trailing dash from truncation) valid.
+func trimDNS1123Tail(s string) string {
+	for len(s) > 0 {
+		c := s[len(s)-1]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			return s
+		}
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // findProfile locates a named BackupProfile on a MysqlFailoverGroup.

@@ -38,28 +38,37 @@ func SetOperatorImageDefaults(image, serviceAccount string) {
 }
 
 // reconcileBackupAssets provisions the shared scripts ConfigMap and any
-// operator-managed backup PVCs referenced by PVC-backed profiles. It
-// runs on every MysqlFailoverGroup reconcile and is a no-op when
-// spec.backup is nil.
+// operator-managed backup PVCs referenced by PVC-backed profiles. The
+// scripts ConfigMap is reconciled whenever spec.backup OR
+// spec.initFromBackup is set (both paths mount dump.py / restore.py);
+// owned PVCs are only provisioned when spec.backup declares PVC-backed
+// profiles.
 func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
-	if fg.Spec.Backup == nil {
+	if fg.Spec.Backup == nil && fg.Spec.InitFromBackup == nil {
 		return nil
 	}
 
+	// Both backup and restore Jobs mount this ConfigMap, so we reconcile
+	// it for either path.
 	if err := r.reconcileBackupScriptsConfigMap(ctx, fg); err != nil {
 		return fmt.Errorf("reconcile backup scripts configmap: %w", err)
 	}
 
-	for _, profile := range fg.Spec.Backup.Profiles {
-		if profile.Storage.Type != v1alpha1.BackupStoragePVC || profile.Storage.PVC == nil {
-			continue
-		}
-		if profile.Storage.PVC.ClaimName != "" {
-			// User-managed PVC; nothing to do.
-			continue
-		}
-		if err := r.reconcileOwnedBackupPVC(ctx, fg, profile); err != nil {
-			return fmt.Errorf("reconcile backup pvc for profile %s: %w", profile.Name, err)
+	// Owned backup PVCs only come from spec.backup.profiles[]. The
+	// initFromBackup PVC source is always user-managed (the restore
+	// source must exist up-front; see buildRestoreJob).
+	if fg.Spec.Backup != nil {
+		for _, profile := range fg.Spec.Backup.Profiles {
+			if profile.Storage.Type != v1alpha1.BackupStoragePVC || profile.Storage.PVC == nil {
+				continue
+			}
+			if profile.Storage.PVC.ClaimName != "" {
+				// User-managed PVC; nothing to do.
+				continue
+			}
+			if err := r.reconcileOwnedBackupPVC(ctx, fg, profile); err != nil {
+				return fmt.Errorf("reconcile backup pvc for profile %s: %w", profile.Name, err)
+			}
 		}
 	}
 
@@ -199,11 +208,25 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 
 	image := operatorImageFromEnv
 	if image == "" {
-		// Falls back to the MySQL image so the build succeeds, but the
-		// operator should always set this in main.go.
+		// Falls back to a deterministic default so the build succeeds,
+		// but the operator should always set this from main.go via
+		// SetOperatorImageDefaults so the CronJob pulls the image the
+		// operator itself is running.
 		image = "bloodraven:latest"
 	}
 	sa := operatorServiceAccountFromEnv
+	if sa == "" {
+		// Without an explicit ServiceAccount the CronJob pod would run
+		// as the namespace "default" SA, which has no RBAC to create
+		// MysqlBackup CRs and scheduled backups would silently fail.
+		// Emit a warning so the misconfiguration is visible and fall
+		// back to the conventional operator SA name ("bloodraven"),
+		// matching the Helm chart default.
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupScheduleServiceAccountMissing",
+			"operator ServiceAccount not configured (set BLOODRAVEN_OPERATOR_SA env var on the operator deployment); falling back to %q",
+			"bloodraven")
+		sa = "bloodraven"
+	}
 
 	cj := &batchv1.CronJob{
 		ObjectMeta: metav1.ObjectMeta{
@@ -336,7 +359,13 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 				CronJobName: scheduleCronJobName(fg.Name, s.Name),
 			}
 			if ru, ok := bySched[s.Name]; ok && ru.latestSet {
-				entry.LastScheduleTime = ru.latest.Status.StartTime
+				// LastScheduleTime is the moment the CronJob materialized
+				// a MysqlBackup CR, which is the CR's creation timestamp.
+				// Job StartTime is nil until the backup reconciler picks
+				// the CR up, so it would be misleadingly empty right after
+				// the CronJob fires.
+				created := ru.latest.CreationTimestamp
+				entry.LastScheduleTime = &created
 				entry.LastBackupName = ru.latest.Name
 				entry.LastBackupPhase = string(ru.latest.Status.Phase)
 				entry.LastSuccessfulTime = ru.lastOK
@@ -371,8 +400,15 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 	return nil
 }
 
-// startAfter returns true if a's start time is after b's start time.
+// startAfter returns true if a was scheduled after b. Prefers the CR
+// creation timestamp (always populated) and falls back to Job StartTime
+// for deterministic ordering when two CRs share the same creation time.
 func startAfter(a, b *v1alpha1.MysqlBackup) bool {
+	ac := a.CreationTimestamp.Time
+	bc := b.CreationTimestamp.Time
+	if !ac.Equal(bc) {
+		return ac.After(bc)
+	}
 	return timeOrZero(a.Status.StartTime).After(timeOrZero(b.Status.StartTime))
 }
 

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -17,6 +18,37 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
+
+// ensureTrailingSlash normalizes a dump prefix/location so it ends with
+// a forward slash. mysqlsh util.loadDump() expects the directory-style
+// prefix produced by util.dumpInstance().
+func ensureTrailingSlash(s string) string {
+	if s == "" {
+		return s
+	}
+	if strings.HasSuffix(s, "/") {
+		return s
+	}
+	return s + "/"
+}
+
+// isS3Location heuristically detects when a MysqlBackup.status.location
+// points at an S3 bucket. util.dumpInstance() stores S3 outputs as a
+// bare prefix (e.g. "lion/seed/") rather than an "s3://" URL, so we
+// have to infer from the absence of a local filesystem path.
+func isS3Location(loc string) bool {
+	if loc == "" {
+		return false
+	}
+	if strings.HasPrefix(loc, "s3://") {
+		return true
+	}
+	if strings.HasPrefix(loc, "/") || strings.HasPrefix(loc, "pvc://") {
+		return false
+	}
+	// Relative prefix with no leading slash => S3-style.
+	return true
+}
 
 // restoreInFlight reports whether spec.initFromBackup is set and the
 // one-shot restore has not yet reached Succeeded. Callers use it to gate
@@ -119,7 +151,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 	}
 
 	// Observe the Job.
-	phase, message := jobPhase(&job)
+	phase, message := jobPhase(&job, "restore")
 	if phase == "" {
 		return 15 * time.Second, nil
 	}
@@ -228,9 +260,23 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		if ref.Status.Phase != v1alpha1.BackupPhaseSucceeded || ref.Status.Location == "" {
 			return nil, fmt.Errorf("referenced mysqlbackup %s is not Succeeded or has no location", ref.Name)
 		}
-		inputURL = ref.Status.Location
-		// Walk back to the profile to pick up S3 bucket/endpoint/creds.
-		if profile := findProfile(fg, ref.Spec.ProfileName); profile != nil && profile.Storage.Type == v1alpha1.BackupStorageS3 && profile.Storage.S3 != nil {
+		inputURL = ensureTrailingSlash(ref.Status.Location)
+
+		// If the referenced backup lived in S3, the restore Job needs
+		// the bucket + credentials for that bucket. We walk back to the
+		// profile on fg.spec.backup; if it was deleted, the raw
+		// location is an S3-relative prefix that mysqlsh cannot
+		// resolve without credentials, so fail fast with a clear
+		// error instead of letting the Job hit a confusing runtime
+		// failure.
+		profile := findProfile(fg, ref.Spec.ProfileName)
+		if isS3Location(ref.Status.Location) && (profile == nil || profile.Storage.Type != v1alpha1.BackupStorageS3 || profile.Storage.S3 == nil) {
+			return nil, fmt.Errorf(
+				"initFromBackup.source.mysqlBackupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles; "+
+					"either restore the profile or set initFromBackup.source.s3 explicitly",
+				ref.Name, ref.Status.Location, ref.Spec.ProfileName)
+		}
+		if profile != nil && profile.Storage.Type == v1alpha1.BackupStorageS3 && profile.Storage.S3 != nil {
 			extraEnv = append(extraEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: profile.Storage.S3.Bucket},
 			)
@@ -250,11 +296,9 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		}
 
 	case src.S3 != nil:
-		prefix := ""
-		if src.S3.Prefix != "" {
-			prefix = src.S3.Prefix
-		}
-		inputURL = prefix
+		// mysqlsh util.loadDump() expects a directory-style prefix with
+		// a trailing slash, matching what util.dumpInstance() writes.
+		inputURL = ensureTrailingSlash(src.S3.Prefix)
 		extraEnv = append(extraEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: src.S3.Bucket},
 		)
@@ -273,9 +317,15 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		})
 
 	case src.PVC != nil:
+		// The restore PVC must already exist and contain the dump;
+		// unlike spec.backup.profiles[].pvc the operator does not
+		// provision a restore source. Reject the empty case with a
+		// clear error so the misconfiguration is loud at reconcile
+		// time, not at Job runtime.
 		claim := src.PVC.ClaimName
 		if claim == "" {
-			return nil, fmt.Errorf("initFromBackup.source.pvc.claimName is required")
+			return nil, fmt.Errorf(
+				"initFromBackup.source.pvc.claimName is required; the restore source PVC must be created out of band and populated with the dump")
 		}
 		mountPath := "/restore"
 		inputURL = mountPath

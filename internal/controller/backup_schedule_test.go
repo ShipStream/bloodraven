@@ -9,6 +9,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
 func TestReconcileBackupSchedules_CreatesCronJob(t *testing.T) {
@@ -122,6 +124,54 @@ func TestReconcileBackupAssets_CreatesScriptsConfigMap(t *testing.T) {
 	}
 	if cm.Data["dump.py"] == "" || cm.Data["restore.py"] == "" {
 		t.Errorf("scripts not embedded in configmap")
+	}
+}
+
+func TestReconcileBackupAssets_CreatesScriptsWhenOnlyInitFromBackup(t *testing.T) {
+	// Scripts ConfigMap must exist for restore Jobs even if spec.backup
+	// is nil. Regression test for Copilot review comment on reconciler.go.
+	fg := fgWithBackup()
+	fg.Spec.Backup = nil
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
+		Source: v1alpha1.InitFromBackupSource{
+			S3: &v1alpha1.S3Storage{Bucket: "b", CredentialsSecret: "s3-creds"},
+		},
+	}
+	r, c := newReconciler(fg)
+	if err := r.reconcileBackupAssets(context.Background(), fg); err != nil {
+		t.Fatalf("reconcileBackupAssets: %v", err)
+	}
+	var cm corev1.ConfigMap
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: backupScriptsConfigMapName("lion"), Namespace: "ns",
+	}, &cm); err != nil {
+		t.Fatalf("scripts configmap not created when only initFromBackup set: %v", err)
+	}
+}
+
+func TestReconcileBackupSchedules_DefaultsServiceAccountWhenMissing(t *testing.T) {
+	// Regression test for Copilot review: without an explicit operator
+	// SA, schedule CronJobs fall back to the conventional "bloodraven"
+	// name and emit a warning event.
+	SetOperatorImageDefaults("bloodraven:test", "")
+	defer SetOperatorImageDefaults("", "")
+
+	fg := fgWithBackup()
+	r, c := newReconciler(fg)
+
+	if err := r.reconcileBackupSchedules(context.Background(), fg); err != nil {
+		t.Fatalf("reconcileBackupSchedules: %v", err)
+	}
+
+	var cj batchv1.CronJob
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: scheduleCronJobName("lion", "nightly"), Namespace: "ns",
+	}, &cj); err != nil {
+		t.Fatalf("cronjob not created: %v", err)
+	}
+	sa := cj.Spec.JobTemplate.Spec.Template.Spec.ServiceAccountName
+	if sa != "bloodraven" {
+		t.Errorf("want default SA 'bloodraven', got %q", sa)
 	}
 }
 

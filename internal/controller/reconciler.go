@@ -187,9 +187,14 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// Drive the one-shot restore Job when spec.initFromBackup is set.
-	// If a restore is still in flight we requeue early and skip pod label
-	// sync; the topology runner separately refuses to clone the replica
-	// until status.restore.phase == Succeeded (see runner.go).
+	// If a restore is still in flight we requeue early and skip pod
+	// label sync. A parallel safety gate lives in the topology runner:
+	// TopologyManagerRunner.sync() calls
+	// TopologyManager.SetAutoBootstrapSuppressed(restoreInFlight) every
+	// 30s, which prevents the fresh-deploy auto-clone path in
+	// applyCrossSiteAction from racing the restore Job for the primary
+	// data directory. Together the two gates ensure the replica is only
+	// cloned after the primary has been loaded from the dump.
 	restoreRequeue, err := r.reconcileRestoreJob(ctx, &fg)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile restore job: %w", err)
