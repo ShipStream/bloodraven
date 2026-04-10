@@ -17,8 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	k8sretry "k8s.io/client-go/util/retry"
 	"k8s.io/client-go/tools/record"
+	k8sretry "k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -114,15 +114,6 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	image := fg.Spec.Image
 	if image == "" {
 		image = defaultMySQLImage
-	}
-
-	// Validate that sidecarImage is explicitly set. Falling back to the MySQL
-	// image is almost always wrong in production since the sidecar binary is
-	// a separate build target (bloodraven-sidecar).
-	if fg.Spec.SidecarImage == "" {
-		r.Recorder.Eventf(&fg, corev1.EventTypeWarning, "MissingSidecarImage",
-			"spec.sidecarImage is not set; falling back to %q which is likely incorrect", image)
-		logger.Info("WARNING: sidecarImage not set, falling back to MySQL image", "image", image)
 	}
 
 	// Validate that the referenced secret contains the expected 'dsn' key.
@@ -399,9 +390,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 
 		sidecarImage := fg.Spec.SidecarImage
-		if sidecarImage == "" {
-			sidecarImage = image
-		}
 
 		configMapName := fmt.Sprintf("mysql-%s-config", fg.Name)
 

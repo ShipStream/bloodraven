@@ -3228,6 +3228,7 @@ spec:
                     type: string
                 type: object
               sidecarImage:
+                default: ghcr.io/shipstream/bloodraven-sidecar:0.1.6
                 description: SidecarImage is the image used for the sidecar/init container.
                 type: string
               sidecarResources:
