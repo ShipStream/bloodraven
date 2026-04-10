@@ -174,7 +174,7 @@ func newTestTopologyManager(site0, site1 *mockMySQL) (*TopologyManager, *mockTai
 	hub := platform.NewHub(testLogger())
 	dns := &mockDNS{}
 	fc := NewFailoverController(testLogger())
-	tm := NewTopologyManager(cfg, site0, site1, fc, tainter, hub, dns, testLogger())
+	tm := NewTopologyManager(cfg, site0, site1, fc, nil, BootstrapConfig{}, tainter, hub, dns, testLogger())
 	// Use a very short cooldown for tests so failovers aren't blocked.
 	tm.failoverCooldown = 0
 	return tm, tainter, dns
