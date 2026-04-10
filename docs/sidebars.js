@@ -6,6 +6,7 @@ const sidebars = {
     'intro',
     'architecture',
     'getting-started',
+    'playground',
     'crd-reference',
     'placement-contract',
     'app-integration',

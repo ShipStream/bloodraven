@@ -8,7 +8,7 @@ The playground deploys a fully working Bloodraven setup on your local machine so
 
 No cloud account, no DNS provider, no production infrastructure required.
 
-<img src="/img/playground.png" alt="Bloodraven Playground showing the dashboard and counter app" />
+<img src={require('/static/img/playground.png').default} alt="Bloodraven Playground showing the dashboard and counter app" />
 
 ## What you get
 
@@ -99,8 +99,8 @@ kubectl -n bloodraven-playground port-forward svc/counter-app 8090:8090
 
 Then open [http://localhost:8091](http://localhost:8091) for the dashboard and [http://localhost:8090](http://localhost:8090) for the counter app.
 
-:::tip Remote access
-Add `--address 0.0.0.0` to `port-forward` if you want to reach the apps from another machine (e.g. over Tailscale).
+:::tip
+**Remote access** Add `--address 0.0.0.0` to `port-forward` if you want to reach the apps from another machine (e.g. over Tailscale).
 :::
 
 ## Try a failover
