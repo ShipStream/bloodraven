@@ -17,11 +17,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	k8sretry "k8s.io/client-go/util/retry"
 	"k8s.io/client-go/tools/record"
+	k8sretry "k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -116,15 +117,6 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		image = defaultMySQLImage
 	}
 
-	// Validate that sidecarImage is explicitly set. Falling back to the MySQL
-	// image is almost always wrong in production since the sidecar binary is
-	// a separate build target (bloodraven-sidecar).
-	if fg.Spec.SidecarImage == "" {
-		r.Recorder.Eventf(&fg, corev1.EventTypeWarning, "MissingSidecarImage",
-			"spec.sidecarImage is not set; falling back to %q which is likely incorrect", image)
-		logger.Info("WARNING: sidecarImage not set, falling back to MySQL image", "image", image)
-	}
-
 	// Validate that the referenced secret contains the expected 'dsn' key.
 	var secret corev1.Secret
 	secretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.SecretName}
@@ -189,7 +181,28 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToFailoverGroup)).
 		Complete(r)
+}
+
+// secretToFailoverGroup maps a Secret change to the MysqlFailoverGroups that reference it
+// (via spec.secretName or spec.tls.secretName), triggering reconciliation on cert rotation.
+func (r *MysqlFailoverGroupReconciler) secretToFailoverGroup(ctx context.Context, obj client.Object) []ctrl.Request {
+	var fgList v1alpha1.MysqlFailoverGroupList
+	if err := r.List(ctx, &fgList, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "unable to list MysqlFailoverGroups for Secret watch")
+		return nil
+	}
+	var requests []ctrl.Request
+	for _, fg := range fgList.Items {
+		if fg.Spec.SecretName == obj.GetName() ||
+			(fg.Spec.TLS != nil && fg.Spec.TLS.SecretName == obj.GetName()) {
+			requests = append(requests, ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace},
+			})
+		}
+	}
+	return requests
 }
 
 func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
@@ -360,7 +373,21 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		},
 	}
 
-	specHash := computeSpecHash(fg, site)
+	// Fetch TLS Secret data so certificate changes are reflected in the spec hash.
+	var tlsSecretData map[string][]byte
+	if fg.Spec.TLS != nil {
+		var tlsSecret corev1.Secret
+		tlsSecretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.TLS.SecretName}
+		if err := r.Get(ctx, tlsSecretKey, &tlsSecret); err != nil {
+			if !errors.IsNotFound(err) {
+				return fmt.Errorf("get TLS secret %s: %w", fg.Spec.TLS.SecretName, err)
+			}
+			log.FromContext(ctx).Info("TLS secret not found yet, skipping TLS hash", "secret", fg.Spec.TLS.SecretName)
+		} else {
+			tlsSecretData = tlsSecret.Data
+		}
+	}
+	specHash := computeSpecHash(fg, site, tlsSecretData)
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		if err := controllerutil.SetControllerReference(fg, deploy, r.Scheme); err != nil {
@@ -399,9 +426,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 
 		sidecarImage := fg.Spec.SidecarImage
-		if sidecarImage == "" {
-			sidecarImage = image
-		}
 
 		configMapName := fmt.Sprintf("mysql-%s-config", fg.Name)
 
@@ -920,7 +944,8 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 }
 
 // computeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
-func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) string {
+// tlsSecretData is the raw data from the TLS Secret (nil when TLS is not configured).
+func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsSecretData map[string][]byte) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
 	fmt.Fprintf(h, "sidecar=%s\n", fg.Spec.SidecarImage)
@@ -934,6 +959,17 @@ func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) st
 	sort.Strings(keys)
 	for _, k := range keys {
 		fmt.Fprintf(h, "mysql.%s=%s\n", k, fg.Spec.MysqlConf[k])
+	}
+	// Include TLS certificate data so cert rotation triggers a rolling update.
+	if len(tlsSecretData) > 0 {
+		tlsKeys := make([]string, 0, len(tlsSecretData))
+		for k := range tlsSecretData {
+			tlsKeys = append(tlsKeys, k)
+		}
+		sort.Strings(tlsKeys)
+		for _, k := range tlsKeys {
+			fmt.Fprintf(h, "tls.%s=%x\n", k, sha256.Sum256(tlsSecretData[k]))
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
@@ -975,6 +1011,10 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 				Zone: fg.Spec.Sites[1].Zone,
 				LBIP: fg.Spec.Sites[1].LBIP,
 			},
+		},
+		SiteHosts: [2]string{
+			fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, fg.Spec.Sites[0].Name, fg.Namespace),
+			fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, fg.Spec.Sites[1].Name, fg.Namespace),
 		},
 		PollInterval:      pollInterval,
 		FailureThreshold:  int(failureThreshold),

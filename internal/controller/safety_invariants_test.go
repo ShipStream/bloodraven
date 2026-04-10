@@ -27,7 +27,7 @@ func newSafetyTestTM(site0, site1 *mockMySQL) (*TopologyManager, *mockTainter, *
 	fc := NewFailoverController(testLogger())
 	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	clk := clock.NewFakeClock(start)
-	tm := NewTopologyManagerWithClock(cfg, site0, site1, fc, tainter, hub, dns, testLogger(), clk)
+	tm := NewTopologyManagerWithClock(cfg, site0, site1, fc, nil, BootstrapConfig{}, tainter, hub, dns, testLogger(), clk)
 	tm.failoverCooldown = 0 // disabled by default for most tests
 	return tm, tainter, dns, clk
 }
@@ -135,7 +135,7 @@ func TestInvariant_NeverPromoteDuringCooldown(t *testing.T) {
 	fc := NewFailoverController(testLogger())
 	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	clk := clock.NewFakeClock(start)
-	tm := NewTopologyManagerWithClock(cfg, site0, site1, fc, tainter, hub, dns, testLogger(), clk)
+	tm := NewTopologyManagerWithClock(cfg, site0, site1, fc, nil, BootstrapConfig{}, tainter, hub, dns, testLogger(), clk)
 
 	// Establish normal state
 	pollN(tm, 2)

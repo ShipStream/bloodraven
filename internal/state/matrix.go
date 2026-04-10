@@ -7,6 +7,7 @@ type CrossSiteAction struct {
 	PromoteSite string // which site to promote ("" = none)
 	FlipDNS     string // which site gets DNS ("" = no change)
 	Alert       string // alert message ("" = none)
+	SplitBrain  bool   // true when both sites are writable (fresh-deploy or true split-brain)
 }
 
 // EvalCrossSite evaluates the combined state matrix and returns cross-site actions.
@@ -34,6 +35,7 @@ func EvalCrossSite(site0State, site1State, site0Prev, site1Prev SiteState, site0
 
 	case site0State == StateWritable && site1State == StateWritable:
 		a.Alert = "SPLIT BRAIN: both sites are writable"
+		a.SplitBrain = true
 
 	case site0State == StateReadOnly && site1State == StateReadOnly:
 		a.Alert = "NO PRIMARY: both sites are read-only"
