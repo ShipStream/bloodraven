@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
@@ -186,12 +187,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 	return 0, nil
 }
 
-// setRestoreStatus patches fg.status.restore and swallows IsNotFound / no-op.
+// setRestoreStatus patches fg.status.restore. IsNotFound is treated as
+// a no-op (the CR was deleted out from under us) and other errors are
+// logged but not propagated: this function is called from multiple
+// places inside reconcileRestoreJob and we want the main Job-observation
+// path to keep running rather than crash-looping the reconciler on a
+// transient status write failure.
 func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, rs *v1alpha1.RestoreStatus) {
 	patch := client.MergeFrom(fg.DeepCopy())
 	fg.Status.Restore = rs
 	if err := r.Status().Patch(ctx, fg, patch); err != nil && !apierrors.IsNotFound(err) {
-		// Non-fatal; logged by caller via controller-runtime log.
+		log.FromContext(ctx).Error(err, "update restore status",
+			"fg", fg.Name, "phase", rs.Phase)
 	}
 }
 
