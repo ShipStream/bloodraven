@@ -57,6 +57,19 @@ const FeatureList = [
     ),
   },
   {
+    icon: '\uD83D\uDCBE',
+    title: 'Backup & Restore',
+    description: (
+      <>
+        Scheduled and on-demand dumps via <code>util.dumpInstance()</code> to
+        S3 or PVC, with structured retention, exponential-backoff retries,
+        Prometheus metrics, automatic artifact cleanup on delete, and
+        bootstrap-only <code>util.loadDump()</code> restores into a brand-new
+        failover group.
+      </>
+    ),
+  },
+  {
     icon: '\uD83C\uDFAF',
     title: 'Single Source of Truth',
     description: (

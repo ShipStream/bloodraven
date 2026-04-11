@@ -15,6 +15,7 @@ Bloodraven is a Kubernetes operator for managing MySQL async replication failove
 - **Migrates workloads** by tainting nodes at the failed site so Kubernetes evicts application pods
 - **Prevents split-brain** with sidecar self-fencing: if both the operator and peer are unreachable, the sidecar sets `super_read_only=ON` as a safety net
 - **Broadcasts status** over a WebSocket API for dashboards and alerting integrations
+- **Backs up and restores** via mysqlsh `util.dumpInstance()` / `util.loadDump()` to S3 or PVC, with scheduled CronJobs, structured retention, retries, and automatic artifact cleanup
 
 :::tip
 **Using an AI agent?** This documentation is available as `llms.txt` and `llms-full.txt` at the site root for consumption by LLM-based tools. Give your agent context with a prompt like:
@@ -68,4 +69,5 @@ spec:
 - [Architecture](./architecture.mdx) -- How the operator, sidecars, and MySQL instances interact
 - [Getting Started](./getting-started.mdx) -- Install the operator and create your first failover group
 - [Playground](./playground.mdx) -- Try Bloodraven locally on k3d, kind, or minikube with a live dashboard and chaos tools
+- [Backup and restore](./backup-restore.mdx) -- Scheduled dumps to S3 or PVC, bootstrap-only restore, retention, metrics
 - [CRD Reference](./crd-reference.mdx) -- Complete spec and status field reference
