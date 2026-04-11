@@ -380,9 +380,24 @@ type InitFromBackupSource struct {
 	// +optional
 	S3 *S3Storage `json:"s3,omitempty"`
 
-	// PVC restores from a PVC mount.
+	// PVC restores from an existing PVC. Restore only supports referencing
+	// a pre-created claim by name; provisioning fields are not supported here.
 	// +optional
-	PVC *PVCStorage `json:"pvc,omitempty"`
+	PVC *InitFromBackupPVCSource `json:"pvc,omitempty"`
+}
+
+// InitFromBackupPVCSource identifies an existing PVC to mount as the restore
+// source. Unlike PVCStorage, this restore-specific type does not support
+// operator provisioning and requires claimName to be set.
+type InitFromBackupPVCSource struct {
+	// ClaimName is the name of an existing PersistentVolumeClaim in the same
+	// namespace to use as the restore source.
+	// +kubebuilder:validation:MinLength=1
+	ClaimName string `json:"claimName"`
+
+	// SubPath inside the PVC where the dump is located. Optional.
+	// +optional
+	SubPath string `json:"subPath,omitempty"`
 }
 
 // LoadOptions maps onto the options argument of util.loadDump().

@@ -184,7 +184,7 @@ func TestBuildRestoreJob_PVCSource_EmptyClaimName_Errors(t *testing.T) {
 	fg := fgWithBackup()
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
 		Source: v1alpha1.InitFromBackupSource{
-			PVC: &v1alpha1.PVCStorage{SubPath: "dumps"},
+			PVC: &v1alpha1.InitFromBackupPVCSource{SubPath: "dumps"},
 		},
 	}
 	r, _ := newReconciler(fg)

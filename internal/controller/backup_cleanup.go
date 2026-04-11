@@ -2,7 +2,6 @@ package controller
 
 import (
 	"fmt"
-	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -138,13 +137,12 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 
 	case v1alpha1.BackupStoragePVC:
 		// Mount the same PVC the backup used.
-		var claimName, subPath string
+		var claimName string
 		if profile != nil && profile.Storage.PVC != nil {
 			claimName = profile.Storage.PVC.ClaimName
 			if claimName == "" {
 				claimName = ownedBackupPVCName(fg.Name, profile.Name)
 			}
-			subPath = strings.TrimLeft(profile.Storage.PVC.SubPath, "/")
 		}
 		if claimName == "" {
 			return nil, fmt.Errorf("cleanup job: PVC backup %s has no resolvable claim name", backup.Name)
@@ -157,12 +155,12 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 				},
 			},
 		}
+		// Mount the PVC without SubPath so the full path expressed in
+		// backup.status.location (e.g. /backups/<subPath>/<name>) is
+		// accessible inside the cleanup container.
 		mount := corev1.VolumeMount{
 			Name:      "backups",
 			MountPath: backupPVCMountPath,
-		}
-		if subPath != "" {
-			mount.SubPath = subPath
 		}
 		volumes = append(volumes, vol)
 		volumeMounts = append(volumeMounts, mount)

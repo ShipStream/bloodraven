@@ -4069,30 +4069,22 @@ spec:
                         type: object
                         x-kubernetes-map-type: atomic
                       pvc:
-                        description: PVC restores from a PVC mount.
+                        description: |-
+                          PVC restores from an existing PVC. Restore only supports referencing
+                          a pre-created claim by name; provisioning fields are not supported here.
                         properties:
                           claimName:
                             description: |-
-                              ClaimName is the name of a pre-existing PVC to use. If empty the
-                              operator provisions a PVC per profile.
-                            type: string
-                          size:
-                            anyOf:
-                            - type: integer
-                            - type: string
-                            description: Size is used when the operator provisions
-                              the PVC.
-                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                            x-kubernetes-int-or-string: true
-                          storageClassName:
-                            description: StorageClassName is used when the operator
-                              provisions the PVC.
+                              ClaimName is the name of an existing PersistentVolumeClaim in the same
+                              namespace to use as the restore source.
+                            minLength: 1
                             type: string
                           subPath:
-                            description: |-
-                              SubPath inside the PVC to use. Each backup lands under
-                              "<subPath>/<mysqlbackup-name>/".
+                            description: SubPath inside the PVC where the dump is
+                              located. Optional.
                             type: string
+                        required:
+                        - claimName
                         type: object
                       s3:
                         description: S3 restores directly from an S3 URL. Requires
