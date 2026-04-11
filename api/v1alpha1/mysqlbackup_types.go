@@ -52,7 +52,8 @@ type MysqlBackupSpec struct {
 	SourceSiteOverride string `json:"sourceSiteOverride,omitempty"`
 
 	// TriggeredBy is a free-form label recording what created this CR
-	// (e.g. "schedule/nightly", "manual"). Informational only.
+	// (e.g. "schedule/nightly", "manual", "retry/nightly/attempt-2").
+	// Informational only.
 	TriggeredBy string `json:"triggeredBy,omitempty"`
 }
 
@@ -100,9 +101,42 @@ type MysqlBackupStatus struct {
 	// "s3://bucket/prefix/backup-name/" or "/backups/subpath/backup-name".
 	Location string `json:"location,omitempty"`
 
+	// StorageType is the storage backend kind (S3 or PVC) that was used
+	// for this backup. Populated at Job creation time so cleanup logic
+	// can dispatch on it without resorting to a brittle location
+	// heuristic after the referenced profile is gone.
+	StorageType BackupStorageType `json:"storageType,omitempty"`
+
 	// Size is the reported backup size as a human-readable string, best
 	// effort. Empty when the Job log did not report a size.
 	Size string `json:"size,omitempty"`
+
+	// SizeBytes is the structured backup size emitted by the dump
+	// sidecar. 0 when unknown (e.g. remote output where the dump
+	// utility did not return a total).
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
+
+	// GtidExecuted is the value of @@global.gtid_executed captured at
+	// dump time. Empty on non-GTID instances.
+	GtidExecuted string `json:"gtidExecuted,omitempty"`
+
+	// BinlogFile is the binary log file name at dump time. Populated
+	// alongside BinlogPos for pre-GTID point-in-time tooling.
+	BinlogFile string `json:"binlogFile,omitempty"`
+
+	// BinlogPos is the binary log position at dump time.
+	BinlogPos int64 `json:"binlogPos,omitempty"`
+
+	// ActiveSiteAtStart records MysqlFailoverGroup.status.activeSite as
+	// observed when this backup's Job was created. The reconciler uses
+	// this to emit an InFlightFailover warning when the group's active
+	// site drifts while the backup is running.
+	ActiveSiteAtStart string `json:"activeSiteAtStart,omitempty"`
+
+	// Attempt is the retry attempt number for scheduled CRs: 1 for the
+	// original attempt, 2 for the first retry, and so on. 0 is treated
+	// as 1 for older CRs.
+	Attempt int32 `json:"attempt,omitempty"`
 
 	// Message is a human-readable status message.
 	Message string `json:"message,omitempty"`

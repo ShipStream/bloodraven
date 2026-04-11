@@ -29,6 +29,9 @@ var dumpScript string
 //go:embed restore_script.py
 var restoreScript string
 
+//go:embed cleanup_script.py
+var cleanupScript string
+
 // BackupDumpScript returns the embedded Python dump script. Exposed so the
 // failover-group reconciler can populate a shared ConfigMap.
 func BackupDumpScript() string { return dumpScript }
@@ -36,8 +39,14 @@ func BackupDumpScript() string { return dumpScript }
 // BackupRestoreScript returns the embedded Python load script.
 func BackupRestoreScript() string { return restoreScript }
 
+// BackupCleanupScript returns the embedded Python cleanup script used by
+// the MysqlBackup finalizer to delete the underlying artifact (S3 prefix
+// or PVC subdirectory) before the CR is removed.
+func BackupCleanupScript() string { return cleanupScript }
+
 // backupScriptsConfigMapName is the name of the shared ConfigMap that holds
-// the dump.py / restore.py scripts for a failover group. One per group.
+// the dump.py / restore.py / cleanup.py scripts for a failover group. One
+// per group.
 func backupScriptsConfigMapName(fgName string) string {
 	return fmt.Sprintf("mysql-%s-backup-scripts", fgName)
 }
@@ -57,6 +66,12 @@ func restoreCredsSecretName(fgName string) string {
 // backupJobName returns the Job name for a given MysqlBackup.
 func backupJobName(backupName string) string {
 	return truncateDNS1123(fmt.Sprintf("mysqlbackup-%s", backupName))
+}
+
+// cleanupJobName returns the Job name for the artifact-cleanup Job
+// attached to the MysqlBackup finalizer.
+func cleanupJobName(backupName string) string {
+	return truncateDNS1123(fmt.Sprintf("mysqlbackup-%s-cleanup", backupName))
 }
 
 // restoreJobName returns the restore Job name for a given failover group
@@ -129,3 +144,62 @@ func backupImage(fg *v1alpha1.MysqlFailoverGroup) string {
 	}
 	return v1alpha1.DefaultBackupImage
 }
+
+// ensureBackupLabels stamps the three canonical labels on a MysqlBackup
+// based on its spec. Returns true when it actually changed anything so
+// the caller can decide whether to issue an Update. Idempotent.
+//
+// The three labels are:
+//
+//	shipstream.io/failover-group   -> spec.failoverGroupRef.name
+//	shipstream.io/backup-profile   -> spec.profileName
+//	app.kubernetes.io/managed-by   -> bloodraven
+//
+// Stamping them for every MysqlBackup (including ad-hoc CRs created by
+// `kubectl create`) means retention, finalizers, and the failover-group
+// rollup can all use label-selector lookups without having to list and
+// filter the whole namespace.
+func ensureBackupLabels(backup *v1alpha1.MysqlBackup) bool {
+	desired := map[string]string{
+		labelFailoverGroup: backup.Spec.FailoverGroupRef.Name,
+		labelBackupProfile: backup.Spec.ProfileName,
+		labelManagedBy:     managerName,
+	}
+	changed := false
+	if backup.Labels == nil {
+		backup.Labels = map[string]string{}
+	}
+	for k, v := range desired {
+		if v == "" {
+			continue
+		}
+		if backup.Labels[k] != v {
+			backup.Labels[k] = v
+			changed = true
+		}
+	}
+	return changed
+}
+
+// humanBytes formats a byte count using binary (1024-based) units so the
+// Go side can produce the exact same string that backup_script.py writes
+// into the BLOODRAVEN_DUMP_COMPLETE sentinel. Values below 1 KiB are
+// returned as "<N> B"; everything else gets one decimal and a unit suffix
+// from {KiB, MiB, GiB, TiB, PiB, EiB}.
+func humanBytes(n int64) string {
+	const unit = int64(1024)
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := unit, 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	suffix := []string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffix[exp])
+}
+
+// ptr32 returns a pointer to the given int32. Used for Secret.DefaultMode
+// in the backup / restore / cleanup Jobs.
+func ptr32(v int32) *int32 { return &v }

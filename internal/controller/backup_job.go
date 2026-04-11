@@ -12,9 +12,13 @@ import (
 )
 
 const (
-	backupScriptsMountPath = "/scripts"
-	backupPVCMountPath     = "/backups"
-	backupJobContainerName = "mysqlsh"
+	backupScriptsMountPath  = "/scripts"
+	backupPVCMountPath      = "/backups"
+	backupJobContainerName  = "mysqlsh"
+	backupCredsMountPath    = "/run/bloodraven/mysql-creds"
+	backupAWSCredsMountPath = "/run/bloodraven/aws-creds"
+	mysqlshHomeMountPath    = "/home/mysqlsh"
+	tmpMountPath            = "/tmp"
 )
 
 // BackupJobInputs bundles the resolved inputs for BuildBackupJob. Keeping
@@ -35,6 +39,20 @@ type BackupJobInputs struct {
 
 // BuildBackupJob renders a batchv1.Job that executes mysqlsh
 // util.dumpInstance() against the selected source site.
+//
+// Credentials for MySQL (and, when targeting S3, for AWS) are mounted as
+// files under /run/bloodraven/{mysql,aws}-creds rather than injected as
+// environment variables via envFrom. This keeps plaintext secrets out of
+// the pod spec and out of process-level /proc/PID/environ inspection.
+// The embedded Python scripts read the files via the
+// BLOODRAVEN_MYSQL_CREDS_DIR / BLOODRAVEN_AWS_CREDS_DIR env vars.
+//
+// Pod- and container-level security contexts are hardened by default
+// (RunAsNonRoot, ReadOnlyRootFilesystem, Capabilities.Drop=ALL, seccomp
+// RuntimeDefault). Users can override individual fields via
+// spec.backup.podSecurityContext / containerSecurityContext; those
+// override values are merged on top of the defaults, never the other
+// way around.
 //
 // The Job is not owner-ref'd here; the caller must attach an owner
 // reference to the MysqlBackup CR via controllerutil.SetControllerReference
@@ -61,19 +79,23 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 	// Labels applied to both Job and pod so listings/queries work.
 	labels := map[string]string{
-		labelAppName:        "mysql-backup",
-		labelInstance:       fg.Name,
-		labelFailoverGroup:  fg.Name,
-		labelMysqlBackup:    backup.Name,
-		labelBackupProfile:  in.Profile.Name,
-		labelManagedBy:      managerName,
-		labelResourceKind:   "backup",
+		labelAppName:       "mysql-backup",
+		labelInstance:      fg.Name,
+		labelFailoverGroup: fg.Name,
+		labelMysqlBackup:   backup.Name,
+		labelBackupProfile: in.Profile.Name,
+		labelManagedBy:     managerName,
+		labelResourceKind:  "backup",
 	}
 
-	// Resolve env vars + volumes for the selected storage backend.
 	envVars := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_MYSQL_HOST", Value: backupMySQLHost(fg, in.SourceSite)},
 		{Name: "BLOODRAVEN_BACKUP_NAME", Value: backup.Name},
+		{Name: "BLOODRAVEN_MYSQL_CREDS_DIR", Value: backupCredsMountPath},
+		{Name: "BLOODRAVEN_STORAGE_TYPE", Value: string(in.Profile.Storage.Type)},
+		// mysqlsh needs a writable HOME because it creates state files
+		// under ~/.mysqlsh. /home/mysqlsh is an emptyDir below.
+		{Name: "HOME", Value: mysqlshHomeMountPath},
 	}
 	if fg.Spec.TLS != nil {
 		envVars = append(envVars, corev1.EnvVar{Name: "BLOODRAVEN_TLS", Value: "1"})
@@ -95,22 +117,43 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	}
 	envVars = append(envVars, corev1.EnvVar{Name: "BLOODRAVEN_DUMP_OPTIONS", Value: dumpOptsJSON})
 
-	// envFrom: derived creds secret (user/password) + (for S3) the profile's
-	// credentials secret so AWS_* env vars land in the container too.
-	envFrom := []corev1.EnvFromSource{
-		{
-			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: in.CredsSecretName},
+	// Mount the derived MySQL creds Secret as files (mode 0400) instead
+	// of injecting via envFrom.
+	volumes = append(volumes, corev1.Volume{
+		Name: "mysql-creds",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  in.CredsSecretName,
+				DefaultMode: ptr32(0o400),
 			},
 		},
-	}
+	})
+	volumeMounts = append(volumeMounts, corev1.VolumeMount{
+		Name:      "mysql-creds",
+		MountPath: backupCredsMountPath,
+		ReadOnly:  true,
+	})
+
+	// For S3 profiles, mount the AWS creds Secret as files the same way
+	// and point the script at them.
 	if in.Profile.Storage.Type == v1alpha1.BackupStorageS3 && in.Profile.Storage.S3 != nil {
-		envFrom = append(envFrom, corev1.EnvFromSource{
-			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: in.Profile.Storage.S3.CredentialsSecret,
+		volumes = append(volumes, corev1.Volume{
+			Name: "aws-creds",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  in.Profile.Storage.S3.CredentialsSecret,
+					DefaultMode: ptr32(0o400),
 				},
 			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "aws-creds",
+			MountPath: backupAWSCredsMountPath,
+			ReadOnly:  true,
+		})
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "BLOODRAVEN_AWS_CREDS_DIR",
+			Value: backupAWSCredsMountPath,
 		})
 	}
 
@@ -128,6 +171,23 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		MountPath: backupScriptsMountPath,
 		ReadOnly:  true,
 	})
+
+	// Writable home for mysqlsh state + /tmp (needed because the
+	// container-level default sets ReadOnlyRootFilesystem=true).
+	volumes = append(volumes,
+		corev1.Volume{
+			Name:         "mysqlsh-home",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+		corev1.Volume{
+			Name:         "tmp",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+	)
+	volumeMounts = append(volumeMounts,
+		corev1.VolumeMount{Name: "mysqlsh-home", MountPath: mysqlshHomeMountPath},
+		corev1.VolumeMount{Name: "tmp", MountPath: tmpMountPath},
+	)
 
 	// TLS volume, if configured.
 	if fg.Spec.TLS != nil {
@@ -153,6 +213,8 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		backoffLimit = 0
 	}
 
+	podSC, containerSC := mergeSecurityContexts(bspec.PodSecurityContext, bspec.ContainerSecurityContext)
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -167,15 +229,16 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: bspec.ImagePullSecrets,
+					SecurityContext:  podSC,
 					Containers: []corev1.Container{
 						{
-							Name:    backupJobContainerName,
-							Image:   image,
-							Command: []string{"mysqlsh", "--no-wizard", "--py", "-f", backupScriptsMountPath + "/dump.py"},
-							Env:     envVars,
-							EnvFrom: envFrom,
-							Resources: bspec.Resources,
-							VolumeMounts: volumeMounts,
+							Name:            backupJobContainerName,
+							Image:           image,
+							Command:         []string{"mysqlsh", "--no-wizard", "--py", "-f", backupScriptsMountPath + "/dump.py"},
+							Env:             envVars,
+							Resources:       bspec.Resources,
+							VolumeMounts:    volumeMounts,
+							SecurityContext: containerSC,
 						},
 					},
 					Volumes: volumes,
@@ -185,6 +248,129 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 	}
 
 	return job, nil
+}
+
+// mergeSecurityContexts returns the hardened pod- and container-level
+// SecurityContexts used by backup, restore, and cleanup Jobs. User
+// overrides from spec.backup.podSecurityContext /
+// containerSecurityContext are merged on top of the defaults field by
+// field: any unset user field stays at the default, any set user field
+// wins.
+//
+// The defaults match the Restricted Pod Security Standard:
+//
+//	pod:
+//	  RunAsNonRoot:   true
+//	  RunAsUser:      27   (mysql)
+//	  RunAsGroup:     27
+//	  FSGroup:        27
+//	  SeccompProfile: RuntimeDefault
+//
+//	container:
+//	  AllowPrivilegeEscalation: false
+//	  ReadOnlyRootFilesystem:   true
+//	  RunAsNonRoot:             true
+//	  Capabilities.Drop:        [ALL]
+//	  SeccompProfile:           RuntimeDefault
+//
+// The `27` UID matches the stock MySQL image and keeps the dump Job
+// compatible with PVC volumes written by the main MySQL Deployment.
+func mergeSecurityContexts(userPod *corev1.PodSecurityContext, userContainer *corev1.SecurityContext) (*corev1.PodSecurityContext, *corev1.SecurityContext) {
+	t := true
+	f := false
+	mysqlUID := int64(27)
+	mysqlGID := int64(27)
+
+	pod := &corev1.PodSecurityContext{
+		RunAsNonRoot: &t,
+		RunAsUser:    &mysqlUID,
+		RunAsGroup:   &mysqlGID,
+		FSGroup:      &mysqlGID,
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+	if userPod != nil {
+		if userPod.RunAsNonRoot != nil {
+			pod.RunAsNonRoot = userPod.RunAsNonRoot
+		}
+		if userPod.RunAsUser != nil {
+			pod.RunAsUser = userPod.RunAsUser
+		}
+		if userPod.RunAsGroup != nil {
+			pod.RunAsGroup = userPod.RunAsGroup
+		}
+		if userPod.FSGroup != nil {
+			pod.FSGroup = userPod.FSGroup
+		}
+		if userPod.FSGroupChangePolicy != nil {
+			pod.FSGroupChangePolicy = userPod.FSGroupChangePolicy
+		}
+		if userPod.SeccompProfile != nil {
+			pod.SeccompProfile = userPod.SeccompProfile
+		}
+		if userPod.SELinuxOptions != nil {
+			pod.SELinuxOptions = userPod.SELinuxOptions
+		}
+		if userPod.WindowsOptions != nil {
+			pod.WindowsOptions = userPod.WindowsOptions
+		}
+		if len(userPod.SupplementalGroups) > 0 {
+			pod.SupplementalGroups = userPod.SupplementalGroups
+		}
+		if len(userPod.Sysctls) > 0 {
+			pod.Sysctls = userPod.Sysctls
+		}
+	}
+
+	c := &corev1.SecurityContext{
+		AllowPrivilegeEscalation: &f,
+		ReadOnlyRootFilesystem:   &t,
+		RunAsNonRoot:             &t,
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+	if userContainer != nil {
+		if userContainer.AllowPrivilegeEscalation != nil {
+			c.AllowPrivilegeEscalation = userContainer.AllowPrivilegeEscalation
+		}
+		if userContainer.ReadOnlyRootFilesystem != nil {
+			c.ReadOnlyRootFilesystem = userContainer.ReadOnlyRootFilesystem
+		}
+		if userContainer.RunAsNonRoot != nil {
+			c.RunAsNonRoot = userContainer.RunAsNonRoot
+		}
+		if userContainer.RunAsUser != nil {
+			c.RunAsUser = userContainer.RunAsUser
+		}
+		if userContainer.RunAsGroup != nil {
+			c.RunAsGroup = userContainer.RunAsGroup
+		}
+		if userContainer.Privileged != nil {
+			c.Privileged = userContainer.Privileged
+		}
+		if userContainer.ProcMount != nil {
+			c.ProcMount = userContainer.ProcMount
+		}
+		if userContainer.Capabilities != nil {
+			c.Capabilities = userContainer.Capabilities
+		}
+		if userContainer.SeccompProfile != nil {
+			c.SeccompProfile = userContainer.SeccompProfile
+		}
+		if userContainer.SELinuxOptions != nil {
+			c.SELinuxOptions = userContainer.SELinuxOptions
+		}
+		if userContainer.WindowsOptions != nil {
+			c.WindowsOptions = userContainer.WindowsOptions
+		}
+	}
+
+	return pod, c
 }
 
 // backupMySQLHost returns the in-cluster hostname of a site's MySQL service.
@@ -251,7 +437,10 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 			Name:      "backups",
 			MountPath: backupPVCMountPath,
 		}}
-		return outputPath, nil, volumes, mounts, nil
+		env := []corev1.EnvVar{
+			{Name: "BLOODRAVEN_PVC_MOUNT_PATH", Value: backupPVCMountPath},
+		}
+		return outputPath, env, volumes, mounts, nil
 
 	default:
 		return "", nil, nil, nil, fmt.Errorf("profile %q has unknown storage type %q", profile.Name, profile.Storage.Type)

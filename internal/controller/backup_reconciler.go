@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -24,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 )
 
 // Condition types on MysqlBackup.status.conditions.
@@ -69,11 +72,19 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
-	// Handle deletion with finalizer: delete the owned Job, ConfigMap, Secret.
+	// Handle deletion with finalizer. The rewritten finalize returns
+	// (done, err):
+	//   (true,  nil)  => we may remove the finalizer
+	//   (false, nil)  => cleanup still in progress, requeue softly
+	//   (false, err)  => hard error, back off on the next reconcile
 	if !backup.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&backup, mysqlBackupFinalizer) {
-			if err := r.finalize(ctx, &backup); err != nil {
+			done, err := r.finalize(ctx, &backup)
+			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("finalize mysqlbackup: %w", err)
+			}
+			if !done {
+				return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 			}
 			controllerutil.RemoveFinalizer(&backup, mysqlBackupFinalizer)
 			if err := r.Update(ctx, &backup); err != nil {
@@ -85,6 +96,9 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	if !controllerutil.ContainsFinalizer(&backup, mysqlBackupFinalizer) {
 		controllerutil.AddFinalizer(&backup, mysqlBackupFinalizer)
+		// Also stamp the canonical labels on first encounter so label
+		// selectors work even for ad-hoc CRs created by `kubectl create`.
+		_ = ensureBackupLabels(&backup)
 		if err := r.Update(ctx, &backup); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
@@ -110,14 +124,21 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, fmt.Errorf("get failover group: %w", err)
 	}
 
-	// Ensure owner reference so deleting the group cascades to in-flight
-	// backups. Set once on creation; subsequent updates are no-ops.
+	// Coalesce owner-ref set + label stamp into a single Update so we
+	// don't round-trip the reconciler twice on creation.
+	needsUpdate := false
 	if len(backup.OwnerReferences) == 0 {
 		if err := controllerutil.SetControllerReference(&fg, &backup, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("set owner ref: %w", err)
 		}
+		needsUpdate = true
+	}
+	if ensureBackupLabels(&backup) {
+		needsUpdate = true
+	}
+	if needsUpdate {
 		if err := r.Update(ctx, &backup); err != nil {
-			return ctrl.Result{}, fmt.Errorf("update owner ref: %w", err)
+			return ctrl.Result{}, fmt.Errorf("update owner ref / labels: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
@@ -181,6 +202,11 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		backup.Status.StartTime = &now
 		backup.Status.JobName = built.Name
 		backup.Status.SourceSite = sourceSite
+		backup.Status.StorageType = profile.Storage.Type
+		backup.Status.ActiveSiteAtStart = fg.Status.ActiveSite
+		if backup.Status.Attempt == 0 {
+			backup.Status.Attempt = 1
+		}
 		backup.Status.Message = fmt.Sprintf("running (source=%s, reason=%s)", sourceSite, reason)
 		backup.Status.ObservedGeneration = backup.Generation
 		setCondition(&backup.Status.Conditions, metav1.Condition{
@@ -200,57 +226,116 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Job exists — observe its status.
 	phase, message := jobPhase(&job, "backup")
 	if phase == "" {
-		// Still running.
+		// Still running. Emit a soft warning if the group's active
+		// site drifted while the backup was in flight.
+		r.maybeWarnInFlightFailover(&backup, &fg)
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
 
-	patch := client.MergeFrom(backup.DeepCopy())
-	now := metav1.Now()
-	backup.Status.Phase = phase
-	if backup.Status.StartTime == nil {
+	// --- Terminal state ----------------------------------------------
+	//
+	// Build a candidate next status on a deep-copied starting point,
+	// then only patch + emit metrics/events if it's semantically
+	// different from what's already on the object. This is the key
+	// exactly-once guarantee for metric emission: stableJobCompletionTime
+	// returns the same instant for every reconcile of the same terminal
+	// Job, so DeepEqual short-circuits all subsequent attempts.
+	next := *backup.Status.DeepCopy()
+	stableTime := stableJobCompletionTime(&job)
+	var completion metav1.Time
+	if stableTime != nil {
+		completion = *stableTime
+	} else {
+		completion = metav1.Now()
+	}
+
+	next.Phase = phase
+	if next.StartTime == nil {
 		if job.Status.StartTime != nil {
-			backup.Status.StartTime = job.Status.StartTime
+			next.StartTime = job.Status.StartTime
 		} else {
-			backup.Status.StartTime = &now
+			next.StartTime = &completion
 		}
 	}
-	backup.Status.CompletionTime = &now
-	backup.Status.Message = message
-	if backup.Status.SourceSite == "" {
-		backup.Status.SourceSite = sourceSite
+	next.CompletionTime = &completion
+	next.Message = message
+	if next.SourceSite == "" {
+		next.SourceSite = sourceSite
 	}
-	backup.Status.ObservedGeneration = backup.Generation
+	if next.StorageType == "" && profile != nil {
+		next.StorageType = profile.Storage.Type
+	}
+	next.ObservedGeneration = backup.Generation
 
 	if phase == v1alpha1.BackupPhaseSucceeded {
-		if loc, size := r.tailJobCompletion(ctx, &backup, &job); loc != "" {
-			backup.Status.Location = loc
-			backup.Status.Size = size
+		if meta, ok := r.tailJobCompletion(ctx, &backup, &job); ok {
+			if meta.Location != "" {
+				next.Location = meta.Location
+			}
+			if meta.Size != "" {
+				next.Size = meta.Size
+			}
+			if meta.SizeBytes > 0 {
+				next.SizeBytes = meta.SizeBytes
+			}
+			if meta.GtidExecuted != "" {
+				next.GtidExecuted = meta.GtidExecuted
+			}
+			if meta.BinlogFile != "" {
+				next.BinlogFile = meta.BinlogFile
+			}
+			if meta.BinlogPos > 0 {
+				next.BinlogPos = meta.BinlogPos
+			}
 		}
-		setCondition(&backup.Status.Conditions, metav1.Condition{
+		// If the dump didn't report bytes but did report a size string
+		// (pure local case), derive a display string from the Go
+		// helper so it's consistent across code paths.
+		if next.Size == "" && next.SizeBytes > 0 {
+			next.Size = humanBytes(next.SizeBytes)
+		}
+		setCondition(&next.Conditions, metav1.Condition{
 			Type:               ConditionBackupReady,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: backup.Generation,
-			LastTransitionTime: now,
+			LastTransitionTime: completion,
 			Reason:             "Succeeded",
 			Message:            message,
 		})
-		r.Recorder.Eventf(&backup, corev1.EventTypeNormal, "BackupSucceeded",
-			"backup %s completed: %s", backup.Name, message)
 	} else {
-		setCondition(&backup.Status.Conditions, metav1.Condition{
+		setCondition(&next.Conditions, metav1.Condition{
 			Type:               ConditionBackupReady,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: backup.Generation,
-			LastTransitionTime: now,
+			LastTransitionTime: completion,
 			Reason:             "Failed",
 			Message:            message,
 		})
-		r.Recorder.Eventf(&backup, corev1.EventTypeWarning, "BackupFailed",
-			"backup %s failed: %s", backup.Name, message)
 	}
 
+	// Exactly-once short-circuit.
+	if backup.Status.Phase == phase && equality.Semantic.DeepEqual(&backup.Status, &next) {
+		// Nothing to do — still run retention once though.
+		if err := r.pruneRetention(ctx, &backup); err != nil {
+			logger.Error(err, "retention prune after terminal state")
+		}
+		return ctrl.Result{}, nil
+	}
+
+	patch := client.MergeFrom(backup.DeepCopy())
+	backup.Status = next
 	if err := r.Status().Patch(ctx, &backup, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch final status: %w", err)
+	}
+
+	r.emitTerminalMetrics(&backup, &job)
+
+	if phase == v1alpha1.BackupPhaseSucceeded {
+		r.Recorder.Eventf(&backup, corev1.EventTypeNormal, "BackupSucceeded",
+			"backup %s completed: %s", backup.Name, message)
+	} else {
+		r.Recorder.Eventf(&backup, corev1.EventTypeWarning, "BackupFailed",
+			"backup %s failed: %s", backup.Name, message)
 	}
 
 	if err := r.pruneRetention(ctx, &backup); err != nil {
@@ -268,15 +353,93 @@ func (r *MysqlBackupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// finalize deletes dependent resources on MysqlBackup deletion. Job,
-// creds Secret are owned by the CR so Kubernetes garbage collection will
-// handle them; the finalizer exists so we can add S3 artifact cleanup
-// later without a schema migration.
-func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.MysqlBackup) error {
-	// For v1: nothing to do beyond letting owner-ref GC clean up. Keep
-	// the finalizer attached so future versions that add S3 cleanup
-	// can hook in here without a breaking change.
-	return nil
+// finalize deletes the dump artifact for a MysqlBackup before the CR is
+// released. Returns (done, err) so the caller can distinguish
+// "cleanup complete" from "cleanup in progress":
+//
+//	(true,  nil)  => may remove the finalizer
+//	(false, nil)  => still working, requeue
+//	(false, err)  => hard error, back off
+//
+// When the referenced group or profile is gone we emit an
+// ArtifactCleanupSkipped warning event and release the finalizer
+// immediately — there's nothing we can do without a bucket/claim.
+func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, error) {
+	// No location recorded — nothing to clean up.
+	if backup.Status.Location == "" {
+		return true, nil
+	}
+
+	var fg v1alpha1.MysqlFailoverGroup
+	fgKey := types.NamespacedName{Namespace: backup.Namespace, Name: backup.Spec.FailoverGroupRef.Name}
+	if err := r.Get(ctx, fgKey, &fg); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
+				"failover group %q gone; cannot clean up artifact at %q", fgKey.Name, backup.Status.Location)
+			return true, nil
+		}
+		return false, fmt.Errorf("get failover group: %w", err)
+	}
+
+	profile := findProfile(&fg, backup.Spec.ProfileName)
+	if profile == nil {
+		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
+			"profile %q gone from group %q; cannot clean up artifact at %q",
+			backup.Spec.ProfileName, fg.Name, backup.Status.Location)
+		return true, nil
+	}
+
+	// Re-create the derived creds Secret in case it was GC'd between
+	// backup completion and finalize.
+	credsName := backupCredsSecretName(backup.Name)
+	if err := r.ensureDerivedCredsSecret(ctx, &fg, backup, credsName); err != nil {
+		return false, fmt.Errorf("ensure creds secret: %w", err)
+	}
+
+	// Observe the cleanup Job.
+	var cleanupJob batchv1.Job
+	cleanupKey := types.NamespacedName{Namespace: backup.Namespace, Name: cleanupJobName(backup.Name)}
+	if err := r.Get(ctx, cleanupKey, &cleanupJob); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("get cleanup job: %w", err)
+		}
+		// Build and create.
+		built, err := buildCleanupJob(cleanupJobInputs{
+			FailoverGroup:        &fg,
+			Profile:              profile,
+			Backup:               backup,
+			CredsSecretName:      credsName,
+			ScriptsConfigMapName: backupScriptsConfigMapName(fg.Name),
+		})
+		if err != nil {
+			return false, fmt.Errorf("build cleanup job: %w", err)
+		}
+		if err := controllerutil.SetControllerReference(backup, built, r.Scheme); err != nil {
+			return false, fmt.Errorf("set cleanup job owner ref: %w", err)
+		}
+		if err := r.Create(ctx, built); err != nil {
+			return false, fmt.Errorf("create cleanup job: %w", err)
+		}
+		r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupStarted",
+			"created cleanup Job %s for artifact at %q", built.Name, backup.Status.Location)
+		return false, nil
+	}
+
+	phase, msg := jobPhase(&cleanupJob, "cleanup")
+	switch phase {
+	case v1alpha1.BackupPhaseSucceeded:
+		r.Recorder.Eventf(backup, corev1.EventTypeNormal, "ArtifactCleanupSucceeded",
+			"artifact cleanup succeeded for %q", backup.Status.Location)
+		return true, nil
+	case v1alpha1.BackupPhaseFailed:
+		r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupFailed",
+			"artifact cleanup Job %s failed: %s (remove finalizer %q to force-delete)",
+			cleanupJob.Name, msg, mysqlBackupFinalizer)
+		return false, fmt.Errorf("cleanup job %s failed: %s", cleanupJob.Name, msg)
+	default:
+		// Still running.
+		return false, nil
+	}
 }
 
 // failBackup transitions a MysqlBackup to Failed with the given reason.
@@ -350,8 +513,9 @@ func (r *MysqlBackupReconciler) ensureDerivedCredsSecret(ctx context.Context, fg
 }
 
 // jobPhase summarizes a batch/v1 Job status into a BackupPhase, using
-// `kind` ("backup" or "restore") to produce an accurate success message
-// for either caller. Returns empty phase when the Job is still running.
+// `kind` ("backup", "restore", or "cleanup") to produce an accurate
+// success message for either caller. Returns empty phase when the Job
+// is still running.
 //
 // Both JobComplete and JobFailed conditions are consulted first; when a
 // Job is terminal but the conditions have not yet been set by
@@ -393,20 +557,104 @@ func jobPhase(job *batchv1.Job, kind string) (v1alpha1.BackupPhase, string) {
 	return "", ""
 }
 
+// stableJobCompletionTime returns a deterministic terminal time for a
+// Job so that repeated reconciles of the same terminal CR produce
+// identical status. Preference order:
+//
+//  1. First JobComplete / JobFailed condition's LastTransitionTime.
+//  2. job.Status.CompletionTime (Succeeded path only).
+//  3. nil — caller falls back to metav1.Now().
+//
+// This is the exactly-once anchor: the semantic-equality check in the
+// terminal reconcile path only works if the computed "next" status is
+// byte-identical across reconciles, which in turn requires a stable
+// completion timestamp.
+func stableJobCompletionTime(job *batchv1.Job) *metav1.Time {
+	for i := range job.Status.Conditions {
+		c := &job.Status.Conditions[i]
+		if (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) && c.Status == corev1.ConditionTrue {
+			t := c.LastTransitionTime
+			return &t
+		}
+	}
+	if job.Status.CompletionTime != nil {
+		t := *job.Status.CompletionTime
+		return &t
+	}
+	return nil
+}
+
+// dumpCompletionMetadata is the parsed shape of the BLOODRAVEN_DUMP_COMPLETE
+// sentinel line emitted by backup_script.py on success.
+type dumpCompletionMetadata struct {
+	Location     string
+	Size         string
+	SizeBytes    int64
+	GtidExecuted string
+	BinlogFile   string
+	BinlogPos    int64
+}
+
+// parseDumpCompleteLine parses a single `BLOODRAVEN_DUMP_COMPLETE k=v ...`
+// sentinel line emitted by backup_script.py. Returns (meta, true) on a
+// well-formed sentinel and (zero, false) on a prefix mismatch. Unknown
+// keys are tolerated (forward-compatible). Malformed numerics leave
+// the corresponding field at zero.
+//
+// Space-bearing values (e.g. "1.4 GiB") are round-tripped through an
+// underscore escape so this whitespace-splitting parser can recover them.
+func parseDumpCompleteLine(line string) (dumpCompletionMetadata, bool) {
+	const prefix = "BLOODRAVEN_DUMP_COMPLETE"
+	if !strings.HasPrefix(line, prefix) {
+		return dumpCompletionMetadata{}, false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	fields := strings.Fields(rest)
+	var meta dumpCompletionMetadata
+	for _, f := range fields {
+		eq := strings.IndexByte(f, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := f[:eq]
+		val := strings.ReplaceAll(f[eq+1:], "_", " ")
+		switch key {
+		case "location":
+			meta.Location = val
+		case "size":
+			meta.Size = val
+		case "sizeBytes":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				meta.SizeBytes = n
+			}
+		case "gtidExecuted":
+			meta.GtidExecuted = strings.ReplaceAll(val, " ", "")
+		case "binlogFile":
+			meta.BinlogFile = val
+		case "binlogPos":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				meta.BinlogPos = n
+			}
+		}
+	}
+	return meta, true
+}
+
 // tailJobCompletion tails the Job pod log and parses the trailing
-// BLOODRAVEN_DUMP_COMPLETE sentinel to populate status.location/size.
-// Best-effort; returns empty strings on any failure. Requires a real
-// clientset (nil in fake-client tests).
-func (r *MysqlBackupReconciler) tailJobCompletion(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job) (string, string) {
+// BLOODRAVEN_DUMP_COMPLETE sentinel into dumpCompletionMetadata.
+// Returns (zero, false) on any failure so the caller can cleanly leave
+// the existing status untouched. Requires a real clientset (nil in
+// fake-client tests).
+func (r *MysqlBackupReconciler) tailJobCompletion(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job) (dumpCompletionMetadata, bool) {
 	if r.Clientset == nil {
-		return "", ""
+		return dumpCompletionMetadata{}, false
 	}
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(job.Namespace),
 		client.MatchingLabels{labelMysqlBackup: backup.Name},
 	); err != nil {
-		return "", ""
+		return dumpCompletionMetadata{}, false
 	}
 	var podName string
 	for i := range pods.Items {
@@ -417,7 +665,7 @@ func (r *MysqlBackupReconciler) tailJobCompletion(ctx context.Context, backup *v
 		}
 	}
 	if podName == "" {
-		return "", ""
+		return dumpCompletionMetadata{}, false
 	}
 
 	req := r.Clientset.CoreV1().Pods(job.Namespace).GetLogs(podName, &corev1.PodLogOptions{
@@ -426,49 +674,102 @@ func (r *MysqlBackupReconciler) tailJobCompletion(ctx context.Context, backup *v
 	})
 	stream, err := req.Stream(ctx)
 	if err != nil {
-		return "", ""
+		return dumpCompletionMetadata{}, false
 	}
 	defer func() { _ = stream.Close() }()
 
-	var lastLocation, lastSize string
+	var (
+		last dumpCompletionMetadata
+		ok   bool
+	)
 	sc := bufio.NewScanner(io.LimitReader(stream, 64*1024))
 	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasPrefix(line, "BLOODRAVEN_DUMP_COMPLETE") {
-			// Format: BLOODRAVEN_DUMP_COMPLETE location=... size=...
-			parts := strings.Fields(strings.TrimPrefix(line, "BLOODRAVEN_DUMP_COMPLETE "))
-			for _, p := range parts {
-				if strings.HasPrefix(p, "location=") {
-					lastLocation = strings.TrimPrefix(p, "location=")
-				}
-				if strings.HasPrefix(p, "size=") {
-					lastSize = strings.TrimPrefix(p, "size=")
-				}
-			}
+		if meta, hit := parseDumpCompleteLine(sc.Text()); hit {
+			last = meta
+			ok = true
 		}
 	}
-	return lastLocation, lastSize
+	return last, ok
 }
 
 func ptr64(v int64) *int64 { return &v }
 
+// emitTerminalMetrics updates the backup Prometheus metrics for a single
+// terminal MysqlBackup observation. Called from the non-short-circuit
+// branch of the reconcile loop, so it runs at most once per terminal CR.
+func (r *MysqlBackupReconciler) emitTerminalMetrics(backup *v1alpha1.MysqlBackup, job *batchv1.Job) {
+	group := backup.Spec.FailoverGroupRef.Name
+	profile := backup.Spec.ProfileName
+	result := "failure"
+	if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded {
+		result = "success"
+	}
+
+	bmetrics.BackupRunsTotal.WithLabelValues(group, profile, result).Inc()
+
+	// Duration: prefer explicit StartTime/CompletionTime on the CR;
+	// fall back to Job fields.
+	var start, end time.Time
+	if backup.Status.StartTime != nil {
+		start = backup.Status.StartTime.Time
+	} else if job.Status.StartTime != nil {
+		start = job.Status.StartTime.Time
+	}
+	if backup.Status.CompletionTime != nil {
+		end = backup.Status.CompletionTime.Time
+	}
+	if !start.IsZero() && !end.IsZero() && end.After(start) {
+		bmetrics.BackupDurationSeconds.WithLabelValues(group, profile).
+			Observe(end.Sub(start).Seconds())
+	}
+
+	if !end.IsZero() {
+		bmetrics.BackupLastAttemptTimestamp.WithLabelValues(group, profile).
+			Set(float64(end.Unix()))
+	}
+	if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded {
+		if !end.IsZero() {
+			bmetrics.BackupLastSuccessTimestamp.WithLabelValues(group, profile).
+				Set(float64(end.Unix()))
+		}
+		if backup.Status.SizeBytes > 0 {
+			bmetrics.BackupLastSizeBytes.WithLabelValues(group, profile).
+				Set(float64(backup.Status.SizeBytes))
+		}
+	}
+}
+
+// maybeWarnInFlightFailover emits an InFlightFailover warning event
+// when the failover group's active site drifted after this backup's
+// Job was created. The artifact is still a valid point-in-time snapshot
+// of the original source site — this is a soft signal to the operator,
+// not a failure condition.
+func (r *MysqlBackupReconciler) maybeWarnInFlightFailover(backup *v1alpha1.MysqlBackup, fg *v1alpha1.MysqlFailoverGroup) {
+	if backup.Status.ActiveSiteAtStart == "" {
+		return
+	}
+	if fg.Status.ActiveSite == "" {
+		return
+	}
+	if fg.Status.ActiveSite == backup.Status.ActiveSiteAtStart {
+		return
+	}
+	r.Recorder.Eventf(backup, corev1.EventTypeWarning, "InFlightFailover",
+		"failover group active site drifted during backup (started=%s, current=%s); artifact remains a valid snapshot of the source site",
+		backup.Status.ActiveSiteAtStart, fg.Status.ActiveSite)
+}
+
 // pruneRetention deletes old MysqlBackup CRs for the same (failover
-// group, profile). Keeps profile.retention newest successes plus a
-// hard-coded cap of failed runs.
+// group, profile). List happens in-namespace rather than via a label
+// selector so the sweep works for ad-hoc CRs that may not carry the
+// canonical labels. Successes go through the combined count/age/
+// min-keep policy; failures go through a simple count cap.
 func (r *MysqlBackupReconciler) pruneRetention(ctx context.Context, trigger *v1alpha1.MysqlBackup) error {
 	var list v1alpha1.MysqlBackupList
-	if err := r.List(ctx, &list,
-		client.InNamespace(trigger.Namespace),
-		client.MatchingLabels{
-			labelFailoverGroup: trigger.Spec.FailoverGroupRef.Name,
-			labelBackupProfile: trigger.Spec.ProfileName,
-		},
-	); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(trigger.Namespace)); err != nil {
 		return err
 	}
 
-	// If the trigger was not created with the standard labels, fall back
-	// to filtering in-memory.
 	filtered := list.Items[:0]
 	for _, b := range list.Items {
 		if b.Spec.FailoverGroupRef.Name != trigger.Spec.FailoverGroupRef.Name {
@@ -483,28 +784,110 @@ func (r *MysqlBackupReconciler) pruneRetention(ctx context.Context, trigger *v1a
 		filtered = append(filtered, b)
 	}
 
-	// Determine keep count for successes.
-	keepSuccess := int32(0)
+	// Resolve the effective policy from the (possibly nil) profile.
+	var profile *v1alpha1.BackupProfile
 	var fg v1alpha1.MysqlFailoverGroup
 	if err := r.Get(ctx, types.NamespacedName{Namespace: trigger.Namespace, Name: trigger.Spec.FailoverGroupRef.Name}, &fg); err == nil {
-		if profile := findProfile(&fg, trigger.Spec.ProfileName); profile != nil {
-			keepSuccess = profile.Retention
-		}
+		profile = findProfile(&fg, trigger.Spec.ProfileName)
 	}
-	if keepSuccess == 0 {
-		// Retention=0 means "keep all". Still trim failed runs.
-		return r.pruneByPhase(ctx, filtered, v1alpha1.BackupPhaseFailed, maxFailedRetention)
-	}
+	count, maxAge, minKeep, maxFailed := resolveRetention(profile)
 
-	if err := r.pruneByPhase(ctx, filtered, v1alpha1.BackupPhaseSucceeded, int(keepSuccess)); err != nil {
+	if err := r.pruneSuccessful(ctx, filtered, count, maxAge, minKeep); err != nil {
 		return err
 	}
-	return r.pruneByPhase(ctx, filtered, v1alpha1.BackupPhaseFailed, maxFailedRetention)
+	return r.pruneByPhase(ctx, filtered, v1alpha1.BackupPhaseFailed, int(maxFailed))
+}
+
+// resolveRetention dispatches on BackupProfile.RetentionPolicy vs. the
+// shorthand Retention field and returns the effective policy knobs:
+//
+//	count   = max successful CRs to keep (0 disables count-based)
+//	maxAge  = max age of a successful CR (0 disables age-based)
+//	minKeep = safety floor: this many newest successes always kept
+//	maxFailed = cap on the Failed bucket
+//
+// The shorthand path applies a MinKeep=1 safety floor so a retention
+// sweep after a long outage can't wipe the last good backup.
+func resolveRetention(profile *v1alpha1.BackupProfile) (count int32, maxAge time.Duration, minKeep int32, maxFailed int32) {
+	if profile == nil {
+		return 0, 0, 0, int32(maxFailedRetention)
+	}
+	if profile.RetentionPolicy != nil {
+		p := profile.RetentionPolicy
+		mk := p.MinKeep
+		if mk < 0 {
+			mk = 0
+		}
+		mf := p.MaxFailedKeep
+		if mf == 0 {
+			mf = int32(maxFailedRetention)
+		}
+		return p.Count, time.Duration(p.MaxAgeDays) * 24 * time.Hour, mk, mf
+	}
+	// Shorthand: single-count retention with a MinKeep=1 safety floor.
+	return profile.Retention, 0, 1, int32(maxFailedRetention)
+}
+
+// pruneSuccessful applies the combined count/age/min-keep retention
+// policy to the Succeeded bucket of a filtered MysqlBackup slice. A CR
+// is kept when ANY of the following are true:
+//
+//   - its rank from newest is < MinKeep (safety floor),
+//   - count > 0 and its rank from newest is < count, or
+//   - maxAge > 0 and its completion time is within the age window.
+//
+// When both count and maxAge are zero the function is a no-op so users
+// who set neither don't accidentally wipe their history.
+func (r *MysqlBackupReconciler) pruneSuccessful(ctx context.Context, all []v1alpha1.MysqlBackup, count int32, maxAge time.Duration, minKeep int32) error {
+	if count == 0 && maxAge == 0 {
+		return nil
+	}
+	bucket := make([]v1alpha1.MysqlBackup, 0, len(all))
+	for _, b := range all {
+		if b.Status.Phase == v1alpha1.BackupPhaseSucceeded {
+			bucket = append(bucket, b)
+		}
+	}
+	if len(bucket) == 0 {
+		return nil
+	}
+	sort.Slice(bucket, func(i, j int) bool {
+		ti := timeOrZero(bucket[i].Status.CompletionTime)
+		tj := timeOrZero(bucket[j].Status.CompletionTime)
+		return ti.After(tj)
+	})
+	cutoff := time.Now().Add(-maxAge)
+	for i, b := range bucket {
+		// Safety floor.
+		if int32(i) < minKeep {
+			continue
+		}
+		// Within the count window.
+		if count > 0 && int32(i) < count {
+			continue
+		}
+		// Within the age window.
+		if maxAge > 0 {
+			t := timeOrZero(b.Status.CompletionTime)
+			if !t.IsZero() && t.After(cutoff) {
+				continue
+			}
+		}
+		// Not kept by any policy check => delete.
+		victim := b
+		if err := r.Delete(ctx, &victim); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete old succeeded backup %s: %w", victim.Name, err)
+		}
+	}
+	return nil
 }
 
 // pruneByPhase keeps the newest `keep` entries in the given phase and
 // deletes the rest. Entries without a CompletionTime sort last.
 func (r *MysqlBackupReconciler) pruneByPhase(ctx context.Context, all []v1alpha1.MysqlBackup, phase v1alpha1.BackupPhase, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
 	bucket := make([]v1alpha1.MysqlBackup, 0, len(all))
 	for _, b := range all {
 		if b.Status.Phase == phase {

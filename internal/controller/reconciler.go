@@ -208,8 +208,12 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile backup schedules: %w", err)
 	}
 
-	// Roll up backup status (per-schedule LastBackupTime etc).
-	if err := r.updateBackupStatus(ctx, &fg); err != nil {
+	// Roll up backup status (per-schedule LastBackupTime etc). The
+	// returned duration is the minimum wake-up across schedules —
+	// non-zero when a pending retry backoff hasn't elapsed yet, so
+	// the reconciler wakes up exactly when the retry is due.
+	backupRequeue, err := r.updateBackupStatus(ctx, &fg)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("update backup status: %w", err)
 	}
 
@@ -218,6 +222,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
 	}
 
+	if backupRequeue > 0 {
+		return ctrl.Result{RequeueAfter: backupRequeue}, nil
+	}
 	return ctrl.Result{}, nil
 }
 

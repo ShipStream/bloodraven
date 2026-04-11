@@ -231,20 +231,46 @@ func TestBuildBackupJob_S3_EnvAndConfig(t *testing.T) {
 		t.Errorf("dump options not encoded: %q", envMap["BLOODRAVEN_DUMP_OPTIONS"])
 	}
 
-	// envFrom: creds secret + s3 creds secret
-	if len(c.EnvFrom) != 2 {
-		t.Errorf("want 2 envFrom entries, got %d", len(c.EnvFrom))
+	// Creds are now mounted as files, not injected via envFrom.
+	if len(c.EnvFrom) != 0 {
+		t.Errorf("want 0 envFrom entries (creds are files now), got %d", len(c.EnvFrom))
+	}
+	if envMap["BLOODRAVEN_MYSQL_CREDS_DIR"] != backupCredsMountPath {
+		t.Errorf("want BLOODRAVEN_MYSQL_CREDS_DIR=%s, got %q", backupCredsMountPath, envMap["BLOODRAVEN_MYSQL_CREDS_DIR"])
+	}
+	if envMap["BLOODRAVEN_AWS_CREDS_DIR"] != backupAWSCredsMountPath {
+		t.Errorf("want BLOODRAVEN_AWS_CREDS_DIR=%s, got %q", backupAWSCredsMountPath, envMap["BLOODRAVEN_AWS_CREDS_DIR"])
+	}
+	if envMap["BLOODRAVEN_STORAGE_TYPE"] != string(v1alpha1.BackupStorageS3) {
+		t.Errorf("want BLOODRAVEN_STORAGE_TYPE=S3, got %q", envMap["BLOODRAVEN_STORAGE_TYPE"])
 	}
 
-	// scripts ConfigMap must be mounted
-	foundScripts := false
+	// Both creds volumes must be mounted at the expected paths.
+	mountByName := map[string]corev1.VolumeMount{}
 	for _, m := range c.VolumeMounts {
-		if m.Name == "scripts" && m.MountPath == backupScriptsMountPath {
-			foundScripts = true
-		}
+		mountByName[m.Name] = m
 	}
-	if !foundScripts {
-		t.Errorf("scripts ConfigMap not mounted")
+	if m, ok := mountByName["mysql-creds"]; !ok || m.MountPath != backupCredsMountPath {
+		t.Errorf("mysql-creds not mounted at %s: %+v", backupCredsMountPath, m)
+	}
+	if m, ok := mountByName["aws-creds"]; !ok || m.MountPath != backupAWSCredsMountPath {
+		t.Errorf("aws-creds not mounted at %s: %+v", backupAWSCredsMountPath, m)
+	}
+	if m, ok := mountByName["scripts"]; !ok || m.MountPath != backupScriptsMountPath {
+		t.Errorf("scripts ConfigMap not mounted at %s: %+v", backupScriptsMountPath, m)
+	}
+
+	// Hardened SecurityContext defaults.
+	podSC := job.Spec.Template.Spec.SecurityContext
+	if podSC == nil || podSC.RunAsNonRoot == nil || !*podSC.RunAsNonRoot {
+		t.Errorf("pod SecurityContext.RunAsNonRoot should be true: %+v", podSC)
+	}
+	cSC := c.SecurityContext
+	if cSC == nil || cSC.AllowPrivilegeEscalation == nil || *cSC.AllowPrivilegeEscalation {
+		t.Errorf("container SecurityContext.AllowPrivilegeEscalation should be false: %+v", cSC)
+	}
+	if cSC == nil || cSC.ReadOnlyRootFilesystem == nil || !*cSC.ReadOnlyRootFilesystem {
+		t.Errorf("container SecurityContext.ReadOnlyRootFilesystem should be true: %+v", cSC)
 	}
 }
 
@@ -276,22 +302,33 @@ func TestBuildBackupJob_PVC_MountsClaim(t *testing.T) {
 		t.Errorf("expected PVC output url, got %q", outputURL)
 	}
 
-	var hasBackupVolume bool
+	var hasBackupVolume, hasAWSVolume, hasMysqlCreds bool
 	for _, v := range job.Spec.Template.Spec.Volumes {
-		if v.Name == "backups" && v.PersistentVolumeClaim != nil {
-			if v.PersistentVolumeClaim.ClaimName != "mysql-lion-backup-daily-local" {
-				t.Errorf("want owned claim name, got %s", v.PersistentVolumeClaim.ClaimName)
+		switch v.Name {
+		case "backups":
+			if v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != "mysql-lion-backup-daily-local" {
+				t.Errorf("want owned claim name, got %+v", v.PersistentVolumeClaim)
 			}
 			hasBackupVolume = true
+		case "aws-creds":
+			hasAWSVolume = true
+		case "mysql-creds":
+			hasMysqlCreds = true
 		}
 	}
 	if !hasBackupVolume {
 		t.Errorf("PVC volume not attached")
 	}
+	if hasAWSVolume {
+		t.Errorf("PVC profile must not mount aws-creds")
+	}
+	if !hasMysqlCreds {
+		t.Errorf("mysql-creds volume must be mounted for PVC profile")
+	}
 
-	// PVC profile MUST NOT carry S3 envFrom entries.
-	if len(c.EnvFrom) != 1 {
-		t.Errorf("want 1 envFrom (creds only), got %d", len(c.EnvFrom))
+	// No envFrom at all — creds are file-mounted.
+	if len(c.EnvFrom) != 0 {
+		t.Errorf("want 0 envFrom entries (creds are files now), got %d", len(c.EnvFrom))
 	}
 }
 

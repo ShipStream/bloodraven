@@ -6,9 +6,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// DefaultBackupImage is the default image that runs mysqlsh inside backup/restore
-// Jobs. The community-shell image ships mysqlsh with native S3 support (8.0.32+).
-const DefaultBackupImage = "container-registry.oracle.com/mysql/community-shell:8.0"
+// DefaultBackupImage is the default image that runs mysqlsh inside backup,
+// restore, and cleanup Jobs. We deliberately pin a full version here
+// (major.minor) rather than a floating tag.
+//
+// A common mistake is to reach for "container-registry.oracle.com/mysql/
+// community-shell:8.0" — that repository does not exist in the Oracle
+// registry. The shipped mysqlsh binary is bundled with the community-server
+// image, which is what we default to here.
+//
+// Production deployments should always pin this explicitly via
+// spec.backup.image; never rely on ":9" or ":latest" because cross-version
+// mysqlsh dump/load compatibility is not guaranteed.
+const DefaultBackupImage = "container-registry.oracle.com/mysql/community-server:9.6"
 
 // BackupSpec is the top-level backup configuration embedded in
 // MysqlFailoverGroupSpec as spec.backup. All fields are optional; omitting
@@ -16,8 +26,10 @@ const DefaultBackupImage = "container-registry.oracle.com/mysql/community-shell:
 type BackupSpec struct {
 	// Image is the container image containing mysqlsh. It must include
 	// util.dumpInstance() and util.loadDump() with native S3 support
-	// (mysqlsh 8.0.32+).
-	// +kubebuilder:default="container-registry.oracle.com/mysql/community-shell:8.0"
+	// (mysqlsh 8.0.32+). Defaults to DefaultBackupImage; production
+	// deployments should always pin a full major.minor tag here and
+	// avoid floating tags.
+	// +kubebuilder:default="container-registry.oracle.com/mysql/community-server:9.6"
 	Image string `json:"image,omitempty"`
 
 	// ImagePullSecrets for the backup image.
@@ -56,6 +68,59 @@ type BackupSpec struct {
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=0
 	BackoffLimit int32 `json:"backoffLimit,omitempty"`
+
+	// Retry configures operator-level retries for scheduled MysqlBackup
+	// CRs that land in Failed. This is independent of Job-level
+	// backoffLimit: Job backoff retries the container, whereas this
+	// retries the whole CR, producing a new MysqlBackup with its own
+	// Job and attempt counter. Omit to disable.
+	// +optional
+	Retry *BackupRetrySpec `json:"retry,omitempty"`
+
+	// PITR, when true, is a reserved-not-implemented marker. The
+	// reconciler emits a warning event on every sync when this is
+	// enabled; no PITR logic is wired up today. Left here so the API
+	// shape is stable for a future point-in-time recovery feature.
+	// +optional
+	PITR *bool `json:"pitr,omitempty"`
+
+	// PodSecurityContext overrides the default pod-level security context
+	// used for backup, restore, and cleanup Jobs. User fields are merged
+	// on top of the hardened defaults (RunAsNonRoot, RuntimeDefault
+	// seccomp, etc.) — leave fields unset to keep the default.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// ContainerSecurityContext overrides the default container-level
+	// security context. Same merge semantics as PodSecurityContext:
+	// hardened defaults (ReadOnlyRootFilesystem, AllowPrivilegeEscalation
+	// false, capability drop ALL) are applied first and user fields take
+	// precedence.
+	// +optional
+	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
+}
+
+// BackupRetrySpec configures operator-level retries for scheduled
+// MysqlBackup CRs. MaxAttempts includes the original attempt.
+type BackupRetrySpec struct {
+	// MaxAttempts is the total number of attempts (including the
+	// original). 1 disables retries. Values are clamped to [1, 10].
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	MaxAttempts int32 `json:"maxAttempts,omitempty"`
+
+	// InitialBackoffSeconds is the delay between the first failure and
+	// the first retry. Subsequent retries double the backoff until
+	// MaxBackoffSeconds.
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=1
+	InitialBackoffSeconds int32 `json:"initialBackoffSeconds,omitempty"`
+
+	// MaxBackoffSeconds caps the exponential backoff. Default: 1800 (30m).
+	// +kubebuilder:default=1800
+	// +kubebuilder:validation:Minimum=1
+	MaxBackoffSeconds int32 `json:"maxBackoffSeconds,omitempty"`
 }
 
 // BackupProfile is a named, reusable backup configuration.
@@ -72,12 +137,56 @@ type BackupProfile struct {
 	// +optional
 	Dump *DumpOptions `json:"dump,omitempty"`
 
-	// Retention is the maximum number of successful MysqlBackup CRs to
-	// retain for this profile. Older successful CRs are pruned. 0
-	// disables pruning.
+	// Retention is the legacy shorthand for count-based retention: the
+	// maximum number of successful MysqlBackup CRs to keep for this
+	// profile. 0 disables count-based pruning. If RetentionPolicy is
+	// set it fully overrides this field.
 	// +kubebuilder:default=7
 	// +kubebuilder:validation:Minimum=0
 	Retention int32 `json:"retention,omitempty"`
+
+	// RetentionPolicy is the structured retention configuration. When
+	// set it replaces the shorthand Retention field and enables
+	// age-based pruning plus a min-keep safety floor.
+	// +optional
+	RetentionPolicy *RetentionPolicy `json:"retentionPolicy,omitempty"`
+}
+
+// RetentionPolicy is the structured retention configuration that replaces
+// the legacy single-int Retention shorthand on BackupProfile. All fields
+// are optional; a zero value disables the corresponding policy knob. The
+// reconciler keeps a successful MysqlBackup iff ANY of the enabled checks
+// say "keep":
+//
+//   - MinKeep: this many newest successes are always kept (safety floor).
+//   - Count: keep the newest Count successful CRs.
+//   - MaxAgeDays: keep successful CRs with completionTime newer than this.
+//
+// MinKeep is the critical knob: it prevents a retention sweep from wiping
+// the last good backup after a long outage in which every recent attempt
+// has failed.
+type RetentionPolicy struct {
+	// Count is the max number of successful CRs to keep. 0 disables
+	// count-based pruning.
+	// +kubebuilder:validation:Minimum=0
+	Count int32 `json:"count,omitempty"`
+
+	// MaxAgeDays is the maximum age (in days) of a successful CR before
+	// it becomes eligible for pruning. 0 disables age-based pruning.
+	// +kubebuilder:validation:Minimum=0
+	MaxAgeDays int32 `json:"maxAgeDays,omitempty"`
+
+	// MinKeep is a safety floor: this many newest successful CRs are
+	// always kept, regardless of Count / MaxAgeDays. Default: 1.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=0
+	MinKeep int32 `json:"minKeep,omitempty"`
+
+	// MaxFailedKeep caps the Failed bucket independently of the success
+	// retention policy. Default: 10.
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=0
+	MaxFailedKeep int32 `json:"maxFailedKeep,omitempty"`
 }
 
 // BackupStorageType enumerates the supported storage backends.
@@ -203,9 +312,22 @@ type BackupSchedule struct {
 	// +kubebuilder:validation:MinLength=1
 	ProfileName string `json:"profileName"`
 
-	// Schedule is a standard cron expression (5 fields, UTC).
+	// Schedule is a standard cron expression (5 fields). Evaluation uses
+	// TimeZone below, not kube-controller-manager's local clock.
 	// +kubebuilder:validation:MinLength=1
 	Schedule string `json:"schedule"`
+
+	// TimeZone is an IANA timezone name ("America/Los_Angeles",
+	// "Europe/Berlin", ...) used when interpreting the Schedule cron
+	// expression. Defaults to "Etc/UTC".
+	//
+	// We set this explicitly because the kube-controller-manager local
+	// timezone is environment-dependent and unreliable for backups: two
+	// clusters running the same manifest can end up firing the same
+	// cron at different wall-clock times. Per-schedule TimeZone makes
+	// backups reproducible regardless of where the control plane runs.
+	// +kubebuilder:default="Etc/UTC"
+	TimeZone string `json:"timeZone,omitempty"`
 
 	// Suspend pauses this schedule without deleting the CronJob.
 	// +kubebuilder:default=false
@@ -307,6 +429,20 @@ type BackupScheduleStatus struct {
 
 	// LastBackupPhase is the phase of that most-recent MysqlBackup.
 	LastBackupPhase string `json:"lastBackupPhase,omitempty"`
+
+	// LastSuccessfulBackupName is the name of the most recent Succeeded
+	// MysqlBackup created by this schedule. Lets dashboards link to the
+	// last known-good CR even after a subsequent failure.
+	LastSuccessfulBackupName string `json:"lastSuccessfulBackupName,omitempty"`
+
+	// LastRetryAttempt is the attempt counter of the latest CR (or the
+	// latest retry created off it). 0 or 1 for the original attempt.
+	LastRetryAttempt int32 `json:"lastRetryAttempt,omitempty"`
+
+	// NextRetryTime, when set, is the earliest time the operator will
+	// create a retry CR for a Failed latest attempt. Used by the
+	// scheduler loop to wake up at exactly the right moment.
+	NextRetryTime *metav1.Time `json:"nextRetryTime,omitempty"`
 }
 
 // RestoreStatus tracks an in-flight or completed initFromBackup run.

@@ -9,6 +9,12 @@
 #
 # To trigger a one-off backup:
 #   kubectl apply -f playground/manifests/mysqlbackup-adhoc.yaml
+#
+# NOTE: production deployments should always pin the mysqlsh image to a
+# full major.minor tag (as below). Using a floating tag like `:9` or
+# `:latest` is discouraged because mysqlsh dump/load compatibility across
+# versions is not guaranteed. The image below bundles mysqlsh with the
+# community-server 9.6 release.
 apiVersion: shipstream.io/v1alpha1
 kind: MysqlFailoverGroup
 metadata:
@@ -16,12 +22,20 @@ metadata:
   namespace: bloodraven-playground
 spec:
   backup:
-    image: container-registry.oracle.com/mysql/community-shell:8.0
+    image: container-registry.oracle.com/mysql/community-server:9.6
     maxLagSecondsForSource: 60
     activeDeadlineSeconds: 1800
+    retry:
+      maxAttempts: 3
+      initialBackoffSeconds: 60
+      maxBackoffSeconds: 900
     profiles:
       - name: minio
-        retention: 5
+        retentionPolicy:
+          count: 5
+          maxAgeDays: 7
+          minKeep: 1
+          maxFailedKeep: 10
         storage:
           type: S3
           s3:
@@ -48,4 +62,5 @@ spec:
       - name: every-10min
         profileName: minio
         schedule: "*/10 * * * *"
+        timeZone: "Etc/UTC"
         concurrencyPolicy: Forbid

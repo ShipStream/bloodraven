@@ -8,9 +8,10 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -28,6 +29,12 @@ var operatorImageFromEnv = ""
 // CronJobs. Defaults to the operator's own ServiceAccount.
 var operatorServiceAccountFromEnv = ""
 
+// defaultScheduleTimeZone is the timezone used when a BackupSchedule
+// does not set TimeZone. We default to UTC rather than the
+// kube-controller-manager local timezone for reproducibility across
+// clusters.
+const defaultScheduleTimeZone = "Etc/UTC"
+
 // SetOperatorImageDefaults is called from cmd/bloodraven/main.go so the
 // schedule reconciler knows what image and ServiceAccount to run inside
 // the scheduled CronJob pods. It is a package-level setter to keep the
@@ -43,9 +50,23 @@ func SetOperatorImageDefaults(image, serviceAccount string) {
 // spec.initFromBackup is set (both paths mount dump.py / restore.py);
 // owned PVCs are only provisioned when spec.backup declares PVC-backed
 // profiles.
+//
+// This function also emits the PITR reserved-not-implemented warning
+// event when spec.backup.pitr is explicitly enabled — PITR is a future
+// feature and the operator does not yet act on it.
 func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	if fg.Spec.Backup == nil && fg.Spec.InitFromBackup == nil {
 		return nil
+	}
+
+	// PITR warning: reserved-not-implemented. The API field exists to
+	// keep the shape stable for a future release but nothing in the
+	// reconciler acts on it today. Loud-fail so the user doesn't
+	// assume point-in-time recovery is wired up.
+	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && *fg.Spec.Backup.PITR {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupPITRNotImplemented",
+			"spec.backup.pitr is reserved for a future release; bloodraven does not currently "+
+				"perform any point-in-time recovery actions and the field has no effect")
 	}
 
 	// Both backup and restore Jobs mount this ConfigMap, so we reconcile
@@ -76,8 +97,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context
 }
 
 // reconcileBackupScriptsConfigMap owns a single per-group ConfigMap that
-// holds the embedded dump.py / restore.py scripts. Backup and restore
-// Jobs mount this ConfigMap read-only at /scripts.
+// holds the embedded dump.py / restore.py / cleanup.py scripts. Backup,
+// restore, and cleanup Jobs mount this ConfigMap read-only at /scripts.
 func (r *MysqlFailoverGroupReconciler) reconcileBackupScriptsConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -99,6 +120,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupScriptsConfigMap(ctx conte
 		cm.Data = map[string]string{
 			"dump.py":    BackupDumpScript(),
 			"restore.py": BackupRestoreScript(),
+			"cleanup.py": BackupCleanupScript(),
 		}
 		return nil
 	})
@@ -208,24 +230,19 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 
 	image := operatorImageFromEnv
 	if image == "" {
-		// Falls back to a deterministic default so the build succeeds,
-		// but the operator should always set this from main.go via
-		// SetOperatorImageDefaults so the CronJob pulls the image the
-		// operator itself is running.
 		image = "bloodraven:latest"
 	}
 	sa := operatorServiceAccountFromEnv
 	if sa == "" {
-		// Without an explicit ServiceAccount the CronJob pod would run
-		// as the namespace "default" SA, which has no RBAC to create
-		// MysqlBackup CRs and scheduled backups would silently fail.
-		// Emit a warning so the misconfiguration is visible and fall
-		// back to the conventional operator SA name ("bloodraven"),
-		// matching the Helm chart default.
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupScheduleServiceAccountMissing",
 			"operator ServiceAccount not configured (set BLOODRAVEN_OPERATOR_SA env var on the operator deployment); falling back to %q",
 			"bloodraven")
 		sa = "bloodraven"
+	}
+
+	tz := sched.TimeZone
+	if tz == "" {
+		tz = defaultScheduleTimeZone
 	}
 
 	cj := &batchv1.CronJob{
@@ -262,6 +279,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 		}
 
 		cj.Spec.Schedule = sched.Schedule
+		// TimeZone is a *string on CronJobSpec; mint a local copy so
+		// later mutations to the BackupSchedule struct don't alias
+		// the pointer.
+		tzCopy := tz
+		cj.Spec.TimeZone = &tzCopy
 		cj.Spec.Suspend = boolPtr(sched.Suspend)
 		cj.Spec.ConcurrencyPolicy = concurrency
 		cj.Spec.StartingDeadlineSeconds = sched.StartingDeadlineSeconds
@@ -303,12 +325,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 
 // updateBackupStatus lists MysqlBackup CRs for this failover group and
 // rolls the most recent activity per schedule into
-// fg.status.backupSchedules[] and fg.status.lastBackupTime.
-func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+// fg.status.backupSchedules[] and fg.status.lastBackupTime. Returns the
+// minimum wake-up duration across all schedules (non-zero when a
+// retry is pending), and any fatal error.
+func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	if fg.Spec.Backup == nil || len(fg.Spec.Backup.Schedules) == 0 {
 		// Still clear the rollup if nothing is scheduled.
-		if fg.Status.BackupSchedules == nil {
-			return nil
+		if fg.Status.BackupSchedules == nil && fg.Status.LastBackupTime == nil {
+			return 0, nil
 		}
 	}
 
@@ -317,14 +341,15 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 		client.InNamespace(fg.Namespace),
 		client.MatchingLabels{labelFailoverGroup: fg.Name},
 	); err != nil {
-		return fmt.Errorf("list backups: %w", err)
+		return 0, fmt.Errorf("list backups: %w", err)
 	}
 
 	// Most-recent-per-schedule rollup (by start time).
 	type rollup struct {
-		latest    v1alpha1.MysqlBackup
-		latestSet bool
-		lastOK    *metav1.Time
+		latest     v1alpha1.MysqlBackup
+		latestSet  bool
+		lastOK     *metav1.Time
+		lastOKName string
 	}
 	bySched := map[string]*rollup{}
 
@@ -346,12 +371,16 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 		if b.Status.Phase == v1alpha1.BackupPhaseSucceeded && b.Status.CompletionTime != nil {
 			if ru.lastOK == nil || b.Status.CompletionTime.After(ru.lastOK.Time) {
 				ru.lastOK = b.Status.CompletionTime
+				ru.lastOKName = b.Name
 			}
 		}
 	}
 
-	var schedules []v1alpha1.BackupScheduleStatus
-	var overallLastOK *metav1.Time
+	var (
+		schedules     []v1alpha1.BackupScheduleStatus
+		overallLastOK *metav1.Time
+		minRequeue    time.Duration
+	)
 	if fg.Spec.Backup != nil {
 		for _, s := range fg.Spec.Backup.Schedules {
 			entry := v1alpha1.BackupScheduleStatus{
@@ -359,18 +388,30 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 				CronJobName: scheduleCronJobName(fg.Name, s.Name),
 			}
 			if ru, ok := bySched[s.Name]; ok && ru.latestSet {
-				// LastScheduleTime is the moment the CronJob materialized
-				// a MysqlBackup CR, which is the CR's creation timestamp.
-				// Job StartTime is nil until the backup reconciler picks
-				// the CR up, so it would be misleadingly empty right after
-				// the CronJob fires.
 				created := ru.latest.CreationTimestamp
 				entry.LastScheduleTime = &created
 				entry.LastBackupName = ru.latest.Name
 				entry.LastBackupPhase = string(ru.latest.Status.Phase)
 				entry.LastSuccessfulTime = ru.lastOK
+				entry.LastSuccessfulBackupName = ru.lastOKName
+				entry.LastRetryAttempt = ru.latest.Status.Attempt
 				if ru.lastOK != nil && (overallLastOK == nil || ru.lastOK.After(overallLastOK.Time)) {
 					overallLastOK = ru.lastOK
+				}
+				// Operator-level retry: when the latest attempt landed
+				// in Failed and the schedule has a Retry spec, consider
+				// materializing a fresh CR.
+				if ru.latest.Status.Phase == v1alpha1.BackupPhaseFailed {
+					next, wait, err := r.maybeScheduleRetry(ctx, fg, s, &ru.latest)
+					if err != nil {
+						return 0, err
+					}
+					if next != nil {
+						entry.NextRetryTime = next
+					}
+					if wait > 0 && (minRequeue == 0 || wait < minRequeue) {
+						minRequeue = wait
+					}
 				}
 			}
 			schedules = append(schedules, entry)
@@ -391,13 +432,138 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 	// Deterministic ordering for diff stability.
 	sort.Slice(schedules, func(i, j int) bool { return schedules[i].Name < schedules[j].Name })
 
+	// Semantic-equality short-circuit: skip the status patch when the
+	// computed rollup is byte-identical to what's already on the CR.
+	// This eliminates patch churn on idle reconciles and — crucially —
+	// prevents every MysqlBackup watch event from producing a status
+	// update storm on the failover group.
+	if equality.Semantic.DeepEqual(schedules, fg.Status.BackupSchedules) &&
+		equality.Semantic.DeepEqual(overallLastOK, fg.Status.LastBackupTime) {
+		return minRequeue, nil
+	}
+
 	patchBase := fg.DeepCopy()
 	fg.Status.BackupSchedules = schedules
 	fg.Status.LastBackupTime = overallLastOK
 	if err := r.Status().Patch(ctx, fg, client.MergeFrom(patchBase)); err != nil {
-		return fmt.Errorf("patch backup status rollup: %w", err)
+		return 0, fmt.Errorf("patch backup status rollup: %w", err)
 	}
-	return nil
+	return minRequeue, nil
+}
+
+// maybeScheduleRetry considers materializing a retry MysqlBackup for a
+// Failed latest attempt on a scheduled CR. Returns (next, wait, err):
+//
+//	next  — populates entry.NextRetryTime when non-nil
+//	wait  — contributes to the reconciler's RequeueAfter
+//	err   — fatal error (list / create failures)
+//
+// A no-op result is (nil, 0, nil): no retry pending, no wake-up needed.
+func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sched v1alpha1.BackupSchedule, failed *v1alpha1.MysqlBackup) (*metav1.Time, time.Duration, error) {
+	if fg.Spec.Backup == nil || fg.Spec.Backup.Retry == nil {
+		return nil, 0, nil
+	}
+	retry := fg.Spec.Backup.Retry
+	if retry.MaxAttempts <= 1 {
+		return nil, 0, nil
+	}
+
+	current := failed.Status.Attempt
+	if current < 1 {
+		current = 1
+	}
+	if current >= retry.MaxAttempts {
+		return nil, 0, nil
+	}
+
+	// Check if a later attempt already exists (same schedule, higher
+	// Attempt counter). If so, the retry has already been materialized.
+	var siblings v1alpha1.MysqlBackupList
+	if err := r.List(ctx, &siblings,
+		client.InNamespace(fg.Namespace),
+		client.MatchingLabels{
+			labelFailoverGroup:  fg.Name,
+			labelBackupSchedule: sched.Name,
+		},
+	); err != nil {
+		return nil, 0, fmt.Errorf("list retry siblings: %w", err)
+	}
+	for i := range siblings.Items {
+		if siblings.Items[i].Status.Attempt > current {
+			return nil, 0, nil
+		}
+	}
+
+	initial := retry.InitialBackoffSeconds
+	if initial <= 0 {
+		initial = 60
+	}
+	maxBackoff := retry.MaxBackoffSeconds
+	if maxBackoff <= 0 {
+		maxBackoff = 1800
+	}
+
+	// Exponential backoff starting at initial, doubling each step,
+	// capped at maxBackoff. For the Nth retry (1-indexed), wait
+	// initial * 2^(N-1) seconds.
+	step := int32(1)
+	for i := int32(1); i < current; i++ {
+		step *= 2
+	}
+	backoffSeconds := initial * step
+	if backoffSeconds > maxBackoff {
+		backoffSeconds = maxBackoff
+	}
+
+	var base time.Time
+	if failed.Status.CompletionTime != nil {
+		base = failed.Status.CompletionTime.Time
+	} else {
+		base = time.Now()
+	}
+	when := base.Add(time.Duration(backoffSeconds) * time.Second)
+	now := time.Now()
+	if when.After(now) {
+		wait := when.Sub(now)
+		next := metav1.NewTime(when)
+		return &next, wait, nil
+	}
+
+	// Backoff elapsed — create the retry CR.
+	nextAttempt := current + 1
+	retryCR := &v1alpha1.MysqlBackup{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: fmt.Sprintf("%s-%s-r%d-", fg.Name, sched.ProfileName, nextAttempt),
+			Namespace:    fg.Namespace,
+			Labels: map[string]string{
+				labelFailoverGroup:  fg.Name,
+				labelBackupProfile:  sched.ProfileName,
+				labelBackupSchedule: sched.Name,
+				labelManagedBy:      managerName,
+			},
+		},
+		Spec: v1alpha1.MysqlBackupSpec{
+			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name},
+			ProfileName:      sched.ProfileName,
+			TriggeredBy:      fmt.Sprintf("retry/%s/attempt-%d", sched.Name, nextAttempt),
+		},
+	}
+	if err := r.Create(ctx, retryCR); err != nil {
+		return nil, 0, fmt.Errorf("create retry backup: %w", err)
+	}
+	// Best-effort status patch to record the attempt number. Missing
+	// this doesn't break anything — the reconciler will default
+	// Attempt=1 on the next pass — but it helps siblings loop detect
+	// the retry on the very next reconcile of the parent CR.
+	freshPatch := client.MergeFrom(retryCR.DeepCopy())
+	retryCR.Status.Attempt = nextAttempt
+	_ = r.Status().Patch(ctx, retryCR, freshPatch)
+
+	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "BackupRetryScheduled",
+		"scheduled retry #%d for failed backup %s (schedule=%s)",
+		nextAttempt, failed.Name, sched.Name)
+
+	return nil, 0, nil
 }
 
 // startAfter returns true if a was scheduled after b. Prefers the CR
@@ -413,9 +579,3 @@ func startAfter(a, b *v1alpha1.MysqlBackup) bool {
 }
 
 func boolPtr(v bool) *bool { return &v }
-
-// Tick reserved for future: if the reconciler wants to requeue schedule
-// rollup updates on a fixed cadence (not currently needed because the
-// Watches(MysqlBackup) wiring in SetupWithManager already re-triggers
-// reconciliation on every backup state change).
-var _ = time.Second

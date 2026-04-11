@@ -34,9 +34,11 @@ func ensureTrailingSlash(s string) string {
 }
 
 // isS3Location heuristically detects when a MysqlBackup.status.location
-// points at an S3 bucket. util.dumpInstance() stores S3 outputs as a
-// bare prefix (e.g. "lion/seed/") rather than an "s3://" URL, so we
-// have to infer from the absence of a local filesystem path.
+// points at an S3 bucket. Used as a fallback when the CR does not carry
+// the explicit StorageType field (old CRs). util.dumpInstance() stores
+// S3 outputs as a bare prefix (e.g. "lion/seed/") rather than an
+// "s3://" URL, so we have to infer from the absence of a local
+// filesystem path.
 func isS3Location(loc string) bool {
 	if loc == "" {
 		return false
@@ -65,6 +67,52 @@ func restoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 	return fg.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded
 }
 
+// restoreTargetSite chooses the site that will receive a bootstrap
+// restore load. Resolution order:
+//
+//  1. If status.ActiveSite is set AND that site is observed to be
+//     writable (or has no observed state / empty state yet), use it.
+//  2. If status.ActiveSite is set but that site is observed in any
+//     other state (read-only, unreachable, etc.), refuse — return "".
+//  3. Otherwise (fresh deploy) fall back to spec.sites[0].
+//
+// The caller fails fast with a clear error when this returns empty so
+// the operator can't accidentally overwrite a recovering replica with
+// a stale dump. This is a deliberate change from the prior behavior
+// of always targeting spec.sites[0].
+func restoreTargetSite(fg *v1alpha1.MysqlFailoverGroup) string {
+	if fg == nil || len(fg.Spec.Sites) == 0 {
+		return ""
+	}
+
+	active := fg.Status.ActiveSite
+	if active != "" {
+		for i := range fg.Status.Sites {
+			s := &fg.Status.Sites[i]
+			if s.Name != active {
+				continue
+			}
+			// Allow writable AND allow not-yet-observed (empty state)
+			// because during a fresh deploy the status may lag briefly
+			// behind the first Deployment becoming Ready.
+			if s.State == "" || s.State == "writable" {
+				return active
+			}
+			// Any other observed state (read-only, unreachable,
+			// unknown) means something else has already started up
+			// on that site — refuse to load into it.
+			return ""
+		}
+		// ActiveSite is set but the matching status entry is missing.
+		// Treat as "fresh" for compatibility.
+		return active
+	}
+
+	// Fresh deploy: no observed sites yet, no active site — target the
+	// first spec site.
+	return fg.Spec.Sites[0].Name
+}
+
 // reconcileRestoreJob creates and observes the one-shot restore Job when
 // spec.initFromBackup is set. The returned duration is non-zero when the
 // caller should requeue and NOT proceed to the pod-label sync / topology
@@ -86,10 +134,26 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 	if len(fg.Spec.Sites) == 0 {
 		return 0, fmt.Errorf("initFromBackup set but no sites configured")
 	}
-	targetSite := fg.Spec.Sites[0].Name
 
-	// Wait for the target site's Deployment to be Ready before creating
-	// the restore Job; mysqlsh util.loadDump() needs a live server.
+	targetSite := restoreTargetSite(fg)
+	if targetSite == "" {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreTargetUnavailable",
+			"refusing to run restore: active site %q is not writable / not ready",
+			fg.Status.ActiveSite)
+		r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
+			Phase:   v1alpha1.BackupPhasePending,
+			Message: fmt.Sprintf("waiting for a writable target site (activeSite=%q)", fg.Status.ActiveSite),
+		})
+		return 30 * time.Second, nil
+	}
+
+	// Wait for the target site's Deployment to be fully rolled out
+	// before creating the restore Job; mysqlsh util.loadDump() needs a
+	// live server. We accept Generation<=1 (fresh deploy where the
+	// ObservedGeneration may still lag), OR the standard rolled-out
+	// check (ObservedGeneration>=Generation && UpdatedReplicas>=1 &&
+	// ReadyReplicas>=1). This guards against firing a load against a
+	// Deployment in the middle of a rolling update.
 	deployName := resourceName(fg.Name, targetSite)
 	var deploy appsv1.Deployment
 	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: deployName}, &deploy); err != nil {
@@ -98,11 +162,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		}
 		return 0, fmt.Errorf("get target deployment: %w", err)
 	}
-	if deploy.Status.ReadyReplicas < 1 {
+	if !deploymentRolledOut(&deploy) {
 		r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
 			Phase:      v1alpha1.BackupPhasePending,
 			TargetSite: targetSite,
-			Message:    "waiting for primary MySQL to become ready",
+			Message:    "waiting for target MySQL Deployment to become ready",
 		})
 		return 10 * time.Second, nil
 	}
@@ -187,6 +251,26 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 	return 0, nil
 }
 
+// deploymentRolledOut returns true when a Deployment is fully rolled
+// out and has at least one ready replica. Generation<=1 is a fresh
+// deploy where ObservedGeneration may briefly lag; we accept as ready
+// if ReadyReplicas>=1 in that case.
+func deploymentRolledOut(deploy *appsv1.Deployment) bool {
+	if deploy.Status.ReadyReplicas < 1 {
+		return false
+	}
+	if deploy.Generation <= 1 {
+		return true
+	}
+	if deploy.Status.ObservedGeneration < deploy.Generation {
+		return false
+	}
+	if deploy.Status.UpdatedReplicas < 1 {
+		return false
+	}
+	return true
+}
+
 // setRestoreStatus patches fg.status.restore. IsNotFound is treated as
 // a no-op (the CR was deleted out from under us) and other errors are
 // logged but not propagated: this function is called from multiple
@@ -245,17 +329,20 @@ func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Cont
 }
 
 // buildRestoreJob resolves the initFromBackup source and constructs the
-// one-shot batchv1.Job. Returns an error when the source cannot be
-// resolved (e.g. referenced MysqlBackup has no status.location yet).
+// one-shot batchv1.Job. The Job shape mirrors BuildBackupJob: creds are
+// mounted as files rather than injected via envFrom, the container runs
+// with the hardened pod- and container-level security context defaults
+// from mergeSecurityContexts, and writable mysqlsh home + /tmp emptyDirs
+// are attached so ReadOnlyRootFilesystem=true is compatible with mysqlsh.
 func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, targetSite, credsName string) (*batchv1.Job, error) {
 	src := fg.Spec.InitFromBackup.Source
 
 	var (
-		inputURL     string
-		extraEnv     []corev1.EnvVar
-		envFromExtra []corev1.EnvFromSource
-		extraVolumes []corev1.Volume
-		extraMounts  []corev1.VolumeMount
+		inputURL       string
+		extraEnv       []corev1.EnvVar
+		extraVolumes   []corev1.Volume
+		extraMounts    []corev1.VolumeMount
+		awsCredsSecret string
 	)
 
 	switch {
@@ -269,15 +356,16 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		}
 		inputURL = ensureTrailingSlash(ref.Status.Location)
 
-		// If the referenced backup lived in S3, the restore Job needs
-		// the bucket + credentials for that bucket. We walk back to the
-		// profile on fg.spec.backup; if it was deleted, the raw
-		// location is an S3-relative prefix that mysqlsh cannot
-		// resolve without credentials, so fail fast with a clear
-		// error instead of letting the Job hit a confusing runtime
-		// failure.
+		// Prefer the structured StorageType set by the backup
+		// reconciler; fall back to the old heuristic for pre-upgrade
+		// CRs that don't carry it.
+		wantsS3 := ref.Status.StorageType == v1alpha1.BackupStorageS3
+		if ref.Status.StorageType == "" {
+			wantsS3 = isS3Location(ref.Status.Location)
+		}
+
 		profile := findProfile(fg, ref.Spec.ProfileName)
-		if isS3Location(ref.Status.Location) && (profile == nil || profile.Storage.Type != v1alpha1.BackupStorageS3 || profile.Storage.S3 == nil) {
+		if wantsS3 && (profile == nil || profile.Storage.Type != v1alpha1.BackupStorageS3 || profile.Storage.S3 == nil) {
 			return nil, fmt.Errorf(
 				"initFromBackup.source.mysqlBackupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles; "+
 					"either restore the profile or set initFromBackup.source.s3 explicitly",
@@ -295,16 +383,10 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 			if profile.Storage.S3.Region != "" {
 				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: profile.Storage.S3.Region})
 			}
-			envFromExtra = append(envFromExtra, corev1.EnvFromSource{
-				SecretRef: &corev1.SecretEnvSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: profile.Storage.S3.CredentialsSecret},
-				},
-			})
+			awsCredsSecret = profile.Storage.S3.CredentialsSecret
 		}
 
 	case src.S3 != nil:
-		// mysqlsh util.loadDump() expects a directory-style prefix with
-		// a trailing slash, matching what util.dumpInstance() writes.
 		inputURL = ensureTrailingSlash(src.S3.Prefix)
 		extraEnv = append(extraEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: src.S3.Bucket},
@@ -317,27 +399,19 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		if src.S3.Region != "" {
 			extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: src.S3.Region})
 		}
-		envFromExtra = append(envFromExtra, corev1.EnvFromSource{
-			SecretRef: &corev1.SecretEnvSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: src.S3.CredentialsSecret},
-			},
-		})
+		awsCredsSecret = src.S3.CredentialsSecret
 
 	case src.PVC != nil:
-		// The restore PVC must already exist and contain the dump;
-		// unlike spec.backup.profiles[].pvc the operator does not
-		// provision a restore source. Reject the empty case with a
-		// clear error so the misconfiguration is loud at reconcile
-		// time, not at Job runtime.
 		claim := src.PVC.ClaimName
 		if claim == "" {
 			return nil, fmt.Errorf(
 				"initFromBackup.source.pvc.claimName is required; the restore source PVC must be created out of band and populated with the dump")
 		}
 		mountPath := "/restore"
+		sub := strings.TrimLeft(src.PVC.SubPath, "/")
 		inputURL = mountPath
-		if src.PVC.SubPath != "" {
-			inputURL = mountPath + "/" + src.PVC.SubPath
+		if sub != "" {
+			inputURL = mountPath + "/" + sub
 		}
 		extraVolumes = append(extraVolumes, corev1.Volume{
 			Name: "restore-src",
@@ -374,19 +448,25 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		{Name: "BLOODRAVEN_MYSQL_HOST", Value: backupMySQLHost(fg, targetSite)},
 		{Name: "BLOODRAVEN_INPUT_URL", Value: inputURL},
 		{Name: "BLOODRAVEN_LOAD_OPTIONS", Value: loadOptsJSON},
+		{Name: "BLOODRAVEN_MYSQL_CREDS_DIR", Value: backupCredsMountPath},
+		{Name: "HOME", Value: mysqlshHomeMountPath},
 	}
 	if fg.Spec.TLS != nil {
 		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_TLS", Value: "1"})
 	}
 	env = append(env, extraEnv...)
 
-	envFrom := []corev1.EnvFromSource{
-		{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: credsName}}},
-	}
-	envFrom = append(envFrom, envFromExtra...)
-
-	// Shared scripts ConfigMap (same one created by reconcileBackupAssets).
-	volumes := append([]corev1.Volume{
+	// MySQL creds mounted as files (mode 0400).
+	volumes := []corev1.Volume{
+		{
+			Name: "mysql-creds",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  credsName,
+					DefaultMode: ptr32(0o400),
+				},
+			},
+		},
 		{
 			Name: "scripts",
 			VolumeSource: corev1.VolumeSource{
@@ -395,11 +475,40 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 				},
 			},
 		},
-	}, extraVolumes...)
-
-	mounts := append([]corev1.VolumeMount{
+		{
+			Name:         "mysqlsh-home",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+		{
+			Name:         "tmp",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "mysql-creds", MountPath: backupCredsMountPath, ReadOnly: true},
 		{Name: "scripts", MountPath: backupScriptsMountPath, ReadOnly: true},
-	}, extraMounts...)
+		{Name: "mysqlsh-home", MountPath: mysqlshHomeMountPath},
+		{Name: "tmp", MountPath: tmpMountPath},
+	}
+
+	if awsCredsSecret != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "aws-creds",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  awsCredsSecret,
+					DefaultMode: ptr32(0o400),
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{
+			Name: "aws-creds", MountPath: backupAWSCredsMountPath, ReadOnly: true,
+		})
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_AWS_CREDS_DIR", Value: backupAWSCredsMountPath})
+	}
+
+	volumes = append(volumes, extraVolumes...)
+	mounts = append(mounts, extraMounts...)
 
 	if fg.Spec.TLS != nil {
 		volumes = append(volumes, corev1.Volume{
@@ -417,16 +526,20 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 
 	activeDeadline := int64(7200)
 	backoff := int32(0)
+	var (
+		pullSecrets    []corev1.LocalObjectReference
+		podSCSrc       *corev1.PodSecurityContext
+		containerSCSrc *corev1.SecurityContext
+	)
 	if fg.Spec.Backup != nil {
 		if fg.Spec.Backup.ActiveDeadlineSeconds > 0 {
 			activeDeadline = fg.Spec.Backup.ActiveDeadlineSeconds
 		}
-	}
-
-	var pullSecrets []corev1.LocalObjectReference
-	if fg.Spec.Backup != nil {
 		pullSecrets = fg.Spec.Backup.ImagePullSecrets
+		podSCSrc = fg.Spec.Backup.PodSecurityContext
+		containerSCSrc = fg.Spec.Backup.ContainerSecurityContext
 	}
+	podSC, containerSC := mergeSecurityContexts(podSCSrc, containerSCSrc)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -442,14 +555,15 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,
+					SecurityContext:  podSC,
 					Containers: []corev1.Container{
 						{
-							Name:    backupJobContainerName,
-							Image:   image,
-							Command: []string{"mysqlsh", "--no-wizard", "--py", "-f", backupScriptsMountPath + "/restore.py"},
-							Env:     env,
-							EnvFrom: envFrom,
-							VolumeMounts: mounts,
+							Name:            backupJobContainerName,
+							Image:           image,
+							Command:         []string{"mysqlsh", "--no-wizard", "--py", "-f", backupScriptsMountPath + "/restore.py"},
+							Env:             env,
+							VolumeMounts:    mounts,
+							SecurityContext: containerSC,
 						},
 					},
 					Volumes: volumes,
@@ -459,4 +573,3 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 	}
 	return job, nil
 }
-

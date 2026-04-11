@@ -21,9 +21,21 @@ cross-site replication starts.
   operator.
 - **`MysqlBackup` CRD** &mdash; one CR per backup run. Created ad-hoc via
   `kubectl create` or by the schedule CronJob. Tracks phase, start /
-  completion times, dump location, and size.
+  completion times, dump location, size, GTID, and binlog coordinates.
 - **Restore** &mdash; `spec.initFromBackup` on the failover group. Gates
-  initial bootstrap on a one-shot `util.loadDump()` into the first site.
+  initial bootstrap on a one-shot `util.loadDump()` into a dynamically-
+  selected target site.
+
+## The backup image
+
+The default image is pinned to
+`container-registry.oracle.com/mysql/community-server:9.6`. This
+bundles the `mysqlsh` binary; the `community-shell` repository that
+appears in some docs **does not exist** in the Oracle registry — a
+common stumbling block. Production deployments should always pin this
+explicitly via `spec.backup.image` and avoid floating tags like `:9`
+or `:latest`, since `mysqlsh` dump/load compatibility across versions
+is not guaranteed.
 
 ## Backup source selection
 
@@ -32,6 +44,60 @@ primary is not loaded by long-running backups. It falls back to the
 primary when the replica is unreachable, not replicating, or lagging
 beyond `spec.backup.maxLagSecondsForSource` (default `300`). Override
 per-backup with `spec.sourceSiteOverride` on a `MysqlBackup` CR.
+
+When `ActiveSite` changes *while* a backup is in flight, the backup
+reconciler emits an `InFlightFailover` warning event on the CR. This
+is a soft signal: the artifact is still a valid point-in-time snapshot
+of the original source, but operators should know a failover happened
+mid-dump so they can correlate it with any replication-gap alerts.
+
+## Security context defaults
+
+Every backup, restore, and cleanup Job pod runs with a hardened pod-
+and container-level `SecurityContext` matching the Restricted Pod
+Security Standard:
+
+| Level      | Field                      | Default                    |
+| ---------- | -------------------------- | -------------------------- |
+| pod        | `runAsNonRoot`             | `true`                     |
+| pod        | `runAsUser` / `runAsGroup` | `27` (mysql)               |
+| pod        | `fsGroup`                  | `27`                       |
+| pod        | `seccompProfile.type`      | `RuntimeDefault`           |
+| container  | `allowPrivilegeEscalation` | `false`                    |
+| container  | `readOnlyRootFilesystem`   | `true`                     |
+| container  | `runAsNonRoot`             | `true`                     |
+| container  | `capabilities.drop`        | `[ALL]`                    |
+| container  | `seccompProfile.type`      | `RuntimeDefault`           |
+
+Because `readOnlyRootFilesystem=true`, the backup Job pod also mounts
+two ephemeral `emptyDir` volumes: `mysqlsh-home` at `/home/mysqlsh`
+(mysqlsh needs a writable home for `~/.mysqlsh`) and `tmp` at `/tmp`.
+`HOME` is set to `/home/mysqlsh` so mysqlsh discovers them cleanly.
+
+Users can override individual fields via `spec.backup.podSecurityContext`
+and `spec.backup.containerSecurityContext`. Overrides are merged on
+top of the defaults — any unset field stays at the default, and any
+set field wins. This lets you tighten further (e.g. set a specific
+`seLinuxOptions`) without reintroducing capabilities or root access.
+
+## Credential layout
+
+MySQL credentials are never injected into the backup pod via `envFrom`.
+Instead the reconciler derives a Secret per backup run (with
+`MYSQL_USER` / `MYSQL_PASSWORD` keys parsed from the failover group's
+DSN secret) and mounts it **as files** at
+`/run/bloodraven/mysql-creds/` with mode `0400`. The embedded Python
+dump script reads the files via the `BLOODRAVEN_MYSQL_CREDS_DIR` env
+var. This keeps plaintext passwords out of `/proc/$PID/environ` on
+the pod and makes accidental env-var leaks (e.g. in panic stack
+traces) much less dangerous.
+
+For S3 profiles the same pattern applies to AWS credentials: the
+profile's `credentialsSecret` is mounted at
+`/run/bloodraven/aws-creds/` (mode `0400`), pointed at by
+`BLOODRAVEN_AWS_CREDS_DIR`, and the dump script assembles a standard
+`~/.aws/credentials` file on the fly so the AWS SDK inside `mysqlsh`
+picks it up natively.
 
 ## S3 backup profile
 
@@ -46,11 +112,19 @@ spec:
   secretName: mysql-credentials
   # ... sites, dns, sidecar omitted ...
   backup:
-    image: container-registry.oracle.com/mysql/community-shell:8.0
+    image: container-registry.oracle.com/mysql/community-server:9.6
     maxLagSecondsForSource: 120
+    retry:
+      maxAttempts: 3
+      initialBackoffSeconds: 60
+      maxBackoffSeconds: 1800
     profiles:
       - name: nightly-s3
-        retention: 14
+        retentionPolicy:
+          count: 14
+          maxAgeDays: 30
+          minKeep: 1
+          maxFailedKeep: 10
         storage:
           type: S3
           s3:
@@ -67,14 +141,26 @@ spec:
       - name: nightly
         profileName: nightly-s3
         schedule: "0 2 * * *"
+        timeZone: "America/Los_Angeles"
 ```
 
 The referenced `s3-backup-creds` Secret must contain
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally
-`AWS_SESSION_TOKEN` / `AWS_REGION`. The keys are injected into the
-backup Job pod via `envFrom` so `mysqlsh` picks them up natively.
+`AWS_SESSION_TOKEN` / `AWS_REGION`. The keys are each mounted as a
+separate file under `/run/bloodraven/aws-creds/` and the dump script
+stitches them into a standard credentials file at startup.
 
-## MinIO or other S3-compatible stores
+### TimeZone
+
+`schedules[].timeZone` is an IANA zone name (default `Etc/UTC`) that
+is passed to the `CronJob` spec's `.timeZone` field. This matters
+because kube-controller-manager's local timezone is environment-
+dependent and unreliable — two clusters running the same manifest
+can fire the same cron at different wall-clock times. Pinning the
+TZ per-schedule makes backup scheduling reproducible no matter where
+the control plane runs.
+
+### MinIO or other S3-compatible stores
 
 Set `storage.s3.endpointURL` to the target endpoint (e.g.
 `https://minio.internal:9000`). The reconciler maps this onto
@@ -86,6 +172,7 @@ mysqlsh's `s3EndpointOverride` option.
 backup:
   profiles:
     - name: daily-local
+      retention: 7
       storage:
         type: PVC
         pvc:
@@ -97,7 +184,76 @@ backup:
 
 If `pvc.claimName` is empty the operator provisions a PVC named
 `mysql-<fg>-backup-<profile>`. Otherwise the user-managed claim is
-mounted read-write into the backup Job.
+mounted read-write into the backup Job at `/backups`.
+
+## Structured retention
+
+Each profile can use the structured `retentionPolicy` field instead
+of the shorthand `retention: N` int:
+
+| Field            | Meaning                                                              | Default |
+| ---------------- | -------------------------------------------------------------------- | ------- |
+| `count`          | Max successful CRs to keep. 0 disables count-based pruning.          | 0       |
+| `maxAgeDays`     | Max age of a successful CR before it's eligible for pruning.         | 0       |
+| `minKeep`        | Safety floor — this many newest successful CRs are always kept.      | 1       |
+| `maxFailedKeep`  | Max Failed CRs to keep per profile.                                  | 10      |
+
+A successful CR is kept if **any** of the enabled checks say "keep":
+inside the `count` window, inside the `maxAgeDays` window, or within
+the `minKeep` floor. `minKeep` is the critical safety knob: if every
+recent attempt after a long outage has failed, it prevents a retention
+sweep on the next successful run from wiping the last good backup.
+
+The legacy shorthand `retention: 7` is still supported and maps to
+`(count=7, minKeep=1, maxFailedKeep=10)`.
+
+## Artifact cleanup
+
+When a `MysqlBackup` CR is deleted (manually or by retention) the
+reconciler runs a short-lived cleanup `Job` via the
+`shipstream.io/mysqlbackup` finalizer. The cleanup Job uses the same
+`mysqlsh` image and credentials layout as the backup Job, but runs
+`cleanup.py` instead of `dump.py`. It dispatches on the
+`BLOODRAVEN_STORAGE_TYPE` env var:
+
+- **S3** &mdash; invokes `util.rmdump(prefix, {s3BucketName: ...})`
+  to recursively delete the dump prefix. "Not found" / "no such key"
+  responses are treated as success.
+- **PVC** &mdash; resolves the dump subdirectory under the mount and
+  `rmtree`s it. Refuses to delete anything outside the mount root.
+
+Events:
+
+- `ArtifactCleanupStarted` &mdash; cleanup Job created.
+- `ArtifactCleanupSucceeded` &mdash; artifact removed or already gone.
+- `ArtifactCleanupFailed` &mdash; cleanup Job failed. The finalizer
+  blocks the CR deletion until either the next attempt succeeds or
+  an operator force-deletes by removing the `shipstream.io/mysqlbackup`
+  finalizer by hand.
+- `ArtifactCleanupSkipped` &mdash; the referenced failover group or
+  profile is gone, so cleanup cannot run.
+
+## Retries for scheduled backups
+
+`spec.backup.retry` configures operator-level retries for scheduled
+CRs that land in `Failed`. This is independent of the Job-level
+`backoffLimit`: Job backoff retries the container inside a single CR,
+whereas this retries the whole CR and produces a fresh `MysqlBackup`
+object with its own Job and attempt counter.
+
+```yaml
+backup:
+  retry:
+    maxAttempts: 3         # total attempts including the original
+    initialBackoffSeconds: 60
+    maxBackoffSeconds: 1800
+```
+
+Backoff is exponential: the Nth retry waits
+`initialBackoffSeconds * 2^(N-1)` seconds from the failed CR's
+completion time, capped at `maxBackoffSeconds`. `spec.backup.retry`
+is ignored for ad-hoc CRs — those are operator-initiated and do not
+participate in automatic retries.
 
 ## One-off backups
 
@@ -115,8 +271,8 @@ spec:
 ```
 
 Inspect with `kubectl get mysqlbackups`. The `Phase`, `Location`, and
-`Size` columns reflect the current state. Failed runs leave a condition
-on `.status.conditions` explaining the reason.
+`Size` columns reflect the current state. Failed runs leave a
+condition on `.status.conditions` explaining the reason.
 
 ## Restore at bootstrap
 
@@ -149,15 +305,40 @@ spec:
         name: orders-preupgrade
 ```
 
-The operator creates the first site's Deployment, waits for its MySQL
-to be Ready, then spawns a `mysql-<fg>-<site>-restore` Job that runs
-`util.loadDump()`. Once the Job reaches `Succeeded`,
-`status.restore.phase = Succeeded` and the normal replication bootstrap
-path populates the second site from the restored primary.
+### Dynamic target-site resolution
 
-You can also point `initFromBackup.source` directly at an S3 URL or a
-read-only PVC, which is useful when the source backup CR has been
-garbage-collected:
+The restore reconciler does not hard-code `spec.sites[0]` as the
+restore target. Instead it resolves dynamically via
+`restoreTargetSite`:
+
+1. If `status.activeSite` is set and that site is observed writable
+   (or has no observed state yet on fresh deploys), use it.
+2. If `status.activeSite` is set but that site is observed in any
+   other state (read-only, unreachable), **refuse** — the reconciler
+   emits a `RestoreTargetUnavailable` warning event and parks the
+   restore in `Pending`. This prevents accidentally overwriting a
+   recovering standby with a stale dump.
+3. Otherwise (true fresh deploy) fall back to `spec.sites[0].Name`.
+
+### Rolled-out Deployment gate
+
+Before spawning the load Job, the reconciler waits until the target
+site's Deployment is fully rolled out:
+
+- `generation <= 1` → accept as long as `ReadyReplicas >= 1` (fresh
+  deploy; `ObservedGeneration` may briefly lag).
+- Otherwise, require `ObservedGeneration >= Generation`,
+  `UpdatedReplicas >= 1`, and `ReadyReplicas >= 1`.
+
+This guards against firing a load against a Deployment mid-rolling-
+update, which would race the ready MySQL container against the
+terminating one.
+
+### Direct S3 / PVC sources
+
+`initFromBackup.source` also accepts a direct S3 URL or a read-only
+PVC, which is useful when the source backup CR has been garbage-
+collected:
 
 ```yaml
 initFromBackup:
@@ -173,20 +354,6 @@ Job, and the reconciler will rebuild it on the next pass. Restoring
 into a non-empty data directory is not supported &mdash; `util.loadDump()`
 fails fast with a clear error.
 
-## Retention
-
-Each profile's `retention` field caps the number of `Succeeded`
-`MysqlBackup` CRs kept for that profile. Older successes are deleted
-on the next reconcile after a successful run. A hard-coded cap of 10
-`Failed` CRs per profile prevents unbounded growth from repeated
-failures.
-
-:::note
-Remote S3 artifacts are **not** automatically deleted when a
-`MysqlBackup` CR is pruned. Use an S3 lifecycle rule or a manual
-sweep until artifact cleanup lands in a future release.
-:::
-
 ## Required MySQL privileges
 
 Consistent dumps (`dump.consistent: true`, the default) need
@@ -201,9 +368,53 @@ GRANT RELOAD, LOCK TABLES, PROCESS, REPLICATION CLIENT,
 
 Without `BACKUP_ADMIN`, set `dump.consistent: false` on the profile.
 
+## Point-in-time recovery (PITR)
+
+`spec.backup.pitr` is reserved for a future release. When set to
+`true` the reconciler emits a `BackupPITRNotImplemented` warning
+event on every sync; no PITR logic is wired up today. The field is
+in place so the API shape is stable for when PITR lands.
+
+## Metrics
+
+The operator emits five Prometheus metrics for backups. All are
+labelled by `{group, profile}` unless noted.
+
+| Metric                                                   | Type      | Labels                         | What it measures                                                    |
+| -------------------------------------------------------- | --------- | ------------------------------ | ------------------------------------------------------------------- |
+| `bloodraven_backup_runs_total`                           | counter   | `group, profile, result`       | Terminal backups labelled `success` or `failure`.                   |
+| `bloodraven_backup_duration_seconds`                     | histogram | `group, profile`               | Wall-clock duration from Job StartTime to CompletionTime.           |
+| `bloodraven_backup_last_success_timestamp_seconds`       | gauge     | `group, profile`               | Unix timestamp of the most recent successful backup.                |
+| `bloodraven_backup_last_attempt_timestamp_seconds`       | gauge     | `group, profile`               | Unix timestamp of the most recent terminal attempt, any result.     |
+| `bloodraven_backup_last_size_bytes`                      | gauge     | `group, profile`               | Size in bytes of the last successful backup artifact.               |
+
+All five are emitted **exactly once** per terminal reconcile, via a
+semantic-equality check on the computed next status plus a stable
+completion timestamp derived from the Job's terminal condition. This
+means re-reconciling an already-terminal CR does not produce duplicate
+counter increments or churny gauge updates.
+
+Typical alerts:
+
+- **Stale backup**:
+  `time() - bloodraven_backup_last_success_timestamp_seconds > 86400`
+- **Repeated failures**:
+  `increase(bloodraven_backup_runs_total{result="failure"}[24h]) > 3`
+- **Runaway duration**:
+  `histogram_quantile(0.95, rate(bloodraven_backup_duration_seconds_bucket[1h])) > 3600`
+
 ## Monitoring
 
 - `kubectl get mysqlbackups -A` &mdash; phase, location, size.
 - `kubectl describe mysqlfailovergroup <name>` &mdash; rollup under
-  `status.backupSchedules[]` and `status.lastBackupTime`.
-- `kubectl logs job/mysqlbackup-<name>` &mdash; live dump progress.
+  `status.backupSchedules[]` (including `lastSuccessfulBackupName`,
+  `lastRetryAttempt`, `nextRetryTime`) and `status.lastBackupTime`.
+- `kubectl logs job/mysqlbackup-<name>` &mdash; live dump progress,
+  plus the final `BLOODRAVEN_DUMP_COMPLETE` sentinel line with the
+  structured `location`, `sizeBytes`, `gtidExecuted`, `binlogFile`,
+  `binlogPos` fields.
+- Prometheus metrics above.
+- Events on the `MysqlBackup` CR: `BackupStarted`, `BackupSucceeded`,
+  `BackupFailed`, `InFlightFailover`, `ArtifactCleanup*`.
+- Events on the `MysqlFailoverGroup` CR: `BackupRetryScheduled`,
+  `BackupPITRNotImplemented`, `RestoreTargetUnavailable`.

@@ -95,7 +95,8 @@ spec:
               triggeredBy:
                 description: |-
                   TriggeredBy is a free-form label recording what created this CR
-                  (e.g. "schedule/nightly", "manual"). Informational only.
+                  (e.g. "schedule/nightly", "manual", "retry/nightly/attempt-2").
+                  Informational only.
                 type: string
             required:
             - failoverGroupRef
@@ -104,6 +105,29 @@ spec:
           status:
             description: MysqlBackupStatus tracks the observed state of a MysqlBackup.
             properties:
+              activeSiteAtStart:
+                description: |-
+                  ActiveSiteAtStart records MysqlFailoverGroup.status.activeSite as
+                  observed when this backup's Job was created. The reconciler uses
+                  this to emit an InFlightFailover warning when the group's active
+                  site drifts while the backup is running.
+                type: string
+              attempt:
+                description: |-
+                  Attempt is the retry attempt number for scheduled CRs: 1 for the
+                  original attempt, 2 for the first retry, and so on. 0 is treated
+                  as 1 for older CRs.
+                format: int32
+                type: integer
+              binlogFile:
+                description: |-
+                  BinlogFile is the binary log file name at dump time. Populated
+                  alongside BinlogPos for pre-GTID point-in-time tooling.
+                type: string
+              binlogPos:
+                description: BinlogPos is the binary log position at dump time.
+                format: int64
+                type: integer
               completionTime:
                 description: CompletionTime is when the backup Job reached a terminal
                   state.
@@ -168,6 +192,11 @@ spec:
                   - type
                   type: object
                 type: array
+              gtidExecuted:
+                description: |-
+                  GtidExecuted is the value of @@global.gtid_executed captured at
+                  dump time. Empty on non-GTID instances.
+                type: string
               jobName:
                 description: JobName is the name of the batchv1.Job running the dump.
                 type: string
@@ -198,6 +227,13 @@ spec:
                   Size is the reported backup size as a human-readable string, best
                   effort. Empty when the Job log did not report a size.
                 type: string
+              sizeBytes:
+                description: |-
+                  SizeBytes is the structured backup size emitted by the dump
+                  sidecar. 0 when unknown (e.g. remote output where the dump
+                  utility did not return a total).
+                format: int64
+                type: integer
               sourceSite:
                 description: |-
                   SourceSite is the site name whose MySQL instance was used as the
@@ -206,6 +242,16 @@ spec:
               startTime:
                 description: StartTime is when the backup Job was created.
                 format: date-time
+                type: string
+              storageType:
+                description: |-
+                  StorageType is the storage backend kind (S3 or PVC) that was used
+                  for this backup. Populated at Job creation time so cleanup logic
+                  can dispatch on it without resorting to a brittle location
+                  heuristic after the referenced profile is gone.
+                enum:
+                - S3
+                - PVC
                 type: string
             type: object
         type: object
