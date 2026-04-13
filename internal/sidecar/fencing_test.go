@@ -48,7 +48,7 @@ func testLogger() *slog.Logger {
 
 // newTestFencingMonitor creates a FencingMonitor with a FakeClock for deterministic testing.
 func newTestFencingMonitor(f Fencer, clk *clock.FakeClock) *FencingMonitor {
-	return NewFencingMonitorWithClock(f, "bloodraven:8081", "peer:8080", 5*time.Second, 20*time.Second, testLogger(), clk)
+	return NewFencingMonitorWithClock(f, "127.0.0.1:8081", "127.0.0.1:8080", 5*time.Second, 20*time.Second, testLogger(), clk)
 }
 
 func TestEvaluateDoesNothingWhenBothReachable(t *testing.T) {

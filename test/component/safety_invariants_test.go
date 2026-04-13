@@ -76,7 +76,7 @@ func TestSafetyInvariant_NeverAutoUnfence(t *testing.T) {
 	clk := clock.NewFakeClock(start)
 
 	f := newMockSidecarMySQL(false) // primary (not read-only)
-	fm := sidecar.NewFencingMonitorWithClock(f, "bloodraven:8081", "peer:8080",
+	fm := sidecar.NewFencingMonitorWithClock(f, "127.0.0.1:8081", "127.0.0.1:8080",
 		5*time.Second, 20*time.Second, safetyTestLogger(), clk)
 
 	// Initialize last-seen times
@@ -152,7 +152,7 @@ func TestSafetyInvariant_NeverSelfFenceReplica(t *testing.T) {
 	clk := clock.NewFakeClock(start)
 
 	f := newMockSidecarMySQL(true) // replica (read-only)
-	fm := sidecar.NewFencingMonitorWithClock(f, "bloodraven:8081", "peer:8080",
+	fm := sidecar.NewFencingMonitorWithClock(f, "127.0.0.1:8081", "127.0.0.1:8080",
 		5*time.Second, 20*time.Second, safetyTestLogger(), clk)
 
 	// Advance way past timeout

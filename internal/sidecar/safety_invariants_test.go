@@ -39,7 +39,7 @@ func (okTransport) RoundTrip(_ *http.Request) (*http.Response, error) {
 // and clock for fully deterministic, socket-free testing.
 func newIsolatedFencingMonitor(f Fencer, clk *clock.FakeClock, transport http.RoundTripper) *FencingMonitor {
 	client := &http.Client{Transport: transport}
-	return NewFencingMonitorFull(f, "bloodraven:8081", "peer:8080", 5*time.Second, 20*time.Second, testLogger(), clk, client)
+	return NewFencingMonitorFull(f, "127.0.0.1:8081", "127.0.0.1:8080", 5*time.Second, 20*time.Second, testLogger(), clk, client)
 }
 
 // INVARIANT: Never self-fence a replica.
