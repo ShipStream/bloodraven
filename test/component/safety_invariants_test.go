@@ -20,7 +20,7 @@ import (
 type errTransport struct{}
 
 func (errTransport) RoundTrip(_ *http.Request) (*http.Response, error) {
-	return nil, context.DeadlineExceeded
+	return nil, errors.New("connection refused")
 }
 
 // ---------------------------------------------------------------------------
