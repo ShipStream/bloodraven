@@ -72,10 +72,18 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- with .Values.extraEnv }}
           env:
+            # Image and ServiceAccount used when the controller creates
+            # CronJobs for scheduled backups (spec.backup.schedules[]).
+            # Kept in sync with the operator's own Deployment so that
+            # trigger-backup pods run the same binary under the same SA.
+            - name: BLOODRAVEN_OPERATOR_IMAGE
+              value: {{ include "bloodraven.image" . | quote }}
+            - name: BLOODRAVEN_OPERATOR_SA
+              value: {{ include "bloodraven.serviceAccountName" . | quote }}
+            {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- end }}
           {{- with .Values.extraVolumeMounts }}
           volumeMounts:
             {{- toYaml . | nindent 12 }}

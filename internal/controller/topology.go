@@ -119,6 +119,12 @@ type TopologyManager struct {
 	bootstrapPhase BootstrapPhase
 	bootstrapErr   error
 
+	// autoBootstrapSuppressed is set by the runner while a one-shot
+	// initFromBackup restore is in flight. It prevents the fresh-deploy
+	// auto-clone path from racing the restore Job to populate the
+	// primary. Protected by mu. See runner.sync().
+	autoBootstrapSuppressed bool
+
 	// StatusCallback is invoked after each poll cycle that produces a state change.
 	// The runner sets this to push status updates to the CR.
 	StatusCallback func(TopologySnapshot)
@@ -570,8 +576,11 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	if action.SplitBrain && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
 		tm.mu.RLock()
 		phase := tm.bootstrapPhase
+		suppressed := tm.autoBootstrapSuppressed
 		tm.mu.RUnlock()
-		if phase == BootstrapPhaseNone || phase == BootstrapPhaseFailed {
+		if suppressed {
+			tm.logger.Info("auto-bootstrap suppressed (initFromBackup restore in flight)")
+		} else if phase == BootstrapPhaseNone || phase == BootstrapPhaseFailed {
 			if tm.isFreshDeploy(ctx) {
 				tm.startBootstrap(ctx)
 				return
@@ -650,6 +659,16 @@ func (tm *TopologyManager) BootstrapPhase() BootstrapPhase {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 	return tm.bootstrapPhase
+}
+
+// SetAutoBootstrapSuppressed toggles the gate that prevents the
+// fresh-deploy clone path from racing a one-shot initFromBackup
+// restore. The runner calls this on every sync based on the CR's
+// status.restore.phase.
+func (tm *TopologyManager) SetAutoBootstrapSuppressed(v bool) {
+	tm.mu.Lock()
+	tm.autoBootstrapSuppressed = v
+	tm.mu.Unlock()
 }
 
 // isBootstrapping reports whether an auto-bootstrap is currently running.

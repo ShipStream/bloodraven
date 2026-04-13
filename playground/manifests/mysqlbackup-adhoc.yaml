@@ -1,0 +1,21 @@
+# One-off backup triggered against the playground failover group.
+# Requires the backup profile "minio" to exist on spec.backup.profiles[].
+#
+# Apply with:
+#   kubectl apply -f playground/manifests/mysqlbackup-adhoc.yaml
+#
+# Watch progress with:
+#   kubectl get mysqlbackups -n bloodraven-playground -w
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlBackup
+metadata:
+  generateName: playground-adhoc-
+  namespace: bloodraven-playground
+  labels:
+    shipstream.io/failover-group: playground
+    shipstream.io/backup-profile: minio
+spec:
+  failoverGroupRef:
+    name: playground
+  profileName: minio
+  triggeredBy: manual

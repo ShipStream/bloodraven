@@ -27,6 +27,14 @@ import (
 )
 
 func main() {
+	// Subcommand dispatcher: when invoked by a scheduled CronJob pod as
+	// `bloodraven trigger-backup ...`, skip manager setup and just POST a
+	// MysqlBackup CR. See trigger.go.
+	if len(os.Args) > 1 && os.Args[1] == "trigger-backup" {
+		runTriggerBackup(os.Args[2:])
+		return
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 
@@ -80,6 +88,31 @@ func main() {
 		logger.Error("unable to create controller", "error", err)
 		os.Exit(1)
 	}
+
+	// Register the MysqlBackup reconciler alongside the failover-group
+	// reconciler. Both share the manager, so they share leader election.
+	backupReconciler := &controller.MysqlBackupReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("bloodraven-backup"),
+		Clientset: clientset,
+	}
+	if err := backupReconciler.SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create backup controller", "error", err)
+		os.Exit(1)
+	}
+
+	// Tell the schedule reconciler which operator image and ServiceAccount
+	// to embed into the CronJob pods it creates. These can be overridden
+	// via env vars to support kind/k3d playground runs where the operator
+	// image tag is something like "bloodraven:playground".
+	operatorImage := os.Getenv("BLOODRAVEN_OPERATOR_IMAGE")
+	if operatorImage == "" {
+		operatorImage = "bloodraven:latest"
+	}
+	operatorSA := os.Getenv("BLOODRAVEN_OPERATOR_SA")
+	controller.SetOperatorImageDefaults(operatorImage, operatorSA)
+
 	if err := mgr.Add(runner); err != nil {
 		logger.Error("unable to add topology manager runner", "error", err)
 		os.Exit(1)

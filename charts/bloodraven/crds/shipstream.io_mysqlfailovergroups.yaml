@@ -53,6 +53,874 @@ spec:
           spec:
             description: MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
             properties:
+              backup:
+                description: |-
+                  Backup configures scheduled and on-demand backups for this failover
+                  group. Omit the field to disable backups entirely.
+                properties:
+                  activeDeadlineSeconds:
+                    default: 7200
+                    description: |-
+                      ActiveDeadlineSeconds caps the wall-clock duration of a single
+                      backup Job. Default: 7200 (2h).
+                    format: int64
+                    minimum: 60
+                    type: integer
+                  backoffLimit:
+                    default: 2
+                    description: BackoffLimit is the Job backoffLimit applied to backup
+                      Jobs.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  containerSecurityContext:
+                    description: |-
+                      ContainerSecurityContext overrides the default container-level
+                      security context. Same merge semantics as PodSecurityContext:
+                      hardened defaults (ReadOnlyRootFilesystem, AllowPrivilegeEscalation
+                      false, capability drop ALL) are applied first and user fields take
+                      precedence.
+                    properties:
+                      allowPrivilegeEscalation:
+                        description: |-
+                          AllowPrivilegeEscalation controls whether a process can gain more
+                          privileges than its parent process. This bool directly controls if
+                          the no_new_privs flag will be set on the container process.
+                          AllowPrivilegeEscalation is true always when the container is:
+                          1) run as Privileged
+                          2) has CAP_SYS_ADMIN
+                          Note that this field cannot be set when spec.os.name is windows.
+                        type: boolean
+                      appArmorProfile:
+                        description: |-
+                          appArmorProfile is the AppArmor options to use by this container. If set, this profile
+                          overrides the pod's appArmorProfile.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          localhostProfile:
+                            description: |-
+                              localhostProfile indicates a profile loaded on the node that should be used.
+                              The profile must be preconfigured on the node to work.
+                              Must match the loaded name of the profile.
+                              Must be set if and only if type is "Localhost".
+                            type: string
+                          type:
+                            description: |-
+                              type indicates which kind of AppArmor profile will be applied.
+                              Valid options are:
+                                Localhost - a profile pre-loaded on the node.
+                                RuntimeDefault - the container runtime's default profile.
+                                Unconfined - no AppArmor enforcement.
+                            type: string
+                        required:
+                        - type
+                        type: object
+                      capabilities:
+                        description: |-
+                          The capabilities to add/drop when running containers.
+                          Defaults to the default set of capabilities granted by the container runtime.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          add:
+                            description: Added capabilities
+                            items:
+                              description: Capability represent POSIX capabilities
+                                type
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          drop:
+                            description: Removed capabilities
+                            items:
+                              description: Capability represent POSIX capabilities
+                                type
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
+                      privileged:
+                        description: |-
+                          Run container in privileged mode.
+                          Processes in privileged containers are essentially equivalent to root on the host.
+                          Defaults to false.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        type: boolean
+                      procMount:
+                        description: |-
+                          procMount denotes the type of proc mount to use for the containers.
+                          The default value is Default which uses the container runtime defaults for
+                          readonly paths and masked paths.
+                          This requires the ProcMountType feature flag to be enabled.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        type: string
+                      readOnlyRootFilesystem:
+                        description: |-
+                          Whether this container has a read-only root filesystem.
+                          Default is false.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        type: boolean
+                      runAsGroup:
+                        description: |-
+                          The GID to run the entrypoint of the container process.
+                          Uses runtime default if unset.
+                          May also be set in PodSecurityContext.  If set in both SecurityContext and
+                          PodSecurityContext, the value specified in SecurityContext takes precedence.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        format: int64
+                        type: integer
+                      runAsNonRoot:
+                        description: |-
+                          Indicates that the container must run as a non-root user.
+                          If true, the Kubelet will validate the image at runtime to ensure that it
+                          does not run as UID 0 (root) and fail to start the container if it does.
+                          If unset or false, no such validation will be performed.
+                          May also be set in PodSecurityContext.  If set in both SecurityContext and
+                          PodSecurityContext, the value specified in SecurityContext takes precedence.
+                        type: boolean
+                      runAsUser:
+                        description: |-
+                          The UID to run the entrypoint of the container process.
+                          Defaults to user specified in image metadata if unspecified.
+                          May also be set in PodSecurityContext.  If set in both SecurityContext and
+                          PodSecurityContext, the value specified in SecurityContext takes precedence.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        format: int64
+                        type: integer
+                      seLinuxOptions:
+                        description: |-
+                          The SELinux context to be applied to the container.
+                          If unspecified, the container runtime will allocate a random SELinux context for each
+                          container.  May also be set in PodSecurityContext.  If set in both SecurityContext and
+                          PodSecurityContext, the value specified in SecurityContext takes precedence.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          level:
+                            description: Level is SELinux level label that applies
+                              to the container.
+                            type: string
+                          role:
+                            description: Role is a SELinux role label that applies
+                              to the container.
+                            type: string
+                          type:
+                            description: Type is a SELinux type label that applies
+                              to the container.
+                            type: string
+                          user:
+                            description: User is a SELinux user label that applies
+                              to the container.
+                            type: string
+                        type: object
+                      seccompProfile:
+                        description: |-
+                          The seccomp options to use by this container. If seccomp options are
+                          provided at both the pod & container level, the container options
+                          override the pod options.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          localhostProfile:
+                            description: |-
+                              localhostProfile indicates a profile defined in a file on the node should be used.
+                              The profile must be preconfigured on the node to work.
+                              Must be a descending path, relative to the kubelet's configured seccomp profile location.
+                              Must be set if type is "Localhost". Must NOT be set for any other type.
+                            type: string
+                          type:
+                            description: |-
+                              type indicates which kind of seccomp profile will be applied.
+                              Valid options are:
+
+                              Localhost - a profile defined in a file on the node should be used.
+                              RuntimeDefault - the container runtime default profile should be used.
+                              Unconfined - no profile should be applied.
+                            type: string
+                        required:
+                        - type
+                        type: object
+                      windowsOptions:
+                        description: |-
+                          The Windows specific settings applied to all containers.
+                          If unspecified, the options from the PodSecurityContext will be used.
+                          If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.
+                          Note that this field cannot be set when spec.os.name is linux.
+                        properties:
+                          gmsaCredentialSpec:
+                            description: |-
+                              GMSACredentialSpec is where the GMSA admission webhook
+                              (https://github.com/kubernetes-sigs/windows-gmsa) inlines the contents of the
+                              GMSA credential spec named by the GMSACredentialSpecName field.
+                            type: string
+                          gmsaCredentialSpecName:
+                            description: GMSACredentialSpecName is the name of the
+                              GMSA credential spec to use.
+                            type: string
+                          hostProcess:
+                            description: |-
+                              HostProcess determines if a container should be run as a 'Host Process' container.
+                              All of a Pod's containers must have the same effective HostProcess value
+                              (it is not allowed to have a mix of HostProcess containers and non-HostProcess containers).
+                              In addition, if HostProcess is true then HostNetwork must also be set to true.
+                            type: boolean
+                          runAsUserName:
+                            description: |-
+                              The UserName in Windows to run the entrypoint of the container process.
+                              Defaults to the user specified in image metadata if unspecified.
+                              May also be set in PodSecurityContext. If set in both SecurityContext and
+                              PodSecurityContext, the value specified in SecurityContext takes precedence.
+                            type: string
+                        type: object
+                    type: object
+                  image:
+                    default: container-registry.oracle.com/mysql/community-server:9.6
+                    description: |-
+                      Image is the container image containing mysqlsh. It must include
+                      util.dumpInstance() and util.loadDump() with native S3 support
+                      (mysqlsh 8.0.32+). Defaults to DefaultBackupImage; production
+                      deployments should always pin a full major.minor tag here and
+                      avoid floating tags.
+                    type: string
+                  imagePullSecrets:
+                    description: ImagePullSecrets for the backup image.
+                    items:
+                      description: |-
+                        LocalObjectReference contains enough information to let you locate the
+                        referenced object inside the same namespace.
+                      properties:
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    type: array
+                  maxLagSecondsForSource:
+                    default: 300
+                    description: |-
+                      MaxLagSecondsForSource is the threshold for replica-first source
+                      selection. The backup reconciler prefers the replica site as the
+                      dump source, but only if secondsBehindSource is at or below this
+                      value. Above it, the reconciler falls back to the primary.
+                    format: int64
+                    minimum: 0
+                    type: integer
+                  pitr:
+                    description: |-
+                      PITR, when true, is a reserved-not-implemented marker. The
+                      reconciler emits a warning event on every sync when this is
+                      enabled; no PITR logic is wired up today. Left here so the API
+                      shape is stable for a future point-in-time recovery feature.
+                    type: boolean
+                  podSecurityContext:
+                    description: |-
+                      PodSecurityContext overrides the default pod-level security context
+                      used for backup, restore, and cleanup Jobs. User fields are merged
+                      on top of the hardened defaults (RunAsNonRoot, RuntimeDefault
+                      seccomp, etc.) — leave fields unset to keep the default.
+                    properties:
+                      appArmorProfile:
+                        description: |-
+                          appArmorProfile is the AppArmor options to use by the containers in this pod.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          localhostProfile:
+                            description: |-
+                              localhostProfile indicates a profile loaded on the node that should be used.
+                              The profile must be preconfigured on the node to work.
+                              Must match the loaded name of the profile.
+                              Must be set if and only if type is "Localhost".
+                            type: string
+                          type:
+                            description: |-
+                              type indicates which kind of AppArmor profile will be applied.
+                              Valid options are:
+                                Localhost - a profile pre-loaded on the node.
+                                RuntimeDefault - the container runtime's default profile.
+                                Unconfined - no AppArmor enforcement.
+                            type: string
+                        required:
+                        - type
+                        type: object
+                      fsGroup:
+                        description: |-
+                          A special supplemental group that applies to all containers in a pod.
+                          Some volume types allow the Kubelet to change the ownership of that volume
+                          to be owned by the pod:
+
+                          1. The owning GID will be the FSGroup
+                          2. The setgid bit is set (new files created in the volume will be owned by FSGroup)
+                          3. The permission bits are OR'd with rw-rw----
+
+                          If unset, the Kubelet will not modify the ownership and permissions of any volume.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        format: int64
+                        type: integer
+                      fsGroupChangePolicy:
+                        description: |-
+                          fsGroupChangePolicy defines behavior of changing ownership and permission of the volume
+                          before being exposed inside Pod. This field will only apply to
+                          volume types which support fsGroup based ownership(and permissions).
+                          It will have no effect on ephemeral volume types such as: secret, configmaps
+                          and emptydir.
+                          Valid values are "OnRootMismatch" and "Always". If not specified, "Always" is used.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        type: string
+                      runAsGroup:
+                        description: |-
+                          The GID to run the entrypoint of the container process.
+                          Uses runtime default if unset.
+                          May also be set in SecurityContext.  If set in both SecurityContext and
+                          PodSecurityContext, the value specified in SecurityContext takes precedence
+                          for that container.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        format: int64
+                        type: integer
+                      runAsNonRoot:
+                        description: |-
+                          Indicates that the container must run as a non-root user.
+                          If true, the Kubelet will validate the image at runtime to ensure that it
+                          does not run as UID 0 (root) and fail to start the container if it does.
+                          If unset or false, no such validation will be performed.
+                          May also be set in SecurityContext.  If set in both SecurityContext and
+                          PodSecurityContext, the value specified in SecurityContext takes precedence.
+                        type: boolean
+                      runAsUser:
+                        description: |-
+                          The UID to run the entrypoint of the container process.
+                          Defaults to user specified in image metadata if unspecified.
+                          May also be set in SecurityContext.  If set in both SecurityContext and
+                          PodSecurityContext, the value specified in SecurityContext takes precedence
+                          for that container.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        format: int64
+                        type: integer
+                      seLinuxChangePolicy:
+                        description: |-
+                          seLinuxChangePolicy defines how the container's SELinux label is applied to all volumes used by the Pod.
+                          It has no effect on nodes that do not support SELinux or to volumes does not support SELinux.
+                          Valid values are "MountOption" and "Recursive".
+
+                          "Recursive" means relabeling of all files on all Pod volumes by the container runtime.
+                          This may be slow for large volumes, but allows mixing privileged and unprivileged Pods sharing the same volume on the same node.
+
+                          "MountOption" mounts all eligible Pod volumes with `-o context` mount option.
+                          This requires all Pods that share the same volume to use the same SELinux label.
+                          It is not possible to share the same volume among privileged and unprivileged Pods.
+                          Eligible volumes are in-tree FibreChannel and iSCSI volumes, and all CSI volumes
+                          whose CSI driver announces SELinux support by setting spec.seLinuxMount: true in their
+                          CSIDriver instance. Other volumes are always re-labelled recursively.
+                          "MountOption" value is allowed only when SELinuxMount feature gate is enabled.
+
+                          If not specified and SELinuxMount feature gate is enabled, "MountOption" is used.
+                          If not specified and SELinuxMount feature gate is disabled, "MountOption" is used for ReadWriteOncePod volumes
+                          and "Recursive" for all other volumes.
+
+                          This field affects only Pods that have SELinux label set, either in PodSecurityContext or in SecurityContext of all containers.
+
+                          All Pods that use the same volume should use the same seLinuxChangePolicy, otherwise some pods can get stuck in ContainerCreating state.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        type: string
+                      seLinuxOptions:
+                        description: |-
+                          The SELinux context to be applied to all containers.
+                          If unspecified, the container runtime will allocate a random SELinux context for each
+                          container.  May also be set in SecurityContext.  If set in
+                          both SecurityContext and PodSecurityContext, the value specified in SecurityContext
+                          takes precedence for that container.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          level:
+                            description: Level is SELinux level label that applies
+                              to the container.
+                            type: string
+                          role:
+                            description: Role is a SELinux role label that applies
+                              to the container.
+                            type: string
+                          type:
+                            description: Type is a SELinux type label that applies
+                              to the container.
+                            type: string
+                          user:
+                            description: User is a SELinux user label that applies
+                              to the container.
+                            type: string
+                        type: object
+                      seccompProfile:
+                        description: |-
+                          The seccomp options to use by the containers in this pod.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        properties:
+                          localhostProfile:
+                            description: |-
+                              localhostProfile indicates a profile defined in a file on the node should be used.
+                              The profile must be preconfigured on the node to work.
+                              Must be a descending path, relative to the kubelet's configured seccomp profile location.
+                              Must be set if type is "Localhost". Must NOT be set for any other type.
+                            type: string
+                          type:
+                            description: |-
+                              type indicates which kind of seccomp profile will be applied.
+                              Valid options are:
+
+                              Localhost - a profile defined in a file on the node should be used.
+                              RuntimeDefault - the container runtime default profile should be used.
+                              Unconfined - no profile should be applied.
+                            type: string
+                        required:
+                        - type
+                        type: object
+                      supplementalGroups:
+                        description: |-
+                          A list of groups applied to the first process run in each container, in
+                          addition to the container's primary GID and fsGroup (if specified).  If
+                          the SupplementalGroupsPolicy feature is enabled, the
+                          supplementalGroupsPolicy field determines whether these are in addition
+                          to or instead of any group memberships defined in the container image.
+                          If unspecified, no additional groups are added, though group memberships
+                          defined in the container image may still be used, depending on the
+                          supplementalGroupsPolicy field.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        items:
+                          format: int64
+                          type: integer
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      supplementalGroupsPolicy:
+                        description: |-
+                          Defines how supplemental groups of the first container processes are calculated.
+                          Valid values are "Merge" and "Strict". If not specified, "Merge" is used.
+                          (Alpha) Using the field requires the SupplementalGroupsPolicy feature gate to be enabled
+                          and the container runtime must implement support for this feature.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        type: string
+                      sysctls:
+                        description: |-
+                          Sysctls hold a list of namespaced sysctls used for the pod. Pods with unsupported
+                          sysctls (by the container runtime) might fail to launch.
+                          Note that this field cannot be set when spec.os.name is windows.
+                        items:
+                          description: Sysctl defines a kernel parameter to be set
+                          properties:
+                            name:
+                              description: Name of a property to set
+                              type: string
+                            value:
+                              description: Value of a property to set
+                              type: string
+                          required:
+                          - name
+                          - value
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      windowsOptions:
+                        description: |-
+                          The Windows specific settings applied to all containers.
+                          If unspecified, the options within a container's SecurityContext will be used.
+                          If set in both SecurityContext and PodSecurityContext, the value specified in SecurityContext takes precedence.
+                          Note that this field cannot be set when spec.os.name is linux.
+                        properties:
+                          gmsaCredentialSpec:
+                            description: |-
+                              GMSACredentialSpec is where the GMSA admission webhook
+                              (https://github.com/kubernetes-sigs/windows-gmsa) inlines the contents of the
+                              GMSA credential spec named by the GMSACredentialSpecName field.
+                            type: string
+                          gmsaCredentialSpecName:
+                            description: GMSACredentialSpecName is the name of the
+                              GMSA credential spec to use.
+                            type: string
+                          hostProcess:
+                            description: |-
+                              HostProcess determines if a container should be run as a 'Host Process' container.
+                              All of a Pod's containers must have the same effective HostProcess value
+                              (it is not allowed to have a mix of HostProcess containers and non-HostProcess containers).
+                              In addition, if HostProcess is true then HostNetwork must also be set to true.
+                            type: boolean
+                          runAsUserName:
+                            description: |-
+                              The UserName in Windows to run the entrypoint of the container process.
+                              Defaults to the user specified in image metadata if unspecified.
+                              May also be set in PodSecurityContext. If set in both SecurityContext and
+                              PodSecurityContext, the value specified in SecurityContext takes precedence.
+                            type: string
+                        type: object
+                    type: object
+                  profiles:
+                    description: |-
+                      Profiles are reusable, named backup configurations. Schedules and
+                      ad-hoc MysqlBackup CRs reference profiles by name.
+                    items:
+                      description: BackupProfile is a named, reusable backup configuration.
+                      properties:
+                        dump:
+                          description: Dump customizes util.dumpInstance() options.
+                          properties:
+                            bytesPerChunk:
+                              default: 64M
+                              description: BytesPerChunk is the approximate chunk
+                                size (e.g. "64M").
+                              type: string
+                            compression:
+                              default: zstd
+                              description: Compression algorithm used by the dump
+                                utility.
+                              enum:
+                              - none
+                              - gzip
+                              - zstd
+                              type: string
+                            consistent:
+                              default: true
+                              description: |-
+                                Consistent toggles consistent (locking) dumps. Requires BACKUP_ADMIN
+                                on the MySQL user.
+                              type: boolean
+                            excludeSchemas:
+                              description: ExcludeSchemas skipped by the dump.
+                              items:
+                                type: string
+                              type: array
+                            includeSchemas:
+                              description: IncludeSchemas, if non-empty, restricts
+                                the dump to these schemas.
+                              items:
+                                type: string
+                              type: array
+                            ocimds:
+                              default: false
+                              description: Ocimds enables MySQL HeatWave Service compatibility
+                                checks.
+                              type: boolean
+                            threads:
+                              default: 4
+                              description: Threads is the number of parallel dump
+                                threads.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                          type: object
+                        name:
+                          description: Name is the unique profile identifier within
+                            this failover group.
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        retention:
+                          default: 7
+                          description: |-
+                            Retention is the legacy shorthand for count-based retention: the
+                            maximum number of successful MysqlBackup CRs to keep for this
+                            profile. 0 disables count-based pruning. If RetentionPolicy is
+                            set it fully overrides this field.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        retentionPolicy:
+                          description: |-
+                            RetentionPolicy is the structured retention configuration. When
+                            set it replaces the shorthand Retention field and enables
+                            age-based pruning plus a min-keep safety floor.
+                          properties:
+                            count:
+                              description: |-
+                                Count is the max number of successful CRs to keep. 0 disables
+                                count-based pruning.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            maxAgeDays:
+                              description: |-
+                                MaxAgeDays is the maximum age (in days) of a successful CR before
+                                it becomes eligible for pruning. 0 disables age-based pruning.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            maxFailedKeep:
+                              default: 10
+                              description: |-
+                                MaxFailedKeep caps the Failed bucket independently of the success
+                                retention policy. Default: 10.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            minKeep:
+                              default: 1
+                              description: |-
+                                MinKeep is a safety floor: this many newest successful CRs are
+                                always kept, regardless of Count / MaxAgeDays. Default: 1.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                          type: object
+                        storage:
+                          description: Storage selects and configures the backup destination.
+                          properties:
+                            pvc:
+                              description: PVC configures a local PVC destination.
+                              properties:
+                                claimName:
+                                  description: |-
+                                    ClaimName is the name of a pre-existing PVC to use. If empty the
+                                    operator provisions a PVC per profile.
+                                  type: string
+                                size:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: Size is used when the operator provisions
+                                    the PVC.
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                storageClassName:
+                                  description: StorageClassName is used when the operator
+                                    provisions the PVC.
+                                  type: string
+                                subPath:
+                                  description: |-
+                                    SubPath inside the PVC to use. Each backup lands under
+                                    "<subPath>/<mysqlbackup-name>/".
+                                  type: string
+                              type: object
+                            s3:
+                              description: S3 configures an S3-compatible object store
+                                destination.
+                              properties:
+                                bucket:
+                                  description: Bucket is the S3 bucket name.
+                                  minLength: 1
+                                  type: string
+                                credentialsSecret:
+                                  description: |-
+                                    CredentialsSecret references a Secret whose keys provide AWS
+                                    credentials to backup and restore Jobs. Expected keys:
+                                      AWS_ACCESS_KEY_ID (required)
+                                      AWS_SECRET_ACCESS_KEY (required)
+                                      AWS_SESSION_TOKEN (optional)
+                                      AWS_REGION (optional, overrides .region)
+                                  minLength: 1
+                                  type: string
+                                endpointURL:
+                                  description: |-
+                                    EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
+                                    Passed to mysqlsh as s3EndpointOverride.
+                                  type: string
+                                prefix:
+                                  description: |-
+                                    Prefix is the object-name prefix inside the bucket. Each backup
+                                    lands under "<prefix>/<mysqlbackup-name>/".
+                                  type: string
+                                region:
+                                  description: Region is the AWS region. Optional
+                                    for non-AWS S3 stores.
+                                  type: string
+                                storageClass:
+                                  description: |-
+                                    StorageClass is the S3 storage class (e.g. STANDARD_IA,
+                                    DEEP_ARCHIVE). Informational; not enforced by the operator.
+                                  type: string
+                              required:
+                              - bucket
+                              - credentialsSecret
+                              type: object
+                            type:
+                              description: Type is the storage backend discriminator.
+                              enum:
+                              - S3
+                              - PVC
+                              type: string
+                          required:
+                          - type
+                          type: object
+                          x-kubernetes-validations:
+                          - message: exactly one of s3 or pvc must be set and must
+                              match type
+                            rule: (self.type == 'S3' && has(self.s3) && !has(self.pvc))
+                              || (self.type == 'PVC' && has(self.pvc) && !has(self.s3))
+                      required:
+                      - name
+                      - storage
+                      type: object
+                    type: array
+                  resources:
+                    description: Resources for the backup Job's mysqlsh container.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  retry:
+                    description: |-
+                      Retry configures operator-level retries for scheduled MysqlBackup
+                      CRs that land in Failed. This is independent of Job-level
+                      backoffLimit: Job backoff retries the container, whereas this
+                      retries the whole CR, producing a new MysqlBackup with its own
+                      Job and attempt counter. Omit to disable.
+                    properties:
+                      initialBackoffSeconds:
+                        default: 60
+                        description: |-
+                          InitialBackoffSeconds is the delay between the first failure and
+                          the first retry. Subsequent retries double the backoff until
+                          MaxBackoffSeconds.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      maxAttempts:
+                        default: 1
+                        description: |-
+                          MaxAttempts is the total number of attempts (including the
+                          original). 1 disables retries. Values are clamped to [1, 10].
+                        format: int32
+                        maximum: 10
+                        minimum: 1
+                        type: integer
+                      maxBackoffSeconds:
+                        default: 1800
+                        description: 'MaxBackoffSeconds caps the exponential backoff.
+                          Default: 1800 (30m).'
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                  schedules:
+                    description: |-
+                      Schedules describe cron-driven recurring backups, each referencing
+                      a profile by name. Each schedule becomes a Kubernetes CronJob owned
+                      by this failover group.
+                    items:
+                      description: |-
+                        BackupSchedule drives recurring backups via a Kubernetes CronJob owned
+                        by the operator. Each schedule references a named profile. The CronJob's
+                        pod creates a MysqlBackup CR via the "bloodraven trigger-backup"
+                        subcommand; the MysqlBackupReconciler then materializes the backup Job.
+                      properties:
+                        concurrencyPolicy:
+                          default: Forbid
+                          description: ConcurrencyPolicy is forwarded to the CronJob
+                            spec.
+                          enum:
+                          - Allow
+                          - Forbid
+                          - Replace
+                          type: string
+                        failedJobsHistoryLimit:
+                          default: 3
+                          description: FailedJobsHistoryLimit is forwarded to the
+                            CronJob spec.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        name:
+                          description: Name uniquely identifies this schedule within
+                            the failover group.
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        profileName:
+                          description: ProfileName references a BackupProfile by name.
+                          minLength: 1
+                          type: string
+                        schedule:
+                          description: |-
+                            Schedule is a standard cron expression (5 fields). Evaluation uses
+                            TimeZone below, not kube-controller-manager's local clock.
+                          minLength: 1
+                          type: string
+                        startingDeadlineSeconds:
+                          description: StartingDeadlineSeconds is forwarded to the
+                            CronJob spec.
+                          format: int64
+                          type: integer
+                        successfulJobsHistoryLimit:
+                          default: 3
+                          description: SuccessfulJobsHistoryLimit is forwarded to
+                            the CronJob spec.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        suspend:
+                          default: false
+                          description: Suspend pauses this schedule without deleting
+                            the CronJob.
+                          type: boolean
+                        timeZone:
+                          default: Etc/UTC
+                          description: |-
+                            TimeZone is an IANA timezone name ("America/Los_Angeles",
+                            "Europe/Berlin", ...) used when interpreting the Schedule cron
+                            expression. Defaults to "Etc/UTC".
+
+                            We set this explicitly because the kube-controller-manager local
+                            timezone is environment-dependent and unreliable for backups: two
+                            clusters running the same manifest can end up firing the same
+                            cron at different wall-clock times. Per-schedule TimeZone makes
+                            backups reproducible regardless of where the control plane runs.
+                          type: string
+                      required:
+                      - name
+                      - profileName
+                      - schedule
+                      type: object
+                    type: array
+                type: object
               cloneTimeout:
                 default: 3600
                 description: |-
@@ -3148,6 +4016,125 @@ spec:
                 default: mysql:9.6
                 description: 'Image is the MySQL container image. Default: mysql:9.6'
                 type: string
+              initFromBackup:
+                description: |-
+                  InitFromBackup, when set, gates normal bootstrap on a one-shot
+                  restore of the given backup into the initial primary site. The
+                  restore runs once; after success it is skipped on subsequent
+                  reconciles even if this field is still populated.
+                properties:
+                  loadOptions:
+                    description: LoadOptions are forwarded to util.loadDump(). Omit
+                      for sane defaults.
+                    properties:
+                      loadIndexes:
+                        default: true
+                        description: LoadIndexes controls whether indexes are rebuilt
+                          during load.
+                        type: boolean
+                      resetProgress:
+                        default: true
+                        description: ResetProgress clears previous loadDump progress
+                          tracking.
+                        type: boolean
+                      skipBinlog:
+                        default: true
+                        description: SkipBinlog disables binary logging during the
+                          load to speed it up.
+                        type: boolean
+                      threads:
+                        default: 4
+                        description: Threads is the number of parallel load threads.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                  source:
+                    description: Source is a tagged reference to the artifact to restore.
+                    properties:
+                      mysqlBackupRef:
+                        description: |-
+                          MysqlBackupRef restores from a previously-completed MysqlBackup in
+                          the same namespace. Its status.location is resolved automatically.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      pvc:
+                        description: |-
+                          PVC restores from an existing PVC. Restore only supports referencing
+                          a pre-created claim by name; provisioning fields are not supported here.
+                        properties:
+                          claimName:
+                            description: |-
+                              ClaimName is the name of an existing PersistentVolumeClaim in the same
+                              namespace to use as the restore source.
+                            minLength: 1
+                            type: string
+                          subPath:
+                            description: SubPath inside the PVC where the dump is
+                              located. Optional.
+                            type: string
+                        required:
+                        - claimName
+                        type: object
+                      s3:
+                        description: S3 restores directly from an S3 URL. Requires
+                          credentialsSecret.
+                        properties:
+                          bucket:
+                            description: Bucket is the S3 bucket name.
+                            minLength: 1
+                            type: string
+                          credentialsSecret:
+                            description: |-
+                              CredentialsSecret references a Secret whose keys provide AWS
+                              credentials to backup and restore Jobs. Expected keys:
+                                AWS_ACCESS_KEY_ID (required)
+                                AWS_SECRET_ACCESS_KEY (required)
+                                AWS_SESSION_TOKEN (optional)
+                                AWS_REGION (optional, overrides .region)
+                            minLength: 1
+                            type: string
+                          endpointURL:
+                            description: |-
+                              EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
+                              Passed to mysqlsh as s3EndpointOverride.
+                            type: string
+                          prefix:
+                            description: |-
+                              Prefix is the object-name prefix inside the bucket. Each backup
+                              lands under "<prefix>/<mysqlbackup-name>/".
+                            type: string
+                          region:
+                            description: Region is the AWS region. Optional for non-AWS
+                              S3 stores.
+                            type: string
+                          storageClass:
+                            description: |-
+                              StorageClass is the S3 storage class (e.g. STANDARD_IA,
+                              DEEP_ARCHIVE). Informational; not enforced by the operator.
+                            type: string
+                        required:
+                        - bucket
+                        - credentialsSecret
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of mysqlBackupRef, s3, or pvc must be set
+                      rule: '(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ?
+                        1 : 0) + (has(self.pvc) ? 1 : 0) == 1'
+                required:
+                - source
+                type: object
               mysqlConf:
                 additionalProperties:
                   type: string
@@ -3461,6 +4448,67 @@ spec:
                 description: ActiveSite is the name of the site currently acting as
                   primary (writable).
                 type: string
+              backupSchedules:
+                description: |-
+                  BackupSchedules is a per-schedule rollup of the most recent backup
+                  activity for each entry in spec.backup.schedules.
+                items:
+                  description: |-
+                    BackupScheduleStatus is the per-schedule rollup exposed on
+                    MysqlFailoverGroupStatus.
+                  properties:
+                    cronJobName:
+                      description: |-
+                        CronJobName is the name of the Kubernetes CronJob that materializes
+                        this schedule.
+                      type: string
+                    lastBackupName:
+                      description: |-
+                        LastBackupName is the name of the most recent MysqlBackup created
+                        by this schedule.
+                      type: string
+                    lastBackupPhase:
+                      description: LastBackupPhase is the phase of that most-recent
+                        MysqlBackup.
+                      type: string
+                    lastRetryAttempt:
+                      description: |-
+                        LastRetryAttempt is the attempt counter of the latest CR (or the
+                        latest retry created off it). 0 or 1 for the original attempt.
+                      format: int32
+                      type: integer
+                    lastScheduleTime:
+                      description: |-
+                        LastScheduleTime is the most recent time this schedule created a
+                        MysqlBackup CR.
+                      format: date-time
+                      type: string
+                    lastSuccessfulBackupName:
+                      description: |-
+                        LastSuccessfulBackupName is the name of the most recent Succeeded
+                        MysqlBackup created by this schedule. Lets dashboards link to the
+                        last known-good CR even after a subsequent failure.
+                      type: string
+                    lastSuccessfulTime:
+                      description: |-
+                        LastSuccessfulTime is the most recent time a MysqlBackup created by
+                        this schedule reached the Succeeded phase.
+                      format: date-time
+                      type: string
+                    name:
+                      description: Name of the schedule this entry describes.
+                      type: string
+                    nextRetryTime:
+                      description: |-
+                        NextRetryTime, when set, is the earliest time the operator will
+                        create a retry CR for a Failed latest attempt. Used by the
+                        scheduler loop to wake up at exactly the right moment.
+                      format: date-time
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
               conditions:
                 description: Conditions represent the latest available observations.
                 items:
@@ -3518,6 +4566,13 @@ spec:
                   - type
                   type: object
                 type: array
+              lastBackupTime:
+                description: |-
+                  LastBackupTime is the completion time of the most recent successful
+                  MysqlBackup across all profiles, regardless of whether it was
+                  scheduled or on-demand.
+                format: date-time
+                type: string
               lastFailover:
                 description: LastFailover is the timestamp of the last failover event.
                 format: date-time
@@ -3526,6 +4581,39 @@ spec:
                 description: LastFailoverTarget is the site that was last promoted
                   during failover.
                 type: string
+              restore:
+                description: Restore tracks an in-flight or completed initFromBackup
+                  operation.
+                properties:
+                  completionTime:
+                    description: CompletionTime is when the restore Job reached a
+                      terminal state.
+                    format: date-time
+                    type: string
+                  jobName:
+                    description: JobName is the name of the batchv1.Job performing
+                      the restore.
+                    type: string
+                  message:
+                    description: Message is a human-readable status message.
+                    type: string
+                  phase:
+                    description: Phase of the restore Job.
+                    enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Failed
+                    type: string
+                  startTime:
+                    description: StartTime is when the restore Job was created.
+                    format: date-time
+                    type: string
+                  targetSite:
+                    description: TargetSite is the site name whose MySQL instance
+                      is being populated.
+                    type: string
+                type: object
               sites:
                 description: Sites is the observed state of each site, parallel to
                   spec.sites.

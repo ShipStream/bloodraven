@@ -8,7 +8,7 @@ Tracking implementation progress for items in [bloodraven-wishlist.md](bloodrave
 - [x] 2. MySQL configuration management — already implemented as `spec.mysqlConf`, docs added
 - [x] 3. Container resource requests and limits — `spec.sites[].resources` existed, added `spec.sidecarResources`
 - [ ] 4. Multiple MySQL credentials (`spec.credentials`)
-- [ ] 5. Backup and restore (`spec.backup`)
+- [x] 5. Backup and restore (`spec.backup`) — mysqlsh-based, S3 + PVC targets, bootstrap restore via `spec.initFromBackup`, new `MysqlBackup` CRD
 - [x] 6. Reduce default failover cooldown (60m → 5m) — `8cdcf46`, `3594235`
 - [ ] 7. Data loss detection and reporting on emergency failover
 - [ ] 8. Old primary recovery procedure
