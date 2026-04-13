@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -46,9 +47,11 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// newTestFencingMonitor creates a FencingMonitor with a FakeClock for deterministic testing.
+// newTestFencingMonitor creates a FencingMonitor with a FakeClock and a stub
+// transport for deterministic, socket-free testing.
 func newTestFencingMonitor(f Fencer, clk *clock.FakeClock) *FencingMonitor {
-	return NewFencingMonitorWithClock(f, "bloodraven:8081", "peer:8080", 5*time.Second, 20*time.Second, testLogger(), clk)
+	client := &http.Client{Transport: noopTransport{}}
+	return NewFencingMonitorFull(f, "127.0.0.1:8081", "127.0.0.1:8080", 5*time.Second, 20*time.Second, testLogger(), clk, client)
 }
 
 func TestEvaluateDoesNothingWhenBothReachable(t *testing.T) {
