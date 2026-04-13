@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -13,6 +14,14 @@ import (
 	"github.com/shipstream/bloodraven/internal/sidecar"
 	"github.com/shipstream/bloodraven/internal/state"
 )
+
+// errTransport always returns an error, simulating unreachable endpoints
+// without opening any network connections or performing DNS lookups.
+type errTransport struct{}
+
+func (errTransport) RoundTrip(_ *http.Request) (*http.Response, error) {
+	return nil, context.DeadlineExceeded
+}
 
 // ---------------------------------------------------------------------------
 // Safety Invariant: Never expose two primaries through the primary service
@@ -76,8 +85,8 @@ func TestSafetyInvariant_NeverAutoUnfence(t *testing.T) {
 	clk := clock.NewFakeClock(start)
 
 	f := newMockSidecarMySQL(false) // primary (not read-only)
-	fm := sidecar.NewFencingMonitorWithClock(f, "127.0.0.1:8081", "127.0.0.1:8080",
-		5*time.Second, 20*time.Second, safetyTestLogger(), clk)
+	fm := sidecar.NewFencingMonitorFull(f, "127.0.0.1:8081", "127.0.0.1:8080",
+		5*time.Second, 20*time.Second, safetyTestLogger(), clk, &http.Client{Transport: errTransport{}})
 
 	// Initialize last-seen times
 	fm.Check(context.Background()) // sets lastBloodravenOK/lastPeerOK via checkBloodraven/checkPeer (which fail since no server)
@@ -152,8 +161,8 @@ func TestSafetyInvariant_NeverSelfFenceReplica(t *testing.T) {
 	clk := clock.NewFakeClock(start)
 
 	f := newMockSidecarMySQL(true) // replica (read-only)
-	fm := sidecar.NewFencingMonitorWithClock(f, "127.0.0.1:8081", "127.0.0.1:8080",
-		5*time.Second, 20*time.Second, safetyTestLogger(), clk)
+	fm := sidecar.NewFencingMonitorFull(f, "127.0.0.1:8081", "127.0.0.1:8080",
+		5*time.Second, 20*time.Second, safetyTestLogger(), clk, &http.Client{Transport: errTransport{}})
 
 	// Advance way past timeout
 	clk.Advance(60 * time.Second)
