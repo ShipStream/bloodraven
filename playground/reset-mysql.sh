@@ -83,11 +83,19 @@ ok "Taints cleared"
 info "Reapplying mysql-secret..."
 kubectl apply -f "$SCRIPT_DIR/manifests/mysql-secret.yaml"
 
-# ── 6. Scale back up ─────────────────────────────────────────────────────
-# Remove taints before scale-up (operator is still at zero, so they won't reappear)
+# ── 6. Scale operator back up FIRST so it can create PVCs ────────────────
 for node in $(kubectl get nodes -o name); do
   kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
 done
+info "Scaling operator back up (must reconcile PVCs before MySQL starts)..."
+kubectl -n "$NAMESPACE" scale deployment bloodraven --replicas=1
+kubectl -n "$NAMESPACE" rollout status deployment/bloodraven --timeout=60s 2>/dev/null || true
+ok "Operator running"
+
+# Give reconciler time to create PVCs
+sleep 5
+
+# ── 7. Scale MySQL back up ───────────────────────────────────────────────
 info "Scaling MySQL deployments back up..."
 kubectl -n "$NAMESPACE" scale deployment mysql-playground-iad mysql-playground-pdx --replicas=1
 
@@ -140,12 +148,6 @@ if [[ -n "$REPL_USER" && -n "$ROOT_PASS" ]]; then
        FLUSH PRIVILEGES;" 2>/dev/null && ok "Replication user created on $site" || warn "Failed to create replication user on $site"
   done
 fi
-
-# ── 10. Scale operator back up ────────────────────────────────────────────
-info "Scaling operator back up..."
-kubectl -n "$NAMESPACE" scale deployment bloodraven --replicas=1
-kubectl -n "$NAMESPACE" rollout status deployment/bloodraven --timeout=60s 2>/dev/null || true
-ok "Operator running"
 
 echo ""
 kubectl -n "$NAMESPACE" get pods -o wide -l app.kubernetes.io/name=mysql

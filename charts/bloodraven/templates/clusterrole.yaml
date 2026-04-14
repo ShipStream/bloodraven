@@ -57,6 +57,14 @@ rules:
   - apiGroups: [shipstream.io]
     resources: [mysqlbackups/status]
     verbs: [get, patch, update]
+  # External DNS (DNSEndpoint updates for DNS failover)
+  - apiGroups: [externaldns.k8s.io]
+    resources: [dnsendpoints]
+    verbs: [create, delete, get, list, patch, update, watch]
+  # PodDisruptionBudgets
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [create, delete, get, list, patch, update, watch]
   # Leader election
   - apiGroups: [coordination.k8s.io]
     resources: [leases]

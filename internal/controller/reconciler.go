@@ -132,11 +132,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile configmap: %w", err)
 	}
 
-	// Reconcile init-users ConfigMap (credentials mode only).
-	if fg.Spec.UsesCredentials() {
-		if err := r.reconcileInitUsersConfigMap(ctx, &fg); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcile init-users configmap: %w", err)
-		}
+	// Reconcile init-users ConfigMap for MySQL user creation on first boot.
+	if err := r.reconcileInitUsersConfigMap(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile init-users configmap: %w", err)
 	}
 
 	// Reconcile backup assets (shared scripts ConfigMap + owned PVCs for
@@ -592,6 +590,19 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		for k, v := range labels {
 			podLabels[k] = v
 		}
+		// Set role/healthy labels so Services have endpoints from pod creation.
+		// syncPodLabels refines these once topology polling confirms state.
+		if fg.Status.ActiveSite == site.Name {
+			podLabels[labelRole] = "primary"
+			podLabels[labelHealthy] = "yes"
+		} else {
+			podLabels[labelRole] = "replica"
+			if fg.Status.ActiveSite != "" {
+				podLabels[labelHealthy] = "yes"
+			} else {
+				podLabels[labelHealthy] = "no"
+			}
+		}
 
 		sidecarImage := fg.Spec.SidecarImage
 
@@ -750,6 +761,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 						},
 					},
 				}
+				mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+					corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
+				)
 				mysqlContainer.Lifecycle = &corev1.Lifecycle{
 					PreStop: &corev1.LifecycleHandler{
 						Exec: &corev1.ExecAction{
@@ -833,6 +847,17 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					},
 				},
 			},
+			{
+				Name: "init-users",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: fmt.Sprintf("mysql-%s-init-users", fg.Name),
+						},
+						DefaultMode: int32Ptr(0555),
+					},
+				},
+			},
 		}
 
 		if fg.Spec.TLS != nil {
@@ -863,17 +888,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			}
 			volumes = append(volumes,
 				credSecretVolume("creds-operator", fg.Spec.Credentials.OperatorSecret),
-				corev1.Volume{
-					Name: "init-users",
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: fmt.Sprintf("mysql-%s-init-users", fg.Name),
-							},
-							DefaultMode: int32Ptr(0555),
-						},
-					},
-				},
 			)
 			if s := fg.Spec.Credentials.AppSecret; s != "" {
 				volumes = append(volumes, credSecretVolume("creds-app", s))

@@ -158,9 +158,9 @@ func TestBootstrapReplica_HappyPath(t *testing.T) {
 		t.Errorf("primary calls: got %v, want [CheckReadOnly]", pCalls)
 	}
 
-	// Replica should have SetCloneDonorList and CloneInstance called
+	// Replica should have SetCloneDonorList, KillAppConnections, and CloneInstance called
 	rCalls := replica.getCalls()
-	expected := []string{"SetCloneDonorList", "CloneInstance"}
+	expected := []string{"SetCloneDonorList", "KillAppConnections", "CloneInstance"}
 	if len(rCalls) != len(expected) {
 		t.Fatalf("replica calls: got %v, want %v", rCalls, expected)
 	}

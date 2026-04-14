@@ -262,6 +262,14 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	tm := NewTopologyManager(cfg, siteMySQL[0], siteMySQL[1], failoverCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
 		r.logger.With("fg", nn.String()))
 
+	// Restore failover history from CR status so recovery logic works across
+	// operator restarts — without this, checkRecovery() returns early because
+	// lastFailoverTarget is empty after a fresh TopologyManager.
+	if fg.Status.LastFailoverTarget != "" {
+		tm.SetLastFailoverTarget(fg.Status.LastFailoverTarget)
+		r.logger.Info("restored lastFailoverTarget from CR status", "fg", nn, "target", fg.Status.LastFailoverTarget)
+	}
+
 	// Set the status callback to update the CR status subresource on state changes.
 	tm.StatusCallback = func(snap TopologySnapshot) {
 		r.updateCRStatus(ctx, nn, snap)

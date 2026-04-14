@@ -215,6 +215,12 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysq
 	}
 }
 
+// SetLastFailoverTarget restores the failover target from persisted CR status.
+// Called once at startup so recovery logic works across operator restarts.
+func (tm *TopologyManager) SetLastFailoverTarget(target string) {
+	tm.lastFailoverTarget = target
+}
+
 // activeSiteLocked returns the name of the single writable site, or "" if zero
 // or more than one site is writable. Must be called with tm.mu held.
 func (tm *TopologyManager) activeSiteLocked() string {

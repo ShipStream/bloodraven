@@ -52,5 +52,28 @@ kubectl -n bloodraven-playground port-forward svc/counter-app 8090:8090
 
 Full documentation: `docs/docs/playground.mdx`.
 
+## Chaos & Integration Testing in the Playground
+
+Lessons from running chaos scenarios against a live k3d cluster:
+
+### Environment setup
+- k3d cluster needs `--k3s-arg '--tls-san=<hostname>@server:0'` if you want remote kubectl access (e.g. over Tailscale).
+- Podman + k3d: images get a `localhost/` prefix after import. `setup.sh` handles this automatically via `IMG_PREFIX`, but if you apply manifests manually, use `localhost/bloodraven:playground` etc.
+- After any MySQL data wipe (`reset-mysql.sh` or PVC deletion), the `replicator` user must be recreated — it's not part of the Docker entrypoint. The reset and setup scripts do this automatically, but manual resets require `CREATE USER IF NOT EXISTS 'replicator'@'%' ...` with REPLICATION SLAVE, BACKUP_ADMIN, CLONE_ADMIN grants.
+
+### Running chaos scenarios
+- **`kill-site` vs `scale --replicas=0`**: `chaos.sh kill-site` deletes the pod, but the Deployment controller recreates it in <5s. To truly hold a site down (e.g. for self-fencing or anti-flap tests), use `kubectl scale deployment --replicas=0`. The pod kill simulates a crash; the scale-down simulates a sustained outage.
+- **Network partition doesn't work via iptables on host netns**: `chaos.sh network-partition` blocks port 3306 on the k3d node's host network, but kube-proxy DNAT operates in different iptables chains. The operator still reaches MySQL via ClusterIP. True partition testing needs pod-level network manipulation or NetworkPolicy.
+- **Relay log drain takes 30s on dead primary**: Failover won't complete until the 30s relay log drain timeout expires when the old primary is unreachable. Plan for ~37s total failover time in tests, not ~6s.
+- **Sandbox blocks kubectl**: If running inside a sandboxed environment (e.g. Claude Code), kubectl needs network access to the k3d API server port. Use `dangerouslyDisableSandbox` or whitelist the port.
+
+### Known operator behaviors during testing
+- After operator restart, `lastFailoverTarget` is lost (volatile). Old primary recovery won't trigger until the next failover within the new operator lifecycle. This is a known gap (see `playground/chaos-results.md`).
+- Fresh-deploy bootstrap (`isFreshDeploy`) checks `SHOW REPLICA STATUS` — if a previous failed clone left replication metadata, bootstrap won't trigger. Fix: `STOP REPLICA; RESET REPLICA ALL;` on the stuck site, then restart operator.
+- CLONE INSTANCE in Docker returns Error 3707 ("Restart server failed") because there's no mysqld supervisor. This is handled as an expected connection drop — Kubernetes restarts the container.
+
+### Rebuilding after code changes
+`./playground/rebuild.sh operator` builds, imports to k3d, and restarts the operator deployment. For sidecar changes, use `./playground/rebuild.sh sidecar` (restarts MySQL pods). Both can be combined: `./playground/rebuild.sh operator sidecar`.
+
 ## Architecture & Configuration Notes
-This project is a Go 1.25 Kubernetes operator built around a single custom resource and two binaries. When making material changes to reconciliation, failover, CRD types, sidecar behavior, or deployment model, update the relevant documentation in `docs/` to keep code and docs aligned.
+This project is a Go 1.26 Kubernetes operator built around a single custom resource and two binaries. When making material changes to reconciliation, failover, CRD types, sidecar behavior, or deployment model, update the relevant documentation in `docs/` to keep code and docs aligned.
