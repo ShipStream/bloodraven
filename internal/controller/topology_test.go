@@ -41,7 +41,8 @@ func (m *mockMySQL) Promote(_ context.Context) error {
 
 func (m *mockMySQL) Close() error { return nil }
 
-func (m *mockMySQL) SetSuperReadOnly(_ context.Context, _ bool) error { return nil }
+func (m *mockMySQL) SetSuperReadOnly(_ context.Context, _ bool) error  { return nil }
+func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) { return 0, nil }
 func (m *mockMySQL) StopReplica(_ context.Context) error              { return nil }
 func (m *mockMySQL) ResetReplicaAll(_ context.Context) error          { return nil }
 func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
@@ -240,17 +241,19 @@ func TestFailoverSite0Down(t *testing.T) {
 		t.Error("site1 should have been promoted (readOnly should be false)")
 	}
 
-	// DNS flip is deferred until promotion is confirmed.
-	// SetReadOnly(false) sets readOnly=false, but we need RecoveryThreshold polls to confirm.
-	if dns.getLastIP() != "" {
-		t.Error("DNS should not flip before promotion confirmation")
+	// DNS should have flipped immediately at failover trigger (before promotion).
+	if dns.getLastIP() != "2.2.2.2" {
+		t.Errorf("DNS should flip at failover trigger, got %s", dns.getLastIP())
 	}
 
-	// Poll to confirm promotion (recovery threshold = 2 polls of read_only=0)
+	// DNS should flip exactly once even after additional polls.
 	pollN(tm, 2)
 
-	if dns.getLastIP() != "2.2.2.2" {
-		t.Errorf("DNS should point to site1 after confirmation, got %s", dns.getLastIP())
+	dns.mu.Lock()
+	calls := dns.calls
+	dns.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("DNS should flip exactly once, got %d calls", calls)
 	}
 }
 
@@ -273,10 +276,15 @@ func TestPromotionNotRepeated(t *testing.T) {
 		t.Fatal("site1 should have been promoted (readOnly should be false)")
 	}
 
+	// DNS should have flipped at trigger time
+	if dns.getLastIP() != "2.2.2.2" {
+		t.Errorf("DNS should flip at failover trigger, got %s", dns.getLastIP())
+	}
+
 	// Poll again while site0 still down, site1 recovering
 	pollN(tm, 5)
 
-	// DNS should only flip once (after confirmation)
+	// DNS should only flip once (at trigger time)
 	dns.mu.Lock()
 	calls := dns.calls
 	dns.mu.Unlock()
@@ -285,7 +293,7 @@ func TestPromotionNotRepeated(t *testing.T) {
 	}
 }
 
-func TestPromotionFailureSkipsDNS(t *testing.T) {
+func TestPromotionFailure_DNSStillFlips(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{readOnly: true}
 	tm, _, dns := newTestTopologyManager(site0, site1)
@@ -299,10 +307,14 @@ func TestPromotionFailureSkipsDNS(t *testing.T) {
 	site0.setError(errors.New("connection refused"))
 	pollN(tm, 3) // trigger failover attempt
 
-	// Promotion failed, so no DNS flip should happen
-	pollN(tm, 5)
-	if dns.getLastIP() != "" {
-		t.Error("DNS should not flip when promotion fails")
+	// DNS flips before promotion — even if promotion fails, DNS was already updated.
+	if dns.getLastIP() != "2.2.2.2" {
+		t.Errorf("DNS should flip at trigger time even when promotion fails, got %q", dns.getLastIP())
+	}
+
+	// promotedSite should NOT be set since Execute returned an error.
+	if tm.promotedSite != "" {
+		t.Errorf("promotedSite should be empty after failed promotion, got %q", tm.promotedSite)
 	}
 }
 

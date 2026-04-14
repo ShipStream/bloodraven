@@ -18,6 +18,7 @@ type Checker interface {
 
 	// Failover hardening methods:
 	SetSuperReadOnly(ctx context.Context, on bool) error
+	KillAppConnections(ctx context.Context) (killed int, err error)
 	StopReplica(ctx context.Context) error
 	ResetReplicaAll(ctx context.Context) error
 	SetReadOnly(ctx context.Context, on bool) error

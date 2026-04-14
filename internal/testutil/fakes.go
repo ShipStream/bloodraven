@@ -201,6 +201,13 @@ func (m *FakeMySQL) GetGtidExecuted(_ context.Context) (string, error) {
 	return "", nil
 }
 
+func (m *FakeMySQL) KillAppConnections(_ context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("KillAppConnections")
+	return 0, nil
+}
+
 func (m *FakeMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -331,6 +338,10 @@ func (m *FakeFencer) SetSuperReadOnly(_ context.Context) error {
 	default:
 	}
 	return nil
+}
+
+func (m *FakeFencer) KillConnections(_ context.Context) (int, error) {
+	return 0, nil
 }
 
 func (m *FakeFencer) IsSuperReadOnly() bool {

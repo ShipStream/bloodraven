@@ -57,11 +57,11 @@ func TestInvariant_NeverExposeTwoPrimaries(t *testing.T) {
 	}
 }
 
-// INVARIANT 2: Never flip DNS before promoted MySQL is confirmed writable.
+// INVARIANT 2: DNS flips at the time of failover trigger (before promotion).
 //
-// After failover, the DNS flip must be deferred until the promoted site's
-// read_only=0 is confirmed through the recovery threshold.
-func TestInvariant_NeverFlipDNSBeforeConfirmation(t *testing.T) {
+// DNS is flipped immediately when failover is triggered so that DNS
+// propagation overlaps with the relay-log drain and MySQL promotion.
+func TestInvariant_DNSFlipsAtFailoverTrigger(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{readOnly: true}
 	tm, _, dns, _ := newSafetyTestTM(site0, site1)
@@ -72,22 +72,20 @@ func TestInvariant_NeverFlipDNSBeforeConfirmation(t *testing.T) {
 	// site0 goes down
 	site0.setError(errors.New("connection refused"))
 
-	// Hit failure threshold — triggers failover
+	// Hit failure threshold — triggers failover + immediate DNS flip
 	pollN(tm, 3)
 
-	// At this point, FailoverController.Execute has set site1's readOnly=false,
-	// but the topology manager has NOT yet confirmed it through polls.
-	// DNS must not have flipped yet.
-	if dns.getLastIP() != "" {
-		t.Error("SAFETY VIOLATION: DNS flipped before promotion was confirmed via polling")
+	// DNS should have flipped immediately at failover trigger
+	if dns.getLastIP() != "2.2.2.2" {
+		t.Errorf("SAFETY VIOLATION: DNS should flip at failover trigger, got %q", dns.getLastIP())
 	}
 
-	// Now poll to confirm (recovery threshold = 2)
-	pollN(tm, 2)
-
-	// NOW DNS should have flipped
-	if dns.getLastIP() != "2.2.2.2" {
-		t.Errorf("DNS should point to site1 after confirmation, got %q", dns.getLastIP())
+	// DNS should flip exactly once
+	dns.mu.Lock()
+	calls := dns.calls
+	dns.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("SAFETY VIOLATION: DNS should flip exactly once, got %d", calls)
 	}
 }
 
@@ -365,7 +363,7 @@ func TestInvariant_DNSFlipsOnlyOnce(t *testing.T) {
 }
 
 // INVARIANT: Failover uses correct step sequence.
-// Fence -> Drain -> Stop -> Reset -> GetGtid -> Clear super_read_only -> Set read_only=0
+// Fence -> Kill connections -> Drain -> Stop -> Reset -> GetGtid -> Clear super_read_only -> Set read_only=0
 func TestInvariant_FailoverSequence(t *testing.T) {
 	candidate := &trackingMock{readOnly: true}
 	oldPrimary := &trackingMock{}
@@ -376,10 +374,16 @@ func TestInvariant_FailoverSequence(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Old primary must be fenced first
+	// Old primary must be fenced and have connections killed
 	opCalls := oldPrimary.getCalls()
-	if len(opCalls) != 1 || opCalls[0] != "SetSuperReadOnly(ON)" {
-		t.Errorf("SAFETY VIOLATION: old primary not fenced first, calls: %v", opCalls)
+	opExpected := []string{"SetSuperReadOnly(ON)", "KillAppConnections"}
+	if len(opCalls) != len(opExpected) {
+		t.Fatalf("SAFETY VIOLATION: old primary calls: %v, want %v", opCalls, opExpected)
+	}
+	for i, want := range opExpected {
+		if opCalls[i] != want {
+			t.Errorf("SAFETY VIOLATION: old primary call[%d]: got %q, want %q", i, opCalls[i], want)
+		}
 	}
 
 	// Candidate must follow exact sequence

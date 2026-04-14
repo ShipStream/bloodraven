@@ -28,37 +28,44 @@ func (f *FailoverController) Execute(ctx context.Context, candidate mysql.Checke
 		} else {
 			f.logger.Info("fenced old primary with super_read_only=ON")
 		}
+
+		// 2. Kill app connections on old primary to force reconnection via DNS.
+		if killed, err := oldPrimary.KillAppConnections(ctx); err != nil {
+			f.logger.Warn("failed to kill app connections on old primary", "error", err)
+		} else {
+			f.logger.Info("killed app connections on old primary", "count", killed)
+		}
 	}
 
-	// 2. On candidate: WaitForRelayLogDrain (30s timeout).
+	// 3. On candidate: WaitForRelayLogDrain (30s timeout).
 	if err := candidate.WaitForRelayLogDrain(ctx, 30*time.Second); err != nil {
 		f.logger.Warn("relay log drain did not complete cleanly, proceeding with promotion", "error", err)
 	} else {
 		f.logger.Info("relay log drain complete")
 	}
 
-	// 3. STOP REPLICA.
+	// 4. STOP REPLICA.
 	if err := candidate.StopReplica(ctx); err != nil {
 		return "", err
 	}
 
-	// 4. RESET REPLICA ALL.
+	// 5. RESET REPLICA ALL.
 	if err := candidate.ResetReplicaAll(ctx); err != nil {
 		return "", err
 	}
 
-	// 5. Record GTID before promotion (high-water mark of replicated data).
+	// 6. Record GTID before promotion (high-water mark of replicated data).
 	promotionGtid, err := candidate.GetGtidExecuted(ctx)
 	if err != nil {
 		f.logger.Warn("failed to record promotion GTID", "error", err)
 	}
 
-	// 6. Clear super_read_only (may have been set by sidecar fencing or previous state).
+	// 7. Clear super_read_only (may have been set by sidecar fencing or previous state).
 	if err := candidate.SetSuperReadOnly(ctx, false); err != nil {
 		return "", err
 	}
 
-	// 7. SET GLOBAL read_only = 0.
+	// 8. SET GLOBAL read_only = 0.
 	if err := candidate.SetReadOnly(ctx, false); err != nil {
 		return "", err
 	}
