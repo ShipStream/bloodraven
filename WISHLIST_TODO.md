@@ -4,7 +4,7 @@ Tracking implementation progress for items in [bloodraven-wishlist.md](bloodrave
 
 ## P0 — Must have before first production tenant
 
-- [ ] 1. DNS flip before MySQL promotion (reverse the failover sequence)
+- [x] 1. DNS flip before MySQL promotion (reverse the failover sequence)
 - [x] 2. MySQL configuration management — already implemented as `spec.mysqlConf`, docs added
 - [x] 3. Container resource requests and limits — `spec.sites[].resources` existed, added `spec.sidecarResources`
 - [x] 4. Multiple MySQL credentials (`spec.credentials`) — per-role secrets with MySQL user lifecycle management
