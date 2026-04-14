@@ -98,7 +98,7 @@ func (u *UpdateController) Execute(ctx context.Context,
 	// Phase 3: Failover to the (now-updated) standby
 	u.setPhase(UpdatePhaseFailover)
 	u.logger.Info("ordered update: failing over to updated standby", "site", standbySiteName)
-	if err := u.failover.Execute(ctx, standbyChecker, activeChecker, standbySiteName); err != nil {
+	if _, err := u.failover.Execute(ctx, standbyChecker, activeChecker, standbySiteName); err != nil {
 		return fmt.Errorf("failover during update: %w", err)
 	}
 

@@ -4581,6 +4581,12 @@ spec:
                 description: LastFailoverTarget is the site that was last promoted
                   during failover.
                 type: string
+              promotionGtidExecuted:
+                description: |-
+                  PromotionGtidExecuted is the GTID executed set recorded on the
+                  candidate at the moment of the most recent promotion, before it
+                  began accepting writes. Used for data-loss accounting.
+                type: string
               restore:
                 description: Restore tracks an in-flight or completed initFromBackup
                   operation.
@@ -4621,6 +4627,17 @@ spec:
                   description: SiteStatus describes the observed state of a single
                     site.
                   properties:
+                    divergentGtid:
+                      description: |-
+                        DivergentGtid is the GTID set of transactions on this site that
+                        diverge from the current primary. Populated when RecoveryState is
+                        RecoveryBlocked.
+                      type: string
+                    divergentTransactionCount:
+                      description: DivergentTransactionCount is the number of divergent
+                        transactions.
+                      format: int64
+                      type: integer
                     gtidExecuted:
                       description: GtidExecuted is the GTID executed set (populated
                         when replication status is enriched).
@@ -4633,6 +4650,16 @@ spec:
                     name:
                       description: Name is the site identifier, mirrored from spec
                         for convenience.
+                      type: string
+                    recoveryState:
+                      description: |-
+                        RecoveryState tracks old-primary recovery progress after failover.
+                        Empty when no recovery is needed.
+                      enum:
+                      - ""
+                      - Recovering
+                      - RecoveryBlocked
+                      - Recovered
                       type: string
                     replicating:
                       description: Replicating indicates whether replication is running

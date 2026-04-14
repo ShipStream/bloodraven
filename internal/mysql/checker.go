@@ -26,6 +26,9 @@ type Checker interface {
 	StartReplica(ctx context.Context) error
 	WaitForRelayLogDrain(ctx context.Context, timeout time.Duration) error
 
+	// GTID methods:
+	GetGtidExecuted(ctx context.Context) (string, error)
+
 	// Clone plugin methods:
 	SetCloneDonorList(ctx context.Context, donor string) error
 	CloneInstance(ctx context.Context, user, host, password string, useSSL bool, cloneTimeoutSec int) error

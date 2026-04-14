@@ -349,6 +349,23 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		freshFG.Status.LastFailover = &t
 	}
 	freshFG.Status.LastFailoverTarget = snap.LastFailoverTarget
+	freshFG.Status.PromotionGtidExecuted = snap.PromotionGtidExecuted
+
+	// Write per-site recovery fields.
+	for i := range freshFG.Status.Sites {
+		if snap.RecoverySite == snap.SiteNames[i] && snap.RecoveryState != "" {
+			freshFG.Status.Sites[i].RecoveryState = snap.RecoveryState
+			freshFG.Status.Sites[i].DivergentGtid = snap.DivergentGtid
+			if snap.DivergentTxnCount > 0 {
+				c := snap.DivergentTxnCount
+				freshFG.Status.Sites[i].DivergentTransactionCount = &c
+			}
+		} else {
+			freshFG.Status.Sites[i].RecoveryState = ""
+			freshFG.Status.Sites[i].DivergentGtid = ""
+			freshFG.Status.Sites[i].DivergentTransactionCount = nil
+		}
+	}
 
 	// Evaluate replication health.
 	hasWritable := snap.SiteStates[0] == state.StateWritable || snap.SiteStates[1] == state.StateWritable
@@ -472,6 +489,27 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			LastTransitionTime: now,
 			Reason:             "NotUpdating",
 			Message:            "No update in progress",
+		})
+	}
+
+	// RecoveryPending condition.
+	if snap.RecoveryState == "RecoveryBlocked" {
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
+			Type:               "RecoveryPending",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: freshFG.Generation,
+			LastTransitionTime: now,
+			Reason:             "DivergentTransactions",
+			Message:            fmt.Sprintf("Old primary %s has %d divergent transactions — must be wiped and re-cloned", snap.RecoverySite, snap.DivergentTxnCount),
+		})
+	} else {
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
+			Type:               "RecoveryPending",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: freshFG.Generation,
+			LastTransitionTime: now,
+			Reason:             "NoRecoveryPending",
+			Message:            "No old primary recovery pending",
 		})
 	}
 

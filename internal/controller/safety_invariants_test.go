@@ -365,13 +365,13 @@ func TestInvariant_DNSFlipsOnlyOnce(t *testing.T) {
 }
 
 // INVARIANT: Failover uses correct step sequence.
-// Fence -> Drain -> Stop -> Reset -> Clear super_read_only -> Set read_only=0
+// Fence -> Drain -> Stop -> Reset -> GetGtid -> Clear super_read_only -> Set read_only=0
 func TestInvariant_FailoverSequence(t *testing.T) {
 	candidate := &trackingMock{readOnly: true}
 	oldPrimary := &trackingMock{}
 	fc := NewFailoverController(testLogger())
 
-	err := fc.Execute(context.Background(), candidate, oldPrimary, "site1")
+	_, err := fc.Execute(context.Background(), candidate, oldPrimary, "site1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestInvariant_FailoverSequence(t *testing.T) {
 
 	// Candidate must follow exact sequence
 	candCalls := candidate.getCalls()
-	expected := []string{"WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
+	expected := []string{"WaitForRelayLogDrain", "StopReplica", "ResetReplicaAll", "GetGtidExecuted", "SetSuperReadOnly(OFF)", "SetReadOnly(OFF)"}
 	if len(candCalls) != len(expected) {
 		t.Fatalf("SAFETY VIOLATION: wrong number of candidate calls: %v, want %v", candCalls, expected)
 	}

@@ -37,6 +37,7 @@ type mockMySQL struct {
 	cloneInstanceCalled   bool
 	cloneInstanceErr      error
 	changeReplicationOpts mysql.ReplicationSourceOpts
+	gtidExecuted          string
 
 	// replicaStatus is returned from ShowReplicaStatus. nil (default) means
 	// "never had replication configured", which is the fresh-deploy signature.
@@ -120,6 +121,12 @@ func (m *mockMySQL) SetCloneDonorList(_ context.Context, donor string) error {
 	defer m.mu.Unlock()
 	m.cloneDonorList = donor
 	return nil
+}
+
+func (m *mockMySQL) GetGtidExecuted(_ context.Context) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.gtidExecuted, nil
 }
 
 func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {

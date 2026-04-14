@@ -22,6 +22,7 @@ Metrics are served on `:8080/metrics` in standard Prometheus exposition format.
 | `bloodraven_replication_lag_seconds` | Gauge | `site` | Replication lag in seconds on the replica site. `-1` if lag is NULL (not replicating). Only present for replica sites. |
 | `bloodraven_replication_running` | Gauge | `site`, `thread` | Whether a replication thread is running (`1`=yes, `0`=no). Thread is `io` or `sql`. Only present for replica sites. |
 | `bloodraven_site_state` | Gauge | `site`, `state` | Current site state as a state-set: `1` for the current state, `0` for others. State is `writable`, `read-only`, `unreachable`, or `unknown`. |
+| `bloodraven_divergent_transactions` | Gauge | `site` | Number of divergent transactions on a site pending recovery after emergency failover. `0` when healthy. Non-zero means the site has committed transactions that never replicated to the current primary. |
 
 ### Scrape configuration
 
@@ -107,6 +108,14 @@ groups:
           severity: warning
         annotations:
           summary: "Replication lag on {{ $labels.site }} is {{ $value }}s"
+
+      # Divergent transactions after emergency failover
+      - alert: BloodravenDivergentTransactions
+        expr: bloodraven_divergent_transactions > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.site }} has {{ $value }} divergent transactions — must be wiped and re-cloned"
 
       # Replication thread down
       - alert: BloodravenReplicationDown
@@ -247,6 +256,7 @@ share rendering code with a WebSocket consumer should normalize keys.
 | `Ready=False`, `Degraded=True` | A site is unreachable or replication is broken | Check `status.sites[].state` and MySQL pod logs |
 | `Ready=False`, both sites `read-only` | No primary exists (may follow a failed failover) | See [Operations: Manual promotion](./operations.mdx#manual-promotion) |
 | `Ready=False`, both sites `writable` | Split brain | See [Operations: Split brain recovery](./operations.mdx#split-brain-recovery) |
+| `RecoveryPending=True` | Old primary returned with divergent transactions | Check `status.sites[].divergentGtid`, wipe and re-clone the affected site. See [Failover: Old primary recovery](./failover.mdx#old-primary-recovery). |
 | Repeated failovers | Flapping network or unstable MySQL | Check `bloodraven_state_transitions_total` and consider increasing `failureThreshold` or `failoverCooldown` |
 | High replication lag | Slow network, heavy write load, or undersized replica | Check `bloodraven_replication_lag_seconds` and MySQL performance metrics |
 

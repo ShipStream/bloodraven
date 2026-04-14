@@ -19,7 +19,8 @@ func NewFailoverController(logger *slog.Logger) *FailoverController {
 }
 
 // Execute performs a failover: fences old primary, drains relay logs on candidate, promotes candidate.
-func (f *FailoverController) Execute(ctx context.Context, candidate mysql.Checker, oldPrimary mysql.Checker, candidateSite string) error {
+// Returns the candidate's GTID executed set captured just before promotion (before it accepts writes).
+func (f *FailoverController) Execute(ctx context.Context, candidate mysql.Checker, oldPrimary mysql.Checker, candidateSite string) (string, error) {
 	// 1. Fence old primary: SET GLOBAL super_read_only=ON (ignore error if unreachable).
 	if oldPrimary != nil {
 		if err := oldPrimary.SetSuperReadOnly(ctx, true); err != nil {
@@ -38,24 +39,30 @@ func (f *FailoverController) Execute(ctx context.Context, candidate mysql.Checke
 
 	// 3. STOP REPLICA.
 	if err := candidate.StopReplica(ctx); err != nil {
-		return err
+		return "", err
 	}
 
 	// 4. RESET REPLICA ALL.
 	if err := candidate.ResetReplicaAll(ctx); err != nil {
-		return err
+		return "", err
 	}
 
-	// 5. Clear super_read_only (may have been set by sidecar fencing or previous state).
+	// 5. Record GTID before promotion (high-water mark of replicated data).
+	promotionGtid, err := candidate.GetGtidExecuted(ctx)
+	if err != nil {
+		f.logger.Warn("failed to record promotion GTID", "error", err)
+	}
+
+	// 6. Clear super_read_only (may have been set by sidecar fencing or previous state).
 	if err := candidate.SetSuperReadOnly(ctx, false); err != nil {
-		return err
+		return "", err
 	}
 
-	// 6. SET GLOBAL read_only = 0.
+	// 7. SET GLOBAL read_only = 0.
 	if err := candidate.SetReadOnly(ctx, false); err != nil {
-		return err
+		return "", err
 	}
 
-	f.logger.Info("failover complete", "promotedSite", candidateSite)
-	return nil
+	f.logger.Info("failover complete", "promotedSite", candidateSite, "promotionGtid", promotionGtid)
+	return promotionGtid, nil
 }

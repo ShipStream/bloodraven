@@ -187,6 +187,7 @@ The operator writes the following status fields.
 | `conditions` | []Condition | Standard Kubernetes conditions |
 | `lastFailover` | timestamp | When the last failover occurred |
 | `lastFailoverTarget` | string | Which site was promoted in the last failover |
+| `promotionGtidExecuted` | string | GTID set recorded on the candidate at the moment of the most recent promotion, before it began accepting writes. Used for data-loss accounting. |
 
 ### SiteStatus
 
@@ -198,6 +199,9 @@ The operator writes the following status fields.
 | `replicating` | bool | Whether this site is replicating from another site |
 | `secondsBehindSource` | int | Replication lag in seconds (only set when replicating) |
 | `gtidExecuted` | string | GTID set executed on this site |
+| `recoveryState` | string | Old-primary recovery state: empty (no recovery needed), `RecoveryBlocked` (divergent transactions detected — site must be wiped and re-cloned), or `Recovered` |
+| `divergentGtid` | string | GTID set of transactions on this site that diverge from the current primary. Populated when `recoveryState` is `RecoveryBlocked`. |
+| `divergentTransactionCount` | int | Number of divergent transactions. Populated when `recoveryState` is `RecoveryBlocked`. |
 
 ### Conditions
 
@@ -205,6 +209,7 @@ The operator writes the following status fields.
 |---|---|
 | `Ready` | `True` when the failover group has one writable primary and all replicas are healthy |
 | `Degraded` | `True` when replication is broken, lag exceeds `maxLagSeconds`, or a site is unreachable |
+| `RecoveryPending` | `True` when an old primary has divergent transactions and requires manual intervention (wipe + re-clone). Reason is `DivergentTransactions`. |
 
 ### Example status
 

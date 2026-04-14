@@ -79,6 +79,12 @@ type TopologySnapshot struct {
 	UpdatePhase        string // non-empty if an ordered update is in progress
 	BootstrapPhase     string // non-empty if a fresh-deploy bootstrap is in progress or finished
 	BootstrapError     string // non-empty if bootstrap failed
+
+	PromotionGtidExecuted string // GTID set at the moment of the most recent promotion
+	RecoverySite          string // site name if recovery is pending/blocked
+	RecoveryState         string // "", "Recovering", "RecoveryBlocked", "Recovered"
+	DivergentGtid         string
+	DivergentTxnCount     int64
 }
 
 // siteTracker tracks debounce counters and current state for one site.
@@ -110,7 +116,13 @@ type TopologyManager struct {
 	failoverCooldown   time.Duration
 
 	// Promotion state: tracks which site was promoted and is pending DNS flip.
-	promotedSite string // empty = no pending promotion
+	promotedSite          string // empty = no pending promotion
+	promotionGtidExecuted string // GTID set at last promotion
+
+	// Recovery state for old primary after failover.
+	recoveryPendingSite    string // site name with blocked recovery ("" = none)
+	recoveryDivergentGtid  string
+	recoveryDivergentCount int64
 
 	// Bootstrap orchestration. When bootstrap is nil or bootstrapCfg.ReplUser is
 	// empty, auto-bootstrap is disabled. bootstrapPhase/bootstrapErr are protected by mu.
@@ -410,6 +422,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		}
 	}
 
+	// Check if old primary recovery is needed.
+	recoveryChanged := tm.checkRecovery(ctx, siteRepl)
+
 	// Emit replication metrics.
 	for i := range tm.sites {
 		name := tm.sites[i].name
@@ -437,8 +452,8 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		}
 	}
 
-	// Notify the status callback on any state change.
-	if anyTransition && tm.StatusCallback != nil {
+	// Notify the status callback on any state change or recovery event.
+	if (anyTransition || recoveryChanged) && tm.StatusCallback != nil {
 		tm.mu.RLock()
 		activeSite := tm.activeSiteLocked()
 		bootstrapPhase := string(tm.bootstrapPhase)
@@ -458,6 +473,12 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 			Alert:              alertMsg,
 			BootstrapPhase:     bootstrapPhase,
 			BootstrapError:     bootstrapErrStr,
+
+			PromotionGtidExecuted: tm.promotionGtidExecuted,
+			RecoverySite:          tm.recoveryPendingSite,
+			RecoveryState:         tm.recoveryStateLocked(),
+			DivergentGtid:         tm.recoveryDivergentGtid,
+			DivergentTxnCount:     tm.recoveryDivergentCount,
 		})
 	}
 
@@ -588,6 +609,20 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 	}
 
+	// If both sites are writable after a prior failover and this is not a
+	// fresh deploy, the old primary has returned. Fence it immediately so it
+	// stops accepting writes; recovery proceeds in checkRecovery once it
+	// transitions to read-only.
+	if action.SplitBrain && tm.lastFailoverTarget != "" && !tm.isBootstrapping() {
+		oldPrimarySiteName := tm.otherSiteName(tm.lastFailoverTarget)
+		if site := tm.getSite(oldPrimarySiteName); site != nil && site.state == state.StateWritable {
+			tm.logger.Info("fencing returning old primary (split brain after failover)", "site", oldPrimarySiteName)
+			if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
+				tm.logger.Error("failed to fence returning old primary", "site", oldPrimarySiteName, "error", err)
+			}
+		}
+	}
+
 	if action.PromoteSite != "" && tm.promotedSite == "" {
 		// Check anti-flap cooldown.
 		if !tm.lastFailover.IsZero() && tm.clock.Since(tm.lastFailover) < tm.failoverCooldown {
@@ -608,10 +643,12 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				oldPrimaryChecker = oldPrimary.mysql
 			}
 
-			if err := tm.failover.Execute(ctx, candidate.mysql, oldPrimaryChecker, candidate.name); err != nil {
+			promotionGtid, err := tm.failover.Execute(ctx, candidate.mysql, oldPrimaryChecker, candidate.name)
+			if err != nil {
 				tm.logger.Error("failover failed", "error", err)
 				return
 			}
+			tm.promotionGtidExecuted = promotionGtid
 			// DNS flip deferred until next poll confirms read_only=0.
 			tm.promotedSite = candidate.name
 			tm.lastFailover = tm.clock.Now()
@@ -827,6 +864,157 @@ func isCloneConnectionDrop(err error) bool {
 		}
 	}
 	return false
+}
+
+// recoveryStateLocked returns the current recovery state string for status
+// reporting. Must be called with tm.mu held (at least RLock).
+func (tm *TopologyManager) recoveryStateLocked() string {
+	if tm.recoveryPendingSite != "" {
+		return "RecoveryBlocked"
+	}
+	return ""
+}
+
+// checkRecovery detects an old primary that has come back after failover and
+// either auto-rejoins it (no divergence) or blocks with metadata (divergence
+// detected). Returns true if recovery state changed this cycle.
+func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl [2]*mysql.ReplicaStatus) bool {
+	if tm.lastFailoverTarget == "" || tm.isBootstrapping() {
+		return false
+	}
+	if tm.bootstrapCfg.ReplUser == "" {
+		return false
+	}
+
+	// Find the active (writable) site.
+	activeIdx := -1
+	for i := range tm.sites {
+		if tm.sites[i].state == state.StateWritable {
+			if activeIdx != -1 {
+				return false // both writable, handled by split-brain logic
+			}
+			activeIdx = i
+		}
+	}
+	if activeIdx == -1 {
+		return false
+	}
+
+	otherIdx := 1 - activeIdx
+	otherSite := &tm.sites[otherIdx]
+
+	if otherSite.state != state.StateReadOnly {
+		return false
+	}
+
+	// Already replicating — recovery was already completed.
+	if siteRepl[otherIdx] != nil && (siteRepl[otherIdx].IORunning || siteRepl[otherIdx].SQLRunning) {
+		// If we had a previous recovery-blocked state that is now resolved
+		// (e.g. admin wiped and re-cloned), clear it.
+		if tm.recoveryPendingSite == otherSite.name {
+			tm.mu.Lock()
+			tm.recoveryPendingSite = ""
+			tm.recoveryDivergentGtid = ""
+			tm.recoveryDivergentCount = 0
+			tm.mu.Unlock()
+			metrics.DivergentTransactions.WithLabelValues(otherSite.name).Set(0)
+			tm.logger.Info("recovery state cleared (site is now replicating)", "site", otherSite.name)
+			return true
+		}
+		return false
+	}
+
+	// Already detected and blocked — nothing to do.
+	if tm.recoveryPendingSite == otherSite.name {
+		return false
+	}
+
+	// Read-only site with no active replication after a prior failover — initiate recovery.
+	return tm.initiateRecovery(ctx, otherIdx, activeIdx)
+}
+
+// initiateRecovery fences the old primary, compares GTID sets, and either
+// auto-recovers (no divergence) or blocks with metadata (divergence).
+// Returns true if recovery state changed.
+func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, newPrimaryIdx int) bool {
+	oldPrimary := &tm.sites[oldPrimaryIdx]
+	newPrimary := &tm.sites[newPrimaryIdx]
+
+	tm.logger.Info("initiating old primary recovery", "oldPrimary", oldPrimary.name, "newPrimary", newPrimary.name)
+
+	// Defensive fence.
+	if err := oldPrimary.mysql.SetSuperReadOnly(ctx, true); err != nil {
+		tm.logger.Error("recovery: failed to fence old primary", "site", oldPrimary.name, "error", err)
+		return false
+	}
+
+	oldGtidStr, err := oldPrimary.mysql.GetGtidExecuted(ctx)
+	if err != nil {
+		tm.logger.Error("recovery: failed to get old primary GTID", "site", oldPrimary.name, "error", err)
+		return false
+	}
+	newGtidStr, err := newPrimary.mysql.GetGtidExecuted(ctx)
+	if err != nil {
+		tm.logger.Error("recovery: failed to get new primary GTID", "site", newPrimary.name, "error", err)
+		return false
+	}
+
+	oldGtid, err := mysql.ParseGTIDSet(oldGtidStr)
+	if err != nil {
+		tm.logger.Error("recovery: failed to parse old primary GTID", "site", oldPrimary.name, "error", err)
+		return false
+	}
+	newGtid, err := mysql.ParseGTIDSet(newGtidStr)
+	if err != nil {
+		tm.logger.Error("recovery: failed to parse new primary GTID", "site", newPrimary.name, "error", err)
+		return false
+	}
+
+	if newGtid.Contains(oldGtid) {
+		tm.logger.Info("no GTID divergence, auto-recovering old primary as replica", "site", oldPrimary.name)
+		tm.executeRecovery(ctx, oldPrimaryIdx, newPrimaryIdx)
+		return true
+	}
+
+	divergent := oldGtid.Subtract(newGtid)
+	count := divergent.TransactionCount()
+	tm.logger.Warn("GTID divergence detected — old primary has transactions not on new primary",
+		"site", oldPrimary.name,
+		"divergentTransactions", count,
+		"divergentGtid", divergent.String(),
+		"oldPrimaryGtid", oldGtidStr,
+		"newPrimaryGtid", newGtidStr)
+
+	tm.mu.Lock()
+	tm.recoveryPendingSite = oldPrimary.name
+	tm.recoveryDivergentGtid = divergent.String()
+	tm.recoveryDivergentCount = count
+	tm.mu.Unlock()
+
+	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(float64(count))
+	return true
+}
+
+// executeRecovery reconfigures the old primary as a replica of the new primary.
+func (tm *TopologyManager) executeRecovery(ctx context.Context, oldPrimaryIdx, newPrimaryIdx int) {
+	oldPrimary := &tm.sites[oldPrimaryIdx]
+	newPrimaryHost := tm.cfg.SiteHosts[newPrimaryIdx]
+
+	err := tm.failover.RecoverOldPrimary(ctx, oldPrimary.mysql, newPrimaryHost,
+		tm.bootstrapCfg.ReplUser, tm.bootstrapCfg.ReplPassword, tm.bootstrapCfg.UseSSL)
+	if err != nil {
+		tm.logger.Error("old primary recovery failed", "site", oldPrimary.name, "error", err)
+		return
+	}
+
+	tm.mu.Lock()
+	tm.recoveryPendingSite = ""
+	tm.recoveryDivergentGtid = ""
+	tm.recoveryDivergentCount = 0
+	tm.mu.Unlock()
+
+	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
+	tm.logger.Info("old primary recovery complete — now replicating from new primary", "site", oldPrimary.name, "source", newPrimaryHost)
 }
 
 // emitBootstrapStatus notifies the runner that the bootstrap phase changed.

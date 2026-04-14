@@ -194,6 +194,13 @@ func (m *FakeMySQL) SetCloneDonorList(_ context.Context, donor string) error {
 	return nil
 }
 
+func (m *FakeMySQL) GetGtidExecuted(_ context.Context) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("GetGtidExecuted")
+	return "", nil
+}
+
 func (m *FakeMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
