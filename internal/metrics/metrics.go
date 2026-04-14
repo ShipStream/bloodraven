@@ -29,6 +29,11 @@ var (
 		Help: "Number of DNS flips per target site.",
 	}, []string{"site"})
 
+	FailoversTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_failovers_total",
+		Help: "Total number of failovers executed. Incremented after successful MySQL promotion.",
+	}, []string{"target_site"})
+
 	ReplicationLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_replication_lag_seconds",
 		Help: "Replication lag in seconds. Only set for the replica site; -1 if lag is NULL (not replicating).",
@@ -108,7 +113,7 @@ var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
 
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {
-	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount,
+	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount, FailoversTotal,
 		ReplicationLag, ReplicationRunning, SiteState, DivergentTransactions,
 		BackupRunsTotal, BackupDurationSeconds,
 		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes)

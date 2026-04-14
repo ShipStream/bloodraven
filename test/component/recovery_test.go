@@ -4,7 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/shipstream/bloodraven/internal/controller"
+	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
 )
 
@@ -233,5 +235,106 @@ func TestRecovery_NoCredentials_Skipped(t *testing.T) {
 
 	if replConfigured {
 		t.Error("recovery should be skipped when no replication credentials are configured")
+	}
+}
+
+func TestRecovery_StatusResponse_CarriesRecoveryFields(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-10"}
+	dc2 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-10"}
+	h := newRecoveryHarness(t, dc1, dc2)
+
+	h.pollN(2) // establish
+
+	dc1.setError(errDown)
+	h.pollN(3) // failover
+	h.pollN(2) // confirm
+
+	// dc1 comes back read-only with DIVERGENT transactions.
+	dc1.setError(nil)
+	dc1.setReadOnly(true)
+	dc1.mu.Lock()
+	dc1.gtidExecuted = "uuid1:1-10,uuid_divergent:1-5"
+	dc1.mu.Unlock()
+
+	h.pollN(2) // detect recovery needed
+
+	s := h.tm.Status()
+
+	// dc1 (index 0) should have recovery fields populated.
+	if s.Sites[0].RecoveryState != "RecoveryBlocked" {
+		t.Errorf("expected dc1 RecoveryState=RecoveryBlocked, got %q", s.Sites[0].RecoveryState)
+	}
+	if s.Sites[0].DivergentGtid == "" {
+		t.Error("expected dc1 DivergentGtid to be populated")
+	}
+	if s.Sites[0].DivergentTransactionCount == nil || *s.Sites[0].DivergentTransactionCount != 5 {
+		t.Errorf("expected dc1 DivergentTransactionCount=5, got %v", s.Sites[0].DivergentTransactionCount)
+	}
+
+	// dc2 (index 1) should have no recovery fields.
+	if s.Sites[1].RecoveryState != "" {
+		t.Errorf("expected dc2 RecoveryState empty, got %q", s.Sites[1].RecoveryState)
+	}
+
+	// PromotionGtidExecuted should be populated from the failover.
+	if s.PromotionGtidExecuted == "" {
+		t.Error("expected PromotionGtidExecuted to be populated after failover")
+	}
+}
+
+func TestRecovery_DivergentTransactionsMetric(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-10"}
+	dc2 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-10"}
+	h := newRecoveryHarness(t, dc1, dc2)
+
+	h.pollN(2) // establish
+
+	dc1.setError(errDown)
+	h.pollN(3) // failover
+	h.pollN(2) // confirm
+
+	// dc1 comes back read-only with divergence.
+	dc1.setError(nil)
+	dc1.setReadOnly(true)
+	dc1.mu.Lock()
+	dc1.gtidExecuted = "uuid1:1-10,uuid_divergent:1-3"
+	dc1.mu.Unlock()
+
+	h.pollN(2) // detect recovery
+
+	val := testutil.ToFloat64(metrics.DivergentTransactions.WithLabelValues("dc1"))
+	if val != 3 {
+		t.Errorf("expected DivergentTransactions metric=3 for dc1, got %v", val)
+	}
+}
+
+func TestRecovery_StatusCleared_AfterAutoRecovery(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-10"}
+	dc2 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-10"}
+	h := newRecoveryHarness(t, dc1, dc2)
+
+	h.pollN(2) // establish
+
+	dc1.setError(errDown)
+	h.pollN(3) // failover
+	h.pollN(2) // confirm
+
+	// dc1 comes back with NO divergence (GTID matches).
+	dc1.setError(nil)
+	dc1.setReadOnly(true)
+	dc1.mu.Lock()
+	dc1.gtidExecuted = "uuid1:1-10"
+	dc1.mu.Unlock()
+
+	h.pollN(2)
+
+	s := h.tm.Status()
+
+	// No recovery fields should be set (auto-recovered).
+	if s.Sites[0].RecoveryState != "" {
+		t.Errorf("expected dc1 RecoveryState empty after auto-recovery, got %q", s.Sites[0].RecoveryState)
+	}
+	if s.Sites[0].DivergentTransactionCount != nil {
+		t.Errorf("expected dc1 DivergentTransactionCount nil after auto-recovery, got %v", s.Sites[0].DivergentTransactionCount)
 	}
 }

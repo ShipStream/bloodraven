@@ -73,14 +73,15 @@ func main() {
 
 	// Create and register the topology manager runner.
 	// This is leader-election-aware: polling and failover only run on the leader.
-	runner := controller.NewTopologyManagerRunner(mgr.GetClient(), clientset, hub, logger)
+	recorder := mgr.GetEventRecorderFor("bloodraven")
+	runner := controller.NewTopologyManagerRunner(mgr.GetClient(), clientset, hub, recorder, logger)
 
 	// Create and register the reconciler
 	tainter := platform.NewNodeTainter(clientset, logger)
 	reconciler := &controller.MysqlFailoverGroupReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("bloodraven"),
+		Recorder: recorder,
 		Runner:   runner,
 		Tainter:  tainter,
 	}
