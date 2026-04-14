@@ -59,6 +59,11 @@ func (t *trackingMock) SetSuperReadOnly(_ context.Context, on bool) error {
 	return err
 }
 
+func (t *trackingMock) KillAppConnections(_ context.Context) (int, error) {
+	t.record("KillAppConnections")
+	return 0, nil
+}
+
 func (t *trackingMock) StopReplica(_ context.Context) error {
 	t.record("StopReplica")
 	return nil
@@ -124,10 +129,16 @@ func TestFailoverExecute_FullSequence(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Verify old primary was fenced.
+	// Verify old primary was fenced and connections killed.
 	opCalls := oldPrimary.getCalls()
-	if len(opCalls) != 1 || opCalls[0] != "SetSuperReadOnly(ON)" {
-		t.Errorf("old primary calls: got %v, want [SetSuperReadOnly(ON)]", opCalls)
+	opExpected := []string{"SetSuperReadOnly(ON)", "KillAppConnections"}
+	if len(opCalls) != len(opExpected) {
+		t.Fatalf("old primary calls: got %v, want %v", opCalls, opExpected)
+	}
+	for i, want := range opExpected {
+		if opCalls[i] != want {
+			t.Errorf("old primary call[%d]: got %q, want %q", i, opCalls[i], want)
+		}
 	}
 
 	// Verify candidate sequence: drain -> stop -> reset -> clear super_read_only -> set read_only=0.
