@@ -51,28 +51,28 @@ func TestSafetyInvariant_NeverDualPrimary(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Safety Invariant: Never flip DNS before promoted MySQL is confirmed writable.
+// Safety Invariant: DNS flips at failover trigger time (before promotion).
 // ---------------------------------------------------------------------------
 
-func TestSafetyInvariant_NoDNSBeforeWritableConfirmed(t *testing.T) {
+func TestSafetyInvariant_DNSFlipsAtFailoverTrigger(t *testing.T) {
 	h := newTestHarness(t)
 	h.pollN(2) // establish dc1=writable, dc2=read-only
 
 	// dc1 goes down
 	h.dc1MySQL.setError(errDown)
-	h.pollN(3) // failure threshold
+	h.pollN(3) // failure threshold — triggers failover + immediate DNS flip
 
-	// At this point, failover was triggered and dc2 had SetReadOnly(false)
-	// called, but DNS should NOT have flipped yet (needs confirmation polls)
-	if h.dns.getLastIP() != "" {
-		t.Error("SAFETY VIOLATION: DNS flipped before promotion was confirmed by polling")
+	// DNS should have flipped immediately at failover trigger
+	if h.dns.getLastIP() != "2.2.2.2" {
+		t.Errorf("DNS should flip at failover trigger, got %q", h.dns.getLastIP())
 	}
 
-	// Now poll to confirm (recovery threshold = 2)
-	h.pollN(2)
-
-	if h.dns.getLastIP() != "2.2.2.2" {
-		t.Errorf("DNS should point to dc2 after confirmation, got %q", h.dns.getLastIP())
+	// DNS should flip exactly once
+	h.dns.mu.Lock()
+	calls := h.dns.calls
+	h.dns.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("DNS should flip exactly once, got %d", calls)
 	}
 }
 
@@ -381,6 +381,13 @@ func (tc *trackingChecker) SetSuperReadOnly(_ context.Context, on bool) error {
 		tc.recordCall("SetSuperReadOnly(OFF)")
 	}
 	return nil
+}
+
+func (tc *trackingChecker) KillAppConnections(_ context.Context) (int, error) {
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
+	tc.recordCall("KillAppConnections")
+	return 0, nil
 }
 
 func (tc *trackingChecker) StopReplica(_ context.Context) error {

@@ -53,6 +53,11 @@ func (b *bootstrapMock) Promote(_ context.Context) error {
 
 func (b *bootstrapMock) Close() error { return nil }
 
+func (b *bootstrapMock) KillAppConnections(_ context.Context) (int, error) {
+	b.record("KillAppConnections")
+	return 0, nil
+}
+
 func (b *bootstrapMock) SetSuperReadOnly(_ context.Context, on bool) error {
 	if on {
 		b.record("SetSuperReadOnly(ON)")

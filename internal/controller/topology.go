@@ -353,17 +353,13 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		}
 	}
 
-	// Check for pending promotion confirmation: if we promoted a site and it's
-	// now writable, flip DNS.
+	// Check for pending promotion confirmation: DNS was already flipped at
+	// failover trigger time; this block confirms the promoted site is writable
+	// and clears the guard flag to allow future failovers.
 	if tm.promotedSite != "" {
 		site := tm.getSite(tm.promotedSite)
 		if site != nil && site.state == state.StateWritable {
-			tm.logger.Info("promotion confirmed, flipping DNS", "site", site.name, "ip", site.lbIP)
-			if err := tm.dns.UpdateDNSRecord(ctx, site.lbIP); err != nil {
-				tm.logger.Error("DNS flip failed", "site", site.name, "error", err)
-			} else {
-				metrics.DNSFlipCount.WithLabelValues(site.name).Inc()
-			}
+			tm.logger.Info("promotion confirmed: site is writable", "site", site.name)
 			tm.promotedSite = ""
 		}
 	}
@@ -603,6 +599,14 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		if candidate != nil {
 			tm.logger.Info("initiating failover", "candidate", candidate.name, "oldPrimary", oldPrimaryName)
 
+			// DNS flip FIRST: start propagation now so it overlaps with
+			// the relay-log drain and MySQL promotion steps.
+			if err := tm.dns.UpdateDNSRecord(ctx, candidate.lbIP); err != nil {
+				tm.logger.Error("DNS flip failed", "site", candidate.name, "error", err)
+			} else {
+				metrics.DNSFlipCount.WithLabelValues(candidate.name).Inc()
+			}
+
 			var oldPrimaryChecker mysql.Checker
 			if oldPrimary != nil {
 				oldPrimaryChecker = oldPrimary.mysql
@@ -612,7 +616,6 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				tm.logger.Error("failover failed", "error", err)
 				return
 			}
-			// DNS flip deferred until next poll confirms read_only=0.
 			tm.promotedSite = candidate.name
 			tm.lastFailover = tm.clock.Now()
 			tm.lastFailoverTarget = candidate.name

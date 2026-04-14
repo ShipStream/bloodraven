@@ -37,6 +37,30 @@ func (m *checker) SetSuperReadOnly(ctx context.Context, on bool) error {
 	return nil
 }
 
+func (m *checker) KillAppConnections(ctx context.Context) (int, error) {
+	rows, err := m.db.QueryContext(ctx,
+		`SELECT id FROM information_schema.processlist
+		 WHERE id != CONNECTION_ID()
+		 AND command NOT IN ('Binlog Dump', 'Binlog Dump GTID')`)
+	if err != nil {
+		return 0, fmt.Errorf("list app connections: %w", err)
+	}
+	defer rows.Close()
+
+	var killed int
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		if _, err := m.db.ExecContext(ctx, fmt.Sprintf("KILL %d", id)); err != nil {
+			continue
+		}
+		killed++
+	}
+	return killed, rows.Err()
+}
+
 func (m *checker) StopReplica(ctx context.Context) error {
 	_, err := m.db.ExecContext(ctx, "STOP REPLICA")
 	if err != nil {

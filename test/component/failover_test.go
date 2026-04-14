@@ -41,18 +41,13 @@ func TestFailover_DC1Down_PromoteDC2(t *testing.T) {
 		t.Error("dc2 should have been promoted (readOnly should be false)")
 	}
 
-	// DNS flip is deferred until promotion is confirmed via recovery threshold.
-	if h.dns.getLastIP() != "" {
-		t.Error("DNS should not flip before promotion confirmation")
+	// DNS should have flipped immediately at failover trigger (before promotion).
+	if h.dns.getLastIP() != "2.2.2.2" {
+		t.Errorf("DNS should flip at failover trigger, got %s", h.dns.getLastIP())
 	}
 
 	// 5. Poll 2x more -- dc2 confirmed writable (recovery threshold = 2).
 	h.pollN(2)
-
-	// 6. Verify: DNS flipped to dc2 IP.
-	if h.dns.getLastIP() != "2.2.2.2" {
-		t.Errorf("DNS should point to dc2 (2.2.2.2), got %s", h.dns.getLastIP())
-	}
 
 	s = h.tm.Status()
 	if s.Sites[1].State != "writable" {
@@ -90,15 +85,13 @@ func TestFailover_DC2Down_PromoteDC1(t *testing.T) {
 		t.Error("dc1 should have been promoted")
 	}
 
-	// Confirm promotion.
-	h.pollN(2)
-
+	// DNS should have flipped immediately at failover trigger.
 	if h.dns.getLastIP() != "1.1.1.1" {
-		t.Errorf("DNS should point to dc1 (1.1.1.1), got %s", h.dns.getLastIP())
+		t.Errorf("DNS should flip at failover trigger, got %s", h.dns.getLastIP())
 	}
 }
 
-func TestFailover_DNSDeferredUntilConfirmed(t *testing.T) {
+func TestFailover_DNSFlipsAtTrigger(t *testing.T) {
 	h := newTestHarness(t) // DC1 writable, DC2 read-only
 
 	// Establish normal.
@@ -107,26 +100,17 @@ func TestFailover_DNSDeferredUntilConfirmed(t *testing.T) {
 	// DC1 goes down.
 	h.dc1MySQL.setError(errDown)
 
-	// Reach failure threshold: failover triggers.
+	// Reach failure threshold: failover triggers — DNS flips immediately.
 	h.pollN(3)
 
-	// At this point, promotion happened (SetReadOnly(false) on DC2), but
-	// DNS should NOT have flipped yet -- it waits for recovery threshold
-	// confirmation that DC2 is actually writable.
-	if h.dns.getLastIP() != "" {
-		t.Error("DNS should be deferred until promotion confirmed")
-	}
-
-	// One more poll (1 of 2 recovery polls).
-	h.pollN(1)
-	if h.dns.getLastIP() != "" {
-		t.Error("DNS should still be deferred after 1 recovery poll (need 2)")
-	}
-
-	// Second recovery poll -- now confirmed.
-	h.pollN(1)
 	if h.dns.getLastIP() != "2.2.2.2" {
-		t.Errorf("DNS should flip after 2 recovery polls, got %s", h.dns.getLastIP())
+		t.Errorf("DNS should flip at failover trigger, got %s", h.dns.getLastIP())
+	}
+
+	// Additional polls should NOT cause another DNS flip.
+	h.pollN(5)
+	if h.dns.getCalls() != 1 {
+		t.Errorf("DNS should flip exactly once, got %d", h.dns.getCalls())
 	}
 }
 
@@ -146,11 +130,13 @@ func TestFailover_AntiFlap(t *testing.T) {
 		t.Fatal("first failover: dc2 should have been promoted")
 	}
 
-	// Confirm promotion so DNS flips.
-	h.pollN(2)
+	// DNS should have flipped immediately at trigger time.
 	if h.dns.getLastIP() != "2.2.2.2" {
 		t.Fatalf("first failover: DNS should point to dc2, got %s", h.dns.getLastIP())
 	}
+
+	// Poll to confirm promotion.
+	h.pollN(2)
 
 	// Now DC2 goes down too (while cooldown is still active).
 	h.dc2MySQL.setError(errDown)

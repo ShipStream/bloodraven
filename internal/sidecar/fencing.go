@@ -14,6 +14,7 @@ import (
 type Fencer interface {
 	IsReadOnly(ctx context.Context) (bool, error)
 	SetSuperReadOnly(ctx context.Context) error
+	KillConnections(ctx context.Context) (int, error)
 }
 
 // FencingMonitor polls Bloodraven and the peer sidecar, and self-fences
@@ -193,6 +194,12 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 	if err := f.mysql.SetSuperReadOnly(ctx); err != nil {
 		f.logger.Error("SELF-FENCING FAILED: could not set super_read_only", "error", err)
 		return
+	}
+
+	if killed, err := f.mysql.KillConnections(ctx); err != nil {
+		f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err)
+	} else {
+		f.logger.Info("SELF-FENCING: killed app connections", "count", killed)
 	}
 
 	f.fenced = true

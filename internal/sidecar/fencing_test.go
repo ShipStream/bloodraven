@@ -43,6 +43,10 @@ func (m *mockFencer) SetSuperReadOnly(_ context.Context) error {
 	return nil
 }
 
+func (m *mockFencer) KillConnections(_ context.Context) (int, error) {
+	return 0, nil
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }

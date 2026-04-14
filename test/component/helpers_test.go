@@ -69,6 +69,8 @@ func (m *mockMySQL) SetSuperReadOnly(_ context.Context, on bool) error {
 	return nil
 }
 
+func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) { return 0, nil }
+
 func (m *mockMySQL) StopReplica(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -353,6 +355,8 @@ func (m *mockSidecarMySQL) SetSuperReadOnly(_ context.Context) error {
 	m.readOnly = true
 	return nil
 }
+
+func (m *mockSidecarMySQL) KillConnections(_ context.Context) (int, error) { return 0, nil }
 
 func (m *mockSidecarMySQL) isSuperReadOnly() bool {
 	m.mu.Lock()
