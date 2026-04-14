@@ -47,6 +47,10 @@ const (
 
 	specHashAnnotation = "shipstream.io/spec-hash"
 
+	// RecloneAnnotation is set by an admin to trigger a reclone of a
+	// specific site from the current primary via CLONE INSTANCE.
+	RecloneAnnotation = "bloodraven.shipstream.io/reclone-site"
+
 	mysqlPort   = 3306
 	sidecarPort = 8080
 )

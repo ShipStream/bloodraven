@@ -133,6 +133,10 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		if ok && existing.cfg == cfg {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
+			if recloneSite := fg.GetAnnotations()[RecloneAnnotation]; recloneSite != "" {
+				existing.tm.SetRecloneSite(recloneSite)
+				r.removeRecloneAnnotation(ctx, nn)
+			}
 			continue
 		}
 
@@ -150,6 +154,10 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RLock()
 		if mt, ok := r.managers[nn]; ok {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
+			if recloneSite := fg.GetAnnotations()[RecloneAnnotation]; recloneSite != "" {
+				mt.tm.SetRecloneSite(recloneSite)
+				r.removeRecloneAnnotation(ctx, nn)
+			}
 		}
 		r.mu.RUnlock()
 	}
@@ -166,6 +174,30 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	r.mu.Unlock()
 
 	return nil
+}
+
+// removeRecloneAnnotation removes the one-shot reclone annotation from the CR
+// after it has been passed to the topology manager.
+func (r *TopologyManagerRunner) removeRecloneAnnotation(ctx context.Context, nn types.NamespacedName) {
+	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+		var fresh v1alpha1.MysqlFailoverGroup
+		if err := r.client.Get(ctx, nn, &fresh); err != nil {
+			return err
+		}
+		annotations := fresh.GetAnnotations()
+		if annotations == nil {
+			return nil
+		}
+		if _, ok := annotations[RecloneAnnotation]; !ok {
+			return nil
+		}
+		delete(annotations, RecloneAnnotation)
+		fresh.SetAnnotations(annotations)
+		return r.client.Update(ctx, &fresh)
+	})
+	if err != nil {
+		r.logger.Error("failed to remove reclone annotation", "fg", nn, "error", err)
+	}
 }
 
 // startManager creates and starts a TopologyManager for a single MysqlFailoverGroup.
@@ -541,7 +573,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
 			Reason:             "DivergentTransactions",
-			Message:            fmt.Sprintf("Old primary %s has %d divergent transactions — must be wiped and re-cloned", snap.RecoverySite, snap.DivergentTxnCount),
+			Message:            fmt.Sprintf("Old primary %s has %d divergent transactions — annotate with bloodraven.shipstream.io/reclone-site=%s to recover", snap.RecoverySite, snap.DivergentTxnCount, snap.RecoverySite),
 		})
 	} else {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{

@@ -53,6 +53,12 @@ var (
 		Help: "Number of divergent transactions on a site pending recovery. 0 when healthy.",
 	}, []string{"site"})
 
+	// RecloneOperations counts admin-triggered reclone operations per site.
+	RecloneOperations = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_reclone_operations_total",
+		Help: "Total number of admin-triggered reclone operations per site.",
+	}, []string{"site"})
+
 	// --- Backup metrics ------------------------------------------------
 	//
 	// These five metrics are emitted exactly-once per terminal backup
@@ -109,7 +115,7 @@ var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {
 	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount,
-		ReplicationLag, ReplicationRunning, SiteState, DivergentTransactions,
+		ReplicationLag, ReplicationRunning, SiteState, DivergentTransactions, RecloneOperations,
 		BackupRunsTotal, BackupDurationSeconds,
 		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes)
 }

@@ -23,6 +23,8 @@ type mockMySQL struct {
 	promoted         bool
 	replicaStatusVal *mysql.ReplicaStatus
 	replicaStatusErr error
+	gtidExecuted     string
+	gtidExecutedErr  error
 }
 
 func (m *mockMySQL) CheckReadOnly(_ context.Context) (bool, error) {
@@ -63,7 +65,11 @@ func (m *mockMySQL) StartReplica(_ context.Context) error { return nil }
 func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
-func (m *mockMySQL) GetGtidExecuted(_ context.Context) (string, error) { return "", nil }
+func (m *mockMySQL) GetGtidExecuted(_ context.Context) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.gtidExecuted, m.gtidExecutedErr
+}
 func (m *mockMySQL) SetCloneDonorList(_ context.Context, _ string) error { return nil }
 func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return nil
@@ -93,6 +99,12 @@ func (m *mockMySQL) setError(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.err = err
+}
+
+func (m *mockMySQL) setGtidExecuted(gtid string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gtidExecuted = gtid
 }
 
 // --- Mock Tainter ---
@@ -178,6 +190,24 @@ func newTestTopologyManager(site0, site1 *mockMySQL) (*TopologyManager, *mockTai
 	fc := NewFailoverController(testLogger())
 	tm := NewTopologyManager(cfg, site0, site1, fc, nil, BootstrapConfig{}, tainter, hub, dns, testLogger())
 	// Use a very short cooldown for tests so failovers aren't blocked.
+	tm.failoverCooldown = 0
+	return tm, tainter, dns
+}
+
+func newTestTopologyManagerWithBootstrap(site0, site1 *mockMySQL) (*TopologyManager, *mockTainter, *mockDNS) {
+	cfg := testTopologyConfig()
+	cfg.SiteHosts = [2]string{"mysql-dc1", "mysql-dc2"}
+	tainter := newMockTainter()
+	hub := platform.NewHub(testLogger())
+	dns := &mockDNS{}
+	fc := NewFailoverController(testLogger())
+	bc := NewBootstrapController(testLogger())
+	bcfg := BootstrapConfig{
+		ReplUser:     "repl",
+		ReplPassword: "replpass",
+		CloneTimeout: 10 * time.Second,
+	}
+	tm := NewTopologyManager(cfg, site0, site1, fc, bc, bcfg, tainter, hub, dns, testLogger())
 	tm.failoverCooldown = 0
 	return tm, tainter, dns
 }
@@ -650,5 +680,249 @@ func TestAdaptivePollInterval(t *testing.T) {
 	tm.sites[0].failCount = 0
 	if got := tm.adaptivePollInterval(base); got != base {
 		t.Errorf("after recovery: expected %v, got %v", base, got)
+	}
+}
+
+// --- selectDonor tests ---
+
+func TestSelectDonor_Site0HasData(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa:1-100"}
+	site1 := &mockMySQL{readOnly: false}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	primary, replica, err := tm.selectDonor(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if primary != 0 || replica != 1 {
+		t.Errorf("expected donor=0 replica=1, got donor=%d replica=%d", primary, replica)
+	}
+}
+
+func TestSelectDonor_Site1HasData(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: false, gtidExecuted: "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb:1-50"}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	primary, replica, err := tm.selectDonor(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if primary != 1 || replica != 0 {
+		t.Errorf("expected donor=1 replica=0, got donor=%d replica=%d", primary, replica)
+	}
+}
+
+func TestSelectDonor_BothEmpty(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: false}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	primary, replica, err := tm.selectDonor(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if primary != 0 || replica != 1 {
+		t.Errorf("expected donor=0 replica=1 for both-empty, got donor=%d replica=%d", primary, replica)
+	}
+}
+
+func TestSelectDonor_BothHaveData(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-10"}
+	site1 := &mockMySQL{readOnly: false, gtidExecuted: "bbbb:1-10"}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	_, _, err := tm.selectDonor(context.Background())
+	if err == nil {
+		t.Fatal("expected error when both sites have data")
+	}
+}
+
+// --- detectEmptySite tests ---
+
+func TestDetectEmptySite_PostPVCWipe(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-100"}
+	site1 := &mockMySQL{readOnly: false} // empty after PVC wipe
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	// Must establish site states first.
+	pollN(tm, 2)
+
+	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
+	if donorIdx != 0 || emptyIdx != 1 {
+		t.Errorf("expected donor=0 empty=1, got donor=%d empty=%d", donorIdx, emptyIdx)
+	}
+}
+
+func TestDetectEmptySite_Site0Empty(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false} // empty
+	site1 := &mockMySQL{readOnly: false, gtidExecuted: "bbbb:1-50"}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	pollN(tm, 2)
+
+	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
+	if donorIdx != 1 || emptyIdx != 0 {
+		t.Errorf("expected donor=1 empty=0, got donor=%d empty=%d", donorIdx, emptyIdx)
+	}
+}
+
+func TestDetectEmptySite_BothHaveData(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-10"}
+	site1 := &mockMySQL{readOnly: false, gtidExecuted: "bbbb:1-10"}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	pollN(tm, 2)
+
+	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
+	if donorIdx != -1 || emptyIdx != -1 {
+		t.Errorf("expected -1,-1 when both have data, got %d,%d", donorIdx, emptyIdx)
+	}
+}
+
+func TestDetectEmptySite_SiteUnreachable(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-100"}
+	site1 := &mockMySQL{err: errors.New("down")}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	pollN(tm, 3) // reach failure threshold
+
+	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
+	if donorIdx != -1 || emptyIdx != -1 {
+		t.Errorf("expected -1,-1 when site unreachable, got %d,%d", donorIdx, emptyIdx)
+	}
+}
+
+// --- checkReclone tests ---
+
+func TestReclone_HappyPath(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	// Establish normal state.
+	pollN(tm, 2)
+
+	tm.SetRecloneSite("dc2")
+
+	recloneStarted := tm.checkReclone(context.Background())
+	if !recloneStarted {
+		t.Fatal("expected reclone to start")
+	}
+	if tm.BootstrapPhase() != BootstrapPhaseCloning {
+		t.Errorf("expected phase Cloning, got %q", tm.BootstrapPhase())
+	}
+	tm.mu.RLock()
+	src := tm.bootstrapSource
+	tm.mu.RUnlock()
+	if src != "reclone" {
+		t.Errorf("expected bootstrapSource=reclone, got %q", src)
+	}
+}
+
+func TestReclone_CannotReclonePrimary(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	pollN(tm, 2)
+
+	tm.SetRecloneSite("dc1") // dc1 is the writable primary
+
+	recloneStarted := tm.checkReclone(context.Background())
+	if recloneStarted {
+		t.Fatal("should not reclone the active primary")
+	}
+
+	// Pending should be cleared.
+	tm.mu.RLock()
+	pending := tm.reclonePendingSite
+	tm.mu.RUnlock()
+	if pending != "" {
+		t.Errorf("reclonePendingSite should be cleared, got %q", pending)
+	}
+}
+
+func TestReclone_ClearsRecoveryState(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	pollN(tm, 2)
+
+	// Simulate RecoveryBlocked state on dc2.
+	tm.mu.Lock()
+	tm.recoveryPendingSite = "dc2"
+	tm.recoveryDivergentGtid = "aaaa:50-55"
+	tm.recoveryDivergentCount = 6
+	tm.mu.Unlock()
+
+	tm.SetRecloneSite("dc2")
+	tm.checkReclone(context.Background())
+
+	tm.mu.RLock()
+	recoverySite := tm.recoveryPendingSite
+	divergentGtid := tm.recoveryDivergentGtid
+	divergentCount := tm.recoveryDivergentCount
+	tm.mu.RUnlock()
+
+	if recoverySite != "" {
+		t.Errorf("recoveryPendingSite should be cleared, got %q", recoverySite)
+	}
+	if divergentGtid != "" {
+		t.Errorf("recoveryDivergentGtid should be cleared, got %q", divergentGtid)
+	}
+	if divergentCount != 0 {
+		t.Errorf("recoveryDivergentCount should be 0, got %d", divergentCount)
+	}
+}
+
+func TestReclone_BlockedDuringBootstrap(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	pollN(tm, 2)
+
+	// Simulate an in-progress bootstrap.
+	tm.mu.Lock()
+	tm.bootstrapPhase = BootstrapPhaseCloning
+	tm.mu.Unlock()
+
+	tm.SetRecloneSite("dc2")
+
+	recloneStarted := tm.checkReclone(context.Background())
+	if recloneStarted {
+		t.Fatal("reclone should be deferred during active bootstrap")
+	}
+
+	// Pending should still be set (deferred, not cleared).
+	tm.mu.RLock()
+	pending := tm.reclonePendingSite
+	tm.mu.RUnlock()
+	if pending != "dc2" {
+		t.Errorf("reclonePendingSite should be preserved for retry, got %q", pending)
+	}
+}
+
+func TestReclone_UnknownSite(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
+	pollN(tm, 2)
+
+	tm.SetRecloneSite("nonexistent")
+
+	recloneStarted := tm.checkReclone(context.Background())
+	if recloneStarted {
+		t.Fatal("should not start reclone for unknown site")
+	}
+
+	tm.mu.RLock()
+	pending := tm.reclonePendingSite
+	tm.mu.RUnlock()
+	if pending != "" {
+		t.Errorf("reclonePendingSite should be cleared for unknown site, got %q", pending)
 	}
 }

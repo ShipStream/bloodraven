@@ -135,6 +135,16 @@ type TopologyManager struct {
 	bootstrapPhase BootstrapPhase
 	bootstrapErr   error
 
+	// bootstrapSource distinguishes fresh-deploy bootstrap from reclone
+	// for status reporting ("fresh-deploy", "auto-clone", or "reclone").
+	// Protected by mu.
+	bootstrapSource string
+
+	// reclonePendingSite is set by the runner when an admin annotation
+	// requests a reclone of a specific site. Processed during the next
+	// poll cycle then cleared. Protected by mu.
+	reclonePendingSite string
+
 	// autoBootstrapSuppressed is set by the runner while a one-shot
 	// initFromBackup restore is in flight. It prevents the fresh-deploy
 	// auto-clone path from racing the restore Job to populate the
@@ -425,6 +435,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// Check if old primary recovery is needed.
 	recoveryChanged := tm.checkRecovery(ctx, siteRepl)
 
+	// Process pending reclone annotation.
+	recloneStarted := tm.checkReclone(ctx)
+
 	// Emit replication metrics.
 	for i := range tm.sites {
 		name := tm.sites[i].name
@@ -453,7 +466,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 
 	// Notify the status callback on any state change or recovery event.
-	if (anyTransition || recoveryChanged) && tm.StatusCallback != nil {
+	if (anyTransition || recoveryChanged || recloneStarted) && tm.StatusCallback != nil {
 		tm.mu.RLock()
 		activeSite := tm.activeSiteLocked()
 		bootstrapPhase := string(tm.bootstrapPhase)
@@ -598,7 +611,8 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		return
 	}
 
-	// Detect fresh-deploy split-brain and auto-bootstrap the replica.
+	// Detect split-brain requiring auto-bootstrap: either one site is empty
+	// (post-PVC-wipe or new site) or both are empty (fresh deploy).
 	if action.SplitBrain && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
 		tm.mu.RLock()
 		phase := tm.bootstrapPhase
@@ -607,6 +621,10 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		if suppressed {
 			tm.logger.Info("auto-bootstrap suppressed (initFromBackup restore in flight)")
 		} else if phase == BootstrapPhaseNone || phase == BootstrapPhaseFailed {
+			if donorIdx, emptyIdx := tm.detectEmptySite(ctx); donorIdx >= 0 {
+				tm.startBootstrapWithIndices(ctx, donorIdx, emptyIdx, "auto-clone")
+				return
+			}
 			if tm.isFreshDeploy(ctx) {
 				tm.startBootstrap(ctx)
 				return
@@ -720,6 +738,15 @@ func (tm *TopologyManager) SetAutoBootstrapSuppressed(v bool) {
 	tm.mu.Unlock()
 }
 
+// SetRecloneSite requests that the given site be recloned from the current
+// primary. Called by the runner when it detects the reclone annotation.
+// The topology manager processes this during the next poll cycle.
+func (tm *TopologyManager) SetRecloneSite(site string) {
+	tm.mu.Lock()
+	tm.reclonePendingSite = site
+	tm.mu.Unlock()
+}
+
 // isBootstrapping reports whether an auto-bootstrap is currently running.
 func (tm *TopologyManager) isBootstrapping() bool {
 	tm.mu.RLock()
@@ -754,18 +781,110 @@ func (tm *TopologyManager) isFreshDeploy(ctx context.Context) bool {
 	return true
 }
 
-// startBootstrap kicks off the async bootstrap goroutine. Caller must hold no locks.
-// Site 0 (first in the spec) is chosen as the primary for fresh-deploy bootstrap.
-func (tm *TopologyManager) startBootstrap(ctx context.Context) {
-	primaryIdx := 0
-	replicaIdx := 1
+// detectEmptySite checks whether exactly one site has data and the other is
+// completely empty (empty GTID_EXECUTED, no replication configured). This
+// covers fresh deploys and post-PVC-wipe scenarios regardless of which site
+// index has data. Returns the donor and empty site indices, or (-1, -1) if
+// auto-clone should not happen.
+func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donorIdx, emptyIdx int) {
+	// Both sites must be reachable.
+	for i := range tm.sites {
+		if tm.sites[i].state == state.StateUnreachable || tm.sites[i].state == state.StateUnknown {
+			return -1, -1
+		}
+	}
 
+	var replStatus [2]*mysql.ReplicaStatus
+	var gtidSets [2]mysql.GTIDSet
+	for i := range tm.sites {
+		rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
+		if err != nil {
+			return -1, -1
+		}
+		replStatus[i] = rs
+
+		raw, err := tm.sites[i].mysql.GetGtidExecuted(ctx)
+		if err != nil {
+			return -1, -1
+		}
+		parsed, err := mysql.ParseGTIDSet(raw)
+		if err != nil {
+			return -1, -1
+		}
+		gtidSets[i] = parsed
+	}
+
+	for i := range tm.sites {
+		other := 1 - i
+		if gtidSets[i].IsEmpty() && replStatus[i] == nil &&
+			!gtidSets[other].IsEmpty() && tm.sites[i].state == state.StateWritable {
+			return other, i
+		}
+	}
+
+	return -1, -1
+}
+
+// selectDonor determines which site should be the clone donor (primary) and
+// which should be the recipient (replica) by comparing GTID_EXECUTED sets.
+// If one site has data and the other is empty, the non-empty site is the donor.
+// If both are empty (true fresh deploy), sites[0] is the donor by convention.
+// If both have data, an error is returned to prevent accidental data loss.
+func (tm *TopologyManager) selectDonor(ctx context.Context) (primaryIdx, replicaIdx int, err error) {
+	var gtids [2]mysql.GTIDSet
+	for i := range tm.sites {
+		raw, qErr := tm.sites[i].mysql.GetGtidExecuted(ctx)
+		if qErr != nil {
+			return 0, 0, fmt.Errorf("get GTID_EXECUTED for %s: %w", tm.sites[i].name, qErr)
+		}
+		parsed, pErr := mysql.ParseGTIDSet(raw)
+		if pErr != nil {
+			return 0, 0, fmt.Errorf("parse GTID_EXECUTED for %s: %w", tm.sites[i].name, pErr)
+		}
+		gtids[i] = parsed
+	}
+
+	switch {
+	case gtids[0].IsEmpty() && gtids[1].IsEmpty():
+		return 0, 1, nil
+	case !gtids[0].IsEmpty() && gtids[1].IsEmpty():
+		return 0, 1, nil
+	case gtids[0].IsEmpty() && !gtids[1].IsEmpty():
+		return 1, 0, nil
+	default:
+		return 0, 0, fmt.Errorf("both sites have data — cannot auto-clone (site %s GTID: %s, site %s GTID: %s)",
+			tm.sites[0].name, gtids[0], tm.sites[1].name, gtids[1])
+	}
+}
+
+// startBootstrap kicks off the async bootstrap goroutine using GTID-based
+// donor selection. Caller must hold no locks.
+func (tm *TopologyManager) startBootstrap(ctx context.Context) {
+	primaryIdx, replicaIdx, err := tm.selectDonor(ctx)
+	if err != nil {
+		tm.logger.Error("cannot determine clone donor", "error", err)
+		tm.mu.Lock()
+		tm.bootstrapPhase = BootstrapPhaseFailed
+		tm.bootstrapErr = err
+		tm.mu.Unlock()
+		tm.emitBootstrapStatus()
+		return
+	}
+	tm.startBootstrapWithIndices(ctx, primaryIdx, replicaIdx, "fresh-deploy")
+}
+
+// startBootstrapWithIndices kicks off the async bootstrap goroutine with
+// explicit donor/recipient indices and a source label for status reporting.
+// Caller must hold no locks.
+func (tm *TopologyManager) startBootstrapWithIndices(ctx context.Context, primaryIdx, replicaIdx int, source string) {
 	tm.mu.Lock()
 	tm.bootstrapPhase = BootstrapPhaseCloning
 	tm.bootstrapErr = nil
+	tm.bootstrapSource = source
 	tm.mu.Unlock()
 
-	tm.logger.Info("starting fresh-deploy bootstrap",
+	tm.logger.Info("starting bootstrap",
+		"source", source,
 		"primary", tm.sites[primaryIdx].name,
 		"replica", tm.sites[replicaIdx].name,
 		"primaryHost", tm.cfg.SiteHosts[primaryIdx])
@@ -778,10 +897,10 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 		if err != nil {
 			tm.bootstrapPhase = BootstrapPhaseFailed
 			tm.bootstrapErr = err
-			tm.logger.Error("bootstrap failed", "error", err)
+			tm.logger.Error("bootstrap failed", "source", source, "error", err)
 		} else {
 			tm.bootstrapPhase = BootstrapPhaseDone
-			tm.logger.Info("bootstrap completed successfully")
+			tm.logger.Info("bootstrap completed successfully", "source", source)
 		}
 		tm.mu.Unlock()
 		tm.emitBootstrapStatus()
@@ -1027,6 +1146,79 @@ func (tm *TopologyManager) executeRecovery(ctx context.Context, oldPrimaryIdx, n
 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
 	tm.logger.Info("old primary recovery complete — now replicating from new primary", "site", oldPrimary.name, "source", newPrimaryHost)
+}
+
+// checkReclone processes a pending reclone annotation. If a reclone was
+// requested for a specific site, validates preconditions and initiates the
+// bootstrap. Returns true if a reclone was started.
+func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
+	tm.mu.RLock()
+	site := tm.reclonePendingSite
+	tm.mu.RUnlock()
+
+	if site == "" {
+		return false
+	}
+
+	if tm.isBootstrapping() {
+		tm.logger.Info("reclone request deferred, bootstrap already in progress", "site", site)
+		return false
+	}
+
+	if tm.bootstrap == nil || tm.bootstrapCfg.ReplUser == "" {
+		tm.logger.Error("reclone requested but bootstrap is not configured (missing replication credentials)")
+		tm.mu.Lock()
+		tm.reclonePendingSite = ""
+		tm.mu.Unlock()
+		return false
+	}
+
+	primaryIdx := -1
+	recloneIdx := -1
+	for i := range tm.sites {
+		if tm.sites[i].state == state.StateWritable {
+			primaryIdx = i
+		}
+		if tm.sites[i].name == site {
+			recloneIdx = i
+		}
+	}
+
+	if recloneIdx == -1 {
+		tm.logger.Error("reclone requested for unknown site", "site", site)
+		tm.mu.Lock()
+		tm.reclonePendingSite = ""
+		tm.mu.Unlock()
+		return false
+	}
+
+	if primaryIdx == -1 {
+		tm.logger.Error("reclone requested but no writable primary found")
+		return false
+	}
+
+	if primaryIdx == recloneIdx {
+		tm.logger.Error("cannot reclone the active primary", "site", site)
+		tm.mu.Lock()
+		tm.reclonePendingSite = ""
+		tm.mu.Unlock()
+		return false
+	}
+
+	tm.mu.Lock()
+	tm.reclonePendingSite = ""
+	if tm.recoveryPendingSite == site {
+		tm.recoveryPendingSite = ""
+		tm.recoveryDivergentGtid = ""
+		tm.recoveryDivergentCount = 0
+	}
+	tm.mu.Unlock()
+
+	metrics.DivergentTransactions.WithLabelValues(site).Set(0)
+	metrics.RecloneOperations.WithLabelValues(site).Inc()
+
+	tm.startBootstrapWithIndices(ctx, primaryIdx, recloneIdx, "reclone")
+	return true
 }
 
 // emitBootstrapStatus notifies the runner that the bootstrap phase changed.
