@@ -743,10 +743,9 @@ func TestSelectDonor_BothHaveData(t *testing.T) {
 func TestDetectEmptySite_PostPVCWipe(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-100"}
 	site1 := &mockMySQL{readOnly: false} // empty after PVC wipe
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-
-	// Must establish site states first.
-	pollN(tm, 2)
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateWritable
 
 	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
 	if donorIdx != 0 || emptyIdx != 1 {
@@ -757,9 +756,9 @@ func TestDetectEmptySite_PostPVCWipe(t *testing.T) {
 func TestDetectEmptySite_Site0Empty(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false} // empty
 	site1 := &mockMySQL{readOnly: false, gtidExecuted: "bbbb:1-50"}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-
-	pollN(tm, 2)
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateWritable
 
 	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
 	if donorIdx != 1 || emptyIdx != 0 {
@@ -770,9 +769,9 @@ func TestDetectEmptySite_Site0Empty(t *testing.T) {
 func TestDetectEmptySite_BothHaveData(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-10"}
 	site1 := &mockMySQL{readOnly: false, gtidExecuted: "bbbb:1-10"}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-
-	pollN(tm, 2)
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateWritable
 
 	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
 	if donorIdx != -1 || emptyIdx != -1 {
@@ -783,13 +782,26 @@ func TestDetectEmptySite_BothHaveData(t *testing.T) {
 func TestDetectEmptySite_SiteUnreachable(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-100"}
 	site1 := &mockMySQL{err: errors.New("down")}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-
-	pollN(tm, 3) // reach failure threshold
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateUnreachable
 
 	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
 	if donorIdx != -1 || emptyIdx != -1 {
 		t.Errorf("expected -1,-1 when site unreachable, got %d,%d", donorIdx, emptyIdx)
+	}
+}
+
+func TestDetectEmptySite_EmptySiteReadOnly(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-100"}
+	site1 := &mockMySQL{readOnly: true} // empty but fenced by sidecar
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateReadOnly
+
+	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
+	if donorIdx != 0 || emptyIdx != 1 {
+		t.Errorf("expected donor=0 empty=1 (read-only empty site allowed), got donor=%d empty=%d", donorIdx, emptyIdx)
 	}
 }
 
