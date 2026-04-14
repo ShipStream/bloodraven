@@ -516,9 +516,6 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		})
 	}
 
-	// Emit Kubernetes Events on significant state transitions.
-	r.emitFailoverEvents(&freshFG, existingStatus, snap)
-
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
 	if equality.Semantic.DeepEqual(existingStatus, &freshFG.Status) {
 		r.logger.Debug("status unchanged, skipping update", "fg", nn)
@@ -540,7 +537,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			return
 		}
 		r.logger.Error("update fg status", "fg", nn, "error", err)
+		return
 	}
+
+	// Emit Kubernetes Events only after the status update succeeds,
+	// so events are not emitted for transitions that failed to persist.
+	r.emitFailoverEvents(&freshFG, existingStatus, snap)
 }
 
 // emitFailoverEvents fires Kubernetes Events when significant failover or
