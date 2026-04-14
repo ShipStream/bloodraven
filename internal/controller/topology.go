@@ -170,15 +170,19 @@ type TopologyManager struct {
 
 // SiteStatusEntry is a single site's status in the StatusResponse.
 type SiteStatusEntry struct {
-	Name  string `json:"name"`
-	State string `json:"state"`
+	Name                      string `json:"name"`
+	State                     string `json:"state"`
+	RecoveryState             string `json:"recovery_state,omitempty"`
+	DivergentGtid             string `json:"divergent_gtid,omitempty"`
+	DivergentTransactionCount *int64 `json:"divergent_transaction_count,omitempty"`
 }
 
 // StatusResponse is returned by the /status endpoint.
 type StatusResponse struct {
-	ActiveSite string             `json:"active_site"`
-	Sites      [2]SiteStatusEntry `json:"sites"`
-	PollTime   string             `json:"poll_time"`
+	ActiveSite            string             `json:"active_site"`
+	Sites                 [2]SiteStatusEntry `json:"sites"`
+	PollTime              string             `json:"poll_time"`
+	PromotionGtidExecuted string             `json:"promotion_gtid_executed,omitempty"`
 }
 
 func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
@@ -241,13 +245,26 @@ func (tm *TopologyManager) activeSiteLocked() string {
 func (tm *TopologyManager) Status() StatusResponse {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
+	var sites [2]SiteStatusEntry
+	for i := range tm.sites {
+		sites[i] = SiteStatusEntry{
+			Name:  tm.sites[i].name,
+			State: tm.sites[i].state.String(),
+		}
+		if tm.recoveryPendingSite == tm.sites[i].name {
+			sites[i].RecoveryState = tm.recoveryStateLocked()
+			sites[i].DivergentGtid = tm.recoveryDivergentGtid
+			if tm.recoveryDivergentCount > 0 {
+				c := tm.recoveryDivergentCount
+				sites[i].DivergentTransactionCount = &c
+			}
+		}
+	}
 	return StatusResponse{
-		ActiveSite: tm.activeSiteLocked(),
-		Sites: [2]SiteStatusEntry{
-			{Name: tm.sites[0].name, State: tm.sites[0].state.String()},
-			{Name: tm.sites[1].name, State: tm.sites[1].state.String()},
-		},
-		PollTime: tm.lastPollTime.Format(time.RFC3339),
+		ActiveSite:            tm.activeSiteLocked(),
+		Sites:                 sites,
+		PollTime:              tm.lastPollTime.Format(time.RFC3339),
+		PromotionGtidExecuted: tm.promotionGtidExecuted,
 	}
 }
 
@@ -525,17 +542,26 @@ func (tm *TopologyManager) broadcastTopology(siteRepl [2]*mysql.ReplicaStatus, a
 			s.SecondsBehindSource = siteRepl[i].SecondsBehindSource
 			s.GtidExecuted = siteRepl[i].ExecutedGtidSet
 		}
+		if tm.recoveryPendingSite == tm.sites[i].name {
+			s.RecoveryState = tm.recoveryStateLocked()
+			s.DivergentGtid = tm.recoveryDivergentGtid
+			if tm.recoveryDivergentCount > 0 {
+				c := tm.recoveryDivergentCount
+				s.DivergentTransactionCount = &c
+			}
+		}
 		sites = append(sites, s)
 	}
 
 	msg := platform.TopologyMessage{
-		Namespace:          tm.cfg.Namespace,
-		Group:              tm.cfg.Name,
-		ActiveSite:         tm.activeSiteLocked(),
-		Sites:              sites,
-		LastFailoverTarget: tm.lastFailoverTarget,
-		Alert:              alertMsg,
-		PollTime:           tm.lastPollTime.Format(time.RFC3339),
+		Namespace:             tm.cfg.Namespace,
+		Group:                 tm.cfg.Name,
+		ActiveSite:            tm.activeSiteLocked(),
+		Sites:                 sites,
+		LastFailoverTarget:    tm.lastFailoverTarget,
+		Alert:                 alertMsg,
+		PollTime:              tm.lastPollTime.Format(time.RFC3339),
+		PromotionGtidExecuted: tm.promotionGtidExecuted,
 	}
 	if !tm.lastFailover.IsZero() {
 		msg.LastFailover = tm.lastFailover.Format(time.RFC3339)
@@ -679,6 +705,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				tm.logger.Error("failover failed", "error", err)
 				return
 			}
+			metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
 			tm.promotionGtidExecuted = promotionGtid
 			tm.promotedSite = candidate.name
 			tm.lastFailover = tm.clock.Now()

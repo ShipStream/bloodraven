@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	k8sretry "k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -39,6 +40,7 @@ type TopologyManagerRunner struct {
 	client    client.Client
 	clientset kubernetes.Interface
 	hub       *platform.Hub
+	recorder  record.EventRecorder
 	logger    *slog.Logger
 
 	mu       sync.RWMutex
@@ -46,11 +48,12 @@ type TopologyManagerRunner struct {
 }
 
 // NewTopologyManagerRunner creates a new runner.
-func NewTopologyManagerRunner(c client.Client, clientset kubernetes.Interface, hub *platform.Hub, logger *slog.Logger) *TopologyManagerRunner {
+func NewTopologyManagerRunner(c client.Client, clientset kubernetes.Interface, hub *platform.Hub, recorder record.EventRecorder, logger *slog.Logger) *TopologyManagerRunner {
 	return &TopologyManagerRunner{
 		client:    c,
 		clientset: clientset,
 		hub:       hub,
+		recorder:  recorder,
 		logger:    logger,
 		managers:  make(map[types.NamespacedName]*managedTopology),
 	}
@@ -607,6 +610,50 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			return
 		}
 		r.logger.Error("update fg status", "fg", nn, "error", err)
+		return
+	}
+
+	// Emit Kubernetes Events only after the status update succeeds,
+	// so events are not emitted for transitions that failed to persist.
+	r.emitFailoverEvents(&freshFG, existingStatus, snap)
+}
+
+// emitFailoverEvents fires Kubernetes Events when significant failover or
+// recovery state transitions occur. It compares the existing persisted status
+// against the snapshot being written to detect one-shot transitions.
+func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGroup, existingStatus *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) {
+	if r.recorder == nil {
+		return
+	}
+
+	// Failover executed: new failover target differs from previously persisted target.
+	if snap.LastFailoverTarget != "" && snap.LastFailoverTarget != existingStatus.LastFailoverTarget {
+		r.recorder.Eventf(fg, corev1.EventTypeNormal, "FailoverExecuted",
+			"Failover completed: %s promoted as new primary", snap.LastFailoverTarget)
+	}
+
+	// Data loss detected: RecoveryBlocked appeared where it wasn't before.
+	oldBlocked := false
+	var oldBlockedSite string
+	for _, s := range existingStatus.Sites {
+		if s.RecoveryState == "RecoveryBlocked" {
+			oldBlocked = true
+			oldBlockedSite = s.Name
+			break
+		}
+	}
+	newBlocked := snap.RecoveryState == "RecoveryBlocked"
+
+	if newBlocked && !oldBlocked {
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, "DataLossDetected",
+			"%d divergent transactions on %s did not replicate before failover",
+			snap.DivergentTxnCount, snap.RecoverySite)
+	}
+
+	// Recovery complete: RecoveryBlocked cleared.
+	if oldBlocked && !newBlocked {
+		r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecoveryComplete",
+			"Old primary %s recovered and is now replicating", oldBlockedSite)
 	}
 }
 

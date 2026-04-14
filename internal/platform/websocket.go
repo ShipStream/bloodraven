@@ -13,25 +13,29 @@ import (
 // current state of a single failover group. It is sent to all connected
 // /ws/status clients on every poll cycle.
 type TopologyMessage struct {
-	Namespace          string         `json:"namespace"`
-	Group              string         `json:"group"`
-	ActiveSite         string         `json:"activeSite"`
-	Sites              []TopologySite `json:"sites"`
-	LastFailover       string         `json:"lastFailover,omitempty"`
-	LastFailoverTarget string         `json:"lastFailoverTarget,omitempty"`
-	Alert              string         `json:"alert,omitempty"`
-	UpdatePhase        string         `json:"updatePhase,omitempty"`
-	PollTime           string         `json:"pollTime"`
+	Namespace             string         `json:"namespace"`
+	Group                 string         `json:"group"`
+	ActiveSite            string         `json:"activeSite"`
+	Sites                 []TopologySite `json:"sites"`
+	LastFailover          string         `json:"lastFailover,omitempty"`
+	LastFailoverTarget    string         `json:"lastFailoverTarget,omitempty"`
+	Alert                 string         `json:"alert,omitempty"`
+	UpdatePhase           string         `json:"updatePhase,omitempty"`
+	PollTime              string         `json:"pollTime"`
+	PromotionGtidExecuted string         `json:"promotionGtidExecuted,omitempty"`
 }
 
 // TopologySite is a single site entry inside a TopologyMessage.
 type TopologySite struct {
-	Name                string `json:"name"`
-	State               string `json:"state"`
-	LastSeen            string `json:"lastSeen,omitempty"`
-	Replicating         bool   `json:"replicating"`
-	SecondsBehindSource *int64 `json:"secondsBehindSource,omitempty"`
-	GtidExecuted        string `json:"gtidExecuted,omitempty"`
+	Name                      string `json:"name"`
+	State                     string `json:"state"`
+	LastSeen                  string `json:"lastSeen,omitempty"`
+	Replicating               bool   `json:"replicating"`
+	SecondsBehindSource       *int64 `json:"secondsBehindSource,omitempty"`
+	GtidExecuted              string `json:"gtidExecuted,omitempty"`
+	RecoveryState             string `json:"recoveryState,omitempty"`
+	DivergentGtid             string `json:"divergentGtid,omitempty"`
+	DivergentTransactionCount *int64 `json:"divergentTransactionCount,omitempty"`
 }
 
 // Hub manages websocket connections and broadcasts state changes.

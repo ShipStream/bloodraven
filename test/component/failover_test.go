@@ -3,6 +3,9 @@ package component
 import (
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/shipstream/bloodraven/internal/metrics"
 )
 
 func TestFailover_DC1Down_PromoteDC2(t *testing.T) {
@@ -192,5 +195,41 @@ func TestFailover_DNSFlipsOnlyOnce(t *testing.T) {
 	calls := h.dns.getCalls()
 	if calls != 1 {
 		t.Errorf("DNS should flip exactly once, got %d calls", calls)
+	}
+}
+
+func TestFailover_FailoversTotalMetric(t *testing.T) {
+	h := newTestHarness(t) // dc1 writable, dc2 read-only
+
+	before := testutil.ToFloat64(metrics.FailoversTotal.WithLabelValues("dc2"))
+
+	// Establish normal.
+	h.pollN(2)
+
+	// DC1 down, trigger failover.
+	h.dc1MySQL.setError(errDown)
+	h.pollN(3)
+
+	after := testutil.ToFloat64(metrics.FailoversTotal.WithLabelValues("dc2"))
+	if after-before != 1 {
+		t.Errorf("expected FailoversTotal for dc2 to increment by 1, got delta %v", after-before)
+	}
+}
+
+func TestFailover_PromotionGtidInStatus(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-10"}
+	dc2 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-10"}
+	h := newTestHarnessWithMySQL(t, dc1, dc2)
+
+	// Establish normal.
+	h.pollN(2)
+
+	// DC1 down, trigger failover.
+	dc1.setError(errDown)
+	h.pollN(3) // failover
+
+	s := h.tm.Status()
+	if s.PromotionGtidExecuted == "" {
+		t.Error("expected PromotionGtidExecuted to be populated after failover")
 	}
 }
