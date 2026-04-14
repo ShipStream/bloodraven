@@ -81,8 +81,9 @@ type TopologySnapshot struct {
 	LastFailoverTarget string
 	Alert              string // non-empty if a cross-site alert fired this cycle
 	UpdatePhase        string // non-empty if an ordered update is in progress
-	BootstrapPhase     string // non-empty if a fresh-deploy bootstrap is in progress or finished
-	BootstrapError     string // non-empty if bootstrap failed
+	BootstrapPhase  string // non-empty if a fresh-deploy bootstrap is in progress or finished
+	BootstrapError  string // non-empty if bootstrap failed
+	BootstrapSource string // "fresh-deploy", "auto-clone", or "reclone"
 
 	PromotionGtidExecuted string // GTID set at the moment of the most recent promotion
 	RecoverySite          string // site name when recovery is blocked due to divergence
@@ -135,9 +136,9 @@ type TopologyManager struct {
 	bootstrapPhase BootstrapPhase
 	bootstrapErr   error
 
-	// bootstrapSource distinguishes fresh-deploy bootstrap from reclone
-	// for status reporting ("fresh-deploy", "auto-clone", or "reclone").
-	// Protected by mu.
+	// bootstrapSource records how the current bootstrap was initiated
+	// ("fresh-deploy", "auto-clone", or "reclone"). Propagated through
+	// BootstrapStatusCallback into condition messages. Protected by mu.
 	bootstrapSource string
 
 	// reclonePendingSite is set by the runner when an admin annotation
@@ -160,7 +161,7 @@ type TopologyManager struct {
 	// Bootstrapping condition so that unrelated conditions (Degraded,
 	// ReplicationBroken, Updating, ...) are not inadvertently cleared by a
 	// partially-populated TopologySnapshot during an async bootstrap run.
-	BootstrapStatusCallback func(phase, errMsg string)
+	BootstrapStatusCallback func(phase, errMsg, source string)
 
 	mu           sync.RWMutex
 	lastPollTime time.Time
@@ -455,6 +456,22 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// Process pending reclone annotation.
 	recloneStarted := tm.checkReclone(ctx)
 
+	// Auto-clone an empty site even when it's not a split-brain (e.g. the
+	// sidecar fenced the empty site to read-only after a PVC wipe).
+	autoCloneStarted := false
+	if !recloneStarted && !tm.isBootstrapping() && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
+		tm.mu.RLock()
+		suppressed := tm.autoBootstrapSuppressed
+		phase := tm.bootstrapPhase
+		tm.mu.RUnlock()
+		if !suppressed && (phase == BootstrapPhaseNone || phase == BootstrapPhaseFailed) {
+			if donorIdx, emptyIdx := tm.detectEmptySite(ctx); donorIdx >= 0 {
+				tm.startBootstrapWithIndices(ctx, donorIdx, emptyIdx, "auto-clone")
+				autoCloneStarted = true
+			}
+		}
+	}
+
 	// Emit replication metrics.
 	for i := range tm.sites {
 		name := tm.sites[i].name
@@ -483,7 +500,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 
 	// Notify the status callback on any state change or recovery event.
-	if (anyTransition || recoveryChanged || recloneStarted) && tm.StatusCallback != nil {
+	if (anyTransition || recoveryChanged || recloneStarted || autoCloneStarted) && tm.StatusCallback != nil {
 		tm.mu.RLock()
 		activeSite := tm.activeSiteLocked()
 		bootstrapPhase := string(tm.bootstrapPhase)
@@ -491,6 +508,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		if tm.bootstrapErr != nil {
 			bootstrapErrStr = tm.bootstrapErr.Error()
 		}
+		bootstrapSrc := tm.bootstrapSource
 		recoverySite := tm.recoveryPendingSite
 		recoveryState := tm.recoveryStateLocked()
 		divergentGtid := tm.recoveryDivergentGtid
@@ -506,8 +524,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 			LastFailover:       tm.lastFailover,
 			LastFailoverTarget: tm.lastFailoverTarget,
 			Alert:              alertMsg,
-			BootstrapPhase:     bootstrapPhase,
-			BootstrapError:     bootstrapErrStr,
+			BootstrapPhase:  bootstrapPhase,
+			BootstrapError:  bootstrapErrStr,
+			BootstrapSource: bootstrapSrc,
 
 			PromotionGtidExecuted: promotionGtid,
 			RecoverySite:          recoverySite,
@@ -843,8 +862,11 @@ func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donorIdx, empty
 
 	for i := range tm.sites {
 		other := 1 - i
+		emptyReachable := tm.sites[i].state == state.StateWritable || tm.sites[i].state == state.StateReadOnly
 		if gtidSets[i].IsEmpty() && replStatus[i] == nil &&
-			!gtidSets[other].IsEmpty() && tm.sites[i].state == state.StateWritable {
+			!gtidSets[other].IsEmpty() &&
+			tm.sites[other].state == state.StateWritable &&
+			emptyReachable {
 			return other, i
 		}
 	}
@@ -1263,6 +1285,7 @@ func (tm *TopologyManager) emitBootstrapStatus() {
 	if tm.bootstrapErr != nil {
 		errMsg = tm.bootstrapErr.Error()
 	}
+	source := tm.bootstrapSource
 	tm.mu.RUnlock()
-	tm.BootstrapStatusCallback(phase, errMsg)
+	tm.BootstrapStatusCallback(phase, errMsg, source)
 }

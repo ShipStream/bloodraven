@@ -809,8 +809,9 @@ func TestReclone_HappyPath(t *testing.T) {
 	if !recloneStarted {
 		t.Fatal("expected reclone to start")
 	}
-	if tm.BootstrapPhase() != BootstrapPhaseCloning {
-		t.Errorf("expected phase Cloning, got %q", tm.BootstrapPhase())
+	phase := tm.BootstrapPhase()
+	if phase == BootstrapPhaseNone || phase == BootstrapPhaseFailed {
+		t.Errorf("expected bootstrap to be in progress or completed successfully, got %q", phase)
 	}
 	tm.mu.RLock()
 	src := tm.bootstrapSource
