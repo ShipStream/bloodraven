@@ -13,7 +13,7 @@ Run commands from the repository root:
 - `make lint` runs `golangci-lint run ./...`. `golangci-lint` is not vendored; install it with `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest` (it lands in `$(go env GOPATH)/bin`). CI installs the same tool with the same command in `.github/workflows/ci.yml`, so local and CI output match when you run this.
 - `make generate` refreshes API deep-copy code in `api/v1alpha1`.
 - `make manifests` generates CRD and RBAC output under `config/`.
-- `docker build --target bloodraven -t bloodraven .` and `docker build --target sidecar -t bloodraven-sidecar .` build container images.
+- `podman build --target bloodraven -t bloodraven .` and `podman build --target sidecar -t bloodraven-sidecar .` build container images (docker works too, but podman is preferred since it runs rootless without a daemon).
 
 ## Coding Style & Naming Conventions
 Use standard Go formatting: run `gofmt` on changed files and keep imports organized. Follow existing package boundaries and keep Kubernetes-facing types explicit and stable. Exported names use `CamelCase`; unexported helpers use `camelCase`; tests follow `TestXxx`. Prefer descriptive file names like `failover.go`, `fencing.go`, and `matrix_test.go` that match one responsibility.
@@ -33,6 +33,24 @@ Before pushing a branch that opens or updates a PR, run all of the following fro
 
 ## Commit & Pull Request Guidelines
 Recent history uses short, imperative subjects such as `Upgrade mysql-watcher to Bloodraven MySQL operator`. Keep commit titles concise and action-oriented. PRs should explain the operational impact, note any CRD, failover, or sidecar behavior changes, link the relevant issue, and include logs, manifests, or screenshots when changing observable cluster behavior.
+
+## Playground
+The `playground/` directory deploys a complete Bloodraven environment into a local multi-node Kubernetes cluster (k3d recommended). It includes a two-site MySQL cluster, real-time dashboard, counter app, and chaos tools for triggering failovers. All scripts auto-detect podman or docker (preferring podman) and the cluster tool (k3d, kind, or minikube).
+
+Key scripts (run from repo root):
+- `./playground/setup.sh` — builds images, installs CRDs, deploys everything. Takes ~2 minutes.
+- `./playground/rebuild.sh [component ...]` — rebuilds images and restarts deployments after code changes. Components: `operator`, `sidecar`, `counter`, `dashboard`, `dns-webhook`.
+- `./playground/chaos.sh <action> [site]` — triggers failover scenarios: `kill-site iad`, `cordon pdx`, `network-partition iad`, `recover`.
+- `./playground/teardown.sh` — removes all playground resources, leaves the cluster intact.
+- `./playground/reset-mysql.sh` — wipes MySQL data and PVCs without full teardown.
+
+Access apps after setup:
+```
+kubectl -n bloodraven-playground port-forward svc/dashboard 8091:8091
+kubectl -n bloodraven-playground port-forward svc/counter-app 8090:8090
+```
+
+Full documentation: `docs/docs/playground.mdx`.
 
 ## Architecture & Configuration Notes
 This project is a Go 1.25 Kubernetes operator built around a single custom resource and two binaries. When making material changes to reconciliation, failover, CRD types, sidecar behavior, or deployment model, update the relevant documentation in `docs/` to keep code and docs aligned.
