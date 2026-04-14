@@ -63,6 +63,13 @@ else
 fi
 info "Using container runtime: $RUNTIME"
 
+# Podman stores images with a localhost/ prefix that persists through k3d import.
+# All image references must include this prefix when podman is the runtime.
+IMG_PREFIX=""
+if [[ "$RUNTIME" == "podman" ]]; then
+  IMG_PREFIX="localhost/"
+fi
+
 kubectl cluster-info >/dev/null 2>&1 || fail "No Kubernetes cluster reachable. Set up a cluster first (see script header)."
 
 # ── 1. Verify at least 2 nodes ───────────────────────────────────────────
@@ -224,14 +231,15 @@ else
   warn "No default StorageClass found — applying storageclass.yaml as-is (rancher.io/local-path)"
   kubectl apply -f "$SCRIPT_DIR/manifests/storageclass.yaml"
 fi
-kubectl apply -f "$SCRIPT_DIR/manifests/external-dns.yaml"
+sed "s|image: bloodraven-dns-webhook|image: ${IMG_PREFIX}bloodraven-dns-webhook|" \
+  "$SCRIPT_DIR/manifests/external-dns.yaml" | kubectl apply -f -
 kubectl apply -f "$SCRIPT_DIR/manifests/dashboard-rbac.yaml"
 
 # ── 8. Deploy the operator via Helm ──────────────────────────────────────
 info "Deploying Bloodraven operator via Helm..."
 helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --namespace "$NAMESPACE" \
-  --set image.repository=bloodraven \
+  --set image.repository="${IMG_PREFIX}bloodraven" \
   --set image.tag=playground \
   --set image.pullPolicy=Never \
   --set installCRDs=false \
@@ -249,18 +257,53 @@ ok "Operator deployed"
 
 # ── 9. Deploy the MysqlFailoverGroup CR ──────────────────────────────────
 info "Creating MysqlFailoverGroup CR..."
-kubectl apply -f "$SCRIPT_DIR/manifests/failovergroup.yaml"
+sed "s|sidecarImage: bloodraven-sidecar|sidecarImage: ${IMG_PREFIX}bloodraven-sidecar|" \
+  "$SCRIPT_DIR/manifests/failovergroup.yaml" | kubectl apply -f -
 
 info "Seeding DNSEndpoint CR (so external-dns chain works immediately)..."
 kubectl apply -f "$SCRIPT_DIR/manifests/dnsendpoint-seed.yaml"
 
 # ── 10. Deploy counter app and dashboard ─────────────────────────────────
 info "Deploying counter app and dashboard..."
-kubectl apply -f "$SCRIPT_DIR/manifests/counter-app.yaml"
-kubectl apply -f "$SCRIPT_DIR/manifests/dashboard.yaml"
+sed "s|image: bloodraven-counter|image: ${IMG_PREFIX}bloodraven-counter|" \
+  "$SCRIPT_DIR/manifests/counter-app.yaml" | kubectl apply -f -
+sed "s|image: bloodraven-dashboard|image: ${IMG_PREFIX}bloodraven-dashboard|" \
+  "$SCRIPT_DIR/manifests/dashboard.yaml" | kubectl apply -f -
 
-# ── 11. Wait and print access info ──────────────────────────────────────
-info "Waiting for pods to become ready (this may take a minute)..."
+# ── 11. Wait for MySQL pods and create replication user ─────────────────
+info "Waiting for MySQL pods to become ready (this may take a few minutes)..."
+for i in $(seq 1 36); do
+  # Clear taints each iteration — operator may apply them before pods are ready
+  for node in $(kubectl get nodes -o name 2>/dev/null); do
+    kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
+  done
+  READY=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=mysql \
+    -o jsonpath='{range .items[*]}{.status.containerStatuses[*].ready}{"\n"}{end}' 2>/dev/null \
+    | grep -c "true true" || true)
+  if [[ "$READY" -ge 2 ]]; then
+    ok "Both MySQL pods are ready"
+    break
+  fi
+  if [[ "$i" -eq 36 ]]; then
+    warn "Timed out waiting for MySQL pods — replication user may need manual creation"
+  fi
+  sleep 5
+done
+
+info "Creating replication user on both MySQL sites..."
+REPL_USER=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_USER}' | base64 -d)
+REPL_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_PASSWORD}' | base64 -d)
+ROOT_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | base64 -d)
+for site in iad pdx; do
+  kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+    mysql "-uroot" "-p${ROOT_PASS}" -e \
+    "CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
+     GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
+     FLUSH PRIVILEGES;" 2>/dev/null && ok "Replication user created on $site" || warn "Failed to create replication user on $site"
+done
+
+# ── 12. Wait for remaining pods and print access info ───────────────────
+info "Waiting for remaining pods..."
 kubectl -n "$NAMESPACE" wait --for=condition=available deployment/external-dns --timeout=120s 2>/dev/null || true
 kubectl -n "$NAMESPACE" wait --for=condition=available deployment/dashboard --timeout=120s 2>/dev/null || true
 

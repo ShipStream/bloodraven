@@ -20,6 +20,11 @@ else
   RUNTIME=""
 fi
 
+# ── 0. Scale operator to zero to prevent taint/PVC race ──────────────────
+info "Scaling operator to zero (prevents taint race during reset)..."
+kubectl -n "$NAMESPACE" scale deployment bloodraven --replicas=0 2>/dev/null || true
+kubectl -n "$NAMESPACE" wait --for=delete pod -l app.kubernetes.io/name=bloodraven --timeout=30s 2>/dev/null || true
+
 # ── 1. Scale down MySQL to release PVC references ─────────────────────────
 info "Scaling down MySQL deployments..."
 kubectl -n "$NAMESPACE" scale deployment mysql-playground-iad mysql-playground-pdx --replicas=0 2>/dev/null || true
@@ -79,7 +84,7 @@ info "Reapplying mysql-secret..."
 kubectl apply -f "$SCRIPT_DIR/manifests/mysql-secret.yaml"
 
 # ── 6. Scale back up ─────────────────────────────────────────────────────
-# Remove taints again right before scale-up (operator may have reapplied them)
+# Remove taints before scale-up (operator is still at zero, so they won't reappear)
 for node in $(kubectl get nodes -o name); do
   kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
 done
@@ -112,14 +117,35 @@ done
 # ── 8. Verify data directory is populated ─────────────────────────────────
 echo ""
 for site in iad pdx; do
-  FILES=$(kubectl -n "$NAMESPACE" exec -l "app.kubernetes.io/name=mysql,shipstream.io/site=$site" \
-    -c mysql -- ls /var/lib/mysql/ 2>/dev/null | wc -w || echo "0")
+  FILES=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" \
+    -c mysql -- ls /var/lib/mysql/ 2>/dev/null | wc -l)
   if [[ "$FILES" -gt 0 ]]; then
     ok "$site: data directory has $FILES entries"
   else
     warn "$site: data directory is EMPTY — MySQL may not have initialized properly"
   fi
 done
+
+# ── 9. Create replication user ────────────────────────────────────────────
+info "Creating replication user on both MySQL sites..."
+REPL_USER=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_USER}' 2>/dev/null | base64 -d)
+REPL_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_PASSWORD}' 2>/dev/null | base64 -d)
+ROOT_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' 2>/dev/null | base64 -d)
+if [[ -n "$REPL_USER" && -n "$ROOT_PASS" ]]; then
+  for site in iad pdx; do
+    kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+      mysql "-uroot" "-p${ROOT_PASS}" -e \
+      "CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
+       GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
+       FLUSH PRIVILEGES;" 2>/dev/null && ok "Replication user created on $site" || warn "Failed to create replication user on $site"
+  done
+fi
+
+# ── 10. Scale operator back up ────────────────────────────────────────────
+info "Scaling operator back up..."
+kubectl -n "$NAMESPACE" scale deployment bloodraven --replicas=1
+kubectl -n "$NAMESPACE" rollout status deployment/bloodraven --timeout=60s 2>/dev/null || true
+ok "Operator running"
 
 echo ""
 kubectl -n "$NAMESPACE" get pods -o wide -l app.kubernetes.io/name=mysql

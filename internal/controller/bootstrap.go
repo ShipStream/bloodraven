@@ -46,7 +46,15 @@ func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts Bootstr
 		return fmt.Errorf("set clone donor list: %w", err)
 	}
 
-	// Step 3: Clone from primary (this may take a long time)
+	// Step 3: Kill other connections on the replica so CLONE's DROP DATA
+	// phase can proceed without waiting on open table handles.
+	if killed, err := opts.Replica.KillAppConnections(ctx); err != nil {
+		b.logger.Warn("failed to kill connections before clone", "error", err)
+	} else if killed > 0 {
+		b.logger.Info("killed connections before clone", "count", killed)
+	}
+
+	// Step 4: Clone from primary (this may take a long time)
 	b.logger.Info("cloning from primary", "donor", opts.PrimaryHost)
 	cloneTimeout := opts.CloneTimeout
 	if cloneTimeout <= 0 {

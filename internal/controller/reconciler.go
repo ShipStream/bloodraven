@@ -921,7 +921,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 						Image: image,
 						Command: []string{
 							"sh", "-c",
-							fmt.Sprintf("cp /etc/mysql/config-map/* /etc/mysql/conf.d/ && echo '[mysqld]\\nserver-id=%d' > /etc/mysql/conf.d/server-id.cnf", serverID),
+							fmt.Sprintf("cp /etc/mysql/config-map/* /etc/mysql/conf.d/ && printf '[mysqld]\\nserver-id=%d\\n' > /etc/mysql/conf.d/server-id.cnf", serverID),
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "config", MountPath: "/etc/mysql/config-map"},

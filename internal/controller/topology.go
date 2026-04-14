@@ -897,6 +897,10 @@ func isCloneConnectionDrop(err error) bool {
 		"EOF",
 		"bad connection",
 		"Lost connection",
+		// Error 3707: mysqld is not managed by a supervisor process (e.g. Docker
+		// without mysqld_safe). The clone data transfer succeeded but the
+		// automatic restart failed — Kubernetes will restart the container.
+		"Restart server failed",
 	} {
 		if strings.Contains(msg, needle) {
 			return true
