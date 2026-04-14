@@ -158,6 +158,18 @@ This follows the same update strategy as MySQL image changes.
 
 ## Rotating MySQL credentials
 
+### Credentials mode (`spec.credentials`)
+
+When using per-role credential secrets, rotation is fully automated:
+
+1. Update the `password` value in the relevant Kubernetes Secret (e.g. `mysql-operator-creds`)
+2. The operator detects the change, connects to the primary, and runs `ALTER USER` to update the MySQL password
+3. Pods are rolling-restarted to pick up the new credentials from the updated Secret
+
+No manual MySQL commands or operator restarts are needed.
+
+### Legacy mode (`spec.secretName`)
+
 1. Update the password on both MySQL instances directly
 2. Update the Kubernetes Secret referenced by `spec.secretName`
 3. Restart the operator to pick up the new credentials (or wait for the Secret to be reloaded, depending on your Secret mounting configuration)

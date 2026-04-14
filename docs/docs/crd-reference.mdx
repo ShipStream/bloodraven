@@ -15,7 +15,8 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 | `image` | string | Yes | -- | MySQL container image (e.g. `mysql:9.6`) |
 | `sidecarImage` | string | Yes | -- | Bloodraven sidecar container image |
 | `sites` | []SiteSpec | Yes | -- | Exactly two site definitions |
-| `secretName` | string | Yes | -- | Name of the Secret containing MySQL credentials (key: `dsn`) |
+| `secretName` | string | No | -- | **(Legacy)** Name of the Secret containing MySQL credentials (key: `dsn`). Mutually exclusive with `credentials`. |
+| `credentials` | CredentialsSpec | No | -- | Per-role MySQL credential management. The operator creates MySQL users with role-appropriate privileges and rotates passwords when secrets change. Mutually exclusive with `secretName`. |
 | `dns` | DNSSpec | Yes | -- | DNS configuration for traffic steering via external-dns |
 | `tls` | TLSSpec | No | -- | TLS configuration (cert-manager integration) |
 | `pollInterval` | duration | No | `2s` | How often the operator polls each MySQL instance |
@@ -85,6 +86,18 @@ Each entry in `spec.sites` defines one site in the failover group.
 |---|---|---|---|
 | `type` | string | No | Kubernetes Service type: `ClusterIP` (default), `LoadBalancer`, or `NodePort` |
 | `annotations` | map[string]string | No | Additional annotations applied to every Service managed by the operator |
+
+### CredentialsSpec
+
+Exactly one of `secretName` or `credentials` must be set. When `credentials` is used, the operator manages MySQL users on the primary — creating them during first boot via an init script and updating passwords via `ALTER USER` when the referenced Secrets change.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `operatorSecret` | string | Yes | Secret for operator and sidecar connections. Required keys: `username`, `password`, `MYSQL_ROOT_PASSWORD`. Optional: `MYSQL_REPLICATION_USER`, `MYSQL_REPLICATION_PASSWORD` (default to operator credentials). Grants: `ALL PRIVILEGES WITH GRANT OPTION`. |
+| `appSecret` | string | No | Secret for application read-write connections. Keys: `username`, `password`. Grants: `ALL PRIVILEGES` (no `GRANT OPTION`, no `SUPER`). |
+| `readOnlySecret` | string | No | Secret for application read-only connections. Keys: `username`, `password`. Grants: `SELECT`, `SHOW VIEW`, `SHOW DATABASES`, `PROCESS`. |
+| `monitorSecret` | string | No | Secret for Prometheus exporter connections. Keys: `username`, `password`. Grants: `PROCESS`, `REPLICATION CLIENT`, `SELECT` on `performance_schema`. |
+| `backupSecret` | string | No | Secret for backup/restore connections. Keys: `username`, `password`. Grants: `SELECT`, `LOCK TABLES`, `SHOW VIEW`, `EVENT`, `TRIGGER`, `RELOAD`, `BACKUP_ADMIN`, `REPLICATION CLIENT`. |
 
 ## Full example
 
@@ -172,6 +185,60 @@ spec:
               key: dsn
       ports:
         - containerPort: 9104
+```
+
+## Full example (credentials mode)
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+spec:
+  image: mysql:9.6
+  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:latest
+  sites:
+    - name: iad
+      zone: us-east-1a
+      lbIP: 10.0.1.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
+    - name: pdx
+      zone: us-west-2a
+      lbIP: 10.0.2.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
+  credentials:
+    operatorSecret: mysql-operator-creds
+    appSecret: mysql-app-creds
+    monitorSecret: mysql-monitor-creds
+    backupSecret: mysql-backup-creds
+  dns:
+    hostname: orders.az.example.com
+    ttl: 60
+```
+
+Each referenced Secret must contain `username` and `password` keys. The operator secret additionally requires `MYSQL_ROOT_PASSWORD`:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-operator-creds
+stringData:
+  username: bloodraven
+  password: <operator-password>
+  MYSQL_ROOT_PASSWORD: <root-password>
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-app-creds
+stringData:
+  username: app
+  password: <app-password>
 ```
 
 ## Status

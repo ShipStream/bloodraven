@@ -28,9 +28,28 @@ This deploys the `bloodraven` operator Deployment, the `MysqlFailoverGroup` CRD,
 
 ## Create secrets
 
-### MySQL credentials
+### MySQL credentials (recommended: per-role secrets)
 
-Create a Secret containing the MySQL DSN the operator will use to connect to each instance:
+Create separate Secrets for each credential role. The operator will create MySQL users with appropriate privileges automatically:
+
+```bash
+# Operator credentials (required)
+kubectl create secret generic mysql-operator-creds \
+  -n default \
+  --from-literal=username=bloodraven \
+  --from-literal=password=operator-password \
+  --from-literal=MYSQL_ROOT_PASSWORD=root-password
+
+# Application credentials (optional)
+kubectl create secret generic mysql-app-creds \
+  -n default \
+  --from-literal=username=app \
+  --from-literal=password=app-password
+```
+
+### MySQL credentials (legacy: single DSN secret)
+
+Alternatively, create a single Secret containing a MySQL DSN. All components share the same user:
 
 ```bash
 kubectl create secret generic mysql-credentials \
@@ -82,7 +101,13 @@ spec:
         storageClassName: fast-ssd
         size: 100Gi
 
-  secretName: mysql-credentials
+  # Option 1: per-role credentials (recommended)
+  credentials:
+    operatorSecret: mysql-operator-creds
+    appSecret: mysql-app-creds
+
+  # Option 2: legacy single secret (mutually exclusive with credentials)
+  # secretName: mysql-credentials
 
   dns:
     hostname: orders.az.example.com

@@ -931,6 +931,49 @@ spec:
                   my.cnf). Default: 3600 (1 hour).
                 minimum: 60
                 type: integer
+              credentials:
+                description: |-
+                  Credentials configures per-role MySQL credential management.
+                  When set, the operator manages MySQL users and privileges for each
+                  configured role. Mutually exclusive with secretName.
+                properties:
+                  appSecret:
+                    description: |-
+                      AppSecret references the Secret for application read-write connections.
+                      Required keys: username, password.
+                      Grants: ALL PRIVILEGES (no GRANT OPTION, no SUPER).
+                    type: string
+                  backupSecret:
+                    description: |-
+                      BackupSecret references the Secret for backup and restore connections.
+                      Required keys: username, password.
+                      Grants: SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD,
+                      BACKUP_ADMIN, REPLICATION CLIENT.
+                    type: string
+                  monitorSecret:
+                    description: |-
+                      MonitorSecret references the Secret for Prometheus exporter connections.
+                      Required keys: username, password.
+                      Grants: PROCESS, REPLICATION CLIENT, SELECT on performance_schema.
+                    type: string
+                  operatorSecret:
+                    description: |-
+                      OperatorSecret references the Secret for operator and sidecar connections.
+                      Required keys: username, password, MYSQL_ROOT_PASSWORD.
+                      Optional keys: MYSQL_REPLICATION_USER, MYSQL_REPLICATION_PASSWORD
+                      (default to operator username/password if omitted).
+                      Grants: ALL PRIVILEGES WITH GRANT OPTION.
+                    minLength: 1
+                    type: string
+                  readOnlySecret:
+                    description: |-
+                      ReadOnlySecret references the Secret for application read-only connections.
+                      Required keys: username, password.
+                      Grants: SELECT, SHOW VIEW, SHOW DATABASES, PROCESS.
+                    type: string
+                required:
+                - operatorSecret
+                type: object
               dns:
                 description: DNS configures the external DNS record managed via the
                   external-dns DNSEndpoint CRD.
@@ -4178,8 +4221,10 @@ spec:
                     type: integer
                 type: object
               secretName:
-                description: SecretName references the secret containing MySQL credentials.
-                minLength: 1
+                description: |-
+                  SecretName references the secret containing MySQL credentials (legacy).
+                  The secret must contain a 'dsn' key with a MySQL DSN string.
+                  Mutually exclusive with credentials.
                 type: string
               serviceTemplate:
                 description: ServiceTemplate customizes the Services created by the
@@ -4438,9 +4483,12 @@ spec:
                 type: string
             required:
             - dns
-            - secretName
             - sites
             type: object
+            x-kubernetes-validations:
+            - message: exactly one of secretName or credentials must be set
+              rule: (has(self.secretName) && self.secretName != '' && !has(self.credentials))
+                || ((!has(self.secretName) || self.secretName == '') && has(self.credentials))
           status:
             description: MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.
             properties:
