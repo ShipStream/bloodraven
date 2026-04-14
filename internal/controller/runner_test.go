@@ -4,12 +4,14 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -391,5 +393,200 @@ func TestUpdateCRStatus_SetsConditions(t *testing.T) {
 	}
 	if !foundReady {
 		t.Error("Ready condition not found in status")
+	}
+}
+
+func drainRunnerEvents(rec *record.FakeRecorder) []string {
+	var out []string
+	for {
+		select {
+		case e := <-rec.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+func TestEmitFailoverEvents_FailoverExecuted(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		LastFailoverTarget: "",
+	}
+	snap := TopologySnapshot{
+		LastFailoverTarget: "dc2",
+	}
+
+	runner.emitFailoverEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d: %v", len(events), events)
+	}
+	if !strings.Contains(events[0], "FailoverExecuted") {
+		t.Errorf("want FailoverExecuted event, got %s", events[0])
+	}
+	if !strings.Contains(events[0], "dc2") {
+		t.Errorf("want event to mention dc2, got %s", events[0])
+	}
+}
+
+func TestEmitFailoverEvents_NoEventOnSameTarget(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		LastFailoverTarget: "dc2",
+	}
+	snap := TopologySnapshot{
+		LastFailoverTarget: "dc2",
+	}
+
+	runner.emitFailoverEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 0 {
+		t.Errorf("want no events when target unchanged, got %v", events)
+	}
+}
+
+func TestEmitFailoverEvents_DataLossDetected(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		Sites: []v1alpha1.SiteStatus{
+			{Name: "dc1", RecoveryState: ""},
+			{Name: "dc2", RecoveryState: ""},
+		},
+	}
+	snap := TopologySnapshot{
+		RecoveryState:     "RecoveryBlocked",
+		RecoverySite:      "dc1",
+		DivergentTxnCount: 5,
+	}
+
+	runner.emitFailoverEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d: %v", len(events), events)
+	}
+	if !strings.Contains(events[0], "DataLossDetected") {
+		t.Errorf("want DataLossDetected event, got %s", events[0])
+	}
+	if !strings.Contains(events[0], "5 divergent") {
+		t.Errorf("want event to mention 5 divergent transactions, got %s", events[0])
+	}
+}
+
+func TestEmitFailoverEvents_NoDataLossEventWhenAlreadyBlocked(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		Sites: []v1alpha1.SiteStatus{
+			{Name: "dc1", RecoveryState: "RecoveryBlocked"},
+			{Name: "dc2", RecoveryState: ""},
+		},
+	}
+	snap := TopologySnapshot{
+		RecoveryState:     "RecoveryBlocked",
+		RecoverySite:      "dc1",
+		DivergentTxnCount: 5,
+	}
+
+	runner.emitFailoverEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 0 {
+		t.Errorf("want no events when already blocked, got %v", events)
+	}
+}
+
+func TestEmitFailoverEvents_RecoveryComplete(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		Sites: []v1alpha1.SiteStatus{
+			{Name: "dc1", RecoveryState: "RecoveryBlocked"},
+			{Name: "dc2", RecoveryState: ""},
+		},
+	}
+	snap := TopologySnapshot{
+		RecoveryState: "",
+	}
+
+	runner.emitFailoverEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d: %v", len(events), events)
+	}
+	if !strings.Contains(events[0], "RecoveryComplete") {
+		t.Errorf("want RecoveryComplete event, got %s", events[0])
+	}
+	if !strings.Contains(events[0], "dc1") {
+		t.Errorf("want event to mention dc1, got %s", events[0])
+	}
+}
+
+func TestEmitFailoverEvents_NilRecorder(t *testing.T) {
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: nil}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{}
+	snap := TopologySnapshot{LastFailoverTarget: "dc2"}
+
+	// Must not panic.
+	runner.emitFailoverEvents(fg, existing, snap)
+}
+
+func TestUpdateCRStatus_EmitsFailoverEvent(t *testing.T) {
+	fg := newTestFG()
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg).
+		Build()
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	rec := record.NewFakeRecorder(10)
+
+	runner := &TopologyManagerRunner{
+		client:   c,
+		recorder: rec,
+		logger:   logger,
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+	failoverTime := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	snap := TopologySnapshot{
+		SiteNames:          [2]string{"dc1", "dc2"},
+		SiteStates:         [2]state.SiteState{state.StateUnreachable, state.StateWritable},
+		ActiveSite:         "dc2",
+		LastFailover:       failoverTime,
+		LastFailoverTarget: "dc2",
+	}
+
+	runner.updateCRStatus(context.Background(), nn, snap)
+	events := drainRunnerEvents(rec)
+
+	found := false
+	for _, e := range events {
+		if strings.Contains(e, "FailoverExecuted") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want FailoverExecuted event from updateCRStatus, got %v", events)
 	}
 }

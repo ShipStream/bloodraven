@@ -15,7 +15,7 @@ import (
 
 func TestAuxMuxHealthz(t *testing.T) {
 	hub := platform.NewHub(slog.Default())
-	runner := controller.NewTopologyManagerRunner(nil, nil, hub, slog.Default())
+	runner := controller.NewTopologyManagerRunner(nil, nil, hub, nil, slog.Default())
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -32,7 +32,7 @@ func TestAuxMuxHealthz(t *testing.T) {
 
 func TestActiveSiteMissingParams(t *testing.T) {
 	hub := platform.NewHub(slog.Default())
-	runner := controller.NewTopologyManagerRunner(nil, nil, hub, slog.Default())
+	runner := controller.NewTopologyManagerRunner(nil, nil, hub, nil, slog.Default())
 
 	tests := []struct {
 		name string
@@ -56,7 +56,7 @@ func TestActiveSiteMissingParams(t *testing.T) {
 
 func TestActiveSiteNoManagers(t *testing.T) {
 	hub := platform.NewHub(slog.Default())
-	runner := controller.NewTopologyManagerRunner(nil, nil, hub, slog.Default())
+	runner := controller.NewTopologyManagerRunner(nil, nil, hub, nil, slog.Default())
 
 	req := httptest.NewRequest(http.MethodGet, "/active-site?namespace=default&group=orders", nil)
 	rec := httptest.NewRecorder()
@@ -69,7 +69,7 @@ func TestActiveSiteNoManagers(t *testing.T) {
 
 func TestActiveSiteNotFound(t *testing.T) {
 	hub := platform.NewHub(slog.Default())
-	runner := controller.NewTopologyManagerRunner(nil, nil, hub, slog.Default())
+	runner := controller.NewTopologyManagerRunner(nil, nil, hub, nil, slog.Default())
 
 	// Add a dummy manager for a different group.
 	cfg := controller.TopologyConfig{
@@ -91,7 +91,7 @@ func TestActiveSiteNotFound(t *testing.T) {
 
 func TestActiveSiteFound(t *testing.T) {
 	hub := platform.NewHub(slog.Default())
-	runner := controller.NewTopologyManagerRunner(nil, nil, hub, slog.Default())
+	runner := controller.NewTopologyManagerRunner(nil, nil, hub, nil, slog.Default())
 
 	cfg := controller.TopologyConfig{
 		Name:  "orders",
@@ -127,7 +127,7 @@ func TestActiveSiteFound(t *testing.T) {
 
 func TestAuxMuxStatusWithoutFailoverGroups(t *testing.T) {
 	hub := platform.NewHub(slog.Default())
-	runner := controller.NewTopologyManagerRunner(nil, nil, hub, slog.Default())
+	runner := controller.NewTopologyManagerRunner(nil, nil, hub, nil, slog.Default())
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	rec := httptest.NewRecorder()

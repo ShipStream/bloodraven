@@ -10,7 +10,7 @@ Tracking implementation progress for items in [bloodraven-wishlist.md](bloodrave
 - [ ] 4. Multiple MySQL credentials (`spec.credentials`)
 - [x] 5. Backup and restore (`spec.backup`) — mysqlsh-based, S3 + PVC targets, bootstrap restore via `spec.initFromBackup`, new `MysqlBackup` CRD
 - [x] 6. Reduce default failover cooldown (60m → 5m) — `8cdcf46`, `3594235`
-- [ ] 7. Data loss detection and reporting on emergency failover
+- [x] 7. Data loss detection and reporting on emergency failover — Kubernetes Events (FailoverExecuted, DataLossDetected, RecoveryComplete), `bloodraven_failovers_total` metric, recovery fields in REST/WS APIs
 - [x] 8. Old primary recovery procedure — auto-rejoin on no divergence; fence + alert on divergence (requires wipe/re-clone)
 
 ## P1 — Required before multi-tenant scale
