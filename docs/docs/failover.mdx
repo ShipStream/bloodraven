@@ -69,18 +69,70 @@ When the operator decides to fail over to a candidate site, it executes these st
 4. **Reset replication on the candidate**: `RESET REPLICA ALL`
    - Clears all replication configuration so the candidate operates as an independent primary
 
-5. **Promote the candidate**: `SET GLOBAL read_only=0`
+5. **Record promotion GTID**: `SELECT @@global.gtid_executed`
+   - Captures the candidate's GTID set before it starts accepting writes, stored in `status.promotionGtidExecuted` for data-loss accounting
+
+6. **Promote the candidate**: `SET GLOBAL read_only=0`
    - Makes the candidate writable
 
-6. **Wait for confirmation**
+7. **Wait for confirmation**
    - The next poll cycle confirms the candidate is in the `writable` state
 
-7. **Update DNSEndpoint**
+8. **Update DNSEndpoint**
    - Creates or updates the `DNSEndpoint` CR so that the A-record points to the candidate site's load balancer IP. external-dns syncs this to the configured DNS provider.
 
-8. **Update node taints**
+9. **Update node taints**
    - Taint old active site nodes: `shipstream.io/db-readonly=true:NoExecute`
    - Untaint new active site nodes: remove the `shipstream.io/db-readonly` taint
+
+## Old primary recovery
+
+After an emergency failover, the old primary may come back online. The operator automatically detects this and takes action based on whether the old primary's data has diverged from the new primary.
+
+### Detection
+
+On each poll cycle, if a site is read-only with no replication configured (the signature of a former primary after `RESET REPLICA ALL`), and a prior failover has occurred, the operator initiates recovery:
+
+1. **Fence** the returning site with `SET GLOBAL super_read_only=ON` (defensive — the sidecar may have already fenced it)
+2. **Query `@@global.gtid_executed`** on both the old and new primary
+3. **Compare GTID sets** to determine if the old primary has any transactions not on the new primary
+
+If the old primary returns **writable** (e.g., power was cut before the sidecar could self-fence), the operator first detects this as a split-brain condition and fences it immediately. Recovery proceeds on the next poll cycle once the site transitions to read-only.
+
+### No divergence (automatic rejoin)
+
+If the new primary's GTID set contains all transactions from the old primary, there is no data loss. The operator automatically reconfigures the old primary as a replica:
+
+1. `SET GLOBAL super_read_only=ON`
+2. `STOP REPLICA`
+3. `CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1`
+4. `START REPLICA`
+
+The site resumes normal replication and the operator clears recovery state.
+
+### Divergence detected (manual intervention required)
+
+If the old primary has committed transactions that never replicated to the new primary, the operator:
+
+- Keeps the site **fenced** (`super_read_only=ON`)
+- Records the divergent GTID set and transaction count in `status.sites[].divergentGtid` and `status.sites[].divergentTransactionCount`
+- Sets `status.sites[].recoveryState` to `RecoveryBlocked`
+- Sets the `RecoveryPending` condition to `True` with reason `DivergentTransactions`
+- Emits the `bloodraven_divergent_transactions` Prometheus metric
+
+:::danger
+Divergent transactions mean the old primary accepted writes that the new primary never received. These transactions are effectively lost from the replication stream. The site must be **wiped and re-cloned** from the current primary to recover. Do not attempt to manually reconfigure replication — conflicting GTID sets will cause replication errors.
+:::
+
+To recover a divergent site:
+
+1. Investigate the divergent transactions to understand what data was lost (check `status.sites[].divergentGtid`)
+2. Delete the PVC for the affected site to trigger a fresh data clone
+3. The operator will detect the fresh instance and bootstrap it as a replica via `CLONE INSTANCE`
+
+### Prerequisites
+
+Old primary recovery requires replication credentials (`MYSQL_REPLICATION_USER` and `MYSQL_REPLICATION_PASSWORD`) in the Secret referenced by `spec.secretName`. Without these, recovery is skipped and the site remains fenced.
 
 ## Anti-flap cooldown
 

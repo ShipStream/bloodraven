@@ -63,6 +63,7 @@ func (m *mockMySQL) StartReplica(_ context.Context) error { return nil }
 func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
+func (m *mockMySQL) GetGtidExecuted(_ context.Context) (string, error) { return "", nil }
 func (m *mockMySQL) SetCloneDonorList(_ context.Context, _ string) error { return nil }
 func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return nil

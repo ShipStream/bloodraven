@@ -257,6 +257,12 @@ type MysqlFailoverGroupStatus struct {
 	// LastFailoverTarget is the site that was last promoted during failover.
 	LastFailoverTarget string `json:"lastFailoverTarget,omitempty"`
 
+	// PromotionGtidExecuted is the GTID executed set recorded on the
+	// candidate at the moment of the most recent promotion, before it
+	// began accepting writes. Used for data-loss accounting.
+	// +optional
+	PromotionGtidExecuted string `json:"promotionGtidExecuted,omitempty"`
+
 	// UpdatePhase indicates the current phase of an ordered update, empty if not updating.
 	UpdatePhase string `json:"updatePhase,omitempty"`
 
@@ -296,6 +302,23 @@ type SiteStatus struct {
 
 	// SecondsBehindSource is the replication lag in seconds (populated when replication status is enriched).
 	SecondsBehindSource *int64 `json:"secondsBehindSource,omitempty"`
+
+	// RecoveryState tracks old-primary recovery progress after failover.
+	// Empty when no recovery is needed. RecoveryBlocked means divergent
+	// transactions were detected and the site must be wiped and re-cloned.
+	// +kubebuilder:validation:Enum="";RecoveryBlocked
+	// +optional
+	RecoveryState string `json:"recoveryState,omitempty"`
+
+	// DivergentGtid is the GTID set of transactions on this site that
+	// diverge from the current primary. Populated when RecoveryState is
+	// RecoveryBlocked.
+	// +optional
+	DivergentGtid string `json:"divergentGtid,omitempty"`
+
+	// DivergentTransactionCount is the number of divergent transactions.
+	// +optional
+	DivergentTransactionCount *int64 `json:"divergentTransactionCount,omitempty"`
 }
 
 func init() {

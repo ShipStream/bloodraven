@@ -44,6 +44,15 @@ var (
 		Help: "Current site state as a state-set (1 for current state, 0 for others). State label is 'writable', 'read-only', 'unreachable', or 'unknown'.",
 	}, []string{"site", "state"})
 
+	// --- Recovery metrics -----------------------------------------------
+
+	// DivergentTransactions is the number of divergent transactions on a
+	// site pending recovery after an emergency failover. 0 when healthy.
+	DivergentTransactions = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_divergent_transactions",
+		Help: "Number of divergent transactions on a site pending recovery. 0 when healthy.",
+	}, []string{"site"})
+
 	// --- Backup metrics ------------------------------------------------
 	//
 	// These five metrics are emitted exactly-once per terminal backup
@@ -100,7 +109,7 @@ var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {
 	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount,
-		ReplicationLag, ReplicationRunning, SiteState,
+		ReplicationLag, ReplicationRunning, SiteState, DivergentTransactions,
 		BackupRunsTotal, BackupDurationSeconds,
 		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes)
 }

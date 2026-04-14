@@ -268,6 +268,99 @@ func TestParseGTIDSet_TaggedGTID_BackwardCompatible(t *testing.T) {
 	}
 }
 
+func TestGTIDSet_Subtract(t *testing.T) {
+	tests := []struct {
+		name      string
+		a, b      string
+		want      string
+		wantCount int64
+	}{
+		{
+			name: "empty minus empty",
+			a:    "", b: "",
+			want: "", wantCount: 0,
+		},
+		{
+			name: "something minus empty",
+			a:    "uuid1:1-5", b: "",
+			want: "uuid1:1-5", wantCount: 5,
+		},
+		{
+			name: "empty minus something",
+			a:    "", b: "uuid1:1-5",
+			want: "", wantCount: 0,
+		},
+		{
+			name: "identical sets",
+			a:    "uuid1:1-10", b: "uuid1:1-10",
+			want: "", wantCount: 0,
+		},
+		{
+			name: "superset minus subset",
+			a:    "uuid1:1-10", b: "uuid1:3-7",
+			want: "uuid1:1-2:8-10", wantCount: 5,
+		},
+		{
+			name: "subset minus superset",
+			a:    "uuid1:3-7", b: "uuid1:1-10",
+			want: "", wantCount: 0,
+		},
+		{
+			name: "disjoint UUIDs",
+			a:    "uuid1:1-5", b: "uuid2:1-5",
+			want: "uuid1:1-5", wantCount: 5,
+		},
+		{
+			name: "partial overlap from left",
+			a:    "uuid1:1-10", b: "uuid1:1-5",
+			want: "uuid1:6-10", wantCount: 5,
+		},
+		{
+			name: "partial overlap from right",
+			a:    "uuid1:1-10", b: "uuid1:6-15",
+			want: "uuid1:1-5", wantCount: 5,
+		},
+		{
+			name: "multi UUID mixed",
+			a:    "uuid1:1-10,uuid2:1-5",
+			b:    "uuid1:1-10",
+			want: "uuid2:1-5", wantCount: 5,
+		},
+		{
+			name: "multi interval subtraction",
+			a:    "uuid1:1-20",
+			b:    "uuid1:3-5:10-15",
+			want: "uuid1:1-2:6-9:16-20", wantCount: 11,
+		},
+		{
+			name: "single transaction divergence",
+			a:    "uuid1:1-10",
+			b:    "uuid1:1-9",
+			want: "uuid1:10", wantCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, err := ParseGTIDSet(tt.a)
+			if err != nil {
+				t.Fatalf("parse a: %v", err)
+			}
+			b, err := ParseGTIDSet(tt.b)
+			if err != nil {
+				t.Fatalf("parse b: %v", err)
+			}
+			got := a.Subtract(b)
+			if got.String() != tt.want {
+				t.Errorf("Subtract() = %q, want %q", got.String(), tt.want)
+			}
+			if got.TransactionCount() != tt.wantCount {
+				t.Errorf("TransactionCount() = %d, want %d", got.TransactionCount(), tt.wantCount)
+			}
+		})
+	}
+}
+
 func TestParseGTIDSet_MalformedIntervalNotTreatedAsTag(t *testing.T) {
 	// These inputs must return errors, not be silently misparsed as tagged GTID entries.
 	tests := []string{

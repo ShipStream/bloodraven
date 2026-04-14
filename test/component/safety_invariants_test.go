@@ -247,7 +247,7 @@ func TestSafetyInvariant_FenceBeforePromote(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	fc := controller.NewFailoverController(logger)
 
-	err := fc.Execute(context.Background(), candidate, oldPrimary, "dc2")
+	_, err := fc.Execute(context.Background(), candidate, oldPrimary, "dc2")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

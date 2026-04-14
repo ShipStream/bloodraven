@@ -76,6 +76,40 @@ If both sites report `writable` (split brain), the operator will **not** take au
 Split brain means both sites accepted writes independently. You may need to reconcile conflicting data manually before re-establishing replication. Replication will break if conflicting transactions exist on both sides.
 :::
 
+## Recovering a divergent old primary
+
+After an emergency failover, the old primary may come back with transactions that never replicated. When this happens, the operator automatically detects the divergence, fences the site, and sets the `RecoveryPending` condition to `True`.
+
+Check the divergence details:
+
+```bash
+kubectl get mysqlfailovergroup orders -o jsonpath='{range .status.sites[*]}{.name}: recoveryState={.recoveryState} divergentTxns={.divergentTransactionCount} divergentGtid={.divergentGtid}{"\n"}{end}'
+```
+
+To recover the site, wipe its data and let the operator re-clone from the current primary:
+
+**Step 1: Investigate the lost transactions**
+
+Review the divergent GTID set to understand what data was lost. These transactions were committed on the old primary but never reached the replica before failover.
+
+**Step 2: Delete the PVC**
+
+```bash
+kubectl delete pvc data-mysql-orders-iad-0
+```
+
+**Step 3: Delete the pod to trigger recreation**
+
+```bash
+kubectl delete pod mysql-orders-iad-0
+```
+
+The operator will detect the fresh MySQL instance and bootstrap it as a replica via `CLONE INSTANCE`, restoring it to a consistent state with the current primary.
+
+:::caution
+If the old primary came back with no divergence (GTID sets match), the operator automatically reconfigures it as a replica — no manual intervention is needed. The `RecoveryPending` condition only appears when divergent transactions exist.
+:::
+
 ## Total loss recovery
 
 If both sites are `unreachable`, the operator cannot take any action. Recovery steps:

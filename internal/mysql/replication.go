@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -171,6 +172,15 @@ func (m *checker) ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error)
 	}
 
 	return rs, nil
+}
+
+func (m *checker) GetGtidExecuted(ctx context.Context) (string, error) {
+	var gtid string
+	err := m.db.QueryRowContext(ctx, "SELECT @@global.gtid_executed").Scan(&gtid)
+	if err != nil {
+		return "", fmt.Errorf("query gtid_executed: %w", err)
+	}
+	return strings.TrimSpace(gtid), nil
 }
 
 func (m *checker) ChangeReplicationSource(ctx context.Context, opts ReplicationSourceOpts) error {

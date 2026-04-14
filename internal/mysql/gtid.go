@@ -199,6 +199,59 @@ func intervalsContain(intervals []Interval, target Interval) bool {
 	return pos > target.End
 }
 
+// Subtract returns the transactions in g that are not in other.
+// This is the Go equivalent of MySQL's GTID_SUBTRACT(g, other).
+func (g GTIDSet) Subtract(other GTIDSet) GTIDSet {
+	result := make(GTIDSet)
+	for uuid, intervals := range g {
+		otherIntervals, ok := other[uuid]
+		if !ok {
+			cp := make([]Interval, len(intervals))
+			copy(cp, intervals)
+			result[uuid] = cp
+			continue
+		}
+		remaining := subtractAllIntervals(intervals, otherIntervals)
+		if len(remaining) > 0 {
+			result[uuid] = remaining
+		}
+	}
+	return result
+}
+
+// subtractAllIntervals removes all ranges covered by sub from the source intervals.
+func subtractAllIntervals(source, sub []Interval) []Interval {
+	var result []Interval
+	for _, s := range source {
+		pieces := []Interval{s}
+		for _, r := range sub {
+			var next []Interval
+			for _, p := range pieces {
+				next = append(next, subtractInterval(p, r)...)
+			}
+			pieces = next
+		}
+		result = append(result, pieces...)
+	}
+	return result
+}
+
+// subtractInterval removes the range [b.Start, b.End] from interval a,
+// returning zero, one, or two remaining intervals.
+func subtractInterval(a, b Interval) []Interval {
+	if b.End < a.Start || b.Start > a.End {
+		return []Interval{a}
+	}
+	var result []Interval
+	if a.Start < b.Start {
+		result = append(result, Interval{Start: a.Start, End: b.Start - 1})
+	}
+	if a.End > b.End {
+		result = append(result, Interval{Start: b.End + 1, End: a.End})
+	}
+	return result
+}
+
 // TransactionCount returns the total number of transactions in the set.
 func (g GTIDSet) TransactionCount() int64 {
 	var total int64

@@ -118,6 +118,11 @@ func (b *bootstrapMock) SetCloneDonorList(_ context.Context, donor string) error
 	return b.setDonorErr
 }
 
+func (b *bootstrapMock) GetGtidExecuted(_ context.Context) (string, error) {
+	b.record("GetGtidExecuted")
+	return "", nil
+}
+
 func (b *bootstrapMock) CloneInstance(_ context.Context, _, _, _ string, _ bool, cloneTimeoutSec int) error {
 	b.record("CloneInstance")
 	b.mu.Lock()
