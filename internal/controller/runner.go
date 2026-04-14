@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -103,6 +105,20 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		cfg := CRConfigToTopologyConfig(fg)
 
+		// Include operator secret data hash so credential changes
+		// trigger a topology manager restart with new connections.
+		operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
+		if operatorSecretName != "" {
+			var secret corev1.Secret
+			if err := r.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}, &secret); err == nil {
+				h := sha256.New()
+				for k, v := range secret.Data {
+					fmt.Fprintf(h, "%s=%x\n", k, sha256.Sum256(v))
+				}
+				cfg.CredentialHash = hex.EncodeToString(h.Sum(nil))[:16]
+			}
+		}
+
 		r.mu.RLock()
 		existing, ok := r.managers[nn]
 		r.mu.RUnlock()
@@ -150,28 +166,38 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cfg TopologyConfig) error {
 	nn := FailoverGroupNamespacedName(fg)
 
-	// Read the MySQL credentials secret.
+	// Read the operator credentials secret.
+	operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
 	var secret corev1.Secret
-	secretNN := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.SecretName}
+	secretNN := types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}
 	if err := r.client.Get(ctx, secretNN, &secret); err != nil {
 		return fmt.Errorf("get secret %s: %w", secretNN, err)
 	}
 
-	dsnBytes, ok := secret.Data["dsn"]
-	if !ok {
-		return fmt.Errorf("secret %s missing 'dsn' key", secretNN)
-	}
-
 	var siteMySQL [2]internalmysql.Checker
 	for i, site := range fg.Spec.Sites {
-		dsn, err := buildSiteDSN(string(dsnBytes), fg, site)
-		if err != nil {
-			// Close any already-created checkers
-			for j := 0; j < i; j++ {
-				siteMySQL[j].Close()
+		var dsn string
+		var err error
+		if fg.Spec.UsesCredentials() {
+			dsn = buildSiteDSNFromCreds(
+				string(secret.Data["username"]),
+				string(secret.Data["password"]),
+				fg, site,
+			)
+		} else {
+			dsnBytes, ok := secret.Data["dsn"]
+			if !ok {
+				return fmt.Errorf("secret %s missing 'dsn' key", secretNN)
 			}
-			return fmt.Errorf("build site %s DSN: %w", site.Name, err)
+			dsn, err = buildSiteDSN(string(dsnBytes), fg, site)
+			if err != nil {
+				for j := 0; j < i; j++ {
+					siteMySQL[j].Close()
+				}
+				return fmt.Errorf("build site %s DSN: %w", site.Name, err)
+			}
 		}
+
 		checker, err := internalmysql.NewChecker(dsn)
 		if err != nil {
 			for j := 0; j < i; j++ {
@@ -187,23 +213,32 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 
 	dns := platform.NewDNSEndpointUpdater(r.client, fg.Name, string(fg.UID), fg.Namespace, fg.Name, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL)
 
-	// Build bootstrap configuration from the secret. Both replication user and
-	// password must be present to enable the auto-bootstrap path; otherwise the
-	// clone/replication setup would fail with invalid credentials. When disabled
-	// we pass a nil controller and empty config to the topology manager so the
-	// bootstrap path is truly gated by valid credentials.
-	replUser := string(secret.Data["MYSQL_REPLICATION_USER"])
-	replPassword := string(secret.Data["MYSQL_REPLICATION_PASSWORD"])
+	// Build bootstrap configuration. In credentials mode, use operator
+	// username/password as replication credentials unless overridden.
+	var replUser, replPassword string
+	if fg.Spec.UsesCredentials() {
+		replUser = string(secret.Data["MYSQL_REPLICATION_USER"])
+		replPassword = string(secret.Data["MYSQL_REPLICATION_PASSWORD"])
+		if replUser == "" {
+			replUser = string(secret.Data["username"])
+		}
+		if replPassword == "" {
+			replPassword = string(secret.Data["password"])
+		}
+	} else {
+		replUser = string(secret.Data["MYSQL_REPLICATION_USER"])
+		replPassword = string(secret.Data["MYSQL_REPLICATION_PASSWORD"])
+	}
+
 	var bootstrapCtl *BootstrapController
 	var bootstrapCfg BootstrapConfig
-	switch {
-	case replUser == "" || replPassword == "":
+	if replUser == "" || replPassword == "" {
 		missing := "MYSQL_REPLICATION_USER"
 		if replUser != "" {
 			missing = "MYSQL_REPLICATION_PASSWORD"
 		}
 		r.logger.Warn("auto-bootstrap disabled: secret missing replication credentials", "fg", nn, "missing", missing)
-	default:
+	} else {
 		bootstrapCtl = NewBootstrapController(r.logger.With("fg", nn.String()))
 		bootstrapCfg = BootstrapConfig{
 			ReplUser:     replUser,
@@ -621,4 +656,16 @@ func buildSiteDSN(baseDSN string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1
 	}
 	parsed.Addr = fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d", fg.Name, site.Name, fg.Namespace, mysqlPort)
 	return parsed.FormatDSN(), nil
+}
+
+// buildSiteDSNFromCreds constructs a DSN from username/password credentials
+// and the site service endpoint (used in credentials mode).
+func buildSiteDSNFromCreds(username, password string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) string {
+	cfg := mysql.NewConfig()
+	cfg.User = username
+	cfg.Passwd = password
+	cfg.Net = "tcp"
+	cfg.Addr = fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d", fg.Name, site.Name, fg.Namespace, mysqlPort)
+	cfg.Timeout = 5 * time.Second
+	return cfg.FormatDSN()
 }

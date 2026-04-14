@@ -287,19 +287,31 @@ func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg 
 }
 
 // ensureRestoreCredsSecret creates or updates the derived Secret used by
-// the restore Job, parsing the group's DSN secret.
+// the restore Job. In credentials mode, reads from the effective backup
+// secret. In legacy mode, parses the DSN secret.
 func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, secretName string) error {
-	var dsnSecret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.SecretName}, &dsnSecret); err != nil {
-		return fmt.Errorf("get dsn secret: %w", err)
+	var user, password string
+
+	backupSecretName := fg.Spec.EffectiveBackupSecretName()
+	var srcSecret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: backupSecretName}, &srcSecret); err != nil {
+		return fmt.Errorf("get credential secret %s: %w", backupSecretName, err)
 	}
-	dsnBytes, ok := dsnSecret.Data["dsn"]
-	if !ok {
-		return fmt.Errorf("secret %s missing 'dsn' key", fg.Spec.SecretName)
-	}
-	parsed, err := mysqldriver.ParseDSN(string(dsnBytes))
-	if err != nil {
-		return fmt.Errorf("parse dsn: %w", err)
+
+	if fg.Spec.UsesCredentials() {
+		user = string(srcSecret.Data["username"])
+		password = string(srcSecret.Data["password"])
+	} else {
+		dsnBytes, ok := srcSecret.Data["dsn"]
+		if !ok {
+			return fmt.Errorf("secret %s missing 'dsn' key", backupSecretName)
+		}
+		parsed, err := mysqldriver.ParseDSN(string(dsnBytes))
+		if err != nil {
+			return fmt.Errorf("parse dsn: %w", err)
+		}
+		user = parsed.User
+		password = parsed.Passwd
 	}
 
 	derived := &corev1.Secret{
@@ -308,7 +320,7 @@ func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Cont
 			Namespace: fg.Namespace,
 		},
 	}
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, derived, func() error {
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, derived, func() error {
 		if err := controllerutil.SetControllerReference(fg, derived, r.Scheme); err != nil {
 			return err
 		}
@@ -320,8 +332,8 @@ func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Cont
 		derived.Labels[labelResourceKind] = "restore"
 		derived.Type = corev1.SecretTypeOpaque
 		derived.Data = map[string][]byte{
-			"MYSQL_USER":     []byte(parsed.User),
-			"MYSQL_PASSWORD": []byte(parsed.Passwd),
+			"MYSQL_USER":     []byte(user),
+			"MYSQL_PASSWORD": []byte(password),
 		}
 		return nil
 	})

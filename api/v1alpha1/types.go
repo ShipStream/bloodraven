@@ -32,6 +32,7 @@ type MysqlFailoverGroupList struct {
 }
 
 // MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
+// +kubebuilder:validation:XValidation:rule="(has(self.secretName) && self.secretName != '' && !has(self.credentials)) || ((!has(self.secretName) || self.secretName == '') && has(self.credentials))",message="exactly one of secretName or credentials must be set"
 type MysqlFailoverGroupSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.6
 	// +kubebuilder:default="mysql:9.6"
@@ -48,9 +49,17 @@ type MysqlFailoverGroupSpec struct {
 	// +kubebuilder:validation:MaxItems=2
 	Sites []SiteSpec `json:"sites"`
 
-	// SecretName references the secret containing MySQL credentials.
-	// +kubebuilder:validation:MinLength=1
-	SecretName string `json:"secretName"`
+	// SecretName references the secret containing MySQL credentials (legacy).
+	// The secret must contain a 'dsn' key with a MySQL DSN string.
+	// Mutually exclusive with credentials.
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+
+	// Credentials configures per-role MySQL credential management.
+	// When set, the operator manages MySQL users and privileges for each
+	// configured role. Mutually exclusive with secretName.
+	// +optional
+	Credentials *CredentialsSpec `json:"credentials,omitempty"`
 
 	// TLS configures TLS for the MySQL instances.
 	TLS *TLSSpec `json:"tls,omitempty"`
@@ -238,6 +247,45 @@ type ServiceTemplate struct {
 
 	// Annotations are additional annotations applied to every Service managed by this failover group.
 	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+// CredentialsSpec configures per-role MySQL credential management.
+// Each field references a Secret with 'username' and 'password' keys.
+// The operator creates MySQL users with role-appropriate privileges
+// and rotates passwords when the referenced Secrets change.
+type CredentialsSpec struct {
+	// OperatorSecret references the Secret for operator and sidecar connections.
+	// Required keys: username, password, MYSQL_ROOT_PASSWORD.
+	// Optional keys: MYSQL_REPLICATION_USER, MYSQL_REPLICATION_PASSWORD
+	// (default to operator username/password if omitted).
+	// Grants: ALL PRIVILEGES WITH GRANT OPTION.
+	// +kubebuilder:validation:MinLength=1
+	OperatorSecret string `json:"operatorSecret"`
+
+	// AppSecret references the Secret for application read-write connections.
+	// Required keys: username, password.
+	// Grants: ALL PRIVILEGES (no GRANT OPTION, no SUPER).
+	// +optional
+	AppSecret string `json:"appSecret,omitempty"`
+
+	// ReadOnlySecret references the Secret for application read-only connections.
+	// Required keys: username, password.
+	// Grants: SELECT, SHOW VIEW, SHOW DATABASES, PROCESS.
+	// +optional
+	ReadOnlySecret string `json:"readOnlySecret,omitempty"`
+
+	// MonitorSecret references the Secret for Prometheus exporter connections.
+	// Required keys: username, password.
+	// Grants: PROCESS, REPLICATION CLIENT, SELECT on performance_schema.
+	// +optional
+	MonitorSecret string `json:"monitorSecret,omitempty"`
+
+	// BackupSecret references the Secret for backup and restore connections.
+	// Required keys: username, password.
+	// Grants: SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD,
+	// BACKUP_ADMIN, REPLICATION CLIENT.
+	// +optional
+	BackupSecret string `json:"backupSecret,omitempty"`
 }
 
 // MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.

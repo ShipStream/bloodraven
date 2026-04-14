@@ -717,15 +717,254 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 func TestComputeSpecHash_StableWithoutTLS(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
-	h1 := computeSpecHash(fg, site, nil)
-	h2 := computeSpecHash(fg, site, nil)
+	h1 := computeSpecHash(fg, site, nil, nil)
+	h2 := computeSpecHash(fg, site, nil, nil)
 	if h1 != h2 {
 		t.Errorf("hash should be stable: got %s and %s", h1, h2)
 	}
 
 	// Adding TLS data should change the hash.
-	h3 := computeSpecHash(fg, site, map[string][]byte{"tls.crt": []byte("cert")})
+	h3 := computeSpecHash(fg, site, map[string][]byte{"tls.crt": []byte("cert")}, nil)
 	if h3 == h1 {
 		t.Error("hash should differ when TLS data is provided")
+	}
+}
+
+func TestComputeSpecHash_IncludesCredentialData(t *testing.T) {
+	fg := newTestFG()
+	site := fg.Spec.Sites[0]
+	h1 := computeSpecHash(fg, site, nil, nil)
+
+	credData := map[string]map[string][]byte{
+		"op-secret": {"username": []byte("admin"), "password": []byte("pass1")},
+	}
+	h2 := computeSpecHash(fg, site, nil, credData)
+	if h2 == h1 {
+		t.Error("hash should differ when credential data is provided")
+	}
+
+	credData2 := map[string]map[string][]byte{
+		"op-secret": {"username": []byte("admin"), "password": []byte("pass2")},
+	}
+	h3 := computeSpecHash(fg, site, nil, credData2)
+	if h3 == h2 {
+		t.Error("hash should differ when password changes")
+	}
+}
+
+func newTestFGWithCredentials() *v1alpha1.MysqlFailoverGroup {
+	fg := newTestFG()
+	fg.Spec.SecretName = ""
+	fg.Spec.Credentials = &v1alpha1.CredentialsSpec{
+		OperatorSecret: "mysql-operator-creds",
+		AppSecret:      "mysql-app-creds",
+		BackupSecret:   "mysql-backup-creds",
+	}
+	return fg
+}
+
+func newTestCredentialSecrets() []*corev1.Secret {
+	return []*corev1.Secret{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mysql-operator-creds",
+				Namespace: "shared-lion",
+			},
+			Data: map[string][]byte{
+				"username":            []byte("bloodraven"),
+				"password":            []byte("operator-pass"),
+				"MYSQL_ROOT_PASSWORD": []byte("root-pass"),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mysql-app-creds",
+				Namespace: "shared-lion",
+			},
+			Data: map[string][]byte{
+				"username": []byte("app"),
+				"password": []byte("app-pass"),
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "mysql-backup-creds",
+				Namespace: "shared-lion",
+			},
+			Data: map[string][]byte{
+				"username": []byte("backup"),
+				"password": []byte("backup-pass"),
+			},
+		},
+	}
+}
+
+func TestReconcile_CredentialsMode_CreatesDeployment(t *testing.T) {
+	fg := newTestFGWithCredentials()
+	objs := []client.Object{fg}
+	for _, s := range newTestCredentialSecrets() {
+		objs = append(objs, s)
+	}
+	r, c := newReconciler(objs...)
+
+	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
+
+	// First reconcile adds the finalizer.
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	// Second reconcile creates resources.
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var deploy appsv1.Deployment
+	deployNN := types.NamespacedName{Name: "mysql-lion-dc1", Namespace: "shared-lion"}
+	if err := c.Get(context.Background(), deployNN, &deploy); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+
+	// Verify the MySQL container uses individual env vars, not envFrom.
+	mysqlContainer := deploy.Spec.Template.Spec.Containers[0]
+	if mysqlContainer.Name != "mysql" {
+		t.Fatalf("expected mysql container, got %s", mysqlContainer.Name)
+	}
+	if len(mysqlContainer.EnvFrom) != 0 {
+		t.Error("credentials mode should not use envFrom")
+	}
+	foundRootPw := false
+	for _, e := range mysqlContainer.Env {
+		if e.Name == "MYSQL_ROOT_PASSWORD" {
+			foundRootPw = true
+			if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+				t.Error("MYSQL_ROOT_PASSWORD should be a secretKeyRef")
+			} else if e.ValueFrom.SecretKeyRef.Name != "mysql-operator-creds" {
+				t.Errorf("MYSQL_ROOT_PASSWORD should ref operator secret, got %s", e.ValueFrom.SecretKeyRef.Name)
+			}
+		}
+	}
+	if !foundRootPw {
+		t.Error("expected MYSQL_ROOT_PASSWORD env var in credentials mode")
+	}
+
+	// Verify sidecar uses MYSQL_USER/MYSQL_PASSWORD.
+	sidecar := deploy.Spec.Template.Spec.Containers[1]
+	if sidecar.Name != "sidecar" {
+		t.Fatalf("expected sidecar container, got %s", sidecar.Name)
+	}
+	foundUser := false
+	for _, e := range sidecar.Env {
+		if e.Name == "MYSQL_USER" {
+			foundUser = true
+		}
+		if e.Name == "MYSQL_DSN" {
+			t.Error("sidecar should not have MYSQL_DSN in credentials mode")
+		}
+	}
+	if !foundUser {
+		t.Error("expected MYSQL_USER env var in sidecar")
+	}
+
+	// Verify credential volumes exist.
+	foundCredsOperator := false
+	foundInitUsers := false
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if v.Name == "creds-operator" {
+			foundCredsOperator = true
+		}
+		if v.Name == "init-users" {
+			foundInitUsers = true
+		}
+	}
+	if !foundCredsOperator {
+		t.Error("expected creds-operator volume")
+	}
+	if !foundInitUsers {
+		t.Error("expected init-users volume")
+	}
+}
+
+func TestReconcile_CredentialsMode_CreatesInitUsersConfigMap(t *testing.T) {
+	fg := newTestFGWithCredentials()
+	objs := []client.Object{fg}
+	for _, s := range newTestCredentialSecrets() {
+		objs = append(objs, s)
+	}
+	r, c := newReconciler(objs...)
+
+	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
+
+	// First reconcile adds finalizer, second creates resources.
+	r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn})
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var cm corev1.ConfigMap
+	cmNN := types.NamespacedName{Name: "mysql-lion-init-users", Namespace: "shared-lion"}
+	if err := c.Get(context.Background(), cmNN, &cm); err != nil {
+		t.Fatalf("get init-users configmap: %v", err)
+	}
+
+	script, ok := cm.Data["01-bloodraven-users.sh"]
+	if !ok {
+		t.Fatal("missing init script key")
+	}
+	if !strings.Contains(script, "create_user_with_grants operator") {
+		t.Error("init script should create operator user")
+	}
+	if !strings.Contains(script, "create_user_with_grants app") {
+		t.Error("init script should create app user")
+	}
+	if !strings.Contains(script, "create_user_with_grants backup") {
+		t.Error("init script should create backup user")
+	}
+}
+
+func TestSecretToFailoverGroup_CredentialsMode(t *testing.T) {
+	fg := newTestFGWithCredentials()
+	objs := []client.Object{fg}
+	for _, s := range newTestCredentialSecrets() {
+		objs = append(objs, s)
+	}
+	r, _ := newReconciler(objs...)
+
+	tests := []struct {
+		secretName string
+		wantMatch  bool
+	}{
+		{"mysql-operator-creds", true},
+		{"mysql-app-creds", true},
+		{"mysql-backup-creds", true},
+		{"unrelated-secret", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.secretName, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tt.secretName,
+					Namespace: "shared-lion",
+				},
+			}
+			requests := r.secretToFailoverGroup(context.Background(), secret)
+			if tt.wantMatch && len(requests) == 0 {
+				t.Error("expected match")
+			}
+			if !tt.wantMatch && len(requests) > 0 {
+				t.Error("expected no match")
+			}
+		})
+	}
+}
+
+func TestBuildSiteDSNFromCreds(t *testing.T) {
+	fg := newTestFG()
+	dsn := buildSiteDSNFromCreds("myuser", "mypass", fg, fg.Spec.Sites[0])
+	if !strings.Contains(dsn, "myuser:mypass@") {
+		t.Errorf("DSN should contain credentials: %s", dsn)
+	}
+	if !strings.Contains(dsn, "mysql-lion-dc1.shared-lion.svc.cluster.local") {
+		t.Errorf("DSN should contain site host: %s", dsn)
 	}
 }

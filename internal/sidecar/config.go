@@ -43,7 +43,12 @@ type Config struct {
 func ConfigFromEnv() (*Config, error) {
 	dsn := os.Getenv("MYSQL_DSN")
 	if dsn == "" {
-		return nil, fmt.Errorf("MYSQL_DSN is required")
+		user := os.Getenv("MYSQL_USER")
+		password := os.Getenv("MYSQL_PASSWORD")
+		if user == "" {
+			return nil, fmt.Errorf("one of MYSQL_DSN or MYSQL_USER+MYSQL_PASSWORD is required")
+		}
+		dsn = fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/", user, password)
 	}
 
 	podName := os.Getenv("MY_POD_NAME")

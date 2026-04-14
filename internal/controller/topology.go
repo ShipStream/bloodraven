@@ -37,6 +37,10 @@ type TopologyConfig struct {
 	FailureThreshold  int
 	RecoveryThreshold int
 	FailoverCooldown  int64 // nanoseconds, default 5m
+
+	// CredentialHash is a hash of the operator secret data. A change
+	// triggers a topology manager restart with new MySQL connections.
+	CredentialHash string
 }
 
 // BootstrapConfig holds configuration for auto-bootstrap of fresh-deploy replicas.

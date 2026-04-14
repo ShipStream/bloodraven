@@ -45,7 +45,9 @@ kind: MysqlFailoverGroup
 metadata:
   name: orders
 spec:
-  secretName: mysql-credentials
+  credentials:
+    operatorSecret: mysql-operator-creds
+    appSecret: mysql-app-creds
   dns:
     hostname: orders.az.example.com
     ttl: 60

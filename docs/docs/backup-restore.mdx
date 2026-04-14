@@ -84,13 +84,18 @@ set field wins. This lets you tighten further (e.g. set a specific
 
 MySQL credentials are never injected into the backup pod via `envFrom`.
 Instead the reconciler derives a Secret per backup run (with
-`MYSQL_USER` / `MYSQL_PASSWORD` keys parsed from the failover group's
-DSN secret) and mounts it **as files** at
+`MYSQL_USER` / `MYSQL_PASSWORD` keys) and mounts it **as files** at
 `/run/bloodraven/mysql-creds/` with mode `0400`. The embedded Python
 dump script reads the files via the `BLOODRAVEN_MYSQL_CREDS_DIR` env
 var. This keeps plaintext passwords out of `/proc/$PID/environ` on
 the pod and makes accidental env-var leaks (e.g. in panic stack
 traces) much less dangerous.
+
+In **credentials mode** (`spec.credentials`), the derived Secret reads
+`username`/`password` directly from `spec.credentials.backupSecret`
+(or falls back to `operatorSecret` if no dedicated backup secret is
+configured). In **legacy mode** (`spec.secretName`), the credentials
+are parsed from the DSN in the referenced Secret.
 
 For S3 profiles the same pattern applies to AWS credentials: the
 profile's `credentialsSecret` is mounted at

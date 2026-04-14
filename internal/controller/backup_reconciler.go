@@ -466,24 +466,39 @@ func (r *MysqlBackupReconciler) failBackup(ctx context.Context, backup *v1alpha1
 }
 
 // ensureDerivedCredsSecret creates or updates the per-backup Secret
-// carrying MYSQL_USER / MYSQL_PASSWORD parsed from the failover group's
-// DSN secret. The Secret is owned by the MysqlBackup CR so it is garbage
-// collected with the backup.
+// carrying MYSQL_USER / MYSQL_PASSWORD. In credentials mode, reads
+// directly from the effective backup secret. In legacy mode, parses
+// the DSN secret. The Secret is owned by the MysqlBackup CR so it is
+// garbage collected with the backup.
 func (r *MysqlBackupReconciler) ensureDerivedCredsSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, backup *v1alpha1.MysqlBackup, secretName string) error {
-	var dsnSecret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.SecretName}, &dsnSecret); err != nil {
-		return fmt.Errorf("get dsn secret %s: %w", fg.Spec.SecretName, err)
+	var user, password string
+
+	backupSecretName := fg.Spec.EffectiveBackupSecretName()
+	var srcSecret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: backupSecretName}, &srcSecret); err != nil {
+		return fmt.Errorf("get backup credential secret %s: %w", backupSecretName, err)
 	}
-	dsnBytes, ok := dsnSecret.Data["dsn"]
-	if !ok {
-		return fmt.Errorf("secret %s missing 'dsn' key", fg.Spec.SecretName)
-	}
-	parsed, err := mysqldriver.ParseDSN(string(dsnBytes))
-	if err != nil {
-		return fmt.Errorf("parse dsn: %w", err)
-	}
-	if parsed.User == "" {
-		return fmt.Errorf("dsn has empty user")
+
+	if fg.Spec.UsesCredentials() {
+		user = string(srcSecret.Data["username"])
+		password = string(srcSecret.Data["password"])
+		if user == "" {
+			return fmt.Errorf("credential secret %s has empty 'username'", backupSecretName)
+		}
+	} else {
+		dsnBytes, ok := srcSecret.Data["dsn"]
+		if !ok {
+			return fmt.Errorf("secret %s missing 'dsn' key", backupSecretName)
+		}
+		parsed, err := mysqldriver.ParseDSN(string(dsnBytes))
+		if err != nil {
+			return fmt.Errorf("parse dsn: %w", err)
+		}
+		if parsed.User == "" {
+			return fmt.Errorf("dsn has empty user")
+		}
+		user = parsed.User
+		password = parsed.Passwd
 	}
 
 	derived := &corev1.Secret{
@@ -492,7 +507,7 @@ func (r *MysqlBackupReconciler) ensureDerivedCredsSecret(ctx context.Context, fg
 			Namespace: backup.Namespace,
 		},
 	}
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, derived, func() error {
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, derived, func() error {
 		if err := controllerutil.SetControllerReference(backup, derived, r.Scheme); err != nil {
 			return err
 		}
@@ -504,8 +519,8 @@ func (r *MysqlBackupReconciler) ensureDerivedCredsSecret(ctx context.Context, fg
 		derived.Labels[labelManagedBy] = managerName
 		derived.Type = corev1.SecretTypeOpaque
 		derived.Data = map[string][]byte{
-			"MYSQL_USER":     []byte(parsed.User),
-			"MYSQL_PASSWORD": []byte(parsed.Passwd),
+			"MYSQL_USER":     []byte(user),
+			"MYSQL_PASSWORD": []byte(password),
 		}
 		return nil
 	})

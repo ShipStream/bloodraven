@@ -122,26 +122,21 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		image = defaultMySQLImage
 	}
 
-	// Validate that the referenced secret contains the expected 'dsn' key.
-	var secret corev1.Secret
-	secretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.SecretName}
-	if err := r.Get(ctx, secretKey, &secret); err != nil {
-		if !errors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("get secret %s: %w", fg.Spec.SecretName, err)
-		}
-		r.Recorder.Eventf(&fg, corev1.EventTypeWarning, "SecretNotFound",
-			"secret %q not found", fg.Spec.SecretName)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-	if _, ok := secret.Data["dsn"]; !ok {
-		r.Recorder.Eventf(&fg, corev1.EventTypeWarning, "SecretMissingKey",
-			"secret %q does not contain required key 'dsn'", fg.Spec.SecretName)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	// Validate that the referenced credential secret(s) exist and contain expected keys.
+	if result, err := r.validateCredentialSecrets(ctx, &fg); err != nil || result.RequeueAfter > 0 {
+		return result, err
 	}
 
 	// Reconcile ConfigMap
 	if err := r.reconcileConfigMap(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile configmap: %w", err)
+	}
+
+	// Reconcile init-users ConfigMap (credentials mode only).
+	if fg.Spec.UsesCredentials() {
+		if err := r.reconcileInitUsersConfigMap(ctx, &fg); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcile init-users configmap: %w", err)
+		}
 	}
 
 	// Reconcile backup assets (shared scripts ConfigMap + owned PVCs for
@@ -175,6 +170,15 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	if err := r.reconcilePDB(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile pdb: %w", err)
+	}
+
+	// Reconcile MySQL users for credentials mode.
+	if fg.Spec.UsesCredentials() {
+		if err := r.reconcileCredentials(ctx, &fg); err != nil {
+			logger.Error(err, "credential reconciliation failed, will retry")
+			r.Recorder.Eventf(&fg, corev1.EventTypeWarning, "CredentialReconcileFailed",
+				"failed to reconcile MySQL users: %v", err)
+		}
 	}
 
 	// Drive the one-shot restore Job when spec.initFromBackup is set.
@@ -234,20 +238,30 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 }
 
 // secretToFailoverGroup maps a Secret change to the MysqlFailoverGroups that reference it
-// (via spec.secretName or spec.tls.secretName), triggering reconciliation on cert rotation.
+// (via spec.secretName, spec.credentials.*, or spec.tls.secretName), triggering
+// reconciliation on credential or cert rotation.
 func (r *MysqlFailoverGroupReconciler) secretToFailoverGroup(ctx context.Context, obj client.Object) []ctrl.Request {
 	var fgList v1alpha1.MysqlFailoverGroupList
 	if err := r.List(ctx, &fgList, client.InNamespace(obj.GetNamespace())); err != nil {
 		log.FromContext(ctx).Error(err, "unable to list MysqlFailoverGroups for Secret watch")
 		return nil
 	}
+	secretName := obj.GetName()
 	var requests []ctrl.Request
 	for _, fg := range fgList.Items {
-		if fg.Spec.SecretName == obj.GetName() ||
-			(fg.Spec.TLS != nil && fg.Spec.TLS.SecretName == obj.GetName()) {
+		if fg.Spec.TLS != nil && fg.Spec.TLS.SecretName == secretName {
 			requests = append(requests, ctrl.Request{
 				NamespacedName: types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace},
 			})
+			continue
+		}
+		for _, ref := range fg.Spec.AllReferencedSecretNames() {
+			if ref == secretName {
+				requests = append(requests, ctrl.Request{
+					NamespacedName: types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace},
+				})
+				break
+			}
 		}
 	}
 	return requests
@@ -289,6 +303,88 @@ func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v
 
 	r.Recorder.Event(fg, corev1.EventTypeNormal, "GracefulShutdown", "Graceful shutdown complete, removing finalizer")
 	return nil
+}
+
+// validateCredentialSecrets validates that the referenced credential
+// secrets exist and contain the expected keys for the active mode.
+func (r *MysqlFailoverGroupReconciler) validateCredentialSecrets(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (ctrl.Result, error) {
+	if fg.Spec.UsesCredentials() {
+		return r.validateCredentialsMode(ctx, fg)
+	}
+	return r.validateLegacySecret(ctx, fg)
+}
+
+func (r *MysqlFailoverGroupReconciler) validateLegacySecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (ctrl.Result, error) {
+	var secret corev1.Secret
+	secretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.SecretName}
+	if err := r.Get(ctx, secretKey, &secret); err != nil {
+		if !errors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("get secret %s: %w", fg.Spec.SecretName, err)
+		}
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "SecretNotFound",
+			"secret %q not found", fg.Spec.SecretName)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if _, ok := secret.Data["dsn"]; !ok {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "SecretMissingKey",
+			"secret %q does not contain required key 'dsn'", fg.Spec.SecretName)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *MysqlFailoverGroupReconciler) validateCredentialsMode(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (ctrl.Result, error) {
+	operatorSecretName := fg.Spec.Credentials.OperatorSecret
+	var secret corev1.Secret
+	secretKey := types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}
+	if err := r.Get(ctx, secretKey, &secret); err != nil {
+		if !errors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("get operator secret %s: %w", operatorSecretName, err)
+		}
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "SecretNotFound",
+			"operator secret %q not found", operatorSecretName)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	for _, key := range []string{"username", "password", "MYSQL_ROOT_PASSWORD"} {
+		if _, ok := secret.Data[key]; !ok {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "SecretMissingKey",
+				"operator secret %q missing required key %q", operatorSecretName, key)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+	}
+
+	// Validate optional credential secrets have required keys.
+	type optionalSecret struct {
+		name string
+		role string
+	}
+	for _, opt := range []optionalSecret{
+		{fg.Spec.Credentials.AppSecret, "app"},
+		{fg.Spec.Credentials.ReadOnlySecret, "read-only"},
+		{fg.Spec.Credentials.MonitorSecret, "monitor"},
+		{fg.Spec.Credentials.BackupSecret, "backup"},
+	} {
+		if opt.name == "" {
+			continue
+		}
+		var s corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: opt.name}, &s); err != nil {
+			if !errors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("get %s secret %s: %w", opt.role, opt.name, err)
+			}
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "SecretNotFound",
+				"%s secret %q not found", opt.role, opt.name)
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		for _, key := range []string{"username", "password"} {
+			if _, ok := s.Data[key]; !ok {
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "SecretMissingKey",
+					"%s secret %q missing required key %q", opt.role, opt.name, key)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+		}
+	}
+	return ctrl.Result{}, nil
 }
 
 // resourceName returns a deterministic name for a per-site resource.
@@ -447,7 +543,19 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			tlsSecretData = tlsSecret.Data
 		}
 	}
-	specHash := computeSpecHash(fg, site, tlsSecretData)
+
+	// Fetch credential secret data so password changes trigger rolling restart.
+	var credSecretData map[string]map[string][]byte
+	if fg.Spec.UsesCredentials() {
+		credSecretData = make(map[string]map[string][]byte)
+		for _, name := range fg.Spec.AllReferencedSecretNames() {
+			var s corev1.Secret
+			if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err == nil {
+				credSecretData[name] = s.Data
+			}
+		}
+	}
+	specHash := computeSpecHash(fg, site, tlsSecretData, credSecretData)
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		if err := controllerutil.SetControllerReference(fg, deploy, r.Scheme); err != nil {
@@ -528,8 +636,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			})
 		}
 
-		containers := []corev1.Container{
-			{
+		mysqlContainer := corev1.Container{
 				Name:  "mysql",
 				Image: image,
 				Ports: []corev1.ContainerPort{
@@ -539,27 +646,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 						Protocol:      corev1.ProtocolTCP,
 					},
 				},
-				EnvFrom: []corev1.EnvFromSource{
-					{
-						SecretRef: &corev1.SecretEnvSource{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: fg.Spec.SecretName,
-							},
-						},
-					},
-				},
 				VolumeMounts: volumeMounts,
-				Resources: site.Resources,
-				Lifecycle: &corev1.Lifecycle{
-					PreStop: &corev1.LifecycleHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{
-								"sh", "-c",
-								`mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
-							},
-						},
-					},
-				},
+				Resources:    site.Resources,
 				LivenessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
 						TCPSocket: &corev1.TCPSocketAction{
@@ -578,8 +666,112 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					InitialDelaySeconds: 5,
 					PeriodSeconds:       5,
 				},
-			},
-			{
+			}
+
+			operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
+
+			sidecarEnv := []corev1.EnvVar{
+				{Name: "MY_POD_NAME", ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+				}},
+				{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", sidecarPort)},
+				{Name: "PEER_ADDRESS", Value: peerAddress},
+				{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
+				{Name: "MY_SITE", Value: site.Name},
+				{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+				}},
+				{Name: "FAILOVER_GROUP", Value: fg.Name},
+				{Name: "LEASE_TIMEOUT", Value: leaseTimeout},
+				{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
+			}
+
+			if fg.Spec.UsesCredentials() {
+				mysqlContainer.Env = []corev1.EnvVar{
+					{Name: "MYSQL_ROOT_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
+							Key:                  "MYSQL_ROOT_PASSWORD",
+						},
+					}},
+				}
+				mysqlContainer.Lifecycle = &corev1.Lifecycle{
+					PreStop: &corev1.LifecycleHandler{
+						Exec: &corev1.ExecAction{
+							Command: []string{
+								"sh", "-c",
+								`mysql -u "$(cat /etc/mysql/creds/operator/username)" -p"$(cat /etc/mysql/creds/operator/password)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
+							},
+						},
+					},
+				}
+				mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+					corev1.VolumeMount{Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true},
+					corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
+				)
+				appendCredVolume := func(name, secretName string) {
+					mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+						corev1.VolumeMount{Name: "creds-" + name, MountPath: "/etc/mysql/creds/" + name, ReadOnly: true})
+				}
+				if fg.Spec.Credentials.AppSecret != "" {
+					appendCredVolume("app", fg.Spec.Credentials.AppSecret)
+				}
+				if fg.Spec.Credentials.ReadOnlySecret != "" {
+					appendCredVolume("readonly", fg.Spec.Credentials.ReadOnlySecret)
+				}
+				if fg.Spec.Credentials.MonitorSecret != "" {
+					appendCredVolume("monitor", fg.Spec.Credentials.MonitorSecret)
+				}
+				if fg.Spec.Credentials.BackupSecret != "" {
+					appendCredVolume("backup", fg.Spec.Credentials.BackupSecret)
+				}
+
+				sidecarEnv = append([]corev1.EnvVar{
+					{Name: "MYSQL_USER", ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
+							Key:                  "username",
+						},
+					}},
+					{Name: "MYSQL_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
+							Key:                  "password",
+						},
+					}},
+				}, sidecarEnv...)
+			} else {
+				mysqlContainer.EnvFrom = []corev1.EnvFromSource{
+					{
+						SecretRef: &corev1.SecretEnvSource{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: fg.Spec.SecretName,
+							},
+						},
+					},
+				}
+				mysqlContainer.Lifecycle = &corev1.Lifecycle{
+					PreStop: &corev1.LifecycleHandler{
+						Exec: &corev1.ExecAction{
+							Command: []string{
+								"sh", "-c",
+								`mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
+							},
+						},
+					},
+				}
+
+				sidecarEnv = append([]corev1.EnvVar{
+					{Name: "MYSQL_DSN", ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: fg.Spec.SecretName},
+							Key:                  "dsn",
+						},
+					}},
+				}, sidecarEnv...)
+			}
+
+			sidecarContainer := corev1.Container{
 				Name:  "sidecar",
 				Image: sidecarImage,
 				Ports: []corev1.ContainerPort{
@@ -589,27 +781,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 						Protocol:      corev1.ProtocolTCP,
 					},
 				},
-				Env: []corev1.EnvVar{
-					{Name: "MYSQL_DSN", ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: fg.Spec.SecretName},
-							Key:                  "dsn",
-						},
-					}},
-					{Name: "MY_POD_NAME", ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
-					}},
-					{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", sidecarPort)},
-					{Name: "PEER_ADDRESS", Value: peerAddress},
-					{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
-					{Name: "MY_SITE", Value: site.Name},
-					{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
-					}},
-					{Name: "FAILOVER_GROUP", Value: fg.Name},
-					{Name: "LEASE_TIMEOUT", Value: leaseTimeout},
-					{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
-				},
+				Env:          sidecarEnv,
 				VolumeMounts: sidecarVolumeMounts,
 				Resources:    fg.Spec.SidecarResources,
 				LivenessProbe: &corev1.Probe{
@@ -632,8 +804,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					InitialDelaySeconds: 3,
 					PeriodSeconds:       5,
 				},
-			},
-		}
+			}
+
+			containers := []corev1.Container{mysqlContainer, sidecarContainer}
 
 		volumes := []corev1.Volume{
 			{
@@ -671,6 +844,49 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					},
 				},
 			})
+		}
+
+		if fg.Spec.UsesCredentials() {
+			credSecretVolume := func(volName, secretName string) corev1.Volume {
+				return corev1.Volume{
+					Name: volName,
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: secretName,
+							Items: []corev1.KeyToPath{
+								{Key: "username", Path: "username"},
+								{Key: "password", Path: "password"},
+							},
+						},
+					},
+				}
+			}
+			volumes = append(volumes,
+				credSecretVolume("creds-operator", fg.Spec.Credentials.OperatorSecret),
+				corev1.Volume{
+					Name: "init-users",
+					VolumeSource: corev1.VolumeSource{
+						ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: fmt.Sprintf("mysql-%s-init-users", fg.Name),
+							},
+							DefaultMode: int32Ptr(0555),
+						},
+					},
+				},
+			)
+			if s := fg.Spec.Credentials.AppSecret; s != "" {
+				volumes = append(volumes, credSecretVolume("creds-app", s))
+			}
+			if s := fg.Spec.Credentials.ReadOnlySecret; s != "" {
+				volumes = append(volumes, credSecretVolume("creds-readonly", s))
+			}
+			if s := fg.Spec.Credentials.MonitorSecret; s != "" {
+				volumes = append(volumes, credSecretVolume("creds-monitor", s))
+			}
+			if s := fg.Spec.Credentials.BackupSecret; s != "" {
+				volumes = append(volumes, credSecretVolume("creds-backup", s))
+			}
 		}
 
 		podAnnotations := make(map[string]string)
@@ -1005,7 +1221,8 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 
 // computeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
 // tlsSecretData is the raw data from the TLS Secret (nil when TLS is not configured).
-func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsSecretData map[string][]byte) string {
+// credSecretData is a map of secret-name→data for credential secrets (nil in legacy mode).
+func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsSecretData map[string][]byte, credSecretData map[string]map[string][]byte) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
 	fmt.Fprintf(h, "sidecar=%s\n", fg.Spec.SidecarImage)
@@ -1031,8 +1248,29 @@ func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 			fmt.Fprintf(h, "tls.%s=%x\n", k, sha256.Sum256(tlsSecretData[k]))
 		}
 	}
+	// Include credential secret data so password rotation triggers pod rolling restart.
+	if len(credSecretData) > 0 {
+		credNames := make([]string, 0, len(credSecretData))
+		for name := range credSecretData {
+			credNames = append(credNames, name)
+		}
+		sort.Strings(credNames)
+		for _, name := range credNames {
+			data := credSecretData[name]
+			dataKeys := make([]string, 0, len(data))
+			for k := range data {
+				dataKeys = append(dataKeys, k)
+			}
+			sort.Strings(dataKeys)
+			for _, k := range dataKeys {
+				fmt.Fprintf(h, "cred.%s.%s=%x\n", name, k, sha256.Sum256(data[k]))
+			}
+		}
+	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
+
+func int32Ptr(i int32) *int32 { return &i }
 
 // CRConfigToTopologyConfig extracts topology manager configuration from a CR.
 // This bridges the CRD spec to the internal config used by TopologyManager.
