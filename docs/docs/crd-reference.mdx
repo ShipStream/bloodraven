@@ -266,7 +266,7 @@ The operator writes the following status fields.
 | `replicating` | bool | Whether this site is replicating from another site |
 | `secondsBehindSource` | int | Replication lag in seconds (only set when replicating) |
 | `gtidExecuted` | string | GTID set executed on this site |
-| `recoveryState` | string | Old-primary recovery state: empty (no recovery needed) or `RecoveryBlocked` (divergent transactions detected — site must be wiped and re-cloned) |
+| `recoveryState` | string | Old-primary recovery state: empty (no recovery needed) or `RecoveryBlocked` (divergent transactions detected — trigger a reclone to recover) |
 | `divergentGtid` | string | GTID set of transactions on this site that diverge from the current primary. Populated when `recoveryState` is `RecoveryBlocked`. |
 | `divergentTransactionCount` | int | Number of divergent transactions. Populated when `recoveryState` is `RecoveryBlocked`. |
 
@@ -276,7 +276,14 @@ The operator writes the following status fields.
 |---|---|
 | `Ready` | `True` when the failover group has one writable primary and all replicas are healthy |
 | `Degraded` | `True` when replication is broken, lag exceeds `maxLagSeconds`, or a site is unreachable |
-| `RecoveryPending` | `True` when an old primary has divergent transactions and requires manual intervention (wipe + re-clone). Reason is `DivergentTransactions`. |
+| `RecoveryPending` | `True` when an old primary has divergent transactions and requires manual intervention. Reason is `DivergentTransactions`. Use the reclone annotation to recover. |
+| `Bootstrapping` | `True` when a clone operation is in progress (fresh-deploy, auto-clone, or reclone). Reason indicates the phase. |
+
+### Annotations
+
+| Annotation | Description |
+|---|---|
+| `bloodraven.shipstream.io/reclone-site` | Set to a site name (e.g. `iad`) to trigger a `CLONE INSTANCE` from the current primary to that site. The operator processes the annotation, removes it automatically, and reports progress via the `Bootstrapping` condition. Use this to recover a divergent site without manually deleting its PVC. |
 
 ### Example status
 

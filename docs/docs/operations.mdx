@@ -86,25 +86,32 @@ Check the divergence details:
 kubectl get mysqlfailovergroup orders -o jsonpath='{range .status.sites[*]}{.name}: recoveryState={.recoveryState} divergentTxns={.divergentTransactionCount} divergentGtid={.divergentGtid}{"\n"}{end}'
 ```
 
-To recover the site, wipe its data and let the operator re-clone from the current primary:
+To recover the site, investigate the lost transactions and then trigger a reclone:
 
 **Step 1: Investigate the lost transactions**
 
 Review the divergent GTID set to understand what data was lost. These transactions were committed on the old primary but never reached the replica before failover.
 
-**Step 2: Delete the PVC**
+**Step 2: Trigger a reclone**
+
+Use the reclone annotation to have the operator run `CLONE INSTANCE` on the divergent site, replacing all its data with a fresh copy from the current primary:
+
+```bash
+kubectl annotate mysqlfailovergroup orders bloodraven.shipstream.io/reclone-site=iad
+```
+
+The operator processes the annotation, removes it automatically, and begins cloning. The site will temporarily appear unreachable during the MySQL restart that follows the clone. Progress is reported in the `Bootstrapping` condition.
+
+**Alternative: Manual PVC deletion**
+
+If you prefer to wipe the storage entirely:
 
 ```bash
 kubectl delete pvc data-mysql-orders-iad-0
-```
-
-**Step 3: Delete the pod to trigger recreation**
-
-```bash
 kubectl delete pod mysql-orders-iad-0
 ```
 
-The operator will detect the fresh MySQL instance and bootstrap it as a replica via `CLONE INSTANCE`, restoring it to a consistent state with the current primary.
+The operator will detect the fresh (empty) MySQL instance and automatically clone it from the primary.
 
 :::caution
 If the old primary came back with no divergence (GTID sets match), the operator automatically reconfigures it as a replica — no manual intervention is needed. The `RecoveryPending` condition only appears when divergent transactions exist.

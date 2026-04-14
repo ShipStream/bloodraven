@@ -24,7 +24,7 @@ Tracking implementation progress for items in [bloodraven-wishlist.md](bloodrave
 
 ## P2 — Nice to have
 
-- [ ] 15. Automatic initial clone
+- [x] 15. Automatic initial clone — GTID-based donor selection, empty-site detection, annotation-based reclone trigger
 - [ ] 16. Read replica lag-aware routing
 - [ ] 17. Maintenance mode
 - [ ] 18. Operator high availability (leader election)

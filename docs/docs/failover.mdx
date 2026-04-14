@@ -121,14 +121,16 @@ If the old primary has committed transactions that never replicated to the new p
 - Emits the `bloodraven_divergent_transactions` Prometheus metric
 
 :::danger
-Divergent transactions mean the old primary accepted writes that the new primary never received. These transactions are effectively lost from the replication stream. The site must be **wiped and re-cloned** from the current primary to recover. Do not attempt to manually reconfigure replication — conflicting GTID sets will cause replication errors.
+Divergent transactions mean the old primary accepted writes that the new primary never received. These transactions are effectively lost from the replication stream. The site must be **re-cloned** from the current primary to recover. Do not attempt to manually reconfigure replication — conflicting GTID sets will cause replication errors.
 :::
 
 To recover a divergent site:
 
 1. Investigate the divergent transactions to understand what data was lost (check `status.sites[].divergentGtid`)
-2. Delete the PVC for the affected site to trigger a fresh data clone
-3. The operator will detect the fresh instance and bootstrap it as a replica via `CLONE INSTANCE`
+2. Trigger a reclone using the annotation: `kubectl annotate mysqlfailovergroup <name> bloodraven.shipstream.io/reclone-site=<site>`
+3. The operator will run `CLONE INSTANCE` on the target site, replacing all data with a fresh copy from the current primary
+
+See [Recovering a divergent old primary](./operations.mdx#recovering-a-divergent-old-primary) for the full procedure.
 
 ### Prerequisites
 

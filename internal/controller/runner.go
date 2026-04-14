@@ -136,6 +136,10 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		if ok && existing.cfg == cfg {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
+			if recloneSite := fg.GetAnnotations()[RecloneAnnotation]; recloneSite != "" {
+				existing.tm.SetRecloneSite(recloneSite)
+				r.removeRecloneAnnotation(ctx, nn)
+			}
 			continue
 		}
 
@@ -153,6 +157,10 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RLock()
 		if mt, ok := r.managers[nn]; ok {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
+			if recloneSite := fg.GetAnnotations()[RecloneAnnotation]; recloneSite != "" {
+				mt.tm.SetRecloneSite(recloneSite)
+				r.removeRecloneAnnotation(ctx, nn)
+			}
 		}
 		r.mu.RUnlock()
 	}
@@ -169,6 +177,30 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	r.mu.Unlock()
 
 	return nil
+}
+
+// removeRecloneAnnotation removes the one-shot reclone annotation from the CR
+// after it has been passed to the topology manager.
+func (r *TopologyManagerRunner) removeRecloneAnnotation(ctx context.Context, nn types.NamespacedName) {
+	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+		var fresh v1alpha1.MysqlFailoverGroup
+		if err := r.client.Get(ctx, nn, &fresh); err != nil {
+			return err
+		}
+		annotations := fresh.GetAnnotations()
+		if annotations == nil {
+			return nil
+		}
+		if _, ok := annotations[RecloneAnnotation]; !ok {
+			return nil
+		}
+		delete(annotations, RecloneAnnotation)
+		fresh.SetAnnotations(annotations)
+		return r.client.Update(ctx, &fresh)
+	})
+	if err != nil {
+		r.logger.Error("failed to remove reclone annotation", "fg", nn, "error", err)
+	}
 }
 
 // startManager creates and starts a TopologyManager for a single MysqlFailoverGroup.
@@ -278,8 +310,8 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// unrelated conditions set by the most recent Poll cycle (Degraded,
 	// ReplicationBroken, Updating, ...) are not clobbered by a partially
 	// populated snapshot from the async bootstrap goroutine.
-	tm.BootstrapStatusCallback = func(phase, errMsg string) {
-		r.updateBootstrappingCondition(ctx, nn, phase, errMsg)
+	tm.BootstrapStatusCallback = func(phase, errMsg, source string) {
+		r.updateBootstrappingCondition(ctx, nn, phase, errMsg, source)
 	}
 
 	tmCtx, cancel := context.WithCancel(ctx)
@@ -520,7 +552,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	// Bootstrapping condition reflects fresh-deploy bootstrap progress.
-	setBootstrappingCondition(&freshFG.Status.Conditions, freshFG.Generation, now, snap.BootstrapPhase, snap.BootstrapError)
+	setBootstrappingCondition(&freshFG.Status.Conditions, freshFG.Generation, now, snap.BootstrapPhase, snap.BootstrapError, snap.BootstrapSource)
 
 	// Update phase tracking.
 	freshFG.Status.UpdatePhase = snap.UpdatePhase
@@ -552,7 +584,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
 			Reason:             "DivergentTransactions",
-			Message:            fmt.Sprintf("Old primary %s has %d divergent transactions — must be wiped and re-cloned", snap.RecoverySite, snap.DivergentTxnCount),
+			Message:            fmt.Sprintf("Old primary %s has %d divergent transactions — annotate with bloodraven.shipstream.io/reclone-site=%s to recover", snap.RecoverySite, snap.DivergentTxnCount, snap.RecoverySite),
 		})
 	} else {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
@@ -637,7 +669,15 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 // current phase. It is shared between the full-status writer (updateCRStatus)
 // and the dedicated bootstrap-only writer (updateBootstrappingCondition) so
 // they stay in sync.
-func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64, now metav1.Time, phase, errMsg string) {
+func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64, now metav1.Time, phase, errMsg, source string) {
+	label := "Bootstrap"
+	switch source {
+	case "reclone":
+		label = "Reclone"
+	case "auto-clone":
+		label = "Auto-clone"
+	}
+
 	switch phase {
 	case "":
 		setCondition(conditions, metav1.Condition{
@@ -655,12 +695,12 @@ func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64,
 			ObservedGeneration: generation,
 			LastTransitionTime: now,
 			Reason:             string(BootstrapPhaseDone),
-			Message:            "Fresh-deploy bootstrap completed successfully",
+			Message:            fmt.Sprintf("%s completed successfully", label),
 		})
 	case string(BootstrapPhaseFailed):
-		msg := "Bootstrap failed"
+		msg := fmt.Sprintf("%s failed", label)
 		if errMsg != "" {
-			msg = fmt.Sprintf("Bootstrap failed: %s", errMsg)
+			msg = fmt.Sprintf("%s failed: %s", label, errMsg)
 		}
 		setCondition(conditions, metav1.Condition{
 			Type:               "Bootstrapping",
@@ -677,7 +717,7 @@ func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64,
 			ObservedGeneration: generation,
 			LastTransitionTime: now,
 			Reason:             phase,
-			Message:            fmt.Sprintf("Fresh-deploy bootstrap in progress: %s", phase),
+			Message:            fmt.Sprintf("%s in progress: %s", label, phase),
 		})
 	}
 }
@@ -686,14 +726,14 @@ func setBootstrappingCondition(conditions *[]metav1.Condition, generation int64,
 // CR. It is invoked from the bootstrap goroutine on phase transitions; using a
 // dedicated path (rather than updateCRStatus with a partially populated
 // TopologySnapshot) prevents inadvertently clearing unrelated conditions.
-func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context, nn types.NamespacedName, phase, errMsg string) {
+func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context, nn types.NamespacedName, phase, errMsg, source string) {
 	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		var fresh v1alpha1.MysqlFailoverGroup
 		if err := r.client.Get(ctx, nn, &fresh); err != nil {
 			return err
 		}
 		before := fresh.Status.DeepCopy()
-		setBootstrappingCondition(&fresh.Status.Conditions, fresh.Generation, metav1.Now(), phase, errMsg)
+		setBootstrappingCondition(&fresh.Status.Conditions, fresh.Generation, metav1.Now(), phase, errMsg, source)
 		if equality.Semantic.DeepEqual(before, &fresh.Status) {
 			return nil
 		}

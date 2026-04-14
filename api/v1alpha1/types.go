@@ -353,7 +353,7 @@ type SiteStatus struct {
 
 	// RecoveryState tracks old-primary recovery progress after failover.
 	// Empty when no recovery is needed. RecoveryBlocked means divergent
-	// transactions were detected and the site must be wiped and re-cloned.
+	// transactions were detected and the site must be re-cloned.
 	// +kubebuilder:validation:Enum="";RecoveryBlocked
 	// +optional
 	RecoveryState string `json:"recoveryState,omitempty"`

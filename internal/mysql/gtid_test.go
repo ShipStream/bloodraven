@@ -361,6 +361,24 @@ func TestGTIDSet_Subtract(t *testing.T) {
 	}
 }
 
+func TestGTIDSet_IsEmpty(t *testing.T) {
+	empty, err := ParseGTIDSet("")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !empty.IsEmpty() {
+		t.Error("expected empty GTID set to be empty")
+	}
+
+	nonEmpty, err := ParseGTIDSet("uuid1:1-5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if nonEmpty.IsEmpty() {
+		t.Error("expected non-empty GTID set to not be empty")
+	}
+}
+
 func TestParseGTIDSet_MalformedIntervalNotTreatedAsTag(t *testing.T) {
 	// These inputs must return errors, not be silently misparsed as tagged GTID entries.
 	tests := []string{

@@ -156,6 +156,11 @@ func parseInterval(s string) (Interval, error) {
 	return Interval{Start: start, End: end}, nil
 }
 
+// IsEmpty returns true if the set contains no transactions.
+func (g GTIDSet) IsEmpty() bool {
+	return len(g) == 0
+}
+
 // Contains returns true if this set contains all transactions in other.
 func (g GTIDSet) Contains(other GTIDSet) bool {
 	for uuid, otherIntervals := range other {
