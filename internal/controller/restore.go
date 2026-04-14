@@ -314,6 +314,10 @@ func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Cont
 		password = parsed.Passwd
 	}
 
+	if user == "" {
+		return fmt.Errorf("secret %s has empty username", backupSecretName)
+	}
+
 	derived := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,

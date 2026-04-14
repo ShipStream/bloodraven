@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -112,8 +113,13 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			var secret corev1.Secret
 			if err := r.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}, &secret); err == nil {
 				h := sha256.New()
-				for k, v := range secret.Data {
-					fmt.Fprintf(h, "%s=%x\n", k, sha256.Sum256(v))
+				keys := make([]string, 0, len(secret.Data))
+				for k := range secret.Data {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					fmt.Fprintf(h, "%s=%x\n", k, sha256.Sum256(secret.Data[k]))
 				}
 				cfg.CredentialHash = hex.EncodeToString(h.Sum(nil))[:16]
 			}

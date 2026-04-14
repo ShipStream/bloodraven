@@ -709,21 +709,21 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					corev1.VolumeMount{Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true},
 					corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
 				)
-				appendCredVolume := func(name, secretName string) {
+				appendCredVolume := func(name string) {
 					mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
 						corev1.VolumeMount{Name: "creds-" + name, MountPath: "/etc/mysql/creds/" + name, ReadOnly: true})
 				}
 				if fg.Spec.Credentials.AppSecret != "" {
-					appendCredVolume("app", fg.Spec.Credentials.AppSecret)
+					appendCredVolume("app")
 				}
 				if fg.Spec.Credentials.ReadOnlySecret != "" {
-					appendCredVolume("readonly", fg.Spec.Credentials.ReadOnlySecret)
+					appendCredVolume("readonly")
 				}
 				if fg.Spec.Credentials.MonitorSecret != "" {
-					appendCredVolume("monitor", fg.Spec.Credentials.MonitorSecret)
+					appendCredVolume("monitor")
 				}
 				if fg.Spec.Credentials.BackupSecret != "" {
-					appendCredVolume("backup", fg.Spec.Credentials.BackupSecret)
+					appendCredVolume("backup")
 				}
 
 				sidecarEnv = append([]corev1.EnvVar{

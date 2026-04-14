@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	k8sretry "k8s.io/client-go/util/retry"
@@ -222,8 +222,15 @@ func (r *MysqlFailoverGroupReconciler) setCredentialHash(ctx context.Context, fg
 }
 
 func openMySQL(user, password, addr string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s)/", user, password, addr)
-	db, err := sql.Open("mysql", dsn)
+	cfg := mysqldriver.NewConfig()
+	cfg.User = user
+	cfg.Passwd = password
+	cfg.Net = "tcp"
+	cfg.Addr = addr
+	cfg.Timeout = 5 * time.Second
+	cfg.ReadTimeout = 5 * time.Second
+	cfg.WriteTimeout = 5 * time.Second
+	db, err := sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {
 		return nil, err
 	}
@@ -238,6 +245,7 @@ func openMySQL(user, password, addr string) (*sql.DB, error) {
 }
 
 func escapeSingleQuotes(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
 	return strings.ReplaceAll(s, "'", "''")
 }
 

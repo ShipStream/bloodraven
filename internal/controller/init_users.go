@@ -55,44 +55,45 @@ escape_sql() {
 }
 
 create_user_with_grants() {
-    local user pass
+    local user pass grants
     user=$(escape_sql "$(read_cred "$1" username)")
     pass=$(escape_sql "$(read_cred "$1" password)")
     if [ -z "$user" ] || [ -z "$pass" ]; then
         echo "bloodraven-init: skipping $1 (credentials not mounted)"
         return
     fi
+    grants="${2//__USER__/$user}"
     echo "bloodraven-init: creating $1 user '${user}'"
     mysql -u root -p"${MYSQL_ROOT_PASSWORD}" <<EOSQL
 CREATE USER IF NOT EXISTS '${user}'@'%' IDENTIFIED BY '${pass}';
 ALTER USER '${user}'@'%' IDENTIFIED BY '${pass}';
-$2
+${grants}
 FLUSH PRIVILEGES;
 EOSQL
 }
 
 `
 	// Operator user — full admin for topology management, replication, cloning.
-	script += `create_user_with_grants operator "GRANT ALL PRIVILEGES ON *.* TO '\$(escape_sql \"\$(read_cred operator username)\")'@'%' WITH GRANT OPTION;"
+	script += `create_user_with_grants operator "GRANT ALL PRIVILEGES ON *.* TO '__USER__'@'%' WITH GRANT OPTION;"
 `
 
 	if fg.Spec.Credentials.AppSecret != "" {
-		script += `create_user_with_grants app "GRANT ALL PRIVILEGES ON *.* TO '\$(escape_sql \"\$(read_cred app username)\")'@'%';"
+		script += `create_user_with_grants app "GRANT ALL PRIVILEGES ON *.* TO '__USER__'@'%';"
 `
 	}
 
 	if fg.Spec.Credentials.ReadOnlySecret != "" {
-		script += `create_user_with_grants readonly "GRANT SELECT, SHOW VIEW, SHOW DATABASES, PROCESS ON *.* TO '\$(escape_sql \"\$(read_cred readonly username)\")'@'%';"
+		script += `create_user_with_grants readonly "GRANT SELECT, SHOW VIEW, SHOW DATABASES, PROCESS ON *.* TO '__USER__'@'%';"
 `
 	}
 
 	if fg.Spec.Credentials.MonitorSecret != "" {
-		script += `create_user_with_grants monitor "GRANT PROCESS, REPLICATION CLIENT ON *.* TO '\$(escape_sql \"\$(read_cred monitor username)\")'@'%'; GRANT SELECT ON performance_schema.* TO '\$(escape_sql \"\$(read_cred monitor username)\")'@'%';"
+		script += `create_user_with_grants monitor "GRANT PROCESS, REPLICATION CLIENT ON *.* TO '__USER__'@'%'; GRANT SELECT ON performance_schema.* TO '__USER__'@'%';"
 `
 	}
 
 	if fg.Spec.Credentials.BackupSecret != "" {
-		script += `create_user_with_grants backup "GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT ON *.* TO '\$(escape_sql \"\$(read_cred backup username)\")'@'%';"
+		script += `create_user_with_grants backup "GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT ON *.* TO '__USER__'@'%';"
 `
 	}
 

@@ -46,7 +46,7 @@ func ConfigFromEnv() (*Config, error) {
 		user := os.Getenv("MYSQL_USER")
 		password := os.Getenv("MYSQL_PASSWORD")
 		if user == "" {
-			return nil, fmt.Errorf("one of MYSQL_DSN or MYSQL_USER+MYSQL_PASSWORD is required")
+			return nil, fmt.Errorf("one of MYSQL_DSN or MYSQL_USER is required")
 		}
 		dsn = fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/", user, password)
 	}
