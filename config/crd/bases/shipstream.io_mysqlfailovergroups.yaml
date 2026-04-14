@@ -4654,12 +4654,11 @@ spec:
                     recoveryState:
                       description: |-
                         RecoveryState tracks old-primary recovery progress after failover.
-                        Empty when no recovery is needed.
+                        Empty when no recovery is needed. RecoveryBlocked means divergent
+                        transactions were detected and the site must be wiped and re-cloned.
                       enum:
                       - ""
-                      - Recovering
                       - RecoveryBlocked
-                      - Recovered
                       type: string
                     replicating:
                       description: Replicating indicates whether replication is running

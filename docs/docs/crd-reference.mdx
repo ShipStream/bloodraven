@@ -199,7 +199,7 @@ The operator writes the following status fields.
 | `replicating` | bool | Whether this site is replicating from another site |
 | `secondsBehindSource` | int | Replication lag in seconds (only set when replicating) |
 | `gtidExecuted` | string | GTID set executed on this site |
-| `recoveryState` | string | Old-primary recovery state: empty (no recovery needed), `RecoveryBlocked` (divergent transactions detected — site must be wiped and re-cloned), or `Recovered` |
+| `recoveryState` | string | Old-primary recovery state: empty (no recovery needed) or `RecoveryBlocked` (divergent transactions detected — site must be wiped and re-cloned) |
 | `divergentGtid` | string | GTID set of transactions on this site that diverge from the current primary. Populated when `recoveryState` is `RecoveryBlocked`. |
 | `divergentTransactionCount` | int | Number of divergent transactions. Populated when `recoveryState` is `RecoveryBlocked`. |
 

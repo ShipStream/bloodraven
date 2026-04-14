@@ -81,8 +81,8 @@ type TopologySnapshot struct {
 	BootstrapError     string // non-empty if bootstrap failed
 
 	PromotionGtidExecuted string // GTID set at the moment of the most recent promotion
-	RecoverySite          string // site name if recovery is pending/blocked
-	RecoveryState         string // "", "Recovering", "RecoveryBlocked", "Recovered"
+	RecoverySite          string // site name when recovery is blocked due to divergence
+	RecoveryState         string // "" or "RecoveryBlocked"
 	DivergentGtid         string
 	DivergentTxnCount     int64
 }
@@ -461,6 +461,11 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		if tm.bootstrapErr != nil {
 			bootstrapErrStr = tm.bootstrapErr.Error()
 		}
+		recoverySite := tm.recoveryPendingSite
+		recoveryState := tm.recoveryStateLocked()
+		divergentGtid := tm.recoveryDivergentGtid
+		divergentTxnCount := tm.recoveryDivergentCount
+		promotionGtid := tm.promotionGtidExecuted
 		tm.mu.RUnlock()
 		tm.StatusCallback(TopologySnapshot{
 			SiteNames:          [2]string{tm.sites[0].name, tm.sites[1].name},
@@ -474,11 +479,11 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 			BootstrapPhase:     bootstrapPhase,
 			BootstrapError:     bootstrapErrStr,
 
-			PromotionGtidExecuted: tm.promotionGtidExecuted,
-			RecoverySite:          tm.recoveryPendingSite,
-			RecoveryState:         tm.recoveryStateLocked(),
-			DivergentGtid:         tm.recoveryDivergentGtid,
-			DivergentTxnCount:     tm.recoveryDivergentCount,
+			PromotionGtidExecuted: promotionGtid,
+			RecoverySite:          recoverySite,
+			RecoveryState:         recoveryState,
+			DivergentGtid:         divergentGtid,
+			DivergentTxnCount:     divergentTxnCount,
 		})
 	}
 
