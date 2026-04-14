@@ -11,6 +11,15 @@ info()  { echo -e "\033[1;34m==>\033[0m $*"; }
 ok()    { echo -e "\033[1;32m OK\033[0m $*"; }
 warn()  { echo -e "\033[1;33m!!\033[0m $*"; }
 
+# Prefer podman (rootless, no daemon) over docker
+if command -v podman >/dev/null 2>&1; then
+  RUNTIME=podman
+elif command -v docker >/dev/null 2>&1; then
+  RUNTIME=docker
+else
+  RUNTIME=""
+fi
+
 # ── 1. Scale down MySQL to release PVC references ─────────────────────────
 info "Scaling down MySQL deployments..."
 kubectl -n "$NAMESPACE" scale deployment mysql-playground-iad mysql-playground-pdx --replicas=0 2>/dev/null || true
@@ -54,7 +63,7 @@ ok "PVCs cleaned up"
 # ── 3. Wipe data directories on k3d nodes ─────────────────────────────────
 info "Wiping data directories on k3d nodes..."
 for node in k3d-bloodraven-agent-0 k3d-bloodraven-agent-1 k3d-bloodraven-server-0; do
-  docker exec "$node" sh -c 'rm -rf /var/lib/rancher/k3s/storage/pvc-*' 2>/dev/null || true
+  ${RUNTIME:-docker} exec "$node" sh -c 'rm -rf /var/lib/rancher/k3s/storage/pvc-*' 2>/dev/null || true
 done
 ok "Data wiped"
 
