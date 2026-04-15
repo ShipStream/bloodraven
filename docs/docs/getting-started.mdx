@@ -172,8 +172,8 @@ By default, ArgoCD does not know how to assess the health of `MysqlFailoverGroup
 
 | CR | Condition / Field | ArgoCD Health |
 |---|---|---|
-| `MysqlFailoverGroup` | `Degraded=True` or `RecoveryPending=True` | **Degraded** |
-| `MysqlFailoverGroup` | `Bootstrapping=True` or `Updating=True` | **Progressing** |
+| `MysqlFailoverGroup` | `Degraded=True`, `RecoveryPending=True`, or `Bootstrapping=True` with `reason=Failed` | **Degraded** |
+| `MysqlFailoverGroup` | `Bootstrapping=True` (in progress) or `Updating=True` | **Progressing** |
 | `MysqlFailoverGroup` | `Ready=True` | **Healthy** |
 | `MysqlBackup` | `phase: Succeeded` | **Healthy** |
 | `MysqlBackup` | `phase: Failed` | **Degraded** |
@@ -181,11 +181,12 @@ By default, ArgoCD does not know how to assess the health of `MysqlFailoverGroup
 
 ### Option 1: Patch argocd-cm directly
 
-Apply the patch file shipped in the chart:
+Extract the chart and apply the patch file:
 
 ```bash
+helm pull bloodraven/bloodraven --untar
 kubectl patch configmap argocd-cm -n argocd \
-  --patch-file charts/bloodraven/argocd/argocd-cm-patch.yaml
+  --patch-file bloodraven/argocd/argocd-cm-patch.yaml
 ```
 
 Then restart the ArgoCD application controller to pick up the change:
@@ -196,23 +197,32 @@ kubectl rollout restart deployment argocd-application-controller -n argocd
 
 ### Option 2: ArgoCD Helm chart values
 
-If you deploy ArgoCD via its Helm chart, merge the health checks into your values file:
+If you deploy ArgoCD via its Helm chart, extract the lua scripts from the Bloodraven chart and merge them into your ArgoCD values file:
+
+```bash
+helm pull bloodraven/bloodraven --untar
+```
+
+Then copy the contents of `bloodraven/argocd/health-mysqlfailovergroup.lua` and `bloodraven/argocd/health-mysqlbackup.lua` into your ArgoCD values:
 
 ```yaml
 # argocd-values.yaml
 configs:
   cm:
     resource.customizations.health.shipstream.io_MysqlFailoverGroup: |
-      # contents of argocd/health-mysqlfailovergroup.lua
+      # paste contents of bloodraven/argocd/health-mysqlfailovergroup.lua
     resource.customizations.health.shipstream.io_MysqlBackup: |
-      # contents of argocd/health-mysqlbackup.lua
+      # paste contents of bloodraven/argocd/health-mysqlbackup.lua
 ```
-
-The standalone lua files at `charts/bloodraven/argocd/health-mysqlfailovergroup.lua` and `charts/bloodraven/argocd/health-mysqlbackup.lua` can be copied directly into the values block.
 
 ### Option 3: Kustomize overlay
 
-If you manage ArgoCD with Kustomize, use a strategic merge patch:
+If you manage ArgoCD with Kustomize, extract the patch from the chart and add it as a strategic merge patch:
+
+```bash
+helm pull bloodraven/bloodraven --untar
+cp bloodraven/argocd/argocd-cm-patch.yaml .
+```
 
 ```yaml
 # kustomization.yaml

@@ -47,8 +47,13 @@ if recoveryPending ~= nil and recoveryPending.status == "True" then
 end
 
 if bootstrapping ~= nil and bootstrapping.status == "True" then
-  hs.status = "Progressing"
-  hs.message = bootstrapping.message or "Bootstrapping"
+  if bootstrapping.reason == "Failed" then
+    hs.status = "Degraded"
+    hs.message = "Bootstrapping: " .. (bootstrapping.message or "Bootstrap failed")
+  else
+    hs.status = "Progressing"
+    hs.message = bootstrapping.message or "Bootstrapping"
+  end
   return hs
 end
 
