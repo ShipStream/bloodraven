@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Create draft GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           generate_release_notes: true
@@ -141,6 +141,6 @@ jobs:
     needs: [docker, helm]
     steps:
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: false
