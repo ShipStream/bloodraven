@@ -44,6 +44,11 @@ Key scripts (run from repo root):
 - `./playground/teardown.sh` — removes all playground resources, leaves the cluster intact.
 - `./playground/reset-mysql.sh` — wipes MySQL data and PVCs without full teardown.
 
+After creating a cluster, dump the config so it can be monitored remotely:
+```
+k3d kubeconfig get bloodraven
+```
+
 Access apps after setup:
 ```
 kubectl -n bloodraven-playground port-forward svc/dashboard 8091:8091
