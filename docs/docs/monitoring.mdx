@@ -138,6 +138,96 @@ groups:
           summary: "No site is currently writable"
 ```
 
+## Kubernetes Events
+
+Bloodraven emits standard Kubernetes Events on `MysqlFailoverGroup` and `MysqlBackup` resources. These events can be forwarded to Slack, PagerDuty, or any webhook endpoint using tools like [Kubewatch](https://github.com/robusta-dev/kubewatch), [Argo Events](https://argoproj.github.io/argo-events/), or [Event Router](https://github.com/heptiolabs/eventrouter).
+
+### Topology and failover
+
+| Reason | Type | Description |
+|---|---|---|
+| `FailoverExecuted` | Normal | A failover completed and a new primary was promoted |
+| `DataLossDetected` | Warning | Divergent transactions found on old primary after emergency failover |
+| `RecoveryComplete` | Normal | Old primary recovered and is now replicating |
+| `SplitBrainDetected` | Warning | Both sites are writable (split brain) |
+| `NoPrimaryDetected` | Warning | Both sites are read-only (no primary) |
+| `TotalLossDetected` | Warning | Both sites are unreachable |
+| `SiteRecovered` | Normal | Degraded condition cleared, topology is healthy |
+
+### Backup lifecycle
+
+| Reason | Type | Description |
+|---|---|---|
+| `BackupStarted` | Normal | Backup Job created |
+| `BackupSucceeded` | Normal | Backup completed successfully |
+| `BackupFailed` | Warning | Backup Job failed |
+| `InFlightFailover` | Warning | Active site changed while a backup was in progress |
+
+### Backup scheduling
+
+| Reason | Type | Description |
+|---|---|---|
+| `BackupScheduleInvalid` | Warning | Schedule references an unknown backup profile |
+| `BackupScheduleServiceAccountMissing` | Warning | Operator ServiceAccount not configured |
+| `BackupRetryScheduled` | Normal | Retry scheduled for a failed backup |
+| `BackupPITRNotImplemented` | Warning | `spec.backup.pitr` field has no effect (reserved for future use) |
+
+### Artifact cleanup
+
+| Reason | Type | Description |
+|---|---|---|
+| `ArtifactCleanupStarted` | Normal | Cleanup Job created for backup artifact |
+| `ArtifactCleanupSucceeded` | Normal | Artifact removed successfully |
+| `ArtifactCleanupFailed` | Warning | Cleanup Job failed (finalizer blocks deletion until resolved) |
+| `ArtifactCleanupSkipped` | Warning | Referenced failover group or profile is gone |
+
+### Restore
+
+| Reason | Type | Description |
+|---|---|---|
+| `RestoreStarted` | Normal | Restore Job created |
+| `RestoreSucceeded` | Normal | Restore completed successfully |
+| `RestoreFailed` | Warning | Restore Job failed |
+| `RestoreTargetUnavailable` | Warning | Active site is not writable or not ready for restore |
+| `RestoreBuildFailed` | Warning | Failed to build restore Job spec |
+
+### Credentials and secrets
+
+| Reason | Type | Description |
+|---|---|---|
+| `CredentialReconcileFailed` | Warning | Failed to reconcile MySQL users |
+| `SecretNotFound` | Warning | Referenced Secret not found |
+| `SecretMissingKey` | Warning | Secret is missing a required key |
+
+### Lifecycle
+
+| Reason | Type | Description |
+|---|---|---|
+| `GracefulShutdown` | Normal | Graceful shutdown started or completed |
+
+### Forwarding events with Kubewatch
+
+[Kubewatch](https://github.com/robusta-dev/kubewatch) can watch for Kubernetes Events and forward them to Slack, PagerDuty, webhooks, and more. Example configuration to forward all Bloodraven events to Slack:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubewatch
+data:
+  .kubewatch.yaml: |
+    handler:
+      slack:
+        token: "xoxb-your-slack-token"
+        channel: "#mysql-alerts"
+    resource:
+      event: true
+    namespaces:
+      - bloodraven
+```
+
+[Argo Events](https://argoproj.github.io/argo-events/) and [Event Router](https://github.com/heptiolabs/eventrouter) are alternatives that offer richer filtering and routing capabilities.
+
 ## Status API
 
 The operator serves a JSON status API on `:8082`.

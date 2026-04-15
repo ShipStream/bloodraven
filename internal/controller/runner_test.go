@@ -539,6 +539,176 @@ func TestEmitFailoverEvents_RecoveryComplete(t *testing.T) {
 	}
 }
 
+func TestEmitDegradedTransitionEvents_SplitBrain(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		Conditions: []metav1.Condition{
+			{Type: "Degraded", Status: metav1.ConditionFalse, Reason: "Healthy"},
+		},
+	}
+	snap := TopologySnapshot{
+		Alert:      "SPLIT BRAIN: both sites are writable",
+		SiteStates: [2]state.SiteState{state.StateWritable, state.StateWritable},
+	}
+
+	runner.emitDegradedTransitionEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d: %v", len(events), events)
+	}
+	if !strings.Contains(events[0], "SplitBrainDetected") {
+		t.Errorf("want SplitBrainDetected event, got %s", events[0])
+	}
+}
+
+func TestEmitDegradedTransitionEvents_NoPrimary(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		Conditions: []metav1.Condition{
+			{Type: "Degraded", Status: metav1.ConditionFalse, Reason: "Healthy"},
+		},
+	}
+	snap := TopologySnapshot{
+		Alert:      "NO PRIMARY: both sites are read-only",
+		SiteStates: [2]state.SiteState{state.StateReadOnly, state.StateReadOnly},
+	}
+
+	runner.emitDegradedTransitionEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d: %v", len(events), events)
+	}
+	if !strings.Contains(events[0], "NoPrimaryDetected") {
+		t.Errorf("want NoPrimaryDetected event, got %s", events[0])
+	}
+}
+
+func TestEmitDegradedTransitionEvents_TotalLoss(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		Conditions: []metav1.Condition{
+			{Type: "Degraded", Status: metav1.ConditionFalse, Reason: "Healthy"},
+		},
+	}
+	snap := TopologySnapshot{
+		Alert:      "TOTAL LOSS: both sites are unreachable",
+		SiteStates: [2]state.SiteState{state.StateUnreachable, state.StateUnreachable},
+	}
+
+	runner.emitDegradedTransitionEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d: %v", len(events), events)
+	}
+	if !strings.Contains(events[0], "TotalLossDetected") {
+		t.Errorf("want TotalLossDetected event, got %s", events[0])
+	}
+}
+
+func TestEmitDegradedTransitionEvents_SiteRecovered(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		Conditions: []metav1.Condition{
+			{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "SplitBrain"},
+		},
+	}
+	snap := TopologySnapshot{
+		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+	}
+
+	runner.emitDegradedTransitionEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d: %v", len(events), events)
+	}
+	if !strings.Contains(events[0], "SiteRecovered") {
+		t.Errorf("want SiteRecovered event, got %s", events[0])
+	}
+}
+
+func TestEmitDegradedTransitionEvents_NoEventOnSameReason(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		Conditions: []metav1.Condition{
+			{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "SplitBrain"},
+		},
+	}
+	snap := TopologySnapshot{
+		Alert:      "SPLIT BRAIN: both sites are writable",
+		SiteStates: [2]state.SiteState{state.StateWritable, state.StateWritable},
+	}
+
+	runner.emitDegradedTransitionEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 0 {
+		t.Errorf("want no events when reason unchanged, got %v", events)
+	}
+}
+
+func TestEmitDegradedTransitionEvents_TransitionBetweenAlerts(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		Conditions: []metav1.Condition{
+			{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "SplitBrain"},
+		},
+	}
+	snap := TopologySnapshot{
+		Alert:      "TOTAL LOSS: both sites are unreachable",
+		SiteStates: [2]state.SiteState{state.StateUnreachable, state.StateUnreachable},
+	}
+
+	runner.emitDegradedTransitionEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d: %v", len(events), events)
+	}
+	if !strings.Contains(events[0], "TotalLossDetected") {
+		t.Errorf("want TotalLossDetected event, got %s", events[0])
+	}
+}
+
+func TestEmitDegradedTransitionEvents_NoRecoveryEventOnFreshCR(t *testing.T) {
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{}
+	snap := TopologySnapshot{
+		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+	}
+
+	runner.emitDegradedTransitionEvents(fg, existing, snap)
+	events := drainRunnerEvents(rec)
+
+	if len(events) != 0 {
+		t.Errorf("want no events on fresh CR becoming healthy, got %v", events)
+	}
+}
+
 func TestEmitFailoverEvents_NilRecorder(t *testing.T) {
 	fg := newTestFG()
 	runner := &TopologyManagerRunner{recorder: nil}

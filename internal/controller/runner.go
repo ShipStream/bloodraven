@@ -479,15 +479,8 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		Message:            readyMessage,
 	})
 
-	if snap.Alert != "" {
-		reason := "Alert"
-		if snap.SiteStates[0] == state.StateWritable && snap.SiteStates[1] == state.StateWritable {
-			reason = "SplitBrain"
-		} else if snap.SiteStates[0] == state.StateReadOnly && snap.SiteStates[1] == state.StateReadOnly {
-			reason = "NoPrimary"
-		} else if snap.SiteStates[0] == state.StateUnreachable && snap.SiteStates[1] == state.StateUnreachable {
-			reason = "TotalLoss"
-		}
+	reason := degradedReason(snap)
+	if reason != "Healthy" {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               "Degraded",
 			Status:             metav1.ConditionTrue,
@@ -624,6 +617,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// Emit Kubernetes Events only after the status update succeeds,
 	// so events are not emitted for transitions that failed to persist.
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
+	r.emitDegradedTransitionEvents(&freshFG, existingStatus, snap)
 }
 
 // emitFailoverEvents fires Kubernetes Events when significant failover or
@@ -663,6 +657,66 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecoveryComplete",
 			"Old primary %s recovered and is now replicating", oldBlockedSite)
 	}
+}
+
+// emitDegradedTransitionEvents fires Kubernetes Events when the Degraded
+// condition reason transitions (e.g. Healthy → SplitBrain, TotalLoss → Healthy).
+// Events are only emitted on transitions, not on every poll cycle.
+func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlFailoverGroup, existingStatus *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) {
+	if r.recorder == nil {
+		return
+	}
+
+	oldReason := conditionReason(existingStatus.Conditions, "Degraded")
+	newReason := degradedReason(snap)
+
+	if oldReason == newReason {
+		return
+	}
+
+	switch newReason {
+	case "SplitBrain":
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, "SplitBrainDetected",
+			"Both sites are writable: %s", snap.Alert)
+	case "NoPrimary":
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, "NoPrimaryDetected",
+			"Both sites are read-only: %s", snap.Alert)
+	case "TotalLoss":
+		r.recorder.Eventf(fg, corev1.EventTypeWarning, "TotalLossDetected",
+			"Both sites are unreachable: %s", snap.Alert)
+	case "Healthy":
+		if oldReason != "" {
+			r.recorder.Event(fg, corev1.EventTypeNormal, "SiteRecovered",
+				"Degraded condition cleared, topology is healthy")
+		}
+	}
+}
+
+// degradedReason returns the Degraded condition reason for a topology snapshot.
+func degradedReason(snap TopologySnapshot) string {
+	if snap.Alert == "" {
+		return "Healthy"
+	}
+	if snap.SiteStates[0] == state.StateWritable && snap.SiteStates[1] == state.StateWritable {
+		return "SplitBrain"
+	}
+	if snap.SiteStates[0] == state.StateReadOnly && snap.SiteStates[1] == state.StateReadOnly {
+		return "NoPrimary"
+	}
+	if snap.SiteStates[0] == state.StateUnreachable && snap.SiteStates[1] == state.StateUnreachable {
+		return "TotalLoss"
+	}
+	return "Alert"
+}
+
+// conditionReason returns the Reason of the named condition, or "" if not found.
+func conditionReason(conditions []metav1.Condition, condType string) string {
+	for _, c := range conditions {
+		if c.Type == condType {
+			return c.Reason
+		}
+	}
+	return ""
 }
 
 // setBootstrappingCondition writes the Bootstrapping condition based on the
