@@ -106,6 +106,11 @@ func (b *bootstrapMock) StartReplica(_ context.Context) error {
 	return b.startReplicaErr
 }
 
+func (b *bootstrapMock) StartReplicaSQLThread(_ context.Context) error {
+	b.record("StartReplicaSQLThread")
+	return nil
+}
+
 func (b *bootstrapMock) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	b.record("WaitForRelayLogDrain")
 	return nil

@@ -25,6 +25,7 @@ type Checker interface {
 	ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error)
 	ChangeReplicationSource(ctx context.Context, opts ReplicationSourceOpts) error
 	StartReplica(ctx context.Context) error
+	StartReplicaSQLThread(ctx context.Context) error
 	WaitForRelayLogDrain(ctx context.Context, timeout time.Duration) error
 
 	// GTID methods:

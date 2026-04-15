@@ -78,9 +78,9 @@ func (m *mockCheckerForDrain) ShowReplicaStatus(_ context.Context) (*ReplicaStat
 func (m *mockCheckerForDrain) ChangeReplicationSource(_ context.Context, _ ReplicationSourceOpts) error {
 	return nil
 }
-func (m *mockCheckerForDrain) StartReplica(_ context.Context) error { return nil }
+func (m *mockCheckerForDrain) StartReplica(_ context.Context) error          { return nil }
+func (m *mockCheckerForDrain) StartReplicaSQLThread(_ context.Context) error { return nil }
 func (m *mockCheckerForDrain) WaitForRelayLogDrain(ctx context.Context, timeout time.Duration) error {
-	// Mirror the real checker's WaitForRelayLogDrain logic for testing.
 	deadline := time.Now().Add(timeout)
 	interval := 100 * time.Millisecond
 	timer := time.NewTimer(interval)
@@ -94,17 +94,24 @@ func (m *mockCheckerForDrain) WaitForRelayLogDrain(ctx context.Context, timeout 
 		if rs == nil {
 			return nil
 		}
-		if !rs.SQLRunning {
-			return nil
-		}
-		if rs.SecondsBehindSource != nil && *rs.SecondsBehindSource == 0 {
-			return nil
-		}
 		if rs.LastError != "" {
 			return fmt.Errorf("relay log drain aborted: SQL thread error: %s", rs.LastError)
 		}
+		if rs.SQLRunning {
+			if rs.SecondsBehindSource != nil && *rs.SecondsBehindSource == 0 {
+				return nil
+			}
+		} else {
+			hasPending, parseErr := hasUnappliedRelayLogs(rs.RetrievedGtidSet, rs.ExecutedGtidSet)
+			if parseErr != nil {
+				return parseErr
+			}
+			if !hasPending {
+				return nil
+			}
+		}
 		if time.Now().After(deadline) {
-			return nil // simplified for test
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -146,15 +153,94 @@ func TestWaitForRelayLogDrain_AlreadyCaughtUp(t *testing.T) {
 	}
 }
 
-func TestWaitForRelayLogDrain_SQLStopped(t *testing.T) {
+func TestWaitForRelayLogDrain_SQLStopped_NoPending(t *testing.T) {
 	mock := &mockCheckerForDrain{
 		statusResult: &ReplicaStatus{
-			SQLRunning: false,
+			SQLRunning:       false,
+			ExecutedGtidSet:  "uuid1:1-10",
+			RetrievedGtidSet: "uuid1:1-10",
 		},
 	}
 	err := mock.WaitForRelayLogDrain(context.Background(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWaitForRelayLogDrain_SQLStopped_EmptyRetrieved(t *testing.T) {
+	mock := &mockCheckerForDrain{
+		statusResult: &ReplicaStatus{
+			SQLRunning:       false,
+			RetrievedGtidSet: "",
+		},
+	}
+	err := mock.WaitForRelayLogDrain(context.Background(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHasUnappliedRelayLogs(t *testing.T) {
+	tests := []struct {
+		name      string
+		retrieved string
+		executed  string
+		want      bool
+	}{
+		{"empty retrieved", "", "uuid1:1-10", false},
+		{"equal sets", "uuid1:1-10", "uuid1:1-10", false},
+		{"executed superset", "uuid1:1-5", "uuid1:1-10", false},
+		{"pending transactions", "uuid1:1-20", "uuid1:1-10", true},
+		{"completely different uuid", "uuid2:1-5", "uuid1:1-10", true},
+		{"both empty", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := hasUnappliedRelayLogs(tt.retrieved, tt.executed)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("hasUnappliedRelayLogs(%q, %q) = %v, want %v", tt.retrieved, tt.executed, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWaitForRelayLogDrain_SQLStopped_WithPendingLogs(t *testing.T) {
+	mock := &mockCheckerForDrain{
+		statusResult: &ReplicaStatus{
+			SQLRunning:       false,
+			RetrievedGtidSet: "uuid1:1-20",
+			ExecutedGtidSet:  "uuid1:1-10",
+		},
+	}
+	// With pending relay logs and SQL thread stopped, the mock drain loop
+	// will detect the gap but can't actually restart the thread (mock is static),
+	// so it will hit the deadline and return nil (simplified for test).
+	err := mock.WaitForRelayLogDrain(context.Background(), 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The key assertion: ShowReplicaStatus was called more than once (didn't return early).
+	if mock.calls < 2 {
+		t.Errorf("expected multiple ShowReplicaStatus calls (drain loop), got %d", mock.calls)
+	}
+}
+
+func TestWaitForRelayLogDrain_SQLStopped_LastError(t *testing.T) {
+	mock := &mockCheckerForDrain{
+		statusResult: &ReplicaStatus{
+			SQLRunning: false,
+			LastError:  "Error 'Duplicate entry' on query",
+		},
+	}
+	err := mock.WaitForRelayLogDrain(context.Background(), 5*time.Second)
+	if err == nil {
+		t.Fatal("expected error for SQL thread with LastError")
+	}
+	if !strings.Contains(err.Error(), "SQL thread error") {
+		t.Errorf("expected SQL thread error message, got: %v", err)
 	}
 }
 

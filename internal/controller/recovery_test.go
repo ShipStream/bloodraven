@@ -18,6 +18,7 @@ func TestRecoverOldPrimary_FullSequence(t *testing.T) {
 	expected := []string{
 		"SetSuperReadOnly(ON)",
 		"StopReplica",
+		"ResetReplicaAll",
 		"ChangeReplicationSource",
 		"StartReplica",
 	}
@@ -41,14 +42,13 @@ func TestRecoverOldPrimary_NoSSL(t *testing.T) {
 	}
 
 	calls := oldPrimary.getCalls()
-	if len(calls) != 4 {
-		t.Fatalf("expected 4 calls, got %v", calls)
+	if len(calls) != 5 {
+		t.Fatalf("expected 5 calls, got %v", calls)
 	}
-	// The sequence should be the same regardless of SSL.
 	if calls[0] != "SetSuperReadOnly(ON)" {
 		t.Errorf("call[0]: got %q, want SetSuperReadOnly(ON)", calls[0])
 	}
-	if calls[3] != "StartReplica" {
-		t.Errorf("call[3]: got %q, want StartReplica", calls[3])
+	if calls[4] != "StartReplica" {
+		t.Errorf("call[4]: got %q, want StartReplica", calls[4])
 	}
 }

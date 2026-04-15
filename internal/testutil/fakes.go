@@ -176,6 +176,13 @@ func (m *FakeMySQL) StartReplica(_ context.Context) error {
 	return nil
 }
 
+func (m *FakeMySQL) StartReplicaSQLThread(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("StartReplicaSQLThread")
+	return nil
+}
+
 func (m *FakeMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

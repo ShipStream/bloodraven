@@ -114,6 +114,10 @@ func (m *mockMySQL) StartReplica(_ context.Context) error {
 	return nil
 }
 
+func (m *mockMySQL) StartReplicaSQLThread(_ context.Context) error {
+	return nil
+}
+
 func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }

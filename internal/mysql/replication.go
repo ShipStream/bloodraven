@@ -16,6 +16,7 @@ type ReplicaStatus struct {
 	LastError           string
 	SourceHost          string
 	ExecutedGtidSet     string
+	RetrievedGtidSet    string
 }
 
 // ReplicationSourceOpts configures CHANGE REPLICATION SOURCE TO.
@@ -171,6 +172,10 @@ func (m *checker) ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error)
 		rs.ExecutedGtidSet = v.String
 	}
 
+	if v, ok := colMap["Retrieved_Gtid_Set"]; ok && v.Valid {
+		rs.RetrievedGtidSet = v.String
+	}
+
 	return rs, nil
 }
 
@@ -205,10 +210,19 @@ func (m *checker) StartReplica(ctx context.Context) error {
 	return nil
 }
 
+func (m *checker) StartReplicaSQLThread(ctx context.Context) error {
+	_, err := m.db.ExecContext(ctx, "START REPLICA SQL_THREAD")
+	if err != nil {
+		return fmt.Errorf("start replica sql_thread: %w", err)
+	}
+	return nil
+}
+
 func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	interval := 500 * time.Millisecond
 	const maxInterval = 4 * time.Second
+	sqlThreadRestarted := false
 
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
@@ -219,22 +233,34 @@ func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duratio
 			return fmt.Errorf("wait for relay log drain: %w", err)
 		}
 		if rs == nil {
-			// No replication configured, nothing to drain.
 			return nil
 		}
 
-		// Relay log is drained when SQL thread has caught up (Seconds_Behind_Source == 0)
-		// or SQL thread has stopped (no more relay log to apply).
-		if !rs.SQLRunning {
-			return nil
-		}
-		if rs.SecondsBehindSource != nil && *rs.SecondsBehindSource == 0 {
-			return nil
-		}
-
-		// SQL thread is running but has a permanent error — no point polling further.
 		if rs.LastError != "" {
 			return fmt.Errorf("relay log drain aborted: SQL thread error: %s", rs.LastError)
+		}
+
+		if rs.SQLRunning {
+			if rs.SecondsBehindSource != nil && *rs.SecondsBehindSource == 0 {
+				return nil
+			}
+		} else {
+			// SQL thread is stopped. Check for unapplied relay logs by comparing
+			// Retrieved_Gtid_Set (fetched by IO thread) with Executed_Gtid_Set.
+			hasPending, parseErr := hasUnappliedRelayLogs(rs.RetrievedGtidSet, rs.ExecutedGtidSet)
+			if parseErr != nil {
+				return fmt.Errorf("relay log drain: check pending relay logs: %w", parseErr)
+			}
+			if !hasPending {
+				return nil
+			}
+			// Pending relay logs exist — restart the SQL thread to apply them.
+			if !sqlThreadRestarted {
+				if startErr := m.StartReplicaSQLThread(ctx); startErr != nil {
+					return fmt.Errorf("relay log drain: restart SQL thread: %w", startErr)
+				}
+				sqlThreadRestarted = true
+			}
 		}
 
 		if time.Now().After(deadline) {
@@ -247,10 +273,27 @@ func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duratio
 		case <-timer.C:
 		}
 
-		// Exponential backoff: 500ms → 1s → 2s → 4s (cap).
 		if interval < maxInterval {
 			interval *= 2
 		}
 		timer.Reset(interval)
 	}
+}
+
+func hasUnappliedRelayLogs(retrievedRaw, executedRaw string) (bool, error) {
+	if strings.TrimSpace(retrievedRaw) == "" {
+		return false, nil
+	}
+	retrieved, err := ParseGTIDSet(retrievedRaw)
+	if err != nil {
+		return false, fmt.Errorf("parse retrieved GTID set: %w", err)
+	}
+	if retrieved.IsEmpty() {
+		return false, nil
+	}
+	executed, err := ParseGTIDSet(executedRaw)
+	if err != nil {
+		return false, fmt.Errorf("parse executed GTID set: %w", err)
+	}
+	return !executed.Contains(retrieved), nil
 }

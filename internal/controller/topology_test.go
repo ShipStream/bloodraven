@@ -61,7 +61,8 @@ func (m *mockMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, 
 func (m *mockMySQL) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
 	return nil
 }
-func (m *mockMySQL) StartReplica(_ context.Context) error { return nil }
+func (m *mockMySQL) StartReplica(_ context.Context) error          { return nil }
+func (m *mockMySQL) StartReplicaSQLThread(_ context.Context) error { return nil }
 func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
@@ -727,14 +728,28 @@ func TestSelectDonor_BothEmpty(t *testing.T) {
 	}
 }
 
-func TestSelectDonor_BothHaveData(t *testing.T) {
+func TestSelectDonor_BothHaveData_DisjointGTIDs(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-10"}
 	site1 := &mockMySQL{readOnly: false, gtidExecuted: "bbbb:1-10"}
 	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
 
+	primary, replica, err := tm.selectDonor(context.Background())
+	if err != nil {
+		t.Fatalf("disjoint GTIDs should be treated as fresh deploy, got error: %v", err)
+	}
+	if primary != 0 || replica != 1 {
+		t.Errorf("expected primary=0, replica=1; got primary=%d, replica=%d", primary, replica)
+	}
+}
+
+func TestSelectDonor_BothHaveData_OverlappingGTIDs(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-10"}
+	site1 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-5,bbbb:1-10"}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+
 	_, _, err := tm.selectDonor(context.Background())
 	if err == nil {
-		t.Fatal("expected error when both sites have data")
+		t.Fatal("expected error when both sites have overlapping GTIDs")
 	}
 }
 
