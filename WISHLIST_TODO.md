@@ -20,7 +20,7 @@ Tracking implementation progress for items in [bloodraven-wishlist.md](bloodrave
 - [x] 11. Pod annotations and labels passthrough (`spec.podLabels`, `spec.podAnnotations`) — `2ee4d22`
 - [x] 12. PodDisruptionBudget management
 - [x] 13. Configurable service types and annotations (`spec.serviceTemplate`) — `327b6c5`
-- [ ] 14. Webhook-based notifications
+- [x] 14. Webhook-based notifications — addressed via Kubernetes Events; external tools (Kubewatch, Argo Events) forward events to Slack/PagerDuty/webhooks
 
 ## P2 — Nice to have
 
