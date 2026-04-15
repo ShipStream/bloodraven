@@ -37,18 +37,19 @@ Bloodraven supports two strategies for handling application failover. Choose the
 
 ### Strategy 1: Taint-based failover
 
-Best for applications that run on **dedicated nodes per site** and should be fully migrated when the database fails over.
+Best for applications that run on **dedicated or shared nodes** and should be fully migrated when the database fails over.
 
 **How it works:**
 
-1. The operator taints nodes at the old active site with `shipstream.io/db-readonly=true:NoExecute`
+1. The operator taints nodes at the old active site with `shipstream.io/db-readonly-<group>=true:NoExecute`
 2. Kubernetes evicts pods that do not tolerate this taint
 3. Those pods are rescheduled to the new active site's nodes (which have the taint removed)
 
 **Application requirements:**
 
 - Deploy on nodes labeled with `shipstream.io/failover-group=<name>` and `shipstream.io/site=<site>`
-- Do **not** add a toleration for `shipstream.io/db-readonly:NoExecute`
+- Do **not** add a toleration for `shipstream.io/db-readonly-<name>:NoExecute` (your own group's taint)
+- On shared nodes, **add** tolerations for other groups' taints (see [Placement Contract](./placement-contract.mdx#cross-group-tolerations))
 - Use `mysql-orders-primary` for writes (the Service follows the active site)
 
 **Example pod spec:**
@@ -75,7 +76,12 @@ spec:
           value: mysql-orders-primary.default.svc.cluster.local
         - name: MYSQL_PORT
           value: "3306"
-  # No toleration for shipstream.io/db-readonly -- pod will be evicted on failover
+  # No toleration for shipstream.io/db-readonly-orders -- pod will be evicted on failover
+  # On shared nodes, add tolerations for OTHER groups' taints:
+  # tolerations:
+  #   - key: shipstream.io/db-readonly-inventory
+  #     operator: Exists
+  #     effect: NoExecute
 ```
 
 ### Strategy 2: Service-based failover

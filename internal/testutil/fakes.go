@@ -262,7 +262,7 @@ func NewFakeTainter() *FakeTainter {
 	return &FakeTainter{Taints: make(map[string]bool)}
 }
 
-func (m *FakeTainter) SetTaint(_ context.Context, selector string, taint bool) error {
+func (m *FakeTainter) SetTaint(_ context.Context, selector string, _ string, taint bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Taints[selector] = taint

@@ -24,7 +24,7 @@ spec:
       # The counter app tolerates the readonly taint so it stays scheduled,
       # but in a real setup you'd want separate read/write deployments.
       # Here we use it to demonstrate the taint-based eviction flow.
-      # NO toleration for shipstream.io/db-readonly — the pod gets evicted
+      # NO toleration for shipstream.io/db-readonly-playground — the pod gets evicted
       # from the old-primary site and rescheduled to the new-primary site.
       # Tolerate disk-pressure so playground works on low-disk local clusters.
       tolerations:

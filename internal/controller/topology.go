@@ -633,7 +633,7 @@ func (tm *TopologyManager) taintSelector(site *siteTracker) string {
 func (tm *TopologyManager) applyPerSiteAction(ctx context.Context, site *siteTracker, action state.Action) {
 	if action.Taint != nil {
 		selector := tm.taintSelector(site)
-		if err := tm.tainter.SetTaint(ctx, selector, *action.Taint); err != nil {
+		if err := tm.tainter.SetTaint(ctx, selector, tm.cfg.Name, *action.Taint); err != nil {
 			tm.logger.Error("taint operation failed", "site", site.name, "apply", *action.Taint, "error", err)
 		} else {
 			op := "remove"

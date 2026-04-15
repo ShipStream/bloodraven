@@ -75,6 +75,7 @@ ok "Data wiped"
 # ── 4. Remove db-readonly taints ──────────────────────────────────────────
 info "Removing db-readonly taints..."
 for node in $(kubectl get nodes -o name); do
+  kubectl taint "$node" shipstream.io/db-readonly-playground- 2>/dev/null || true
   kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
 done
 ok "Taints cleared"
@@ -85,6 +86,7 @@ kubectl apply -f "$SCRIPT_DIR/manifests/mysql-secret.yaml"
 
 # ── 6. Scale operator back up FIRST so it can create PVCs ────────────────
 for node in $(kubectl get nodes -o name); do
+  kubectl taint "$node" shipstream.io/db-readonly-playground- 2>/dev/null || true
   kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
 done
 info "Scaling operator back up (must reconcile PVCs before MySQL starts)..."
@@ -116,7 +118,8 @@ for i in $(seq 1 24); do
   fi
   # Clear taints each iteration in case operator reapplied them
   for node in $(kubectl get nodes -o name); do
-    kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
+    kubectl taint "$node" shipstream.io/db-readonly-playground- 2>/dev/null || true
+  kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
   done
   echo "  ... waiting ($i/24) — $READY/2 pods ready"
   sleep 5

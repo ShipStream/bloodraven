@@ -15,7 +15,7 @@ Tracking implementation progress for items in [bloodraven-wishlist.md](bloodrave
 
 ## P1 — Required before multi-tenant scale
 
-- [ ] 9. Shared-node support (per-failover-group taint scoping)
+- [x] 9. Shared-node support (per-failover-group taint scoping)
 - [x] 10. Per-site extra containers and init containers (`spec.extraContainers`, `spec.extraInitContainers`) — `327b6c5`
 - [x] 11. Pod annotations and labels passthrough (`spec.podLabels`, `spec.podAnnotations`) — `2ee4d22`
 - [x] 12. PodDisruptionBudget management

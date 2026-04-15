@@ -275,6 +275,7 @@ info "Waiting for MySQL pods to become ready (this may take a few minutes)..."
 for i in $(seq 1 36); do
   # Clear taints each iteration — operator may apply them before pods are ready
   for node in $(kubectl get nodes -o name 2>/dev/null); do
+    kubectl taint "$node" shipstream.io/db-readonly-playground- 2>/dev/null || true
     kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
   done
   READY=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=mysql \

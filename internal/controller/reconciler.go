@@ -292,7 +292,7 @@ func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v
 	if r.Tainter != nil {
 		for _, site := range fg.Spec.Sites {
 			selector := fmt.Sprintf("shipstream.io/failover-group=%s,shipstream.io/site=%s", fg.Name, site.Name)
-			if err := r.Tainter.SetTaint(ctx, selector, false); err != nil {
+			if err := r.Tainter.SetTaint(ctx, selector, fg.Name, false); err != nil {
 				logger.Error(err, "failed to remove taint during shutdown", "site", site.Name)
 				// Continue cleanup despite taint removal failure
 			}
@@ -920,7 +920,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				// pods should be evicted by this taint.
 				Tolerations: []corev1.Toleration{
 					{
-						Key:      platform.TaintKey,
+						Key:      platform.TaintKeyForGroup(fg.Name),
 						Operator: corev1.TolerationOpExists,
 						Effect:   corev1.TaintEffectNoExecute,
 					},

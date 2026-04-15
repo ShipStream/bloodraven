@@ -8,7 +8,7 @@ Bloodraven uses node labels and taints to control where MySQL pods run and to ev
 
 ## Why node labeling matters
 
-When the operator performs a failover, it taints nodes at the old active site with `NoExecute` to force Kubernetes to evict application pods that do not tolerate the taint. For this to work safely, nodes must be dedicated to a specific failover group and site so that tainting a node does not disrupt unrelated workloads.
+When the operator performs a failover, it taints nodes at the old active site with `NoExecute` to force Kubernetes to evict application pods that do not tolerate the taint. Taints are scoped per failover group, so a failover in one group does not disrupt pods belonging to another group.
 
 ## Required node labels
 
@@ -35,10 +35,16 @@ You can label multiple nodes per site. The operator will taint or untaint all no
 
 ## Taint behavior
 
-When a site loses its primary role (either through failover or because it becomes unreachable), the operator applies this taint to all nodes at that site:
+When a site loses its primary role (either through failover or because it becomes unreachable), the operator applies a per-group taint to all nodes at that site:
 
 ```
-shipstream.io/db-readonly=true:NoExecute
+shipstream.io/db-readonly-<group>=true:NoExecute
+```
+
+For example, for a failover group named `orders`:
+
+```
+shipstream.io/db-readonly-orders=true:NoExecute
 ```
 
 When a site becomes the active primary, the operator removes this taint from its nodes.
@@ -54,31 +60,33 @@ This gives you two categories of workloads:
 
 | Workload type | Toleration | Behavior on failover |
 |---|---|---|
-| Write-dependent apps | No toleration for `shipstream.io/db-readonly:NoExecute` | Evicted from the old site, rescheduled to the new active site |
-| Read-only / stateless apps | Tolerates `shipstream.io/db-readonly:NoExecute` | Continues running at both sites |
+| Write-dependent apps | No toleration for `shipstream.io/db-readonly-<group>:NoExecute` | Evicted from the old site, rescheduled to the new active site |
+| Read-only / stateless apps | Tolerates `shipstream.io/db-readonly-<group>:NoExecute` | Continues running at both sites |
 
-## Node dedication
+## Shared-node support
 
-Nodes should be dedicated to a single failover group. If you run multiple failover groups on shared nodes, a failover in one group will taint nodes that may also host pods for another group, causing unintended evictions.
+Because taints are scoped per failover group, multiple groups can share nodes in the same node pool. A failover in `orders` applies `shipstream.io/db-readonly-orders=true:NoExecute`, which only evicts pods that do not tolerate that specific taint. Pods belonging to `inventory` are unaffected — as long as they tolerate the `orders` taint.
 
-**Recommended layout:**
+### Cross-group tolerations
 
+On shared nodes, application pods must tolerate taint keys from **other** failover groups but **not** their own. This ensures they are only evicted by their own group's failover:
+
+```yaml
+# Pod for the "orders" group on nodes shared with "inventory"
+spec:
+  tolerations:
+    # Tolerate other groups' taints so this pod is not evicted by their failovers
+    - key: shipstream.io/db-readonly-inventory
+      operator: Exists
+      effect: NoExecute
+    # Do NOT tolerate orders' taint — this pod should be evicted on orders failover
 ```
-node-iad-orders-1:
-  labels:
-    shipstream.io/failover-group: orders
-    shipstream.io/site: iad
 
-node-iad-orders-2:
-  labels:
-    shipstream.io/failover-group: orders
-    shipstream.io/site: iad
+A mutating admission webhook or Helm template can automate generating these tolerations across groups.
 
-node-pdx-orders-1:
-  labels:
-    shipstream.io/failover-group: orders
-    shipstream.io/site: pdx
-```
+### Dedicated nodes
+
+If you prefer dedicated nodes per group (the simplest model), no cross-group tolerations are needed. Each node only receives taints for its labeled group, so only that group's pods are affected.
 
 ## Scheduling MySQL pods
 
@@ -88,7 +96,7 @@ The `shipstream.io/failover-group` and `shipstream.io/site` node labels describe
 
 ## Multiple failover groups
 
-If you operate multiple failover groups, each group requires its own set of labeled nodes:
+Multiple failover groups can share nodes in the same pool. Each node is labeled with the failover group it serves:
 
 ```bash
 # Group: orders
@@ -99,3 +107,5 @@ kubectl label node node-b shipstream.io/failover-group=orders shipstream.io/site
 kubectl label node node-c shipstream.io/failover-group=inventory shipstream.io/site=iad
 kubectl label node node-d shipstream.io/failover-group=inventory shipstream.io/site=pdx
 ```
+
+A failover in `orders` taints nodes `node-a`/`node-b` with `shipstream.io/db-readonly-orders=true:NoExecute`. Nodes `node-c`/`node-d` are unaffected because they belong to the `inventory` group's selector.

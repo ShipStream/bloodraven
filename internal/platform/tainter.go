@@ -15,15 +15,22 @@ import (
 )
 
 const (
-	TaintKey   = "shipstream.io/db-readonly"
-	TaintValue = "true"
+	LegacyTaintKey = "shipstream.io/db-readonly"
+	TaintKeyPrefix = "shipstream.io/db-readonly-"
+	TaintValue     = "true"
 )
+
+func TaintKeyForGroup(group string) string {
+	return TaintKeyPrefix + group
+}
 
 // NodeTainter manages node taints for failover group site failover.
 // The selector parameter is a Kubernetes label selector string, e.g.
 // "shipstream.io/failover-group=orders,shipstream.io/site=iad".
+// The group parameter is the failover group name, used to derive the
+// per-group taint key (e.g. "shipstream.io/db-readonly-orders").
 type NodeTainter interface {
-	SetTaint(ctx context.Context, selector string, taint bool) error
+	SetTaint(ctx context.Context, selector string, group string, taint bool) error
 }
 
 type nodeTainter struct {
@@ -35,7 +42,8 @@ func NewNodeTainter(client kubernetes.Interface, logger *slog.Logger) NodeTainte
 	return &nodeTainter{client: client, logger: logger}
 }
 
-func (t *nodeTainter) SetTaint(ctx context.Context, selector string, taint bool) error {
+func (t *nodeTainter) SetTaint(ctx context.Context, selector string, group string, taint bool) error {
+	taintKey := TaintKeyForGroup(group)
 	nodes, err := t.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
 	})
@@ -47,12 +55,11 @@ func (t *nodeTainter) SetTaint(ctx context.Context, selector string, taint bool)
 	for _, node := range nodes.Items {
 		node := node
 		if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
-			// Re-fetch the node to get latest resource version.
 			fresh, err := t.client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
 			if err != nil {
 				return fmt.Errorf("get node %s: %w", node.Name, err)
 			}
-			return t.patchNodeTaint(ctx, *fresh, taint)
+			return t.patchNodeTaint(ctx, *fresh, taintKey, taint)
 		}); err != nil {
 			errs = append(errs, err)
 		}
@@ -60,31 +67,39 @@ func (t *nodeTainter) SetTaint(ctx context.Context, selector string, taint bool)
 	return errors.Join(errs...)
 }
 
-func (t *nodeTainter) patchNodeTaint(ctx context.Context, node corev1.Node, apply bool) error {
-	hasTaint, _ := findTaint(node.Spec.Taints)
+func (t *nodeTainter) patchNodeTaint(ctx context.Context, node corev1.Node, taintKey string, apply bool) error {
+	var hasTaint, hasLegacy bool
+	for _, taint := range node.Spec.Taints {
+		switch taint.Key {
+		case taintKey:
+			hasTaint = true
+		case LegacyTaintKey:
+			hasLegacy = true
+		}
+	}
 
-	if apply && hasTaint {
+	if apply && hasTaint && !hasLegacy {
 		return nil
 	}
-	if !apply && !hasTaint {
+	if !apply && !hasTaint && !hasLegacy {
 		return nil
 	}
 
 	newTaints := make([]corev1.Taint, 0, len(node.Spec.Taints)+1)
 	for _, taint := range node.Spec.Taints {
-		if taint.Key != TaintKey {
+		if taint.Key != taintKey && taint.Key != LegacyTaintKey {
 			newTaints = append(newTaints, taint)
 		}
 	}
 	if apply {
 		newTaints = append(newTaints, corev1.Taint{
-			Key:    TaintKey,
+			Key:    taintKey,
 			Value:  TaintValue,
 			Effect: corev1.TaintEffectNoExecute,
 		})
-		t.logger.Info("applying taint", "node", node.Name)
+		t.logger.Info("applying taint", "node", node.Name, "key", taintKey)
 	} else {
-		t.logger.Info("removing taint", "node", node.Name)
+		t.logger.Info("removing taint", "node", node.Name, "key", taintKey)
 	}
 
 	patch := map[string]interface{}{
@@ -102,13 +117,4 @@ func (t *nodeTainter) patchNodeTaint(ctx context.Context, node corev1.Node, appl
 		return fmt.Errorf("patch node %s: %w", node.Name, err)
 	}
 	return nil
-}
-
-func findTaint(taints []corev1.Taint) (bool, int) {
-	for i, t := range taints {
-		if t.Key == TaintKey {
-			return true, i
-		}
-	}
-	return false, -1
 }

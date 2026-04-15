@@ -82,8 +82,8 @@ When the operator decides to fail over to a candidate site, it executes these st
    - Creates or updates the `DNSEndpoint` CR so that the A-record points to the candidate site's load balancer IP. external-dns syncs this to the configured DNS provider.
 
 9. **Update node taints**
-   - Taint old active site nodes: `shipstream.io/db-readonly=true:NoExecute`
-   - Untaint new active site nodes: remove the `shipstream.io/db-readonly` taint
+   - Taint old active site nodes: `shipstream.io/db-readonly-<group>=true:NoExecute`
+   - Untaint new active site nodes: remove the `shipstream.io/db-readonly-<group>` taint
 
 ## Old primary recovery
 

@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/testutil"
 )
 
@@ -208,6 +209,20 @@ func TestReconcile_CreatesDeployments(t *testing.T) {
 		initContainers := deploy.Spec.Template.Spec.InitContainers
 		if len(initContainers) == 0 {
 			t.Errorf("deployment %s: no init containers", dc)
+		}
+
+		// Verify per-group taint toleration key
+		tolerations := deploy.Spec.Template.Spec.Tolerations
+		expectedKey := platform.TaintKeyForGroup("lion")
+		found := false
+		for _, tol := range tolerations {
+			if tol.Key == expectedKey {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("deployment %s: expected toleration for %s, got %v", dc, expectedKey, tolerations)
 		}
 	}
 }

@@ -119,7 +119,7 @@ func newMockTainter() *mockTainter {
 	return &mockTainter{taints: make(map[string]bool)}
 }
 
-func (m *mockTainter) SetTaint(_ context.Context, selector string, taint bool) error {
+func (m *mockTainter) SetTaint(_ context.Context, selector string, _ string, taint bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.taints[selector] = taint
