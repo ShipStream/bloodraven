@@ -14,6 +14,10 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 - **Network partition**: `chaos.sh network-partition` uses a NetworkPolicy deny-all. This blocks at the pod network level (not host netns). Cleanup: `chaos.sh recover`.
 - **Relay log drain**: Failover takes ~37s total when primary is dead (30s drain timeout + detection + promotion). Plan wait times accordingly.
 - **Replication user**: Survives pod restarts but not PVC wipes. After `reset-mysql.sh` the init-users script recreates it on MySQL first boot.
+- **Verify replication between scenarios**: After any failover, always verify replication is actually working (`SELECT SERVICE_STATE FROM performance_schema.replication_connection_status` should show `ON`) before proceeding. GTID divergence from the respawn race (see scenario 1 note) can silently break replication, causing false results in subsequent scenarios.
+- **db-readonly taint blocks PVC provisioning**: The operator applies `shipstream.io/db-readonly:NoExecute` to non-writable nodes. The local-path-provisioner's helper pod does not tolerate this taint and gets evicted, blocking PVC creation. After `reset-mysql.sh`, always check for and clear this taint on both nodes: `kubectl taint nodes k3d-bloodraven-agent-0 shipstream.io/db-readonly- 2>/dev/null; kubectl taint nodes k3d-bloodraven-agent-1 shipstream.io/db-readonly- 2>/dev/null`
+- **Distroless containers**: The sidecar and operator images use distroless base images with no shell or userspace tools. Use `kubectl debug --target=<container> --image=busybox` to get a shell with tools like `kill`, `ps`, etc.
+- **JSON patch vs merge patch**: When patching the MysqlFailoverGroup CR, always use `--type json` (JSON Patch). Merge patches on the `spec.sites` array drop required fields (lbIP, storage, zone) and fail validation.
 
 ---
 
@@ -29,6 +33,8 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 **Verify**: activeSite flips, new primary read_only=0, DNS updated, old primary auto-recovers as replica (IO=Yes, SQL=Yes). Counter data preserved.
 
 **Timing**: ~37s to failover complete (30s relay drain timeout on dead primary). Recovery adds ~5s after old primary pod respawns.
+
+**Caution — GTID divergence race**: When the old primary pod respawns, MySQL commits 1-3 internal transactions (system table updates, auto-increment counters) before the operator can fence it. This may create GTID divergence that blocks auto-recovery, requiring `reset-mysql.sh`. Whether divergence occurs is timing-dependent — it doesn't happen every time. If recovery logs "GTID divergence detected" instead of "no GTID divergence, auto-recovering", the scenario was affected.
 
 ---
 
@@ -54,6 +60,8 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 
 **Note**: `kubectl exec` uses the API server, not the pod network, so you can still query MySQL on the partitioned pod.
 
+**Note**: After partition removal, recovery may log transient errors ("invalid connection", "connection refused") as the old primary's MySQL connections re-establish. These retry and succeed — don't be alarmed by 1-2 failed recovery attempts in the logs.
+
 ---
 
 ### 4. Data Integrity Under Failover
@@ -71,6 +79,8 @@ kubectl -n bloodraven-playground exec deploy/mysql-playground-<primary> -c mysql
 
 **Verify**: Post-failover counter >= pre-failover counter. Compare GTID sets to quantify async replication gap (typically 0 transactions lost when replica is caught up).
 
+**Critical**: Before running this scenario, verify replication is actually running on the replica (`SELECT SERVICE_STATE FROM performance_schema.replication_connection_status` → `ON`). If a previous scenario caused GTID divergence and recovery was blocked, the replica won't be replicating and writes on the primary won't propagate — giving a false data-loss result.
+
 ---
 
 ### 5. Operator Kill During Active Failover
@@ -81,6 +91,8 @@ kubectl -n bloodraven-playground exec deploy/mysql-playground-<primary> -c mysql
 **Injection**: `./playground/chaos.sh kill-site iad && sleep 1 && ./playground/chaos.sh kill-operator`
 
 **Verify**: After ~45s convergence, exactly one site has read_only=0. No split-brain.
+
+**Observation**: In practice, the primary pod often respawns before the new operator finishes starting. The new operator discovers the original topology already restored (iad=writable, pdx=read-only) and resumes normal monitoring without triggering a failover. Replication may be in CONNECTING state briefly while the IO thread reconnects to the restarted primary's new pod IP via the Service DNS.
 
 ---
 
@@ -100,6 +112,8 @@ kubectl -n $NS scale deployment mysql-playground-pdx --replicas=0
 **Verify**: Primary super_read_only=1, sidecar logs "SELF-FENCED", writes fail. Cleanup: scale both back to 1.
 
 **Important**: Must use `scale --replicas=0`, not `kill-site`. Deployment recreates killed pods in <5s, which refreshes the sidecar's peer timer and prevents self-fencing.
+
+**After cleanup**: When the operator and replica come back, the operator will typically promote the OTHER site (not the self-fenced one) as primary. Expect the active site to flip. The self-fenced site becomes a replica.
 
 ---
 
@@ -128,6 +142,8 @@ kubectl exec ... -e "SET GLOBAL read_only=OFF; INSERT INTO divergence_test.rogue
 
 **Verify**: Status shows RecoveryPending with reason DivergentTransactions, operator logs "GTID divergence", exact divergent GTID set reported. Cleanup: `./playground/reset-mysql.sh`.
 
+**Important**: `reset-mysql.sh` is **required** after this scenario — divergent GTID state cannot be auto-recovered. Clear db-readonly taints on both nodes after reset if PVCs fail to provision.
+
 ---
 
 ### 9. Rapid Successive Failures (Anti-Flap)
@@ -146,6 +162,13 @@ kubectl -n bloodraven-playground scale deployment mysql-playground-pdx --replica
 **Verify**: Operator logs "anti-flap cooldown". No second failover during cooldown window. System has no writable MySQL until cooldown expires.
 
 **Important**: Use `scale --replicas=0` for the second kill, not `kill-site`. The pod must stay down longer than failureThreshold (6s) for the operator to even consider a second failover.
+
+**Known difficulty**: This scenario has been INCONCLUSIVE across 3 rounds of testing. Three approaches fail:
+1. `scale --replicas=0` — the operator reconciler immediately scales back to 1
+2. NetworkPolicy on both sites — results in TOTAL LOSS (both unreachable), not a failover candidate, so the anti-flap check is never evaluated
+3. Sequential partition (partition primary → failover → recover → partition new primary) — after recovering from the first partition, both sites can end up self-fenced in "NO PRIMARY" state
+
+The anti-flap code (topology.go) is unit-tested but requires a scenario where one site is unreachable and the other is a valid promotion candidate within the cooldown window — difficult to achieve in the playground.
 
 ---
 
@@ -186,11 +209,19 @@ kubectl -n $NS scale deployment mysql-playground-iad mysql-playground-pdx --repl
 
 **Injection**:
 ```bash
-kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type merge \
-  -p '{"spec":{"sites":[{"name":"iad","resources":{"requests":{"memory":"300Mi"}}},{"name":"pdx","resources":{"requests":{"memory":"300Mi"}}}]}}'
+kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json \
+  -p '[{"op":"replace","path":"/spec/sites/0/resources/requests/memory","value":"300Mi"},{"op":"replace","path":"/spec/sites/1/resources/requests/memory","value":"300Mi"}]'
 ```
 
-**Verify**: Operator logs show ordered rollout (standby first). Replication stays healthy throughout. Write availability maintained (brief failover if primary must restart). Both pods end up with new resource spec.
+**Verify**: Both pods end up with new resource spec. Replication running. One site writable, one read-only.
+
+**Current behavior (as of April 2026)**: The `UpdateController` exists in `internal/controller/updater.go` with ordered-update logic (standby first, failover, old primary) but is **not wired into the reconciler**. Both Deployments use `RecreateDeploymentStrategyType` and restart simultaneously, causing a brief TOTAL LOSS window (~10-15s). After both pods return, the operator detects split brain and re-establishes the topology. The active site may flip during the update. Ordered zero-downtime updates require wiring in the `UpdateController`.
+
+**Cleanup**: Revert the resource change after testing:
+```bash
+kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json \
+  -p '[{"op":"replace","path":"/spec/sites/0/resources/requests/memory","value":"256Mi"},{"op":"replace","path":"/spec/sites/1/resources/requests/memory","value":"256Mi"}]'
+```
 
 ---
 
@@ -207,6 +238,8 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type merg
 ```
 
 **Verify**: New operator either waits for the in-progress clone to finish (MySQL tracks clone state in `performance_schema.clone_status`) or starts a fresh clone. End state: healthy primary/replica pair. No stuck bootstrap phase.
+
+**Caution**: Before deleting the replica PVC, clear the `shipstream.io/db-readonly` taint from the replica's node. Otherwise the local-path-provisioner's helper pod gets evicted by the NoExecute taint and the replacement PVC never provisions, leaving the replica pod stuck in Pending.
 
 ---
 
@@ -250,6 +283,8 @@ kubectl -n $NS exec deploy/mysql-playground-$REPLICA -c mysql -- \
 
 **Verify**: After failover, the relay log drain phase (30s timeout) attempts to apply pending relay logs before promotion. If drain succeeds: all 20 rows survive. If drain times out (old primary unreachable, relay logs incomplete): some rows lost. Compare GTID sets to quantify exact loss.
 
+**Testing challenge**: `kill-site` causes the primary pod to respawn in <5s. The operator detects the respawned pod before completing the failover, and the system may restore the original topology via split-brain recovery instead of completing the failover to the replica. This means the 20 rows survive via normal replication from the restarted primary, not via relay log drain. To force the primary to stay dead, try: scale operator to 0, scale primary to 0, then scale operator back to 1. The reconciler will eventually scale the primary back to 1, but the failover should complete before that.
+
 **Alternative — SOURCE_DELAY**: Instead of stopping the SQL thread, use `CHANGE REPLICATION SOURCE TO SOURCE_DELAY=10` to add a fixed 10-second lag. Then write transactions over 5 seconds and kill the primary. The last ~10s of writes should be in the relay log but unapplied. Relay log drain should recover them if the relay logs are intact (they are — only the primary is dead, not the replica).
 
 ```bash
@@ -277,10 +312,97 @@ SITE=<active-site>
 POD=$(kubectl -n $NS get pods -l shipstream.io/site=$SITE -o name)
 
 # Kill PID 1 in the sidecar container (triggers container restart, not pod restart)
-kubectl -n $NS exec $POD -c sidecar -- kill 1
+# Distroless container has no kill binary — use kubectl debug:
+kubectl -n $NS debug $POD --target=sidecar --image=busybox -- kill 1
 ```
 
 **Verify**: MySQL stays up (port 3306 connectable throughout). Sidecar container restarts (check `RESTARTS` count). Operator may log brief health check failures but does NOT trigger failover (MySQL itself is still reachable). Sidecar re-initializes fencing timers on restart (grace period).
+
+**Note**: `kubectl exec $POD -c sidecar -- kill 1` does NOT work on distroless images (no `kill` binary). Use `kubectl debug --target=sidecar --image=busybox` to get an ephemeral container that shares the sidecar's PID namespace.
+
+---
+
+## Scenarios 16-18: Additional Failure Modes
+
+### 16. MySQL Process Kill (Not Pod Kill)
+**Category**: Process-level failure | **Risk**: Medium
+
+**Hypothesis**: Killing the mysqld process (via `mysqladmin shutdown`) causes the container to exit and restart. If MySQL recovers within failureThreshold (~6s), no failover. If slower, failover triggers correctly as fail-fast behavior.
+
+**Injection**:
+```bash
+NS=bloodraven-playground
+PRIMARY=$(kubectl -n $NS get mysqlfailovergroups playground -o jsonpath='{.status.activeSite}')
+POD=$(kubectl -n $NS get pods -l shipstream.io/site=$PRIMARY -o jsonpath='{.items[0].metadata.name}')
+
+# Record restart count
+kubectl -n $NS get pod/$POD -o jsonpath='{.status.containerStatuses[?(@.name=="mysql")].restartCount}'
+
+# Kill mysqld (container will restart, pod stays)
+kubectl -n $NS exec pod/$POD -c mysql -- mysqladmin -uroot -pplayground-root-pw shutdown
+```
+
+**Verify**: MySQL container restarts (RESTARTS count increments). Check whether failover triggered — with 2s poll interval and failureThreshold=3, even a 2-4 second outage may trigger failover. Either outcome is acceptable: no failover (MySQL recovered in time) or failover (correct fail-fast). Document which occurs and the timing.
+
+**Note**: `kill -9 1` via `kubectl debug --target=mysql` does NOT work — PID 1 (init process) cannot be killed from within its PID namespace. Use `mysqladmin shutdown` instead.
+
+---
+
+### 17. Network Partition of Replica (Not Primary)
+**Category**: Asymmetric failure — replica isolation | **Risk**: Medium
+
+**Hypothesis**: Partitioning the replica causes the operator to log an alert but NOT trigger failover (primary is healthy). The replica sidecar does NOT self-fence (already read-only — `evaluate()` skips read-only nodes). After partition removal, replication resumes and data written during the partition catches up.
+
+**Injection**:
+```bash
+NS=bloodraven-playground
+PRIMARY=$(kubectl -n $NS get mysqlfailovergroups playground -o jsonpath='{.status.activeSite}')
+REPLICA=$([ "$PRIMARY" = "iad" ] && echo "pdx" || echo "iad")
+
+# Write test data before partition
+kubectl -n $NS exec deploy/mysql-playground-$PRIMARY -c mysql -- \
+  mysql -uroot -pplayground-root-pw -e "UPDATE chaos_test.counter SET val = 200 WHERE id = 1;"
+
+# Partition the replica
+./playground/chaos.sh network-partition $REPLICA
+
+# Wait 15s for detection, then write more data during partition
+kubectl -n $NS exec deploy/mysql-playground-$PRIMARY -c mysql -- \
+  mysql -uroot -pplayground-root-pw -e "UPDATE chaos_test.counter SET val = 300 WHERE id = 1;"
+
+# Remove partition
+./playground/chaos.sh recover
+```
+
+**Verify**: Active site unchanged (no failover). Replica sidecar logs show zero "SELF-FENC" entries. After partition removal, replica catches up — val=300 visible on replica. MySQL IO thread auto-reconnects via Service DNS.
+
+---
+
+### 18. Rapid CR Spec Changes During Active Failover
+**Category**: Reconciler contention / state machine stress | **Risk**: High
+
+**Hypothesis**: Concurrent CR spec patches during an active failover should not break convergence. The reconciler may log conflict errors ("Operation cannot be fulfilled on deployments.apps") but retries succeed. The system converges to exactly one writable site.
+
+**Injection**:
+```bash
+NS=bloodraven-playground
+PRIMARY=$(kubectl -n $NS get mysqlfailovergroups playground -o jsonpath='{.status.activeSite}')
+
+# Kill primary to start failover
+./playground/chaos.sh kill-site $PRIMARY
+
+# Immediately hammer the CR with 5 spec changes
+for i in $(seq 1 5); do
+  sleep 2
+  MEM=$((256 + i * 10))
+  kubectl -n $NS patch mysqlfailovergroup playground --type json \
+    -p "[{\"op\":\"replace\",\"path\":\"/spec/sites/0/resources/requests/memory\",\"value\":\"${MEM}Mi\"},{\"op\":\"replace\",\"path\":\"/spec/sites/1/resources/requests/memory\",\"value\":\"${MEM}Mi\"}]"
+done
+```
+
+**Verify**: After ~60s, exactly one site has read_only=0. Check operator logs for "cannot be fulfilled" conflict errors (expected, should be retried). No stuck state or split-brain. Revert resource patch after test.
+
+**Note**: Use JSON patch (`--type json`) instead of merge patch — merge patch drops required fields from the sites array.
 
 ---
 
