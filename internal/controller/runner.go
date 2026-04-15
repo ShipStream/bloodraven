@@ -32,6 +32,11 @@ type managedTopology struct {
 	tm     *TopologyManager
 	cancel context.CancelFunc
 	cfg    TopologyConfig
+
+	// lastTopologyDegradedReason tracks the most recent topology-level
+	// Degraded reason so transition events are not confused by replication
+	// reasons that overwrite the shared Degraded condition.
+	lastTopologyDegradedReason string
 }
 
 // TopologyManagerRunner manages TopologyManager instances for all MysqlFailoverGroup resources.
@@ -617,7 +622,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// Emit Kubernetes Events only after the status update succeeds,
 	// so events are not emitted for transitions that failed to persist.
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
-	r.emitDegradedTransitionEvents(&freshFG, existingStatus, snap)
+	r.emitDegradedTransitionEvents(&freshFG, nn, snap)
 }
 
 // emitFailoverEvents fires Kubernetes Events when significant failover or
@@ -659,17 +664,26 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	}
 }
 
-// emitDegradedTransitionEvents fires Kubernetes Events when the Degraded
-// condition reason transitions (e.g. Healthy → SplitBrain, TotalLoss → Healthy).
-// Events are only emitted on transitions, not on every poll cycle.
-func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlFailoverGroup, existingStatus *v1alpha1.MysqlFailoverGroupStatus, snap TopologySnapshot) {
+// emitDegradedTransitionEvents fires Kubernetes Events when the topology-level
+// Degraded reason transitions (e.g. Healthy → SplitBrain, TotalLoss → Healthy).
+// It tracks the last topology reason on the managedTopology struct rather than
+// reading from the persisted Degraded condition, which is shared with replication
+// reasons and could produce false transitions.
+func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, snap TopologySnapshot) {
 	if r.recorder == nil {
 		return
 	}
 
-	oldReason := conditionReason(existingStatus.Conditions, "Degraded")
 	newReason := degradedReason(snap)
 
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	oldReason := mt.lastTopologyDegradedReason
 	if oldReason == newReason {
 		return
 	}
@@ -690,6 +704,8 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 				"Degraded condition cleared, topology is healthy")
 		}
 	}
+
+	mt.lastTopologyDegradedReason = newReason
 }
 
 // degradedReason returns the Degraded condition reason for a topology snapshot.
@@ -707,16 +723,6 @@ func degradedReason(snap TopologySnapshot) string {
 		return "TotalLoss"
 	}
 	return "Alert"
-}
-
-// conditionReason returns the Reason of the named condition, or "" if not found.
-func conditionReason(conditions []metav1.Condition, condType string) string {
-	for _, c := range conditions {
-		if c.Type == condType {
-			return c.Reason
-		}
-	}
-	return ""
 }
 
 // setBootstrappingCondition writes the Bootstrapping condition based on the

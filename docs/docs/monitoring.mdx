@@ -218,13 +218,32 @@ data:
   .kubewatch.yaml: |
     handler:
       slack:
-        token: "xoxb-your-slack-token"
         channel: "#mysql-alerts"
     resource:
       event: true
     namespaces:
       - bloodraven
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubewatch
+spec:
+  template:
+    spec:
+      containers:
+        - name: kubewatch
+          env:
+            - name: KW_SLACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kubewatch-secrets
+                  key: slack-token
 ```
+
+:::note
+Store credentials in a Kubernetes Secret, not in the ConfigMap. The `KW_SLACK_TOKEN` environment variable is read by Kubewatch at startup.
+:::
 
 [Argo Events](https://argoproj.github.io/argo-events/) and [Event Router](https://github.com/heptiolabs/eventrouter) are alternatives that offer richer filtering and routing capabilities.
 
