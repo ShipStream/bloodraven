@@ -906,8 +906,13 @@ func (tm *TopologyManager) selectDonor(ctx context.Context) (primaryIdx, replica
 		return 0, 1, nil
 	case gtids[0].IsEmpty() && !gtids[1].IsEmpty():
 		return 1, 0, nil
+	case !gtids[0].HasCommonUUIDs(gtids[1]):
+		// Disjoint GTID sets = two independently initialized MySQL instances (fresh deploy).
+		// Pick sites[0] as donor by convention.
+		tm.logger.Info("both sites have data with disjoint GTIDs — treating as fresh deploy", "site0", tm.sites[0].name, "gtid0", gtids[0].String(), "site1", tm.sites[1].name, "gtid1", gtids[1].String())
+		return 0, 1, nil
 	default:
-		return 0, 0, fmt.Errorf("both sites have data — cannot auto-clone (site %s GTID: %s, site %s GTID: %s)",
+		return 0, 0, fmt.Errorf("both sites have data with overlapping GTIDs — cannot auto-clone (site %s GTID: %s, site %s GTID: %s)",
 			tm.sites[0].name, gtids[0], tm.sites[1].name, gtids[1])
 	}
 }

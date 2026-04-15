@@ -594,19 +594,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		for k, v := range labels {
 			podLabels[k] = v
 		}
-		// Set role/healthy labels so Services have endpoints from pod creation.
-		// syncPodLabels refines these once topology polling confirms state.
-		if fg.Status.ActiveSite == site.Name {
-			podLabels[labelRole] = "primary"
-			podLabels[labelHealthy] = "yes"
-		} else {
-			podLabels[labelRole] = "replica"
-			if fg.Status.ActiveSite != "" {
-				podLabels[labelHealthy] = "yes"
-			} else {
-				podLabels[labelHealthy] = "no"
-			}
-		}
+		// Static defaults — syncPodLabels sets the real values on live pods.
+		// These must NOT depend on fg.Status.ActiveSite or any mutable state,
+		// otherwise every status change triggers a Deployment rollout.
+		podLabels[labelRole] = "replica"
+		podLabels[labelHealthy] = "no"
 
 		sidecarImage := fg.Spec.SidecarImage
 

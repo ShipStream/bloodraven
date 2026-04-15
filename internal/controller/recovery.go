@@ -13,8 +13,13 @@ func (f *FailoverController) RecoverOldPrimary(ctx context.Context, oldPrimary m
 		return err
 	}
 
-	// 2. STOP REPLICA (in case it was partially configured).
+	// 2. STOP REPLICA + RESET REPLICA ALL to clear stale applier metadata.
+	// Error 1872 occurs if the previous replication state was corrupted
+	// (e.g. by connection kill during self-fencing).
 	if err := oldPrimary.StopReplica(ctx); err != nil {
+		return err
+	}
+	if err := oldPrimary.ResetReplicaAll(ctx); err != nil {
 		return err
 	}
 

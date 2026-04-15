@@ -257,6 +257,16 @@ func subtractInterval(a, b Interval) []Interval {
 	return result
 }
 
+// HasCommonUUIDs returns true if the two sets share at least one server UUID.
+func (g GTIDSet) HasCommonUUIDs(other GTIDSet) bool {
+	for uuid := range g {
+		if _, ok := other[uuid]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // TransactionCount returns the total number of transactions in the set.
 func (g GTIDSet) TransactionCount() int64 {
 	var total int64
