@@ -99,8 +99,12 @@ type activeSiteResponse struct {
 	ActiveSite string `json:"active_site"`
 }
 
-// RunSafetyNet queries the operator for the active site and sets super_read_only=ON
-// if this sidecar is on a standby site but MySQL has read_only=OFF.
+// RunSafetyNet prevents GTID divergence when a previously-primary pod restarts.
+// It immediately fences MySQL (super_read_only=ON) before querying the operator,
+// then clears the fence only if the operator confirms this is the active site.
+// This "fence first, ask questions later" approach closes the race window where
+// MySQL could commit internal transactions before the operator detects and fences
+// the returning pod.
 func (s *Server) RunSafetyNet(ctx context.Context, cfg *Config) {
 	if cfg.MySite == "" || cfg.PodNamespace == "" || cfg.FailoverGroup == "" || cfg.BloodravenAddress == "" {
 		s.logger.Info("safety net skipped: required identity not configured",
@@ -109,36 +113,34 @@ func (s *Server) RunSafetyNet(ctx context.Context, cfg *Config) {
 		return
 	}
 
+	// Fence immediately — prevent any writes until we confirm our role.
+	if err := s.mysql.SetSuperReadOnly(ctx); err != nil {
+		s.logger.Warn("safety net: could not set initial super_read_only, continuing", "error", err)
+	} else {
+		s.logger.Info("safety net: set super_read_only=ON as precaution on startup")
+	}
+
 	activeSite, err := s.queryActiveSite(ctx, cfg)
 	if err != nil {
-		s.logger.Warn("safety net skipped: could not query active site from operator", "error", err)
+		s.logger.Warn("safety net: could not query active site, staying fenced", "error", err)
 		return
 	}
 
 	if activeSite == "" {
-		s.logger.Info("safety net skipped: no active site reported by operator")
+		s.logger.Info("safety net: no active site reported by operator, staying fenced")
 		return
 	}
 
-	if cfg.MySite == activeSite {
-		s.logger.Info("safety net: this is the active site, no action needed", "site", cfg.MySite)
-		return
-	}
-
-	readOnly, err := s.mysql.IsReadOnly(ctx)
-	if err != nil {
-		s.logger.Warn("safety net: could not query read_only, will retry on next startup", "error", err)
-		return
-	}
-
-	if !readOnly {
-		s.logger.Warn("SAFETY NET: standby site has read_only=OFF, setting super_read_only=ON",
+	if cfg.MySite != activeSite {
+		s.logger.Info("safety net: confirmed standby site, staying fenced",
 			"my_site", cfg.MySite, "active_site", activeSite)
-		if err := s.mysql.SetSuperReadOnly(ctx); err != nil {
-			s.logger.Error("safety net: failed to set super_read_only", "error", err)
-		} else {
-			s.logger.Info("safety net: super_read_only=ON set successfully")
-		}
+		return
+	}
+
+	// We are the active site — clear the fence so the primary can accept writes.
+	s.logger.Info("safety net: this is the active site, clearing super_read_only", "site", cfg.MySite)
+	if err := s.mysql.ClearSuperReadOnly(ctx); err != nil {
+		s.logger.Error("safety net: failed to clear super_read_only on active site", "error", err)
 	}
 }
 

@@ -11,14 +11,16 @@ import (
 
 // mockMysqlQuerier implements mysqlQuerier for testing.
 type mockMysqlQuerier struct {
-	connectable     bool
-	readOnly        bool
-	superReadOnly   bool
-	status          *StatusInfo
-	statusErr       error
-	readOnlyErr     error
-	setReadOnlyErr  error
-	setReadOnlyCalled bool
+	connectable       bool
+	readOnly          bool
+	superReadOnly     bool
+	status            *StatusInfo
+	statusErr         error
+	readOnlyErr       error
+	setReadOnlyErr    error
+	clearReadOnlyErr  error
+	setReadOnlyCalled   bool
+	clearReadOnlyCalled bool
 }
 
 func (m *mockMysqlQuerier) queryStatus(_ context.Context) (*StatusInfo, error) {
@@ -55,6 +57,16 @@ func (m *mockMysqlQuerier) SetSuperReadOnly(_ context.Context) error {
 		return m.setReadOnlyErr
 	}
 	m.superReadOnly = true
+	return nil
+}
+
+func (m *mockMysqlQuerier) ClearSuperReadOnly(_ context.Context) error {
+	m.clearReadOnlyCalled = true
+	if m.clearReadOnlyErr != nil {
+		return m.clearReadOnlyErr
+	}
+	m.superReadOnly = false
+	m.readOnly = false
 	return nil
 }
 
@@ -184,7 +196,7 @@ func safetyNetConfig(operatorAddr, mySite string) *Config {
 	}
 }
 
-func TestSafetyNetSetsSuperReadOnlyOnNonActiveSite(t *testing.T) {
+func TestSafetyNetFencesAndStaysFencedOnNonActiveSite(t *testing.T) {
 	op := fakeOperator("site1", http.StatusOK)
 	defer op.Close()
 	addr := op.Listener.Addr().String()
@@ -195,11 +207,14 @@ func TestSafetyNetSetsSuperReadOnlyOnNonActiveSite(t *testing.T) {
 	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
 
 	if !mock.setReadOnlyCalled {
-		t.Error("safety net should set super_read_only on non-active site with read_only=OFF")
+		t.Error("safety net should set super_read_only on startup")
+	}
+	if mock.clearReadOnlyCalled {
+		t.Error("safety net should NOT clear super_read_only on non-active site")
 	}
 }
 
-func TestSafetyNetSkipsActiveSite(t *testing.T) {
+func TestSafetyNetFencesThenClearsOnActiveSite(t *testing.T) {
 	op := fakeOperator("site1", http.StatusOK)
 	defer op.Close()
 	addr := op.Listener.Addr().String()
@@ -209,23 +224,11 @@ func TestSafetyNetSkipsActiveSite(t *testing.T) {
 
 	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site1"))
 
-	if mock.setReadOnlyCalled {
-		t.Error("safety net should not set super_read_only on active site")
+	if !mock.setReadOnlyCalled {
+		t.Error("safety net should set super_read_only on startup even on active site")
 	}
-}
-
-func TestSafetyNetSkipsWhenAlreadyReadOnly(t *testing.T) {
-	op := fakeOperator("site1", http.StatusOK)
-	defer op.Close()
-	addr := op.Listener.Addr().String()
-
-	mock := &mockMysqlQuerier{connectable: true, readOnly: true}
-	srv := NewServer(mock, ":0", testLogger())
-
-	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
-
-	if mock.setReadOnlyCalled {
-		t.Error("safety net should not set super_read_only when already read-only")
+	if !mock.clearReadOnlyCalled {
+		t.Error("safety net should clear super_read_only after confirming active site")
 	}
 }
 
@@ -240,19 +243,21 @@ func TestSafetyNetSkipsMissingIdentity(t *testing.T) {
 	}
 }
 
-func TestSafetyNetSkipsOperatorUnavailable(t *testing.T) {
+func TestSafetyNetStaysFencedWhenOperatorUnavailable(t *testing.T) {
 	mock := &mockMysqlQuerier{connectable: true, readOnly: false}
 	srv := NewServer(mock, ":0", testLogger())
 
-	// Use a bogus address that won't connect.
 	srv.RunSafetyNet(context.Background(), safetyNetConfig("127.0.0.1:1", "site2"))
 
-	if mock.setReadOnlyCalled {
-		t.Error("safety net should not set super_read_only when operator is unreachable")
+	if !mock.setReadOnlyCalled {
+		t.Error("safety net should fence on startup even when operator is unreachable")
+	}
+	if mock.clearReadOnlyCalled {
+		t.Error("safety net should NOT clear fence when operator is unreachable")
 	}
 }
 
-func TestSafetyNetSkipsOperator503(t *testing.T) {
+func TestSafetyNetStaysFencedOnOperator503(t *testing.T) {
 	op := fakeOperator("", http.StatusServiceUnavailable)
 	defer op.Close()
 	addr := op.Listener.Addr().String()
@@ -262,12 +267,15 @@ func TestSafetyNetSkipsOperator503(t *testing.T) {
 
 	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
 
-	if mock.setReadOnlyCalled {
-		t.Error("safety net should skip when operator returns 503")
+	if !mock.setReadOnlyCalled {
+		t.Error("safety net should fence on startup")
+	}
+	if mock.clearReadOnlyCalled {
+		t.Error("safety net should NOT clear fence when operator returns 503")
 	}
 }
 
-func TestSafetyNetSkipsOperator404(t *testing.T) {
+func TestSafetyNetStaysFencedOnOperator404(t *testing.T) {
 	op := fakeOperator("", http.StatusNotFound)
 	defer op.Close()
 	addr := op.Listener.Addr().String()
@@ -277,12 +285,15 @@ func TestSafetyNetSkipsOperator404(t *testing.T) {
 
 	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
 
-	if mock.setReadOnlyCalled {
-		t.Error("safety net should skip when operator returns 404")
+	if !mock.setReadOnlyCalled {
+		t.Error("safety net should fence on startup")
+	}
+	if mock.clearReadOnlyCalled {
+		t.Error("safety net should NOT clear fence when operator returns 404")
 	}
 }
 
-func TestSafetyNetSkipsEmptyActiveSite(t *testing.T) {
+func TestSafetyNetStaysFencedOnEmptyActiveSite(t *testing.T) {
 	op := fakeOperator("", http.StatusOK)
 	defer op.Close()
 	addr := op.Listener.Addr().String()
@@ -292,12 +303,15 @@ func TestSafetyNetSkipsEmptyActiveSite(t *testing.T) {
 
 	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
 
-	if mock.setReadOnlyCalled {
-		t.Error("safety net should skip when operator returns empty active_site")
+	if !mock.setReadOnlyCalled {
+		t.Error("safety net should fence on startup")
+	}
+	if mock.clearReadOnlyCalled {
+		t.Error("safety net should NOT clear fence when active_site is empty")
 	}
 }
 
-func TestSafetyNetSkipsMalformedJSON(t *testing.T) {
+func TestSafetyNetStaysFencedOnMalformedJSON(t *testing.T) {
 	op := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "not json")
@@ -310,7 +324,10 @@ func TestSafetyNetSkipsMalformedJSON(t *testing.T) {
 
 	srv.RunSafetyNet(context.Background(), safetyNetConfig(addr, "site2"))
 
-	if mock.setReadOnlyCalled {
-		t.Error("safety net should skip when operator returns malformed JSON")
+	if !mock.setReadOnlyCalled {
+		t.Error("safety net should fence on startup")
+	}
+	if mock.clearReadOnlyCalled {
+		t.Error("safety net should NOT clear fence on malformed JSON")
 	}
 }

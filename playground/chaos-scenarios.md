@@ -415,17 +415,3 @@ done
 5. **For each scenario**: Document actual vs. expected, note timing and any bugs
 6. **After code fixes**: `./playground/rebuild.sh operator` (or `sidecar`), then re-run affected scenario
 
-## Files to Monitor
-
-| File | Purpose |
-|------|---------|
-| `playground/chaos.sh` | Chaos injection primitives |
-| `playground/setup.sh` | Playground deployment |
-| `playground/rebuild.sh` | Selective image rebuild |
-| `playground/reset-mysql.sh` | Data wipe and restart |
-| `internal/controller/topology.go` | Polling loop, failover decisions |
-| `internal/controller/failover.go` | Failover orchestration |
-| `internal/controller/recovery.go` | Old primary recovery |
-| `internal/controller/bootstrap.go` | CLONE INSTANCE bootstrap |
-| `internal/sidecar/fencing.go` | Self-fencing monitor |
-| `internal/state/machine.go` | Per-site state machine |

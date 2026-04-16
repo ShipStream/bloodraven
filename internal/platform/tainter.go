@@ -95,7 +95,7 @@ func (t *nodeTainter) patchNodeTaint(ctx context.Context, node corev1.Node, tain
 		newTaints = append(newTaints, corev1.Taint{
 			Key:    taintKey,
 			Value:  TaintValue,
-			Effect: corev1.TaintEffectNoExecute,
+			Effect: corev1.TaintEffectNoSchedule,
 		})
 		t.logger.Info("applying taint", "node", node.Name, "key", taintKey)
 	} else {

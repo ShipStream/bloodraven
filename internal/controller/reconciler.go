@@ -916,13 +916,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					"topology.kubernetes.io/zone": site.Zone,
 				},
 				// MySQL pods must tolerate the db-readonly taint since they
-				// run on both primary and replica nodes. Only application
-				// pods should be evicted by this taint.
+				// run on both primary and replica nodes.
 				Tolerations: []corev1.Toleration{
 					{
 						Key:      platform.TaintKeyForGroup(fg.Name),
 						Operator: corev1.TolerationOpExists,
-						Effect:   corev1.TaintEffectNoExecute,
+						Effect:   corev1.TaintEffectNoSchedule,
 					},
 				},
 				InitContainers: append([]corev1.Container{

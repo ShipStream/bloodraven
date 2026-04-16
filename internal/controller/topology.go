@@ -911,6 +911,19 @@ func (tm *TopologyManager) selectDonor(ctx context.Context) (primaryIdx, replica
 		// Pick sites[0] as donor by convention.
 		tm.logger.Info("both sites have data with disjoint GTIDs — treating as fresh deploy", "site0", tm.sites[0].name, "gtid0", gtids[0].String(), "site1", tm.sites[1].name, "gtid1", gtids[1].String())
 		return 0, 1, nil
+	case gtids[0].Contains(gtids[1]):
+		// Site 0 has all of site 1's transactions (or they're identical).
+		// This happens after a successful CLONE where replication setup failed.
+		// Site 0 is the donor (superset); skip cloning and just set up replication.
+		tm.logger.Info("site 0 contains site 1 GTIDs — prior clone detected, skipping clone",
+			"primary", tm.sites[0].name, "replica", tm.sites[1].name,
+			"gtid0", gtids[0].String(), "gtid1", gtids[1].String())
+		return 0, 1, nil
+	case gtids[1].Contains(gtids[0]):
+		tm.logger.Info("site 1 contains site 0 GTIDs — prior clone detected, skipping clone",
+			"primary", tm.sites[1].name, "replica", tm.sites[0].name,
+			"gtid0", gtids[0].String(), "gtid1", gtids[1].String())
+		return 1, 0, nil
 	default:
 		return 0, 0, fmt.Errorf("both sites have data with overlapping GTIDs — cannot auto-clone (site %s GTID: %s, site %s GTID: %s)",
 			tm.sites[0].name, gtids[0], tm.sites[1].name, gtids[1])
@@ -976,6 +989,19 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primaryIdx, replica
 		return fmt.Errorf("bootstrap: primary host not configured for site %s", tm.sites[primaryIdx].name)
 	}
 
+	// Check if the clone already completed (e.g. prior bootstrap succeeded at
+	// CLONE but failed at SetupReplication). If the primary's GTID set contains
+	// the replica's, the data is already in sync and we can skip directly to
+	// replication setup.
+	if tm.canSkipClone(ctx, primary, replica) {
+		tm.logger.Info("replica already has primary data (prior clone detected), skipping clone phase")
+		tm.mu.Lock()
+		tm.bootstrapPhase = BootstrapPhaseSetupRepl
+		tm.mu.Unlock()
+		tm.emitBootstrapStatus()
+		return tm.setupReplicationForBootstrap(ctx, replica, primaryHost)
+	}
+
 	// Phase 1: Clone from primary. MySQL auto-restarts at the end of a
 	// successful clone, which typically causes the in-flight CLONE INSTANCE
 	// query to return a connection error. We treat such errors as potential
@@ -1032,6 +1058,41 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primaryIdx, replica
 		return fmt.Errorf("setup replication: %w", err)
 	}
 
+	return nil
+}
+
+// canSkipClone returns true when the replica already contains the primary's
+// data (or a superset), indicating a prior CLONE INSTANCE succeeded.
+func (tm *TopologyManager) canSkipClone(ctx context.Context, primary, replica mysql.Checker) bool {
+	pRaw, err := primary.GetGtidExecuted(ctx)
+	if err != nil {
+		return false
+	}
+	rRaw, err := replica.GetGtidExecuted(ctx)
+	if err != nil {
+		return false
+	}
+	pGtid, err := mysql.ParseGTIDSet(pRaw)
+	if err != nil || pGtid.IsEmpty() {
+		return false
+	}
+	rGtid, err := mysql.ParseGTIDSet(rRaw)
+	if err != nil || rGtid.IsEmpty() {
+		return false
+	}
+	return rGtid.Contains(pGtid) || pGtid.Contains(rGtid)
+}
+
+// setupReplicationForBootstrap runs only the replication setup phase of bootstrap.
+func (tm *TopologyManager) setupReplicationForBootstrap(ctx context.Context, replica mysql.Checker, primaryHost string) error {
+	if err := tm.bootstrap.SetupReplication(ctx, replica, ReplicationSetupOpts{
+		SourceHost:   primaryHost,
+		ReplUser:     tm.bootstrapCfg.ReplUser,
+		ReplPassword: tm.bootstrapCfg.ReplPassword,
+		UseSSL:       tm.bootstrapCfg.UseSSL,
+	}); err != nil {
+		return fmt.Errorf("setup replication: %w", err)
+	}
 	return nil
 }
 

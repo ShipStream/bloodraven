@@ -48,6 +48,7 @@ func NewChecker(dsn string) (Checker, error) {
 	}
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(1)
+	db.SetConnMaxIdleTime(30 * time.Second)
 	return &checker{db: db}, nil
 }
 

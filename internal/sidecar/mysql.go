@@ -29,6 +29,7 @@ type mysqlQuerier interface {
 	isConnectable(ctx context.Context) bool
 	IsReadOnly(ctx context.Context) (bool, error)
 	SetSuperReadOnly(ctx context.Context) error
+	ClearSuperReadOnly(ctx context.Context) error
 }
 
 // LiveMysql queries the actual local MySQL instance.
@@ -146,6 +147,16 @@ func (m *LiveMysql) SetSuperReadOnly(ctx context.Context) error {
 	_, err := m.db.ExecContext(ctx, "SET GLOBAL super_read_only = ON")
 	if err != nil {
 		return fmt.Errorf("set super_read_only: %w", err)
+	}
+	return nil
+}
+
+func (m *LiveMysql) ClearSuperReadOnly(ctx context.Context) error {
+	if _, err := m.db.ExecContext(ctx, "SET GLOBAL super_read_only = OFF"); err != nil {
+		return fmt.Errorf("clear super_read_only: %w", err)
+	}
+	if _, err := m.db.ExecContext(ctx, "SET GLOBAL read_only = OFF"); err != nil {
+		return fmt.Errorf("clear read_only: %w", err)
 	}
 	return nil
 }

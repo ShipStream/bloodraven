@@ -257,7 +257,14 @@ func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duratio
 			// Pending relay logs exist — restart the SQL thread to apply them.
 			if !sqlThreadRestarted {
 				if startErr := m.StartReplicaSQLThread(ctx); startErr != nil {
-					return fmt.Errorf("relay log drain: restart SQL thread: %w", startErr)
+					// Connection may be stale after failover turbulence.
+					// Force a reconnect via Ping and retry once.
+					if pingErr := m.db.PingContext(ctx); pingErr != nil {
+						return fmt.Errorf("relay log drain: restart SQL thread: %w (ping also failed: %v)", startErr, pingErr)
+					}
+					if retryErr := m.StartReplicaSQLThread(ctx); retryErr != nil {
+						return fmt.Errorf("relay log drain: restart SQL thread after reconnect: %w", retryErr)
+					}
 				}
 				sqlThreadRestarted = true
 			}
