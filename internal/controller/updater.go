@@ -30,6 +30,10 @@ type UpdateController struct {
 	failover *FailoverController
 	logger   *slog.Logger
 
+	// tickInterval controls how often waitForReplicaReady / waitForSiteReady poll.
+	// Exposed for tests; production code uses 5s.
+	tickInterval time.Duration
+
 	mu       sync.Mutex
 	phase    UpdatePhase
 	updating bool
@@ -38,8 +42,9 @@ type UpdateController struct {
 // NewUpdateController creates a new UpdateController.
 func NewUpdateController(failover *FailoverController, logger *slog.Logger) *UpdateController {
 	return &UpdateController{
-		failover: failover,
-		logger:   logger,
+		failover:     failover,
+		logger:       logger,
+		tickInterval: 5 * time.Second,
 	}
 }
 
@@ -65,6 +70,21 @@ func (u *UpdateController) Execute(ctx context.Context,
 	activeSiteName, standbySiteName string,
 	standbyChecker, activeChecker mysql.Checker,
 	applyUpdate func(ctx context.Context, siteName string) error) error {
+
+	// Precondition: refuse to start if the standby is not actually replicating.
+	// Runs before u.updating=true so an aborted attempt leaves no lock state behind.
+	// A probe error is tolerated — the standby may be briefly unreachable; let the
+	// rest of the flow discover that rather than adding a new transient-error path.
+	if ro, err := standbyChecker.CheckReadOnly(ctx); err == nil {
+		if !ro {
+			return fmt.Errorf("precondition: standby %s is writable; refusing to start ordered update", standbySiteName)
+		}
+		if rs, err := standbyChecker.ShowReplicaStatus(ctx); err == nil {
+			if rs == nil || !rs.IORunning || !rs.SQLRunning {
+				return fmt.Errorf("precondition: standby %s is not replicating", standbySiteName)
+			}
+		}
+	}
 
 	u.mu.Lock()
 	if u.updating {
@@ -128,22 +148,48 @@ func (u *UpdateController) setPhase(p UpdatePhase) {
 }
 
 // waitForReplicaReady waits for the replica to have replication running and caught up.
+// It aborts early (~30s) when the standby is observed writable with no replication source,
+// since that condition will never satisfy the happy path and holding updating=true blocks
+// cross-site split-brain recovery.
 func (u *UpdateController) waitForReplicaReady(ctx context.Context, checker mysql.Checker, timeout time.Duration) error {
+	const failFastThreshold = 6 // 6 × 5s ≈ 30s
 	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(u.tickInterval)
 	defer ticker.Stop()
 
+	writableStreak := 0
+
 	for {
+		probeErr := false
 		// Check if MySQL is reachable
-		_, err := checker.CheckReadOnly(ctx)
-		if err == nil {
+		ro, err := checker.CheckReadOnly(ctx)
+		if err != nil {
+			probeErr = true
+		} else {
 			// Check replication status
 			rs, err := checker.ShowReplicaStatus(ctx)
-			if err == nil && rs != nil && rs.IORunning && rs.SQLRunning {
+			if err != nil {
+				probeErr = true
+			} else if ro && rs != nil && rs.IORunning && rs.SQLRunning {
 				if rs.SecondsBehindSource != nil && *rs.SecondsBehindSource < 5 {
 					return nil
 				}
+				writableStreak = 0
+			} else if !ro && (rs == nil || rs.SourceHost == "") {
+				// Writable standby with no configured source — it will never recover on its own.
+				// Only advance the counter in this specific shape to avoid misfiring during a
+				// brief CHANGE REPLICATION SOURCE window where threads may be starting.
+				writableStreak++
+				if writableStreak >= failFastThreshold {
+					return fmt.Errorf("standby came up writable with no replication source; aborting ordered update")
+				}
+			} else {
+				writableStreak = 0
 			}
+		}
+		if probeErr {
+			// Unreachable != writable. Reset the counter so a flaky probe doesn't trigger abort.
+			writableStreak = 0
 		}
 
 		if time.Now().After(deadline) {
@@ -161,7 +207,7 @@ func (u *UpdateController) waitForReplicaReady(ctx context.Context, checker mysq
 // waitForSiteReady waits for a site to be reachable.
 func (u *UpdateController) waitForSiteReady(ctx context.Context, checker mysql.Checker, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(u.tickInterval)
 	defer ticker.Stop()
 
 	for {
