@@ -3,10 +3,20 @@ package controller
 import (
 	"fmt"
 	"path"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+)
+
+// Defaults applied when the corresponding PITRSpec fields are unset.
+// Kept in one place so generateMyCnf, buildPITRSidecarFragments, and
+// computeSpecHash all agree on the effective value — otherwise a
+// change here would silently fail to roll pods.
+const (
+	defaultPITRMaxBinlogSize       = "100M"
+	defaultPITRArchivePollInterval = 60 * time.Second
 )
 
 // PITR sidecar/pod fragments
@@ -190,41 +200,77 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 	return out, nil
 }
 
-// restorePITRPVCMountPath is the mount path inside the restore Job for
-// the backup profile's PVC when replaying archived binlogs. Separate
-// from pitrPVCMountPath on the live MySQL pod so the two don't share a
-// name; cross-reference in the sidecar config when debugging.
+// restorePITRPVCMountPath is the mount path inside the restore Job's
+// init container for the backup profile's PVC when replaying archived
+// binlogs. Separate from pitrPVCMountPath on the live MySQL pod so the
+// two don't share a name; cross-reference in the sidecar config when
+// debugging.
 const restorePITRPVCMountPath = "/restore-pitr"
 
-// buildRestorePITRExtras returns the env/volume/mount additions the
-// restore Job needs when spec.initFromBackup.pointInTime is set.
-// Returns empty slices when PITR is not requested.
+// restorePITRLocalDir is the shared emptyDir path where the init
+// container drops downloaded binlog files and the mysqlsh container
+// subsequently reads them. Path is shared across both containers;
+// read-write in the init container, read-only in the main container.
+const restorePITRLocalDir = "/pitr-binlogs"
+
+// restorePITRInitContainerName is the name given to the
+// bloodraven pitr-download init container. Named explicitly so it's
+// easy to spot in kubectl describe output when diagnosing restore
+// failures.
+const restorePITRInitContainerName = "pitr-download"
+
+// restorePITRFragments is the bundle of additions PITR contributes to
+// a restore Job spec. Zero value means "PITR replay not requested";
+// callers append unconditionally.
+type restorePITRFragments struct {
+	// MainEnv is the set of env vars the mysqlsh container needs to
+	// know where to find the downloaded binlogs and what datetime to
+	// stop at. Kept deliberately small — the init container does the
+	// storage I/O, the main container just runs replay.
+	MainEnv []corev1.EnvVar
+	// MainMounts is the read-only mount that exposes the shared
+	// emptyDir to the mysqlsh container.
+	MainMounts []corev1.VolumeMount
+	// InitContainer is the bloodraven pitr-download container that
+	// runs before the mysqlsh container.
+	InitContainer *corev1.Container
+	// PodVolumes is the set of pod-level volumes that back the init
+	// container and the read-only handoff to the main container.
+	PodVolumes []corev1.Volume
+}
+
+// buildRestorePITRFragments wires up the restore-side PITR handoff:
 //
-// PITR replay requires:
-//   - The MysqlBackup CR being restored from (so we can pull
-//     gtidExecuted into the replay env — the restore script uses it
-//     to set gtid_purged on the target before replaying).
-//   - The backup profile that held the binlog archive (its storage
-//     config tells us where to fetch binlogs + manifest from).
+//	initContainer: bloodraven pitr-download
+//	   ├── downloads archived binlogs from S3 or PVC
+//	   └── writes to emptyDir /pitr-binlogs
+//	container: mysqlsh
+//	   ├── util.loadDump()  (existing restore.py behavior)
+//	   └── replays /pitr-binlogs/<site>/* via mysqlbinlog | mysql
 //
-// Both are resolved off fg.Spec.Backup.PITR because PITR archival is
-// keyed off the failover group's own profile set, not off any
-// properties of the specific MysqlBackup being restored. In practice
-// the two tend to be the same profile (you archive and dump to the
-// same bucket) but we decouple them here so future users can separate
-// the two if they want.
-func buildRestorePITRExtras(fg *v1alpha1.MysqlFailoverGroup) (
-	[]corev1.EnvVar, []corev1.Volume, []corev1.VolumeMount, error,
-) {
+// Splitting download + replay across two containers removes the aws
+// CLI runtime dependency from the MySQL image and reuses the sidecar
+// archiver's storage-backend abstraction.
+//
+// PITR replay is configured purely from the failover group's archive
+// settings: the backup profile named by fg.Spec.Backup.PITR tells the
+// init container where to fetch archived binlogs and manifests from.
+// util.loadDump() sets @@GLOBAL.gtid_purged from the dump's recorded
+// state, and mysqlbinlog's server-side GTID dedup then skips
+// already-applied transactions during replay — no per-MysqlBackup
+// metadata plumbing needed here.
+func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFragments, error) {
+	var out restorePITRFragments
+
 	if fg.Spec.InitFromBackup == nil || fg.Spec.InitFromBackup.PointInTime == nil {
-		return nil, nil, nil, nil
+		return out, nil
 	}
 	pit := fg.Spec.InitFromBackup.PointInTime
 	if pit.StopDatetime == "" {
-		return nil, nil, nil, fmt.Errorf("initFromBackup.pointInTime.stopDatetime is required")
+		return out, fmt.Errorf("initFromBackup.pointInTime.stopDatetime is required")
 	}
 	if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
-		return nil, nil, nil, fmt.Errorf(
+		return out, fmt.Errorf(
 			"initFromBackup.pointInTime is set but spec.backup.pitr.enabled=false; " +
 				"PITR restore requires the failover group to have continuous binlog " +
 				"archival configured on the source")
@@ -232,57 +278,88 @@ func buildRestorePITRExtras(fg *v1alpha1.MysqlFailoverGroup) (
 	pitr := fg.Spec.Backup.PITR
 	profile := findProfile(fg, pitr.ProfileName)
 	if profile == nil {
-		return nil, nil, nil, fmt.Errorf("pitr profile %q not found in spec.backup.profiles", pitr.ProfileName)
+		return out, fmt.Errorf("pitr profile %q not found in spec.backup.profiles", pitr.ProfileName)
 	}
 
-	var (
-		env     []corev1.EnvVar
-		volumes []corev1.Volume
-		mounts  []corev1.VolumeMount
-	)
-
-	env = append(env,
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
-		corev1.EnvVar{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
-	)
-	if pit.ExcludeGtids != "" {
-		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: pit.ExcludeGtids})
+	// Shared emptyDir volume. Init container writes; main container
+	// reads. sizeLimit is intentionally unset — the node's ephemeral
+	// storage limit is the de-facto cap, matching how the existing
+	// /tmp emptyDir is sized.
+	emptyDirVol := corev1.Volume{
+		Name:         "pitr-binlogs",
+		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 	}
+	initMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir}
+	mainMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir, ReadOnly: true}
+
+	// Build a comma-separated site list from the spec so the init
+	// container can skip a List call in the common case. The init
+	// container falls back to listing the manifest prefix when this
+	// env var is empty.
+	var siteNames []string
+	for _, s := range fg.Spec.Sites {
+		siteNames = append(siteNames, s.Name)
+	}
+
+	initEnv := []corev1.EnvVar{
+		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
+		{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
+		{Name: "BLOODRAVEN_PITR_OUTPUT_DIR", Value: restorePITRLocalDir},
+		{Name: "BLOODRAVEN_PITR_SITES", Value: joinComma(siteNames)},
+	}
+	initMounts := []corev1.VolumeMount{initMount}
+	volumes := []corev1.Volume{emptyDirVol}
 
 	switch profile.Storage.Type {
 	case v1alpha1.BackupStorageS3:
 		if profile.Storage.S3 == nil {
-			return nil, nil, nil, fmt.Errorf("pitr profile %q type=S3 but storage.s3 nil", profile.Name)
+			return out, fmt.Errorf("pitr profile %q type=S3 but storage.s3 nil", profile.Name)
 		}
 		s3 := profile.Storage.S3
 		manifestPrefix := pitrBinlogSubprefix
 		if s3.Prefix != "" {
 			manifestPrefix = path.Join(s3.Prefix, pitrBinlogSubprefix)
 		}
-		env = append(env,
+		initEnv = append(initEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: manifestPrefix},
 			corev1.EnvVar{Name: "BLOODRAVEN_PITR_S3_BUCKET", Value: s3.Bucket},
 		)
 		if s3.EndpointURL != "" {
-			env = append(env, corev1.EnvVar{
+			initEnv = append(initEnv, corev1.EnvVar{
 				Name: "BLOODRAVEN_PITR_S3_ENDPOINT_URL", Value: s3.EndpointURL,
 			})
 		}
 		if s3.Region != "" {
-			env = append(env, corev1.EnvVar{
+			initEnv = append(initEnv, corev1.EnvVar{
 				Name: "BLOODRAVEN_PITR_S3_REGION", Value: s3.Region,
 			})
 		}
-		// AWS creds are already mounted at backupAWSCredsMountPath by
-		// the main restore-job path when source is S3. Re-point the
-		// PITR helper at that same directory rather than double-mount.
-		env = append(env, corev1.EnvVar{
-			Name: "BLOODRAVEN_PITR_AWS_CREDS_DIR", Value: backupAWSCredsMountPath,
-		})
+		if s3.CredentialsSecret != "" {
+			// Mount profile S3 creds at a dedicated path inside the
+			// init container. Kept distinct from the main
+			// backupAWSCredsMountPath so the dump source and PITR
+			// archive can use different credentials if operators
+			// ever need that.
+			volumes = append(volumes, corev1.Volume{
+				Name: "pitr-aws-creds",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName:  s3.CredentialsSecret,
+						DefaultMode: ptr32(0o400),
+					},
+				},
+			})
+			initMounts = append(initMounts, corev1.VolumeMount{
+				Name: "pitr-aws-creds", MountPath: pitrAWSCredsMountDir, ReadOnly: true,
+			})
+			initEnv = append(initEnv, corev1.EnvVar{
+				Name: "BLOODRAVEN_PITR_AWS_CREDS_DIR", Value: pitrAWSCredsMountDir,
+			})
+		}
 
 	case v1alpha1.BackupStoragePVC:
 		if profile.Storage.PVC == nil {
-			return nil, nil, nil, fmt.Errorf("pitr profile %q type=PVC but storage.pvc nil", profile.Name)
+			return out, fmt.Errorf("pitr profile %q type=PVC but storage.pvc nil", profile.Name)
 		}
 		pvc := profile.Storage.PVC
 		claim := pvc.ClaimName
@@ -302,20 +379,74 @@ func buildRestorePITRExtras(fg *v1alpha1.MysqlFailoverGroup) (
 				},
 			},
 		})
-		mounts = append(mounts, corev1.VolumeMount{
-			Name:      "pitr-archive",
-			MountPath: restorePITRPVCMountPath,
-			ReadOnly:  true,
+		initMounts = append(initMounts, corev1.VolumeMount{
+			Name: "pitr-archive", MountPath: restorePITRPVCMountPath, ReadOnly: true,
 		})
-		env = append(env,
+		initEnv = append(initEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_PITR_MANIFEST_PREFIX", Value: manifestPrefix},
 			corev1.EnvVar{Name: "BLOODRAVEN_PITR_PVC_MOUNT_PATH", Value: restorePITRPVCMountPath},
 		)
 
 	default:
-		return nil, nil, nil, fmt.Errorf("pitr profile %q has unknown storage type %q",
+		return out, fmt.Errorf("pitr profile %q has unknown storage type %q",
 			profile.Name, profile.Storage.Type)
 	}
 
-	return env, volumes, mounts, nil
+	// Init container reuses the operator image — the `pitr-download`
+	// subcommand is shipped in the same binary as the main
+	// reconciler. operatorImageFromEnv is wired from main.go; if it's
+	// empty (tests) we fall back to "bloodraven:latest" to keep the
+	// Job spec shape stable.
+	image := operatorImageFromEnv
+	if image == "" {
+		image = "bloodraven:latest"
+	}
+	// Init container shares the main container's hardened security
+	// context — same UID/GID so the emptyDir is readable, same
+	// seccomp/capability profile.
+	_, initSC := mergeSecurityContexts(nil, nil)
+	init := corev1.Container{
+		Name:            restorePITRInitContainerName,
+		Image:           image,
+		Command:         []string{"bloodraven", "pitr-download"},
+		Env:             initEnv,
+		VolumeMounts:    initMounts,
+		SecurityContext: initSC,
+	}
+
+	mainEnv := []corev1.EnvVar{
+		{Name: "BLOODRAVEN_PITR_LOCAL_DIR", Value: restorePITRLocalDir},
+		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
+	}
+	if pit.ExcludeGtids != "" {
+		mainEnv = append(mainEnv, corev1.EnvVar{
+			Name: "BLOODRAVEN_PITR_EXCLUDE_GTIDS", Value: pit.ExcludeGtids,
+		})
+	}
+
+	return restorePITRFragments{
+		MainEnv:       mainEnv,
+		MainMounts:    []corev1.VolumeMount{mainMount},
+		InitContainer: &init,
+		PodVolumes:    volumes,
+	}, nil
+}
+
+// joinComma returns a comma-separated list of non-empty strings, used
+// for BLOODRAVEN_PITR_SITES. stdlib strings.Join would include empty
+// entries when the source slice has gaps; we filter them explicitly.
+func joinComma(parts []string) string {
+	out := make([]byte, 0, 32)
+	first := true
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		if !first {
+			out = append(out, ',')
+		}
+		out = append(out, p...)
+		first = false
+	}
+	return string(out)
 }

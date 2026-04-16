@@ -474,7 +474,7 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
 	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled {
 		maxSize := fg.Spec.Backup.PITR.MaxBinlogSize
 		if maxSize == "" {
-			maxSize = "100M"
+			maxSize = defaultPITRMaxBinlogSize
 		}
 		settings["max-binlog-size"] = maxSize
 	}
@@ -1272,14 +1272,25 @@ func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 	}
 	// PITR settings affect both my.cnf (max_binlog_size) and the
 	// sidecar env (archiver config). Either change must roll the pod.
+	// Hash the EFFECTIVE values (with defaults filled in) rather than
+	// the raw spec: otherwise a release that changes the default
+	// MaxBinlogSize or ArchivePollInterval in code would fail to
+	// produce a hash change and pods wouldn't roll to pick up the
+	// new value.
 	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil {
 		p := fg.Spec.Backup.PITR
+		effMaxBinlogSize := p.MaxBinlogSize
+		if effMaxBinlogSize == "" {
+			effMaxBinlogSize = defaultPITRMaxBinlogSize
+		}
+		effPollInterval := defaultPITRArchivePollInterval
+		if p.ArchivePollInterval != nil {
+			effPollInterval = p.ArchivePollInterval.Duration
+		}
 		fmt.Fprintf(h, "pitr.enabled=%t\n", p.Enabled)
 		fmt.Fprintf(h, "pitr.profile=%s\n", p.ProfileName)
-		fmt.Fprintf(h, "pitr.maxBinlogSize=%s\n", p.MaxBinlogSize)
-		if p.ArchivePollInterval != nil {
-			fmt.Fprintf(h, "pitr.archivePollInterval=%s\n", p.ArchivePollInterval.Duration)
-		}
+		fmt.Fprintf(h, "pitr.maxBinlogSize=%s\n", effMaxBinlogSize)
+		fmt.Fprintf(h, "pitr.archivePollInterval=%s\n", effPollInterval)
 	}
 	// Include TLS certificate data so cert rotation triggers a rolling update.
 	if len(tlsSecretData) > 0 {

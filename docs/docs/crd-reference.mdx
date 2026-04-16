@@ -99,6 +99,31 @@ Exactly one of `secretName` or `credentials` must be set. When `credentials` is 
 | `monitorSecret` | string | No | Secret for Prometheus exporter connections. Keys: `username`, `password`. Grants: `PROCESS`, `REPLICATION CLIENT`, `SELECT` on `performance_schema`. |
 | `backupSecret` | string | No | Secret for backup/restore connections. Keys: `username`, `password`. Grants: `SELECT`, `LOCK TABLES`, `SHOW VIEW`, `EVENT`, `TRIGGER`, `RELOAD`, `BACKUP_ADMIN`, `REPLICATION CLIENT`. |
 
+### PITRSpec (`spec.backup.pitr`)
+
+Enables continuous binary-log archival so restores can target an
+arbitrary `stopDatetime` on top of any retained full dump. See
+[Backup and restore → Point-in-time recovery](/docs/backup-restore#point-in-time-recovery-pitr)
+for the end-to-end story.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `enabled` | bool | No | Turns archival on. Omitting the whole block is equivalent to `false`. |
+| `profileName` | string | Yes when enabled | Name of a `spec.backup.profiles[]` entry. Binlog objects and per-site manifests live under a `binlogs/` subprefix inside that profile's storage. |
+| `maxBinlogSize` | string | No | Passed to MySQL as `max_binlog_size`. Controls rotation cadence (and therefore the RPO gap). Default `"100M"`. |
+| `archivePollInterval` | duration | No | Belt-and-suspenders scan cadence alongside inotify. Default `"60s"`. |
+
+### PointInTimeSpec (`spec.initFromBackup.pointInTime`)
+
+Requests binlog replay on top of the loaded dump. Requires the source
+failover group to have had `spec.backup.pitr.enabled=true` at the
+time of the full dump — otherwise there is no archive to replay.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `stopDatetime` | string | Yes | Replay target. Accepts RFC 3339 (`2026-04-15T09:30:00Z`) or MySQL's native form (`2026-04-15 09:30:00`). |
+| `excludeGtids` | string | No | Forwarded verbatim as `mysqlbinlog --exclude-gtids=...` to surgically skip known-bad transactions while replaying everything else. |
+
 ## Full example
 
 ```yaml
@@ -255,6 +280,7 @@ The operator writes the following status fields.
 | `lastFailover` | timestamp | When the last failover occurred |
 | `lastFailoverTarget` | string | Which site was promoted in the last failover |
 | `promotionGtidExecuted` | string | GTID set recorded on the candidate at the moment of the most recent promotion, before it began accepting writes. Used for data-loss accounting. |
+| `pitr` | PITRStatus | Reserved summary of the continuous binlog archive. The v1alpha1 controller does not yet populate this field; live archiver health is exposed on the sidecar HTTP server at `/archiver/status`. |
 
 ### SiteStatus
 

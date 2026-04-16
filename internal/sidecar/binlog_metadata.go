@@ -21,10 +21,13 @@ import (
 //   - FirstEventTime / LastEventTime: wall-clock timestamps taken from
 //     event headers. The parser walks the file once; this is cheap.
 //   - PreviousGTIDs: GTID set present at the start of the file
-//     (PREVIOUS_GTIDS_LOG_EVENT), used by restore to prune files whose
-//     entire content predates the dump's gtid_executed.
-//   - EndGTIDs: PreviousGTIDs plus all GTID events observed while
-//     scanning to the end of file. Same shape as PreviousGTIDs.
+//     (PREVIOUS_GTIDS_LOG_EVENT). This is the complete GTID state that
+//     was already applied BEFORE this file was opened; it's enough for
+//     restore to cheaply prune files whose entire contents predate the
+//     dump's gtid_executed. A full per-file GTID range would require
+//     accumulating GTID events and merging sets, which the MVP restore
+//     path doesn't need — timestamp filtering plus server-side GTID
+//     dedup at replay time is sufficient.
 //
 // MySQL writes the FDE with the server start time, not the "first real
 // event time". We therefore skip the FDE when computing FirstEventTime
@@ -35,7 +38,6 @@ type BinlogMetadata struct {
 	FirstEventTime time.Time `json:"firstEventTime"`
 	LastEventTime  time.Time `json:"lastEventTime"`
 	PreviousGTIDs  string    `json:"previousGtids,omitempty"`
-	EndGTIDs       string    `json:"endGtids,omitempty"`
 }
 
 // parseBinlogMetadata scans the given binlog file once and returns a
@@ -58,46 +60,26 @@ func parseBinlogMetadata(path string) (BinlogMetadata, error) {
 	}
 
 	parser := replication.NewBinlogParser()
-
-	// GTID accumulator for EndGTIDs: we start with PreviousGTIDs and
-	// extend it as we see GTID events (GTID_EVENT or GTID_LIST_EVENT).
-	// Tracking the full set from strings is tricky; we build a simple
-	// string accumulator by concatenating GTIDs as observed and let
-	// the restore side run them through mysql's GTID normalization.
-	// A more precise approach would be github.com/go-mysql-org/go-mysql
-	// mysql.ParseGTIDSet, but for MVP we keep this as a best-effort
-	// string hint.
 	var gotFirstTimestamp bool
 
 	err = parser.ParseFile(path, 0, func(e *replication.BinlogEvent) error {
 		ts := time.Unix(int64(e.Header.Timestamp), 0).UTC()
 
-		switch ev := e.Event.(type) {
-		case *replication.FormatDescriptionEvent:
-			// FDE timestamp is server-start-time, not useful as
-			// FirstEventTime. Skip.
-			_ = ev
-		case *replication.PreviousGTIDsEvent:
-			meta.PreviousGTIDs = ev.GTIDSets
-			if meta.EndGTIDs == "" {
-				meta.EndGTIDs = ev.GTIDSets
-			}
-		case *replication.GTIDEvent:
-			if !gotFirstTimestamp && e.Header.Timestamp > 0 {
+		if pg, ok := e.Event.(*replication.PreviousGTIDsEvent); ok {
+			meta.PreviousGTIDs = pg.GTIDSets
+			return nil
+		}
+		// FDE timestamp is server-start-time, not a real event time;
+		// skip it so FirstEventTime tracks the first actual event.
+		if e.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT {
+			return nil
+		}
+		if e.Header.Timestamp > 0 {
+			if !gotFirstTimestamp {
 				meta.FirstEventTime = ts
 				gotFirstTimestamp = true
 			}
-			if e.Header.Timestamp > 0 {
-				meta.LastEventTime = ts
-			}
-		default:
-			if !gotFirstTimestamp && e.Header.Timestamp > 0 && e.Header.EventType != replication.FORMAT_DESCRIPTION_EVENT {
-				meta.FirstEventTime = ts
-				gotFirstTimestamp = true
-			}
-			if e.Header.Timestamp > 0 {
-				meta.LastEventTime = ts
-			}
+			meta.LastEventTime = ts
 		}
 		return nil
 	})

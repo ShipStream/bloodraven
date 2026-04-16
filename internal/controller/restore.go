@@ -451,18 +451,18 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		return nil, err
 	}
 
-	// PITR replay on top of the loaded dump. The helper adds env vars
-	// pointing the restore_script.py PITR path at the profile's
-	// archive location, plus a volume + mount for PVC-backed archives.
-	// For S3-backed archives the AWS creds are shared with the main
-	// load path; no extra mount needed.
-	pitrEnv, pitrVolumes, pitrMounts, err := buildRestorePITRExtras(fg)
+	// PITR replay. The download and replay phases are split across an
+	// init container (bloodraven pitr-download, downloads binlogs from
+	// S3/PVC into a shared emptyDir) and the main container
+	// (restore.py, runs mysqlbinlog | mysql on the downloaded files).
+	// See buildRestorePITRFragments for the shape.
+	pitrFrags, err := buildRestorePITRFragments(fg)
 	if err != nil {
 		return nil, err
 	}
-	extraEnv = append(extraEnv, pitrEnv...)
-	extraVolumes = append(extraVolumes, pitrVolumes...)
-	extraMounts = append(extraMounts, pitrMounts...)
+	extraEnv = append(extraEnv, pitrFrags.MainEnv...)
+	extraVolumes = append(extraVolumes, pitrFrags.PodVolumes...)
+	extraMounts = append(extraMounts, pitrFrags.MainMounts...)
 
 	labels := map[string]string{
 		labelAppName:       "mysql-restore",
@@ -570,6 +570,11 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 	}
 	podSC, containerSC := mergeSecurityContexts(podSCSrc, containerSCSrc)
 
+	var initContainers []corev1.Container
+	if pitrFrags.InitContainer != nil {
+		initContainers = append(initContainers, *pitrFrags.InitContainer)
+	}
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      restoreJobName(fg.Name, targetSite),
@@ -585,6 +590,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,
 					SecurityContext:  podSC,
+					InitContainers:   initContainers,
 					Containers: []corev1.Container{
 						{
 							Name:            backupJobContainerName,

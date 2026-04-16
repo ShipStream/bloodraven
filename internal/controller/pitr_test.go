@@ -130,17 +130,82 @@ func TestBuildPITRSidecarFragments_PVC(t *testing.T) {
 	}
 }
 
-// TestBuildRestorePITRExtras_RequiresSourceArchive fails cleanly when a
-// PITR restore is requested but the failover group doesn't archive
-// binlogs — nothing to replay.
-func TestBuildRestorePITRExtras_RequiresSourceArchive(t *testing.T) {
+// TestBuildRestorePITRFragments_RequiresSourceArchive fails cleanly
+// when a PITR restore is requested but the failover group doesn't
+// archive binlogs — nothing to replay.
+func TestBuildRestorePITRFragments_RequiresSourceArchive(t *testing.T) {
 	fg := withBackup(nil)
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
 		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"},
 	}
-	_, _, _, err := buildRestorePITRExtras(fg)
+	_, err := buildRestorePITRFragments(fg)
 	if err == nil {
 		t.Fatalf("want error when pitr archive is not configured on source")
+	}
+}
+
+// TestBuildRestorePITRFragments_S3BuildsInitContainer verifies the
+// init container is emitted with the right image/command and that
+// both the AWS creds secret and the shared emptyDir are mounted.
+func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
+	fg := withBackup(&v1alpha1.PITRSpec{Enabled: true, ProfileName: "primary"})
+	fg.Spec.Sites = []v1alpha1.SiteSpec{{Name: "us-east-1a"}, {Name: "us-east-1b"}}
+	fg.Spec.Backup.Profiles = []v1alpha1.BackupProfile{{
+		Name: "primary",
+		Storage: v1alpha1.BackupStorage{
+			Type: v1alpha1.BackupStorageS3,
+			S3: &v1alpha1.S3Storage{
+				Bucket:            "lion",
+				Prefix:            "dumps",
+				Region:            "us-east-1",
+				CredentialsSecret: "aws-creds",
+			},
+		},
+	}}
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
+		PointInTime: &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"},
+	}
+
+	frags, err := buildRestorePITRFragments(fg)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if frags.InitContainer == nil {
+		t.Fatal("want init container, got nil")
+	}
+	ic := frags.InitContainer
+	if ic.Name != restorePITRInitContainerName {
+		t.Errorf("init container name: want %q, got %q", restorePITRInitContainerName, ic.Name)
+	}
+	if len(ic.Command) == 0 || ic.Command[0] != "bloodraven" || ic.Command[1] != "pitr-download" {
+		t.Errorf("init container command: want [bloodraven pitr-download ...], got %v", ic.Command)
+	}
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_STOP_DATETIME", "2026-04-15T09:30:00Z")
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_STORAGE_TYPE", "S3")
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_SITES", "us-east-1a,us-east-1b")
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_OUTPUT_DIR", restorePITRLocalDir)
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_S3_BUCKET", "lion")
+	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_AWS_CREDS_DIR", pitrAWSCredsMountDir)
+
+	// Must mount the emptyDir (RW) and the AWS creds secret.
+	var sawShared, sawAWS bool
+	for _, m := range ic.VolumeMounts {
+		if m.Name == "pitr-binlogs" && !m.ReadOnly {
+			sawShared = true
+		}
+		if m.Name == "pitr-aws-creds" {
+			sawAWS = true
+		}
+	}
+	if !sawShared || !sawAWS {
+		t.Errorf("init container mounts: want RW pitr-binlogs + pitr-aws-creds, got %+v", ic.VolumeMounts)
+	}
+
+	// Main container gets RO shared volume + BLOODRAVEN_PITR_LOCAL_DIR.
+	assertEnvEquals(t, frags.MainEnv, "BLOODRAVEN_PITR_LOCAL_DIR", restorePITRLocalDir)
+	assertEnvEquals(t, frags.MainEnv, "BLOODRAVEN_PITR_STOP_DATETIME", "2026-04-15T09:30:00Z")
+	if len(frags.MainMounts) != 1 || !frags.MainMounts[0].ReadOnly {
+		t.Errorf("want 1 RO main mount, got %+v", frags.MainMounts)
 	}
 }
 

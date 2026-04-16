@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -25,7 +26,6 @@ type ManifestEntry struct {
 	FirstEventTime time.Time `json:"firstEventTime,omitempty"`
 	LastEventTime  time.Time `json:"lastEventTime,omitempty"`
 	PreviousGTIDs  string    `json:"previousGtids,omitempty"`
-	EndGTIDs       string    `json:"endGtids,omitempty"`
 	ArchivedAt     time.Time `json:"archivedAt"`
 }
 
@@ -37,6 +37,40 @@ type Manifest struct {
 	Version int             `json:"version"`
 	Site    string          `json:"site"`
 	Files   []ManifestEntry `json:"files"`
+}
+
+// ManifestKey returns the storage-relative key for a site's manifest.
+// Exported so the cmd/bloodraven pitr-download subcommand can use the
+// same key convention as the sidecar archiver without duplicating the
+// string layout.
+func ManifestKey(prefix, site string) string {
+	return manifestKey(prefix, site)
+}
+
+// ManifestKeyPrefix is the common prefix every site manifest shares
+// (e.g. "<prefix>/manifest-"). List callers use it to filter S3
+// ListObjectsV2 results down to just manifest objects.
+func ManifestKeyPrefix(prefix string) string {
+	return path.Join(prefix, "manifest-")
+}
+
+// LoadManifest is the exported read-only counterpart of loadManifest.
+// Used by the restore init container to fetch site manifests without
+// pulling in the whole archiver package.
+func LoadManifest(ctx context.Context, store ArchiveStore, prefix, site string) (*Manifest, error) {
+	return loadManifest(ctx, store, prefix, site)
+}
+
+// SiteFromManifestKey extracts "us-east-1a" from
+// "<prefix>/manifest-us-east-1a.json". Returns "" if the key doesn't
+// match the expected shape so callers can ignore stray objects in the
+// same prefix.
+func SiteFromManifestKey(key string) string {
+	base := path.Base(key)
+	if !strings.HasPrefix(base, "manifest-") || !strings.HasSuffix(base, ".json") {
+		return ""
+	}
+	return base[len("manifest-") : len(base)-len(".json")]
 }
 
 // manifestKey returns the storage-relative key for a site's manifest.

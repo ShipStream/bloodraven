@@ -423,7 +423,6 @@ func (a *BinlogArchiver) archiveOne(ctx context.Context, absPath, name string) e
 		FirstEventTime: meta.FirstEventTime,
 		LastEventTime:  meta.LastEventTime,
 		PreviousGTIDs:  meta.PreviousGTIDs,
-		EndGTIDs:       meta.EndGTIDs,
 		ArchivedAt:     time.Now().UTC(),
 	}
 	if err := appendManifestEntry(ctx, a.store, a.cfg.ManifestPrefix, a.site, entry); err != nil {
@@ -451,20 +450,27 @@ type Status struct {
 	Site           string    `json:"site"`
 }
 
-// Snapshot returns a copy of the archiver's observable state.
+// Snapshot returns a copy of the archiver's observable state. The
+// role query is done OUTSIDE the mutex: IsReadOnly runs a SQL query
+// that can block for up to the handler's context timeout, and holding
+// a.mu across that call would stall scanAndArchive's own lastScanAt /
+// lastError updates under load.
 func (a *BinlogArchiver) Snapshot(ctx context.Context) Status {
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	primary := false
 	if ro, err := a.mysql.IsReadOnly(ctx); err == nil {
 		primary = !ro
 	}
+	a.mu.Lock()
+	lastScanAt := a.lastScanAt
+	filesArchiv := a.filesArchiv
+	lastError := a.lastError
+	a.mu.Unlock()
 	return Status{
 		Enabled:        true,
 		Primary:        primary,
-		LastScanAt:     a.lastScanAt,
-		FilesArchived:  a.filesArchiv,
-		LastError:      a.lastError,
+		LastScanAt:     lastScanAt,
+		FilesArchived:  filesArchiv,
+		LastError:      lastError,
 		StorageType:    a.cfg.StorageType,
 		ManifestPrefix: a.cfg.ManifestPrefix,
 		Site:           a.site,

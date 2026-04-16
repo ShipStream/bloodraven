@@ -28,12 +28,24 @@ import (
 )
 
 func main() {
-	// Subcommand dispatcher: when invoked by a scheduled CronJob pod as
-	// `bloodraven trigger-backup ...`, skip manager setup and just POST a
-	// MysqlBackup CR. See trigger.go.
-	if len(os.Args) > 1 && os.Args[1] == "trigger-backup" {
-		runTriggerBackup(os.Args[2:])
-		return
+	// Subcommand dispatcher. Each subcommand bypasses manager setup
+	// and runs as a standalone process — the same binary is shipped
+	// to CronJob pods, restore init containers, etc., so one image
+	// covers every control-plane-adjacent workload.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "trigger-backup":
+			// Invoked by scheduled CronJob pods to POST a MysqlBackup
+			// CR. See trigger.go.
+			runTriggerBackup(os.Args[2:])
+			return
+		case "pitr-download":
+			// Invoked by restore Job init containers to download
+			// archived binlog files into the shared emptyDir before
+			// the mysqlsh container runs replay. See pitr_download.go.
+			runPITRDownload(os.Args[2:])
+			return
+		}
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -239,6 +251,14 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sC
 		if ns == "" || group == "" || profile == "" {
 			rw.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(rw).Encode(map[string]string{"error": "namespace, group, and profile query parameters are required"})
+			return
+		}
+		// Guard against callers (notably tests) that build the mux
+		// without a real client. Returning 503 keeps the contract
+		// consistent with other "operator not ready" responses.
+		if k8sClient == nil {
+			rw.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(rw).Encode(map[string]string{"error": "operator k8s client not configured"})
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)

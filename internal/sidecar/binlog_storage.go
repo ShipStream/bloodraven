@@ -18,19 +18,26 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-// archiveStore abstracts the two storage backends (S3 and local PVC)
+// ArchiveStore abstracts the two storage backends (S3 and local PVC)
 // behind a tiny upload/download/delete/list interface. The archiver
-// and the future retention sweeper both program against this — so
-// adding a third backend (GCS, Azure) later is localized to this file.
-type archiveStore interface {
+// (sidecar goroutine), the retention sweeper, and the restore-side
+// pitr-download subcommand all program against this — so adding a
+// third backend (GCS, Azure) later is localized to this file.
+type ArchiveStore interface {
 	// Put writes data under key. Overwrites are OK: the archiver treats
 	// the write as idempotent by key.
 	Put(ctx context.Context, key string, r io.Reader, size int64) error
 
 	// Get reads the object at key into a new byte slice. Used for
-	// manifest read-modify-write; binlog objects themselves are only
-	// ever consumed by the restore Job, not by the sidecar.
+	// manifest read-modify-write and for the restore path's manifest
+	// load; binlog files go through GetFile instead so they don't have
+	// to fit in memory.
 	Get(ctx context.Context, key string) ([]byte, bool, error)
+
+	// GetFile streams the object at key into a local file at dst. Used
+	// by the restore init container to download each needed binlog to
+	// the shared emptyDir without buffering the whole thing in RAM.
+	GetFile(ctx context.Context, key, dst string) error
 
 	// Delete removes the object at key. Missing-key is a no-op (returns
 	// nil). Used by retention cleanup.
@@ -40,7 +47,19 @@ type archiveStore interface {
 	// at path to the object at key. For S3 it uses the managed uploader
 	// (multipart if large); for PVC it is a sendfile-ish copy.
 	PutFile(ctx context.Context, key, path string) error
+
+	// List returns every key with the given prefix. S3 handles
+	// pagination internally; PVC walks the on-disk tree. Keys are
+	// returned relative to the storage root (matching the same form
+	// used by Put/Get).
+	List(ctx context.Context, prefix string) ([]string, error)
 }
+
+// archiveStore is the historical unexported alias; kept for the
+// sidecar-internal call sites that already reference it to avoid a
+// mass rename in this commit. New external call sites should use
+// the exported ArchiveStore name directly.
+type archiveStore = ArchiveStore
 
 // NewArchiveStore is the exported constructor used by cmd/sidecar/main.go.
 // Delegates to newArchiveStore; keeping the lowercase version around
@@ -168,6 +187,63 @@ func (s *s3Store) Get(ctx context.Context, key string) ([]byte, bool, error) {
 	return buf.Bytes(), true, nil
 }
 
+func (s *s3Store) GetFile(ctx context.Context, key, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+	}
+	resp, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("s3 get %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	// Stream to a tmp file + rename for atomicity; a reader picking up
+	// the file mid-download would otherwise get garbage.
+	tmp := dst + ".part"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", tmp, err)
+	}
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("stream %s: %w", key, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename %s: %w", dst, err)
+	}
+	return nil
+}
+
+// List returns every key with the given prefix. Uses the paginated
+// ListObjectsV2 under the hood so large archives aren't truncated.
+func (s *s3Store) List(ctx context.Context, prefix string) ([]string, error) {
+	var out []string
+	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(prefix),
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("s3 list %s: %w", prefix, err)
+		}
+		for _, obj := range page.Contents {
+			if obj.Key != nil {
+				out = append(out, *obj.Key)
+			}
+		}
+	}
+	return out, nil
+}
+
 func (s *s3Store) Delete(ctx context.Context, key string) error {
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -212,15 +288,33 @@ func newPVCStore(cfg *PITRPVCConfig) (*pvcStore, error) {
 	return &pvcStore{root: cfg.MountPath}, nil
 }
 
-func (p *pvcStore) fullPath(key string) string {
-	// Reject leading slashes and .. traversals to keep keys contained
-	// within the mounted backup volume.
-	clean := filepath.Clean("/" + strings.TrimLeft(key, "/"))
-	return filepath.Join(p.root, clean)
+// fullPath resolves a storage-relative key into an absolute filesystem
+// path under p.root. It rejects keys that try to escape the mounted
+// backup volume via "..", which would otherwise write outside the PVC.
+// Relies on filepath.Rel to detect escape rather than just string
+// prefix matching so we catch cases like root="/mnt/pvc/" vs
+// cleaned="/mnt/pvc-evil/...".
+func (p *pvcStore) fullPath(key string) (string, error) {
+	clean := filepath.Clean(strings.TrimLeft(key, "/\\"))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid archive key %q", key)
+	}
+	full := filepath.Join(p.root, clean)
+	rel, err := filepath.Rel(p.root, full)
+	if err != nil {
+		return "", fmt.Errorf("resolve archive key %q: %w", key, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("archive key escapes pvc root: %q", key)
+	}
+	return full, nil
 }
 
 func (p *pvcStore) Put(_ context.Context, key string, r io.Reader, _ int64) error {
-	dst := p.fullPath(key)
+	dst, err := p.fullPath(key)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 	}
@@ -266,7 +360,11 @@ func (p *pvcStore) PutFile(ctx context.Context, key, path string) error {
 }
 
 func (p *pvcStore) Get(_ context.Context, key string) ([]byte, bool, error) {
-	data, err := os.ReadFile(p.fullPath(key))
+	src, err := p.fullPath(key)
+	if err != nil {
+		return nil, false, err
+	}
+	data, err := os.ReadFile(src)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -277,11 +375,92 @@ func (p *pvcStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 }
 
 func (p *pvcStore) Delete(_ context.Context, key string) error {
-	err := os.Remove(p.fullPath(key))
-	if err != nil && !os.IsNotExist(err) {
+	dst, err := p.fullPath(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete %s: %w", key, err)
 	}
 	return nil
+}
+
+// GetFile copies the archived object at key into dst. Used by the
+// restore-side pitr-download subcommand to pull binlog files onto a
+// shared emptyDir so the mysqlsh container can feed them to
+// mysqlbinlog. tmp+rename keeps the consumer from seeing a partial
+// file if we're preempted mid-copy.
+func (p *pvcStore) GetFile(_ context.Context, key, dst string) error {
+	src, err := p.fullPath(key)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", src, err)
+	}
+	defer in.Close()
+	tmp := dst + ".part"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", tmp, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("copy %s: %w", key, err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close %s: %w", tmp, err)
+	}
+	return os.Rename(tmp, dst)
+}
+
+// List walks the on-disk tree under prefix and returns every file key
+// (relative to the PVC root), matching the S3 semantics.
+func (p *pvcStore) List(_ context.Context, prefix string) ([]string, error) {
+	root, err := p.fullPath(prefix)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("stat %s: %w", root, err)
+	}
+	var out []string
+	if !info.IsDir() {
+		// Caller passed a full key; mirror S3 behavior and return it
+		// if it exists.
+		out = append(out, prefix)
+		return out, nil
+	}
+	err = filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if fi.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(p.root, path)
+		if err != nil {
+			return err
+		}
+		// Normalize to forward slashes so callers building keys with
+		// path.Join (which uses /) match regardless of GOOS.
+		out = append(out, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk %s: %w", root, err)
+	}
+	return out, nil
 }
 
 // readTrimFile reads a small file and returns its trimmed contents.

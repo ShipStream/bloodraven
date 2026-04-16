@@ -329,9 +329,11 @@ type MysqlFailoverGroupStatus struct {
 	// +optional
 	LastBackupTime *metav1.Time `json:"lastBackupTime,omitempty"`
 
-	// PITR summarizes the state of continuous binary-log archival for
-	// this failover group. Populated by periodic manifest scans when
-	// spec.backup.pitr.enabled is true.
+	// PITR is the API surface for surfacing a summary of the
+	// continuous binary-log archive (oldest/newest archived events,
+	// count, bytes). Reserved: the v1alpha1 controller does not yet
+	// populate this field. Live archiver health is exposed via the
+	// sidecar's /archiver/status endpoint in the meantime.
 	// +optional
 	PITR *PITRStatus `json:"pitr,omitempty"`
 }
