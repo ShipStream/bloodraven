@@ -375,10 +375,147 @@ Without `BACKUP_ADMIN`, set `dump.consistent: false` on the profile.
 
 ## Point-in-time recovery (PITR)
 
-`spec.backup.pitr` is reserved for a future release. When set to
-`true` the reconciler emits a `BackupPITRNotImplemented` warning
-event on every sync; no PITR logic is wired up today. The field is
-in place so the API shape is stable for when PITR lands.
+Bloodraven can continuously archive MySQL binary logs so restores can
+target an arbitrary `--stop-datetime` on top of any retained full
+dump, not just the dump's own capture point.
+
+### How it works
+
+Binlog archival runs **inside the existing sidecar** on every MySQL
+pod. The archiver goroutine:
+
+1. Uses **inotify** on `mysql-bin.index` in the data PVC to detect
+   rotations. A poll-tick every `archivePollInterval` (default 60s)
+   is a belt-and-suspenders safety net in case an inotify event is
+   missed.
+2. Gates on `@@read_only` — only the primary uploads. After a
+   failover the new primary takes over within one scan cycle; GTID
+   dedup at restore time makes any brief overlap harmless.
+3. For each newly sealed binlog file, extracts timestamp + GTID
+   metadata, uploads the file to the referenced backup profile's
+   storage, and appends an entry to a per-site manifest.
+
+Storage layout under the profile's prefix:
+
+```
+<profile-prefix>/binlogs/
+├── manifest-<site-a>.json
+├── manifest-<site-b>.json    # post-failover (or different primary)
+├── <site-a>/mysql-bin.000042
+├── <site-a>/mysql-bin.000043
+└── <site-b>/mysql-bin.000001
+```
+
+Per-site manifests prevent races between the current primary and a
+post-failover primary writing to the same object. The restore side
+reads every manifest in the prefix and merges their entries.
+
+### Enabling PITR
+
+Set `spec.backup.pitr` on the failover group and point it at an
+existing backup profile:
+
+```yaml
+spec:
+  backup:
+    profiles:
+    - name: primary
+      storage:
+        type: S3
+        s3:
+          bucket: lion-backups
+          prefix: prod
+          region: us-east-1
+          credentialsSecret: aws-creds
+      retentionPolicy:
+        count: 14
+        minKeep: 3
+    pitr:
+      enabled: true
+      profileName: primary
+      maxBinlogSize: "100M"     # MySQL max_binlog_size; controls
+                                # rotation cadence and therefore RPO
+```
+
+When enabled, the operator:
+
+- Injects `max_binlog_size=<value>` into the generated `my.cnf`
+  (default `100M`). Smaller values shorten the RPO gap (unarchived
+  tail on a crashed primary) at the cost of more objects.
+- Mounts the MySQL data PVC **read-only** into the sidecar container
+  so the archiver can read sealed binlog files.
+- Mounts the profile's storage credentials (for S3) or the backup
+  PVC (for PVC) into the sidecar.
+- Rolls the MySQL pods to pick up the new config (the spec hash
+  includes effective PITR values, with defaults normalized, so
+  changing the default in a future release also rolls pods).
+
+### Retention
+
+Archived binlogs are pruned to track full-backup retention: once the
+oldest retained `MysqlBackup` for a profile moves forward, binlogs
+with `lastEventTime` before that cutoff are no longer needed and
+get deleted.
+
+The mechanism is pull-driven: the sidecar archiver polls the
+operator's auxiliary HTTP server at
+`/pitr-cutoff?namespace=X&group=Y&profile=Z` (default once per hour),
+which returns the minimum `CompletionTime` across retained backups.
+The archiver then prunes its own manifest and deletes the
+corresponding objects. The operator pod doesn't need storage
+credentials — the archiver already has them.
+
+### Restore to a target timestamp
+
+Add a `pointInTime` block to `spec.initFromBackup`:
+
+```yaml
+spec:
+  initFromBackup:
+    source:
+      mysqlBackupRef:
+        name: nightly-2026-04-14
+    pointInTime:
+      stopDatetime: "2026-04-15T09:30:00Z"
+      # excludeGtids: "server-uuid:42"   # optional, skip a bad txn
+```
+
+`stopDatetime` accepts RFC 3339 (with or without trailing `Z` or
+timezone offset) or MySQL's native `YYYY-MM-DD HH:MM:SS` form.
+
+The restore Job runs in two phases, one per container:
+
+1. **`pitr-download` init container** (`bloodraven pitr-download`
+   subcommand) — downloads every archived binlog whose
+   `firstEventTime ≤ stopDatetime` from the PITR archive storage
+   into a shared `emptyDir` (`/pitr-binlogs/<site>/...`). Uses the
+   AWS SDK v2 for S3 (with paginator), so it doesn't depend on the
+   `aws` CLI existing in the MySQL image.
+2. **`mysqlsh` main container** — runs the existing `util.loadDump()`
+   as before, then feeds the downloaded binlogs through
+   `mysqlbinlog --stop-datetime=<target> | mysql --binary-mode`.
+   Server-side GTID dedup skips transactions already applied by the
+   dump load.
+
+### Observability
+
+- **Archiver status**: `GET /archiver/status` on the sidecar
+  (`mysql-<fg>-<site>:8080`) returns `{enabled, primary, lastScanAt,
+  filesArchived, lastError, storageType, manifestPrefix, site}` —
+  handy for `kubectl exec` poking or a Prometheus scraper.
+- **Job logs**: `BLOODRAVEN_PITR_START`, `BLOODRAVEN_PITR_COMPLETE`
+  / `BLOODRAVEN_PITR_FAILED` / `BLOODRAVEN_PITR_NOOP` from the
+  restore container; one JSON line per archived file from the init
+  container.
+
+### Known limitations
+
+- The sidecar's `PITRStatus` API field exists but is not yet
+  populated by a controller-side manifest scan; live archiver health
+  comes from the sidecar HTTP endpoint in the meantime.
+- A GTID-set-based file filter would let the restore download fewer
+  binlogs; today it filters on `firstEventTime` only and relies on
+  GTID dedup to cover over-inclusion.
 
 ## Metrics
 

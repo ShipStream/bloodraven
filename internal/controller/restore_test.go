@@ -180,6 +180,68 @@ func TestBuildRestoreJob_MysqlBackupRef_MissingS3Profile_Errors(t *testing.T) {
 	}
 }
 
+func TestBuildRestoreJob_MysqlBackupRef_PVCStorage_MountsBackupPVC(t *testing.T) {
+	fg := fgWithBackup()
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
+		Source: v1alpha1.InitFromBackupSource{
+			MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"},
+		},
+	}
+	seed := succeededSeedBackup()
+	seed.Spec.ProfileName = "daily-local"
+	seed.Status.StorageType = v1alpha1.BackupStoragePVC
+	seed.Status.Location = backupPVCMountPath + "/seed/"
+	r, _ := newReconciler(fg, seed)
+
+	job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+	if err != nil {
+		t.Fatalf("buildRestoreJob: %v", err)
+	}
+
+	container := job.Spec.Template.Spec.Containers[0]
+	envMap := map[string]string{}
+	for _, e := range container.Env {
+		envMap[e.Name] = e.Value
+	}
+	if envMap["BLOODRAVEN_INPUT_URL"] != backupPVCMountPath+"/seed/" {
+		t.Errorf("want PVC input url preserved, got %q", envMap["BLOODRAVEN_INPUT_URL"])
+	}
+
+	var restoreSrcVolume *corev1.Volume
+	for i := range job.Spec.Template.Spec.Volumes {
+		if job.Spec.Template.Spec.Volumes[i].Name == "restore-src" {
+			restoreSrcVolume = &job.Spec.Template.Spec.Volumes[i]
+			break
+		}
+	}
+	if restoreSrcVolume == nil || restoreSrcVolume.PersistentVolumeClaim == nil {
+		t.Fatal("expected restore-src PVC volume for mysqlBackupRef PVC source")
+	}
+	if got, want := restoreSrcVolume.PersistentVolumeClaim.ClaimName, ownedBackupPVCName("lion", "daily-local"); got != want {
+		t.Errorf("restore-src claim = %q, want %q", got, want)
+	}
+	if !restoreSrcVolume.PersistentVolumeClaim.ReadOnly {
+		t.Error("expected restore-src PVC volume to be read-only")
+	}
+
+	var restoreSrcMount *corev1.VolumeMount
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name == "restore-src" {
+			restoreSrcMount = &container.VolumeMounts[i]
+			break
+		}
+	}
+	if restoreSrcMount == nil {
+		t.Fatal("expected restore-src volume mount for mysqlBackupRef PVC source")
+	}
+	if restoreSrcMount.MountPath != backupPVCMountPath {
+		t.Errorf("restore-src mount path = %q, want %q", restoreSrcMount.MountPath, backupPVCMountPath)
+	}
+	if !restoreSrcMount.ReadOnly {
+		t.Error("expected restore-src mount to be read-only")
+	}
+}
+
 func TestBuildRestoreJob_PVCSource_EmptyClaimName_Errors(t *testing.T) {
 	fg := fgWithBackup()
 	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
@@ -269,4 +331,3 @@ func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
 		t.Errorf("want Succeeded, got %+v", fresh.Status.Restore)
 	}
 }
-

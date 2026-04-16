@@ -1,7 +1,8 @@
 #!/usr/bin/env mysqlsh --py -f
 # Bloodraven restore script. Executed inside a restore Job running the
 # mysqlsh image. Loads a previous dump into an empty MySQL instance via
-# util.loadDump().
+# util.loadDump(), and optionally replays archived binlogs up to a
+# point-in-time target (PITR) on top of the loaded dump.
 #
 # Required env:
 #   BLOODRAVEN_MYSQL_HOST       host[:port] or [ipv6]:port of the target
@@ -9,14 +10,28 @@
 #   BLOODRAVEN_LOAD_OPTIONS     JSON object with util.loadDump() options
 #   BLOODRAVEN_MYSQL_CREDS_DIR  directory with MYSQL_USER / MYSQL_PASSWORD files
 #
-# Optional env:
+# Optional env (full-dump only):
 #   BLOODRAVEN_TLS=1                  require TLS on the session
 #   BLOODRAVEN_S3_BUCKET              bucket name (S3 sources)
 #   BLOODRAVEN_S3_ENDPOINT_OVERRIDE   non-AWS endpoint
 #   BLOODRAVEN_AWS_CREDS_DIR          directory with AWS_* files (S3 sources)
 #   MYSQL_USER / MYSQL_PASSWORD       legacy env-var fallback (not recommended)
+#
+# Optional PITR env (enables post-load binlog replay):
+#   BLOODRAVEN_PITR_STOP_DATETIME     mysqlbinlog --stop-datetime target
+#                                     (RFC 3339 or MySQL form).
+#   BLOODRAVEN_PITR_EXCLUDE_GTIDS     optional mysqlbinlog --exclude-gtids set.
+#   BLOODRAVEN_PITR_LOCAL_DIR         local directory populated by the
+#                                     `bloodraven pitr-download` init
+#                                     container. Contains per-site
+#                                     subdirs with sealed binlog files;
+#                                     this script just globs them and
+#                                     pipes through mysqlbinlog | mysql.
+import datetime
+import glob
 import json
 import os
+import subprocess
 import sys
 
 import mysqlsh  # type: ignore
@@ -115,6 +130,114 @@ def _configure_aws_creds_dir():
         os.environ["AWS_REGION"] = region
 
 
+# --------------------------------------------------------------------
+# PITR: binlog replay on top of the loaded dump
+# --------------------------------------------------------------------
+#
+# The `bloodraven pitr-download` init container has already fetched
+# every archived binlog that could contribute to the replay window and
+# dropped them into BLOODRAVEN_PITR_LOCAL_DIR, organized per site:
+#
+#   /pitr-binlogs/
+#   ├── us-east-1a/
+#   │   ├── mysql-bin.000042
+#   │   └── mysql-bin.000043
+#   └── us-east-1b/
+#       └── mysql-bin.000001
+#
+# All this script has to do is glob them in deterministic order and
+# pipe `mysqlbinlog --stop-datetime=<target>` through `mysql
+# --binary-mode` to the target instance. GTID dedup on the server
+# skips transactions already present from the dump load, so the order
+# across sites doesn't matter for correctness.
+
+
+def _parse_pitr_target(s):
+    """Normalize the user-provided datetime to mysqlbinlog's expected
+    'YYYY-MM-DD HH:MM:SS' form. Accepts RFC 3339 ("2026-04-15T09:30:00Z"
+    or with offset) for k8s-style timestamp pasting."""
+    s = s.strip()
+    if "T" in s:
+        try:
+            if s.endswith("Z"):
+                dt = datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ")
+            else:
+                dt = datetime.datetime.fromisoformat(s)
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+    return s
+
+
+def _collect_binlogs(local_dir):
+    """Return every binlog file under local_dir in a deterministic
+    order (site, then filename). Missing / empty dirs return an empty
+    list so callers can treat "nothing to replay" as a no-op."""
+    files = []
+    if not os.path.isdir(local_dir):
+        return files
+    for site in sorted(os.listdir(local_dir)):
+        site_dir = os.path.join(local_dir, site)
+        if not os.path.isdir(site_dir):
+            continue
+        for fn in sorted(glob.glob(os.path.join(site_dir, "mysql-bin.*"))):
+            # Skip the partial-download marker files the init container
+            # uses for atomic rename; shouldn't exist by the time we
+            # run, but guard against it anyway.
+            if fn.endswith(".part"):
+                continue
+            files.append(fn)
+    return files
+
+
+def _run_pitr(host, port, user, password, stop_datetime, exclude_gtids, local_dir):
+    files = _collect_binlogs(local_dir)
+    if not files:
+        print("BLOODRAVEN_PITR_NOOP: no archived binlogs in {}; dump load is final state".format(
+              local_dir), flush=True)
+        return
+
+    binlog_cmd = ["mysqlbinlog", "--stop-datetime=" + stop_datetime]
+    if exclude_gtids:
+        binlog_cmd += ["--exclude-gtids=" + exclude_gtids]
+    binlog_cmd += files
+    mysql_cmd = [
+        "mysql", "--binary-mode",
+        "-h", host, "-P", str(port),
+        "-u", user,
+    ]
+
+    print("BLOODRAVEN_PITR_START stop_datetime={} files={}".format(
+          stop_datetime, len(files)), flush=True)
+
+    # Pass the password via MYSQL_PWD rather than -p so it never lands
+    # on argv / procfs.
+    env = dict(os.environ)
+    env["MYSQL_PWD"] = password
+    p1 = subprocess.Popen(binlog_cmd, stdout=subprocess.PIPE)
+    p2 = subprocess.Popen(mysql_cmd, stdin=p1.stdout, env=env)
+    p1.stdout.close()
+    rc2 = p2.wait()
+    rc1 = p1.wait()
+    if rc1 != 0:
+        print("BLOODRAVEN_PITR_FAILED: mysqlbinlog exit={}".format(rc1),
+              file=sys.stderr, flush=True)
+        sys.exit(2)
+    if rc2 != 0:
+        print("BLOODRAVEN_PITR_FAILED: mysql exit={}".format(rc2),
+              file=sys.stderr, flush=True)
+        sys.exit(2)
+    print("BLOODRAVEN_PITR_COMPLETE stop_datetime={}".format(stop_datetime),
+          flush=True)
+
+
+# --------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------
+
+
 def main():
     host = os.environ["BLOODRAVEN_MYSQL_HOST"]
     input_url = os.environ["BLOODRAVEN_INPUT_URL"]
@@ -152,6 +275,14 @@ def main():
         sys.exit(2)
 
     print("BLOODRAVEN_LOAD_COMPLETE input={}".format(input_url), flush=True)
+
+    # Optional PITR replay on top of the loaded dump.
+    stop_dt = os.environ.get("BLOODRAVEN_PITR_STOP_DATETIME")
+    if stop_dt:
+        stop_dt_mysql = _parse_pitr_target(stop_dt)
+        exclude_gtids = os.environ.get("BLOODRAVEN_PITR_EXCLUDE_GTIDS", "")
+        local_dir = os.environ.get("BLOODRAVEN_PITR_LOCAL_DIR", "/pitr-binlogs")
+        _run_pitr(host_only, port, user, password, stop_dt_mysql, exclude_gtids, local_dir)
 
 
 if __name__ == "__main__":

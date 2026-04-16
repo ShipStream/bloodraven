@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -27,12 +28,24 @@ import (
 )
 
 func main() {
-	// Subcommand dispatcher: when invoked by a scheduled CronJob pod as
-	// `bloodraven trigger-backup ...`, skip manager setup and just POST a
-	// MysqlBackup CR. See trigger.go.
-	if len(os.Args) > 1 && os.Args[1] == "trigger-backup" {
-		runTriggerBackup(os.Args[2:])
-		return
+	// Subcommand dispatcher. Each subcommand bypasses manager setup
+	// and runs as a standalone process — the same binary is shipped
+	// to CronJob pods, restore init containers, etc., so one image
+	// covers every control-plane-adjacent workload.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "trigger-backup":
+			// Invoked by scheduled CronJob pods to POST a MysqlBackup
+			// CR. See trigger.go.
+			runTriggerBackup(os.Args[2:])
+			return
+		case "pitr-download":
+			// Invoked by restore Job init containers to download
+			// archived binlog files into the shared emptyDir before
+			// the mysqlsh container runs replay. See pitr_download.go.
+			runPITRDownload(os.Args[2:])
+			return
+		}
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -134,7 +147,7 @@ func main() {
 
 	// Start a separate HTTP server for websocket and status on :8082
 	// (controller-runtime handles metrics on :8080 and probes on :8081)
-	mux := newAuxMux(runner, hub)
+	mux := newAuxMux(runner, hub, mgr.GetClient())
 
 	auxSrv := &http.Server{
 		Addr:    ":8082",
@@ -179,7 +192,7 @@ func (f runnableFunc) Start(ctx context.Context) error {
 	return f(ctx)
 }
 
-func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub) *http.ServeMux {
+func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Client) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, _ *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -224,6 +237,77 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub) *htt
 			"group":       group,
 			"active_site": status.ActiveSite,
 		})
+	})
+	// /pitr-cutoff is consumed by the sidecar's binlog archiver.
+	// Given a (namespace, group, profile) triple it returns the
+	// completion time of the OLDEST successful MysqlBackup retained
+	// for that profile. Anything older than this cutoff is safe to
+	// purge from the PITR archive — its replay window is already
+	// covered by the oldest-surviving full dump. The archiver runs
+	// this lookup on its own cadence and handles the actual deletes
+	// (it has storage credentials; the operator pod does not).
+	mux.HandleFunc("/pitr-cutoff", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "application/json")
+		ns := r.URL.Query().Get("namespace")
+		group := r.URL.Query().Get("group")
+		profile := r.URL.Query().Get("profile")
+		if ns == "" || group == "" || profile == "" {
+			rw.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(rw).Encode(map[string]string{"error": "namespace, group, and profile query parameters are required"})
+			return
+		}
+		// Guard against callers (notably tests) that build the mux
+		// without a real client. Returning 503 keeps the contract
+		// consistent with other "operator not ready" responses.
+		if k8sClient == nil {
+			rw.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(rw).Encode(map[string]string{"error": "operator k8s client not configured"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		var list v1alpha1.MysqlBackupList
+		if err := k8sClient.List(ctx, &list, client.InNamespace(ns)); err != nil {
+			rw.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(rw).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Minimum CompletionTime across successful, non-deleting
+		// MysqlBackups that match (group, profile). Entries without a
+		// CompletionTime are ignored (they can't establish a cutoff
+		// anyway). If there are no retained backups we return empty
+		// so the archiver treats "nothing to prune yet".
+		var cutoff *time.Time
+		for i := range list.Items {
+			b := &list.Items[i]
+			if !b.DeletionTimestamp.IsZero() {
+				continue
+			}
+			if b.Spec.FailoverGroupRef.Name != group {
+				continue
+			}
+			if b.Spec.ProfileName != profile {
+				continue
+			}
+			if b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+				continue
+			}
+			if b.Status.CompletionTime == nil {
+				continue
+			}
+			t := b.Status.CompletionTime.Time
+			if cutoff == nil || t.Before(*cutoff) {
+				c := t
+				cutoff = &c
+			}
+		}
+		resp := map[string]any{"namespace": ns, "group": group, "profile": profile}
+		if cutoff != nil {
+			resp["cutoffTime"] = cutoff.UTC().Format(time.RFC3339)
+		}
+		json.NewEncoder(rw).Encode(resp)
 	})
 	mux.HandleFunc("/ws/status", hub.HandleWS)
 	return mux

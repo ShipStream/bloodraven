@@ -310,11 +310,46 @@ spec:
                     type: integer
                   pitr:
                     description: |-
-                      PITR, when true, is a reserved-not-implemented marker. The
-                      reconciler emits a warning event on every sync when this is
-                      enabled; no PITR logic is wired up today. Left here so the API
-                      shape is stable for a future point-in-time recovery feature.
-                    type: boolean
+                      PITR configures point-in-time recovery via continuous binary-log
+                      archival. When enabled, the per-pod sidecar watches the local
+                      binlog index and uploads each sealed binlog file to the storage
+                      backend of the referenced profile. Restore jobs can then replay
+                      archived binlogs up to a target timestamp on top of a full dump.
+                      Omit the field to disable PITR entirely.
+                    properties:
+                      archivePollInterval:
+                        default: 60s
+                        description: |-
+                          ArchivePollInterval is how often the archiver reconciles the list
+                          of binlog files against storage as a belt-and-suspenders safety
+                          net alongside inotify. Default: 60s.
+                        type: string
+                      enabled:
+                        default: false
+                        description: |-
+                          Enabled turns binlog archival on or off. Omitting spec.backup.pitr
+                          entirely is equivalent to Enabled=false.
+                        type: boolean
+                      maxBinlogSize:
+                        default: 100M
+                        description: |-
+                          MaxBinlogSize is forwarded as the MySQL max_binlog_size variable,
+                          controlling how frequently binlogs rotate. Smaller values reduce
+                          the RPO gap (the tail of transactions on a crashed primary that
+                          may not yet have been archived) at the cost of more objects in
+                          storage. Accepts any value MySQL accepts (e.g. "100M", "256M",
+                          "1073741824"). Defaults to "100M" when PITR is enabled.
+                        type: string
+                      profileName:
+                        description: |-
+                          ProfileName selects the BackupProfile whose storage backend will
+                          hold the archived binlog files. Binlog objects land under a
+                          dedicated "binlogs/" subprefix (or subpath) inside the profile
+                          location so they do not collide with full dumps. Required when
+                          Enabled=true.
+                        minLength: 1
+                        type: string
+                    type: object
                   podSecurityContext:
                     description: |-
                       PodSecurityContext overrides the default pod-level security context
@@ -4092,6 +4127,32 @@ spec:
                         minimum: 1
                         type: integer
                     type: object
+                  pointInTime:
+                    description: |-
+                      PointInTime, when set, enables post-load binlog replay to recover
+                      the restored instance to a specific target timestamp. Requires
+                      the source backup's failover group to have had spec.backup.pitr
+                      enabled at the time of the full dump. Omit for a plain dump-only
+                      restore.
+                    properties:
+                      excludeGtids:
+                        description: |-
+                          ExcludeGtids is an optional GTID set passed verbatim to
+                          mysqlbinlog --exclude-gtids. Useful for surgically skipping a
+                          known-bad transaction (e.g. an accidental DROP TABLE) while
+                          replaying everything else.
+                        type: string
+                      stopDatetime:
+                        description: |-
+                          StopDatetime is the MySQL-style datetime at which to stop
+                          replaying binlog events (forwarded to mysqlbinlog
+                          --stop-datetime). Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
+                          the MySQL native form ("2026-04-15 09:30:00"). Required.
+                        minLength: 1
+                        type: string
+                    required:
+                    - stopDatetime
+                    type: object
                   source:
                     description: Source is a tagged reference to the artifact to restore.
                     properties:
@@ -4629,6 +4690,61 @@ spec:
                 description: LastFailoverTarget is the site that was last promoted
                   during failover.
                 type: string
+              pitr:
+                description: |-
+                  PITR is the API surface for surfacing a summary of the
+                  continuous binary-log archive (oldest/newest archived events,
+                  count, bytes). Reserved: the v1alpha1 controller does not yet
+                  populate this field. Live archiver health is exposed via the
+                  sidecar's /archiver/status endpoint in the meantime.
+                properties:
+                  archivedBytes:
+                    description: ArchivedBytes is the total size of archived binlog
+                      files.
+                    format: int64
+                    type: integer
+                  archivedFileCount:
+                    description: |-
+                      ArchivedFileCount is the number of binlog files currently held in
+                      storage across all sites.
+                    format: int32
+                    type: integer
+                  enabled:
+                    description: |-
+                      Enabled mirrors spec.backup.pitr.enabled so consumers (status
+                      widgets, `kubectl get -o wide`) can see at a glance whether
+                      archival is running.
+                    type: boolean
+                  lastArchivedTime:
+                    description: |-
+                      LastArchivedTime is the wall clock at which the most recent
+                      binlog file was uploaded (archivedAt on the manifest entry).
+                    format: date-time
+                    type: string
+                  message:
+                    description: |-
+                      Message is a human-readable status string (e.g. a parse error
+                      from the last manifest read). Empty on the happy path.
+                    type: string
+                  newestArchivedTime:
+                    description: |-
+                      NewestArchivedTime is the latest last-event timestamp across all
+                      archived binlogs. Together with OldestArchivedTime this is the
+                      window available for restores.
+                    format: date-time
+                    type: string
+                  oldestArchivedTime:
+                    description: |-
+                      OldestArchivedTime is the earliest first-event timestamp across
+                      all archived binlogs still present in storage. Together with a
+                      full backup's completion time this is the earliest recoverable
+                      point.
+                    format: date-time
+                    type: string
+                  profileName:
+                    description: ProfileName mirrors spec.backup.pitr.profileName.
+                    type: string
+                type: object
               promotionGtidExecuted:
                 description: |-
                   PromotionGtidExecuted is the GTID executed set recorded on the

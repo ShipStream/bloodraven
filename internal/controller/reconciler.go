@@ -497,6 +497,19 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
 		settings["require-secure-transport"] = "ON"
 	}
 
+	// PITR: set max_binlog_size so the rotation cadence (and therefore
+	// the archival cadence — and therefore the RPO window) is driven by
+	// the CRD rather than MySQL's 1 GB default. Placed before user
+	// overrides so operators can still override via spec.mysqlConf if
+	// they want something different from what spec.backup.pitr configures.
+	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled {
+		maxSize := fg.Spec.Backup.PITR.MaxBinlogSize
+		if maxSize == "" {
+			maxSize = defaultPITRMaxBinlogSize
+		}
+		settings["max-binlog-size"] = maxSize
+	}
+
 	// Apply user overrides
 	for k, v := range fg.Spec.MysqlConf {
 		settings[k] = v
@@ -812,6 +825,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			}, sidecarEnv...)
 		}
 
+		// PITR sidecar wiring (no-op when spec.backup.pitr.enabled=false).
+		pitrFrags, err := buildPITRSidecarFragments(fg)
+		if err != nil {
+			return fmt.Errorf("build pitr sidecar fragments: %w", err)
+		}
+		sidecarEnv = append(sidecarEnv, pitrFrags.SidecarEnv...)
+		sidecarVolumeMounts = append(sidecarVolumeMounts, pitrFrags.SidecarVolumeMounts...)
 		sidecarContainer := corev1.Container{
 			Name:  "sidecar",
 			Image: sidecarImage,
@@ -929,6 +949,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				volumes = append(volumes, credSecretVolume("creds-backup", s))
 			}
 		}
+
+		// PITR contributions (AWS creds secret or backup PVC volume).
+		volumes = append(volumes, pitrFrags.PodVolumes...)
 
 		podAnnotations := make(map[string]string)
 		for k, v := range fg.Spec.PodAnnotations {
@@ -1276,6 +1299,28 @@ func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 	sort.Strings(keys)
 	for _, k := range keys {
 		fmt.Fprintf(h, "mysql.%s=%s\n", k, fg.Spec.MysqlConf[k])
+	}
+	// PITR settings affect both my.cnf (max_binlog_size) and the
+	// sidecar env (archiver config). Either change must roll the pod.
+	// Hash the EFFECTIVE values (with defaults filled in) rather than
+	// the raw spec: otherwise a release that changes the default
+	// MaxBinlogSize or ArchivePollInterval in code would fail to
+	// produce a hash change and pods wouldn't roll to pick up the
+	// new value.
+	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil {
+		p := fg.Spec.Backup.PITR
+		effMaxBinlogSize := p.MaxBinlogSize
+		if effMaxBinlogSize == "" {
+			effMaxBinlogSize = defaultPITRMaxBinlogSize
+		}
+		effPollInterval := defaultPITRArchivePollInterval
+		if p.ArchivePollInterval != nil {
+			effPollInterval = p.ArchivePollInterval.Duration
+		}
+		fmt.Fprintf(h, "pitr.enabled=%t\n", p.Enabled)
+		fmt.Fprintf(h, "pitr.profile=%s\n", p.ProfileName)
+		fmt.Fprintf(h, "pitr.maxBinlogSize=%s\n", effMaxBinlogSize)
+		fmt.Fprintf(h, "pitr.archivePollInterval=%s\n", effPollInterval)
 	}
 	// Include TLS certificate data so cert rotation triggers a rolling update.
 	if len(tlsSecretData) > 0 {
