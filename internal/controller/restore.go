@@ -451,6 +451,19 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		return nil, err
 	}
 
+	// PITR replay on top of the loaded dump. The helper adds env vars
+	// pointing the restore_script.py PITR path at the profile's
+	// archive location, plus a volume + mount for PVC-backed archives.
+	// For S3-backed archives the AWS creds are shared with the main
+	// load path; no extra mount needed.
+	pitrEnv, pitrVolumes, pitrMounts, err := buildRestorePITRExtras(fg)
+	if err != nil {
+		return nil, err
+	}
+	extraEnv = append(extraEnv, pitrEnv...)
+	extraVolumes = append(extraVolumes, pitrVolumes...)
+	extraMounts = append(extraMounts, pitrMounts...)
+
 	labels := map[string]string{
 		labelAppName:       "mysql-restore",
 		labelInstance:      fg.Name,

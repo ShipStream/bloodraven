@@ -476,12 +476,14 @@ func TestStableJobCompletionTime_NilWhenNoSignal(t *testing.T) {
 	}
 }
 
-// --- PITR warning -----------------------------------------------------------
+// --- PITR validation -------------------------------------------------------
 
-func TestReconcileBackupAssets_EmitsPITRWarningWhenEnabled(t *testing.T) {
+func TestReconcileBackupAssets_EmitsPITRWarningForUnknownProfile(t *testing.T) {
 	fg := fgWithBackup()
-	enabled := true
-	fg.Spec.Backup.PITR = &enabled
+	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{
+		Enabled:     true,
+		ProfileName: "does-not-exist",
+	}
 	r, _ := newReconciler(fg)
 	if err := r.reconcileBackupAssets(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -490,12 +492,31 @@ func TestReconcileBackupAssets_EmitsPITRWarningWhenEnabled(t *testing.T) {
 	events := drainEvents(rec)
 	found := false
 	for _, e := range events {
-		if strings.Contains(e, "BackupPITRNotImplemented") {
+		if strings.Contains(e, "BackupPITRInvalid") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("want BackupPITRNotImplemented event, got %v", events)
+		t.Errorf("want BackupPITRInvalid event, got %v", events)
+	}
+}
+
+func TestReconcileBackupAssets_PITREnabledWithValidProfile(t *testing.T) {
+	fg := fgWithBackup()
+	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{
+		Enabled:     true,
+		ProfileName: fg.Spec.Backup.Profiles[0].Name,
+	}
+	r, _ := newReconciler(fg)
+	if err := r.reconcileBackupAssets(context.Background(), fg); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	rec := r.Recorder.(*record.FakeRecorder)
+	events := drainEvents(rec)
+	for _, e := range events {
+		if strings.Contains(e, "BackupPITRInvalid") {
+			t.Errorf("did not expect BackupPITRInvalid for valid profile, got: %s", e)
+		}
 	}
 }
 

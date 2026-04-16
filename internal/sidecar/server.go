@@ -14,6 +14,7 @@ type Server struct {
 	mysql      mysqlQuerier
 	logger     *slog.Logger
 	httpServer *http.Server
+	archiver   *BinlogArchiver
 }
 
 // NewServer creates a new sidecar HTTP server.
@@ -27,6 +28,7 @@ func NewServer(mysql mysqlQuerier, listenAddr string, logger *slog.Logger) *Serv
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.HandleFunc("GET /peer/ping", s.handlePeerPing)
+	mux.HandleFunc("GET /archiver/status", s.handleArchiverStatus)
 
 	s.httpServer = &http.Server{
 		Addr:              listenAddr,
@@ -38,6 +40,11 @@ func NewServer(mysql mysqlQuerier, listenAddr string, logger *slog.Logger) *Serv
 
 	return s
 }
+
+// SetArchiver wires a BinlogArchiver into the server so its state can
+// be exposed through /archiver/status. Optional: when unset, the
+// endpoint returns a disabled payload.
+func (s *Server) SetArchiver(a *BinlogArchiver) { s.archiver = a }
 
 // Run starts the HTTP server and blocks until the context is cancelled.
 func (s *Server) Run(ctx context.Context) error {
@@ -92,6 +99,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePeerPing(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("pong"))
+}
+
+// handleArchiverStatus returns the BinlogArchiver's Snapshot. When the
+// archiver is disabled (PITR not configured for this failover group)
+// we still return 200 + enabled:false so polling callers can tell
+// "no archiver" apart from "archiver crashed".
+func (s *Server) handleArchiverStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.archiver == nil {
+		json.NewEncoder(w).Encode(Status{Enabled: false})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	json.NewEncoder(w).Encode(s.archiver.Snapshot(ctx))
 }
 
 // activeSiteResponse is the JSON response from the operator's /active-site endpoint.

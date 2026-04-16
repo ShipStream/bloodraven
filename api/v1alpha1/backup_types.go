@@ -77,12 +77,14 @@ type BackupSpec struct {
 	// +optional
 	Retry *BackupRetrySpec `json:"retry,omitempty"`
 
-	// PITR, when true, is a reserved-not-implemented marker. The
-	// reconciler emits a warning event on every sync when this is
-	// enabled; no PITR logic is wired up today. Left here so the API
-	// shape is stable for a future point-in-time recovery feature.
+	// PITR configures point-in-time recovery via continuous binary-log
+	// archival. When enabled, the per-pod sidecar watches the local
+	// binlog index and uploads each sealed binlog file to the storage
+	// backend of the referenced profile. Restore jobs can then replay
+	// archived binlogs up to a target timestamp on top of a full dump.
+	// Omit the field to disable PITR entirely.
 	// +optional
-	PITR *bool `json:"pitr,omitempty"`
+	PITR *PITRSpec `json:"pitr,omitempty"`
 
 	// PodSecurityContext overrides the default pod-level security context
 	// used for backup, restore, and cleanup Jobs. User fields are merged
@@ -98,6 +100,102 @@ type BackupSpec struct {
 	// precedence.
 	// +optional
 	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
+}
+
+// PITRSpec configures continuous binary-log archival for point-in-time
+// recovery. The sidecar running on the primary MySQL pod watches the
+// local binlog index via inotify and uploads each sealed binlog file
+// (plus a per-site manifest) to the storage backend of the named
+// backup profile. Restore Jobs later consume those artifacts to replay
+// transactions up to a specified target timestamp.
+type PITRSpec struct {
+	// Enabled turns binlog archival on or off. Omitting spec.backup.pitr
+	// entirely is equivalent to Enabled=false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// ProfileName selects the BackupProfile whose storage backend will
+	// hold the archived binlog files. Binlog objects land under a
+	// dedicated "binlogs/" subprefix (or subpath) inside the profile
+	// location so they do not collide with full dumps. Required when
+	// Enabled=true.
+	// +kubebuilder:validation:MinLength=1
+	ProfileName string `json:"profileName,omitempty"`
+
+	// MaxBinlogSize is forwarded as the MySQL max_binlog_size variable,
+	// controlling how frequently binlogs rotate. Smaller values reduce
+	// the RPO gap (the tail of transactions on a crashed primary that
+	// may not yet have been archived) at the cost of more objects in
+	// storage. Accepts any value MySQL accepts (e.g. "100M", "256M",
+	// "1073741824"). Defaults to "100M" when PITR is enabled.
+	// +kubebuilder:default="100M"
+	MaxBinlogSize string `json:"maxBinlogSize,omitempty"`
+
+	// ArchivePollInterval is how often the archiver reconciles the list
+	// of binlog files against storage as a belt-and-suspenders safety
+	// net alongside inotify. Default: 60s.
+	// +kubebuilder:default="60s"
+	ArchivePollInterval *metav1.Duration `json:"archivePollInterval,omitempty"`
+}
+
+// PITRStatus is the observed summary of continuous binlog archival for
+// a failover group. Populated by the operator from periodic scans of
+// the per-site manifest files in storage.
+type PITRStatus struct {
+	// Enabled mirrors spec.backup.pitr.enabled so consumers (status
+	// widgets, `kubectl get -o wide`) can see at a glance whether
+	// archival is running.
+	Enabled bool `json:"enabled,omitempty"`
+
+	// ProfileName mirrors spec.backup.pitr.profileName.
+	ProfileName string `json:"profileName,omitempty"`
+
+	// OldestArchivedTime is the earliest first-event timestamp across
+	// all archived binlogs still present in storage. Together with a
+	// full backup's completion time this is the earliest recoverable
+	// point.
+	OldestArchivedTime *metav1.Time `json:"oldestArchivedTime,omitempty"`
+
+	// NewestArchivedTime is the latest last-event timestamp across all
+	// archived binlogs. Together with OldestArchivedTime this is the
+	// window available for restores.
+	NewestArchivedTime *metav1.Time `json:"newestArchivedTime,omitempty"`
+
+	// ArchivedFileCount is the number of binlog files currently held in
+	// storage across all sites.
+	ArchivedFileCount int32 `json:"archivedFileCount,omitempty"`
+
+	// ArchivedBytes is the total size of archived binlog files.
+	ArchivedBytes int64 `json:"archivedBytes,omitempty"`
+
+	// LastArchivedTime is the wall clock at which the most recent
+	// binlog file was uploaded (archivedAt on the manifest entry).
+	LastArchivedTime *metav1.Time `json:"lastArchivedTime,omitempty"`
+
+	// Message is a human-readable status string (e.g. a parse error
+	// from the last manifest read). Empty on the happy path.
+	Message string `json:"message,omitempty"`
+}
+
+// PointInTimeSpec configures a restore that replays archived binlogs on
+// top of a loaded full dump. It lives under InitFromBackupSpec; leaving
+// it unset yields a plain dump-only restore. PITR requires the target
+// failover group's spec.backup.pitr block to have been enabled at the
+// time of the full dump, otherwise no binlog archive exists to replay.
+type PointInTimeSpec struct {
+	// StopDatetime is the MySQL-style datetime at which to stop
+	// replaying binlog events (forwarded to mysqlbinlog
+	// --stop-datetime). Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
+	// the MySQL native form ("2026-04-15 09:30:00"). Required.
+	// +kubebuilder:validation:MinLength=1
+	StopDatetime string `json:"stopDatetime"`
+
+	// ExcludeGtids is an optional GTID set passed verbatim to
+	// mysqlbinlog --exclude-gtids. Useful for surgically skipping a
+	// known-bad transaction (e.g. an accidental DROP TABLE) while
+	// replaying everything else.
+	// +optional
+	ExcludeGtids string `json:"excludeGtids,omitempty"`
 }
 
 // BackupRetrySpec configures operator-level retries for scheduled
@@ -367,6 +465,14 @@ type InitFromBackupSpec struct {
 	// LoadOptions are forwarded to util.loadDump(). Omit for sane defaults.
 	// +optional
 	LoadOptions *LoadOptions `json:"loadOptions,omitempty"`
+
+	// PointInTime, when set, enables post-load binlog replay to recover
+	// the restored instance to a specific target timestamp. Requires
+	// the source backup's failover group to have had spec.backup.pitr
+	// enabled at the time of the full dump. Omit for a plain dump-only
+	// restore.
+	// +optional
+	PointInTime *PointInTimeSpec `json:"pointInTime,omitempty"`
 }
 
 // InitFromBackupSource is the tagged-union selector for the restore source.

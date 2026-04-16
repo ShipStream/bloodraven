@@ -665,6 +665,41 @@ func TestGenerateMyCnf_NoCloneDDLTimeout(t *testing.T) {
 	}
 }
 
+func TestGenerateMyCnf_PITRInjectsMaxBinlogSize(t *testing.T) {
+	fg := newTestFG()
+	if fg.Spec.Backup == nil {
+		fg.Spec.Backup = &v1alpha1.BackupSpec{}
+	}
+	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p", MaxBinlogSize: "128M"}
+	cnf := generateMyCnf(fg)
+	if !strings.Contains(cnf, "max-binlog-size=128M") {
+		t.Errorf("my.cnf should contain max-binlog-size=128M when PITR is enabled; got:\n%s", cnf)
+	}
+}
+
+func TestGenerateMyCnf_PITRDefaultMaxBinlogSize(t *testing.T) {
+	fg := newTestFG()
+	if fg.Spec.Backup == nil {
+		fg.Spec.Backup = &v1alpha1.BackupSpec{}
+	}
+	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "p"}
+	cnf := generateMyCnf(fg)
+	// Default when MaxBinlogSize is unset should be 100M per the PITR design.
+	if !strings.Contains(cnf, "max-binlog-size=100M") {
+		t.Errorf("my.cnf should contain default max-binlog-size=100M; got:\n%s", cnf)
+	}
+}
+
+func TestGenerateMyCnf_PITRDisabledLeavesDefault(t *testing.T) {
+	fg := newTestFG()
+	// With PITR off, MySQL's own default (1 GB) applies — we must not
+	// emit the knob ourselves.
+	cnf := generateMyCnf(fg)
+	if strings.Contains(cnf, "max-binlog-size=") {
+		t.Errorf("my.cnf should not set max-binlog-size when PITR is disabled; got:\n%s", cnf)
+	}
+}
+
 func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 	fg := newTestFG()
 	fg.Spec.TLS = &v1alpha1.TLSSpec{

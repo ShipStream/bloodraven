@@ -466,6 +466,19 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
 		settings["require-secure-transport"] = "ON"
 	}
 
+	// PITR: set max_binlog_size so the rotation cadence (and therefore
+	// the archival cadence — and therefore the RPO window) is driven by
+	// the CRD rather than MySQL's 1 GB default. Placed before user
+	// overrides so operators can still override via spec.mysqlConf if
+	// they want something different from what spec.backup.pitr configures.
+	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled {
+		maxSize := fg.Spec.Backup.PITR.MaxBinlogSize
+		if maxSize == "" {
+			maxSize = "100M"
+		}
+		settings["max-binlog-size"] = maxSize
+	}
+
 	// Apply user overrides
 	for k, v := range fg.Spec.MysqlConf {
 		settings[k] = v
@@ -644,179 +657,187 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 
 		mysqlContainer := corev1.Container{
-				Name:  "mysql",
-				Image: image,
-				Ports: []corev1.ContainerPort{
-					{
-						Name:          "mysql",
-						ContainerPort: mysqlPort,
-						Protocol:      corev1.ProtocolTCP,
+			Name:  "mysql",
+			Image: image,
+			Ports: []corev1.ContainerPort{
+				{
+					Name:          "mysql",
+					ContainerPort: mysqlPort,
+					Protocol:      corev1.ProtocolTCP,
+				},
+			},
+			VolumeMounts: volumeMounts,
+			Resources:    site.Resources,
+			LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					TCPSocket: &corev1.TCPSocketAction{
+						Port: intstr.FromInt32(mysqlPort),
 					},
 				},
-				VolumeMounts: volumeMounts,
-				Resources:    site.Resources,
-				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						TCPSocket: &corev1.TCPSocketAction{
-							Port: intstr.FromInt32(mysqlPort),
-						},
+				InitialDelaySeconds: 30,
+				PeriodSeconds:       10,
+			},
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					TCPSocket: &corev1.TCPSocketAction{
+						Port: intstr.FromInt32(mysqlPort),
 					},
-					InitialDelaySeconds: 30,
-					PeriodSeconds:       10,
 				},
-				ReadinessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						TCPSocket: &corev1.TCPSocketAction{
-							Port: intstr.FromInt32(mysqlPort),
-						},
-					},
-					InitialDelaySeconds: 5,
-					PeriodSeconds:       5,
-				},
-			}
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       5,
+			},
+		}
 
-			operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
+		operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
 
-			sidecarEnv := []corev1.EnvVar{
-				{Name: "MY_POD_NAME", ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+		sidecarEnv := []corev1.EnvVar{
+			{Name: "MY_POD_NAME", ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+			}},
+			{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", sidecarPort)},
+			{Name: "PEER_ADDRESS", Value: peerAddress},
+			{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
+			{Name: "MY_SITE", Value: site.Name},
+			{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+			}},
+			{Name: "FAILOVER_GROUP", Value: fg.Name},
+			{Name: "LEASE_TIMEOUT", Value: leaseTimeout},
+			{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
+		}
+
+		if fg.Spec.UsesCredentials() {
+			mysqlContainer.Env = []corev1.EnvVar{
+				{Name: "MYSQL_ROOT_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
+						Key:                  "MYSQL_ROOT_PASSWORD",
+					},
 				}},
-				{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", sidecarPort)},
-				{Name: "PEER_ADDRESS", Value: peerAddress},
-				{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
-				{Name: "MY_SITE", Value: site.Name},
-				{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+			}
+			mysqlContainer.Lifecycle = &corev1.Lifecycle{
+				PreStop: &corev1.LifecycleHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"sh", "-c",
+							`mysql -u "$(cat /etc/mysql/creds/operator/username)" -p"$(cat /etc/mysql/creds/operator/password)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
+						},
+					},
+				},
+			}
+			mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+				corev1.VolumeMount{Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true},
+				corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
+			)
+			appendCredVolume := func(name string) {
+				mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+					corev1.VolumeMount{Name: "creds-" + name, MountPath: "/etc/mysql/creds/" + name, ReadOnly: true})
+			}
+			if fg.Spec.Credentials.AppSecret != "" {
+				appendCredVolume("app")
+			}
+			if fg.Spec.Credentials.ReadOnlySecret != "" {
+				appendCredVolume("readonly")
+			}
+			if fg.Spec.Credentials.MonitorSecret != "" {
+				appendCredVolume("monitor")
+			}
+			if fg.Spec.Credentials.BackupSecret != "" {
+				appendCredVolume("backup")
+			}
+
+			sidecarEnv = append([]corev1.EnvVar{
+				{Name: "MYSQL_USER", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
+						Key:                  "username",
+					},
 				}},
-				{Name: "FAILOVER_GROUP", Value: fg.Name},
-				{Name: "LEASE_TIMEOUT", Value: leaseTimeout},
-				{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
-			}
-
-			if fg.Spec.UsesCredentials() {
-				mysqlContainer.Env = []corev1.EnvVar{
-					{Name: "MYSQL_ROOT_PASSWORD", ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-							Key:                  "MYSQL_ROOT_PASSWORD",
-						},
-					}},
-				}
-				mysqlContainer.Lifecycle = &corev1.Lifecycle{
-					PreStop: &corev1.LifecycleHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{
-								"sh", "-c",
-								`mysql -u "$(cat /etc/mysql/creds/operator/username)" -p"$(cat /etc/mysql/creds/operator/password)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
-							},
-						},
+				{Name: "MYSQL_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
+						Key:                  "password",
 					},
-				}
-				mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
-					corev1.VolumeMount{Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true},
-					corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
-				)
-				appendCredVolume := func(name string) {
-					mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
-						corev1.VolumeMount{Name: "creds-" + name, MountPath: "/etc/mysql/creds/" + name, ReadOnly: true})
-				}
-				if fg.Spec.Credentials.AppSecret != "" {
-					appendCredVolume("app")
-				}
-				if fg.Spec.Credentials.ReadOnlySecret != "" {
-					appendCredVolume("readonly")
-				}
-				if fg.Spec.Credentials.MonitorSecret != "" {
-					appendCredVolume("monitor")
-				}
-				if fg.Spec.Credentials.BackupSecret != "" {
-					appendCredVolume("backup")
-				}
-
-				sidecarEnv = append([]corev1.EnvVar{
-					{Name: "MYSQL_USER", ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-							Key:                  "username",
+				}},
+			}, sidecarEnv...)
+		} else {
+			mysqlContainer.EnvFrom = []corev1.EnvFromSource{
+				{
+					SecretRef: &corev1.SecretEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: fg.Spec.SecretName,
 						},
-					}},
-					{Name: "MYSQL_PASSWORD", ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-							Key:                  "password",
-						},
-					}},
-				}, sidecarEnv...)
-			} else {
-				mysqlContainer.EnvFrom = []corev1.EnvFromSource{
-					{
-						SecretRef: &corev1.SecretEnvSource{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: fg.Spec.SecretName,
-							},
-						},
-					},
-				}
-				mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
-					corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
-				)
-				mysqlContainer.Lifecycle = &corev1.Lifecycle{
-					PreStop: &corev1.LifecycleHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{
-								"sh", "-c",
-								`mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
-							},
-						},
-					},
-				}
-
-				sidecarEnv = append([]corev1.EnvVar{
-					{Name: "MYSQL_DSN", ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: fg.Spec.SecretName},
-							Key:                  "dsn",
-						},
-					}},
-				}, sidecarEnv...)
-			}
-
-			sidecarContainer := corev1.Container{
-				Name:  "sidecar",
-				Image: sidecarImage,
-				Ports: []corev1.ContainerPort{
-					{
-						Name:          "sidecar",
-						ContainerPort: sidecarPort,
-						Protocol:      corev1.ProtocolTCP,
 					},
 				},
-				Env:          sidecarEnv,
-				VolumeMounts: sidecarVolumeMounts,
-				Resources:    fg.Spec.SidecarResources,
-				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/health",
-							Port: intstr.FromInt32(sidecarPort),
+			}
+			mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+				corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
+			)
+			mysqlContainer.Lifecycle = &corev1.Lifecycle{
+				PreStop: &corev1.LifecycleHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"sh", "-c",
+							`mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
 						},
 					},
-					InitialDelaySeconds: 5,
-					PeriodSeconds:       10,
-				},
-				ReadinessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/health",
-							Port: intstr.FromInt32(sidecarPort),
-						},
-					},
-					InitialDelaySeconds: 3,
-					PeriodSeconds:       5,
 				},
 			}
 
-			containers := []corev1.Container{mysqlContainer, sidecarContainer}
+			sidecarEnv = append([]corev1.EnvVar{
+				{Name: "MYSQL_DSN", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: fg.Spec.SecretName},
+						Key:                  "dsn",
+					},
+				}},
+			}, sidecarEnv...)
+		}
+
+		// PITR sidecar wiring (no-op when spec.backup.pitr.enabled=false).
+		pitrFrags, err := buildPITRSidecarFragments(fg)
+		if err != nil {
+			return fmt.Errorf("build pitr sidecar fragments: %w", err)
+		}
+		sidecarEnv = append(sidecarEnv, pitrFrags.SidecarEnv...)
+		sidecarVolumeMounts = append(sidecarVolumeMounts, pitrFrags.SidecarVolumeMounts...)
+
+		sidecarContainer := corev1.Container{
+			Name:  "sidecar",
+			Image: sidecarImage,
+			Ports: []corev1.ContainerPort{
+				{
+					Name:          "sidecar",
+					ContainerPort: sidecarPort,
+					Protocol:      corev1.ProtocolTCP,
+				},
+			},
+			Env:          sidecarEnv,
+			VolumeMounts: sidecarVolumeMounts,
+			Resources:    fg.Spec.SidecarResources,
+			LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/health",
+						Port: intstr.FromInt32(sidecarPort),
+					},
+				},
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       10,
+			},
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/health",
+						Port: intstr.FromInt32(sidecarPort),
+					},
+				},
+				InitialDelaySeconds: 3,
+				PeriodSeconds:       5,
+			},
+		}
+
+		containers := []corev1.Container{mysqlContainer, sidecarContainer}
 
 		volumes := []corev1.Volume{
 			{
@@ -898,6 +919,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				volumes = append(volumes, credSecretVolume("creds-backup", s))
 			}
 		}
+
+		// PITR contributions (AWS creds secret or backup PVC volume).
+		volumes = append(volumes, pitrFrags.PodVolumes...)
 
 		podAnnotations := make(map[string]string)
 		for k, v := range fg.Spec.PodAnnotations {
@@ -1245,6 +1269,17 @@ func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 	sort.Strings(keys)
 	for _, k := range keys {
 		fmt.Fprintf(h, "mysql.%s=%s\n", k, fg.Spec.MysqlConf[k])
+	}
+	// PITR settings affect both my.cnf (max_binlog_size) and the
+	// sidecar env (archiver config). Either change must roll the pod.
+	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil {
+		p := fg.Spec.Backup.PITR
+		fmt.Fprintf(h, "pitr.enabled=%t\n", p.Enabled)
+		fmt.Fprintf(h, "pitr.profile=%s\n", p.ProfileName)
+		fmt.Fprintf(h, "pitr.maxBinlogSize=%s\n", p.MaxBinlogSize)
+		if p.ArchivePollInterval != nil {
+			fmt.Fprintf(h, "pitr.archivePollInterval=%s\n", p.ArchivePollInterval.Duration)
+		}
 	}
 	// Include TLS certificate data so cert rotation triggers a rolling update.
 	if len(tlsSecretData) > 0 {

@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
@@ -51,8 +52,45 @@ func main() {
 		cancel()
 	}()
 
+	// Optional binlog archiver. Built before the HTTP server so the
+	// server can expose its Snapshot() via /archiver/status.
+	var archiver *sidecar.BinlogArchiver
+	if cfg.PITR != nil {
+		store, err := sidecar.NewArchiveStore(ctx, cfg.PITR)
+		if err != nil {
+			logger.Error("failed to init archive store", "error", err)
+			os.Exit(1)
+		}
+		archiver = sidecar.NewBinlogArchiver(cfg.PITR, cfg.MySite, mysql, store, logger)
+
+		// Opt in to operator-driven retention when we have the
+		// minimum identity fields (namespace, group, profile) + the
+		// operator address. Missing any of them simply leaves
+		// retention disabled: binlogs still upload, just forever.
+		profile := os.Getenv("BLOODRAVEN_PITR_PROFILE_NAME")
+		if profile != "" && cfg.BloodravenAddress != "" &&
+			cfg.PodNamespace != "" && cfg.FailoverGroup != "" {
+			retentionInterval := time.Hour
+			if v := os.Getenv("BLOODRAVEN_PITR_RETENTION_INTERVAL"); v != "" {
+				if d, err := time.ParseDuration(v); err == nil {
+					retentionInterval = d
+				}
+			}
+			archiver.SetRetentionClient(
+				cfg.BloodravenAddress,
+				cfg.PodNamespace,
+				cfg.FailoverGroup,
+				profile,
+				retentionInterval,
+			)
+		}
+	}
+
 	// Create the HTTP server
 	srv := sidecar.NewServer(mysql, cfg.ListenAddr, logger)
+	if archiver != nil {
+		srv.SetArchiver(archiver)
+	}
 
 	// Run startup safety net
 	srv.RunSafetyNet(ctx, cfg)
@@ -67,7 +105,9 @@ func main() {
 		logger,
 	)
 
-	// Run both the HTTP server and fencing monitor concurrently
+	// Run the HTTP server, fencing monitor, and (optionally) the
+	// archiver concurrently. Any of them failing cancels the shared
+	// context, bringing the others down cleanly.
 	var wg sync.WaitGroup
 
 	wg.Add(1)
@@ -84,6 +124,14 @@ func main() {
 		defer wg.Done()
 		fm.Run(ctx)
 	}()
+
+	if archiver != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			archiver.Run(ctx)
+		}()
+	}
 
 	wg.Wait()
 	logger.Info("sidecar stopped")

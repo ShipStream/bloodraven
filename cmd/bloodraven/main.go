@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -131,7 +132,7 @@ func main() {
 
 	// Start a separate HTTP server for websocket and status on :8082
 	// (controller-runtime handles metrics on :8080 and probes on :8081)
-	mux := newAuxMux(runner, hub)
+	mux := newAuxMux(runner, hub, mgr.GetClient())
 
 	auxSrv := &http.Server{
 		Addr:    ":8082",
@@ -176,7 +177,7 @@ func (f runnableFunc) Start(ctx context.Context) error {
 	return f(ctx)
 }
 
-func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub) *http.ServeMux {
+func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Client) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, _ *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -221,6 +222,69 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub) *htt
 			"group":       group,
 			"active_site": status.ActiveSite,
 		})
+	})
+	// /pitr-cutoff is consumed by the sidecar's binlog archiver.
+	// Given a (namespace, group, profile) triple it returns the
+	// completion time of the OLDEST successful MysqlBackup retained
+	// for that profile. Anything older than this cutoff is safe to
+	// purge from the PITR archive — its replay window is already
+	// covered by the oldest-surviving full dump. The archiver runs
+	// this lookup on its own cadence and handles the actual deletes
+	// (it has storage credentials; the operator pod does not).
+	mux.HandleFunc("/pitr-cutoff", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "application/json")
+		ns := r.URL.Query().Get("namespace")
+		group := r.URL.Query().Get("group")
+		profile := r.URL.Query().Get("profile")
+		if ns == "" || group == "" || profile == "" {
+			rw.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(rw).Encode(map[string]string{"error": "namespace, group, and profile query parameters are required"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+
+		var list v1alpha1.MysqlBackupList
+		if err := k8sClient.List(ctx, &list, client.InNamespace(ns)); err != nil {
+			rw.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(rw).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Minimum CompletionTime across successful, non-deleting
+		// MysqlBackups that match (group, profile). Entries without a
+		// CompletionTime are ignored (they can't establish a cutoff
+		// anyway). If there are no retained backups we return empty
+		// so the archiver treats "nothing to prune yet".
+		var cutoff *time.Time
+		for i := range list.Items {
+			b := &list.Items[i]
+			if !b.DeletionTimestamp.IsZero() {
+				continue
+			}
+			if b.Spec.FailoverGroupRef.Name != group {
+				continue
+			}
+			if b.Spec.ProfileName != profile {
+				continue
+			}
+			if b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+				continue
+			}
+			if b.Status.CompletionTime == nil {
+				continue
+			}
+			t := b.Status.CompletionTime.Time
+			if cutoff == nil || t.Before(*cutoff) {
+				c := t
+				cutoff = &c
+			}
+		}
+		resp := map[string]any{"namespace": ns, "group": group, "profile": profile}
+		if cutoff != nil {
+			resp["cutoffTime"] = cutoff.UTC().Format(time.RFC3339)
+		}
+		json.NewEncoder(rw).Encode(resp)
 	})
 	mux.HandleFunc("/ws/status", hub.HandleWS)
 	return mux

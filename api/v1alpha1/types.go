@@ -328,6 +328,12 @@ type MysqlFailoverGroupStatus struct {
 	// scheduled or on-demand.
 	// +optional
 	LastBackupTime *metav1.Time `json:"lastBackupTime,omitempty"`
+
+	// PITR summarizes the state of continuous binary-log archival for
+	// this failover group. Populated by periodic manifest scans when
+	// spec.backup.pitr.enabled is true.
+	// +optional
+	PITR *PITRStatus `json:"pitr,omitempty"`
 }
 
 // SiteStatus describes the observed state of a single site.

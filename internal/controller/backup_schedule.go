@@ -59,14 +59,20 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context
 		return nil
 	}
 
-	// PITR warning: reserved-not-implemented. The API field exists to
-	// keep the shape stable for a future release but nothing in the
-	// reconciler acts on it today. Loud-fail so the user doesn't
-	// assume point-in-time recovery is wired up.
-	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && *fg.Spec.Backup.PITR {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupPITRNotImplemented",
-			"spec.backup.pitr is reserved for a future release; bloodraven does not currently "+
-				"perform any point-in-time recovery actions and the field has no effect")
+	// PITR validation: when enabled, the referenced profile must exist.
+	// The sidecar is responsible for the actual archival; the operator
+	// only validates config, injects max_binlog_size, and wires env
+	// vars into the pod spec.
+	if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled {
+		pitr := fg.Spec.Backup.PITR
+		if pitr.ProfileName == "" {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupPITRInvalid",
+				"spec.backup.pitr.enabled=true but profileName is empty; binlog archival disabled")
+		} else if findProfile(fg, pitr.ProfileName) == nil {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupPITRInvalid",
+				"spec.backup.pitr.profileName=%q does not match any entry in spec.backup.profiles[]; "+
+					"binlog archival disabled", pitr.ProfileName)
+		}
 	}
 
 	// Both backup and restore Jobs mount this ConfigMap, so we reconcile

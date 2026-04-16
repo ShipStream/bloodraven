@@ -20,7 +20,7 @@ func TestAuxMuxHealthz(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 
-	newAuxMux(runner, hub).ServeHTTP(rec, req)
+	newAuxMux(runner, hub, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -46,7 +46,7 @@ func TestActiveSiteMissingParams(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, tt.url, nil)
 			rec := httptest.NewRecorder()
-			newAuxMux(runner, hub).ServeHTTP(rec, req)
+			newAuxMux(runner, hub, nil).ServeHTTP(rec, req)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("expected 400, got %d", rec.Code)
 			}
@@ -60,7 +60,7 @@ func TestActiveSiteNoManagers(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/active-site?namespace=default&group=orders", nil)
 	rec := httptest.NewRecorder()
-	newAuxMux(runner, hub).ServeHTTP(rec, req)
+	newAuxMux(runner, hub, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", rec.Code)
@@ -82,7 +82,7 @@ func TestActiveSiteNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/active-site?namespace=default&group=orders", nil)
 	rec := httptest.NewRecorder()
-	newAuxMux(runner, hub).ServeHTTP(rec, req)
+	newAuxMux(runner, hub, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rec.Code)
@@ -103,7 +103,7 @@ func TestActiveSiteFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/active-site?namespace=default&group=orders", nil)
 	rec := httptest.NewRecorder()
-	newAuxMux(runner, hub).ServeHTTP(rec, req)
+	newAuxMux(runner, hub, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -132,7 +132,7 @@ func TestAuxMuxStatusWithoutFailoverGroups(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	rec := httptest.NewRecorder()
 
-	newAuxMux(runner, hub).ServeHTTP(rec, req)
+	newAuxMux(runner, hub, nil).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
