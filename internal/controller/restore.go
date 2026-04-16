@@ -376,8 +376,10 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		// reconciler; fall back to the old heuristic for pre-upgrade
 		// CRs that don't carry it.
 		wantsS3 := ref.Status.StorageType == v1alpha1.BackupStorageS3
+		wantsPVC := ref.Status.StorageType == v1alpha1.BackupStoragePVC
 		if ref.Status.StorageType == "" {
 			wantsS3 = isS3Location(ref.Status.Location)
+			wantsPVC = !wantsS3
 		}
 
 		profile := findProfile(fg, ref.Spec.ProfileName)
@@ -387,7 +389,13 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 					"either restore the profile or set initFromBackup.source.s3 explicitly",
 				ref.Name, ref.Status.Location, ref.Spec.ProfileName)
 		}
-		if profile != nil && profile.Storage.Type == v1alpha1.BackupStorageS3 && profile.Storage.S3 != nil {
+		if wantsPVC && (profile == nil || profile.Storage.Type != v1alpha1.BackupStoragePVC || profile.Storage.PVC == nil) {
+			return nil, fmt.Errorf(
+				"initFromBackup.source.mysqlBackupRef=%q resolves to a PVC location (%q) but profile %q is missing from spec.backup.profiles; "+
+					"either restore the profile or set initFromBackup.source.pvc explicitly",
+				ref.Name, ref.Status.Location, ref.Spec.ProfileName)
+		}
+		if wantsS3 && profile != nil && profile.Storage.Type == v1alpha1.BackupStorageS3 && profile.Storage.S3 != nil {
 			extraEnv = append(extraEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: profile.Storage.S3.Bucket},
 			)
@@ -400,6 +408,26 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: profile.Storage.S3.Region})
 			}
 			awsCredsSecret = profile.Storage.S3.CredentialsSecret
+		} else if wantsPVC && profile != nil && profile.Storage.Type == v1alpha1.BackupStoragePVC && profile.Storage.PVC != nil {
+			claim := profile.Storage.PVC.ClaimName
+			if claim == "" {
+				claim = ownedBackupPVCName(fg.Name, profile.Name)
+			}
+			// MysqlBackup.status.location stores the in-pod dump path that the
+			// backup Job used. For PVC-backed backups that path lives under
+			// /backups, so the restore Job must mount the same claim there.
+			extraVolumes = append(extraVolumes, corev1.Volume{
+				Name: "restore-src",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: claim,
+						ReadOnly:  true,
+					},
+				},
+			})
+			extraMounts = append(extraMounts, corev1.VolumeMount{
+				Name: "restore-src", MountPath: backupPVCMountPath, ReadOnly: true,
+			})
 		}
 
 	case src.S3 != nil:
