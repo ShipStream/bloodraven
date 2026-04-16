@@ -29,4 +29,4 @@ Tracking implementation progress for items in [bloodraven-wishlist.md](bloodrave
 - [ ] 17. Maintenance mode
 - [ ] 18. Operator high availability (leader election)
 - [ ] 19. kubectl plugin
-- [ ] 20. Helm chart with ArgoCD compatibility
+- [x] 20. Helm chart with ArgoCD compatibility — chart at `charts/bloodraven/`, custom lua health checks for MysqlFailoverGroup and MysqlBackup CRDs in `charts/bloodraven/argocd/`

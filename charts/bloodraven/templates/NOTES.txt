@@ -57,3 +57,13 @@ Next steps:
 
   4. Check the failover group status:
      kubectl get mysqlfailovergroups -n {{ .Release.Namespace }}
+
+  5. (ArgoCD users) Register custom health checks so MysqlFailoverGroup and
+     MysqlBackup resources show proper health in the ArgoCD UI.
+
+     Extract the patch file from the chart and apply it:
+       helm pull bloodraven/bloodraven --untar
+       kubectl patch configmap argocd-cm -n argocd \
+         --patch-file bloodraven/argocd/argocd-cm-patch.yaml
+
+     See https://bloodraven.readthedocs.io/en/latest/docs/getting-started#argocd-integration
