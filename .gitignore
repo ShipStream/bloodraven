@@ -1,3 +1,4 @@
 orchestrator
 bin/
 
+k3d-default.yaml
