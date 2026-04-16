@@ -92,11 +92,25 @@ func (p *archiverPoller) scan(ctx context.Context) {
 		if err != nil {
 			p.logger.Debug("archiver status poll failed", "site", pair.name, "error", err)
 			p.store(pair.name, nil)
+			// Drop the site's gauge labels so scrapes see absent
+			// rather than a stale "last known good" backlog value.
+			// alert rules can use absent()/up() semantics during
+			// sidecar outages.
+			p.clearSiteMetrics(pair.name)
 			continue
 		}
 		p.store(pair.name, status)
 		p.emitMetrics(pair.name, status)
 	}
+}
+
+// clearSiteMetrics drops all archiver gauges for a single site. Used
+// when a poll fails, so Prometheus won't report stale values during a
+// sidecar outage.
+func (p *archiverPoller) clearSiteMetrics(site string) {
+	metrics.ArchiverUploadFailures.DeleteLabelValues(p.nn.Namespace, p.nn.Name, site)
+	metrics.ArchiverLastUploadTimestamp.DeleteLabelValues(p.nn.Namespace, p.nn.Name, site)
+	metrics.ArchiverBacklogFiles.DeleteLabelValues(p.nn.Namespace, p.nn.Name, site)
 }
 
 func (p *archiverPoller) store(site string, s *internalmysql.ArchiverStatus) {
@@ -137,9 +151,7 @@ func (p *archiverPoller) emitMetrics(site string, s *internalmysql.ArchiverStatu
 // stopped FG's labels don't linger in /metrics forever.
 func (p *archiverPoller) clearMetrics() {
 	for _, pair := range p.clients {
-		metrics.ArchiverUploadFailures.DeleteLabelValues(p.nn.Namespace, p.nn.Name, pair.name)
-		metrics.ArchiverLastUploadTimestamp.DeleteLabelValues(p.nn.Namespace, p.nn.Name, pair.name)
-		metrics.ArchiverBacklogFiles.DeleteLabelValues(p.nn.Namespace, p.nn.Name, pair.name)
+		p.clearSiteMetrics(pair.name)
 	}
 }
 

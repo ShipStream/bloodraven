@@ -290,6 +290,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	}
 
 	archivedThisCycle := 0
+	hadFileError := false
 	for _, relOrAbs := range sealed {
 		// index entries may be absolute ("/var/lib/mysql/mysql-bin.000042")
 		// or relative to binlog_basename depending on MySQL version; we
@@ -304,6 +305,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 			a.incUploadFailures()
 			a.setError(fmt.Sprintf("archive %s: %v", name, err))
 			a.logger.Warn("archive binlog", "file", name, "error", err)
+			hadFileError = true
 			// Don't bail: try remaining files. A single bad file
 			// shouldn't block newer ones.
 			continue
@@ -321,7 +323,13 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		a.mu.Unlock()
 		a.logger.Info("archived sealed binlogs", "count", archivedThisCycle)
 	}
-	a.setError("")
+	// Preserve the most recent per-file error when at least one archive
+	// failed this cycle — otherwise /archiver/status would look green
+	// after a partial failure and the operator's status.pitr Message
+	// would flap clear on every scan.
+	if !hadFileError {
+		a.setError("")
+	}
 
 	// Recompute manifest aggregates so the operator can populate
 	// status.pitr without re-listing storage. Reload the manifest to

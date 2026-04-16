@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -768,21 +769,33 @@ func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *
 		Enabled:     true,
 		ProfileName: profileName,
 	}
+	// Iterate in site-name order so the derived Message (and any future
+	// order-sensitive field) is reproducible across reconciles — map
+	// iteration in Go is randomized, which would otherwise flap the
+	// CR status on every poll when multiple sites report LastError.
+	snaps := mt.archiver.Snapshots()
+	sites := make([]string, 0, len(snaps))
+	for name := range snaps {
+		sites = append(sites, name)
+	}
+	sort.Strings(sites)
+
 	var (
-		haveAny bool
-		lastErr string
+		haveAny   bool
+		errorMsgs []string
 	)
-	for _, s := range mt.archiver.Snapshots() {
+	for _, name := range sites {
+		s := snaps[name]
 		if s == nil {
 			continue
 		}
 		haveAny = true
-		if s.ManifestFileCount > int64(out.ArchivedFileCount) {
-			out.ArchivedFileCount = int32(s.ManifestFileCount)
-		}
-		if s.ManifestBytes > out.ArchivedBytes {
-			out.ArchivedBytes = s.ManifestBytes
-		}
+		// ArchivedFileCount and ArchivedBytes sum across sites: each
+		// site maintains its own manifest for the binlogs produced
+		// while it was primary, and those sets don't overlap. So
+		// "files held in storage across all sites" is the sum.
+		out.ArchivedFileCount += int32(s.ManifestFileCount)
+		out.ArchivedBytes += s.ManifestBytes
 		if !s.OldestArchivedTime.IsZero() &&
 			(out.OldestArchivedTime == nil || s.OldestArchivedTime.Before(out.OldestArchivedTime.Time)) {
 			t := metav1.NewTime(s.OldestArchivedTime)
@@ -799,7 +812,7 @@ func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *
 			out.LastArchivedTime = &t
 		}
 		if s.LastError != "" {
-			lastErr = fmt.Sprintf("%s: %s", s.Site, s.LastError)
+			errorMsgs = append(errorMsgs, fmt.Sprintf("%s: %s", name, s.LastError))
 		}
 	}
 	if !haveAny {
@@ -807,7 +820,9 @@ func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *
 		// flapping between populated and empty while polls warm up.
 		return
 	}
-	out.Message = lastErr
+	// Join all per-site errors so nothing is silently dropped. Empty
+	// when every site is clean.
+	out.Message = strings.Join(errorMsgs, "; ")
 	fg.Status.PITR = out
 }
 

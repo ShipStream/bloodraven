@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -59,6 +60,9 @@ func (c *SidecarClient) Ping(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("ping sidecar: %w", err)
 	}
+	// Drain then close so net/http can return the connection to the
+	// keep-alive pool — Ping runs on the sidecar health hot path.
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {

@@ -267,6 +267,11 @@ func TestScanBacklogReflectsPendingFiles(t *testing.T) {
 	a.scanAndArchive(context.Background())
 
 	snap := a.Snapshot(context.Background())
+	// lastError must survive the end of the scan — otherwise
+	// /archiver/status would look healthy despite active failures.
+	if !strings.Contains(snap.LastError, "archive") {
+		t.Errorf("LastError = %q, want per-file error preserved", snap.LastError)
+	}
 	if snap.BacklogFiles != 3 {
 		t.Errorf("BacklogFiles = %d, want 3 (all uploads failed, 3 sealed)", snap.BacklogFiles)
 	}

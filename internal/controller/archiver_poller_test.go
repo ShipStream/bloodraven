@@ -120,11 +120,11 @@ func TestPopulatePITRStatus_AggregatesAcrossSites(t *testing.T) {
 	if pitr.ProfileName != "nightly" {
 		t.Errorf("ProfileName = %q, want nightly", pitr.ProfileName)
 	}
-	if pitr.ArchivedFileCount != 5 {
-		t.Errorf("ArchivedFileCount = %d, want 5 (max across sites)", pitr.ArchivedFileCount)
+	if pitr.ArchivedFileCount != 8 {
+		t.Errorf("ArchivedFileCount = %d, want 8 (sum across sites: 5+3)", pitr.ArchivedFileCount)
 	}
-	if pitr.ArchivedBytes != 1200 {
-		t.Errorf("ArchivedBytes = %d, want 1200 (max across sites)", pitr.ArchivedBytes)
+	if pitr.ArchivedBytes != 1700 {
+		t.Errorf("ArchivedBytes = %d, want 1700 (sum across sites: 500+1200)", pitr.ArchivedBytes)
 	}
 	if pitr.OldestArchivedTime == nil || !pitr.OldestArchivedTime.Time.Equal(t0.Add(-30*time.Minute)) {
 		t.Errorf("OldestArchivedTime = %v, want %v", pitr.OldestArchivedTime, t0.Add(-30*time.Minute))
@@ -135,10 +135,45 @@ func TestPopulatePITRStatus_AggregatesAcrossSites(t *testing.T) {
 	if pitr.LastArchivedTime == nil || !pitr.LastArchivedTime.Time.Equal(t0.Add(11*time.Minute)) {
 		t.Errorf("LastArchivedTime = %v, want %v", pitr.LastArchivedTime, t0.Add(11*time.Minute))
 	}
-	// Message carries the most recent LastError. Either site's error is
-	// acceptable — just make sure we don't drop the signal entirely.
-	if pitr.Message == "" {
-		t.Error("expected Message to carry a lastError")
+	// Only dc2 has a LastError in this fixture.
+	if pitr.Message != "dc2: slow upload" {
+		t.Errorf("Message = %q, want %q", pitr.Message, "dc2: slow upload")
+	}
+}
+
+// TestPopulatePITRStatus_DeterministicMessage ensures the Message is
+// stable across reconciles when multiple sites report errors. Runs
+// populatePITRStatus several times with the same snapshot; the
+// serialized output must match byte-for-byte on every pass.
+func TestPopulatePITRStatus_DeterministicMessage(t *testing.T) {
+	nn := types.NamespacedName{Namespace: "default", Name: "orders"}
+	snaps := map[string]*internalmysql.ArchiverStatus{
+		"dc3": {Enabled: true, Site: "dc3", LastError: "s3 403"},
+		"dc1": {Enabled: true, Site: "dc1", LastError: "parse error"},
+		"dc2": {Enabled: true, Site: "dc2", LastError: "timeout"},
+	}
+	r := newRunnerWithArchiverSnapshots(t, nn, snaps)
+
+	var first string
+	for i := 0; i < 10; i++ {
+		fg := pitrEnabledFG(nn.Namespace, nn.Name)
+		r.populatePITRStatus(nn, fg)
+		if fg.Status.PITR == nil {
+			t.Fatal("expected PITR populated")
+		}
+		got := fg.Status.PITR.Message
+		if i == 0 {
+			first = got
+			continue
+		}
+		if got != first {
+			t.Fatalf("Message not deterministic across calls: %q vs %q", first, got)
+		}
+	}
+	// Sites should be iterated in alphabetic order.
+	want := "dc1: parse error; dc2: timeout; dc3: s3 403"
+	if first != want {
+		t.Errorf("Message = %q, want %q", first, want)
 	}
 }
 
