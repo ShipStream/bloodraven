@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,6 +40,12 @@ type managedTopology struct {
 	lastTopologyDegradedReason string
 }
 
+// DeploymentReconciler is the subset of the reconciler that the runner needs
+// for ordered updates — specifically, reconciling a single site's Deployment.
+type DeploymentReconciler interface {
+	ReconcileSiteDeployment(ctx context.Context, fgName types.NamespacedName, siteName string) error
+}
+
 // TopologyManagerRunner manages TopologyManager instances for all MysqlFailoverGroup resources.
 // It implements manager.Runnable and runs only on the leader-elected instance.
 type TopologyManagerRunner struct {
@@ -47,6 +54,10 @@ type TopologyManagerRunner struct {
 	hub       *platform.Hub
 	recorder  record.EventRecorder
 	logger    *slog.Logger
+
+	// deployReconciler is set after the reconciler is created (circular dependency).
+	// Used by the ordered update callback to reconcile a single site's Deployment.
+	deployReconciler DeploymentReconciler
 
 	mu       sync.RWMutex
 	managers map[types.NamespacedName]*managedTopology
@@ -62,6 +73,23 @@ func NewTopologyManagerRunner(c client.Client, clientset kubernetes.Interface, h
 		logger:    logger,
 		managers:  make(map[types.NamespacedName]*managedTopology),
 	}
+}
+
+// SetDeploymentReconciler wires the reconciler back-reference. Call after both
+// the runner and reconciler are constructed.
+func (r *TopologyManagerRunner) SetDeploymentReconciler(dr DeploymentReconciler) {
+	r.deployReconciler = dr
+}
+
+// HasManager reports whether a topology manager is currently running for the
+// given CR. The reconciler uses this to decide whether Deployment updates can
+// be safely deferred to the ordered update path; when no manager exists (fresh
+// deploy, or operator just started), the reconciler must apply updates itself.
+func (r *TopologyManagerRunner) HasManager(nn types.NamespacedName) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.managers[nn]
+	return ok
 }
 
 // NeedLeaderElection implements manager.LeaderElectionRunnable.
@@ -145,6 +173,8 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 				existing.tm.SetRecloneSite(recloneSite)
 				r.removeRecloneAnnotation(ctx, nn)
 			}
+			// Detect spec drift for ordered rolling updates.
+			r.checkSpecDrift(ctx, fg, existing.tm)
 			continue
 		}
 
@@ -206,6 +236,56 @@ func (r *TopologyManagerRunner) removeRecloneAnnotation(ctx context.Context, nn 
 	if err != nil {
 		r.logger.Error("failed to remove reclone annotation", "fg", nn, "error", err)
 	}
+}
+
+// checkSpecDrift compares the desired spec hash for each site against the live
+// Deployment annotation. If they differ, it records the drifted sites on the
+// topology manager so the next poll cycle can trigger an ordered update.
+func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, tm *TopologyManager) {
+	// Skip if the updater is already running.
+	if tm.isUpdating() {
+		return
+	}
+
+	// Fetch TLS/credential secret data for spec hash computation.
+	var tlsSecretData map[string][]byte
+	if fg.Spec.TLS != nil {
+		var tlsSecret corev1.Secret
+		tlsSecretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.TLS.SecretName}
+		if err := r.client.Get(ctx, tlsSecretKey, &tlsSecret); err == nil {
+			tlsSecretData = tlsSecret.Data
+		}
+	}
+	var credSecretData map[string]map[string][]byte
+	if fg.Spec.UsesCredentials() {
+		credSecretData = make(map[string]map[string][]byte)
+		for _, name := range fg.Spec.AllReferencedSecretNames() {
+			var s corev1.Secret
+			if err := r.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err == nil {
+				credSecretData[name] = s.Data
+			}
+		}
+	}
+
+	var driftSites []string
+	for _, site := range fg.Spec.Sites {
+		desiredHash := computeSpecHash(fg, site, tlsSecretData, credSecretData)
+
+		var deploy appsv1.Deployment
+		deployNN := types.NamespacedName{
+			Namespace: fg.Namespace,
+			Name:      resourceName(fg.Name, site.Name),
+		}
+		if err := r.client.Get(ctx, deployNN, &deploy); err != nil {
+			continue // Deployment doesn't exist yet — reconciler will create it
+		}
+		liveHash := deploy.Annotations[specHashAnnotation]
+		if liveHash != "" && liveHash != desiredHash {
+			driftSites = append(driftSites, site.Name)
+		}
+	}
+
+	tm.SetSpecDriftSites(driftSites)
 }
 
 // startManager creates and starts a TopologyManager for a single MysqlFailoverGroup.
@@ -296,7 +376,8 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		}
 	}
 
-	tm := NewTopologyManager(cfg, siteMySQL[0], siteMySQL[1], failoverCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
+	updateCtl := NewUpdateController(failoverCtl, r.logger.With("fg", nn.String()))
+	tm := NewTopologyManager(cfg, siteMySQL[0], siteMySQL[1], failoverCtl, updateCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
 		r.logger.With("fg", nn.String()))
 
 	// Restore failover history from CR status so recovery logic works across
@@ -317,6 +398,14 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// populated snapshot from the async bootstrap goroutine.
 	tm.BootstrapStatusCallback = func(phase, errMsg, source string) {
 		r.updateBootstrappingCondition(ctx, nn, phase, errMsg, source)
+	}
+
+	// Wire the ordered update callback so the UpdateController can reconcile
+	// one site's Deployment at a time.
+	if r.deployReconciler != nil {
+		tm.ApplyUpdate = func(applyCtx context.Context, siteName string) error {
+			return r.deployReconciler.ReconcileSiteDeployment(applyCtx, nn, siteName)
+		}
 	}
 
 	tmCtx, cancel := context.WithCancel(ctx)

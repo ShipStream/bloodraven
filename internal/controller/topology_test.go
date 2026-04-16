@@ -45,8 +45,8 @@ func (m *mockMySQL) Close() error { return nil }
 
 func (m *mockMySQL) SetSuperReadOnly(_ context.Context, _ bool) error  { return nil }
 func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) { return 0, nil }
-func (m *mockMySQL) StopReplica(_ context.Context) error              { return nil }
-func (m *mockMySQL) ResetReplicaAll(_ context.Context) error          { return nil }
+func (m *mockMySQL) StopReplica(_ context.Context) error               { return nil }
+func (m *mockMySQL) ResetReplicaAll(_ context.Context) error           { return nil }
 func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -168,7 +168,7 @@ func taintSelector(siteName string) string {
 
 func testTopologyConfig() TopologyConfig {
 	return TopologyConfig{
-		Name:  "lion",
+		Name: "lion",
 		Sites: [2]SiteTopologyConfig{
 			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
 			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
@@ -189,7 +189,7 @@ func newTestTopologyManager(site0, site1 *mockMySQL) (*TopologyManager, *mockTai
 	hub := platform.NewHub(testLogger())
 	dns := &mockDNS{}
 	fc := NewFailoverController(testLogger())
-	tm := NewTopologyManager(cfg, site0, site1, fc, nil, BootstrapConfig{}, tainter, hub, dns, testLogger())
+	tm := NewTopologyManager(cfg, site0, site1, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger())
 	// Use a very short cooldown for tests so failovers aren't blocked.
 	tm.failoverCooldown = 0
 	return tm, tainter, dns
@@ -208,7 +208,7 @@ func newTestTopologyManagerWithBootstrap(site0, site1 *mockMySQL) (*TopologyMana
 		ReplPassword: "replpass",
 		CloneTimeout: 10 * time.Second,
 	}
-	tm := NewTopologyManager(cfg, site0, site1, fc, bc, bcfg, tainter, hub, dns, testLogger())
+	tm := NewTopologyManager(cfg, site0, site1, fc, nil, bc, bcfg, tainter, hub, dns, testLogger())
 	tm.failoverCooldown = 0
 	return tm, tainter, dns
 }

@@ -147,6 +147,20 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile backup assets: %w", err)
 	}
 
+	// Skip Deployment reconciliation when an ordered update is in progress.
+	// The UpdateController manages site-by-site Deployment updates to avoid
+	// simultaneous restarts of both sites (which causes a TOTAL LOSS window).
+	orderedUpdateActive := fg.Status.UpdatePhase != ""
+
+	// When a topology manager is already running for this CR, defer Deployment
+	// updates to the ordered update path: the reconciler firing on a CR spec
+	// change must not restart both sites simultaneously. The runner's
+	// checkSpecDrift compares the desired hash against the live Deployment
+	// annotation, so leaving the existing Deployment untouched is what causes
+	// drift to be observed and the ordered update to start. New Deployments
+	// (initial bootstrap) are always created here since there's no manager yet.
+	managerRunning := r.Runner != nil && r.Runner.HasManager(req.NamespacedName)
+
 	// Reconcile per-site resources
 	for i, site := range fg.Spec.Sites {
 		serverID := int32(101 + i)
@@ -155,8 +169,25 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err := r.reconcilePVC(ctx, &fg, site); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile pvc %s: %w", site.Name, err)
 		}
-		if err := r.reconcileDeployment(ctx, &fg, site, peerSite, serverID, image); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", site.Name, err)
+		if !orderedUpdateActive {
+			deferDeployment := false
+			if managerRunning {
+				var existing appsv1.Deployment
+				deployNN := types.NamespacedName{
+					Namespace: fg.Namespace,
+					Name:      resourceName(fg.Name, site.Name),
+				}
+				if err := r.Get(ctx, deployNN, &existing); err == nil {
+					deferDeployment = true
+				} else if !errors.IsNotFound(err) {
+					return ctrl.Result{}, fmt.Errorf("get deployment %s: %w", site.Name, err)
+				}
+			}
+			if !deferDeployment {
+				if err := r.reconcileDeployment(ctx, &fg, site, peerSite, serverID, image); err != nil {
+					return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", site.Name, err)
+				}
+			}
 		}
 		if err := r.reconcileSiteService(ctx, &fg, site); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile site service %s: %w", site.Name, err)
@@ -801,7 +832,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 		sidecarEnv = append(sidecarEnv, pitrFrags.SidecarEnv...)
 		sidecarVolumeMounts = append(sidecarVolumeMounts, pitrFrags.SidecarVolumeMounts...)
-
 		sidecarContainer := corev1.Container{
 			Name:  "sidecar",
 			Image: sidecarImage,
@@ -1374,6 +1404,28 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 		RecoveryThreshold: int(recoveryThreshold),
 		FailoverCooldown:  failoverCooldown,
 	}
+}
+
+// ReconcileSiteDeployment reconciles a single site's Deployment to match the
+// desired CR spec. Used by the ordered update controller to update one site at
+// a time instead of both simultaneously.
+func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Context, fgName types.NamespacedName, siteName string) error {
+	var fg v1alpha1.MysqlFailoverGroup
+	if err := r.Get(ctx, fgName, &fg); err != nil {
+		return fmt.Errorf("get CR: %w", err)
+	}
+	image := fg.Spec.Image
+	if image == "" {
+		image = defaultMySQLImage
+	}
+	for i, site := range fg.Spec.Sites {
+		if site.Name == siteName {
+			serverID := int32(101 + i)
+			peerSite := fg.Spec.Sites[1-i]
+			return r.reconcileDeployment(ctx, &fg, site, peerSite, serverID, image)
+		}
+	}
+	return fmt.Errorf("site %q not found in CR %s", siteName, fgName)
 }
 
 // FailoverGroupNamespacedName creates a NamespacedName from a failover group.

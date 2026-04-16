@@ -72,18 +72,18 @@ func (c TopologyConfig) PollIntervalDuration() time.Duration {
 // TopologySnapshot captures the topology state at a point in time.
 // It is passed to the StatusCallback after each poll cycle that produces a state change.
 type TopologySnapshot struct {
-	SiteNames       [2]string
-	SiteStates      [2]state.SiteState
-	SiteLastSeen    [2]time.Time
-	SiteReplication [2]*mysql.ReplicaStatus // nil if site is primary or unreachable
-	ActiveSite      string                  // name of the writable site, empty if none
+	SiteNames          [2]string
+	SiteStates         [2]state.SiteState
+	SiteLastSeen       [2]time.Time
+	SiteReplication    [2]*mysql.ReplicaStatus // nil if site is primary or unreachable
+	ActiveSite         string                  // name of the writable site, empty if none
 	LastFailover       time.Time
 	LastFailoverTarget string
 	Alert              string // non-empty if a cross-site alert fired this cycle
 	UpdatePhase        string // non-empty if an ordered update is in progress
-	BootstrapPhase  string // non-empty if a fresh-deploy bootstrap is in progress or finished
-	BootstrapError  string // non-empty if bootstrap failed
-	BootstrapSource string // "fresh-deploy", "auto-clone", or "reclone"
+	BootstrapPhase     string // non-empty if a fresh-deploy bootstrap is in progress or finished
+	BootstrapError     string // non-empty if bootstrap failed
+	BootstrapSource    string // "fresh-deploy", "auto-clone", or "reclone"
 
 	PromotionGtidExecuted string // GTID set at the moment of the most recent promotion
 	RecoverySite          string // site name when recovery is blocked due to divergence
@@ -106,8 +106,8 @@ type siteTracker struct {
 
 // TopologyManager is the main control loop.
 type TopologyManager struct {
-	cfg   TopologyConfig
-	sites [2]siteTracker
+	cfg     TopologyConfig
+	sites   [2]siteTracker
 	tainter platform.NodeTainter
 	hub     *platform.Hub
 	dns     platform.DNSUpdater
@@ -128,6 +128,14 @@ type TopologyManager struct {
 	recoveryPendingSite    string // site name with blocked recovery ("" = none)
 	recoveryDivergentGtid  string
 	recoveryDivergentCount int64
+
+	// Ordered update orchestration.
+	updater *UpdateController
+
+	// ApplyUpdate is a callback provided by the runner that patches a single
+	// site's Deployment to match the desired spec. The topology manager calls
+	// this from the UpdateController when a rolling update is in progress.
+	ApplyUpdate func(ctx context.Context, siteName string) error
 
 	// Bootstrap orchestration. When bootstrap is nil or bootstrapCfg.ReplUser is
 	// empty, auto-bootstrap is disabled. bootstrapPhase/bootstrapErr are protected by mu.
@@ -151,6 +159,11 @@ type TopologyManager struct {
 	// auto-clone path from racing the restore Job to populate the
 	// primary. Protected by mu. See runner.sync().
 	autoBootstrapSuppressed bool
+
+	// specDriftSites lists site names whose Deployment spec-hash differs
+	// from the desired hash. Set by the runner, consumed by checkUpdate.
+	// Protected by mu.
+	specDriftSites []string
 
 	// StatusCallback is invoked after each poll cycle that produces a state change.
 	// The runner sets this to push status updates to the CR.
@@ -186,12 +199,12 @@ type StatusResponse struct {
 	PromotionGtidExecuted string             `json:"promotion_gtid_executed,omitempty"`
 }
 
-func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
-	return NewTopologyManagerWithClock(cfg, site0MySQL, site1MySQL, failover, bootstrap, bootstrapCfg, tainter, hub, dns, logger, clock.RealClock{})
+func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, updater *UpdateController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
+	return NewTopologyManagerWithClock(cfg, site0MySQL, site1MySQL, failover, updater, bootstrap, bootstrapCfg, tainter, hub, dns, logger, clock.RealClock{})
 }
 
 // NewTopologyManagerWithClock creates a TopologyManager with an injectable clock for testing.
-func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
+func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, updater *UpdateController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
 	cooldown := time.Duration(cfg.FailoverCooldown)
 	if cooldown == 0 {
 		cooldown = 5 * time.Minute
@@ -216,6 +229,7 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysq
 		},
 		failover:         failover,
 		failoverCooldown: cooldown,
+		updater:          updater,
 		bootstrap:        bootstrap,
 		bootstrapCfg:     bootstrapCfg,
 		tainter:          tainter,
@@ -462,6 +476,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// Process pending reclone annotation.
 	recloneStarted := tm.checkReclone(ctx)
 
+	// Check for ordered rolling update trigger.
+	updateStarted := tm.checkUpdate(ctx)
+
 	// Auto-clone an empty site even when it's not a split-brain (e.g. the
 	// sidecar fenced the empty site to read-only after a PVC wipe).
 	autoCloneStarted := false
@@ -505,8 +522,8 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		}
 	}
 
-	// Notify the status callback on any state change or recovery event.
-	if (anyTransition || recoveryChanged || recloneStarted || autoCloneStarted) && tm.StatusCallback != nil {
+	// Notify the status callback on any state change, recovery event, or update event.
+	if (anyTransition || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted) && tm.StatusCallback != nil {
 		tm.mu.RLock()
 		activeSite := tm.activeSiteLocked()
 		bootstrapPhase := string(tm.bootstrapPhase)
@@ -521,6 +538,10 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		divergentTxnCount := tm.recoveryDivergentCount
 		promotionGtid := tm.promotionGtidExecuted
 		tm.mu.RUnlock()
+		var updatePhase string
+		if tm.updater != nil {
+			updatePhase = string(tm.updater.Phase())
+		}
 		tm.StatusCallback(TopologySnapshot{
 			SiteNames:          [2]string{tm.sites[0].name, tm.sites[1].name},
 			SiteStates:         [2]state.SiteState{tm.sites[0].state, tm.sites[1].state},
@@ -530,9 +551,10 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 			LastFailover:       tm.lastFailover,
 			LastFailoverTarget: tm.lastFailoverTarget,
 			Alert:              alertMsg,
-			BootstrapPhase:  bootstrapPhase,
-			BootstrapError:  bootstrapErrStr,
-			BootstrapSource: bootstrapSrc,
+			UpdatePhase:        updatePhase,
+			BootstrapPhase:     bootstrapPhase,
+			BootstrapError:     bootstrapErrStr,
+			BootstrapSource:    bootstrapSrc,
 
 			PromotionGtidExecuted: promotionGtid,
 			RecoverySite:          recoverySite,
@@ -651,10 +673,10 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		tm.logger.Warn("ALERT", "message", action.Alert)
 	}
 
-	// Suppress any cross-site actions while a bootstrap is in progress: the
-	// replica will appear unreachable during the MySQL restart that follows
-	// CLONE INSTANCE, and we do not want to initiate a failover on that signal.
-	if tm.isBootstrapping() {
+	// Suppress any cross-site actions while a bootstrap or ordered update is in
+	// progress: during an update the standby is restarting and will appear
+	// unreachable, and we do not want to initiate a spurious failover.
+	if tm.isBootstrapping() || tm.isUpdating() {
 		tm.mu.RLock()
 		phase := tm.bootstrapPhase
 		tm.mu.RUnlock()
@@ -808,6 +830,136 @@ func (tm *TopologyManager) isBootstrapping() bool {
 		return true
 	}
 	return false
+}
+
+// isUpdating reports whether an ordered update is currently running.
+func (tm *TopologyManager) isUpdating() bool {
+	return tm.updater != nil && tm.updater.IsUpdating()
+}
+
+// checkUpdate detects spec drift and triggers an ordered rolling update.
+// It runs the update asynchronously so that the poll loop is not blocked.
+// Returns true if an update was started this cycle.
+func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
+	if tm.updater == nil || tm.ApplyUpdate == nil {
+		return false
+	}
+	if tm.isUpdating() || tm.isBootstrapping() {
+		return false
+	}
+
+	// Both sites must be healthy (one writable, one read-only).
+	activeIdx := -1
+	standbyIdx := -1
+	for i := range tm.sites {
+		switch tm.sites[i].state {
+		case state.StateWritable:
+			activeIdx = i
+		case state.StateReadOnly:
+			standbyIdx = i
+		}
+	}
+	if activeIdx < 0 || standbyIdx < 0 {
+		return false
+	}
+
+	// Check if either site has pending spec drift. The runner sets
+	// specDriftSites when it detects a mismatch between the Deployment's
+	// spec-hash annotation and the desired hash computed from the CR.
+	tm.mu.RLock()
+	driftSites := tm.specDriftSites
+	tm.mu.RUnlock()
+	if len(driftSites) == 0 {
+		return false
+	}
+
+	activeName := tm.sites[activeIdx].name
+	standbyName := tm.sites[standbyIdx].name
+	standbyChecker := tm.sites[standbyIdx].mysql
+	activeChecker := tm.sites[activeIdx].mysql
+	applyUpdate := tm.ApplyUpdate
+
+	tm.logger.Info("ordered update: spec drift detected, starting ordered update",
+		"driftSites", driftSites, "active", activeName, "standby", standbyName)
+
+	go func() {
+		if err := tm.updater.Execute(ctx, activeName, standbyName, standbyChecker, activeChecker, applyUpdate); err != nil {
+			tm.logger.Error("ordered update failed", "error", err)
+		}
+		// Clear drift sites after update completes (success or failure).
+		tm.mu.Lock()
+		tm.specDriftSites = nil
+		tm.mu.Unlock()
+		// Trigger a status callback to clear the Updating condition.
+		if tm.StatusCallback != nil {
+			tm.emitStatusSnapshot()
+		}
+	}()
+
+	return true
+}
+
+// emitStatusSnapshot sends a TopologySnapshot through the status callback
+// using current state. Safe to call from any goroutine.
+func (tm *TopologyManager) emitStatusSnapshot() {
+	// Collect replication status for read-only sites.
+	ctx := context.Background()
+	var siteRepl [2]*mysql.ReplicaStatus
+	for i := range tm.sites {
+		if tm.sites[i].state == state.StateReadOnly {
+			rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
+			if err == nil {
+				siteRepl[i] = rs
+			}
+		}
+	}
+
+	tm.mu.RLock()
+	activeSite := tm.activeSiteLocked()
+	bootstrapPhase := string(tm.bootstrapPhase)
+	bootstrapErrStr := ""
+	if tm.bootstrapErr != nil {
+		bootstrapErrStr = tm.bootstrapErr.Error()
+	}
+	bootstrapSrc := tm.bootstrapSource
+	recoverySite := tm.recoveryPendingSite
+	recoveryState := tm.recoveryStateLocked()
+	divergentGtid := tm.recoveryDivergentGtid
+	divergentTxnCount := tm.recoveryDivergentCount
+	promotionGtid := tm.promotionGtidExecuted
+	var updatePhase string
+	if tm.updater != nil {
+		updatePhase = string(tm.updater.Phase())
+	}
+	tm.mu.RUnlock()
+
+	tm.StatusCallback(TopologySnapshot{
+		SiteNames:          [2]string{tm.sites[0].name, tm.sites[1].name},
+		SiteStates:         [2]state.SiteState{tm.sites[0].state, tm.sites[1].state},
+		SiteLastSeen:       [2]time.Time{tm.sites[0].lastSeen, tm.sites[1].lastSeen},
+		SiteReplication:    siteRepl,
+		ActiveSite:         activeSite,
+		LastFailover:       tm.lastFailover,
+		LastFailoverTarget: tm.lastFailoverTarget,
+		UpdatePhase:        updatePhase,
+		BootstrapPhase:     bootstrapPhase,
+		BootstrapError:     bootstrapErrStr,
+		BootstrapSource:    bootstrapSrc,
+
+		PromotionGtidExecuted: promotionGtid,
+		RecoverySite:          recoverySite,
+		RecoveryState:         recoveryState,
+		DivergentGtid:         divergentGtid,
+		DivergentTxnCount:     divergentTxnCount,
+	})
+}
+
+// SetSpecDriftSites records which sites have spec drift (Deployment hash != desired hash).
+// Called by the runner after detecting drift.
+func (tm *TopologyManager) SetSpecDriftSites(sites []string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.specDriftSites = sites
 }
 
 // isFreshDeploy reports whether both sites are writable AND neither has ever
