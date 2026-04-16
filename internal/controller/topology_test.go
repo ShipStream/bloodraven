@@ -954,3 +954,185 @@ func TestReclone_UnknownSite(t *testing.T) {
 		t.Errorf("reclonePendingSite should be cleared for unknown site, got %q", pending)
 	}
 }
+
+// TestIsHealthyReplica_TruthTable covers issue #46 Part 1: the site-level health
+// signal must require both read-only state and active replication.
+func TestIsHealthyReplica_TruthTable(t *testing.T) {
+	cases := []struct {
+		name        string
+		st          state.SiteState
+		replicating bool
+		want        bool
+	}{
+		{"readonly-and-replicating", state.StateReadOnly, true, true},
+		{"readonly-but-not-replicating", state.StateReadOnly, false, false},
+		{"writable-even-if-flag-set", state.StateWritable, true, false},
+		{"unreachable", state.StateUnreachable, true, false},
+		{"unknown", state.StateUnknown, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &siteTracker{state: tc.st, replicating: tc.replicating}
+			if got := tr.isHealthyReplica(); got != tc.want {
+				t.Errorf("isHealthyReplica=%v want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPoll_SetsReplicatingFlagWithDebounce verifies the streak-based debounce
+// for the replicating flag on the read-only site.
+func TestPoll_SetsReplicatingFlagWithDebounce(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false} // primary
+	site1 := &mockMySQL{
+		readOnly: true,
+		replicaStatusVal: &mysql.ReplicaStatus{
+			IORunning:  true,
+			SQLRunning: true,
+			SourceHost: "dc1",
+		},
+	}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	// First poll promotes site1 to StateReadOnly and records streak=1; replicating still false.
+	pollN(tm, 1)
+	tm.mu.RLock()
+	replicating := tm.sites[1].replicating
+	streak := tm.sites[1].replicatingStreak
+	tm.mu.RUnlock()
+	if replicating {
+		t.Errorf("replicating should still be false after 1 healthy tick (debounce), streak=%d", streak)
+	}
+
+	// Need enough polls to get RecoveryThreshold (2) transitions plus one more healthy
+	// tick for the debounce. Three polls is enough to cover both.
+	pollN(tm, 3)
+	tm.mu.RLock()
+	replicating = tm.sites[1].replicating
+	tm.mu.RUnlock()
+	if !replicating {
+		t.Error("replicating should be true after consecutive healthy ticks")
+	}
+}
+
+// TestPoll_ClearsReplicatingWhenReplicationStopped covers issue #46 Part 1's core
+// case: super_read_only=ON but replication threads stopped must NOT register as
+// a healthy replica.
+func TestPoll_ClearsReplicatingWhenReplicationStopped(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{
+		readOnly: true,
+		replicaStatusVal: &mysql.ReplicaStatus{
+			IORunning:  true,
+			SQLRunning: true,
+			SourceHost: "dc1",
+		},
+	}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	pollN(tm, 4)
+
+	tm.mu.RLock()
+	healthy := tm.sites[1].isHealthyReplica()
+	tm.mu.RUnlock()
+	if !healthy {
+		t.Fatal("setup: expected site1 to be a healthy replica before simulated breakage")
+	}
+
+	// Simulate replication threads stopping — super_read_only stays ON.
+	site1.mu.Lock()
+	site1.replicaStatusVal = &mysql.ReplicaStatus{
+		IORunning:  false,
+		SQLRunning: false,
+		SourceHost: "dc1",
+	}
+	site1.mu.Unlock()
+
+	pollN(tm, 1)
+
+	tm.mu.RLock()
+	replicating := tm.sites[1].replicating
+	streak := tm.sites[1].replicatingStreak
+	healthy = tm.sites[1].isHealthyReplica()
+	tm.mu.RUnlock()
+	if replicating || healthy || streak != 0 {
+		t.Errorf("expected replicating=false streak=0 after broken replication, got replicating=%v streak=%d", replicating, streak)
+	}
+}
+
+// TestCheckUpdate_DefersWhenStandbyNotReplicating verifies the issue #46 gate:
+// even with spec drift and both sites in the right states, checkUpdate must NOT
+// start an ordered update against a stale standby.
+func TestCheckUpdate_DefersWhenStandbyNotReplicating(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{
+		readOnly:         true,
+		replicaStatusVal: &mysql.ReplicaStatus{}, // empty — threads stopped, no source
+	}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	// Attach an UpdateController and ApplyUpdate callback so checkUpdate doesn't
+	// early-return on nil dependencies.
+	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	tm.ApplyUpdate = func(_ context.Context, _ string) error {
+		t.Fatal("ApplyUpdate must not be called when standby is not replicating")
+		return nil
+	}
+
+	// Poll enough to settle states (site1 -> StateReadOnly with RecoveryThreshold=2).
+	pollN(tm, 3)
+
+	// Drift on standby — the classic trigger for an ordered update.
+	tm.SetSpecDriftSites([]string{"dc2"})
+
+	started := tm.checkUpdate(context.Background())
+	if started {
+		t.Fatal("checkUpdate must defer when the standby is not a healthy replica")
+	}
+	if tm.updater.IsUpdating() {
+		t.Error("UpdateController must not enter updating state on deferred start")
+	}
+}
+
+// TestPoll_ZerosReplicatingOnStateLeave makes sure a tracker that was a healthy
+// replica does not carry replicating=true into a later writable/unreachable state.
+func TestPoll_ZerosReplicatingOnStateLeave(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{
+		readOnly: true,
+		replicaStatusVal: &mysql.ReplicaStatus{
+			IORunning:  true,
+			SQLRunning: true,
+			SourceHost: "dc1",
+		},
+	}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	pollN(tm, 4)
+
+	tm.mu.RLock()
+	initialReplicating := tm.sites[1].replicating
+	tm.mu.RUnlock()
+	if !initialReplicating {
+		t.Fatal("setup: expected site1.replicating=true after healthy polls")
+	}
+
+	// Simulate site1 becoming unreachable — ShowReplicaStatus path will emit
+	// a warn and clear replicating; even without that, the state transition to
+	// StateUnreachable must zero the flag.
+	site1.mu.Lock()
+	site1.err = errors.New("conn refused")
+	site1.mu.Unlock()
+
+	// FailureThreshold=3 ticks to confirm unreachable transition.
+	pollN(tm, 5)
+
+	tm.mu.RLock()
+	replicating := tm.sites[1].replicating
+	streak := tm.sites[1].replicatingStreak
+	st := tm.sites[1].state
+	tm.mu.RUnlock()
+	if st == state.StateReadOnly {
+		t.Fatal("setup: site1 should have left StateReadOnly after unreachable ticks")
+	}
+	if replicating || streak != 0 {
+		t.Errorf("replicating should be cleared on state leave, got replicating=%v streak=%d", replicating, streak)
+	}
+}

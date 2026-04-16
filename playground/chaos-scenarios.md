@@ -215,7 +215,9 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
 
 **Verify**: Both pods end up with new resource spec. Replication running. One site writable, one read-only.
 
-**Current behavior (as of April 2026)**: The `UpdateController` exists in `internal/controller/updater.go` with ordered-update logic (standby first, failover, old primary) but is **not wired into the reconciler**. Both Deployments use `RecreateDeploymentStrategyType` and restart simultaneously, causing a brief TOTAL LOSS window (~10-15s). After both pods return, the operator detects split brain and re-establishes the topology. The active site may flip during the update. Ordered zero-downtime updates require wiring in the `UpdateController`.
+**Current behavior**: The `UpdateController` (`internal/controller/updater.go`) performs an ordered replica-first → failover → old-primary roll. Healthy case produces a brief writer flip but no TOTAL LOSS window.
+
+**Issue #46 safety net (April 2026)**: If the standby is not actually replicating (`super_read_only=ON` but threads stopped / no source configured), the updater now **refuses to start** via an `isHealthyReplica()` debounce in the topology poll. If the new standby pod comes up writable with no source mid-update, `waitForReplicaReady` **fails fast** after ~30s instead of holding `isUpdating()=true` for the full 5-minute deadline; cross-site split-brain recovery then takes over. Expect either (a) a clean ordered update, or (b) an aborted update followed by reclone/fence on the next reconcile — not a 5-minute split-brain hang.
 
 **Cleanup**: Revert the resource change after testing:
 ```bash

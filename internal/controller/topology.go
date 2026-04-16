@@ -102,6 +102,19 @@ type siteTracker struct {
 	failCount     int
 	recoveryCount int
 	lastSeen      time.Time // last successful poll
+
+	// replicating is true only when the site is a read-only replica with IO+SQL
+	// threads running and a configured source host, observed for replicatingStreak
+	// consecutive poll ticks. Used by checkUpdate to refuse ordered updates against
+	// a stale standby whose super_read_only=ON but replication is not actually running.
+	replicating       bool
+	replicatingStreak int
+}
+
+// isHealthyReplica reports whether the site is a read-only replica with debounced
+// replication health. Used as the precondition for starting an ordered update.
+func (t *siteTracker) isHealthyReplica() bool {
+	return t.state == state.StateReadOnly && t.replicating
 }
 
 // TopologyManager is the main control loop.
@@ -404,6 +417,11 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		prevStates[i] = tm.sites[i].state
 		if newStates[i] != prevStates[i] {
 			tm.sites[i].state = newStates[i]
+			// Leaving StateReadOnly invalidates any prior replication-health signal.
+			if newStates[i] != state.StateReadOnly {
+				tm.sites[i].replicating = false
+				tm.sites[i].replicatingStreak = 0
+			}
 		}
 	}
 	tm.mu.Unlock()
@@ -457,17 +475,42 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		}
 	}
 
-	// Check replication status on the read-only site (the replica).
+	// Check replication status on the read-only site (the replica), and update
+	// the tracker's replicating flag. isHealthyReplica() consults this flag to
+	// gate ordered updates — a site whose super_read_only=ON but replication
+	// threads are not running must not be targeted.
 	var siteRepl [2]*mysql.ReplicaStatus
+	const replicatingStreakThreshold = 2
 	for i := range tm.sites {
-		if tm.sites[i].state == state.StateReadOnly {
-			rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
-			if err != nil {
-				tm.logger.Warn("failed to check replica status", "site", tm.sites[i].name, "error", err)
-			} else {
-				siteRepl[i] = rs
-			}
+		if tm.sites[i].state != state.StateReadOnly {
+			continue
 		}
+		// Bound each probe so a hung MySQL cannot stall the whole poll loop —
+		// replicating flag going stale would also starve failover/update decisions.
+		replCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		rs, err := tm.sites[i].mysql.ShowReplicaStatus(replCtx)
+		cancel()
+		if err != nil {
+			tm.logger.Warn("failed to check replica status", "site", tm.sites[i].name, "error", err)
+			tm.mu.Lock()
+			tm.sites[i].replicating = false
+			tm.sites[i].replicatingStreak = 0
+			tm.mu.Unlock()
+			continue
+		}
+		siteRepl[i] = rs
+		healthy := rs != nil && rs.IORunning && rs.SQLRunning && rs.SourceHost != ""
+		tm.mu.Lock()
+		if healthy {
+			tm.sites[i].replicatingStreak++
+			if tm.sites[i].replicatingStreak >= replicatingStreakThreshold {
+				tm.sites[i].replicating = true
+			}
+		} else {
+			tm.sites[i].replicating = false
+			tm.sites[i].replicatingStreak = 0
+		}
+		tm.mu.Unlock()
 	}
 
 	// Check if old primary recovery is needed.
@@ -860,6 +903,19 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 		}
 	}
 	if activeIdx < 0 || standbyIdx < 0 {
+		return false
+	}
+
+	// Refuse to start an ordered update against a stale standby. A site whose
+	// super_read_only=ON but replication is not actually running is exactly the
+	// precondition for the deadlock in issue #46 — updating it would restart a
+	// pod that holds no data and never catch up.
+	tm.mu.RLock()
+	healthyStandby := tm.sites[standbyIdx].isHealthyReplica()
+	tm.mu.RUnlock()
+	if !healthyStandby {
+		tm.logger.Info("ordered update: standby not replicating, deferring",
+			"site", tm.sites[standbyIdx].name)
 		return false
 	}
 
