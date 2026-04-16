@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -981,5 +983,139 @@ func TestBuildSiteDSNFromCreds(t *testing.T) {
 	}
 	if !strings.Contains(dsn, "mysql-lion-dc1.shared-lion.svc.cluster.local") {
 		t.Errorf("DSN should contain site host: %s", dsn)
+	}
+}
+
+// TestReconcile_DefersDeploymentUpdateWhenManagerRunning verifies that when a
+// topology manager is registered for a CR, the reconciler skips per-site
+// Deployment updates so the ordered update path can pick them up via
+// checkSpecDrift. This prevents the "both Deployments restart simultaneously"
+// race that causes a TOTAL LOSS window during rolling updates.
+func TestReconcile_DefersDeploymentUpdateWhenManagerRunning(t *testing.T) {
+	ctx := context.Background()
+	fg := newTestFG()
+	r, c := newReconciler(fg)
+	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
+
+	// Initial reconcile creates Deployments via the fast path (no manager).
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("initial reconcile failed: %v", err)
+	}
+
+	captureSite := func(site string) (string, string) {
+		t.Helper()
+		var d appsv1.Deployment
+		if err := c.Get(ctx, types.NamespacedName{Name: "mysql-lion-" + site, Namespace: "shared-lion"}, &d); err != nil {
+			t.Fatalf("get deployment %s: %v", site, err)
+		}
+		if len(d.Spec.Template.Spec.Containers) == 0 {
+			t.Fatalf("deployment %s has no containers", site)
+		}
+		return d.Annotations[specHashAnnotation], d.Spec.Template.Spec.Containers[0].Image
+	}
+
+	hashDC1Before, imgDC1Before := captureSite("dc1")
+	hashDC2Before, imgDC2Before := captureSite("dc2")
+	if hashDC1Before == "" || hashDC2Before == "" {
+		t.Fatal("expected initial spec hash on Deployment annotations")
+	}
+
+	// Wire a runner with a registered manager so HasManager returns true.
+	discardLog := slog.New(slog.NewTextHandler(io.Discard, nil))
+	runner := &TopologyManagerRunner{
+		client:   c,
+		logger:   discardLog,
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	fc := NewFailoverController(discardLog)
+	cfg := testTopologyConfig()
+	tm := NewTopologyManager(cfg, site0, site1, fc, nil, nil, BootstrapConfig{},
+		newMockTainter(), platform.NewHub(discardLog), &mockDNS{}, discardLog)
+	runner.managers[nn] = &managedTopology{tm: tm, cancel: func() {}}
+	r.Runner = runner
+
+	// Mutate spec to trigger drift.
+	var fresh v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &fresh); err != nil {
+		t.Fatalf("get CR for mutation: %v", err)
+	}
+	fresh.Spec.Image = "mysql:9.7"
+	if err := c.Update(ctx, &fresh); err != nil {
+		t.Fatalf("update CR: %v", err)
+	}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+
+	// Both Deployments must be untouched by the reconciler.
+	if h, img := captureSite("dc1"); h != hashDC1Before || img != imgDC1Before {
+		t.Errorf("dc1 deployment was modified: hash %s->%s, image %s->%s",
+			hashDC1Before, h, imgDC1Before, img)
+	}
+	if h, img := captureSite("dc2"); h != hashDC2Before || img != imgDC2Before {
+		t.Errorf("dc2 deployment was modified: hash %s->%s, image %s->%s",
+			hashDC2Before, h, imgDC2Before, img)
+	}
+
+	// checkSpecDrift must surface both sites to the topology manager.
+	runner.checkSpecDrift(ctx, &fresh, tm)
+	tm.mu.RLock()
+	drift := append([]string(nil), tm.specDriftSites...)
+	tm.mu.RUnlock()
+	if len(drift) != 2 {
+		t.Fatalf("expected 2 drift sites, got %d: %v", len(drift), drift)
+	}
+	gotDC1, gotDC2 := false, false
+	for _, s := range drift {
+		switch s {
+		case "dc1":
+			gotDC1 = true
+		case "dc2":
+			gotDC2 = true
+		}
+	}
+	if !gotDC1 || !gotDC2 {
+		t.Errorf("expected drift sites [dc1, dc2], got %v", drift)
+	}
+}
+
+// TestReconcile_AppliesDeploymentUpdateWhenNoManager verifies that when no
+// topology manager is running (initial deploy or pre-leader-election state),
+// the reconciler still applies Deployment updates directly. This is the
+// bootstrap path that must keep working even after the deferred-update change.
+func TestReconcile_AppliesDeploymentUpdateWhenNoManager(t *testing.T) {
+	ctx := context.Background()
+	fg := newTestFG()
+	r, c := newReconciler(fg)
+	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("initial reconcile failed: %v", err)
+	}
+
+	var fresh v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &fresh); err != nil {
+		t.Fatalf("get CR for mutation: %v", err)
+	}
+	fresh.Spec.Image = "mysql:9.7"
+	if err := c.Update(ctx, &fresh); err != nil {
+		t.Fatalf("update CR: %v", err)
+	}
+
+	// No runner, no manager → reconciler must apply the update.
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+
+	var d appsv1.Deployment
+	if err := c.Get(ctx, types.NamespacedName{Name: "mysql-lion-dc1", Namespace: "shared-lion"}, &d); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	if d.Spec.Template.Spec.Containers[0].Image != "mysql:9.7" {
+		t.Errorf("expected image mysql:9.7 after reconcile (no manager), got %s",
+			d.Spec.Template.Spec.Containers[0].Image)
 	}
 }

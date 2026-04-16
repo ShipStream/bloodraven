@@ -262,7 +262,7 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
-		Name:  "lion",
+		Name: "lion",
 		Sites: [2]controller.SiteTopologyConfig{
 			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
 			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
@@ -274,7 +274,7 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 		FailoverCooldown:  0, // no cooldown by default
 	}
 
-	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
+	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
 
 	return &testHarness{
 		tm:       tm,
@@ -302,7 +302,7 @@ func newTestHarnessWithCooldown(t *testing.T, cooldown time.Duration) *testHarne
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
-		Name:  "lion",
+		Name: "lion",
 		Sites: [2]controller.SiteTopologyConfig{
 			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
 			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
@@ -314,7 +314,7 @@ func newTestHarnessWithCooldown(t *testing.T, cooldown time.Duration) *testHarne
 		FailoverCooldown:  int64(cooldown),
 	}
 
-	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
+	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
 
 	return &testHarness{
 		tm:       tm,

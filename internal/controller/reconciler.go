@@ -147,6 +147,20 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile backup assets: %w", err)
 	}
 
+	// Skip Deployment reconciliation when an ordered update is in progress.
+	// The UpdateController manages site-by-site Deployment updates to avoid
+	// simultaneous restarts of both sites (which causes a TOTAL LOSS window).
+	orderedUpdateActive := fg.Status.UpdatePhase != ""
+
+	// When a topology manager is already running for this CR, defer Deployment
+	// updates to the ordered update path: the reconciler firing on a CR spec
+	// change must not restart both sites simultaneously. The runner's
+	// checkSpecDrift compares the desired hash against the live Deployment
+	// annotation, so leaving the existing Deployment untouched is what causes
+	// drift to be observed and the ordered update to start. New Deployments
+	// (initial bootstrap) are always created here since there's no manager yet.
+	managerRunning := r.Runner != nil && r.Runner.HasManager(req.NamespacedName)
+
 	// Reconcile per-site resources
 	for i, site := range fg.Spec.Sites {
 		serverID := int32(101 + i)
@@ -155,8 +169,25 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err := r.reconcilePVC(ctx, &fg, site); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile pvc %s: %w", site.Name, err)
 		}
-		if err := r.reconcileDeployment(ctx, &fg, site, peerSite, serverID, image); err != nil {
-			return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", site.Name, err)
+		if !orderedUpdateActive {
+			deferDeployment := false
+			if managerRunning {
+				var existing appsv1.Deployment
+				deployNN := types.NamespacedName{
+					Namespace: fg.Namespace,
+					Name:      resourceName(fg.Name, site.Name),
+				}
+				if err := r.Get(ctx, deployNN, &existing); err == nil {
+					deferDeployment = true
+				} else if !errors.IsNotFound(err) {
+					return ctrl.Result{}, fmt.Errorf("get deployment %s: %w", site.Name, err)
+				}
+			}
+			if !deferDeployment {
+				if err := r.reconcileDeployment(ctx, &fg, site, peerSite, serverID, image); err != nil {
+					return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", site.Name, err)
+				}
+			}
 		}
 		if err := r.reconcileSiteService(ctx, &fg, site); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile site service %s: %w", site.Name, err)
@@ -644,179 +675,179 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 
 		mysqlContainer := corev1.Container{
-				Name:  "mysql",
-				Image: image,
-				Ports: []corev1.ContainerPort{
-					{
-						Name:          "mysql",
-						ContainerPort: mysqlPort,
-						Protocol:      corev1.ProtocolTCP,
+			Name:  "mysql",
+			Image: image,
+			Ports: []corev1.ContainerPort{
+				{
+					Name:          "mysql",
+					ContainerPort: mysqlPort,
+					Protocol:      corev1.ProtocolTCP,
+				},
+			},
+			VolumeMounts: volumeMounts,
+			Resources:    site.Resources,
+			LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					TCPSocket: &corev1.TCPSocketAction{
+						Port: intstr.FromInt32(mysqlPort),
 					},
 				},
-				VolumeMounts: volumeMounts,
-				Resources:    site.Resources,
-				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						TCPSocket: &corev1.TCPSocketAction{
-							Port: intstr.FromInt32(mysqlPort),
-						},
+				InitialDelaySeconds: 30,
+				PeriodSeconds:       10,
+			},
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					TCPSocket: &corev1.TCPSocketAction{
+						Port: intstr.FromInt32(mysqlPort),
 					},
-					InitialDelaySeconds: 30,
-					PeriodSeconds:       10,
 				},
-				ReadinessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						TCPSocket: &corev1.TCPSocketAction{
-							Port: intstr.FromInt32(mysqlPort),
-						},
-					},
-					InitialDelaySeconds: 5,
-					PeriodSeconds:       5,
-				},
-			}
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       5,
+			},
+		}
 
-			operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
+		operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
 
-			sidecarEnv := []corev1.EnvVar{
-				{Name: "MY_POD_NAME", ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+		sidecarEnv := []corev1.EnvVar{
+			{Name: "MY_POD_NAME", ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+			}},
+			{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", sidecarPort)},
+			{Name: "PEER_ADDRESS", Value: peerAddress},
+			{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
+			{Name: "MY_SITE", Value: site.Name},
+			{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+			}},
+			{Name: "FAILOVER_GROUP", Value: fg.Name},
+			{Name: "LEASE_TIMEOUT", Value: leaseTimeout},
+			{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
+		}
+
+		if fg.Spec.UsesCredentials() {
+			mysqlContainer.Env = []corev1.EnvVar{
+				{Name: "MYSQL_ROOT_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
+						Key:                  "MYSQL_ROOT_PASSWORD",
+					},
 				}},
-				{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", sidecarPort)},
-				{Name: "PEER_ADDRESS", Value: peerAddress},
-				{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
-				{Name: "MY_SITE", Value: site.Name},
-				{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.namespace"},
+			}
+			mysqlContainer.Lifecycle = &corev1.Lifecycle{
+				PreStop: &corev1.LifecycleHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"sh", "-c",
+							`mysql -u "$(cat /etc/mysql/creds/operator/username)" -p"$(cat /etc/mysql/creds/operator/password)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
+						},
+					},
+				},
+			}
+			mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+				corev1.VolumeMount{Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true},
+				corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
+			)
+			appendCredVolume := func(name string) {
+				mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+					corev1.VolumeMount{Name: "creds-" + name, MountPath: "/etc/mysql/creds/" + name, ReadOnly: true})
+			}
+			if fg.Spec.Credentials.AppSecret != "" {
+				appendCredVolume("app")
+			}
+			if fg.Spec.Credentials.ReadOnlySecret != "" {
+				appendCredVolume("readonly")
+			}
+			if fg.Spec.Credentials.MonitorSecret != "" {
+				appendCredVolume("monitor")
+			}
+			if fg.Spec.Credentials.BackupSecret != "" {
+				appendCredVolume("backup")
+			}
+
+			sidecarEnv = append([]corev1.EnvVar{
+				{Name: "MYSQL_USER", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
+						Key:                  "username",
+					},
 				}},
-				{Name: "FAILOVER_GROUP", Value: fg.Name},
-				{Name: "LEASE_TIMEOUT", Value: leaseTimeout},
-				{Name: "PEER_CHECK_INTERVAL", Value: peerCheckInterval},
-			}
-
-			if fg.Spec.UsesCredentials() {
-				mysqlContainer.Env = []corev1.EnvVar{
-					{Name: "MYSQL_ROOT_PASSWORD", ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-							Key:                  "MYSQL_ROOT_PASSWORD",
-						},
-					}},
-				}
-				mysqlContainer.Lifecycle = &corev1.Lifecycle{
-					PreStop: &corev1.LifecycleHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{
-								"sh", "-c",
-								`mysql -u "$(cat /etc/mysql/creds/operator/username)" -p"$(cat /etc/mysql/creds/operator/password)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
-							},
-						},
+				{Name: "MYSQL_PASSWORD", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
+						Key:                  "password",
 					},
-				}
-				mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
-					corev1.VolumeMount{Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true},
-					corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
-				)
-				appendCredVolume := func(name string) {
-					mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
-						corev1.VolumeMount{Name: "creds-" + name, MountPath: "/etc/mysql/creds/" + name, ReadOnly: true})
-				}
-				if fg.Spec.Credentials.AppSecret != "" {
-					appendCredVolume("app")
-				}
-				if fg.Spec.Credentials.ReadOnlySecret != "" {
-					appendCredVolume("readonly")
-				}
-				if fg.Spec.Credentials.MonitorSecret != "" {
-					appendCredVolume("monitor")
-				}
-				if fg.Spec.Credentials.BackupSecret != "" {
-					appendCredVolume("backup")
-				}
-
-				sidecarEnv = append([]corev1.EnvVar{
-					{Name: "MYSQL_USER", ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-							Key:                  "username",
+				}},
+			}, sidecarEnv...)
+		} else {
+			mysqlContainer.EnvFrom = []corev1.EnvFromSource{
+				{
+					SecretRef: &corev1.SecretEnvSource{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: fg.Spec.SecretName,
 						},
-					}},
-					{Name: "MYSQL_PASSWORD", ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-							Key:                  "password",
-						},
-					}},
-				}, sidecarEnv...)
-			} else {
-				mysqlContainer.EnvFrom = []corev1.EnvFromSource{
-					{
-						SecretRef: &corev1.SecretEnvSource{
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: fg.Spec.SecretName,
-							},
-						},
-					},
-				}
-				mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
-					corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
-				)
-				mysqlContainer.Lifecycle = &corev1.Lifecycle{
-					PreStop: &corev1.LifecycleHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{
-								"sh", "-c",
-								`mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
-							},
-						},
-					},
-				}
-
-				sidecarEnv = append([]corev1.EnvVar{
-					{Name: "MYSQL_DSN", ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: fg.Spec.SecretName},
-							Key:                  "dsn",
-						},
-					}},
-				}, sidecarEnv...)
-			}
-
-			sidecarContainer := corev1.Container{
-				Name:  "sidecar",
-				Image: sidecarImage,
-				Ports: []corev1.ContainerPort{
-					{
-						Name:          "sidecar",
-						ContainerPort: sidecarPort,
-						Protocol:      corev1.ProtocolTCP,
 					},
 				},
-				Env:          sidecarEnv,
-				VolumeMounts: sidecarVolumeMounts,
-				Resources:    fg.Spec.SidecarResources,
-				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/health",
-							Port: intstr.FromInt32(sidecarPort),
+			}
+			mysqlContainer.VolumeMounts = append(mysqlContainer.VolumeMounts,
+				corev1.VolumeMount{Name: "init-users", MountPath: "/docker-entrypoint-initdb.d", ReadOnly: true},
+			)
+			mysqlContainer.Lifecycle = &corev1.Lifecycle{
+				PreStop: &corev1.LifecycleHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"sh", "-c",
+							`mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
 						},
 					},
-					InitialDelaySeconds: 5,
-					PeriodSeconds:       10,
-				},
-				ReadinessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path: "/health",
-							Port: intstr.FromInt32(sidecarPort),
-						},
-					},
-					InitialDelaySeconds: 3,
-					PeriodSeconds:       5,
 				},
 			}
 
-			containers := []corev1.Container{mysqlContainer, sidecarContainer}
+			sidecarEnv = append([]corev1.EnvVar{
+				{Name: "MYSQL_DSN", ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: fg.Spec.SecretName},
+						Key:                  "dsn",
+					},
+				}},
+			}, sidecarEnv...)
+		}
+
+		sidecarContainer := corev1.Container{
+			Name:  "sidecar",
+			Image: sidecarImage,
+			Ports: []corev1.ContainerPort{
+				{
+					Name:          "sidecar",
+					ContainerPort: sidecarPort,
+					Protocol:      corev1.ProtocolTCP,
+				},
+			},
+			Env:          sidecarEnv,
+			VolumeMounts: sidecarVolumeMounts,
+			Resources:    fg.Spec.SidecarResources,
+			LivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/health",
+						Port: intstr.FromInt32(sidecarPort),
+					},
+				},
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       10,
+			},
+			ReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/health",
+						Port: intstr.FromInt32(sidecarPort),
+					},
+				},
+				InitialDelaySeconds: 3,
+				PeriodSeconds:       5,
+			},
+		}
+
+		containers := []corev1.Container{mysqlContainer, sidecarContainer}
 
 		volumes := []corev1.Volume{
 			{
@@ -1328,6 +1359,28 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 		RecoveryThreshold: int(recoveryThreshold),
 		FailoverCooldown:  failoverCooldown,
 	}
+}
+
+// ReconcileSiteDeployment reconciles a single site's Deployment to match the
+// desired CR spec. Used by the ordered update controller to update one site at
+// a time instead of both simultaneously.
+func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Context, fgName types.NamespacedName, siteName string) error {
+	var fg v1alpha1.MysqlFailoverGroup
+	if err := r.Get(ctx, fgName, &fg); err != nil {
+		return fmt.Errorf("get CR: %w", err)
+	}
+	image := fg.Spec.Image
+	if image == "" {
+		image = defaultMySQLImage
+	}
+	for i, site := range fg.Spec.Sites {
+		if site.Name == siteName {
+			serverID := int32(101 + i)
+			peerSite := fg.Spec.Sites[1-i]
+			return r.reconcileDeployment(ctx, &fg, site, peerSite, serverID, image)
+		}
+	}
+	return fmt.Errorf("site %q not found in CR %s", siteName, fgName)
 }
 
 // FailoverGroupNamespacedName creates a NamespacedName from a failover group.

@@ -89,6 +89,9 @@ func main() {
 		logger.Error("unable to create controller", "error", err)
 		os.Exit(1)
 	}
+	// Wire the back-reference so the topology runner can call
+	// reconciler.ReconcileSiteDeployment for ordered rolling updates.
+	runner.SetDeploymentReconciler(reconciler)
 
 	// Register the MysqlBackup reconciler alongside the failover-group
 	// reconciler. Both share the manager, so they share leader election.

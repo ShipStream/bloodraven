@@ -43,7 +43,7 @@ func newBootstrapHarness(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 		CloneTimeout: 30 * time.Second,
 	}
 
-	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, bc, bootCfg, tainter, hub, dns, logger, clk)
+	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, bc, bootCfg, tainter, hub, dns, logger, clk)
 
 	return &testHarness{
 		tm:       tm,
