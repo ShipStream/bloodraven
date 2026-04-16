@@ -34,6 +34,11 @@ type UpdateController struct {
 	// Exposed for tests; production code uses 5s.
 	tickInterval time.Duration
 
+	// failFastDuration is how long waitForReplicaReady tolerates a writable standby
+	// with no replication source before aborting. Derived at call time from
+	// tickInterval so the threshold scales with the polling cadence.
+	failFastDuration time.Duration
+
 	mu       sync.Mutex
 	phase    UpdatePhase
 	updating bool
@@ -42,9 +47,10 @@ type UpdateController struct {
 // NewUpdateController creates a new UpdateController.
 func NewUpdateController(failover *FailoverController, logger *slog.Logger) *UpdateController {
 	return &UpdateController{
-		failover:     failover,
-		logger:       logger,
-		tickInterval: 5 * time.Second,
+		failover:         failover,
+		logger:           logger,
+		tickInterval:     5 * time.Second,
+		failFastDuration: 30 * time.Second,
 	}
 }
 
@@ -75,16 +81,21 @@ func (u *UpdateController) Execute(ctx context.Context,
 	// Runs before u.updating=true so an aborted attempt leaves no lock state behind.
 	// A probe error is tolerated — the standby may be briefly unreachable; let the
 	// rest of the flow discover that rather than adding a new transient-error path.
-	if ro, err := standbyChecker.CheckReadOnly(ctx); err == nil {
+	// Each probe is bounded independently so a hung MySQL cannot stall the reconciler.
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if ro, err := standbyChecker.CheckReadOnly(probeCtx); err == nil {
 		if !ro {
+			cancel()
 			return fmt.Errorf("precondition: standby %s is writable; refusing to start ordered update", standbySiteName)
 		}
-		if rs, err := standbyChecker.ShowReplicaStatus(ctx); err == nil {
-			if rs == nil || !rs.IORunning || !rs.SQLRunning {
+		if rs, err := standbyChecker.ShowReplicaStatus(probeCtx); err == nil {
+			if rs == nil || !rs.IORunning || !rs.SQLRunning || rs.SourceHost == "" {
+				cancel()
 				return fmt.Errorf("precondition: standby %s is not replicating", standbySiteName)
 			}
 		}
 	}
+	cancel()
 
 	u.mu.Lock()
 	if u.updating {
@@ -152,7 +163,15 @@ func (u *UpdateController) setPhase(p UpdatePhase) {
 // since that condition will never satisfy the happy path and holding updating=true blocks
 // cross-site split-brain recovery.
 func (u *UpdateController) waitForReplicaReady(ctx context.Context, checker mysql.Checker, timeout time.Duration) error {
-	const failFastThreshold = 6 // 6 × 5s ≈ 30s
+	// Derive the fail-fast tick threshold from duration ÷ tickInterval so the
+	// behaviour is consistent regardless of how tests override the tick cadence.
+	failFastThreshold := 1
+	if u.tickInterval > 0 {
+		failFastThreshold = int((u.failFastDuration + u.tickInterval - 1) / u.tickInterval)
+		if failFastThreshold < 1 {
+			failFastThreshold = 1
+		}
+	}
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(u.tickInterval)
 	defer ticker.Stop()

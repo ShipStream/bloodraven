@@ -485,7 +485,11 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		if tm.sites[i].state != state.StateReadOnly {
 			continue
 		}
-		rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
+		// Bound each probe so a hung MySQL cannot stall the whole poll loop —
+		// replicating flag going stale would also starve failover/update decisions.
+		replCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		rs, err := tm.sites[i].mysql.ShowReplicaStatus(replCtx)
+		cancel()
 		if err != nil {
 			tm.logger.Warn("failed to check replica status", "site", tm.sites[i].name, "error", err)
 			tm.mu.Lock()

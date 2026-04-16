@@ -22,6 +22,7 @@ func TestUpdateController_ExecuteOrder(t *testing.T) {
 		ReplicaStatusVal: &mysql.ReplicaStatus{
 			IORunning:           true,
 			SQLRunning:          true,
+			SourceHost:          "dc1",
 			SecondsBehindSource: int64Ptr(0),
 		},
 	}
@@ -66,6 +67,7 @@ func TestUpdateController_IsUpdating(t *testing.T) {
 		ReplicaStatusVal: &mysql.ReplicaStatus{
 			IORunning:           true,
 			SQLRunning:          true,
+			SourceHost:          "dc1",
 			SecondsBehindSource: int64Ptr(0),
 		},
 	}
@@ -108,6 +110,7 @@ func TestUpdateController_ConcurrentReject(t *testing.T) {
 		ReplicaStatusVal: &mysql.ReplicaStatus{
 			IORunning:           true,
 			SQLRunning:          true,
+			SourceHost:          "dc1",
 			SecondsBehindSource: int64Ptr(0),
 		},
 	}
@@ -161,6 +164,7 @@ func TestUpdateController_PhaseProgression(t *testing.T) {
 		ReplicaStatusVal: &mysql.ReplicaStatus{
 			IORunning:           true,
 			SQLRunning:          true,
+			SourceHost:          "dc1",
 			SecondsBehindSource: int64Ptr(0),
 		},
 	}
@@ -211,6 +215,7 @@ func TestUpdateController_ApplyUpdateError(t *testing.T) {
 		ReplicaStatusVal: &mysql.ReplicaStatus{
 			IORunning:           true,
 			SQLRunning:          true,
+			SourceHost:          "dc1",
 			SecondsBehindSource: int64Ptr(0),
 		},
 	}
@@ -247,6 +252,7 @@ func TestUpdateController_FailoverExecuted(t *testing.T) {
 		ReplicaStatusVal: &mysql.ReplicaStatus{
 			IORunning:           true,
 			SQLRunning:          true,
+			SourceHost:          "dc1",
 			SecondsBehindSource: int64Ptr(0),
 		},
 	}
@@ -395,6 +401,7 @@ func TestWaitForReplicaReady_FailFastOnWritableStandby(t *testing.T) {
 	logger := testutil.TestLogger()
 	uc := NewUpdateController(NewFailoverController(logger), logger)
 	uc.tickInterval = 5 * time.Millisecond
+	uc.failFastDuration = 30 * time.Millisecond
 
 	// Writable with no replication source — will never become healthy.
 	checker := &testutil.FakeMySQL{
@@ -411,7 +418,8 @@ func TestWaitForReplicaReady_FailFastOnWritableStandby(t *testing.T) {
 	if !strings.Contains(err.Error(), "writable") {
 		t.Errorf("expected writable abort error, got: %v", err)
 	}
-	// 6 ticks × 5ms + probe time; cap at 1s to catch regression back to 5-min deadline.
+	// Derived threshold (30ms/5ms) × probe time; cap at 1s to catch regression
+	// back to 5-min deadline.
 	if elapsed > time.Second {
 		t.Errorf("fail-fast took too long: %v (expected well under 1s)", elapsed)
 	}
@@ -423,10 +431,11 @@ func TestWaitForReplicaReady_CounterResetsOnProbeError(t *testing.T) {
 	logger := testutil.TestLogger()
 	uc := NewUpdateController(NewFailoverController(logger), logger)
 	uc.tickInterval = 2 * time.Millisecond
+	uc.failFastDuration = 12 * time.Millisecond // threshold = 6 ticks
 
 	checker := &flappingChecker{
 		writable:   true,
-		errorEvery: 3, // error every 3rd tick
+		errorEvery: 3, // error every 3rd tick — max 2 consecutive writable
 	}
 
 	// Outer deadline short enough to bail out of the test; fail-fast should NOT
