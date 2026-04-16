@@ -280,7 +280,7 @@ The operator writes the following status fields.
 | `lastFailover` | timestamp | When the last failover occurred |
 | `lastFailoverTarget` | string | Which site was promoted in the last failover |
 | `promotionGtidExecuted` | string | GTID set recorded on the candidate at the moment of the most recent promotion, before it began accepting writes. Used for data-loss accounting. |
-| `pitr` | PITRStatus | Reserved summary of the continuous binlog archive. The v1alpha1 controller does not yet populate this field; live archiver health is exposed on the sidecar HTTP server at `/archiver/status`. |
+| `pitr` | PITRStatus | Summary of the continuous binlog archive, populated by the operator from periodic polls of each sidecar's `/archiver/status` endpoint. Present when `spec.backup.pitr.enabled=true`. |
 
 ### SiteStatus
 

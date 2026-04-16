@@ -118,7 +118,7 @@ func (s *Server) handleArchiverStatus(w http.ResponseWriter, r *http.Request) {
 
 // activeSiteResponse is the JSON response from the operator's /active-site endpoint.
 type activeSiteResponse struct {
-	ActiveSite string `json:"active_site"`
+	ActiveSite string `json:"activeSite"`
 }
 
 // RunSafetyNet prevents GTID divergence when a previously-primary pod restarts.

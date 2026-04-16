@@ -15,13 +15,13 @@
 - [ ] 11. Graceful planned-failover API
 - [ ] 12. PVC loss recovery runbook
 - [ ] 13. Backup encryption at rest
-- [ ] 14. Sidecar archiver resilience
-- [ ] 15. Populate `status.pitr`
+- [x] 14. Sidecar archiver resilience
+- [x] 15. Populate `status.pitr`
 - [ ] 16. Grafana dashboards
 - [ ] 17. Log schema contract
 - [ ] 18. `kubectl` plugin
-- [ ] 19. WebSocket vs REST casing inconsistency
-- [ ] 20. Metric naming conformance
+- [x] 19. WebSocket vs REST casing inconsistency
+- [x] 20. Metric naming conformance
 - [ ] 21. "Why not group replication?" page
 - [ ] 22. Production hardening checklist
 - [ ] 23. Failure-mode matrix

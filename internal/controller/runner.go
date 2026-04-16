@@ -34,6 +34,11 @@ type managedTopology struct {
 	cancel context.CancelFunc
 	cfg    TopologyConfig
 
+	// archiver polls each sidecar's /archiver/status endpoint and caches
+	// the latest snapshot for updateCRStatus to copy into status.pitr.
+	// nil only if the runner hasn't finished wiring yet.
+	archiver *archiverPoller
+
 	// lastTopologyDegradedReason tracks the most recent topology-level
 	// Degraded reason so transition events are not confused by replication
 	// reasons that overwrite the shared Degraded condition.
@@ -410,11 +415,19 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 
 	tmCtx, cancel := context.WithCancel(ctx)
 
+	siteNames := make([]string, len(fg.Spec.Sites))
+	for i, s := range fg.Spec.Sites {
+		siteNames[i] = s.Name
+	}
+	archiver := newArchiverPoller(fg.Namespace, fg.Name, siteNames, buildSidecarClients(fg),
+		r.logger.With("fg", nn.String()))
+
 	r.mu.Lock()
 	r.managers[nn] = &managedTopology{
-		tm:     tm,
-		cancel: cancel,
-		cfg:    cfg,
+		tm:       tm,
+		cancel:   cancel,
+		cfg:      cfg,
+		archiver: archiver,
 	}
 	r.mu.Unlock()
 
@@ -426,6 +439,8 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		}
 		r.logger.Info("topology manager stopped", "fg", nn)
 	}()
+
+	go archiver.Run(tmCtx)
 
 	return nil
 }
@@ -684,6 +699,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		})
 	}
 
+	// Populate status.pitr from the archiver poller's cache. Done here
+	// (rather than on every reconcile) so the topology callback is the
+	// single writer of freshFG.Status and we stay on one resource
+	// version.
+	r.populatePITRStatus(nn, &freshFG)
+
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
 	if equality.Semantic.DeepEqual(existingStatus, &freshFG.Status) {
 		r.logger.Debug("status unchanged, skipping update", "fg", nn)
@@ -712,6 +733,82 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// so events are not emitted for transitions that failed to persist.
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
 	r.emitDegradedTransitionEvents(&freshFG, nn, snap)
+}
+
+// populatePITRStatus fills freshFG.Status.PITR from the cached
+// per-site archiver snapshots. Aggregates across sites by taking the
+// oldest first-event time, newest last-event time, maximum file
+// count/bytes, and latest upload timestamp — values the user cares
+// about are coverage bounds, not per-site breakdowns.
+//
+// No-ops when PITR is disabled in spec or when no archiver snapshot
+// has been observed yet (e.g. the poller just started and both sites
+// are unreachable). In that case we clear stale data so a disabled
+// flip doesn't keep showing bounds from a previous configuration.
+func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup) {
+	enabled := fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled
+	if !enabled {
+		fg.Status.PITR = nil
+		return
+	}
+
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok || mt.archiver == nil {
+		return
+	}
+
+	profileName := ""
+	if fg.Spec.Backup.PITR.ProfileName != "" {
+		profileName = fg.Spec.Backup.PITR.ProfileName
+	}
+
+	out := &v1alpha1.PITRStatus{
+		Enabled:     true,
+		ProfileName: profileName,
+	}
+	var (
+		haveAny bool
+		lastErr string
+	)
+	for _, s := range mt.archiver.Snapshots() {
+		if s == nil {
+			continue
+		}
+		haveAny = true
+		if s.ManifestFileCount > int64(out.ArchivedFileCount) {
+			out.ArchivedFileCount = int32(s.ManifestFileCount)
+		}
+		if s.ManifestBytes > out.ArchivedBytes {
+			out.ArchivedBytes = s.ManifestBytes
+		}
+		if !s.OldestArchivedTime.IsZero() &&
+			(out.OldestArchivedTime == nil || s.OldestArchivedTime.Before(out.OldestArchivedTime.Time)) {
+			t := metav1.NewTime(s.OldestArchivedTime)
+			out.OldestArchivedTime = &t
+		}
+		if !s.NewestArchivedTime.IsZero() &&
+			(out.NewestArchivedTime == nil || s.NewestArchivedTime.After(out.NewestArchivedTime.Time)) {
+			t := metav1.NewTime(s.NewestArchivedTime)
+			out.NewestArchivedTime = &t
+		}
+		if !s.LastUploadAt.IsZero() &&
+			(out.LastArchivedTime == nil || s.LastUploadAt.After(out.LastArchivedTime.Time)) {
+			t := metav1.NewTime(s.LastUploadAt)
+			out.LastArchivedTime = &t
+		}
+		if s.LastError != "" {
+			lastErr = fmt.Sprintf("%s: %s", s.Site, s.LastError)
+		}
+	}
+	if !haveAny {
+		// No sidecar has responded yet; keep existing status to avoid
+		// flapping between populated and empty while polls warm up.
+		return
+	}
+	out.Message = lastErr
+	fg.Status.PITR = out
 }
 
 // emitFailoverEvents fires Kubernetes Events when significant failover or

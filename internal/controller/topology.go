@@ -199,17 +199,17 @@ type TopologyManager struct {
 type SiteStatusEntry struct {
 	Name                      string `json:"name"`
 	State                     string `json:"state"`
-	RecoveryState             string `json:"recovery_state,omitempty"`
-	DivergentGtid             string `json:"divergent_gtid,omitempty"`
-	DivergentTransactionCount *int64 `json:"divergent_transaction_count,omitempty"`
+	RecoveryState             string `json:"recoveryState,omitempty"`
+	DivergentGtid             string `json:"divergentGtid,omitempty"`
+	DivergentTransactionCount *int64 `json:"divergentTransactionCount,omitempty"`
 }
 
 // StatusResponse is returned by the /status endpoint.
 type StatusResponse struct {
-	ActiveSite            string             `json:"active_site"`
+	ActiveSite            string             `json:"activeSite"`
 	Sites                 [2]SiteStatusEntry `json:"sites"`
-	PollTime              string             `json:"poll_time"`
-	PromotionGtidExecuted string             `json:"promotion_gtid_executed,omitempty"`
+	PollTime              string             `json:"pollTime"`
+	PromotionGtidExecuted string             `json:"promotionGtidExecuted,omitempty"`
 }
 
 func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, updater *UpdateController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {

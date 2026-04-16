@@ -298,18 +298,6 @@ function copyCmd(cmd) {
   }
 }
 
-// Normalize REST /status JSON (snake_case) to the shape handleMessage expects.
-// The operator returns {active_site, sites, poll_time}; handleMessage reads
-// activeSite/sites/pollTime.
-function normalizeStatus(raw) {
-  if (!raw || typeof raw !== 'object') return raw;
-  return {
-    activeSite: raw.active_site,
-    sites: raw.sites,
-    pollTime: raw.poll_time,
-  };
-}
-
 // Poll the REST status endpoint as a fallback when the WebSocket isn't
 // connected. The WS broadcast (/ws/status) is the primary source of live
 // topology and fires on every operator poll cycle.
@@ -318,13 +306,13 @@ async function pollStatus() {
     const r = await fetch('/api/operator/status');
     if (!r.ok) return;
     const data = await r.json();
-    // The operator returns {"namespace/name": {active_site, sites, poll_time}}.
+    // The operator returns {"namespace/name": {activeSite, sites, pollTime}}.
     if (data.sites) {
-      handleMessage(normalizeStatus(data));
+      handleMessage(data);
     } else if (typeof data === 'object') {
       for (const key of Object.keys(data)) {
         if (data[key] && data[key].sites) {
-          handleMessage(normalizeStatus(data[key]));
+          handleMessage(data[key]);
         }
       }
     }

@@ -233,9 +233,9 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sC
 			return
 		}
 		json.NewEncoder(rw).Encode(map[string]string{
-			"namespace":   ns,
-			"group":       group,
-			"active_site": status.ActiveSite,
+			"namespace":  ns,
+			"group":      group,
+			"activeSite": status.ActiveSite,
 		})
 	})
 	// /pitr-cutoff is consumed by the sidecar's binlog archiver.

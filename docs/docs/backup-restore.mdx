@@ -510,9 +510,6 @@ The restore Job runs in two phases, one per container:
 
 ### Known limitations
 
-- The sidecar's `PITRStatus` API field exists but is not yet
-  populated by a controller-side manifest scan; live archiver health
-  comes from the sidecar HTTP endpoint in the meantime.
 - A GTID-set-based file filter would let the restore download fewer
   binlogs; today it filters on `firstEventTime` only and relies on
   GTID dedup to cover over-inclusion.
