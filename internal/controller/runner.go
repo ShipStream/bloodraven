@@ -201,10 +201,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		if ok && existing.cfg == cfg {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
 			existing.tm.SetTopologyFrozen(frozen)
-			if recloneSite := fg.GetAnnotations()[RecloneAnnotation]; recloneSite != "" {
-				existing.tm.SetRecloneSite(recloneSite)
-				r.removeRecloneAnnotation(ctx, nn)
-			}
+			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
 			// Detect spec drift for ordered rolling updates.
 			r.checkSpecDrift(ctx, fg, existing.tm)
 			continue
@@ -222,15 +219,13 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		// Apply the suppression flag on the freshly-started manager so the
 		// first poll cycle already respects an in-flight restore.
 		r.mu.RLock()
-		if mt, ok := r.managers[nn]; ok {
+		mt, started := r.managers[nn]
+		r.mu.RUnlock()
+		if started {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
 			mt.tm.SetTopologyFrozen(frozen)
-			if recloneSite := fg.GetAnnotations()[RecloneAnnotation]; recloneSite != "" {
-				mt.tm.SetRecloneSite(recloneSite)
-				r.removeRecloneAnnotation(ctx, nn)
-			}
+			r.handleRecloneAnnotation(ctx, fg, nn, mt.tm)
 		}
-		r.mu.RUnlock()
 	}
 
 	// Stop managers for deleted CRs.
@@ -245,6 +240,36 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	r.mu.Unlock()
 
 	return nil
+}
+
+// handleRecloneAnnotation consumes the one-shot reclone annotation
+// under the safety interlock described in reclone.go. Invalid
+// annotations are rejected with a RecloneRejected Event and the
+// annotation is cleared so the admin can retry with a fixed value
+// rather than receive one rejection event per reconcile.
+func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, tm *TopologyManager) {
+	raw := fg.GetAnnotations()[RecloneAnnotation]
+	if raw == "" {
+		return
+	}
+	req := parseRecloneAnnotation(raw)
+	if err := validateRecloneRequest(fg, req); err != nil {
+		r.logger.Warn("reclone annotation rejected", "fg", nn, "value", raw, "error", err.Error())
+		if r.recorder != nil {
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, "RecloneRejected", err.Error())
+		}
+		// Clear the annotation so the admin sees a single rejection and
+		// can re-apply with the correct value. Leaving it would spam
+		// the same event on every sync interval.
+		r.removeRecloneAnnotation(ctx, nn)
+		return
+	}
+	tm.SetRecloneSite(req.Site)
+	if r.recorder != nil {
+		r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecloneRequested",
+			"admin requested CLONE INSTANCE of site %q", req.Site)
+	}
+	r.removeRecloneAnnotation(ctx, nn)
 }
 
 // removeRecloneAnnotation removes the one-shot reclone annotation from the CR

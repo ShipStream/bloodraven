@@ -140,9 +140,9 @@ kubectl -n $NS scale deployment mysql-playground-pdx --replicas=0
 kubectl exec ... -e "SET GLOBAL read_only=OFF; INSERT INTO divergence_test.rogue VALUES (1); SET GLOBAL read_only=ON;"
 ```
 
-**Verify**: Status shows RecoveryPending with reason DivergentTransactions, operator logs "GTID divergence", exact divergent GTID set reported. Cleanup: `./playground/reset-mysql.sh`.
+**Verify**: Status shows RecoveryPending with reason DivergentTransactions, operator logs "GTID divergence", exact divergent GTID set reported. Cleanup: run scenario 19 (Reclone Safety Interlock) to exercise the reclone path against the divergent state this scenario leaves behind, or skip straight to `./playground/reset-mysql.sh`.
 
-**Important**: `reset-mysql.sh` is **required** after this scenario — divergent GTID state cannot be auto-recovered. Clear db-readonly taints on both nodes after reset if PVCs fail to provision.
+**Important**: `reset-mysql.sh` is **required** after this scenario (or after scenario 19 if you chain) — divergent GTID state cannot be auto-recovered without a reclone. Clear db-readonly taints on both nodes after reset if PVCs fail to provision.
 
 ---
 
@@ -408,12 +408,76 @@ done
 
 ---
 
+### 19. Reclone Safety Interlock
+**Category**: Admin-action safety / divergent-GTID confirmation | **Risk**: Medium
+
+**Hypothesis**: The `bloodraven.shipstream.io/reclone-site` annotation rejects bare site names and mismatched GTID prefixes when the target site has a non-empty `status.sites[].divergentGtid`, preventing a fat-fingered `reclone-site=<wrong-site>` from destroying the wrong replica. Cold reclones (no divergence recorded) still accept the bare form.
+
+**Prerequisite**: Scenario 8 (GTID Divergence Detection) — it creates a site with `divergentGtid` and `recoveryState=RecoveryBlocked` that the interlock gates can be exercised against. Do NOT run `reset-mysql.sh` until this scenario completes; the interlock needs the divergent state scenario 8 leaves behind.
+
+**Injection (four sub-cases)**:
+
+```bash
+NS=bloodraven-playground
+FG=playground
+
+# Identify the divergent site from scenario 8's aftermath.
+SITE=$(kubectl -n $NS get mfg $FG -o jsonpath='{range .status.sites[?(@.recoveryState=="RecoveryBlocked")]}{.name}{end}')
+DG=$(kubectl -n $NS get mfg $FG -o jsonpath="{.status.sites[?(@.name==\"$SITE\")].divergentGtid}")
+echo "divergent site=$SITE gtid=$DG"
+
+# --- A) Rejected: bare site name against a divergent site ---
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE
+sleep 5
+kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -5
+kubectl -n $NS get mfg $FG -o jsonpath='{.metadata.annotations.bloodraven\.shipstream\.io/reclone-site}'; echo
+
+# --- B) Rejected: mismatched GTID prefix ---
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:deadbeef
+sleep 5
+kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -5
+
+# --- C) Accepted: matching 8-char prefix of divergentGtid ---
+PREFIX=$(echo -n "$DG" | cut -c1-8)
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE:$PREFIX
+# Watch for RecloneRequested and the Bootstrapping condition entering Cloning.
+kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp -w &
+EVENT_WATCH_PID=$!
+sleep 90
+kill $EVENT_WATCH_PID 2>/dev/null
+
+# --- D) Cold reclone still works (no divergence) ---
+# After sub-case C completes the site has rejoined as replica and no longer
+# has divergentGtid in status. The bare form should now be accepted.
+kubectl -n $NS annotate --overwrite mfg $FG bloodraven.shipstream.io/reclone-site=$SITE
+sleep 5
+kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.lastTimestamp | tail -3
+```
+
+**Verify**:
+
+| Sub-case | Expected outcome |
+|---|---|
+| A. bare site, divergent | `RecloneRejected` Warning event with "annotation must include the divergent-GTID prefix" text; annotation removed from CR; no `Bootstrapping` condition transition; `divergentGtid` unchanged. |
+| B. mismatched prefix | `RecloneRejected` Warning event with "does not match the observed divergentGtid" text; annotation removed; site still fenced; no clone executed. |
+| C. matching prefix | `RecloneRequested` Normal event with site name; `Bootstrapping` condition cycles through `Cloning` → `WaitingForRestart` → `SetupReplication` → `Done`; `RecoveryPending` clears; site comes back as replica with `SERVICE_STATE=ON`. Wall-clock: 30–60s total. |
+| D. cold bare site | `RecloneRequested` Normal event (no rejection); another full bootstrap cycle runs. This confirms we didn't accidentally make the interlock mandatory in the non-divergent case. |
+
+**Timing**: Sub-cases A and B resolve within one sync cycle (~30s; the runner's `sync()` ticker). Sub-case C takes 30-60s for the clone + restart. Sub-case D is the same.
+
+**Important — sync interval**: The runner re-reads CRs every 30s, so the annotation may sit briefly before being processed. If you see no event after 5s, wait up to 35s before concluding rejection isn't firing.
+
+**Cleanup**: `./playground/reset-mysql.sh` is advisable after sub-case D to restore a clean matrix for subsequent scenarios. Clear the `shipstream.io/db-readonly` taint from both nodes after the reset.
+
+---
+
 ## Execution Plan
 
 1. **Setup**: `k3d cluster create` + `./playground/setup.sh`
 2. **Run scenarios 1-10 first** (core failure modes, each builds confidence for later ones)
-3. **Run 11-15** (advanced, may need reset between scenarios)
-4. **Between scenarios**: `./playground/chaos.sh status` to confirm clean state; `./playground/reset-mysql.sh` if topology is broken
-5. **For each scenario**: Document actual vs. expected, note timing and any bugs
-6. **After code fixes**: `./playground/rebuild.sh operator` (or `sidecar`), then re-run affected scenario
+3. **Run 11-18** (advanced, may need reset between scenarios)
+4. **Run 19 immediately after scenario 8** (scenario 8 leaves behind the divergent state it needs as a prerequisite — don't reset in between)
+5. **Between scenarios**: `./playground/chaos.sh status` to confirm clean state; `./playground/reset-mysql.sh` if topology is broken
+6. **For each scenario**: Document actual vs. expected, note timing and any bugs
+7. **After code fixes**: `./playground/rebuild.sh operator` (or `sidecar`), then re-run affected scenario
 
