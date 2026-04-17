@@ -99,8 +99,8 @@ func validateRecloneRequest(fg *v1alpha1.MysqlFailoverGroup, req RecloneRequest)
 	if req.GtidPrefix == "" {
 		return fmt.Errorf(
 			"reclone of %q rejected: site has divergent transactions (gtid %q); "+
-				"annotation must include the divergent-GTID prefix to confirm intent — "+
-				"use reclone-site=%s:%s",
+				"annotation value must include the divergent-GTID prefix to confirm intent — "+
+				"set annotation bloodraven.shipstream.io/reclone-site=%s:%s",
 			req.Site, divergentGtid, req.Site, truncateForHint(divergentGtid, minRecloneGtidPrefix))
 	}
 	if len(req.GtidPrefix) < minRecloneGtidPrefix {

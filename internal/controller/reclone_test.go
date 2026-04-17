@@ -146,31 +146,34 @@ func TestValidateRecloneRequest_DivergentSite_ExtendedPrefix_OK(t *testing.T) {
 	}
 }
 
-// Fat-finger scenario from the wishlist: admin meant pdx (which has
-// divergent data) but typed iad (which is healthy). The prefix they
-// copied belongs to pdx, not iad. Under the old code this would have
-// wiped iad. The interlock must catch it.
-func TestValidateRecloneRequest_FatFingerSiteName_Rejected(t *testing.T) {
+// Cold-reclone remains allowed when the requested site has no recorded
+// divergent GTID, even if the supplied prefix happens to match another
+// site's divergence. The interlock is not the last line of defence for
+// a fat-fingered healthy site — the operator's downstream checkReclone
+// refuses to reclone the active primary.
+func TestValidateRecloneRequest_ColdReclone_CrossSitePrefixAllowed(t *testing.T) {
 	fg := recloneFG([]string{"iad", "pdx"}, map[string]string{
 		"pdx": "f00dbabe-0000-0000-0000-000000000000:20-25",
 	})
-	// Wrong site (iad), right prefix (copied from pdx).
-	err := validateRecloneRequest(fg, RecloneRequest{Site: "iad", GtidPrefix: "f00dbabe"})
-	// iad has no divergent GTID, so cold-reclone is allowed — this
-	// specific case still goes through. Document the real fat-finger
-	// protection: the user typed pdx-for-iad but hit iad which is
-	// healthy, so the interlock is not the last line of defence
-	// here — the operator's downstream checkReclone refuses to
-	// reclone the active primary. Validate via a different setup:
-	// both sites divergent, wrong prefix.
-	_ = err
+	if err := validateRecloneRequest(fg, RecloneRequest{Site: "iad", GtidPrefix: "f00dbabe"}); err != nil {
+		t.Errorf("cold reclone should be allowed when target site has no divergent GTID, got %v", err)
+	}
+}
 
-	fg2 := recloneFG([]string{"iad", "pdx"}, map[string]string{
+// Fat-finger scenario from the wishlist: admin meant pdx but typed iad,
+// and pasted pdx's divergent-GTID prefix. When iad itself is divergent,
+// the cross-site prefix mismatch must be rejected — under the old code
+// this would have wiped iad.
+func TestValidateRecloneRequest_DivergentSite_CrossSitePrefixRejected(t *testing.T) {
+	fg := recloneFG([]string{"iad", "pdx"}, map[string]string{
 		"iad": "a1b2c3d4-0000-0000-0000-000000000000:11-15",
 		"pdx": "f00dbabe-0000-0000-0000-000000000000:20-25",
 	})
-	err = validateRecloneRequest(fg2, RecloneRequest{Site: "iad", GtidPrefix: "f00dbabe"})
+	err := validateRecloneRequest(fg, RecloneRequest{Site: "iad", GtidPrefix: "f00dbabe"})
 	if err == nil {
 		t.Fatal("cross-site prefix leak should be rejected")
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Errorf("error = %v, want 'does not match'", err)
 	}
 }
