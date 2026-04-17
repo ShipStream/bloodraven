@@ -503,7 +503,10 @@ Without `BACKUP_ADMIN`, set `dump.consistent: false` on the profile.
 
 Bloodraven can continuously archive MySQL binary logs so restores can
 target an arbitrary `--stop-datetime` on top of any retained full
-dump, not just the dump's own capture point.
+dump, not just the dump's own capture point. For the interaction
+between PITR and emergency-failover RPO — specifically, when PITR
+does and does not narrow the data-loss window — see
+[Durability and RPO → PITR and the RPO window](./durability-and-rpo.mdx#pitr-and-the-rpo-window).
 
 ### How it works
 
