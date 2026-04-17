@@ -23,6 +23,7 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 | `failureThreshold` | int | No | `3` | Consecutive failed polls before a site is marked unreachable |
 | `recoveryThreshold` | int | No | `2` | Consecutive successful polls before a site is marked writable |
 | `failoverCooldown` | duration | No | `5m` | Minimum time between automatic failovers |
+| `splitBrainPolicy` | SplitBrainPolicySpec | No | -- | Opt-in automated resolution when both sites are writable and the operator has no prior failover history. Omit or leave `preferSite` empty to require manual resolution (alert only). |
 | `sidecarResources` | ResourceRequirements | No | -- | Compute resources (requests/limits) for the sidecar container |
 | `mysqlConf` | map[string]string | No | -- | MySQL configuration overrides merged into the generated `my.cnf`. Changes trigger an ordered rolling restart when `updateStrategy: OrderedUpdate` is set. |
 | `replication` | ReplicationSpec | No | -- | Replication health settings |
@@ -79,6 +80,14 @@ Each entry in `spec.sites` defines one site in the failover group.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `maxLagSeconds` | int | No | Maximum acceptable replication lag in seconds before the replica is considered unhealthy |
+
+### SplitBrainPolicySpec
+
+Opt-in configuration for how the operator should behave when both sites are simultaneously writable. See [Split-brain resolution](./failover.mdx#split-brain-resolution) for a full description of semantics and tradeoffs.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `preferSite` | string | No | Site name that wins unresolvable split-brain ties. Must match one of `spec.sites[].name`. If empty or unset, the operator falls back to manual resolution (alert only). |
 
 ### ServiceTemplate
 

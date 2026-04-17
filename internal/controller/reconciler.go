@@ -1380,6 +1380,11 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 		failoverCooldown = int64(fg.Spec.FailoverCooldown.Duration)
 	}
 
+	var splitBrainPreferSite string
+	if fg.Spec.SplitBrainPolicy != nil {
+		splitBrainPreferSite = fg.Spec.SplitBrainPolicy.PreferSite
+	}
+
 	return TopologyConfig{
 		Namespace: fg.Namespace,
 		Name:      fg.Name,
@@ -1399,10 +1404,11 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 			fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, fg.Spec.Sites[0].Name, fg.Namespace),
 			fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, fg.Spec.Sites[1].Name, fg.Namespace),
 		},
-		PollInterval:      pollInterval,
-		FailureThreshold:  int(failureThreshold),
-		RecoveryThreshold: int(recoveryThreshold),
-		FailoverCooldown:  failoverCooldown,
+		PollInterval:         pollInterval,
+		FailureThreshold:     int(failureThreshold),
+		RecoveryThreshold:    int(recoveryThreshold),
+		FailoverCooldown:     failoverCooldown,
+		SplitBrainPreferSite: splitBrainPreferSite,
 	}
 }
 

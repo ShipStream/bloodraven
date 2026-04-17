@@ -38,6 +38,11 @@ type TopologyConfig struct {
 	RecoveryThreshold int
 	FailoverCooldown  int64 // nanoseconds, default 5m
 
+	// SplitBrainPreferSite, when non-empty, names the site that wins
+	// unresolvable split-brain ties. It must equal one of Sites[].Name.
+	// Empty means manual resolution (alert only) — the existing default.
+	SplitBrainPreferSite string
+
 	// CredentialHash is a hash of the operator secret data. A change
 	// triggers a topology manager restart with new MySQL connections.
 	CredentialHash string
@@ -758,6 +763,34 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			tm.logger.Info("fencing returning old primary (split brain after failover)", "site", oldPrimarySiteName)
 			if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
 				tm.logger.Error("failed to fence returning old primary", "site", oldPrimarySiteName, "error", err)
+			}
+		}
+	}
+
+	// Split-brain with no prior failover target (fresh deploy past bootstrap,
+	// or operator restart that lost in-memory state): if the user configured
+	// spec.splitBrainPolicy.preferSite, fence the non-preferred site and
+	// promote the preferred one. The promotion still flows through the
+	// standard path below so it respects the anti-flap cooldown.
+	if action.SplitBrain && action.PromoteSite == "" && tm.lastFailoverTarget == "" && !tm.isBootstrapping() {
+		if prefer := tm.cfg.SplitBrainPreferSite; prefer != "" {
+			if preferred := tm.getSite(prefer); preferred != nil && preferred.state == state.StateWritable {
+				loserName := tm.otherSiteName(prefer)
+				if loser := tm.getSite(loserName); loser != nil && loser.state == state.StateWritable {
+					tm.logger.Warn("split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.preferSite",
+						"preferSite", prefer, "fencedSite", loserName)
+					if err := loser.mysql.SetSuperReadOnly(ctx, true); err != nil {
+						tm.logger.Error("failed to fence non-preferred site", "site", loserName, "error", err)
+					} else {
+						metrics.SplitBrainAutoResolveTotal.WithLabelValues(prefer).Inc()
+					}
+					// Synthesize a promotion so the preferred site is
+					// re-promoted (clears replication metadata, records
+					// promotionGtid, flips DNS). The anti-flap cooldown
+					// check below still applies.
+					action.PromoteSite = prefer
+					action.FlipDNS = prefer
+				}
 			}
 		}
 	}
