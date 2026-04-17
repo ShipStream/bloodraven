@@ -119,9 +119,9 @@ func TestActiveSiteFound(t *testing.T) {
 	if result["group"] != "orders" {
 		t.Errorf("expected group=orders, got %q", result["group"])
 	}
-	// No polls run, so active_site should be empty.
-	if result["active_site"] != "" {
-		t.Errorf("expected empty active_site, got %q", result["active_site"])
+	// No polls run, so activeSite should be empty.
+	if result["activeSite"] != "" {
+		t.Errorf("expected empty activeSite, got %q", result["activeSite"])
 	}
 }
 

@@ -20,8 +20,8 @@ var (
 	}, []string{"site", "action"})
 
 	WSClientCount = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "bloodraven_websocket_clients",
-		Help: "Number of connected websocket clients.",
+		Name: "bloodraven_websocket_connected_clients",
+		Help: "Number of currently connected WebSocket clients.",
 	})
 
 	DNSFlipCount = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -112,6 +112,40 @@ var (
 		Name: "bloodraven_backup_last_size_bytes",
 		Help: "Size in bytes of the last successful MysqlBackup artifact per (group, profile).",
 	}, []string{"group", "profile"})
+
+	// --- PITR archiver metrics ----------------------------------------
+	//
+	// These three gauges mirror per-site sidecar archiver state that the
+	// operator polls via /archiver/status. They use Gauge (not Counter)
+	// because the operator doesn't observe individual increments — it
+	// reports the sidecar's current cumulative value. Labels are
+	// (namespace, group, site) so multi-cluster Prometheus scrapes can
+	// disambiguate.
+
+	// ArchiverUploadFailures is the cumulative count of failed archive
+	// attempts reported by the sidecar since its last start. Resets on
+	// sidecar restart; dashboards should use `increase()` / `rate()` to
+	// handle resets gracefully.
+	ArchiverUploadFailures = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_archiver_upload_failures",
+		Help: "Cumulative PITR archiver upload failures reported by the per-site sidecar. Monotonic except across sidecar restarts.",
+	}, []string{"namespace", "group", "site"})
+
+	// ArchiverLastUploadTimestamp is the Unix timestamp of the most
+	// recent successful binlog archive, per site. 0 when the sidecar
+	// has not archived anything since start.
+	ArchiverLastUploadTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_archiver_last_upload_timestamp_seconds",
+		Help: "Unix timestamp of the last successful PITR binlog archive per site.",
+	}, []string{"namespace", "group", "site"})
+
+	// ArchiverBacklogFiles is the count of sealed binlogs not yet
+	// present in the manifest at the end of the last scan. >0 means
+	// the archiver is behind and RPO is drifting.
+	ArchiverBacklogFiles = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_archiver_backlog_files",
+		Help: "Sealed binlogs that have not been uploaded yet at the end of the last archiver scan.",
+	}, []string{"namespace", "group", "site"})
 )
 
 // AllStates is the set of possible site states, used to emit the full state-set.
@@ -122,5 +156,6 @@ func Register(reg prometheus.Registerer) {
 	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount, FailoversTotal,
 		ReplicationLag, ReplicationRunning, SiteState, DivergentTransactions, RecloneOperations,
 		BackupRunsTotal, BackupDurationSeconds,
-		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes)
+		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes,
+		ArchiverUploadFailures, ArchiverLastUploadTimestamp, ArchiverBacklogFiles)
 }

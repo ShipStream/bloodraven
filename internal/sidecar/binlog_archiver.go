@@ -53,12 +53,33 @@ type BinlogArchiver struct {
 	store        archiveStore
 	logger       *slog.Logger
 
-	// mu guards lastError, lastScanAt, filesArchiv, lastRetentionRun.
+	// mu guards lastError, lastScanAt, filesArchiv, lastRetentionRun,
+	// uploadFailures, lastUploadAt, backlogFiles, and the manifest
+	// aggregates (manifestFileCount/Bytes/oldest/newest).
 	mu               sync.Mutex
 	lastError        string
 	lastScanAt       time.Time
 	filesArchiv      int64
 	lastRetentionRun time.Time
+	// uploadFailures is the cumulative count of failed archive attempts
+	// since sidecar start. Increments once per binlog whose upload or
+	// manifest append errors out, including role-check / index-read
+	// failures that prevent the scan from progressing.
+	uploadFailures int64
+	// lastUploadAt is the wall-clock time of the most recent successful
+	// archive (ManifestEntry appended). Zero until the first success.
+	lastUploadAt time.Time
+	// backlogFiles is the count of sealed index entries that were
+	// missing from the manifest at the end of the most recent scan.
+	// Reset every cycle. >0 means the archiver hasn't caught up yet.
+	backlogFiles int64
+	// manifestFileCount/Bytes and oldest/newestArchivedTime are
+	// aggregates computed from the manifest after each scan.
+	// They power the operator's status.pitr fields.
+	manifestFileCount  int64
+	manifestBytes      int64
+	oldestArchivedTime time.Time
+	newestArchivedTime time.Time
 }
 
 // retentionClientConfig is what the archiver needs to query the
@@ -217,6 +238,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	// primary's first archive cycle fires a couple of seconds later.
 	ro, err := a.mysql.IsReadOnly(ctx)
 	if err != nil {
+		a.incUploadFailures()
 		a.setError(fmt.Sprintf("role check: %v", err))
 		a.logger.Debug("role check failed; skipping scan", "error", err)
 		return
@@ -225,12 +247,14 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		// Standby: nothing to do. Clear any stale error so a former
 		// primary that failed over cleanly stops reporting noise.
 		a.setError("")
+		a.setBacklog(0)
 		return
 	}
 
 	indexPath := filepath.Join(a.cfg.BinlogDir, a.cfg.BinlogIndex)
 	entries, err := readBinlogIndex(indexPath)
 	if err != nil {
+		a.incUploadFailures()
 		a.setError(fmt.Sprintf("read index: %v", err))
 		a.logger.Warn("read binlog index", "path", indexPath, "error", err)
 		return
@@ -239,6 +263,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		// < 2 means either no binlogs yet (len 0) or only the active
 		// one exists (len 1). Nothing sealed to archive.
 		a.setError("")
+		a.setBacklog(0)
 		return
 	}
 	// Drop the last entry: it is the active binlog (tail of the index
@@ -247,6 +272,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 
 	manifest, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
 	if err != nil {
+		a.incUploadFailures()
 		a.setError(fmt.Sprintf("load manifest: %v", err))
 		a.logger.Warn("load manifest", "error", err)
 		return
@@ -256,7 +282,15 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		archivedNames[f.Name] = struct{}{}
 	}
 
+	backlog := int64(0)
+	for _, relOrAbs := range sealed {
+		if _, seen := archivedNames[filepath.Base(relOrAbs)]; !seen {
+			backlog++
+		}
+	}
+
 	archivedThisCycle := 0
+	hadFileError := false
 	for _, relOrAbs := range sealed {
 		// index entries may be absolute ("/var/lib/mysql/mysql-bin.000042")
 		// or relative to binlog_basename depending on MySQL version; we
@@ -268,22 +302,44 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		}
 		abs := filepath.Join(a.cfg.BinlogDir, name)
 		if err := a.archiveOne(ctx, abs, name); err != nil {
+			a.incUploadFailures()
 			a.setError(fmt.Sprintf("archive %s: %v", name, err))
 			a.logger.Warn("archive binlog", "file", name, "error", err)
+			hadFileError = true
 			// Don't bail: try remaining files. A single bad file
 			// shouldn't block newer ones.
 			continue
 		}
 		archivedThisCycle++
+		backlog--
 	}
+	a.setBacklog(backlog)
 
 	if archivedThisCycle > 0 {
+		now := time.Now().UTC()
 		a.mu.Lock()
 		a.filesArchiv += int64(archivedThisCycle)
+		a.lastUploadAt = now
 		a.mu.Unlock()
 		a.logger.Info("archived sealed binlogs", "count", archivedThisCycle)
 	}
-	a.setError("")
+	// Preserve the most recent per-file error when at least one archive
+	// failed this cycle — otherwise /archiver/status would look green
+	// after a partial failure and the operator's status.pitr Message
+	// would flap clear on every scan.
+	if !hadFileError {
+		a.setError("")
+	}
+
+	// Recompute manifest aggregates so the operator can populate
+	// status.pitr without re-listing storage. Reload the manifest to
+	// include entries just appended this cycle.
+	if archivedThisCycle > 0 {
+		if m, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site); err == nil {
+			manifest = m
+		}
+	}
+	a.updateManifestAggregates(manifest.Files)
 
 	// Opportunistic retention sweep. Runs at most once per
 	// retentionCfg.Interval; piggybacked on the archive scan so we
@@ -448,6 +504,27 @@ type Status struct {
 	StorageType    string    `json:"storageType"`
 	ManifestPrefix string    `json:"manifestPrefix"`
 	Site           string    `json:"site"`
+	// UploadFailures is the cumulative count of archive-attempt errors
+	// since sidecar start (role check, index read, manifest I/O, or
+	// per-file upload). Monotonic except across restarts.
+	UploadFailures int64 `json:"uploadFailures"`
+	// LastUploadAt is the time of the most recent successful archive.
+	// Omitted until the archiver has appended at least one manifest
+	// entry in this process lifetime.
+	LastUploadAt time.Time `json:"lastUploadAt,omitempty"`
+	// BacklogFiles is the number of sealed binlogs present in the
+	// index but still missing from the manifest at the end of the
+	// last scan. 0 on the happy path.
+	BacklogFiles int64 `json:"backlogFiles"`
+	// ManifestFileCount / ManifestBytes / OldestArchivedTime /
+	// NewestArchivedTime are aggregates computed from the site's
+	// manifest. The operator mirrors these into status.pitr so users
+	// can see PITR coverage from kubectl describe without needing
+	// storage access. Zero values mean "no archived files yet".
+	ManifestFileCount  int64     `json:"manifestFileCount"`
+	ManifestBytes      int64     `json:"manifestBytes"`
+	OldestArchivedTime time.Time `json:"oldestArchivedTime,omitempty"`
+	NewestArchivedTime time.Time `json:"newestArchivedTime,omitempty"`
 }
 
 // Snapshot returns a copy of the archiver's observable state. The
@@ -461,19 +538,23 @@ func (a *BinlogArchiver) Snapshot(ctx context.Context) Status {
 		primary = !ro
 	}
 	a.mu.Lock()
-	lastScanAt := a.lastScanAt
-	filesArchiv := a.filesArchiv
-	lastError := a.lastError
-	a.mu.Unlock()
+	defer a.mu.Unlock()
 	return Status{
-		Enabled:        true,
-		Primary:        primary,
-		LastScanAt:     lastScanAt,
-		FilesArchived:  filesArchiv,
-		LastError:      lastError,
-		StorageType:    a.cfg.StorageType,
-		ManifestPrefix: a.cfg.ManifestPrefix,
-		Site:           a.site,
+		Enabled:            true,
+		Primary:            primary,
+		LastScanAt:         a.lastScanAt,
+		FilesArchived:      a.filesArchiv,
+		LastError:          a.lastError,
+		StorageType:        a.cfg.StorageType,
+		ManifestPrefix:     a.cfg.ManifestPrefix,
+		Site:               a.site,
+		UploadFailures:     a.uploadFailures,
+		LastUploadAt:       a.lastUploadAt,
+		BacklogFiles:       a.backlogFiles,
+		ManifestFileCount:  a.manifestFileCount,
+		ManifestBytes:      a.manifestBytes,
+		OldestArchivedTime: a.oldestArchivedTime,
+		NewestArchivedTime: a.newestArchivedTime,
 	}
 }
 
@@ -486,6 +567,50 @@ func (a *BinlogArchiver) setScan(t time.Time) {
 func (a *BinlogArchiver) setError(s string) {
 	a.mu.Lock()
 	a.lastError = s
+	a.mu.Unlock()
+}
+
+func (a *BinlogArchiver) incUploadFailures() {
+	a.mu.Lock()
+	a.uploadFailures++
+	a.mu.Unlock()
+}
+
+func (a *BinlogArchiver) setBacklog(n int64) {
+	if n < 0 {
+		n = 0
+	}
+	a.mu.Lock()
+	a.backlogFiles = n
+	a.mu.Unlock()
+}
+
+// updateManifestAggregates recomputes file count, total bytes, and the
+// oldest/newest event-time bounds from the current manifest. Called at
+// the end of each scan so the values surfaced via Snapshot track what's
+// actually in storage.
+func (a *BinlogArchiver) updateManifestAggregates(files []ManifestEntry) {
+	var (
+		count  int64
+		bytes  int64
+		oldest time.Time
+		newest time.Time
+	)
+	for _, f := range files {
+		count++
+		bytes += f.Size
+		if !f.FirstEventTime.IsZero() && (oldest.IsZero() || f.FirstEventTime.Before(oldest)) {
+			oldest = f.FirstEventTime
+		}
+		if !f.LastEventTime.IsZero() && f.LastEventTime.After(newest) {
+			newest = f.LastEventTime
+		}
+	}
+	a.mu.Lock()
+	a.manifestFileCount = count
+	a.manifestBytes = bytes
+	a.oldestArchivedTime = oldest
+	a.newestArchivedTime = newest
 	a.mu.Unlock()
 }
 

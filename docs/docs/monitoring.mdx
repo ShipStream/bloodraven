@@ -19,11 +19,14 @@ Metrics are served on `:8080/metrics` in standard Prometheus exposition format.
 | `bloodraven_taint_operations_total` | Counter | `site`, `action` | Count of node taint/untaint operations |
 | `bloodraven_dns_flips_total` | Counter | `site` | Count of DNSEndpoint updates (DNS record flips) |
 | `bloodraven_failovers_total` | Counter | `target_site` | Total number of failovers executed. Incremented after successful MySQL promotion. |
-| `bloodraven_websocket_clients` | Gauge | -- | Number of currently connected WebSocket clients |
+| `bloodraven_websocket_connected_clients` | Gauge | -- | Number of currently connected WebSocket clients |
 | `bloodraven_replication_lag_seconds` | Gauge | `site` | Replication lag in seconds on the replica site. `-1` if lag is NULL (not replicating). Only present for replica sites. |
 | `bloodraven_replication_running` | Gauge | `site`, `thread` | Whether a replication thread is running (`1`=yes, `0`=no). Thread is `io` or `sql`. Only present for replica sites. |
 | `bloodraven_site_state` | Gauge | `site`, `state` | Current site state as a state-set: `1` for the current state, `0` for others. State is `writable`, `read-only`, `unreachable`, or `unknown`. |
 | `bloodraven_divergent_transactions` | Gauge | `site` | Number of divergent transactions on a site pending recovery after emergency failover. `0` when healthy. Non-zero means the site has committed transactions that never replicated to the current primary. |
+| `bloodraven_archiver_upload_failures` | Gauge | `namespace`, `group`, `site` | Cumulative PITR archiver upload failures reported by the per-site sidecar. Monotonic except across sidecar restarts — use `increase()` / `rate()` in dashboards. |
+| `bloodraven_archiver_last_upload_timestamp_seconds` | Gauge | `namespace`, `group`, `site` | Unix timestamp of the last successful PITR binlog archive per site. `0` if nothing archived yet. |
+| `bloodraven_archiver_backlog_files` | Gauge | `namespace`, `group`, `site` | Sealed binlogs present in the MySQL index but missing from the archiver manifest at the end of the last scan. `>0` means archival is falling behind. |
 
 ### Scrape configuration
 
@@ -261,28 +264,20 @@ curl http://localhost:8082/status
 
 ```json
 {
-  "failoverGroups": [
-    {
-      "name": "orders",
-      "namespace": "default",
-      "activeSite": "iad",
-      "sites": [
-        {
-          "name": "iad",
-          "state": "writable",
-          "replicating": false,
-          "lastSeen": "2025-01-01T00:00:00Z"
-        },
-        {
-          "name": "pdx",
-          "state": "read-only",
-          "replicating": true,
-          "secondsBehindSource": 0,
-          "lastSeen": "2025-01-01T00:00:00Z"
-        }
-      ]
-    }
-  ]
+  "default/orders": {
+    "activeSite": "iad",
+    "sites": [
+      {
+        "name": "iad",
+        "state": "writable"
+      },
+      {
+        "name": "pdx",
+        "state": "read-only"
+      }
+    ],
+    "pollTime": "2025-01-01T00:00:00Z"
+  }
 }
 ```
 
@@ -298,13 +293,13 @@ curl "http://localhost:8082/active-site?namespace=default&group=orders"
 {
   "namespace": "default",
   "group": "orders",
-  "active_site": "iad"
+  "activeSite": "iad"
 }
 ```
 
 | Status | Meaning |
 |---|---|
-| `200` | Failover group found. `active_site` may be `""` if no single writable site exists (first boot, split-brain). |
+| `200` | Failover group found. `activeSite` may be `""` if no single writable site exists (first boot, split-brain). |
 | `400` | Missing `namespace` or `group` query parameter. |
 | `404` | Failover group not found on this operator instance. |
 | `503` | Operator has no active topology managers (startup race or non-leader replica). |
@@ -368,9 +363,8 @@ ws.onmessage = (event) => {
 };
 ```
 
-Note that WebSocket keys are camelCase while the REST `/status` endpoint
-returns snake_case (`active_site`, `poll_time`). REST clients that want to
-share rendering code with a WebSocket consumer should normalize keys.
+Both the REST and WebSocket endpoints use camelCase JSON keys, so the same
+field names work for either consumer.
 
 ## Troubleshooting
 

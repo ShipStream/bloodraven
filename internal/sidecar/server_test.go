@@ -180,7 +180,7 @@ func fakeOperator(activeSite string, statusCode int) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(statusCode)
 		if statusCode == http.StatusOK {
-			json.NewEncoder(w).Encode(map[string]string{"active_site": activeSite})
+			json.NewEncoder(w).Encode(map[string]string{"activeSite": activeSite})
 		} else {
 			json.NewEncoder(w).Encode(map[string]string{"error": "test"})
 		}
@@ -307,7 +307,7 @@ func TestSafetyNetStaysFencedOnEmptyActiveSite(t *testing.T) {
 		t.Error("safety net should fence on startup")
 	}
 	if mock.clearReadOnlyCalled {
-		t.Error("safety net should NOT clear fence when active_site is empty")
+		t.Error("safety net should NOT clear fence when activeSite is empty")
 	}
 }
 
