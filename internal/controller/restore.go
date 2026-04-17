@@ -344,14 +344,51 @@ func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Cont
 	return err
 }
 
+// restoreJobInputs captures the knobs that differ between a bootstrap
+// restore (spec.initFromBackup) and an in-place restore
+// (spec.restoreInPlace). Both paths build the same underlying Job
+// shape; only the source, load options, job name, and a handful of
+// extra env vars (drop-schemas, reset-replication, PITR database
+// filter) vary.
+type restoreJobInputs struct {
+	JobName     string
+	TargetSite  string
+	CredsName   string
+	Source      v1alpha1.InitFromBackupSource
+	LoadOptions *v1alpha1.LoadOptions
+	PointInTime *v1alpha1.PointInTimeSpec
+	// ExtraEnv is appended to the container env verbatim. Used by
+	// in-place restore to inject BLOODRAVEN_DROP_ALL_USER_SCHEMAS,
+	// BLOODRAVEN_DROP_SCHEMAS, BLOODRAVEN_RESET_REPLICATION, and
+	// BLOODRAVEN_PITR_FILTER_DATABASE.
+	ExtraEnv []corev1.EnvVar
+}
+
 // buildRestoreJob resolves the initFromBackup source and constructs the
-// one-shot batchv1.Job. The Job shape mirrors BuildBackupJob: creds are
-// mounted as files rather than injected via envFrom, the container runs
-// with the hardened pod- and container-level security context defaults
-// from mergeSecurityContexts, and writable mysqlsh home + /tmp emptyDirs
-// are attached so ReadOnlyRootFilesystem=true is compatible with mysqlsh.
+// one-shot batchv1.Job used by the bootstrap restore path. The Job shape
+// mirrors BuildBackupJob: creds are mounted as files rather than
+// injected via envFrom, the container runs with the hardened pod- and
+// container-level security context defaults from mergeSecurityContexts,
+// and writable mysqlsh home + /tmp emptyDirs are attached so
+// ReadOnlyRootFilesystem=true is compatible with mysqlsh.
 func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, targetSite, credsName string) (*batchv1.Job, error) {
-	src := fg.Spec.InitFromBackup.Source
+	return r.buildRestoreJobSpec(ctx, fg, restoreJobInputs{
+		JobName:     restoreJobName(fg.Name, targetSite),
+		TargetSite:  targetSite,
+		CredsName:   credsName,
+		Source:      fg.Spec.InitFromBackup.Source,
+		LoadOptions: fg.Spec.InitFromBackup.LoadOptions,
+		PointInTime: fg.Spec.InitFromBackup.PointInTime,
+	})
+}
+
+// buildRestoreJobSpec is the shared core of both bootstrap and in-place
+// restore Job construction. See restoreJobInputs for the per-caller
+// parameters.
+func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, in restoreJobInputs) (*batchv1.Job, error) {
+	src := in.Source
+	targetSite := in.TargetSite
+	credsName := in.CredsName
 
 	var (
 		inputURL       string
@@ -474,7 +511,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		return nil, fmt.Errorf("initFromBackup.source must set mysqlBackupRef, s3, or pvc")
 	}
 
-	loadOptsJSON, err := marshalLoadOptions(fg.Spec.InitFromBackup.LoadOptions)
+	loadOptsJSON, err := marshalLoadOptions(in.LoadOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -484,7 +521,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 	// S3/PVC into a shared emptyDir) and the main container
 	// (restore.py, runs mysqlbinlog | mysql on the downloaded files).
 	// See buildRestorePITRFragments for the shape.
-	pitrFrags, err := buildRestorePITRFragments(fg)
+	pitrFrags, err := buildRestorePITRFragmentsFor(fg, in.PointInTime)
 	if err != nil {
 		return nil, err
 	}
@@ -512,6 +549,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_TLS", Value: "1"})
 	}
 	env = append(env, extraEnv...)
+	env = append(env, in.ExtraEnv...)
 
 	// MySQL creds mounted as files (mode 0400).
 	volumes := []corev1.Volume{
@@ -603,9 +641,13 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		initContainers = append(initContainers, *pitrFrags.InitContainer)
 	}
 
+	jobName := in.JobName
+	if jobName == "" {
+		jobName = restoreJobName(fg.Name, targetSite)
+	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      restoreJobName(fg.Name, targetSite),
+			Name:      jobName,
 			Namespace: fg.Namespace,
 			Labels:    labels,
 		},

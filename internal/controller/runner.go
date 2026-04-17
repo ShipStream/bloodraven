@@ -172,9 +172,11 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RUnlock()
 
 		suppress := restoreInFlight(fg)
+		frozen := inPlaceRestoreInFlight(fg)
 
 		if ok && existing.cfg == cfg {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
+			existing.tm.SetTopologyFrozen(frozen)
 			if recloneSite := fg.GetAnnotations()[RecloneAnnotation]; recloneSite != "" {
 				existing.tm.SetRecloneSite(recloneSite)
 				r.removeRecloneAnnotation(ctx, nn)
@@ -198,6 +200,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RLock()
 		if mt, ok := r.managers[nn]; ok {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
+			mt.tm.SetTopologyFrozen(frozen)
 			if recloneSite := fg.GetAnnotations()[RecloneAnnotation]; recloneSite != "" {
 				mt.tm.SetRecloneSite(recloneSite)
 				r.removeRecloneAnnotation(ctx, nn)

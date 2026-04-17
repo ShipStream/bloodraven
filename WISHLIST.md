@@ -7,7 +7,7 @@
 - [x] 3. Split-brain auto-resolution option
 - [ ] 4. Fencing durability during operator-down + partial partition
 - [ ] 5. Reclone safety interlocks
-- [ ] 6. In-place restore path
+- [x] 6. In-place restore path
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
 - [ ] 8. DR drill automation / backup verification
 - [ ] 9. Restore duration and size metrics
