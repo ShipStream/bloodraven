@@ -12,8 +12,8 @@ situation.
 
 ## TL;DR
 
-Bloodraven is optimised for the **two-site, geographically-separated,
-accept-non-zero-RPO** deployment. Group Replication is optimised for
+Bloodraven is optimized for the **two-site, geographically-separated,
+accept-non-zero-RPO** deployment. Group Replication is optimized for
 the **three-or-more-node, low-latency, zero-RPO** deployment. They're
 different design points, and Bloodraven solves problems Group
 Replication doesn't — most importantly: staying writable when the
@@ -114,7 +114,7 @@ vantage points:
 
 | Concern | Group Replication | Bloodraven |
 |---|---|---|
-| RPO on hard primary loss | 0 | ≈ `seconds_behind_source` of the replica at failure |
+| RPO on hard primary loss | 0 | ≈ `secondsBehindSource` of the replica at failure |
 | Commit latency | 1 cross-node round-trip | 1 local fsync |
 | Minimum nodes to tolerate 1 failure | 3 | 2 |
 | Write availability during a partition | Majority side only | The reachable side (operator arbitrates) |
