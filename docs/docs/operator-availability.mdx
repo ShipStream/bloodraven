@@ -170,7 +170,9 @@ on whichever site accepted them. The sidecar self-fence prevents any
 post-primary-crash writes from being accepted on a partitioned-away
 primary, so you never have two versions of "the latest state" to
 reconcile. Async replication's normal RPO applies to the crashed-primary
-case — see [Old primary recovery](./failover.mdx#old-primary-recovery).
+case — see [Durability and RPO](./durability-and-rpo.mdx) for the
+full contract, or [Old primary recovery](./failover.mdx#old-primary-recovery)
+for the operator's post-failover reconciliation.
 
 **Does operator downtime cause split brain?** No, by design. Sidecars
 self-fence any MySQL instance that can reach neither its peer nor the
