@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,7 +86,7 @@ func TestSafetyInvariant_NeverAutoUnfence(t *testing.T) {
 	clk := clock.NewFakeClock(start)
 
 	f := newMockSidecarMySQL(false) // primary (not read-only)
-	fm := sidecar.NewFencingMonitorFull(f, "127.0.0.1:8081", "127.0.0.1:8080",
+	fm := sidecar.NewFencingMonitorFull(f, "127.0.0.1:8081", []string{"127.0.0.1:8080"},
 		5*time.Second, 20*time.Second, safetyTestLogger(), clk, &http.Client{Transport: errTransport{}})
 
 	// Initialize last-seen times
@@ -161,7 +162,7 @@ func TestSafetyInvariant_NeverSelfFenceReplica(t *testing.T) {
 	clk := clock.NewFakeClock(start)
 
 	f := newMockSidecarMySQL(true) // replica (read-only)
-	fm := sidecar.NewFencingMonitorFull(f, "127.0.0.1:8081", "127.0.0.1:8080",
+	fm := sidecar.NewFencingMonitorFull(f, "127.0.0.1:8081", []string{"127.0.0.1:8080"},
 		5*time.Second, 20*time.Second, safetyTestLogger(), clk, &http.Client{Transport: errTransport{}})
 
 	// Advance way past timeout
@@ -276,12 +277,13 @@ func TestSafetyInvariant_FenceBeforePromote(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSafetyInvariant_CrossSiteMatrix(t *testing.T) {
+	pc := state.SiteRolePrimaryCandidate
 	tests := []struct {
-		name       string
-		site0State state.SiteState
-		site1State state.SiteState
-		wantPromo  string
-		wantAlert  string
+		name            string
+		site0State      state.SiteState
+		site1State      state.SiteState
+		wantPromo       string
+		wantAlertPrefix string
 	}{
 		{
 			name:       "site0_unreachable_site1_readonly_promotes_site1",
@@ -296,35 +298,41 @@ func TestSafetyInvariant_CrossSiteMatrix(t *testing.T) {
 			wantPromo:  "dc1",
 		},
 		{
-			name:       "both_writable_is_split_brain",
-			site0State: state.StateWritable,
-			site1State: state.StateWritable,
-			wantAlert:  "SPLIT BRAIN: both sites are writable",
+			name:            "both_writable_is_split_brain",
+			site0State:      state.StateWritable,
+			site1State:      state.StateWritable,
+			wantAlertPrefix: "SPLIT BRAIN:",
 		},
 		{
-			name:       "both_readonly_is_no_primary",
-			site0State: state.StateReadOnly,
-			site1State: state.StateReadOnly,
-			wantAlert:  "NO PRIMARY: both sites are read-only",
+			name:            "both_readonly_is_no_primary",
+			site0State:      state.StateReadOnly,
+			site1State:      state.StateReadOnly,
+			wantAlertPrefix: "NO PRIMARY:",
 		},
 		{
-			name:       "both_unreachable_is_total_loss",
-			site0State: state.StateUnreachable,
-			site1State: state.StateUnreachable,
-			wantAlert:  "TOTAL LOSS: both sites are unreachable",
+			name:            "both_unreachable_is_total_loss",
+			site0State:      state.StateUnreachable,
+			site1State:      state.StateUnreachable,
+			wantAlertPrefix: "TOTAL LOSS:",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			action := state.EvalCrossSite(tt.site0State, tt.site1State,
-				state.StateUnknown, state.StateUnknown, "dc1", "dc2")
+			action := state.EvalCrossSite([]state.SiteObservation{
+				{Name: "dc1", Role: pc, State: tt.site0State},
+				{Name: "dc2", Role: pc, State: tt.site1State},
+			}, nil)
 
-			if action.PromoteSite != tt.wantPromo {
-				t.Errorf("PromoteSite: got %q, want %q", action.PromoteSite, tt.wantPromo)
+			firstCandidate := ""
+			if len(action.PromotionCandidates) > 0 {
+				firstCandidate = action.PromotionCandidates[0]
 			}
-			if tt.wantAlert != "" && action.Alert != tt.wantAlert {
-				t.Errorf("Alert: got %q, want %q", action.Alert, tt.wantAlert)
+			if firstCandidate != tt.wantPromo {
+				t.Errorf("PromotionCandidates[0]: got %q, want %q", firstCandidate, tt.wantPromo)
+			}
+			if tt.wantAlertPrefix != "" && !strings.HasPrefix(action.Alert, tt.wantAlertPrefix) {
+				t.Errorf("Alert: got %q, want prefix %q", action.Alert, tt.wantAlertPrefix)
 			}
 		})
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/shipstream/bloodraven/internal/clock"
+	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -27,7 +28,7 @@ func newSafetyTestTM(site0, site1 *mockMySQL) (*TopologyManager, *mockTainter, *
 	fc := NewFailoverController(testLogger())
 	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	clk := clock.NewFakeClock(start)
-	tm := NewTopologyManagerWithClock(cfg, site0, site1, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger(), clk)
+	tm := NewTopologyManagerWithClock(cfg, []internalmysql.Checker{site0, site1}, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger(), clk)
 	tm.failoverCooldown = 0 // disabled by default for most tests
 	return tm, tainter, dns, clk
 }
@@ -133,7 +134,7 @@ func TestInvariant_NeverPromoteDuringCooldown(t *testing.T) {
 	fc := NewFailoverController(testLogger())
 	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	clk := clock.NewFakeClock(start)
-	tm := NewTopologyManagerWithClock(cfg, site0, site1, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger(), clk)
+	tm := NewTopologyManagerWithClock(cfg, []internalmysql.Checker{site0, site1}, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger(), clk)
 
 	// Establish normal state
 	pollN(tm, 2)
@@ -290,15 +291,15 @@ func TestInvariant_NeverSilentlyIgnoreStatusDrift(t *testing.T) {
 	// First poll: site1 becomes ReadOnly (immediate), site0 not yet confirmed writable.
 	// Verify callback was invoked with the transition data.
 	initial := callbacks[len(callbacks)-1]
-	if initial.SiteStates[1] != state.StateReadOnly {
-		t.Errorf("initial snapshot SiteStates[1]: got %v, want ReadOnly", initial.SiteStates[1])
+	if initial.Sites[1].State != state.StateReadOnly {
+		t.Errorf("initial snapshot Sites[1].State: got %v, want ReadOnly", initial.Sites[1].State)
 	}
 
 	// Second poll: site0 recovery threshold met -> Writable
 	pollN(tm, 1)
 	last := callbacks[len(callbacks)-1]
-	if last.SiteStates[0] != state.StateWritable {
-		t.Errorf("snapshot after recovery threshold SiteStates[0]: got %v, want Writable", last.SiteStates[0])
+	if last.Sites[0].State != state.StateWritable {
+		t.Errorf("snapshot after recovery threshold Sites[0].State: got %v, want Writable", last.Sites[0].State)
 	}
 
 	// State change: site0 goes down -> should trigger callback with
@@ -311,7 +312,7 @@ func TestInvariant_NeverSilentlyIgnoreStatusDrift(t *testing.T) {
 
 	gotTransition := false
 	for _, snap := range callbacks {
-		if snap.SiteStates[0] == state.StateUnreachable {
+		if snap.Sites[0].State == state.StateUnreachable {
 			gotTransition = true
 			// The reconciler uses ActiveSite to set role=primary/replica labels.
 			// When site0 goes unreachable and site1 is promoted, ActiveSite must change.

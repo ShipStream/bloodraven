@@ -17,16 +17,23 @@ type Fencer interface {
 	KillConnections(ctx context.Context) (int, error)
 }
 
-// FencingMonitor polls Bloodraven and the peer sidecar, and self-fences
-// (sets super_read_only=ON) when the primary is truly isolated from both.
+// FencingMonitor polls Bloodraven and every peer sidecar, and self-
+// fences (sets super_read_only=ON) when the primary is truly isolated
+// from both the operator and every peer.
+//
+// Multi-site semantics: the monitor tracks a per-peer "last-seen"
+// timestamp. The site is considered to have peer connectivity as long
+// as *any* peer answered within the lease timeout. Self-fencing fires
+// only when the operator is unreachable beyond the lease AND every
+// peer is unreachable beyond the lease.
 type FencingMonitor struct {
 	mysql            Fencer
 	bloodravenAddr   string
-	peerAddr         string
+	peerAddrs        []string
 	checkInterval    time.Duration
 	leaseTimeout     time.Duration
 	lastBloodravenOK time.Time
-	lastPeerOK       time.Time
+	lastPeerOK       map[string]time.Time
 	fenced           bool
 	logger           *slog.Logger
 	httpClient       *http.Client
@@ -37,25 +44,25 @@ type FencingMonitor struct {
 func NewFencingMonitor(
 	mysql Fencer,
 	bloodravenAddr string,
-	peerAddr string,
+	peerAddrs []string,
 	checkInterval time.Duration,
 	leaseTimeout time.Duration,
 	logger *slog.Logger,
 ) *FencingMonitor {
-	return NewFencingMonitorWithClock(mysql, bloodravenAddr, peerAddr, checkInterval, leaseTimeout, logger, clock.RealClock{})
+	return NewFencingMonitorWithClock(mysql, bloodravenAddr, peerAddrs, checkInterval, leaseTimeout, logger, clock.RealClock{})
 }
 
 // NewFencingMonitorWithClock creates a FencingMonitor with an injectable clock for testing.
 func NewFencingMonitorWithClock(
 	mysql Fencer,
 	bloodravenAddr string,
-	peerAddr string,
+	peerAddrs []string,
 	checkInterval time.Duration,
 	leaseTimeout time.Duration,
 	logger *slog.Logger,
 	clk clock.Clock,
 ) *FencingMonitor {
-	return NewFencingMonitorFull(mysql, bloodravenAddr, peerAddr, checkInterval, leaseTimeout, logger, clk, nil)
+	return NewFencingMonitorFull(mysql, bloodravenAddr, peerAddrs, checkInterval, leaseTimeout, logger, clk, nil)
 }
 
 // NewFencingMonitorFull creates a FencingMonitor with all injectable dependencies.
@@ -63,7 +70,7 @@ func NewFencingMonitorWithClock(
 func NewFencingMonitorFull(
 	mysql Fencer,
 	bloodravenAddr string,
-	peerAddr string,
+	peerAddrs []string,
 	checkInterval time.Duration,
 	leaseTimeout time.Duration,
 	logger *slog.Logger,
@@ -73,23 +80,35 @@ func NewFencingMonitorFull(
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 2 * time.Second}
 	}
+	// Filter empty entries so the monitor does not treat "" as a peer
+	// that will never answer and keep the primary fenced forever.
+	var cleaned []string
+	for _, p := range peerAddrs {
+		if p != "" {
+			cleaned = append(cleaned, p)
+		}
+	}
 	return &FencingMonitor{
 		mysql:          mysql,
 		bloodravenAddr: bloodravenAddr,
-		peerAddr:       peerAddr,
+		peerAddrs:      cleaned,
 		checkInterval:  checkInterval,
 		leaseTimeout:   leaseTimeout,
 		logger:         logger,
 		clock:          clk,
 		httpClient:     httpClient,
+		lastPeerOK:     make(map[string]time.Time, len(cleaned)),
 	}
 }
 
 // Run starts the fencing monitor loop. Blocks until ctx is cancelled.
 func (f *FencingMonitor) Run(ctx context.Context) {
 	// Initialize last-seen times to now (grace period on startup)
-	f.lastBloodravenOK = f.clock.Now()
-	f.lastPeerOK = f.clock.Now()
+	now := f.clock.Now()
+	f.lastBloodravenOK = now
+	for _, addr := range f.peerAddrs {
+		f.lastPeerOK[addr] = now
+	}
 
 	ticker := f.clock.NewTicker(f.checkInterval)
 	defer ticker.Stop()
@@ -106,7 +125,9 @@ func (f *FencingMonitor) Run(ctx context.Context) {
 // Check performs a single fencing check cycle. Exported for deterministic testing.
 func (f *FencingMonitor) Check(ctx context.Context) {
 	f.checkBloodraven(ctx)
-	f.checkPeer(ctx)
+	for _, addr := range f.peerAddrs {
+		f.checkPeer(ctx, addr)
+	}
 	f.evaluate(ctx)
 }
 
@@ -134,28 +155,40 @@ func (f *FencingMonitor) checkBloodraven(ctx context.Context) {
 	}
 }
 
-func (f *FencingMonitor) checkPeer(ctx context.Context) {
-	if f.peerAddr == "" {
+func (f *FencingMonitor) checkPeer(ctx context.Context, addr string) {
+	if addr == "" {
 		return
 	}
 
-	url := fmt.Sprintf("http://%s/peer/ping", f.peerAddr)
+	url := fmt.Sprintf("http://%s/peer/ping", addr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		f.logger.Warn("fencing: failed to create peer request", "error", err)
+		f.logger.Warn("fencing: failed to create peer request", "peer", addr, "error", err)
 		return
 	}
 
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		f.logger.Debug("fencing: peer unreachable", "addr", f.peerAddr, "error", err)
+		f.logger.Debug("fencing: peer unreachable", "peer", addr, "error", err)
 		return
 	}
 	resp.Body.Close()
 
 	if resp.StatusCode == http.StatusOK {
-		f.lastPeerOK = f.clock.Now()
+		f.lastPeerOK[addr] = f.clock.Now()
 	}
+}
+
+// latestPeerSeen returns the most recent time at which any peer was
+// observed healthy. Returns the zero time when no peers are configured.
+func (f *FencingMonitor) latestPeerSeen() time.Time {
+	var latest time.Time
+	for _, t := range f.lastPeerOK {
+		if t.After(latest) {
+			latest = t
+		}
+	}
+	return latest
 }
 
 func (f *FencingMonitor) evaluate(ctx context.Context) {
@@ -171,23 +204,29 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		return
 	}
 	if readOnly {
-		// We are a replica, no self-fencing needed.
 		return
 	}
 
 	now := f.clock.Now()
 	bloodravenDown := now.Sub(f.lastBloodravenOK) > f.leaseTimeout
-	peerDown := now.Sub(f.lastPeerOK) > f.leaseTimeout
 
-	if !bloodravenDown || !peerDown {
-		// At least one is reachable (or within timeout), no action needed.
+	// Peers: if no peers are configured, treat peers as "down" so the
+	// operator-only signal drives fencing. Otherwise require *every*
+	// peer to be silent beyond the lease.
+	peersDown := true
+	if len(f.peerAddrs) > 0 {
+		latest := f.latestPeerSeen()
+		peersDown = latest.IsZero() || now.Sub(latest) > f.leaseTimeout
+	}
+
+	if !bloodravenDown || !peersDown {
 		return
 	}
 
-	// Both Bloodraven and peer are unreachable beyond the lease timeout. Self-fence.
-	f.logger.Error("SELF-FENCING: both Bloodraven and peer unreachable beyond lease timeout, setting super_read_only=ON",
+	f.logger.Error("SELF-FENCING: Bloodraven and every peer unreachable beyond lease timeout, setting super_read_only=ON",
 		"bloodraven_last_ok", f.lastBloodravenOK,
-		"peer_last_ok", f.lastPeerOK,
+		"latest_peer_ok", f.latestPeerSeen(),
+		"peers", f.peerAddrs,
 		"lease_timeout", f.leaseTimeout,
 	)
 

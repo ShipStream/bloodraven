@@ -24,7 +24,7 @@ func main() {
 	logger = logger.With("pod", cfg.PodName)
 	logger.Info("sidecar starting",
 		"listen_addr", cfg.ListenAddr,
-		"peer_address", cfg.PeerAddress,
+		"peer_addresses", cfg.PeerAddresses,
 		"bloodraven_address", cfg.BloodravenAddress,
 		"lease_timeout", cfg.LeaseTimeout,
 		"peer_check_interval", cfg.PeerCheckInterval,
@@ -99,7 +99,7 @@ func main() {
 	fm := sidecar.NewFencingMonitor(
 		mysql,
 		cfg.BloodravenAddress,
-		cfg.PeerAddress,
+		cfg.PeerAddresses,
 		cfg.PeerCheckInterval,
 		cfg.LeaseTimeout,
 		logger,

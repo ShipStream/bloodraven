@@ -51,11 +51,24 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
+const testPeerAddr = "127.0.0.1:8080"
+
 // newTestFencingMonitor creates a FencingMonitor with a FakeClock and a stub
 // transport for deterministic, socket-free testing.
 func newTestFencingMonitor(f Fencer, clk *clock.FakeClock) *FencingMonitor {
 	client := &http.Client{Transport: noopTransport{}}
-	return NewFencingMonitorFull(f, "127.0.0.1:8081", "127.0.0.1:8080", 5*time.Second, 20*time.Second, testLogger(), clk, client)
+	return NewFencingMonitorFull(f, "127.0.0.1:8081", []string{testPeerAddr}, 5*time.Second, 20*time.Second, testLogger(), clk, client)
+}
+
+// setPeerLastOK overwrites the last-seen time for every peer in fm,
+// mirroring the old fm.lastPeerOK = t assignment so existing tests can
+// express "every peer is fresh" or "every peer is stale" in one line.
+// It seeds entries for every configured peer, overriding any zero-time
+// initialisation from construction.
+func setPeerLastOK(fm *FencingMonitor, t time.Time) {
+	for _, addr := range fm.peerAddrs {
+		fm.lastPeerOK[addr] = t
+	}
 }
 
 func TestEvaluateDoesNothingWhenBothReachable(t *testing.T) {
@@ -64,9 +77,8 @@ func TestEvaluateDoesNothingWhenBothReachable(t *testing.T) {
 	f := newMockFencer(false) // primary (not read-only)
 	fm := newTestFencingMonitor(f, clk)
 
-	// Both recently OK
 	fm.lastBloodravenOK = clk.Now()
-	fm.lastPeerOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
 
 	fm.evaluate(context.Background())
 
@@ -84,9 +96,8 @@ func TestEvaluateDoesNothingWhenOnlyBloodravenDown(t *testing.T) {
 	f := newMockFencer(false) // primary
 	fm := newTestFencingMonitor(f, clk)
 
-	// Bloodraven down past timeout, peer OK
 	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
-	fm.lastPeerOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
 
 	fm.evaluate(context.Background())
 
@@ -104,9 +115,8 @@ func TestEvaluateDoesNothingWhenOnlyPeerDown(t *testing.T) {
 	f := newMockFencer(false) // primary
 	fm := newTestFencingMonitor(f, clk)
 
-	// Bloodraven OK, peer down past timeout
 	fm.lastBloodravenOK = clk.Now()
-	fm.lastPeerOK = clk.Now().Add(-30 * time.Second)
+	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
 
 	fm.evaluate(context.Background())
 
@@ -124,9 +134,8 @@ func TestEvaluateFencesWhenBothUnreachablePastTimeout(t *testing.T) {
 	f := newMockFencer(false) // primary
 	fm := newTestFencingMonitor(f, clk)
 
-	// Both down past timeout
 	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
-	fm.lastPeerOK = clk.Now().Add(-30 * time.Second)
+	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
 
 	fm.evaluate(context.Background())
 
@@ -144,9 +153,8 @@ func TestEvaluateDoesNotFenceWhenBothDownButWithinTimeout(t *testing.T) {
 	f := newMockFencer(false) // primary
 	fm := newTestFencingMonitor(f, clk)
 
-	// Both down but within timeout
 	fm.lastBloodravenOK = clk.Now().Add(-10 * time.Second)
-	fm.lastPeerOK = clk.Now().Add(-10 * time.Second)
+	setPeerLastOK(fm, clk.Now().Add(-10*time.Second))
 
 	fm.evaluate(context.Background())
 
@@ -164,9 +172,8 @@ func TestEvaluateDoesNotFenceWhenAlreadyReadOnly(t *testing.T) {
 	f := newMockFencer(true) // replica (read-only)
 	fm := newTestFencingMonitor(f, clk)
 
-	// Both down past timeout
 	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
-	fm.lastPeerOK = clk.Now().Add(-30 * time.Second)
+	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
 
 	fm.evaluate(context.Background())
 
@@ -184,20 +191,16 @@ func TestEvaluateDoesNotReFenceWhenAlreadyFenced(t *testing.T) {
 	f := newMockFencer(false) // primary
 	fm := newTestFencingMonitor(f, clk)
 
-	// Both down past timeout
 	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
-	fm.lastPeerOK = clk.Now().Add(-30 * time.Second)
+	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
 
-	// First fence
 	fm.evaluate(context.Background())
 	if !fm.fenced {
 		t.Fatal("should have fenced")
 	}
 
-	// Reset the mock to track second call
 	f.superReadOnly = false
 
-	// Evaluate again
 	fm.evaluate(context.Background())
 
 	if f.superReadOnly {
@@ -212,7 +215,7 @@ func TestFencingExecutesSetSuperReadOnly(t *testing.T) {
 	fm := newTestFencingMonitor(f, clk)
 
 	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
-	fm.lastPeerOK = clk.Now().Add(-30 * time.Second)
+	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
 
 	fm.evaluate(context.Background())
 
@@ -229,7 +232,7 @@ func TestEvaluateHandlesReadOnlyError(t *testing.T) {
 	fm := newTestFencingMonitor(f, clk)
 
 	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
-	fm.lastPeerOK = clk.Now().Add(-30 * time.Second)
+	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
 
 	fm.evaluate(context.Background())
 
@@ -249,21 +252,43 @@ func TestCheckStepFunction(t *testing.T) {
 	f := newMockFencer(false) // primary
 	fm := newTestFencingMonitor(f, clk)
 
-	// Initialize last-seen times
 	fm.lastBloodravenOK = clk.Now()
-	fm.lastPeerOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
 
-	// Step 1: both reachable, no fencing
 	fm.Check(context.Background())
 	if fm.fenced {
 		t.Error("should not fence when both reachable")
 	}
 
-	// Step 2: advance clock past lease timeout
 	clk.Advance(30 * time.Second)
 	fm.Check(context.Background())
 
 	if !fm.fenced {
 		t.Error("should fence after clock advances past lease timeout with both unreachable")
+	}
+}
+
+// TestEvaluateRequiresAllPeersDown verifies the N-site quorum rule:
+// self-fencing requires the operator AND every peer to be silent.
+func TestEvaluateRequiresAllPeersDown(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false)
+	client := &http.Client{Transport: noopTransport{}}
+	fm := NewFencingMonitorFull(f, "127.0.0.1:8081",
+		[]string{"peer-a:8080", "peer-b:8080", "peer-c:8080"},
+		5*time.Second, 20*time.Second, testLogger(), clk, client)
+
+	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
+	for addr := range fm.lastPeerOK {
+		fm.lastPeerOK[addr] = clk.Now().Add(-30 * time.Second)
+	}
+	// One peer is still alive.
+	fm.lastPeerOK["peer-c:8080"] = clk.Now()
+
+	fm.evaluate(context.Background())
+
+	if fm.fenced {
+		t.Fatal("should not self-fence when at least one peer is still reachable")
 	}
 }

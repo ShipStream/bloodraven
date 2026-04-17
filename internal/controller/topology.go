@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -21,31 +22,45 @@ type SiteTopologyConfig struct {
 	Name string
 	Zone string
 	LBIP string
+	Role state.SiteRole
+	// Host is the MySQL service hostname (without port) for this site.
+	// Used as the donor/source host for clone and replication setup.
+	Host string
 }
 
-// TopologyConfig holds topology manager configuration, decoupled from config source.
+// TopologyConfig holds topology manager configuration, decoupled from
+// CR-type specifics. Callers build this from MysqlFailoverGroupSpec via
+// CRConfigToTopologyConfig.
 type TopologyConfig struct {
 	Namespace string // failover group namespace (from CR metadata.namespace)
 	Name      string // failover group name (from CR metadata.name)
-	Sites     [2]SiteTopologyConfig
 
-	// SiteHosts are the MySQL service hostnames (without port) for each site.
-	// Used as the donor/source host for clone and replication setup.
-	SiteHosts [2]string
+	// Sites lists every site that participates in this topology, in
+	// declared order. The list length must equal the length of
+	// spec.sites.
+	Sites []SiteTopologyConfig
 
 	PollInterval      int64 // nanoseconds
 	FailureThreshold  int
 	RecoveryThreshold int
 	FailoverCooldown  int64 // nanoseconds, default 5m
 
-	// SplitBrainPreferSite, when non-empty, names the site that wins
-	// unresolvable split-brain ties. It must equal one of Sites[].Name.
-	// Empty means manual resolution (alert only) — the existing default.
-	SplitBrainPreferSite string
+	// SitePriorities is the ordered list of primary-candidate site
+	// names that win split-brain ties. An empty slice means manual
+	// resolution (alert only).
+	SitePriorities []string
 
 	// CredentialHash is a hash of the operator secret data. A change
 	// triggers a topology manager restart with new MySQL connections.
 	CredentialHash string
+}
+
+// Equal reports whether two TopologyConfig values have the same field
+// set. Used by the runner to detect when a CR change requires restart.
+// It is equivalent to reflect.DeepEqual but documents the intent at
+// call sites.
+func (c TopologyConfig) Equal(other TopologyConfig) bool {
+	return reflect.DeepEqual(c, other)
 }
 
 // BootstrapConfig holds configuration for auto-bootstrap of fresh-deploy replicas.
@@ -74,17 +89,27 @@ func (c TopologyConfig) PollIntervalDuration() time.Duration {
 	return time.Duration(c.PollInterval)
 }
 
+// SiteSnapshot captures one site's observation at a point in time.
+type SiteSnapshot struct {
+	Name        string
+	Role        state.SiteRole
+	State       state.SiteState
+	LastSeen    time.Time
+	Replication *mysql.ReplicaStatus // nil if site is primary or unreachable
+}
+
 // TopologySnapshot captures the topology state at a point in time.
-// It is passed to the StatusCallback after each poll cycle that produces a state change.
+// It is passed to the StatusCallback after each poll cycle that
+// produces a state change.
 type TopologySnapshot struct {
-	SiteNames          [2]string
-	SiteStates         [2]state.SiteState
-	SiteLastSeen       [2]time.Time
-	SiteReplication    [2]*mysql.ReplicaStatus // nil if site is primary or unreachable
-	ActiveSite         string                  // name of the writable site, empty if none
+	// Sites is the per-site snapshot, parallel to cfg.Sites.
+	Sites []SiteSnapshot
+
+	ActiveSite         string
 	LastFailover       time.Time
 	LastFailoverTarget string
 	Alert              string // non-empty if a cross-site alert fired this cycle
+	DegradedReason     string // one of "Healthy", "Degraded", "SplitBrain", "NoPrimary", "TotalLoss", or ""
 	UpdatePhase        string // non-empty if an ordered update is in progress
 	BootstrapPhase     string // non-empty if a fresh-deploy bootstrap is in progress or finished
 	BootstrapError     string // non-empty if bootstrap failed
@@ -102,6 +127,8 @@ type siteTracker struct {
 	name          string
 	zone          string // topology.kubernetes.io/zone value
 	lbIP          string
+	role          state.SiteRole
+	host          string
 	mysql         mysql.Checker
 	state         state.SiteState
 	failCount     int
@@ -122,10 +149,21 @@ func (t *siteTracker) isHealthyReplica() bool {
 	return t.state == state.StateReadOnly && t.replicating
 }
 
+// isPromotable reports whether this site is eligible for auto-promotion.
+func (t *siteTracker) isPromotable() bool {
+	return t.role == state.SiteRolePrimaryCandidate
+}
+
+// observation returns this tracker's current state as a SiteObservation
+// suitable for feeding EvalCrossSite. Caller must hold tm.mu (read).
+func (t *siteTracker) observation() state.SiteObservation {
+	return state.SiteObservation{Name: t.name, Role: t.role, State: t.state}
+}
+
 // TopologyManager is the main control loop.
 type TopologyManager struct {
 	cfg     TopologyConfig
-	sites   [2]siteTracker
+	sites   []siteTracker
 	tainter platform.NodeTainter
 	hub     *platform.Hub
 	dns     platform.DNSUpdater
@@ -203,6 +241,7 @@ type TopologyManager struct {
 // SiteStatusEntry is a single site's status in the StatusResponse.
 type SiteStatusEntry struct {
 	Name                      string `json:"name"`
+	Role                      string `json:"role,omitempty"`
 	State                     string `json:"state"`
 	RecoveryState             string `json:"recoveryState,omitempty"`
 	DivergentGtid             string `json:"divergentGtid,omitempty"`
@@ -211,40 +250,46 @@ type SiteStatusEntry struct {
 
 // StatusResponse is returned by the /status endpoint.
 type StatusResponse struct {
-	ActiveSite            string             `json:"activeSite"`
-	Sites                 [2]SiteStatusEntry `json:"sites"`
-	PollTime              string             `json:"pollTime"`
-	PromotionGtidExecuted string             `json:"promotionGtidExecuted,omitempty"`
+	ActiveSite            string            `json:"activeSite"`
+	Sites                 []SiteStatusEntry `json:"sites"`
+	PollTime              string            `json:"pollTime"`
+	PromotionGtidExecuted string            `json:"promotionGtidExecuted,omitempty"`
 }
 
-func NewTopologyManager(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, updater *UpdateController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
-	return NewTopologyManagerWithClock(cfg, site0MySQL, site1MySQL, failover, updater, bootstrap, bootstrapCfg, tainter, hub, dns, logger, clock.RealClock{})
+// NewTopologyManager creates a TopologyManager for the given configuration.
+// siteCheckers must be parallel to cfg.Sites.
+func NewTopologyManager(cfg TopologyConfig, siteCheckers []mysql.Checker, failover *FailoverController, updater *UpdateController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
+	return NewTopologyManagerWithClock(cfg, siteCheckers, failover, updater, bootstrap, bootstrapCfg, tainter, hub, dns, logger, clock.RealClock{})
 }
 
 // NewTopologyManagerWithClock creates a TopologyManager with an injectable clock for testing.
-func NewTopologyManagerWithClock(cfg TopologyConfig, site0MySQL, site1MySQL mysql.Checker, failover *FailoverController, updater *UpdateController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
+func NewTopologyManagerWithClock(cfg TopologyConfig, siteCheckers []mysql.Checker, failover *FailoverController, updater *UpdateController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger, clk clock.Clock) *TopologyManager {
 	cooldown := time.Duration(cfg.FailoverCooldown)
 	if cooldown == 0 {
 		cooldown = 5 * time.Minute
 	}
+	if len(siteCheckers) != len(cfg.Sites) {
+		panic(fmt.Sprintf("topology manager: got %d MySQL checkers for %d configured sites", len(siteCheckers), len(cfg.Sites)))
+	}
+	sites := make([]siteTracker, len(cfg.Sites))
+	for i, s := range cfg.Sites {
+		role := s.Role
+		if role == "" {
+			role = state.SiteRolePrimaryCandidate
+		}
+		sites[i] = siteTracker{
+			name:  s.Name,
+			zone:  s.Zone,
+			lbIP:  s.LBIP,
+			role:  role,
+			host:  s.Host,
+			mysql: siteCheckers[i],
+			state: state.StateUnknown,
+		}
+	}
 	return &TopologyManager{
-		cfg: cfg,
-		sites: [2]siteTracker{
-			{
-				name:  cfg.Sites[0].Name,
-				zone:  cfg.Sites[0].Zone,
-				lbIP:  cfg.Sites[0].LBIP,
-				mysql: site0MySQL,
-				state: state.StateUnknown,
-			},
-			{
-				name:  cfg.Sites[1].Name,
-				zone:  cfg.Sites[1].Zone,
-				lbIP:  cfg.Sites[1].LBIP,
-				mysql: site1MySQL,
-				state: state.StateUnknown,
-			},
-		},
+		cfg:              cfg,
+		sites:            sites,
 		failover:         failover,
 		failoverCooldown: cooldown,
 		updater:          updater,
@@ -264,8 +309,9 @@ func (tm *TopologyManager) SetLastFailoverTarget(target string) {
 	tm.lastFailoverTarget = target
 }
 
-// activeSiteLocked returns the name of the single writable site, or "" if zero
-// or more than one site is writable. Must be called with tm.mu held.
+// activeSiteLocked returns the name of the single writable site, or ""
+// if zero or more than one site is writable. Must be called with tm.mu
+// held.
 func (tm *TopologyManager) activeSiteLocked() string {
 	var name string
 	var count int
@@ -284,10 +330,11 @@ func (tm *TopologyManager) activeSiteLocked() string {
 func (tm *TopologyManager) Status() StatusResponse {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	var sites [2]SiteStatusEntry
+	sites := make([]SiteStatusEntry, len(tm.sites))
 	for i := range tm.sites {
 		sites[i] = SiteStatusEntry{
 			Name:  tm.sites[i].name,
+			Role:  string(tm.sites[i].role),
 			State: tm.sites[i].state.String(),
 		}
 		if tm.recoveryPendingSite == tm.sites[i].name {
@@ -347,10 +394,11 @@ func (tm *TopologyManager) Run(ctx context.Context) {
 	}
 }
 
-// adaptivePollInterval returns the next poll interval based on the worst-case
-// failure count across both sites. When both sites are healthy the base interval
-// is used; when either is failing, the interval increases exponentially up to
-// base * 2^maxPollBackoffExponent (capped at 30s).
+// adaptivePollInterval returns the next poll interval based on the
+// worst-case failure count across all sites. When every site is healthy
+// the base interval is used; when any site is failing, the interval
+// increases exponentially up to base * 2^maxPollBackoffExponent (capped
+// at 30s).
 func (tm *TopologyManager) adaptivePollInterval(base time.Duration) time.Duration {
 	maxFail := 0
 	for i := range tm.sites {
@@ -374,10 +422,9 @@ func (tm *TopologyManager) adaptivePollInterval(base time.Duration) time.Duratio
 	return interval
 }
 
-// Poll executes a single poll cycle: checks both sites, applies debounce,
-// evaluates transitions, and triggers any necessary actions.
+// Poll executes a single poll cycle: checks every site, applies
+// debounce, evaluates transitions, and triggers any necessary actions.
 func (tm *TopologyManager) Poll(ctx context.Context) {
-	// Poll both sites in parallel.
 	type pollResult struct {
 		readOnly bool
 		err      error
@@ -392,31 +439,36 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		return pollResult{readOnly: ro, err: err, duration: tm.clock.Since(start)}
 	}
 
-	var r [2]pollResult
+	// Poll every site in parallel.
+	results := make([]pollResult, len(tm.sites))
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); r[0] = pollSite(&tm.sites[0]) }()
-	go func() { defer wg.Done(); r[1] = pollSite(&tm.sites[1]) }()
+	wg.Add(len(tm.sites))
+	for i := range tm.sites {
+		i := i
+		go func() {
+			defer wg.Done()
+			results[i] = pollSite(&tm.sites[i])
+		}()
+	}
 	wg.Wait()
 
 	for i := range tm.sites {
-		metrics.PollLatency.WithLabelValues(tm.sites[i].name).Observe(r[i].duration.Seconds())
+		metrics.PollLatency.WithLabelValues(tm.sites[i].name).Observe(results[i].duration.Seconds())
 	}
 
 	now := tm.clock.Now()
 
 	// Compute new debounced states.
-	var newStates [2]state.SiteState
+	newStates := make([]state.SiteState, len(tm.sites))
 	for i := range tm.sites {
-		newStates[i] = tm.computeState(&tm.sites[i], r[i].readOnly, r[i].err)
+		newStates[i] = tm.computeState(&tm.sites[i], results[i].readOnly, results[i].err)
 	}
 
-	// Update lastSeen and state under the lock to avoid races with Status()
-	// and any goroutines that may read siteTracker fields concurrently.
+	// Update lastSeen and state under the lock.
 	tm.mu.Lock()
-	var prevStates [2]state.SiteState
+	prevStates := make([]state.SiteState, len(tm.sites))
 	for i := range tm.sites {
-		if r[i].err == nil {
+		if results[i].err == nil {
 			tm.sites[i].lastSeen = now
 		}
 		prevStates[i] = tm.sites[i].state
@@ -431,9 +483,11 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 	tm.mu.Unlock()
 
-	// Apply per-site transitions (outside the lock — these may do I/O).
+	// Apply per-site transitions (outside the lock).
+	anyTransition := false
 	for i := range tm.sites {
 		if newStates[i] != prevStates[i] {
+			anyTransition = true
 			tm.logger.Info("state transition", "site", tm.sites[i].name, "from", prevStates[i], "to", newStates[i])
 			metrics.StateTransitions.WithLabelValues(tm.sites[i].name, prevStates[i].String(), newStates[i].String()).Inc()
 			tm.applyPerSiteAction(ctx, &tm.sites[i], state.EvalPerSiteTransition(prevStates[i], newStates[i]))
@@ -444,7 +498,8 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// failover trigger time; this block confirms the promoted site is writable
 	// and clears the guard flag to allow future failovers.
 	if tm.promotedSite != "" {
-		site := tm.getSite(tm.promotedSite)
+		siteName := tm.promotedSite
+		site := tm.getSite(siteName)
 		if site != nil && site.state == state.StateWritable {
 			tm.logger.Info("promotion confirmed: site is writable", "site", site.name)
 			tm.promotedSite = ""
@@ -452,12 +507,13 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 
 	// Cross-site evaluation (only on state transitions to avoid repeated actions).
-	var alertMsg string
-	anyTransition := newStates[0] != prevStates[0] || newStates[1] != prevStates[1]
+	var alertMsg, degradedReason string
 	if anyTransition {
-		cross := state.EvalCrossSite(tm.sites[0].state, tm.sites[1].state, prevStates[0], prevStates[1], tm.sites[0].name, tm.sites[1].name)
-		alertMsg = cross.Alert
-		tm.applyCrossSiteAction(ctx, cross)
+		observations := tm.observations()
+		action := state.EvalCrossSite(observations, tm.cfg.SitePriorities)
+		alertMsg = action.Alert
+		degradedReason = action.Reason
+		tm.applyCrossSiteAction(ctx, action)
 	}
 
 	// Update status.
@@ -480,18 +536,13 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		}
 	}
 
-	// Check replication status on the read-only site (the replica), and update
-	// the tracker's replicating flag. isHealthyReplica() consults this flag to
-	// gate ordered updates — a site whose super_read_only=ON but replication
-	// threads are not running must not be targeted.
-	var siteRepl [2]*mysql.ReplicaStatus
+	// Check replication status on every read-only site.
+	siteRepl := make([]*mysql.ReplicaStatus, len(tm.sites))
 	const replicatingStreakThreshold = 2
 	for i := range tm.sites {
 		if tm.sites[i].state != state.StateReadOnly {
 			continue
 		}
-		// Bound each probe so a hung MySQL cannot stall the whole poll loop —
-		// replicating flag going stale would also starve failover/update decisions.
 		replCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		rs, err := tm.sites[i].mysql.ShowReplicaStatus(replCtx)
 		cancel()
@@ -527,7 +578,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// Check for ordered rolling update trigger.
 	updateStarted := tm.checkUpdate(ctx)
 
-	// Auto-clone an empty site even when it's not a split-brain (e.g. the
+	// Auto-clone any empty site even outside of split-brain (e.g. the
 	// sidecar fenced the empty site to read-only after a PVC wipe).
 	autoCloneStarted := false
 	if !recloneStarted && !tm.isBootstrapping() && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
@@ -536,8 +587,8 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		phase := tm.bootstrapPhase
 		tm.mu.RUnlock()
 		if !suppressed && (phase == BootstrapPhaseNone || phase == BootstrapPhaseFailed) {
-			if donorIdx, emptyIdx := tm.detectEmptySite(ctx); donorIdx >= 0 {
-				tm.startBootstrapWithIndices(ctx, donorIdx, emptyIdx, "auto-clone")
+			if donor, empty := tm.detectEmptySite(ctx); donor != "" && empty != "" {
+				tm.startBootstrapByName(ctx, donor, empty, "auto-clone")
 				autoCloneStarted = true
 			}
 		}
@@ -572,70 +623,99 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 
 	// Notify the status callback on any state change, recovery event, or update event.
 	if (anyTransition || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted) && tm.StatusCallback != nil {
-		tm.mu.RLock()
-		activeSite := tm.activeSiteLocked()
-		bootstrapPhase := string(tm.bootstrapPhase)
-		bootstrapErrStr := ""
-		if tm.bootstrapErr != nil {
-			bootstrapErrStr = tm.bootstrapErr.Error()
-		}
-		bootstrapSrc := tm.bootstrapSource
-		recoverySite := tm.recoveryPendingSite
-		recoveryState := tm.recoveryStateLocked()
-		divergentGtid := tm.recoveryDivergentGtid
-		divergentTxnCount := tm.recoveryDivergentCount
-		promotionGtid := tm.promotionGtidExecuted
-		tm.mu.RUnlock()
-		var updatePhase string
-		if tm.updater != nil {
-			updatePhase = string(tm.updater.Phase())
-		}
-		tm.StatusCallback(TopologySnapshot{
-			SiteNames:          [2]string{tm.sites[0].name, tm.sites[1].name},
-			SiteStates:         [2]state.SiteState{tm.sites[0].state, tm.sites[1].state},
-			SiteLastSeen:       [2]time.Time{tm.sites[0].lastSeen, tm.sites[1].lastSeen},
-			SiteReplication:    siteRepl,
-			ActiveSite:         activeSite,
-			LastFailover:       tm.lastFailover,
-			LastFailoverTarget: tm.lastFailoverTarget,
-			Alert:              alertMsg,
-			UpdatePhase:        updatePhase,
-			BootstrapPhase:     bootstrapPhase,
-			BootstrapError:     bootstrapErrStr,
-			BootstrapSource:    bootstrapSrc,
-
-			PromotionGtidExecuted: promotionGtid,
-			RecoverySite:          recoverySite,
-			RecoveryState:         recoveryState,
-			DivergentGtid:         divergentGtid,
-			DivergentTxnCount:     divergentTxnCount,
-		})
+		tm.StatusCallback(tm.buildSnapshot(siteRepl, alertMsg, degradedReason))
 	}
 
 	// Broadcast full topology to WebSocket clients on every poll cycle.
 	tm.broadcastTopology(siteRepl, alertMsg)
 }
 
+// observations returns a SiteObservation for every site. Caller must
+// hold no locks (we acquire RLock here).
+func (tm *TopologyManager) observations() []state.SiteObservation {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	out := make([]state.SiteObservation, len(tm.sites))
+	for i := range tm.sites {
+		out[i] = tm.sites[i].observation()
+	}
+	return out
+}
+
+// buildSnapshot produces a TopologySnapshot from current tracker state.
+// Callers must provide the most recent siteRepl values and any alert
+// computed this cycle.
+func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus, alert, degradedReason string) TopologySnapshot {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+
+	sites := make([]SiteSnapshot, len(tm.sites))
+	for i := range tm.sites {
+		var repl *mysql.ReplicaStatus
+		if i < len(siteRepl) {
+			repl = siteRepl[i]
+		}
+		sites[i] = SiteSnapshot{
+			Name:        tm.sites[i].name,
+			Role:        tm.sites[i].role,
+			State:       tm.sites[i].state,
+			LastSeen:    tm.sites[i].lastSeen,
+			Replication: repl,
+		}
+	}
+
+	var updatePhase string
+	if tm.updater != nil {
+		updatePhase = string(tm.updater.Phase())
+	}
+
+	snap := TopologySnapshot{
+		Sites:                 sites,
+		ActiveSite:            tm.activeSiteLocked(),
+		LastFailover:          tm.lastFailover,
+		LastFailoverTarget:    tm.lastFailoverTarget,
+		Alert:                 alert,
+		DegradedReason:        degradedReason,
+		UpdatePhase:           updatePhase,
+		BootstrapPhase:        string(tm.bootstrapPhase),
+		BootstrapSource:       tm.bootstrapSource,
+		PromotionGtidExecuted: tm.promotionGtidExecuted,
+		RecoverySite:          tm.recoveryPendingSite,
+		RecoveryState:         tm.recoveryStateLocked(),
+		DivergentGtid:         tm.recoveryDivergentGtid,
+		DivergentTxnCount:     tm.recoveryDivergentCount,
+	}
+	if tm.bootstrapErr != nil {
+		snap.BootstrapError = tm.bootstrapErr.Error()
+	}
+	return snap
+}
+
 // broadcastTopology builds a full TopologyMessage from the current locked
 // state and pushes it to all WebSocket clients. Called at the end of every
 // poll cycle so dashboards get live updates (not just on transitions).
-func (tm *TopologyManager) broadcastTopology(siteRepl [2]*mysql.ReplicaStatus, alertMsg string) {
+func (tm *TopologyManager) broadcastTopology(siteRepl []*mysql.ReplicaStatus, alertMsg string) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 
 	sites := make([]platform.TopologySite, 0, len(tm.sites))
 	for i := range tm.sites {
+		var repl *mysql.ReplicaStatus
+		if i < len(siteRepl) {
+			repl = siteRepl[i]
+		}
 		s := platform.TopologySite{
 			Name:  tm.sites[i].name,
+			Role:  string(tm.sites[i].role),
 			State: tm.sites[i].state.String(),
 		}
 		if !tm.sites[i].lastSeen.IsZero() {
 			s.LastSeen = tm.sites[i].lastSeen.Format(time.RFC3339)
 		}
-		if siteRepl[i] != nil {
-			s.Replicating = siteRepl[i].IORunning && siteRepl[i].SQLRunning
-			s.SecondsBehindSource = siteRepl[i].SecondsBehindSource
-			s.GtidExecuted = siteRepl[i].ExecutedGtidSet
+		if repl != nil {
+			s.Replicating = repl.IORunning && repl.SQLRunning
+			s.SecondsBehindSource = repl.SecondsBehindSource
+			s.GtidExecuted = repl.ExecutedGtidSet
 		}
 		if tm.recoveryPendingSite == tm.sites[i].name {
 			s.RecoveryState = tm.recoveryStateLocked()
@@ -713,7 +793,6 @@ func (tm *TopologyManager) applyPerSiteAction(ctx context.Context, site *siteTra
 			metrics.TaintOperations.WithLabelValues(site.name, op).Inc()
 		}
 	}
-
 }
 
 func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action state.CrossSiteAction) {
@@ -732,8 +811,8 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		return
 	}
 
-	// Detect split-brain requiring auto-bootstrap: either one site is empty
-	// (post-PVC-wipe or new site) or both are empty (fresh deploy).
+	// Detect split-brain requiring auto-bootstrap: one or more sites are
+	// empty (post-PVC-wipe or new site) or every site is empty (fresh deploy).
 	if action.SplitBrain && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
 		tm.mu.RLock()
 		phase := tm.bootstrapPhase
@@ -742,8 +821,8 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		if suppressed {
 			tm.logger.Info("auto-bootstrap suppressed (initFromBackup restore in flight)")
 		} else if phase == BootstrapPhaseNone || phase == BootstrapPhaseFailed {
-			if donorIdx, emptyIdx := tm.detectEmptySite(ctx); donorIdx >= 0 {
-				tm.startBootstrapWithIndices(ctx, donorIdx, emptyIdx, "auto-clone")
+			if donor, empty := tm.detectEmptySite(ctx); donor != "" && empty != "" {
+				tm.startBootstrapByName(ctx, donor, empty, "auto-clone")
 				return
 			}
 			if tm.isFreshDeploy(ctx) {
@@ -753,101 +832,228 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 	}
 
-	// If both sites are writable after a prior failover and this is not a
-	// fresh deploy, the old primary has returned. Fence it immediately so it
-	// stops accepting writes; recovery proceeds in checkRecovery once it
-	// transitions to read-only.
+	// If any site is writable after a prior failover and this is not a
+	// fresh deploy, the old primary(s) may have returned. Fence every
+	// writable site except the current failover target so they stop
+	// accepting writes; recovery proceeds in checkRecovery for each
+	// fenced site once it transitions to read-only.
 	if action.SplitBrain && tm.lastFailoverTarget != "" && !tm.isBootstrapping() {
-		oldPrimarySiteName := tm.otherSiteName(tm.lastFailoverTarget)
-		if site := tm.getSite(oldPrimarySiteName); site != nil && site.state == state.StateWritable {
-			tm.logger.Info("fencing returning old primary (split brain after failover)", "site", oldPrimarySiteName)
-			if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
-				tm.logger.Error("failed to fence returning old primary", "site", oldPrimarySiteName, "error", err)
+		for i := range tm.sites {
+			if tm.sites[i].name == tm.lastFailoverTarget {
+				continue
+			}
+			if tm.sites[i].state != state.StateWritable {
+				continue
+			}
+			tm.logger.Info("fencing returning old primary (split brain after failover)", "site", tm.sites[i].name)
+			if err := tm.sites[i].mysql.SetSuperReadOnly(ctx, true); err != nil {
+				tm.logger.Error("failed to fence returning old primary", "site", tm.sites[i].name, "error", err)
 			}
 		}
 	}
 
-	// Split-brain with no prior failover target (fresh deploy past bootstrap,
-	// or operator restart that lost in-memory state): if the user configured
-	// spec.splitBrainPolicy.preferSite, fence the non-preferred site and
-	// promote the preferred one. The promotion still flows through the
-	// standard path below so it respects the anti-flap cooldown.
-	if action.SplitBrain && action.PromoteSite == "" && tm.lastFailoverTarget == "" && !tm.isBootstrapping() {
-		if prefer := tm.cfg.SplitBrainPreferSite; prefer != "" {
-			if preferred := tm.getSite(prefer); preferred != nil && preferred.state == state.StateWritable {
-				loserName := tm.otherSiteName(prefer)
-				if loser := tm.getSite(loserName); loser != nil && loser.state == state.StateWritable {
-					tm.logger.Warn("split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.preferSite",
-						"preferSite", prefer, "fencedSite", loserName)
-					if err := loser.mysql.SetSuperReadOnly(ctx, true); err != nil {
-						tm.logger.Error("failed to fence non-preferred site", "site", loserName, "error", err)
+	// Resolve a concrete promotion target. The state machine emits an
+	// ordered candidate list; we pick the freshest one by GTID (most-
+	// caught-up replica wins). Priority order is only a tiebreaker.
+	//
+	// Split-brain with no prior failover target (fresh deploy past
+	// bootstrap, or operator restart that lost in-memory state) takes
+	// a separate path: when the user configured
+	// spec.splitBrainPolicy.sitePriorities we fence every non-winning
+	// writable site and synthesize a promotion of the policy winner.
+	// GTID freshness is intentionally not consulted here — split-brain
+	// winner selection is policy-driven because every writable side
+	// may carry unique writes, and the operator's designated
+	// authority is what matters.
+	promote := ""
+	if action.SplitBrain && tm.lastFailoverTarget == "" && !tm.isBootstrapping() && len(tm.cfg.SitePriorities) > 0 {
+		writable := tm.writableObservations()
+		winner, losers := state.ResolveSplitBrain(writable, tm.cfg.SitePriorities)
+		if winner != "" {
+			for _, loser := range losers {
+				if site := tm.getSite(loser); site != nil && site.state == state.StateWritable {
+					tm.logger.Warn("split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities",
+						"winner", winner, "fencedSite", loser)
+					if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
+						tm.logger.Error("failed to fence non-preferred site", "site", loser, "error", err)
 					} else {
-						metrics.SplitBrainAutoResolveTotal.WithLabelValues(prefer).Inc()
+						metrics.SplitBrainAutoResolveTotal.WithLabelValues(winner).Inc()
 					}
-					// Synthesize a promotion so the preferred site is
-					// re-promoted (clears replication metadata, records
-					// promotionGtid, flips DNS). The anti-flap cooldown
-					// check below still applies.
-					action.PromoteSite = prefer
-					action.FlipDNS = prefer
 				}
 			}
+			promote = winner
+		}
+	}
+	if promote == "" && len(action.PromotionCandidates) > 0 {
+		promote = tm.pickFreshestCandidate(ctx, action.PromotionCandidates)
+		if promote == "" {
+			tm.logger.Warn("promotion candidates present but GTID picker returned no winner — no reachable candidate?",
+				"candidates", action.PromotionCandidates)
 		}
 	}
 
-	if action.PromoteSite != "" && tm.promotedSite == "" {
-		// Check anti-flap cooldown.
+	if promote != "" && tm.promotedSite == "" {
 		if !tm.lastFailover.IsZero() && tm.clock.Since(tm.lastFailover) < tm.failoverCooldown {
 			tm.logger.Info("failover blocked by anti-flap cooldown",
 				"lastFailover", tm.lastFailover, "cooldown", tm.failoverCooldown)
 			return
 		}
 
-		candidate := tm.getSite(action.PromoteSite)
-		oldPrimaryName := tm.otherSiteName(action.PromoteSite)
-		oldPrimary := tm.getSite(oldPrimaryName)
+		candidate := tm.getSite(promote)
+		if candidate == nil {
+			tm.logger.Error("promotion requested for unknown site", "site", promote)
+			return
+		}
+		if !candidate.isPromotable() {
+			tm.logger.Error("promotion target is not a primary-candidate — refusing",
+				"site", candidate.name, "role", candidate.role)
+			return
+		}
 
-		if candidate != nil {
-			tm.logger.Info("initiating failover", "candidate", candidate.name, "oldPrimary", oldPrimaryName)
-
-			// DNS flip FIRST: start propagation now so it overlaps with
-			// the relay-log drain and MySQL promotion steps.
-			if err := tm.dns.UpdateDNSRecord(ctx, candidate.lbIP); err != nil {
-				tm.logger.Error("DNS flip failed", "site", candidate.name, "error", err)
-			} else {
-				metrics.DNSFlipCount.WithLabelValues(candidate.name).Inc()
+		// Pick an old primary for fencing: prefer the last failover
+		// target if it is still known; otherwise fence any site that
+		// recently looked writable. For N sites we simply call
+		// Execute with no old-primary checker when one isn't known —
+		// fencing is best-effort by design.
+		var oldPrimaryChecker mysql.Checker
+		oldPrimaryName := tm.previousPrimary(candidate.name)
+		if oldPrimaryName != "" {
+			if site := tm.getSite(oldPrimaryName); site != nil {
+				oldPrimaryChecker = site.mysql
 			}
+		}
 
-			var oldPrimaryChecker mysql.Checker
-			if oldPrimary != nil {
-				oldPrimaryChecker = oldPrimary.mysql
-			}
+		tm.logger.Info("initiating failover", "candidate", candidate.name, "oldPrimary", oldPrimaryName)
 
-			promotionGtid, err := tm.failover.Execute(ctx, candidate.mysql, oldPrimaryChecker, candidate.name)
-			if err != nil {
-				tm.logger.Error("failover failed", "error", err)
-				return
-			}
-			metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
-			tm.promotionGtidExecuted = promotionGtid
-			tm.promotedSite = candidate.name
-			tm.lastFailover = tm.clock.Now()
-			tm.lastFailoverTarget = candidate.name
+		// DNS flip FIRST: start propagation now so it overlaps with
+		// the relay-log drain and MySQL promotion steps.
+		if err := tm.dns.UpdateDNSRecord(ctx, candidate.lbIP); err != nil {
+			tm.logger.Error("DNS flip failed", "site", candidate.name, "error", err)
+		} else {
+			metrics.DNSFlipCount.WithLabelValues(candidate.name).Inc()
+		}
+
+		promotionGtid, err := tm.failover.Execute(ctx, candidate.mysql, oldPrimaryChecker, candidate.name)
+		if err != nil {
+			tm.logger.Error("failover failed", "error", err)
+			return
+		}
+		metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
+		tm.promotionGtidExecuted = promotionGtid
+		tm.promotedSite = candidate.name
+		tm.lastFailover = tm.clock.Now()
+		tm.lastFailoverTarget = candidate.name
+	}
+}
+
+// previousPrimary returns the name of the most likely "old primary" —
+// the last failover target if it is different from newPrimary, or
+// otherwise the first writable site other than newPrimary. Returns ""
+// if there is no plausible old primary to fence.
+func (tm *TopologyManager) previousPrimary(newPrimary string) string {
+	if tm.lastFailoverTarget != "" && tm.lastFailoverTarget != newPrimary {
+		return tm.lastFailoverTarget
+	}
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	for i := range tm.sites {
+		if tm.sites[i].name == newPrimary {
+			continue
+		}
+		if tm.sites[i].state == state.StateWritable {
+			return tm.sites[i].name
 		}
 	}
+	return ""
+}
+
+// writableObservations returns observations for every currently writable site.
+func (tm *TopologyManager) writableObservations() []state.SiteObservation {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	var out []state.SiteObservation
+	for i := range tm.sites {
+		if tm.sites[i].state == state.StateWritable {
+			out = append(out, tm.sites[i].observation())
+		}
+	}
+	return out
+}
+
+// pickFreshestCandidate queries GTID_EXECUTED from every candidate in
+// parallel and returns the name of the replica with the most-caught-up
+// set. GTID freshness is the primary selector (minimise data loss on
+// promotion); ties or incomparable sets fall back to candidate order,
+// which the caller has already sorted by priority list + declared
+// order. Unreachable candidates are skipped; returns "" when no
+// candidate can be reached or parsed.
+func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates []string) string {
+	type candidateInfo struct {
+		pos  int
+		name string
+		gtid mysql.GTIDSet
+		ok   bool
+	}
+
+	infos := make([]candidateInfo, len(candidates))
+	var wg sync.WaitGroup
+	for i, name := range candidates {
+		site := tm.getSite(name)
+		if site == nil {
+			infos[i] = candidateInfo{pos: i, name: name}
+			continue
+		}
+		infos[i] = candidateInfo{pos: i, name: name}
+		checker := site.mysql
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			raw, err := checker.GetGtidExecuted(queryCtx)
+			if err != nil {
+				tm.logger.Warn("failover picker: failed to query GTID", "site", infos[i].name, "error", err)
+				return
+			}
+			parsed, err := mysql.ParseGTIDSet(raw)
+			if err != nil {
+				tm.logger.Warn("failover picker: failed to parse GTID", "site", infos[i].name, "error", err)
+				return
+			}
+			infos[i].gtid = parsed
+			infos[i].ok = true
+		}()
+	}
+	wg.Wait()
+
+	best := -1
+	for i := range infos {
+		if !infos[i].ok {
+			continue
+		}
+		if best < 0 {
+			best = i
+			continue
+		}
+		// A strictly-newer GTID set wins over the current best;
+		// otherwise keep the earlier (higher-priority) candidate.
+		if infos[i].gtid.Contains(infos[best].gtid) && !infos[best].gtid.Contains(infos[i].gtid) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return ""
+	}
+	tm.logger.Info("failover picker: selected promotion target by GTID freshness",
+		"site", infos[best].name, "gtid", infos[best].gtid.String(), "candidates", candidates)
+	return infos[best].name
 }
 
 // SetLastFailoverForTest allows tests to manipulate the cooldown timer
 // without sleeping. This should only be used in tests.
 func (tm *TopologyManager) SetLastFailoverForTest(t time.Time) {
 	tm.lastFailover = t
-}
-
-func (tm *TopologyManager) otherSiteName(name string) string {
-	if name == tm.sites[0].name {
-		return tm.sites[1].name
-	}
-	return tm.sites[0].name
 }
 
 // Stop cancels the TopologyManager's context, causing the Run loop to exit.
@@ -913,9 +1119,12 @@ func (tm *TopologyManager) isUpdating() bool {
 	return tm.updater != nil && tm.updater.IsUpdating()
 }
 
-// checkUpdate detects spec drift and triggers an ordered rolling update.
-// It runs the update asynchronously so that the poll loop is not blocked.
-// Returns true if an update was started this cycle.
+// checkUpdate detects spec drift and triggers an ordered rolling
+// update. Returns true if an update was started this cycle.
+//
+// For N sites, the update is ordered: all non-active sites are updated
+// one at a time, and the active site is updated last (after a planned
+// handoff — currently still pending in the non-active rollout set).
 func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 	if tm.updater == nil || tm.ApplyUpdate == nil {
 		return false
@@ -924,37 +1133,34 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 		return false
 	}
 
-	// Both sites must be healthy (one writable, one read-only).
-	activeIdx := -1
-	standbyIdx := -1
+	// Identify the active site and each healthy standby.
+	var activeName string
+	var activeChecker mysql.Checker
+	var standbyName string
+	var standbyChecker mysql.Checker
+	tm.mu.RLock()
 	for i := range tm.sites {
 		switch tm.sites[i].state {
 		case state.StateWritable:
-			activeIdx = i
+			if activeName != "" {
+				// Split-brain — let that path recover before touching updates.
+				tm.mu.RUnlock()
+				return false
+			}
+			activeName = tm.sites[i].name
+			activeChecker = tm.sites[i].mysql
 		case state.StateReadOnly:
-			standbyIdx = i
+			if tm.sites[i].isHealthyReplica() && standbyName == "" {
+				standbyName = tm.sites[i].name
+				standbyChecker = tm.sites[i].mysql
+			}
 		}
 	}
-	if activeIdx < 0 || standbyIdx < 0 {
-		return false
-	}
-
-	// Refuse to start an ordered update against a stale standby. A site whose
-	// super_read_only=ON but replication is not actually running is exactly the
-	// precondition for the deadlock in issue #46 — updating it would restart a
-	// pod that holds no data and never catch up.
-	tm.mu.RLock()
-	healthyStandby := tm.sites[standbyIdx].isHealthyReplica()
 	tm.mu.RUnlock()
-	if !healthyStandby {
-		tm.logger.Info("ordered update: standby not replicating, deferring",
-			"site", tm.sites[standbyIdx].name)
+	if activeName == "" || standbyName == "" {
 		return false
 	}
 
-	// Check if either site has pending spec drift. The runner sets
-	// specDriftSites when it detects a mismatch between the Deployment's
-	// spec-hash annotation and the desired hash computed from the CR.
 	tm.mu.RLock()
 	driftSites := tm.specDriftSites
 	tm.mu.RUnlock()
@@ -962,15 +1168,10 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 		return false
 	}
 
-	activeName := tm.sites[activeIdx].name
-	standbyName := tm.sites[standbyIdx].name
-	standbyChecker := tm.sites[standbyIdx].mysql
-	activeChecker := tm.sites[activeIdx].mysql
-	applyUpdate := tm.ApplyUpdate
-
 	tm.logger.Info("ordered update: spec drift detected, starting ordered update",
 		"driftSites", driftSites, "active", activeName, "standby", standbyName)
 
+	applyUpdate := tm.ApplyUpdate
 	go func() {
 		if err := tm.updater.Execute(ctx, activeName, standbyName, standbyChecker, activeChecker, applyUpdate); err != nil {
 			tm.logger.Error("ordered update failed", "error", err)
@@ -991,9 +1192,12 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 // emitStatusSnapshot sends a TopologySnapshot through the status callback
 // using current state. Safe to call from any goroutine.
 func (tm *TopologyManager) emitStatusSnapshot() {
+	if tm.StatusCallback == nil {
+		return
+	}
 	// Collect replication status for read-only sites.
 	ctx := context.Background()
-	var siteRepl [2]*mysql.ReplicaStatus
+	siteRepl := make([]*mysql.ReplicaStatus, len(tm.sites))
 	for i := range tm.sites {
 		if tm.sites[i].state == state.StateReadOnly {
 			rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
@@ -1002,45 +1206,7 @@ func (tm *TopologyManager) emitStatusSnapshot() {
 			}
 		}
 	}
-
-	tm.mu.RLock()
-	activeSite := tm.activeSiteLocked()
-	bootstrapPhase := string(tm.bootstrapPhase)
-	bootstrapErrStr := ""
-	if tm.bootstrapErr != nil {
-		bootstrapErrStr = tm.bootstrapErr.Error()
-	}
-	bootstrapSrc := tm.bootstrapSource
-	recoverySite := tm.recoveryPendingSite
-	recoveryState := tm.recoveryStateLocked()
-	divergentGtid := tm.recoveryDivergentGtid
-	divergentTxnCount := tm.recoveryDivergentCount
-	promotionGtid := tm.promotionGtidExecuted
-	var updatePhase string
-	if tm.updater != nil {
-		updatePhase = string(tm.updater.Phase())
-	}
-	tm.mu.RUnlock()
-
-	tm.StatusCallback(TopologySnapshot{
-		SiteNames:          [2]string{tm.sites[0].name, tm.sites[1].name},
-		SiteStates:         [2]state.SiteState{tm.sites[0].state, tm.sites[1].state},
-		SiteLastSeen:       [2]time.Time{tm.sites[0].lastSeen, tm.sites[1].lastSeen},
-		SiteReplication:    siteRepl,
-		ActiveSite:         activeSite,
-		LastFailover:       tm.lastFailover,
-		LastFailoverTarget: tm.lastFailoverTarget,
-		UpdatePhase:        updatePhase,
-		BootstrapPhase:     bootstrapPhase,
-		BootstrapError:     bootstrapErrStr,
-		BootstrapSource:    bootstrapSrc,
-
-		PromotionGtidExecuted: promotionGtid,
-		RecoverySite:          recoverySite,
-		RecoveryState:         recoveryState,
-		DivergentGtid:         divergentGtid,
-		DivergentTxnCount:     divergentTxnCount,
-	})
+	tm.StatusCallback(tm.buildSnapshot(siteRepl, "", ""))
 }
 
 // SetSpecDriftSites records which sites have spec drift (Deployment hash != desired hash).
@@ -1051,132 +1217,123 @@ func (tm *TopologyManager) SetSpecDriftSites(sites []string) {
 	tm.specDriftSites = sites
 }
 
-// isFreshDeploy reports whether both sites are writable AND neither has ever
-// had replication configured. This is the signature of a fresh deployment —
-// as opposed to a "true" split-brain where at least one side previously had
-// replication set up and may now hold diverged writes.
+// isFreshDeploy reports whether every site is writable AND none has
+// ever had replication configured. This is the signature of a fresh
+// deployment — as opposed to a "true" split-brain where at least one
+// site previously had replication set up and may now hold diverged
+// writes.
 func (tm *TopologyManager) isFreshDeploy(ctx context.Context) bool {
-	if tm.sites[0].state != state.StateWritable || tm.sites[1].state != state.StateWritable {
-		return false
+	for i := range tm.sites {
+		if tm.sites[i].state != state.StateWritable {
+			return false
+		}
 	}
 	for i := range tm.sites {
 		rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
 		if err != nil {
-			// Be conservative: if we can't determine replication state, don't bootstrap.
 			tm.logger.Warn("fresh-deploy check: could not read replica status", "site", tm.sites[i].name, "error", err)
 			return false
 		}
 		if rs != nil {
-			// Replication was configured at some point — not a fresh deploy.
 			return false
 		}
 	}
 	return true
 }
 
-// detectEmptySite checks whether exactly one site has data and the other is
-// completely empty (empty GTID_EXECUTED, no replication configured). This
-// covers fresh deploys and post-PVC-wipe scenarios regardless of which site
-// index has data. Returns the donor and empty site indices, or (-1, -1) if
-// auto-clone should not happen.
-func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donorIdx, emptyIdx int) {
-	// Both sites must be reachable.
+// detectEmptySite looks for exactly one donor/recipient pair where a
+// single site is reachable but completely empty (empty GTID_EXECUTED,
+// no replication configured). Works for any number of sites; the
+// donor is the writable site with data, and the recipient is any
+// reachable empty site. When multiple sites are empty the operator
+// clones one per poll cycle. Returns ("", "") when no eligible pair
+// exists.
+func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty string) {
+	// Every site must be reachable.
 	for i := range tm.sites {
-		if tm.sites[i].state == state.StateUnreachable || tm.sites[i].state == state.StateUnknown {
-			return -1, -1
+		switch tm.sites[i].state {
+		case state.StateUnreachable, state.StateUnknown:
+			return "", ""
 		}
 	}
 
-	var replStatus [2]*mysql.ReplicaStatus
-	var gtidSets [2]mysql.GTIDSet
+	replStatus := make([]*mysql.ReplicaStatus, len(tm.sites))
+	gtidSets := make([]mysql.GTIDSet, len(tm.sites))
 	for i := range tm.sites {
 		rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
 		if err != nil {
-			return -1, -1
+			return "", ""
 		}
 		replStatus[i] = rs
 
 		raw, err := tm.sites[i].mysql.GetGtidExecuted(ctx)
 		if err != nil {
-			return -1, -1
+			return "", ""
 		}
 		parsed, err := mysql.ParseGTIDSet(raw)
 		if err != nil {
-			return -1, -1
+			return "", ""
 		}
 		gtidSets[i] = parsed
 	}
 
+	// Locate the writable site with data (our donor). We only clone
+	// from a writable site to avoid copying from a stale replica.
+	donorIdx := -1
 	for i := range tm.sites {
-		other := 1 - i
-		emptyReachable := tm.sites[i].state == state.StateWritable || tm.sites[i].state == state.StateReadOnly
-		if gtidSets[i].IsEmpty() && replStatus[i] == nil &&
-			!gtidSets[other].IsEmpty() &&
-			tm.sites[other].state == state.StateWritable &&
-			emptyReachable {
-			return other, i
+		if tm.sites[i].state == state.StateWritable && !gtidSets[i].IsEmpty() {
+			donorIdx = i
+			break
 		}
 	}
+	if donorIdx < 0 {
+		return "", ""
+	}
 
-	return -1, -1
+	// Locate any empty, reachable non-donor site.
+	for i := range tm.sites {
+		if i == donorIdx {
+			continue
+		}
+		reachable := tm.sites[i].state == state.StateWritable || tm.sites[i].state == state.StateReadOnly
+		if !reachable {
+			continue
+		}
+		if gtidSets[i].IsEmpty() && replStatus[i] == nil {
+			return tm.sites[donorIdx].name, tm.sites[i].name
+		}
+	}
+	return "", ""
 }
 
-// selectDonor determines which site should be the clone donor (primary) and
-// which should be the recipient (replica) by comparing GTID_EXECUTED sets.
-// If one site has data and the other is empty, the non-empty site is the donor.
-// If both are empty (true fresh deploy), sites[0] is the donor by convention.
-// If both have data, an error is returned to prevent accidental data loss.
-func (tm *TopologyManager) selectDonor(ctx context.Context) (primaryIdx, replicaIdx int, err error) {
-	var gtids [2]mysql.GTIDSet
+// selectSeedSite determines which site should be seeded as the initial
+// primary during fresh-deploy bootstrap. The winner is the highest-
+// priority primary-candidate in cfg.SitePriorities, falling back to the
+// first primary-candidate in declared order.
+func (tm *TopologyManager) selectSeedSite() string {
+	for _, name := range tm.cfg.SitePriorities {
+		if site := tm.getSite(name); site != nil && site.isPromotable() {
+			return site.name
+		}
+	}
 	for i := range tm.sites {
-		raw, qErr := tm.sites[i].mysql.GetGtidExecuted(ctx)
-		if qErr != nil {
-			return 0, 0, fmt.Errorf("get GTID_EXECUTED for %s: %w", tm.sites[i].name, qErr)
+		if tm.sites[i].isPromotable() {
+			return tm.sites[i].name
 		}
-		parsed, pErr := mysql.ParseGTIDSet(raw)
-		if pErr != nil {
-			return 0, 0, fmt.Errorf("parse GTID_EXECUTED for %s: %w", tm.sites[i].name, pErr)
-		}
-		gtids[i] = parsed
 	}
-
-	switch {
-	case gtids[0].IsEmpty() && gtids[1].IsEmpty():
-		return 0, 1, nil
-	case !gtids[0].IsEmpty() && gtids[1].IsEmpty():
-		return 0, 1, nil
-	case gtids[0].IsEmpty() && !gtids[1].IsEmpty():
-		return 1, 0, nil
-	case !gtids[0].HasCommonUUIDs(gtids[1]):
-		// Disjoint GTID sets = two independently initialized MySQL instances (fresh deploy).
-		// Pick sites[0] as donor by convention.
-		tm.logger.Info("both sites have data with disjoint GTIDs — treating as fresh deploy", "site0", tm.sites[0].name, "gtid0", gtids[0].String(), "site1", tm.sites[1].name, "gtid1", gtids[1].String())
-		return 0, 1, nil
-	case gtids[0].Contains(gtids[1]):
-		// Site 0 has all of site 1's transactions (or they're identical).
-		// This happens after a successful CLONE where replication setup failed.
-		// Site 0 is the donor (superset); skip cloning and just set up replication.
-		tm.logger.Info("site 0 contains site 1 GTIDs — prior clone detected, skipping clone",
-			"primary", tm.sites[0].name, "replica", tm.sites[1].name,
-			"gtid0", gtids[0].String(), "gtid1", gtids[1].String())
-		return 0, 1, nil
-	case gtids[1].Contains(gtids[0]):
-		tm.logger.Info("site 1 contains site 0 GTIDs — prior clone detected, skipping clone",
-			"primary", tm.sites[1].name, "replica", tm.sites[0].name,
-			"gtid0", gtids[0].String(), "gtid1", gtids[1].String())
-		return 1, 0, nil
-	default:
-		return 0, 0, fmt.Errorf("both sites have data with overlapping GTIDs — cannot auto-clone (site %s GTID: %s, site %s GTID: %s)",
-			tm.sites[0].name, gtids[0], tm.sites[1].name, gtids[1])
-	}
+	return ""
 }
 
-// startBootstrap kicks off the async bootstrap goroutine using GTID-based
-// donor selection. Caller must hold no locks.
+// startBootstrap kicks off the async bootstrap goroutine for a
+// fresh-deploy scenario: the first primary-candidate is chosen as the
+// initial primary, and every other site is cloned from it one per poll
+// cycle (this function schedules the first clone; subsequent cycles
+// pick up additional empty sites via detectEmptySite → auto-clone).
+// Caller must hold no locks.
 func (tm *TopologyManager) startBootstrap(ctx context.Context) {
-	primaryIdx, replicaIdx, err := tm.selectDonor(ctx)
-	if err != nil {
-		tm.logger.Error("cannot determine clone donor", "error", err)
+	seed := tm.selectSeedSite()
+	if seed == "" {
+		err := fmt.Errorf("no primary-candidate site available to seed")
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseFailed
 		tm.bootstrapErr = err
@@ -1184,13 +1341,61 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 		tm.emitBootstrapStatus()
 		return
 	}
-	tm.startBootstrapWithIndices(ctx, primaryIdx, replicaIdx, "fresh-deploy")
+
+	// Pick any non-seed site as the first clone recipient. We prefer
+	// primary-candidate sites first so that post-fresh-deploy there is
+	// at least one replica ready for failover before dr-only followers
+	// are cloned; they will be picked up on subsequent poll cycles.
+	recipient := ""
+	for i := range tm.sites {
+		if tm.sites[i].name == seed {
+			continue
+		}
+		if tm.sites[i].isPromotable() {
+			recipient = tm.sites[i].name
+			break
+		}
+	}
+	if recipient == "" {
+		for i := range tm.sites {
+			if tm.sites[i].name != seed {
+				recipient = tm.sites[i].name
+				break
+			}
+		}
+	}
+	if recipient == "" {
+		err := fmt.Errorf("no recipient site available for bootstrap")
+		tm.mu.Lock()
+		tm.bootstrapPhase = BootstrapPhaseFailed
+		tm.bootstrapErr = err
+		tm.mu.Unlock()
+		tm.emitBootstrapStatus()
+		return
+	}
+
+	tm.startBootstrapByName(ctx, seed, recipient, "fresh-deploy")
 }
 
-// startBootstrapWithIndices kicks off the async bootstrap goroutine with
-// explicit donor/recipient indices and a source label for status reporting.
-// Caller must hold no locks.
-func (tm *TopologyManager) startBootstrapWithIndices(ctx context.Context, primaryIdx, replicaIdx int, source string) {
+// startBootstrapByName kicks off the async bootstrap goroutine for the
+// named donor/recipient pair. Caller must hold no locks.
+func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, recipient, source string) {
+	donorSite := tm.getSite(donor)
+	recipientSite := tm.getSite(recipient)
+	if donorSite == nil || recipientSite == nil {
+		tm.logger.Error("bootstrap aborted: unknown site", "donor", donor, "recipient", recipient)
+		return
+	}
+	if donorSite.host == "" {
+		err := fmt.Errorf("bootstrap: donor host not configured for site %s", donor)
+		tm.mu.Lock()
+		tm.bootstrapPhase = BootstrapPhaseFailed
+		tm.bootstrapErr = err
+		tm.mu.Unlock()
+		tm.emitBootstrapStatus()
+		return
+	}
+
 	tm.mu.Lock()
 	tm.bootstrapPhase = BootstrapPhaseCloning
 	tm.bootstrapErr = nil
@@ -1199,14 +1404,14 @@ func (tm *TopologyManager) startBootstrapWithIndices(ctx context.Context, primar
 
 	tm.logger.Info("starting bootstrap",
 		"source", source,
-		"primary", tm.sites[primaryIdx].name,
-		"replica", tm.sites[replicaIdx].name,
-		"primaryHost", tm.cfg.SiteHosts[primaryIdx])
+		"donor", donor,
+		"recipient", recipient,
+		"donorHost", donorSite.host)
 
 	tm.emitBootstrapStatus()
 
 	go func() {
-		err := tm.runBootstrap(ctx, primaryIdx, replicaIdx)
+		err := tm.runBootstrap(ctx, donorSite.mysql, recipientSite.mysql, donorSite.host, recipient)
 		tm.mu.Lock()
 		if err != nil {
 			tm.bootstrapPhase = BootstrapPhaseFailed
@@ -1221,15 +1426,9 @@ func (tm *TopologyManager) startBootstrapWithIndices(ctx context.Context, primar
 	}()
 }
 
-// runBootstrap performs the clone, waits for the MySQL restart, and sets up replication.
-func (tm *TopologyManager) runBootstrap(ctx context.Context, primaryIdx, replicaIdx int) error {
-	primary := tm.sites[primaryIdx].mysql
-	replica := tm.sites[replicaIdx].mysql
-	primaryHost := tm.cfg.SiteHosts[primaryIdx]
-	if primaryHost == "" {
-		return fmt.Errorf("bootstrap: primary host not configured for site %s", tm.sites[primaryIdx].name)
-	}
-
+// runBootstrap performs the clone, waits for the MySQL restart, and
+// sets up replication of recipient from donor.
+func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica mysql.Checker, primaryHost, replicaSite string) error {
 	// Check if the clone already completed (e.g. prior bootstrap succeeded at
 	// CLONE but failed at SetupReplication). If the primary's GTID set contains
 	// the replica's, the data is already in sync and we can skip directly to
@@ -1243,17 +1442,12 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primaryIdx, replica
 		return tm.setupReplicationForBootstrap(ctx, replica, primaryHost)
 	}
 
-	// Phase 1: Clone from primary. MySQL auto-restarts at the end of a
-	// successful clone, which typically causes the in-flight CLONE INSTANCE
-	// query to return a connection error. We treat such errors as potential
-	// success and proceed to the wait phase, where we verify the replica comes
-	// back online. A true clone failure will surface during the wait or the
-	// subsequent SetupReplication call (e.g. GTID set mismatch, missing data).
+	// Phase 1: Clone from primary.
 	err := tm.bootstrap.BootstrapReplica(ctx, BootstrapOpts{
 		Primary:      primary,
 		Replica:      replica,
 		PrimaryHost:  primaryHost,
-		ReplicaSite:  tm.sites[replicaIdx].name,
+		ReplicaSite:  replicaSite,
 		ReplUser:     tm.bootstrapCfg.ReplUser,
 		ReplPassword: tm.bootstrapCfg.ReplPassword,
 		UseSSL:       tm.bootstrapCfg.UseSSL,
@@ -1273,8 +1467,6 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primaryIdx, replica
 	tm.emitBootstrapStatus()
 
 	waitErr := util.RetryWithBackoff(ctx, tm.logger, 10, 2*time.Second, func() error {
-		// Bound each probe so a hung MySQL cannot block the bootstrap goroutine
-		// indefinitely; matches the poll loop's 5s per-attempt budget.
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		_, checkErr := replica.CheckReadOnly(probeCtx)
@@ -1372,10 +1564,13 @@ func (tm *TopologyManager) recoveryStateLocked() string {
 	return ""
 }
 
-// checkRecovery detects an old primary that has come back after failover and
-// either auto-rejoins it (no divergence) or blocks with metadata (divergence
-// detected). Returns true if recovery state changed this cycle.
-func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl [2]*mysql.ReplicaStatus) bool {
+// checkRecovery detects an old primary that has come back after a
+// failover and either auto-rejoins it (no divergence) or blocks with
+// metadata (divergence detected). For N sites we scan every read-only
+// non-active site and pick the first one that needs recovery; multiple
+// divergent sites are reported sequentially across poll cycles.
+// Returns true if recovery state changed this cycle.
+func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl []*mysql.ReplicaStatus) bool {
 	if tm.lastFailoverTarget == "" || tm.isBootstrapping() {
 		return false
 	}
@@ -1383,12 +1578,12 @@ func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl [2]*mysql
 		return false
 	}
 
-	// Find the active (writable) site.
+	// Find the active (writable) site; refuse to proceed on split-brain.
 	activeIdx := -1
 	for i := range tm.sites {
 		if tm.sites[i].state == state.StateWritable {
 			if activeIdx != -1 {
-				return false // both writable, handled by split-brain logic
+				return false
 			}
 			activeIdx = i
 		}
@@ -1397,37 +1592,42 @@ func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl [2]*mysql
 		return false
 	}
 
-	otherIdx := 1 - activeIdx
-	otherSite := &tm.sites[otherIdx]
-
-	if otherSite.state != state.StateReadOnly {
-		return false
-	}
-
-	// Already replicating — recovery was already completed.
-	if siteRepl[otherIdx] != nil && (siteRepl[otherIdx].IORunning || siteRepl[otherIdx].SQLRunning) {
-		// If we had a previous recovery-blocked state that is now resolved
-		// (e.g. admin wiped and re-cloned), clear it.
-		if tm.recoveryPendingSite == otherSite.name {
-			tm.mu.Lock()
-			tm.recoveryPendingSite = ""
-			tm.recoveryDivergentGtid = ""
-			tm.recoveryDivergentCount = 0
-			tm.mu.Unlock()
-			metrics.DivergentTransactions.WithLabelValues(otherSite.name).Set(0)
-			tm.logger.Info("recovery state cleared (site is now replicating)", "site", otherSite.name)
-			return true
+	// Scan non-active sites for one that looks like an old primary.
+	for i := range tm.sites {
+		if i == activeIdx {
+			continue
 		}
-		return false
+		other := &tm.sites[i]
+		if other.state != state.StateReadOnly {
+			continue
+		}
+		var repl *mysql.ReplicaStatus
+		if i < len(siteRepl) {
+			repl = siteRepl[i]
+		}
+		if repl != nil && (repl.IORunning || repl.SQLRunning) {
+			// Already replicating. If this site previously had
+			// recovery-blocked state (e.g. admin re-cloned), clear it.
+			if tm.recoveryPendingSite == other.name {
+				tm.mu.Lock()
+				tm.recoveryPendingSite = ""
+				tm.recoveryDivergentGtid = ""
+				tm.recoveryDivergentCount = 0
+				tm.mu.Unlock()
+				metrics.DivergentTransactions.WithLabelValues(other.name).Set(0)
+				tm.logger.Info("recovery state cleared (site is now replicating)", "site", other.name)
+				return true
+			}
+			continue
+		}
+		// Already recorded as blocked — nothing to do.
+		if tm.recoveryPendingSite == other.name {
+			continue
+		}
+		// Read-only with no active replication after a prior failover: start recovery.
+		return tm.initiateRecovery(ctx, i, activeIdx)
 	}
-
-	// Already detected and blocked — nothing to do.
-	if tm.recoveryPendingSite == otherSite.name {
-		return false
-	}
-
-	// Read-only site with no active replication after a prior failover — initiate recovery.
-	return tm.initiateRecovery(ctx, otherIdx, activeIdx)
+	return false
 }
 
 // initiateRecovery fences the old primary, compares GTID sets, and either
@@ -1495,7 +1695,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 // executeRecovery reconfigures the old primary as a replica of the new primary.
 func (tm *TopologyManager) executeRecovery(ctx context.Context, oldPrimaryIdx, newPrimaryIdx int) {
 	oldPrimary := &tm.sites[oldPrimaryIdx]
-	newPrimaryHost := tm.cfg.SiteHosts[newPrimaryIdx]
+	newPrimaryHost := tm.sites[newPrimaryIdx].host
 
 	err := tm.failover.RecoverOldPrimary(ctx, oldPrimary.mysql, newPrimaryHost,
 		tm.bootstrapCfg.ReplUser, tm.bootstrapCfg.ReplPassword, tm.bootstrapCfg.UseSSL)
@@ -1539,18 +1739,8 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 		return false
 	}
 
-	primaryIdx := -1
-	recloneIdx := -1
-	for i := range tm.sites {
-		if tm.sites[i].state == state.StateWritable {
-			primaryIdx = i
-		}
-		if tm.sites[i].name == site {
-			recloneIdx = i
-		}
-	}
-
-	if recloneIdx == -1 {
+	recipient := tm.getSite(site)
+	if recipient == nil {
 		tm.logger.Error("reclone requested for unknown site", "site", site)
 		tm.mu.Lock()
 		tm.reclonePendingSite = ""
@@ -1558,12 +1748,18 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 		return false
 	}
 
-	if primaryIdx == -1 {
+	var donor *siteTracker
+	for i := range tm.sites {
+		if tm.sites[i].state == state.StateWritable {
+			donor = &tm.sites[i]
+			break
+		}
+	}
+	if donor == nil {
 		tm.logger.Error("reclone requested but no writable primary found")
 		return false
 	}
-
-	if primaryIdx == recloneIdx {
+	if donor.name == recipient.name {
 		tm.logger.Error("cannot reclone the active primary", "site", site)
 		tm.mu.Lock()
 		tm.reclonePendingSite = ""
@@ -1583,15 +1779,13 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 	metrics.DivergentTransactions.WithLabelValues(site).Set(0)
 	metrics.RecloneOperations.WithLabelValues(site).Inc()
 
-	tm.startBootstrapWithIndices(ctx, primaryIdx, recloneIdx, "reclone")
+	tm.startBootstrapByName(ctx, donor.name, recipient.name, "reclone")
 	return true
 }
 
 // emitBootstrapStatus notifies the runner that the bootstrap phase changed.
 // It uses a dedicated BootstrapStatusCallback so that only the Bootstrapping
-// condition is updated on the CR — a full TopologySnapshot from this path
-// would lack SiteReplication/UpdatePhase and could inadvertently clear
-// Degraded/Updating conditions that were set by the most recent Poll cycle.
+// condition is updated on the CR.
 func (tm *TopologyManager) emitBootstrapStatus() {
 	if tm.BootstrapStatusCallback == nil {
 		return

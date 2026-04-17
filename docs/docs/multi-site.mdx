@@ -1,0 +1,166 @@
+---
+sidebar_position: 3
+---
+
+# Multi-site topology
+
+Bloodraven supports any number of sites (≥ 2) per `MysqlFailoverGroup`.
+Each site declares a **role** that controls its behaviour during
+failover:
+
+| Role | Auto-promoted? | Typical use |
+|------|----------------|-------------|
+| `primary-candidate` (default) | yes | active/standby pair inside a region |
+| `dr-only` | no | cross-region follower, kept for disaster recovery |
+
+The spec must contain at least **two** `primary-candidate` sites so the
+operator always has a promotion target for the current primary. Any
+number of `dr-only` sites may be appended for cross-region DR or
+read-only regional fan-out.
+
+## Replication topology
+
+Bloodraven uses a **star topology**: one site is the active primary,
+and every other site replicates from it. There are no replication
+chains.
+
+```
+               primary (iad, primary-candidate)
+                /        |         \
+               /         |          \
+           (pdx)       (fra)       (syd)
+   primary-candidate  primary-candidate  dr-only
+```
+
+During failover, the newly promoted primary becomes the source for
+every remaining replica (including `dr-only` sites) via a single
+`CHANGE REPLICATION SOURCE` per replica.
+
+## Failover target selection
+
+When the active site becomes unreachable and at least one
+`primary-candidate` replica is reachable, the operator promotes the
+best candidate using this order:
+
+1. **GTID freshness.** The operator queries `@@gtid_executed` on every
+   eligible primary-candidate replica in parallel and picks the one
+   whose executed set is strictly a superset of the others. This is
+   the primary selector: promoting the freshest replica minimises
+   transactions lost to the async-replication RPO window.
+2. **Priority tiebreaker.** When multiple replicas have equivalent
+   GTID sets (common in healthy clusters), the first entry in
+   `spec.splitBrainPolicy.sitePriorities` that is currently eligible
+   wins. Entries not in the list fall through to declared site order.
+3. **Declared order.** Final tiebreaker for replicas that share GTID
+   sets and are not named in the priority list.
+
+`dr-only` sites are never auto-promoted.
+
+If *no* `primary-candidate` replica is reachable when the primary
+fails, the operator emits a `NoPrimary` alert and takes no action.
+Manual promotion is required (future: the [planned-failover
+API](../WISHLIST.md#11-graceful-planned-failover-api) will cover the
+deliberate-promotion path).
+
+## Split-brain resolution
+
+`spec.splitBrainPolicy.sitePriorities` doubles as the split-brain
+tiebreaker. When more than one site is simultaneously writable and the
+operator cannot infer a winner from its own recent failover history
+(for example, after a fresh deploy or an operator restart that lost
+in-memory state), the first entry in `sitePriorities` that is
+currently writable and primary-candidate is promoted; every other
+writable site is fenced (`SET GLOBAL super_read_only=ON`).
+
+If `sitePriorities` is empty — or if no entry in the list is currently
+a writable primary-candidate — the operator alerts only and requires
+manual resolution. This matches the default "don't guess" behaviour of
+earlier Bloodraven versions.
+
+:::warning
+Split-brain auto-resolution is a policy decision, not a safety
+feature. Writes accepted on losing sites that did not replicate to the
+winner are lost when those sites are fenced. The existing divergent-
+GTID detection will block auto-rejoin of any losing site whose GTID
+set contains transactions the winner never saw; those transactions
+are only recoverable via re-clone.
+:::
+
+## Example: three-site cross-region DR
+
+Two in-region `primary-candidate` sites (active/standby HA) plus a
+cross-region `dr-only` follower:
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+spec:
+  sites:
+    - name: iad
+      role: primary-candidate
+      zone: iad-1a
+      lbIP: 10.0.0.10
+      storage: { storageClassName: gp3, size: 500Gi }
+    - name: pdx
+      role: primary-candidate
+      zone: pdx-1a
+      lbIP: 10.1.0.10
+      storage: { storageClassName: gp3, size: 500Gi }
+    - name: fra
+      role: dr-only
+      zone: fra-1a
+      lbIP: 10.2.0.10
+      storage: { storageClassName: gp3, size: 500Gi }
+  splitBrainPolicy:
+    sitePriorities: [iad, pdx]
+  # ... rest of spec ...
+```
+
+Failover behaviour:
+
+- If `iad` goes down, `pdx` is promoted (first priority, primary-
+  candidate, reachable replica).
+- If `iad` *and* `pdx` both go down, the operator alerts — it will
+  **not** auto-promote `fra` because `fra` is `dr-only`. Manual
+  promotion would use the forthcoming planned-failover API.
+- If two sites become simultaneously writable (split-brain), the
+  winner is the first `sitePriorities` entry currently writable;
+  others are fenced.
+
+## Sidecar peer awareness
+
+Each pod's sidecar is given the list of peer sidecar addresses (every
+non-self site) via the `PEER_ADDRESSES` env var — a comma-separated
+list that the operator populates from `spec.sites[]` at reconcile
+time. The sidecar tracks per-peer liveness and only self-fences when
+the operator **and every peer** are unreachable beyond
+`spec.sidecar.leaseTimeout`. A single reachable peer is enough to
+keep the primary writable.
+
+This quorum rule matters as the number of sites grows: a split where
+the primary can still reach at least one peer is preserved as a
+legitimate-writes window rather than collapsing to a self-fenced
+outage.
+
+## Sizing and compatibility
+
+- Minimum: 2 sites, both `primary-candidate`.
+- Maximum: none imposed by the CRD. Practical limits derive from
+  replication cost on the primary (each replica opens an I/O thread)
+  and from DNS/LB churn at failover time.
+- Every site is managed identically at the Kubernetes level — same
+  Deployment/Service/PVC shape, same role/permission model. Adding a
+  site is a CRD edit plus a reconcile.
+
+## Known limitations
+
+- `dr-only` sites cannot be auto-promoted. Region-level loss of every
+  primary-candidate site requires manual intervention.
+- The ordered rolling-update path walks a single active/standby pair
+  per update cycle; additional sites observe spec drift and get
+  rolled on subsequent cycles.
+- Multi-site-aware planned failover (`kubectl annotate ...
+  planned-failover=<site>`) is tracked in
+  [WISHLIST.md#11](../WISHLIST.md).

@@ -39,7 +39,7 @@ func (okTransport) RoundTrip(_ *http.Request) (*http.Response, error) {
 // and clock for fully deterministic, socket-free testing.
 func newIsolatedFencingMonitor(f Fencer, clk *clock.FakeClock, transport http.RoundTripper) *FencingMonitor {
 	client := &http.Client{Transport: transport}
-	return NewFencingMonitorFull(f, "127.0.0.1:8081", "127.0.0.1:8080", 5*time.Second, 20*time.Second, testLogger(), clk, client)
+	return NewFencingMonitorFull(f, "127.0.0.1:8081", []string{"127.0.0.1:8080"}, 5*time.Second, 20*time.Second, testLogger(), clk, client)
 }
 
 // INVARIANT: Never self-fence a replica.
@@ -52,7 +52,7 @@ func TestFencingInvariant_NeverSelfFenceReplica(t *testing.T) {
 
 	// Initialize times
 	fm.lastBloodravenOK = clk.Now()
-	fm.lastPeerOK = clk.Now()
+	fm.lastPeerOK["127.0.0.1:8080"] = clk.Now()
 
 	// Advance past lease timeout so both endpoints are "down"
 	clk.Advance(30 * time.Second)
@@ -78,7 +78,7 @@ func TestFencingInvariant_NeverAutoUnfence(t *testing.T) {
 
 	// Initialize and advance past timeout
 	fm.lastBloodravenOK = clk.Now()
-	fm.lastPeerOK = clk.Now()
+	fm.lastPeerOK["127.0.0.1:8080"] = clk.Now()
 	clk.Advance(30 * time.Second)
 
 	// First check: should fence
@@ -112,7 +112,7 @@ func TestFencingInvariant_RequiresBothDown(t *testing.T) {
 	// Use okTransport for the Check and manually manage lastPeerOK.
 	fm := newIsolatedFencingMonitor(f, clk, okTransport{})
 	fm.lastBloodravenOK = clk.Now()
-	fm.lastPeerOK = clk.Now()
+	fm.lastPeerOK["127.0.0.1:8080"] = clk.Now()
 
 	// Advance past timeout
 	clk.Advance(30 * time.Second)
@@ -131,7 +131,7 @@ func TestFencingInvariant_RequiresBothDown(t *testing.T) {
 	}
 
 	// Now test other direction: peer OK, bloodraven expired
-	fm.lastPeerOK = clk.Now()
+	fm.lastPeerOK["127.0.0.1:8080"] = clk.Now()
 	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
 
 	fm.evaluate(context.Background())
@@ -150,7 +150,7 @@ func TestFencingInvariant_FencesExactlyOnce(t *testing.T) {
 	fm := newIsolatedFencingMonitor(f, clk, noopTransport{})
 
 	fm.lastBloodravenOK = clk.Now()
-	fm.lastPeerOK = clk.Now()
+	fm.lastPeerOK["127.0.0.1:8080"] = clk.Now()
 	clk.Advance(30 * time.Second)
 
 	// Multiple check cycles

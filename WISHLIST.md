@@ -11,7 +11,7 @@
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
 - [ ] 8. DR drill automation / backup verification
 - [ ] 9. Restore duration and size metrics
-- [ ] 10. Three-or-more-site topology
+- [x] 10. Three-or-more-site topology
 - [ ] 11. Graceful planned-failover API
 - [ ] 12. PVC loss recovery runbook
 - [ ] 13. Backup encryption at rest
@@ -55,7 +55,7 @@
 
 **9. Restore duration and size metrics.** Add `bloodraven_restore_duration_seconds` and `bloodraven_restore_last_success_timestamp_seconds`, plus per-restore GTID and binlog-replay coordinates in status. DR confidence requires knowing your actual measured restore time, not estimated.
 
-**10. Three-or-more-site topology.** Hard-coded two-site is fine for now, but a `sites[]` list of length 2–N with explicit roles (`primary-candidate`, `dr-only`) would enable cross-region DR-plus-local-HA without a second CR type. Even if you don't implement it yet, note it as a non-goal or roadmap item so users calibrate.
+**10. Three-or-more-site topology.** ~~Hard-coded two-site is fine for now~~ — done. `spec.sites[]` now accepts 2–N entries with a `role` of `primary-candidate` (promotable) or `dr-only` (passive follower). Split-brain ties are broken by `spec.splitBrainPolicy.sitePriorities` (ordered list). Replication is a star: every replica follows the active primary. Sidecar self-fencing was generalised to "operator AND every peer unreachable". See `docs/docs/multi-site.mdx`.
 
 **11. Graceful planned-failover API.** Manual promotion today is a multi-step `kubectl exec` dance documented in ops. Replace with a single annotation or subresource — `kubectl annotate mysqlfailovergroup orders bloodraven.shipstream.io/planned-failover=pdx` — that drains writes, waits for zero replication lag, and promotes atomically. The anti-flap cooldown bypass is noted as a caution; make the planned path not bypass it.
 

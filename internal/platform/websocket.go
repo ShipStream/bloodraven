@@ -28,6 +28,7 @@ type TopologyMessage struct {
 // TopologySite is a single site entry inside a TopologyMessage.
 type TopologySite struct {
 	Name                      string `json:"name"`
+	Role                      string `json:"role,omitempty"`
 	State                     string `json:"state"`
 	LastSeen                  string `json:"lastSeen,omitempty"`
 	Replicating               bool   `json:"replicating"`
