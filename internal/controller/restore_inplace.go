@@ -399,7 +399,6 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		if err := r.Create(ctx, built); err != nil {
 			return 0, fmt.Errorf("create in-place restore job: %w", err)
 		}
-		now := metav1.Now()
 		r.setInPlaceRestoreStatus(ctx, fg, &v1alpha1.RestoreInPlaceStatus{
 			Phase:      v1alpha1.RestoreInPlaceRestoring,
 			JobName:    built.Name,
@@ -408,7 +407,6 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 			StartTime:  cur.StartTime,
 			Message:    "restore Job created",
 		})
-		_ = now
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceJobCreated",
 			"created in-place restore Job %s targeting site %s (scope=%s)",
 			built.Name, target, cur.Scope)
@@ -505,6 +503,22 @@ func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Conte
 	fg.Status.RestoreInPlace = s
 	if err := r.Status().Patch(ctx, fg, patch); err != nil && !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "update in-place restore status", "fg", fg.Name)
+	}
+	// Push the freeze state to the topology manager directly so it
+	// takes effect on the next poll cycle rather than waiting for the
+	// runner's 30-second re-sync tick. Without this step there is a
+	// window between status patch and runner re-sync in which the
+	// topology manager could still fire a cross-site action (promotion,
+	// auto-clone, recovery) against a cluster that is actively being
+	// restored. A return of false from SetTopologyFrozen is expected
+	// when no manager is running yet (fresh deploy) — the runner's
+	// startManager path reads status.restoreInPlace and applies the
+	// correct flag when it starts the manager.
+	if r.Runner != nil {
+		r.Runner.SetTopologyFrozen(
+			types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name},
+			inPlaceRestoreInFlight(fg),
+		)
 	}
 }
 
@@ -610,6 +624,7 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 		Source:      spec.Source,
 		LoadOptions: loadOpts,
 		PointInTime: spec.PointInTime,
+		FieldPath:   "restoreInPlace",
 		ExtraEnv:    extraEnv,
 	})
 }

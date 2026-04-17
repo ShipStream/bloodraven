@@ -191,15 +191,25 @@ def _maybe_reset_replication(session):
     if not _bool("BLOODRAVEN_RESET_REPLICATION"):
         return
     print("BLOODRAVEN_RESET_REPLICATION_START", flush=True)
-    # STOP REPLICA is a no-op if no replica threads are running, but it
-    # errors on MySQL versions without a configured channel — swallow
-    # the error so the RESET REPLICA ALL still runs.
+    # Both statements are best-effort. A MySQL instance that has never
+    # been configured as a replica (no channel metadata — common for
+    # the primary of a fresh-deployed failover group) will error on
+    # either STOP REPLICA or RESET REPLICA ALL depending on the server
+    # version, and a legitimate in-place restore against such a
+    # primary must still succeed. We swallow the errors rather than
+    # sniff specific error codes because the desired post-condition
+    # ("replication metadata cleared") is already true in the
+    # no-channel case.
     try:
         session.run_sql("STOP REPLICA")
     except Exception as e:  # noqa: BLE001
         print("BLOODRAVEN_RESET_REPLICATION_STOP_IGNORED: {}".format(e),
               flush=True)
-    session.run_sql("RESET REPLICA ALL")
+    try:
+        session.run_sql("RESET REPLICA ALL")
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_RESET_REPLICATION_RESET_IGNORED: {}".format(e),
+              flush=True)
     print("BLOODRAVEN_RESET_REPLICATION_DONE", flush=True)
 
 

@@ -357,6 +357,12 @@ type restoreJobInputs struct {
 	Source      v1alpha1.InitFromBackupSource
 	LoadOptions *v1alpha1.LoadOptions
 	PointInTime *v1alpha1.PointInTimeSpec
+	// FieldPath is the root CR field name used in error messages
+	// ("initFromBackup" for bootstrap restore, "restoreInPlace" for
+	// in-place restore). The shared builder formats
+	// "<FieldPath>.source.…" so operators see the field they actually
+	// need to edit. Defaults to "initFromBackup" when empty.
+	FieldPath string
 	// ExtraEnv is appended to the container env verbatim. Used by
 	// in-place restore to inject BLOODRAVEN_DROP_ALL_USER_SCHEMAS,
 	// BLOODRAVEN_DROP_SCHEMAS, BLOODRAVEN_RESET_REPLICATION, and
@@ -389,6 +395,10 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	src := in.Source
 	targetSite := in.TargetSite
 	credsName := in.CredsName
+	fp := in.FieldPath
+	if fp == "" {
+		fp = "initFromBackup"
+	}
 
 	var (
 		inputURL       string
@@ -422,15 +432,15 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		profile := findProfile(fg, ref.Spec.ProfileName)
 		if wantsS3 && (profile == nil || profile.Storage.Type != v1alpha1.BackupStorageS3 || profile.Storage.S3 == nil) {
 			return nil, fmt.Errorf(
-				"initFromBackup.source.mysqlBackupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles; "+
-					"either restore the profile or set initFromBackup.source.s3 explicitly",
-				ref.Name, ref.Status.Location, ref.Spec.ProfileName)
+				"%s.source.mysqlBackupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles; "+
+					"either restore the profile or set %s.source.s3 explicitly",
+				fp, ref.Name, ref.Status.Location, ref.Spec.ProfileName, fp)
 		}
 		if wantsPVC && (profile == nil || profile.Storage.Type != v1alpha1.BackupStoragePVC || profile.Storage.PVC == nil) {
 			return nil, fmt.Errorf(
-				"initFromBackup.source.mysqlBackupRef=%q resolves to a PVC location (%q) but profile %q is missing from spec.backup.profiles; "+
-					"either restore the profile or set initFromBackup.source.pvc explicitly",
-				ref.Name, ref.Status.Location, ref.Spec.ProfileName)
+				"%s.source.mysqlBackupRef=%q resolves to a PVC location (%q) but profile %q is missing from spec.backup.profiles; "+
+					"either restore the profile or set %s.source.pvc explicitly",
+				fp, ref.Name, ref.Status.Location, ref.Spec.ProfileName, fp)
 		}
 		if wantsS3 && profile != nil && profile.Storage.Type == v1alpha1.BackupStorageS3 && profile.Storage.S3 != nil {
 			extraEnv = append(extraEnv,
@@ -486,7 +496,8 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		claim := src.PVC.ClaimName
 		if claim == "" {
 			return nil, fmt.Errorf(
-				"initFromBackup.source.pvc.claimName is required; the restore source PVC must be created out of band and populated with the dump")
+				"%s.source.pvc.claimName is required; the restore source PVC must be created out of band and populated with the dump",
+				fp)
 		}
 		mountPath := "/restore"
 		sub := strings.TrimLeft(src.PVC.SubPath, "/")
@@ -508,7 +519,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		})
 
 	default:
-		return nil, fmt.Errorf("initFromBackup.source must set mysqlBackupRef, s3, or pvc")
+		return nil, fmt.Errorf("%s.source must set mysqlBackupRef, s3, or pvc", fp)
 	}
 
 	loadOptsJSON, err := marshalLoadOptions(in.LoadOptions)
