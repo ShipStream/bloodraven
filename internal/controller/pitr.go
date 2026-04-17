@@ -260,18 +260,29 @@ type restorePITRFragments struct {
 // already-applied transactions during replay — no per-MysqlBackup
 // metadata plumbing needed here.
 func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFragments, error) {
+	if fg.Spec.InitFromBackup == nil {
+		return restorePITRFragments{}, nil
+	}
+	return buildRestorePITRFragmentsFor(fg, fg.Spec.InitFromBackup.PointInTime)
+}
+
+// buildRestorePITRFragmentsFor is the parameterized variant that lets
+// both the bootstrap restore (spec.initFromBackup.pointInTime) and the
+// in-place restore (spec.restoreInPlace.pointInTime) share the PITR
+// init-container wiring. A nil pit is a no-op: callers get an empty
+// fragments struct and skip the init container entirely.
+func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1.PointInTimeSpec) (restorePITRFragments, error) {
 	var out restorePITRFragments
 
-	if fg.Spec.InitFromBackup == nil || fg.Spec.InitFromBackup.PointInTime == nil {
+	if pit == nil {
 		return out, nil
 	}
-	pit := fg.Spec.InitFromBackup.PointInTime
 	if pit.StopDatetime == "" {
-		return out, fmt.Errorf("initFromBackup.pointInTime.stopDatetime is required")
+		return out, fmt.Errorf("pointInTime.stopDatetime is required")
 	}
 	if fg.Spec.Backup == nil || fg.Spec.Backup.PITR == nil || !fg.Spec.Backup.PITR.Enabled {
 		return out, fmt.Errorf(
-			"initFromBackup.pointInTime is set but spec.backup.pitr.enabled=false; " +
+			"pointInTime is set but spec.backup.pitr.enabled=false; " +
 				"PITR restore requires the failover group to have continuous binlog " +
 				"archival configured on the source")
 	}

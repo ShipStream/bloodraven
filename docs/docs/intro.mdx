@@ -13,7 +13,7 @@ Bloodraven is a Kubernetes operator for managing MySQL async replication failove
 - **Detects** when the active primary becomes unreachable and **promotes** the standby replica to primary
 - **Steers traffic** by updating a DNSEndpoint CR (consumed by external-dns) to point to the new primary's load balancer IP
 - **Migrates workloads** by tainting nodes at the failed site so Kubernetes evicts application pods
-- **Prevents split-brain** with sidecar self-fencing: if both the operator and peer are unreachable, the sidecar sets `super_read_only=ON` as a safety net
+- **Prevents split-brain** with sidecar self-fencing: if both the operator and peer are unreachable, the sidecar sets `super_read_only=ON` as a safety net (see [Operator availability](./operator-availability.mdx) and [Durability and RPO](./durability-and-rpo.mdx) for exact behaviour and bounds)
 - **Broadcasts status** over a WebSocket API for dashboards and alerting integrations
 - **Backs up and restores** via mysqlsh `util.dumpInstance()` / `util.loadDump()` to S3 or PVC, with scheduled CronJobs, structured retention, retries, and automatic artifact cleanup
 
@@ -24,6 +24,13 @@ Bloodraven is a Kubernetes operator for managing MySQL async replication failove
 Read https://bloodraven.readthedocs.io/en/latest/llms-full.txt and help me configure a MysqlFailoverGroup for two sites with async replication and automatic DNS failover.
 ```
 
+:::
+
+:::info When to use Bloodraven
+Bloodraven targets the **two-site, accept-non-zero-RPO** deployment.
+If you need synchronous writes and zero RPO on primary loss, read
+[Why not Group Replication?](./why-not-group-replication.mdx) first
+to make sure the tradeoffs match your use case.
 :::
 
 ## Components

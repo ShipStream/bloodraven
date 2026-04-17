@@ -4,7 +4,7 @@ sidebar_position: 9
 
 # Operations
 
-Day-2 operations guide for managing Bloodraven failover groups, including manual intervention, recovery procedures, and maintenance tasks.
+Day-2 operations guide for managing Bloodraven failover groups, including manual intervention, recovery procedures, and maintenance tasks. Before rolling Bloodraven out to production, also walk through the [Production hardening checklist](./production-hardening.mdx) and keep the [Failure-mode matrix](./failure-mode-matrix.mdx) open during incidents.
 
 ## Manual promotion
 
@@ -94,13 +94,25 @@ Review the divergent GTID set to understand what data was lost. These transactio
 
 **Step 2: Trigger a reclone**
 
-Use the reclone annotation to have the operator run `CLONE INSTANCE` on the divergent site, replacing all its data with a fresh copy from the current primary:
+Use the reclone annotation to have the operator run `CLONE INSTANCE` on the divergent site, replacing all its data with a fresh copy from the current primary. The annotation value must include a prefix (8 or more characters) of the observed `divergentGtid` — this **confirmation interlock** prevents a fat-fingered site name from destroying the wrong replica:
 
 ```bash
-kubectl annotate mysqlfailovergroup orders bloodraven.shipstream.io/reclone-site=iad
+# Read the divergent GTID first:
+DG=$(kubectl get mysqlfailovergroup orders -o jsonpath='{.status.sites[?(@.name=="iad")].divergentGtid}')
+echo "$DG"
+# a1b2c3d4-0000-0000-0000-000000000000:11-15
+
+# Annotate with <site>:<first-8+-chars-of-GTID>
+kubectl annotate mysqlfailovergroup orders bloodraven.shipstream.io/reclone-site=iad:a1b2c3d4
 ```
 
-The operator processes the annotation, removes it automatically, and begins cloning. The site will temporarily appear unreachable during the MySQL restart that follows the clone. Progress is reported in the `Bootstrapping` condition.
+If the prefix doesn't match the observed `divergentGtid` (wrong site, stale copy of the GTID, typo), the operator emits a `RecloneRejected` Warning Event and clears the annotation — no clone is started. Re-read `status.sites[].divergentGtid` and try again.
+
+A `RecloneRequested` Normal Event marks the start. The site will temporarily appear unreachable during the MySQL restart that follows the clone. Progress is reported in the `Bootstrapping` condition.
+
+:::note Cold reclone
+When a site has **no** `divergentGtid` (PVC loss, manual rebuild, first-time bootstrap mistakes), the bare annotation form `reclone-site=<site>` is accepted — there is no recoverable data to protect against. The interlock only applies when divergence is recorded.
+:::
 
 **Alternative: Manual PVC deletion**
 

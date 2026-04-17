@@ -4,7 +4,7 @@ sidebar_position: 7
 
 # Failover
 
-This page covers the state machine that drives failover decisions, the exact sequence of operations during a failover, the anti-flap cooldown, and ordered updates for zero-downtime rollouts.
+This page covers the state machine that drives failover decisions, the exact sequence of operations during a failover, the anti-flap cooldown, and ordered updates for zero-downtime rollouts. For the bounded-RPO contract and the exact set of transactions that can be lost on emergency failover, see [Durability and RPO](./durability-and-rpo.mdx). For what happens when the operator itself is unavailable during a failure, see [Operator availability](./operator-availability.mdx).
 
 ## State machine
 
@@ -127,8 +127,17 @@ Divergent transactions mean the old primary accepted writes that the new primary
 To recover a divergent site:
 
 1. Investigate the divergent transactions to understand what data was lost (check `status.sites[].divergentGtid`)
-2. Trigger a reclone using the annotation: `kubectl annotate mysqlfailovergroup <name> bloodraven.shipstream.io/reclone-site=<site>`
-3. The operator will run `CLONE INSTANCE` on the target site, replacing all data with a fresh copy from the current primary
+2. Trigger a reclone using the annotation, including the first 8+ characters of the observed `divergentGtid` as a confirmation token:
+
+   ```bash
+   # Read the divergent GTID first:
+   kubectl get mysqlfailovergroup <name> -o jsonpath='{.status.sites[?(@.name=="<site>")].divergentGtid}'
+   # Then annotate with <site>:<prefix-of-divergentGtid>:
+   kubectl annotate mysqlfailovergroup <name> bloodraven.shipstream.io/reclone-site=<site>:<gtid-prefix>
+   ```
+
+3. The operator validates that the prefix matches the observed `divergentGtid` — a mismatch is rejected with a `RecloneRejected` Warning Event, so a fat-fingered site name can't destroy the wrong replica. When a site has **no** `divergentGtid` (cold reclone: PVC loss, manual rebuild), the bare form `reclone-site=<site>` is still accepted.
+4. The operator runs `CLONE INSTANCE` on the target site, replacing all data with a fresh copy from the current primary. A `RecloneRequested` Event marks the start.
 
 See [Recovering a divergent old primary](./operations.mdx#recovering-a-divergent-old-primary) for the full procedure.
 

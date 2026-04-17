@@ -359,6 +359,132 @@ Job, and the reconciler will rebuild it on the next pass. Restoring
 into a non-empty data directory is not supported &mdash; `util.loadDump()`
 fails fast with a clear error.
 
+### Per-schema bootstrap (tenant migration pattern)
+
+`loadOptions.includeSchemas` and `loadOptions.excludeSchemas` are
+forwarded to `util.loadDump()` and let you carve a subset of a
+full-instance dump into a brand-new failover group. This is useful for
+migrating a single tenant off a shared cluster onto its own dedicated
+one:
+
+```yaml
+spec:
+  initFromBackup:
+    source:
+      mysqlBackupRef:
+        name: shared-nightly
+    loadOptions:
+      includeSchemas: ["tenant_42"]
+```
+
+Operationally, the migration pattern is: put the tenant into
+application-level maintenance mode, take a backup of the shared
+cluster, deploy a new `MysqlFailoverGroup` with `includeSchemas`
+pointing at the tenant's schema, then flip the app's connection string
+to the new group. System users are not part of a `util.dumpInstance`
+dump, so pair the restore with whatever user-provisioning process the
+new group uses.
+
+## In-place restore (`spec.restoreInPlace`)
+
+`initFromBackup` is one-shot and runs before the failover group is
+considered ready. For rolling an existing, live cluster back to a
+previous dump (or replaying to a point-in-time) without teardown or
+rename, use `spec.restoreInPlace`. It is re-triggerable and operates
+directly against the active primary.
+
+Two modes are supported, selected by `loadOptions.includeSchemas`:
+
+### Full-instance in-place restore
+
+When `includeSchemas` is empty, the restore wipes every user schema on
+the primary and reloads from the dump. Choreography:
+
+1. **Preflight** &mdash; validates that `status.activeSite` is writable
+   and the `confirm` timestamp is newer than the last consumed one.
+2. **Fencing** &mdash; the operator strips the `primary` role label on
+   the active pod(s), so the `-primary` Service sheds endpoints and
+   apps see connection errors. The topology manager is frozen: no
+   promotion, auto-clone, or recovery actions fire during the restore.
+3. **Restoring** &mdash; a Job runs `util.loadDump()` after a
+   `STOP REPLICA; RESET REPLICA ALL; DROP DATABASE <each-user-schema>`
+   preflight. `skipBinlog=true` on the load (the replica is about to be
+   re-cloned, so there is no point burning binlog space). Optional PITR
+   replay runs after the dump load, against the same primary.
+4. **Resuming** &mdash; the primary role label is restored, the
+   topology manager is unfrozen, and the `reclone-site` annotation is
+   set for the peer. The existing reclone machinery then CLONEs the
+   peer from the freshly-restored primary in the background.
+
+```yaml
+spec:
+  restoreInPlace:
+    confirm: "2026-04-17T14:32:00Z"
+    source:
+      mysqlBackupRef:
+        name: orders-nightly-20260416
+    pointInTime:
+      stopDatetime: "2026-04-17T14:30:00Z"
+```
+
+### Per-schema in-place restore
+
+When `includeSchemas` contains exactly one entry, the restore drops and
+reloads only that schema. The primary Service stays up &mdash; other
+tenants keep writing &mdash; and replication carries the DROP + load
+through the primary's binlog to the peer. No reclone is scheduled.
+
+```yaml
+spec:
+  restoreInPlace:
+    confirm: "2026-04-17T14:32:00Z"
+    source:
+      mysqlBackupRef:
+        name: shared-nightly
+    loadOptions:
+      includeSchemas: ["tenant_42"]
+```
+
+The caller is responsible for putting the affected tenant into
+application-level maintenance mode. The operator forces
+`skipBinlog=false` on the load so the propagation to the peer works.
+
+:::warning Per-schema PITR has a caveat
+PITR binlog replay on a per-schema restore adds
+`mysqlbinlog --database=<schema>` to the pipeline. That filter matches
+on the session's default database at log time, **not** on the schemas
+a statement actually touches. For well-isolated multi-tenant schemas
+this is fine. For apps that issue cross-schema statements
+(`INSERT INTO a.t SELECT ... FROM b.t`) use a full-instance restore
+instead &mdash; the filter can silently drop or misapply events.
+:::
+
+### The `confirm` timestamp
+
+`spec.restoreInPlace.confirm` must be an RFC 3339 timestamp (e.g.
+`2026-04-17T14:32:00Z`). It is the anti-fat-finger gate: the operator
+refuses to run the restore unless `confirm` parses and is strictly
+greater than `status.restoreInPlace.confirmTokenUsed`. On every new
+run, bump `confirm` to a newer timestamp. A common idiom in automation
+is to set `confirm: $(date -u +%FT%TZ)` at the moment the user
+authorizes the restore.
+
+This gives programmatic callers a simple "just send now()" pattern
+while also protecting against replay: an older manifest applied
+accidentally does not re-trigger a restore.
+
+### Observing the state machine
+
+```bash
+kubectl get mysqlfailovergroup orders -o jsonpath='{.status.restoreInPlace}' | jq .
+```
+
+Phase sequence:
+`Preflight` &rarr; `Fencing` &rarr; `Restoring` &rarr; `Resuming`
+&rarr; `Succeeded` (or `Failed` at any point). `Failed` is terminal;
+inspect the Job logs, fix the underlying issue, then bump `confirm` to
+re-arm.
+
 ## Required MySQL privileges
 
 Consistent dumps (`dump.consistent: true`, the default) need
@@ -377,7 +503,10 @@ Without `BACKUP_ADMIN`, set `dump.consistent: false` on the profile.
 
 Bloodraven can continuously archive MySQL binary logs so restores can
 target an arbitrary `--stop-datetime` on top of any retained full
-dump, not just the dump's own capture point.
+dump, not just the dump's own capture point. For the interaction
+between PITR and emergency-failover RPO — specifically, when PITR
+does and does not narrow the data-loss window — see
+[Durability and RPO → PITR and the RPO window](./durability-and-rpo.mdx#pitr-and-the-rpo-window).
 
 ### How it works
 

@@ -4102,6 +4102,22 @@ spec:
                     description: LoadOptions are forwarded to util.loadDump(). Omit
                       for sane defaults.
                     properties:
+                      excludeSchemas:
+                        description: |-
+                          ExcludeSchemas, if non-empty, skips these schemas during load.
+                          Forwarded to util.loadDump() as excludeSchemas.
+                        items:
+                          type: string
+                        type: array
+                      includeSchemas:
+                        description: |-
+                          IncludeSchemas, if non-empty, restricts the load to these schemas.
+                          Useful for carving a single tenant out of a full-instance dump
+                          (e.g. migrating one client schema into its own failover group).
+                          Forwarded to util.loadDump() as includeSchemas.
+                        items:
+                          type: string
+                        type: array
                       loadIndexes:
                         default: true
                         description: LoadIndexes controls whether indexes are rebuilt
@@ -4114,8 +4130,12 @@ spec:
                         type: boolean
                       skipBinlog:
                         default: true
-                        description: SkipBinlog disables binary logging during the
-                          load to speed it up.
+                        description: |-
+                          SkipBinlog disables binary logging during the load to speed it up.
+                          For in-place restores that must replicate to the peer site via
+                          normal MySQL replication (per-schema in-place restore), callers
+                          should set this to false so the load's DDL/DMLs flow through the
+                          primary's binlog to the replica.
                         type: boolean
                       threads:
                         default: 4
@@ -4277,6 +4297,188 @@ spec:
                     format: int64
                     minimum: 0
                     type: integer
+                type: object
+              restoreInPlace:
+                description: |-
+                  RestoreInPlace, when set, runs a re-triggerable destructive
+                  restore against the currently-active primary. Unlike
+                  InitFromBackup (one-shot, greenfield), this field is meant to be
+                  edited repeatedly: bumping spec.restoreInPlace.confirm to a newer
+                  RFC 3339 timestamp triggers another restore. See RestoreInPlaceSpec
+                  for the full-instance vs per-schema semantics and the fencing
+                  choreography.
+                properties:
+                  confirm:
+                    description: |-
+                      Confirm is a required anti-fat-finger token that gates the
+                      destructive restore. Must be an RFC 3339 timestamp (e.g.
+                      "2026-04-17T14:32:00Z"). The operator refuses to run an in-place
+                      restore unless Confirm parses and is strictly greater than the
+                      timestamp recorded in status.restoreInPlace.confirmTokenUsed.
+                      This gives programmatic callers a simple "just send now()" idiom
+                      while also protecting against replay (an older manifest applied
+                      accidentally will not re-trigger a restore).
+                    minLength: 1
+                    type: string
+                  loadOptions:
+                    description: |-
+                      LoadOptions are forwarded to util.loadDump(). In-place restores
+                      require includeSchemas to be either empty (full instance) or
+                      exactly one entry (single schema). For per-schema restores the
+                      operator also forces skipBinlog to false so the DROP+load flows
+                      through the primary's binlog to the replica.
+                    properties:
+                      excludeSchemas:
+                        description: |-
+                          ExcludeSchemas, if non-empty, skips these schemas during load.
+                          Forwarded to util.loadDump() as excludeSchemas.
+                        items:
+                          type: string
+                        type: array
+                      includeSchemas:
+                        description: |-
+                          IncludeSchemas, if non-empty, restricts the load to these schemas.
+                          Useful for carving a single tenant out of a full-instance dump
+                          (e.g. migrating one client schema into its own failover group).
+                          Forwarded to util.loadDump() as includeSchemas.
+                        items:
+                          type: string
+                        type: array
+                      loadIndexes:
+                        default: true
+                        description: LoadIndexes controls whether indexes are rebuilt
+                          during load.
+                        type: boolean
+                      resetProgress:
+                        default: true
+                        description: ResetProgress clears previous loadDump progress
+                          tracking.
+                        type: boolean
+                      skipBinlog:
+                        default: true
+                        description: |-
+                          SkipBinlog disables binary logging during the load to speed it up.
+                          For in-place restores that must replicate to the peer site via
+                          normal MySQL replication (per-schema in-place restore), callers
+                          should set this to false so the load's DDL/DMLs flow through the
+                          primary's binlog to the replica.
+                        type: boolean
+                      threads:
+                        default: 4
+                        description: Threads is the number of parallel load threads.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    type: object
+                  pointInTime:
+                    description: |-
+                      PointInTime, when set, enables post-load binlog replay to recover
+                      the restored data to a specific target timestamp.
+                    properties:
+                      excludeGtids:
+                        description: |-
+                          ExcludeGtids is an optional GTID set passed verbatim to
+                          mysqlbinlog --exclude-gtids. Useful for surgically skipping a
+                          known-bad transaction (e.g. an accidental DROP TABLE) while
+                          replaying everything else.
+                        type: string
+                      stopDatetime:
+                        description: |-
+                          StopDatetime is the MySQL-style datetime at which to stop
+                          replaying binlog events (forwarded to mysqlbinlog
+                          --stop-datetime). Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
+                          the MySQL native form ("2026-04-15 09:30:00"). Required.
+                        minLength: 1
+                        type: string
+                    required:
+                    - stopDatetime
+                    type: object
+                  source:
+                    description: Source is a tagged reference to the artifact to restore.
+                    properties:
+                      mysqlBackupRef:
+                        description: |-
+                          MysqlBackupRef restores from a previously-completed MysqlBackup in
+                          the same namespace. Its status.location is resolved automatically.
+                        properties:
+                          name:
+                            default: ""
+                            description: |-
+                              Name of the referent.
+                              This field is effectively required, but due to backwards compatibility is
+                              allowed to be empty. Instances of this type with an empty value here are
+                              almost certainly wrong.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      pvc:
+                        description: |-
+                          PVC restores from an existing PVC. Restore only supports referencing
+                          a pre-created claim by name; provisioning fields are not supported here.
+                        properties:
+                          claimName:
+                            description: |-
+                              ClaimName is the name of an existing PersistentVolumeClaim in the same
+                              namespace to use as the restore source.
+                            minLength: 1
+                            type: string
+                          subPath:
+                            description: SubPath inside the PVC where the dump is
+                              located. Optional.
+                            type: string
+                        required:
+                        - claimName
+                        type: object
+                      s3:
+                        description: S3 restores directly from an S3 URL. Requires
+                          credentialsSecret.
+                        properties:
+                          bucket:
+                            description: Bucket is the S3 bucket name.
+                            minLength: 1
+                            type: string
+                          credentialsSecret:
+                            description: |-
+                              CredentialsSecret references a Secret whose keys provide AWS
+                              credentials to backup and restore Jobs. Expected keys:
+                                AWS_ACCESS_KEY_ID (required)
+                                AWS_SECRET_ACCESS_KEY (required)
+                                AWS_SESSION_TOKEN (optional)
+                                AWS_REGION (optional, overrides .region)
+                            minLength: 1
+                            type: string
+                          endpointURL:
+                            description: |-
+                              EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
+                              Passed to mysqlsh as s3EndpointOverride.
+                            type: string
+                          prefix:
+                            description: |-
+                              Prefix is the object-name prefix inside the bucket. Each backup
+                              lands under "<prefix>/<mysqlbackup-name>/".
+                            type: string
+                          region:
+                            description: Region is the AWS region. Optional for non-AWS
+                              S3 stores.
+                            type: string
+                          storageClass:
+                            description: |-
+                              StorageClass is the S3 storage class (e.g. STANDARD_IA,
+                              DEEP_ARCHIVE). Informational; not enforced by the operator.
+                            type: string
+                        required:
+                        - bucket
+                        - credentialsSecret
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of mysqlBackupRef, s3, or pvc must be set
+                      rule: '(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ?
+                        1 : 0) + (has(self.pvc) ? 1 : 0) == 1'
+                required:
+                - confirm
+                - source
                 type: object
               secretName:
                 description: |-
@@ -4825,6 +5027,58 @@ spec:
                   targetSite:
                     description: TargetSite is the site name whose MySQL instance
                       is being populated.
+                    type: string
+                type: object
+              restoreInPlace:
+                description: |-
+                  RestoreInPlace tracks an in-flight or completed in-place restore
+                  (spec.restoreInPlace). The consumed confirm token is stamped here
+                  on success so subsequent reconciles can distinguish "restore
+                  already done" from "new restore requested".
+                properties:
+                  completionTime:
+                    description: CompletionTime is when the restore reached a terminal
+                      phase.
+                    format: date-time
+                    type: string
+                  confirmTokenUsed:
+                    description: |-
+                      ConfirmTokenUsed records the spec.restoreInPlace.confirm value of
+                      the most recent executed restore. Subsequent reconciles ignore
+                      any spec.confirm <= this value; a new restore requires a strictly
+                      greater RFC 3339 timestamp.
+                    type: string
+                  jobName:
+                    description: JobName is the name of the batchv1.Job performing
+                      the load.
+                    type: string
+                  message:
+                    description: Message is a human-readable status line.
+                    type: string
+                  phase:
+                    description: Phase of the in-place restore.
+                    enum:
+                    - ""
+                    - Preflight
+                    - Fencing
+                    - Restoring
+                    - Resuming
+                    - Succeeded
+                    - Failed
+                    type: string
+                  scope:
+                    description: |-
+                      Scope is a human-readable tag: "full" for a full-instance
+                      restore, or "schema:<name>" for a per-schema restore.
+                    type: string
+                  startTime:
+                    description: StartTime is when the restore entered Preflight.
+                    format: date-time
+                    type: string
+                  targetSite:
+                    description: |-
+                      TargetSite is the site that received the load (always the active
+                      primary at the moment of preflight).
                     type: string
                 type: object
               sites:

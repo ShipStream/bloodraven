@@ -216,6 +216,17 @@ type TopologyManager struct {
 	// primary. Protected by mu. See runner.sync().
 	autoBootstrapSuppressed bool
 
+	// topologyFrozen is set by the runner while an in-place restore
+	// (spec.restoreInPlace) is actively mutating the cluster. Unlike
+	// autoBootstrapSuppressed (which only gates fresh-deploy cloning),
+	// this flag blocks every cross-site decision — promotion, reclone,
+	// auto-bootstrap, even fencing of a returning old primary. The
+	// topology manager observes state normally (so status still
+	// reflects reality) but takes no corrective action until the
+	// in-place restore reconciler clears the flag. Protected by mu.
+	// See runner.sync() and MysqlFailoverGroupReconciler.reconcileInPlaceRestore.
+	topologyFrozen bool
+
 	// specDriftSites lists site names whose Deployment spec-hash differs
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
 	// Protected by mu.
@@ -581,7 +592,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// Auto-clone any empty site even outside of split-brain (e.g. the
 	// sidecar fenced the empty site to read-only after a PVC wipe).
 	autoCloneStarted := false
-	if !recloneStarted && !tm.isBootstrapping() && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
+	if !recloneStarted && !tm.isBootstrapping() && !tm.isTopologyFrozen() && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
 		tm.mu.RLock()
 		suppressed := tm.autoBootstrapSuppressed
 		phase := tm.bootstrapPhase
@@ -798,6 +809,15 @@ func (tm *TopologyManager) applyPerSiteAction(ctx context.Context, site *siteTra
 func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action state.CrossSiteAction) {
 	if action.Alert != "" {
 		tm.logger.Warn("ALERT", "message", action.Alert)
+	}
+
+	// In-place restore is mutating the cluster right now; every
+	// cross-site decision (promotion, fencing a "returning" primary,
+	// auto-cloning an empty peer) would actively fight the restore.
+	// Defer until the in-place restore reconciler clears the flag.
+	if tm.isTopologyFrozen() {
+		tm.logger.Info("cross-site action deferred: in-place restore in progress")
+		return
 	}
 
 	// Suppress any cross-site actions while a bootstrap or ordered update is in
@@ -1092,6 +1112,30 @@ func (tm *TopologyManager) SetAutoBootstrapSuppressed(v bool) {
 	tm.mu.Lock()
 	tm.autoBootstrapSuppressed = v
 	tm.mu.Unlock()
+}
+
+// SetTopologyFrozen toggles the gate that blocks every cross-site
+// action (promotion, reclone, auto-bootstrap, returning-old-primary
+// fencing) while an in-place restore is actively mutating the cluster.
+// The runner sets this from the CR's status.restoreInPlace.phase.
+//
+// This is a stronger signal than SetAutoBootstrapSuppressed: polling
+// and metrics emission continue normally so the operator still has
+// visibility into site health, but decisions that would reshape the
+// cluster are deferred until the in-place restore reconciler clears
+// the flag.
+func (tm *TopologyManager) SetTopologyFrozen(v bool) {
+	tm.mu.Lock()
+	tm.topologyFrozen = v
+	tm.mu.Unlock()
+}
+
+// isTopologyFrozen reports whether an in-place restore is currently
+// holding the topology manager still.
+func (tm *TopologyManager) isTopologyFrozen() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.topologyFrozen
 }
 
 // SetRecloneSite requests that the given site be recloned from the current
@@ -1574,6 +1618,9 @@ func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl []*mysql.
 	if tm.lastFailoverTarget == "" || tm.isBootstrapping() {
 		return false
 	}
+	if tm.isTopologyFrozen() {
+		return false
+	}
 	if tm.bootstrapCfg.ReplUser == "" {
 		return false
 	}
@@ -1728,6 +1775,11 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 
 	if tm.isBootstrapping() {
 		tm.logger.Info("reclone request deferred, bootstrap already in progress", "site", site)
+		return false
+	}
+
+	if tm.isTopologyFrozen() {
+		tm.logger.Info("reclone request deferred, in-place restore in progress", "site", site)
 		return false
 	}
 

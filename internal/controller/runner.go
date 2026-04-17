@@ -98,6 +98,30 @@ func (r *TopologyManagerRunner) HasManager(nn types.NamespacedName) bool {
 	return ok
 }
 
+// SetTopologyFrozen flips the topology-freeze flag on the managed
+// TopologyManager for the given CR, immediately (without waiting for
+// the runner's 30-second re-sync tick). The reconciler calls this at
+// every in-place restore phase transition so there is no window where
+// the topology manager could fire a cross-site action against a
+// cluster that is actively being restored.
+//
+// Returns true when the flag was applied; false when no manager is
+// running for this CR (for example during fresh deploy, operator
+// restart, or CR deletion). A return of false is expected in those
+// cases and is not an error — the runner's next re-sync will observe
+// status.restoreInPlace and apply the correct flag when it starts the
+// manager.
+func (r *TopologyManagerRunner) SetTopologyFrozen(nn types.NamespacedName, frozen bool) bool {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	mt.tm.SetTopologyFrozen(frozen)
+	return true
+}
+
 // NeedLeaderElection implements manager.LeaderElectionRunnable.
 // Topology polling and failover must only run on the leader.
 func (r *TopologyManagerRunner) NeedLeaderElection() bool {
@@ -172,13 +196,12 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RUnlock()
 
 		suppress := restoreInFlight(fg)
+		frozen := inPlaceRestoreInFlight(fg)
 
 		if ok && existing.cfg.Equal(cfg) {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
-			if recloneSite := fg.GetAnnotations()[RecloneAnnotation]; recloneSite != "" {
-				existing.tm.SetRecloneSite(recloneSite)
-				r.removeRecloneAnnotation(ctx, nn)
-			}
+			existing.tm.SetTopologyFrozen(frozen)
+			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
 			// Detect spec drift for ordered rolling updates.
 			r.checkSpecDrift(ctx, fg, existing.tm)
 			continue
@@ -196,14 +219,13 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		// Apply the suppression flag on the freshly-started manager so the
 		// first poll cycle already respects an in-flight restore.
 		r.mu.RLock()
-		if mt, ok := r.managers[nn]; ok {
-			mt.tm.SetAutoBootstrapSuppressed(suppress)
-			if recloneSite := fg.GetAnnotations()[RecloneAnnotation]; recloneSite != "" {
-				mt.tm.SetRecloneSite(recloneSite)
-				r.removeRecloneAnnotation(ctx, nn)
-			}
-		}
+		mt, started := r.managers[nn]
 		r.mu.RUnlock()
+		if started {
+			mt.tm.SetAutoBootstrapSuppressed(suppress)
+			mt.tm.SetTopologyFrozen(frozen)
+			r.handleRecloneAnnotation(ctx, fg, nn, mt.tm)
+		}
 	}
 
 	// Stop managers for deleted CRs.
@@ -218,6 +240,36 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	r.mu.Unlock()
 
 	return nil
+}
+
+// handleRecloneAnnotation consumes the one-shot reclone annotation
+// under the safety interlock described in reclone.go. Invalid
+// annotations are rejected with a RecloneRejected Event and the
+// annotation is cleared so the admin can retry with a fixed value
+// rather than receive one rejection event per reconcile.
+func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, tm *TopologyManager) {
+	raw := fg.GetAnnotations()[RecloneAnnotation]
+	if raw == "" {
+		return
+	}
+	req := parseRecloneAnnotation(raw)
+	if err := validateRecloneRequest(fg, req); err != nil {
+		r.logger.Warn("reclone annotation rejected", "fg", nn, "value", raw, "error", err.Error())
+		if r.recorder != nil {
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, "RecloneRejected", err.Error())
+		}
+		// Clear the annotation so the admin sees a single rejection and
+		// can re-apply with the correct value. Leaving it would spam
+		// the same event on every sync interval.
+		r.removeRecloneAnnotation(ctx, nn)
+		return
+	}
+	tm.SetRecloneSite(req.Site)
+	if r.recorder != nil {
+		r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecloneRequested",
+			"admin requested CLONE INSTANCE of site %q", req.Site)
+	}
+	r.removeRecloneAnnotation(ctx, nn)
 }
 
 // removeRecloneAnnotation removes the one-shot reclone annotation from the CR
