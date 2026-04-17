@@ -845,7 +845,14 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				tm.startBootstrapByName(ctx, donor, empty, "auto-clone")
 				return
 			}
-			if tm.isFreshDeploy(ctx) {
+			// A recorded lastFailoverTarget means a failover has already
+			// happened in this cluster's lifetime, so the split-brain state
+			// here is "old primary respawned writable after failover" —
+			// handled by the fence-returning-old-primary branch below, not
+			// a fresh deploy. Without this guard the fresh-deploy bootstrap
+			// reverts the failover by re-cloning the promoted site back to
+			// the respawned old primary.
+			if tm.lastFailoverTarget == "" && tm.isFreshDeploy(ctx) {
 				tm.startBootstrap(ctx)
 				return
 			}

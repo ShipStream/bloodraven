@@ -63,6 +63,18 @@ type MysqlFailoverGroupReconciler struct {
 	Recorder record.EventRecorder
 	Runner   *TopologyManagerRunner
 	Tainter  platform.NodeTainter // optional, for taint cleanup during deletion
+
+	// APIReader is an uncached reader for paths that cannot tolerate a stale
+	// cache view — specifically waitForDeploymentRollout, which must observe
+	// the post-patch Generation before it can meaningfully check rollout
+	// progress. If left nil the cached client is used, which is safe for
+	// tests but would re-introduce the rolling-update race in production.
+	APIReader client.Reader
+
+	// rolloutPollInterval overrides the production-default 2s cadence used by
+	// waitForDeploymentRollout. Tests set this to a small value so the timeout
+	// path exercises the ticker quickly.
+	rolloutPollInterval time.Duration
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups,verbs=get;list;watch;create;update;patch;delete
@@ -1451,8 +1463,11 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 }
 
 // ReconcileSiteDeployment reconciles a single site's Deployment to match the
-// desired CR spec. Used by the ordered update controller to update one site at
-// a time instead of both simultaneously.
+// desired CR spec, then blocks until the Deployment's rollout has completed
+// (new pod Ready, old pod gone). Used by the ordered update controller so the
+// "update standby → failover → update old active" sequence actually runs in
+// order; without the rollout wait, both sites' pods end up rolling in parallel
+// and the cluster briefly has no reachable MySQL.
 func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Context, fgName types.NamespacedName, siteName string) error {
 	var fg v1alpha1.MysqlFailoverGroup
 	if err := r.Get(ctx, fgName, &fg); err != nil {
@@ -1462,13 +1477,76 @@ func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Conte
 	if image == "" {
 		image = defaultMySQLImage
 	}
+	siteFound := false
 	for i, site := range fg.Spec.Sites {
 		if site.Name == siteName {
+			siteFound = true
 			serverID := int32(101 + i)
-			return r.reconcileDeployment(ctx, &fg, site, serverID, image)
+			if err := r.reconcileDeployment(ctx, &fg, site, serverID, image); err != nil {
+				return err
+			}
+			break
 		}
 	}
-	return fmt.Errorf("site %q not found in CR %s", siteName, fgName)
+	if !siteFound {
+		return fmt.Errorf("site %q not found in CR %s", siteName, fgName)
+	}
+	deployName := types.NamespacedName{Namespace: fgName.Namespace, Name: resourceName(fgName.Name, siteName)}
+	return r.waitForDeploymentRollout(ctx, deployName, 5*time.Minute)
+}
+
+// waitForDeploymentRollout polls a Deployment until its rollout is complete or
+// the timeout expires. A rollout is complete when the Deployment controller has
+// observed the latest spec AND the desired number of replicas are both updated
+// and available (new pod Ready) AND no extra pods from a prior ReplicaSet remain.
+//
+// Reads bypass the controller-runtime cache via APIReader when available: the
+// cached client lags behind the apiserver, and a pre-patch cached snapshot
+// will satisfy the rollout-complete check before Kubernetes has even started
+// rolling the new pod — the exact race that motivates this wait.
+//
+// rolloutPollInterval can be overridden by tests; zero uses the production default.
+func (r *MysqlFailoverGroupReconciler) waitForDeploymentRollout(ctx context.Context, nn types.NamespacedName, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	interval := r.rolloutPollInterval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+
+	for {
+		var dep appsv1.Deployment
+		err := reader.Get(ctx, nn, &dep)
+		if err == nil {
+			desired := int32(1)
+			if dep.Spec.Replicas != nil {
+				desired = *dep.Spec.Replicas
+			}
+			if dep.Status.ObservedGeneration >= dep.Generation &&
+				dep.Status.UpdatedReplicas == desired &&
+				dep.Status.AvailableReplicas == desired &&
+				dep.Status.Replicas == dep.Status.UpdatedReplicas {
+				return nil
+			}
+		}
+		// Transient API errors fall through to the next tick; NotFound is
+		// possible during the brief window after a Deployment delete and is
+		// treated the same — the wait will fail on timeout if it persists.
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for deployment %s rollout: %w", nn, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // FailoverGroupNamespacedName creates a NamespacedName from a failover group.

@@ -92,11 +92,12 @@ func main() {
 	// Create and register the reconciler
 	tainter := platform.NewNodeTainter(clientset, logger)
 	reconciler := &controller.MysqlFailoverGroupReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: recorder,
-		Runner:   runner,
-		Tainter:  tainter,
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  recorder,
+		Runner:    runner,
+		Tainter:   tainter,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error("unable to create controller", "error", err)
