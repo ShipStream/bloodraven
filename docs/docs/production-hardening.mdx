@@ -1,0 +1,187 @@
+---
+sidebar_position: 9.5
+---
+
+# Production hardening checklist
+
+Work through this before labeling a Bloodraven deployment "production".
+Each bullet links to the page with the setting's detail. Items are
+grouped; within a group, order doesn't matter.
+
+## Image supply chain
+
+- [ ] Pin `spec.image`, `spec.sidecarImage`, and `spec.backup.image`
+      to **immutable tags** (or digests). No `:latest`, no MySQL `:9`,
+      no `:edge`. A silently-drifting MySQL image breaks dump/restore
+      and sometimes replication.
+- [ ] **Mirror the operator, sidecar, and backup images to a private
+      registry.** A DockerHub rate-limit or Oracle registry outage
+      should never be able to stop a pod from starting mid-incident.
+- [ ] Verify images are pulled using `imagePullSecrets` scoped to the
+      namespace; service-account-wide pulls leak credentials across
+      workloads.
+- [ ] Enable `imagePullPolicy: IfNotPresent` once tags are immutable.
+
+## Credentials
+
+- [ ] Use **`spec.credentials`** (per-role Secrets), not the legacy
+      `spec.secretName` DSN mode. Per-role credentials are required
+      for the backup-verification and PITR paths to hold least
+      privilege. See
+      [CRD Reference → CredentialsSpec](./crd-reference.mdx#credentialsspec).
+- [ ] Populate `operatorSecret`, `appSecret`, `readOnlySecret`,
+      `monitorSecret`, and `backupSecret` — five distinct users.
+- [ ] Store Secrets with a provider that supports rotation (External
+      Secrets Operator, sealed-secrets, Vault). Rotate regularly.
+- [ ] Supply `MYSQL_REPLICATION_USER` / `MYSQL_REPLICATION_PASSWORD`
+      explicitly. Without them, automatic old-primary recovery is
+      skipped — see [Failover → Prerequisites](./failover.mdx#prerequisites).
+
+## TLS
+
+- [ ] Set `spec.tls` with a cert-manager issuer. Bloodraven forces
+      `require-secure-transport` when TLS is configured, so all client
+      traffic is encrypted in-cluster.
+- [ ] Use a separate issuer for MySQL TLS from the one your mesh /
+      ingress uses, so rotating the MySQL cert doesn't churn
+      unrelated workloads.
+
+## Failover tuning
+
+- [ ] Set `spec.failoverCooldown` to **≥ 5 m** (the default). Lower
+      values increase the risk of cascade failovers during unstable
+      infrastructure; higher values extend MTTR after a flapping
+      primary comes back.
+- [ ] Set `spec.replication.maxLagSeconds` based on your RPO
+      tolerance. This is an alerting threshold (`Degraded=True` with
+      reason `ReplicationLagging`), not a promotion gate — treat it
+      as a page-worthy signal, not a soft warning.
+- [ ] Use **`spec.updateStrategy: OrderedUpdate`** (the default).
+      The alternative, `Recreate`, restarts both MySQL pods
+      simultaneously on any spec change and creates a write outage.
+      Ordered updates roll the replica first, fail over, then roll
+      the former primary — zero write downtime for typical spec
+      changes.
+
+## Storage
+
+- [ ] Use a **network-attached, topology-aware StorageClass** for the
+      MySQL data PVCs (EBS + `WaitForFirstConsumer`, Persistent Disk,
+      Ceph RBD, etc.). Never `hostPath` or `emptyDir`.
+- [ ] Confirm the StorageClass's `reclaimPolicy` is `Retain` for the
+      MySQL data PVCs. `Delete` + a routine `kubectl delete pvc`
+      turns a pod-restart case into a full reclone.
+- [ ] Confirm the StorageClass supports `allowVolumeExpansion: true`
+      if you anticipate growing storage. Resizing without expansion
+      support means a data migration.
+
+## PITR / backups
+
+- [ ] Enable PITR (`spec.backup.pitr.enabled: true`) with a
+      `maxBinlogSize` sized for your RPO target. Default `100M`
+      balances rotation overhead against unarchived-tail size;
+      smaller if your write rate is high.
+- [ ] Pick a backup profile storage that is **in a different
+      fault domain** from the MySQL PVCs (different region / different
+      provider). Backups stored on the same disk as the DB are not
+      backups.
+- [ ] Configure at least one recurring schedule under
+      `spec.backup.schedules[]` and pin its `timeZone`.
+      See [Backup and restore → TimeZone](./backup-restore.mdx#timezone).
+- [ ] Set a **retention policy** (`retentionPolicy.count`,
+      `maxAgeDays`, `minKeep`, `maxFailedKeep`) on every profile. An
+      unbounded retention is a bill, not a backup strategy.
+- [ ] Run backup-verification externally (restore into a throwaway
+      namespace periodically, assert a sanity query works). Unverified
+      backups are Schrödinger backups.
+
+## Placement
+
+- [ ] **Label nodes** with a fault-domain zone topology label
+      (e.g. `topology.kubernetes.io/zone=zone-iad`). Bloodraven's
+      per-site `spec.sites[].zone` targets nodes via
+      `nodeAffinity` — without correct node labels the sites will
+      co-locate.
+- [ ] Set per-site `resources.requests` generously enough that
+      MySQL has breathing room; `resources.limits` optional for
+      memory only if you're also using `innodb_buffer_pool_size` tuning.
+- [ ] Honour the
+      [placement contract](./placement-contract.mdx): apps must
+      respect the `shipstream.io/db-readonly-<group>` node taint that
+      Bloodraven applies to losing sites after a failover.
+
+## Observability
+
+- [ ] Scrape `bloodraven` on `:8080/metrics` and alert on:
+  - `bloodraven_state_transitions_total` spikes
+  - `bloodraven_failovers_total` increase (at least a warning)
+  - `bloodraven_replication_lag_seconds` sustained > your threshold
+  - `bloodraven_divergent_transactions > 0` (critical — data loss)
+  - `up{job="bloodraven"} == 0` for > 2 × `pollInterval`
+      (operator is down; see
+      [Monitoring](./monitoring.mdx#available-metrics) for the full
+      list and recommended rules)
+- [ ] Ship a `PrometheusRule` resource alongside your install with
+      the above expressions baked in. The Helm chart installs a
+      `PodMonitor` but not alerting rules; curate your own.
+- [ ] Forward Kubernetes Events for `MysqlFailoverGroup` and
+      `MysqlBackup` CRs somewhere humans read. See
+      [Monitoring → Kubernetes Events](./monitoring.mdx#kubernetes-events).
+- [ ] Scrape your sidecars too: PITR archiver status is surfaced via
+      Prometheus gauges the operator exports (labeled by site).
+- [ ] Publish / log dashboards — Grafana, otherwise the first
+      post-incident question becomes "was this visible?".
+
+## Control-plane availability
+
+- [ ] Keep the operator's pod up. Use a tight liveness probe and
+      `restartPolicy: Always`. Size the `PodDisruptionBudget` so the
+      operator isn't evicted during routine node drains — the shipped
+      chart does **not** ship a PDB for the operator; add one.
+- [ ] Leader election is on by default and stays on. Running multiple
+      operator replicas is fine but doesn't speed up MTTR; the
+      design tradeoffs are in the README's "Non-HA control plane"
+      note.
+
+## Network
+
+- [ ] Configure NetworkPolicy so the operator Pod can reach both
+      MySQL Services and the sidecar HTTP endpoint on `:8080`. A
+      silently-blocking CNI is the #1 source of spurious
+      `unreachable` states in the state machine.
+- [ ] Make sure `external-dns` (or whatever consumes the
+      `DNSEndpoint` CR) is running. Failover updates the CR, but the
+      actual DNS record only changes when the external-dns pod
+      reconciles. Monitor its lag.
+- [ ] If you're using TLS with a private CA, mount the CA into the
+      sidecar and operator pods so their MySQL connections trust it.
+
+## Disaster readiness
+
+- [ ] Rehearse failover on the playground (`./playground/chaos.sh
+      kill-site iad`) and confirm your application behaves.
+- [ ] Rehearse PVC loss end-to-end at least once per quarter —
+      delete a PVC, watch the operator auto-clone, confirm data is
+      intact.
+- [ ] Write down the non-obvious bits that only you know (donor
+      secrets, runbook phone numbers, which engineer holds which
+      credential). A production system that only one person can
+      recover is a liability.
+- [ ] Periodically check that the PITR archive has current manifests
+      and that `status.pitr.newestArchivedTime` is close to "now".
+      A stale archive is a silent RPO regression.
+
+## Change management
+
+- [ ] Validate CRD spec changes with `kubectl apply --dry-run=server`
+      before rolling them to production. The CRD has several opinionated
+      defaults that can silently re-align your config on `apply`.
+- [ ] When rotating the sidecar image independently of the MySQL
+      image (`spec.sidecarImage`), the `OrderedUpdate` path handles
+      it automatically. Don't `kubectl delete pod` to force the
+      rollout — let the operator drive it.
+- [ ] Never force-promote a site by patching CR status directly. The
+      operator reads status as *truth* from the data plane; tampering
+      with it leads to split-brain. Use the manual-promotion
+      procedure in [Operations → Manual promotion](./operations.mdx#manual-promotion)
+      if you truly need to override.
