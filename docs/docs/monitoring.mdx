@@ -152,6 +152,8 @@ Bloodraven emits standard Kubernetes Events on `MysqlFailoverGroup` and `MysqlBa
 | `FailoverExecuted` | Normal | A failover completed and a new primary was promoted |
 | `DataLossDetected` | Warning | Divergent transactions found on old primary after emergency failover |
 | `RecoveryComplete` | Normal | Old primary recovered and is now replicating |
+| `RecloneRequested` | Normal | Admin submitted a valid `bloodraven.shipstream.io/reclone-site` annotation; CLONE INSTANCE will start on the next poll |
+| `RecloneRejected` | Warning | Reclone annotation failed the safety interlock (unknown site, missing/short/mismatched divergent-GTID prefix); annotation was cleared so the admin can retry |
 | `SplitBrainDetected` | Warning | Both sites are writable (split brain) |
 | `NoPrimaryDetected` | Warning | Both sites are read-only (no primary) |
 | `TotalLossDetected` | Warning | Both sites are unreachable |

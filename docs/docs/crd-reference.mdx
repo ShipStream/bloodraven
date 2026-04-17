@@ -309,7 +309,7 @@ The operator writes the following status fields.
 
 | Annotation | Description |
 |---|---|
-| `bloodraven.shipstream.io/reclone-site` | Set to a site name (e.g. `iad`) to trigger a `CLONE INSTANCE` from the current primary to that site. The operator processes the annotation, removes it automatically, and reports progress via the `Bootstrapping` condition. Use this to recover a divergent site without manually deleting its PVC. |
+| `bloodraven.shipstream.io/reclone-site` | Triggers a `CLONE INSTANCE` from the current primary to the named site. Value format is `<site>` (cold reclone, when `status.sites[].divergentGtid` is empty) or `<site>:<gtid-prefix>` (when divergence is recorded — the prefix must be 8+ characters and match `status.sites[].divergentGtid`, as a confirmation interlock against fat-fingered site names). Invalid annotations are rejected with a `RecloneRejected` Warning Event and cleared. Valid ones emit `RecloneRequested` and report progress via the `Bootstrapping` condition. |
 
 ### Example status
 
