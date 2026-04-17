@@ -216,9 +216,17 @@ type ReplicationSpec struct {
 // minimum-two-candidate quorum that the CRD requires.
 //
 // "dr-only" sites are passive replicas. They follow the active primary
-// (typical use: cross-region DR) but are never considered as promotion
-// targets; the operator will neither auto-promote them on failover nor
-// auto-fence them on split-brain resolution.
+// (typical use: cross-region DR) and are never considered as promotion
+// targets — the operator will not auto-promote them on failover, and
+// the split-brain priority picker treats them as ineligible winners.
+//
+// A writable "dr-only" site is an anomaly (the role implies read-only
+// replication), and when the operator detects that anomaly during
+// split-brain resolution it fences the site along with the other
+// losers so divergent writes cannot continue. The role limits
+// *promotion* and *policy eligibility*; it does not exempt the site
+// from the same safety fencing that protects primary-candidate
+// losers.
 // +kubebuilder:validation:Enum=primary-candidate;dr-only
 type SiteRole string
 

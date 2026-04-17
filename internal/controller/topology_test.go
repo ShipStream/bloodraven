@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/shipstream/bloodraven/internal/mysql"
-	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -190,7 +189,7 @@ func newTestTopologyManager(site0, site1 *mockMySQL) (*TopologyManager, *mockTai
 	hub := platform.NewHub(testLogger())
 	dns := &mockDNS{}
 	fc := NewFailoverController(testLogger())
-	tm := NewTopologyManager(cfg, []internalmysql.Checker{site0, site1}, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger())
+	tm := NewTopologyManager(cfg, []mysql.Checker{site0, site1}, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger())
 	// Use a very short cooldown for tests so failovers aren't blocked.
 	tm.failoverCooldown = 0
 	return tm, tainter, dns
@@ -210,7 +209,7 @@ func newTestTopologyManagerWithBootstrap(site0, site1 *mockMySQL) (*TopologyMana
 		ReplPassword: "replpass",
 		CloneTimeout: 10 * time.Second,
 	}
-	tm := NewTopologyManager(cfg, []internalmysql.Checker{site0, site1}, fc, nil, bc, bcfg, tainter, hub, dns, testLogger())
+	tm := NewTopologyManager(cfg, []mysql.Checker{site0, site1}, fc, nil, bc, bcfg, tainter, hub, dns, testLogger())
 	tm.failoverCooldown = 0
 	return tm, tainter, dns
 }
