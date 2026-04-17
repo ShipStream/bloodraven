@@ -156,6 +156,16 @@ type MysqlFailoverGroupSpec struct {
 	// automated action and alerts only (manual resolution required).
 	// +optional
 	SplitBrainPolicy *SplitBrainPolicySpec `json:"splitBrainPolicy,omitempty"`
+
+	// RestoreInPlace, when set, runs a re-triggerable destructive
+	// restore against the currently-active primary. Unlike
+	// InitFromBackup (one-shot, greenfield), this field is meant to be
+	// edited repeatedly: bumping spec.restoreInPlace.confirm to a newer
+	// RFC 3339 timestamp triggers another restore. See RestoreInPlaceSpec
+	// for the full-instance vs per-schema semantics and the fencing
+	// choreography.
+	// +optional
+	RestoreInPlace *RestoreInPlaceSpec `json:"restoreInPlace,omitempty"`
 }
 
 // SplitBrainPolicySpec configures automated split-brain resolution.
@@ -348,6 +358,13 @@ type MysqlFailoverGroupStatus struct {
 	// Restore tracks an in-flight or completed initFromBackup operation.
 	// +optional
 	Restore *RestoreStatus `json:"restore,omitempty"`
+
+	// RestoreInPlace tracks an in-flight or completed in-place restore
+	// (spec.restoreInPlace). The consumed confirm token is stamped here
+	// on success so subsequent reconciles can distinguish "restore
+	// already done" from "new restore requested".
+	// +optional
+	RestoreInPlace *RestoreInPlaceStatus `json:"restoreInPlace,omitempty"`
 
 	// BackupSchedules is a per-schedule rollup of the most recent backup
 	// activity for each entry in spec.backup.schedules.
