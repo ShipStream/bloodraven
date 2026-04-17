@@ -33,6 +33,7 @@ type MysqlFailoverGroupList struct {
 
 // MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
 // +kubebuilder:validation:XValidation:rule="(has(self.secretName) && self.secretName != '' && !has(self.credentials)) || ((!has(self.secretName) || self.secretName == '') && has(self.credentials))",message="exactly one of secretName or credentials must be set"
+// +kubebuilder:validation:XValidation:rule="!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.preferSite) || self.splitBrainPolicy.preferSite == '' || self.splitBrainPolicy.preferSite == self.sites[0].name || self.splitBrainPolicy.preferSite == self.sites[1].name",message="splitBrainPolicy.preferSite must match one of spec.sites[].name"
 type MysqlFailoverGroupSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.6
 	// +kubebuilder:default="mysql:9.6"
@@ -146,6 +147,46 @@ type MysqlFailoverGroupSpec struct {
 	// reconciles even if this field is still populated.
 	// +optional
 	InitFromBackup *InitFromBackupSpec `json:"initFromBackup,omitempty"`
+
+	// SplitBrainPolicy configures automated resolution when both sites
+	// are simultaneously writable and there is no prior failover history
+	// the operator can use to pick a winner (for example, after a fresh
+	// deploy or an operator restart that lost in-memory state). When
+	// omitted, or when PreferSite is empty, the operator takes no
+	// automated action and alerts only (manual resolution required).
+	// +optional
+	SplitBrainPolicy *SplitBrainPolicySpec `json:"splitBrainPolicy,omitempty"`
+
+	// RestoreInPlace, when set, runs a re-triggerable destructive
+	// restore against the currently-active primary. Unlike
+	// InitFromBackup (one-shot, greenfield), this field is meant to be
+	// edited repeatedly: bumping spec.restoreInPlace.confirm to a newer
+	// RFC 3339 timestamp triggers another restore. See RestoreInPlaceSpec
+	// for the full-instance vs per-schema semantics and the fencing
+	// choreography.
+	// +optional
+	RestoreInPlace *RestoreInPlaceSpec `json:"restoreInPlace,omitempty"`
+}
+
+// SplitBrainPolicySpec configures automated split-brain resolution.
+//
+// Setting PreferSite declares an authoritative site that wins ties. When
+// both sites are writable and the operator cannot infer a winner from
+// its own failover history, the operator will fence the non-preferred
+// site and promote the preferred one as primary.
+//
+// This is a policy decision, not a safety feature: any writes accepted
+// on the losing site that did not replicate to the winner will be
+// isolated when the losing site is fenced. The existing divergent-GTID
+// detection will block auto-rejoin of the losing site if its GTID set
+// contains transactions the winner never saw, and those transactions
+// are only recoverable via re-clone.
+type SplitBrainPolicySpec struct {
+	// PreferSite is the name of the site that wins unresolvable
+	// split-brain ties. Must match one of spec.sites[].name. If empty,
+	// the operator falls back to manual resolution (alert only).
+	// +optional
+	PreferSite string `json:"preferSite,omitempty"`
 }
 
 // ReplicationSpec configures replication health monitoring.
@@ -317,6 +358,13 @@ type MysqlFailoverGroupStatus struct {
 	// Restore tracks an in-flight or completed initFromBackup operation.
 	// +optional
 	Restore *RestoreStatus `json:"restore,omitempty"`
+
+	// RestoreInPlace tracks an in-flight or completed in-place restore
+	// (spec.restoreInPlace). The consumed confirm token is stamped here
+	// on success so subsequent reconciles can distinguish "restore
+	// already done" from "new restore requested".
+	// +optional
+	RestoreInPlace *RestoreInPlaceStatus `json:"restoreInPlace,omitempty"`
 
 	// BackupSchedules is a per-schedule rollup of the most recent backup
 	// activity for each entry in spec.backup.schedules.

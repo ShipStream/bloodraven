@@ -339,6 +339,67 @@ func TestMarshalDumpOptions_DefaultEmpty(t *testing.T) {
 	}
 }
 
+func TestMarshalLoadOptions_DefaultEmpty(t *testing.T) {
+	got, err := marshalLoadOptions(nil)
+	if err != nil || got != "{}" {
+		t.Errorf("got %q err %v", got, err)
+	}
+}
+
+func TestMarshalLoadOptions_IncludeSchemas(t *testing.T) {
+	l := &v1alpha1.LoadOptions{
+		IncludeSchemas: []string{"tenant_42"},
+	}
+	got, err := marshalLoadOptions(l)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(got, `"includeSchemas":["tenant_42"]`) {
+		t.Errorf("want includeSchemas in output, got %q", got)
+	}
+}
+
+func TestMarshalLoadOptions_ExcludeSchemas(t *testing.T) {
+	l := &v1alpha1.LoadOptions{
+		ExcludeSchemas: []string{"tmp", "scratch"},
+	}
+	got, err := marshalLoadOptions(l)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !strings.Contains(got, `"excludeSchemas":["tmp","scratch"]`) {
+		t.Errorf("want excludeSchemas in output, got %q", got)
+	}
+}
+
+func TestMarshalLoadOptions_AllFields(t *testing.T) {
+	reset := true
+	skipBin := false
+	loadIdx := true
+	l := &v1alpha1.LoadOptions{
+		Threads:        8,
+		ResetProgress:  &reset,
+		SkipBinlog:     &skipBin,
+		LoadIndexes:    &loadIdx,
+		IncludeSchemas: []string{"orders"},
+	}
+	got, err := marshalLoadOptions(l)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	for _, want := range []string{
+		`"threads":8`,
+		`"resetProgress":true`,
+		`"skipBinlog":false`,
+		`"loadIndexes":true`,
+		`"includeSchemas":["orders"]`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("want %s in output, got %q", want, got)
+		}
+	}
+}
+
 // --- jobPhase: failed-counter fallback + kind parameterization ----------
 
 func TestJobPhase_UsesKindString(t *testing.T) {

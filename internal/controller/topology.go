@@ -38,6 +38,11 @@ type TopologyConfig struct {
 	RecoveryThreshold int
 	FailoverCooldown  int64 // nanoseconds, default 5m
 
+	// SplitBrainPreferSite, when non-empty, names the site that wins
+	// unresolvable split-brain ties. It must equal one of Sites[].Name.
+	// Empty means manual resolution (alert only) — the existing default.
+	SplitBrainPreferSite string
+
 	// CredentialHash is a hash of the operator secret data. A change
 	// triggers a topology manager restart with new MySQL connections.
 	CredentialHash string
@@ -172,6 +177,17 @@ type TopologyManager struct {
 	// auto-clone path from racing the restore Job to populate the
 	// primary. Protected by mu. See runner.sync().
 	autoBootstrapSuppressed bool
+
+	// topologyFrozen is set by the runner while an in-place restore
+	// (spec.restoreInPlace) is actively mutating the cluster. Unlike
+	// autoBootstrapSuppressed (which only gates fresh-deploy cloning),
+	// this flag blocks every cross-site decision — promotion, reclone,
+	// auto-bootstrap, even fencing of a returning old primary. The
+	// topology manager observes state normally (so status still
+	// reflects reality) but takes no corrective action until the
+	// in-place restore reconciler clears the flag. Protected by mu.
+	// See runner.sync() and MysqlFailoverGroupReconciler.reconcileInPlaceRestore.
+	topologyFrozen bool
 
 	// specDriftSites lists site names whose Deployment spec-hash differs
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
@@ -525,7 +541,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// Auto-clone an empty site even when it's not a split-brain (e.g. the
 	// sidecar fenced the empty site to read-only after a PVC wipe).
 	autoCloneStarted := false
-	if !recloneStarted && !tm.isBootstrapping() && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
+	if !recloneStarted && !tm.isBootstrapping() && !tm.isTopologyFrozen() && tm.bootstrap != nil && tm.bootstrapCfg.ReplUser != "" {
 		tm.mu.RLock()
 		suppressed := tm.autoBootstrapSuppressed
 		phase := tm.bootstrapPhase
@@ -716,6 +732,15 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		tm.logger.Warn("ALERT", "message", action.Alert)
 	}
 
+	// In-place restore is mutating the cluster right now; every
+	// cross-site decision (promotion, fencing a "returning" primary,
+	// auto-cloning an empty peer) would actively fight the restore.
+	// Defer until the in-place restore reconciler clears the flag.
+	if tm.isTopologyFrozen() {
+		tm.logger.Info("cross-site action deferred: in-place restore in progress")
+		return
+	}
+
 	// Suppress any cross-site actions while a bootstrap or ordered update is in
 	// progress: during an update the standby is restarting and will appear
 	// unreachable, and we do not want to initiate a spurious failover.
@@ -758,6 +783,34 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			tm.logger.Info("fencing returning old primary (split brain after failover)", "site", oldPrimarySiteName)
 			if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
 				tm.logger.Error("failed to fence returning old primary", "site", oldPrimarySiteName, "error", err)
+			}
+		}
+	}
+
+	// Split-brain with no prior failover target (fresh deploy past bootstrap,
+	// or operator restart that lost in-memory state): if the user configured
+	// spec.splitBrainPolicy.preferSite, fence the non-preferred site and
+	// promote the preferred one. The promotion still flows through the
+	// standard path below so it respects the anti-flap cooldown.
+	if action.SplitBrain && action.PromoteSite == "" && tm.lastFailoverTarget == "" && !tm.isBootstrapping() {
+		if prefer := tm.cfg.SplitBrainPreferSite; prefer != "" {
+			if preferred := tm.getSite(prefer); preferred != nil && preferred.state == state.StateWritable {
+				loserName := tm.otherSiteName(prefer)
+				if loser := tm.getSite(loserName); loser != nil && loser.state == state.StateWritable {
+					tm.logger.Warn("split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.preferSite",
+						"preferSite", prefer, "fencedSite", loserName)
+					if err := loser.mysql.SetSuperReadOnly(ctx, true); err != nil {
+						tm.logger.Error("failed to fence non-preferred site", "site", loserName, "error", err)
+					} else {
+						metrics.SplitBrainAutoResolveTotal.WithLabelValues(prefer).Inc()
+					}
+					// Synthesize a promotion so the preferred site is
+					// re-promoted (clears replication metadata, records
+					// promotionGtid, flips DNS). The anti-flap cooldown
+					// check below still applies.
+					action.PromoteSite = prefer
+					action.FlipDNS = prefer
+				}
 			}
 		}
 	}
@@ -853,6 +906,30 @@ func (tm *TopologyManager) SetAutoBootstrapSuppressed(v bool) {
 	tm.mu.Lock()
 	tm.autoBootstrapSuppressed = v
 	tm.mu.Unlock()
+}
+
+// SetTopologyFrozen toggles the gate that blocks every cross-site
+// action (promotion, reclone, auto-bootstrap, returning-old-primary
+// fencing) while an in-place restore is actively mutating the cluster.
+// The runner sets this from the CR's status.restoreInPlace.phase.
+//
+// This is a stronger signal than SetAutoBootstrapSuppressed: polling
+// and metrics emission continue normally so the operator still has
+// visibility into site health, but decisions that would reshape the
+// cluster are deferred until the in-place restore reconciler clears
+// the flag.
+func (tm *TopologyManager) SetTopologyFrozen(v bool) {
+	tm.mu.Lock()
+	tm.topologyFrozen = v
+	tm.mu.Unlock()
+}
+
+// isTopologyFrozen reports whether an in-place restore is currently
+// holding the topology manager still.
+func (tm *TopologyManager) isTopologyFrozen() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.topologyFrozen
 }
 
 // SetRecloneSite requests that the given site be recloned from the current
@@ -1346,6 +1423,9 @@ func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl [2]*mysql
 	if tm.lastFailoverTarget == "" || tm.isBootstrapping() {
 		return false
 	}
+	if tm.isTopologyFrozen() {
+		return false
+	}
 	if tm.bootstrapCfg.ReplUser == "" {
 		return false
 	}
@@ -1495,6 +1575,11 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 
 	if tm.isBootstrapping() {
 		tm.logger.Info("reclone request deferred, bootstrap already in progress", "site", site)
+		return false
+	}
+
+	if tm.isTopologyFrozen() {
+		tm.logger.Info("reclone request deferred, in-place restore in progress", "site", site)
 		return false
 	}
 

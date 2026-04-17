@@ -518,12 +518,28 @@ type LoadOptions struct {
 	ResetProgress *bool `json:"resetProgress,omitempty"`
 
 	// SkipBinlog disables binary logging during the load to speed it up.
+	// For in-place restores that must replicate to the peer site via
+	// normal MySQL replication (per-schema in-place restore), callers
+	// should set this to false so the load's DDL/DMLs flow through the
+	// primary's binlog to the replica.
 	// +kubebuilder:default=true
 	SkipBinlog *bool `json:"skipBinlog,omitempty"`
 
 	// LoadIndexes controls whether indexes are rebuilt during load.
 	// +kubebuilder:default=true
 	LoadIndexes *bool `json:"loadIndexes,omitempty"`
+
+	// IncludeSchemas, if non-empty, restricts the load to these schemas.
+	// Useful for carving a single tenant out of a full-instance dump
+	// (e.g. migrating one client schema into its own failover group).
+	// Forwarded to util.loadDump() as includeSchemas.
+	// +optional
+	IncludeSchemas []string `json:"includeSchemas,omitempty"`
+
+	// ExcludeSchemas, if non-empty, skips these schemas during load.
+	// Forwarded to util.loadDump() as excludeSchemas.
+	// +optional
+	ExcludeSchemas []string `json:"excludeSchemas,omitempty"`
 }
 
 // BackupScheduleStatus is the per-schedule rollup exposed on
@@ -564,6 +580,147 @@ type BackupScheduleStatus struct {
 	// create a retry CR for a Failed latest attempt. Used by the
 	// scheduler loop to wake up at exactly the right moment.
 	NextRetryTime *metav1.Time `json:"nextRetryTime,omitempty"`
+}
+
+// RestoreInPlaceSpec configures a re-runnable in-place restore that loads
+// a previous dump into the currently-active primary WITHOUT a
+// teardown/rename cycle. Unlike initFromBackup (which is one-shot and
+// runs before normal bootstrap), an in-place restore operates against a
+// live cluster: it fences writes, wipes (or drops) target schemas,
+// loads the dump into the running mysqld, optionally replays binlogs
+// to a target timestamp, and resumes.
+//
+// Two modes are supported, selected by loadOptions.includeSchemas:
+//
+//   - Full-instance restore (includeSchemas empty or unset): drops all
+//     user schemas, re-loads from the dump, and re-clones the replica
+//     via CLONE INSTANCE after the load completes. Both the primary
+//     Service and the sidecar are fenced for the duration.
+//
+//   - Per-schema restore (exactly one entry in includeSchemas): drops
+//     the named schema only, re-loads just that schema, and relies on
+//     normal MySQL replication to propagate the DROP+load to the
+//     replica. The primary Service remains up — other tenants keep
+//     writing — and it is the caller's responsibility to put the
+//     affected tenant into application-level maintenance mode.
+//
+// WARNING: PITR binlog replay via mysqlbinlog --database=<x> is not
+// airtight for apps that issue cross-schema statements (e.g.
+// `INSERT INTO a.t SELECT ... FROM b.t`) — the filter matches on the
+// session's current default database at log time, not on the schemas
+// actually referenced. For well-isolated multi-tenant schemas this is
+// fine; for cross-schema apps, use a full-instance restore instead.
+type RestoreInPlaceSpec struct {
+	// Confirm is a required anti-fat-finger token that gates the
+	// destructive restore. Must be an RFC 3339 timestamp (e.g.
+	// "2026-04-17T14:32:00Z"). The operator refuses to run an in-place
+	// restore unless Confirm parses and is strictly greater than the
+	// timestamp recorded in status.restoreInPlace.confirmTokenUsed.
+	// This gives programmatic callers a simple "just send now()" idiom
+	// while also protecting against replay (an older manifest applied
+	// accidentally will not re-trigger a restore).
+	// +kubebuilder:validation:MinLength=1
+	Confirm string `json:"confirm"`
+
+	// Source is a tagged reference to the artifact to restore.
+	// +kubebuilder:validation:XValidation:rule="(has(self.mysqlBackupRef) ? 1 : 0) + (has(self.s3) ? 1 : 0) + (has(self.pvc) ? 1 : 0) == 1",message="exactly one of mysqlBackupRef, s3, or pvc must be set"
+	Source InitFromBackupSource `json:"source"`
+
+	// LoadOptions are forwarded to util.loadDump(). In-place restores
+	// require includeSchemas to be either empty (full instance) or
+	// exactly one entry (single schema). For per-schema restores the
+	// operator also forces skipBinlog to false so the DROP+load flows
+	// through the primary's binlog to the replica.
+	// +optional
+	LoadOptions *LoadOptions `json:"loadOptions,omitempty"`
+
+	// PointInTime, when set, enables post-load binlog replay to recover
+	// the restored data to a specific target timestamp.
+	// +optional
+	PointInTime *PointInTimeSpec `json:"pointInTime,omitempty"`
+}
+
+// RestoreInPlacePhase enumerates the discrete states an in-place restore
+// progresses through. The controller advances the state machine by one
+// step per reconcile so that operator restarts land on a well-defined
+// observable state.
+//
+// For full-instance restores the post-restore replica reclone is not a
+// dedicated phase: the operator sets the reclone annotation during the
+// transition out of Restoring and hands off to the existing reclone
+// machinery (see internal/controller/topology.go:checkReclone). The
+// in-place restore is considered Succeeded once the primary has the
+// fresh data; the replica catching up runs independently in the
+// background and is observable via the normal bootstrap/reclone status.
+// +kubebuilder:validation:Enum="";Preflight;Fencing;Restoring;Resuming;Succeeded;Failed
+type RestoreInPlacePhase string
+
+const (
+	// RestoreInPlaceNone is the zero value (no restore scheduled or
+	// last restore completed and was cleared from status).
+	RestoreInPlaceNone RestoreInPlacePhase = ""
+
+	// RestoreInPlacePreflight means the operator has accepted the
+	// confirmation token and is validating preconditions (active site
+	// writable, deployment rolled out, source artifact resolvable).
+	RestoreInPlacePreflight RestoreInPlacePhase = "Preflight"
+
+	// RestoreInPlaceFencing means the operator is applying the
+	// pre-restore fence: freezing the topology manager and (for
+	// full-instance restores) stripping the primary role label so the
+	// -primary Service sheds client connections for the duration of
+	// the load.
+	RestoreInPlaceFencing RestoreInPlacePhase = "Fencing"
+
+	// RestoreInPlaceRestoring means the restore Job is running the
+	// loadDump (and optional PITR replay) against the active primary.
+	RestoreInPlaceRestoring RestoreInPlacePhase = "Restoring"
+
+	// RestoreInPlaceResuming means the operator is lifting the fence:
+	// restoring the primary role label, scheduling the replica reclone
+	// (full-instance only), and unfreezing the topology manager.
+	RestoreInPlaceResuming RestoreInPlacePhase = "Resuming"
+
+	// RestoreInPlaceSucceeded is the terminal success state.
+	RestoreInPlaceSucceeded RestoreInPlacePhase = "Succeeded"
+
+	// RestoreInPlaceFailed is the terminal failure state. The operator
+	// will not retry automatically; bump spec.restoreInPlace.confirm to
+	// a newer timestamp to re-arm.
+	RestoreInPlaceFailed RestoreInPlacePhase = "Failed"
+)
+
+// RestoreInPlaceStatus tracks an in-flight or completed in-place
+// restore.
+type RestoreInPlaceStatus struct {
+	// Phase of the in-place restore.
+	Phase RestoreInPlacePhase `json:"phase,omitempty"`
+
+	// JobName is the name of the batchv1.Job performing the load.
+	JobName string `json:"jobName,omitempty"`
+
+	// TargetSite is the site that received the load (always the active
+	// primary at the moment of preflight).
+	TargetSite string `json:"targetSite,omitempty"`
+
+	// Scope is a human-readable tag: "full" for a full-instance
+	// restore, or "schema:<name>" for a per-schema restore.
+	Scope string `json:"scope,omitempty"`
+
+	// ConfirmTokenUsed records the spec.restoreInPlace.confirm value of
+	// the most recent executed restore. Subsequent reconciles ignore
+	// any spec.confirm <= this value; a new restore requires a strictly
+	// greater RFC 3339 timestamp.
+	ConfirmTokenUsed string `json:"confirmTokenUsed,omitempty"`
+
+	// StartTime is when the restore entered Preflight.
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+
+	// CompletionTime is when the restore reached a terminal phase.
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// Message is a human-readable status line.
+	Message string `json:"message,omitempty"`
 }
 
 // RestoreStatus tracks an in-flight or completed initFromBackup run.
