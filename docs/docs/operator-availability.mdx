@@ -30,9 +30,9 @@ failure that happens *while the operator is also down*.
 - **Availability is not preserved during operator downtime.** A primary
   failure while the operator is down is an outage for writes until the
   operator comes back. This is the explicit tradeoff. If you need
-  lower MTTR, invest in faster operator restarts (Kubernetes
-  `restartPolicy: Always`, small image, short liveness probe backoff)
-  rather than in a multi-replica control plane.
+  lower MTTR, invest in faster operator recovery (small image / fast
+  image pulls, short liveness probe backoff, favorable scheduling or
+  `priorityClass`) rather than in a multi-replica control plane.
 
 ## What the operator is responsible for
 
@@ -71,8 +71,10 @@ A normal pod restart is ≈ 5–10 seconds. Within that window:
 
 - No MySQL state changes are observed.
 - Sidecars count down `leaseTimeout` (default `20s`). The restart
-  finishes well before that, the sidecar's next `GET /active-site`
-  succeeds, and the self-fence timer resets.
+  finishes well before that, and on the next periodic fencing check
+  (`peerCheckInterval`, default `5s`) the sidecar can reach the
+  operator's `/healthz` endpoint again, so the self-fence timer is
+  refreshed before it expires.
 - In-flight `RecloneRequested` / `RecloneRejected` decisions are
   idempotent: the annotation is either still present (will be handled
   on the next sync) or already cleared.
@@ -91,8 +93,8 @@ This is the case the wishlist asked us to document explicitly.
 | 0 | Operator pod crashes / is being upgraded. Liveness fails. | `-primary` Service still points at the active primary; replica is healthy. |
 | ≤ 20 s | Sidecars on both sites notice the operator is unreachable. Each one starts its `leaseTimeout` timer. | Nothing user-visible. Writes still work. |
 | t<sub>p</sub> | The primary pod goes down for any reason (node crash, OOM, partition, manual kill). | Apps connecting to `-primary` fail: first `ECONNREFUSED` once the pod is gone, then DNS name resolves but the Service has no endpoints. Reads from `-replicas` continue uninterrupted. |
-| t<sub>p</sub> + 20 s | The replica's sidecar observes that both the operator *and* the peer primary are unreachable for longer than `leaseTimeout`. It self-fences the replica (`SET GLOBAL super_read_only = ON`). The replica is now read-only and explicitly refusing writes. | Reads still work. Writes still fail. **No split brain is possible.** |
-| …operator still down… | Nothing happens. There is no component elected or authorised to promote the replica. | Writes remain unavailable. Operator's CR status is stale (no new polls have been recorded). |
+| t<sub>p</sub> + 20 s | If the primary pod is still alive but isolated (network partition), its own sidecar observes that both the operator *and* the peer replica are unreachable for longer than `leaseTimeout` and self-fences the primary (`SET GLOBAL super_read_only = ON`). If the primary simply crashed, there is nothing to fence — the replica stays read-only by virtue of its existing `read_only=1` (the replica's fencing monitor is a no-op on a read-only instance). Either way, no writable node exists. | Reads still work. Writes still fail. **No split brain is possible.** |
+| …operator still down… | Nothing happens. There is no component elected or authorized to promote the replica. | Writes remain unavailable. Operator's CR status is stale (no new polls have been recorded). |
 | t<sub>r</sub> | Operator pod is rescheduled and starts leading. | Operator begins polling both sites. |
 | t<sub>r</sub> + `failureThreshold × pollInterval` ≈ 6 s | Operator declares the dead primary `unreachable` and the live replica `read-only`. | Debounced state visible in `status.sites[]`. |
 | t<sub>r</sub> + ≈ 6 s + [relay drain](./failover.mdx#failover-sequence) (up to 30 s) | Operator promotes the replica, updates the `-primary` Service selector, flips the DNSEndpoint. | `FailoverExecuted` Event. `-primary` Service now routes to the new primary. |
@@ -108,9 +110,13 @@ operator-down + primary-failure outage looks like this:
 2. Reads keep succeeding throughout (the `-replicas` Service still has
    a healthy endpoint, as long as the replica stays up).
 3. Writes resume once the operator finishes its first post-restart
-   failover cycle, roughly **20 s (sidecar fence of a potentially-stale
-   primary) + operator-startup time + 6 s (debounce) + up to 30 s
-   (relay drain) ≈ 40–60 s** after the operator pod comes back.
+   failover cycle, roughly **operator-startup time + 6 s (debounce) +
+   up to 30 s (relay drain) ≈ 10–40 s** after the operator pod comes
+   back. If the old primary is still alive but isolated, there may
+   also be an additional stale-primary fencing window driven by
+   `leaseTimeout` plus the sidecar check interval; that fencing only
+   applies to a still-writable old primary and may already have
+   happened before the operator restarts.
 
 **Write-path unavailability is the cost of not running a multi-replica
 control plane.** Correctness — no split brain, no silent divergence,
@@ -135,12 +141,15 @@ operator (down). Human intervention is required. See
 
 ## Recommended mitigations
 
-These are things you can do to minimise the blast radius of operator
+These are things you can do to minimize the blast radius of operator
 downtime without adopting a multi-replica control plane:
 
-- **Keep the operator pod up.** Use a tight liveness probe and
-  `restartPolicy: Always`. Rely on Kubernetes to reschedule the pod
-  promptly; a healthy node restart is ≈ 5 s, well inside `leaseTimeout`.
+- **Keep the operator pod up.** Use a tight liveness probe, a
+  readiness probe that only reports ready once the manager is healthy,
+  and immutable image tags (or an explicit pull policy) to avoid
+  rollout-time pull failures. Rely on Kubernetes to restart or
+  reschedule the pod promptly; a healthy node restart is ≈ 5 s, well
+  inside `leaseTimeout`.
 - **Size the PodDisruptionBudget so the operator isn't evicted during
   routine node drains.** The shipped Helm chart does not set a PDB on
   the operator; add one if your cluster does aggressive scheduling.
