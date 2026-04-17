@@ -2,7 +2,7 @@
 
 ## Checklist
 
-- [ ] 1. Operator HA / leader election
+- [x] 1. Operator HA / leader election (docs-only; multi-replica HA is an intentional non-goal)
 - [ ] 2. Document the RPO model explicitly
 - [ ] 3. Split-brain auto-resolution option
 - [ ] 4. Fencing durability during operator-down + partial partition

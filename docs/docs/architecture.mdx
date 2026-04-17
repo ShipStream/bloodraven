@@ -45,7 +45,11 @@ graph TB
 
 ## Operator (`bloodraven`)
 
-The operator runs as a single-replica Deployment. For each `MysqlFailoverGroup`, it:
+The operator runs as a single-replica Deployment with controller-runtime
+leader election enabled as a safety belt. See
+[Operator availability](./operator-availability.mdx) for the complete
+breakdown of what happens — and what doesn't — when the operator is
+down. For each `MysqlFailoverGroup`, it:
 
 1. Creates a StatefulSet-style Pod, Service, and PVC per site
 2. Creates a `mysql-<name>-primary` Service whose selector tracks the active site
@@ -69,7 +73,7 @@ Each MySQL pod includes a sidecar container that:
 - **Startup safety net**: on boot, queries the operator's `GET /active-site` endpoint to determine the current active site. If this sidecar is on a standby site but MySQL has `read_only=OFF`, it sets `super_read_only=ON` to prevent a stale primary from accepting writes after a pod restart following failover
 - **Binlog archiver (PITR)**: when `spec.backup.pitr.enabled=true`, a goroutine watches `mysql-bin.index` via inotify and uploads each sealed binlog to the referenced backup profile's storage. Only the primary uploads (gated on `@@read_only`); after a failover the new primary's archiver takes over within one scan cycle. Archived files are pruned once the oldest retained `MysqlBackup` moves past them, using a cutoff timestamp pulled from the operator's `/pitr-cutoff` endpoint. See [Backup and restore → PITR](/docs/backup-restore#point-in-time-recovery-pitr).
 
-This self-fencing behavior is a critical safety net. Even if the operator is down, an isolated MySQL instance will not accept writes that could diverge from the other site.
+This self-fencing behavior is a critical safety net. Even if the operator is down, an isolated MySQL instance will not accept writes that could diverge from the other site. The full timing of operator-down + primary-failure is documented in [Operator availability](./operator-availability.mdx#operator-down--primary-failure).
 
 Architectural note: the archiver runs in the sidecar rather than the operator because inotify + direct binlog file reads need the MySQL data PVC mounted. PVCs are typically `ReadWriteOnce` and bound to one node, so a centralized archiver in the operator pod can't mount every failover group's data volume. The sidecar is already per-pod and already knows its local MySQL's role, so it's the natural home.
 
