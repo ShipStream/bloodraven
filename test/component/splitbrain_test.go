@@ -1,6 +1,11 @@
 package component
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/shipstream/bloodraven/internal/metrics"
+)
 
 func TestSplitBrain_BothWritable_NoAction(t *testing.T) {
 	// Both DCs are writable -- split brain scenario.
@@ -95,6 +100,75 @@ func TestTotalLoss_BothUnreachable(t *testing.T) {
 	}
 	if s.Sites[1].State != "unreachable" {
 		t.Errorf("dc2 state: got %s, want unreachable", s.Sites[1].State)
+	}
+}
+
+func TestSplitBrain_PreferSite_FencesLoserAndPromotesWinner(t *testing.T) {
+	// Both sites writable, preferSite=dc1 → dc2 should be fenced and dc1
+	// re-promoted via the standard failover path.
+	before := testutil.ToFloat64(metrics.SplitBrainAutoResolveTotal.WithLabelValues("dc1"))
+	h := newTestHarnessWithPreferSite(t, "dc1")
+
+	h.pollN(2) // recovery threshold — transition both sites to writable
+
+	if !h.dc2MySQL.superReadOnly {
+		t.Error("dc2 should have been fenced (super_read_only=ON) by preferSite policy")
+	}
+	if h.dc1MySQL.isReadOnly() {
+		t.Error("dc1 should have been promoted (readOnly=false)")
+	}
+	if h.dns.getLastIP() != "1.1.1.1" {
+		t.Errorf("DNS should point to preferred site, got %q", h.dns.getLastIP())
+	}
+	if got := testutil.ToFloat64(metrics.SplitBrainAutoResolveTotal.WithLabelValues("dc1")); got-before != 1 {
+		t.Errorf("bloodraven_split_brain_auto_resolve_total{prefer_site=dc1}: got delta %v, want 1", got-before)
+	}
+}
+
+func TestSplitBrain_PreferSite_DC2Wins(t *testing.T) {
+	// Mirror: preferSite=dc2 should fence dc1 and promote dc2.
+	h := newTestHarnessWithPreferSite(t, "dc2")
+
+	h.pollN(2)
+
+	if !h.dc1MySQL.superReadOnly {
+		t.Error("dc1 should have been fenced (super_read_only=ON) by preferSite policy")
+	}
+	if h.dc2MySQL.isReadOnly() {
+		t.Error("dc2 should have been promoted (readOnly=false)")
+	}
+	if h.dns.getLastIP() != "2.2.2.2" {
+		t.Errorf("DNS should point to preferred site, got %q", h.dns.getLastIP())
+	}
+}
+
+func TestSplitBrain_NoPreferSite_NoAction(t *testing.T) {
+	// Empty preferSite (manual mode) should retain the existing alert-only
+	// behavior: no fencing, no DNS flip.
+	h := newTestHarnessWithPreferSite(t, "")
+
+	h.pollN(2)
+
+	if h.dc1MySQL.superReadOnly || h.dc2MySQL.superReadOnly {
+		t.Error("manual policy (empty preferSite) must not fence either site")
+	}
+	if h.dns.getLastIP() != "" {
+		t.Errorf("manual policy must not flip DNS, got %q", h.dns.getLastIP())
+	}
+}
+
+func TestSplitBrain_PreferSite_UnknownName_NoAction(t *testing.T) {
+	// If preferSite doesn't match a real site (should be caught by CRD
+	// validation, but defend at runtime too), fall back to manual behavior.
+	h := newTestHarnessWithPreferSite(t, "dc-ghost")
+
+	h.pollN(2)
+
+	if h.dc1MySQL.superReadOnly || h.dc2MySQL.superReadOnly {
+		t.Error("unknown preferSite must not fence either site")
+	}
+	if h.dns.getLastIP() != "" {
+		t.Errorf("unknown preferSite must not flip DNS, got %q", h.dns.getLastIP())
 	}
 }
 

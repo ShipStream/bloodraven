@@ -4497,6 +4497,22 @@ spec:
                 maxItems: 2
                 minItems: 2
                 type: array
+              splitBrainPolicy:
+                description: |-
+                  SplitBrainPolicy configures automated resolution when both sites
+                  are simultaneously writable and there is no prior failover history
+                  the operator can use to pick a winner (for example, after a fresh
+                  deploy or an operator restart that lost in-memory state). When
+                  omitted, or when PreferSite is empty, the operator takes no
+                  automated action and alerts only (manual resolution required).
+                properties:
+                  preferSite:
+                    description: |-
+                      PreferSite is the name of the site that wins unresolvable
+                      split-brain ties. Must match one of spec.sites[].name. If empty,
+                      the operator falls back to manual resolution (alert only).
+                    type: string
+                type: object
               terminationGracePeriodSeconds:
                 default: 60
                 description: 'TerminationGracePeriodSeconds is the grace period for
@@ -4550,6 +4566,10 @@ spec:
             - message: exactly one of secretName or credentials must be set
               rule: (has(self.secretName) && self.secretName != '' && !has(self.credentials))
                 || ((!has(self.secretName) || self.secretName == '') && has(self.credentials))
+            - message: splitBrainPolicy.preferSite must match one of spec.sites[].name
+              rule: '!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.preferSite)
+                || self.splitBrainPolicy.preferSite == '''' || self.splitBrainPolicy.preferSite
+                == self.sites[0].name || self.splitBrainPolicy.preferSite == self.sites[1].name'
           status:
             description: MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.
             properties:

@@ -48,11 +48,11 @@ After updating individual site states, the operator evaluates the pair together:
 | `writable` | `read-only` | **Healthy** -- no action needed |
 | `unreachable` | `read-only` | **Failover** -- promote Site B |
 | `read-only` | `unreachable` | **Failover** -- promote Site A |
-| `writable` | `writable` | **Split brain** -- alert, no automatic action |
+| `writable` | `writable` | **Split brain** -- see [Split-brain resolution](#split-brain-resolution) |
 | `read-only` | `read-only` | **No primary** -- alert, no automatic action |
 | `unreachable` | `unreachable` | **Total loss** -- alert, no automatic action |
 
-The operator only takes automatic action for the failover case. All other anomalous states require human investigation.
+The operator only takes automatic action for the failover case (and, opt-in, for split brain). All other anomalous states require human investigation.
 
 ## Failover sequence
 
@@ -135,6 +135,61 @@ See [Recovering a divergent old primary](./operations.mdx#recovering-a-divergent
 ### Prerequisites
 
 Old primary recovery requires replication credentials (`MYSQL_REPLICATION_USER` and `MYSQL_REPLICATION_PASSWORD`) in the Secret referenced by `spec.secretName`. Without these, recovery is skipped and the site remains fenced.
+
+## Split-brain resolution
+
+When the state machine observes both sites as `writable` simultaneously, the operator's response is tiered:
+
+1. **After a prior operator-initiated failover** -- The operator already knows which site it promoted (`status.lastFailoverTarget`). The other site being writable means the old primary returned. The operator fences it immediately (`SET GLOBAL super_read_only=ON`) and recovery proceeds on the next poll. This runs regardless of `spec.splitBrainPolicy`.
+2. **No prior failover history, `spec.splitBrainPolicy.preferSite` is set** -- The operator fences the non-preferred site and re-promotes the preferred one through the standard failover path (DNS flip, relay-log drain, `RESET REPLICA ALL`, promotion GTID record, `read_only=0`). The anti-flap cooldown still applies to this promotion.
+3. **No prior failover history, no `preferSite` configured** -- The operator alerts only (`SPLIT BRAIN: both sites are writable`) and takes no automated action. This is the default.
+
+### When `preferSite` applies
+
+`preferSite` is a tiebreaker for states the operator cannot resolve from its own history. The two common triggers:
+
+- **Fresh deploy with existing data.** Both sites come up writable and `lastFailoverTarget` is empty because this operator instance has never failed anything over. Without `preferSite`, the operator alerts and waits for an admin.
+- **Operator restart amnesia.** In-memory `lastFailoverTarget` is repopulated from `status.lastFailoverTarget` at startup, but if a split brain occurred during the restart window (for example, an old primary came back *while* the operator was restarting), the operator may never have had an opportunity to record the most recent failover. `preferSite` provides a deterministic answer in this case.
+
+When history *is* available (case 1 above), the operator trusts it and does **not** consult `preferSite`. This preserves the invariant that the site most recently promoted keeps its writes.
+
+### Configuration
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+spec:
+  sites:
+    - name: iad
+      # ...
+    - name: pdx
+      # ...
+  splitBrainPolicy:
+    preferSite: iad  # "iad always wins ties"
+```
+
+`preferSite` must match one of `spec.sites[].name`; the CRD's CEL validation rejects mismatches at admission time.
+
+### Data-loss implications
+
+:::danger
+`preferSite` is a **policy** decision, not a safety feature. When the operator fences the losing site to resolve a split brain:
+
+- Any transactions committed on the losing site that did *not* replicate to the winner are isolated.
+- Those transactions are *not* automatically replayed, merged, or preserved. They remain on the losing site's PVC but are outside the replication stream.
+- When the fenced site attempts to rejoin, Bloodraven's existing divergent-GTID detection compares `executed_gtid_set` on both sides. If the loser has GTIDs the winner never saw, rejoin is **blocked** and the site must be recloned to recover. The divergent GTID set and transaction count are recorded in `status.sites[].divergentGtid` and `status.sites[].divergentTransactionCount`.
+- In other words, `preferSite` makes split-brain resolution fast and deterministic at the cost of silently losing the loser's unreplicated writes. The loss is surfaced loudly (`RecoveryBlocked` condition, `bloodraven_divergent_transactions` gauge) but not prevented.
+:::
+
+Choose `preferSite` only when your operational model has a clear authoritative site -- for example, a primary region that you always want writes to land in, with the other region serving as a pure DR replica whose occasional writes during a split brain are acceptable to discard.
+
+### Observability
+
+- Metric: `bloodraven_split_brain_auto_resolve_total{prefer_site="<name>"}` -- counter, incremented each time the operator resolves a split brain by fencing the non-preferred site.
+- Log event: `split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.preferSite` at `warn` level, with `preferSite` and `fencedSite` fields.
+- The standard failover log, metric (`bloodraven_failovers_total`), and DNS-flip metric (`bloodraven_dns_flips_total`) also fire, since split-brain resolution runs through the same promotion path.
 
 ## Anti-flap cooldown
 

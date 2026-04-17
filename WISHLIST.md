@@ -4,7 +4,7 @@
 
 - [ ] 1. Operator HA / leader election
 - [ ] 2. Document the RPO model explicitly
-- [ ] 3. Split-brain auto-resolution option
+- [x] 3. Split-brain auto-resolution option
 - [ ] 4. Fencing durability during operator-down + partial partition
 - [ ] 5. Reclone safety interlocks
 - [ ] 6. In-place restore path

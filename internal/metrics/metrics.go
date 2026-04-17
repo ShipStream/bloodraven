@@ -34,6 +34,11 @@ var (
 		Help: "Total number of failovers executed. Incremented after successful MySQL promotion.",
 	}, []string{"target_site"})
 
+	SplitBrainAutoResolveTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_split_brain_auto_resolve_total",
+		Help: "Total number of split-brain incidents auto-resolved by spec.splitBrainPolicy.preferSite. The label is the preferred (winning) site.",
+	}, []string{"prefer_site"})
+
 	ReplicationLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_replication_lag_seconds",
 		Help: "Replication lag in seconds. Only set for the replica site; -1 if lag is NULL (not replicating).",
@@ -154,6 +159,7 @@ var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {
 	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount, FailoversTotal,
+		SplitBrainAutoResolveTotal,
 		ReplicationLag, ReplicationRunning, SiteState, DivergentTransactions, RecloneOperations,
 		BackupRunsTotal, BackupDurationSeconds,
 		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes,
