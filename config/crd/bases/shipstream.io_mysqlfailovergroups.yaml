@@ -4595,6 +4595,10 @@ spec:
                   sites with role "dr-only" may be appended for cross-region DR.
                   Failover is performed by picking the best primary-candidate replica
                   when the active site is lost.
+
+                  MaxItems is set to 16 so the Kubernetes CEL cost estimator can bound
+                  the uniqueness-and-priority validation rules. Real deployments are
+                  expected to use well under that; raise the cap if needed.
                 items:
                   description: SiteSpec defines the configuration for a single site
                     in the failover group.
@@ -4606,7 +4610,9 @@ spec:
                     name:
                       description: |-
                         Name is the site identifier (e.g. "iad", "pdx", "lhr").
-                        Must be unique within spec.sites.
+                        Must be unique within spec.sites. MaxLength caps the CEL cost
+                        of the spec-level uniqueness and priority-membership rules.
+                      maxLength: 253
                       minLength: 1
                       type: string
                     resources:
@@ -4707,6 +4713,7 @@ spec:
                   - storage
                   - zone
                   type: object
+                maxItems: 16
                 minItems: 2
                 type: array
               splitBrainPolicy:
@@ -4726,8 +4733,14 @@ spec:
                       that is currently writable becomes the new primary; every other
                       writable site is fenced. If empty, the operator falls back to
                       manual resolution (alert only).
+
+                      MaxItems must stay equal to spec.sites' MaxItems so the CEL cost
+                      estimator can bound the "every priority entry names a real
+                      primary-candidate" rule.
                     items:
+                      maxLength: 253
                       type: string
+                    maxItems: 16
                     type: array
                     x-kubernetes-list-type: atomic
                 type: object

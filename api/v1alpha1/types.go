@@ -50,7 +50,12 @@ type MysqlFailoverGroupSpec struct {
 	// sites with role "dr-only" may be appended for cross-region DR.
 	// Failover is performed by picking the best primary-candidate replica
 	// when the active site is lost.
+	//
+	// MaxItems is set to 16 so the Kubernetes CEL cost estimator can bound
+	// the uniqueness-and-priority validation rules. Real deployments are
+	// expected to use well under that; raise the cap if needed.
 	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=16
 	Sites []SiteSpec `json:"sites"`
 
 	// SecretName references the secret containing MySQL credentials (legacy).
@@ -196,8 +201,14 @@ type SplitBrainPolicySpec struct {
 	// that is currently writable becomes the new primary; every other
 	// writable site is fenced. If empty, the operator falls back to
 	// manual resolution (alert only).
+	//
+	// MaxItems must stay equal to spec.sites' MaxItems so the CEL cost
+	// estimator can bound the "every priority entry names a real
+	// primary-candidate" rule.
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=253
 	SitePriorities []string `json:"sitePriorities,omitempty"`
 }
 
@@ -243,8 +254,10 @@ const (
 // SiteSpec defines the configuration for a single site in the failover group.
 type SiteSpec struct {
 	// Name is the site identifier (e.g. "iad", "pdx", "lhr").
-	// Must be unique within spec.sites.
+	// Must be unique within spec.sites. MaxLength caps the CEL cost
+	// of the spec-level uniqueness and priority-membership rules.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
 	// Role governs whether this site can be auto-promoted on failover.
