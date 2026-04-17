@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/shipstream/bloodraven/internal/controller"
+	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -74,10 +75,10 @@ func TestActiveSiteNotFound(t *testing.T) {
 	// Add a dummy manager for a different group.
 	cfg := controller.TopologyConfig{
 		Name:  "other",
-		Sites: [2]controller.SiteTopologyConfig{{Name: "dc1"}, {Name: "dc2"}},
+		Sites: []controller.SiteTopologyConfig{{Name: "dc1"}, {Name: "dc2"}},
 	}
 	fc := controller.NewFailoverController(slog.Default())
-	tm := controller.NewTopologyManager(cfg, nil, nil, fc, nil, nil, controller.BootstrapConfig{}, nil, hub, nil, slog.Default())
+	tm := controller.NewTopologyManager(cfg, []mysql.Checker{nil, nil}, fc, nil, nil, controller.BootstrapConfig{}, nil, hub, nil, slog.Default())
 	runner.SetManagerForTest(types.NamespacedName{Namespace: "default", Name: "other"}, tm)
 
 	req := httptest.NewRequest(http.MethodGet, "/active-site?namespace=default&group=orders", nil)
@@ -95,10 +96,10 @@ func TestActiveSiteFound(t *testing.T) {
 
 	cfg := controller.TopologyConfig{
 		Name:  "orders",
-		Sites: [2]controller.SiteTopologyConfig{{Name: "iad"}, {Name: "pdx"}},
+		Sites: []controller.SiteTopologyConfig{{Name: "iad"}, {Name: "pdx"}},
 	}
 	fc := controller.NewFailoverController(slog.Default())
-	tm := controller.NewTopologyManager(cfg, nil, nil, fc, nil, nil, controller.BootstrapConfig{}, nil, hub, nil, slog.Default())
+	tm := controller.NewTopologyManager(cfg, []mysql.Checker{nil, nil}, fc, nil, nil, controller.BootstrapConfig{}, nil, hub, nil, slog.Default())
 	runner.SetManagerForTest(types.NamespacedName{Namespace: "default", Name: "orders"}, tm)
 
 	req := httptest.NewRequest(http.MethodGet, "/active-site?namespace=default&group=orders", nil)

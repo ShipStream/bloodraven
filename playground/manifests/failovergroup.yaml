@@ -16,6 +16,7 @@ spec:
     ttl: 10
   sites:
     - name: iad
+      role: primary-candidate
       zone: zone-iad
       lbIP: "10.96.100.10"
       storage:
@@ -29,6 +30,7 @@ spec:
           cpu: 500m
           memory: 512Mi
     - name: pdx
+      role: primary-candidate
       zone: zone-pdx
       lbIP: "10.96.100.20"
       storage:

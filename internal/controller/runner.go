@@ -198,7 +198,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		suppress := restoreInFlight(fg)
 		frozen := inPlaceRestoreInFlight(fg)
 
-		if ok && existing.cfg == cfg {
+		if ok && existing.cfg.Equal(cfg) {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
 			existing.tm.SetTopologyFrozen(frozen)
 			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
@@ -358,7 +358,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		return fmt.Errorf("get secret %s: %w", secretNN, err)
 	}
 
-	var siteMySQL [2]internalmysql.Checker
+	siteMySQL := make([]internalmysql.Checker, len(fg.Spec.Sites))
 	for i, site := range fg.Spec.Sites {
 		var dsn string
 		var err error
@@ -435,7 +435,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	}
 
 	updateCtl := NewUpdateController(failoverCtl, r.logger.With("fg", nn.String()))
-	tm := NewTopologyManager(cfg, siteMySQL[0], siteMySQL[1], failoverCtl, updateCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
+	tm := NewTopologyManager(cfg, siteMySQL, failoverCtl, updateCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
 		r.logger.With("fg", nn.String()))
 
 	// Restore failover history from CR status so recovery logic works across
@@ -583,11 +583,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	freshFG.Status.ActiveSite = snap.ActiveSite
 	// Ensure the Sites slice is allocated to match the number of sites.
-	if len(freshFG.Status.Sites) != len(snap.SiteNames) {
-		freshFG.Status.Sites = make([]v1alpha1.SiteStatus, len(snap.SiteNames))
+	if len(freshFG.Status.Sites) != len(snap.Sites) {
+		freshFG.Status.Sites = make([]v1alpha1.SiteStatus, len(snap.Sites))
 	}
-	for i := range freshFG.Status.Sites {
-		freshFG.Status.Sites[i] = siteStatusFromSnapshot(snap.SiteNames[i], snap.SiteStates[i], snap.SiteLastSeen[i], snap.SiteReplication[i])
+	for i, s := range snap.Sites {
+		freshFG.Status.Sites[i] = siteStatusFromSnapshot(s.Name, s.State, s.LastSeen, s.Replication)
 	}
 
 	if !snap.LastFailover.IsZero() {
@@ -598,8 +598,8 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	freshFG.Status.PromotionGtidExecuted = snap.PromotionGtidExecuted
 
 	// Write per-site recovery fields.
-	for i := range freshFG.Status.Sites {
-		if snap.RecoverySite == snap.SiteNames[i] && snap.RecoveryState != "" {
+	for i, s := range snap.Sites {
+		if snap.RecoverySite == s.Name && snap.RecoveryState != "" {
 			freshFG.Status.Sites[i].RecoveryState = snap.RecoveryState
 			freshFG.Status.Sites[i].DivergentGtid = snap.DivergentGtid
 			if snap.DivergentTxnCount > 0 {
@@ -614,11 +614,14 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	// Evaluate replication health.
-	hasWritable := snap.SiteStates[0] == state.StateWritable || snap.SiteStates[1] == state.StateWritable
+	hasWritable := false
 	replicationHealthy := true
-	for i := range snap.SiteReplication {
-		if snap.SiteReplication[i] != nil {
-			replicationHealthy = replicationHealthy && snap.SiteReplication[i].IORunning && snap.SiteReplication[i].SQLRunning
+	for _, s := range snap.Sites {
+		if s.State == state.StateWritable {
+			hasWritable = true
+		}
+		if s.Replication != nil {
+			replicationHealthy = replicationHealthy && s.Replication.IORunning && s.Replication.SQLRunning
 		}
 	}
 
@@ -668,12 +671,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		maxLagSeconds = freshFG.Spec.Replication.MaxLagSeconds
 	}
 
-	for i := range snap.SiteReplication {
-		repl := snap.SiteReplication[i]
+	for _, s := range snap.Sites {
+		repl := s.Replication
 		if repl == nil {
 			continue
 		}
-		siteName := snap.SiteNames[i]
+		siteName := s.Name
 		if !repl.IORunning || !repl.SQLRunning {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type:               "Degraded",
@@ -961,19 +964,38 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 	mt.lastTopologyDegradedReason = newReason
 }
 
-// degradedReason returns the Degraded condition reason for a topology snapshot.
+// degradedReason returns the Degraded condition reason for a topology
+// snapshot. Prefers the pre-computed DegradedReason from the state
+// machine; falls back to inspecting aggregate site states when the
+// snapshot is a partial update (e.g. bootstrap-only).
 func degradedReason(snap TopologySnapshot) string {
+	if snap.DegradedReason != "" {
+		return snap.DegradedReason
+	}
 	if snap.Alert == "" {
 		return "Healthy"
 	}
-	if snap.SiteStates[0] == state.StateWritable && snap.SiteStates[1] == state.StateWritable {
+	var writable, readOnly, unreachable int
+	for _, s := range snap.Sites {
+		switch s.State {
+		case state.StateWritable:
+			writable++
+		case state.StateReadOnly:
+			readOnly++
+		case state.StateUnreachable:
+			unreachable++
+		}
+	}
+	if len(snap.Sites) == 0 {
+		return "Alert"
+	}
+	switch {
+	case writable > 1:
 		return "SplitBrain"
-	}
-	if snap.SiteStates[0] == state.StateReadOnly && snap.SiteStates[1] == state.StateReadOnly {
-		return "NoPrimary"
-	}
-	if snap.SiteStates[0] == state.StateUnreachable && snap.SiteStates[1] == state.StateUnreachable {
+	case unreachable == len(snap.Sites):
 		return "TotalLoss"
+	case writable == 0 && readOnly > 0:
+		return "NoPrimary"
 	}
 	return "Alert"
 }

@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/testutil"
 )
@@ -1066,7 +1067,7 @@ func TestReconcile_DefersDeploymentUpdateWhenManagerRunning(t *testing.T) {
 	site1 := &mockMySQL{readOnly: true}
 	fc := NewFailoverController(discardLog)
 	cfg := testTopologyConfig()
-	tm := NewTopologyManager(cfg, site0, site1, fc, nil, nil, BootstrapConfig{},
+	tm := NewTopologyManager(cfg, []internalmysql.Checker{site0, site1}, fc, nil, nil, BootstrapConfig{},
 		newMockTainter(), platform.NewHub(discardLog), &mockDNS{}, discardLog)
 	runner.managers[nn] = &managedTopology{tm: tm, cancel: func() {}}
 	r.Runner = runner

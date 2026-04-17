@@ -15,6 +15,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
+	"github.com/shipstream/bloodraven/internal/state"
 )
 
 // ---------------------------------------------------------------------------
@@ -262,19 +263,15 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
-		Name: "lion",
-		Sites: [2]controller.SiteTopologyConfig{
-			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
-			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
-		},
-		SiteHosts:         [2]string{"mysql-lion-dc1.default.svc.cluster.local", "mysql-lion-dc2.default.svc.cluster.local"},
+		Name:              "lion",
+		Sites:             defaultTwoSiteConfig(),
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
 		RecoveryThreshold: 2,
 		FailoverCooldown:  0, // no cooldown by default
 	}
 
-	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
+	tm := controller.NewTopologyManagerWithClock(cfg, []mysql.Checker{dc1, dc2}, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
 
 	return &testHarness{
 		tm:       tm,
@@ -288,9 +285,20 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 	}
 }
 
-// newTestHarnessWithPreferSite creates a harness where both sites start
-// writable and spec.splitBrainPolicy.preferSite is set to the given site name.
-func newTestHarnessWithPreferSite(t *testing.T, preferSite string) *testHarness {
+// defaultTwoSiteConfig returns the canonical dc1/dc2 site slice used by
+// the component test harness helpers.
+func defaultTwoSiteConfig() []controller.SiteTopologyConfig {
+	return []controller.SiteTopologyConfig{
+		{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate,
+			Host: "mysql-lion-dc1.default.svc.cluster.local"},
+		{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate,
+			Host: "mysql-lion-dc2.default.svc.cluster.local"},
+	}
+}
+
+// newTestHarnessWithPriorities creates a harness where both sites start
+// writable and spec.splitBrainPolicy.sitePriorities is set to the given list.
+func newTestHarnessWithPriorities(t *testing.T, priorities []string) *testHarness {
 	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -303,20 +311,16 @@ func newTestHarnessWithPreferSite(t *testing.T, preferSite string) *testHarness 
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
-		Name: "lion",
-		Sites: [2]controller.SiteTopologyConfig{
-			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
-			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
-		},
-		SiteHosts:            [2]string{"mysql-lion-dc1.default.svc.cluster.local", "mysql-lion-dc2.default.svc.cluster.local"},
-		PollInterval:         int64(50 * time.Millisecond),
-		FailureThreshold:     3,
-		RecoveryThreshold:    2,
-		FailoverCooldown:     0,
-		SplitBrainPreferSite: preferSite,
+		Name:              "lion",
+		Sites:             defaultTwoSiteConfig(),
+		PollInterval:      int64(50 * time.Millisecond),
+		FailureThreshold:  3,
+		RecoveryThreshold: 2,
+		FailoverCooldown:  0,
+		SitePriorities:    priorities,
 	}
 
-	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
+	tm := controller.NewTopologyManagerWithClock(cfg, []mysql.Checker{dc1, dc2}, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
 
 	return &testHarness{
 		tm:       tm,
@@ -344,19 +348,15 @@ func newTestHarnessWithCooldown(t *testing.T, cooldown time.Duration) *testHarne
 	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	cfg := controller.TopologyConfig{
-		Name: "lion",
-		Sites: [2]controller.SiteTopologyConfig{
-			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
-			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
-		},
-		SiteHosts:         [2]string{"mysql-lion-dc1.default.svc.cluster.local", "mysql-lion-dc2.default.svc.cluster.local"},
+		Name:              "lion",
+		Sites:             defaultTwoSiteConfig(),
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
 		RecoveryThreshold: 2,
 		FailoverCooldown:  int64(cooldown),
 	}
 
-	tm := controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
+	tm := controller.NewTopologyManagerWithClock(cfg, []mysql.Checker{dc1, dc2}, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
 
 	return &testHarness{
 		tm:       tm,

@@ -5,6 +5,7 @@ const sidebars = {
   docsSidebar: [
     'intro',
     'architecture',
+    'multi-site',
     'getting-started',
     'playground',
     'crd-reference',

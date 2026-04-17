@@ -74,12 +74,14 @@ func restoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 //     writable (or has no observed state / empty state yet), use it.
 //  2. If status.ActiveSite is set but that site is observed in any
 //     other state (read-only, unreachable, etc.), refuse — return "".
-//  3. Otherwise (fresh deploy) fall back to spec.sites[0].
+//  3. Otherwise (fresh deploy) fall back to the default seed site —
+//     the highest-priority primary-candidate according to
+//     spec.splitBrainPolicy.sitePriorities, or the first primary-
+//     candidate in declared order.
 //
 // The caller fails fast with a clear error when this returns empty so
 // the operator can't accidentally overwrite a recovering replica with
-// a stale dump. This is a deliberate change from the prior behavior
-// of always targeting spec.sites[0].
+// a stale dump.
 func restoreTargetSite(fg *v1alpha1.MysqlFailoverGroup) string {
 	if fg == nil || len(fg.Spec.Sites) == 0 {
 		return ""
@@ -109,7 +111,11 @@ func restoreTargetSite(fg *v1alpha1.MysqlFailoverGroup) string {
 	}
 
 	// Fresh deploy: no observed sites yet, no active site — target the
-	// first spec site.
+	// default seed site. Falls back to spec.sites[0] when the spec has
+	// no primary-candidate (an invalid-but-handled configuration).
+	if seed := fg.Spec.DefaultSeedSite(); seed != nil {
+		return seed.Name
+	}
 	return fg.Spec.Sites[0].Name
 }
 

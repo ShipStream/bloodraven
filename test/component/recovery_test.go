@@ -20,12 +20,8 @@ func newRecoveryHarness(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 	// Re-create with replication credentials.
 	h.tm.Stop()
 	cfg := controller.TopologyConfig{
-		Name: "lion",
-		Sites: [2]controller.SiteTopologyConfig{
-			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
-			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
-		},
-		SiteHosts:         [2]string{"mysql-lion-dc1.default.svc.cluster.local", "mysql-lion-dc2.default.svc.cluster.local"},
+		Name:              "lion",
+		Sites:             defaultTwoSiteConfig(),
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
 		RecoveryThreshold: 2,
@@ -37,7 +33,7 @@ func newRecoveryHarness(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 		UseSSL:       false,
 	}
 	fc := controller.NewFailoverController(h.logger)
-	h.tm = controller.NewTopologyManagerWithClock(cfg, dc1, dc2, fc, nil, nil, bootstrapCfg, h.tainter, h.hub, h.dns, h.logger, h.clock)
+	h.tm = controller.NewTopologyManagerWithClock(cfg, []mysql.Checker{dc1, dc2}, fc, nil, nil, bootstrapCfg, h.tainter, h.hub, h.dns, h.logger, h.clock)
 	return h
 }
 

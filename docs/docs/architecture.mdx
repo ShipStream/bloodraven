@@ -4,7 +4,9 @@ sidebar_position: 2
 
 # Architecture
 
-Bloodraven manages MySQL async replication failover groups. Each `MysqlFailoverGroup` resource describes two sites, each running a MySQL pod with a sidecar container. The operator continuously polls both sites and takes corrective action when the topology deviates from the desired state.
+Bloodraven manages MySQL async replication failover groups. Each `MysqlFailoverGroup` resource describes **two or more sites**, each running a MySQL pod with a sidecar container. Sites carry explicit roles — `primary-candidate` (promotable on failover) or `dr-only` (passive replica) — and at least two primary-candidate sites are required so an active primary always has a promotion target. The operator continuously polls every site and takes corrective action when the topology deviates from the desired state.
+
+Bloodraven uses a **star replication topology**: one site is the active primary, and every other site replicates from it. There are no replication chains. See [Multi-site topology](./multi-site.mdx) for the full role model and sizing guidance.
 
 ## High-level overview
 
@@ -68,8 +70,8 @@ The operator exposes:
 Each MySQL pod includes a sidecar container that:
 
 - Responds to health and readiness probes
-- Monitors connectivity to both the operator and the peer site
-- **Self-fences** if both the operator and the peer are unreachable: sets `SET GLOBAL super_read_only=ON` on its local MySQL instance to prevent a stale primary from accepting writes during a network partition
+- Monitors connectivity to both the operator and **every peer site** (the sidecar is given a comma-separated list of peer sidecar addresses at pod-spec time)
+- **Self-fences** if the operator AND every peer are unreachable: sets `SET GLOBAL super_read_only=ON` on its local MySQL instance to prevent a stale primary from accepting writes during a full isolation. A single reachable peer is enough to keep the primary writable.
 - **Startup safety net**: on boot, queries the operator's `GET /active-site` endpoint to determine the current active site. If this sidecar is on a standby site but MySQL has `read_only=OFF`, it sets `super_read_only=ON` to prevent a stale primary from accepting writes after a pod restart following failover
 - **Binlog archiver (PITR)**: when `spec.backup.pitr.enabled=true`, a goroutine watches `mysql-bin.index` via inotify and uploads each sealed binlog to the referenced backup profile's storage. Only the primary uploads (gated on `@@read_only`); after a failover the new primary's archiver takes over within one scan cycle. Archived files are pruned once the oldest retained `MysqlBackup` moves past them, using a cutoff timestamp pulled from the operator's `/pitr-cutoff` endpoint. See [Backup and restore → PITR](/docs/backup-restore#point-in-time-recovery-pitr).
 

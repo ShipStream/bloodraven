@@ -18,11 +18,8 @@ spec:
     - jsonPath: .status.activeSite
       name: Active
       type: string
-    - jsonPath: .status.sites[0].state
-      name: Site-A
-      type: string
-    - jsonPath: .status.sites[1].state
-      name: Site-B
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -4593,8 +4590,15 @@ spec:
                 type: object
               sites:
                 description: |-
-                  Sites defines the two sites that form this failover group.
-                  Exactly two sites must be specified; either can be active.
+                  Sites defines the sites that form this failover group. The slice must
+                  contain at least two sites with role "primary-candidate"; additional
+                  sites with role "dr-only" may be appended for cross-region DR.
+                  Failover is performed by picking the best primary-candidate replica
+                  when the active site is lost.
+
+                  MaxItems is set to 16 so the Kubernetes CEL cost estimator can bound
+                  the uniqueness-and-priority validation rules. Real deployments are
+                  expected to use well under that; raise the cap if needed.
                 items:
                   description: SiteSpec defines the configuration for a single site
                     in the failover group.
@@ -4604,7 +4608,11 @@ spec:
                       minLength: 1
                       type: string
                     name:
-                      description: Name is the site identifier (e.g. "iad", "pdx").
+                      description: |-
+                        Name is the site identifier (e.g. "iad", "pdx", "lhr").
+                        Must be unique within spec.sites. MaxLength caps the CEL cost
+                        of the spec-level uniqueness and priority-membership rules.
+                      maxLength: 253
                       minLength: 1
                       type: string
                     resources:
@@ -4667,6 +4675,15 @@ spec:
                             More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                           type: object
                       type: object
+                    role:
+                      default: primary-candidate
+                      description: |-
+                        Role governs whether this site can be auto-promoted on failover.
+                        Default: primary-candidate.
+                      enum:
+                      - primary-candidate
+                      - dr-only
+                      type: string
                     storage:
                       description: Storage configures the persistent volume for this
                         site.
@@ -4696,24 +4713,36 @@ spec:
                   - storage
                   - zone
                   type: object
-                maxItems: 2
+                maxItems: 16
                 minItems: 2
                 type: array
               splitBrainPolicy:
                 description: |-
-                  SplitBrainPolicy configures automated resolution when both sites
-                  are simultaneously writable and there is no prior failover history
-                  the operator can use to pick a winner (for example, after a fresh
-                  deploy or an operator restart that lost in-memory state). When
-                  omitted, or when PreferSite is empty, the operator takes no
-                  automated action and alerts only (manual resolution required).
+                  SplitBrainPolicy configures automated resolution when more than
+                  one site is simultaneously writable and there is no prior
+                  failover history the operator can use to pick a winner (for
+                  example, after a fresh deploy or an operator restart that lost
+                  in-memory state). When omitted, or when SitePriorities is empty,
+                  the operator takes no automated action and alerts only (manual
+                  resolution required).
                 properties:
-                  preferSite:
+                  sitePriorities:
                     description: |-
-                      PreferSite is the name of the site that wins unresolvable
-                      split-brain ties. Must match one of spec.sites[].name. If empty,
-                      the operator falls back to manual resolution (alert only).
-                    type: string
+                      SitePriorities is the ordered list of primary-candidate site
+                      names that win unresolvable split-brain ties. The first entry
+                      that is currently writable becomes the new primary; every other
+                      writable site is fenced. If empty, the operator falls back to
+                      manual resolution (alert only).
+
+                      MaxItems must stay equal to spec.sites' MaxItems so the CEL cost
+                      estimator can bound the "every priority entry names a real
+                      primary-candidate" rule.
+                    items:
+                      maxLength: 253
+                      type: string
+                    maxItems: 16
+                    type: array
+                    x-kubernetes-list-type: atomic
                 type: object
               terminationGracePeriodSeconds:
                 default: 60
@@ -4768,10 +4797,17 @@ spec:
             - message: exactly one of secretName or credentials must be set
               rule: (has(self.secretName) && self.secretName != '' && !has(self.credentials))
                 || ((!has(self.secretName) || self.secretName == '') && has(self.credentials))
-            - message: splitBrainPolicy.preferSite must match one of spec.sites[].name
-              rule: '!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.preferSite)
-                || self.splitBrainPolicy.preferSite == '''' || self.splitBrainPolicy.preferSite
-                == self.sites[0].name || self.splitBrainPolicy.preferSite == self.sites[1].name'
+            - message: spec.sites[].name must be unique
+              rule: self.sites.all(x, self.sites.filter(y, y.name == x.name).size()
+                == 1)
+            - message: spec.sites must contain at least two sites with role 'primary-candidate'
+              rule: self.sites.filter(s, s.role == 'primary-candidate').size() >=
+                2
+            - message: splitBrainPolicy.sitePriorities entries must match the names
+                of sites with role 'primary-candidate'
+              rule: '!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities)
+                || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s,
+                s.name == p && s.role == ''primary-candidate''))'
           status:
             description: MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.
             properties:

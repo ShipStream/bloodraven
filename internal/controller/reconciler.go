@@ -29,6 +29,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/platform"
+	"github.com/shipstream/bloodraven/internal/state"
 )
 
 const (
@@ -164,7 +165,6 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Reconcile per-site resources
 	for i, site := range fg.Spec.Sites {
 		serverID := int32(101 + i)
-		peerSite := fg.Spec.Sites[1-i]
 
 		if err := r.reconcilePVC(ctx, &fg, site); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile pvc %s: %w", site.Name, err)
@@ -184,7 +184,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 				}
 			}
 			if !deferDeployment {
-				if err := r.reconcileDeployment(ctx, &fg, site, peerSite, serverID, image); err != nil {
+				if err := r.reconcileDeployment(ctx, &fg, site, serverID, image); err != nil {
 					return ctrl.Result{}, fmt.Errorf("reconcile deployment %s: %w", site.Name, err)
 				}
 			}
@@ -585,7 +585,7 @@ func (r *MysqlFailoverGroupReconciler) reconcilePVC(ctx context.Context, fg *v1a
 	return err
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site, peerSite v1alpha1.SiteSpec, serverID int32, image string) error {
+func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, serverID int32, image string) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      resourceName(fg.Name, site.Name),
@@ -666,8 +666,16 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 
 		configMapName := fmt.Sprintf("mysql-%s-config", fg.Name)
 
-		peerAddress := fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d",
-			fg.Name, peerSite.Name, fg.Namespace, sidecarPort)
+		// Build the list of peer sidecar addresses. The sidecar treats
+		// "all peers unreachable" as one half of the self-fencing
+		// quorum, so every non-self site needs to be listed here.
+		peerNames := fg.Spec.PeerSiteNames(site.Name)
+		peerAddrs := make([]string, len(peerNames))
+		for i, name := range peerNames {
+			peerAddrs[i] = fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d",
+				fg.Name, name, fg.Namespace, sidecarPort)
+		}
+		peerAddresses := strings.Join(peerAddrs, ",")
 
 		bloodravenAddress := fg.Spec.Sidecar.BloodravenAddress
 		if bloodravenAddress == "" {
@@ -744,7 +752,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
 			}},
 			{Name: "LISTEN_ADDR", Value: fmt.Sprintf(":%d", sidecarPort)},
-			{Name: "PEER_ADDRESS", Value: peerAddress},
+			{Name: "PEER_ADDRESSES", Value: peerAddresses},
 			{Name: "BLOODRAVEN_ADDRESS", Value: bloodravenAddress},
 			{Name: "MY_SITE", Value: site.Name},
 			{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{
@@ -1217,12 +1225,13 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 		role   string
 	}
 
-	sites := []siteInfo{
-		{fg.Spec.Sites[0], fg.Status.Sites[0], "replica"},
-		{fg.Spec.Sites[1], fg.Status.Sites[1], "replica"},
-	}
-
-	for i := range sites {
+	sites := make([]siteInfo, len(fg.Spec.Sites))
+	for i := range fg.Spec.Sites {
+		sites[i] = siteInfo{
+			spec:   fg.Spec.Sites[i],
+			status: fg.Status.Sites[i],
+			role:   "replica",
+		}
 		if fg.Status.ActiveSite == fg.Spec.Sites[i].Name {
 			sites[i].role = "primary"
 		}
@@ -1413,35 +1422,31 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 		failoverCooldown = int64(fg.Spec.FailoverCooldown.Duration)
 	}
 
-	var splitBrainPreferSite string
-	if fg.Spec.SplitBrainPolicy != nil {
-		splitBrainPreferSite = fg.Spec.SplitBrainPolicy.PreferSite
+	var sitePriorities []string
+	if fg.Spec.SplitBrainPolicy != nil && len(fg.Spec.SplitBrainPolicy.SitePriorities) > 0 {
+		sitePriorities = append(sitePriorities, fg.Spec.SplitBrainPolicy.SitePriorities...)
+	}
+
+	sites := make([]SiteTopologyConfig, len(fg.Spec.Sites))
+	for i, s := range fg.Spec.Sites {
+		sites[i] = SiteTopologyConfig{
+			Name: s.Name,
+			Zone: s.Zone,
+			LBIP: s.LBIP,
+			Role: state.SiteRole(s.EffectiveRole()),
+			Host: fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, s.Name, fg.Namespace),
+		}
 	}
 
 	return TopologyConfig{
-		Namespace: fg.Namespace,
-		Name:      fg.Name,
-		Sites: [2]SiteTopologyConfig{
-			{
-				Name: fg.Spec.Sites[0].Name,
-				Zone: fg.Spec.Sites[0].Zone,
-				LBIP: fg.Spec.Sites[0].LBIP,
-			},
-			{
-				Name: fg.Spec.Sites[1].Name,
-				Zone: fg.Spec.Sites[1].Zone,
-				LBIP: fg.Spec.Sites[1].LBIP,
-			},
-		},
-		SiteHosts: [2]string{
-			fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, fg.Spec.Sites[0].Name, fg.Namespace),
-			fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, fg.Spec.Sites[1].Name, fg.Namespace),
-		},
-		PollInterval:         pollInterval,
-		FailureThreshold:     int(failureThreshold),
-		RecoveryThreshold:    int(recoveryThreshold),
-		FailoverCooldown:     failoverCooldown,
-		SplitBrainPreferSite: splitBrainPreferSite,
+		Namespace:         fg.Namespace,
+		Name:              fg.Name,
+		Sites:             sites,
+		PollInterval:      pollInterval,
+		FailureThreshold:  int(failureThreshold),
+		RecoveryThreshold: int(recoveryThreshold),
+		FailoverCooldown:  failoverCooldown,
+		SitePriorities:    sitePriorities,
 	}
 }
 
@@ -1460,8 +1465,7 @@ func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Conte
 	for i, site := range fg.Spec.Sites {
 		if site.Name == siteName {
 			serverID := int32(101 + i)
-			peerSite := fg.Spec.Sites[1-i]
-			return r.reconcileDeployment(ctx, &fg, site, peerSite, serverID, image)
+			return r.reconcileDeployment(ctx, &fg, site, serverID, image)
 		}
 	}
 	return fmt.Errorf("site %q not found in CR %s", siteName, fgName)

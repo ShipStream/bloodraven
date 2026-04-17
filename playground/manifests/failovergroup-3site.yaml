@@ -1,0 +1,61 @@
+# Three-site playground variant: two primary-candidate sites (iad, pdx)
+# plus a cross-region dr-only follower (fra). Useful for exercising the
+# "primary-candidate only can be promoted" and "sitePriorities picks the
+# split-brain winner" behaviours without touching the default 2-site
+# manifest.
+#
+# Apply instead of (not alongside) failovergroup.yaml.
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: playground
+  namespace: bloodraven-playground
+spec:
+  image: mysql:9.6
+  sidecarImage: bloodraven-sidecar:playground
+  secretName: mysql-credentials
+  pollInterval: 2s
+  failureThreshold: 3
+  recoveryThreshold: 2
+  failoverCooldown: 30s
+  dns:
+    hostname: playground-db.example.local
+    ttl: 10
+  splitBrainPolicy:
+    sitePriorities: [iad, pdx]
+  sites:
+    - name: iad
+      role: primary-candidate
+      zone: zone-iad
+      lbIP: "10.96.100.10"
+      storage:
+        storageClassName: playground-fast
+        size: 1Gi
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits:   { cpu: 500m, memory: 512Mi }
+    - name: pdx
+      role: primary-candidate
+      zone: zone-pdx
+      lbIP: "10.96.100.20"
+      storage:
+        storageClassName: playground-fast
+        size: 1Gi
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits:   { cpu: 500m, memory: 512Mi }
+    - name: fra
+      role: dr-only
+      zone: zone-fra
+      lbIP: "10.96.100.30"
+      storage:
+        storageClassName: playground-fast
+        size: 1Gi
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits:   { cpu: 500m, memory: 512Mi }
+  sidecar:
+    leaseTimeout: 20s
+    peerCheckInterval: 5s
+  replication:
+    maxLagSeconds: 30

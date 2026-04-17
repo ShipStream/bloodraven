@@ -205,8 +205,13 @@ func TestUpdateCRStatus_IsNotFound_NoPanic(t *testing.T) {
 
 	nn := types.NamespacedName{Name: "gone-fg", Namespace: "default"}
 	snap := TopologySnapshot{
-		SiteNames:  [2]string{"dc1", "dc2"},
-		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateWritable},
+
+			{Name: "dc2", State: state.StateReadOnly},
+
+		},
 	}
 
 	runner.updateCRStatus(context.Background(), nn, snap)
@@ -229,8 +234,13 @@ func TestUpdateCRStatus_ExistingCR(t *testing.T) {
 
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	snap := TopologySnapshot{
-		SiteNames:  [2]string{"dc1", "dc2"},
-		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateWritable},
+
+			{Name: "dc2", State: state.StateReadOnly},
+
+		},
 		ActiveSite: "dc1",
 	}
 
@@ -275,8 +285,13 @@ func TestUpdateCRStatus_DeletedMidUpdate(t *testing.T) {
 
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	snap := TopologySnapshot{
-		SiteNames:  [2]string{"dc1", "dc2"},
-		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateWritable},
+
+			{Name: "dc2", State: state.StateReadOnly},
+
+		},
 	}
 
 	// Must not panic even though CR is deleted mid-update.
@@ -370,8 +385,13 @@ func TestUpdateCRStatus_SetsConditions(t *testing.T) {
 
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	snap := TopologySnapshot{
-		SiteNames:  [2]string{"dc1", "dc2"},
-		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateWritable},
+
+			{Name: "dc2", State: state.StateReadOnly},
+
+		},
 		ActiveSite: "dc1",
 	}
 
@@ -557,7 +577,13 @@ func TestEmitDegradedTransitionEvents_SplitBrain(t *testing.T) {
 
 	snap := TopologySnapshot{
 		Alert:      "SPLIT BRAIN: both sites are writable",
-		SiteStates: [2]state.SiteState{state.StateWritable, state.StateWritable},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateWritable},
+
+			{Name: "dc2", State: state.StateWritable},
+
+		},
 	}
 
 	runner.emitDegradedTransitionEvents(fg, nn, snap)
@@ -578,7 +604,13 @@ func TestEmitDegradedTransitionEvents_NoPrimary(t *testing.T) {
 
 	snap := TopologySnapshot{
 		Alert:      "NO PRIMARY: both sites are read-only",
-		SiteStates: [2]state.SiteState{state.StateReadOnly, state.StateReadOnly},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateReadOnly},
+
+			{Name: "dc2", State: state.StateReadOnly},
+
+		},
 	}
 
 	runner.emitDegradedTransitionEvents(fg, nn, snap)
@@ -599,7 +631,13 @@ func TestEmitDegradedTransitionEvents_TotalLoss(t *testing.T) {
 
 	snap := TopologySnapshot{
 		Alert:      "TOTAL LOSS: both sites are unreachable",
-		SiteStates: [2]state.SiteState{state.StateUnreachable, state.StateUnreachable},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateUnreachable},
+
+			{Name: "dc2", State: state.StateUnreachable},
+
+		},
 	}
 
 	runner.emitDegradedTransitionEvents(fg, nn, snap)
@@ -619,7 +657,13 @@ func TestEmitDegradedTransitionEvents_SiteRecovered(t *testing.T) {
 	runner, nn := newDegradedTestRunner(rec, fg, "SplitBrain")
 
 	snap := TopologySnapshot{
-		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateWritable},
+
+			{Name: "dc2", State: state.StateReadOnly},
+
+		},
 	}
 
 	runner.emitDegradedTransitionEvents(fg, nn, snap)
@@ -640,7 +684,13 @@ func TestEmitDegradedTransitionEvents_NoEventOnSameReason(t *testing.T) {
 
 	snap := TopologySnapshot{
 		Alert:      "SPLIT BRAIN: both sites are writable",
-		SiteStates: [2]state.SiteState{state.StateWritable, state.StateWritable},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateWritable},
+
+			{Name: "dc2", State: state.StateWritable},
+
+		},
 	}
 
 	runner.emitDegradedTransitionEvents(fg, nn, snap)
@@ -658,7 +708,13 @@ func TestEmitDegradedTransitionEvents_TransitionBetweenAlerts(t *testing.T) {
 
 	snap := TopologySnapshot{
 		Alert:      "TOTAL LOSS: both sites are unreachable",
-		SiteStates: [2]state.SiteState{state.StateUnreachable, state.StateUnreachable},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateUnreachable},
+
+			{Name: "dc2", State: state.StateUnreachable},
+
+		},
 	}
 
 	runner.emitDegradedTransitionEvents(fg, nn, snap)
@@ -678,7 +734,13 @@ func TestEmitDegradedTransitionEvents_NoRecoveryEventOnFreshManager(t *testing.T
 	runner, nn := newDegradedTestRunner(rec, fg, "")
 
 	snap := TopologySnapshot{
-		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateWritable},
+
+			{Name: "dc2", State: state.StateReadOnly},
+
+		},
 	}
 
 	runner.emitDegradedTransitionEvents(fg, nn, snap)
@@ -696,7 +758,13 @@ func TestEmitDegradedTransitionEvents_ReplicationDoesNotCauseFalseRecovery(t *te
 
 	// Topology recovers — this should emit SiteRecovered.
 	snap := TopologySnapshot{
-		SiteStates: [2]state.SiteState{state.StateWritable, state.StateReadOnly},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateWritable},
+
+			{Name: "dc2", State: state.StateReadOnly},
+
+		},
 	}
 	runner.emitDegradedTransitionEvents(fg, nn, snap)
 	events := drainRunnerEvents(rec)
@@ -744,8 +812,13 @@ func TestUpdateCRStatus_EmitsFailoverEvent(t *testing.T) {
 	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
 	failoverTime := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
 	snap := TopologySnapshot{
-		SiteNames:          [2]string{"dc1", "dc2"},
-		SiteStates:         [2]state.SiteState{state.StateUnreachable, state.StateWritable},
+		Sites: []SiteSnapshot{
+
+			{Name: "dc1", State: state.StateUnreachable},
+
+			{Name: "dc2", State: state.StateWritable},
+
+		},
 		ActiveSite:         "dc2",
 		LastFailover:       failoverTime,
 		LastFailoverTarget: "dc2",

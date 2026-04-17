@@ -3,6 +3,7 @@ package sidecar
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -17,16 +18,22 @@ type Config struct {
 	// ListenAddr is the HTTP listen address (default ":8080").
 	ListenAddr string
 
-	// PeerAddress is the address of the peer sidecar (e.g. "mysql-lion-pdx.shared-lion.svc.cluster.local:8080").
-	PeerAddress string
+	// PeerAddresses lists every peer sidecar address this sidecar
+	// should monitor for liveness (one per non-self site). Empty in a
+	// one-site configuration — the self-fencing monitor then relies
+	// solely on BloodravenAddress reachability.
+	PeerAddresses []string
 
 	// BloodravenAddress is the address of the Bloodraven operator's auxiliary HTTP server.
 	BloodravenAddress string
 
-	// LeaseTimeout is how long both Bloodraven and peer must be unreachable before self-fencing.
+	// LeaseTimeout is how long both Bloodraven AND every peer must be
+	// unreachable before self-fencing. A quorum of one-or-more-peer-
+	// reachable is enough to keep the site writable; self-fencing
+	// triggers only when every peer AND the operator are silent.
 	LeaseTimeout time.Duration
 
-	// PeerCheckInterval is how often the fencing monitor checks Bloodraven and peer.
+	// PeerCheckInterval is how often the fencing monitor checks Bloodraven and peers.
 	PeerCheckInterval time.Duration
 
 	// MySite is the site this sidecar belongs to.
@@ -123,7 +130,20 @@ func ConfigFromEnv() (*Config, error) {
 		listenAddr = ":8080"
 	}
 
-	peerAddress := os.Getenv("PEER_ADDRESS")
+	var peerAddresses []string
+	if v := os.Getenv("PEER_ADDRESSES"); v != "" {
+		for _, part := range strings.Split(v, ",") {
+			if s := strings.TrimSpace(part); s != "" {
+				peerAddresses = append(peerAddresses, s)
+			}
+		}
+	} else if v := os.Getenv("PEER_ADDRESS"); v != "" {
+		// Backwards-compatibility shim for the single-peer env var.
+		// Retained purely so an older operator can still drive a new
+		// sidecar during a rolling operator upgrade; the operator
+		// itself only emits PEER_ADDRESSES.
+		peerAddresses = []string{v}
+	}
 	bloodravenAddress := os.Getenv("BLOODRAVEN_ADDRESS")
 
 	leaseTimeout := 20 * time.Second
@@ -157,7 +177,7 @@ func ConfigFromEnv() (*Config, error) {
 		MysqlDSN:          dsn,
 		PodName:           podName,
 		ListenAddr:        listenAddr,
-		PeerAddress:       peerAddress,
+		PeerAddresses:     peerAddresses,
 		BloodravenAddress: bloodravenAddress,
 		LeaseTimeout:      leaseTimeout,
 		PeerCheckInterval: peerCheckInterval,

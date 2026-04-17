@@ -107,7 +107,7 @@ func TestSplitBrain_PreferSite_FencesLoserAndPromotesWinner(t *testing.T) {
 	// Both sites writable, preferSite=dc1 → dc2 should be fenced and dc1
 	// re-promoted via the standard failover path.
 	before := testutil.ToFloat64(metrics.SplitBrainAutoResolveTotal.WithLabelValues("dc1"))
-	h := newTestHarnessWithPreferSite(t, "dc1")
+	h := newTestHarnessWithPriorities(t, []string{"dc1"})
 
 	h.pollN(2) // recovery threshold — transition both sites to writable
 
@@ -127,12 +127,12 @@ func TestSplitBrain_PreferSite_FencesLoserAndPromotesWinner(t *testing.T) {
 
 func TestSplitBrain_PreferSite_DC2Wins(t *testing.T) {
 	// Mirror: preferSite=dc2 should fence dc1 and promote dc2.
-	h := newTestHarnessWithPreferSite(t, "dc2")
+	h := newTestHarnessWithPriorities(t, []string{"dc2"})
 
 	h.pollN(2)
 
 	if !h.dc1MySQL.superReadOnly {
-		t.Error("dc1 should have been fenced (super_read_only=ON) by preferSite policy")
+		t.Error("dc1 should have been fenced (super_read_only=ON) by priority policy")
 	}
 	if h.dc2MySQL.isReadOnly() {
 		t.Error("dc2 should have been promoted (readOnly=false)")
@@ -145,7 +145,7 @@ func TestSplitBrain_PreferSite_DC2Wins(t *testing.T) {
 func TestSplitBrain_NoPreferSite_NoAction(t *testing.T) {
 	// Empty preferSite (manual mode) should retain the existing alert-only
 	// behavior: no fencing, no DNS flip.
-	h := newTestHarnessWithPreferSite(t, "")
+	h := newTestHarnessWithPriorities(t, nil)
 
 	h.pollN(2)
 
@@ -160,7 +160,7 @@ func TestSplitBrain_NoPreferSite_NoAction(t *testing.T) {
 func TestSplitBrain_PreferSite_UnknownName_NoAction(t *testing.T) {
 	// If preferSite doesn't match a real site (should be caught by CRD
 	// validation, but defend at runtime too), fall back to manual behavior.
-	h := newTestHarnessWithPreferSite(t, "dc-ghost")
+	h := newTestHarnessWithPriorities(t, []string{"dc-ghost"})
 
 	h.pollN(2)
 

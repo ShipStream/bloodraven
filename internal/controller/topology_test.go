@@ -169,9 +169,9 @@ func taintSelector(siteName string) string {
 func testTopologyConfig() TopologyConfig {
 	return TopologyConfig{
 		Name: "lion",
-		Sites: [2]SiteTopologyConfig{
-			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1"},
-			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2"},
+		Sites: []SiteTopologyConfig{
+			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate},
+			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate},
 		},
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
@@ -189,7 +189,7 @@ func newTestTopologyManager(site0, site1 *mockMySQL) (*TopologyManager, *mockTai
 	hub := platform.NewHub(testLogger())
 	dns := &mockDNS{}
 	fc := NewFailoverController(testLogger())
-	tm := NewTopologyManager(cfg, site0, site1, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger())
+	tm := NewTopologyManager(cfg, []mysql.Checker{site0, site1}, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger())
 	// Use a very short cooldown for tests so failovers aren't blocked.
 	tm.failoverCooldown = 0
 	return tm, tainter, dns
@@ -197,7 +197,8 @@ func newTestTopologyManager(site0, site1 *mockMySQL) (*TopologyManager, *mockTai
 
 func newTestTopologyManagerWithBootstrap(site0, site1 *mockMySQL) (*TopologyManager, *mockTainter, *mockDNS) {
 	cfg := testTopologyConfig()
-	cfg.SiteHosts = [2]string{"mysql-dc1", "mysql-dc2"}
+	cfg.Sites[0].Host = "mysql-dc1"
+	cfg.Sites[1].Host = "mysql-dc2"
 	tainter := newMockTainter()
 	hub := platform.NewHub(testLogger())
 	dns := &mockDNS{}
@@ -208,7 +209,7 @@ func newTestTopologyManagerWithBootstrap(site0, site1 *mockMySQL) (*TopologyMana
 		ReplPassword: "replpass",
 		CloneTimeout: 10 * time.Second,
 	}
-	tm := NewTopologyManager(cfg, site0, site1, fc, nil, bc, bcfg, tainter, hub, dns, testLogger())
+	tm := NewTopologyManager(cfg, []mysql.Checker{site0, site1}, fc, nil, bc, bcfg, tainter, hub, dns, testLogger())
 	tm.failoverCooldown = 0
 	return tm, tainter, dns
 }
@@ -517,13 +518,13 @@ func TestPollChecksReplicaStatus(t *testing.T) {
 	// Need RecoveryThreshold polls for site0 writable + state change
 	pollN(tm, 2)
 
-	if captured.SiteReplication[1] == nil {
+	if captured.Sites[1].Replication == nil {
 		t.Fatal("expected site1 replication status to be populated")
 	}
-	if !captured.SiteReplication[1].IORunning || !captured.SiteReplication[1].SQLRunning {
+	if !captured.Sites[1].Replication.IORunning || !captured.Sites[1].Replication.SQLRunning {
 		t.Error("expected site1 replication IO and SQL threads running")
 	}
-	if captured.SiteReplication[0] != nil {
+	if captured.Sites[0].Replication != nil {
 		t.Error("site0 is primary, should not have replication status")
 	}
 }
@@ -543,10 +544,10 @@ func TestReplicationBrokenInSnapshot(t *testing.T) {
 
 	pollN(tm, 2)
 
-	if captured.SiteReplication[1] == nil {
+	if captured.Sites[1].Replication == nil {
 		t.Fatal("expected site1 replication status to be populated")
 	}
-	if captured.SiteReplication[1].SQLRunning {
+	if captured.Sites[1].Replication.SQLRunning {
 		t.Error("expected site1 SQL thread to be stopped")
 	}
 }
@@ -628,7 +629,7 @@ func TestReplicationNotCheckedOnWritableSite(t *testing.T) {
 	pollN(tm, 2)
 
 	// site0 is writable, so its replication should NOT be checked
-	if captured.SiteReplication[0] != nil {
+	if captured.Sites[0].Replication != nil {
 		t.Error("writable site should not have replication status checked")
 	}
 }
@@ -684,76 +685,12 @@ func TestAdaptivePollInterval(t *testing.T) {
 	}
 }
 
-// --- selectDonor tests ---
-
-func TestSelectDonor_Site0HasData(t *testing.T) {
-	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa:1-100"}
-	site1 := &mockMySQL{readOnly: false}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-
-	primary, replica, err := tm.selectDonor(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if primary != 0 || replica != 1 {
-		t.Errorf("expected donor=0 replica=1, got donor=%d replica=%d", primary, replica)
-	}
-}
-
-func TestSelectDonor_Site1HasData(t *testing.T) {
-	site0 := &mockMySQL{readOnly: false}
-	site1 := &mockMySQL{readOnly: false, gtidExecuted: "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb:1-50"}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-
-	primary, replica, err := tm.selectDonor(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if primary != 1 || replica != 0 {
-		t.Errorf("expected donor=1 replica=0, got donor=%d replica=%d", primary, replica)
-	}
-}
-
-func TestSelectDonor_BothEmpty(t *testing.T) {
-	site0 := &mockMySQL{readOnly: false}
-	site1 := &mockMySQL{readOnly: false}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-
-	primary, replica, err := tm.selectDonor(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if primary != 0 || replica != 1 {
-		t.Errorf("expected donor=0 replica=1 for both-empty, got donor=%d replica=%d", primary, replica)
-	}
-}
-
-func TestSelectDonor_BothHaveData_DisjointGTIDs(t *testing.T) {
-	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-10"}
-	site1 := &mockMySQL{readOnly: false, gtidExecuted: "bbbb:1-10"}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-
-	primary, replica, err := tm.selectDonor(context.Background())
-	if err != nil {
-		t.Fatalf("disjoint GTIDs should be treated as fresh deploy, got error: %v", err)
-	}
-	if primary != 0 || replica != 1 {
-		t.Errorf("expected primary=0, replica=1; got primary=%d, replica=%d", primary, replica)
-	}
-}
-
-func TestSelectDonor_BothHaveData_OverlappingGTIDs(t *testing.T) {
-	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-10"}
-	site1 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-5,bbbb:1-10"}
-	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-
-	_, _, err := tm.selectDonor(context.Background())
-	if err == nil {
-		t.Fatal("expected error when both sites have overlapping GTIDs")
-	}
-}
-
 // --- detectEmptySite tests ---
+//
+// The N-site donor selector is purely empty-detection: it walks the
+// sites once and returns the first writable-with-data donor plus the
+// first reachable empty recipient. Every case below asserts that
+// bookkeeping on the site-name level.
 
 func TestDetectEmptySite_PostPVCWipe(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-100"}
@@ -762,9 +699,9 @@ func TestDetectEmptySite_PostPVCWipe(t *testing.T) {
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateWritable
 
-	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
-	if donorIdx != 0 || emptyIdx != 1 {
-		t.Errorf("expected donor=0 empty=1, got donor=%d empty=%d", donorIdx, emptyIdx)
+	donor, empty := tm.detectEmptySite(context.Background())
+	if donor != "dc1" || empty != "dc2" {
+		t.Errorf("expected donor=dc1 empty=dc2, got donor=%q empty=%q", donor, empty)
 	}
 }
 
@@ -775,9 +712,9 @@ func TestDetectEmptySite_Site0Empty(t *testing.T) {
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateWritable
 
-	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
-	if donorIdx != 1 || emptyIdx != 0 {
-		t.Errorf("expected donor=1 empty=0, got donor=%d empty=%d", donorIdx, emptyIdx)
+	donor, empty := tm.detectEmptySite(context.Background())
+	if donor != "dc2" || empty != "dc1" {
+		t.Errorf("expected donor=dc2 empty=dc1, got donor=%q empty=%q", donor, empty)
 	}
 }
 
@@ -788,9 +725,9 @@ func TestDetectEmptySite_BothHaveData(t *testing.T) {
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateWritable
 
-	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
-	if donorIdx != -1 || emptyIdx != -1 {
-		t.Errorf("expected -1,-1 when both have data, got %d,%d", donorIdx, emptyIdx)
+	donor, empty := tm.detectEmptySite(context.Background())
+	if donor != "" || empty != "" {
+		t.Errorf("expected empty/empty when both have data, got donor=%q empty=%q", donor, empty)
 	}
 }
 
@@ -801,9 +738,9 @@ func TestDetectEmptySite_SiteUnreachable(t *testing.T) {
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateUnreachable
 
-	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
-	if donorIdx != -1 || emptyIdx != -1 {
-		t.Errorf("expected -1,-1 when site unreachable, got %d,%d", donorIdx, emptyIdx)
+	donor, empty := tm.detectEmptySite(context.Background())
+	if donor != "" || empty != "" {
+		t.Errorf("expected empty/empty when a site is unreachable, got donor=%q empty=%q", donor, empty)
 	}
 }
 
@@ -814,9 +751,56 @@ func TestDetectEmptySite_EmptySiteReadOnly(t *testing.T) {
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateReadOnly
 
-	donorIdx, emptyIdx := tm.detectEmptySite(context.Background())
-	if donorIdx != 0 || emptyIdx != 1 {
-		t.Errorf("expected donor=0 empty=1 (read-only empty site allowed), got donor=%d empty=%d", donorIdx, emptyIdx)
+	donor, empty := tm.detectEmptySite(context.Background())
+	if donor != "dc1" || empty != "dc2" {
+		t.Errorf("expected donor=dc1 empty=dc2 (read-only empty site allowed), got donor=%q empty=%q", donor, empty)
+	}
+}
+
+// --- pickFreshestCandidate tests ---
+
+// TestPickFreshestCandidate_FresherGtidBeatsPriority: a
+// higher-priority site with a stale GTID loses to a lower-priority
+// site with a strictly newer GTID. This is the critical correctness
+// property of the failover picker — priority is a tiebreaker, not a
+// dominant factor, because promoting a stale replica means losing
+// transactions that actually exist on a fresher one.
+func TestPickFreshestCandidate_FresherGtidBeatsPriority(t *testing.T) {
+	// dc1 is the priority-first candidate but is 10 transactions
+	// behind; dc2 has the full GTID set.
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-40"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-50"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	winner := tm.pickFreshestCandidate(context.Background(), []string{"dc1", "dc2"})
+	if winner != "dc2" {
+		t.Fatalf("expected picker to promote dc2 (fresher GTID) despite dc1 priority, got %q", winner)
+	}
+}
+
+// TestPickFreshestCandidate_EqualGtidKeepsPriority: when every
+// candidate has the same GTID set, the earliest-by-priority wins.
+func TestPickFreshestCandidate_EqualGtidKeepsPriority(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-50"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-50"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	winner := tm.pickFreshestCandidate(context.Background(), []string{"dc2", "dc1"})
+	if winner != "dc2" {
+		t.Fatalf("expected priority tiebreaker to pick dc2 on equal GTIDs, got %q", winner)
+	}
+}
+
+// TestPickFreshestCandidate_SkipsUnreachable: a candidate whose GTID
+// query fails is skipped; the freshest reachable replica wins.
+func TestPickFreshestCandidate_SkipsUnreachable(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, gtidExecutedErr: errors.New("connection refused")}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-30"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	winner := tm.pickFreshestCandidate(context.Background(), []string{"dc1", "dc2"})
+	if winner != "dc2" {
+		t.Fatalf("expected picker to skip unreachable dc1 and choose dc2, got %q", winner)
 	}
 }
 

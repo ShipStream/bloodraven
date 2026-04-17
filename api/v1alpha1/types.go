@@ -9,8 +9,7 @@ import (
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Active",type=string,JSONPath=`.status.activeSite`
-// +kubebuilder:printcolumn:name="Site-A",type=string,JSONPath=`.status.sites[0].state`
-// +kubebuilder:printcolumn:name="Site-B",type=string,JSONPath=`.status.sites[1].state`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // MysqlFailoverGroup is the Schema for the mysqlfailovergroups API.
@@ -33,7 +32,9 @@ type MysqlFailoverGroupList struct {
 
 // MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
 // +kubebuilder:validation:XValidation:rule="(has(self.secretName) && self.secretName != '' && !has(self.credentials)) || ((!has(self.secretName) || self.secretName == '') && has(self.credentials))",message="exactly one of secretName or credentials must be set"
-// +kubebuilder:validation:XValidation:rule="!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.preferSite) || self.splitBrainPolicy.preferSite == '' || self.splitBrainPolicy.preferSite == self.sites[0].name || self.splitBrainPolicy.preferSite == self.sites[1].name",message="splitBrainPolicy.preferSite must match one of spec.sites[].name"
+// +kubebuilder:validation:XValidation:rule="self.sites.all(x, self.sites.filter(y, y.name == x.name).size() == 1)",message="spec.sites[].name must be unique"
+// +kubebuilder:validation:XValidation:rule="self.sites.filter(s, s.role == 'primary-candidate').size() >= 2",message="spec.sites must contain at least two sites with role 'primary-candidate'"
+// +kubebuilder:validation:XValidation:rule="!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities) || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'primary-candidate'))",message="splitBrainPolicy.sitePriorities entries must match the names of sites with role 'primary-candidate'"
 type MysqlFailoverGroupSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.6
 	// +kubebuilder:default="mysql:9.6"
@@ -44,10 +45,17 @@ type MysqlFailoverGroupSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	SidecarImage string `json:"sidecarImage,omitempty"`
 
-	// Sites defines the two sites that form this failover group.
-	// Exactly two sites must be specified; either can be active.
+	// Sites defines the sites that form this failover group. The slice must
+	// contain at least two sites with role "primary-candidate"; additional
+	// sites with role "dr-only" may be appended for cross-region DR.
+	// Failover is performed by picking the best primary-candidate replica
+	// when the active site is lost.
+	//
+	// MaxItems is set to 16 so the Kubernetes CEL cost estimator can bound
+	// the uniqueness-and-priority validation rules. Real deployments are
+	// expected to use well under that; raise the cap if needed.
 	// +kubebuilder:validation:MinItems=2
-	// +kubebuilder:validation:MaxItems=2
+	// +kubebuilder:validation:MaxItems=16
 	Sites []SiteSpec `json:"sites"`
 
 	// SecretName references the secret containing MySQL credentials (legacy).
@@ -148,12 +156,13 @@ type MysqlFailoverGroupSpec struct {
 	// +optional
 	InitFromBackup *InitFromBackupSpec `json:"initFromBackup,omitempty"`
 
-	// SplitBrainPolicy configures automated resolution when both sites
-	// are simultaneously writable and there is no prior failover history
-	// the operator can use to pick a winner (for example, after a fresh
-	// deploy or an operator restart that lost in-memory state). When
-	// omitted, or when PreferSite is empty, the operator takes no
-	// automated action and alerts only (manual resolution required).
+	// SplitBrainPolicy configures automated resolution when more than
+	// one site is simultaneously writable and there is no prior
+	// failover history the operator can use to pick a winner (for
+	// example, after a fresh deploy or an operator restart that lost
+	// in-memory state). When omitted, or when SitePriorities is empty,
+	// the operator takes no automated action and alerts only (manual
+	// resolution required).
 	// +optional
 	SplitBrainPolicy *SplitBrainPolicySpec `json:"splitBrainPolicy,omitempty"`
 
@@ -170,23 +179,37 @@ type MysqlFailoverGroupSpec struct {
 
 // SplitBrainPolicySpec configures automated split-brain resolution.
 //
-// Setting PreferSite declares an authoritative site that wins ties. When
-// both sites are writable and the operator cannot infer a winner from
-// its own failover history, the operator will fence the non-preferred
-// site and promote the preferred one as primary.
+// SitePriorities declares an ordered list of authoritative sites that
+// win unresolvable ties. When more than one site is writable and the
+// operator cannot infer a winner from its own failover history, the
+// operator walks the list in order and promotes the first entry that
+// is currently writable; every other writable site is fenced.
+//
+// Entries must reference sites with role "primary-candidate" — a
+// "dr-only" site is never auto-promoted, and naming one here is
+// rejected by validation.
 //
 // This is a policy decision, not a safety feature: any writes accepted
-// on the losing site that did not replicate to the winner will be
-// isolated when the losing site is fenced. The existing divergent-GTID
-// detection will block auto-rejoin of the losing site if its GTID set
-// contains transactions the winner never saw, and those transactions
-// are only recoverable via re-clone.
+// on losing sites that did not replicate to the winner will be isolated
+// when those sites are fenced. The existing divergent-GTID detection
+// will block auto-rejoin of any losing site whose GTID set contains
+// transactions the winner never saw; those transactions are only
+// recoverable via re-clone.
 type SplitBrainPolicySpec struct {
-	// PreferSite is the name of the site that wins unresolvable
-	// split-brain ties. Must match one of spec.sites[].name. If empty,
-	// the operator falls back to manual resolution (alert only).
+	// SitePriorities is the ordered list of primary-candidate site
+	// names that win unresolvable split-brain ties. The first entry
+	// that is currently writable becomes the new primary; every other
+	// writable site is fenced. If empty, the operator falls back to
+	// manual resolution (alert only).
+	//
+	// MaxItems must stay equal to spec.sites' MaxItems so the CEL cost
+	// estimator can bound the "every priority entry names a real
+	// primary-candidate" rule.
 	// +optional
-	PreferSite string `json:"preferSite,omitempty"`
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=253
+	SitePriorities []string `json:"sitePriorities,omitempty"`
 }
 
 // ReplicationSpec configures replication health monitoring.
@@ -197,11 +220,51 @@ type ReplicationSpec struct {
 	MaxLagSeconds int64 `json:"maxLagSeconds,omitempty"`
 }
 
+// SiteRole describes the promotion eligibility of a site.
+//
+// "primary-candidate" sites are full participants: they can be promoted
+// as the active primary during failover, and they count against the
+// minimum-two-candidate quorum that the CRD requires.
+//
+// "dr-only" sites are passive replicas. They follow the active primary
+// (typical use: cross-region DR) and are never considered as promotion
+// targets — the operator will not auto-promote them on failover, and
+// the split-brain priority picker treats them as ineligible winners.
+//
+// A writable "dr-only" site is an anomaly (the role implies read-only
+// replication), and when the operator detects that anomaly during
+// split-brain resolution it fences the site along with the other
+// losers so divergent writes cannot continue. The role limits
+// *promotion* and *policy eligibility*; it does not exempt the site
+// from the same safety fencing that protects primary-candidate
+// losers.
+// +kubebuilder:validation:Enum=primary-candidate;dr-only
+type SiteRole string
+
+const (
+	// SiteRolePrimaryCandidate is the default role: a site that
+	// participates in failover elections.
+	SiteRolePrimaryCandidate SiteRole = "primary-candidate"
+
+	// SiteRoleDROnly is a passive replica role: a site that follows
+	// the active primary but is never promoted automatically.
+	SiteRoleDROnly SiteRole = "dr-only"
+)
+
 // SiteSpec defines the configuration for a single site in the failover group.
 type SiteSpec struct {
-	// Name is the site identifier (e.g. "iad", "pdx").
+	// Name is the site identifier (e.g. "iad", "pdx", "lhr").
+	// Must be unique within spec.sites. MaxLength caps the CEL cost
+	// of the spec-level uniqueness and priority-membership rules.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
+
+	// Role governs whether this site can be auto-promoted on failover.
+	// Default: primary-candidate.
+	// +kubebuilder:default="primary-candidate"
+	// +optional
+	Role SiteRole `json:"role,omitempty"`
 
 	// Zone is the Kubernetes topology zone for node selection.
 	// +kubebuilder:validation:MinLength=1
@@ -216,6 +279,23 @@ type SiteSpec struct {
 
 	// Resources defines the compute resources for the MySQL container.
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// EffectiveRole returns the site's role, defaulting to
+// SiteRolePrimaryCandidate when unset. Callers should prefer this over
+// reading Role directly so that the default is applied consistently even
+// for objects that bypassed CRD validation (e.g., in-memory test fixtures).
+func (s SiteSpec) EffectiveRole() SiteRole {
+	if s.Role == "" {
+		return SiteRolePrimaryCandidate
+	}
+	return s.Role
+}
+
+// IsPromotable reports whether this site can be auto-promoted to primary
+// during failover.
+func (s SiteSpec) IsPromotable() bool {
+	return s.EffectiveRole() == SiteRolePrimaryCandidate
 }
 
 // StorageSpec defines PVC storage configuration.
