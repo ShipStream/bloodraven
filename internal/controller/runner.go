@@ -98,6 +98,30 @@ func (r *TopologyManagerRunner) HasManager(nn types.NamespacedName) bool {
 	return ok
 }
 
+// SetTopologyFrozen flips the topology-freeze flag on the managed
+// TopologyManager for the given CR, immediately (without waiting for
+// the runner's 30-second re-sync tick). The reconciler calls this at
+// every in-place restore phase transition so there is no window where
+// the topology manager could fire a cross-site action against a
+// cluster that is actively being restored.
+//
+// Returns true when the flag was applied; false when no manager is
+// running for this CR (for example during fresh deploy, operator
+// restart, or CR deletion). A return of false is expected in those
+// cases and is not an error — the runner's next re-sync will observe
+// status.restoreInPlace and apply the correct flag when it starts the
+// manager.
+func (r *TopologyManagerRunner) SetTopologyFrozen(nn types.NamespacedName, frozen bool) bool {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	mt.tm.SetTopologyFrozen(frozen)
+	return true
+}
+
 // NeedLeaderElection implements manager.LeaderElectionRunnable.
 // Topology polling and failover must only run on the leader.
 func (r *TopologyManagerRunner) NeedLeaderElection() bool {
@@ -172,9 +196,11 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RUnlock()
 
 		suppress := restoreInFlight(fg)
+		frozen := inPlaceRestoreInFlight(fg)
 
 		if ok && existing.cfg == cfg {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
+			existing.tm.SetTopologyFrozen(frozen)
 			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
 			// Detect spec drift for ordered rolling updates.
 			r.checkSpecDrift(ctx, fg, existing.tm)
@@ -197,6 +223,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RUnlock()
 		if started {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
+			mt.tm.SetTopologyFrozen(frozen)
 			r.handleRecloneAnnotation(ctx, fg, nn, mt.tm)
 		}
 	}

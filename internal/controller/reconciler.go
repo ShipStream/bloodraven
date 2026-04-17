@@ -231,6 +231,24 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: restoreRequeue}, nil
 	}
 
+	// Drive the re-triggerable in-place restore state machine when
+	// spec.restoreInPlace is set. Unlike reconcileRestoreJob (one-shot,
+	// greenfield), this path operates on a live cluster and coordinates
+	// with syncPodLabels (for Service-layer fencing) and the topology
+	// runner (for SetTopologyFrozen). We run it BEFORE syncPodLabels so
+	// label transitions land on the same reconcile that advances the
+	// state machine.
+	if inPlaceRequeue, err := r.reconcileInPlaceRestore(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile in-place restore: %w", err)
+	} else if inPlaceRequeue > 0 {
+		// Still sync labels before we bounce: the fence needs pod labels
+		// re-applied on the same pass that transitions into Fencing.
+		if err := r.syncPodLabels(ctx, &fg); err != nil {
+			return ctrl.Result{}, fmt.Errorf("sync pod labels during in-place restore: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: inPlaceRequeue}, nil
+	}
+
 	// Reconcile scheduled backups (one CronJob per schedule entry).
 	if err := r.reconcileBackupSchedules(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile backup schedules: %w", err)
@@ -1207,6 +1225,21 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 	for i := range sites {
 		if fg.Status.ActiveSite == fg.Spec.Sites[i].Name {
 			sites[i].role = "primary"
+		}
+	}
+
+	// During a full-instance in-place restore we strip the primary role
+	// label so the -primary Service sheds endpoints. Clients connected
+	// to the Service see immediate disconnects, which is the intended
+	// fence (the alternative — letting them read from a half-loaded
+	// datadir — is strictly worse). Per-schema restores skip this:
+	// other tenants continue writing, and app-level maintenance-mode
+	// handles the affected schema.
+	if inPlaceRestoreFencesPrimaryService(fg) {
+		for i := range sites {
+			if sites[i].role == "primary" {
+				sites[i].role = "fenced"
+			}
 		}
 	}
 

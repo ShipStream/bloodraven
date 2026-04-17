@@ -502,6 +502,12 @@ func marshalLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
 	if l.LoadIndexes != nil {
 		opts["loadIndexes"] = *l.LoadIndexes
 	}
+	if len(l.IncludeSchemas) > 0 {
+		opts["includeSchemas"] = l.IncludeSchemas
+	}
+	if len(l.ExcludeSchemas) > 0 {
+		opts["excludeSchemas"] = l.ExcludeSchemas
+	}
 	b, err := json.Marshal(opts)
 	if err != nil {
 		return "", fmt.Errorf("marshal load options: %w", err)

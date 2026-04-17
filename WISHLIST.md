@@ -7,7 +7,7 @@
 - [x] 3. Split-brain auto-resolution option
 - [ ] 4. Fencing durability during operator-down + partial partition
 - [x] 5. Reclone safety interlocks
-- [ ] 6. In-place restore path
+- [x] 6. In-place restore path
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
 - [ ] 8. DR drill automation / backup verification
 - [ ] 9. Restore duration and size metrics
@@ -22,9 +22,9 @@
 - [ ] 18. `kubectl` plugin
 - [x] 19. WebSocket vs REST casing inconsistency
 - [x] 20. Metric naming conformance
-- [ ] 21. "Why not group replication?" page
-- [ ] 22. Production hardening checklist
-- [ ] 23. Failure-mode matrix
+- [x] 21. "Why not group replication?" page
+- [x] 22. Production hardening checklist
+- [x] 23. Failure-mode matrix
 - [ ] 24. Upgrade / version-skew policy
 - [ ] 25. CRD version-migration plan
 - [ ] 26. Security model / threat model doc
