@@ -176,49 +176,49 @@ func (u *UpdateController) waitForReplicaReady(ctx context.Context, checker mysq
 	ticker := time.NewTicker(u.tickInterval)
 	defer ticker.Stop()
 
-	writableStreak := 0
+	// writableObservations counts ticks where we confirmed the standby is
+	// writable. It is deliberately not a strict "streak": probe errors leave
+	// it alone rather than resetting, so a stale connection pool whose dial
+	// errors alternate with successful "writable with no source" reads
+	// cannot pin the counter below the fail-fast threshold and mask a
+	// genuinely broken standby until the outer 5-minute deadline.
+	writableObservations := 0
 
 	for {
 		// Check if MySQL is reachable
 		ro, err := checker.CheckReadOnly(ctx)
 		if err == nil {
-			// Check replication status
-			rs, rsErr := checker.ShowReplicaStatus(ctx)
-			if rsErr == nil {
-				switch {
-				case ro && rs != nil && rs.IORunning && rs.SQLRunning:
-					if rs.SecondsBehindSource != nil && *rs.SecondsBehindSource < 5 {
+			if !ro {
+				// Writable standby counts regardless of whether
+				// ShowReplicaStatus succeeds: cross-site recovery is
+				// suppressed while the update runs, so nothing will start
+				// the replica for us once the node is writable. The data
+				// directory often retains master.info across a pod rollout,
+				// leaving SourceHost populated with threads stopped — that
+				// shape matters just as much as "no source at all" and
+				// must also drive the fail-fast abort. Skipping the
+				// replication probe here also avoids letting an
+				// intermittent ShowReplicaStatus error swallow the !ro
+				// observation and pin the counter below the threshold.
+				writableObservations++
+				if writableObservations >= failFastThreshold {
+					return fmt.Errorf("standby is writable but replication is not running; aborting ordered update")
+				}
+			} else {
+				// Read-only: check replication progress. A successful probe
+				// that shows threads still starting up is real progress, so
+				// reset the counter. A ShowReplicaStatus error with ro=true
+				// is a probe blip — leave the counter alone and retry.
+				rs, rsErr := checker.ShowReplicaStatus(ctx)
+				if rsErr == nil {
+					if rs != nil && rs.IORunning && rs.SQLRunning &&
+						rs.SecondsBehindSource != nil && *rs.SecondsBehindSource < 5 {
 						return nil
 					}
-					// Replication running but catching up — real progress, not the target bad state.
-					writableStreak = 0
-				case !ro:
-					// Writable standby counts regardless of whether a source is
-					// configured: cross-site recovery is suppressed while the
-					// update runs, so nothing will start the replica for us.
-					// The data directory often retains master.info across a pod
-					// rollout, leaving SourceHost populated with threads
-					// stopped — that shape matters just as much as "no source
-					// at all" and must also drive the fail-fast abort.
-					writableStreak++
-					if writableStreak >= failFastThreshold {
-						return fmt.Errorf("standby is writable but replication is not running; aborting ordered update")
-					}
-				default:
-					// Read-only but replication not fully running yet (e.g. super_read_only=ON
-					// with threads still starting). Give it more time — this is normal progress.
-					writableStreak = 0
+					writableObservations = 0
 				}
 			}
-			// ShowReplicaStatus error is treated like CheckReadOnly error below: a probe blip.
 		}
-		// Probe errors leave writableStreak alone. Resetting it here would let a
-		// stale connection pool — whose dial errors alternate with successful
-		// "writable with no source" reads — keep the counter pinned below the
-		// threshold forever, masking a genuinely broken standby and holding
-		// isUpdating=true until the outer 5-minute deadline. Sustained writable
-		// observations remain meaningful evidence even when interspersed with
-		// transient errors.
 
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for replica to be ready")

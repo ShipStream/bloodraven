@@ -430,8 +430,8 @@ func TestWaitForReplicaReady_FailFastOnWritableStandby(t *testing.T) {
 // came up writable with no replication source, the mysql connection pool
 // would alternate between successful "writable-no-source" reads and
 // "connection refused" errors (from stale conns dialing the evicted pod IP).
-// The old implementation reset writableStreak on every probe error, pinning
-// the counter below the fail-fast threshold and holding isUpdating=true
+// The old implementation reset the writable counter on every probe error,
+// pinning it below the fail-fast threshold and holding isUpdating=true
 // until the full 5-minute deadline. Probe errors must no longer mask
 // sustained writable-no-source observations.
 func TestWaitForReplicaReady_AbortsDespiteTransientProbeErrors(t *testing.T) {
@@ -491,6 +491,33 @@ func TestWaitForReplicaReady_AbortsWhenThreadsStoppedButSourceConfigured(t *test
 	}
 	if !strings.Contains(err.Error(), "writable") {
 		t.Errorf("expected writable-abort error, got: %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("fail-fast took too long: %v", elapsed)
+	}
+}
+
+// TestWaitForReplicaReady_AbortsWhenReplicaStatusErrors covers the case where
+// CheckReadOnly consistently reports writable but ShowReplicaStatus errors
+// every probe (e.g. a permission glitch or one half of the wire closed). The
+// !ro observation is sufficient evidence of the bad state on its own; a
+// failing replica-status probe must not mask it.
+func TestWaitForReplicaReady_AbortsWhenReplicaStatusErrors(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = 2 * time.Millisecond
+	uc.failFastDuration = 12 * time.Millisecond
+
+	checker := &replicaStatusErrorChecker{writable: true}
+
+	start := time.Now()
+	err := uc.waitForReplicaReady(context.Background(), checker, 2*time.Second)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("waitForReplicaReady should abort on sustained writable standby even with ShowReplicaStatus errors")
+	}
+	if !strings.Contains(err.Error(), "writable") {
+		t.Errorf("expected writable abort error, got: %v", err)
 	}
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("fail-fast took too long: %v", elapsed)
@@ -566,3 +593,39 @@ func (f *flappingChecker) CloneInstance(_ context.Context, _, _, _ string, _ boo
 	return nil
 }
 func (f *flappingChecker) Close() error { return nil }
+
+// replicaStatusErrorChecker always succeeds at CheckReadOnly but always fails
+// ShowReplicaStatus — exercising the case where the writable observation must
+// drive fail-fast on its own.
+type replicaStatusErrorChecker struct {
+	writable bool
+}
+
+func (r *replicaStatusErrorChecker) CheckReadOnly(_ context.Context) (bool, error) {
+	return !r.writable, nil
+}
+
+func (r *replicaStatusErrorChecker) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
+	return nil, errors.New("show replica status failed")
+}
+
+func (r *replicaStatusErrorChecker) Promote(_ context.Context) error                  { return nil }
+func (r *replicaStatusErrorChecker) SetSuperReadOnly(_ context.Context, _ bool) error { return nil }
+func (r *replicaStatusErrorChecker) SetReadOnly(_ context.Context, _ bool) error      { return nil }
+func (r *replicaStatusErrorChecker) StopReplica(_ context.Context) error              { return nil }
+func (r *replicaStatusErrorChecker) ResetReplicaAll(_ context.Context) error          { return nil }
+func (r *replicaStatusErrorChecker) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
+	return nil
+}
+func (r *replicaStatusErrorChecker) StartReplica(_ context.Context) error          { return nil }
+func (r *replicaStatusErrorChecker) StartReplicaSQLThread(_ context.Context) error { return nil }
+func (r *replicaStatusErrorChecker) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
+	return nil
+}
+func (r *replicaStatusErrorChecker) SetCloneDonorList(_ context.Context, _ string) error { return nil }
+func (r *replicaStatusErrorChecker) GetGtidExecuted(_ context.Context) (string, error)   { return "", nil }
+func (r *replicaStatusErrorChecker) KillAppConnections(_ context.Context) (int, error)   { return 0, nil }
+func (r *replicaStatusErrorChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
+	return nil
+}
+func (r *replicaStatusErrorChecker) Close() error { return nil }

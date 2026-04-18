@@ -67,8 +67,11 @@ type MysqlFailoverGroupReconciler struct {
 	// APIReader is an uncached reader for paths that cannot tolerate a stale
 	// cache view — specifically waitForDeploymentRollout, which must observe
 	// the post-patch Generation before it can meaningfully check rollout
-	// progress. If left nil the cached client is used, which is safe for
-	// tests but would re-introduce the rolling-update race in production.
+	// progress. SetupWithManager defaults this to mgr.GetAPIReader() when it
+	// has not been injected explicitly, so manager-backed production wiring
+	// cannot silently fall back to the cached client. Tests that construct
+	// the reconciler directly may leave it nil; the cached client is used in
+	// that case.
 	APIReader client.Reader
 
 	// rolloutPollInterval overrides the production-default 2s cadence used by
@@ -287,6 +290,13 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 }
 
 func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Defend against wiring paths that forget to inject APIReader: under a
+	// manager the uncached reader is always available, and falling back to
+	// the cached client would re-introduce the rolling-update rollout race
+	// that waitForDeploymentRollout exists to close.
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlFailoverGroup{}).
 		Owns(&appsv1.Deployment{}).
@@ -1543,7 +1553,15 @@ func (r *MysqlFailoverGroupReconciler) waitForDeploymentRollout(ctx context.Cont
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timeout waiting for deployment %s rollout: %w", nn, ctx.Err())
+			cerr := ctx.Err()
+			switch cerr {
+			case context.DeadlineExceeded:
+				return fmt.Errorf("timeout waiting for deployment %s rollout: %w", nn, cerr)
+			case context.Canceled:
+				return fmt.Errorf("stopped waiting for deployment %s rollout: %w", nn, cerr)
+			default:
+				return fmt.Errorf("context done while waiting for deployment %s rollout: %w", nn, cerr)
+			}
 		case <-ticker.C:
 		}
 	}
