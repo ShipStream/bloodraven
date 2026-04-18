@@ -1155,3 +1155,109 @@ func TestReconcile_AppliesDeploymentUpdateWhenNoManager(t *testing.T) {
 			d.Spec.Template.Spec.Containers[0].Image)
 	}
 }
+
+// TestWaitForDeploymentRollout_ReadyReturnsImmediately verifies the wait
+// returns without error when the Deployment's status already matches "rolled
+// out" (ObservedGeneration caught up, desired replicas updated and available).
+func TestWaitForDeploymentRollout_ReadyReturnsImmediately(t *testing.T) {
+	replicas := int32(1)
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mysql-lion-dc1",
+			Namespace:  "shared-lion",
+			Generation: 3,
+		},
+		Spec: appsv1.DeploymentSpec{Replicas: &replicas},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 3,
+			Replicas:           1,
+			UpdatedReplicas:    1,
+			AvailableReplicas:  1,
+		},
+	}
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dep).Build()
+	r := &MysqlFailoverGroupReconciler{Client: c, Scheme: scheme}
+
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "mysql-lion-dc1"}
+	start := time.Now()
+	if err := r.waitForDeploymentRollout(context.Background(), nn, 5*time.Second); err != nil {
+		t.Fatalf("waitForDeploymentRollout should return nil when rollout is complete: %v", err)
+	}
+	if d := time.Since(start); d > 500*time.Millisecond {
+		t.Errorf("waitForDeploymentRollout should return immediately when ready, took %v", d)
+	}
+}
+
+// TestWaitForDeploymentRollout_StaleGenerationTimesOut verifies the wait
+// does not falsely succeed when the Deployment controller hasn't yet observed
+// the latest generation — this is the shape that causes the rolling-update
+// race (old pod serves the Service while the new pod is still starting).
+func TestWaitForDeploymentRollout_StaleGenerationTimesOut(t *testing.T) {
+	replicas := int32(1)
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mysql-lion-dc1",
+			Namespace:  "shared-lion",
+			Generation: 3,
+		},
+		Spec: appsv1.DeploymentSpec{Replicas: &replicas},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 2,
+			Replicas:           1,
+			UpdatedReplicas:    0,
+			AvailableReplicas:  0,
+		},
+	}
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dep).Build()
+	r := &MysqlFailoverGroupReconciler{
+		Client:              c,
+		Scheme:              scheme,
+		rolloutPollInterval: 10 * time.Millisecond,
+	}
+
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "mysql-lion-dc1"}
+	err := r.waitForDeploymentRollout(context.Background(), nn, 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("waitForDeploymentRollout should time out when rollout incomplete")
+	}
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Errorf("expected timeout error, got: %v", err)
+	}
+}
+
+// TestWaitForDeploymentRollout_UpdatedButNotAvailable verifies a Deployment
+// whose new ReplicaSet has been created but whose pods aren't Ready yet (i.e.
+// MySQL is still starting up) does NOT count as a complete rollout. Letting
+// this satisfy the wait would recreate the bug where the ordered update
+// proceeds to failover against a half-started pod.
+func TestWaitForDeploymentRollout_UpdatedButNotAvailable(t *testing.T) {
+	replicas := int32(1)
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "mysql-lion-dc1",
+			Namespace:  "shared-lion",
+			Generation: 1,
+		},
+		Spec: appsv1.DeploymentSpec{Replicas: &replicas},
+		Status: appsv1.DeploymentStatus{
+			ObservedGeneration: 1,
+			Replicas:           1,
+			UpdatedReplicas:    1,
+			AvailableReplicas:  0,
+		},
+	}
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dep).Build()
+	r := &MysqlFailoverGroupReconciler{
+		Client:              c,
+		Scheme:              scheme,
+		rolloutPollInterval: 10 * time.Millisecond,
+	}
+
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "mysql-lion-dc1"}
+	if err := r.waitForDeploymentRollout(context.Background(), nn, 100*time.Millisecond); err == nil {
+		t.Fatal("waitForDeploymentRollout must not return nil while AvailableReplicas < desired")
+	}
+}

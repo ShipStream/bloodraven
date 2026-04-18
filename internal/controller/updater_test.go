@@ -425,35 +425,128 @@ func TestWaitForReplicaReady_FailFastOnWritableStandby(t *testing.T) {
 	}
 }
 
-// TestWaitForReplicaReady_CounterResetsOnProbeError ensures a flaky connection
-// doesn't trigger the writable-abort path (unreachable != writable).
-func TestWaitForReplicaReady_CounterResetsOnProbeError(t *testing.T) {
+// TestWaitForReplicaReady_AbortsDespiteTransientProbeErrors is a regression
+// test for a deadlock observed in the playground: when the new standby pod
+// came up writable with no replication source, the mysql connection pool
+// would alternate between successful "writable-no-source" reads and
+// "connection refused" errors (from stale conns dialing the evicted pod IP).
+// The old implementation reset the writable counter on every probe error,
+// pinning it below the fail-fast threshold and holding isUpdating=true
+// until the full 5-minute deadline. Probe errors must no longer mask
+// sustained writable-no-source observations.
+func TestWaitForReplicaReady_AbortsDespiteTransientProbeErrors(t *testing.T) {
 	logger := testutil.TestLogger()
 	uc := NewUpdateController(NewFailoverController(logger), logger)
 	uc.tickInterval = 2 * time.Millisecond
-	uc.failFastDuration = 12 * time.Millisecond // threshold = 6 ticks
+	uc.failFastDuration = 12 * time.Millisecond // threshold = 6 writable ticks
 
-	checker := &flappingChecker{
-		writable:   true,
-		errorEvery: 3, // error every 3rd tick — max 2 consecutive writable
-	}
+	// Writable with no source; ~1 in 3 probes fails. A pre-fix implementation
+	// that reset the counter on each error would never reach the threshold.
+	checker := &flappingChecker{writable: true, errorEvery: 3}
 
-	// Outer deadline short enough to bail out of the test; fail-fast should NOT
-	// fire because the counter resets on each probe error.
 	start := time.Now()
-	err := uc.waitForReplicaReady(context.Background(), checker, 200*time.Millisecond)
+	err := uc.waitForReplicaReady(context.Background(), checker, 2*time.Second)
 	elapsed := time.Since(start)
 	if err == nil {
-		t.Fatal("expected deadline timeout (not writable abort)")
+		t.Fatal("waitForReplicaReady should abort on sustained writable standby")
+	}
+	if !strings.Contains(err.Error(), "writable") {
+		t.Errorf("expected writable abort error, got: %v", err)
+	}
+	// Threshold 6 writable observations with 1/3 probes erroring ≈ 9 ticks ≈ 18ms.
+	// 500ms is generous slack for scheduler jitter.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("fail-fast took too long despite probe errors: %v", elapsed)
+	}
+}
+
+// TestWaitForReplicaReady_AbortsWhenThreadsStoppedButSourceConfigured
+// is a regression test for the playground observation that after a Deployment
+// rollout the new standby pod comes up with `@@read_only=0` AND the data
+// directory retains master.info from the previous pod — so ShowReplicaStatus
+// returns a row with SourceHost set but IO/SQL threads stopped. The original
+// fail-fast only matched "no source configured" and missed this shape,
+// letting the ordered update hang until the 5-minute deadline while cross-
+// site recovery was suppressed.
+func TestWaitForReplicaReady_AbortsWhenThreadsStoppedButSourceConfigured(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = 2 * time.Millisecond
+	uc.failFastDuration = 12 * time.Millisecond
+
+	checker := &testutil.FakeMySQL{
+		ReadOnlyVal: false,
+		ReplicaStatusVal: &mysql.ReplicaStatus{
+			IORunning:  false,
+			SQLRunning: false,
+			SourceHost: "mysql-playground-pdx.bloodraven-playground.svc.cluster.local",
+		},
+	}
+
+	start := time.Now()
+	err := uc.waitForReplicaReady(context.Background(), checker, time.Second)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("waitForReplicaReady should abort on writable standby with stopped replica threads")
+	}
+	if !strings.Contains(err.Error(), "writable") {
+		t.Errorf("expected writable-abort error, got: %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("fail-fast took too long: %v", elapsed)
+	}
+}
+
+// TestWaitForReplicaReady_AbortsWhenReplicaStatusErrors covers the case where
+// CheckReadOnly consistently reports writable but ShowReplicaStatus errors
+// every probe (e.g. a permission glitch or one half of the wire closed). The
+// !ro observation is sufficient evidence of the bad state on its own; a
+// failing replica-status probe must not mask it.
+func TestWaitForReplicaReady_AbortsWhenReplicaStatusErrors(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = 2 * time.Millisecond
+	uc.failFastDuration = 12 * time.Millisecond
+
+	checker := &replicaStatusErrorChecker{writable: true}
+
+	start := time.Now()
+	err := uc.waitForReplicaReady(context.Background(), checker, 2*time.Second)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("waitForReplicaReady should abort on sustained writable standby even with ShowReplicaStatus errors")
+	}
+	if !strings.Contains(err.Error(), "writable") {
+		t.Errorf("expected writable abort error, got: %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("fail-fast took too long: %v", elapsed)
+	}
+}
+
+// TestWaitForReplicaReady_ProbeErrorsAloneDoNotAbortAsWritable complements
+// the regression test above: if the standby is only ever unreachable (never
+// observed writable), the function must NOT trigger the writable-abort path.
+// It exits via the outer deadline instead — the caller's outer budget still
+// bounds the hang.
+func TestWaitForReplicaReady_ProbeErrorsAloneDoNotAbortAsWritable(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = 2 * time.Millisecond
+	uc.failFastDuration = 12 * time.Millisecond
+
+	// errorEvery=1 → every probe errors.
+	checker := &flappingChecker{writable: true, errorEvery: 1}
+
+	err := uc.waitForReplicaReady(context.Background(), checker, 80*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected deadline timeout")
 	}
 	if strings.Contains(err.Error(), "writable") {
-		t.Errorf("counter should have reset on probe errors; got writable abort: %v", err)
+		t.Errorf("must not hit writable abort when no probe ever succeeded: %v", err)
 	}
 	if !strings.Contains(err.Error(), "timeout") {
 		t.Errorf("expected timeout error, got: %v", err)
-	}
-	if elapsed < 150*time.Millisecond {
-		t.Errorf("expected to hit the deadline, exited too early: %v", elapsed)
 	}
 }
 
@@ -500,3 +593,39 @@ func (f *flappingChecker) CloneInstance(_ context.Context, _, _, _ string, _ boo
 	return nil
 }
 func (f *flappingChecker) Close() error { return nil }
+
+// replicaStatusErrorChecker always succeeds at CheckReadOnly but always fails
+// ShowReplicaStatus — exercising the case where the writable observation must
+// drive fail-fast on its own.
+type replicaStatusErrorChecker struct {
+	writable bool
+}
+
+func (r *replicaStatusErrorChecker) CheckReadOnly(_ context.Context) (bool, error) {
+	return !r.writable, nil
+}
+
+func (r *replicaStatusErrorChecker) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
+	return nil, errors.New("show replica status failed")
+}
+
+func (r *replicaStatusErrorChecker) Promote(_ context.Context) error                  { return nil }
+func (r *replicaStatusErrorChecker) SetSuperReadOnly(_ context.Context, _ bool) error { return nil }
+func (r *replicaStatusErrorChecker) SetReadOnly(_ context.Context, _ bool) error      { return nil }
+func (r *replicaStatusErrorChecker) StopReplica(_ context.Context) error              { return nil }
+func (r *replicaStatusErrorChecker) ResetReplicaAll(_ context.Context) error          { return nil }
+func (r *replicaStatusErrorChecker) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
+	return nil
+}
+func (r *replicaStatusErrorChecker) StartReplica(_ context.Context) error          { return nil }
+func (r *replicaStatusErrorChecker) StartReplicaSQLThread(_ context.Context) error { return nil }
+func (r *replicaStatusErrorChecker) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
+	return nil
+}
+func (r *replicaStatusErrorChecker) SetCloneDonorList(_ context.Context, _ string) error { return nil }
+func (r *replicaStatusErrorChecker) GetGtidExecuted(_ context.Context) (string, error)   { return "", nil }
+func (r *replicaStatusErrorChecker) KillAppConnections(_ context.Context) (int, error)   { return 0, nil }
+func (r *replicaStatusErrorChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
+	return nil
+}
+func (r *replicaStatusErrorChecker) Close() error { return nil }

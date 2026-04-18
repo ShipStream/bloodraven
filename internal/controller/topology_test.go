@@ -432,6 +432,48 @@ func TestSplitBrainNoAction(t *testing.T) {
 	}
 }
 
+// TestSplitBrainAfterFailover_NoFreshDeployBootstrap is a regression test for a
+// bug where, after a successful failover, a respawned old primary triggered
+// the isFreshDeploy auto-bootstrap path (both sites writable, no replication
+// configured on either). That path would select the old primary as clone donor
+// and silently revert the failover. With lastFailoverTarget set, this shape
+// must be handled by the fence-returning-old-primary branch, not a bootstrap.
+func TestSplitBrainAfterFailover_NoFreshDeployBootstrap(t *testing.T) {
+	// Initial topology: site0 writable (primary), site1 read-only replicating.
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "abc:1-10"}
+	site1 := &mockMySQL{
+		readOnly: true,
+		replicaStatusVal: &mysql.ReplicaStatus{
+			IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1",
+		},
+		gtidExecuted: "abc:1-10",
+	}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+	pollN(tm, 2)
+
+	// A prior failover promoted site1. After operator restart, this is
+	// restored from CR status; in tests we set it directly.
+	tm.lastFailoverTarget = "dc2"
+
+	// Simulate post-failover split-brain: site1 was promoted (replica threads
+	// cleared by RESET REPLICA ALL) and site0 (old primary) respawned writable
+	// before the operator could fence it. Both now look writable with no
+	// replication configured — the exact shape that tricked isFreshDeploy.
+	site1.setReadOnly(false)
+	site1.mu.Lock()
+	site1.replicaStatusVal = nil
+	site1.mu.Unlock()
+
+	pollN(tm, 2)
+
+	tm.mu.RLock()
+	phase := tm.bootstrapPhase
+	tm.mu.RUnlock()
+	if phase != BootstrapPhaseNone {
+		t.Fatalf("bootstrap must not start during post-failover split-brain, got phase=%q", phase)
+	}
+}
+
 func TestDoubleReadOnlyNoAction(t *testing.T) {
 	site0 := &mockMySQL{readOnly: true}
 	site1 := &mockMySQL{readOnly: true}
