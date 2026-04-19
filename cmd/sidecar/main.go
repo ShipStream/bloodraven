@@ -86,13 +86,19 @@ func main() {
 		}
 	}
 
+	// Shared topology cache: written by the fencing monitor (from
+	// operator /active-site polls and peer-relay reads) and served
+	// by the HTTP server for peers' /peer/active-site requests.
+	topology := &sidecar.TopologyCache{}
+
 	// Create the HTTP server
 	srv := sidecar.NewServer(mysql, cfg.ListenAddr, logger)
+	srv.SetTopology(topology)
 	if archiver != nil {
 		srv.SetArchiver(archiver)
 	}
 
-	// Run startup safety net
+	// Run startup safety net (also seeds the topology cache).
 	srv.RunSafetyNet(ctx, cfg)
 
 	// Create the fencing monitor
@@ -103,7 +109,7 @@ func main() {
 		cfg.PeerCheckInterval,
 		cfg.LeaseTimeout,
 		logger,
-	)
+	).WithTopology(cfg.MySite, cfg.PodNamespace, cfg.FailoverGroup, topology)
 
 	// Run the HTTP server, fencing monitor, and (optionally) the
 	// archiver concurrently. Any of them failing cancels the shared

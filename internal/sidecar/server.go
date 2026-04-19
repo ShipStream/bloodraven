@@ -15,6 +15,7 @@ type Server struct {
 	logger     *slog.Logger
 	httpServer *http.Server
 	archiver   *BinlogArchiver
+	topology   *TopologyCache
 }
 
 // NewServer creates a new sidecar HTTP server.
@@ -28,6 +29,7 @@ func NewServer(mysql mysqlQuerier, listenAddr string, logger *slog.Logger) *Serv
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /status", s.handleStatus)
 	mux.HandleFunc("GET /peer/ping", s.handlePeerPing)
+	mux.HandleFunc("GET /peer/active-site", s.handlePeerActiveSite)
 	mux.HandleFunc("GET /archiver/status", s.handleArchiverStatus)
 
 	s.httpServer = &http.Server{
@@ -40,6 +42,12 @@ func NewServer(mysql mysqlQuerier, listenAddr string, logger *slog.Logger) *Serv
 
 	return s
 }
+
+// SetTopology attaches the shared TopologyCache so the server can
+// relay this sidecar's last-known authoritative view to peers via
+// /peer/active-site. Optional: when unset, /peer/active-site returns
+// 204 No Content, which peers treat as "no view available".
+func (s *Server) SetTopology(c *TopologyCache) { s.topology = c }
 
 // SetArchiver wires a BinlogArchiver into the server so its state can
 // be exposed through /archiver/status. Optional: when unset, the
@@ -101,6 +109,27 @@ func (s *Server) handlePeerPing(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("pong"))
 }
 
+// handlePeerActiveSite relays this sidecar's last-known authoritative
+// view of the failover group's active site to a peer. Peers use this
+// as a partition-tolerant fallback when their own link to the
+// operator is broken. The payload mirrors TopologySnapshot. Returns
+// 204 when no view is cached yet (either topology-aware fencing is
+// disabled, or the sidecar has never successfully queried the
+// operator — the peer should treat either as "no hint available").
+func (s *Server) handlePeerActiveSite(w http.ResponseWriter, _ *http.Request) {
+	if s.topology == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	snap := s.topology.Snapshot()
+	if snap.ActiveSite == "" || snap.ObservedAt.IsZero() {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(snap)
+}
+
 // handleArchiverStatus returns the BinlogArchiver's Snapshot. When the
 // archiver is disabled (PITR not configured for this failover group)
 // we still return 200 + enabled:false so polling callers can tell
@@ -151,6 +180,14 @@ func (s *Server) RunSafetyNet(ctx context.Context, cfg *Config) {
 	if activeSite == "" {
 		s.logger.Info("safety net: no active site reported by operator, staying fenced")
 		return
+	}
+
+	// Seed the shared topology cache with the operator's answer.
+	// The fencing monitor re-polls on its own cadence, but this
+	// guarantees the cache is warm from the first tick onward and
+	// gives peers a usable /peer/active-site response immediately.
+	if s.topology != nil {
+		s.topology.Set(activeSite, time.Now())
 	}
 
 	if cfg.MySite != activeSite {

@@ -2,9 +2,11 @@ package sidecar
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/shipstream/bloodraven/internal/clock"
@@ -18,14 +20,28 @@ type Fencer interface {
 }
 
 // FencingMonitor polls Bloodraven and every peer sidecar, and self-
-// fences (sets super_read_only=ON) when the primary is truly isolated
-// from both the operator and every peer.
+// fences (sets super_read_only=ON) when one of two conditions holds:
 //
-// Multi-site semantics: the monitor tracks a per-peer "last-seen"
-// timestamp. The site is considered to have peer connectivity as long
-// as *any* peer answered within the lease timeout. Self-fencing fires
-// only when the operator is unreachable beyond the lease AND every
-// peer is unreachable beyond the lease.
+//  1. Topology mismatch: the operator-authoritative active site
+//     disagrees with this sidecar's own site. Fires immediately,
+//     regardless of lease timing. Closes the "stale primary returns
+//     after a failover while the operator is unreachable to it but
+//     reachable to the peer" gap (WISHLIST item #4).
+//
+//  2. Lease expiry: both the operator AND every peer are unreachable
+//     beyond leaseTimeout. The classic fallback for when the sidecar
+//     can't learn anything authoritative.
+//
+// Multi-site semantics for rule #2: the monitor tracks a per-peer
+// "last-seen" timestamp. The site is considered to have peer
+// connectivity as long as *any* peer answered within the lease
+// timeout. Self-fencing fires only when every peer is silent.
+//
+// Topology-aware fencing (rule #1) is only active when mySite,
+// namespace, and group are all non-empty AND a TopologyCache is
+// attached. Otherwise the monitor degrades to lease-only behavior,
+// which matches historical behavior and keeps single-site test
+// harnesses simple.
 type FencingMonitor struct {
 	mysql            Fencer
 	bloodravenAddr   string
@@ -38,6 +54,16 @@ type FencingMonitor struct {
 	logger           *slog.Logger
 	httpClient       *http.Client
 	clock            clock.Clock
+
+	// Topology-aware fields. Populated by WithTopology; zero values
+	// disable rule #1 above. mySite/namespace/group are the identity
+	// this sidecar uses when hitting the operator's /active-site
+	// endpoint and when comparing against the cached authoritative
+	// answer.
+	mySite    string
+	namespace string
+	group     string
+	topology  *TopologyCache
 }
 
 // NewFencingMonitor creates a new FencingMonitor.
@@ -101,6 +127,30 @@ func NewFencingMonitorFull(
 	}
 }
 
+// WithTopology enables topology-aware fencing. Call once after
+// construction and before Run. Returns the receiver so it can be
+// chained off NewFencingMonitor(...).
+//
+// mySite, namespace, and group identify this sidecar to the
+// operator's /active-site endpoint. cache is shared with the sidecar
+// HTTP server so peers can relay the view through /peer/active-site.
+// Passing "" for any identity field, or nil for cache, leaves
+// topology-aware fencing disabled and the monitor continues to use
+// the lease-expiry rule only.
+func (f *FencingMonitor) WithTopology(mySite, namespace, group string, cache *TopologyCache) *FencingMonitor {
+	f.mySite = mySite
+	f.namespace = namespace
+	f.group = group
+	f.topology = cache
+	return f
+}
+
+// topologyEnabled reports whether the monitor has everything it
+// needs to fetch and compare authoritative topology state.
+func (f *FencingMonitor) topologyEnabled() bool {
+	return f.topology != nil && f.mySite != "" && f.namespace != "" && f.group != ""
+}
+
 // Run starts the fencing monitor loop. Blocks until ctx is cancelled.
 func (f *FencingMonitor) Run(ctx context.Context) {
 	// Initialize last-seen times to now (grace period on startup)
@@ -125,8 +175,14 @@ func (f *FencingMonitor) Run(ctx context.Context) {
 // Check performs a single fencing check cycle. Exported for deterministic testing.
 func (f *FencingMonitor) Check(ctx context.Context) {
 	f.checkBloodraven(ctx)
+	if f.topologyEnabled() {
+		f.checkActiveSite(ctx)
+	}
 	for _, addr := range f.peerAddrs {
 		f.checkPeer(ctx, addr)
+		if f.topologyEnabled() {
+			f.checkPeerTopology(ctx, addr)
+		}
 	}
 	f.evaluate(ctx)
 }
@@ -179,6 +235,99 @@ func (f *FencingMonitor) checkPeer(ctx context.Context, addr string) {
 	}
 }
 
+// checkActiveSite fetches the operator's authoritative view of the
+// current active site for this failover group. On success the cache
+// is overwritten (operator is always authoritative, so we never
+// compare timestamps here). Failures are silent — the cache ages
+// naturally and peer relays can keep it fresh.
+func (f *FencingMonitor) checkActiveSite(ctx context.Context) {
+	if f.bloodravenAddr == "" {
+		return
+	}
+
+	endpoint := fmt.Sprintf("http://%s/active-site?namespace=%s&group=%s",
+		f.bloodravenAddr, url.QueryEscape(f.namespace), url.QueryEscape(f.group))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		f.logger.Warn("fencing: failed to create active-site request", "error", err)
+		return
+	}
+
+	resp, err := f.httpClient.Do(req)
+	if err != nil {
+		f.logger.Debug("fencing: operator /active-site unreachable", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// 404 (group not found yet) or 503 (operator not ready) just
+		// mean no authoritative view available — not a fencing signal
+		// on its own. Log at debug.
+		f.logger.Debug("fencing: operator /active-site non-200", "status", resp.StatusCode)
+		return
+	}
+
+	var body struct {
+		ActiveSite string `json:"activeSite"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		f.logger.Warn("fencing: decode /active-site response", "error", err)
+		return
+	}
+	if body.ActiveSite == "" {
+		// Operator admits it has no active site (e.g. quorum not yet
+		// established). Leave cache alone.
+		return
+	}
+	f.topology.Set(body.ActiveSite, f.clock.Now())
+}
+
+// checkPeerTopology asks a peer sidecar for its last-known authoritative
+// view of the active site. This is the partition-tolerant path: if
+// this sidecar's link to the operator is broken but a peer's link
+// still works, the peer's cache stays fresh and we can adopt it.
+// Adoption only happens when the peer's observedAt is strictly newer
+// than our own, so a stale peer never drags us backwards.
+func (f *FencingMonitor) checkPeerTopology(ctx context.Context, addr string) {
+	if addr == "" {
+		return
+	}
+
+	endpoint := fmt.Sprintf("http://%s/peer/active-site", addr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		f.logger.Warn("fencing: failed to create peer active-site request", "peer", addr, "error", err)
+		return
+	}
+
+	resp, err := f.httpClient.Do(req)
+	if err != nil {
+		f.logger.Debug("fencing: peer /peer/active-site unreachable", "peer", addr, "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		// 404 means the peer predates this endpoint (rolling upgrade);
+		// we silently fall back to operator-only topology data.
+		return
+	}
+
+	var snap TopologySnapshot
+	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+		f.logger.Warn("fencing: decode /peer/active-site response", "peer", addr, "error", err)
+		return
+	}
+	if snap.ActiveSite == "" || snap.ObservedAt.IsZero() {
+		return
+	}
+	if f.topology.Adopt(snap.ActiveSite, snap.ObservedAt) {
+		f.logger.Info("fencing: adopted active-site view from peer",
+			"peer", addr, "active_site", snap.ActiveSite, "observed_at", snap.ObservedAt)
+	}
+}
+
 // latestPeerSeen returns the most recent time at which any peer was
 // observed healthy. Returns the zero time when no peers are configured.
 func (f *FencingMonitor) latestPeerSeen() time.Time {
@@ -207,6 +356,26 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		return
 	}
 
+	// Rule #1 — topology mismatch. If the cached authoritative
+	// active site is known and disagrees with our site, fence
+	// immediately. This catches the "stale primary returns from a
+	// partition to find the operator has failed over to the peer"
+	// scenario even when the peer is reachable (peer reachability
+	// alone would otherwise keep rule #2 quiet).
+	if f.topologyEnabled() {
+		snap := f.topology.Snapshot()
+		if snap.ActiveSite != "" && snap.ActiveSite != f.mySite {
+			f.logger.Error("SELF-FENCING: topology mismatch — operator-authoritative active site disagrees with our site, setting super_read_only=ON",
+				"my_site", f.mySite,
+				"authoritative_active_site", snap.ActiveSite,
+				"observed_at", snap.ObservedAt,
+			)
+			f.doFence(ctx)
+			return
+		}
+	}
+
+	// Rule #2 — lease expiry on every reachability signal.
 	now := f.clock.Now()
 	bloodravenDown := now.Sub(f.lastBloodravenOK) > f.leaseTimeout
 
@@ -230,6 +399,13 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		"lease_timeout", f.leaseTimeout,
 	)
 
+	f.doFence(ctx)
+}
+
+// doFence performs the actual SET GLOBAL super_read_only=ON +
+// KILL-app-connections step and flips the fenced flag. Separated so
+// both fencing rules share the same write sequence.
+func (f *FencingMonitor) doFence(ctx context.Context) {
 	if err := f.mysql.SetSuperReadOnly(ctx); err != nil {
 		f.logger.Error("SELF-FENCING FAILED: could not set super_read_only", "error", err)
 		return
