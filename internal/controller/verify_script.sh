@@ -141,13 +141,16 @@ if [[ "$PITR_MODE" != "none" && "$PITR_MODE" != "" ]]; then
             log "PITR mode=timestamp requires BLOODRAVEN_PITR_STOP_DATETIME"
             exit 1
         fi
-        # mysqlbinlog wants a local datetime format; the sidecar emits
-        # RFC3339 UTC instants, which mysqlbinlog accepts when the
-        # server's TZ is UTC. The ephemeral mysqld defaults to the
-        # container's TZ; we set --default-time-zone=+00:00 at replay
-        # time to keep them aligned.
-        MB_STOP="${BLOODRAVEN_PITR_STOP_DATETIME//T/ }"
-        MB_STOP="${MB_STOP%Z}"
+        # mysqlbinlog wants "YYYY-MM-DD HH:MM:SS" in the server's TZ; we
+        # pin the server to UTC via --default-time-zone below. Accept
+        # RFC3339 in any form (Z, +00:00, fractional seconds) as well as
+        # the bare MySQL datetime shape, and normalize to UTC via GNU
+        # `date`.
+        MB_STOP="$(date -u -d "$BLOODRAVEN_PITR_STOP_DATETIME" +"%Y-%m-%d %H:%M:%S" 2>/dev/null || true)"
+        if [[ -z "$MB_STOP" ]]; then
+            log "invalid BLOODRAVEN_PITR_STOP_DATETIME=$BLOODRAVEN_PITR_STOP_DATETIME"
+            exit 1
+        fi
         MB_ARGS+=(--stop-datetime="$MB_STOP")
     fi
 
@@ -168,25 +171,35 @@ if [[ "$PITR_MODE" != "none" && "$PITR_MODE" != "" ]]; then
         exit "$REPLAY_RC"
     fi
 
-    # Read the last applied coordinate from the final binlog file in the
-    # list via a cheap tail + awk over mysqlbinlog's own summary. The
-    # "#<datetime>" header and "end_log_pos" marker are stable across 8.0+.
-    LAST_FILE="$(basename "${BINLOGS[-1]}")"
-    eval "$(mysqlbinlog --no-defaults "${BINLOGS[-1]}" 2>/dev/null \
-        | awk '
-            /^# at [0-9]+/ { pos=$3 }
-            /^#[0-9]{6} / && NF>=2 {
-                # ex: "#260420  1:59:57 server id 1 ..."
-                d=$1; t=$2;
-                ts=sprintf("20%s-%s-%s %s",
-                    substr(d,2,2), substr(d,4,2), substr(d,6,2), t);
-                last_ts=ts
-            }
-            END {
-                printf("LAST_POS=%s\n", pos+0);
-                printf("LAST_TS=%q\n", last_ts);
-            }'
-    )"
+    # Read the last applied coordinate from the replayed stream. Scan
+    # each binlog file in reverse with the same --stop-datetime filter
+    # used for replay so timestamp-mode runs report the last APPLIED
+    # event rather than end-of-file. The "#<datetime>" header and
+    # "# at <pos>" marker are stable across mysqlbinlog 8.0+. Output is
+    # "<pos>|<ts>"; parsed with bash param expansion (no `eval`, no
+    # gawk-only `%q`).
+    for ((i=${#BINLOGS[@]}-1; i>=0; i--)); do
+        f="${BINLOGS[i]}"
+        parsed=$(mysqlbinlog --no-defaults "${MB_ARGS[@]}" "$f" 2>/dev/null \
+            | awk '
+                /^# at [0-9]+/ { pos=$3 }
+                /^#[0-9]{6} / && NF>=2 {
+                    # ex: "#260420  1:59:57 server id 1 ..."
+                    d=$1; t=$2;
+                    ts=sprintf("20%s-%s-%s %s",
+                        substr(d,2,2), substr(d,4,2), substr(d,6,2), t);
+                    last_ts=ts
+                }
+                END {
+                    printf("%d|%s", pos+0, last_ts);
+                }')
+        LAST_POS="${parsed%%|*}"
+        LAST_TS="${parsed#*|}"
+        if [[ "$LAST_POS" -gt 0 && -n "$LAST_TS" ]]; then
+            LAST_FILE="$(basename "$f")"
+            break
+        fi
+    done
     # Translate "YYYY-MM-DD HH:MM:SS" into RFC3339 UTC.
     if [[ -n "$LAST_TS" ]]; then
         LAST_TS_RFC="$(date -u -d "$LAST_TS UTC" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || printf '')"

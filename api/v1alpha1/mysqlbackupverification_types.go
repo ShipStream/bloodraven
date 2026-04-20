@@ -144,11 +144,11 @@ type PointInTimeVerificationSpec struct {
 }
 
 // SanityCheckSpec configures the post-load scalar sanity check. The
-// verification runs the named Query via `mysqlsh --sql -e` against the
-// ephemeral mysqld, expects a single row / single column result (empty
-// result sets are treated as scalar 0), and fails the verification if
-// the scalar is less than Expect.MinRows or if the query exceeds
-// MaxDurationSeconds.
+// verification runs the named Query via the `mysql` CLI (`mysql -B -N
+// -e`, wrapped in `timeout`) against the ephemeral mysqld, expects a
+// single row / single column result (empty result sets are treated as
+// scalar 0), and fails the verification if the scalar is less than
+// Expect.MinRows or if the query exceeds MaxDurationSeconds.
 type SanityCheckSpec struct {
 	// Query is a single SQL statement. Must return a scalar
 	// (single-row, single-column) result. Multi-statement inputs are

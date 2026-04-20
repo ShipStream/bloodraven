@@ -24,10 +24,12 @@ rules:
   # location, size, GTID, binlog coordinates, and sanity-query results
   # that get written back to status.
   #
-  # Only `get` is granted here (no list/watch) — reconcilers already
-  # know the exact pod name from the Job, so no discovery is required,
-  # and the scope is intentionally limited so an operator compromise
-  # cannot tail arbitrary workload logs.
+  # Reconcilers discover the relevant terminal pod via `pods list` using
+  # label selectors (the pods/jobs verbs above already cover that), then
+  # fetch logs for the resolved pod via `pods/log get`. Only `get` is
+  # granted for `pods/log` (no list/watch), so the log-access scope
+  # remains intentionally limited — an operator compromise cannot tail
+  # arbitrary workload logs.
   - apiGroups: [""]
     resources: [pods/log]
     verbs: [get]

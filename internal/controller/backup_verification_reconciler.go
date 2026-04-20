@@ -799,6 +799,10 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 			out.Sanity = sanity
 		}
 	}
+	if err := sc.Err(); err != nil {
+		log.FromContext(ctx).Error(err, "failed to scan verification sentinel log output",
+			"pod", chosen.Name, "namespace", job.Namespace, "job", job.Name)
+	}
 	return out
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -187,7 +188,11 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// Sanity-check env: verify.sh branches on BLOODRAVEN_VERIFY_SANITY_QUERY
 	// being non-empty; min-rows floor and timeout are numeric scalars.
 	if v.Spec.SanityCheck != nil && v.Spec.SanityCheck.Query != "" {
-		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_QUERY", Value: v.Spec.SanityCheck.Query})
+		query, err := validateSanityQuery(v.Spec.SanityCheck.Query)
+		if err != nil {
+			return nil, fmt.Errorf("verification job: %w", err)
+		}
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_QUERY", Value: query})
 		maxSec := int32(60)
 		var minRows int64
 		if v.Spec.SanityCheck.Expect != nil {
@@ -362,6 +367,33 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		},
 	}
 	return job, nil
+}
+
+// validateSanityQuery enforces the CRD contract that
+// SanityCheckSpec.Query is a single SQL statement with no embedded
+// newlines. Multi-statement input would break the client-side timeout
+// budget (`timeout` wraps `mysql -e`, and multiple statements share the
+// budget) and complicates the scalar-capture contract, so we reject
+// any `;` other than an optional trailing one before handing the value
+// to `mysql -e`. Returns the query with a trailing `;` stripped so
+// verify.sh sees a single clean statement.
+func validateSanityQuery(q string) (string, error) {
+	trimmed := strings.TrimSpace(q)
+	if trimmed == "" {
+		return "", fmt.Errorf("sanityCheck.query must not be empty")
+	}
+	if strings.ContainsAny(trimmed, "\n\r") {
+		return "", fmt.Errorf("sanityCheck.query must be a single line (contains a newline)")
+	}
+	// Strip a single trailing `;` — common SQL convention — before
+	// scanning for any remaining separators.
+	trimmed = strings.TrimRight(trimmed, " \t")
+	trimmed = strings.TrimSuffix(trimmed, ";")
+	trimmed = strings.TrimRight(trimmed, " \t")
+	if strings.Contains(trimmed, ";") {
+		return "", fmt.Errorf("sanityCheck.query must be a single statement (contains `;`)")
+	}
+	return trimmed, nil
 }
 
 // verificationPITRSpec translates a verification's

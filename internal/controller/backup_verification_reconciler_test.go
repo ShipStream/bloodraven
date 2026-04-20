@@ -634,6 +634,60 @@ func TestBuildVerificationJob_SanityCheck_SetsEnvVars(t *testing.T) {
 	}
 }
 
+func TestValidateSanityQuery(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "single statement", in: "SELECT 1", want: "SELECT 1"},
+		{name: "trailing semicolon stripped", in: "SELECT COUNT(*) FROM o ;", want: "SELECT COUNT(*) FROM o"},
+		{name: "leading trailing whitespace", in: "   SELECT 1  ", want: "SELECT 1"},
+		{name: "empty", in: "   ", wantErr: true},
+		{name: "multi-statement", in: "SELECT 1; DELETE FROM t", wantErr: true},
+		{name: "newline rejected", in: "SELECT\n1", wantErr: true},
+		{name: "carriage return rejected", in: "SELECT\r1", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := validateSanityQuery(tc.in)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("wantErr=%v got err=%v", tc.wantErr, err)
+			}
+			if err == nil && got != tc.want {
+				t.Errorf("want %q got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestBuildVerificationJob_SanityCheck_RejectsMultiStatement(t *testing.T) {
+	fg := verifyFG()
+	backup := successfulBackup("happy", "lion", "nightly-s3")
+	v := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify-bad-sanity", Namespace: "ns"},
+		Spec: v1alpha1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			ProfileName:      "nightly-s3",
+			SanityCheck: &v1alpha1.SanityCheckSpec{
+				Query: "SELECT 1; DROP TABLE orders",
+			},
+		},
+	}
+	if _, err := buildVerificationJob(verificationJobInputs{
+		FailoverGroup:        fg,
+		Profile:              fg.Spec.Backup.Profiles[0],
+		Verification:         v,
+		Backup:               backup,
+		CredsSecretName:      "c",
+		ScriptsConfigMapName: "s",
+		PVCName:              "p",
+	}); err == nil {
+		t.Fatal("expected multi-statement sanity query to be rejected")
+	}
+}
+
 func TestParseReplaySentinel_HappyPath(t *testing.T) {
 	mark, ok := parseReplaySentinel(
 		"BLOODRAVEN_VERIFY_REPLAY_COMPLETE file=mysql-bin.000412 position=9183001 timestamp=2026-04-20T01:59:57Z")
