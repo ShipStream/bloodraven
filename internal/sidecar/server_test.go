@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // mockMysqlQuerier implements mysqlQuerier for testing.
@@ -83,6 +84,62 @@ func TestPeerPingReturns200(t *testing.T) {
 	}
 	if w.Body.String() != "pong" {
 		t.Errorf("expected 'pong', got %q", w.Body.String())
+	}
+}
+
+func TestPeerActiveSite_ReturnsSnapshot(t *testing.T) {
+	mock := &mockMysqlQuerier{connectable: true}
+	srv := NewServer(mock, ":0", testLogger())
+
+	cache := &TopologyCache{}
+	observed := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	cache.Set("pdx", observed)
+	srv.SetTopology(cache)
+
+	req := httptest.NewRequest(http.MethodGet, "/peer/active-site", nil)
+	w := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var snap TopologySnapshot
+	if err := json.NewDecoder(w.Body).Decode(&snap); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if snap.ActiveSite != "pdx" {
+		t.Errorf("activeSite = %q, want pdx", snap.ActiveSite)
+	}
+	if !snap.ObservedAt.Equal(observed) {
+		t.Errorf("observedAt = %v, want %v", snap.ObservedAt, observed)
+	}
+}
+
+func TestPeerActiveSite_EmptyCacheReturns204(t *testing.T) {
+	mock := &mockMysqlQuerier{connectable: true}
+	srv := NewServer(mock, ":0", testLogger())
+	srv.SetTopology(&TopologyCache{}) // empty cache
+
+	req := httptest.NewRequest(http.MethodGet, "/peer/active-site", nil)
+	w := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204 for empty cache, got %d", w.Code)
+	}
+}
+
+func TestPeerActiveSite_NoTopologyReturns204(t *testing.T) {
+	mock := &mockMysqlQuerier{connectable: true}
+	srv := NewServer(mock, ":0", testLogger())
+	// No SetTopology call — topology is nil.
+
+	req := httptest.NewRequest(http.MethodGet, "/peer/active-site", nil)
+	w := httptest.NewRecorder()
+	srv.httpServer.Handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204 when topology is nil, got %d", w.Code)
 	}
 }
 

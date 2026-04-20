@@ -132,6 +132,77 @@ primary; reads start failing if the replica was serving them via
 the Service selector narrows to exclude the down replica until it
 recovers.
 
+### Operator-down + partial partition (stale-primary scenario)
+
+This is the subtle case that WISHLIST #4 called out. A primary has
+already been failed over — the operator promoted the peer after the
+original primary lost connectivity — and the original primary now
+comes back into a state where it can reach its peer sidecar but
+still cannot reach the operator.
+
+Under a naive "fence only when operator AND every peer are silent"
+rule, this stale primary never fences: its peer is reachable, so
+the lease counter is refreshed every tick. Two MySQL instances
+could both report `read_only=OFF` until the operator's link comes
+back and it force-fences the wrong one.
+
+Bloodraven closes this by having the sidecar poll authoritative
+topology on every fencing tick, not only at boot:
+
+1. The sidecar `GET`s the operator's
+   `/active-site?namespace=<ns>&group=<g>` and caches the reply
+   (`activeSite`, `observedAt`). The cache is also seeded by the
+   boot-time safety net.
+2. It `GET`s each peer's `/peer/active-site`. If a peer returns
+   a view with a strictly newer `observedAt`, the sidecar adopts
+   it — this is how a sidecar that has lost its own operator link
+   can still learn that a failover has happened.
+3. Before running the lease-expiry rule, the sidecar compares the
+   cached authoritative `activeSite` against its own site. If they
+   differ and MySQL is still writable, it fences immediately:
+   `SET GLOBAL super_read_only=ON` and kill open app connections.
+
+The sequence for the scenario above:
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant SiteA as Site A (stale primary)
+    participant SiteB as Site B (new primary)
+    participant Op as Operator
+
+    Note over Op,SiteB: Earlier: operator failed over A→B<br/>after A lost connectivity.
+
+    Op->>SiteB: /active-site → {activeSite: B, observedAt: t0}
+    SiteB-->>Op: cached
+
+    Note over SiteA: Site A comes back. Operator<br/>still unreachable to A.
+
+    SiteA-)Op: /active-site (fails)
+    SiteA-)SiteB: /peer/ping → 200
+    SiteA->>SiteB: /peer/active-site
+    SiteB-->>SiteA: {activeSite: B, observedAt: t0}
+
+    Note over SiteA: adopt: observedAt(t0) > own(stale)
+
+    SiteA->>SiteA: cached.activeSite = B ≠ mySite(A)<br/>SET super_read_only=ON
+
+    App-xSiteA: writes now fail (super_read_only)
+```
+
+The stale primary fences within one fencing tick
+(`peerCheckInterval`, default 5 s) of coming back — it does not
+wait for `leaseTimeout`, and it does not depend on the operator
+being reachable. The only prerequisite is that at least one peer
+has ever successfully observed the authoritative `/active-site`.
+The boot-time safety net guarantees this for any peer that has
+been up since the last failover.
+
+Rolling upgrade note: a peer running an older sidecar that does
+not yet implement `/peer/active-site` returns 404; the adopting
+sidecar silently falls back to the operator-only path. No lease
+behavior changes in the mixed-version window.
+
 ### Operator-down + both-site outage
 
 Rare, but by construction, nothing can recover this automatically —
@@ -183,11 +254,15 @@ case — see [Durability and RPO](./durability-and-rpo.mdx) for the
 full contract, or [Old primary recovery](./failover.mdx#old-primary-recovery)
 for the operator's post-failover reconciliation.
 
-**Does operator downtime cause split brain?** No, by design. Sidecars
-self-fence any MySQL instance that can reach neither its peer nor the
-operator beyond `leaseTimeout`. In a partition where one site still has
-both the operator and the peer reachable, the operator-visible site
-stays authoritative and the isolated site fences itself.
+**Does operator downtime cause split brain?** No, by design. Two rules
+cooperate. (1) Sidecars poll the operator's `/active-site` every tick
+and also read each peer's `/peer/active-site`; if the authoritative
+active site disagrees with this site and MySQL is still writable, the
+sidecar fences immediately. (2) As a backstop, any MySQL instance that
+can reach neither its peer nor the operator beyond `leaseTimeout`
+self-fences. Rule (1) is what prevents a returning stale primary from
+continuing to accept writes even when its peer is reachable — see
+[Operator-down + partial partition](#operator-down--partial-partition-stale-primary-scenario).
 
 **Why not scale the operator horizontally?** Because the failure-detection
 loop is the bottleneck, not the operator process. Polling happens every

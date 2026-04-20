@@ -1,11 +1,16 @@
 package sidecar
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,6 +270,337 @@ func TestCheckStepFunction(t *testing.T) {
 
 	if !fm.fenced {
 		t.Error("should fence after clock advances past lease timeout with both unreachable")
+	}
+}
+
+// routingTransport lets a single *http.Client dispatch to different
+// stub handlers based on the request path. This keeps the tests
+// socket-free while exercising the full checkActiveSite /
+// checkPeerTopology code paths.
+type routingTransport struct {
+	// routes keys are request-path suffix prefixes matched with
+	// strings.HasPrefix. The first matching route wins, so order in
+	// the slice matters for overlapping prefixes.
+	routes []routingRoute
+}
+
+type routingRoute struct {
+	pathPrefix string
+	handler    func(r *http.Request) (*http.Response, error)
+}
+
+func (t *routingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	for _, route := range t.routes {
+		if strings.HasPrefix(r.URL.Path, route.pathPrefix) {
+			return route.handler(r)
+		}
+	}
+	return nil, fmt.Errorf("no stub for %s", r.URL.Path)
+}
+
+func jsonResponse(status int, body any) func(*http.Request) (*http.Response, error) {
+	return func(_ *http.Request) (*http.Response, error) {
+		buf, _ := json.Marshal(body)
+		return &http.Response{
+			StatusCode: status,
+			Body:       io.NopCloser(bytes.NewReader(buf)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	}
+}
+
+func errorResponse(err error) func(*http.Request) (*http.Response, error) {
+	return func(_ *http.Request) (*http.Response, error) { return nil, err }
+}
+
+// newTopologyFencingMonitor builds a FencingMonitor wired to a
+// TopologyCache and identity fields, with a routing transport so
+// tests can inject /active-site and /peer/active-site responses
+// without touching the network.
+func newTopologyFencingMonitor(
+	f Fencer,
+	clk *clock.FakeClock,
+	cache *TopologyCache,
+	routes []routingRoute,
+) *FencingMonitor {
+	client := &http.Client{Transport: &routingTransport{routes: routes}}
+	fm := NewFencingMonitorFull(
+		f,
+		"127.0.0.1:8081",
+		[]string{testPeerAddr},
+		5*time.Second,
+		20*time.Second,
+		testLogger(),
+		clk,
+		client,
+	).WithTopology("iad", "default", "orders", cache)
+	return fm
+}
+
+// TestEvaluate_TopologyMismatchFencesImmediately verifies rule #1:
+// when the operator-authoritative active site disagrees with mySite,
+// the monitor fences even though the operator and peer are both
+// currently reachable. Closes WISHLIST #4 — a stale primary that
+// returns from a partition must fence itself as soon as it learns a
+// failover has happened, without waiting for the lease to expire.
+func TestEvaluate_TopologyMismatchFencesImmediately(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false) // primary
+
+	cache := &TopologyCache{}
+	cache.Set("pdx", clk.Now()) // operator says active site is pdx
+	fm := newTopologyFencingMonitor(f, clk, cache, nil)
+
+	// Operator + peer both reachable — rule #2 would never fire.
+	fm.lastBloodravenOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
+
+	fm.evaluate(context.Background())
+
+	if !fm.fenced {
+		t.Fatal("should fence when topology says active site != mySite")
+	}
+	if !f.superReadOnly {
+		t.Error("should SET super_read_only on topology mismatch")
+	}
+}
+
+// TestEvaluate_TopologyMatchDoesNotFence verifies the hot-path
+// case: operator confirms this is the active site, lease counters
+// fresh → no fence.
+func TestEvaluate_TopologyMatchDoesNotFence(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false) // primary
+
+	cache := &TopologyCache{}
+	cache.Set("iad", clk.Now()) // iad == our site
+	fm := newTopologyFencingMonitor(f, clk, cache, nil)
+
+	fm.lastBloodravenOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
+
+	fm.evaluate(context.Background())
+
+	if fm.fenced {
+		t.Error("should not fence when topology confirms this is the active site")
+	}
+}
+
+// TestEvaluate_EmptyCacheDoesNotFence verifies that an unpopulated
+// cache does not accidentally trigger rule #1. Until the sidecar
+// has successfully observed any authoritative topology, lease-only
+// behavior applies.
+func TestEvaluate_EmptyCacheDoesNotFence(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false)
+
+	cache := &TopologyCache{}
+	fm := newTopologyFencingMonitor(f, clk, cache, nil)
+
+	fm.lastBloodravenOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
+
+	fm.evaluate(context.Background())
+
+	if fm.fenced {
+		t.Error("empty topology cache should not trigger fencing")
+	}
+}
+
+// TestCheckActiveSite_PopulatesCache verifies that a successful
+// /active-site response from the operator overwrites the cache.
+func TestCheckActiveSite_PopulatesCache(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false)
+	cache := &TopologyCache{}
+
+	routes := []routingRoute{
+		{pathPrefix: "/active-site", handler: jsonResponse(200, map[string]string{
+			"activeSite": "pdx",
+		})},
+	}
+	fm := newTopologyFencingMonitor(f, clk, cache, routes)
+
+	fm.checkActiveSite(context.Background())
+
+	snap := cache.Snapshot()
+	if snap.ActiveSite != "pdx" {
+		t.Errorf("activeSite = %q, want pdx", snap.ActiveSite)
+	}
+	if !snap.ObservedAt.Equal(clk.Now()) {
+		t.Errorf("observedAt = %v, want %v", snap.ObservedAt, clk.Now())
+	}
+}
+
+// TestCheckActiveSite_PassesIdentityParams verifies that the
+// /active-site URL carries the namespace and group as query params.
+// The operator returns 400 without them.
+func TestCheckActiveSite_PassesIdentityParams(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false)
+	cache := &TopologyCache{}
+
+	var captured url.Values
+	routes := []routingRoute{
+		{pathPrefix: "/active-site", handler: func(r *http.Request) (*http.Response, error) {
+			captured = r.URL.Query()
+			return jsonResponse(200, map[string]string{"activeSite": "iad"})(r)
+		}},
+	}
+	fm := newTopologyFencingMonitor(f, clk, cache, routes)
+
+	fm.checkActiveSite(context.Background())
+
+	if got := captured.Get("namespace"); got != "default" {
+		t.Errorf("namespace query = %q, want default", got)
+	}
+	if got := captured.Get("group"); got != "orders" {
+		t.Errorf("group query = %q, want orders", got)
+	}
+}
+
+// TestCheckActiveSite_LeavesCacheOnFailure verifies that an
+// unreachable operator does not wipe the cache.
+func TestCheckActiveSite_LeavesCacheOnFailure(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false)
+	cache := &TopologyCache{}
+	cache.Set("iad", start.Add(-5*time.Second))
+
+	routes := []routingRoute{
+		{pathPrefix: "/active-site", handler: errorResponse(fmt.Errorf("connection refused"))},
+	}
+	fm := newTopologyFencingMonitor(f, clk, cache, routes)
+
+	fm.checkActiveSite(context.Background())
+
+	snap := cache.Snapshot()
+	if snap.ActiveSite != "iad" {
+		t.Errorf("cache clobbered on failure: %q", snap.ActiveSite)
+	}
+}
+
+// TestCheckPeerTopology_AdoptsNewerSnapshot verifies the
+// partition-tolerant path: if the operator is unreachable but a
+// peer's /peer/active-site returns a strictly newer view, we adopt.
+func TestCheckPeerTopology_AdoptsNewerSnapshot(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false)
+	cache := &TopologyCache{}
+	cache.Set("iad", start.Add(-30*time.Second)) // stale "I'm active"
+
+	peerSnap := TopologySnapshot{
+		ActiveSite: "pdx",
+		ObservedAt: start, // strictly newer
+	}
+	routes := []routingRoute{
+		{pathPrefix: "/peer/active-site", handler: jsonResponse(200, peerSnap)},
+	}
+	fm := newTopologyFencingMonitor(f, clk, cache, routes)
+
+	fm.checkPeerTopology(context.Background(), testPeerAddr)
+
+	snap := cache.Snapshot()
+	if snap.ActiveSite != "pdx" {
+		t.Errorf("expected adoption of peer view pdx, got %q", snap.ActiveSite)
+	}
+}
+
+// TestCheckPeerTopology_IgnoresOlderSnapshot verifies that a peer
+// with a stale cache cannot drag us backward.
+func TestCheckPeerTopology_IgnoresOlderSnapshot(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false)
+	cache := &TopologyCache{}
+	cache.Set("pdx", start) // fresh
+
+	peerSnap := TopologySnapshot{
+		ActiveSite: "iad",                     // stale
+		ObservedAt: start.Add(-30 * time.Second),
+	}
+	routes := []routingRoute{
+		{pathPrefix: "/peer/active-site", handler: jsonResponse(200, peerSnap)},
+	}
+	fm := newTopologyFencingMonitor(f, clk, cache, routes)
+
+	fm.checkPeerTopology(context.Background(), testPeerAddr)
+
+	snap := cache.Snapshot()
+	if snap.ActiveSite != "pdx" {
+		t.Errorf("peer older snapshot should have been ignored, got %q", snap.ActiveSite)
+	}
+}
+
+// TestCheckPeerTopology_OldSidecarReturns404 verifies the
+// rolling-upgrade compatibility path: an older peer that does not
+// yet serve /peer/active-site returns 404, which we silently
+// ignore. The cache stays intact.
+func TestCheckPeerTopology_OldSidecarReturns404(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false)
+	cache := &TopologyCache{}
+	cache.Set("iad", start)
+
+	routes := []routingRoute{
+		{pathPrefix: "/peer/active-site", handler: func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}},
+	}
+	fm := newTopologyFencingMonitor(f, clk, cache, routes)
+
+	fm.checkPeerTopology(context.Background(), testPeerAddr)
+
+	snap := cache.Snapshot()
+	if snap.ActiveSite != "iad" {
+		t.Errorf("cache clobbered by 404: %q", snap.ActiveSite)
+	}
+}
+
+// TestEvaluate_StalePrimaryLearnsViaPeer is the end-to-end flow
+// that closes the WISHLIST #4 gap: operator unreachable, peer
+// reachable with a newer view that names a different site as
+// active. A single Check cycle should adopt the peer's view and
+// fence immediately, without waiting for the lease to expire.
+func TestEvaluate_StalePrimaryLearnsViaPeer(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false) // primary (still writable)
+	cache := &TopologyCache{}
+	cache.Set("iad", start.Add(-30*time.Second)) // pre-failover view
+
+	peerSnap := TopologySnapshot{
+		ActiveSite: "pdx",
+		ObservedAt: start,
+	}
+	routes := []routingRoute{
+		{pathPrefix: "/healthz", handler: errorResponse(fmt.Errorf("operator partitioned"))},
+		{pathPrefix: "/active-site", handler: errorResponse(fmt.Errorf("operator partitioned"))},
+		{pathPrefix: "/peer/ping", handler: jsonResponse(200, "pong")},
+		{pathPrefix: "/peer/active-site", handler: jsonResponse(200, peerSnap)},
+	}
+	fm := newTopologyFencingMonitor(f, clk, cache, routes)
+
+	// Lease counters are fresh — rule #2 cannot fire.
+	fm.lastBloodravenOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
+
+	fm.Check(context.Background())
+
+	if !fm.fenced {
+		t.Fatal("stale primary should fence after adopting peer's fresher active-site view")
+	}
+	snap := cache.Snapshot()
+	if snap.ActiveSite != "pdx" {
+		t.Errorf("cache should have adopted peer's view, got %q", snap.ActiveSite)
 	}
 }
 

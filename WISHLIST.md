@@ -5,7 +5,7 @@
 - [x] 1. Operator HA / leader election (docs-only; multi-replica HA is an intentional non-goal)
 - [x] 2. Document the RPO model explicitly
 - [x] 3. Split-brain auto-resolution option
-- [ ] 4. Fencing durability during operator-down + partial partition
+- [x] 4. Fencing durability during operator-down + partial partition
 - [x] 5. Reclone safety interlocks
 - [x] 6. In-place restore path
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
@@ -41,7 +41,7 @@
 
 **3. Split-brain auto-resolution option.** Today, `writable/writable` → alert only. For users with a strict authoritative-site policy (e.g., "iad always wins ties"), offer an opt-in `spec.splitBrainPolicy` with `manual` (current) and `preferSite: <name>` options. Document the data-reconciliation implications loudly.
 
-**4. Fencing durability during operator-down + partial partition.** Current design: sidecar self-fences when both operator *and* peer are unreachable. What happens if the sidecar can reach the peer primary but not the operator, and the peer is actually a stale primary from a prior failover? Walk through this in the docs with a sequence diagram. If there's a gap, close it (e.g., sidecar also checks `/active-site` on every poll, not just at startup).
+**4. Fencing durability during operator-down + partial partition.** ~~Current design: sidecar self-fences when both operator *and* peer are unreachable.~~ — done. The sidecar now polls the operator's `/active-site` every `peerCheckInterval` tick, and peer sidecars relay their cached view via `/peer/active-site`. When the authoritative `activeSite` disagrees with `mySite` and MySQL is still writable, the sidecar fences immediately — independent of lease timing and operator reachability. The lease-expiry rule remains as a backstop for the "everything silent" case. A returning stale primary that can reach only its peer (not the operator) now fences within one tick of adopting the peer's fresher view. Tests in `internal/sidecar/{fencing,topology_cache,server}_test.go`; sequence diagram in `docs/docs/operator-availability.mdx#operator-down--partial-partition-stale-primary-scenario`.
 
 **5. Reclone safety interlocks.** The reclone annotation triggers `CLONE INSTANCE` which wipes the target. Add a confirmation mechanism — either a `confirmReclone: <site-name>` field that must match, or require the annotation value to include the current `divergentGtid` prefix. Fat-fingering `reclone-site=iad` when you meant `pdx` is a career-ending mistake.
 
