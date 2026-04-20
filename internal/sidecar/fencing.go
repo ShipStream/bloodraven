@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -258,7 +259,10 @@ func (f *FencingMonitor) checkActiveSite(ctx context.Context) {
 		f.logger.Debug("fencing: operator /active-site unreachable", "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		// 404 (group not found yet) or 503 (operator not ready) just
@@ -306,7 +310,10 @@ func (f *FencingMonitor) checkPeerTopology(ctx context.Context, addr string) {
 		f.logger.Debug("fencing: peer /peer/active-site unreachable", "peer", addr, "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		// 404 means the peer predates this endpoint (rolling upgrade);
