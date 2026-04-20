@@ -813,6 +813,26 @@ spec:
                                 KeepOnFailure mirrors MysqlBackupVerificationSpec.KeepOnFailure
                                 for CRs created by this schedule. Default: true.
                               type: boolean
+                            pointInTime:
+                              description: |-
+                                PointInTime is copied onto each scheduled verification CR by
+                                trigger-verification. See PointInTimeVerificationSpec.
+                              properties:
+                                mode:
+                                  default: none
+                                  description: Mode selects the replay behavior.
+                                  enum:
+                                  - none
+                                  - latest
+                                  - timestamp
+                                  type: string
+                                timestamp:
+                                  description: |-
+                                    Timestamp is an RFC3339 instant; replay stops just before the
+                                    first binlog event after this time. Required when Mode=timestamp;
+                                    ignored otherwise.
+                                  type: string
+                              type: object
                             retentionPolicy:
                               description: |-
                                 RetentionPolicy caps how many verification CRs per profile are
@@ -835,6 +855,45 @@ spec:
                                   format: int32
                                   minimum: 0
                                   type: integer
+                              type: object
+                            sanityCheck:
+                              description: |-
+                                SanityCheck is copied onto each scheduled verification CR by
+                                trigger-verification. See SanityCheckSpec.
+                              properties:
+                                expect:
+                                  description: |-
+                                    Expect configures the pass/fail thresholds applied to the query
+                                    result. When nil, a non-error return with any scalar result
+                                    passes.
+                                  properties:
+                                    maxDurationSeconds:
+                                      default: 60
+                                      description: |-
+                                        MaxDurationSeconds is the client-side timeout for the sanity
+                                        query. Exceeding it fails the verification with
+                                        reason=SanityCheckTimeout. Default: 60.
+                                      format: int32
+                                      minimum: 1
+                                      type: integer
+                                    minRows:
+                                      description: |-
+                                        MinRows is the floor applied to the scalar result. When >0 and
+                                        the scalar result is less than MinRows, the verification fails
+                                        with reason=SanityCheckFailed. Default: 0 (disabled).
+                                      format: int64
+                                      minimum: 0
+                                      type: integer
+                                  type: object
+                                query:
+                                  description: |-
+                                    Query is a single SQL statement. Must return a scalar
+                                    (single-row, single-column) result. Multi-statement inputs are
+                                    rejected to keep the timeout budget predictable.
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - query
                               type: object
                             schedule:
                               description: |-

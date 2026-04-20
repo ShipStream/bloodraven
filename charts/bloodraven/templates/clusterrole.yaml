@@ -15,14 +15,17 @@ rules:
   - apiGroups: [""]
     resources: [nodes, pods]
     verbs: [get, list, patch, update, watch]
-  # pods/log is used exclusively by the MysqlBackup reconciler to tail the
-  # final `BLOODRAVEN_DUMP_COMPLETE` sentinel line printed by the embedded
-  # backup_script.py at the end of a successful mysqlsh dumpInstance run.
-  # That sentinel carries the resolved location, size, GTID, and binlog
-  # coordinates that get written back to MysqlBackup.status.
+  # pods/log is used by the MysqlBackup reconciler to tail the final
+  # `BLOODRAVEN_DUMP_COMPLETE` sentinel line printed by the embedded
+  # backup_script.py at the end of a successful mysqlsh dumpInstance run,
+  # and by the MysqlBackupVerification reconciler to tail the trailing
+  # `BLOODRAVEN_VERIFY_REPLAY_COMPLETE` / `BLOODRAVEN_VERIFY_SANITY_COMPLETE`
+  # sentinels emitted by verify.sh. Those sentinels carry the resolved
+  # location, size, GTID, binlog coordinates, and sanity-query results
+  # that get written back to status.
   #
-  # Only `get` is granted here (no list/watch) — the reconciler already
-  # knows the exact pod name from the Job, so no discovery is required,
+  # Only `get` is granted here (no list/watch) — reconcilers already
+  # know the exact pod name from the Job, so no discovery is required,
   # and the scope is intentionally limited so an operator compromise
   # cannot tail arbitrary workload logs.
   - apiGroups: [""]

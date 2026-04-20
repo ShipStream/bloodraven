@@ -130,9 +130,10 @@ func main() {
 	// by the verification CR; the reconciler cleans them up on
 	// success and retains them on failure for inspection.
 	verificationReconciler := &controller.MysqlBackupVerificationReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("bloodraven-verification"),
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("bloodraven-verification"),
+		Clientset: clientset,
 	}
 	if err := verificationReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error("unable to create verification controller", "error", err)

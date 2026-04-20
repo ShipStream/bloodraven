@@ -208,6 +208,15 @@ spec:
               message:
                 description: Message is a human-readable status message.
                 type: string
+              mysqlImage:
+                description: |-
+                  MysqlImage is the MySQL server image tag that was in use on the
+                  source failover group at the time this backup was taken. Captured
+                  from MysqlFailoverGroup.spec.image when the backup Job is created;
+                  backfilled from the live spec on next reconcile if empty on older
+                  CRs. Verification pins its ephemeral mysqld to this tag so a dump
+                  taken on a different MySQL major version still loads cleanly.
+                type: string
               observedGeneration:
                 description: |-
                   ObservedGeneration is the .metadata.generation this status was

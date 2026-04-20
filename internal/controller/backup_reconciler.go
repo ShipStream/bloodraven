@@ -203,6 +203,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		backup.Status.JobName = built.Name
 		backup.Status.SourceSite = sourceSite
 		backup.Status.StorageType = profile.Storage.Type
+		backup.Status.MysqlImage = mysqlImageFor(&fg)
 		backup.Status.ActiveSiteAtStart = fg.Status.ActiveSite
 		if backup.Status.Attempt == 0 {
 			backup.Status.Attempt = 1
@@ -264,6 +265,9 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	if next.StorageType == "" && profile != nil {
 		next.StorageType = profile.Storage.Type
+	}
+	if next.MysqlImage == "" {
+		next.MysqlImage = mysqlImageFor(&fg)
 	}
 	next.ObservedGeneration = backup.Generation
 

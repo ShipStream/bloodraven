@@ -31,6 +31,7 @@ Metrics are served on `:8080/metrics` in standard Prometheus exposition format.
 | `bloodraven_backup_verification_last_attempt_timestamp_seconds` | Gauge | `group`, `profile` | Unix timestamp of the last terminal verification attempt, regardless of result. Distinguishes "verification never ran" from "verification ran but failed". |
 | `bloodraven_backup_verification_runs_total` | Counter | `group`, `profile`, `result` | Terminal verification attempts labelled `success` or `failure`. |
 | `bloodraven_backup_verification_duration_seconds` | Histogram | `group`, `profile` | Wall-clock duration of a verification run. |
+| `bloodraven_backup_verification_replay_lag_seconds` | Gauge | `group`, `profile` | For verifications with PITR replay enabled: `completionTime − replayedThroughBinlog.timestamp`. A rising value means archived binlogs trail the live primary &mdash; alert below your RPO target. |
 
 ### Scrape configuration
 

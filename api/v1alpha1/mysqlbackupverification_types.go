@@ -102,6 +102,83 @@ type MysqlBackupVerificationSpec struct {
 	// "schedule/<schedule-name>"). Informational only.
 	// +optional
 	TriggeredBy string `json:"triggeredBy,omitempty"`
+
+	// PointInTime configures whether the verification replays archived
+	// binlogs on top of the restored dump. Leave nil or set mode=none to
+	// skip replay (Phase 1 behavior). mode=latest replays every archived
+	// event at or after the backup's binlog coordinates; mode=timestamp
+	// stops the replay at a caller-supplied RFC3339 instant. Requires
+	// spec.backup.pitr.enabled=true on the referenced failover group.
+	// +optional
+	PointInTime *PointInTimeVerificationSpec `json:"pointInTime,omitempty"`
+
+	// SanityCheck runs a single scalar-returning SELECT against the
+	// ephemeral mysqld after the dump load (and optional PITR replay)
+	// succeeds. Failures (errors, timeouts, or minRows mismatch) flip
+	// the verification to Failed with a SanityCheckFailed /
+	// SanityCheckTimeout reason so an otherwise-loadable but obviously
+	// corrupt dump does not quietly pass the freshness gauge.
+	// +optional
+	SanityCheck *SanityCheckSpec `json:"sanityCheck,omitempty"`
+}
+
+// PointInTimeVerificationSpec controls PITR binlog replay during a
+// verification. When Mode is "none" (or this field is nil), the
+// verification stops after util.loadDump() returns; no binlog replay
+// happens. "latest" replays up through the newest archived event; it
+// exercises the archiver+replay path end-to-end. "timestamp" replays
+// through a caller-supplied instant — useful for drilling at a specific
+// known-good point, or as a regression check that archives covering a
+// past incident still replay cleanly.
+type PointInTimeVerificationSpec struct {
+	// Mode selects the replay behavior.
+	// +kubebuilder:default=none
+	// +kubebuilder:validation:Enum=none;latest;timestamp
+	Mode string `json:"mode,omitempty"`
+
+	// Timestamp is an RFC3339 instant; replay stops just before the
+	// first binlog event after this time. Required when Mode=timestamp;
+	// ignored otherwise.
+	// +optional
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+// SanityCheckSpec configures the post-load scalar sanity check. The
+// verification runs the named Query via `mysqlsh --sql -e` against the
+// ephemeral mysqld, expects a single row / single column result (empty
+// result sets are treated as scalar 0), and fails the verification if
+// the scalar is less than Expect.MinRows or if the query exceeds
+// MaxDurationSeconds.
+type SanityCheckSpec struct {
+	// Query is a single SQL statement. Must return a scalar
+	// (single-row, single-column) result. Multi-statement inputs are
+	// rejected to keep the timeout budget predictable.
+	// +kubebuilder:validation:MinLength=1
+	Query string `json:"query"`
+
+	// Expect configures the pass/fail thresholds applied to the query
+	// result. When nil, a non-error return with any scalar result
+	// passes.
+	// +optional
+	Expect *SanityCheckExpectation `json:"expect,omitempty"`
+}
+
+// SanityCheckExpectation captures the pass/fail thresholds applied to
+// the sanity query scalar result.
+type SanityCheckExpectation struct {
+	// MinRows is the floor applied to the scalar result. When >0 and
+	// the scalar result is less than MinRows, the verification fails
+	// with reason=SanityCheckFailed. Default: 0 (disabled).
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	MinRows int64 `json:"minRows,omitempty"`
+
+	// MaxDurationSeconds is the client-side timeout for the sanity
+	// query. Exceeding it fails the verification with
+	// reason=SanityCheckTimeout. Default: 60.
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=1
+	MaxDurationSeconds int32 `json:"maxDurationSeconds,omitempty"`
 }
 
 // VerificationStorage sizes and parameterizes the ephemeral PVC used as
@@ -184,6 +261,20 @@ type MysqlBackupVerificationStatus struct {
 	// restore Job to the ephemeral MySQL Pod.
 	ServiceName string `json:"serviceName,omitempty"`
 
+	// ReplayedThroughBinlog is populated on Succeeded verifications
+	// whose spec.pointInTime.mode was not "none". Captures the last
+	// binlog event that was applied so operators can correlate the
+	// verified coverage window against their RPO target.
+	// +optional
+	ReplayedThroughBinlog *BinlogReplayMark `json:"replayedThroughBinlog,omitempty"`
+
+	// SanityCheck is populated when spec.sanityCheck is set. Records
+	// whether the query ran, its duration, and the scalar result so
+	// operators can look at `kubectl describe` and tell what the
+	// verification actually asserted.
+	// +optional
+	SanityCheck *SanityCheckResult `json:"sanityCheck,omitempty"`
+
 	// Message is a human-readable status message.
 	Message string `json:"message,omitempty"`
 
@@ -195,6 +286,50 @@ type MysqlBackupVerificationStatus struct {
 	// verification's state. Types include "Verified" and
 	// "ResourcesCleanedUp".
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// BinlogReplayMark records the final binlog coordinate and server-clock
+// timestamp a PITR replay caught up to. Reported by the verification
+// Job via a structured log sentinel so the reconciler can populate
+// status without shelling out to MySQL itself.
+type BinlogReplayMark struct {
+	// File is the last binlog file applied, e.g. "mysql-bin.000412".
+	// +optional
+	File string `json:"file,omitempty"`
+
+	// Position is the byte offset within File of the last applied
+	// event.
+	// +optional
+	Position int64 `json:"position,omitempty"`
+
+	// Timestamp is the wall-clock time of the last applied event, in
+	// RFC3339. Used to compute bloodraven_backup_verification_replay_lag_seconds.
+	// +optional
+	Timestamp *metav1.Time `json:"timestamp,omitempty"`
+}
+
+// SanityCheckResult captures the observed outcome of
+// spec.sanityCheck.query. ResultRow is the scalar column rendered as a
+// string so the status subresource stays generic over MySQL type.
+type SanityCheckResult struct {
+	// Ran is true when the verification Job actually executed the
+	// sanity query. Useful for distinguishing "skipped because upstream
+	// phase failed" from "ran but returned 0 rows".
+	Ran bool `json:"ran,omitempty"`
+
+	// DurationMs is the client-side wall-clock duration of the query.
+	// +optional
+	DurationMs int64 `json:"durationMs,omitempty"`
+
+	// ResultRow is the scalar result rendered as a string. Empty when
+	// the query returned zero rows.
+	// +optional
+	ResultRow string `json:"resultRow,omitempty"`
+
+	// Error is the error message from a failed sanity query. Set on
+	// SanityCheckFailed or SanityCheckTimeout terminal transitions.
+	// +optional
+	Error string `json:"error,omitempty"`
 }
 
 // VerificationBackupRef records which MysqlBackup a verification run
@@ -282,6 +417,16 @@ type VerificationSpec struct {
 	// retained after they reach a terminal phase.
 	// +optional
 	RetentionPolicy *VerificationRetentionPolicy `json:"retentionPolicy,omitempty"`
+
+	// PointInTime is copied onto each scheduled verification CR by
+	// trigger-verification. See PointInTimeVerificationSpec.
+	// +optional
+	PointInTime *PointInTimeVerificationSpec `json:"pointInTime,omitempty"`
+
+	// SanityCheck is copied onto each scheduled verification CR by
+	// trigger-verification. See SanityCheckSpec.
+	// +optional
+	SanityCheck *SanityCheckSpec `json:"sanityCheck,omitempty"`
 }
 
 // VerificationRetentionPolicy caps the number of MysqlBackupVerification

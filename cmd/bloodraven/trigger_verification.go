@@ -56,6 +56,28 @@ func runTriggerVerification(args []string) {
 		os.Exit(1)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Fetch the group's VerificationSpec so the scheduled CR inherits
+	// spec.pointInTime / spec.sanityCheck. The Phase 1 reconciler was
+	// happy to leave these unset, but Phase 2 uses them to drive PITR
+	// replay and sanity-check evaluation.
+	var fg v1alpha1.MysqlFailoverGroup
+	if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: *group}, &fg); err != nil {
+		logger.Error("get failover group", "error", err, "group", *group)
+		os.Exit(1)
+	}
+	var verifSpec *v1alpha1.VerificationSpec
+	if fg.Spec.Backup != nil {
+		for i := range fg.Spec.Backup.Profiles {
+			if fg.Spec.Backup.Profiles[i].Name == *profile {
+				verifSpec = fg.Spec.Backup.Profiles[i].Verification
+				break
+			}
+		}
+	}
+
 	labels := map[string]string{
 		"shipstream.io/failover-group": *group,
 		"shipstream.io/backup-profile": *profile,
@@ -74,9 +96,20 @@ func runTriggerVerification(args []string) {
 			TriggeredBy:      "schedule",
 		},
 	}
+	if verifSpec != nil {
+		verify.Spec.KeepOnFailure = verifSpec.KeepOnFailure
+		verify.Spec.TTLSecondsAfterFinished = verifSpec.TTLSecondsAfterFinished
+		if verifSpec.Storage != nil {
+			verify.Spec.Storage = verifSpec.Storage.DeepCopy()
+		}
+		if verifSpec.PointInTime != nil {
+			verify.Spec.PointInTime = verifSpec.PointInTime.DeepCopy()
+		}
+		if verifSpec.SanityCheck != nil {
+			verify.Spec.SanityCheck = verifSpec.SanityCheck.DeepCopy()
+		}
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	if err := cl.Create(ctx, verify); err != nil {
 		logger.Error("create mysqlbackupverification", "error", err, "group", *group, "profile", *profile)
 		os.Exit(1)

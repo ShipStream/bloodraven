@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"math"
+	"strconv"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -153,12 +154,54 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 
 	inputURL := ensureTrailingSlash(backup.Status.Location)
 
+	// PITR replay fragments (download init container + shared emptyDir
+	// + main-container env/mounts). buildRestorePITRFragmentsFor returns
+	// empty fragments when the translated spec is nil, so the append
+	// paths are unconditional below.
+	pitFromVerification, err := verificationPITRSpec(v.Spec.PointInTime)
+	if err != nil {
+		return nil, err
+	}
+	pitrFrags, err := buildRestorePITRFragmentsFor(fg, pitFromVerification)
+	if err != nil {
+		return nil, err
+	}
+
 	env := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_DATA_DIR", Value: verificationDataMountPath},
 		{Name: "BLOODRAVEN_SCRIPTS_DIR", Value: backupScriptsMountPath},
 		{Name: "BLOODRAVEN_INPUT_URL", Value: inputURL},
 		{Name: "BLOODRAVEN_LOAD_OPTIONS", Value: loadOptsJSON},
 		{Name: "HOME", Value: mysqlshHomeMountPath},
+	}
+
+	// PITR replay env: tell verify.sh whether to run replay at all, and
+	// forward the stop datetime + local dir picked up by mysqlbinlog.
+	// pitrFrags.MainEnv already carries BLOODRAVEN_PITR_LOCAL_DIR and
+	// BLOODRAVEN_PITR_STOP_DATETIME so we only need the mode toggle.
+	if v.Spec.PointInTime != nil && v.Spec.PointInTime.Mode != "" && v.Spec.PointInTime.Mode != "none" {
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_PITR_MODE", Value: v.Spec.PointInTime.Mode})
+	}
+	env = append(env, pitrFrags.MainEnv...)
+
+	// Sanity-check env: verify.sh branches on BLOODRAVEN_VERIFY_SANITY_QUERY
+	// being non-empty; min-rows floor and timeout are numeric scalars.
+	if v.Spec.SanityCheck != nil && v.Spec.SanityCheck.Query != "" {
+		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_QUERY", Value: v.Spec.SanityCheck.Query})
+		maxSec := int32(60)
+		var minRows int64
+		if v.Spec.SanityCheck.Expect != nil {
+			if v.Spec.SanityCheck.Expect.MaxDurationSeconds > 0 {
+				maxSec = v.Spec.SanityCheck.Expect.MaxDurationSeconds
+			}
+			if v.Spec.SanityCheck.Expect.MinRows > 0 {
+				minRows = v.Spec.SanityCheck.Expect.MinRows
+			}
+		}
+		env = append(env,
+			corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS", Value: strconv.FormatInt(int64(maxSec), 10)},
+			corev1.EnvVar{Name: "BLOODRAVEN_VERIFY_SANITY_MIN_ROWS", Value: strconv.FormatInt(minRows, 10)},
+		)
 	}
 
 	volumes := []corev1.Volume{
@@ -257,6 +300,16 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_AWS_CREDS_DIR", Value: backupAWSCredsMountPath})
 	}
 
+	// Splice PITR fragments: shared emptyDir volume, pitr-aws-creds /
+	// pitr-archive volume, and the read-only main-container mount.
+	volumes = append(volumes, pitrFrags.PodVolumes...)
+	mounts = append(mounts, pitrFrags.MainMounts...)
+
+	var initContainers []corev1.Container
+	if pitrFrags.InitContainer != nil {
+		initContainers = append(initContainers, *pitrFrags.InitContainer)
+	}
+
 	activeDeadline := verificationDefaultActiveDeadline
 	backoff := int32(0)
 	var (
@@ -289,6 +342,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,
 					SecurityContext:  podSC,
+					InitContainers:   initContainers,
 					Containers: []corev1.Container{
 						{
 							Name:  backupJobContainerName,
@@ -308,6 +362,38 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		},
 	}
 	return job, nil
+}
+
+// verificationPITRSpec translates a verification's
+// PointInTimeVerificationSpec into the PITR shape that the shared
+// restore-path init-container builder understands. Returns nil (no
+// replay) for empty / "none" input. "latest" is encoded as a
+// far-future stop datetime so the download + mysqlbinlog pipeline
+// includes every archived event; "timestamp" requires a caller-supplied
+// RFC3339 instant.
+func verificationPITRSpec(in *v1alpha1.PointInTimeVerificationSpec) (*v1alpha1.PointInTimeSpec, error) {
+	if in == nil {
+		return nil, nil
+	}
+	switch in.Mode {
+	case "", "none":
+		return nil, nil
+	case "latest":
+		// A stop datetime far enough in the future that no archived
+		// event could land after it. mysqlbinlog --stop-datetime is
+		// inclusive of the target time, and the pitr-download init
+		// container uses it as the ceiling when selecting manifest
+		// entries — so a sentinel value effectively means "everything
+		// available".
+		return &v1alpha1.PointInTimeSpec{StopDatetime: "9999-12-31T23:59:59Z"}, nil
+	case "timestamp":
+		if in.Timestamp == "" {
+			return nil, fmt.Errorf("pointInTime.timestamp is required when mode=timestamp")
+		}
+		return &v1alpha1.PointInTimeSpec{StopDatetime: in.Timestamp}, nil
+	default:
+		return nil, fmt.Errorf("pointInTime.mode %q is not one of none|latest|timestamp", in.Mode)
+	}
 }
 
 // verificationLoadOptions returns the util.loadDump() options used for

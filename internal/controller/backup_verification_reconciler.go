@@ -1,19 +1,24 @@
 package controller
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	mysqldriver "github.com/go-sql-driver/mysql"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,6 +49,14 @@ type MysqlBackupVerificationReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+
+	// Clientset is optional; when non-nil the reconciler tails the
+	// verification Job pod logs for the BLOODRAVEN_VERIFY_REPLAY_COMPLETE
+	// and BLOODRAVEN_VERIFY_SANITY_COMPLETE sentinels and populates
+	// status.replayedThroughBinlog / status.sanityCheck accordingly.
+	// Fake-client tests leave this nil; status will then only carry the
+	// terminal Phase and Conditions.
+	Clientset kubernetes.Interface
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackupverifications,verbs=get;list;watch;create;update;patch;delete
@@ -54,6 +67,7 @@ type MysqlBackupVerificationReconciler struct {
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 
 func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("mysqlbackupverification", req.NamespacedName)
@@ -257,27 +271,47 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 		completion = metav1.Now()
 	}
 
+	// Parse the verify.sh log sentinels for PITR replay + sanity check
+	// details. Nil sentinels (missing Clientset, older Jobs) leave the
+	// status fields at zero value and do not fail the reconcile.
+	sentinels := r.tailVerificationSentinels(ctx, &v, &job)
+	if sentinels.Replay != nil {
+		next.ReplayedThroughBinlog = sentinels.Replay
+	}
+	if sentinels.Sanity != nil {
+		next.SanityCheck = sentinels.Sanity
+	}
+
+	reason := "Succeeded"
 	if phase == v1alpha1.BackupPhaseSucceeded {
 		next.Phase = v1alpha1.VerificationPhaseSucceeded
-		setCondition(&next.Conditions, metav1.Condition{
-			Type:               ConditionVerified,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: v.Generation,
-			LastTransitionTime: completion,
-			Reason:             "Succeeded",
-			Message:            message,
-		})
 	} else {
 		next.Phase = v1alpha1.VerificationPhaseFailed
-		setCondition(&next.Conditions, metav1.Condition{
-			Type:               ConditionVerified,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: v.Generation,
-			LastTransitionTime: completion,
-			Reason:             "Failed",
-			Message:            message,
-		})
+		reason = "Failed"
+		// Attribute the failure to the sanity-check phase when the
+		// sentinel tells us that's where we stopped. Operators get a
+		// distinct reason they can filter on (SanityCheckFailed vs the
+		// generic RestoreFailed) without having to grep pod logs.
+		if sentinels.Sanity != nil && sentinels.Sanity.Error != "" {
+			if strings.EqualFold(sentinels.Sanity.Error, "timeout") {
+				reason = "SanityCheckTimeout"
+			} else {
+				reason = "SanityCheckFailed"
+			}
+		}
 	}
+	conditionStatus := metav1.ConditionTrue
+	if phase != v1alpha1.BackupPhaseSucceeded {
+		conditionStatus = metav1.ConditionFalse
+	}
+	setCondition(&next.Conditions, metav1.Condition{
+		Type:               ConditionVerified,
+		Status:             conditionStatus,
+		ObservedGeneration: v.Generation,
+		LastTransitionTime: completion,
+		Reason:             reason,
+		Message:            message,
+	})
 	next.CompletionTime = &completion
 	if next.StartTime != nil {
 		next.DurationSeconds = int64(completion.Sub(next.StartTime.Time).Seconds())
@@ -689,6 +723,155 @@ func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.Mysq
 		bmetrics.BackupVerificationDurationSeconds.WithLabelValues(group, profile).
 			Observe(end.Sub(v.Status.StartTime.Time).Seconds())
 	}
+	// Replay lag is only meaningful on success with PITR coordinates.
+	if v.Status.Phase == v1alpha1.VerificationPhaseSucceeded &&
+		v.Status.ReplayedThroughBinlog != nil &&
+		v.Status.ReplayedThroughBinlog.Timestamp != nil &&
+		!end.IsZero() {
+		lag := end.Sub(v.Status.ReplayedThroughBinlog.Timestamp.Time).Seconds()
+		if lag < 0 {
+			lag = 0
+		}
+		bmetrics.BackupVerificationReplayLagSeconds.WithLabelValues(group, profile).Set(lag)
+	}
+}
+
+// verifySentinels bundles the parsed output of the verify.sh post-load
+// sentinels. Either field may be nil when the corresponding phase did
+// not run (no pointInTime, no sanityCheck) or when log tailing is
+// unavailable (no Clientset).
+type verifySentinels struct {
+	Replay *v1alpha1.BinlogReplayMark
+	Sanity *v1alpha1.SanityCheckResult
+}
+
+// tailVerificationSentinels reads the verification Job pod's logs and
+// parses the trailing BLOODRAVEN_VERIFY_REPLAY_COMPLETE and
+// BLOODRAVEN_VERIFY_SANITY_COMPLETE sentinels into structured status
+// fragments. Returns zero-value sentinels on any failure path so the
+// caller cleanly leaves status at its existing values.
+func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx context.Context, v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) verifySentinels {
+	out := verifySentinels{}
+	if r.Clientset == nil {
+		return out
+	}
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(job.Namespace),
+		client.MatchingLabels{labelMysqlBackupVerification: v.Name},
+	); err != nil {
+		return out
+	}
+	// Prefer the Succeeded pod; on Failed runs the pod phase is Failed
+	// but we still want its tail. Take the most recent terminal pod.
+	var chosen *corev1.Pod
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
+			continue
+		}
+		if chosen == nil || p.CreationTimestamp.After(chosen.CreationTimestamp.Time) {
+			chosen = p
+		}
+	}
+	if chosen == nil {
+		return out
+	}
+
+	req := r.Clientset.CoreV1().Pods(job.Namespace).GetLogs(chosen.Name, &corev1.PodLogOptions{
+		Container: backupJobContainerName,
+		TailLines: ptr64(200),
+	})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return out
+	}
+	defer func() { _ = stream.Close() }()
+
+	sc := bufio.NewScanner(io.LimitReader(stream, 64*1024))
+	for sc.Scan() {
+		line := sc.Text()
+		if mark, ok := parseReplaySentinel(line); ok {
+			out.Replay = mark
+			continue
+		}
+		if sanity, ok := parseSanitySentinel(line); ok {
+			out.Sanity = sanity
+		}
+	}
+	return out
+}
+
+// parseReplaySentinel parses a single BLOODRAVEN_VERIFY_REPLAY_COMPLETE
+// line into a BinlogReplayMark. Returns (nil, false) on a prefix
+// mismatch. Missing fields are tolerated (forward-compatible with
+// future verify.sh extensions).
+func parseReplaySentinel(line string) (*v1alpha1.BinlogReplayMark, bool) {
+	const prefix = "BLOODRAVEN_VERIFY_REPLAY_COMPLETE"
+	if !strings.HasPrefix(line, prefix) {
+		return nil, false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	mark := &v1alpha1.BinlogReplayMark{}
+	for _, f := range strings.Fields(rest) {
+		eq := strings.IndexByte(f, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := f[:eq]
+		val := f[eq+1:]
+		switch key {
+		case "file":
+			mark.File = val
+		case "position":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				mark.Position = n
+			}
+		case "timestamp":
+			if val == "" {
+				continue
+			}
+			if t, err := time.Parse(time.RFC3339, val); err == nil {
+				mt := metav1.NewTime(t)
+				mark.Timestamp = &mt
+			}
+		}
+	}
+	return mark, true
+}
+
+// parseSanitySentinel parses a single BLOODRAVEN_VERIFY_SANITY_COMPLETE
+// line into a SanityCheckResult. verify.sh escapes whitespace in
+// string-valued fields (resultRow, error) as underscores so the
+// whitespace-split parser round-trips cleanly.
+func parseSanitySentinel(line string) (*v1alpha1.SanityCheckResult, bool) {
+	const prefix = "BLOODRAVEN_VERIFY_SANITY_COMPLETE"
+	if !strings.HasPrefix(line, prefix) {
+		return nil, false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	res := &v1alpha1.SanityCheckResult{}
+	for _, f := range strings.Fields(rest) {
+		eq := strings.IndexByte(f, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := f[:eq]
+		val := strings.ReplaceAll(f[eq+1:], "_", " ")
+		switch key {
+		case "ran":
+			res.Ran = val == "1" || strings.EqualFold(val, "true")
+		case "durationMs":
+			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+				res.DurationMs = n
+			}
+		case "resultRow":
+			res.ResultRow = val
+		case "error":
+			res.Error = val
+		}
+	}
+	return res, true
 }
 
 // pruneRetention deletes old MysqlBackupVerification CRs for the same

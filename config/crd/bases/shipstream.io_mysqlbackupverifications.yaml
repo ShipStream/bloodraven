@@ -118,6 +118,30 @@ spec:
                   Defaults to true. Retention GC still reclaims KeepOnFailure
                   artifacts once the CR ages out of the failed-run retention bucket.
                 type: boolean
+              pointInTime:
+                description: |-
+                  PointInTime configures whether the verification replays archived
+                  binlogs on top of the restored dump. Leave nil or set mode=none to
+                  skip replay (Phase 1 behavior). mode=latest replays every archived
+                  event at or after the backup's binlog coordinates; mode=timestamp
+                  stops the replay at a caller-supplied RFC3339 instant. Requires
+                  spec.backup.pitr.enabled=true on the referenced failover group.
+                properties:
+                  mode:
+                    default: none
+                    description: Mode selects the replay behavior.
+                    enum:
+                    - none
+                    - latest
+                    - timestamp
+                    type: string
+                  timestamp:
+                    description: |-
+                      Timestamp is an RFC3339 instant; replay stops just before the
+                      first binlog event after this time. Required when Mode=timestamp;
+                      ignored otherwise.
+                    type: string
+                type: object
               profileName:
                 description: |-
                   ProfileName is the name of a spec.backup.profiles[] entry on the
@@ -187,6 +211,49 @@ spec:
                       otherwise to an implementation-defined value. Requests cannot exceed Limits.
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
+                type: object
+              sanityCheck:
+                description: |-
+                  SanityCheck runs a single scalar-returning SELECT against the
+                  ephemeral mysqld after the dump load (and optional PITR replay)
+                  succeeds. Failures (errors, timeouts, or minRows mismatch) flip
+                  the verification to Failed with a SanityCheckFailed /
+                  SanityCheckTimeout reason so an otherwise-loadable but obviously
+                  corrupt dump does not quietly pass the freshness gauge.
+                properties:
+                  expect:
+                    description: |-
+                      Expect configures the pass/fail thresholds applied to the query
+                      result. When nil, a non-error return with any scalar result
+                      passes.
+                    properties:
+                      maxDurationSeconds:
+                        default: 60
+                        description: |-
+                          MaxDurationSeconds is the client-side timeout for the sanity
+                          query. Exceeding it fails the verification with
+                          reason=SanityCheckTimeout. Default: 60.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      minRows:
+                        description: |-
+                          MinRows is the floor applied to the scalar result. When >0 and
+                          the scalar result is less than MinRows, the verification fails
+                          with reason=SanityCheckFailed. Default: 0 (disabled).
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    type: object
+                  query:
+                    description: |-
+                      Query is a single SQL statement. Must return a scalar
+                      (single-row, single-column) result. Multi-statement inputs are
+                      rejected to keep the timeout budget predictable.
+                    minLength: 1
+                    type: string
+                required:
+                - query
                 type: object
               storage:
                 description: |-
@@ -360,6 +427,58 @@ spec:
               pvcName:
                 description: PVCName is the name of the ephemeral MySQL PVC.
                 type: string
+              replayedThroughBinlog:
+                description: |-
+                  ReplayedThroughBinlog is populated on Succeeded verifications
+                  whose spec.pointInTime.mode was not "none". Captures the last
+                  binlog event that was applied so operators can correlate the
+                  verified coverage window against their RPO target.
+                properties:
+                  file:
+                    description: File is the last binlog file applied, e.g. "mysql-bin.000412".
+                    type: string
+                  position:
+                    description: |-
+                      Position is the byte offset within File of the last applied
+                      event.
+                    format: int64
+                    type: integer
+                  timestamp:
+                    description: |-
+                      Timestamp is the wall-clock time of the last applied event, in
+                      RFC3339. Used to compute bloodraven_backup_verification_replay_lag_seconds.
+                    format: date-time
+                    type: string
+                type: object
+              sanityCheck:
+                description: |-
+                  SanityCheck is populated when spec.sanityCheck is set. Records
+                  whether the query ran, its duration, and the scalar result so
+                  operators can look at `kubectl describe` and tell what the
+                  verification actually asserted.
+                properties:
+                  durationMs:
+                    description: DurationMs is the client-side wall-clock duration
+                      of the query.
+                    format: int64
+                    type: integer
+                  error:
+                    description: |-
+                      Error is the error message from a failed sanity query. Set on
+                      SanityCheckFailed or SanityCheckTimeout terminal transitions.
+                    type: string
+                  ran:
+                    description: |-
+                      Ran is true when the verification Job actually executed the
+                      sanity query. Useful for distinguishing "skipped because upstream
+                      phase failed" from "ran but returned 0 rows".
+                    type: boolean
+                  resultRow:
+                    description: |-
+                      ResultRow is the scalar result rendered as a string. Empty when
+                      the query returned zero rows.
+                    type: string
+                type: object
               serviceName:
                 description: |-
                   ServiceName is the name of the headless Service routing the
