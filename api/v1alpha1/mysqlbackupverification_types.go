@@ -23,10 +23,13 @@ import (
 // bloodraven_backup_verified_timestamp_seconds gauge give operators a
 // concrete signal that recent backups are restorable.
 //
-// Verification runs in the operator's own namespace with a dedicated
-// Pod, Service, and PVC, all cleaned up on success. On failure,
-// KeepOnFailure (default true) leaves the PVC and Pod intact for
-// inspection; the retention sweep eventually reclaims them.
+// Phase 1 implementation runs the ephemeral mysqld inside the
+// verification Job's Pod on a dedicated PVC, with a derived
+// credentials Secret for the restore script. No Service is created;
+// the Pod binds 127.0.0.1 only and is not reachable from outside its
+// own network namespace. On success all artifacts are cleaned up; on
+// failure KeepOnFailure (default true) leaves the Job Pod and PVC in
+// place for inspection until the retention sweep reclaims them.
 type MysqlBackupVerification struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -88,8 +91,10 @@ type MysqlBackupVerificationSpec struct {
 	TTLSecondsAfterFinished int32 `json:"ttlSecondsAfterFinished,omitempty"`
 
 	// Resources sets requests and limits for the verification MySQL
-	// container. Defaults to 2x the backup size capped at 8 GiB for
-	// memory, 2 CPUs, when unset.
+	// container. Forwarded to the Job pod verbatim; when unset, no
+	// verification-specific resource requests or limits are
+	// configured (the container inherits cluster / namespace default
+	// limits if any).
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 

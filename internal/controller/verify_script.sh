@@ -57,7 +57,7 @@ mysqld \
     --socket="$SOCKET" \
     --log-error="$ERRLOG" \
     --skip-log-bin \
-    --skip-slave-start \
+    --skip-replica-start \
     --skip-name-resolve \
     --local-infile=1 &
 MYSQLD_PID=$!

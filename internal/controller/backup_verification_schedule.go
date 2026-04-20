@@ -75,6 +75,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneVerificationSchedule(ctx cont
 	}
 	sa := operatorServiceAccountFromEnv
 	if sa == "" {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "VerificationScheduleServiceAccountMissing",
+			"operator ServiceAccount not configured (set BLOODRAVEN_OPERATOR_SA env var on the operator deployment); falling back to %q for verification schedule %q",
+			"bloodraven", profile.Name)
 		sa = "bloodraven"
 	}
 

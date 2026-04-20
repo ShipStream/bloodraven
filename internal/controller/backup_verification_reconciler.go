@@ -69,7 +69,7 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	// Deletion path: clean up artifacts then drop the finalizer.
 	if !v.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&v, mysqlBackupVerificationFinalizer) {
-			if err := r.cleanupEphemeral(ctx, &v, true); err != nil {
+			if _, err := r.cleanupEphemeral(ctx, &v, true); err != nil {
 				return ctrl.Result{RequeueAfter: 15 * time.Second}, fmt.Errorf("cleanup on delete: %w", err)
 			}
 			controllerutil.RemoveFinalizer(&v, mysqlBackupVerificationFinalizer)
@@ -93,13 +93,14 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	// Terminal: retention GC then stop reconciling (aside from TTL
 	// cleanup of any lingering ephemeral resources on success).
 	if v.Status.Phase == v1alpha1.VerificationPhaseSucceeded || v.Status.Phase == v1alpha1.VerificationPhaseFailed {
-		if err := r.maybeCleanupAfterTerminal(ctx, &v); err != nil {
+		requeue, err := r.maybeCleanupAfterTerminal(ctx, &v)
+		if err != nil {
 			logger.Error(err, "post-terminal cleanup")
 		}
 		if err := r.pruneRetention(ctx, &v); err != nil {
 			logger.Error(err, "retention prune")
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 
 	// Resolve the referenced failover group.
@@ -288,13 +289,14 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 
 	if v.Status.Phase == next.Phase && equality.Semantic.DeepEqual(&v.Status, &next) {
 		// Idempotent — just run post-terminal cleanup + retention.
-		if err := r.maybeCleanupAfterTerminal(ctx, &v); err != nil {
+		requeue, err := r.maybeCleanupAfterTerminal(ctx, &v)
+		if err != nil {
 			logger.Error(err, "post-terminal cleanup")
 		}
 		if err := r.pruneRetention(ctx, &v); err != nil {
 			logger.Error(err, "retention prune")
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 
 	patch := client.MergeFrom(v.DeepCopy())
@@ -316,13 +318,14 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	// Cleanup: success → full cleanup; failure with KeepOnFailure=false
 	// → full cleanup; failure with KeepOnFailure=true → keep PVC+Pod
 	// for inspection, retention sweep reclaims later.
-	if err := r.maybeCleanupAfterTerminal(ctx, &v); err != nil {
+	requeue, err := r.maybeCleanupAfterTerminal(ctx, &v)
+	if err != nil {
 		logger.Error(err, "post-terminal cleanup")
 	}
 	if err := r.pruneRetention(ctx, &v); err != nil {
 		logger.Error(err, "retention prune")
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: requeue}, nil
 }
 
 // SetupWithManager registers the reconciler with the manager.
@@ -394,19 +397,21 @@ func (r *MysqlBackupVerificationReconciler) resolveBackup(ctx context.Context, v
 // created strictly earlier than v. Empty result means nothing is
 // blocking us.
 func (r *MysqlBackupVerificationReconciler) findBlockingVerification(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (string, error) {
+	// List in-namespace and filter by spec rather than matching on
+	// labels — ad-hoc CRs created via `kubectl create -f` without
+	// labels, and the narrow window before a brand-new CR has been
+	// label-stamped, would otherwise bypass single-flight entirely.
 	var list v1alpha1.MysqlBackupVerificationList
-	if err := r.List(ctx, &list,
-		client.InNamespace(v.Namespace),
-		client.MatchingLabels{
-			labelFailoverGroup: v.Spec.FailoverGroupRef.Name,
-			labelBackupProfile: v.Spec.ProfileName,
-		},
-	); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(v.Namespace)); err != nil {
 		return "", err
 	}
 	for i := range list.Items {
 		other := &list.Items[i]
 		if other.Name == v.Name {
+			continue
+		}
+		if other.Spec.FailoverGroupRef.Name != v.Spec.FailoverGroupRef.Name ||
+			other.Spec.ProfileName != v.Spec.ProfileName {
 			continue
 		}
 		if !other.DeletionTimestamp.IsZero() {
@@ -540,17 +545,24 @@ func (r *MysqlBackupVerificationReconciler) failVerification(ctx context.Context
 	}
 	r.Recorder.Eventf(v, corev1.EventTypeWarning, reason, "%s", message)
 	r.emitTerminalMetrics(v)
-	if err := r.maybeCleanupAfterTerminal(ctx, v); err != nil {
-		log.FromContext(ctx).Error(err, "post-terminal cleanup")
+	requeue, cerr := r.maybeCleanupAfterTerminal(ctx, v)
+	if cerr != nil {
+		log.FromContext(ctx).Error(cerr, "post-terminal cleanup")
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: requeue}, nil
 }
 
 // maybeCleanupAfterTerminal implements the success/failure cleanup
 // policy. Success always deletes ephemeral resources after the TTL
 // elapses; failure retains them iff spec.keepOnFailure is true (the
 // default).
-func (r *MysqlBackupVerificationReconciler) maybeCleanupAfterTerminal(ctx context.Context, v *v1alpha1.MysqlBackupVerification) error {
+//
+// Returns a non-zero requeue duration when the TTL gate is currently
+// deferring deletion — the caller must propagate it via
+// ctrl.Result{RequeueAfter}, otherwise a successful verification with
+// a non-zero TTL would never fire cleanup after the controller cache
+// quiesces.
+func (r *MysqlBackupVerificationReconciler) maybeCleanupAfterTerminal(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (time.Duration, error) {
 	keepOnFailure := true
 	if v.Spec.KeepOnFailure != nil {
 		keepOnFailure = *v.Spec.KeepOnFailure
@@ -560,22 +572,25 @@ func (r *MysqlBackupVerificationReconciler) maybeCleanupAfterTerminal(ctx contex
 		return r.cleanupEphemeral(ctx, v, false)
 	case v1alpha1.VerificationPhaseFailed:
 		if keepOnFailure {
-			return nil
+			return 0, nil
 		}
 		return r.cleanupEphemeral(ctx, v, false)
 	}
-	return nil
+	return 0, nil
 }
 
 // cleanupEphemeral deletes the Job, PVC, and derived Secret owned by a
 // verification. `force=true` is used on the deletion path and skips the
-// TTL gate. Returns nil when all known resources are already gone.
-func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context, v *v1alpha1.MysqlBackupVerification, force bool) error {
+// TTL gate. Returns (remainingTTL, nil) when the TTL has not elapsed
+// and cleanup is deferred; (0, nil) after a successful pass; and
+// (0, err) on hard failure.
+func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context, v *v1alpha1.MysqlBackupVerification, force bool) (time.Duration, error) {
 	if !force {
 		ttl := time.Duration(v.Spec.TTLSecondsAfterFinished) * time.Second
 		if ttl > 0 && v.Status.CompletionTime != nil {
-			if time.Since(v.Status.CompletionTime.Time) < ttl {
-				return nil
+			elapsed := time.Since(v.Status.CompletionTime.Time)
+			if elapsed < ttl {
+				return ttl - elapsed, nil
 			}
 		}
 	}
@@ -589,30 +604,30 @@ func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context
 	if err := r.Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: jobName}, &job); err == nil {
 		fg := metav1.DeletePropagationForeground
 		if err := r.Delete(ctx, &job, &client.DeleteOptions{PropagationPolicy: &fg}); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete verification job: %w", err)
+			return 0, fmt.Errorf("delete verification job: %w", err)
 		}
 	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get verification job for cleanup: %w", err)
+		return 0, fmt.Errorf("get verification job for cleanup: %w", err)
 	}
 
 	// PVC.
 	var pvc corev1.PersistentVolumeClaim
 	if err := r.Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: pvcName}, &pvc); err == nil {
 		if err := r.Delete(ctx, &pvc); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete verification pvc: %w", err)
+			return 0, fmt.Errorf("delete verification pvc: %w", err)
 		}
 	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get verification pvc for cleanup: %w", err)
+		return 0, fmt.Errorf("get verification pvc for cleanup: %w", err)
 	}
 
 	// Derived creds Secret.
 	var s corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: secretName}, &s); err == nil {
 		if err := r.Delete(ctx, &s); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete verification creds secret: %w", err)
+			return 0, fmt.Errorf("delete verification creds secret: %w", err)
 		}
 	} else if !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get verification creds for cleanup: %w", err)
+		return 0, fmt.Errorf("get verification creds for cleanup: %w", err)
 	}
 
 	// Best-effort status patch recording cleanup. Separate from the
@@ -630,11 +645,11 @@ func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context
 			Message:            "ephemeral resources deleted",
 		})
 		if err := r.Status().Patch(ctx, v, patch); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("patch cleanup condition: %w", err)
+			return 0, fmt.Errorf("patch cleanup condition: %w", err)
 		}
 	}
 
-	return nil
+	return 0, nil
 }
 
 func hasCondition(conds []metav1.Condition, t string) bool {
