@@ -45,6 +45,11 @@ func main() {
 			// the mysqlsh container runs replay. See pitr_download.go.
 			runPITRDownload(os.Args[2:])
 			return
+		case "trigger-verification":
+			// Invoked by scheduled verification CronJob pods to POST a
+			// MysqlBackupVerification CR. See trigger_verification.go.
+			runTriggerVerification(os.Args[2:])
+			return
 		}
 	}
 
@@ -117,6 +122,20 @@ func main() {
 	}
 	if err := backupReconciler.SetupWithManager(mgr); err != nil {
 		logger.Error("unable to create backup controller", "error", err)
+		os.Exit(1)
+	}
+
+	// Register the MysqlBackupVerification reconciler alongside the
+	// backup reconciler. Verification runs are short-lived Jobs owned
+	// by the verification CR; the reconciler cleans them up on
+	// success and retains them on failure for inspection.
+	verificationReconciler := &controller.MysqlBackupVerificationReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("bloodraven-verification"),
+	}
+	if err := verificationReconciler.SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create verification controller", "error", err)
 		os.Exit(1)
 	}
 

@@ -25,6 +25,11 @@ cross-site replication starts.
 - **Restore** &mdash; `spec.initFromBackup` on the failover group. Gates
   initial bootstrap on a one-shot `util.loadDump()` into a dynamically-
   selected target site.
+- **Verification** &mdash; a parallel `MysqlBackupVerification` CRD and
+  `spec.backup.profiles[].verification` block that periodically
+  restores the latest Succeeded backup into a throwaway MySQL instance
+  to prove it's actually loadable. See
+  [Backup verification](./backup-verification.mdx).
 
 ## The backup image
 

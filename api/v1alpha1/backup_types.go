@@ -248,6 +248,15 @@ type BackupProfile struct {
 	// age-based pruning plus a min-keep safety floor.
 	// +optional
 	RetentionPolicy *RetentionPolicy `json:"retentionPolicy,omitempty"`
+
+	// Verification, when set and Enabled=true, schedules periodic
+	// MysqlBackupVerification runs against the most recent Succeeded
+	// backup produced from this profile. The MysqlFailoverGroup
+	// reconciler renders a CronJob per enabled verification that POSTs
+	// a MysqlBackupVerification CR, analogous to how
+	// spec.backup.schedules[] renders backup CronJobs.
+	// +optional
+	Verification *VerificationSpec `json:"verification,omitempty"`
 }
 
 // RetentionPolicy is the structured retention configuration that replaces

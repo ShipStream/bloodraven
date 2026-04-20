@@ -1,0 +1,377 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: mysqlbackupverifications.shipstream.io
+spec:
+  group: shipstream.io
+  names:
+    kind: MysqlBackupVerification
+    listKind: MysqlBackupVerificationList
+    plural: mysqlbackupverifications
+    singular: mysqlbackupverification
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.failoverGroupRef.name
+      name: Group
+      type: string
+    - jsonPath: .spec.profileName
+      name: Profile
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.backupRef.name
+      name: Backup
+      priority: 1
+      type: string
+    - jsonPath: .status.startTime
+      name: Started
+      type: date
+    - jsonPath: .status.completionTime
+      name: Completed
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          MysqlBackupVerification is the Schema for the mysqlbackupverifications API.
+          A verification restores a MysqlBackup artifact into an ephemeral,
+          throwaway MySQL instance to prove the backup can actually be loaded.
+          Unverified backups are schrödinger backups — the CR + its
+          bloodraven_backup_verified_timestamp_seconds gauge give operators a
+          concrete signal that recent backups are restorable.
+
+          Phase 1 implementation runs the ephemeral mysqld inside the
+          verification Job's Pod on a dedicated PVC, with a derived
+          credentials Secret for the restore script. No Service is created;
+          the Pod binds 127.0.0.1 only and is not reachable from outside its
+          own network namespace. On success all artifacts are cleaned up; on
+          failure KeepOnFailure (default true) leaves the Job Pod and PVC in
+          place for inspection until the retention sweep reclaims them.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MysqlBackupVerificationSpec defines the desired state of
+              a verification run.
+            properties:
+              backupRef:
+                description: |-
+                  BackupRef optionally pins the verification to a specific
+                  MysqlBackup in the same namespace. When empty, the reconciler
+                  resolves the latest Succeeded MysqlBackup for (group, profile).
+                properties:
+                  name:
+                    default: ""
+                    description: |-
+                      Name of the referent.
+                      This field is effectively required, but due to backwards compatibility is
+                      allowed to be empty. Instances of this type with an empty value here are
+                      almost certainly wrong.
+                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                    type: string
+                type: object
+                x-kubernetes-map-type: atomic
+              failoverGroupRef:
+                description: |-
+                  FailoverGroupRef identifies the MysqlFailoverGroup in the same
+                  namespace whose backup profile should drive this verification.
+                properties:
+                  name:
+                    description: Name of the MysqlFailoverGroup.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              keepOnFailure:
+                default: true
+                description: |-
+                  KeepOnFailure leaves the ephemeral Pod and PVC in place when the
+                  verification terminates in Failed, so operators can kubectl exec
+                  into the verification instance to inspect why the load failed.
+                  On success all artifacts are always cleaned up regardless of
+                  this field.
+
+                  Defaults to true. Retention GC still reclaims KeepOnFailure
+                  artifacts once the CR ages out of the failed-run retention bucket.
+                type: boolean
+              profileName:
+                description: |-
+                  ProfileName is the name of a spec.backup.profiles[] entry on the
+                  referenced failover group.
+                minLength: 1
+                type: string
+              resources:
+                description: |-
+                  Resources sets requests and limits for the verification MySQL
+                  container. Forwarded to the Job pod verbatim; when unset, no
+                  verification-specific resource requests or limits are
+                  configured (the container inherits cluster / namespace default
+                  limits if any).
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims,
+                      that are used by this container.
+
+                      This field depends on the
+                      DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: |-
+                            Name must match the name of one entry in pod.spec.resourceClaims of
+                            the Pod where this field is used. It makes that resource available
+                            inside a container.
+                          type: string
+                        request:
+                          description: |-
+                            Request is the name chosen for a request in the referenced claim.
+                            If empty, everything from the claim is made available, otherwise
+                            only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
+              storage:
+                description: |-
+                  Storage configures the ephemeral PVC the verification MySQL pod
+                  mounts as its datadir. The PVC is always dedicated per
+                  verification run and deleted during cleanup; its lifecycle is
+                  NOT shared with the backup PVC.
+                properties:
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      Size is the requested PVC capacity. When empty the reconciler
+                      defaults to max(10Gi, 1.5 * backup.status.sizeBytes rounded up
+                      to the nearest 10Gi).
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storageClassName:
+                    description: |-
+                      StorageClassName names the StorageClass used for the ephemeral
+                      PVC. When empty the cluster default StorageClass is used.
+                    type: string
+                type: object
+              triggeredBy:
+                description: |-
+                  TriggeredBy records what created this CR ("manual",
+                  "schedule/<schedule-name>"). Informational only.
+                type: string
+              ttlSecondsAfterFinished:
+                default: 0
+                description: |-
+                  TTLSecondsAfterFinished controls how long the verification Pod +
+                  Service + PVC persist after a successful verification before the
+                  reconciler cleans them up. Default: 0 (clean up immediately).
+                  Failed verifications with KeepOnFailure=true ignore this value.
+                format: int32
+                minimum: 0
+                type: integer
+            required:
+            - failoverGroupRef
+            - profileName
+            type: object
+          status:
+            description: MysqlBackupVerificationStatus tracks observed state of a
+              verification.
+            properties:
+              backupRef:
+                description: |-
+                  BackupRef is the resolved reference to the MysqlBackup that was
+                  verified. Populated once the reconciler resolves spec.backupRef
+                  (or the latest-Succeeded default).
+                properties:
+                  location:
+                    description: Location copied from MysqlBackup.status.location.
+                    type: string
+                  name:
+                    description: Name of the verified MysqlBackup.
+                    type: string
+                  storageType:
+                    description: StorageType copied from MysqlBackup.status.storageType.
+                    enum:
+                    - S3
+                    - PVC
+                    type: string
+                  uid:
+                    description: UID of the verified MysqlBackup at resolution time.
+                    type: string
+                required:
+                - name
+                type: object
+              completionTime:
+                description: CompletionTime is when the verification reached a terminal
+                  phase.
+                format: date-time
+                type: string
+              conditions:
+                description: |-
+                  Conditions represent the latest available observations of this
+                  verification's state. Types include "Verified" and
+                  "ResourcesCleanedUp".
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              durationSeconds:
+                description: |-
+                  DurationSeconds is the wall-clock duration from StartTime to
+                  CompletionTime, computed on terminal transition.
+                format: int64
+                type: integer
+              jobName:
+                description: |-
+                  JobName is the name of the restore Job that loaded the dump into
+                  the ephemeral MySQL instance.
+                type: string
+              message:
+                description: Message is a human-readable status message.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the .metadata.generation this status was
+                  computed against.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is the lifecycle phase of this verification run.
+                enum:
+                - Pending
+                - Provisioning
+                - Restoring
+                - Checking
+                - Cleaning
+                - Succeeded
+                - Failed
+                type: string
+              podName:
+                description: PodName is the name of the ephemeral MySQL Pod.
+                type: string
+              pvcName:
+                description: PVCName is the name of the ephemeral MySQL PVC.
+                type: string
+              serviceName:
+                description: |-
+                  ServiceName is the name of the headless Service routing the
+                  restore Job to the ephemeral MySQL Pod.
+                type: string
+              startTime:
+                description: StartTime is when the verification entered Provisioning.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -96,6 +96,7 @@ rules:
   - shipstream.io
   resources:
   - mysqlbackups
+  - mysqlbackupverifications
   - mysqlfailovergroups
   verbs:
   - create
@@ -109,6 +110,7 @@ rules:
   - shipstream.io
   resources:
   - mysqlbackups/finalizers
+  - mysqlbackupverifications/finalizers
   - mysqlfailovergroups/finalizers
   verbs:
   - update
@@ -116,6 +118,7 @@ rules:
   - shipstream.io
   resources:
   - mysqlbackups/status
+  - mysqlbackupverifications/status
   - mysqlfailovergroups/status
   verbs:
   - get
