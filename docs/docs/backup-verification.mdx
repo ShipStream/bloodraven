@@ -12,9 +12,10 @@ backup into a throwaway MySQL instance to prove the backup is actually
 loadable, and exports a freshness gauge so alerting can fire on stale
 or broken verifications.
 
-This page documents what Phase 1 ships. See `WISHLIST.md` #8 for the
-roadmap of later phases (PITR replay, configurable sanity queries,
-`kubectl` plugin integration, Grafana panels).
+Phase 1 established the CRD and the dump-load contract. Phase 2 layers
+PITR binlog replay and configurable scalar sanity queries on top of the
+same CRD. See `WISHLIST.md` #8 for remaining roadmap items (`kubectl`
+plugin integration, Grafana panels).
 
 ## Concepts
 
@@ -36,19 +37,21 @@ roadmap of later phases (PITR replay, configurable sanity queries,
 
 ## What counts as "verified"
 
-Phase 1 verification contract: **the backup dump loads into an empty
-mysqld without error**. That covers the failure modes that cause most
-real disasters &mdash; corrupt object store, truncated dump, missing
-credential rotation, storage class regression, mysqlsh version
-incompatibility. It deliberately does not cover:
+The default verification contract is **the backup dump loads into an
+empty mysqld without error**. That covers the failure modes that cause
+most real disasters &mdash; corrupt object store, truncated dump,
+missing credential rotation, storage class regression, mysqlsh version
+incompatibility. When you also set `spec.pointInTime` or
+`spec.sanityCheck` the contract extends to "archived binlogs replay on
+top of the dump" and "a caller-supplied SELECT returns a result that
+matches an expectation," respectively.
+
+The feature deliberately does not cover:
 
 - Logical equivalence with the live primary (a different tool).
 - Backup encryption decryption (wishlist #13).
-- PITR binlog replay (Phase 2).
-- Application-level sanity queries (Phase 2).
-
-Phase 2 will layer PITR replay and configurable sanity queries on top
-of the same CRD.
+- Application-level rehearsal of writes / traffic cutover
+  (wishlist #7, #11).
 
 ## Scheduling a verification
 
@@ -125,6 +128,55 @@ spec:
     name: orders-nightly-20260413-0200
 ```
 
+### PITR binlog replay
+
+When the failover group has `spec.backup.pitr.enabled: true`, a
+verification can confirm that the archived binlog stream replays
+cleanly on top of the dump. Add `spec.pointInTime`:
+
+```yaml
+spec:
+  failoverGroupRef: { name: orders }
+  profileName: nightly
+  pointInTime:
+    mode: latest            # one of: none | latest | timestamp
+```
+
+- `mode: none` (default) &mdash; no replay; equivalent to leaving
+  `pointInTime` unset.
+- `mode: latest` &mdash; replay through the newest archived event. The
+  operator wires a `bloodraven pitr-download` init container that
+  downloads manifests + binlog files into an emptyDir, then `verify.sh`
+  streams them into the ephemeral mysqld via `mysqlbinlog`.
+- `mode: timestamp` &mdash; replay stops just before the first event
+  after `spec.pointInTime.timestamp` (RFC3339).
+
+On success, `status.replayedThroughBinlog` is populated with the last
+applied file, position, and server-clock timestamp. The
+`bloodraven_backup_verification_replay_lag_seconds` gauge is published
+as `completionTime − replayedThroughBinlog.timestamp`; alert on a
+threshold that matches your RPO target.
+
+### Sanity query
+
+After the dump loads (and optional PITR replay succeeds), a single
+scalar-returning SELECT can be evaluated:
+
+```yaml
+spec:
+  sanityCheck:
+    query: "SELECT COUNT(*) FROM orders.orders WHERE created_at > NOW() - INTERVAL 7 DAY"
+    expect:
+      minRows: 1            # optional; fails if the scalar is below this
+      maxDurationSeconds: 60
+```
+
+The verification records the scalar value in
+`status.sanityCheck.resultRow` on success, or an error string on
+failure. `maxDurationSeconds` is enforced with a client-side timeout;
+exceeding it fails the run with reason `SanityCheckTimeout`, and a
+query error or below-floor scalar fails with `SanityCheckFailed`.
+
 ## Lifecycle
 
 A verification CR passes through these phases:
@@ -193,6 +245,7 @@ the `(group, profile)` label set:
 | `bloodraven_backup_verification_last_attempt_timestamp_seconds`| Gauge     | Unix time of last terminal attempt, success or failure               |
 | `bloodraven_backup_verification_runs_total`                    | Counter   | Terminal attempts by `result="success"` or `result="failure"`        |
 | `bloodraven_backup_verification_duration_seconds`              | Histogram | Wall-clock duration from StartTime to CompletionTime                 |
+| `bloodraven_backup_verification_replay_lag_seconds`            | Gauge     | `completionTime − replayedThroughBinlog.timestamp` (Succeeded + PITR)|
 
 ### Alerts
 
@@ -237,12 +290,13 @@ of its managed state.
   created, so the verification instance is not reachable from
   anywhere outside the Pod's network namespace.
 
-## Known limitations (Phase 1)
+## Known limitations
 
-- No PITR replay &mdash; a verification confirms the dump loads, not
-  that the archived binlogs replay cleanly.
-- No configurable sanity query &mdash; the load succeeding *is* the
-  success criterion.
 - No backup encryption support &mdash; will follow wishlist #13.
 - No `kubectl bloodraven verify-backup` subcommand yet &mdash; will
   follow wishlist #18.
+- The `Checking` phase value is defined in the CRD enum but the
+  reconciler does not currently transition through it at runtime; the
+  sanity query runs inside the same Job container as the restore and
+  the phase goes `Restoring → Succeeded|Failed` directly. Sanity
+  results land on `status.sanityCheck` either way.

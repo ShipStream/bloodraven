@@ -127,6 +127,17 @@ type MysqlBackupStatus struct {
 	// BinlogPos is the binary log position at dump time.
 	BinlogPos int64 `json:"binlogPos,omitempty"`
 
+	// MysqlImage is the resolved MySQL server image (spec.image, or the
+	// controller default) that was in use on the source failover group
+	// when this backup was taken. Captured when the backup Job is
+	// created and backfilled from the live spec on next reconcile if
+	// empty on older CRs. Retained so future verifications can pin the
+	// ephemeral mysqld to a version-compatible tag; the Phase-2
+	// verification Job currently runs on the backup/restore image
+	// (spec.backup.image) and does not yet consume this field.
+	// +optional
+	MysqlImage string `json:"mysqlImage,omitempty"`
+
 	// ActiveSiteAtStart records MysqlFailoverGroup.status.activeSite as
 	// observed when this backup's Job was created. The reconciler uses
 	// this to emit an InFlightFailover warning when the group's active

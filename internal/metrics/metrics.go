@@ -164,6 +164,18 @@ var (
 		},
 	}, []string{"group", "profile"})
 
+	// BackupVerificationReplayLagSeconds is the difference between the
+	// verification's CompletionTime and the timestamp of the last binlog
+	// event the PITR replay caught up to. Measures PITR archive freshness
+	// at verification time: a high value means the archived binlog stream
+	// lags the live primary and a real PITR restore would recover less
+	// than operators expect. Emitted only for Succeeded runs whose
+	// spec.pointInTime.mode is not "none".
+	BackupVerificationReplayLagSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_backup_verification_replay_lag_seconds",
+		Help: "Difference in seconds between the verification completion time and the timestamp of the last replayed binlog event.",
+	}, []string{"group", "profile"})
+
 	// --- PITR archiver metrics ----------------------------------------
 	//
 	// These three gauges mirror per-site sidecar archiver state that the
@@ -211,5 +223,6 @@ func Register(reg prometheus.Registerer) {
 		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes,
 		BackupVerifiedTimestamp, BackupVerificationLastAttemptTimestamp,
 		BackupVerificationRunsTotal, BackupVerificationDurationSeconds,
+		BackupVerificationReplayLagSeconds,
 		ArchiverUploadFailures, ArchiverLastUploadTimestamp, ArchiverBacklogFiles)
 }

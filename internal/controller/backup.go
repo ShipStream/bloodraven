@@ -145,6 +145,17 @@ func backupImage(fg *v1alpha1.MysqlFailoverGroup) string {
 	return v1alpha1.DefaultBackupImage
 }
 
+// mysqlImageFor returns the resolved MySQL server image for a failover
+// group. Mirrors the resolution used by the Deployment syncer in
+// reconciler.go. Exposed here so backup CRs can stamp the tag in use at
+// dump time onto MysqlBackup.status.mysqlImage.
+func mysqlImageFor(fg *v1alpha1.MysqlFailoverGroup) string {
+	if fg.Spec.Image != "" {
+		return fg.Spec.Image
+	}
+	return defaultMySQLImage
+}
+
 // ensureBackupLabels stamps the three canonical labels on a MysqlBackup
 // based on its spec. Returns true when it actually changed anything so
 // the caller can decide whether to issue an Update. Idempotent.

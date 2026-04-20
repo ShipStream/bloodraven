@@ -9,7 +9,7 @@
 - [x] 5. Reclone safety interlocks
 - [x] 6. In-place restore path
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
-- [x] 8. DR drill automation / backup verification (Phase 1 shipped; PITR replay + sanity queries still to come)
+- [x] 8. DR drill automation / backup verification (Phases 1 and 2 shipped; `kubectl` plugin + Grafana panels via #16/#18)
 - [ ] 9. Restore duration and size metrics
 - [x] 10. Three-or-more-site topology
 - [ ] 11. Graceful planned-failover API
@@ -51,7 +51,7 @@
 
 **7. Cross-region/cross-cluster DR as a first-class feature.** Today DR = "create a new MysqlFailoverGroup with `initFromBackup` in another cluster." This works but is ad-hoc. Consider a `MysqlDRTarget` CR that continuously ships backups + binlogs to a designated target cluster/bucket and can be promoted with one command. At minimum, document the recommended multi-cluster DR topology with a runbook.
 
-**8. DR drill automation / backup verification.** ~~Ship a `MysqlBackupVerification` CRD or CronJob template that periodically restores the latest backup into a throwaway namespace, runs a sanity query, and emits a `bloodraven_backup_verified_timestamp_seconds` gauge.~~ — Phase 1 shipped. A `MysqlBackupVerification` CRD plus `spec.backup.profiles[].verification` block schedules periodic restore-of-the-latest-backup into an ephemeral mysqld pod+PVC in the operator namespace. The `bloodraven_backup_verified_timestamp_seconds` gauge plus a duration histogram and a success/failure counter mirror the `bloodraven_backup_*` family. PITR binlog replay and configurable sanity queries are Phase 2; see `proposals/08-backup-verification.md` and `docs/docs/backup-verification.mdx`.
+**8. DR drill automation / backup verification.** ~~Ship a `MysqlBackupVerification` CRD or CronJob template that periodically restores the latest backup into a throwaway namespace, runs a sanity query, and emits a `bloodraven_backup_verified_timestamp_seconds` gauge.~~ — Phases 1 and 2 shipped. A `MysqlBackupVerification` CRD plus `spec.backup.profiles[].verification` block schedules periodic restore-of-the-latest-backup into an ephemeral mysqld pod+PVC in the operator namespace. `spec.pointInTime` drives PITR binlog replay via a `bloodraven pitr-download` init container + `mysqlbinlog` piped into the ephemeral mysqld; `spec.sanityCheck` runs a scalar SELECT with a client-side timeout. The `bloodraven_backup_verified_timestamp_seconds` gauge plus duration, attempts-counter, and `bloodraven_backup_verification_replay_lag_seconds` metrics mirror the `bloodraven_backup_*` family. `MysqlBackup.status.mysqlImage` captures the active-site image tag at dump time for version-pinned drills. See `proposals/08-backup-verification.md` and `docs/docs/backup-verification.mdx`.
 
 **9. Restore duration and size metrics.** Add `bloodraven_restore_duration_seconds` and `bloodraven_restore_last_success_timestamp_seconds`, plus per-restore GTID and binlog-replay coordinates in status. DR confidence requires knowing your actual measured restore time, not estimated.
 

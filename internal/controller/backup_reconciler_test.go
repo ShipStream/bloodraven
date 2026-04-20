@@ -586,6 +586,11 @@ func TestMysqlBackupReconciler_CreatesJob_PicksReplica(t *testing.T) {
 	if got.Status.SourceSite != "pdx" {
 		t.Errorf("want source pdx, got %s", got.Status.SourceSite)
 	}
+	// Phase 2: capture the active-site MySQL image tag for
+	// version-pinned verification.
+	if got.Status.MysqlImage != "mysql:9.6" {
+		t.Errorf("want status.mysqlImage=mysql:9.6, got %q", got.Status.MysqlImage)
+	}
 
 	// Derived creds Secret should exist.
 	var creds corev1.Secret

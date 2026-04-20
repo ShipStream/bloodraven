@@ -478,3 +478,262 @@ func TestVerificationReconciler_RetentionPrunesOldSuccesses(t *testing.T) {
 		t.Errorf("retention did not prune: %d Succeeded remain (want <=2)", succeeded)
 	}
 }
+
+// --- Phase 2: PITR, sanity, and sentinel parsing ------------------------
+
+func TestVerificationPITRSpec_ModeNoneIsNil(t *testing.T) {
+	out, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{Mode: "none"})
+	if err != nil || out != nil {
+		t.Errorf("mode=none should yield (nil, nil), got (%+v, %v)", out, err)
+	}
+	out, err = verificationPITRSpec(nil)
+	if err != nil || out != nil {
+		t.Errorf("nil spec should yield (nil, nil), got (%+v, %v)", out, err)
+	}
+}
+
+func TestVerificationPITRSpec_Latest_UsesFarFutureStop(t *testing.T) {
+	out, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{Mode: "latest"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if out == nil || !strings.HasPrefix(out.StopDatetime, "9999-") {
+		t.Errorf("mode=latest should sentinel-stop far-future, got %+v", out)
+	}
+}
+
+func TestVerificationPITRSpec_Timestamp_RequiresValue(t *testing.T) {
+	if _, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp"}); err == nil {
+		t.Error("mode=timestamp without Timestamp should error")
+	}
+	out, err := verificationPITRSpec(&v1alpha1.PointInTimeVerificationSpec{
+		Mode: "timestamp", Timestamp: "2026-04-20T01:00:00Z",
+	})
+	if err != nil || out == nil || out.StopDatetime != "2026-04-20T01:00:00Z" {
+		t.Errorf("timestamp plumb: out=%+v err=%v", out, err)
+	}
+}
+
+func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
+	fg := verifyFG()
+	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+	backup := successfulBackup("happy", "lion", "nightly-s3")
+	v := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify-pitr", Namespace: "ns"},
+		Spec: v1alpha1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			ProfileName:      "nightly-s3",
+			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
+				Mode: "timestamp", Timestamp: "2026-04-20T01:00:00Z",
+			},
+		},
+	}
+	job, err := buildVerificationJob(verificationJobInputs{
+		FailoverGroup:        fg,
+		Profile:              fg.Spec.Backup.Profiles[0],
+		Verification:         v,
+		Backup:               backup,
+		CredsSecretName:      "c",
+		ScriptsConfigMapName: "s",
+		PVCName:              "p",
+	})
+	if err != nil {
+		t.Fatalf("buildVerificationJob: %v", err)
+	}
+	if len(job.Spec.Template.Spec.InitContainers) != 1 {
+		t.Fatalf("want 1 init container, got %d", len(job.Spec.Template.Spec.InitContainers))
+	}
+	if job.Spec.Template.Spec.InitContainers[0].Name != restorePITRInitContainerName {
+		t.Errorf("want init container %q, got %q",
+			restorePITRInitContainerName, job.Spec.Template.Spec.InitContainers[0].Name)
+	}
+	var haveMode, haveLocalDir, haveStop bool
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		switch e.Name {
+		case "BLOODRAVEN_VERIFY_PITR_MODE":
+			haveMode = e.Value == "timestamp"
+		case "BLOODRAVEN_PITR_LOCAL_DIR":
+			haveLocalDir = e.Value != ""
+		case "BLOODRAVEN_PITR_STOP_DATETIME":
+			haveStop = e.Value == "2026-04-20T01:00:00Z"
+		}
+	}
+	if !haveMode || !haveLocalDir || !haveStop {
+		t.Errorf("missing PITR env vars: mode=%v localDir=%v stop=%v", haveMode, haveLocalDir, haveStop)
+	}
+}
+
+func TestBuildVerificationJob_PITRRequiresPITREnabled(t *testing.T) {
+	fg := verifyFG() // no fg.Spec.Backup.PITR set
+	backup := successfulBackup("happy", "lion", "nightly-s3")
+	v := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify-bad-pitr", Namespace: "ns"},
+		Spec: v1alpha1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			ProfileName:      "nightly-s3",
+			PointInTime: &v1alpha1.PointInTimeVerificationSpec{
+				Mode: "timestamp", Timestamp: "2026-04-20T01:00:00Z",
+			},
+		},
+	}
+	_, err := buildVerificationJob(verificationJobInputs{
+		FailoverGroup:        fg,
+		Profile:              fg.Spec.Backup.Profiles[0],
+		Verification:         v,
+		Backup:               backup,
+		CredsSecretName:      "c",
+		ScriptsConfigMapName: "s",
+		PVCName:              "p",
+	})
+	if err == nil {
+		t.Fatal("want error when pointInTime is set but PITR not enabled")
+	}
+}
+
+func TestBuildVerificationJob_SanityCheck_SetsEnvVars(t *testing.T) {
+	fg := verifyFG()
+	backup := successfulBackup("happy", "lion", "nightly-s3")
+	v := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify-sanity", Namespace: "ns"},
+		Spec: v1alpha1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			ProfileName:      "nightly-s3",
+			SanityCheck: &v1alpha1.SanityCheckSpec{
+				Query: "SELECT COUNT(*) FROM orders.orders",
+				Expect: &v1alpha1.SanityCheckExpectation{
+					MinRows:            5,
+					MaxDurationSeconds: 30,
+				},
+			},
+		},
+	}
+	job, err := buildVerificationJob(verificationJobInputs{
+		FailoverGroup:        fg,
+		Profile:              fg.Spec.Backup.Profiles[0],
+		Verification:         v,
+		Backup:               backup,
+		CredsSecretName:      "c",
+		ScriptsConfigMapName: "s",
+		PVCName:              "p",
+	})
+	if err != nil {
+		t.Fatalf("buildVerificationJob: %v", err)
+	}
+	env := map[string]string{}
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	if env["BLOODRAVEN_VERIFY_SANITY_QUERY"] != "SELECT COUNT(*) FROM orders.orders" {
+		t.Errorf("sanity query env not set: %q", env["BLOODRAVEN_VERIFY_SANITY_QUERY"])
+	}
+	if env["BLOODRAVEN_VERIFY_SANITY_MIN_ROWS"] != "5" {
+		t.Errorf("sanity min_rows env: %q", env["BLOODRAVEN_VERIFY_SANITY_MIN_ROWS"])
+	}
+	if env["BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS"] != "30" {
+		t.Errorf("sanity max_seconds env: %q", env["BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS"])
+	}
+}
+
+func TestValidateSanityQuery(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "single statement", in: "SELECT 1", want: "SELECT 1"},
+		{name: "trailing semicolon stripped", in: "SELECT COUNT(*) FROM o ;", want: "SELECT COUNT(*) FROM o"},
+		{name: "leading trailing whitespace", in: "   SELECT 1  ", want: "SELECT 1"},
+		{name: "empty", in: "   ", wantErr: true},
+		{name: "multi-statement", in: "SELECT 1; DELETE FROM t", wantErr: true},
+		{name: "newline rejected", in: "SELECT\n1", wantErr: true},
+		{name: "carriage return rejected", in: "SELECT\r1", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := validateSanityQuery(tc.in)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("wantErr=%v got err=%v", tc.wantErr, err)
+			}
+			if err == nil && got != tc.want {
+				t.Errorf("want %q got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestBuildVerificationJob_SanityCheck_RejectsMultiStatement(t *testing.T) {
+	fg := verifyFG()
+	backup := successfulBackup("happy", "lion", "nightly-s3")
+	v := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "verify-bad-sanity", Namespace: "ns"},
+		Spec: v1alpha1.MysqlBackupVerificationSpec{
+			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "lion"},
+			ProfileName:      "nightly-s3",
+			SanityCheck: &v1alpha1.SanityCheckSpec{
+				Query: "SELECT 1; DROP TABLE orders",
+			},
+		},
+	}
+	if _, err := buildVerificationJob(verificationJobInputs{
+		FailoverGroup:        fg,
+		Profile:              fg.Spec.Backup.Profiles[0],
+		Verification:         v,
+		Backup:               backup,
+		CredsSecretName:      "c",
+		ScriptsConfigMapName: "s",
+		PVCName:              "p",
+	}); err == nil {
+		t.Fatal("expected multi-statement sanity query to be rejected")
+	}
+}
+
+func TestParseReplaySentinel_HappyPath(t *testing.T) {
+	mark, ok := parseReplaySentinel(
+		"BLOODRAVEN_VERIFY_REPLAY_COMPLETE file=mysql-bin.000412 position=9183001 timestamp=2026-04-20T01:59:57Z")
+	if !ok {
+		t.Fatal("want ok")
+	}
+	if mark.File != "mysql-bin.000412" || mark.Position != 9183001 {
+		t.Errorf("file/pos mismatch: %+v", mark)
+	}
+	if mark.Timestamp == nil || mark.Timestamp.Format(time.RFC3339) != "2026-04-20T01:59:57Z" {
+		t.Errorf("timestamp not parsed: %+v", mark.Timestamp)
+	}
+}
+
+func TestParseReplaySentinel_PrefixMismatch(t *testing.T) {
+	if mark, ok := parseReplaySentinel("hello world"); ok || mark != nil {
+		t.Errorf("non-sentinel line accepted: %+v", mark)
+	}
+}
+
+func TestParseSanitySentinel_Scalar(t *testing.T) {
+	res, ok := parseSanitySentinel("BLOODRAVEN_VERIFY_SANITY_COMPLETE ran=1 durationMs=140 resultRow=42")
+	if !ok || res == nil {
+		t.Fatal("want ok")
+	}
+	if !res.Ran || res.DurationMs != 140 || res.ResultRow != "42" || res.Error != "" {
+		t.Errorf("sanity fields: %+v", res)
+	}
+}
+
+func TestParseSanitySentinel_Timeout(t *testing.T) {
+	res, ok := parseSanitySentinel("BLOODRAVEN_VERIFY_SANITY_COMPLETE ran=1 durationMs=60000 error=timeout")
+	if !ok || res == nil {
+		t.Fatal("want ok")
+	}
+	if res.Error != "timeout" {
+		t.Errorf("want error=timeout, got %q", res.Error)
+	}
+}
+
+func TestParseSanitySentinel_WhitespaceEscape(t *testing.T) {
+	res, ok := parseSanitySentinel("BLOODRAVEN_VERIFY_SANITY_COMPLETE ran=1 durationMs=12 error=ERROR_1146_(42S02):_Table_'x.y'_doesn't_exist")
+	if !ok {
+		t.Fatal("want ok")
+	}
+	if !strings.Contains(res.Error, "Table 'x.y' doesn't exist") {
+		t.Errorf("error did not round-trip: %q", res.Error)
+	}
+}
