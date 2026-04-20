@@ -135,6 +135,35 @@ For more advanced scenarios, use the chaos script:
 ./playground/chaos.sh recover            # Undo all chaos
 ```
 
+## Exercise backup verification
+
+The playground's `minio` backup profile ships with scheduled verification enabled (`*/30 * * * *`). The operator materializes a CronJob that fires `bloodraven trigger-verification` on the schedule, which creates a `MysqlBackupVerification` CR against the latest Succeeded `MysqlBackup`.
+
+To drive the feature by hand without waiting for the schedule:
+
+```bash
+# Create a verification and wait for it to reach a terminal phase
+./playground/verify-backup.sh run minio
+
+# Same, but replay archived binlogs on top (pointInTime.mode=latest)
+./playground/verify-backup.sh run-pitr minio
+
+# List all verifications with their phase
+./playground/verify-backup.sh status
+
+# Tail the Job pod log for the most recent verification
+./playground/verify-backup.sh logs
+
+# Remove completed runs
+./playground/verify-backup.sh cleanup            # Succeeded only
+./playground/verify-backup.sh cleanup --failed   # Failed only
+
+# Inspect the scheduled CronJob the operator materialized
+./playground/verify-backup.sh schedule-list
+```
+
+A successful run provisions an ephemeral PVC + mysqld, loads the dump, runs the sanity query, and cleans up. On failure the Pod and PVC are retained so you can `kubectl exec` in and inspect why the load failed.
+
 ## Dashboard features
 
 The dashboard connects to the operator via WebSocket and polls DNS state every 3 seconds.
