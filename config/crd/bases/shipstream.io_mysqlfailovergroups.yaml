@@ -774,6 +774,128 @@ spec:
                               match type
                             rule: (self.type == 'S3' && has(self.s3) && !has(self.pvc))
                               || (self.type == 'PVC' && has(self.pvc) && !has(self.s3))
+                        verification:
+                          description: |-
+                            Verification, when set and Enabled=true, schedules periodic
+                            MysqlBackupVerification runs against the most recent Succeeded
+                            backup produced from this profile. The MysqlFailoverGroup
+                            reconciler renders a CronJob per enabled verification that POSTs
+                            a MysqlBackupVerification CR, analogous to how
+                            spec.backup.schedules[] renders backup CronJobs.
+                          properties:
+                            concurrencyPolicy:
+                              default: Forbid
+                              description: |-
+                                ConcurrencyPolicy is forwarded to the CronJob spec. Only Forbid
+                                (default) and Replace are allowed; Allow would stack overlapping
+                                verifications against the same profile, which can't share a PVC.
+                              enum:
+                              - Forbid
+                              - Replace
+                              type: string
+                            enabled:
+                              default: false
+                              description: |-
+                                Enabled turns the scheduled verification CronJob on or off.
+                                Omitting spec.backup.profiles[].verification entirely is
+                                equivalent to Enabled=false.
+                              type: boolean
+                            failedJobsHistoryLimit:
+                              default: 3
+                              description: FailedJobsHistoryLimit is forwarded to
+                                the CronJob spec.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            keepOnFailure:
+                              default: true
+                              description: |-
+                                KeepOnFailure mirrors MysqlBackupVerificationSpec.KeepOnFailure
+                                for CRs created by this schedule. Default: true.
+                              type: boolean
+                            retentionPolicy:
+                              description: |-
+                                RetentionPolicy caps how many verification CRs per profile are
+                                retained after they reach a terminal phase.
+                              properties:
+                                keepFailures:
+                                  default: 10
+                                  description: |-
+                                    KeepFailures is the max number of Failed CRs to keep. Failed
+                                    runs are what operators most want to investigate, so they are
+                                    retained independently of the Succeeded bucket. Default: 10.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                keepSuccessful:
+                                  default: 30
+                                  description: |-
+                                    KeepSuccessful is the max number of Succeeded CRs to keep.
+                                    Default: 30.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                              type: object
+                            schedule:
+                              description: |-
+                                Schedule is a standard cron expression (5 fields). Evaluated in
+                                the TimeZone below. Required when Enabled=true.
+                              type: string
+                            startingDeadlineSeconds:
+                              description: StartingDeadlineSeconds is forwarded to
+                                the CronJob spec.
+                              format: int64
+                              type: integer
+                            storage:
+                              description: |-
+                                Storage, KeepOnFailure, and TTLSecondsAfterFinished seed the
+                                per-CR spec fields of the same name. The reconciler copies these
+                                into each MysqlBackupVerification created by the CronJob.
+                              properties:
+                                size:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: |-
+                                    Size is the requested PVC capacity. When empty the reconciler
+                                    defaults to max(10Gi, 1.5 * backup.status.sizeBytes rounded up
+                                    to the nearest 10Gi).
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                storageClassName:
+                                  description: |-
+                                    StorageClassName names the StorageClass used for the ephemeral
+                                    PVC. When empty the cluster default StorageClass is used.
+                                  type: string
+                              type: object
+                            successfulJobsHistoryLimit:
+                              default: 3
+                              description: SuccessfulJobsHistoryLimit is forwarded
+                                to the CronJob spec.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                            suspend:
+                              default: false
+                              description: Suspend pauses the scheduled CronJob without
+                                deleting it.
+                              type: boolean
+                            timeZone:
+                              default: Etc/UTC
+                              description: |-
+                                TimeZone is an IANA timezone name used when interpreting
+                                Schedule. Defaults to "Etc/UTC" for the same reproducibility
+                                reasons as BackupSchedule.TimeZone.
+                              type: string
+                            ttlSecondsAfterFinished:
+                              default: 0
+                              description: |-
+                                TTLSecondsAfterFinished mirrors the per-CR field for scheduled
+                                CRs. Default: 0.
+                              format: int32
+                              minimum: 0
+                              type: integer
+                          type: object
                       required:
                       - name
                       - storage

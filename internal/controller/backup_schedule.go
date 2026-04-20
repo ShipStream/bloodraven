@@ -127,6 +127,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupScriptsConfigMap(ctx conte
 			"dump.py":    BackupDumpScript(),
 			"restore.py": BackupRestoreScript(),
 			"cleanup.py": BackupCleanupScript(),
+			"verify.sh":  BackupVerifyScript(),
 		}
 		return nil
 	})

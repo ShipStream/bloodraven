@@ -27,6 +27,10 @@ Metrics are served on `:8080/metrics` in standard Prometheus exposition format.
 | `bloodraven_archiver_upload_failures` | Gauge | `namespace`, `group`, `site` | Cumulative PITR archiver upload failures reported by the per-site sidecar. Monotonic except across sidecar restarts — use `increase()` / `rate()` in dashboards. |
 | `bloodraven_archiver_last_upload_timestamp_seconds` | Gauge | `namespace`, `group`, `site` | Unix timestamp of the last successful PITR binlog archive per site. `0` if nothing archived yet. |
 | `bloodraven_archiver_backlog_files` | Gauge | `namespace`, `group`, `site` | Sealed binlogs present in the MySQL index but missing from the archiver manifest at the end of the last scan. `>0` means archival is falling behind. |
+| `bloodraven_backup_verified_timestamp_seconds` | Gauge | `group`, `profile` | Unix timestamp of the last `Succeeded` `MysqlBackupVerification` per profile. Anchor staleness alerts on this gauge &mdash; a fresh `bloodraven_backup_last_success_timestamp_seconds` without a fresh verification means nobody has *proven* the backup can be restored. |
+| `bloodraven_backup_verification_last_attempt_timestamp_seconds` | Gauge | `group`, `profile` | Unix timestamp of the last terminal verification attempt, regardless of result. Distinguishes "verification never ran" from "verification ran but failed". |
+| `bloodraven_backup_verification_runs_total` | Counter | `group`, `profile`, `result` | Terminal verification attempts labelled `success` or `failure`. |
+| `bloodraven_backup_verification_duration_seconds` | Histogram | `group`, `profile` | Wall-clock duration of a verification run. |
 
 ### Scrape configuration
 

@@ -118,6 +118,52 @@ var (
 		Help: "Size in bytes of the last successful MysqlBackup artifact per (group, profile).",
 	}, []string{"group", "profile"})
 
+	// --- Backup verification metrics ----------------------------------
+	//
+	// Verification is periodic restore-of-the-latest-backup into a
+	// throwaway MySQL instance. The headline signal is
+	// BackupVerifiedTimestamp: users alert on
+	// `time() - bloodraven_backup_verified_timestamp_seconds > <SLO>`
+	// to catch "backup ran but is not actually restorable."
+
+	// BackupVerifiedTimestamp is the Unix timestamp of the most
+	// recent Succeeded MysqlBackupVerification per (group, profile).
+	// This is the gauge wishlist item #8 explicitly names; dashboards
+	// and alerts should anchor freshness checks on it.
+	BackupVerifiedTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_backup_verified_timestamp_seconds",
+		Help: "Unix timestamp of the last Succeeded MysqlBackupVerification per (group, profile).",
+	}, []string{"group", "profile"})
+
+	// BackupVerificationLastAttemptTimestamp is the Unix timestamp of
+	// the most recent terminal verification attempt regardless of
+	// result. Lets operators distinguish "verification never ran" from
+	// "verification ran but failed".
+	BackupVerificationLastAttemptTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_backup_verification_last_attempt_timestamp_seconds",
+		Help: "Unix timestamp of the last terminal MysqlBackupVerification attempt per (group, profile) regardless of result.",
+	}, []string{"group", "profile"})
+
+	// BackupVerificationRunsTotal counts terminal verification
+	// attempts labelled by result ("success" or "failure"). Labels are
+	// (group, profile, result).
+	BackupVerificationRunsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_backup_verification_runs_total",
+		Help: "Total number of terminal MysqlBackupVerification runs labelled by result (success|failure).",
+	}, []string{"group", "profile", "result"})
+
+	// BackupVerificationDurationSeconds is the wall-clock duration of
+	// a verification run from StartTime to CompletionTime. Buckets
+	// mirror the backup duration histogram (15s → 8h).
+	BackupVerificationDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "bloodraven_backup_verification_duration_seconds",
+		Help: "Wall-clock duration of a MysqlBackupVerification run from StartTime to CompletionTime.",
+		Buckets: []float64{
+			15, 30, 60, 120, 300, 600, 900, 1800,
+			3600, 7200, 14400, 28800,
+		},
+	}, []string{"group", "profile"})
+
 	// --- PITR archiver metrics ----------------------------------------
 	//
 	// These three gauges mirror per-site sidecar archiver state that the
@@ -163,5 +209,7 @@ func Register(reg prometheus.Registerer) {
 		ReplicationLag, ReplicationRunning, SiteState, DivergentTransactions, RecloneOperations,
 		BackupRunsTotal, BackupDurationSeconds,
 		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes,
+		BackupVerifiedTimestamp, BackupVerificationLastAttemptTimestamp,
+		BackupVerificationRunsTotal, BackupVerificationDurationSeconds,
 		ArchiverUploadFailures, ArchiverLastUploadTimestamp, ArchiverBacklogFiles)
 }

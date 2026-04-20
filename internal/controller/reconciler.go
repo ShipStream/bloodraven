@@ -269,6 +269,12 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile backup schedules: %w", err)
 	}
 
+	// Reconcile scheduled verification runs (one CronJob per profile
+	// whose .verification.enabled=true).
+	if err := r.reconcileVerificationSchedules(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile verification schedules: %w", err)
+	}
+
 	// Roll up backup status (per-schedule LastBackupTime etc). The
 	// returned duration is the minimum wake-up across schedules —
 	// non-zero when a pending retry backoff hasn't elapsed yet, so
