@@ -122,6 +122,77 @@ func (r *TopologyManagerRunner) SetTopologyFrozen(nn types.NamespacedName, froze
 	return true
 }
 
+// SetPlannedFailoverActive toggles the planned-failover guard on the
+// managed TopologyManager so the automatic cross-site evaluator stands
+// down while the reconciler drives its own fence/promote sequence.
+// Returns true when the flag was applied; false when no manager is
+// running for this CR. A false return is safe — see the comment on
+// SetTopologyFrozen.
+func (r *TopologyManagerRunner) SetPlannedFailoverActive(nn types.NamespacedName, active bool) bool {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	mt.tm.SetPlannedFailoverActive(active)
+	return true
+}
+
+// plannedFailoverManager returns the managed TopologyManager for the
+// given CR, or an error when no manager is running. The caller must not
+// cache the returned pointer; a reconfiguration can replace the manager
+// at any time.
+func (r *TopologyManagerRunner) plannedFailoverManager(nn types.NamespacedName) (*TopologyManager, error) {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("planned-failover: no topology manager running for %s", nn)
+	}
+	return mt.tm, nil
+}
+
+// PlannedFailoverFence applies super_read_only=ON on the named site
+// and returns its GTID_EXECUTED after the fence takes effect.
+func (r *TopologyManagerRunner) PlannedFailoverFence(ctx context.Context, nn types.NamespacedName, site string) (string, error) {
+	tm, err := r.plannedFailoverManager(nn)
+	if err != nil {
+		return "", err
+	}
+	return tm.FenceSite(ctx, site)
+}
+
+// PlannedFailoverUnfence clears super_read_only on the named site.
+// Used by the rollback path when the target fails to catch up.
+func (r *TopologyManagerRunner) PlannedFailoverUnfence(ctx context.Context, nn types.NamespacedName, site string) error {
+	tm, err := r.plannedFailoverManager(nn)
+	if err != nil {
+		return err
+	}
+	return tm.UnfenceSite(ctx, site)
+}
+
+// PlannedFailoverGtidExecuted returns the named site's current
+// GTID_EXECUTED. Used to poll the target during the zero-lag gate.
+func (r *TopologyManagerRunner) PlannedFailoverGtidExecuted(ctx context.Context, nn types.NamespacedName, site string) (string, error) {
+	tm, err := r.plannedFailoverManager(nn)
+	if err != nil {
+		return "", err
+	}
+	return tm.GetSiteGtidExecuted(ctx, site)
+}
+
+// PlannedFailoverPromote runs FailoverController.Execute against the
+// named target and flips DNS. Returns the promotion GTID.
+func (r *TopologyManagerRunner) PlannedFailoverPromote(ctx context.Context, nn types.NamespacedName, target, source string) (string, error) {
+	tm, err := r.plannedFailoverManager(nn)
+	if err != nil {
+		return "", err
+	}
+	return tm.PlannedPromote(ctx, target, source)
+}
+
 // NeedLeaderElection implements manager.LeaderElectionRunnable.
 // Topology polling and failover must only run on the leader.
 func (r *TopologyManagerRunner) NeedLeaderElection() bool {

@@ -4442,6 +4442,23 @@ spec:
                   type: string
                 description: MysqlConf allows overriding default my.cnf settings.
                 type: object
+              plannedFailover:
+                description: |-
+                  PlannedFailover configures cluster-wide defaults for the graceful
+                  planned-failover API. The admin triggers a planned failover by
+                  annotating the CR with bloodraven.shipstream.io/planned-failover=<site>;
+                  this block lets the knobs live on the CR rather than being spelled
+                  into every kubectl annotate.
+                properties:
+                  maxLagWait:
+                    default: 5m
+                    description: |-
+                      MaxLagWait bounds the time spent waiting for the target's
+                      GTID_EXECUTED to cover the fenced source's GTID_EXECUTED before
+                      the state machine rolls back to the source. Must be expressible
+                      as a Go time.Duration. Default: 5m.
+                    type: string
+                type: object
               podAnnotations:
                 additionalProperties:
                   type: string
@@ -5183,6 +5200,83 @@ spec:
                   profileName:
                     description: ProfileName mirrors spec.backup.pitr.profileName.
                     type: string
+                type: object
+              plannedFailover:
+                description: |-
+                  PlannedFailover tracks the most recent planned (admin-triggered)
+                  failover attempt. Terminal status is retained until a newer
+                  annotation replaces the block; the field is how kubectl describe
+                  tells the story of a switchover after the fact.
+                properties:
+                  completionTime:
+                    description: CompletionTime is when the state machine reached
+                      a terminal phase.
+                    format: date-time
+                    type: string
+                  durationSeconds:
+                    description: DurationSeconds is CompletionTime - StartTime, rounded
+                      to seconds.
+                    format: int64
+                    type: integer
+                  maxLagWait:
+                    description: |-
+                      MaxLagWait is the effective maxLagWait used for this run
+                      (after applying the spec default and the per-annotation override).
+                    type: string
+                  message:
+                    description: |-
+                      Message is a human-readable status line suitable for
+                      kubectl describe.
+                    type: string
+                  phase:
+                    description: Phase of the planned failover.
+                    enum:
+                    - ""
+                    - Pending
+                    - Validating
+                    - Draining
+                    - WaitingForLag
+                    - Promoting
+                    - Resuming
+                    - Succeeded
+                    - Failed
+                    type: string
+                  reason:
+                    description: |-
+                      Reason is a machine-readable tag on Failed outcomes. Examples:
+                      "CooldownActive", "LagTimeout", "SourceCrashed", "ExecuteFailed",
+                      "InvalidAnnotation", "ConcurrentOperation", "UnknownSite".
+                    type: string
+                  sourceGtidAtFence:
+                    description: |-
+                      SourceGtidAtFence is the source's GTID_EXECUTED recorded
+                      immediately after super_read_only=ON took effect.
+                    type: string
+                  sourcePrimary:
+                    description: |-
+                      SourcePrimary is the site being fenced (status.activeSite at the
+                      moment the annotation was accepted).
+                    type: string
+                  startTime:
+                    description: StartTime is when the annotation was first accepted.
+                    format: date-time
+                    type: string
+                  target:
+                    description: Target is the site the admin asked to promote.
+                    type: string
+                  targetGtidAtPromotion:
+                    description: |-
+                      TargetGtidAtPromotion is the target's GTID_EXECUTED captured just
+                      before the operator ran SET GLOBAL read_only=0 on it.
+                    type: string
+                  transactionsLost:
+                    description: |-
+                      TransactionsLost is the count of GTIDs present on the fenced
+                      source but not on the promoted target. By construction this is 0
+                      on a successful planned switchover; the field is retained for
+                      symmetry with the emergency-failover path's data-loss accounting.
+                    format: int64
+                    type: integer
                 type: object
               promotionGtidExecuted:
                 description: |-

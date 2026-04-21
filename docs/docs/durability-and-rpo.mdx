@@ -125,6 +125,7 @@ are enumerated in `divergentGtid`.
 | Both sites unreachable (operator sees `TotalLoss`) | n/a | **No failover occurs.** RPO accumulates on the primary until at least one site comes back. See [Operator availability](./operator-availability.mdx#operator-down--both-site-outage). |
 | Operator is down while the primary crashes | Depends on lag at crash | **Same as the equivalent PVC-lost case** — sidecars fence themselves, the replica is read-only, RPO is bounded by the lag at crash. Write-*availability* is also lost until the operator returns (see [Operator availability](./operator-availability.mdx#operator-down--primary-failure)), but RPO is not made worse by the operator being down. |
 | Split-brain (both sites `writable`) | Both have been accepting conflicting writes | RPO is undefined until a human picks an authoritative side; the *losing* side's divergent GTIDs are lost when that side is fenced and recloned. See [Split-brain recovery](./operations.mdx#split-brain-recovery). |
+| [Planned failover](./planned-failover.mdx) (admin annotation) | Target caught up to fenced source GTID before promotion | **0 — by construction.** The zero-lag gate at `WaitingForLag` only advances once the target's `GTID_EXECUTED` ⊇ the source's fenced `GTID_EXECUTED`. Any scenario that would produce loss (lag never closes, source crashes mid-drain) routes to a `Failed` rollback instead of promoting a lagging replica. |
 
 ## PITR and the RPO window
 
