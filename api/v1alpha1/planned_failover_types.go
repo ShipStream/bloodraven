@@ -15,13 +15,36 @@ type PlannedFailoverSpec struct {
 	// +kubebuilder:default="5m"
 	// +optional
 	MaxLagWait *metav1.Duration `json:"maxLagWait,omitempty"`
+
+	// DrainTimeout bounds the time the source primary has to shed
+	// active application connections after super_read_only=ON is set.
+	// During this window the reconciler repeatedly calls
+	// KillAppConnections; if any connections remain after the timeout
+	// the state machine proceeds anyway so a stuck client cannot block
+	// a planned switchover indefinitely. Default: 30s.
+	// +kubebuilder:default="30s"
+	// +optional
+	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
+
+	// OnCooldown controls how the state machine reacts when the
+	// anti-flap cooldown rejects a request at Validating:
+	//   - "reject" (default): stamp Failed{CooldownActive} and clear the
+	//     annotation. The admin must re-annotate after the cooldown
+	//     expires.
+	//   - "defer": stamp Deferred and keep the annotation in place;
+	//     the reconciler re-tries validation at cooldown expiry and
+	//     transitions to Draining automatically.
+	// +kubebuilder:default="reject"
+	// +kubebuilder:validation:Enum=reject;defer
+	// +optional
+	OnCooldown string `json:"onCooldown,omitempty"`
 }
 
 // PlannedFailoverPhase enumerates the discrete states a planned failover
 // progresses through. The reconciler advances the state machine by one
 // step per reconcile so that operator restarts land on a well-defined
 // observable state.
-// +kubebuilder:validation:Enum="";Pending;Validating;Draining;WaitingForLag;Promoting;Resuming;Succeeded;Failed
+// +kubebuilder:validation:Enum="";Pending;Deferred;Validating;Draining;WaitingForLag;Promoting;Resuming;Succeeded;Failed
 type PlannedFailoverPhase string
 
 const (
@@ -31,6 +54,12 @@ const (
 	// PlannedFailoverPhasePending means the annotation has been observed
 	// and the reconciler is about to validate preconditions.
 	PlannedFailoverPhasePending PlannedFailoverPhase = "Pending"
+
+	// PlannedFailoverPhaseDeferred means validation rejected the request
+	// because the anti-flap cooldown is still active AND
+	// spec.plannedFailover.onCooldown="defer". The annotation remains
+	// in place; the reconciler re-tries validation at cooldown expiry.
+	PlannedFailoverPhaseDeferred PlannedFailoverPhase = "Deferred"
 
 	// PlannedFailoverPhaseValidating means the reconciler is checking
 	// preconditions (unknown site, role, cooldown, in-flight restore,
@@ -114,4 +143,21 @@ type PlannedFailoverStatus struct {
 	// (after applying the spec default and the per-annotation override).
 	// +optional
 	MaxLagWait *metav1.Duration `json:"maxLagWait,omitempty"`
+
+	// DrainStartTime is when the reconciler entered the Draining phase
+	// (immediately after super_read_only=ON took effect on the source).
+	// The DrainTimeout budget is measured from this timestamp.
+	// +optional
+	DrainStartTime *metav1.Time `json:"drainStartTime,omitempty"`
+
+	// DrainTimeout is the effective drainTimeout used for this run.
+	// +optional
+	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
+
+	// RetryAfter is populated on the Deferred phase with the earliest
+	// time the state machine will retry validation. Derived from
+	// status.lastFailover + spec.failoverCooldown. Clears on transition
+	// out of Deferred.
+	// +optional
+	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
 }

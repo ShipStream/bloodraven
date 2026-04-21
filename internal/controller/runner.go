@@ -183,6 +183,18 @@ func (r *TopologyManagerRunner) PlannedFailoverGtidExecuted(ctx context.Context,
 	return tm.GetSiteGtidExecuted(ctx, site)
 }
 
+// PlannedFailoverDrainConnections kills non-replication connections on
+// the named site and returns the count killed. Polled by the Draining
+// state until it returns zero (clean drain) or the drainTimeout budget
+// elapses.
+func (r *TopologyManagerRunner) PlannedFailoverDrainConnections(ctx context.Context, nn types.NamespacedName, site string) (int, error) {
+	tm, err := r.plannedFailoverManager(nn)
+	if err != nil {
+		return 0, err
+	}
+	return tm.KillSiteAppConnections(ctx, site)
+}
+
 // PlannedFailoverPromote runs FailoverController.Execute against the
 // named target and flips DNS. Returns the promotion GTID.
 func (r *TopologyManagerRunner) PlannedFailoverPromote(ctx context.Context, nn types.NamespacedName, target, source string) (string, error) {

@@ -30,15 +30,18 @@ The annotation API closes all four.
 
 ```
   Pending ──► Validating ──► Draining ──► WaitingForLag ──► Promoting ──► Resuming ──► Succeeded
-                   │             │               │               │             │
-                   └─ reject ────┴─ rollback ────┴─ rollback ────┴─ fail ──────┴──► Failed
+       │           │             │               │               │             │
+       │           └──► Deferred (cooldown active, onCooldown=defer) ──► re-enters Validating
+       │
+       └─ reject ────┴─ rollback ────┴─ rollback ────┴─ fail ──────┴──► Failed
 ```
 
 | Phase | What the operator is doing |
 | --- | --- |
 | `Pending` | Annotation observed; status block initialised. |
 | `Validating` | Checking target is primary-candidate, replicating, read-only, no concurrent restore/update, cooldown not active. |
-| `Draining` | `SET GLOBAL super_read_only=ON` on source; stripping the `role=primary` pod label so the `-primary` Service sheds endpoints. |
+| `Deferred` | `spec.plannedFailover.onCooldown: defer` is set and cooldown is still active. Annotation is retained; reconciler re-validates at `status.plannedFailover.retryAfter`. |
+| `Draining` | Two steps, one per reconcile: (1) `SET GLOBAL super_read_only=ON` on source + record `sourceGtidAtFence`, strip `role=primary` pod label so the `-primary` Service sheds endpoints; (2) `KillAppConnections` in a loop until idle or `drainTimeout` elapses. |
 | `WaitingForLag` | Polling the target's `GTID_EXECUTED` until it contains the source's fenced GTID set. |
 | `Promoting` | Running the same 8-step sequence as emergency failover: kill app connections, relay-log drain, `STOP REPLICA`, `RESET REPLICA ALL`, capture promotion GTID, clear `super_read_only`, `SET GLOBAL read_only=0`, DNS flip. |
 | `Resuming` | Persisting `status.activeSite`, `status.lastFailover`, `status.promotionGtidExecuted`; releasing the topology-manager guard. |
@@ -54,10 +57,18 @@ Cluster-wide knobs live on the CR so common overrides don't have to be spelled i
 ```yaml
 spec:
   plannedFailover:
-    maxLagWait: 5m   # max time to wait for the target to catch up before rolling back
+    maxLagWait: 5m     # max time to wait for the target to catch up before rolling back
+    drainTimeout: 30s  # upper bound on KillAppConnections polling after super_read_only=ON
+    onCooldown: reject # one of: "reject" (default) or "defer"
 ```
 
-`maxLagWait` is the only knob exposed in this release; omitting the block is equivalent to `{maxLagWait: 5m}`. Cooldown is enforced by `spec.failoverCooldown` (the same setting the emergency path uses). A future release will add `drainTimeout` and a `defer-on-cooldown` policy; track [Wishlist #11](https://github.com/ShipStream/bloodraven/blob/main/WISHLIST.md) for the rollout.
+All three fields are optional; omitting the block is equivalent to `{maxLagWait: 5m, drainTimeout: 30s, onCooldown: reject}`.
+
+- **`maxLagWait`** — how long `WaitingForLag` polls the target before rolling back. Set shorter than the default when you know the cluster is caught up and want to fail fast.
+- **`drainTimeout`** — upper bound on the `Draining` phase's `KillAppConnections` loop. After `super_read_only=ON`, the reconciler kills stragglers every second until the count reaches zero or the budget expires; advancing to `WaitingForLag` happens either way so a stuck client cannot block the switchover.
+- **`onCooldown`** — what happens when `Validating` rejects the request because the anti-flap cooldown is active:
+  - `reject` (default): stamp `Failed{CooldownActive}` and clear the annotation. The admin must re-annotate after the cooldown expires.
+  - `defer`: stamp `Deferred`, keep the annotation in place, and re-try validation automatically at `status.plannedFailover.retryAfter`. Useful when you want to queue a switchover immediately after an emergency event without manually waiting out the cooldown.
 
 ### Per-request override
 
@@ -103,9 +114,12 @@ Every path out of `Draining`, `WaitingForLag`, or `Promoting` either completes a
 | Failure | Observable | Rollback? |
 | --- | --- | --- |
 | Target is unknown / dr-only / not replicating | `phase: Failed`, `reason: TargetUnhealthy` or `UnknownSite`, event `PlannedFailoverRejected` | no fence applied |
-| Anti-flap cooldown active | `phase: Failed`, `reason: CooldownActive`, message includes `retry after ...` | no fence applied |
+| Anti-flap cooldown active + `onCooldown: reject` | `phase: Failed`, `reason: CooldownActive`, message includes `retry after ...` | no fence applied |
+| Anti-flap cooldown active + `onCooldown: defer` | `phase: Deferred`, `reason: CooldownActive`, `retryAfter` populated; annotation retained | no fence applied; reconciler retries automatically |
+| Admin removes the annotation while `Deferred` | `phase: Failed`, `reason: Cancelled` | no fence applied |
 | Concurrent in-place restore or ordered update | `phase: Failed`, `reason: ConcurrentOperation` | no fence applied |
 | Zero-lag wait times out | `phase: Failed`, `reason: LagTimeout`, source unfenced, `role=primary` label restored, no DNS flip | yes |
+| `drainTimeout` elapses with clients still connected | `Draining` advances to `WaitingForLag` anyway with a message noting remaining connections | N/A — source is already fenced, clients get `ER_OPTION_PREVENTS_STATEMENT` on their next write |
 | Source crashes during `Draining` | `phase: Failed`, `reason: SourceCrashed` | hand-off to emergency failover path |
 | `FailoverController.Execute` fails mid-promotion | `phase: Failed`, `reason: ExecuteFailed` | **no** — same failure mode as emergency; manual recovery required |
 | DNS flip fails | `phase: Succeeded` with a warning event | N/A — the Service label swap carries writes to the new primary while external DNS catches up |
@@ -135,7 +149,7 @@ The default cooldown is 5 minutes; production deployments should keep this, not 
 
 ### Events
 
-`PlannedFailoverStarted`, `PlannedFailoverSkipped` (already-active target), `PlannedFailoverRejected`, `PlannedFailoverDraining`, `PlannedFailoverLagOK`, `PlannedFailoverCompleted`, `PlannedFailoverFailed`.
+`PlannedFailoverStarted`, `PlannedFailoverSkipped` (already-active target), `PlannedFailoverRejected`, `PlannedFailoverDeferred` (cooldown + defer policy), `PlannedFailoverDraining`, `PlannedFailoverLagOK`, `PlannedFailoverCompleted`, `PlannedFailoverFailed`.
 
 ## RPO
 

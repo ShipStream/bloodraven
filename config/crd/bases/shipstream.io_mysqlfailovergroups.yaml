@@ -4450,6 +4450,16 @@ spec:
                   this block lets the knobs live on the CR rather than being spelled
                   into every kubectl annotate.
                 properties:
+                  drainTimeout:
+                    default: 30s
+                    description: |-
+                      DrainTimeout bounds the time the source primary has to shed
+                      active application connections after super_read_only=ON is set.
+                      During this window the reconciler repeatedly calls
+                      KillAppConnections; if any connections remain after the timeout
+                      the state machine proceeds anyway so a stuck client cannot block
+                      a planned switchover indefinitely. Default: 30s.
+                    type: string
                   maxLagWait:
                     default: 5m
                     description: |-
@@ -4457,6 +4467,21 @@ spec:
                       GTID_EXECUTED to cover the fenced source's GTID_EXECUTED before
                       the state machine rolls back to the source. Must be expressible
                       as a Go time.Duration. Default: 5m.
+                    type: string
+                  onCooldown:
+                    default: reject
+                    description: |-
+                      OnCooldown controls how the state machine reacts when the
+                      anti-flap cooldown rejects a request at Validating:
+                        - "reject" (default): stamp Failed{CooldownActive} and clear the
+                          annotation. The admin must re-annotate after the cooldown
+                          expires.
+                        - "defer": stamp Deferred and keep the annotation in place;
+                          the reconciler re-tries validation at cooldown expiry and
+                          transitions to Draining automatically.
+                    enum:
+                    - reject
+                    - defer
                     type: string
                 type: object
               podAnnotations:
@@ -5213,6 +5238,17 @@ spec:
                       a terminal phase.
                     format: date-time
                     type: string
+                  drainStartTime:
+                    description: |-
+                      DrainStartTime is when the reconciler entered the Draining phase
+                      (immediately after super_read_only=ON took effect on the source).
+                      The DrainTimeout budget is measured from this timestamp.
+                    format: date-time
+                    type: string
+                  drainTimeout:
+                    description: DrainTimeout is the effective drainTimeout used for
+                      this run.
+                    type: string
                   durationSeconds:
                     description: DurationSeconds is CompletionTime - StartTime, rounded
                       to seconds.
@@ -5233,6 +5269,7 @@ spec:
                     enum:
                     - ""
                     - Pending
+                    - Deferred
                     - Validating
                     - Draining
                     - WaitingForLag
@@ -5246,6 +5283,14 @@ spec:
                       Reason is a machine-readable tag on Failed outcomes. Examples:
                       "CooldownActive", "LagTimeout", "SourceCrashed", "ExecuteFailed",
                       "InvalidAnnotation", "ConcurrentOperation", "UnknownSite".
+                    type: string
+                  retryAfter:
+                    description: |-
+                      RetryAfter is populated on the Deferred phase with the earliest
+                      time the state machine will retry validation. Derived from
+                      status.lastFailover + spec.failoverCooldown. Clears on transition
+                      out of Deferred.
+                    format: date-time
                     type: string
                   sourceGtidAtFence:
                     description: |-

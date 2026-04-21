@@ -155,6 +155,98 @@ func TestEnvtest_StatusSubresourceWrites(t *testing.T) {
 	}
 }
 
+func TestEnvtest_PlannedFailoverSpecAndStatus(t *testing.T) {
+	ns := "envtest-planned-failover"
+	ensureNamespace(t, ns)
+
+	fg := newTestFG(ns)
+	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{
+		MaxLagWait:   &metav1.Duration{Duration: 2 * time.Minute},
+		DrainTimeout: &metav1.Duration{Duration: 10 * time.Second},
+		OnCooldown:   "defer",
+	}
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatalf("failed to create fg with spec.plannedFailover: %v", err)
+	}
+
+	// Stamp a Deferred status with all the fields that need schema validation.
+	now := metav1.Now()
+	retry := metav1.NewTime(now.Add(2 * time.Minute))
+	lagWrap := metav1.Duration{Duration: 2 * time.Minute}
+	drainWrap := metav1.Duration{Duration: 10 * time.Second}
+	lost := int64(0)
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase:            v1alpha1.PlannedFailoverPhaseDeferred,
+		Target:           "dc2",
+		SourcePrimary:    "dc1",
+		StartTime:        &now,
+		MaxLagWait:       &lagWrap,
+		DrainTimeout:     &drainWrap,
+		RetryAfter:       &retry,
+		Reason:           "CooldownActive",
+		Message:          "cooldown active; retrying at " + retry.Format(time.RFC3339),
+		TransactionsLost: &lost,
+	}
+	if err := k8sClient.Status().Update(ctx, fg); err != nil {
+		t.Fatalf("failed to update planned-failover status: %v", err)
+	}
+
+	var fetched v1alpha1.MysqlFailoverGroup
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lion", Namespace: ns}, &fetched); err != nil {
+		t.Fatalf("failed to read back: %v", err)
+	}
+	if fetched.Spec.PlannedFailover == nil ||
+		fetched.Spec.PlannedFailover.OnCooldown != "defer" ||
+		fetched.Spec.PlannedFailover.MaxLagWait.Duration != 2*time.Minute ||
+		fetched.Spec.PlannedFailover.DrainTimeout.Duration != 10*time.Second {
+		t.Errorf("spec.plannedFailover round-trip mismatch: %+v", fetched.Spec.PlannedFailover)
+	}
+	if fetched.Status.PlannedFailover == nil ||
+		fetched.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhaseDeferred {
+		t.Fatalf("status.plannedFailover round-trip mismatch: %+v", fetched.Status.PlannedFailover)
+	}
+	if fetched.Status.PlannedFailover.Reason != "CooldownActive" {
+		t.Errorf("reason = %q, want CooldownActive", fetched.Status.PlannedFailover.Reason)
+	}
+	if fetched.Status.PlannedFailover.RetryAfter == nil {
+		t.Error("RetryAfter not round-tripped")
+	}
+}
+
+func TestEnvtest_PlannedFailoverOnCooldownEnumRejectsGarbage(t *testing.T) {
+	ns := "envtest-planned-failover-enum"
+	ensureNamespace(t, ns)
+
+	fg := newTestFG(ns)
+	fg.Spec.PlannedFailover = &v1alpha1.PlannedFailoverSpec{
+		OnCooldown: "bogus",
+	}
+	err := k8sClient.Create(ctx, fg)
+	if err == nil {
+		t.Fatal("expected CRD enum validation to reject onCooldown=bogus")
+	}
+}
+
+func TestEnvtest_PlannedFailoverPhaseEnumRejectsGarbage(t *testing.T) {
+	ns := "envtest-planned-failover-phase"
+	ensureNamespace(t, ns)
+
+	fg := newTestFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	now := metav1.Now()
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase:     v1alpha1.PlannedFailoverPhase("NotARealPhase"),
+		Target:    "dc2",
+		StartTime: &now,
+	}
+	err := k8sClient.Status().Update(ctx, fg)
+	if err == nil {
+		t.Fatal("expected CRD enum validation to reject an unknown phase")
+	}
+}
+
 func TestEnvtest_ReconcilerCreatesResources(t *testing.T) {
 	ns := "envtest-reconciler"
 	ensureNamespace(t, ns)

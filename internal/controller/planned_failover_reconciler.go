@@ -47,8 +47,12 @@ func plannedFailoverTerminal(s *v1alpha1.PlannedFailoverStatus) bool {
 		s.Phase == v1alpha1.PlannedFailoverPhaseFailed
 }
 
-// plannedFailoverInFlight reports whether the given status is in a
-// non-terminal, non-empty phase. Used to drive the topology guard.
+// plannedFailoverInFlight reports whether the given status represents
+// an *active* state machine run — one that is holding the topology
+// manager guard and making forward progress toward promotion. Deferred
+// is intentionally excluded: we have not fenced the source yet, so the
+// topology manager must remain free to handle an emergency failover
+// (the same cooldown check applies to both paths).
 func plannedFailoverInFlight(s *v1alpha1.PlannedFailoverStatus) bool {
 	if s == nil {
 		return false
@@ -81,53 +85,58 @@ func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailover(ctx context.Cont
 		r.Runner.SetPlannedFailoverActive(nn, plannedFailoverInFlight(fg.Status.PlannedFailover))
 	}
 
-	// Did the admin just arm a new run? Look for the annotation.
 	raw, hasAnnotation := fg.GetAnnotations()[PlannedFailoverAnnotation]
-
-	// No annotation, no active status → nothing to do.
-	if !hasAnnotation && fg.Status.PlannedFailover == nil {
-		return 0, nil
-	}
-
-	// No annotation but terminal status present → nothing to drive. Leave
-	// the terminal block in place for `kubectl describe` to show.
-	if !hasAnnotation && plannedFailoverTerminal(fg.Status.PlannedFailover) {
-		return 0, nil
-	}
-
-	// An annotation is present. Two sub-cases:
-	//   a) no prior in-flight run → consume + start a new run
-	//   b) an in-flight run already exists → ignore the annotation
-	//      until terminal (prevents re-arm during a live run)
-	if hasAnnotation && plannedFailoverInFlight(fg.Status.PlannedFailover) {
-		// Stale / duplicate annotation during an active run. Clear it
-		// so the admin is not surprised by delayed re-arm behaviour.
-		if err := r.removePlannedFailoverAnnotation(ctx, nn); err != nil {
-			logger.Error(err, "remove stale planned-failover annotation", "fg", nn)
-		}
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PlannedFailoverRejected",
-			"planned-failover annotation ignored: a previous planned failover is still running (phase=%q)",
-			fg.Status.PlannedFailover.Phase)
-	}
-
-	// Fresh annotation + no in-flight run: parse, validate, and stamp
-	// Pending. On rejection the annotation is cleared + event emitted.
-	if hasAnnotation && !plannedFailoverInFlight(fg.Status.PlannedFailover) {
-		if d, err := r.acceptPlannedFailoverAnnotation(ctx, fg, nn, raw); err != nil {
-			return 0, err
-		} else if d > 0 {
-			return d, nil
-		}
-	}
-
-	// Dispatch on the current phase.
 	cur := fg.Status.PlannedFailover
+
+	// Nothing to do: no annotation and no non-terminal status.
+	if !hasAnnotation && (cur == nil || plannedFailoverTerminal(cur)) {
+		return 0, nil
+	}
+
+	// Admin removed the annotation while a deferred request was
+	// waiting for cooldown → treat as an explicit cancel.
+	if !hasAnnotation && cur != nil && cur.Phase == v1alpha1.PlannedFailoverPhaseDeferred {
+		return r.plannedFailoverFail(ctx, fg, "Cancelled",
+			"planned-failover annotation removed while deferred (cooldown still pending); run cancelled",
+			"rejected")
+	}
+
+	// Annotation present: decide between accepting a fresh arm,
+	// retrying a deferred run, or clearing a stale duplicate.
+	if hasAnnotation {
+		switch {
+		case cur == nil || plannedFailoverTerminal(cur):
+			// Fresh arm.
+			if d, err := r.acceptPlannedFailoverAnnotation(ctx, fg, nn, raw); err != nil {
+				return 0, err
+			} else if d > 0 {
+				return d, nil
+			}
+			cur = fg.Status.PlannedFailover
+		case cur.Phase == v1alpha1.PlannedFailoverPhaseDeferred:
+			// Retry path handled in the phase dispatch below. Fall
+			// through without consuming the annotation.
+		default:
+			// Stale duplicate during an active run. Clear and warn so
+			// the admin does not see delayed re-arm behaviour.
+			if err := r.removePlannedFailoverAnnotation(ctx, nn); err != nil {
+				logger.Error(err, "remove stale planned-failover annotation", "fg", nn)
+			}
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PlannedFailoverRejected",
+				"planned-failover annotation ignored: a previous planned failover is still running (phase=%q)",
+				cur.Phase)
+		}
+	}
+
+	// Phase dispatch.
 	if cur == nil || plannedFailoverTerminal(cur) {
 		return 0, nil
 	}
 	switch cur.Phase {
 	case v1alpha1.PlannedFailoverPhasePending, v1alpha1.PlannedFailoverPhaseValidating:
 		return r.plannedFailoverValidating(ctx, fg, nn)
+	case v1alpha1.PlannedFailoverPhaseDeferred:
+		return r.plannedFailoverDeferredReconcile(ctx, fg, nn, raw)
 	case v1alpha1.PlannedFailoverPhaseDraining:
 		return r.plannedFailoverDraining(ctx, fg, nn)
 	case v1alpha1.PlannedFailoverPhaseWaitingForLag:
@@ -160,7 +169,8 @@ func (r *MysqlFailoverGroupReconciler) acceptPlannedFailoverAnnotation(ctx conte
 		return 0, nil
 	}
 
-	result, reason, err := validatePlannedFailoverRequest(fg, req, time.Now())
+	now := time.Now()
+	result, reason, err := validatePlannedFailoverRequest(fg, req, now)
 	switch result {
 	case PlannedFailoverSkip:
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverSkipped",
@@ -170,16 +180,20 @@ func (r *MysqlFailoverGroupReconciler) acceptPlannedFailoverAnnotation(ctx conte
 		}
 		return 0, nil
 	case PlannedFailoverReject:
-		// Stamp a terminal Failed block so kubectl describe shows the
-		// rejection reason. Don't increment lost/promotion counters —
-		// nothing mutated.
-		now := metav1.Now()
+		// Cooldown-active AND spec opts into defer → stamp Deferred,
+		// keep the annotation, requeue at cooldown expiry.
+		if reason == "CooldownActive" && effectiveOnCooldown(fg) == PlannedFailoverOnCooldownDefer {
+			return r.stampDeferred(ctx, fg, req, now, err.Error(), true)
+		}
+
+		// Terminal Failed.
+		metaNow := metav1.NewTime(now)
 		r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
 			Phase:          v1alpha1.PlannedFailoverPhaseFailed,
 			Target:         req.Site,
 			SourcePrimary:  fg.Status.ActiveSite,
-			StartTime:      &now,
-			CompletionTime: &now,
+			StartTime:      &metaNow,
+			CompletionTime: &metaNow,
 			Reason:         reason,
 			Message:        err.Error(),
 		})
@@ -192,24 +206,165 @@ func (r *MysqlFailoverGroupReconciler) acceptPlannedFailoverAnnotation(ctx conte
 	}
 
 	// Accept: stamp Pending, clear annotation, requeue fast.
-	now := metav1.Now()
+	metaNow := metav1.NewTime(now)
 	maxLagWait := effectiveMaxLagWait(fg, req)
-	durWrap := metav1.Duration{Duration: maxLagWait}
+	drainTimeout := effectiveDrainTimeout(fg)
+	lagWrap := metav1.Duration{Duration: maxLagWait}
+	drainWrap := metav1.Duration{Duration: drainTimeout}
 	r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
 		Phase:         v1alpha1.PlannedFailoverPhasePending,
 		Target:        req.Site,
 		SourcePrimary: fg.Status.ActiveSite,
-		StartTime:     &now,
+		StartTime:     &metaNow,
 		Message:       fmt.Sprintf("admin requested graceful switchover to %q", req.Site),
-		MaxLagWait:    &durWrap,
+		MaxLagWait:    &lagWrap,
+		DrainTimeout:  &drainWrap,
 	})
 	if rmErr := r.removePlannedFailoverAnnotation(ctx, nn); rmErr != nil {
 		log.FromContext(ctx).Error(rmErr, "remove accepted planned-failover annotation", "fg", nn)
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverStarted",
-		"planned failover from %q to %q accepted (maxLagWait=%s)",
-		fg.Status.ActiveSite, req.Site, maxLagWait)
+		"planned failover from %q to %q accepted (maxLagWait=%s, drainTimeout=%s)",
+		fg.Status.ActiveSite, req.Site, maxLagWait, drainTimeout)
 	return 1 * time.Second, nil
+}
+
+// stampDeferred writes the Deferred phase and returns a requeue bound
+// by the cooldown expiry so we wake up exactly when retry is due.
+// When initial is true the first PlannedFailoverDeferred event is
+// emitted; subsequent updates (same phase already stamped) stay silent
+// to avoid flooding the event recorder.
+func (r *MysqlFailoverGroupReconciler) stampDeferred(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, now time.Time, rejectMsg string, initial bool) (time.Duration, error) {
+	metaNow := metav1.NewTime(now)
+	maxLagWait := effectiveMaxLagWait(fg, req)
+	drainTimeout := effectiveDrainTimeout(fg)
+	lagWrap := metav1.Duration{Duration: maxLagWait}
+	drainWrap := metav1.Duration{Duration: drainTimeout}
+
+	retry := cooldownRetryAfter(fg)
+	var retryMeta *metav1.Time
+	if !retry.IsZero() {
+		m := metav1.NewTime(retry)
+		retryMeta = &m
+	}
+
+	// Preserve the original StartTime across re-stamps of the Deferred
+	// phase so status.durationSeconds reflects wall-clock from first
+	// acceptance, not from the most recent retry.
+	start := &metaNow
+	if cur := fg.Status.PlannedFailover; cur != nil && cur.StartTime != nil && cur.Phase == v1alpha1.PlannedFailoverPhaseDeferred {
+		start = cur.StartTime
+	}
+
+	msg := fmt.Sprintf("planned failover to %q deferred until %s (cooldown active); annotation retained for automatic retry",
+		req.Site, retry.UTC().Format(time.RFC3339))
+	if rejectMsg != "" {
+		msg = rejectMsg + " — annotation retained for automatic retry"
+	}
+
+	r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
+		Phase:         v1alpha1.PlannedFailoverPhaseDeferred,
+		Target:        req.Site,
+		SourcePrimary: fg.Status.ActiveSite,
+		StartTime:     start,
+		Message:       msg,
+		Reason:        "CooldownActive",
+		MaxLagWait:    &lagWrap,
+		DrainTimeout:  &drainWrap,
+		RetryAfter:    retryMeta,
+	})
+
+	if initial {
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverDeferred",
+			"planned failover to %q deferred: cooldown active, retrying at %s",
+			req.Site, retry.UTC().Format(time.RFC3339))
+	}
+
+	// Compute a requeue that wakes exactly at retry time (with a 1s
+	// cushion so we observe the expired cooldown on the next tick).
+	if retry.IsZero() {
+		return 30 * time.Second, nil
+	}
+	delay := time.Until(retry) + time.Second
+	if delay < time.Second {
+		delay = time.Second
+	}
+	if delay > 10*time.Minute {
+		delay = 10 * time.Minute
+	}
+	return delay, nil
+}
+
+// plannedFailoverDeferredReconcile re-parses the annotation (it may
+// have been edited while deferred), re-validates, and either advances
+// to Validating when the cooldown has cleared or re-stamps Deferred
+// with an updated RetryAfter.
+func (r *MysqlFailoverGroupReconciler) plannedFailoverDeferredReconcile(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, raw string) (time.Duration, error) {
+	req, parseErr := parsePlannedFailoverAnnotation(raw)
+	if parseErr != nil {
+		// Annotation edited into something invalid — treat as a reject.
+		if rmErr := r.removePlannedFailoverAnnotation(ctx, nn); rmErr != nil {
+			log.FromContext(ctx).Error(rmErr, "remove invalid planned-failover annotation", "fg", nn)
+		}
+		return r.plannedFailoverFail(ctx, fg, "InvalidAnnotation", parseErr.Error(), "rejected")
+	}
+
+	now := time.Now()
+	result, reason, err := validatePlannedFailoverRequest(fg, req, now)
+	switch result {
+	case PlannedFailoverAccept:
+		// Cooldown cleared. Promote the request to Pending and let the
+		// normal state machine take over.
+		cur := fg.Status.PlannedFailover
+		metaNow := metav1.NewTime(now)
+		maxLagWait := effectiveMaxLagWait(fg, req)
+		drainTimeout := effectiveDrainTimeout(fg)
+		lagWrap := metav1.Duration{Duration: maxLagWait}
+		drainWrap := metav1.Duration{Duration: drainTimeout}
+		start := &metaNow
+		if cur != nil && cur.StartTime != nil {
+			start = cur.StartTime
+		}
+		r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
+			Phase:         v1alpha1.PlannedFailoverPhasePending,
+			Target:        req.Site,
+			SourcePrimary: fg.Status.ActiveSite,
+			StartTime:     start,
+			Message:       fmt.Sprintf("cooldown cleared; proceeding with planned failover to %q", req.Site),
+			MaxLagWait:    &lagWrap,
+			DrainTimeout:  &drainWrap,
+		})
+		if rmErr := r.removePlannedFailoverAnnotation(ctx, nn); rmErr != nil {
+			log.FromContext(ctx).Error(rmErr, "remove promoted-deferred planned-failover annotation", "fg", nn)
+		}
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverStarted",
+			"deferred planned failover to %q resumed (maxLagWait=%s, drainTimeout=%s)",
+			req.Site, maxLagWait, drainTimeout)
+		return 1 * time.Second, nil
+	case PlannedFailoverSkip:
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverSkipped",
+			"deferred planned failover: site %q is already the active primary; clearing annotation", req.Site)
+		if rmErr := r.removePlannedFailoverAnnotation(ctx, nn); rmErr != nil {
+			log.FromContext(ctx).Error(rmErr, "remove idempotent deferred annotation", "fg", nn)
+		}
+		// Move to a terminal Failed (describing the skip) so operators
+		// can see the outcome on the CR.
+		return r.plannedFailoverFail(ctx, fg, "AlreadyActive",
+			fmt.Sprintf("deferred planned failover to %q resolved as no-op: target is already active", req.Site),
+			"rejected")
+	}
+
+	// Still rejected. If cooldown is still active, re-stamp Deferred
+	// with an updated retryAfter. Any other reject reason becomes
+	// terminal (the cluster changed state in a way that makes the
+	// request invalid for more than cooldown).
+	if reason == "CooldownActive" {
+		return r.stampDeferred(ctx, fg, req, now, err.Error(), false)
+	}
+	if rmErr := r.removePlannedFailoverAnnotation(ctx, nn); rmErr != nil {
+		log.FromContext(ctx).Error(rmErr, "remove newly-rejected deferred annotation", "fg", nn)
+	}
+	return r.plannedFailoverFail(ctx, fg, reason, err.Error(), "rejected")
 }
 
 // plannedFailoverValidating re-checks pre-conditions one more time
@@ -244,54 +399,128 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverValidating(ctx context.Con
 	return 1 * time.Second, nil
 }
 
-// plannedFailoverDraining applies super_read_only=ON on the source and
-// records its GTID_EXECUTED. The primary role label will be stripped
-// by syncPodLabels on this reconcile pass (the reconciler already
-// calls syncPodLabels at the end of Reconcile).
+// plannedFailoverDraining runs a two-step flow inside the Draining
+// phase:
+//
+//  1. First entry (SourceGtidAtFence == ""): fence the source with
+//     super_read_only=ON and record its GTID_EXECUTED. The primary
+//     role label will be stripped by syncPodLabels at the end of the
+//     reconcile. Stamp DrainStartTime and requeue fast for the drain
+//     loop.
+//
+//  2. Subsequent entries: call KillAppConnections on the source.
+//     Advance to WaitingForLag when the last call returned zero
+//     killed (clean drain) or DrainTimeout has elapsed (budget
+//     exceeded; proceed anyway rather than block indefinitely on a
+//     stuck client).
+//
+// The source primary is already read-only at this point, so no new
+// writes can slip in while we drain.
 func (r *MysqlFailoverGroupReconciler) plannedFailoverDraining(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) (time.Duration, error) {
 	cur := fg.Status.PlannedFailover
+	// If the source disappears between annotation and Draining, there
+	// is nothing to fence — we hand off to the emergency path and
+	// stamp Failed with SourceCrashed so the operator sees why the
+	// planned attempt was abandoned. This check runs before the Runner
+	// guard so the hand-off path is taken regardless of whether the
+	// topology manager is wired yet.
+	if cur.SourcePrimary == "" {
+		return r.plannedFailoverFail(ctx, fg, "SourceCrashed",
+			"planned-failover: no active source primary at draining phase; emergency failover will handle promotion",
+			"failed_other")
+	}
 	if r.Runner == nil {
 		return r.plannedFailoverFail(ctx, fg, "InternalError",
 			"planned-failover: runner not wired; cannot fence source primary",
 			"failed_other")
 	}
 
-	// If the source disappears between annotation and Draining, there
-	// is nothing to fence — we hand off to the emergency path and
-	// stamp Failed with SourceCrashed so the operator sees why the
-	// planned attempt was abandoned.
-	if cur.SourcePrimary == "" {
-		return r.plannedFailoverFail(ctx, fg, "SourceCrashed",
-			"planned-failover: no active source primary at draining phase; emergency failover will handle promotion",
-			"failed_other")
-	}
-
-	fenceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	gtid, err := r.Runner.PlannedFailoverFence(fenceCtx, nn, cur.SourcePrimary)
-	cancel()
-	if err != nil {
-		// The source may have crashed mid-drain. We do not unfence —
-		// there is nothing to unfence, and the emergency path will
-		// handle the (now-empty) primary. Stamp Failed so the operator
-		// sees the reason, and let the topology manager take over by
-		// clearing the planned-failover flag.
-		if r.Runner != nil {
+	// Step 1: first entry into Draining — fence and record GTID.
+	if cur.SourceGtidAtFence == "" {
+		fenceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		gtid, err := r.Runner.PlannedFailoverFence(fenceCtx, nn, cur.SourcePrimary)
+		cancel()
+		if err != nil {
+			// The source may have crashed mid-drain. We do not unfence
+			// — there is nothing to unfence, and the emergency path
+			// will handle the (now-empty) primary.
 			r.Runner.SetPlannedFailoverActive(nn, false)
+			return r.plannedFailoverFail(ctx, fg, "SourceCrashed",
+				fmt.Sprintf("planned-failover: failed to fence source primary %q: %v; emergency failover path will take over", cur.SourcePrimary, err),
+				"failed_other")
 		}
-		return r.plannedFailoverFail(ctx, fg, "SourceCrashed",
-			fmt.Sprintf("planned-failover: failed to fence source primary %q: %v; emergency failover path will take over", cur.SourcePrimary, err),
-			"failed_other")
+
+		now := metav1.Now()
+		next := cur.DeepCopy()
+		next.SourceGtidAtFence = gtid
+		next.DrainStartTime = &now
+		next.Message = fmt.Sprintf("source fenced at gtid %s; draining connections on %q",
+			truncateGtidHint(gtid), cur.SourcePrimary)
+		r.setPlannedFailoverStatus(ctx, fg, next)
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverDraining",
+			"fenced source primary %q; draining application connections (timeout %s)",
+			cur.SourcePrimary, effectiveDrainTimeoutFromStatus(cur))
+		return 1 * time.Second, nil
 	}
 
-	// Fence took. Advance to WaitingForLag with the recorded GTID.
+	// Step 2: drain loop. Kill stragglers; advance when idle or budget
+	// exhausted.
+	drainTimeout := effectiveDrainTimeoutFromStatus(cur)
+	var drainStart time.Time
+	if cur.DrainStartTime != nil {
+		drainStart = cur.DrainStartTime.Time
+	}
+	elapsed := time.Since(drainStart)
+	budgetExceeded := !drainStart.IsZero() && elapsed >= drainTimeout
+
+	killCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	killed, killErr := r.Runner.PlannedFailoverDrainConnections(killCtx, nn, cur.SourcePrimary)
+	cancel()
+
+	if killErr != nil {
+		// Transient failure to talk to MySQL. If the drain budget has
+		// elapsed, proceed anyway — the source is fenced and we do not
+		// want a stuck client to block the switchover indefinitely.
+		if budgetExceeded {
+			return r.advanceToWaitingForLag(ctx, fg, cur,
+				fmt.Sprintf("drain budget exhausted after %s (last kill: %v); proceeding to promotion", truncateDur(elapsed), killErr))
+		}
+		log.FromContext(ctx).Info("planned-failover drain: transient kill error, will retry",
+			"fg", nn, "site", cur.SourcePrimary, "error", killErr.Error())
+		return 1 * time.Second, nil
+	}
+
+	if killed == 0 {
+		return r.advanceToWaitingForLag(ctx, fg, cur,
+			fmt.Sprintf("source %q drained cleanly in %s", cur.SourcePrimary, truncateDur(elapsed)))
+	}
+	if budgetExceeded {
+		return r.advanceToWaitingForLag(ctx, fg, cur,
+			fmt.Sprintf("drain budget exhausted after %s with %d connection(s) remaining on %q; proceeding",
+				truncateDur(elapsed), killed, cur.SourcePrimary))
+	}
+	return 1 * time.Second, nil
+}
+
+// advanceToWaitingForLag stamps the WaitingForLag phase with the given
+// message and emits no event (the phase-entry event is
+// PlannedFailoverLagOK, which fires only after catch-up).
+func (r *MysqlFailoverGroupReconciler) advanceToWaitingForLag(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.PlannedFailoverStatus, msg string) (time.Duration, error) {
 	next := cur.DeepCopy()
 	next.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
-	next.SourceGtidAtFence = gtid
-	next.Message = fmt.Sprintf("source fenced at gtid %s; waiting for target %q to catch up", truncateGtidHint(gtid), cur.Target)
+	next.Message = fmt.Sprintf("%s; waiting for target %q to catch up", msg, cur.Target)
 	r.setPlannedFailoverStatus(ctx, fg, next)
-	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverDraining",
-		"fenced source primary %q; waiting for target %q to catch up", cur.SourcePrimary, cur.Target)
 	return 1 * time.Second, nil
+}
+
+// effectiveDrainTimeoutFromStatus returns the drainTimeout captured on
+// status at acceptance time; falling back to the package default when
+// status does not have it set (e.g. an operator upgraded mid-flight).
+func effectiveDrainTimeoutFromStatus(cur *v1alpha1.PlannedFailoverStatus) time.Duration {
+	if cur != nil && cur.DrainTimeout != nil && cur.DrainTimeout.Duration > 0 {
+		return cur.DrainTimeout.Duration
+	}
+	return defaultPlannedFailoverDrainTimeout
 }
 
 // plannedFailoverWaitingForLag polls the target's GTID_EXECUTED until

@@ -35,6 +35,20 @@ const (
 	// neither spec.plannedFailover.maxLagWait nor the annotation
 	// override is supplied.
 	defaultPlannedFailoverMaxLagWait = 5 * time.Minute
+
+	// defaultPlannedFailoverDrainTimeout is the fallback drainTimeout
+	// when spec.plannedFailover.drainTimeout is not supplied.
+	defaultPlannedFailoverDrainTimeout = 30 * time.Second
+
+	// PlannedFailoverOnCooldownReject is the default behaviour:
+	// cooldown at Validating results in a terminal Failed status with
+	// reason "CooldownActive".
+	PlannedFailoverOnCooldownReject = "reject"
+
+	// PlannedFailoverOnCooldownDefer keeps the annotation in place and
+	// re-tries validation at cooldown expiry; the state machine enters
+	// the Deferred phase in the interim.
+	PlannedFailoverOnCooldownDefer = "defer"
 )
 
 // PlannedFailoverRequest is the parsed form of the
@@ -274,6 +288,40 @@ func effectiveMaxLagWait(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverReq
 		return fg.Spec.PlannedFailover.MaxLagWait.Duration
 	}
 	return defaultPlannedFailoverMaxLagWait
+}
+
+// effectiveDrainTimeout returns the drain timeout for a planned
+// failover, honoring spec.plannedFailover.drainTimeout first, then the
+// package default.
+func effectiveDrainTimeout(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
+	if fg.Spec.PlannedFailover != nil && fg.Spec.PlannedFailover.DrainTimeout != nil && fg.Spec.PlannedFailover.DrainTimeout.Duration > 0 {
+		return fg.Spec.PlannedFailover.DrainTimeout.Duration
+	}
+	return defaultPlannedFailoverDrainTimeout
+}
+
+// effectiveOnCooldown returns the spec.plannedFailover.onCooldown
+// policy, defaulting to "reject". An empty value or any unknown value
+// falls back to "reject" so a malformed spec does not accidentally
+// enable the defer path.
+func effectiveOnCooldown(fg *v1alpha1.MysqlFailoverGroup) string {
+	if fg.Spec.PlannedFailover != nil {
+		switch fg.Spec.PlannedFailover.OnCooldown {
+		case PlannedFailoverOnCooldownDefer:
+			return PlannedFailoverOnCooldownDefer
+		}
+	}
+	return PlannedFailoverOnCooldownReject
+}
+
+// cooldownRetryAfter returns the earliest time after which the cooldown
+// check will accept a new planned failover. Returns the zero time when
+// no prior failover has been recorded.
+func cooldownRetryAfter(fg *v1alpha1.MysqlFailoverGroup) time.Time {
+	if fg.Status.LastFailover == nil || fg.Status.LastFailover.IsZero() {
+		return time.Time{}
+	}
+	return fg.Status.LastFailover.Time.Add(failoverCooldownFromSpec(fg))
 }
 
 // plannedFailoverFencesSourcePrimary reports whether syncPodLabels

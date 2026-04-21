@@ -1224,6 +1224,21 @@ func (tm *TopologyManager) GetSiteGtidExecuted(ctx context.Context, name string)
 	return gtid, nil
 }
 
+// KillSiteAppConnections kills non-replication application connections
+// on the named site and returns the count killed. Used by the
+// planned-failover Draining loop to drain in-flight transactions.
+func (tm *TopologyManager) KillSiteAppConnections(ctx context.Context, name string) (int, error) {
+	site := tm.getSite(name)
+	if site == nil {
+		return 0, errSiteNotFound
+	}
+	killed, err := site.mysql.KillAppConnections(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("kill app connections on %q: %w", name, err)
+	}
+	return killed, nil
+}
+
 // PlannedPromote runs FailoverController.Execute against the target,
 // flips DNS to the target's LB IP, and updates the in-memory
 // lastFailover/lastFailoverTarget fields so the anti-flap cooldown
