@@ -147,7 +147,9 @@ func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailover(ctx context.Cont
 		return r.plannedFailoverResuming(ctx, fg, nn)
 	}
 	// Unknown phase: wipe so the next reconcile can restart from scratch.
-	r.setPlannedFailoverStatus(ctx, fg, nil)
+	if err := r.setPlannedFailoverStatus(ctx, fg, nil); err != nil {
+		return 0, err
+	}
 	return 2 * time.Second, nil
 }
 
@@ -170,7 +172,7 @@ func (r *MysqlFailoverGroupReconciler) acceptPlannedFailoverAnnotation(ctx conte
 	}
 
 	now := time.Now()
-	result, reason, err := validatePlannedFailoverRequest(fg, req, now)
+	result, reason, err := validatePlannedFailoverRequest(fg, req, now, false)
 	switch result {
 	case PlannedFailoverSkip:
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverSkipped",
@@ -188,7 +190,7 @@ func (r *MysqlFailoverGroupReconciler) acceptPlannedFailoverAnnotation(ctx conte
 
 		// Terminal Failed.
 		metaNow := metav1.NewTime(now)
-		r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
+		if err := r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
 			Phase:          v1alpha1.PlannedFailoverPhaseFailed,
 			Target:         req.Site,
 			SourcePrimary:  fg.Status.ActiveSite,
@@ -196,7 +198,9 @@ func (r *MysqlFailoverGroupReconciler) acceptPlannedFailoverAnnotation(ctx conte
 			CompletionTime: &metaNow,
 			Reason:         reason,
 			Message:        err.Error(),
-		})
+		}); err != nil {
+			return 0, err
+		}
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PlannedFailoverRejected", "%s", err.Error())
 		metrics.PlannedFailoversTotal.WithLabelValues(req.Site, "rejected").Inc()
 		if rmErr := r.removePlannedFailoverAnnotation(ctx, nn); rmErr != nil {
@@ -211,7 +215,7 @@ func (r *MysqlFailoverGroupReconciler) acceptPlannedFailoverAnnotation(ctx conte
 	drainTimeout := effectiveDrainTimeout(fg)
 	lagWrap := metav1.Duration{Duration: maxLagWait}
 	drainWrap := metav1.Duration{Duration: drainTimeout}
-	r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
+	if err := r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
 		Phase:         v1alpha1.PlannedFailoverPhasePending,
 		Target:        req.Site,
 		SourcePrimary: fg.Status.ActiveSite,
@@ -219,7 +223,9 @@ func (r *MysqlFailoverGroupReconciler) acceptPlannedFailoverAnnotation(ctx conte
 		Message:       fmt.Sprintf("admin requested graceful switchover to %q", req.Site),
 		MaxLagWait:    &lagWrap,
 		DrainTimeout:  &drainWrap,
-	})
+	}); err != nil {
+		return 0, err
+	}
 	if rmErr := r.removePlannedFailoverAnnotation(ctx, nn); rmErr != nil {
 		log.FromContext(ctx).Error(rmErr, "remove accepted planned-failover annotation", "fg", nn)
 	}
@@ -262,7 +268,7 @@ func (r *MysqlFailoverGroupReconciler) stampDeferred(ctx context.Context, fg *v1
 		msg = rejectMsg + " — annotation retained for automatic retry"
 	}
 
-	r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
+	if err := r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
 		Phase:         v1alpha1.PlannedFailoverPhaseDeferred,
 		Target:        req.Site,
 		SourcePrimary: fg.Status.ActiveSite,
@@ -272,7 +278,9 @@ func (r *MysqlFailoverGroupReconciler) stampDeferred(ctx context.Context, fg *v1
 		MaxLagWait:    &lagWrap,
 		DrainTimeout:  &drainWrap,
 		RetryAfter:    retryMeta,
-	})
+	}); err != nil {
+		return 0, err
+	}
 
 	if initial {
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverDeferred",
@@ -310,7 +318,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDeferredReconcile(ctx cont
 	}
 
 	now := time.Now()
-	result, reason, err := validatePlannedFailoverRequest(fg, req, now)
+	result, reason, err := validatePlannedFailoverRequest(fg, req, now, false)
 	switch result {
 	case PlannedFailoverAccept:
 		// Cooldown cleared. Promote the request to Pending and let the
@@ -325,7 +333,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDeferredReconcile(ctx cont
 		if cur != nil && cur.StartTime != nil {
 			start = cur.StartTime
 		}
-		r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
+		if err := r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
 			Phase:         v1alpha1.PlannedFailoverPhasePending,
 			Target:        req.Site,
 			SourcePrimary: fg.Status.ActiveSite,
@@ -333,7 +341,9 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDeferredReconcile(ctx cont
 			Message:       fmt.Sprintf("cooldown cleared; proceeding with planned failover to %q", req.Site),
 			MaxLagWait:    &lagWrap,
 			DrainTimeout:  &drainWrap,
-		})
+		}); err != nil {
+			return 0, err
+		}
 		if rmErr := r.removePlannedFailoverAnnotation(ctx, nn); rmErr != nil {
 			log.FromContext(ctx).Error(rmErr, "remove promoted-deferred planned-failover annotation", "fg", nn)
 		}
@@ -380,7 +390,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverValidating(ctx context.Con
 		req.MaxLagWait = cur.MaxLagWait.Duration
 	}
 
-	result, reason, err := validatePlannedFailoverRequest(fg, req, time.Now())
+	result, reason, err := validatePlannedFailoverRequest(fg, req, time.Now(), true)
+	if result == PlannedFailoverSkip {
+		return r.plannedFailoverFail(ctx, fg, "AlreadyActive",
+			fmt.Sprintf("planned-failover: target %q is already the active primary; nothing to do", cur.Target),
+			"failed_other")
+	}
 	if result != PlannedFailoverAccept {
 		return r.plannedFailoverFail(ctx, fg, reason, err.Error(), "failed_other")
 	}
@@ -390,7 +405,9 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverValidating(ctx context.Con
 	next := cur.DeepCopy()
 	next.Phase = v1alpha1.PlannedFailoverPhaseDraining
 	next.Message = fmt.Sprintf("fencing source primary %q", next.SourcePrimary)
-	r.setPlannedFailoverStatus(ctx, fg, next)
+	if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+		return 0, err
+	}
 	// Set the topology guard now so the draining reconcile cannot
 	// race an emergency failover.
 	if r.Runner != nil {
@@ -459,7 +476,9 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDraining(ctx context.Conte
 		next.DrainStartTime = &now
 		next.Message = fmt.Sprintf("source fenced at gtid %s; draining connections on %q",
 			truncateGtidHint(gtid), cur.SourcePrimary)
-		r.setPlannedFailoverStatus(ctx, fg, next)
+		if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+			return 0, err
+		}
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverDraining",
 			"fenced source primary %q; draining application connections (timeout %s)",
 			cur.SourcePrimary, effectiveDrainTimeoutFromStatus(cur))
@@ -514,7 +533,9 @@ func (r *MysqlFailoverGroupReconciler) advanceToWaitingForLag(ctx context.Contex
 	next.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
 	next.LagWaitStartTime = &now
 	next.Message = fmt.Sprintf("%s; waiting for target %q to catch up", msg, cur.Target)
-	r.setPlannedFailoverStatus(ctx, fg, next)
+	if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+		return 0, err
+	}
 	return 1 * time.Second, nil
 }
 
@@ -592,7 +613,9 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForLag(ctx context.
 		next.Phase = v1alpha1.PlannedFailoverPhasePromoting
 		next.TargetGtidAtPromotion = targetGtid
 		next.Message = fmt.Sprintf("target %q caught up in %s; promoting", cur.Target, truncateDur(elapsed))
-		r.setPlannedFailoverStatus(ctx, fg, next)
+		if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+			return 0, err
+		}
 		metrics.PlannedFailoverLagWaitSeconds.WithLabelValues(cur.Target).Observe(elapsed.Seconds())
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverLagOK",
 			"target %q caught up after %s; proceeding to promote", cur.Target, truncateDur(elapsed))
@@ -636,7 +659,9 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 		next.TargetGtidAtPromotion = promotionGtid
 	}
 	next.Message = fmt.Sprintf("promoted %q; finalising status", cur.Target)
-	r.setPlannedFailoverStatus(ctx, fg, next)
+	if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+		return 0, err
+	}
 	return 1 * time.Second, nil
 }
 
@@ -653,6 +678,13 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverResuming(ctx context.Conte
 	// persist to the CR so the next operator restart reads them back.
 	if err := r.patchFailoverTrackingFields(ctx, nn, cur.Target, cur.TargetGtidAtPromotion, now); err != nil {
 		log.FromContext(ctx).Error(err, "planned-failover: persist lastFailover fields", "fg", nn)
+		return 2 * time.Second, nil
+	}
+	fg.Status.ActiveSite = cur.Target
+	fg.Status.LastFailover = &now
+	fg.Status.LastFailoverTarget = cur.Target
+	if cur.TargetGtidAtPromotion != "" {
+		fg.Status.PromotionGtidExecuted = cur.TargetGtidAtPromotion
 	}
 
 	// Compute transactionsLost. On a clean planned switchover this is
@@ -675,7 +707,9 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverResuming(ctx context.Conte
 	next.DurationSeconds = &duration
 	next.TransactionsLost = &lost
 	next.Message = fmt.Sprintf("promoted %q, %d transactions lost", cur.Target, lost)
-	r.setPlannedFailoverStatus(ctx, fg, next)
+	if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+		return 0, err
+	}
 
 	metrics.PlannedFailoversTotal.WithLabelValues(cur.Target, "success").Inc()
 	metrics.PlannedFailoverDurationSeconds.WithLabelValues(cur.Target).Observe(float64(duration))
@@ -712,6 +746,8 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverRollback(ctx context.Conte
 		if err := r.Runner.PlannedFailoverUnfence(unfenceCtx, nn, cur.SourcePrimary); err != nil {
 			log.FromContext(ctx).Error(err, "planned-failover: unfence after rollback",
 				"fg", nn, "site", cur.SourcePrimary)
+			cancel()
+			return 5 * time.Second, nil
 		}
 		cancel()
 	}
@@ -746,7 +782,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverFail(ctx context.Context, 
 	}
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 
-	r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
+	if err := r.setPlannedFailoverStatus(ctx, fg, &v1alpha1.PlannedFailoverStatus{
 		Phase:             v1alpha1.PlannedFailoverPhaseFailed,
 		Target:            target,
 		SourcePrimary:     source,
@@ -757,7 +793,9 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverFail(ctx context.Context, 
 		Reason:            reason,
 		Message:           msg,
 		MaxLagWait:        maxLagWait,
-	})
+	}); err != nil {
+		return 0, err
+	}
 
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PlannedFailoverFailed",
 		"planned failover failed (%s): %s", reason, msg)
@@ -775,12 +813,14 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverFail(ctx context.Context, 
 // setPlannedFailoverStatus patches only fg.Status.PlannedFailover.
 // Mirrors setInPlaceRestoreStatus's merge-patch pattern. Passing nil
 // clears the block.
-func (r *MysqlFailoverGroupReconciler) setPlannedFailoverStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, s *v1alpha1.PlannedFailoverStatus) {
+func (r *MysqlFailoverGroupReconciler) setPlannedFailoverStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, s *v1alpha1.PlannedFailoverStatus) error {
 	patch := client.MergeFrom(fg.DeepCopy())
 	fg.Status.PlannedFailover = s
 	if err := r.Status().Patch(ctx, fg, patch); err != nil && !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "update planned-failover status", "fg", fg.Name)
+		return err
 	}
+	return nil
 }
 
 // removePlannedFailoverAnnotation deletes the one-shot annotation from
@@ -832,10 +872,12 @@ func (r *MysqlFailoverGroupReconciler) patchFailoverTrackingFields(ctx context.C
 func plannedFailoverTransactionsLost(sourceGtid, targetGtid string) int64 {
 	src, err := internalmysql.ParseGTIDSet(sourceGtid)
 	if err != nil {
+		log.Log.Error(err, "planned-failover: parse sourceGtidAtFence failed; reporting transactionsLost=0", "gtid", sourceGtid)
 		return 0
 	}
 	dst, err := internalmysql.ParseGTIDSet(targetGtid)
 	if err != nil {
+		log.Log.Error(err, "planned-failover: parse targetGtidAtPromotion failed; reporting transactionsLost=0", "gtid", targetGtid)
 		return 0
 	}
 	// Per-UUID intervals on source that are not covered by the target.
@@ -847,8 +889,8 @@ func plannedFailoverTransactionsLost(sourceGtid, targetGtid string) int64 {
 			// interval of the same uuid.
 			covered := int64(0)
 			for _, di := range dstIntervals {
-				lo := maxInt64(si.Start, di.Start)
-				hi := minInt64(si.End, di.End)
+				lo := max(si.Start, di.Start)
+				hi := min(si.End, di.End)
 				if hi >= lo {
 					covered += hi - lo + 1
 				}
@@ -893,19 +935,3 @@ func truncateGtidHint(s string) string {
 func truncateDur(d time.Duration) time.Duration {
 	return d.Round(100 * time.Millisecond)
 }
-
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func minInt64(a, b int64) int64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-

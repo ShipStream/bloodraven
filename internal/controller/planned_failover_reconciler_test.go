@@ -283,6 +283,60 @@ func TestReconcilePlannedFailover_DrainingWithoutSourceStampsSourceCrashed(t *te
 	}
 }
 
+func TestReconcilePlannedFailover_PendingAdvancesToDraining(t *testing.T) {
+	fg := plannedFailoverFG("")
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase:         v1alpha1.PlannedFailoverPhasePending,
+		Target:        "pdx",
+		SourcePrimary: "iad",
+		StartTime:     &start,
+		MaxLagWait:    &metav1.Duration{Duration: 30 * time.Second},
+	}
+
+	r, _ := newReconciler(fg)
+	d, err := r.reconcilePlannedFailover(context.Background(), fg)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if d <= 0 {
+		t.Fatalf("expected positive requeue, got %s", d)
+	}
+	fetched := fetchFG(t, r, fgNN(fg))
+	pf := fetched.Status.PlannedFailover
+	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseDraining {
+		t.Fatalf("expected Draining, got %+v", pf)
+	}
+	if pf.Message == "" || !strings.Contains(pf.Message, "fencing source primary") {
+		t.Fatalf("expected draining message, got %q", pf.Message)
+	}
+}
+
+func TestReconcilePlannedFailover_ValidatingAlreadyActiveDoesNotPanic(t *testing.T) {
+	fg := plannedFailoverFG("")
+	fg.Status.ActiveSite = "pdx"
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase:         v1alpha1.PlannedFailoverPhaseValidating,
+		Target:        "pdx",
+		SourcePrimary: "iad",
+		StartTime:     &start,
+	}
+
+	r, _ := newReconciler(fg)
+	if _, err := r.reconcilePlannedFailover(context.Background(), fg); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	fetched := fetchFG(t, r, fgNN(fg))
+	pf := fetched.Status.PlannedFailover
+	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseFailed {
+		t.Fatalf("expected Failed terminal status, got %+v", pf)
+	}
+	if pf.Reason != "AlreadyActive" {
+		t.Fatalf("expected AlreadyActive, got %q", pf.Reason)
+	}
+}
+
 func TestReconcilePlannedFailover_ResumingStampsSucceeded(t *testing.T) {
 	fg := plannedFailoverFG("")
 	start := metav1.NewTime(time.Now().Add(-10 * time.Second))

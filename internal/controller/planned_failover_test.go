@@ -91,7 +91,7 @@ func TestParsePlannedFailoverAnnotation(t *testing.T) {
 func TestValidatePlannedFailover_Accept(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 	now := time.Now()
-	result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now)
+	result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now, false)
 	if err != nil || result != PlannedFailoverAccept {
 		t.Fatalf("expected accept, got result=%v err=%v", result, err)
 	}
@@ -99,7 +99,7 @@ func TestValidatePlannedFailover_Accept(t *testing.T) {
 
 func TestValidatePlannedFailover_EmptySite(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{}, time.Now())
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{}, time.Now(), false)
 	if result != PlannedFailoverReject {
 		t.Fatalf("expected reject, got %v", result)
 	}
@@ -113,7 +113,7 @@ func TestValidatePlannedFailover_EmptySite(t *testing.T) {
 
 func TestValidatePlannedFailover_UnknownSite(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "sfo"}, time.Now())
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "sfo"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "UnknownSite" {
 		t.Fatalf("expected UnknownSite reject, got result=%v reason=%q err=%v", result, reason, err)
 	}
@@ -121,7 +121,7 @@ func TestValidatePlannedFailover_UnknownSite(t *testing.T) {
 
 func TestValidatePlannedFailover_DROnlyTargetRejected(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx", "lhr"}, []string{"lhr"}, "iad", nil, nil)
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "lhr"}, time.Now())
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "lhr"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "UnknownSite" {
 		t.Fatalf("expected UnknownSite reject for dr-only target, got result=%v reason=%q err=%v", result, reason, err)
 	}
@@ -132,7 +132,7 @@ func TestValidatePlannedFailover_DROnlyTargetRejected(t *testing.T) {
 
 func TestValidatePlannedFailover_ActiveSiteIsNoop(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
-	result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "iad"}, time.Now())
+	result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "iad"}, time.Now(), false)
 	if result != PlannedFailoverSkip {
 		t.Fatalf("expected skip (target is active), got %v (err=%v)", result, err)
 	}
@@ -142,7 +142,7 @@ func TestValidatePlannedFailover_UnreachableTarget(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
 		map[string]string{"pdx": "unreachable"},
 		map[string]bool{"pdx": false})
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now())
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "TargetUnhealthy" {
 		t.Fatalf("expected TargetUnhealthy reject, got result=%v reason=%q err=%v", result, reason, err)
 	}
@@ -152,7 +152,7 @@ func TestValidatePlannedFailover_TargetNotReplicating(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
 		map[string]string{"pdx": "read-only"},
 		map[string]bool{"pdx": false})
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now())
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "TargetUnhealthy" {
 		t.Fatalf("expected TargetUnhealthy reject, got result=%v reason=%q err=%v", result, reason, err)
 	}
@@ -169,7 +169,7 @@ func TestValidatePlannedFailover_CooldownActive(t *testing.T) {
 	last := metav1.NewTime(now.Add(-2 * time.Minute))
 	fg.Status.LastFailover = &last
 
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now)
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now, false)
 	if result != PlannedFailoverReject || reason != "CooldownActive" {
 		t.Fatalf("expected CooldownActive reject, got result=%v reason=%q err=%v", result, reason, err)
 	}
@@ -186,7 +186,7 @@ func TestValidatePlannedFailover_CooldownExpired(t *testing.T) {
 	last := metav1.NewTime(now.Add(-10 * time.Minute))
 	fg.Status.LastFailover = &last
 
-	result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now)
+	result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now, false)
 	if result != PlannedFailoverAccept {
 		t.Fatalf("expected accept once cooldown expired, got %v (err=%v)", result, err)
 	}
@@ -197,7 +197,7 @@ func TestValidatePlannedFailover_ConcurrentRestoreRejected(t *testing.T) {
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase: v1alpha1.RestoreInPlaceRestoring,
 	}
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now())
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "ConcurrentOperation" {
 		t.Fatalf("expected ConcurrentOperation reject, got result=%v reason=%q err=%v", result, reason, err)
 	}
@@ -206,7 +206,7 @@ func TestValidatePlannedFailover_ConcurrentRestoreRejected(t *testing.T) {
 func TestValidatePlannedFailover_ConcurrentUpdateRejected(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 	fg.Status.UpdatePhase = "UpdatingReplicas"
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now())
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "ConcurrentOperation" {
 		t.Fatalf("expected ConcurrentOperation reject, got result=%v reason=%q err=%v", result, reason, err)
 	}
@@ -217,7 +217,7 @@ func TestValidatePlannedFailover_InFlightPlannedFailoverRejected(t *testing.T) {
 	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
 		Phase: v1alpha1.PlannedFailoverPhaseWaitingForLag,
 	}
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now())
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverReject || reason != "ConcurrentOperation" {
 		t.Fatalf("expected ConcurrentOperation reject, got result=%v reason=%q err=%v", result, reason, err)
 	}
@@ -231,7 +231,7 @@ func TestValidatePlannedFailover_TerminalPlannedFailoverOK(t *testing.T) {
 	}
 	// Terminal Succeeded must not block a fresh run. Active site is "iad",
 	// so pdx is a valid target.
-	result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now())
+	result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
 	if result != PlannedFailoverAccept {
 		t.Fatalf("expected accept with prior terminal status, got %v (err=%v)", result, err)
 	}

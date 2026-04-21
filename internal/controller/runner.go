@@ -280,10 +280,12 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		suppress := restoreInFlight(fg)
 		frozen := inPlaceRestoreInFlight(fg)
+		plannedActive := plannedFailoverInFlight(fg.Status.PlannedFailover)
 
 		if ok && existing.cfg.Equal(cfg) {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
 			existing.tm.SetTopologyFrozen(frozen)
+			existing.tm.SetPlannedFailoverActive(plannedActive)
 			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
 			// Detect spec drift for ordered rolling updates.
 			r.checkSpecDrift(ctx, fg, existing.tm)
@@ -307,6 +309,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		if started {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
 			mt.tm.SetTopologyFrozen(frozen)
+			mt.tm.SetPlannedFailoverActive(plannedActive)
 			r.handleRecloneAnnotation(ctx, fg, nn, mt.tm)
 		}
 	}

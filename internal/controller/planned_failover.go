@@ -151,7 +151,7 @@ const (
 // event when something is wrong. The reason string is a short machine-
 // readable tag ("UnknownSite", "CooldownActive", ...) that the state
 // machine stamps into status.plannedFailover.reason.
-func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, now time.Time) (PlannedFailoverValidationResult, string, error) {
+func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, now time.Time, allowCurrentRun bool) (PlannedFailoverValidationResult, string, error) {
 	if req.Site == "" {
 		return PlannedFailoverReject, "InvalidAnnotation", fmt.Errorf(
 			"planned-failover annotation is empty; expected <site>[:maxLagWait=<duration>]")
@@ -235,14 +235,8 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 	// No in-flight planned failover (either from the same attempt
 	// being re-delivered or from a previous attempt that is still
 	// running). Terminal phases do not block; they are replaced.
-	if pf := fg.Status.PlannedFailover; pf != nil {
-		switch pf.Phase {
-		case v1alpha1.PlannedFailoverPhasePending,
-			v1alpha1.PlannedFailoverPhaseValidating,
-			v1alpha1.PlannedFailoverPhaseDraining,
-			v1alpha1.PlannedFailoverPhaseWaitingForLag,
-			v1alpha1.PlannedFailoverPhasePromoting,
-			v1alpha1.PlannedFailoverPhaseResuming:
+	if pf := fg.Status.PlannedFailover; plannedFailoverInFlight(pf) {
+		if !(allowCurrentRun && (pf.Phase == v1alpha1.PlannedFailoverPhasePending || pf.Phase == v1alpha1.PlannedFailoverPhaseValidating)) {
 			return PlannedFailoverReject, "ConcurrentOperation", fmt.Errorf(
 				"planned-failover: previous planned failover is still running (status.plannedFailover.phase=%q)",
 				pf.Phase)
