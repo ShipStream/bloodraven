@@ -441,9 +441,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDraining(ctx context.Conte
 		gtid, err := r.Runner.PlannedFailoverFence(fenceCtx, nn, cur.SourcePrimary)
 		cancel()
 		if err != nil {
-			// The source may have crashed mid-drain. We do not unfence
-			// — there is nothing to unfence, and the emergency path
-			// will handle the (now-empty) primary.
+			// Either the source has crashed (nothing to unfence) or a
+			// transient GTID read failed after the fence took effect.
+			// FenceSite is transactional — on GTID read failure it
+			// best-effort unfences before returning — so we do not need
+			// to retry the unfence here. The emergency failover path
+			// will handle the now-unavailable primary.
 			r.Runner.SetPlannedFailoverActive(nn, false)
 			return r.plannedFailoverFail(ctx, fg, "SourceCrashed",
 				fmt.Sprintf("planned-failover: failed to fence source primary %q: %v; emergency failover path will take over", cur.SourcePrimary, err),
@@ -506,8 +509,10 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDraining(ctx context.Conte
 // message and emits no event (the phase-entry event is
 // PlannedFailoverLagOK, which fires only after catch-up).
 func (r *MysqlFailoverGroupReconciler) advanceToWaitingForLag(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.PlannedFailoverStatus, msg string) (time.Duration, error) {
+	now := metav1.Now()
 	next := cur.DeepCopy()
 	next.Phase = v1alpha1.PlannedFailoverPhaseWaitingForLag
+	next.LagWaitStartTime = &now
 	next.Message = fmt.Sprintf("%s; waiting for target %q to catch up", msg, cur.Target)
 	r.setPlannedFailoverStatus(ctx, fg, next)
 	return 1 * time.Second, nil
@@ -535,15 +540,20 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForLag(ctx context.
 			"failed_other")
 	}
 
-	// Compute the lag-wait deadline from the StartTime of *this* phase
-	// (we stamped into Draining at most ~1s ago, so using the overall
-	// StartTime overstates the wait budget by one reconcile). We
-	// conservatively use StartTime; the inaccuracy is bounded by how
-	// long Draining took to stamp.
+	// Measure the lag-wait budget from LagWaitStartTime (stamped when
+	// we entered this phase). Using StartTime would include
+	// Pending/Validating/Draining/Deferred time and could cause
+	// premature timeouts while also skewing the lag-wait histogram.
+	// Fall back to StartTime if the phase-entry stamp is missing (an
+	// operator upgraded mid-flight against a status object from the
+	// previous schema).
 	var start time.Time
-	if cur.StartTime != nil {
+	switch {
+	case cur.LagWaitStartTime != nil:
+		start = cur.LagWaitStartTime.Time
+	case cur.StartTime != nil:
 		start = cur.StartTime.Time
-	} else {
+	default:
 		start = time.Now()
 	}
 	maxLagWait := defaultPlannedFailoverMaxLagWait
@@ -562,17 +572,19 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForLag(ctx context.
 		if elapsed >= maxLagWait {
 			return r.plannedFailoverRollback(ctx, fg, nn, "LagTimeout",
 				fmt.Sprintf("target %q unresponsive during lag wait (last error: %v); source %q unfenced",
-					cur.Target, err, cur.SourcePrimary), elapsed)
+					cur.Target, err, cur.SourcePrimary), "failed_timeout")
 		}
 		return plannedFailoverLagPollInterval, nil
 	}
 
 	caughtUp, cmpErr := gtidContains(targetGtid, cur.SourceGtidAtFence)
 	if cmpErr != nil {
-		// Malformed GTID: treat as unrecoverable, roll back.
-		return r.plannedFailoverRollback(ctx, fg, nn, "LagTimeout",
+		// Malformed GTID is not a timeout — record it as such so
+		// dashboards can distinguish a lag-starved target from a
+		// parse/format bug that needs operator attention.
+		return r.plannedFailoverRollback(ctx, fg, nn, "InvalidGTID",
 			fmt.Sprintf("planned-failover: cannot parse GTID sets to compare catch-up (%v); source %q unfenced",
-				cmpErr, cur.SourcePrimary), elapsed)
+				cmpErr, cur.SourcePrimary), "failed_other")
 	}
 
 	if caughtUp {
@@ -593,7 +605,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForLag(ctx context.
 		metrics.PlannedFailoverLagWaitSeconds.WithLabelValues(cur.Target).Observe(elapsed.Seconds())
 		return r.plannedFailoverRollback(ctx, fg, nn, "LagTimeout",
 			fmt.Sprintf("target %q did not reach source GTID within %s; fence released, primary %q still active",
-				cur.Target, maxLagWait, cur.SourcePrimary), elapsed)
+				cur.Target, maxLagWait, cur.SourcePrimary), "failed_timeout")
 	}
 	return plannedFailoverLagPollInterval, nil
 }
@@ -684,7 +696,10 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverResuming(ctx context.Conte
 
 // plannedFailoverRollback unfences the source, stamps Failed with the
 // given reason, and clears the topology guard. Used from WaitingForLag.
-func (r *MysqlFailoverGroupReconciler) plannedFailoverRollback(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, reason, msg string, lagElapsed time.Duration) (time.Duration, error) {
+// metricResult labels the planned-failover counter — typically
+// "failed_timeout" for LagTimeout and "failed_other" for parse or
+// internal errors.
+func (r *MysqlFailoverGroupReconciler) plannedFailoverRollback(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, reason, msg, metricResult string) (time.Duration, error) {
 	cur := fg.Status.PlannedFailover
 
 	// Best-effort unfence of the source primary. If this fails the
@@ -701,7 +716,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverRollback(ctx context.Conte
 		cancel()
 	}
 
-	return r.plannedFailoverFail(ctx, fg, reason, msg, "failed_timeout")
+	return r.plannedFailoverFail(ctx, fg, reason, msg, metricResult)
 }
 
 // plannedFailoverFail stamps a terminal Failed status, emits an event,

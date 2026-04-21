@@ -5254,6 +5254,14 @@ spec:
                       to seconds.
                     format: int64
                     type: integer
+                  lagWaitStartTime:
+                    description: |-
+                      LagWaitStartTime is when the reconciler entered the WaitingForLag
+                      phase. The MaxLagWait budget and the lag-wait histogram are both
+                      measured from this timestamp so Pending/Validating/Draining time
+                      does not count against the lag budget.
+                    format: date-time
+                    type: string
                   maxLagWait:
                     description: |-
                       MaxLagWait is the effective maxLagWait used for this run
@@ -5281,8 +5289,9 @@ spec:
                   reason:
                     description: |-
                       Reason is a machine-readable tag on Failed outcomes. Examples:
-                      "CooldownActive", "LagTimeout", "SourceCrashed", "ExecuteFailed",
-                      "InvalidAnnotation", "ConcurrentOperation", "UnknownSite".
+                      "CooldownActive", "LagTimeout", "InvalidGTID", "SourceCrashed",
+                      "ExecuteFailed", "InvalidAnnotation", "ConcurrentOperation",
+                      "UnknownSite".
                     type: string
                   retryAfter:
                     description: |-

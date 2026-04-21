@@ -131,8 +131,9 @@ type PlannedFailoverStatus struct {
 	TransactionsLost *int64 `json:"transactionsLost,omitempty"`
 
 	// Reason is a machine-readable tag on Failed outcomes. Examples:
-	// "CooldownActive", "LagTimeout", "SourceCrashed", "ExecuteFailed",
-	// "InvalidAnnotation", "ConcurrentOperation", "UnknownSite".
+	// "CooldownActive", "LagTimeout", "InvalidGTID", "SourceCrashed",
+	// "ExecuteFailed", "InvalidAnnotation", "ConcurrentOperation",
+	// "UnknownSite".
 	Reason string `json:"reason,omitempty"`
 
 	// Message is a human-readable status line suitable for
@@ -153,6 +154,13 @@ type PlannedFailoverStatus struct {
 	// DrainTimeout is the effective drainTimeout used for this run.
 	// +optional
 	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
+
+	// LagWaitStartTime is when the reconciler entered the WaitingForLag
+	// phase. The MaxLagWait budget and the lag-wait histogram are both
+	// measured from this timestamp so Pending/Validating/Draining time
+	// does not count against the lag budget.
+	// +optional
+	LagWaitStartTime *metav1.Time `json:"lagWaitStartTime,omitempty"`
 
 	// RetryAfter is populated on the Deferred phase with the earliest
 	// time the state machine will retry validation. Derived from

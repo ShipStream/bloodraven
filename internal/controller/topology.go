@@ -1183,6 +1183,12 @@ func (tm *TopologyManager) isPlannedFailoverActive() bool {
 // FenceSite sets super_read_only=ON on the named site and returns the
 // site's GTID_EXECUTED captured after the fence takes effect. Returns
 // errSiteNotFound when the site name is unknown.
+//
+// Transactional: if the GTID read fails after the fence succeeded, the
+// site is best-effort unfenced before the error is returned. Leaving a
+// healthy primary stuck in super_read_only on a transient metadata
+// read is worse than failing the whole operation — the caller can
+// retry and the site stays writable in the meantime.
 func (tm *TopologyManager) FenceSite(ctx context.Context, name string) (string, error) {
 	site := tm.getSite(name)
 	if site == nil {
@@ -1193,6 +1199,13 @@ func (tm *TopologyManager) FenceSite(ctx context.Context, name string) (string, 
 	}
 	gtid, err := site.mysql.GetGtidExecuted(ctx)
 	if err != nil {
+		// Best-effort unfence using a fresh short-lived context so a
+		// cancelled parent ctx doesn't block the rollback attempt.
+		unfenceCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if unfenceErr := site.mysql.SetSuperReadOnly(unfenceCtx, false); unfenceErr != nil {
+			tm.logger.Error("fence rollback failed: site left super_read_only=ON", "site", name, "error", unfenceErr)
+		}
+		cancel()
 		return "", fmt.Errorf("read GTID_EXECUTED on %q after fence: %w", name, err)
 	}
 	return gtid, nil

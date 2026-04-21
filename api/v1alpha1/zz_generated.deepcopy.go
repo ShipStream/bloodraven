@@ -1035,6 +1035,10 @@ func (in *PlannedFailoverStatus) DeepCopyInto(out *PlannedFailoverStatus) {
 		*out = new(metav1.Duration)
 		**out = **in
 	}
+	if in.LagWaitStartTime != nil {
+		in, out := &in.LagWaitStartTime, &out.LagWaitStartTime
+		*out = (*in).DeepCopy()
+	}
 	if in.RetryAfter != nil {
 		in, out := &in.RetryAfter, &out.RetryAfter
 		*out = (*in).DeepCopy()
