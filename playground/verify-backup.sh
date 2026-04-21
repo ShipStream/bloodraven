@@ -7,9 +7,17 @@
 # produced at least one Succeeded MysqlBackup (e.g. via the scheduled
 # CronJob, or by applying playground/manifests/mysqlbackup-adhoc.yaml).
 #
+# `run` creates a bare MysqlBackupVerification (no spec.sanityCheck /
+# spec.pointInTime). To exercise the full scheduled contract — which
+# copies the profile's verification block (sanityCheck, PITR, etc.)
+# onto the CR via `bloodraven trigger-verification` — fire the
+# operator-managed CronJob as a one-off Job:
+#
+#   kubectl -n bloodraven-playground create job verify-now \
+#     --from=cronjob/mysql-playground-verify-minio
+#
 # Usage:
-#   ./playground/verify-backup.sh run [profile]        Create a verification and wait for a terminal phase (default profile: minio)
-#   ./playground/verify-backup.sh run-pitr [profile]   Same as `run`, but with spec.pointInTime.mode=latest
+#   ./playground/verify-backup.sh run [profile]        Create a bare verification and wait for a terminal phase (default profile: minio)
 #   ./playground/verify-backup.sh status               List verifications with phase + age
 #   ./playground/verify-backup.sh logs [name]          Tail the Job pod log for the latest (or named) verification
 #   ./playground/verify-backup.sh cleanup [--failed]   Delete Succeeded (or Failed with --failed) verifications
@@ -26,25 +34,19 @@ warn()  { echo -e "\033[1;33m!!\033[0m $*"; }
 fail()  { echo -e "\033[1;31mERR\033[0m $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '/^# Bloodraven/,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'
   exit 1
 }
 
 # Emit a MysqlBackupVerification manifest to stdout. Uses generateName
 # so repeated runs don't collide; mirrors the labels the scheduled
 # CronJob would stamp so status/cleanup selectors work uniformly.
+# Intentionally bare — no spec.sanityCheck / spec.pointInTime — so the
+# script has no knowledge of the profile's verification block. Use the
+# operator's CronJob for full-contract coverage (see file header).
 emit_verification_manifest() {
-  local profile="$1" mode="${2:-none}"
+  local profile="$1"
   local name_stem="${GROUP}-${profile}-verify-"
-  local pit_block=""
-  if [[ "$mode" != "none" ]]; then
-    pit_block=$(cat <<YAML
-
-  pointInTime:
-    mode: ${mode}
-YAML
-)
-  fi
   cat <<YAML
 apiVersion: shipstream.io/v1alpha1
 kind: MysqlBackupVerification
@@ -59,17 +61,19 @@ spec:
   failoverGroupRef:
     name: ${GROUP}
   profileName: ${profile}
-  triggeredBy: manual${pit_block}
+  triggeredBy: manual
 YAML
 }
 
 ensure_succeeded_backup_exists() {
   local profile="$1"
   local count
+  # kubectl jsonpath filters the list server-side-ish and avoids a `jq`
+  # dependency. One name per line → wc -l is the count.
   count=$(kubectl -n "$NAMESPACE" get mysqlbackups \
     -l "shipstream.io/failover-group=${GROUP},shipstream.io/backup-profile=${profile}" \
-    -o json 2>/dev/null \
-    | jq '[.items[] | select(.status.phase=="Succeeded")] | length')
+    -o jsonpath='{range .items[?(@.status.phase=="Succeeded")]}{.metadata.name}{"\n"}{end}' \
+    2>/dev/null | grep -c . || true)
   if [[ "${count:-0}" -eq 0 ]]; then
     fail "no Succeeded MysqlBackup found for (group=${GROUP}, profile=${profile}). Run a backup first (e.g. wait for the every-10min CronJob, or apply playground/manifests/mysqlbackup-adhoc.yaml)."
   fi
@@ -102,12 +106,11 @@ wait_for_terminal() {
 
 cmd_run() {
   local profile="${1:-$DEFAULT_PROFILE}"
-  local mode="${2:-none}"
 
   ensure_succeeded_backup_exists "$profile"
 
   local out name
-  out=$(emit_verification_manifest "$profile" "$mode" | kubectl create -f -)
+  out=$(emit_verification_manifest "$profile" | kubectl create -f -)
   # `kubectl create` prints `mysqlbackupverification.shipstream.io/<name> created`
   name=$(echo "$out" | awk -F'[/ ]' '/created/ {print $2}')
   [[ -n "$name" ]] || fail "failed to extract CR name from: $out"
@@ -125,10 +128,6 @@ cmd_run() {
   warn "Job logs (tail -n 200):"
   cmd_logs "$name" || true
   return 1
-}
-
-cmd_run_pitr() {
-  cmd_run "${1:-$DEFAULT_PROFILE}" "latest"
 }
 
 cmd_status() {
@@ -164,7 +163,8 @@ cmd_cleanup() {
   fi
   local names
   names=$(kubectl -n "$NAMESPACE" get mysqlbackupverifications \
-    -o json | jq -r ".items[] | select(.status.phase==\"${phase}\") | .metadata.name")
+    -o jsonpath="{range .items[?(@.status.phase=='${phase}')]}{.metadata.name}{'\n'}{end}" \
+    2>/dev/null || true)
   if [[ -z "$names" ]]; then
     info "no ${phase} verifications to delete"
     return 0
@@ -178,15 +178,13 @@ cmd_cleanup() {
 
 cmd_schedule_list() {
   kubectl -n "$NAMESPACE" get cronjobs \
-    -l app.kubernetes.io/component=backup-verification-schedule \
-    -o wide 2>/dev/null \
-    || kubectl -n "$NAMESPACE" get cronjobs | grep -E 'NAME|verify' || true
+    -l "shipstream.io/failover-group=${GROUP},shipstream.io/resource=backup-verification-schedule" \
+    -o wide
 }
 
 # ── Main dispatch ────────────────────────────────────────────────────────
 case "${1:-}" in
   run)            shift; cmd_run "${1:-}" ;;
-  run-pitr)       shift; cmd_run_pitr "${1:-}" ;;
   status)         cmd_status ;;
   logs)           shift; cmd_logs "${1:-}" ;;
   cleanup)        shift; cmd_cleanup "${1:-}" ;;

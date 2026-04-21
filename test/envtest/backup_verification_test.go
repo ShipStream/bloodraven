@@ -231,6 +231,28 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 		t.Errorf("verification Job container should invoke verify.sh, got %q", cmd)
 	}
 
+	// The verification Job mounts the backup source read-only, so
+	// mysqlsh must not try to write its default load-progress file
+	// next to the dump. The reconciler signals "disabled" by setting
+	// BLOODRAVEN_LOAD_PROGRESS_FILE to an empty string; restore.py
+	// then passes progressFile="" to util.loadDump (which mysqlsh
+	// treats as "disable progress tracking"). Dropping this env entry
+	// silently regresses the fix from 4e120d6, so assert it
+	// explicitly.
+	var gotProgress *corev1.EnvVar
+	for i := range job.Spec.Template.Spec.Containers[0].Env {
+		e := &job.Spec.Template.Spec.Containers[0].Env[i]
+		if e.Name == "BLOODRAVEN_LOAD_PROGRESS_FILE" {
+			gotProgress = e
+			break
+		}
+	}
+	if gotProgress == nil {
+		t.Errorf("verification Job must set BLOODRAVEN_LOAD_PROGRESS_FILE (empty string disables mysqlsh progress tracking on the read-only backup mount); env missing")
+	} else if gotProgress.Value != "" {
+		t.Errorf("verification Job must set BLOODRAVEN_LOAD_PROGRESS_FILE=\"\" to disable mysqlsh progress tracking on the read-only backup mount; got %q", gotProgress.Value)
+	}
+
 	var after v1alpha1.MysqlBackupVerification
 	if err := k8sClient.Get(ctx, nn, &after); err != nil {
 		t.Fatalf("get verify after reconcile: %v", err)
