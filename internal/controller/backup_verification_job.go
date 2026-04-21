@@ -173,6 +173,11 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		{Name: "BLOODRAVEN_SCRIPTS_DIR", Value: backupScriptsMountPath},
 		{Name: "BLOODRAVEN_INPUT_URL", Value: inputURL},
 		{Name: "BLOODRAVEN_LOAD_OPTIONS", Value: loadOptsJSON},
+		// mysqlsh's default progressFile lives next to the dump, but the
+		// backup source is mounted read-only on verification Jobs, so
+		// disable progress tracking to avoid a writable-backup
+		// requirement.
+		{Name: "BLOODRAVEN_LOAD_PROGRESS_FILE", Value: ""},
 		{Name: "HOME", Value: mysqlshHomeMountPath},
 	}
 

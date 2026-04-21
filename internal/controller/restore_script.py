@@ -388,6 +388,14 @@ def main():
     if endpoint:
         opts["s3EndpointOverride"] = endpoint
 
+    # Verification runs mount the backup source read-only, so mysqlsh
+    # can't write its default `load-progress.<uid>.json` alongside the
+    # dump. When BLOODRAVEN_LOAD_PROGRESS_FILE is set the caller takes
+    # over progressFile selection; an empty value disables tracking.
+    progress_file = os.environ.get("BLOODRAVEN_LOAD_PROGRESS_FILE")
+    if progress_file is not None:
+        opts["progressFile"] = progress_file
+
     _configure_aws_creds_dir()
 
     host_only, port = _host_port(host)
