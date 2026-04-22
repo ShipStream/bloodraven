@@ -13,7 +13,9 @@ grouped; within a group, order doesn't matter.
 - [ ] Pin `spec.image`, `spec.sidecarImage`, and `spec.backup.image`
       to **immutable tags** (or digests). No `:latest`, no MySQL `:9`,
       no `:edge`. A silently-drifting MySQL image breaks dump/restore
-      and sometimes replication.
+      and sometimes replication. See the
+      [Upgrade and version-skew policy](./upgrade-policy.mdx#supported-mysql-versions)
+      for which MySQL tags are supported.
 - [ ] **Mirror the operator, sidecar, and backup images to a private
       registry.** A DockerHub rate-limit or Oracle registry outage
       should never be able to stop a pod from starting mid-incident.

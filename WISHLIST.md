@@ -25,7 +25,7 @@
 - [x] 21. "Why not group replication?" page
 - [x] 22. Production hardening checklist
 - [x] 23. Failure-mode matrix
-- [ ] 24. Upgrade / version-skew policy
+- [x] 24. Upgrade / version-skew policy
 - [ ] 25. CRD version-migration plan
 - [ ] 26. Security model / threat model doc
 - [ ] 27. Backup/restore performance guide
@@ -98,7 +98,7 @@
 
 **23. Failure-mode matrix.** A table: *failure* × *observable signal* × *operator action* × *operator-time-to-act* × *operator limitations*. Rows: pod killed, node lost, PVC lost, AZ partition, cross-site partition, operator pod crash, both operator + one site down, split brain, DNS provider down, S3 unreachable. Users currently have to piece this together from the state-machine docs.
 
-**24. Upgrade / version-skew policy.** What MySQL versions are supported? What's the MySQL major-version upgrade path (8.0 → 8.4 → 9.x)? Does the operator support running the two sites at different MySQL versions transiently during upgrade? What's the sidecar ↔ operator version skew guarantee? The docs are silent.
+**24. Upgrade / version-skew policy.** ~~What MySQL versions are supported? What's the MySQL major-version upgrade path (8.0 → 8.4 → 9.x)? Does the operator support running the two sites at different MySQL versions transiently during upgrade? What's the sidecar ↔ operator version skew guarantee? The docs are silent.~~ — shipped. `docs/docs/upgrade-policy.mdx` states a narrow, opinionated stance: `mysql:9.6` today, `mysql:9.7` once the first 9.x LTS ships (and pinned there long-term); MySQL 8.x and post-9.7 Innovation releases are out of scope. The page covers the `OrderedUpdate` replica-first rollout as the only supported upgrade path, permits transient cross-site skew during rollout but not steady-state, and commits to a one-minor sidecar ↔ operator skew window tied to the additive-only HTTP surface. Cross-linked from `operations.mdx`, `production-hardening.mdx`, and `failover.mdx`.
 
 **25. CRD version-migration plan.** Currently `v1alpha1`. Document the path to `v1beta1` → `v1`, with conversion-webhook commitments. Users pinning to `v1alpha1` need to know the breaking-change contract.
 
