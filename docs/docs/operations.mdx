@@ -6,9 +6,41 @@ sidebar_position: 9
 
 Day-2 operations guide for managing Bloodraven failover groups, including manual intervention, recovery procedures, and maintenance tasks. Before rolling Bloodraven out to production, also walk through the [Production hardening checklist](./production-hardening.mdx) and keep the [Failure-mode matrix](./failure-mode-matrix.mdx) open during incidents.
 
-## Manual promotion
+## Planned failover (graceful switchover)
 
-If you need to force a failover (for example, during planned maintenance), you can manually promote a site by setting the target site's MySQL instance to writable and the current primary to read-only.
+To promote a replica during planned maintenance, annotate the `MysqlFailoverGroup` with the target site name. The operator drains writes on the current primary, waits for the target to catch up, and promotes it atomically -- no `kubectl exec` required.
+
+```bash
+kubectl annotate mysqlfailovergroup orders \
+  bloodraven.shipstream.io/planned-failover=pdx
+```
+
+Optional per-request override (otherwise the `spec.plannedFailover` defaults apply):
+
+```bash
+kubectl annotate mysqlfailovergroup orders \
+  bloodraven.shipstream.io/planned-failover=pdx:maxLagWait=30s
+```
+
+Watch progress on the CR:
+
+```bash
+kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.status.plannedFailover}{"\n"}'
+```
+
+The state machine advances through `Pending → Validating → Draining → WaitingForLag → Promoting → Resuming → Succeeded`, emitting Kubernetes Events (`PlannedFailoverStarted`, `PlannedFailoverDraining`, `PlannedFailoverLagOK`, `PlannedFailoverCompleted`) at each transition. See [Planned failover](./planned-failover.mdx) for the full lifecycle, rollback behaviour, and RPO guarantees.
+
+Unlike the legacy `kubectl exec` dance below, this path:
+
+- **Respects the anti-flap cooldown.** A planned failover cannot run within `spec.failoverCooldown` of the last failover (planned *or* emergency).
+- **Guarantees zero RPO on success.** Promotion only proceeds after `GTID_EXECUTED` on the target ⊇ the fenced source.
+- **Rolls back on timeout.** If the target does not catch up within `maxLagWait`, the operator clears the fence on the source and reports `status.plannedFailover.phase: Failed` with `reason: LagTimeout`.
+- **Leaves an audit trail.** Every attempt is recorded on the CR and in the `bloodraven_planned_failovers_total{result=...}` counter.
+
+### Manual promotion (fallback, operator unreachable)
+
+If the operator is unreachable and you must promote a site by hand, the legacy three-step dance still works. Use this only as a break-glass procedure; prefer the annotation API above whenever the operator is healthy.
 
 **Step 1: Fence the current primary**
 
@@ -31,10 +63,10 @@ kubectl exec mysql-orders-pdx-0 -c mysql -- \
   mysql -u root -p -e "SET GLOBAL read_only=0;"
 ```
 
-The operator will detect the state change on its next poll cycle and update Services, DNS, and taints accordingly. No operator restart is required.
+When the operator returns it will observe the new topology on its next poll cycle and update Services, DNS, and taints accordingly. No operator restart is required.
 
 :::caution
-Manual promotion bypasses the anti-flap cooldown. Ensure you understand the current replication state before promoting a site -- data loss is possible if the target has not finished applying relay logs.
+Manual promotion **bypasses** the anti-flap cooldown and the zero-lag gate. Ensure you understand the current replication state before promoting a site -- data loss is possible if the target has not finished applying relay logs. The planned-failover API above is safer; reach for this only when the operator is genuinely unavailable.
 :::
 
 ## Split-brain recovery

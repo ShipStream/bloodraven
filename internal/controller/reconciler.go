@@ -264,6 +264,23 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: inPlaceRequeue}, nil
 	}
 
+	// Drive the planned-failover state machine when
+	// spec / status / annotation indicate a graceful switchover is armed
+	// or in flight. This must run AFTER reconcileInPlaceRestore (the two
+	// guard against each other) and BEFORE syncPodLabels (so the source
+	// primary's role label is stripped on the same reconcile that
+	// stamps Draining). The state machine is driven by
+	// status.plannedFailover.phase, not by the annotation alone, so
+	// operator restarts resume cleanly.
+	if pfRequeue, err := r.reconcilePlannedFailover(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile planned failover: %w", err)
+	} else if pfRequeue > 0 {
+		if err := r.syncPodLabels(ctx, &fg); err != nil {
+			return ctrl.Result{}, fmt.Errorf("sync pod labels during planned failover: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: pfRequeue}, nil
+	}
+
 	// Reconcile scheduled backups (one CronJob per schedule entry).
 	if err := r.reconcileBackupSchedules(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile backup schedules: %w", err)
@@ -1273,6 +1290,22 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 	// other tenants continue writing, and app-level maintenance-mode
 	// handles the affected schema.
 	if inPlaceRestoreFencesPrimaryService(fg) {
+		for i := range sites {
+			if sites[i].role == "primary" {
+				sites[i].role = "fenced"
+			}
+		}
+	}
+
+	// During a planned failover we strip the source primary's role
+	// label as soon as we enter Draining so the -primary Service stops
+	// directing writes to it. At that point status.activeSite still
+	// names the source (it is not rewritten until Resuming), so the
+	// matcher below is the fenced site. Once Resuming writes
+	// status.activeSite=<target>, this branch skips over the new
+	// primary and the label sweep on the following reconcile re-adds
+	// the primary label to the target's pod.
+	if plannedFailoverFencesSourcePrimary(fg) {
 		for i := range sites {
 			if sites[i].role == "primary" {
 				sites[i].role = "fenced"

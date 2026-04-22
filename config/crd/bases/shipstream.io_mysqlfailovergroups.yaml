@@ -4442,6 +4442,48 @@ spec:
                   type: string
                 description: MysqlConf allows overriding default my.cnf settings.
                 type: object
+              plannedFailover:
+                description: |-
+                  PlannedFailover configures cluster-wide defaults for the graceful
+                  planned-failover API. The admin triggers a planned failover by
+                  annotating the CR with bloodraven.shipstream.io/planned-failover=<site>;
+                  this block lets the knobs live on the CR rather than being spelled
+                  into every kubectl annotate.
+                properties:
+                  drainTimeout:
+                    default: 30s
+                    description: |-
+                      DrainTimeout bounds the time the source primary has to shed
+                      active application connections after super_read_only=ON is set.
+                      During this window the reconciler repeatedly calls
+                      KillAppConnections; if any connections remain after the timeout
+                      the state machine proceeds anyway so a stuck client cannot block
+                      a planned switchover indefinitely. Default: 30s.
+                    type: string
+                  maxLagWait:
+                    default: 5m
+                    description: |-
+                      MaxLagWait bounds the time spent waiting for the target's
+                      GTID_EXECUTED to cover the fenced source's GTID_EXECUTED before
+                      the state machine rolls back to the source. Must be expressible
+                      as a Go time.Duration. Default: 5m.
+                    type: string
+                  onCooldown:
+                    default: reject
+                    description: |-
+                      OnCooldown controls how the state machine reacts when the
+                      anti-flap cooldown rejects a request at Validating:
+                        - "reject" (default): stamp Failed{CooldownActive} and clear the
+                          annotation. The admin must re-annotate after the cooldown
+                          expires.
+                        - "defer": stamp Deferred and keep the annotation in place;
+                          the reconciler re-tries validation at cooldown expiry and
+                          transitions to Draining automatically.
+                    enum:
+                    - reject
+                    - defer
+                    type: string
+                type: object
               podAnnotations:
                 additionalProperties:
                   type: string
@@ -5183,6 +5225,112 @@ spec:
                   profileName:
                     description: ProfileName mirrors spec.backup.pitr.profileName.
                     type: string
+                type: object
+              plannedFailover:
+                description: |-
+                  PlannedFailover tracks the most recent planned (admin-triggered)
+                  failover attempt. Terminal status is retained until a newer
+                  annotation replaces the block; the field is how kubectl describe
+                  tells the story of a switchover after the fact.
+                properties:
+                  completionTime:
+                    description: CompletionTime is when the state machine reached
+                      a terminal phase.
+                    format: date-time
+                    type: string
+                  drainStartTime:
+                    description: |-
+                      DrainStartTime is when the reconciler entered the Draining phase
+                      (immediately after super_read_only=ON took effect on the source).
+                      The DrainTimeout budget is measured from this timestamp.
+                    format: date-time
+                    type: string
+                  drainTimeout:
+                    description: DrainTimeout is the effective drainTimeout used for
+                      this run.
+                    type: string
+                  durationSeconds:
+                    description: DurationSeconds is CompletionTime - StartTime, rounded
+                      to seconds.
+                    format: int64
+                    type: integer
+                  lagWaitStartTime:
+                    description: |-
+                      LagWaitStartTime is when the reconciler entered the WaitingForLag
+                      phase. The MaxLagWait budget and the lag-wait histogram are both
+                      measured from this timestamp so Pending/Validating/Draining time
+                      does not count against the lag budget.
+                    format: date-time
+                    type: string
+                  maxLagWait:
+                    description: |-
+                      MaxLagWait is the effective maxLagWait used for this run
+                      (after applying the spec default and the per-annotation override).
+                    type: string
+                  message:
+                    description: |-
+                      Message is a human-readable status line suitable for
+                      kubectl describe.
+                    type: string
+                  phase:
+                    description: Phase of the planned failover.
+                    enum:
+                    - ""
+                    - Pending
+                    - Deferred
+                    - Validating
+                    - Draining
+                    - WaitingForLag
+                    - Promoting
+                    - Resuming
+                    - Succeeded
+                    - Failed
+                    type: string
+                  reason:
+                    description: |-
+                      Reason is a machine-readable tag on Failed outcomes. Examples:
+                      "CooldownActive", "LagTimeout", "InvalidGTID", "SourceCrashed",
+                      "ExecuteFailed", "InvalidAnnotation", "ConcurrentOperation",
+                      "UnknownSite".
+                    type: string
+                  retryAfter:
+                    description: |-
+                      RetryAfter is populated on the Deferred phase with the earliest
+                      time the state machine will retry validation. Derived from
+                      status.lastFailover + spec.failoverCooldown. Clears on transition
+                      out of Deferred.
+                    format: date-time
+                    type: string
+                  sourceGtidAtFence:
+                    description: |-
+                      SourceGtidAtFence is the source's GTID_EXECUTED recorded
+                      immediately after super_read_only=ON took effect.
+                    type: string
+                  sourcePrimary:
+                    description: |-
+                      SourcePrimary is the site being fenced (status.activeSite at the
+                      moment the annotation was accepted).
+                    type: string
+                  startTime:
+                    description: StartTime is when the annotation was first accepted.
+                    format: date-time
+                    type: string
+                  target:
+                    description: Target is the site the admin asked to promote.
+                    type: string
+                  targetGtidAtPromotion:
+                    description: |-
+                      TargetGtidAtPromotion is the target's GTID_EXECUTED captured just
+                      before the operator ran SET GLOBAL read_only=0 on it.
+                    type: string
+                  transactionsLost:
+                    description: |-
+                      TransactionsLost is the count of GTIDs present on the fenced
+                      source but not on the promoted target. By construction this is 0
+                      on a successful planned switchover; the field is retained for
+                      symmetry with the emergency-failover path's data-loss accounting.
+                    format: int64
+                    type: integer
                 type: object
               promotionGtidExecuted:
                 description: |-

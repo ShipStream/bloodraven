@@ -227,6 +227,14 @@ type TopologyManager struct {
 	// See runner.sync() and MysqlFailoverGroupReconciler.reconcileInPlaceRestore.
 	topologyFrozen bool
 
+	// plannedFailoverActive is set by the runner while the reconciler
+	// is driving a planned-failover state machine. Blocks automatic
+	// cross-site action in applyCrossSiteAction so an emergency
+	// promotion cannot race the admin-triggered switchover. Cleared on
+	// Succeeded or Failed. Protected by mu. See
+	// planned_failover_reconciler.go.
+	plannedFailoverActive bool
+
 	// specDriftSites lists site names whose Deployment spec-hash differs
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
 	// Protected by mu.
@@ -820,6 +828,16 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		return
 	}
 
+	// A planned failover is driving its own fence/promote sequence
+	// from the reconciler. The topology manager must not race it by
+	// fencing the source itself, auto-promoting a different candidate,
+	// or resolving the transient split-brain window as if it were a
+	// real one.
+	if tm.isPlannedFailoverActive() {
+		tm.logger.Info("cross-site action deferred: planned failover in progress")
+		return
+	}
+
 	// Suppress any cross-site actions while a bootstrap or ordered update is in
 	// progress: during an update the standby is restarting and will appear
 	// unreachable, and we do not want to initiate a spurious failover.
@@ -1144,6 +1162,150 @@ func (tm *TopologyManager) isTopologyFrozen() bool {
 	defer tm.mu.RUnlock()
 	return tm.topologyFrozen
 }
+
+// SetPlannedFailoverActive toggles the guard that blocks automatic
+// cross-site action while a reconciler-driven planned failover is in
+// flight. The runner sets it from the CR's status.plannedFailover.phase.
+func (tm *TopologyManager) SetPlannedFailoverActive(v bool) {
+	tm.mu.Lock()
+	tm.plannedFailoverActive = v
+	tm.mu.Unlock()
+}
+
+// isPlannedFailoverActive reports whether a planned failover is
+// currently running against this CR.
+func (tm *TopologyManager) isPlannedFailoverActive() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.plannedFailoverActive
+}
+
+// FenceSite sets super_read_only=ON on the named site and returns the
+// site's GTID_EXECUTED captured after the fence takes effect. Returns
+// errSiteNotFound when the site name is unknown.
+//
+// Transactional: if the GTID read fails after the fence succeeded, the
+// site is best-effort unfenced before the error is returned. Leaving a
+// healthy primary stuck in super_read_only on a transient metadata
+// read is worse than failing the whole operation — the caller can
+// retry and the site stays writable in the meantime.
+func (tm *TopologyManager) FenceSite(ctx context.Context, name string) (string, error) {
+	site := tm.getSite(name)
+	if site == nil {
+		return "", errSiteNotFound
+	}
+	if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
+		return "", fmt.Errorf("set super_read_only=ON on %q: %w", name, err)
+	}
+	gtid, err := site.mysql.GetGtidExecuted(ctx)
+	if err != nil {
+		// Best-effort unfence using a fresh short-lived context so a
+		// cancelled parent ctx doesn't block the rollback attempt.
+		unfenceCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if unfenceErr := site.mysql.SetSuperReadOnly(unfenceCtx, false); unfenceErr != nil {
+			tm.logger.Error("fence rollback failed: site left super_read_only=ON", "site", name, "error", unfenceErr)
+		}
+		cancel()
+		return "", fmt.Errorf("read GTID_EXECUTED on %q after fence: %w", name, err)
+	}
+	return gtid, nil
+}
+
+// UnfenceSite clears super_read_only on the named site. Used by the
+// planned-failover rollback path when the target fails to catch up.
+func (tm *TopologyManager) UnfenceSite(ctx context.Context, name string) error {
+	site := tm.getSite(name)
+	if site == nil {
+		return errSiteNotFound
+	}
+	if err := site.mysql.SetSuperReadOnly(ctx, false); err != nil {
+		return fmt.Errorf("set super_read_only=OFF on %q: %w", name, err)
+	}
+	return nil
+}
+
+// GetSiteGtidExecuted returns the named site's current GTID_EXECUTED.
+func (tm *TopologyManager) GetSiteGtidExecuted(ctx context.Context, name string) (string, error) {
+	site := tm.getSite(name)
+	if site == nil {
+		return "", errSiteNotFound
+	}
+	gtid, err := site.mysql.GetGtidExecuted(ctx)
+	if err != nil {
+		return "", fmt.Errorf("read GTID_EXECUTED on %q: %w", name, err)
+	}
+	return gtid, nil
+}
+
+// KillSiteAppConnections kills non-replication application connections
+// on the named site and returns the count killed. Used by the
+// planned-failover Draining loop to drain in-flight transactions.
+func (tm *TopologyManager) KillSiteAppConnections(ctx context.Context, name string) (int, error) {
+	site := tm.getSite(name)
+	if site == nil {
+		return 0, errSiteNotFound
+	}
+	killed, err := site.mysql.KillAppConnections(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("kill app connections on %q: %w", name, err)
+	}
+	return killed, nil
+}
+
+// PlannedPromote runs FailoverController.Execute against the target,
+// flips DNS to the target's LB IP, and updates the in-memory
+// lastFailover/lastFailoverTarget fields so the anti-flap cooldown
+// applies to any follow-on emergency or planned failover. Callers must
+// have already set plannedFailoverActive to true and completed the
+// zero-lag gate.
+//
+// Returns the promotion GTID recorded immediately before the target
+// accepted writes. That value matches what the automatic path records
+// into status.promotionGtidExecuted.
+func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source string) (string, error) {
+	targetSite := tm.getSite(target)
+	if targetSite == nil {
+		return "", errSiteNotFound
+	}
+	if !targetSite.isPromotable() {
+		return "", fmt.Errorf("planned promote: site %q has role %q; only primary-candidate sites may be promoted", target, targetSite.role)
+	}
+
+	var sourceChecker mysql.Checker
+	if source != "" {
+		if src := tm.getSite(source); src != nil {
+			sourceChecker = src.mysql
+		}
+	}
+
+	// DNS flip first, mirroring applyCrossSiteAction: start propagation
+	// now so it overlaps with the MySQL steps.
+	if err := tm.dns.UpdateDNSRecord(ctx, targetSite.lbIP); err != nil {
+		tm.logger.Error("planned-failover DNS flip failed", "site", target, "error", err)
+	} else {
+		metrics.DNSFlipCount.WithLabelValues(target).Inc()
+	}
+
+	promotionGtid, err := tm.failover.Execute(ctx, targetSite.mysql, sourceChecker, target)
+	if err != nil {
+		return "", err
+	}
+
+	tm.mu.Lock()
+	tm.promotionGtidExecuted = promotionGtid
+	tm.promotedSite = target
+	tm.lastFailover = tm.clock.Now()
+	tm.lastFailoverTarget = target
+	tm.mu.Unlock()
+
+	return promotionGtid, nil
+}
+
+// errSiteNotFound is returned by the planned-failover primitives when a
+// name does not match any configured site. Sentinel so callers can
+// decide whether to retry (transient lookup failure is impossible — the
+// topology manager only forgets sites when it restarts).
+var errSiteNotFound = fmt.Errorf("planned-failover: site not found in topology manager")
 
 // SetRecloneSite requests that the given site be recloned from the current
 // primary. Called by the runner when it detects the reclone annotation.

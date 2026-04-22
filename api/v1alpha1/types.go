@@ -175,6 +175,14 @@ type MysqlFailoverGroupSpec struct {
 	// choreography.
 	// +optional
 	RestoreInPlace *RestoreInPlaceSpec `json:"restoreInPlace,omitempty"`
+
+	// PlannedFailover configures cluster-wide defaults for the graceful
+	// planned-failover API. The admin triggers a planned failover by
+	// annotating the CR with bloodraven.shipstream.io/planned-failover=<site>;
+	// this block lets the knobs live on the CR rather than being spelled
+	// into every kubectl annotate.
+	// +optional
+	PlannedFailover *PlannedFailoverSpec `json:"plannedFailover,omitempty"`
 }
 
 // SplitBrainPolicySpec configures automated split-brain resolution.
@@ -464,6 +472,13 @@ type MysqlFailoverGroupStatus struct {
 	// sidecar's /archiver/status endpoint in the meantime.
 	// +optional
 	PITR *PITRStatus `json:"pitr,omitempty"`
+
+	// PlannedFailover tracks the most recent planned (admin-triggered)
+	// failover attempt. Terminal status is retained until a newer
+	// annotation replaces the block; the field is how kubectl describe
+	// tells the story of a switchover after the fact.
+	// +optional
+	PlannedFailover *PlannedFailoverStatus `json:"plannedFailover,omitempty"`
 }
 
 // SiteStatus describes the observed state of a single site.

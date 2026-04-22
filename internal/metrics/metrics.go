@@ -34,6 +34,40 @@ var (
 		Help: "Total number of failovers executed. Incremented after successful MySQL promotion.",
 	}, []string{"target_site"})
 
+	// PlannedFailoversTotal counts admin-triggered (graceful)
+	// switchovers separately from the automatic failover counter above,
+	// so existing dashboards and alerts keyed on bloodraven_failovers_total
+	// keep their meaning. The "result" label is one of:
+	//   success         — promotion completed, target is writable
+	//   rejected        — validation failed (unknown site, cooldown, ...)
+	//   failed_timeout  — lag gate timed out; source was unfenced
+	//   failed_other    — any other mid-flight failure
+	PlannedFailoversTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_planned_failovers_total",
+		Help: "Total number of admin-triggered (graceful) planned failovers, labelled by result.",
+	}, []string{"target_site", "result"})
+
+	// PlannedFailoverDurationSeconds is the end-to-end wall-clock
+	// duration of a planned failover, measured from
+	// status.plannedFailover.startTime to completionTime. Buckets span
+	// typical switchover times (1s) to worst-case lag timeouts (300s).
+	PlannedFailoverDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "bloodraven_planned_failover_duration_seconds",
+		Help:    "Wall-clock duration of an admin-triggered planned failover from acceptance to terminal phase.",
+		Buckets: []float64{1, 2, 5, 10, 30, 60, 120, 300},
+	}, []string{"target_site"})
+
+	// PlannedFailoverLagWaitSeconds is the time spent in the
+	// WaitingForLag phase alone: how long the target took to catch up
+	// before it was promoted. Populated on every terminal run,
+	// including rollbacks, so a high distribution here is the canary
+	// for "planned switchover would have timed out".
+	PlannedFailoverLagWaitSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "bloodraven_planned_failover_lag_wait_seconds",
+		Help:    "Time spent waiting for the target GTID to cover the fenced source GTID during a planned failover.",
+		Buckets: []float64{0.5, 1, 2, 5, 10, 30, 60, 120, 300},
+	}, []string{"target_site"})
+
 	SplitBrainAutoResolveTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "bloodraven_split_brain_auto_resolve_total",
 		Help: "Total number of split-brain incidents auto-resolved by spec.splitBrainPolicy.preferSite. The label is the preferred (winning) site.",
@@ -217,6 +251,7 @@ var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {
 	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount, FailoversTotal,
+		PlannedFailoversTotal, PlannedFailoverDurationSeconds, PlannedFailoverLagWaitSeconds,
 		SplitBrainAutoResolveTotal,
 		ReplicationLag, ReplicationRunning, SiteState, DivergentTransactions, RecloneOperations,
 		BackupRunsTotal, BackupDurationSeconds,
