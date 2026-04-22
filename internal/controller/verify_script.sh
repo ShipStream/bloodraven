@@ -62,11 +62,17 @@ if [[ ! -d "${DATA_DIR}/mysql" ]]; then
 fi
 
 log "starting ephemeral mysqld"
+# Pid file and mysqlx socket must live on the writable datadir PVC —
+# the default (/var/run/mysqld/) is not writable in the verification
+# Job container image. mysqlx is disabled outright since nothing in
+# the verify path uses the X protocol.
 mysqld \
     --datadir="$DATA_DIR" \
     --user=mysql \
     --bind-address=127.0.0.1 \
     --socket="$SOCKET" \
+    --pid-file="$DATA_DIR/mysqld.pid" \
+    --mysqlx=OFF \
     --log-error="$ERRLOG" \
     --skip-log-bin \
     --skip-replica-start \
@@ -86,6 +92,17 @@ if ! mysqladmin --socket="$SOCKET" --user=root ping >/dev/null 2>&1; then
     tail -n 50 "$ERRLOG" || true
     exit 1
 fi
+
+# `--initialize-insecure` only creates root@localhost, which mysqlsh's
+# 127.0.0.1 TCP connection doesn't match. Create root@127.0.0.1 with
+# no password so restore.py can connect via BLOODRAVEN_MYSQL_HOST.
+# Runs via the unix socket, which root@localhost can use.
+log "granting root@127.0.0.1 for TCP loopback access"
+mysql --socket="$SOCKET" --user=root <<'SQL'
+CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '';
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+SQL
 
 # The ephemeral root account has no password after --initialize-insecure.
 # Point the shared restore.py at it via BLOODRAVEN_MYSQL_HOST and override

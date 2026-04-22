@@ -48,6 +48,24 @@ spec:
           bytesPerChunk: "64M"
           compression: zstd
           consistent: true
+        # Scheduled verification. The operator renders a CronJob that
+        # fires `bloodraven trigger-verification` on this schedule,
+        # which creates a MysqlBackupVerification CR against the
+        # latest Succeeded MysqlBackup for this profile. The manual
+        # path is `./playground/verify-backup.sh run minio`.
+        verification:
+          enabled: true
+          schedule: "*/30 * * * *"
+          timeZone: "Etc/UTC"
+          concurrencyPolicy: Forbid
+          retentionPolicy:
+            keepSuccessful: 5
+            keepFailures: 5
+          sanityCheck:
+            query: "SELECT COUNT(*) FROM information_schema.tables"
+            expect:
+              minRows: 1
+              maxDurationSeconds: 30
       - name: local-pvc
         retention: 3
         storage:

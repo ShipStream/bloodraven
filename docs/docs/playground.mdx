@@ -135,6 +135,45 @@ For more advanced scenarios, use the chaos script:
 ./playground/chaos.sh recover            # Undo all chaos
 ```
 
+## Exercise backup verification
+
+The playground's `minio` backup profile ships with scheduled verification enabled (`*/30 * * * *`). The operator materializes a CronJob that fires `bloodraven trigger-verification` on the schedule, which creates a `MysqlBackupVerification` CR against the latest Succeeded `MysqlBackup` and copies the profile's `verification` block (`sanityCheck`, etc.) onto the CR.
+
+To drive the feature by hand without waiting for the schedule:
+
+```bash
+# Create a bare verification and wait for it to reach a terminal phase.
+# This skips profile-level inheritance (no sanityCheck / pointInTime);
+# see below for the scheduled-contract path.
+./playground/verify-backup.sh run minio
+
+# List all verifications with their phase
+./playground/verify-backup.sh status
+
+# Tail the Job pod log for the most recent verification
+./playground/verify-backup.sh logs
+
+# Remove completed runs
+./playground/verify-backup.sh cleanup            # Succeeded only
+./playground/verify-backup.sh cleanup --failed   # Failed only
+
+# Inspect the scheduled CronJob the operator materialized
+./playground/verify-backup.sh schedule-list
+```
+
+To run the **full scheduled contract** on demand — the CR built exactly the way the CronJob would build it, including the profile's `sanityCheck` — fire the operator's CronJob as a one-off Job:
+
+```bash
+kubectl -n bloodraven-playground create job verify-now \
+  --from=cronjob/mysql-playground-verify-minio
+```
+
+A successful run provisions an ephemeral PVC + mysqld, loads the dump, runs the sanity query (if inherited from the profile), and cleans up. On failure the Pod and PVC are retained so you can `kubectl exec` in and inspect why the load failed.
+
+:::note
+The playground does not configure PITR binlog archival, so `spec.pointInTime` on a verification CR will be rejected by the reconciler until `spec.backup.pitr.enabled=true` (and a binlog archiver) is wired up on the failover group.
+:::
+
 ## Dashboard features
 
 The dashboard connects to the operator via WebSocket and polls DNS state every 3 seconds.
