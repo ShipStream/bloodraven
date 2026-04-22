@@ -60,8 +60,9 @@ bump:
    default).
 2. Bump `spec.image` to the 9.7 pinned tag.
 3. `kubectl apply`.
-4. Watch `status.conditions` for `Rollout` / `Bootstrapping` and
-   confirm replication catches up before the second site rolls.
+4. Watch `status.updatePhase` and the `Updating` / `Bootstrapping`
+   conditions on `status.conditions`, and confirm replication catches
+   up before the second site rolls.
 5. Run a backup-verification drill (see
    [Backup verification](./backup-verification.mdx)) against the new
    version.
@@ -109,10 +110,16 @@ The supported configuration is matching versions:
 operator Deployment.
 
 Bloodraven tolerates a **one-minor** transient skew in either
-direction during a rolling upgrade. The HTTP surface between the two
-(`/health`, `/status`, `/active-site`, `/peer/ping`,
-`/peer/active-site`, `/archiver/status`) is additive-only, so a
-briefly older-or-newer sidecar stays compatible with the operator
+direction during a rolling upgrade. Both sides of the HTTP surface
+between the two are additive-only:
+
+- **Operator endpoints** (polled by sidecars): `/healthz`, `/status`,
+  `/active-site`, `/pitr-cutoff`.
+- **Sidecar endpoints** (polled by the operator and peer sidecars):
+  `/health`, `/status`, `/peer/ping`, `/peer/active-site`,
+  `/archiver/status`.
+
+A briefly older-or-newer sidecar stays compatible with the operator
 while pods roll. Skew beyond one minor is not tested and not
 guaranteed.
 
