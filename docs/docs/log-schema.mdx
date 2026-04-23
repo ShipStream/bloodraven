@@ -27,7 +27,7 @@ Every record in the operational stream carries:
 
 | Field | Type | Description |
 |---|---|---|
-| `time` | RFC3339 timestamp (string) | Event time, UTC. Set by `slog` automatically. |
+| `time` | RFC3339Nano timestamp (string) | Event time, normalized to UTC by the binary's slog handler regardless of pod timezone. Always ends in `Z`. |
 | `level` | string | One of `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `msg` | string | The event identifier. Stable for events listed in the [Event reference](#event-reference); may change for ad-hoc debug logs. |
 
@@ -50,7 +50,7 @@ Sidecar records additionally carry:
 | `DEBUG` | Per-poll bookkeeping (status no-ops, transient probe errors, archiver tick events). Off by default — the operator's slog handler is set to `INFO`. |
 | `INFO` | State changes the operator deliberately took: failover, promotion, bootstrap, recovery, sidecar lifecycle. **Most of the event vocabulary lives here.** |
 | `WARN` | Degraded but not fatal: a single retry, a peer briefly unreachable, a non-critical operation that failed (connection kill, taint patch). The operator continues. |
-| `ERROR` | Operator-affecting failure: failover failed, self-fence triggered, status update rejected by the API server. **Always paired with an `error` field.** |
+| `ERROR` | Operator-affecting failure: failover failed, self-fence triggered, status update rejected by the API server, CronJob-pod startup validation failed. **Always paired with an `error` field** (a string carrying either the underlying error or, for validation failures, a description of what was missing). |
 
 `DEBUG` records may appear or disappear without notice. `INFO`/`WARN`/`ERROR` `msg` strings listed below are stable.
 

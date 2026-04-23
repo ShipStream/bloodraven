@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/util"
 )
 
 // runTriggerVerification creates a MysqlBackupVerification CR in-cluster
@@ -31,10 +32,10 @@ func runTriggerVerification(args []string) {
 	)
 	_ = fs.Parse(args)
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo)
 
 	if *group == "" || *profile == "" {
-		logger.Error("--group and --profile are required")
+		logger.Error("missing required flags", "error", "--group and --profile must be set")
 		os.Exit(2)
 	}
 	ns := *namespace

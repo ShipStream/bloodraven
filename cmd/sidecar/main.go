@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"github.com/shipstream/bloodraven/internal/sidecar"
+	"github.com/shipstream/bloodraven/internal/util"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo)
 
 	cfg, err := sidecar.ConfigFromEnv()
 	if err != nil {
