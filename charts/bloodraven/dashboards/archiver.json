@@ -68,11 +68,11 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Upload failures / hr (across sites)",
-      "description": "rate() of the cumulative failure gauge. Resets on sidecar restart show as a single negative-looking step, which rate() clamps to 0.",
+      "title": "Upload failures in last 1h (across sites)",
+      "description": "Sum of new upload failures over the last hour across all selected sites. Uses increase() — PromQL's counter-reset heuristic treats a sidecar restart (gauge drops to 0) as a reset, so the result stays non-negative across restarts.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
-      "targets": [{"expr": "sum(increase(bloodraven_archiver_upload_failures{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[1h]) > 0)", "refId": "A"}],
+      "targets": [{"expr": "sum(increase(bloodraven_archiver_upload_failures{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[1h]))", "refId": "A"}],
       "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [
         {"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 5}
