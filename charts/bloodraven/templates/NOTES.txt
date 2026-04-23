@@ -20,6 +20,22 @@ Status API and WebSocket:
   {{ include "bloodraven.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.auxiliary.service.port }}/ws/status
 {{- end }}
 
+{{- if .Values.grafanaDashboards.enabled }}
+
+Grafana dashboards shipped as ConfigMaps (label {{ .Values.grafanaDashboards.label | default "grafana_dashboard" }}={{ .Values.grafanaDashboards.labelValue | default "1" | quote }}):
+  - Bloodraven — Overview              (uid bloodraven-overview)
+  - Bloodraven — Failover & Topology   (uid bloodraven-failover)
+  - Bloodraven — Replication & Recovery (uid bloodraven-replication)
+  - Bloodraven — Backups & Verification (uid bloodraven-backups)
+  - Bloodraven — PITR Archiver         (uid bloodraven-archiver)
+Folder: {{ .Values.grafanaDashboards.folder | default "Bloodraven" }}.
+{{- else }}
+
+Grafana dashboards are available but disabled. To enable:
+  helm upgrade {{ .Release.Name }} bloodraven/bloodraven --reuse-values --set grafanaDashboards.enabled=true
+(Needs Grafana's dashboard-discovery sidecar — default for kube-prometheus-stack.)
+{{- end }}
+
 Next steps:
   1. Install external-dns with the DNSEndpoint CRD source enabled for your DNS provider.
   2. Create a Secret with MySQL credentials (ROOT_PASSWORD, REPLICATION_USER, etc.)

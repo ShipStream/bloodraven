@@ -1,0 +1,182 @@
+{
+  "title": "Bloodraven — Failover & Topology",
+  "uid": "bloodraven-failover",
+  "tags": ["bloodraven", "mysql", "failover"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {"from": "now-24h", "to": "now"},
+  "graphTooltip": 1,
+  "links": [
+    {"title": "Overview", "type": "link", "url": "/d/bloodraven-overview", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true}
+  ],
+  "templating": {
+    "list": [
+      {"name": "datasource", "type": "datasource", "query": "prometheus", "current": {"text": "Prometheus", "value": "Prometheus"}, "refresh": 1},
+      {
+        "name": "site",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {"query": "label_values(bloodraven_site_state, site)", "refId": "site"},
+        "refresh": 2, "multi": true, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Auto failovers (24h)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(increase(bloodraven_failovers_total[24h]))", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 3}
+      ]}}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Planned failovers — success (24h)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "sum(increase(bloodraven_planned_failovers_total{result=\"success\"}[24h]))", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}
+      ]}}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Planned failovers — failed/rejected (24h)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "sum(increase(bloodraven_planned_failovers_total{result=~\"failed_.*|rejected\"}[24h]))", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "red", "value": 1}
+      ]}}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Split-brain auto-resolves (24h)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "sum(increase(bloodraven_split_brain_auto_resolve_total[24h]))", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "orange", "value": 1}
+      ]}}}
+    },
+    {
+      "id": 10,
+      "type": "state-timeline",
+      "title": "Site state timeline",
+      "description": "Colors show which state each site was in at any moment.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 5},
+      "targets": [{"expr": "bloodraven_site_state{site=~\"$site\"} == 1", "refId": "A", "legendFormat": "{{site}} / {{state}}"}],
+      "options": {"showValue": "auto", "mergeValues": true, "rowHeight": 0.9},
+      "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"1": {"text": "active", "color": "blue"}}}], "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "transparent", "value": null}, {"color": "blue", "value": 1}
+      ]}}}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Auto failovers per hour by target",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "targets": [{"expr": "sum by (target_site) (increase(bloodraven_failovers_total[1h]))", "refId": "A", "legendFormat": "{{target_site}}"}],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70}, "unit": "short"}}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Planned failovers per hour by target & result",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "targets": [{"expr": "sum by (target_site, result) (increase(bloodraven_planned_failovers_total[1h]))", "refId": "A", "legendFormat": "{{target_site}} ({{result}})"}],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70, "stacking": {"mode": "normal"}}, "unit": "short"}}
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Planned failover duration — p50 / p95 / p99",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 21},
+      "targets": [
+        {"expr": "histogram_quantile(0.5,  sum by (target_site, le) (rate(bloodraven_planned_failover_duration_seconds_bucket[1h])))", "refId": "A", "legendFormat": "p50 → {{target_site}}"},
+        {"expr": "histogram_quantile(0.95, sum by (target_site, le) (rate(bloodraven_planned_failover_duration_seconds_bucket[1h])))", "refId": "B", "legendFormat": "p95 → {{target_site}}"},
+        {"expr": "histogram_quantile(0.99, sum by (target_site, le) (rate(bloodraven_planned_failover_duration_seconds_bucket[1h])))", "refId": "C", "legendFormat": "p99 → {{target_site}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}}
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Planned failover lag-wait — p50 / p95 / p99",
+      "description": "Time spent in WaitingForLag. Approaching the lag-gate timeout is the canary for 'planned switchover will time out'.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 21},
+      "targets": [
+        {"expr": "histogram_quantile(0.5,  sum by (target_site, le) (rate(bloodraven_planned_failover_lag_wait_seconds_bucket[1h])))", "refId": "A", "legendFormat": "p50 → {{target_site}}"},
+        {"expr": "histogram_quantile(0.95, sum by (target_site, le) (rate(bloodraven_planned_failover_lag_wait_seconds_bucket[1h])))", "refId": "B", "legendFormat": "p95 → {{target_site}}"},
+        {"expr": "histogram_quantile(0.99, sum by (target_site, le) (rate(bloodraven_planned_failover_lag_wait_seconds_bucket[1h])))", "refId": "C", "legendFormat": "p99 → {{target_site}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}}
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "State transitions/s per site (flap detector)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29},
+      "targets": [{"expr": "sum by (site) (rate(bloodraven_state_transitions_total[5m]))", "refId": "A", "legendFormat": "{{site}}"}],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 10}, "unit": "ops"}}
+    },
+    {
+      "id": 21,
+      "type": "table",
+      "title": "State transitions by (site, from, to) — 24h",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29},
+      "targets": [{"expr": "sum by (site, from, to) (increase(bloodraven_state_transitions_total[24h]))", "refId": "A", "instant": true, "format": "table"}],
+      "transformations": [
+        {"id": "organize", "options": {"excludeByName": {"Time": true}, "renameByName": {"Value": "count"}}}
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "DNS flips per hour",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 37},
+      "targets": [{"expr": "sum by (site) (increase(bloodraven_dns_flips_total[1h]))", "refId": "A", "legendFormat": "{{site}}"}],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70}, "unit": "short"}}
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Node taint / untaint ops per hour",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 37},
+      "targets": [{"expr": "sum by (site, action) (increase(bloodraven_taint_operations_total[1h]))", "refId": "A", "legendFormat": "{{site}} / {{action}}"}],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70, "stacking": {"mode": "normal"}}, "unit": "short"}}
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "WebSocket connected clients",
+      "description": "Dashboard subscribers. Helps see which operator instance is leader (non-leader gauges stay at 0).",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 45},
+      "targets": [{"expr": "bloodraven_websocket_connected_clients", "refId": "A", "legendFormat": "{{instance}}"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 10}}}
+    }
+  ]
+}

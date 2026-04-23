@@ -101,6 +101,38 @@ metrics:
     # -- Additional labels for the ServiceMonitor (e.g. release: prometheus)
     labels: {}
 
+# Grafana dashboards.
+#
+# When enabled, the chart renders one ConfigMap per JSON file in
+# `charts/bloodraven/dashboards/`. Each ConfigMap carries the
+# `grafana_dashboard: "1"` label, which Grafana's dashboard-discovery sidecar
+# picks up automatically (this is the default configuration of both the
+# kube-prometheus-stack chart and the upstream grafana/grafana chart).
+#
+# If you run Grafana some other way — provisioning from disk, or importing
+# JSON by hand — just copy the files from `charts/bloodraven/dashboards/`
+# directly, no Helm needed. See docs/docs/monitoring.mdx for all three paths.
+grafanaDashboards:
+  # -- Render the dashboard ConfigMaps. Safe to enable even if you don't yet
+  # run Grafana — the ConfigMaps sit idle until a sidecar discovers them.
+  enabled: false
+  # -- Namespace for the ConfigMaps. Defaults to the release namespace.
+  # Some setups scope the Grafana sidecar to a single namespace (often
+  # `monitoring`); set this accordingly.
+  namespace: ""
+  # -- Selector label name the Grafana sidecar watches for. Leave as-is unless
+  # you changed your sidecar's `LABEL` env var.
+  label: grafana_dashboard
+  # -- Selector label value. Leave as-is unless you changed the sidecar's
+  # `LABEL_VALUE`.
+  labelValue: "1"
+  # -- Grafana folder the dashboards land in.
+  folder: Bloodraven
+  # -- Extra labels to stamp on every dashboard ConfigMap.
+  extraLabels: {}
+  # -- Extra annotations to stamp on every dashboard ConfigMap.
+  extraAnnotations: {}
+
 auxiliary:
   service:
     # -- Create a Service for the auxiliary HTTP/WebSocket endpoint

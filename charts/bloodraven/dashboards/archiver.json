@@ -1,0 +1,130 @@
+{
+  "title": "Bloodraven — PITR Archiver",
+  "uid": "bloodraven-archiver",
+  "tags": ["bloodraven", "mysql", "pitr", "archiver"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "graphTooltip": 1,
+  "links": [
+    {"title": "Overview", "type": "link", "url": "/d/bloodraven-overview", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true},
+    {"title": "Backups", "type": "link", "url": "/d/bloodraven-backups", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true}
+  ],
+  "templating": {
+    "list": [
+      {"name": "datasource", "type": "datasource", "query": "prometheus", "current": {"text": "Prometheus", "value": "Prometheus"}, "refresh": 1},
+      {
+        "name": "ns",
+        "label": "namespace",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {"query": "label_values(bloodraven_archiver_last_upload_timestamp_seconds, namespace)", "refId": "ns"},
+        "refresh": 2, "multi": true, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": "$__all"}
+      },
+      {
+        "name": "group",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {"query": "label_values(bloodraven_archiver_last_upload_timestamp_seconds{namespace=~\"$ns\"}, group)", "refId": "group"},
+        "refresh": 2, "multi": true, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": "$__all"}
+      },
+      {
+        "name": "site",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {"query": "label_values(bloodraven_archiver_last_upload_timestamp_seconds{namespace=~\"$ns\", group=~\"$group\"}, site)", "refId": "site"},
+        "refresh": 2, "multi": true, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Oldest archive upload (most-stale site)",
+      "description": "time() − max age across filtered sites. This is your RPO canary.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
+      "targets": [{"expr": "max(time() - bloodraven_archiver_last_upload_timestamp_seconds{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"})", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "yellow", "value": 300}, {"color": "red", "value": 900}
+      ]}}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Total archiver backlog files",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
+      "targets": [{"expr": "sum(bloodraven_archiver_backlog_files{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"})", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 10}
+      ]}}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Upload failures / hr (across sites)",
+      "description": "rate() of the cumulative failure gauge. Resets on sidecar restart show as a single negative-looking step, which rate() clamps to 0.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 0},
+      "targets": [{"expr": "sum(increase(bloodraven_archiver_upload_failures{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[1h]) > 0)", "refId": "A"}],
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 5}
+      ]}}}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Seconds since last upload per site",
+      "description": "Each site should hug the X-axis. Rising lines = archiver stuck.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 5},
+      "targets": [{"expr": "time() - bloodraven_archiver_last_upload_timestamp_seconds{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}", "refId": "A", "legendFormat": "{{namespace}}/{{group}}/{{site}}"}],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 15}, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "yellow", "value": 300}, {"color": "red", "value": 900}
+      ]}}}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Archiver backlog files per site",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "targets": [{"expr": "bloodraven_archiver_backlog_files{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}", "refId": "A", "legendFormat": "{{namespace}}/{{group}}/{{site}}"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 30}, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 10}
+      ]}}}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Upload failure rate per site (failures/hr)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "targets": [{"expr": "increase(bloodraven_archiver_upload_failures{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}[1h])", "refId": "A", "legendFormat": "{{namespace}}/{{group}}/{{site}}"}],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70}}}
+    },
+    {
+      "id": 20,
+      "type": "table",
+      "title": "Archiver state (per site)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 21},
+      "targets": [
+        {"expr": "time() - bloodraven_archiver_last_upload_timestamp_seconds{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}", "refId": "A", "format": "table", "instant": true},
+        {"expr": "bloodraven_archiver_backlog_files{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}", "refId": "B", "format": "table", "instant": true},
+        {"expr": "bloodraven_archiver_upload_failures{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}", "refId": "C", "format": "table", "instant": true}
+      ],
+      "transformations": [
+        {"id": "merge"},
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true}, "renameByName": {"Value #A": "age_s", "Value #B": "backlog", "Value #C": "upload_failures_total"}}}
+      ]
+    }
+  ]
+}
