@@ -94,6 +94,15 @@ type PITRConfig struct {
 	// lifecycle of the Secret; the sidecar just reads the mounted
 	// file at startup.
 	PassphraseFile string
+
+	// AllowPlaintextFallback opts the encrypted-store wrapper into
+	// legacy mixed-encryption behavior: objects lacking the BRV1 magic
+	// header are passed through as plaintext on Get/GetFile instead of
+	// raising ErrTamperedOrDowngrade. Default false. Only enable this
+	// for a time-bounded migration when an operator is knowingly moving
+	// an unencrypted prefix to encryption — it disables the tamper
+	// detection guarantee that AES-GCM otherwise provides.
+	AllowPlaintextFallback bool
 }
 
 // PITRS3Config is the S3-specific archiver config.
@@ -120,12 +129,33 @@ type PITRPVCConfig struct {
 func ConfigFromEnv() (*Config, error) {
 	dsn := os.Getenv("MYSQL_DSN")
 	if dsn == "" {
-		user := os.Getenv("MYSQL_USER")
-		password := os.Getenv("MYSQL_PASSWORD")
-		if user == "" {
-			return nil, fmt.Errorf("one of MYSQL_DSN or MYSQL_USER is required")
+		// Prefer mounted-file credentials (MYSQL_CREDS_DIR/{username,
+		// password}) over env-var credentials so the hottest secret in
+		// the system doesn't end up in /proc/<pid>/environ or crash
+		// dumps (AUDIT L2). Falls through to MYSQL_USER / MYSQL_PASSWORD
+		// for backward compatibility.
+		credsDir := os.Getenv("MYSQL_CREDS_DIR")
+		if credsDir != "" {
+			user, err := readTrimFile(credsDir + "/username")
+			if err != nil {
+				return nil, fmt.Errorf("read MYSQL_CREDS_DIR/username: %w", err)
+			}
+			password, err := readTrimFile(credsDir + "/password")
+			if err != nil {
+				return nil, fmt.Errorf("read MYSQL_CREDS_DIR/password: %w", err)
+			}
+			if user == "" {
+				return nil, fmt.Errorf("MYSQL_CREDS_DIR/username is empty")
+			}
+			dsn = fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/", user, password)
+		} else {
+			user := os.Getenv("MYSQL_USER")
+			password := os.Getenv("MYSQL_PASSWORD")
+			if user == "" {
+				return nil, fmt.Errorf("one of MYSQL_DSN, MYSQL_CREDS_DIR, or MYSQL_USER is required")
+			}
+			dsn = fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/", user, password)
 		}
-		dsn = fmt.Sprintf("%s:%s@tcp(127.0.0.1:3306)/", user, password)
 	}
 
 	podName := os.Getenv("MY_POD_NAME")
@@ -261,6 +291,11 @@ func pitrConfigFromEnv() (*PITRConfig, error) {
 	// Encryption passphrase path. Optional: when unset the archiver
 	// uploads plaintext binlogs (matching the pre-encryption default).
 	cfg.PassphraseFile = os.Getenv("BLOODRAVEN_PITR_PASSPHRASE_FILE")
+
+	// Legacy plaintext-fallback opt-in. Default: strict.
+	if v := os.Getenv("BLOODRAVEN_PITR_ALLOW_PLAINTEXT_FALLBACK"); v == "1" || v == "true" {
+		cfg.AllowPlaintextFallback = true
+	}
 
 	return cfg, nil
 }

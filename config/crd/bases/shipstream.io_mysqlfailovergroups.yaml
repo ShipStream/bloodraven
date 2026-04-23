@@ -1186,6 +1186,21 @@ spec:
                       - schedule
                       type: object
                     type: array
+                  stagingVolumeSizeLimit:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      StagingVolumeSizeLimit caps the emptyDir used to stage plaintext
+                      dump / restore / verification artifacts inside backup Jobs. When
+                      the full dump spills past this limit the kubelet evicts the Job
+                      pod; without the cap, a multi-GB dump can fill the node's
+                      `/var/lib/kubelet` partition and trigger DiskPressure eviction of
+                      unrelated pods (AUDIT H6). Empty value falls through to the
+                      node's ephemeral-storage limit (preserving previous behavior).
+                      The reconciler does not enforce this — it's a hint to the kubelet.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
                 type: object
               cloneTimeout:
                 default: 3600

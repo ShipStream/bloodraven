@@ -326,12 +326,12 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	}
 
 	// Shared emptyDir volume. Init container writes; main container
-	// reads. sizeLimit is intentionally unset — the node's ephemeral
-	// storage limit is the de-facto cap, matching how the existing
-	// /tmp emptyDir is sized.
+	// reads. Size cap is opt-in via spec.backup.stagingVolumeSizeLimit
+	// (AUDIT H6); leaving it unset preserves the prior behavior where
+	// only the node's ephemeral-storage limit applies.
 	emptyDirVol := corev1.Volume{
 		Name:         "pitr-binlogs",
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		VolumeSource: corev1.VolumeSource{EmptyDir: stagingEmptyDirSource(fg.Spec.Backup)},
 	}
 	initMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir}
 	mainMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir, ReadOnly: true}

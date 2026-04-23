@@ -103,14 +103,30 @@ metrics:
 
 auxiliary:
   service:
-    # -- Create a Service for the auxiliary HTTP/WebSocket endpoint
-    enabled: true
+    # -- Create a Service for the auxiliary HTTP/WebSocket endpoint.
+    # This endpoint exposes /status, /active-site, /pitr-cutoff, and
+    # /ws/status. It currently has NO authentication or authorization
+    # (see AUDIT H2); anything on the pod network can read failover-group
+    # state for arbitrary namespaces and open unbounded WebSockets.
+    # Keep disabled unless the sidecar / dashboard / PITR retention
+    # sweeper actually need it, and pair with a NetworkPolicy that
+    # limits ingress to those specific ServiceAccounts.
+    enabled: false
     # -- Auxiliary service port (status API + WebSocket)
     port: 8082
     # -- Service type
     type: ClusterIP
     # -- Annotations for the auxiliary service
     annotations: {}
+    # -- Comma-separated allowlist of Origin headers permitted on the
+    # /ws/status WebSocket upgrade. Default "*" (wildcard) matches the
+    # pre-hardening behavior — a narrower list is strongly recommended
+    # for production (e.g. "https://dashboard.example.com").
+    wsAllowedOrigins: "*"
+    # -- Cap on concurrent WebSocket clients connected to /ws/status.
+    # Beyond this limit, additional upgrades are rejected with 429.
+    # Defends against an attacker pinning the hub's clients map.
+    wsMaxClients: 100
 
 # -- Install CRDs. Set to false if CRDs are managed externally.
 installCRDs: true

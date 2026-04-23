@@ -16,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+
+	"github.com/shipstream/bloodraven/internal/backupcrypto"
 )
 
 // ArchiveStore abstracts the two storage backends (S3 and local PVC)
@@ -101,11 +103,11 @@ func newArchiveStore(ctx context.Context, cfg *PITRConfig) (archiveStore, error)
 	}
 
 	if cfg.PassphraseFile != "" {
-		passphrase, err := readArchivePassphrase(cfg.PassphraseFile)
+		passphrase, err := backupcrypto.ReadPassphraseFile(cfg.PassphraseFile)
 		if err != nil {
 			return nil, fmt.Errorf("archive store: read passphrase: %w", err)
 		}
-		base = WrapWithEncryption(base, passphrase)
+		base = WrapWithEncryptionOptions(base, passphrase, cfg.AllowPlaintextFallback)
 	}
 	return base, nil
 }
@@ -130,17 +132,41 @@ func newS3Store(ctx context.Context, cfg *PITRS3Config) (*s3Store, error) {
 		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.Region))
 	}
 	if cfg.AWSCredsDir != "" {
-		ak, _ := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_ACCESS_KEY_ID"))
-		sk, _ := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_SECRET_ACCESS_KEY"))
-		st, _ := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_SESSION_TOKEN"))
-		if rg, _ := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_REGION")); cfg.Region == "" && rg != "" {
+		// The operator mounts a Secret here; a missing or unreadable
+		// required file is an operator mistake, not a "fall back to
+		// ambient creds" signal. Failing loud prevents the restore Job
+		// from silently running under IRSA / instance-profile
+		// credentials that may have a broader scope than the caller
+		// intended (see AUDIT M2).
+		ak, err := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_ACCESS_KEY_ID"))
+		if err != nil {
+			return nil, fmt.Errorf("aws creds dir: read AWS_ACCESS_KEY_ID: %w", err)
+		}
+		sk, err := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_SECRET_ACCESS_KEY"))
+		if err != nil {
+			return nil, fmt.Errorf("aws creds dir: read AWS_SECRET_ACCESS_KEY: %w", err)
+		}
+		// Session token is optional; missing file is OK, but a file we
+		// can't read is not. ReadFile will only return os.IsNotExist
+		// when the file is absent; anything else (permission denied,
+		// truncated mount) is surfaced.
+		st, err := readOptionalTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_SESSION_TOKEN"))
+		if err != nil {
+			return nil, fmt.Errorf("aws creds dir: read AWS_SESSION_TOKEN: %w", err)
+		}
+		rg, err := readOptionalTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_REGION"))
+		if err != nil {
+			return nil, fmt.Errorf("aws creds dir: read AWS_REGION: %w", err)
+		}
+		if cfg.Region == "" && rg != "" {
 			loadOpts = append(loadOpts, awsconfig.WithRegion(rg))
 		}
-		if ak != "" && sk != "" {
-			loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
-				credentials.NewStaticCredentialsProvider(ak, sk, st),
-			))
+		if ak == "" || sk == "" {
+			return nil, fmt.Errorf("aws creds dir: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be non-empty")
 		}
+		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(ak, sk, st),
+		))
 	}
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
@@ -495,20 +521,17 @@ func readTrimFile(path string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-// readArchivePassphrase loads a passphrase from path, stripping
-// trailing whitespace. Empty passphrases return an error so a
-// mis-mounted Secret can never silently "succeed" and upload
-// plaintext.
-func readArchivePassphrase(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+// readOptionalTrimFile is like readTrimFile but treats a missing file
+// as empty string without error. Other errors (permission denied,
+// truncated mount, EIO) are still surfaced so an operator mistake
+// doesn't silently produce a degraded credential set.
+func readOptionalTrimFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
 	}
-	trimmed := bytes.TrimFunc(data, func(r rune) bool {
-		return r == '\n' || r == '\r' || r == ' ' || r == '\t'
-	})
-	if len(trimmed) == 0 {
-		return nil, fmt.Errorf("passphrase file %s is empty", path)
-	}
-	return trimmed, nil
+	return strings.TrimSpace(string(b)), nil
 }

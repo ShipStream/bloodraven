@@ -37,6 +37,18 @@ everything proportionally.
 | **Planned failover target fails to catch up** | Admin annotated `bloodraven.shipstream.io/planned-failover=<site>`; target's `GTID_EXECUTED` does not cover source's fenced GTID within `maxLagWait`. | Operator unfences the source, stamps `status.plannedFailover.phase: Failed` with `reason: LagTimeout`, emits `PlannedFailoverFailed` Event. `role=primary` label is restored; no DNS flip occurred. | `maxLagWait` (default 5 min). | No data loss; cluster returns to pre-annotation state. Retry after replication has caught up, or use emergency failover if the source is truly gone. See [Planned failover → Rollback](./planned-failover.mdx#rollback-and-failure-modes). |
 | **Replication credentials missing / wrong** | Auto-clone fails; `Bootstrapping` condition stays in `Failed`. | Operator reports the failure via the `Bootstrapping` condition and events; does not keep retrying indefinitely. | Immediate (on the first bootstrap attempt). | Without `MYSQL_REPLICATION_USER` / `MYSQL_REPLICATION_PASSWORD`, old-primary recovery and auto-clone are both disabled. The rest of the operator (polling, failover, DNS) keeps working. |
 
+## Backup encryption failure modes
+
+These rows apply only when a backup profile has `spec.backup.profiles[].encryption`
+set. See [Backup encryption](./backup-encryption.mdx) for the full threat model.
+
+| Failure | Detection path | Operator action | Typical time-to-act | Notes & limits |
+|---|---|---|---|---|
+| **Passphrase Secret missing at restore time** | Restore Job init container can't mount `spec.initFromBackup.decryption.passphraseSecret`; `kubectl describe pod` shows `CreateContainerConfigError`. | Reconciler records `DecryptionSecretMissing` on the restore CR; stops creating retry Jobs after `backoffLimit`. | Seconds (Job pod fails to start). | Recovery: recreate the Secret with the original passphrase value, or delete & re-apply the restore CR. Ciphertext is unrecoverable without the exact passphrase used at backup time — treat the Secret as critical recovery material. |
+| **Passphrase rotated between backup and restore** | `decrypt-download` init container exits non-zero with a chunk-auth failure from `backupcrypto`. | Job pod's logs show `backupcrypto: chunk 0: cipher: message authentication failed`; reconciler reports `DecryptionFailed`. | Immediate on first read. | AES-GCM catches mismatched keys cleanly — there's no silent garbage load. Recovery requires producing the old passphrase; there is no re-wrap path today. |
+| **Ciphertext truncated by S3 multipart abort** | `decrypt-download` returns `backupcrypto: ciphertext truncated before final chunk` (`ErrTruncated`). | Job pod fails fast; reconciler reports `BackupCiphertextTruncated`. | Immediate. | `ErrTruncated` distinguishes "tail missing" from a generic auth failure. Recover by re-running the source backup and restoring from the replacement artifact. |
+| **Object has no BRV1 magic (tamper / downgrade)** | `decrypt-download` returns `sidecar: object missing BRV1 magic while encryption is required` (`ErrTamperedOrDowngrade`). | Job pod fails fast; reconciler reports `BackupDecryptionRejected`. | Immediate. | Defends against an attacker with bucket write access overwriting ciphertext with attacker-chosen plaintext. Legacy mixed-encryption deployments migrating to encryption can opt back into the old passthrough behavior via `BLOODRAVEN_ALLOW_PLAINTEXT_FALLBACK=1` (sidecar / decrypt-download init container) — time-bounded migration only. |
+
 ## How to read this table for your on-call
 
 Two common uses:

@@ -72,9 +72,16 @@ func main() {
 			cfg.PodNamespace != "" && cfg.FailoverGroup != "" {
 			retentionInterval := time.Hour
 			if v := os.Getenv("BLOODRAVEN_PITR_RETENTION_INTERVAL"); v != "" {
-				if d, err := time.ParseDuration(v); err == nil {
-					retentionInterval = d
+				// Silently defaulting an invalid value hides
+				// operator misconfiguration; fail loud so a typo
+				// doesn't quietly leave retention stuck at the
+				// default hourly cadence (AUDIT L7).
+				d, err := time.ParseDuration(v)
+				if err != nil {
+					logger.Error("parse BLOODRAVEN_PITR_RETENTION_INTERVAL", "value", v, "error", err)
+					os.Exit(1)
 				}
+				retentionInterval = d
 			}
 			archiver.SetRetentionClient(
 				cfg.BloodravenAddress,

@@ -243,6 +243,52 @@ var (
 		Name: "bloodraven_archiver_backlog_files",
 		Help: "Sealed binlogs that have not been uploaded yet at the end of the last archiver scan.",
 	}, []string{"namespace", "group", "site"})
+
+	// --- HTTP RED metrics (aux server + sidecar) ---------------------
+	//
+	// Label set kept narrow (handler, method, status) to bound
+	// cardinality — status is the string form of the class ("2xx",
+	// "4xx", ...) rather than the exact code so the series count stays
+	// manageable across dozens of cluster installs. AUDIT M6.
+	HTTPRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_http_requests_total",
+		Help: "Total HTTP requests served by the operator aux and sidecar mux handlers.",
+	}, []string{"server", "handler", "method", "status"})
+
+	HTTPRequestDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "bloodraven_http_request_duration_seconds",
+		Help:    "End-to-end server-side latency of HTTP requests served by the operator aux and sidecar mux handlers.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"server", "handler", "method"})
+
+	// --- Backup encryption data-plane metrics ------------------------
+	//
+	// Emitted by the cmd/bloodraven encrypt-upload / decrypt-download
+	// subcommands via a BLOODRAVEN_ENCRYPT_METRICS sentinel the
+	// reconciler parses. See AUDIT M5. Labels are (group, profile) to
+	// match the rest of the backup metric family; stage is one of
+	// encrypt|decrypt|upload|download.
+	BackupEncryptDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "bloodraven_backup_encrypt_duration_seconds",
+		Help:    "Wall-clock duration of the encrypt-upload data plane per (group, profile).",
+		Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600},
+	}, []string{"group", "profile"})
+
+	BackupDecryptDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "bloodraven_backup_decrypt_duration_seconds",
+		Help:    "Wall-clock duration of the decrypt-download data plane per (group, profile).",
+		Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600},
+	}, []string{"group", "profile"})
+
+	BackupEncryptBytesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_backup_encrypt_bytes_total",
+		Help: "Plaintext bytes processed by the encrypt-upload data plane per (group, profile).",
+	}, []string{"group", "profile"})
+
+	BackupEncryptFailuresTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_backup_encrypt_failures_total",
+		Help: "Total failures in the encrypt/decrypt data plane labelled by (group, profile, stage).",
+	}, []string{"group", "profile", "stage"})
 )
 
 // AllStates is the set of possible site states, used to emit the full state-set.
@@ -259,5 +305,27 @@ func Register(reg prometheus.Registerer) {
 		BackupVerifiedTimestamp, BackupVerificationLastAttemptTimestamp,
 		BackupVerificationRunsTotal, BackupVerificationDurationSeconds,
 		BackupVerificationReplayLagSeconds,
-		ArchiverUploadFailures, ArchiverLastUploadTimestamp, ArchiverBacklogFiles)
+		ArchiverUploadFailures, ArchiverLastUploadTimestamp, ArchiverBacklogFiles,
+		HTTPRequestsTotal, HTTPRequestDurationSeconds,
+		BackupEncryptDurationSeconds, BackupDecryptDurationSeconds,
+		BackupEncryptBytesTotal, BackupEncryptFailuresTotal)
+}
+
+// StatusClass returns "2xx", "3xx", "4xx", "5xx" for an HTTP status
+// code. Narrowing to a class keeps the label cardinality bounded for
+// Prometheus; the exact code remains available in access logs via the
+// auxLoggingMiddleware in cmd/bloodraven/main.go (AUDIT M4/M6).
+func StatusClass(code int) string {
+	switch {
+	case code >= 500:
+		return "5xx"
+	case code >= 400:
+		return "4xx"
+	case code >= 300:
+		return "3xx"
+	case code >= 200:
+		return "2xx"
+	default:
+		return "1xx"
+	}
 }

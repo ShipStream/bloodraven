@@ -319,9 +319,12 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		}
 
 		// -------- Init container: mysqlsh → /staging -------------------
+		// Size cap comes from spec.backup.stagingVolumeSizeLimit when
+		// set (AUDIT H6). Leaving it unset preserves the previous
+		// "bounded only by node ephemeral-storage" behavior.
 		stagingVolume := corev1.Volume{
 			Name:         "staging",
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			VolumeSource: corev1.VolumeSource{EmptyDir: stagingEmptyDirSource(fg.Spec.Backup)},
 		}
 
 		dumpEnv := append([]corev1.EnvVar{}, baseEnv...)

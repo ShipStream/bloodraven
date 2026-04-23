@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -68,6 +70,18 @@ func main() {
 		}
 	}
 
+	// Flag parsing after the subcommand dispatcher so subcommand argv
+	// isn't interpreted here. The Helm chart writes --leader-elect on
+	// the operator deployment based on the values.leaderElection.enabled
+	// knob; wiring the flag through is what makes that knob honest
+	// (AUDIT H4).
+	fs := flag.NewFlagSet("bloodraven", flag.ExitOnError)
+	leaderElect := fs.Bool("leader-elect", true, "enable manager leader election")
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "parse flags: %v\n", err)
+		os.Exit(2)
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 
@@ -83,7 +97,7 @@ func main() {
 		Metrics: metricsserver.Options{
 			BindAddress: ":8080",
 		},
-		LeaderElection:   true,
+		LeaderElection:   *leaderElect,
 		LeaderElectionID: "bloodraven.shipstream.io",
 	})
 	if err != nil {
@@ -186,8 +200,12 @@ func main() {
 	mux := newAuxMux(runner, hub, mgr.GetClient())
 
 	auxSrv := &http.Server{
-		Addr:    ":8082",
-		Handler: mux,
+		Addr:              ":8082",
+		Handler:           auxLoggingMiddleware(logger, mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 16, // 64 KiB — matches net/http's default-ish cap and still fits auth headers
 	}
 
 	// Add the auxiliary HTTP server as a runnable
@@ -226,6 +244,77 @@ type runnableFunc func(ctx context.Context) error
 
 func (f runnableFunc) Start(ctx context.Context) error {
 	return f(ctx)
+}
+
+// auxLoggingMiddleware emits one structured log line per request
+// against the aux server (method, path, status, duration, remote IP)
+// and increments Prometheus RED counters. A stuck handler or probing
+// attacker otherwise produces zero signal (AUDIT M4/M6).
+func auxLoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusRecorder{ResponseWriter: rw, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		dur := time.Since(start)
+		logger.Info("aux http",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"duration_ms", dur.Milliseconds(),
+			"remote", r.RemoteAddr,
+		)
+		metrics.HTTPRequestsTotal.WithLabelValues("aux", r.URL.Path, r.Method, metrics.StatusClass(sw.status)).Inc()
+		metrics.HTTPRequestDurationSeconds.WithLabelValues("aux", r.URL.Path, r.Method).Observe(dur.Seconds())
+	})
+}
+
+// statusRecorder captures the HTTP status so the logging middleware
+// can record it. net/http doesn't offer this out of the box.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// pitrCutoffCache is a tiny TTL cache in front of the /pitr-cutoff
+// handler. Keyed by (namespace, group, profile). Concurrent-safe.
+type pitrCutoffCache struct {
+	ttl   time.Duration
+	mu    sync.Mutex
+	data  map[string]pitrCutoffEntry
+}
+
+type pitrCutoffEntry struct {
+	value map[string]any
+	at    time.Time
+}
+
+func newPITRCutoffCache(ttl time.Duration) *pitrCutoffCache {
+	return &pitrCutoffCache{ttl: ttl, data: make(map[string]pitrCutoffEntry)}
+}
+
+func (c *pitrCutoffCache) key(ns, group, profile string) string {
+	return ns + "/" + group + "/" + profile
+}
+
+func (c *pitrCutoffCache) get(ns, group, profile string) (map[string]any, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.data[c.key(ns, group, profile)]
+	if !ok || time.Since(e.at) > c.ttl {
+		return nil, false
+	}
+	return e.value, true
+}
+
+func (c *pitrCutoffCache) set(ns, group, profile string, value map[string]any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data[c.key(ns, group, profile)] = pitrCutoffEntry{value: value, at: time.Now()}
 }
 
 func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Client) *http.ServeMux {
@@ -282,6 +371,12 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sC
 	// covered by the oldest-surviving full dump. The archiver runs
 	// this lookup on its own cadence and handles the actual deletes
 	// (it has storage credentials; the operator pod does not).
+	// /pitr-cutoff is a hot path — the sidecar archiver polls it from
+	// every primary. A per-(ns, group, profile) TTL cache keeps the
+	// operator's client from List'ing the whole namespace on every
+	// call, which also bounds the DoS surface on the unauthenticated
+	// endpoint (AUDIT H2).
+	pitrCache := newPITRCutoffCache(30 * time.Second)
 	mux.HandleFunc("/pitr-cutoff", func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
 		ns := r.URL.Query().Get("namespace")
@@ -300,13 +395,24 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sC
 			json.NewEncoder(rw).Encode(map[string]string{"error": "operator k8s client not configured"})
 			return
 		}
+		if cached, ok := pitrCache.get(ns, group, profile); ok {
+			_ = json.NewEncoder(rw).Encode(cached)
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 
 		var list v1alpha1.MysqlBackupList
-		if err := k8sClient.List(ctx, &list, client.InNamespace(ns)); err != nil {
+		// Scope the List by our well-known labels so the API server
+		// filters for us; falls back to full-namespace only when
+		// labels are absent (handled in the filter loop below).
+		if err := k8sClient.List(ctx, &list, client.InNamespace(ns), client.MatchingLabels{
+			"shipstream.io/failover-group":  group,
+			"shipstream.io/backup-profile":  profile,
+		}); err != nil {
 			rw.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(rw).Encode(map[string]string{"error": err.Error()})
+			// Don't echo raw API errors to unauthenticated callers.
+			json.NewEncoder(rw).Encode(map[string]string{"error": "internal error resolving PITR cutoff"})
 			return
 		}
 
@@ -343,6 +449,7 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sC
 		if cutoff != nil {
 			resp["cutoffTime"] = cutoff.UTC().Format(time.RFC3339)
 		}
+		pitrCache.set(ns, group, profile, resp)
 		json.NewEncoder(rw).Encode(resp)
 	})
 	mux.HandleFunc("/ws/status", hub.HandleWS)

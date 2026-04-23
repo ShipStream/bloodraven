@@ -12,9 +12,9 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `image` | string | Yes | -- | MySQL container image (e.g. `mysql:9.6`) |
-| `sidecarImage` | string | Yes | -- | Bloodraven sidecar container image |
-| `sites` | []SiteSpec | Yes | -- | Exactly two site definitions |
+| `image` | string | No | `mysql:9.6` | MySQL container image |
+| `sidecarImage` | string | No | `ghcr.io/shipstream/bloodraven-sidecar:0.1.6` | Bloodraven sidecar container image |
+| `sites` | []SiteSpec | Yes | -- | Site definitions. At least two sites with `role: primary-candidate`; additional `dr-only` sites may be appended. MinItems=2, MaxItems=16. |
 | `secretName` | string | No | -- | **(Legacy)** Name of the Secret containing MySQL credentials (key: `dsn`). Mutually exclusive with `credentials`. |
 | `credentials` | CredentialsSpec | No | -- | Per-role MySQL credential management. The operator creates MySQL users with role-appropriate privileges and rotates passwords when secrets change. Mutually exclusive with `secretName`. |
 | `dns` | DNSSpec | Yes | -- | DNS configuration for traffic steering via external-dns |
@@ -23,29 +23,36 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 | `failureThreshold` | int | No | `3` | Consecutive failed polls before a site is marked unreachable |
 | `recoveryThreshold` | int | No | `2` | Consecutive successful polls before a site is marked writable |
 | `failoverCooldown` | duration | No | `5m` | Minimum time between automatic failovers |
-| `splitBrainPolicy` | SplitBrainPolicySpec | No | -- | Opt-in automated resolution when both sites are writable and the operator has no prior failover history. Omit or leave `preferSite` empty to require manual resolution (alert only). |
+| `splitBrainPolicy` | SplitBrainPolicySpec | No | -- | Opt-in automated resolution when multiple sites are writable and the operator has no prior failover history. See [SplitBrainPolicySpec](#splitbrainpolicyspec). |
+| `sidecar` | SidecarSpec | No | -- | Sidecar-container knobs (lease timeout, peer check interval, Bloodraven aux endpoint). |
 | `sidecarResources` | ResourceRequirements | No | -- | Compute resources (requests/limits) for the sidecar container |
+| `terminationGracePeriodSeconds` | int | No | `60` | Grace period for MySQL container shutdown. |
 | `mysqlConf` | map[string]string | No | -- | MySQL configuration overrides merged into the generated `my.cnf`. Changes trigger an ordered rolling restart when `updateStrategy: OrderedUpdate` is set. |
 | `replication` | ReplicationSpec | No | -- | Replication health settings |
-| `updateStrategy` | string | No | `OrderedUpdate` | Update strategy. Set to `OrderedUpdate` for zero-downtime rollouts. |
+| `updateStrategy` | string | No | `OrderedUpdate` | Update strategy (`OrderedUpdate` or `Recreate`). |
 | `cloneTimeout` | int | No | `3600` | Timeout in seconds for initial data clone operations |
 | `podLabels` | map[string]string | No | -- | Additional labels applied to every MySQL pod. Operator labels take precedence on conflict. |
 | `podAnnotations` | map[string]string | No | -- | Additional annotations applied to every MySQL pod. Operator annotations take precedence on conflict. |
 | `serviceTemplate` | ServiceTemplate | No | -- | Customizes the Services created by the operator |
 | `extraContainers` | []Container | No | -- | Additional containers injected into every MySQL pod (e.g. exporters) |
 | `extraInitContainers` | []Container | No | -- | Additional init containers injected after the operator's built-in init container |
+| `backup` | BackupSpec | No | -- | Backup configuration (profiles, schedules, retry, PITR, encryption, security contexts). See [BackupSpec](#backupspec). |
+| `initFromBackup` | InitFromBackupSpec | No | -- | One-shot restore-on-first-boot before normal bootstrap completes. See [InitFromBackupSpec](#initfrombackupspec). |
+| `restoreInPlace` | RestoreInPlaceSpec | No | -- | Re-triggerable destructive restore against the active primary. Bumping `confirm` to a newer RFC 3339 timestamp re-arms. See [RestoreInPlaceSpec](#restoreinplacespec). |
+| `plannedFailover` | PlannedFailoverSpec | No | -- | Cluster-wide defaults for the graceful planned-failover API (triggered via `bloodraven.shipstream.io/planned-failover=<site>`). |
 
 ### SiteSpec
 
 Each entry in `spec.sites` defines one site in the failover group.
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | Yes | Unique site identifier (e.g. `iad`, `pdx`). Used in Service names and labels. |
-| `zone` | string | Yes | Availability zone or region for pod scheduling |
-| `lbIP` | string | Yes | Load balancer IP address. Used for DNS A-record steering on failover. |
-| `storage` | StorageSpec | Yes | Persistent storage configuration for this site |
-| `resources` | ResourceRequirements | No | Compute resources (requests/limits) for the MySQL container at this site |
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `name` | string | Yes | -- | Unique site identifier (e.g. `iad`, `pdx`). Used in Service names and labels. MaxLength=253. |
+| `role` | string | No | `primary-candidate` | Promotion eligibility: `primary-candidate` (can be auto-promoted on failover) or `dr-only` (passive replica; never auto-promoted). At least two `primary-candidate` sites are required. |
+| `zone` | string | Yes | -- | Availability zone or region for pod scheduling |
+| `lbIP` | string | Yes | -- | Load balancer IP address. Used for DNS A-record steering on failover. |
+| `storage` | StorageSpec | Yes | -- | Persistent storage configuration for this site |
+| `resources` | ResourceRequirements | No | -- | Compute resources (requests/limits) for the MySQL container at this site |
 
 ### StorageSpec
 
@@ -83,11 +90,15 @@ Each entry in `spec.sites` defines one site in the failover group.
 
 ### SplitBrainPolicySpec
 
-Opt-in configuration for how the operator should behave when both sites are simultaneously writable. See [Split-brain resolution](./failover.mdx#split-brain-resolution) for a full description of semantics and tradeoffs.
+Opt-in configuration for how the operator should behave when more than
+one site is simultaneously writable and the operator cannot infer a
+winner from prior failover history. See
+[Split-brain resolution](./failover.mdx#split-brain-resolution) for a
+full description of semantics and tradeoffs.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `preferSite` | string | No | Site name that wins unresolvable split-brain ties. Must match one of `spec.sites[].name`. If empty or unset, the operator falls back to manual resolution (alert only). |
+| `sitePriorities` | []string | No | Ordered list of `primary-candidate` site names. The operator walks the list and promotes the first entry that is currently writable; every other writable site is fenced. Empty or unset falls back to manual resolution (alert only). MaxItems=16. Entries must reference sites with role `primary-candidate`. |
 
 ### ServiceTemplate
 
@@ -108,6 +119,82 @@ Exactly one of `secretName` or `credentials` must be set. When `credentials` is 
 | `monitorSecret` | string | No | Secret for Prometheus exporter connections. Keys: `username`, `password`. Grants: `PROCESS`, `REPLICATION CLIENT`, `SELECT` on `performance_schema`. |
 | `backupSecret` | string | No | Secret for backup/restore connections. Keys: `username`, `password`. Grants: `SELECT`, `LOCK TABLES`, `SHOW VIEW`, `EVENT`, `TRIGGER`, `RELOAD`, `BACKUP_ADMIN`, `REPLICATION CLIENT`. |
 
+### BackupSpec
+
+Top-level backup configuration, embedded as `spec.backup`. Omitting
+the field disables backups for this failover group.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `image` | string | No | `container-registry.oracle.com/mysql/community-server:9.6` | Image containing `mysqlsh` used for dump / load. |
+| `imagePullSecrets` | []LocalObjectReference | No | -- | Pull secrets for the backup image. |
+| `profiles` | []BackupProfile | No | -- | Reusable named backup configurations referenced by schedules and `MysqlBackup` CRs. |
+| `schedules` | []BackupSchedule | No | -- | Cron-driven recurring backups; each references a profile by name. Each entry becomes a Kubernetes CronJob owned by this failover group. |
+| `maxLagSecondsForSource` | int | No | `300` | Threshold above which the backup reconciler falls back from replica-first source selection to the primary. |
+| `resources` | ResourceRequirements | No | -- | Resources for the backup Job's mysqlsh container. |
+| `activeDeadlineSeconds` | int | No | `7200` | Wall-clock cap on a single backup Job. |
+| `backoffLimit` | int | No | `2` | Job-level backoffLimit applied to backup Jobs. |
+| `retry` | BackupRetrySpec | No | -- | Operator-level retries for Failed scheduled MysqlBackup CRs. Independent of Job `backoffLimit`. |
+| `pitr` | PITRSpec | No | -- | Continuous binlog archival for point-in-time recovery. |
+| `podSecurityContext` | PodSecurityContext | No | -- | Overrides default hardened pod security context merged onto the defaults. |
+| `containerSecurityContext` | SecurityContext | No | -- | Overrides default hardened container security context. |
+| `stagingVolumeSizeLimit` | Quantity | No | -- | Cap on the plaintext-staging `emptyDir` used by backup / restore / verify Jobs. Unset falls through to the node's ephemeral-storage limit; set on shared clusters to keep a large dump from triggering `DiskPressure` (AUDIT H6). |
+
+### BackupProfile (`spec.backup.profiles[]`)
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `name` | string | Yes | -- | Profile identifier, `[a-z0-9]([-a-z0-9]*[a-z0-9])?`. |
+| `storage` | BackupStorage | Yes | -- | Tagged union: `type: S3` + `s3` block, or `type: PVC` + `pvc` block. |
+| `dump` | DumpOptions | No | -- | `util.dumpInstance()` tuning (threads, chunk size, compression, schema filters, consistent locking, OCIMDS checks). |
+| `retention` | int | No | `7` | Legacy shorthand: max number of successful MysqlBackup CRs to keep. Ignored when `retentionPolicy` is set. |
+| `retentionPolicy` | RetentionPolicy | No | -- | Structured retention: `count`, `maxAgeDays`, `minKeep` floor, `maxFailedKeep` cap. Replaces the `retention` shorthand. |
+| `verification` | VerificationSpec | No | -- | Opt-in periodic restore-of-this-profile's-latest-backup into a throwaway MySQL instance; renders a CronJob when `enabled: true`. |
+| `encryption` | BackupEncryptionSpec | No | -- | Enables client-side envelope encryption (AES-256-GCM + HKDF-SHA256) for every dump file and, when this profile is also used for PITR, every archived binlog. Passphrase is owned by the operator — rotating or deleting the Secret renders existing ciphertexts unrecoverable. See [Backup encryption](./backup-encryption.mdx). |
+
+### BackupEncryptionSpec
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `algorithm` | string | No | `AES-256-GCM` | Encryption algorithm. Only `AES-256-GCM` is currently supported. |
+| `passphraseSecret` | PassphraseSecretRef | Yes | -- | Reference to a Secret in the same namespace holding the passphrase. See [PassphraseSecretRef](#passphrasesecretref). |
+
+### PassphraseSecretRef
+
+Reused by `BackupEncryptionSpec`, `BackupDecryptionSpec`,
+`spec.initFromBackup.decryption`, and `spec.restoreInPlace.decryption`.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `name` | string | Yes | -- | Name of the Secret. |
+| `key` | string | No | `passphrase` | Key within the Secret that holds the passphrase bytes. Leading and trailing whitespace is stripped when the passphrase is read. |
+
+### BackupDecryptionSpec
+
+Used on `spec.initFromBackup.decryption` and
+`spec.restoreInPlace.decryption` to supply the passphrase that decrypts
+an encrypted backup. When the source is a same-group `mysqlBackupRef`
+and the field is omitted, the operator falls back to the profile's own
+`passphraseSecret`.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `passphraseSecret` | PassphraseSecretRef | Yes | Secret holding the passphrase used at backup time. Rotating to a new value does not re-wrap existing ciphertext — it will simply fail to decrypt. |
+
+### RetentionPolicy
+
+Fields are independently optional; a successful MysqlBackup is kept iff
+**any** enabled check says keep. `minKeep` is the safety floor that
+prevents a retention sweep from wiping the last good backup after a
+long outage of failing attempts.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `count` | int | No | `0` | Max number of successful CRs to keep. 0 disables count-based pruning. |
+| `maxAgeDays` | int | No | `0` | Max age in days of a successful CR before it becomes eligible for pruning. 0 disables age-based pruning. |
+| `minKeep` | int | No | `1` | This many newest successful CRs are always kept, regardless of the other knobs. |
+| `maxFailedKeep` | int | No | `10` | Cap on the Failed bucket, independent of the success retention policy. |
+
 ### PITRSpec (`spec.backup.pitr`)
 
 Enables continuous binary-log archival so restores can target an
@@ -121,6 +208,36 @@ for the end-to-end story.
 | `profileName` | string | Yes when enabled | Name of a `spec.backup.profiles[]` entry. Binlog objects and per-site manifests live under a `binlogs/` subprefix inside that profile's storage. |
 | `maxBinlogSize` | string | No | Passed to MySQL as `max_binlog_size`. Controls rotation cadence (and therefore the RPO gap). Default `"100M"`. |
 | `archivePollInterval` | duration | No | Belt-and-suspenders scan cadence alongside inotify. Default `"60s"`. |
+
+### InitFromBackupSpec (`spec.initFromBackup`)
+
+One-shot restore-on-first-boot. The operator runs a restore Job against
+the initial primary site before normal bootstrap is considered
+complete. Once `status.restore.phase == Succeeded`, subsequent
+reconciles skip the restore even if this field is still set.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `source` | InitFromBackupSource | Yes | Tagged reference: exactly one of `mysqlBackupRef`, `s3`, or `pvc`. |
+| `loadOptions` | LoadOptions | No | `util.loadDump()` tuning (threads, resetProgress, skipBinlog, loadIndexes, schema filters). |
+| `pointInTime` | PointInTimeSpec | No | Post-load binlog replay to a specific target timestamp. Requires the source group to have had `spec.backup.pitr.enabled=true` at backup time. |
+| `decryption` | BackupDecryptionSpec | No | Passphrase to decrypt the source backup and any replayed binlogs. For same-group `mysqlBackupRef`, the operator falls back to the profile's own passphrase when omitted. |
+
+### RestoreInPlaceSpec (`spec.restoreInPlace`)
+
+Re-triggerable destructive restore against the currently-active
+primary. Unlike `initFromBackup` (one-shot, greenfield), this field is
+meant to be edited repeatedly: bumping `confirm` to a newer RFC 3339
+timestamp re-arms another restore. See `RestoreInPlaceSpec` in the
+source for full semantics (full-instance vs. per-schema restores).
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `confirm` | string | Yes | Anti-fat-finger token. Must be an RFC 3339 timestamp strictly greater than `status.restoreInPlace.confirmTokenUsed`. |
+| `source` | InitFromBackupSource | Yes | Tagged reference: one of `mysqlBackupRef`, `s3`, or `pvc`. |
+| `loadOptions` | LoadOptions | No | `util.loadDump()` tuning. For per-schema restores, `skipBinlog` is force-set to `false` so the DROP+load replicates. |
+| `pointInTime` | PointInTimeSpec | No | Post-load binlog replay. |
+| `decryption` | BackupDecryptionSpec | No | Same semantics as `InitFromBackupSpec.Decryption`. |
 
 ### PointInTimeSpec (`spec.initFromBackup.pointInTime`)
 
@@ -289,7 +406,13 @@ The operator writes the following status fields.
 | `lastFailover` | timestamp | When the last failover occurred |
 | `lastFailoverTarget` | string | Which site was promoted in the last failover |
 | `promotionGtidExecuted` | string | GTID set recorded on the candidate at the moment of the most recent promotion, before it began accepting writes. Used for data-loss accounting. |
+| `updatePhase` | string | Current phase of an ordered update; empty when not updating. |
+| `restore` | RestoreStatus | In-flight or completed `initFromBackup` restore (phase, JobName, targetSite, startTime, completionTime, message). |
+| `restoreInPlace` | RestoreInPlaceStatus | In-flight or completed in-place restore (phase, JobName, targetSite, scope, confirmTokenUsed, startTime, completionTime, message). Mirrors the state machine described on [RestoreInPlaceSpec](#restoreinplacespec). |
+| `backupSchedules` | []BackupScheduleStatus | Per-schedule rollup (cronJobName, lastScheduleTime, lastSuccessfulTime, lastBackupName, lastBackupPhase, lastSuccessfulBackupName, lastRetryAttempt, nextRetryTime). |
+| `lastBackupTime` | timestamp | Completion time of the most recent successful MysqlBackup across all profiles, regardless of whether it was scheduled or on-demand. |
 | `pitr` | PITRStatus | Summary of the continuous binlog archive, populated by the operator from periodic polls of each sidecar's `/archiver/status` endpoint. Present when `spec.backup.pitr.enabled=true`. |
+| `plannedFailover` | PlannedFailoverStatus | Most-recent planned (admin-triggered) failover attempt. Retained until a newer annotation replaces it; how `kubectl describe` tells the story of a switchover after the fact. |
 
 ### SiteStatus
 
@@ -318,7 +441,7 @@ The operator writes the following status fields.
 
 | Annotation | Description |
 |---|---|
-| `bloodraven.shipstream.io/reclone-site` | Triggers a `CLONE INSTANCE` from the current primary to the named site. Value format is `<site>` (cold reclone, when `status.sites[].divergentGtid` is empty) or `<site>:<gtid-prefix>` (when divergence is recorded — the prefix must be 8+ characters and match `status.sites[].divergentGtid`, as a confirmation interlock against fat-fingered site names). Invalid annotations are rejected with a `RecloneRejected` Warning Event and cleared. Valid ones emit `RecloneRequested` and report progress via the `Bootstrapping` condition. |
+| `bloodraven.shipstream.io/reclone-site` | Triggers a `CLONE INSTANCE` from the current primary to the named site. Value format depends on the target's state: `<site>:confirm=<group-name>` for a cold reclone (no divergent GTID recorded), or `<site>:<gtid-prefix>` when `status.sites[].divergentGtid` is non-empty — the prefix must be 8+ characters and match the observed divergent GTID. Both forms act as a fat-finger interlock (cold path added by AUDIT L3 / WISHLIST #5). Invalid annotations are rejected with a `RecloneRejected` Warning Event and cleared. Valid ones emit `RecloneRequested` and report progress via the `Bootstrapping` condition. |
 
 ### Example status
 

@@ -70,17 +70,31 @@ func TestValidateRecloneRequest_UnknownSite(t *testing.T) {
 	}
 }
 
-func TestValidateRecloneRequest_ColdReclone_BareSite_OK(t *testing.T) {
+func TestValidateRecloneRequest_ColdReclone_BareSite_RequiresConfirm(t *testing.T) {
+	// Post-AUDIT L3: even without divergence, a cold reclone wipes
+	// the datadir and requires a confirm=<group> token.
 	fg := recloneFG([]string{"iad", "pdx"}, nil)
-	if err := validateRecloneRequest(fg, RecloneRequest{Site: "iad"}); err != nil {
-		t.Errorf("cold reclone with bare site name should be allowed, got %v", err)
+	err := validateRecloneRequest(fg, RecloneRequest{Site: "iad"})
+	if err == nil {
+		t.Fatal("expected cold reclone without confirm token to be rejected")
+	}
+	if !strings.Contains(err.Error(), "confirm=") {
+		t.Errorf("error should suggest confirm= token, got %v", err)
 	}
 }
 
-func TestValidateRecloneRequest_ColdReclone_SitePrefixAlsoOK(t *testing.T) {
+func TestValidateRecloneRequest_ColdReclone_WithConfirm_OK(t *testing.T) {
 	fg := recloneFG([]string{"iad", "pdx"}, nil)
-	if err := validateRecloneRequest(fg, RecloneRequest{Site: "iad", GtidPrefix: "deadbeef"}); err != nil {
-		t.Errorf("cold reclone with prefix should also be allowed, got %v", err)
+	if err := validateRecloneRequest(fg, RecloneRequest{Site: "iad", GtidPrefix: "confirm=orders"}); err != nil {
+		t.Errorf("cold reclone with correct confirm token should succeed, got %v", err)
+	}
+}
+
+func TestValidateRecloneRequest_ColdReclone_WrongConfirm_Rejected(t *testing.T) {
+	fg := recloneFG([]string{"iad", "pdx"}, nil)
+	err := validateRecloneRequest(fg, RecloneRequest{Site: "iad", GtidPrefix: "confirm=wrongfg"})
+	if err == nil {
+		t.Fatal("expected wrong confirm token to be rejected")
 	}
 }
 
@@ -146,17 +160,16 @@ func TestValidateRecloneRequest_DivergentSite_ExtendedPrefix_OK(t *testing.T) {
 	}
 }
 
-// Cold-reclone remains allowed when the requested site has no recorded
-// divergent GTID, even if the supplied prefix happens to match another
-// site's divergence. The interlock is not the last line of defence for
-// a fat-fingered healthy site — the operator's downstream checkReclone
-// refuses to reclone the active primary.
-func TestValidateRecloneRequest_ColdReclone_CrossSitePrefixAllowed(t *testing.T) {
+// Cold-reclone now requires an explicit confirm=<group> token even
+// when the target site has no recorded divergent GTID (AUDIT L3).
+// A GTID prefix from another divergent site is not a valid token.
+func TestValidateRecloneRequest_ColdReclone_CrossSitePrefixRejected(t *testing.T) {
 	fg := recloneFG([]string{"iad", "pdx"}, map[string]string{
 		"pdx": "f00dbabe-0000-0000-0000-000000000000:20-25",
 	})
-	if err := validateRecloneRequest(fg, RecloneRequest{Site: "iad", GtidPrefix: "f00dbabe"}); err != nil {
-		t.Errorf("cold reclone should be allowed when target site has no divergent GTID, got %v", err)
+	err := validateRecloneRequest(fg, RecloneRequest{Site: "iad", GtidPrefix: "f00dbabe"})
+	if err == nil {
+		t.Fatal("cold reclone should reject a cross-site GTID prefix; confirm=<group> is required")
 	}
 }
 

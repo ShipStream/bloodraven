@@ -192,31 +192,6 @@ func TestTamperDetection(t *testing.T) {
 	}
 }
 
-func TestFileRoundTrip(t *testing.T) {
-	tmp := t.TempDir()
-	src := filepath.Join(tmp, "plain.bin")
-	enc := filepath.Join(tmp, "enc.bin")
-	dec := filepath.Join(tmp, "dec.bin")
-	payload := []byte("on-disk round trip")
-	if err := os.WriteFile(src, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	passphrase := []byte("file round trip")
-	if _, err := EncryptFile(enc, src, passphrase); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := DecryptFile(dec, enc, passphrase); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(dec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, payload) {
-		t.Fatalf("round-trip mismatch: got %q want %q", got, payload)
-	}
-}
-
 func TestReadPassphraseFile_TrailingNewline(t *testing.T) {
 	tmp := t.TempDir()
 	p := filepath.Join(tmp, "passphrase")

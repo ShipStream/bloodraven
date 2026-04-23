@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
 	"github.com/shipstream/bloodraven/internal/sidecar"
+	"github.com/shipstream/bloodraven/internal/util"
 )
 
 // runEncryptUpload is the entry point for `bloodraven encrypt-upload`.
@@ -58,7 +61,7 @@ import (
 //	0  on success
 //	2  on any hard failure (bad config, upload/encrypt error)
 func runEncryptUpload(args []string) {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	name := os.Getenv("BLOODRAVEN_BACKUP_NAME")
 	srcDir := os.Getenv("BLOODRAVEN_SOURCE_DIR")
@@ -71,12 +74,23 @@ func runEncryptUpload(args []string) {
 	}
 
 	if name == "" || srcDir == "" || storageType == "" || outputURL == "" || passphraseFile == "" {
-		logger.Error("missing required env",
+		baseLogger.Error("missing required env",
 			"name", name != "", "src", srcDir != "",
 			"storageType", storageType != "", "outputURL", outputURL != "",
 			"passphrase", passphraseFile != "")
 		os.Exit(2)
 	}
+
+	// Bind the backup identity into every structured log line so an
+	// on-call engineer correlating Job logs against a specific backup
+	// has one field to grep on (see AUDIT H7).
+	logger := baseLogger.With(
+		"subcommand", "encrypt-upload",
+		"backup", name,
+		"storage_type", storageType,
+		"output", outputURL,
+		"algorithm", algorithm,
+	)
 
 	passphrase, err := backupcrypto.ReadPassphraseFile(passphraseFile)
 	if err != nil {
@@ -116,11 +130,18 @@ func runEncryptUpload(args []string) {
 	printlnf("BLOODRAVEN_ENCRYPT_UPLOAD_START src=%s output=%s algorithm=%s",
 		srcDir, outputURL, algorithm)
 
-	totalPlaintext, totalCiphertext, files, err := encryptAndUpload(ctx, store, keyPrefix, srcDir, passphrase)
+	runStart := time.Now()
+	totalPlaintext, totalCiphertext, files, digests, err := encryptAndUpload(ctx, store, keyPrefix, srcDir, passphrase)
 	if err != nil {
 		logger.Error("encrypt-upload", "error", err)
+		// Emit a sentinel the reconciler can parse into
+		// bloodraven_backup_encrypt_failures_total (AUDIT M5).
+		printlnf("BLOODRAVEN_ENCRYPT_METRICS stage=encrypt result=failure duration=%.3f bytes=%d files=%d",
+			time.Since(runStart).Seconds(), totalPlaintext, files)
 		os.Exit(2)
 	}
+	printlnf("BLOODRAVEN_ENCRYPT_METRICS stage=encrypt result=success duration=%.3f bytes=%d ciphertext=%d files=%d",
+		time.Since(runStart).Seconds(), totalPlaintext, totalCiphertext, files)
 
 	// Write the encryption manifest next to the objects so a reader
 	// can discover that the prefix holds ciphertext even without the
@@ -132,6 +153,7 @@ func runEncryptUpload(args []string) {
 		Algorithm: algorithm,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		FileCount: files,
+		Files:     digests,
 	}, "", "  ")
 	if err != nil {
 		logger.Error("marshal encryption manifest", "error", err)
@@ -209,11 +231,12 @@ func storageConfigFromEnv(storageType, outputURL string) (*sidecar.PITRConfig, s
 
 // encryptAndUpload walks srcDir recursively, encrypts every file with
 // AES-256-GCM, and uploads the ciphertext to store at keyPrefix/<rel>.
-// Returns (plaintext bytes, ciphertext bytes, file count). Symlinks
-// are intentionally not followed — the staging emptyDir under
-// mysqlsh's control shouldn't have any, and silently following them
-// would widen the trust boundary.
-func encryptAndUpload(ctx context.Context, store sidecar.ArchiveStore, keyPrefix, srcDir string, passphrase []byte) (int64, int64, int, error) {
+// Returns (plaintext bytes, ciphertext bytes, file count, per-file
+// plaintext sha256 map keyed by relative path). Symlinks are
+// intentionally not followed — the staging emptyDir under mysqlsh's
+// control shouldn't have any, and silently following them would widen
+// the trust boundary.
+func encryptAndUpload(ctx context.Context, store sidecar.ArchiveStore, keyPrefix, srcDir string, passphrase []byte) (int64, int64, int, map[string]string, error) {
 	// Pre-collect so we can report a stable count and upload files in a
 	// deterministic (lexical) order, useful for debugging.
 	var relFiles []string
@@ -237,35 +260,57 @@ func encryptAndUpload(ctx context.Context, store sidecar.ArchiveStore, keyPrefix
 		return nil
 	})
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("walk %s: %w", srcDir, err)
+		return 0, 0, 0, nil, fmt.Errorf("walk %s: %w", srcDir, err)
 	}
 	sort.Strings(relFiles)
 
 	var totalPT, totalCT int64
+	digests := make(map[string]string, len(relFiles))
 	for _, rel := range relFiles {
 		if err := ctx.Err(); err != nil {
-			return totalPT, totalCT, 0, err
+			return totalPT, totalCT, 0, nil, err
 		}
 		srcPath := filepath.Join(srcDir, filepath.FromSlash(rel))
-		ct, pt, err := encryptOneAndUpload(ctx, store, path.Join(keyPrefix, rel), srcPath, passphrase)
-		if err != nil {
-			return totalPT, totalCT, 0, fmt.Errorf("upload %s: %w", rel, err)
+		fileStart := time.Now()
+		var ct, pt int64
+		var sha string
+		// Per-file bounded retry with exponential backoff: transient
+		// PVC disk-pressure or S3 hiccups shouldn't force a full
+		// re-dump when the Job's backoffLimit kicks in. 3 attempts
+		// total, starting at 500ms (AUDIT L6).
+		retryErr := util.RetryWithBackoff(ctx, nil, 2, 500*time.Millisecond, func() error {
+			var innerErr error
+			ct, pt, sha, innerErr = encryptOneAndUpload(ctx, store, path.Join(keyPrefix, rel), srcPath, passphrase)
+			return innerErr
+		})
+		if retryErr != nil {
+			return totalPT, totalCT, 0, nil, fmt.Errorf("upload %s: %w", rel, retryErr)
 		}
 		totalPT += pt
 		totalCT += ct
+		digests[rel] = sha
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Info("encrypted file uploaded",
+			"rel", rel,
+			"plaintext_bytes", pt,
+			"ciphertext_bytes", ct,
+			"sha256", sha,
+			"duration_ms", time.Since(fileStart).Milliseconds(),
+		)
 	}
-	return totalPT, totalCT, len(relFiles), nil
+	return totalPT, totalCT, len(relFiles), digests, nil
 }
 
 // encryptOneAndUpload encrypts one file into a temp file under
-// $TMPDIR, then Put-uploads the temp file to the archive store. The
-// temp file is always removed on exit. We do NOT encrypt into memory
-// because dump chunks can be hundreds of megabytes and the Job pod
-// typically runs with modest memory limits.
-func encryptOneAndUpload(ctx context.Context, store sidecar.ArchiveStore, key, srcPath string, passphrase []byte) (int64, int64, error) {
+// $TMPDIR, then Put-uploads the temp file to the archive store.
+// Returns (ciphertext bytes, plaintext bytes, hex sha256 of plaintext).
+// The temp file is always removed on exit. We do NOT encrypt into
+// memory because dump chunks can be hundreds of megabytes and the Job
+// pod typically runs with modest memory limits.
+func encryptOneAndUpload(ctx context.Context, store sidecar.ArchiveStore, key, srcPath string, passphrase []byte) (int64, int64, string, error) {
 	tmpFile, err := os.CreateTemp("", "bloodraven-enc-*")
 	if err != nil {
-		return 0, 0, fmt.Errorf("create temp: %w", err)
+		return 0, 0, "", fmt.Errorf("create temp: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
@@ -273,33 +318,39 @@ func encryptOneAndUpload(ctx context.Context, store sidecar.ArchiveStore, key, s
 	in, err := os.Open(srcPath)
 	if err != nil {
 		_ = tmpFile.Close()
-		return 0, 0, fmt.Errorf("open %s: %w", srcPath, err)
+		return 0, 0, "", fmt.Errorf("open %s: %w", srcPath, err)
 	}
 	defer in.Close()
 
-	pt, err := backupcrypto.Encrypt(tmpFile, in, passphrase)
+	// Tee the plaintext through a sha256 hasher while encrypting, so
+	// the manifest can carry a digest the restore side verifies
+	// (AUDIT L1 — defence-in-depth for B1).
+	hasher := sha256.New()
+	tee := io.TeeReader(in, hasher)
+	pt, err := backupcrypto.Encrypt(tmpFile, tee, passphrase)
 	if err != nil {
 		_ = tmpFile.Close()
-		return 0, 0, fmt.Errorf("encrypt: %w", err)
+		return 0, 0, "", fmt.Errorf("encrypt: %w", err)
 	}
 	if err := tmpFile.Sync(); err != nil {
 		_ = tmpFile.Close()
-		return 0, 0, fmt.Errorf("sync: %w", err)
+		return 0, 0, "", fmt.Errorf("sync: %w", err)
 	}
 	if err := tmpFile.Close(); err != nil {
-		return 0, 0, fmt.Errorf("close: %w", err)
+		return 0, 0, "", fmt.Errorf("close: %w", err)
 	}
 
 	info, err := os.Stat(tmpPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("stat: %w", err)
+		return 0, 0, "", fmt.Errorf("stat: %w", err)
 	}
 	ct := info.Size()
+	sha := hex.EncodeToString(hasher.Sum(nil))
 
 	if err := store.PutFile(ctx, key, tmpPath); err != nil {
-		return ct, pt, fmt.Errorf("put: %w", err)
+		return ct, pt, sha, fmt.Errorf("put: %w", err)
 	}
-	return ct, pt, nil
+	return ct, pt, sha, nil
 }
 
 // runDecryptDownload is the entry point for `bloodraven decrypt-download`.
@@ -322,19 +373,35 @@ func encryptOneAndUpload(ctx context.Context, store sidecar.ArchiveStore, key, s
 //	BLOODRAVEN_PVC_MOUNT_PATH          PVC mount path (PVC only)
 //	AWS_REGION                         AWS region (S3 only, optional)
 func runDecryptDownload(args []string) {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	baseLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	targetDir := os.Getenv("BLOODRAVEN_TARGET_DIR")
 	storageType := os.Getenv("BLOODRAVEN_STORAGE_TYPE")
 	sourcePrefix := os.Getenv("BLOODRAVEN_SOURCE_PREFIX")
 	passphraseFile := os.Getenv("BLOODRAVEN_BACKUP_PASSPHRASE_FILE")
+	// Default strict: an object whose first bytes don't match the BRV1
+	// magic is rejected as tampering, not passed through as plaintext.
+	// Set BLOODRAVEN_ALLOW_PLAINTEXT_FALLBACK=1 to opt back into the
+	// legacy mixed-encryption behavior (see AUDIT B1).
+	allowPlaintext := false
+	if v := os.Getenv("BLOODRAVEN_ALLOW_PLAINTEXT_FALLBACK"); v == "1" || v == "true" {
+		allowPlaintext = true
+	}
 
 	if targetDir == "" || storageType == "" || sourcePrefix == "" || passphraseFile == "" {
-		logger.Error("missing required env",
+		baseLogger.Error("missing required env",
 			"target", targetDir != "", "storageType", storageType != "",
 			"prefix", sourcePrefix != "", "passphrase", passphraseFile != "")
 		os.Exit(2)
 	}
+
+	logger := baseLogger.With(
+		"subcommand", "decrypt-download",
+		"storage_type", storageType,
+		"prefix", sourcePrefix,
+		"target", targetDir,
+		"allow_plaintext_fallback", allowPlaintext,
+	)
 
 	passphrase, err := backupcrypto.ReadPassphraseFile(passphraseFile)
 	if err != nil {
@@ -369,16 +436,30 @@ func runDecryptDownload(args []string) {
 
 	printlnf("BLOODRAVEN_DECRYPT_DOWNLOAD_START prefix=%s target=%s", sourcePrefix, targetDir)
 
+	runStart := time.Now()
+	// Load the encryption manifest up front so we can verify each
+	// plaintext's sha256 after decryption (AUDIT L1). Manifest is
+	// optional — older artifacts without it skip verification.
+	manifest := loadEncryptionManifest(ctx, store, keyPrefix, logger)
 	keys, err := store.List(ctx, keyPrefix+"/")
 	if err != nil {
 		// Some PVC backends stringify the prefix without trailing slash
 		// when the entry is a directory. Retry bare.
 		keys, err = store.List(ctx, keyPrefix)
 		if err != nil {
-			logger.Error("list source", "prefix", keyPrefix, "error", err)
+			logger.Error("list source", "error", err)
 			os.Exit(2)
 		}
 	}
+	// Resolve the absolute staging directory once so we can verify
+	// every descendant path stays under it (defence against crafted
+	// storage keys with "../" segments; see AUDIT H1).
+	absTarget, err := filepath.Abs(targetDir)
+	if err != nil {
+		logger.Error("abs target", "error", err)
+		os.Exit(2)
+	}
+
 	downloaded := 0
 	totalBytes := int64(0)
 	for _, key := range keys {
@@ -397,15 +478,36 @@ func runDecryptDownload(args []string) {
 			// ciphertext set, not one of the dump files themselves.
 			continue
 		}
-		dst := filepath.Join(targetDir, filepath.FromSlash(rel))
+		dst, err := safeJoinUnderRoot(absTarget, rel)
+		if err != nil {
+			logger.Error("reject unsafe storage key", "key", key, "error", err)
+			os.Exit(2)
+		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			logger.Error("mkdir", "dir", filepath.Dir(dst), "error", err)
 			os.Exit(2)
 		}
-		n, err := downloadAndDecrypt(ctx, store, key, dst, passphrase)
+		n, err := downloadAndDecrypt(ctx, store, key, dst, passphrase, allowPlaintext)
 		if err != nil {
 			logger.Error("decrypt", "key", key, "error", err)
 			os.Exit(2)
+		}
+		// Verify plaintext sha256 against manifest (AUDIT L1). Missing
+		// entries are skipped silently so artifacts written by older
+		// encrypt-upload releases still restore.
+		if manifest != nil {
+			if expected, ok := manifest.Files[rel]; ok && expected != "" {
+				actual, err := sha256File(dst)
+				if err != nil {
+					logger.Error("sha256", "key", key, "error", err)
+					os.Exit(2)
+				}
+				if actual != expected {
+					logger.Error("manifest sha256 mismatch", "key", key, "expected", expected, "actual", actual)
+					_ = os.Remove(dst)
+					os.Exit(2)
+				}
+			}
 		}
 		downloaded++
 		totalBytes += n
@@ -413,12 +515,16 @@ func runDecryptDownload(args []string) {
 	}
 
 	printlnf("BLOODRAVEN_DECRYPT_DOWNLOAD_COMPLETE files=%d bytes=%d", downloaded, totalBytes)
+	printlnf("BLOODRAVEN_ENCRYPT_METRICS stage=decrypt result=success duration=%.3f bytes=%d files=%d",
+		time.Since(runStart).Seconds(), totalBytes, downloaded)
 }
 
 // downloadAndDecrypt streams an encrypted object out of the archive
 // store, decrypts it, and writes the plaintext to dst. Returns the
-// plaintext byte count.
-func downloadAndDecrypt(ctx context.Context, store sidecar.ArchiveStore, key, dst string, passphrase []byte) (int64, error) {
+// plaintext byte count. When allowPlaintext is false and the object
+// lacks the BRV1 magic header, the call fails with a tamper/downgrade
+// error rather than silently passing bytes through.
+func downloadAndDecrypt(ctx context.Context, store sidecar.ArchiveStore, key, dst string, passphrase []byte, allowPlaintext bool) (int64, error) {
 	// Use a temp path in the same directory so the final rename is
 	// atomic and the mysqlsh container never sees a half-written file.
 	tmp := dst + ".part"
@@ -442,9 +548,13 @@ func downloadAndDecrypt(ctx context.Context, store sidecar.ArchiveStore, key, ds
 		_ = out.Close()
 		_ = os.Remove(dst)
 		if errors.Is(decErr, backupcrypto.ErrMagicMismatch) {
-			// Object was never encrypted (legacy CR or mis-labelled
-			// profile). Copy plaintext verbatim so the caller gets
-			// the bytes unchanged.
+			if !allowPlaintext {
+				return 0, fmt.Errorf("ciphertext tamper/downgrade detected: object %q missing BRV1 magic (set BLOODRAVEN_ALLOW_PLAINTEXT_FALLBACK=1 to opt into legacy mixed-encryption)", key)
+			}
+			// Legacy upgrade window: object was never encrypted. Copy
+			// plaintext verbatim so the caller gets the bytes
+			// unchanged. Only reached when the operator explicitly
+			// opted in.
 			if _, err := in.Seek(0, io.SeekStart); err != nil {
 				return 0, fmt.Errorf("rewind for plaintext passthrough: %w", err)
 			}
@@ -474,6 +584,43 @@ func downloadAndDecrypt(ctx context.Context, store sidecar.ArchiveStore, key, ds
 	return n, nil
 }
 
+// safeJoinUnderRoot validates that rel, when joined under the absolute
+// directory root, stays lexically inside root. Rejects absolute paths,
+// parent-directory escapes, and NUL / control bytes that can confuse
+// downstream tools. Used by the decrypt-download and pitr-download
+// paths to defend against crafted storage keys (S3 object names may
+// legally contain "../" segments; see AUDIT H1).
+func safeJoinUnderRoot(root, rel string) (string, error) {
+	if strings.ContainsRune(rel, 0x00) {
+		return "", fmt.Errorf("path contains NUL byte: %q", rel)
+	}
+	for _, r := range rel {
+		if r < 0x20 && r != '\t' {
+			return "", fmt.Errorf("path contains control byte %U: %q", r, rel)
+		}
+	}
+	// Normalize the storage-supplied path to OS separators and clean
+	// it. Clean collapses "a/../b" into "b" so a trailing Rel check
+	// catches any attempt to escape root even after normalization.
+	cleaned := filepath.Clean(filepath.FromSlash(rel))
+	if filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("absolute path not allowed: %q", rel)
+	}
+	dst := filepath.Join(root, cleaned)
+	resolved, err := filepath.Abs(dst)
+	if err != nil {
+		return "", fmt.Errorf("abs %q: %w", dst, err)
+	}
+	relBack, err := filepath.Rel(root, resolved)
+	if err != nil {
+		return "", fmt.Errorf("rel %q under %q: %w", resolved, root, err)
+	}
+	if relBack == ".." || strings.HasPrefix(relBack, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes root %q: %q", root, rel)
+	}
+	return resolved, nil
+}
+
 // -----------------------------------------------------------------------
 // Encryption manifest & dump-meta sidecar file
 // -----------------------------------------------------------------------
@@ -495,6 +642,13 @@ type EncryptionManifest struct {
 	Algorithm string `json:"algorithm"`
 	CreatedAt string `json:"createdAt"`
 	FileCount int    `json:"fileCount"`
+
+	// Files carries a per-file plaintext sha256 digest map keyed by
+	// the relative path inside the backup prefix. The restore side
+	// verifies each plaintext after decryption against this map so
+	// that even a ciphertext replacement that preserved valid BRV1
+	// framing is caught (AUDIT L1 — defence-in-depth for B1).
+	Files map[string]string `json:"files,omitempty"`
 }
 
 // dumpMetaFileName is written by backup_script.py in the encrypted
@@ -510,6 +664,43 @@ type dumpMeta struct {
 	GTIDExecuted string `json:"gtidExecuted,omitempty"`
 	BinlogFile   string `json:"binlogFile,omitempty"`
 	BinlogPos    int64  `json:"binlogPos,omitempty"`
+}
+
+// loadEncryptionManifest best-effort fetches the
+// BLOODRAVEN_ENCRYPTION.json manifest from the source prefix. Returns
+// nil if the object doesn't exist or can't be parsed — L1 verification
+// is strictly additive and an old artifact without the Files map is
+// still a valid restore source (AUDIT L1).
+func loadEncryptionManifest(ctx context.Context, store sidecar.ArchiveStore, keyPrefix string, logger *slog.Logger) *EncryptionManifest {
+	key := path.Join(keyPrefix, encryptionManifestFileName)
+	data, ok, err := store.Get(ctx, key)
+	if err != nil || !ok {
+		if err != nil {
+			logger.Warn("could not fetch encryption manifest", "key", key, "error", err)
+		}
+		return nil
+	}
+	var m EncryptionManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		logger.Warn("could not parse encryption manifest", "key", key, "error", err)
+		return nil
+	}
+	return &m
+}
+
+// sha256File hex-encodes the sha256 of the given file. Used by
+// decrypt-download to verify plaintext against the manifest digest.
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func readDumpMeta(path string) dumpMeta {
@@ -536,22 +727,9 @@ func escapeToken(s string) string {
 	return strings.ReplaceAll(s, " ", "_")
 }
 
-// humanBytes returns a binary-unit human-readable byte count. Kept
-// identical to the humanBytes helper in internal/controller so the
-// string on .status.size is consistent across code paths.
-func humanBytes(n int64) string {
-	const unit = int64(1024)
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := unit, 0
-	for x := n / unit; x >= unit; x /= unit {
-		div *= unit
-		exp++
-	}
-	suffix := []string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
-	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffix[exp])
-}
+// humanBytes proxies to util.HumanBytes so the reconciler's .status.size
+// and the encrypt-upload sentinel agree (AUDIT L8).
+func humanBytes(n int64) string { return util.HumanBytes(n) }
 
 // printlnf is a tiny stdout-flushing wrapper for the sentinel-style
 // lines. We don't use slog for these: the operator's log-tail parser

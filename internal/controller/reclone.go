@@ -89,10 +89,17 @@ func validateRecloneRequest(fg *v1alpha1.MysqlFailoverGroup, req RecloneRequest)
 		}
 	}
 	if divergentGtid == "" {
-		// Cold reclone: the admin is asking for CLONE INSTANCE on a
-		// site that doesn't have divergence recorded. Accept either
-		// form — this path is used for PVC loss, manual rebuilds, and
-		// first-time bootstrap mistakes.
+		// Cold reclone: no divergence is recorded but CLONE INSTANCE
+		// still wipes the target's datadir. Require a confirm token
+		// matching the failover group name so a fat-fingered single
+		// annotation can't destructively wipe the wrong site
+		// (AUDIT L3 / WISHLIST #5).
+		if req.GtidPrefix != "confirm="+fg.Name {
+			return fmt.Errorf(
+				"reclone of %q rejected: cold reclone wipes the datadir and must be confirmed — "+
+					"set annotation bloodraven.shipstream.io/reclone-site=%s:confirm=%s",
+				req.Site, req.Site, fg.Name)
+		}
 		return nil
 	}
 

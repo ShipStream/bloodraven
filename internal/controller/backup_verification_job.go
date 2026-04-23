@@ -344,7 +344,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		// container reads it through BLOODRAVEN_INPUT_URL.
 		volumes = append(volumes, corev1.Volume{
 			Name:         "restore-decrypted",
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			VolumeSource: corev1.VolumeSource{EmptyDir: stagingEmptyDirSource(fg.Spec.Backup)},
 		})
 		passRef := in.Profile.Encryption.PassphraseSecret
 		volumes = append(volumes, corev1.Volume{

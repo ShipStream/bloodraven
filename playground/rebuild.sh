@@ -18,6 +18,11 @@ ok()    { echo -e "\033[1;32m OK\033[0m $*"; }
 warn()  { echo -e "\033[1;33m!!\033[0m $*"; }
 fail()  { echo -e "\033[1;31mERR\033[0m $*" >&2; exit 1; }
 
+# Refuse to run outside a known-local cluster context (AUDIT M7).
+# shellcheck source=playground/_guard.sh
+source "$SCRIPT_DIR/_guard.sh"
+require_playground_context
+
 # Prefer podman (rootless, no daemon) over docker
 if command -v podman >/dev/null 2>&1; then
   RUNTIME=podman

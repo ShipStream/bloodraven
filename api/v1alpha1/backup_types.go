@@ -100,6 +100,17 @@ type BackupSpec struct {
 	// precedence.
 	// +optional
 	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
+
+	// StagingVolumeSizeLimit caps the emptyDir used to stage plaintext
+	// dump / restore / verification artifacts inside backup Jobs. When
+	// the full dump spills past this limit the kubelet evicts the Job
+	// pod; without the cap, a multi-GB dump can fill the node's
+	// `/var/lib/kubelet` partition and trigger DiskPressure eviction of
+	// unrelated pods (AUDIT H6). Empty value falls through to the
+	// node's ephemeral-storage limit (preserving previous behavior).
+	// The reconciler does not enforce this — it's a hint to the kubelet.
+	// +optional
+	StagingVolumeSizeLimit *resource.Quantity `json:"stagingVolumeSizeLimit,omitempty"`
 }
 
 // PITRSpec configures continuous binary-log archival for point-in-time

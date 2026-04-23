@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"strings"
 )
 
 // ReadPassphraseFile reads a passphrase from the given file path,
@@ -33,14 +32,3 @@ func ReadPassphraseFile(path string) ([]byte, error) {
 	return trimmed, nil
 }
 
-// PassphraseFromEnv pulls the passphrase file path out of a conventional
-// env var name and returns its contents. Separate helper from
-// ReadPassphraseFile so callers who accept passphrases via a flag can
-// still reach the underlying reader.
-func PassphraseFromEnv(varName string) ([]byte, error) {
-	p := strings.TrimSpace(os.Getenv(varName))
-	if p == "" {
-		return nil, fmt.Errorf("backupcrypto: %s is required but unset", varName)
-	}
-	return ReadPassphraseFile(p)
-}

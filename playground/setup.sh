@@ -53,6 +53,11 @@ for cmd in kubectl helm; do
   command -v "$cmd" >/dev/null || fail "$cmd is required but not found"
 done
 
+# Refuse to run outside a known-local cluster context (AUDIT M7).
+# shellcheck source=playground/_guard.sh
+source "$SCRIPT_DIR/_guard.sh"
+require_playground_context
+
 # Prefer podman (rootless, no daemon) over docker
 if command -v podman >/dev/null 2>&1; then
   RUNTIME=podman

@@ -12,6 +12,15 @@ import (
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
 )
 
+// ErrTamperedOrDowngrade is returned by a strict encrypted store when a
+// fetched object does not begin with the BRV1 magic. Because the store
+// was configured to require encryption for every object, missing magic
+// is treated as a tampering / downgrade attempt rather than a benign
+// "legacy plaintext object" — writing plaintext to a bucket that should
+// only contain ciphertext is how an attacker with write access would
+// try to land attacker-chosen SQL into a restore path.
+var ErrTamperedOrDowngrade = errors.New("sidecar: object missing BRV1 magic while encryption is required")
+
 // encryptedStore wraps an ArchiveStore with transparent AES-256-GCM
 // envelope encryption for every Put / PutFile and transparent
 // decryption for every Get / GetFile. List and Delete pass through
@@ -28,31 +37,67 @@ import (
 type encryptedStore struct {
 	inner      ArchiveStore
 	passphrase []byte
+	// allowPlaintext opts into the legacy mixed-encryption behavior:
+	// Get / GetFile will pass through an object that lacks the BRV1
+	// magic header. This is only safe during a time-bounded migration
+	// window where an operator is knowingly moving an unencrypted prefix
+	// to encryption. Default is false — missing magic becomes
+	// ErrTamperedOrDowngrade so an attacker with write access to the
+	// backend cannot overwrite an encrypted object with attacker-chosen
+	// plaintext and have it silently load into MySQL.
+	allowPlaintext bool
 }
 
 // WrapWithEncryption returns a new ArchiveStore that transparently
 // encrypts puts and decrypts gets using the supplied passphrase. A
 // zero-length passphrase returns inner unchanged so callers can
 // pass through the "encryption disabled" path without branching.
+//
+// Use WrapWithEncryptionAllowPlaintext to opt into the legacy
+// mixed-encryption upgrade window.
 func WrapWithEncryption(inner ArchiveStore, passphrase []byte) ArchiveStore {
+	return WrapWithEncryptionOptions(inner, passphrase, false)
+}
+
+// WrapWithEncryptionOptions is the full form of WrapWithEncryption.
+// Setting allowPlaintext=true restores the pre-hardening behavior
+// where an object missing BRV1 magic is returned as plaintext. This
+// should only be used for an explicit, operator-acknowledged migration
+// window — it is an unauthenticated fallthrough from the ciphertext
+// path and defeats the tamper-detection claim of AES-GCM.
+func WrapWithEncryptionOptions(inner ArchiveStore, passphrase []byte, allowPlaintext bool) ArchiveStore {
 	if len(passphrase) == 0 {
 		return inner
 	}
-	return &encryptedStore{inner: inner, passphrase: passphrase}
+	return &encryptedStore{inner: inner, passphrase: passphrase, allowPlaintext: allowPlaintext}
 }
 
-// Put streams r through the backupcrypto encrypter into an in-memory
-// buffer (bounded by the caller's input size) and forwards the
-// ciphertext to the underlying store. We buffer rather than stream
-// because the AWS SDK v2 uploader may need to seek the body for
-// multipart retries; wrapping Encrypt directly around an io.Reader
-// would break that assumption.
+// Put streams r through the backupcrypto encrypter, writes the
+// ciphertext into a tmp file on disk, and forwards it to the
+// underlying store via PutFile. We do not buffer the full plaintext in
+// memory because callers are free to pass streams of arbitrary size;
+// the old "bytes.Buffer everything" path was a latent OOM bug the day
+// anything other than the small manifest JSON started using Put.
 func (e *encryptedStore) Put(ctx context.Context, key string, r io.Reader, _ int64) error {
-	var buf bytes.Buffer
-	if _, err := backupcrypto.Encrypt(&buf, r, e.passphrase); err != nil {
+	tmp, err := os.CreateTemp("", "bloodraven-enc-put-*")
+	if err != nil {
+		return fmt.Errorf("encrypted store: create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := backupcrypto.Encrypt(tmp, r, e.passphrase); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("encrypt %s: %w", key, err)
 	}
-	return e.inner.Put(ctx, key, bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("encrypted store: sync: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("encrypted store: close temp: %w", err)
+	}
+	return e.inner.PutFile(ctx, key, tmpPath)
 }
 
 // PutFile streams the file at path through backupcrypto and uploads
@@ -100,18 +145,22 @@ func (e *encryptedStore) Get(ctx context.Context, key string) ([]byte, bool, err
 		return data, ok, err
 	}
 	if !backupcrypto.LooksEncrypted(data) {
-		// Legacy / unencrypted object: pass it through so upgrades
-		// that turn on encryption mid-life of a deployment don't
-		// lose access to already-archived files.
-		return data, true, nil
+		if e.allowPlaintext {
+			return data, true, nil
+		}
+		return nil, false, fmt.Errorf("%w: key=%s", ErrTamperedOrDowngrade, key)
 	}
 	var buf bytes.Buffer
 	if _, err := backupcrypto.Decrypt(&buf, bytes.NewReader(data), e.passphrase); err != nil {
 		if errors.Is(err, backupcrypto.ErrMagicMismatch) {
-			// LooksEncrypted already returned true; this branch is
-			// unreachable in practice, but defensive: fall back to
-			// the raw data rather than failing.
-			return data, true, nil
+			// LooksEncrypted returned true but Decrypt disagreed
+			// (short object, truncated header). Under strict mode
+			// treat this as tampering; in legacy mode, fall through
+			// to the raw bytes as the old behaviour.
+			if e.allowPlaintext {
+				return data, true, nil
+			}
+			return nil, false, fmt.Errorf("%w: key=%s", ErrTamperedOrDowngrade, key)
 		}
 		return nil, false, fmt.Errorf("decrypt %s: %w", key, err)
 	}
@@ -152,9 +201,11 @@ func (e *encryptedStore) GetFile(ctx context.Context, key, dst string) error {
 		_ = out.Close()
 		_ = os.Remove(plainPart)
 		if errors.Is(err, backupcrypto.ErrMagicMismatch) {
-			// The underlying object isn't actually encrypted; fall
-			// through to a plain copy so mixed-encryption archives
-			// (PITR migration in-flight) still restore correctly.
+			if !e.allowPlaintext {
+				return fmt.Errorf("%w: key=%s", ErrTamperedOrDowngrade, key)
+			}
+			// Explicit mixed-encryption opt-in: copy bytes through
+			// verbatim.
 			if _, err := in.Seek(0, io.SeekStart); err != nil {
 				return fmt.Errorf("encrypted store: rewind for plaintext passthrough: %w", err)
 			}

@@ -75,7 +75,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 )
 
 // Magic identifies the wire format. It is intentionally ASCII so
@@ -360,70 +359,6 @@ func Decrypt(dst io.Writer, src io.Reader, passphrase []byte) (int64, error) {
 		total += int64(len(plaintext))
 		counter++
 	}
-}
-
-// EncryptFile is a convenience wrapper around Encrypt that opens src
-// and dst, writes the encrypted stream, and fsyncs + closes both. Used
-// by the `bloodraven encrypt-upload` subcommand for staged dump
-// objects and by the archiver when encrypting a binlog file before
-// upload when the archive store does not expose a streaming writer.
-func EncryptFile(dstPath, srcPath string, passphrase []byte) (int64, error) {
-	in, err := os.Open(srcPath)
-	if err != nil {
-		return 0, fmt.Errorf("backupcrypto: open %s: %w", srcPath, err)
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return 0, fmt.Errorf("backupcrypto: create %s: %w", dstPath, err)
-	}
-	n, encErr := Encrypt(out, in, passphrase)
-	if encErr != nil {
-		_ = out.Close()
-		_ = os.Remove(dstPath)
-		return n, encErr
-	}
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		_ = os.Remove(dstPath)
-		return n, fmt.Errorf("backupcrypto: sync %s: %w", dstPath, err)
-	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(dstPath)
-		return n, fmt.Errorf("backupcrypto: close %s: %w", dstPath, err)
-	}
-	return n, nil
-}
-
-// DecryptFile mirrors EncryptFile: reads a BRV1 stream from srcPath,
-// writes plaintext to dstPath, fsyncs + closes. Returns the plaintext
-// byte count.
-func DecryptFile(dstPath, srcPath string, passphrase []byte) (int64, error) {
-	in, err := os.Open(srcPath)
-	if err != nil {
-		return 0, fmt.Errorf("backupcrypto: open %s: %w", srcPath, err)
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return 0, fmt.Errorf("backupcrypto: create %s: %w", dstPath, err)
-	}
-	n, decErr := Decrypt(out, in, passphrase)
-	if decErr != nil {
-		_ = out.Close()
-		_ = os.Remove(dstPath)
-		return n, decErr
-	}
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		_ = os.Remove(dstPath)
-		return n, fmt.Errorf("backupcrypto: sync %s: %w", dstPath, err)
-	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(dstPath)
-		return n, fmt.Errorf("backupcrypto: close %s: %w", dstPath, err)
-	}
-	return n, nil
 }
 
 // LooksEncrypted returns true if the first four bytes of b are the BRV1

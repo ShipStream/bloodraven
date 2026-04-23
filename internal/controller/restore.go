@@ -777,7 +777,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		const decryptDir = "/restore-decrypted"
 		decryptVolume := corev1.Volume{
 			Name:         "restore-decrypted",
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			VolumeSource: corev1.VolumeSource{EmptyDir: stagingEmptyDirSource(fg.Spec.Backup)},
 		}
 		passphraseVolume := corev1.Volume{
 			Name: "backup-passphrase",
