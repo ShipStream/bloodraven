@@ -18,7 +18,7 @@
 - [x] 14. Sidecar archiver resilience
 - [x] 15. Populate `status.pitr`
 - [ ] 16. Grafana dashboards
-- [ ] 17. Log schema contract
+- [x] 17. Log schema contract
 - [ ] 18. `kubectl` plugin
 - [x] 19. WebSocket vs REST casing inconsistency
 - [x] 20. Metric naming conformance
@@ -71,7 +71,7 @@
 
 **16. Grafana dashboards.** Ship opinionated dashboards in the Helm chart (`bloodraven/grafana-dashboards/`). One for per-failover-group health, one for backup/PITR, one for operator internals. Users will build their own otherwise, poorly.
 
-**17. Log schema contract.** "Structured JSON" is mentioned but the field set isn't documented. Publish a log-schema reference — what fields are stable, what the `msg` values are for key events (`failover`, `promotion`, `divergence-detected`, `reclone-started`). Downstream log pipelines need this.
+**17. Log schema contract.** ~~"Structured JSON" is mentioned but the field set isn't documented. Publish a log-schema reference — what fields are stable, what the `msg` values are for key events (`failover`, `promotion`, `divergence-detected`, `reclone-started`). Downstream log pipelines need this.~~ — shipped. `docs/docs/log-schema.mdx` is the contract: it splits the operational `slog` stream from the controller-runtime `zap` stream, lists every common field, and pins the stable `msg` vocabulary for failover (`initiating failover` → `failover complete` → `promotion confirmed: site is writable`, plus `failover failed`), divergence (`divergence detected`), recovery (`old primary recovery complete`), and reclone (the canonical `starting bootstrap` event with `source="reclone"`). Cross-linked from `monitoring.mdx` and `operations.mdx`. As part of the cleanup, removed two duplicate emissions (`starting bootstrap` and `old primary recovery complete` were each emitted twice) and migrated the remaining `snake_case` log keys in the sidecar startup paths to `camelCase` to match the rest of the codebase.
 
 **18. `kubectl` plugin.** `kubectl bloodraven status`, `kubectl bloodraven promote <group> <site>`, `kubectl bloodraven backup <group> --profile nightly`, `kubectl bloodraven verify-backup <name>`. Reduces the `kubectl exec ... mysql -e ...` surface area that's currently in the ops docs.
 
