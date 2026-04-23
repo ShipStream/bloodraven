@@ -226,6 +226,50 @@ func TestEncryptAndUploadRoundTrip(t *testing.T) {
 	}
 }
 
+// TestEncryptAndUploadRejectsSymlink covers the walk-level symlink
+// guard: a crafted symlink under the staging emptyDir would otherwise
+// be followed by the downstream os.Open, letting an attacker who can
+// plant a file in the dump directory exfiltrate arbitrary container-
+// reachable files. The walk rejects any non-regular entry.
+func TestEncryptAndUploadRejectsSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on Windows")
+	}
+	ctx := context.Background()
+	bucket := t.TempDir()
+	passphrase := []byte("symlink rejection passphrase")
+	cfg := &sidecar.PITRConfig{
+		StorageType: "PVC",
+		PVC:         &sidecar.PITRPVCConfig{MountPath: bucket},
+	}
+	rawStore, err := sidecar.NewArchiveStore(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := sidecar.WrapWithEncryption(rawStore, passphrase)
+
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "dump.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Plant a symlink pointing outside the staging dir.
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("ssh-private-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(src, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, _, _, err = encryptAndUpload(ctx, store, "x/y", src, passphrase)
+	if err == nil {
+		t.Fatalf("expected encryptAndUpload to reject symlink, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-regular") {
+		t.Errorf("error %q should mention non-regular file rejection", err.Error())
+	}
+}
+
 func TestIsSafeBasename(t *testing.T) {
 	good := []string{"mysql-bin.000123", "a", "file_with_underscore.log"}
 	for _, n := range good {

@@ -247,9 +247,19 @@ func encryptAndUpload(ctx context.Context, store sidecar.ArchiveStore, keyPrefix
 		if info.IsDir() {
 			return nil
 		}
+		// Reject non-regular entries (symlinks, devices, FIFOs,
+		// sockets). filepath.Walk uses lstat, so a symlink here is
+		// visible as ModeSymlink — but the downstream os.Open would
+		// follow it, letting a crafted link under the staging emptyDir
+		// exfiltrate arbitrary container-reachable files. The staging
+		// dir is operator-controlled; a non-regular entry is always a
+		// bug or an attack.
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("reject non-regular file %q in staging dir (mode=%s)", p, info.Mode())
+		}
 		// Skip the dump metadata sidecar; encrypt-upload carries those
 		// fields forward via the DUMP_COMPLETE sentinel instead.
-		if info.Mode().IsRegular() && info.Name() == dumpMetaFileName {
+		if info.Name() == dumpMetaFileName {
 			return nil
 		}
 		rel, relErr := filepath.Rel(srcDir, p)
@@ -539,34 +549,51 @@ func downloadAndDecrypt(ctx context.Context, store sidecar.ArchiveStore, key, ds
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// Write plaintext to a sibling temp and rename-on-success so a
+	// mid-decrypt SIGKILL / eviction can't leave a partial plaintext
+	// file at dst for the mysqlsh loadDump container to consume.
+	tmpOut := dst + ".decpart"
+	out, err := os.OpenFile(tmpOut, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("create: %w", err)
 	}
 	n, decErr := backupcrypto.Decrypt(out, in, passphrase)
 	if decErr != nil {
 		_ = out.Close()
-		_ = os.Remove(dst)
+		_ = os.Remove(tmpOut)
 		if errors.Is(decErr, backupcrypto.ErrMagicMismatch) {
 			if !allowPlaintext {
 				return 0, fmt.Errorf("ciphertext tamper/downgrade detected: object %q missing BRV1 magic (set BLOODRAVEN_ALLOW_PLAINTEXT_FALLBACK=1 to opt into legacy mixed-encryption)", key)
 			}
 			// Legacy upgrade window: object was never encrypted. Copy
-			// plaintext verbatim so the caller gets the bytes
-			// unchanged. Only reached when the operator explicitly
-			// opted in.
+			// plaintext verbatim through the same tmp + rename dance so
+			// the atomicity invariant holds for this branch too. Only
+			// reached when the operator explicitly opted in.
 			if _, err := in.Seek(0, io.SeekStart); err != nil {
 				return 0, fmt.Errorf("rewind for plaintext passthrough: %w", err)
 			}
-			out, err = os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+			ptOut, err := os.OpenFile(tmpOut, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 			if err != nil {
 				return 0, fmt.Errorf("create plaintext dst: %w", err)
 			}
-			n, copyErr := io.Copy(out, in)
-			_ = out.Close()
+			n, copyErr := io.Copy(ptOut, in)
 			if copyErr != nil {
-				_ = os.Remove(dst)
+				_ = ptOut.Close()
+				_ = os.Remove(tmpOut)
 				return 0, fmt.Errorf("copy plaintext: %w", copyErr)
+			}
+			if err := ptOut.Sync(); err != nil {
+				_ = ptOut.Close()
+				_ = os.Remove(tmpOut)
+				return 0, fmt.Errorf("sync plaintext: %w", err)
+			}
+			if err := ptOut.Close(); err != nil {
+				_ = os.Remove(tmpOut)
+				return 0, fmt.Errorf("close plaintext: %w", err)
+			}
+			if err := os.Rename(tmpOut, dst); err != nil {
+				_ = os.Remove(tmpOut)
+				return 0, fmt.Errorf("rename plaintext: %w", err)
 			}
 			return n, nil
 		}
@@ -574,12 +601,16 @@ func downloadAndDecrypt(ctx context.Context, store sidecar.ArchiveStore, key, ds
 	}
 	if err := out.Sync(); err != nil {
 		_ = out.Close()
-		_ = os.Remove(dst)
+		_ = os.Remove(tmpOut)
 		return 0, fmt.Errorf("sync: %w", err)
 	}
 	if err := out.Close(); err != nil {
-		_ = os.Remove(dst)
+		_ = os.Remove(tmpOut)
 		return 0, fmt.Errorf("close: %w", err)
+	}
+	if err := os.Rename(tmpOut, dst); err != nil {
+		_ = os.Remove(tmpOut)
+		return 0, fmt.Errorf("rename: %w", err)
 	}
 	return n, nil
 }
