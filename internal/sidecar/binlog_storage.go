@@ -71,21 +71,43 @@ func NewArchiveStore(ctx context.Context, cfg *PITRConfig) (archiveStore, error)
 // newArchiveStore constructs the backend matching cfg. It is called
 // once at sidecar startup; the returned store is safe for concurrent
 // use from the archiver goroutine and any future retention worker.
+//
+// When cfg.PassphraseFile is set the concrete backend is wrapped with
+// an encryptedStore so every Put/Get/PutFile/GetFile transparently
+// runs through backupcrypto. List/Delete pass through unchanged.
 func newArchiveStore(ctx context.Context, cfg *PITRConfig) (archiveStore, error) {
+	var base archiveStore
 	switch cfg.StorageType {
 	case "S3":
 		if cfg.S3 == nil {
 			return nil, fmt.Errorf("archive store: S3 config is nil")
 		}
-		return newS3Store(ctx, cfg.S3)
+		s, err := newS3Store(ctx, cfg.S3)
+		if err != nil {
+			return nil, err
+		}
+		base = s
 	case "PVC":
 		if cfg.PVC == nil {
 			return nil, fmt.Errorf("archive store: PVC config is nil")
 		}
-		return newPVCStore(cfg.PVC)
+		s, err := newPVCStore(cfg.PVC)
+		if err != nil {
+			return nil, err
+		}
+		base = s
 	default:
 		return nil, fmt.Errorf("archive store: unknown storage type %q", cfg.StorageType)
 	}
+
+	if cfg.PassphraseFile != "" {
+		passphrase, err := readArchivePassphrase(cfg.PassphraseFile)
+		if err != nil {
+			return nil, fmt.Errorf("archive store: read passphrase: %w", err)
+		}
+		base = WrapWithEncryption(base, passphrase)
+	}
+	return base, nil
 }
 
 // ----------------------------------------------------------------------
@@ -471,4 +493,22 @@ func readTrimFile(path string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// readArchivePassphrase loads a passphrase from path, stripping
+// trailing whitespace. Empty passphrases return an error so a
+// mis-mounted Secret can never silently "succeed" and upload
+// plaintext.
+func readArchivePassphrase(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := bytes.TrimFunc(data, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ' ' || r == '\t'
+	})
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("passphrase file %s is empty", path)
+	}
+	return trimmed, nil
 }

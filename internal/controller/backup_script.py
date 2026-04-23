@@ -17,6 +17,14 @@
 #   BLOODRAVEN_S3_ENDPOINT_OVERRIDE   non-AWS endpoint
 #   BLOODRAVEN_AWS_CREDS_DIR          directory with AWS_* files (S3 targets)
 #   MYSQL_USER / MYSQL_PASSWORD       legacy env-var fallback (not recommended)
+#
+# When run as the mysqlsh-dump init container of an encrypted backup
+# Job, this script writes the dump to a local staging directory and
+# drops a BLOODRAVEN_DUMP_META.json sidecar with the captured GTID /
+# binlog coordinates. The subsequent bloodraven encrypt-upload main
+# container reads that JSON and re-emits the fields on its own
+# BLOODRAVEN_DUMP_COMPLETE sentinel, so the operator log-tail parser
+# sees the same surface whether the Job is encrypted or not.
 import json
 import os
 import sys
@@ -263,6 +271,24 @@ def main():
 
     size_bytes = _dump_size_bytes(output, opts)
     human = _human_bytes(size_bytes) if size_bytes > 0 else ""
+
+    # When the dump wrote to a local staging dir (encrypted-Job init
+    # container), drop a sidecar JSON with the captured coordinates
+    # so the main `bloodraven encrypt-upload` container can forward
+    # them verbatim on its own DUMP_COMPLETE sentinel.
+    if not output.startswith("s3://") and os.path.isdir(output):
+        try:
+            meta_path = os.path.join(output, "BLOODRAVEN_DUMP_META.json")
+            with open(meta_path, "w") as f:
+                json.dump({
+                    "gtidExecuted": meta.get("gtidExecuted", ""),
+                    "binlogFile": meta.get("binlogFile", ""),
+                    "binlogPos": int(meta.get("binlogPos", 0) or 0),
+                }, f)
+            os.chmod(meta_path, 0o600)
+        except OSError as e:  # noqa: BLE001
+            print("BLOODRAVEN_DUMP_WARN: could not write dump meta: {}".format(e),
+                  file=sys.stderr, flush=True)
 
     # Deterministic terminal line that the reconciler parses from the
     # Job pod's log tail to populate MysqlBackup.status. Keys with

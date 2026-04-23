@@ -637,6 +637,59 @@ spec:
                               minimum: 1
                               type: integer
                           type: object
+                        encryption:
+                          description: |-
+                            Encryption, when set, turns on client-side envelope encryption
+                            of every artifact produced under this profile: full dump objects
+                            written by backup Jobs AND sealed binlog files uploaded by the
+                            sidecar archiver. Leaving the field unset falls back to whatever
+                            encryption the underlying storage provides (bucket default SSE,
+                            volume-level encryption, etc.) — which may be sufficient for
+                            many workloads, but is not the same guarantee as keys held in a
+                            Kubernetes Secret that the operator controls.
+
+                            The passphrase is owned by the operator: rotating it or
+                            deleting the Secret renders existing ciphertexts unrecoverable.
+                            Treat the Secret as part of the failover group's critical
+                            recovery material and back it up out-of-band. See
+                            docs/docs/backup-encryption.mdx for the wire format,
+                            threat model, and rotation guidance.
+                          properties:
+                            algorithm:
+                              default: AES-256-GCM
+                              description: |-
+                                Algorithm selects the encryption mechanism. Only
+                                "AES-256-GCM" is currently supported; the field is present so
+                                future releases can add envelope-over-KMS / XChaCha20-Poly1305
+                                / external key-manager modes without a breaking CRD bump.
+                              enum:
+                              - AES-256-GCM
+                              type: string
+                            passphraseSecret:
+                              description: |-
+                                PassphraseSecret references the Secret in the same namespace
+                                as the MysqlFailoverGroup holding the passphrase. The
+                                passphrase must be non-empty; recommended length is >=32 bytes
+                                of random material (use `head -c 48 /dev/urandom | base64`).
+                              properties:
+                                key:
+                                  default: passphrase
+                                  description: |-
+                                    Key within the Secret that holds the passphrase bytes. Leading
+                                    and trailing whitespace is stripped when the passphrase is
+                                    read.
+                                  minLength: 1
+                                  type: string
+                                name:
+                                  description: Name of the Secret.
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                          required:
+                          - passphraseSecret
+                          type: object
                         name:
                           description: Name is the unique profile identifier within
                             this failover group.
@@ -4279,6 +4332,42 @@ spec:
                   restore runs once; after success it is skipped on subsequent
                   reconciles even if this field is still populated.
                 properties:
+                  decryption:
+                    description: |-
+                      Decryption, when set, provides the passphrase needed to decrypt
+                      the source backup and any archived binlogs it replays. Required
+                      whenever the source was encrypted via spec.backup.profiles[].encryption.
+                      When the source is a MysqlBackupRef, the operator falls back to
+                      the profile's own PassphraseSecret if Decryption is omitted — so
+                      same-group restores usually don't need to set this explicitly.
+                      For cross-group or direct S3/PVC restores there is no profile to
+                      consult and Decryption is mandatory.
+                    properties:
+                      passphraseSecret:
+                        description: |-
+                          PassphraseSecret references the Secret holding the passphrase
+                          that was used when the source artifact was originally encrypted.
+                          Bumping the Secret contents to a new value does not rotate the
+                          ciphertext — it will simply fail to decrypt.
+                        properties:
+                          key:
+                            default: passphrase
+                            description: |-
+                              Key within the Secret that holds the passphrase bytes. Leading
+                              and trailing whitespace is stripped when the passphrase is
+                              read.
+                            minLength: 1
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - passphraseSecret
+                    type: object
                   loadOptions:
                     description: LoadOptions are forwarded to util.loadDump(). Omit
                       for sane defaults.
@@ -4543,6 +4632,41 @@ spec:
                       accidentally will not re-trigger a restore).
                     minLength: 1
                     type: string
+                  decryption:
+                    description: |-
+                      Decryption, when set, provides the passphrase needed to decrypt
+                      the source backup and any archived binlogs it replays. Same
+                      fall-back rules as InitFromBackupSpec.Decryption: when omitted
+                      for a MysqlBackupRef source, the operator resolves the
+                      passphrase from the source profile's own PassphraseSecret. For
+                      direct S3/PVC sources Decryption is required whenever the
+                      ciphertext is encrypted.
+                    properties:
+                      passphraseSecret:
+                        description: |-
+                          PassphraseSecret references the Secret holding the passphrase
+                          that was used when the source artifact was originally encrypted.
+                          Bumping the Secret contents to a new value does not rotate the
+                          ciphertext — it will simply fail to decrypt.
+                        properties:
+                          key:
+                            default: passphrase
+                            description: |-
+                              Key within the Secret that holds the passphrase bytes. Leading
+                              and trailing whitespace is stripped when the passphrase is
+                              read.
+                            minLength: 1
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - passphraseSecret
+                    type: object
                   loadOptions:
                     description: |-
                       LoadOptions are forwarded to util.loadDump(). In-place restores

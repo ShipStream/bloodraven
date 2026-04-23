@@ -159,6 +159,14 @@ func pitrDownloadConfigFromEnv() (*sidecar.PITRConfig, error) {
 	default:
 		return nil, fmt.Errorf("BLOODRAVEN_PITR_STORAGE_TYPE=%q; must be S3 or PVC", storageType)
 	}
+
+	// Encryption: when the profile enables archive encryption the
+	// operator sets BLOODRAVEN_PITR_PASSPHRASE_FILE on this init
+	// container. sidecar.NewArchiveStore transparently wraps the
+	// concrete backend in an encryptedStore when PassphraseFile is
+	// non-empty, so the download path decrypts without any further
+	// plumbing here.
+	cfg.PassphraseFile = os.Getenv("BLOODRAVEN_PITR_PASSPHRASE_FILE")
 	return cfg, nil
 }
 

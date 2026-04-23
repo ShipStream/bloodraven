@@ -624,6 +624,7 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 		Source:      spec.Source,
 		LoadOptions: loadOpts,
 		PointInTime: spec.PointInTime,
+		Decryption:  spec.Decryption,
 		FieldPath:   "restoreInPlace",
 		ExtraEnv:    extraEnv,
 	})

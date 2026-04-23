@@ -86,6 +86,14 @@ type PITRConfig struct {
 
 	// PVC is populated when StorageType is "PVC".
 	PVC *PITRPVCConfig
+
+	// PassphraseFile, when non-empty, turns on client-side envelope
+	// encryption (AES-256-GCM + HKDF-SHA256) for every archived
+	// binlog file and manifest. The file must contain the passphrase
+	// bytes (trailing whitespace is stripped). The operator owns the
+	// lifecycle of the Secret; the sidecar just reads the mounted
+	// file at startup.
+	PassphraseFile string
 }
 
 // PITRS3Config is the S3-specific archiver config.
@@ -249,6 +257,10 @@ func pitrConfigFromEnv() (*PITRConfig, error) {
 	default:
 		return nil, fmt.Errorf("BLOODRAVEN_PITR_ENABLED=1 but STORAGE_TYPE=%q; must be S3 or PVC", storageType)
 	}
+
+	// Encryption passphrase path. Optional: when unset the archiver
+	// uploads plaintext binlogs (matching the pre-encryption default).
+	cfg.PassphraseFile = os.Getenv("BLOODRAVEN_PITR_PASSPHRASE_FILE")
 
 	return cfg, nil
 }

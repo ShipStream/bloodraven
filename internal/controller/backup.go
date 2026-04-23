@@ -12,10 +12,11 @@ import (
 // Bloodraven-specific labels added to backup / restore / schedule
 // resources. The labelFailoverGroup constant is declared in reconciler.go.
 const (
-	labelMysqlBackup    = "shipstream.io/mysqlbackup"
-	labelBackupProfile  = "shipstream.io/backup-profile"
-	labelBackupSchedule = "shipstream.io/backup-schedule"
-	labelResourceKind   = "shipstream.io/resource"
+	labelMysqlBackup     = "shipstream.io/mysqlbackup"
+	labelBackupProfile   = "shipstream.io/backup-profile"
+	labelBackupSchedule  = "shipstream.io/backup-schedule"
+	labelResourceKind    = "shipstream.io/resource"
+	labelBackupEncrypted = "shipstream.io/backup-encrypted"
 )
 
 // Finalizers used by backup-related CRs.

@@ -50,6 +50,21 @@ func main() {
 			// MysqlBackupVerification CR. See trigger_verification.go.
 			runTriggerVerification(os.Args[2:])
 			return
+		case "encrypt-upload":
+			// Invoked as the main container of an encrypted backup
+			// Job: reads the staged dump from the mysqlsh init
+			// container, encrypts every file with AES-256-GCM, and
+			// uploads the ciphertext to S3 or a PVC. See
+			// encrypt_upload.go.
+			runEncryptUpload(os.Args[2:])
+			return
+		case "decrypt-download":
+			// Invoked as an init container of a restore / verification
+			// Job whose source backup was encrypted: downloads the
+			// ciphertext prefix and decrypts it into a shared emptyDir
+			// ahead of mysqlsh's loadDump. See encrypt_upload.go.
+			runDecryptDownload(os.Args[2:])
+			return
 		}
 	}
 

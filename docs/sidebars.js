@@ -15,6 +15,7 @@ const sidebars = {
     'monitoring',
     'operations',
     'backup-restore',
+    'backup-encryption',
   ],
 };
 

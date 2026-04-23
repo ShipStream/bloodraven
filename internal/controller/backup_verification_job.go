@@ -320,6 +320,164 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		initContainers = append(initContainers, *pitrFrags.InitContainer)
 	}
 
+	// -------- Decryption wiring -------------------------------------
+	//
+	// When the source backup is encrypted we run the same
+	// `bloodraven decrypt-download` init container the restore path
+	// uses. The profile's encryption.passphraseSecret is the source
+	// of truth — verification doesn't have its own decryption field
+	// by design, because "verify what your profile produced" is
+	// exactly the scope where the profile's passphrase is authoritative.
+	if backup.Status.Encrypted {
+		if !in.Profile.EncryptionEnabled() {
+			return nil, fmt.Errorf(
+				"verification job: backup %q is encrypted but profile %q has no encryption.passphraseSecret; "+
+					"restore the encryption field to verify this backup",
+				backup.Name, in.Profile.Name)
+		}
+		if operatorImageFromEnv == "" {
+			return nil, fmt.Errorf("verification job: operator image is not configured (SetOperatorImageDefaults); required for encrypted verification")
+		}
+
+		const decryptDir = "/restore-decrypted"
+		// Shared emptyDir: init container writes plaintext, main
+		// container reads it through BLOODRAVEN_INPUT_URL.
+		volumes = append(volumes, corev1.Volume{
+			Name:         "restore-decrypted",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		})
+		passRef := in.Profile.Encryption.PassphraseSecret
+		volumes = append(volumes, corev1.Volume{
+			Name: "backup-passphrase",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  passRef.Name,
+					DefaultMode: ptr32(0o400),
+					Items: []corev1.KeyToPath{
+						{
+							Key:  passRef.PassphraseSecretKeyOrDefault(),
+							Path: backupPassphraseFileName,
+						},
+					},
+				},
+			},
+		})
+
+		decEnv := []corev1.EnvVar{
+			{Name: "BLOODRAVEN_TARGET_DIR", Value: decryptDir},
+			{Name: "BLOODRAVEN_STORAGE_TYPE", Value: string(backup.Status.StorageType)},
+			{Name: "BLOODRAVEN_BACKUP_PASSPHRASE_FILE", Value: backupPassphraseMountPath + "/" + backupPassphraseFileName},
+		}
+		decMounts := []corev1.VolumeMount{
+			{Name: "restore-decrypted", MountPath: decryptDir},
+			{Name: "backup-passphrase", MountPath: backupPassphraseMountPath, ReadOnly: true},
+			{Name: "tmp", MountPath: tmpMountPath},
+		}
+
+		switch backup.Status.StorageType {
+		case v1alpha1.BackupStorageS3:
+			prefix := strings.TrimSuffix(backup.Status.Location, "/")
+			decEnv = append(decEnv,
+				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: prefix},
+				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: in.Profile.Storage.S3.Bucket},
+			)
+			if in.Profile.Storage.S3.EndpointURL != "" {
+				decEnv = append(decEnv, corev1.EnvVar{
+					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: in.Profile.Storage.S3.EndpointURL,
+				})
+			}
+			if in.Profile.Storage.S3.Region != "" {
+				decEnv = append(decEnv, corev1.EnvVar{Name: "AWS_REGION", Value: in.Profile.Storage.S3.Region})
+			}
+			if in.Profile.Storage.S3.CredentialsSecret != "" {
+				decMounts = append(decMounts, corev1.VolumeMount{
+					Name: "aws-creds", MountPath: backupAWSCredsMountPath, ReadOnly: true,
+				})
+				decEnv = append(decEnv, corev1.EnvVar{
+					Name: "BLOODRAVEN_AWS_CREDS_DIR", Value: backupAWSCredsMountPath,
+				})
+			}
+			// Drop the S3 env from the mysqlsh container: it reads the
+			// decrypted directory now.
+			filtered := env[:0]
+			for _, e := range env {
+				switch e.Name {
+				case "BLOODRAVEN_S3_BUCKET",
+					"BLOODRAVEN_S3_ENDPOINT_OVERRIDE",
+					"AWS_REGION",
+					"BLOODRAVEN_AWS_CREDS_DIR":
+					continue
+				case "BLOODRAVEN_INPUT_URL":
+					continue
+				}
+				filtered = append(filtered, e)
+			}
+			env = append(filtered, corev1.EnvVar{
+				Name: "BLOODRAVEN_INPUT_URL", Value: decryptDir,
+			})
+
+		case v1alpha1.BackupStoragePVC:
+			const decPVCMount = "/restore-src-encrypted"
+			// Swap the read-only backup-src mount to the decrypt init
+			// container; drop from the main container's mounts since
+			// mysqlsh no longer reads ciphertext directly.
+			volumes = filterOutVolumeByName(volumes, "backup-src")
+			mounts = filterOutMountByName(mounts, "backup-src")
+			claim := in.Profile.Storage.PVC.ClaimName
+			if claim == "" {
+				claim = ownedBackupPVCName(fg.Name, in.Profile.Name)
+			}
+			volumes = append(volumes, corev1.Volume{
+				Name: "decrypt-src",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: claim,
+						ReadOnly:  true,
+					},
+				},
+			})
+			decMounts = append(decMounts, corev1.VolumeMount{
+				Name: "decrypt-src", MountPath: decPVCMount, ReadOnly: true,
+			})
+			// Derive the relative prefix under the PVC root from
+			// backup.Status.Location (which is the absolute pod-side
+			// path the backup wrote to).
+			prefix := strings.TrimPrefix(backup.Status.Location, backupPVCMountPath+"/")
+			prefix = strings.TrimSuffix(prefix, "/")
+			decEnv = append(decEnv,
+				corev1.EnvVar{Name: "BLOODRAVEN_PVC_MOUNT_PATH", Value: decPVCMount},
+				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: prefix},
+			)
+			// Point the mysqlsh INPUT_URL at the decrypted staging
+			// dir instead of the in-pod backup path.
+			for i, e := range env {
+				if e.Name == "BLOODRAVEN_INPUT_URL" {
+					env[i].Value = decryptDir
+					break
+				}
+			}
+		default:
+			return nil, fmt.Errorf("verification job: backup %q has unknown storageType %q for decrypt wiring",
+				backup.Name, backup.Status.StorageType)
+		}
+
+		// Add the read-only decrypt dir to the main container so
+		// loadDump can read files from it.
+		mounts = append(mounts, corev1.VolumeMount{
+			Name: "restore-decrypted", MountPath: decryptDir, ReadOnly: true,
+		})
+
+		_, initSC := mergeSecurityContexts(nil, nil)
+		initContainers = append(initContainers, corev1.Container{
+			Name:            "decrypt-download",
+			Image:           operatorImageFromEnv,
+			Command:         []string{"bloodraven", "decrypt-download"},
+			Env:             decEnv,
+			VolumeMounts:    decMounts,
+			SecurityContext: initSC,
+		})
+	}
+
 	activeDeadline := verificationDefaultActiveDeadline
 	backoff := int32(0)
 	var (
