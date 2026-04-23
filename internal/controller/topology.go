@@ -1891,7 +1891,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 
 	divergent := oldGtid.Subtract(newGtid)
 	count := divergent.TransactionCount()
-	tm.logger.Warn("GTID divergence detected — old primary has transactions not on new primary",
+	tm.logger.Warn("divergence detected",
 		"site", oldPrimary.name,
 		"divergentTransactions", count,
 		"divergentGtid", divergent.String(),
@@ -1927,7 +1927,7 @@ func (tm *TopologyManager) executeRecovery(ctx context.Context, oldPrimaryIdx, n
 	tm.mu.Unlock()
 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
-	tm.logger.Info("old primary recovery complete — now replicating from new primary", "site", oldPrimary.name, "source", newPrimaryHost)
+	tm.logger.Info("old primary recovery complete", "site", oldPrimary.name, "source", newPrimaryHost)
 }
 
 // checkReclone processes a pending reclone annotation. If a reclone was

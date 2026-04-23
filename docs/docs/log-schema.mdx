@@ -1,0 +1,268 @@
+---
+sidebar_position: 8.5
+---
+
+# Log schema contract
+
+Bloodraven emits structured JSON logs from both the operator (`bloodraven`) and the per-MySQL sidecar (`bloodraven-sidecar`). This page is the contract that downstream log pipelines key off of: which fields are stable, what the `msg` values are for the events you care about, and what guarantees we make about changing them.
+
+If you only need one rule of thumb: **filter on `msg` for the event vocabulary in the [Event reference](#event-reference) below — those strings are stable. Everything else is best-effort.**
+
+## Streams
+
+Both binaries write to stdout. There are two independent JSON streams; you can tell them apart by the presence of certain keys.
+
+| Stream | Source | Identifies as | What's in it |
+|---|---|---|---|
+| Operational (`slog`) | Operator and sidecar | Has `time`, `level`, `msg` | Failover, promotion, bootstrap, recovery, fencing, archiver, sidecar startup, divergence detection — every event a human operator or alerting pipeline would care about |
+| Controller-runtime (`zap`) | Operator only | Has `ts`, `level`, `msg`, `logger`, `controller`, `controllerKind`, `reconcileID` | Reconcile-loop bookkeeping from controller-runtime: CR fetches, status updates, watch events. Useful for debugging, *not* a stable interface |
+
+The contract on this page applies to the **operational stream**. The controller-runtime stream is emitted as-is by upstream `sigs.k8s.io/controller-runtime` and inherits whatever shape that library produces — we don't redefine it.
+
+To filter to operational logs in most pipelines, key on the presence of the `time` field (slog) or the absence of the `logger` field (zap).
+
+## Common fields
+
+Every record in the operational stream carries:
+
+| Field | Type | Description |
+|---|---|---|
+| `time` | RFC3339 timestamp (string) | Event time, UTC. Set by `slog` automatically. |
+| `level` | string | One of `DEBUG`, `INFO`, `WARN`, `ERROR`. |
+| `msg` | string | The event identifier. Stable for events listed in the [Event reference](#event-reference); may change for ad-hoc debug logs. |
+
+Records emitted under a specific failover group also carry:
+
+| Field | Type | Description |
+|---|---|---|
+| `fg` | string | The `MysqlFailoverGroup` namespaced name (`namespace/name`). Present on every operator log scoped to a group. On the sidecar, this is the bare group name passed via `BLOODRAVEN_FAILOVER_GROUP`. |
+
+Sidecar records additionally carry:
+
+| Field | Type | Description |
+|---|---|---|
+| `pod` | string | The pod name (set via `BLOODRAVEN_POD_NAME`). Disambiguates per-replica logs when shipping multiple sites' sidecars to one stream. |
+
+## Levels
+
+| Level | When |
+|---|---|
+| `DEBUG` | Per-poll bookkeeping (status no-ops, transient probe errors, archiver tick events). Off by default — the operator's slog handler is set to `INFO`. |
+| `INFO` | State changes the operator deliberately took: failover, promotion, bootstrap, recovery, sidecar lifecycle. **Most of the event vocabulary lives here.** |
+| `WARN` | Degraded but not fatal: a single retry, a peer briefly unreachable, a non-critical operation that failed (connection kill, taint patch). The operator continues. |
+| `ERROR` | Operator-affecting failure: failover failed, self-fence triggered, status update rejected by the API server. **Always paired with an `error` field.** |
+
+`DEBUG` records may appear or disappear without notice. `INFO`/`WARN`/`ERROR` `msg` strings listed below are stable.
+
+## Field naming convention
+
+- Keys are `camelCase`. Common keys: `site`, `fg`, `error`, `peer`, `count`, `source`, `donor`, `recipient`.
+- Site identifiers (`site`, `oldPrimary`, `newPrimary`, `promotedSite`, `donor`, `recipient`, `activeSite`, `authoritativeActiveSite`) all carry the bare site name as defined in `spec.sites[].name`.
+- GTID fields (`promotionGtid`, `divergentGtid`, `oldPrimaryGtid`, `newPrimaryGtid`) carry MySQL GTID-set strings exactly as MySQL returns them — never parsed or canonicalised.
+- Counts (`count`, `divergentTransactions`, `attempt`, `maxRetries`) are JSON numbers, not strings.
+- Durations (`leaseTimeout`, `pollInterval`, `delay`) are emitted by `slog`'s default `time.Duration` rendering — currently a string like `"30s"`. Treat as opaque if you need to parse, prefer the metric of the same name.
+
+## Event reference
+
+This is the stable vocabulary. `msg` strings here will not change without a deprecation note in `CHANGELOG.md`.
+
+### Failover
+
+The four events that trace one failover, in order:
+
+| Level | `msg` | Fields | Fired when |
+|---|---|---|---|
+| INFO | `initiating failover` | `candidate`, `oldPrimary`, `fg` | Operator has chosen a promotion target and is about to flip DNS and run the promotion sequence. |
+| INFO | `failover complete` | `promotedSite`, `promotionGtid`, `fg` | `Execute` finished: candidate is writable. `promotionGtid` is the candidate's `gtid_executed` snapshot taken just before clearing `super_read_only` — the upper bound on data that survived. |
+| INFO | `promotion confirmed: site is writable` | `site`, `fg` | Next poll observes the promoted site is `writable`. The internal post-failover guard clears here. |
+| ERROR | `failover failed` | `error`, `fg` | The promotion sequence returned an error. The operator does not retry automatically; the next eligible state-transition tick will re-evaluate. |
+
+Supporting events emitted inside `Execute`:
+
+| Level | `msg` | Fields |
+|---|---|---|
+| INFO | `fenced old primary with super_read_only=ON` | `fg` |
+| WARN | `failed to fence old primary (may be unreachable)` | `error`, `fg` |
+| INFO | `killed app connections on old primary` | `count`, `fg` |
+| WARN | `failed to kill app connections on old primary` | `error`, `fg` |
+| INFO | `relay log drain complete` | `fg` |
+| WARN | `relay log drain did not complete cleanly, proceeding with promotion` | `error`, `fg` |
+
+### Divergence and recovery
+
+Fired after an emergency failover when the operator inspects the returning old primary.
+
+| Level | `msg` | Fields | Notes |
+|---|---|---|---|
+| INFO | `initiating old primary recovery` | `oldPrimary`, `newPrimary`, `fg` | Recovery sequence starting. |
+| INFO | `no GTID divergence, auto-recovering old primary as replica` | `site`, `fg` | Old primary's GTID set is a subset of the new primary's — safe to attach as replica. |
+| WARN | `divergence detected` | `site`, `divergentTransactions`, `divergentGtid`, `oldPrimaryGtid`, `newPrimaryGtid`, `fg` | Old primary has committed transactions the new primary never saw. Operator does not auto-recover — admin must reclone. Mirrored by the `bloodraven_divergent_transactions` gauge and the `DataLossDetected` Kubernetes Event. |
+| INFO | `old primary recovery complete` | `site`, `source`, `fg` | Old primary is now replicating from the new primary. `source` is the new primary's host. |
+| ERROR | `old primary recovery failed` | `site`, `error`, `fg` | One step of the recovery sequence (fence / GTID query / `CHANGE REPLICATION SOURCE` / `START REPLICA`) returned an error. |
+
+### Bootstrap and reclone
+
+`starting bootstrap` is the single canonical event for "we are about to clone a replica". The `source` field disambiguates *why*:
+
+| `source` value | Meaning |
+|---|---|
+| `fresh-deploy` | Initial bootstrap of a new failover group; donor is the seed site. |
+| `auto-clone` | Operator detected an empty replica during steady-state and is recovering it without an admin trigger. |
+| `reclone` | Admin set the `bloodraven.shipstream.io/reclone-site=<name>` annotation, the safety interlock passed, and the operator is wiping the named site. **This is the `reclone-started` event.** |
+
+| Level | `msg` | Fields |
+|---|---|---|
+| INFO | `starting bootstrap` | `source`, `donor`, `recipient`, `donorHost`, `fg` |
+| INFO | `cloning from primary` | `donor`, `fg` |
+| INFO | `clone completed successfully` | `replica`, `fg` |
+| INFO | `setting up replication` | `source`, `fg` |
+| INFO | `replication started successfully` | `source`, `fg` |
+| INFO | `bootstrap completed successfully` | `source`, `fg` |
+| ERROR | `bootstrap failed` | `source`, `error`, `fg` |
+| INFO | `clone returned expected connection drop, waiting for restart` | `error`, `fg` |
+| INFO | `replica already has primary data (prior clone detected), skipping clone phase` | `fg` |
+
+A reclone-only narrative is therefore: filter `msg="starting bootstrap" AND source="reclone"` for the trigger event, then watch for `bootstrap completed successfully` (`source="reclone"`) or `bootstrap failed` (`source="reclone"`).
+
+### State transitions
+
+Every per-site state change emits one record. Use this to replay the topology timeline.
+
+| Level | `msg` | Fields |
+|---|---|---|
+| INFO | `state transition` | `site`, `from`, `to`, `fg` |
+
+`from` and `to` values: `unknown`, `unreachable`, `read-only`, `writable`. Mirrored by the `bloodraven_state_transitions_total` counter.
+
+### Topology decisions
+
+| Level | `msg` | Fields | Notes |
+|---|---|---|---|
+| WARN | `ALERT` | `message`, `fg` | A cross-site `EvalCrossSite` action returned an alert string (split brain, no primary, total loss). The same conditions emit `SplitBrainDetected` / `NoPrimaryDetected` / `TotalLossDetected` Kubernetes Events. |
+| WARN | `split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities` | (context) | Opt-in `splitBrainPolicy` is fencing the lower-priority site. |
+| INFO | `failover blocked by anti-flap cooldown` | (context) | A failover decision was deferred because `failoverCooldown` has not elapsed since the last one. |
+| INFO | `cross-site action deferred: in-place restore in progress` | `fg` | Decisions are paused while `restoreInPlace` runs. |
+| INFO | `cross-site action deferred: planned failover in progress` | `fg` | Decisions are paused while a planned-failover annotation is being processed. |
+
+### Sidecar fencing
+
+The per-MySQL sidecar emits these in its operational stream. `SELF-FENCING:` is a stable prefix — `msg` strings that begin with it indicate the sidecar wrote `super_read_only=ON` to its local MySQL without operator instruction.
+
+| Level | `msg` | Fields | Notes |
+|---|---|---|---|
+| ERROR | `SELF-FENCING: topology mismatch — operator-authoritative active site disagrees with our site, setting super_read_only=ON` | `site`, `authoritativeActiveSite`, `observedAt`, `pod` | The operator (or a peer relaying the operator's view) reports a different active site than this sidecar is on. Fired even when the operator is reachable. |
+| ERROR | `SELF-FENCING: Bloodraven and every peer unreachable beyond lease timeout, setting super_read_only=ON` | `bloodravenLastOk`, `latestPeerOk`, `peers`, `leaseTimeout`, `pod` | Backstop rule: nothing is reachable, so we can't be sure we're still primary. |
+| INFO | `SELF-FENCING: killed app connections` | `count`, `pod` | Connection kill after fencing succeeded. |
+| ERROR | `SELF-FENCING FAILED: could not set super_read_only` | `error`, `pod` | The fence write itself failed. The sidecar retries on the next tick. |
+| ERROR | `SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore` | `pod` | Final status; the sidecar will not unfence on its own. The next operator promotion clears it. |
+| INFO | `fencing: adopted active-site view from peer` | `peer`, `activeSite`, `observedAt`, `pod` | Peer sidecar relayed a fresher view than what this sidecar had cached. Drives the topology-mismatch rule. |
+
+Safety-net events (sidecar startup):
+
+| Level | `msg` | Fields |
+|---|---|---|
+| INFO | `safety net: set super_read_only=ON as precaution on startup` | `pod` |
+| INFO | `safety net: this is the active site, clearing super_read_only` | `site`, `pod` |
+| INFO | `safety net: confirmed standby site, staying fenced` | `site`, `activeSite`, `pod` |
+| INFO | `safety net: no active site reported by operator, staying fenced` | `pod` |
+| WARN | `safety net: could not query active site, staying fenced` | `error`, `pod` |
+| ERROR | `safety net: failed to clear super_read_only on active site` | `error`, `pod` |
+
+### PITR archiver
+
+Emitted by the sidecar's `BinlogArchiver`.
+
+| Level | `msg` | Fields |
+|---|---|---|
+| INFO | `binlog archiver starting` | `storageType`, `binlogDir`, `binlogIndex`, `pollInterval`, `pod` |
+| INFO | `archived sealed binlogs` | `count`, `pod` |
+| INFO | `retention sweep complete` | (sweep stats), `pod` |
+| WARN | `archive binlog` | `file`, `error`, `pod` |
+| WARN | `retention: delete object` | `key`, `error`, `pod` |
+
+Per-upload success/failure is also reflected in the `bloodraven_archiver_upload_failures` and `bloodraven_archiver_last_upload_timestamp_seconds` metrics — prefer those for alerting.
+
+### Lifecycle
+
+| Level | `msg` | Fields |
+|---|---|---|
+| INFO | `starting bloodraven manager` | (none) |
+| INFO | `starting auxiliary HTTP server` | `addr` |
+| INFO | `topology manager runner starting` | (none) |
+| INFO | `starting topology manager` | `fg` |
+| INFO | `topology manager stopped` | `fg` |
+| INFO | `stopping topology manager` | `fg` |
+| INFO | `config changed, restarting topology manager` | `fg` |
+| INFO | `restored lastFailoverTarget from CR status` | `fg`, `target` |
+| INFO | `starting graceful shutdown` | `fg` |
+| INFO | `CR deleted — DNSEndpoint will be garbage-collected` | (none) |
+| INFO | `sidecar starting` | `listenAddr`, `peerAddresses`, `bloodravenAddress`, `leaseTimeout`, `peerCheckInterval`, `site`, `namespace`, `fg`, `pod` |
+| INFO | `sidecar stopped` | `pod` |
+| INFO | `received signal, shutting down` | `signal`, `pod` |
+
+## Stability commitments
+
+| What | Stability |
+|---|---|
+| `msg` strings listed in the [Event reference](#event-reference) | **Stable.** Changes go through a deprecation note in `CHANGELOG.md`. |
+| Field names listed alongside a stable `msg` | **Stable.** New fields may be added to existing events; existing fields will not be renamed or removed without a deprecation note. |
+| Field value shapes (strings, numbers, durations) | **Stable** for the values listed. GTIDs are passed through verbatim from MySQL — their shape is whatever MySQL emits. |
+| `time`, `level`, `msg` field names themselves | **Stable.** Tied to `log/slog` defaults. |
+| `DEBUG`-level records | **Unstable.** May appear, disappear, or change shape without notice. Disabled by default. |
+| Ad-hoc `INFO`/`WARN`/`ERROR` records *not* listed above (e.g. retry warnings, transient probe errors) | **Best-effort.** Field set is intended to be useful but not contractual. Don't build alerts that key on the exact `msg` string. |
+| Controller-runtime (`zap`) stream | **Inherited from upstream.** Bloodraven does not redefine this stream's shape. |
+
+## Pipeline integration tips
+
+### Filtering operational vs. controller-runtime
+
+Most aggregators (Loki, Elasticsearch, Vector) let you split streams by JSON shape. A reliable predicate:
+
+```jsonpath
+$.time && $.msg   // operational (slog)
+$.ts && $.logger  // controller-runtime (zap)
+```
+
+### Per-event alerts
+
+Because every key event has a stable `msg`, pipeline alerts can be expressed as exact-match filters rather than fragile regexes. Examples for Loki:
+
+```logql
+# Failover started
+{app="bloodraven"} | json | msg = "initiating failover"
+
+# Failover failed (escalate)
+{app="bloodraven"} | json | level = "ERROR" and msg = "failover failed"
+
+# Divergence requires manual reclone
+{app="bloodraven"} | json | msg = "divergence detected"
+
+# Reclone triggered (track who/what asked for it via fg + recipient)
+{app="bloodraven"} | json | msg = "starting bootstrap" and source = "reclone"
+
+# Sidecar self-fenced — page on this
+{app="bloodraven-sidecar"} | json | msg =~ "^SELF-FENCING:"
+```
+
+### Correlating with metrics and Kubernetes Events
+
+Several stable log events are mirrored by other observable signals — when one fires, the others fire too:
+
+| Log event | Metric | Kubernetes Event |
+|---|---|---|
+| `failover complete` | `bloodraven_failovers_total{target_site}` | `FailoverExecuted` |
+| `divergence detected` | `bloodraven_divergent_transactions{site}` &gt; 0 | `DataLossDetected` |
+| `old primary recovery complete` | `bloodraven_divergent_transactions{site}` returns to 0 | `RecoveryComplete` |
+| `state transition` | `bloodraven_state_transitions_total{site, from, to}` | (none — too noisy for events) |
+
+Prefer metrics for alert thresholds and Kubernetes Events for human notification routing; logs are richest for forensics and timeline reconstruction.
+
+### Useful structured fields to index
+
+If your pipeline supports indexing specific fields, the high-value ones are:
+
+- `fg` — partitions everything by failover group
+- `site` (and `oldPrimary` / `newPrimary` / `promotedSite` / `donor` / `recipient`) — for per-site timelines
+- `level` — for severity routing
+- `source` — for bootstrap/reclone disambiguation
+- `error` — full error string from the operator's `error` chain
