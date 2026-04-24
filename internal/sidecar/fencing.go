@@ -331,7 +331,7 @@ func (f *FencingMonitor) checkPeerTopology(ctx context.Context, addr string) {
 	}
 	if f.topology.Adopt(snap.ActiveSite, snap.ObservedAt) {
 		f.logger.Info("fencing: adopted active-site view from peer",
-			"peer", addr, "active_site", snap.ActiveSite, "observed_at", snap.ObservedAt)
+			"peer", addr, "activeSite", snap.ActiveSite, "observedAt", snap.ObservedAt)
 	}
 }
 
@@ -373,9 +373,9 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		snap := f.topology.Snapshot()
 		if snap.ActiveSite != "" && snap.ActiveSite != f.mySite {
 			f.logger.Error("SELF-FENCING: topology mismatch — operator-authoritative active site disagrees with our site, setting super_read_only=ON",
-				"my_site", f.mySite,
-				"authoritative_active_site", snap.ActiveSite,
-				"observed_at", snap.ObservedAt,
+				"site", f.mySite,
+				"authoritativeActiveSite", snap.ActiveSite,
+				"observedAt", snap.ObservedAt,
 			)
 			f.doFence(ctx)
 			return
@@ -400,10 +400,10 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 	}
 
 	f.logger.Error("SELF-FENCING: Bloodraven and every peer unreachable beyond lease timeout, setting super_read_only=ON",
-		"bloodraven_last_ok", f.lastBloodravenOK,
-		"latest_peer_ok", f.latestPeerSeen(),
+		"bloodravenLastOk", f.lastBloodravenOK,
+		"latestPeerOk", f.latestPeerSeen(),
 		"peers", f.peerAddrs,
-		"lease_timeout", f.leaseTimeout,
+		"leaseTimeout", f.leaseTimeout,
 	)
 
 	f.doFence(ctx)

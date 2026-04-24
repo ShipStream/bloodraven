@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"github.com/shipstream/bloodraven/internal/sidecar"
+	"github.com/shipstream/bloodraven/internal/util"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo)
 
 	cfg, err := sidecar.ConfigFromEnv()
 	if err != nil {
@@ -23,14 +24,14 @@ func main() {
 
 	logger = logger.With("pod", cfg.PodName)
 	logger.Info("sidecar starting",
-		"listen_addr", cfg.ListenAddr,
-		"peer_addresses", cfg.PeerAddresses,
-		"bloodraven_address", cfg.BloodravenAddress,
-		"lease_timeout", cfg.LeaseTimeout,
-		"peer_check_interval", cfg.PeerCheckInterval,
-		"my_site", cfg.MySite,
+		"listenAddr", cfg.ListenAddr,
+		"peerAddresses", cfg.PeerAddresses,
+		"bloodravenAddress", cfg.BloodravenAddress,
+		"leaseTimeout", cfg.LeaseTimeout,
+		"peerCheckInterval", cfg.PeerCheckInterval,
+		"site", cfg.MySite,
 		"namespace", cfg.PodNamespace,
-		"failover_group", cfg.FailoverGroup,
+		"fg", cfg.FailoverGroup,
 	)
 
 	mysql, err := sidecar.NewLiveMysqlFromDSN(cfg.MysqlDSN)

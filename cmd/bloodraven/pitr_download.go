@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shipstream/bloodraven/internal/sidecar"
+	"github.com/shipstream/bloodraven/internal/util"
 )
 
 // runPITRDownload is the entry point for `bloodraven pitr-download`.
@@ -40,21 +41,21 @@ import (
 // bloodraven Job surface. The relevant set is documented inline; see
 // internal/controller/restore.go for where each gets set.
 func runPITRDownload(args []string) {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo)
 
 	stopDT := os.Getenv("BLOODRAVEN_PITR_STOP_DATETIME")
 	if stopDT == "" {
-		logger.Error("BLOODRAVEN_PITR_STOP_DATETIME is required")
+		logger.Error("missing required env var", "error", "BLOODRAVEN_PITR_STOP_DATETIME is required")
 		os.Exit(2)
 	}
 	outDir := os.Getenv("BLOODRAVEN_PITR_OUTPUT_DIR")
 	if outDir == "" {
-		logger.Error("BLOODRAVEN_PITR_OUTPUT_DIR is required")
+		logger.Error("missing required env var", "error", "BLOODRAVEN_PITR_OUTPUT_DIR is required")
 		os.Exit(2)
 	}
 	prefix := os.Getenv("BLOODRAVEN_PITR_MANIFEST_PREFIX")
 	if prefix == "" {
-		logger.Error("BLOODRAVEN_PITR_MANIFEST_PREFIX is required")
+		logger.Error("missing required env var", "error", "BLOODRAVEN_PITR_MANIFEST_PREFIX is required")
 		os.Exit(2)
 	}
 

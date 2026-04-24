@@ -13,6 +13,7 @@ const sidebars = {
     'app-integration',
     'failover',
     'monitoring',
+    'log-schema',
     'operations',
     'backup-restore',
     'backup-encryption',

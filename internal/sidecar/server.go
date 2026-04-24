@@ -185,8 +185,8 @@ type activeSiteResponse struct {
 func (s *Server) RunSafetyNet(ctx context.Context, cfg *Config) {
 	if cfg.MySite == "" || cfg.PodNamespace == "" || cfg.FailoverGroup == "" || cfg.BloodravenAddress == "" {
 		s.logger.Info("safety net skipped: required identity not configured",
-			"my_site", cfg.MySite, "namespace", cfg.PodNamespace,
-			"failover_group", cfg.FailoverGroup, "bloodraven_address", cfg.BloodravenAddress)
+			"site", cfg.MySite, "namespace", cfg.PodNamespace,
+			"fg", cfg.FailoverGroup, "bloodravenAddress", cfg.BloodravenAddress)
 		return
 	}
 
@@ -218,7 +218,7 @@ func (s *Server) RunSafetyNet(ctx context.Context, cfg *Config) {
 
 	if cfg.MySite != activeSite {
 		s.logger.Info("safety net: confirmed standby site, staying fenced",
-			"my_site", cfg.MySite, "active_site", activeSite)
+			"site", cfg.MySite, "activeSite", activeSite)
 		return
 	}
 

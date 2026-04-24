@@ -29,8 +29,8 @@ func NewBootstrapController(logger *slog.Logger) *BootstrapController {
 //     CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1
 //  5. START REPLICA
 func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts BootstrapOpts) error {
-	b.logger.Info("starting bootstrap", "replica", opts.ReplicaSite, "primary", opts.PrimaryHost)
-
+	// Higher-level "starting bootstrap" event is emitted by the
+	// topology manager so it carries source/donor/recipient context.
 	// Step 1: Verify primary is writable
 	readOnly, err := opts.Primary.CheckReadOnly(ctx)
 	if err != nil {

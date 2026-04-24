@@ -18,6 +18,8 @@ Run commands from the repository root:
 ## Coding Style & Naming Conventions
 Use standard Go formatting: run `gofmt` on changed files and keep imports organized. Follow existing package boundaries and keep Kubernetes-facing types explicit and stable. Exported names use `CamelCase`; unexported helpers use `camelCase`; tests follow `TestXxx`. Prefer descriptive file names like `failover.go`, `fencing.go`, and `matrix_test.go` that match one responsibility.
 
+Structured-log `msg` strings and field names listed in `docs/docs/log-schema.mdx` are a public stability contract — downstream log pipelines filter on them. When you touch a log call site whose `msg` appears in that doc's Event reference, either preserve the `msg` string and the documented field set exactly, or update `docs/docs/log-schema.mdx` in the same PR and call out the break in the PR description. The same applies to field naming: log keys are `camelCase` (per the contract), not `snake_case`.
+
 ## Testing Guidelines
 Add table-driven unit tests beside the code they cover, using the existing `*_test.go` layout under `internal/`. Put cross-component behavior tests in `test/e2e`. Some tests create local HTTP listeners with `httptest`, so restricted sandboxes may fail even when local developer runs pass.
 

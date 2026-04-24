@@ -27,6 +27,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/platform"
+	"github.com/shipstream/bloodraven/internal/util"
 )
 
 func main() {
@@ -82,7 +83,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo)
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 
 	scheme := k8sruntime.NewScheme()

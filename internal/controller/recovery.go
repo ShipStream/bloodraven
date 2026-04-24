@@ -38,6 +38,8 @@ func (f *FailoverController) RecoverOldPrimary(ctx context.Context, oldPrimary m
 		return err
 	}
 
-	f.logger.Info("old primary recovery complete", "newSource", newPrimaryHost)
+	// "old primary recovery complete" is emitted by the topology
+	// manager once executeRecovery confirms success; emitting it here
+	// would duplicate that event.
 	return nil
 }

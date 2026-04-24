@@ -142,10 +142,10 @@ func (a *BinlogArchiver) SetRetentionClient(bloodravenAddr, namespace, group, pr
 // poll tick).
 func (a *BinlogArchiver) Run(ctx context.Context) {
 	a.logger.Info("binlog archiver starting",
-		"storage_type", a.cfg.StorageType,
-		"binlog_dir", a.cfg.BinlogDir,
-		"binlog_index", a.cfg.BinlogIndex,
-		"poll_interval", a.cfg.PollInterval,
+		"storageType", a.cfg.StorageType,
+		"binlogDir", a.cfg.BinlogDir,
+		"binlogIndex", a.cfg.BinlogIndex,
+		"pollInterval", a.cfg.PollInterval,
 	)
 
 	// Best-effort initial scan: covers the case where binlogs exist
