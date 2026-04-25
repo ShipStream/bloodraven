@@ -7,7 +7,6 @@
 - [ ] 12. PVC loss recovery runbook
 - [ ] 18. `kubectl` plugin
 - [ ] 25. CRD version-migration plan
-- [ ] 26. Security model / threat model doc
 - [ ] 27. Backup/restore performance guide
 - [ ] 28. Network-partition behavior
 - [ ] 29. Known limitations, up-front
@@ -29,8 +28,6 @@
 
 **25. CRD version-migration plan.** Currently `v1alpha1`. Document the path to `v1beta1` → `v1`, with conversion-webhook commitments. Users pinning to `v1alpha1` need to know the breaking-change contract.
 
-**26. Security model / threat model doc.** Who can do what? What happens if the operator's ServiceAccount token leaks? What happens if the MySQL root password leaks? What's the blast radius of a compromised sidecar? The credentials docs cover *how* but not *what an attacker sees*.
-
 **27. Backup/restore performance guide.** For a 500 GB dataset, how long does `util.dumpInstance` take with what `threads`/`bytesPerChunk`? How long does `loadDump` take? At what `maxLagSeconds` does your replica-as-source fallback trigger and what's the primary-impact if it does? Users need ballparks before they commit.
 
 **28. Network-partition behavior.** Explicitly documented scenarios: (a) operator ↔ site-A partition (site-B reachable); (b) site-A ↔ site-B partition (operator reachable to both); (c) asymmetric partition (operator reachable to A, A not reachable to B). For each, the expected observable behavior, which metric moves, which event fires.
@@ -44,4 +41,4 @@
 ## Suggested sequencing
 
 - **Next quarter:** #7, #9, #12, #18, #28 (DR muscle + day-2 ergonomics)
-- **When stable enough for external use:** #25, #26, #30 (open-source prep if that's the path)
+- **When stable enough for external use:** #25, #30 (open-source prep if that's the path)

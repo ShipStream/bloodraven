@@ -1,0 +1,342 @@
+---
+sidebar_position: 9.7
+---
+
+# Security model
+
+This page documents Bloodraven's security posture: the trust boundaries
+between its components, the authorizations each component holds, and the
+blast radius when a specific secret or identity is compromised. It
+complements [Production hardening](./production-hardening.mdx), which
+lists the settings to turn on; this page explains *why* they matter and
+what remains exposed when they are all correct.
+
+Bloodraven is an **in-cluster control plane for a tenant MySQL service**.
+It is not a zero-trust system on its own. It relies on the hosting
+Kubernetes cluster for authentication, namespace isolation, and network
+policy. The guarantees below all assume a competent cluster operator is
+running it.
+
+## Trust model at a glance
+
+Four identities participate in the data path. Everything else in the
+cluster is considered untrusted.
+
+| Identity | What it is | Trust level |
+|---|---|---|
+| **Operator** | Single-replica Deployment running `bloodraven`, bound to a cluster-wide ServiceAccount. Owns the reconcile loop and DNS writes. | Fully trusted — it is the control plane. |
+| **Sidecar** | Per-MySQL-pod container running `bloodraven-sidecar`. Serves read-only status HTTP, manages MySQL startup, writes binlog manifests, and self-fences its MySQL. | Trusted for the single pod it runs in. |
+| **MySQL** | `mysqld` itself, with the per-role users Bloodraven creates (`operator`, `app`, `readonly`, `monitor`, `backup`). | Trusted for query execution; each MySQL user is trusted only for its role's grants. |
+| **Application** | Workloads that connect to the primary/replica Services using `appSecret` / `readOnlySecret`. | Untrusted by the operator — apps are tenants. |
+
+All intra-cluster traffic between these identities flows over the pod
+network. Bloodraven does **not** authenticate HTTP calls between the
+operator and the sidecars, and it does **not** mTLS-protect the sidecar
+HTTP endpoint. Isolation is the hosting cluster's job (NetworkPolicy,
+namespace boundaries, CNI-level encryption if you require it).
+
+## Authorization — who can do what
+
+### Operator ServiceAccount
+
+The operator runs with a **cluster-scoped** ClusterRole
+(`config/rbac/role.yaml`, mirrored in
+`charts/bloodraven/templates/clusterrole.yaml`). It holds the minimum
+set of verbs to reconcile `MysqlFailoverGroup` and `MysqlBackup`
+resources across any namespace. Notably:
+
+- **Full CRUD on `Secrets`, `ConfigMaps`, `Services`, `PersistentVolumeClaims`, `Jobs`, `CronJobs`, `Deployments`, `PodDisruptionBudgets`** — cluster-wide. The operator reads credential Secrets, renders MySQL config into ConfigMaps, and creates PVCs, Services, Pods, and Jobs per site.
+- **Full CRUD on `dnsendpoints.externaldns.k8s.io`** — the failover path writes `DNSEndpoint` CRs that `external-dns` then pushes to the DNS provider.
+- **`get`/`list`/`watch`/`patch` on `pods` and `nodes`**, plus `get` on `pods/log` — used for the tainter, the backup-sentinel log tail, and placement contract enforcement.
+- **Full CRUD on `leases.coordination.k8s.io`** — leader election.
+
+**There is no namespaced partitioning.** A single operator install
+reconciles groups in every namespace. If you need tenant isolation
+(one operator per tenant), deploy one operator per namespace scope and
+use a `Role` instead — the code supports this but the shipped chart
+does not.
+
+### MySQL user roles
+
+When `spec.credentials` is used, the operator creates five MySQL users
+with the following effective grants (see
+[CRD Reference → CredentialsSpec](./crd-reference.mdx#credentialsspec)):
+
+| Role | Effective authority |
+|---|---|
+| `operator` | `ALL PRIVILEGES ON *.* WITH GRANT OPTION` — full admin. Used by the operator and sidecar only. |
+| `app` | `ALL PRIVILEGES ON *.*` without `GRANT OPTION` or `SUPER` — read/write DML + DDL for tenant workloads. |
+| `readonly` | `SELECT, SHOW VIEW, SHOW DATABASES, PROCESS` — read replicas. |
+| `monitor` | `PROCESS, REPLICATION CLIENT` + `SELECT` on `performance_schema.*` — `mysqld_exporter` and similar scrapers. |
+| `backup` | `SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT` — MySQL Shell dump jobs. |
+
+The legacy `spec.secretName` DSN mode collapses all of the above into a
+single user whose credentials the DSN carries. **Do not use it in
+production** — it defeats the entire per-role isolation story.
+
+### Destructive annotations on the CR
+
+`patch` on `mysqlfailovergroups` is the narrow privilege that controls
+every operator-initiated destructive action. The annotations the
+operator acts on are:
+
+- `bloodraven.shipstream.io/reclone-site=<site>:<gtid-prefix>` —
+  Triggers `CLONE INSTANCE` on the named site, overwriting its data
+  directory from the current primary. The GTID-prefix confirmation
+  (≥ 8 chars, must match the current `status.sites[<site>].divergentGtid`)
+  prevents typos from wiping the wrong site. See
+  [Failover → Reclone flow](./failover.mdx#divergence-detected-manual-intervention-required).
+- `bloodraven.shipstream.io/planned-failover=<site>` — Drains writes,
+  honours the anti-flap cooldown, waits for the target to catch up, and
+  promotes the named site.
+
+An attacker with `patch mysqlfailovergroups` in the target namespace
+can therefore cause a data wipe of one site (bounded by the GTID
+confirmation interlock) or an unscheduled failover. RBAC on the CRD
+is the only gate — scope `MysqlFailoverGroup` edit rights as tightly
+as you would scope `kubectl delete pvc`.
+
+## Network surface
+
+| Listener | Port | Authenticated? | Purpose |
+|---|---|---|---|
+| Operator metrics | `:8080` | No | Prometheus scrape (`/metrics`). |
+| Operator health probes | `:8081` | No | Kubernetes liveness/readiness. |
+| Operator auxiliary HTTP | `:8082` | No | `/status`, `/active-site`, `/pitr-cutoff`, `/ws/status` (WebSocket). Consumed by the dashboard and by sidecars that check which site is active. |
+| Sidecar HTTP | `:8080` | No | `/health`, `/status`, `/peer/ping`, `/archiver/status`. Consumed by the operator and the peer sidecar. |
+| MySQL | `:3306` | Yes (password; TLS if `spec.tls` set) | Data plane. |
+
+**None of the HTTP surfaces above authenticate callers.** They expose
+read-only status and GTID coordinates; none accept state-changing
+requests. The design assumes the pod network is protected by
+NetworkPolicy and that the operator + sidecars run in a namespace that
+does not accept untrusted ingress. In particular:
+
+- Do not expose `:8082` outside the cluster. The `/active-site` and
+  `/status` endpoints do not leak credentials but do leak topology,
+  site names, zone labels, and GTID coordinates — useful reconnaissance
+  for an attacker already inside the cluster.
+- The WebSocket push stream (`/ws/status`) is likewise unauthenticated.
+  Anyone that can reach port `8082` can read real-time failover events.
+- If you require scrape auth, front the metrics endpoint with a
+  sidecar (e.g. `kube-rbac-proxy`). The chart does not ship one.
+
+## TLS and data-in-flight
+
+When `spec.tls.secretName` references a Secret with `ca.crt`,
+`tls.crt`, and `tls.key`, the operator mounts it into every MySQL pod
+and renders config that sets `ssl-ca`/`ssl-cert`/`ssl-key` **and**
+`require-secure-transport=ON`. Without TLS set, MySQL accepts
+plaintext connections from anything on the pod network.
+
+- Replication between sites uses the same MySQL port and the same
+  server certificate — cross-site replication is TLS-protected only
+  when `spec.tls` is set. Mirror a single issuer across sites, or
+  ensure both sites' certs chain to a CA each other trusts.
+- The sidecar, operator, backup Jobs, and MySQL Shell dump workers
+  all trust the CA in `ca.crt`. When you rotate the CA, rotate
+  the mounted Secret; the operator detects the hash change and
+  rolls pods.
+- Cert-manager integration is not automatic — Bloodraven expects the
+  Secret to exist. Use a cert-manager `Certificate` resource to
+  populate it.
+
+## Secrets at rest and in memory
+
+- **Nothing is written to disk that wasn't already on disk.** The
+  sidecar receives its DSN via `MYSQL_DSN` env var (or reconstructs
+  one from `MYSQL_USER`/`MYSQL_PASSWORD`) and keeps it in memory. It
+  does not write credentials to a file.
+- **Logs never include passwords.** DSNs are built for in-process use
+  and are never logged; SQL statement errors are truncated before
+  logging. Operator events and condition messages are safe to ship
+  to a log aggregator.
+- **Secret content is copied into env and files as MySQL requires.**
+  The MySQL pod's environment holds `MYSQL_ROOT_PASSWORD` and the
+  per-role passwords during first boot; after user creation these are
+  no longer required and could be unset, but the operator keeps them
+  in the pod spec for simplicity. Anything that can `kubectl exec` or
+  `kubectl describe pod` can see them.
+
+## Compromise scenarios
+
+### The operator ServiceAccount token leaks
+
+This is the worst-case credential compromise. With operator-level
+cluster access, an attacker can:
+
+1. **Read every namespace's Secrets.** Including MySQL credential
+   Secrets for every `MysqlFailoverGroup` the operator manages.
+   Treat this as equivalent to leaking all per-tenant MySQL
+   credentials and all TLS private keys referenced by `spec.tls`.
+2. **Create or patch arbitrary `Deployment`, `Pod`, `Job`,
+   `CronJob`, `Service`, and `PVC` objects** cluster-wide. Because
+   the operator has full CRUD on these, the attacker has a
+   general-purpose tenancy breakout through pod spec injection.
+3. **Write `DNSEndpoint` CRs** that external-dns will push to the
+   public DNS zone, enabling a DNS-hijack attack against any name
+   external-dns manages (not just MySQL names).
+4. **Exfiltrate PVC contents** by scheduling a pod that mounts the
+   target PVC — the ServiceAccount can create pods and PVC mounts.
+
+**Mitigations.** Pin the chart's `serviceAccountName`, bind it to a
+namespace-scoped Role where possible, run the operator in its own
+namespace, and rely on the audit log to detect token reuse from
+unexpected source IPs. Rotate the token (delete the ServiceAccount's
+token Secret) on any suspected compromise — Kubernetes issues a new
+projected token to the pod automatically.
+
+**This is the single largest blast radius in the product.** A
+multi-operator, namespace-scoped deployment model is on the wishlist
+but not implemented today.
+
+### The MySQL `operator` / `root` password leaks
+
+Inside the DB, `operator` and `root` are equivalent — both carry
+`ALL PRIVILEGES ... WITH GRANT OPTION`. An attacker with either can:
+
+1. **Read, modify, or drop any schema.** Including running `SELECT
+   ... INTO OUTFILE` on any path MySQL can reach (bounded by
+   `secure_file_priv`, which Bloodraven sets to the data directory).
+2. **Create new MySQL users** and grant them arbitrary privileges,
+   surviving a password rotation of the known users.
+3. **Run `STOP REPLICA` / `RESET REPLICA ALL` / `CHANGE REPLICATION
+   SOURCE TO ...`** — directly breaking replication or repointing a
+   replica at an attacker-controlled primary.
+4. **Trigger `SHUTDOWN`** (unless `SUPER` is gated), rebooting the
+   MySQL instance.
+
+The blast radius is **per-failover-group**, not cluster-wide. The
+operator will detect the resulting replication breakage and attempt
+recovery or raise `Degraded=True`, but it cannot distinguish malicious
+writes from legitimate ones — divergent GTIDs are the only signal that
+reaches the `status.sites[].divergentGtid` field.
+
+**Mitigations.** Store credential Secrets with a rotating provider
+(ESO, sealed-secrets, Vault). Set alerts on
+`bloodraven_divergent_transactions > 0`. Keep the operator's Secret
+in the same namespace as the failover group so a namespace-compromise
+does not cascade.
+
+### The MySQL `app` password leaks
+
+Bounded by the `app` grants: read/write across every schema, but **no
+`SUPER`, no `GRANT OPTION`, no `REPLICATION` privileges**. The
+attacker cannot:
+
+- Create new MySQL users or escalate within MySQL.
+- Break replication (lacks `REPLICATION CLIENT` / `REPLICATION SLAVE`).
+- Run `KILL` on other sessions (lacks `PROCESS` unless you deviate
+  from the default).
+- Drop the MySQL server itself.
+
+The attacker *can* run arbitrary SQL against the tenant data. This is
+the same blast radius as an application SQL-injection — assume any
+compromise of `app` yields full data read/write for the application's
+schemas.
+
+**Mitigations.** Rotate `appSecret` on detection. The operator
+propagates password changes via `ALTER USER` on the next reconcile.
+Consumers that cache connection strings need to reconnect.
+
+### A sidecar pod is compromised
+
+A sidecar pod shares the pod network namespace with its `mysqld`.
+An attacker with code-execution in the sidecar can:
+
+1. **Connect to `mysqld` on `127.0.0.1:3306` using the `operator`
+   credentials** the sidecar holds. This is the same authority as
+   "operator password leaks", but scoped to the one MySQL instance.
+2. **Self-fence the MySQL** (write `read-only=ON`, kill its own pod)
+   — the sidecar already does this legitimately, but an attacker can
+   use it for denial-of-service. The peer sidecar will eventually
+   promote, so the net effect is an unscheduled failover.
+3. **Write the binlog archive manifest** for that site — corrupting
+   PITR coverage for that site only. Objects already uploaded to the
+   backup bucket are **not** deleted by the sidecar; recovery is
+   possible from the bucket manifest + objects, but
+   `status.pitr.archiveCoverageTo` will mislead operators in the
+   meantime.
+4. **Read the MySQL data directory** — the sidecar's mount point on
+   `/var/lib/mysql` is shared with `mysqld`.
+
+The blast radius is **one MySQL site** of one failover group. The
+attacker does **not** gain operator-level Kubernetes privileges — the
+sidecar runs with a minimal ServiceAccount — and does **not** reach
+the peer site directly (the peer only trusts its own sidecar and the
+operator). The worst observable consequence is a forced failover plus
+data exfiltration from the one site.
+
+**Mitigations.** Use a distroless sidecar image, keep its process
+footprint small, and audit the sidecar image in the same supply-chain
+pipeline as `mysqld`. Alert on `bloodraven_failovers_total` spikes
+that coincide with sidecar restarts.
+
+### A backup bucket credential leaks
+
+Bounded by the bucket IAM policy — not by Bloodraven. Bloodraven
+passes the credentials (from `spec.backup.profiles[].storage.secretRef`)
+to `mysqlsh`, `mysqlbinlog`, and the sidecar archiver as env vars.
+With the credential, an attacker can:
+
+- **Delete or overwrite backup objects** (full dumps and binlogs),
+  destroying the PITR chain.
+- **Read every dump** — they contain the full database content.
+
+**Mitigations.** Scope bucket IAM to the specific profile's prefix.
+Enable object-lock / versioning / MFA-delete on the bucket. Rotate
+bucket credentials independently of MySQL credentials.
+
+### The DNS zone trust is compromised
+
+Bloodraven writes `DNSEndpoint` CRs; `external-dns` translates them
+into DNS records. If the DNS provider or external-dns itself is
+compromised, an attacker can repoint MySQL traffic to an
+attacker-controlled endpoint. **Bloodraven cannot prevent this.**
+The only mitigation is defense in depth at the DNS layer — zone-
+signing, IAM scoping of external-dns, and short TTLs that limit
+the window during which a malicious repoint holds.
+
+## What Bloodraven does not defend against
+
+Explicit non-goals, so the list above is complete:
+
+- **Container escape from `mysqld`** — Out of scope; treat `mysqld` as
+  you would any other privileged workload in your cluster.
+- **Kernel-level exfiltration** of data in MySQL memory — out of
+  scope; use confidential-computing primitives at the node level if
+  required.
+- **Malicious application SQL** — the operator cannot distinguish a
+  legitimate write from a malicious one. Application-level access
+  control is the app's responsibility.
+- **Kubernetes API server compromise** — nothing below the API server
+  can be trusted if the API server is compromised.
+- **Supply-chain attacks on the operator or sidecar images** — pin
+  and mirror per [Production hardening](./production-hardening.mdx#image-supply-chain).
+- **DoS of the control plane** — an attacker with `patch` on a CR can
+  trigger reconciles at whatever rate the API server allows. The
+  operator is rate-limited by controller-runtime's workqueue, but a
+  motivated abuser can still produce noise.
+
+## Hardening summary
+
+If you only read one section, read this. The minimum for a
+production deployment:
+
+1. Use `spec.credentials` (per-role) — never `spec.secretName` (legacy
+   DSN).
+2. Set `spec.tls` and require it in the MySQL clients.
+3. Scope `patch` on `MysqlFailoverGroup` tightly — it is the reclone
+   and planned-failover vector.
+4. Keep the operator in its own namespace and do not grant its
+   ServiceAccount to anyone else.
+5. Apply a NetworkPolicy that permits only the operator to reach
+   sidecar `:8080` and the dashboard to reach operator `:8082`.
+6. Store credential Secrets with a rotating provider and rotate on a
+   schedule.
+7. Lock down the backup bucket IAM to the prefix the profile uses,
+   and enable versioning / object-lock.
+8. Subscribe to divergent-GTID alerts (`bloodraven_divergent_transactions > 0`)
+   — that is your "someone wrote to the wrong primary" tripwire.
+
+For the full checklist see [Production hardening](./production-hardening.mdx).
