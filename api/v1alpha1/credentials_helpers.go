@@ -54,5 +54,43 @@ func (s *MysqlFailoverGroupSpec) AllReferencedSecretNames() []string {
 		add(s.Credentials.MonitorSecret)
 		add(s.Credentials.BackupSecret)
 	}
+	if s.Backup != nil {
+		for i := range s.Backup.Profiles {
+			if enc := s.Backup.Profiles[i].Encryption; enc != nil {
+				add(enc.PassphraseSecret.Name)
+			}
+		}
+	}
+	if s.InitFromBackup != nil && s.InitFromBackup.Decryption != nil {
+		add(s.InitFromBackup.Decryption.PassphraseSecret.Name)
+	}
+	if s.RestoreInPlace != nil && s.RestoreInPlace.Decryption != nil {
+		add(s.RestoreInPlace.Decryption.PassphraseSecret.Name)
+	}
 	return names
+}
+
+// EncryptionEnabled returns true when the profile has backup encryption
+// configured.
+func (p *BackupProfile) EncryptionEnabled() bool {
+	return p != nil && p.Encryption != nil && p.Encryption.PassphraseSecret.Name != ""
+}
+
+// PassphraseSecretKeyOrDefault returns the Secret key holding the
+// passphrase, defaulting to "passphrase" when unset.
+func (r PassphraseSecretRef) PassphraseSecretKeyOrDefault() string {
+	if r.Key == "" {
+		return "passphrase"
+	}
+	return r.Key
+}
+
+// AlgorithmOrDefault returns the configured algorithm, defaulting to
+// AES-256-GCM when the field is empty (common on older CRs that were
+// created before Algorithm became optional).
+func (s *BackupEncryptionSpec) AlgorithmOrDefault() string {
+	if s == nil || s.Algorithm == "" {
+		return "AES-256-GCM"
+	}
+	return s.Algorithm
 }

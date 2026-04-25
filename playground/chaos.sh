@@ -13,11 +13,17 @@
 #   ./playground/chaos.sh watch                      Continuous watch
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAMESPACE="bloodraven-playground"
 
 info()  { echo -e "\033[1;34m==>\033[0m $*"; }
 ok()    { echo -e "\033[1;32m OK\033[0m $*"; }
 warn()  { echo -e "\033[1;33m!!\033[0m $*"; }
+
+# Refuse to run outside a known-local cluster context (AUDIT M7).
+# shellcheck source=playground/_guard.sh
+source "$SCRIPT_DIR/_guard.sh"
+require_playground_context
 
 usage() {
   echo "Usage: $0 <command> [args]"

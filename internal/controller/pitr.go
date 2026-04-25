@@ -197,6 +197,39 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 		return out, fmt.Errorf("profile %q has unknown storage type %q", profile.Name, profile.Storage.Type)
 	}
 
+	// Encryption wiring. When the profile has encryption enabled we
+	// mount the passphrase Secret onto the sidecar container and
+	// point the archiver at the file; everything else (wrapper
+	// selection, re-upload / prune semantics) falls out naturally
+	// from the encryptedStore that sidecar.newArchiveStore chooses.
+	if profile.EncryptionEnabled() {
+		ref := profile.Encryption.PassphraseSecret
+		out.PodVolumes = append(out.PodVolumes, corev1.Volume{
+			Name: "pitr-passphrase",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  ref.Name,
+					DefaultMode: ptr32(0o400),
+					Items: []corev1.KeyToPath{
+						{
+							Key:  ref.PassphraseSecretKeyOrDefault(),
+							Path: backupPassphraseFileName,
+						},
+					},
+				},
+			},
+		})
+		out.SidecarVolumeMounts = append(out.SidecarVolumeMounts, corev1.VolumeMount{
+			Name:      "pitr-passphrase",
+			MountPath: backupPassphraseMountPath,
+			ReadOnly:  true,
+		})
+		out.SidecarEnv = append(out.SidecarEnv, corev1.EnvVar{
+			Name:  "BLOODRAVEN_PITR_PASSPHRASE_FILE",
+			Value: backupPassphraseMountPath + "/" + backupPassphraseFileName,
+		})
+	}
+
 	return out, nil
 }
 
@@ -293,12 +326,12 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	}
 
 	// Shared emptyDir volume. Init container writes; main container
-	// reads. sizeLimit is intentionally unset — the node's ephemeral
-	// storage limit is the de-facto cap, matching how the existing
-	// /tmp emptyDir is sized.
+	// reads. Size cap is opt-in via spec.backup.stagingVolumeSizeLimit
+	// (AUDIT H6); leaving it unset preserves the prior behavior where
+	// only the node's ephemeral-storage limit applies.
 	emptyDirVol := corev1.Volume{
 		Name:         "pitr-binlogs",
-		VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		VolumeSource: corev1.VolumeSource{EmptyDir: stagingEmptyDirSource(fg.Spec.Backup)},
 	}
 	initMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir}
 	mainMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir, ReadOnly: true}
@@ -412,6 +445,40 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	if image == "" {
 		image = "bloodraven:latest"
 	}
+
+	// If the backup profile encrypts binlog archives too, mount the
+	// passphrase Secret onto the download init container and point
+	// the sidecar archive-store wrapper at the file. The operator
+	// uses the same conventional path as backup / restore Jobs so
+	// env var names stay consistent.
+	if profile.EncryptionEnabled() {
+		ref := profile.Encryption.PassphraseSecret
+		volumes = append(volumes, corev1.Volume{
+			Name: "pitr-passphrase",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  ref.Name,
+					DefaultMode: ptr32(0o400),
+					Items: []corev1.KeyToPath{
+						{
+							Key:  ref.PassphraseSecretKeyOrDefault(),
+							Path: backupPassphraseFileName,
+						},
+					},
+				},
+			},
+		})
+		initMounts = append(initMounts, corev1.VolumeMount{
+			Name:      "pitr-passphrase",
+			MountPath: backupPassphraseMountPath,
+			ReadOnly:  true,
+		})
+		initEnv = append(initEnv, corev1.EnvVar{
+			Name:  "BLOODRAVEN_PITR_PASSPHRASE_FILE",
+			Value: backupPassphraseMountPath + "/" + backupPassphraseFileName,
+		})
+	}
+
 	// Init container shares the main container's hardened security
 	// context — same UID/GID so the emptyDir is readable, same
 	// seccomp/capability profile.

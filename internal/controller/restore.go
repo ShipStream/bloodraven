@@ -20,6 +20,32 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
+// filterOutVolumeByName returns a copy of vols with the entry whose
+// Name matches removed. Used by the decrypt-init-container wiring to
+// replace the source-PVC mount with the decrypted-staging mount.
+func filterOutVolumeByName(vols []corev1.Volume, name string) []corev1.Volume {
+	out := vols[:0]
+	for _, v := range vols {
+		if v.Name == name {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// filterOutMountByName mirrors filterOutVolumeByName for VolumeMount slices.
+func filterOutMountByName(mounts []corev1.VolumeMount, name string) []corev1.VolumeMount {
+	out := mounts[:0]
+	for _, m := range mounts {
+		if m.Name == name {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // ensureTrailingSlash normalizes a dump prefix/location so it ends with
 // a forward slash. mysqlsh util.loadDump() expects the directory-style
 // prefix produced by util.dumpInstance().
@@ -363,6 +389,11 @@ type restoreJobInputs struct {
 	Source      v1alpha1.InitFromBackupSource
 	LoadOptions *v1alpha1.LoadOptions
 	PointInTime *v1alpha1.PointInTimeSpec
+	// Decryption, when set, provides the passphrase Secret the restore
+	// will use to decrypt the source artifact. When unset, the
+	// resolver falls back to the profile's own PassphraseSecret when
+	// the source is a MysqlBackupRef pointing at an encrypted backup.
+	Decryption *v1alpha1.BackupDecryptionSpec
 	// FieldPath is the root CR field name used in error messages
 	// ("initFromBackup" for bootstrap restore, "restoreInPlace" for
 	// in-place restore). The shared builder formats
@@ -391,6 +422,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		Source:      fg.Spec.InitFromBackup.Source,
 		LoadOptions: fg.Spec.InitFromBackup.LoadOptions,
 		PointInTime: fg.Spec.InitFromBackup.PointInTime,
+		Decryption:  fg.Spec.InitFromBackup.Decryption,
 	})
 }
 
@@ -407,11 +439,26 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	}
 
 	var (
-		inputURL       string
-		extraEnv       []corev1.EnvVar
-		extraVolumes   []corev1.Volume
-		extraMounts    []corev1.VolumeMount
-		awsCredsSecret string
+		inputURL           string
+		extraEnv           []corev1.EnvVar
+		extraVolumes       []corev1.Volume
+		extraMounts        []corev1.VolumeMount
+		awsCredsSecret     string
+		// Encryption-aware fields, populated when the source is an
+		// encrypted MysqlBackup or a direct S3/PVC source where the
+		// caller supplied a decryption passphrase. decryptSourceKind
+		// is "" when no decrypt step is needed.
+		decryptSourceKind         string // "" | "S3" | "PVC"
+		decryptS3Bucket           string
+		decryptS3EndpointOverride string
+		decryptS3Region           string
+		decryptS3Prefix           string
+		decryptAWSCredsSecret     string
+		decryptPVCClaim           string
+		decryptPVCPrefix          string
+		// Resolved passphrase Secret reference for the source (may
+		// come from in.Decryption or from the source profile itself).
+		passphraseRef *v1alpha1.PassphraseSecretRef
 	)
 
 	switch {
@@ -436,6 +483,43 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		}
 
 		profile := findProfile(fg, ref.Spec.ProfileName)
+		if ref.Status.Encrypted {
+			switch {
+			case in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "":
+				ref := in.Decryption.PassphraseSecret
+				passphraseRef = &ref
+			case profile != nil && profile.EncryptionEnabled():
+				ref := profile.Encryption.PassphraseSecret
+				passphraseRef = &ref
+			default:
+				return nil, fmt.Errorf(
+					"%s.source.mysqlBackupRef=%q is encrypted but no passphrase is available; "+
+						"set %s.decryption.passphraseSecret or restore the profile's encryption.passphraseSecret",
+					fp, ref.Name, fp)
+			}
+			if wantsS3 {
+				s3 := profile.Storage.S3
+				decryptSourceKind = "S3"
+				decryptS3Bucket = s3.Bucket
+				decryptS3EndpointOverride = s3.EndpointURL
+				decryptS3Region = s3.Region
+				decryptS3Prefix = strings.TrimSuffix(inputURL, "/")
+				decryptAWSCredsSecret = s3.CredentialsSecret
+			} else if wantsPVC {
+				pvc := profile.Storage.PVC
+				claim := pvc.ClaimName
+				if claim == "" {
+					claim = ownedBackupPVCName(fg.Name, profile.Name)
+				}
+				decryptSourceKind = "PVC"
+				decryptPVCClaim = claim
+				// inputURL is the in-pod absolute path the backup
+				// wrote to (e.g. "/backups/<backup-name>"). Derive a
+				// storage-relative prefix from the PVC mount path
+				// the decrypt init container will use.
+				decryptPVCPrefix = strings.TrimSuffix(strings.TrimPrefix(inputURL, backupPVCMountPath+"/"), "/")
+			}
+		}
 		if wantsS3 && (profile == nil || profile.Storage.Type != v1alpha1.BackupStorageS3 || profile.Storage.S3 == nil) {
 			return nil, fmt.Errorf(
 				"%s.source.mysqlBackupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles; "+
@@ -498,6 +582,17 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		}
 		awsCredsSecret = src.S3.CredentialsSecret
 
+		if in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "" {
+			ref := in.Decryption.PassphraseSecret
+			passphraseRef = &ref
+			decryptSourceKind = "S3"
+			decryptS3Bucket = src.S3.Bucket
+			decryptS3EndpointOverride = src.S3.EndpointURL
+			decryptS3Region = src.S3.Region
+			decryptS3Prefix = strings.TrimSuffix(src.S3.Prefix, "/")
+			decryptAWSCredsSecret = src.S3.CredentialsSecret
+		}
+
 	case src.PVC != nil:
 		claim := src.PVC.ClaimName
 		if claim == "" {
@@ -523,6 +618,14 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		extraMounts = append(extraMounts, corev1.VolumeMount{
 			Name: "restore-src", MountPath: mountPath, ReadOnly: true,
 		})
+
+		if in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "" {
+			ref := in.Decryption.PassphraseSecret
+			passphraseRef = &ref
+			decryptSourceKind = "PVC"
+			decryptPVCClaim = claim
+			decryptPVCPrefix = strings.TrimPrefix(sub, "/")
+		}
 
 	default:
 		return nil, fmt.Errorf("%s.source must set mysqlBackupRef, s3, or pvc", fp)
@@ -656,6 +759,152 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	var initContainers []corev1.Container
 	if pitrFrags.InitContainer != nil {
 		initContainers = append(initContainers, *pitrFrags.InitContainer)
+	}
+
+	// -------- Decrypt init container + volume wiring -----------------
+	//
+	// When the source is encrypted we run `bloodraven decrypt-download`
+	// as an additional init container. It downloads ciphertext from
+	// S3 or the source PVC, decrypts into a shared emptyDir
+	// (/restore-decrypted), and the main mysqlsh container then runs
+	// loadDump against that local path instead of hitting storage
+	// itself. This keeps the passphrase off the mysqlsh side and lets
+	// mysqlsh's loadDump stay completely unaware of encryption.
+	if passphraseRef != nil {
+		if operatorImageFromEnv == "" {
+			return nil, fmt.Errorf("%s: operator image is not configured (SetOperatorImageDefaults); required for encrypted restore", fp)
+		}
+		const decryptDir = "/restore-decrypted"
+		decryptVolume := corev1.Volume{
+			Name:         "restore-decrypted",
+			VolumeSource: corev1.VolumeSource{EmptyDir: stagingEmptyDirSource(fg.Spec.Backup)},
+		}
+		passphraseVolume := corev1.Volume{
+			Name: "backup-passphrase",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName:  passphraseRef.Name,
+					DefaultMode: ptr32(0o400),
+					Items: []corev1.KeyToPath{
+						{
+							Key:  passphraseRef.PassphraseSecretKeyOrDefault(),
+							Path: backupPassphraseFileName,
+						},
+					},
+				},
+			},
+		}
+
+		decEnv := []corev1.EnvVar{
+			{Name: "BLOODRAVEN_TARGET_DIR", Value: decryptDir},
+			{Name: "BLOODRAVEN_STORAGE_TYPE", Value: decryptSourceKind},
+			{Name: "BLOODRAVEN_BACKUP_PASSPHRASE_FILE", Value: backupPassphraseMountPath + "/" + backupPassphraseFileName},
+		}
+		decMounts := []corev1.VolumeMount{
+			{Name: "restore-decrypted", MountPath: decryptDir},
+			{Name: "backup-passphrase", MountPath: backupPassphraseMountPath, ReadOnly: true},
+			{Name: "tmp", MountPath: tmpMountPath},
+		}
+
+		switch decryptSourceKind {
+		case "S3":
+			decEnv = append(decEnv,
+				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: decryptS3Prefix},
+				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: decryptS3Bucket},
+			)
+			if decryptS3EndpointOverride != "" {
+				decEnv = append(decEnv, corev1.EnvVar{
+					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: decryptS3EndpointOverride,
+				})
+			}
+			if decryptS3Region != "" {
+				decEnv = append(decEnv, corev1.EnvVar{Name: "AWS_REGION", Value: decryptS3Region})
+			}
+			if decryptAWSCredsSecret != "" {
+				// The init container reads the AWS creds from the same
+				// volume that the main container would have used, so
+				// no extra volume is needed — we just add the mount on
+				// the init side. The main-container mount is dropped
+				// below together with the S3 env.
+				decMounts = append(decMounts, corev1.VolumeMount{
+					Name: "aws-creds", MountPath: backupAWSCredsMountPath, ReadOnly: true,
+				})
+				decEnv = append(decEnv, corev1.EnvVar{
+					Name: "BLOODRAVEN_AWS_CREDS_DIR", Value: backupAWSCredsMountPath,
+				})
+			}
+		case "PVC":
+			// Mount the source PVC read-only into the init container
+			// under a dedicated path so the decrypt step doesn't
+			// confuse filepath resolution with the mysqlsh restore-src
+			// mount.
+			const decPVCMount = "/restore-src-encrypted"
+			volumes = append(volumes, corev1.Volume{
+				Name: "decrypt-src",
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: decryptPVCClaim,
+						ReadOnly:  true,
+					},
+				},
+			})
+			decMounts = append(decMounts, corev1.VolumeMount{
+				Name: "decrypt-src", MountPath: decPVCMount, ReadOnly: true,
+			})
+			decEnv = append(decEnv,
+				corev1.EnvVar{Name: "BLOODRAVEN_PVC_MOUNT_PATH", Value: decPVCMount},
+				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: decryptPVCPrefix},
+			)
+		default:
+			return nil, fmt.Errorf("%s: decryption is set but source storage kind is empty", fp)
+		}
+
+		_, initSC := mergeSecurityContexts(nil, nil)
+		initContainers = append(initContainers, corev1.Container{
+			Name:            "decrypt-download",
+			Image:           operatorImageFromEnv,
+			Command:         []string{"bloodraven", "decrypt-download"},
+			Env:             decEnv,
+			VolumeMounts:    decMounts,
+			SecurityContext: initSC,
+		})
+
+		// Rewire the main mysqlsh container to read the decrypted
+		// staging dir. Drop any storage-env that would have pointed
+		// loadDump at the encrypted source, including the aws-creds
+		// mount on the main container (mysqlsh reads local files now).
+		newEnv := env[:0]
+		for _, e := range env {
+			switch e.Name {
+			case "BLOODRAVEN_S3_BUCKET",
+				"BLOODRAVEN_S3_ENDPOINT_OVERRIDE",
+				"AWS_REGION",
+				"BLOODRAVEN_AWS_CREDS_DIR":
+				continue
+			case "BLOODRAVEN_INPUT_URL":
+				newEnv = append(newEnv, corev1.EnvVar{
+					Name:  "BLOODRAVEN_INPUT_URL",
+					Value: decryptDir,
+				})
+				continue
+			}
+			newEnv = append(newEnv, e)
+		}
+		env = newEnv
+
+		// Drop restore-src from the main container mounts; it is no
+		// longer the mysqlsh source. aws-creds stays on the pod
+		// volumes list (the init container uses it) but we remove it
+		// from the main container's mounts since mysqlsh no longer
+		// needs S3 auth.
+		mounts = filterOutMountByName(mounts, "restore-src")
+		mounts = filterOutMountByName(mounts, "aws-creds")
+
+		// Attach the decrypted staging volume + passphrase Secret.
+		volumes = append(volumes, decryptVolume, passphraseVolume)
+		mounts = append(mounts, corev1.VolumeMount{
+			Name: "restore-decrypted", MountPath: decryptDir, ReadOnly: true,
+		})
 	}
 
 	jobName := in.JobName

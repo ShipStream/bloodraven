@@ -96,6 +96,15 @@ grouped; within a group, order doesn't matter.
 - [ ] Run backup-verification externally (restore into a throwaway
       namespace periodically, assert a sanity query works). Unverified
       backups are Schrödinger backups.
+- [ ] **Encrypt backups at rest.** Set
+      `spec.backup.profiles[].encryption.passphraseSecret` on every
+      profile that writes to shared storage. Client-side envelope
+      encryption (AES-256-GCM) keeps the passphrase in a
+      Kubernetes-controlled Secret, so a compromised S3 credential
+      does not expose backup contents. See
+      [Backup encryption](./backup-encryption.mdx). Back the
+      passphrase Secret up out-of-band — losing it makes the backups
+      unrecoverable.
 
 ## Placement
 

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/shipstream/bloodraven/internal/metrics"
 )
 
 // Server is the sidecar HTTP server.
@@ -26,11 +28,11 @@ func NewServer(mysql mysqlQuerier, listenAddr string, logger *slog.Logger) *Serv
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /status", s.handleStatus)
-	mux.HandleFunc("GET /peer/ping", s.handlePeerPing)
-	mux.HandleFunc("GET /peer/active-site", s.handlePeerActiveSite)
-	mux.HandleFunc("GET /archiver/status", s.handleArchiverStatus)
+	mux.HandleFunc("GET /health", s.instrument("/health", s.handleHealth))
+	mux.HandleFunc("GET /status", s.instrument("/status", s.handleStatus))
+	mux.HandleFunc("GET /peer/ping", s.instrument("/peer/ping", s.handlePeerPing))
+	mux.HandleFunc("GET /peer/active-site", s.instrument("/peer/active-site", s.handlePeerActiveSite))
+	mux.HandleFunc("GET /archiver/status", s.instrument("/archiver/status", s.handleArchiverStatus))
 
 	s.httpServer = &http.Server{
 		Addr:              listenAddr,
@@ -41,6 +43,30 @@ func NewServer(mysql mysqlQuerier, listenAddr string, logger *slog.Logger) *Serv
 	}
 
 	return s
+}
+
+// instrument wraps a handler with Prometheus RED metrics for the
+// sidecar HTTP surface (AUDIT M6). The handler label is fixed rather
+// than derived from URL to keep the cardinality bounded.
+func (s *Server) instrument(handlerName string, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sr := &sidecarStatusRecorder{ResponseWriter: w, status: http.StatusOK}
+		h(sr, r)
+		dur := time.Since(start)
+		metrics.HTTPRequestsTotal.WithLabelValues("sidecar", handlerName, r.Method, metrics.StatusClass(sr.status)).Inc()
+		metrics.HTTPRequestDurationSeconds.WithLabelValues("sidecar", handlerName, r.Method).Observe(dur.Seconds())
+	}
+}
+
+type sidecarStatusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *sidecarStatusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
 }
 
 // SetTopology attaches the shared TopologyCache so the server can

@@ -97,6 +97,17 @@ jobs:
             git diff
             exit 1
           fi
+      - name: Check chart CRD drift
+        # CLAUDE.md requires charts/bloodraven/crds/ to mirror
+        # config/crd/bases/. The two paths are edited separately so drift
+        # happens without tooling. This catches it at PR time rather than
+        # during a broken install (AUDIT L5).
+        run: |
+          if ! diff -r config/crd/bases/ charts/bloodraven/crds/; then
+            echo "charts/bloodraven/crds/ is out of sync with config/crd/bases/."
+            echo "Copy regenerated files: cp config/crd/bases/*.yaml charts/bloodraven/crds/ && commit."
+            exit 1
+          fi
 
   all-checks:
     name: All Checks

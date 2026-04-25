@@ -14,7 +14,7 @@
 - [x] 10. Three-or-more-site topology
 - [ ] 11. Graceful planned-failover API
 - [ ] 12. PVC loss recovery runbook
-- [ ] 13. Backup encryption at rest
+- [x] 13. Backup encryption at rest
 - [x] 14. Sidecar archiver resilience
 - [x] 15. Populate `status.pitr`
 - [ ] 16. Grafana dashboards
@@ -61,7 +61,7 @@
 
 **12. PVC loss recovery runbook.** If site `iad`'s PVC is irrecoverable, what exactly do I do? Delete the PVC, let the operator auto-clone from `pdx`? Is there a failure mode where auto-clone runs against a still-replicating stale state? Write the runbook with the expected `Bootstrapping` condition transitions and timing.
 
-**13. Backup encryption at rest.** `util.dumpInstance` supports zstd compression but the docs don't mention encryption. For compliance-sensitive workloads, add either native dump encryption (a passphrase secret) or document the KMS/bucket-encryption story and make it a first-class config field.
+**13. Backup encryption at rest.** ~~`util.dumpInstance` supports zstd compression but the docs don't mention encryption. For compliance-sensitive workloads, add either native dump encryption (a passphrase secret) or document the KMS/bucket-encryption story and make it a first-class config field.~~ — shipped. `spec.backup.profiles[].encryption.passphraseSecret` turns on client-side envelope encryption (AES-256-GCM + HKDF-SHA256) for both full-dump objects and PITR binlog archives. The backup Job splits into a mysqlsh init container that stages the dump in an emptyDir and a `bloodraven encrypt-upload` main container that encrypts and uploads; restore / verify / `pitr-download` pull the mirror `bloodraven decrypt-download` init container in. The sidecar archiver transparently wraps its S3/PVC store with an encrypting decorator. `MysqlBackup.status.encrypted` and `.status.encryptionAlgorithm` reflect what the Job actually produced. Wire format, threat model, rotation guidance, and upgrade passthrough documented at `docs/docs/backup-encryption.mdx`.
 
 **14. Sidecar archiver resilience.** The archiver has `lastError` in its status endpoint but no metric and no retry/backoff guarantees documented. Add `bloodraven_archiver_upload_failures_total`, `bloodraven_archiver_last_upload_timestamp_seconds`, and `bloodraven_archiver_backlog_files` (count of sealed binlogs not yet uploaded). Stale binlog archival is a silent RPO regression.
 

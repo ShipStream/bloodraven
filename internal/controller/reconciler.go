@@ -94,6 +94,12 @@ type MysqlFailoverGroupReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackups,verbs=get;list;watch;create;update;patch;delete
+// Leader-election lease. The operator runs a single-replica deployment
+// today but still uses leader election so a fresh pod doesn't step on
+// a not-yet-drained predecessor. Without this marker,
+// `kubectl apply -f config/rbac/` installs (the documented non-Helm
+// path) produce an operator that crash-loops at startup. AUDIT M3.
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 
 func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -878,9 +884,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			mysqlContainer.Lifecycle = &corev1.Lifecycle{
 				PreStop: &corev1.LifecycleHandler{
 					Exec: &corev1.ExecAction{
+						// MYSQL_PWD keeps the password off argv so it
+						// doesn't show up in /proc/<pid>/cmdline where
+						// anything sharing the pod PID namespace could
+						// read it. `mysql --help` explicitly warns
+						// against the -p"$..." argv form (AUDIT M1).
 						Command: []string{
 							"sh", "-c",
-							`mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
+							`MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
 						},
 					},
 				},

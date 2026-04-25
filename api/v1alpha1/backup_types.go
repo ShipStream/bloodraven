@@ -100,6 +100,17 @@ type BackupSpec struct {
 	// precedence.
 	// +optional
 	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
+
+	// StagingVolumeSizeLimit caps the emptyDir used to stage plaintext
+	// dump / restore / verification artifacts inside backup Jobs. When
+	// the full dump spills past this limit the kubelet evicts the Job
+	// pod; without the cap, a multi-GB dump can fill the node's
+	// `/var/lib/kubelet` partition and trigger DiskPressure eviction of
+	// unrelated pods (AUDIT H6). Empty value falls through to the
+	// node's ephemeral-storage limit (preserving previous behavior).
+	// The reconciler does not enforce this — it's a hint to the kubelet.
+	// +optional
+	StagingVolumeSizeLimit *resource.Quantity `json:"stagingVolumeSizeLimit,omitempty"`
 }
 
 // PITRSpec configures continuous binary-log archival for point-in-time
@@ -257,6 +268,84 @@ type BackupProfile struct {
 	// spec.backup.schedules[] renders backup CronJobs.
 	// +optional
 	Verification *VerificationSpec `json:"verification,omitempty"`
+
+	// Encryption, when set, turns on client-side envelope encryption
+	// of every artifact produced under this profile: full dump objects
+	// written by backup Jobs AND sealed binlog files uploaded by the
+	// sidecar archiver. Leaving the field unset falls back to whatever
+	// encryption the underlying storage provides (bucket default SSE,
+	// volume-level encryption, etc.) — which may be sufficient for
+	// many workloads, but is not the same guarantee as keys held in a
+	// Kubernetes Secret that the operator controls.
+	//
+	// The passphrase is owned by the operator: rotating it or
+	// deleting the Secret renders existing ciphertexts unrecoverable.
+	// Treat the Secret as part of the failover group's critical
+	// recovery material and back it up out-of-band. See
+	// docs/docs/backup-encryption.mdx for the wire format,
+	// threat model, and rotation guidance.
+	// +optional
+	Encryption *BackupEncryptionSpec `json:"encryption,omitempty"`
+}
+
+// BackupEncryptionSpec turns on application-level envelope encryption
+// for a backup profile. When set, dump objects and (when the profile is
+// also used for PITR) archived binlog files are wrapped in a
+// chunked AES-256-GCM stream using a data-encryption key derived from
+// the referenced passphrase via HKDF-SHA256. The salt is random per
+// file so two encryptions of the same plaintext never share a key.
+//
+// The operator enforces the invariant that the restore side resolves a
+// passphrase identical to the encryption-time passphrase: for
+// bootstrap restores the resolver consults
+// spec.initFromBackup.decryption first, then the profile referenced
+// by the source MysqlBackup. Missing or mismatched passphrases make
+// the restore Job fail fast with a clear "decryption failed" event
+// rather than silently reloading garbage into MySQL.
+type BackupEncryptionSpec struct {
+	// Algorithm selects the encryption mechanism. Only
+	// "AES-256-GCM" is currently supported; the field is present so
+	// future releases can add envelope-over-KMS / XChaCha20-Poly1305
+	// / external key-manager modes without a breaking CRD bump.
+	// +kubebuilder:default="AES-256-GCM"
+	// +kubebuilder:validation:Enum=AES-256-GCM
+	Algorithm string `json:"algorithm,omitempty"`
+
+	// PassphraseSecret references the Secret in the same namespace
+	// as the MysqlFailoverGroup holding the passphrase. The
+	// passphrase must be non-empty; recommended length is >=32 bytes
+	// of random material (use `head -c 48 /dev/urandom | base64`).
+	PassphraseSecret PassphraseSecretRef `json:"passphraseSecret"`
+}
+
+// PassphraseSecretRef points at a Secret key holding the passphrase
+// used as input to the per-file HKDF-SHA256 key derivation. The
+// same shape is reused by restore specs (spec.initFromBackup.decryption,
+// spec.restoreInPlace.decryption) so one helper covers both sides.
+type PassphraseSecretRef struct {
+	// Name of the Secret.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Key within the Secret that holds the passphrase bytes. Leading
+	// and trailing whitespace is stripped when the passphrase is
+	// read.
+	// +kubebuilder:default="passphrase"
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key,omitempty"`
+}
+
+// BackupDecryptionSpec carries the passphrase a restore Job needs to
+// recover an encrypted artifact. It is intentionally a separate type
+// from BackupEncryptionSpec: restore-side consumers never need to
+// pick an Algorithm (the ciphertext header encodes it), so the
+// surface is just "where is the passphrase".
+type BackupDecryptionSpec struct {
+	// PassphraseSecret references the Secret holding the passphrase
+	// that was used when the source artifact was originally encrypted.
+	// Bumping the Secret contents to a new value does not rotate the
+	// ciphertext — it will simply fail to decrypt.
+	PassphraseSecret PassphraseSecretRef `json:"passphraseSecret"`
 }
 
 // RetentionPolicy is the structured retention configuration that replaces
@@ -482,6 +571,17 @@ type InitFromBackupSpec struct {
 	// restore.
 	// +optional
 	PointInTime *PointInTimeSpec `json:"pointInTime,omitempty"`
+
+	// Decryption, when set, provides the passphrase needed to decrypt
+	// the source backup and any archived binlogs it replays. Required
+	// whenever the source was encrypted via spec.backup.profiles[].encryption.
+	// When the source is a MysqlBackupRef, the operator falls back to
+	// the profile's own PassphraseSecret if Decryption is omitted — so
+	// same-group restores usually don't need to set this explicitly.
+	// For cross-group or direct S3/PVC restores there is no profile to
+	// consult and Decryption is mandatory.
+	// +optional
+	Decryption *BackupDecryptionSpec `json:"decryption,omitempty"`
 }
 
 // InitFromBackupSource is the tagged-union selector for the restore source.
@@ -647,6 +747,16 @@ type RestoreInPlaceSpec struct {
 	// the restored data to a specific target timestamp.
 	// +optional
 	PointInTime *PointInTimeSpec `json:"pointInTime,omitempty"`
+
+	// Decryption, when set, provides the passphrase needed to decrypt
+	// the source backup and any archived binlogs it replays. Same
+	// fall-back rules as InitFromBackupSpec.Decryption: when omitted
+	// for a MysqlBackupRef source, the operator resolves the
+	// passphrase from the source profile's own PassphraseSecret. For
+	// direct S3/PVC sources Decryption is required whenever the
+	// ciphertext is encrypted.
+	// +optional
+	Decryption *BackupDecryptionSpec `json:"decryption,omitempty"`
 }
 
 // RestoreInPlacePhase enumerates the discrete states an in-place restore

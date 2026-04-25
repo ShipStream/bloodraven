@@ -16,6 +16,7 @@ const sidebars = {
     'log-schema',
     'operations',
     'backup-restore',
+    'backup-encryption',
   ],
 };
 

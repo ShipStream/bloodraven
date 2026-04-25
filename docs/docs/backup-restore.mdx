@@ -30,6 +30,13 @@ cross-site replication starts.
   restores the latest Succeeded backup into a throwaway MySQL instance
   to prove it's actually loadable. See
   [Backup verification](./backup-verification.mdx).
+- **Encryption at rest** &mdash; opt-in, per-profile
+  `spec.backup.profiles[].encryption` block that turns on client-side
+  envelope encryption (AES-256-GCM) for every dump artifact and
+  archived PITR binlog. The passphrase lives in a Kubernetes Secret
+  the operator controls, so keys and storage credentials can be
+  kept on separate blast radii. See
+  [Backup encryption](./backup-encryption.mdx).
 
 ## The backup image
 

@@ -149,6 +149,21 @@ type MysqlBackupStatus struct {
 	// as 1 for older CRs.
 	Attempt int32 `json:"attempt,omitempty"`
 
+	// Encrypted records whether the artifact at Location was encrypted
+	// at rest by the operator. True when the driving profile had
+	// spec.backup.profiles[].encryption set at the time the backup was
+	// taken. The restore side uses this flag to decide whether to run
+	// the decrypt init container; it is also useful as a compliance-
+	// audit trail for "prove every production backup was encrypted".
+	Encrypted bool `json:"encrypted,omitempty"`
+
+	// EncryptionAlgorithm is the algorithm identifier stamped onto the
+	// artifact header (e.g. "AES-256-GCM"). Empty on unencrypted
+	// artifacts. Forward-compat field — a future release that adds a
+	// second algorithm can dispatch on this rather than re-reading the
+	// header from storage.
+	EncryptionAlgorithm string `json:"encryptionAlgorithm,omitempty"`
+
 	// Message is a human-readable status message.
 	Message string `json:"message,omitempty"`
 

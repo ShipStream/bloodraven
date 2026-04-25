@@ -81,6 +81,11 @@ spec:
               value: {{ include "bloodraven.image" . | quote }}
             - name: BLOODRAVEN_OPERATOR_SA
               value: {{ include "bloodraven.serviceAccountName" . | quote }}
+            # WebSocket hardening (AUDIT H2): Origin allowlist + client cap.
+            - name: BLOODRAVEN_WS_ALLOWED_ORIGINS
+              value: {{ .Values.auxiliary.service.wsAllowedOrigins | default "*" | quote }}
+            - name: BLOODRAVEN_WS_MAX_CLIENTS
+              value: {{ .Values.auxiliary.service.wsMaxClients | default 100 | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

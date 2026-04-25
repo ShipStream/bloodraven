@@ -1,6 +1,6 @@
 # Bloodraven
 
-A Kubernetes operator for MySQL async replication failover groups across two sites. Bloodraven owns the full MySQL lifecycle: pod creation, configuration, health monitoring, automated failover, clone-based bootstrapping, and platform reactions (node taints, DNS failover via external-dns, WebSocket broadcasts).
+A Kubernetes operator for MySQL async replication failover groups across two or more sites. Bloodraven owns the full MySQL lifecycle: pod creation, configuration, health monitoring, automated failover between primary candidates (with optional DR-only followers), clone-based bootstrapping, and platform reactions (node taints, DNS failover via external-dns, WebSocket broadcasts).
 
 Single controller, single source of truth, no coordination problems.
 

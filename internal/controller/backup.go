@@ -6,16 +6,20 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
+
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/util"
 )
 
 // Bloodraven-specific labels added to backup / restore / schedule
 // resources. The labelFailoverGroup constant is declared in reconciler.go.
 const (
-	labelMysqlBackup    = "shipstream.io/mysqlbackup"
-	labelBackupProfile  = "shipstream.io/backup-profile"
-	labelBackupSchedule = "shipstream.io/backup-schedule"
-	labelResourceKind   = "shipstream.io/resource"
+	labelMysqlBackup     = "shipstream.io/mysqlbackup"
+	labelBackupProfile   = "shipstream.io/backup-profile"
+	labelBackupSchedule  = "shipstream.io/backup-schedule"
+	labelResourceKind    = "shipstream.io/resource"
+	labelBackupEncrypted = "shipstream.io/backup-encrypted"
 )
 
 // Finalizers used by backup-related CRs.
@@ -192,23 +196,25 @@ func ensureBackupLabels(backup *v1alpha1.MysqlBackup) bool {
 	return changed
 }
 
-// humanBytes formats a byte count using binary (1024-based) units so the
-// Go side can produce the exact same string that backup_script.py writes
-// into the BLOODRAVEN_DUMP_COMPLETE sentinel. Values below 1 KiB are
-// returned as "<N> B"; everything else gets one decimal and a unit suffix
-// from {KiB, MiB, GiB, TiB, PiB, EiB}.
-func humanBytes(n int64) string {
-	const unit = int64(1024)
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
+// humanBytes wraps util.HumanBytes so existing call sites keep the
+// unexported, package-local name while a single definition lives in
+// internal/util/bytefmt.go (AUDIT L8).
+func humanBytes(n int64) string { return util.HumanBytes(n) }
+
+// stagingEmptyDirSource produces the EmptyDirVolumeSource used for
+// backup / restore / verify staging paths, applying the optional
+// BackupSpec.StagingVolumeSizeLimit. Leaving the cap unset preserves
+// the pre-AUDIT-H6 behavior where emptyDir size is bounded only by
+// node ephemeral-storage — intended for dedicated-node deployments.
+// Set the cap on any shared cluster to prevent a large dump from
+// triggering DiskPressure on unrelated pods.
+func stagingEmptyDirSource(backup *v1alpha1.BackupSpec) *corev1.EmptyDirVolumeSource {
+	src := &corev1.EmptyDirVolumeSource{}
+	if backup != nil && backup.StagingVolumeSizeLimit != nil {
+		lim := backup.StagingVolumeSizeLimit.DeepCopy()
+		src.SizeLimit = &lim
 	}
-	div, exp := unit, 0
-	for x := n / unit; x >= unit; x /= unit {
-		div *= unit
-		exp++
-	}
-	suffix := []string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
-	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffix[exp])
+	return src
 }
 
 // ptr32 returns a pointer to the given int32. Used for Secret.DefaultMode

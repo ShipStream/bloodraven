@@ -205,6 +205,15 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		backup.Status.StorageType = profile.Storage.Type
 		backup.Status.MysqlImage = mysqlImageFor(&fg)
 		backup.Status.ActiveSiteAtStart = fg.Status.ActiveSite
+		if profile.EncryptionEnabled() {
+			// Stamp encryption attribution at Job-creation time so the
+			// CR is self-describing even before the log-tail metadata
+			// parse lands. The algorithm default drifts forward with
+			// new releases via AlgorithmOrDefault(); keep both
+			// populated for easy compliance auditing.
+			backup.Status.Encrypted = true
+			backup.Status.EncryptionAlgorithm = profile.Encryption.AlgorithmOrDefault()
+		}
 		if backup.Status.Attempt == 0 {
 			backup.Status.Attempt = 1
 		}
@@ -290,6 +299,21 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			}
 			if meta.BinlogPos > 0 {
 				next.BinlogPos = meta.BinlogPos
+			}
+			if meta.Encrypted {
+				next.Encrypted = true
+			}
+			if meta.EncryptionAlgorithm != "" {
+				next.EncryptionAlgorithm = meta.EncryptionAlgorithm
+			}
+		}
+		// Backfill the encryption fields from the profile spec even when
+		// the log tail couldn't be parsed — this covers fake-client
+		// tests and any transient log-tail failure.
+		if profile != nil && profile.EncryptionEnabled() && !next.Encrypted {
+			next.Encrypted = true
+			if next.EncryptionAlgorithm == "" {
+				next.EncryptionAlgorithm = profile.Encryption.AlgorithmOrDefault()
 			}
 		}
 		// If the dump didn't report bytes but did report a size string
@@ -604,14 +628,17 @@ func stableJobCompletionTime(job *batchv1.Job) *metav1.Time {
 }
 
 // dumpCompletionMetadata is the parsed shape of the BLOODRAVEN_DUMP_COMPLETE
-// sentinel line emitted by backup_script.py on success.
+// sentinel line emitted by backup_script.py (unencrypted flow) or
+// `bloodraven encrypt-upload` (encrypted flow) on success.
 type dumpCompletionMetadata struct {
-	Location     string
-	Size         string
-	SizeBytes    int64
-	GtidExecuted string
-	BinlogFile   string
-	BinlogPos    int64
+	Location            string
+	Size                string
+	SizeBytes           int64
+	GtidExecuted        string
+	BinlogFile          string
+	BinlogPos           int64
+	Encrypted           bool
+	EncryptionAlgorithm string
 }
 
 // parseDumpCompleteLine parses a single `BLOODRAVEN_DUMP_COMPLETE k=v ...`
@@ -654,6 +681,10 @@ func parseDumpCompleteLine(line string) (dumpCompletionMetadata, bool) {
 			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
 				meta.BinlogPos = n
 			}
+		case "encrypted":
+			meta.Encrypted = val == "true" || val == "1"
+		case "algorithm":
+			meta.EncryptionAlgorithm = val
 		}
 	}
 	return meta, true
@@ -664,6 +695,13 @@ func parseDumpCompleteLine(line string) (dumpCompletionMetadata, bool) {
 // Returns (zero, false) on any failure so the caller can cleanly leave
 // the existing status untouched. Requires a real clientset (nil in
 // fake-client tests).
+//
+// Encrypted backup Jobs run the sentinel-emitting `bloodraven
+// encrypt-upload` step in a main container named
+// backupEncryptUploadContainerName; unencrypted Jobs emit it from the
+// mysqlsh main container. We try both container names and fall back to
+// the pod's first container so future container renames don't silently
+// drop metadata.
 func (r *MysqlBackupReconciler) tailJobCompletion(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job) (dumpCompletionMetadata, bool) {
 	if r.Clientset == nil {
 		return dumpCompletionMetadata{}, false
@@ -675,20 +713,43 @@ func (r *MysqlBackupReconciler) tailJobCompletion(ctx context.Context, backup *v
 	); err != nil {
 		return dumpCompletionMetadata{}, false
 	}
-	var podName string
+	var pod *corev1.Pod
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		if p.Status.Phase == corev1.PodSucceeded {
-			podName = p.Name
+			pod = p
 			break
 		}
 	}
-	if podName == "" {
+	if pod == nil {
 		return dumpCompletionMetadata{}, false
 	}
 
-	req := r.Clientset.CoreV1().Pods(job.Namespace).GetLogs(podName, &corev1.PodLogOptions{
-		Container: backupJobContainerName,
+	candidates := []string{backupJobContainerName, backupEncryptUploadContainerName}
+	if len(pod.Spec.Containers) > 0 {
+		// Include the pod's actual main container name as a fallback
+		// for forward compatibility.
+		name := pod.Spec.Containers[0].Name
+		if name != "" && name != backupJobContainerName && name != backupEncryptUploadContainerName {
+			candidates = append(candidates, name)
+		}
+	}
+
+	for _, container := range candidates {
+		meta, ok := r.tailOneContainer(ctx, job.Namespace, pod.Name, container)
+		if ok {
+			return meta, true
+		}
+	}
+	return dumpCompletionMetadata{}, false
+}
+
+// tailOneContainer tails a single pod container log for the
+// BLOODRAVEN_DUMP_COMPLETE sentinel. Separate helper so tailJobCompletion
+// can try multiple container names in order.
+func (r *MysqlBackupReconciler) tailOneContainer(ctx context.Context, namespace, podName, container string) (dumpCompletionMetadata, bool) {
+	req := r.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: container,
 		TailLines: ptr64(50),
 	})
 	stream, err := req.Stream(ctx)

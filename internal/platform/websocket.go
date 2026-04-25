@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -41,24 +44,65 @@ type TopologySite struct {
 
 // Hub manages websocket connections and broadcasts state changes.
 type Hub struct {
-	mu       sync.RWMutex
-	clients  map[*websocket.Conn]struct{}
-	logger   *slog.Logger
-	upgrader websocket.Upgrader
+	mu             sync.RWMutex
+	clients        map[*websocket.Conn]struct{}
+	logger         *slog.Logger
+	upgrader       websocket.Upgrader
+	allowedOrigins map[string]struct{} // nil == allow all (legacy)
+	maxClients     int                 // 0 == unlimited
 }
 
+// NewHub builds a Hub and applies the AUDIT H2 hardening:
+//
+//   - BLOODRAVEN_WS_ALLOWED_ORIGINS (comma-separated) narrows the
+//     Origin header allowlist; default "*" preserves the pre-hardening
+//     behavior so dashboards that don't send Origin keep working.
+//   - BLOODRAVEN_WS_MAX_CLIENTS caps the concurrent connection count;
+//     extra upgrades are rejected with 429. Default 100.
 func NewHub(logger *slog.Logger) *Hub {
-	return &Hub{
-		clients: make(map[*websocket.Conn]struct{}),
-		logger:  logger,
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
+	h := &Hub{
+		clients:    make(map[*websocket.Conn]struct{}),
+		logger:     logger,
+		maxClients: envInt("BLOODRAVEN_WS_MAX_CLIENTS", 100),
 	}
+	if v := strings.TrimSpace(os.Getenv("BLOODRAVEN_WS_ALLOWED_ORIGINS")); v != "" && v != "*" {
+		h.allowedOrigins = make(map[string]struct{})
+		for _, o := range strings.Split(v, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				h.allowedOrigins[o] = struct{}{}
+			}
+		}
+	}
+	h.upgrader = websocket.Upgrader{CheckOrigin: h.checkOrigin}
+	return h
+}
+
+func (h *Hub) checkOrigin(r *http.Request) bool {
+	if h.allowedOrigins == nil {
+		return true
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Non-browser clients typically omit Origin. Accept only when
+		// the allowlist is unset (handled above); otherwise reject.
+		return false
+	}
+	_, ok := h.allowedOrigins[origin]
+	return ok
 }
 
 // HandleWS is the HTTP handler for /ws/status.
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
+	if h.maxClients > 0 {
+		h.mu.RLock()
+		n := len(h.clients)
+		h.mu.RUnlock()
+		if n >= h.maxClients {
+			http.Error(w, "too many websocket clients", http.StatusTooManyRequests)
+			return
+		}
+	}
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.logger.Error("websocket upgrade failed", "error", err)
@@ -111,4 +155,16 @@ func (h *Hub) ClientCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
+}
+
+func envInt(name string, def int) int {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
 }

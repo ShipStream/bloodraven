@@ -12,7 +12,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-mysql-org/go-mysql v1.14.0
 	github.com/go-sql-driver/mysql v1.9.3
-	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // AUDIT M8: pseudo-version is imposed transitively by k8s.io/client-go and k8s.io/apiextensions-apiserver; `go mod tidy` restores it after any downgrade. Revisit once upstream tags v1.5.4.
 	github.com/prometheus/client_golang v1.23.2
 	k8s.io/api v0.35.4
 	k8s.io/apimachinery v0.35.4

@@ -70,7 +70,7 @@ REPL_USER=$(escape_sql "$MYSQL_REPLICATION_USER")
 REPL_PASS=$(escape_sql "$MYSQL_REPLICATION_PASSWORD")
 
 echo "bloodraven-init: creating replication user '${REPL_USER}'"
-mysql -u root -p"${MYSQL_ROOT_PASSWORD}" <<EOSQL
+MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<EOSQL
 CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';
 ALTER USER '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%';
@@ -103,7 +103,7 @@ create_user_with_grants() {
     fi
     grants="${2//__USER__/$user}"
     echo "bloodraven-init: creating $1 user '${user}'"
-    mysql -u root -p"${MYSQL_ROOT_PASSWORD}" <<EOSQL
+    MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<EOSQL
 CREATE USER IF NOT EXISTS '${user}'@'%' IDENTIFIED BY '${pass}';
 ALTER USER '${user}'@'%' IDENTIFIED BY '${pass}';
 ${grants}

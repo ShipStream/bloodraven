@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -160,6 +161,14 @@ func pitrDownloadConfigFromEnv() (*sidecar.PITRConfig, error) {
 	default:
 		return nil, fmt.Errorf("BLOODRAVEN_PITR_STORAGE_TYPE=%q; must be S3 or PVC", storageType)
 	}
+
+	// Encryption: when the profile enables archive encryption the
+	// operator sets BLOODRAVEN_PITR_PASSPHRASE_FILE on this init
+	// container. sidecar.NewArchiveStore transparently wraps the
+	// concrete backend in an encryptedStore when PassphraseFile is
+	// non-empty, so the download path decrypts without any further
+	// plumbing here.
+	cfg.PassphraseFile = os.Getenv("BLOODRAVEN_PITR_PASSPHRASE_FILE")
 	return cfg, nil
 }
 
@@ -231,18 +240,46 @@ func downloadSiteBinlogs(
 	if err != nil {
 		return 0, err
 	}
+	// Reject manifest entries whose Name would escape the site's
+	// staging directory or whose stored RemotePath points outside the
+	// trusted manifest prefix. A compromised bucket could otherwise
+	// have a crafted manifest yank arbitrary objects (e.g. from
+	// another tenant's prefix) or land files in /tmp / /var/run/secrets
+	// via basename traversal (AUDIT H1).
 	siteDir := filepath.Join(outDir, site)
 	if err := os.MkdirAll(siteDir, 0o755); err != nil {
 		return 0, fmt.Errorf("mkdir %s: %w", siteDir, err)
 	}
+	absSiteDir, err := filepath.Abs(siteDir)
+	if err != nil {
+		return 0, fmt.Errorf("abs %s: %w", siteDir, err)
+	}
+	// Reconstruct the expected RemotePath from trusted inputs
+	// (profile prefix + site + basename) rather than trusting the
+	// stored value — the manifest attacker has no way to influence
+	// the prefix + site pair we assemble here.
+	allowedRemotePrefix := path.Join(prefix, site) + "/"
 	downloaded := 0
 	for _, e := range m.Files {
 		if !e.FirstEventTime.IsZero() && e.FirstEventTime.After(stopTime) {
 			continue
 		}
-		dst := filepath.Join(siteDir, e.Name)
-		if err := store.GetFile(ctx, e.RemotePath, dst); err != nil {
-			return downloaded, fmt.Errorf("download %s: %w", e.RemotePath, err)
+		if !isSafeBasename(e.Name) {
+			return downloaded, fmt.Errorf("reject manifest entry with unsafe name %q", e.Name)
+		}
+		dst, err := safeJoinUnderRoot(absSiteDir, e.Name)
+		if err != nil {
+			return downloaded, fmt.Errorf("reject unsafe manifest name %q: %w", e.Name, err)
+		}
+		// Accept the stored RemotePath only when it lies under the
+		// expected prefix+site; otherwise rebuild it from trusted
+		// fields.
+		remotePath := e.RemotePath
+		if remotePath == "" || !strings.HasPrefix(remotePath, allowedRemotePrefix) {
+			remotePath = path.Join(prefix, site, e.Name)
+		}
+		if err := store.GetFile(ctx, remotePath, dst); err != nil {
+			return downloaded, fmt.Errorf("download %s: %w", remotePath, err)
 		}
 		logger.Info("archived binlog downloaded",
 			"site", site,
@@ -252,4 +289,23 @@ func downloadSiteBinlogs(
 		downloaded++
 	}
 	return downloaded, nil
+}
+
+// isSafeBasename rejects names with path separators, parent references,
+// or NUL / control bytes. Manifest entries should always be plain
+// basenames (the archiver writes `mysql-bin.000123`-style names); a
+// payload that contains "/" or ".." is a tampered manifest.
+func isSafeBasename(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 {
+			return false
+		}
+	}
+	return true
 }

@@ -75,6 +75,25 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context
 		}
 	}
 
+	// Encryption validation: the passphrase Secret must exist and
+	// contain the referenced key. We emit events (not failures) so a
+	// user who intentionally plans to create the Secret *after* the
+	// MysqlFailoverGroup isn't blocked — but every subsequent backup
+	// that tries to mount a missing Secret will itself fail visibly,
+	// which is the desired signal path.
+	if fg.Spec.Backup != nil {
+		for i := range fg.Spec.Backup.Profiles {
+			p := &fg.Spec.Backup.Profiles[i]
+			if !p.EncryptionEnabled() {
+				continue
+			}
+			if err := r.validateEncryptionSecret(ctx, fg, p); err != nil {
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupEncryptionInvalid",
+					"profile %q: %s", p.Name, err.Error())
+			}
+		}
+	}
+
 	// Both backup and restore Jobs mount this ConfigMap, so we reconcile
 	// it for either path.
 	if err := r.reconcileBackupScriptsConfigMap(ctx, fg); err != nil {
@@ -99,6 +118,42 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupAssets(ctx context.Context
 		}
 	}
 
+	return nil
+}
+
+// validateEncryptionSecret confirms the referenced passphrase Secret
+// exists and carries the expected key. Errors are returned so the
+// caller can decide how to surface them — reconcileBackupAssets
+// surfaces them as BackupEncryptionInvalid events rather than blocking
+// reconciliation.
+func (r *MysqlFailoverGroupReconciler) validateEncryptionSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, profile *v1alpha1.BackupProfile) error {
+	ref := profile.Encryption.PassphraseSecret
+	key := ref.PassphraseSecretKeyOrDefault()
+	var s corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: ref.Name}, &s); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("encryption.passphraseSecret Secret %q not found in namespace %q",
+				ref.Name, fg.Namespace)
+		}
+		return fmt.Errorf("get encryption Secret: %w", err)
+	}
+	data, ok := s.Data[key]
+	if !ok {
+		return fmt.Errorf("Secret %q does not contain key %q", ref.Name, key)
+	}
+	// Trim common whitespace so a trailing newline doesn't trigger the
+	// empty check (matches backupcrypto.ReadPassphraseFile semantics).
+	for len(data) > 0 {
+		c := data[len(data)-1]
+		if c == '\n' || c == '\r' || c == ' ' || c == '\t' {
+			data = data[:len(data)-1]
+			continue
+		}
+		break
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("Secret %q key %q is empty", ref.Name, key)
+	}
 	return nil
 }
 

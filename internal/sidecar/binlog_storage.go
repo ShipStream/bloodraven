@@ -16,6 +16,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
+
+	"github.com/shipstream/bloodraven/internal/backupcrypto"
 )
 
 // ArchiveStore abstracts the two storage backends (S3 and local PVC)
@@ -71,21 +73,43 @@ func NewArchiveStore(ctx context.Context, cfg *PITRConfig) (archiveStore, error)
 // newArchiveStore constructs the backend matching cfg. It is called
 // once at sidecar startup; the returned store is safe for concurrent
 // use from the archiver goroutine and any future retention worker.
+//
+// When cfg.PassphraseFile is set the concrete backend is wrapped with
+// an encryptedStore so every Put/Get/PutFile/GetFile transparently
+// runs through backupcrypto. List/Delete pass through unchanged.
 func newArchiveStore(ctx context.Context, cfg *PITRConfig) (archiveStore, error) {
+	var base archiveStore
 	switch cfg.StorageType {
 	case "S3":
 		if cfg.S3 == nil {
 			return nil, fmt.Errorf("archive store: S3 config is nil")
 		}
-		return newS3Store(ctx, cfg.S3)
+		s, err := newS3Store(ctx, cfg.S3)
+		if err != nil {
+			return nil, err
+		}
+		base = s
 	case "PVC":
 		if cfg.PVC == nil {
 			return nil, fmt.Errorf("archive store: PVC config is nil")
 		}
-		return newPVCStore(cfg.PVC)
+		s, err := newPVCStore(cfg.PVC)
+		if err != nil {
+			return nil, err
+		}
+		base = s
 	default:
 		return nil, fmt.Errorf("archive store: unknown storage type %q", cfg.StorageType)
 	}
+
+	if cfg.PassphraseFile != "" {
+		passphrase, err := backupcrypto.ReadPassphraseFile(cfg.PassphraseFile)
+		if err != nil {
+			return nil, fmt.Errorf("archive store: read passphrase: %w", err)
+		}
+		base = WrapWithEncryptionOptions(base, passphrase, cfg.AllowPlaintextFallback)
+	}
+	return base, nil
 }
 
 // ----------------------------------------------------------------------
@@ -108,17 +132,41 @@ func newS3Store(ctx context.Context, cfg *PITRS3Config) (*s3Store, error) {
 		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.Region))
 	}
 	if cfg.AWSCredsDir != "" {
-		ak, _ := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_ACCESS_KEY_ID"))
-		sk, _ := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_SECRET_ACCESS_KEY"))
-		st, _ := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_SESSION_TOKEN"))
-		if rg, _ := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_REGION")); cfg.Region == "" && rg != "" {
+		// The operator mounts a Secret here; a missing or unreadable
+		// required file is an operator mistake, not a "fall back to
+		// ambient creds" signal. Failing loud prevents the restore Job
+		// from silently running under IRSA / instance-profile
+		// credentials that may have a broader scope than the caller
+		// intended (see AUDIT M2).
+		ak, err := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_ACCESS_KEY_ID"))
+		if err != nil {
+			return nil, fmt.Errorf("aws creds dir: read AWS_ACCESS_KEY_ID: %w", err)
+		}
+		sk, err := readTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_SECRET_ACCESS_KEY"))
+		if err != nil {
+			return nil, fmt.Errorf("aws creds dir: read AWS_SECRET_ACCESS_KEY: %w", err)
+		}
+		// Session token is optional; missing file is OK, but a file we
+		// can't read is not. ReadFile will only return os.IsNotExist
+		// when the file is absent; anything else (permission denied,
+		// truncated mount) is surfaced.
+		st, err := readOptionalTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_SESSION_TOKEN"))
+		if err != nil {
+			return nil, fmt.Errorf("aws creds dir: read AWS_SESSION_TOKEN: %w", err)
+		}
+		rg, err := readOptionalTrimFile(filepath.Join(cfg.AWSCredsDir, "AWS_REGION"))
+		if err != nil {
+			return nil, fmt.Errorf("aws creds dir: read AWS_REGION: %w", err)
+		}
+		if cfg.Region == "" && rg != "" {
 			loadOpts = append(loadOpts, awsconfig.WithRegion(rg))
 		}
-		if ak != "" && sk != "" {
-			loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
-				credentials.NewStaticCredentialsProvider(ak, sk, st),
-			))
+		if ak == "" || sk == "" {
+			return nil, fmt.Errorf("aws creds dir: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be non-empty")
 		}
+		loadOpts = append(loadOpts, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(ak, sk, st),
+		))
 	}
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
@@ -468,6 +516,21 @@ func (p *pvcStore) List(_ context.Context, prefix string) ([]string, error) {
 func readTrimFile(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// readOptionalTrimFile is like readTrimFile but treats a missing file
+// as empty string without error. Other errors (permission denied,
+// truncated mount, EIO) are still surfaced so an operator mistake
+// doesn't silently produce a degraded credential set.
+func readOptionalTrimFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
