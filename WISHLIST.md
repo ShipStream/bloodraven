@@ -4,18 +4,15 @@
 
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
 - [ ] 9. Restore duration and size metrics
-- [ ] 12. PVC loss recovery runbook
 - [ ] 18. `kubectl` plugin
 - [ ] 25. CRD version-migration plan
 - [ ] 27. Backup/restore performance guide
 - [ ] 28. Network-partition behavior
-- [ ] 29. Known limitations, up-front
 - [ ] 30. Public repo, license, release cadence
 - [ ] 31. Documentation publishing parity
 - [ ] 32. Real-cluster E2E CI gate
 - [ ] 33. True shared-node placement model
 - [ ] 34. Production install examples and alert manifests
-- [ ] 35. Site-local application integration guide
 
 ## P0 — Production adoption blockers
 
@@ -29,11 +26,7 @@
 
 **9. Restore duration and size metrics.** Add `bloodraven_restore_duration_seconds` and `bloodraven_restore_last_success_timestamp_seconds`, plus per-restore GTID and binlog-replay coordinates in status. DR confidence requires knowing your actual measured restore time, not estimated.
 
-**12. PVC loss recovery runbook.** If site `iad`'s PVC is irrecoverable, what exactly do I do? Delete the PVC, let the operator auto-clone from `pdx`? Is there a failure mode where auto-clone runs against a still-replicating stale state? Write the runbook with the expected `Bootstrapping` condition transitions and timing.
-
 **33. True shared-node placement model.** The docs now describe per-group taints, but node discovery still relies on single-valued `shipstream.io/failover-group=<group>` and `shipstream.io/site=<site>` labels. That prevents one physical node from participating in multiple failover groups at the same site. Replace or extend this with a multi-valued-compatible selector model, such as per-group labels (`shipstream.io/failover-group.orders=true`, `shipstream.io/site.orders=iad`) or explicit `spec.sites[].taintNodeSelector`. Update tainting, cleanup, docs, and tests so failover in one group does not require dedicated node pools or affect unrelated tenants.
-
-**35. Site-local application integration guide.** ShipStream's warm-standby web pods may need to connect to their local site's MySQL Service and show maintenance when that local DB is read-only, while workers/cron/runners should be evicted to the active site via taints. The current app docs mostly recommend the moving `-primary` Service, which can create cross-site app-to-DB traffic during DNS/Service convergence. Document supported connection patterns explicitly: site-local services for warm web pods, `-primary` for migrated workers, read-only fallback behavior, DNS TTL expectations, and example Helm/ApplicationSet snippets.
 
 ## P2 — Observability and operability
 
@@ -49,14 +42,12 @@
 
 **28. Network-partition behavior.** Explicitly documented scenarios: (a) operator ↔ site-A partition (site-B reachable); (b) site-A ↔ site-B partition (operator reachable to both); (c) asymmetric partition (operator reachable to A, A not reachable to B). For each, the expected observable behavior, which metric moves, which event fires.
 
-**29. Known limitations, up-front.** Today "known limitations" appears mid-way through the PITR section. Move to a top-level page: two-site only, single-operator-replica (until #1), bootstrap-only restore (until #6), `status.pitr` unpopulated (until #15), `BackupPITRNotImplemented` event semantics, etc. Calibrate user expectations before they write production manifests.
-
 **30. Public repo, license, release cadence.** If this isn't going external, skip. If it might — Apache-2.0, semver on the CRD and the operator separately, `CHANGELOG.md`, GitHub releases with signed images, published Helm chart index. The bar for "a real project someone else will adopt" is higher than the bar for "our internal tool."
 
 ---
 
 ## Suggested sequencing
 
-- **Production adoption gate:** #31, #32, #33, #34, #35
-- **Next quarter:** #7, #9, #12, #18, #28 (DR muscle + day-2 ergonomics)
+- **Production adoption gate:** #31, #32, #33, #34
+- **Next quarter:** #7, #9, #18, #28 (DR muscle + day-2 ergonomics)
 - **When stable enough for external use:** #25, #30 (open-source prep if that's the path)

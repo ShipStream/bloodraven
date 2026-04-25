@@ -17,9 +17,9 @@ For a `MysqlFailoverGroup` named `orders` in namespace `default`, the operator c
 | `mysql-orders-iad` | `mysql-orders-iad.default.svc.cluster.local:3306` | Direct access to the `iad` site instance. |
 | `mysql-orders-pdx` | `mysql-orders-pdx.default.svc.cluster.local:3306` | Direct access to the `pdx` site instance. |
 
-### Recommended connection pattern
+### Default connection pattern
 
-For most applications:
+For workloads that should move with the active database site:
 
 ```
 # Writes
@@ -29,7 +29,9 @@ mysql-orders-primary.<namespace>.svc.cluster.local:3306
 mysql-orders-replicas.<namespace>.svc.cluster.local:3306
 ```
 
-The `-primary` Service selector is updated by the operator whenever a failover occurs. Your application does not need to be aware of which site is currently active.
+The `-primary` Service selector is updated by the operator whenever a failover occurs. Use this for workers, cron jobs, runners, and other write-dependent workloads that Bloodraven should evict and reschedule to the active site.
+
+For warm-standby web pods that intentionally keep one deployment per site, use the [site-local pattern](#strategy-3-site-local-warm-standby) instead.
 
 ## Failover strategies
 
@@ -99,6 +101,80 @@ Best for applications that are **deployed independently per site** and only need
 - Connect to `mysql-orders-primary` for writes
 - Optionally connect to `mysql-orders-replicas` for reads
 - Handle brief connection errors during failover (seconds, not minutes)
+
+### Strategy 3: Site-local warm standby
+
+Best for web/API pods that run in every site and should serve a
+maintenance page when their local MySQL is not writable. This avoids
+cross-site app-to-database traffic and lets each site's frontend reflect
+the state of the local database instance.
+
+**How it works:**
+
+1. Each site deployment connects to its own site Service:
+   `mysql-orders-iad` in `iad`, `mysql-orders-pdx` in `pdx`.
+2. The app checks `@@global.read_only` or handles MySQL error 1290.
+3. If local MySQL is read-only, the app serves maintenance / read-only
+   mode instead of sending writes across the WAN.
+4. User-facing DNS or traffic steering moves users to the active site;
+   Bloodraven still updates the failover group's external DNS record for
+   clients that use `spec.dns.hostname` directly.
+
+**Application requirements:**
+
+- Run one deployment per site, pinned by node affinity or your GitOps
+  generator.
+- Set `MYSQL_HOST` to the site-local Service, not `mysql-orders-primary`.
+- Do not tolerate your own group's `db-readonly` taint for workers that
+  must move; web pods that intentionally stay warm in both sites may
+  tolerate it and rely on the local read-only check.
+- Keep database writes behind retry/maintenance handling. A local
+  read-only response is expected during normal failover.
+
+Example per-site deployment fragment:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-web-iad
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: shipstream.io/site
+                    operator: In
+                    values: [iad]
+      tolerations:
+        - key: shipstream.io/db-readonly-orders
+          operator: Exists
+          effect: NoExecute
+      containers:
+        - name: web
+          image: example/orders-web:latest
+          env:
+            - name: MYSQL_HOST
+              value: mysql-orders-iad.default.svc.cluster.local
+            - name: MYSQL_PORT
+              value: "3306"
+```
+
+For an Argo CD ApplicationSet or Helm chart, make `site` a parameter and
+derive both the node selector and `MYSQL_HOST` from it:
+
+```yaml
+env:
+  - name: MYSQL_HOST
+    value: mysql-orders-{{ .Values.site }}.default.svc.cluster.local
+```
+
+Use the moving `mysql-orders-primary` Service for background workers in
+the same application if those workers should only run where writes are
+accepted.
 
 ## Handling failover in application code
 

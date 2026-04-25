@@ -142,20 +142,90 @@ If the prefix doesn't match the observed `divergentGtid` (wrong site, stale copy
 
 A `RecloneRequested` Normal Event marks the start. The site will temporarily appear unreachable during the MySQL restart that follows the clone. Progress is reported in the `Bootstrapping` condition.
 
-:::note Cold reclone
-When a site has **no** `divergentGtid` (PVC loss, manual rebuild, first-time bootstrap mistakes), the bare annotation form `reclone-site=<site>` is accepted — there is no recoverable data to protect against. The interlock only applies when divergence is recorded.
+## PVC loss recovery runbook
+
+Use this when one site's MySQL data PVC is irrecoverable: cloud volume
+deleted, local disk lost, filesystem corrupted beyond repair, or a
+failed clone left the data directory unusable.
+
+:::danger Data loss boundary
+If the lost PVC belonged to a primary that accepted writes not yet
+replicated elsewhere, those transactions are unrecoverable from
+Bloodraven. PITR can only replay binlog files that survived long enough
+to be archived; a lost primary PVC takes its unarchived binlog tail with
+it. See [Durability and RPO](./durability-and-rpo.mdx#pitr-and-the-rpo-window).
 :::
 
-**Alternative: Manual PVC deletion**
-
-If you prefer to wipe the storage entirely:
+### 1. Identify the failed site and current primary
 
 ```bash
-kubectl delete pvc data-mysql-orders-iad-0
-kubectl delete pod mysql-orders-iad-0
+kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.status.activeSite}{"\n"}{range .status.sites[*]}{.name}: state={.state} recovery={.recoveryState} divergent={.divergentGtid}{"\n"}{end}'
 ```
 
-The operator will detect the fresh (empty) MySQL instance and automatically clone it from the primary.
+Do not wipe the active primary unless you are deliberately restoring
+from backup. If the damaged site is the active primary, first let the
+operator fail over or run a planned failover to a healthy
+primary-candidate site.
+
+### 2. Confirm the target has no recoverable divergent data
+
+For normal old-primary divergence, use the GTID-prefix reclone flow
+above. For PVC loss, the target has no usable data to preserve, so the
+operator accepts the cold reclone form:
+
+```bash
+kubectl annotate mysqlfailovergroup orders \
+  bloodraven.shipstream.io/reclone-site=iad
+```
+
+The operator emits `RecloneRequested` and drives the same clone path used
+for automatic bootstrap. It will not reclone the current active primary.
+
+### 3. If the PVC object itself is bad, delete it
+
+If Kubernetes is still binding the pod to a corrupted claim, delete the
+site pod and PVC so the operator can recreate storage from the CR spec:
+
+```bash
+kubectl delete pod mysql-orders-iad-0
+kubectl delete pvc data-mysql-orders-iad-0
+```
+
+If your cluster uses local-path storage, clear any `db-readonly` taint
+from the node before deleting the PVC; otherwise the provisioner's helper
+pod may be evicted and the replacement claim can stay `Pending`.
+
+### 4. Watch bootstrap and clone progress
+
+```bash
+kubectl describe mysqlfailovergroup orders
+kubectl get pods -l shipstream.io/failover-group=orders -w
+```
+
+Expected condition flow:
+
+| Phase | What you should see |
+|---|---|
+| Requested | `RecloneRequested` Event on the `MysqlFailoverGroup`. |
+| Bootstrapping | `Bootstrapping=True`; the target site pod may restart while `CLONE INSTANCE` replaces the data directory. |
+| Recovering | The cloned site comes back read-only and replication is configured from the active primary. |
+| Healthy | `Bootstrapping=False`, `RecoveryPending=False`, target `state=read-only`, replication running, and `divergentGtid` empty. |
+
+Clone time is proportional to dataset size and storage throughput. Small
+playground datasets finish in minutes; production datasets can take much
+longer.
+
+### 5. Verify the site rejoined safely
+
+```bash
+kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{range .status.sites[*]}{.name}: state={.state} replicating={.replicating} lag={.secondsBehindSource} recovery={.recoveryState}{"\n"}{end}'
+```
+
+The recovered site should be read-only, replicating from the current
+primary, and below your `spec.replication.maxLagSeconds` threshold before
+you consider the incident closed.
 
 :::caution
 If the old primary came back with no divergence (GTID sets match), the operator automatically reconfigures it as a replica — no manual intervention is needed. The `RecoveryPending` condition only appears when divergent transactions exist.

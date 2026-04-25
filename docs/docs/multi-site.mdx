@@ -58,9 +58,9 @@ best candidate using this order:
 
 If *no* `primary-candidate` replica is reachable when the primary
 fails, the operator emits a `NoPrimary` alert and takes no action.
-Manual promotion is required (future: the [planned-failover
-API](../WISHLIST.md#11-graceful-planned-failover-api) will cover the
-deliberate-promotion path).
+Manual promotion of a `dr-only` site is deliberately outside automatic
+failover; convert it to `primary-candidate` first if you intend to make
+it eligible for [planned failover](./planned-failover.mdx).
 
 ## Split-brain resolution
 
@@ -161,6 +161,5 @@ outage.
 - The ordered rolling-update path walks a single active/standby pair
   per update cycle; additional sites observe spec drift and get
   rolled on subsequent cycles.
-- Multi-site-aware planned failover (`kubectl annotate ...
-  planned-failover=<site>`) is tracked in
-  [WISHLIST.md#11](../WISHLIST.md).
+- Planned failover targets only `primary-candidate` sites. A `dr-only`
+  site must be deliberately reclassified before it can be promoted.

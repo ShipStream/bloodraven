@@ -37,8 +37,8 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 | `extraContainers` | []Container | No | -- | Additional containers injected into every MySQL pod (e.g. exporters) |
 | `extraInitContainers` | []Container | No | -- | Additional init containers injected after the operator's built-in init container |
 | `backup` | BackupSpec | No | -- | Backup configuration (profiles, schedules, retry, PITR, encryption, security contexts). See [BackupSpec](#backupspec). |
-| `initFromBackup` | InitFromBackupSpec | No | -- | One-shot restore-on-first-boot before normal bootstrap completes. See [InitFromBackupSpec](#initfrombackupspec). |
-| `restoreInPlace` | RestoreInPlaceSpec | No | -- | Re-triggerable destructive restore against the active primary. Bumping `confirm` to a newer RFC 3339 timestamp re-arms. See [RestoreInPlaceSpec](#restoreinplacespec). |
+| `initFromBackup` | InitFromBackupSpec | No | -- | One-shot restore-on-first-boot before normal bootstrap completes. See [InitFromBackupSpec](#initfrombackupspec-specinitfrombackup). |
+| `restoreInPlace` | RestoreInPlaceSpec | No | -- | Re-triggerable destructive restore against the active primary. Bumping `confirm` to a newer RFC 3339 timestamp re-arms. See [RestoreInPlaceSpec](#restoreinplacespec-specrestoreinplace). |
 | `plannedFailover` | PlannedFailoverSpec | No | -- | Cluster-wide defaults for the graceful planned-failover API (triggered via `bloodraven.shipstream.io/planned-failover=<site>`). |
 
 ### SiteSpec
@@ -408,7 +408,7 @@ The operator writes the following status fields.
 | `promotionGtidExecuted` | string | GTID set recorded on the candidate at the moment of the most recent promotion, before it began accepting writes. Used for data-loss accounting. |
 | `updatePhase` | string | Current phase of an ordered update; empty when not updating. |
 | `restore` | RestoreStatus | In-flight or completed `initFromBackup` restore (phase, JobName, targetSite, startTime, completionTime, message). |
-| `restoreInPlace` | RestoreInPlaceStatus | In-flight or completed in-place restore (phase, JobName, targetSite, scope, confirmTokenUsed, startTime, completionTime, message). Mirrors the state machine described on [RestoreInPlaceSpec](#restoreinplacespec). |
+| `restoreInPlace` | RestoreInPlaceStatus | In-flight or completed in-place restore (phase, JobName, targetSite, scope, confirmTokenUsed, startTime, completionTime, message). Mirrors the state machine described on [RestoreInPlaceSpec](#restoreinplacespec-specrestoreinplace). |
 | `backupSchedules` | []BackupScheduleStatus | Per-schedule rollup (cronJobName, lastScheduleTime, lastSuccessfulTime, lastBackupName, lastBackupPhase, lastSuccessfulBackupName, lastRetryAttempt, nextRetryTime). |
 | `lastBackupTime` | timestamp | Completion time of the most recent successful MysqlBackup across all profiles, regardless of whether it was scheduled or on-demand. |
 | `pitr` | PITRStatus | Summary of the continuous binlog archive, populated by the operator from periodic polls of each sidecar's `/archiver/status` endpoint. Present when `spec.backup.pitr.enabled=true`. |

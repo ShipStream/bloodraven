@@ -4,6 +4,7 @@
 const sidebars = {
   docsSidebar: [
     'intro',
+    'known-limitations',
     'architecture',
     'multi-site',
     'getting-started',
