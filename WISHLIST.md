@@ -11,6 +11,17 @@
 - [ ] 28. Network-partition behavior
 - [ ] 29. Known limitations, up-front
 - [ ] 30. Public repo, license, release cadence
+- [ ] 31. Documentation publishing parity
+- [ ] 32. Real-cluster E2E CI gate
+- [ ] 33. True shared-node placement model
+- [ ] 34. Production install examples and alert manifests
+- [ ] 35. Site-local application integration guide
+
+## P0 — Production adoption blockers
+
+**31. Documentation publishing parity.** The public ReadTheDocs site has lagged behind `main`, causing current features such as planned failover, multi-site, backup verification/encryption, dashboards, and security docs to appear missing or 404 during external evaluation. Make docs publishing part of CI/release: build Docusaurus on every PR, publish on merge to `main`, verify `llms-full.txt` includes all current docs, and add a link-check job for the public site. The docs site must be a trustworthy source of truth before anyone evaluates Bloodraven for production.
+
+**32. Real-cluster E2E CI gate.** Unit/component/envtest coverage is not enough for a MySQL failover operator. Add an optional-but-required-before-release k3d/kind CI job that installs the chart and exercises real MySQL pods, PVCs, Services, DNS/DNSEndpoint behavior, taints, planned failover, emergency failover, operator restart, PVC loss, NetworkPolicy partition, backup restore, and PITR verification. This should run at least on release tags and nightly; if cost is acceptable, run a reduced smoke subset on PRs.
 
 ## P1 — DR and operational completeness
 
@@ -20,9 +31,15 @@
 
 **12. PVC loss recovery runbook.** If site `iad`'s PVC is irrecoverable, what exactly do I do? Delete the PVC, let the operator auto-clone from `pdx`? Is there a failure mode where auto-clone runs against a still-replicating stale state? Write the runbook with the expected `Bootstrapping` condition transitions and timing.
 
+**33. True shared-node placement model.** The docs now describe per-group taints, but node discovery still relies on single-valued `shipstream.io/failover-group=<group>` and `shipstream.io/site=<site>` labels. That prevents one physical node from participating in multiple failover groups at the same site. Replace or extend this with a multi-valued-compatible selector model, such as per-group labels (`shipstream.io/failover-group.orders=true`, `shipstream.io/site.orders=iad`) or explicit `spec.sites[].taintNodeSelector`. Update tainting, cleanup, docs, and tests so failover in one group does not require dedicated node pools or affect unrelated tenants.
+
+**35. Site-local application integration guide.** ShipStream's warm-standby web pods may need to connect to their local site's MySQL Service and show maintenance when that local DB is read-only, while workers/cron/runners should be evicted to the active site via taints. The current app docs mostly recommend the moving `-primary` Service, which can create cross-site app-to-DB traffic during DNS/Service convergence. Document supported connection patterns explicitly: site-local services for warm web pods, `-primary` for migrated workers, read-only fallback behavior, DNS TTL expectations, and example Helm/ApplicationSet snippets.
+
 ## P2 — Observability and operability
 
 **18. `kubectl` plugin.** `kubectl bloodraven status`, `kubectl bloodraven promote <group> <site>`, `kubectl bloodraven backup <group> --profile nightly`, `kubectl bloodraven verify-backup <name>`. Reduces the `kubectl exec ... mysql -e ...` surface area that's currently in the ops docs.
+
+**34. Production install examples and alert manifests.** The docs mention hardening, NetworkPolicy, ServiceMonitor, PrometheusRule, Cloudflare/external-dns, and k3s, but users still have to assemble production manifests themselves. Ship copy-pasteable examples for: NetworkPolicy around operator/sidecar/auxiliary HTTP, PrometheusRule alerts for failover/data-loss/backup/PITR/archiver lag, Cloudflare external-dns configuration notes, k3s storage-class guidance, and a production Helm values overlay. Keep examples generic, but make the ShipStream/k3s/Cloudflare path first-class enough to validate adoption.
 
 ## P3 — Documentation deliverables
 
@@ -40,5 +57,6 @@
 
 ## Suggested sequencing
 
+- **Production adoption gate:** #31, #32, #33, #34, #35
 - **Next quarter:** #7, #9, #12, #18, #28 (DR muscle + day-2 ergonomics)
 - **When stable enough for external use:** #25, #30 (open-source prep if that's the path)
