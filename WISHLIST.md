@@ -5,14 +5,11 @@
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
 - [ ] 9. Restore duration and size metrics
 - [ ] 18. `kubectl` plugin
-- [ ] 25. CRD version-migration plan
 - [ ] 27. Backup/restore performance guide
-- [ ] 28. Network-partition behavior
 - [ ] 30. Public repo, license, release cadence
 - [ ] 31. Documentation publishing parity
 - [ ] 32. Real-cluster E2E CI gate
 - [ ] 33. True shared-node placement model
-- [ ] 34. Production install examples and alert manifests
 
 ## P0 — Production adoption blockers
 
@@ -32,15 +29,9 @@
 
 **18. `kubectl` plugin.** `kubectl bloodraven status`, `kubectl bloodraven promote <group> <site>`, `kubectl bloodraven backup <group> --profile nightly`, `kubectl bloodraven verify-backup <name>`. Reduces the `kubectl exec ... mysql -e ...` surface area that's currently in the ops docs.
 
-**34. Production install examples and alert manifests.** The docs mention hardening, NetworkPolicy, ServiceMonitor, PrometheusRule, Cloudflare/external-dns, and k3s, but users still have to assemble production manifests themselves. Ship copy-pasteable examples for: NetworkPolicy around operator/sidecar/auxiliary HTTP, PrometheusRule alerts for failover/data-loss/backup/PITR/archiver lag, Cloudflare external-dns configuration notes, k3s storage-class guidance, and a production Helm values overlay. Keep examples generic, but make the ShipStream/k3s/Cloudflare path first-class enough to validate adoption.
-
 ## P3 — Documentation deliverables
 
-**25. CRD version-migration plan.** Currently `v1alpha1`. Document the path to `v1beta1` → `v1`, with conversion-webhook commitments. Users pinning to `v1alpha1` need to know the breaking-change contract.
-
 **27. Backup/restore performance guide.** For a 500 GB dataset, how long does `util.dumpInstance` take with what `threads`/`bytesPerChunk`? How long does `loadDump` take? At what `maxLagSeconds` does your replica-as-source fallback trigger and what's the primary-impact if it does? Users need ballparks before they commit.
-
-**28. Network-partition behavior.** Explicitly documented scenarios: (a) operator ↔ site-A partition (site-B reachable); (b) site-A ↔ site-B partition (operator reachable to both); (c) asymmetric partition (operator reachable to A, A not reachable to B). For each, the expected observable behavior, which metric moves, which event fires.
 
 **30. Public repo, license, release cadence.** If this isn't going external, skip. If it might — Apache-2.0, semver on the CRD and the operator separately, `CHANGELOG.md`, GitHub releases with signed images, published Helm chart index. The bar for "a real project someone else will adopt" is higher than the bar for "our internal tool."
 
@@ -48,6 +39,6 @@
 
 ## Suggested sequencing
 
-- **Production adoption gate:** #31, #32, #33, #34
-- **Next quarter:** #7, #9, #18, #28 (DR muscle + day-2 ergonomics)
-- **When stable enough for external use:** #25, #30 (open-source prep if that's the path)
+- **Production adoption gate:** #31, #32, #33
+- **Next quarter:** #7, #9, #18 (DR muscle + day-2 ergonomics)
+- **When stable enough for external use:** #30 (open-source prep if that's the path)
