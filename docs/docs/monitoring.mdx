@@ -146,6 +146,91 @@ groups:
           summary: "No site is currently writable"
 ```
 
+## Grafana dashboards
+
+Bloodraven ships five ready-to-use Grafana dashboards covering every metric the operator publishes. They live in the chart at [`charts/bloodraven/dashboards/`](https://github.com/ShipStream/bloodraven/tree/main/charts/bloodraven/dashboards) and are also installable as ConfigMaps via the Helm chart.
+
+| Dashboard | UID | What it's for |
+|---|---|---|
+| **Overview** | `bloodraven-overview` | Health at a glance: writable sites, state timeline, failover activity, replication lag, backup/archiver freshness. Start here. |
+| **Failover & Topology** | `bloodraven-failover` | Auto and planned failovers, durations, lag-wait histograms, state transitions, DNS flips, node taints, split-brain resolves. |
+| **Replication & Recovery** | `bloodraven-replication` | Replication lag per site, IO/SQL thread up/down, divergent transactions, reclone ops, poll latency. |
+| **Backups & Verification** | `bloodraven-backups` | Backup run/failure counts, duration, size, last-success age, verification runs, PITR replay lag. |
+| **PITR Archiver** | `bloodraven-archiver` | Per-site archiver upload age, backlog files, upload failures. |
+
+All five dashboards share a `datasource` variable and cross-link in the top-left corner, so you can roam between them without losing the time range.
+
+### Setup — three paths
+
+Pick whichever matches your Grafana install. All three use the same JSON files.
+
+#### 1. Helm chart + kube-prometheus-stack (zero-config)
+
+If your Grafana is deployed by [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack) or the upstream [grafana/grafana](https://github.com/grafana/helm-charts/tree/main/charts/grafana) chart, its dashboard-sidecar watches for ConfigMaps labelled `grafana_dashboard: "1"` by default. Just enable the flag:
+
+```bash
+helm upgrade --install bloodraven bloodraven/bloodraven \
+  --namespace bloodraven --create-namespace \
+  --set grafanaDashboards.enabled=true
+```
+
+The chart renders one ConfigMap per dashboard, the sidecar picks them up within ~30s, and the dashboards appear in a "Bloodraven" folder in Grafana. No restart, no re-login.
+
+Common tweaks in `values.yaml`:
+
+```yaml
+grafanaDashboards:
+  enabled: true
+  # Sidecar is often scoped to the monitoring namespace
+  namespace: monitoring
+  # Change folder name
+  folder: MySQL / Bloodraven
+  # If your sidecar watches a non-default label
+  label: grafana_dashboard
+  labelValue: "1"
+```
+
+#### 2. Grafana file-based provisioning
+
+If you provision Grafana from disk, copy the JSON files into your provisioning directory and point a provider at them:
+
+```bash
+# One-time copy (re-run on upgrade to get dashboard updates)
+kubectl -n monitoring cp -c grafana \
+  bloodraven/charts/bloodraven/dashboards \
+  grafana-pod:/var/lib/grafana/dashboards/bloodraven
+```
+
+```yaml
+# /etc/grafana/provisioning/dashboards/bloodraven.yaml
+apiVersion: 1
+providers:
+  - name: bloodraven
+    folder: Bloodraven
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/bloodraven
+```
+
+#### 3. Manual UI import
+
+For one-off installs:
+
+1. In Grafana, click **Dashboards → New → Import**.
+2. Paste the contents of any file in [`charts/bloodraven/dashboards/`](https://github.com/ShipStream/bloodraven/tree/main/charts/bloodraven/dashboards).
+3. Pick your Prometheus datasource when prompted.
+4. Repeat for each dashboard you want.
+
+Cross-dashboard links use the dashboard UID (`bloodraven-overview`, etc.) so they keep working as long as you don't edit the UID on import.
+
+### Prerequisites
+
+- Your Prometheus must be scraping the operator — either the ServiceMonitor the chart ships (`--set metrics.serviceMonitor.enabled=true`) or an equivalent scrape job.
+- The dashboards use standard Prometheus histograms/gauges, so no recording rules are required. Alerts in the next section can sit alongside them.
+
 ## Kubernetes Events
 
 Bloodraven emits standard Kubernetes Events on `MysqlFailoverGroup` and `MysqlBackup` resources. These events can be forwarded to Slack, PagerDuty, or any webhook endpoint using tools like [Kubewatch](https://github.com/robusta-dev/kubewatch), [Argo Events](https://argoproj.github.io/argo-events/), or [Event Router](https://github.com/heptiolabs/eventrouter).

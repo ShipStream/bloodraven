@@ -1,0 +1,178 @@
+{
+  "title": "Bloodraven — Backups & Verification",
+  "uid": "bloodraven-backups",
+  "tags": ["bloodraven", "mysql", "backup"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "1m",
+  "time": {"from": "now-7d", "to": "now"},
+  "graphTooltip": 1,
+  "links": [
+    {"title": "Overview", "type": "link", "url": "/d/bloodraven-overview", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true},
+    {"title": "PITR Archiver", "type": "link", "url": "/d/bloodraven-archiver", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true}
+  ],
+  "templating": {
+    "list": [
+      {"name": "datasource", "type": "datasource", "query": "prometheus", "current": {"text": "Prometheus", "value": "Prometheus"}, "refresh": 1},
+      {
+        "name": "group",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {"query": "label_values(bloodraven_backup_last_attempt_timestamp_seconds, group)", "refId": "group"},
+        "refresh": 2, "multi": true, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": "$__all"}
+      },
+      {
+        "name": "profile",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {"query": "label_values(bloodraven_backup_last_attempt_timestamp_seconds{group=~\"$group\"}, profile)", "refId": "profile"},
+        "refresh": 2, "multi": true, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Headline — is data recoverable?",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Age of last successful backup",
+      "description": "time() - bloodraven_backup_last_success_timestamp_seconds per (group, profile). Red if >2d.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 1},
+      "targets": [{"expr": "time() - bloodraven_backup_last_success_timestamp_seconds{group=~\"$group\", profile=~\"$profile\"}", "refId": "A", "legendFormat": "{{group}}/{{profile}}"}],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "yellow", "value": 86400}, {"color": "red", "value": 172800}
+      ]}}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Age of last verified backup",
+      "description": "time() - bloodraven_backup_verified_timestamp_seconds. Anchor your 'backup is stale' alert on THIS — a fresh backup you haven't restored isn't really a backup.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 1},
+      "targets": [{"expr": "time() - bloodraven_backup_verified_timestamp_seconds{group=~\"$group\", profile=~\"$profile\"}", "refId": "A", "legendFormat": "{{group}}/{{profile}}"}],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "yellow", "value": 172800}, {"color": "red", "value": 604800}
+      ]}}}
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Backup runs",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 8}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Backup results (success/failure) per day",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+      "targets": [{"expr": "sum by (group, profile, result) (increase(bloodraven_backup_runs_total{group=~\"$group\", profile=~\"$profile\"}[1d]))", "refId": "A", "legendFormat": "{{group}}/{{profile}} — {{result}}"}],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70, "stacking": {"mode": "normal"}}, "unit": "short"}, "overrides": [
+        {"matcher": {"id": "byRegexp", "options": ".*success.*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]},
+        {"matcher": {"id": "byRegexp", "options": ".*failure.*"}, "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}
+      ]}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Backup duration p50 / p95",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
+      "targets": [
+        {"expr": "histogram_quantile(0.5,  sum by (group, profile, le) (rate(bloodraven_backup_duration_seconds_bucket{group=~\"$group\", profile=~\"$profile\"}[24h])))", "refId": "A", "legendFormat": "p50 {{group}}/{{profile}}"},
+        {"expr": "histogram_quantile(0.95, sum by (group, profile, le) (rate(bloodraven_backup_duration_seconds_bucket{group=~\"$group\", profile=~\"$profile\"}[24h])))", "refId": "B", "legendFormat": "p95 {{group}}/{{profile}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}}
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Last successful backup size (bytes)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 17},
+      "targets": [{"expr": "bloodraven_backup_last_size_bytes{group=~\"$group\", profile=~\"$profile\"}", "refId": "A", "legendFormat": "{{group}}/{{profile}}"}],
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}}
+    },
+    {
+      "id": 14,
+      "type": "table",
+      "title": "Backup status table",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 17},
+      "targets": [
+        {"expr": "time() - bloodraven_backup_last_success_timestamp_seconds{group=~\"$group\", profile=~\"$profile\"}", "refId": "A", "legendFormat": "success_age", "format": "table", "instant": true},
+        {"expr": "time() - bloodraven_backup_last_attempt_timestamp_seconds{group=~\"$group\", profile=~\"$profile\"}", "refId": "B", "legendFormat": "attempt_age", "format": "table", "instant": true},
+        {"expr": "bloodraven_backup_last_size_bytes{group=~\"$group\", profile=~\"$profile\"}", "refId": "C", "legendFormat": "size", "format": "table", "instant": true}
+      ],
+      "transformations": [
+        {"id": "merge"},
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "namespace": true}, "renameByName": {"Value #A": "success_age_s", "Value #B": "attempt_age_s", "Value #C": "size_bytes"}}}
+      ]
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Verification (restore-of-latest)",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25}
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Verification runs (success/failure) per day",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+      "targets": [{"expr": "sum by (group, profile, result) (increase(bloodraven_backup_verification_runs_total{group=~\"$group\", profile=~\"$profile\"}[1d]))", "refId": "A", "legendFormat": "{{group}}/{{profile}} — {{result}}"}],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 70, "stacking": {"mode": "normal"}}, "unit": "short"}}
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Verification duration p50 / p95",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+      "targets": [
+        {"expr": "histogram_quantile(0.5,  sum by (group, profile, le) (rate(bloodraven_backup_verification_duration_seconds_bucket{group=~\"$group\", profile=~\"$profile\"}[24h])))", "refId": "A", "legendFormat": "p50 {{group}}/{{profile}}"},
+        {"expr": "histogram_quantile(0.95, sum by (group, profile, le) (rate(bloodraven_backup_verification_duration_seconds_bucket{group=~\"$group\", profile=~\"$profile\"}[24h])))", "refId": "B", "legendFormat": "p95 {{group}}/{{profile}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}}
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Verification PITR replay lag",
+      "description": "completionTime − last replayed binlog event. A rising value means archived binlogs trail the live primary — alert below your RPO target.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 34},
+      "targets": [{"expr": "bloodraven_backup_verification_replay_lag_seconds{group=~\"$group\", profile=~\"$profile\"}", "refId": "A", "legendFormat": "{{group}}/{{profile}}"}],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 20}, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null}, {"color": "yellow", "value": 60}, {"color": "red", "value": 300}
+      ]}}}
+    },
+    {
+      "id": 24,
+      "type": "table",
+      "title": "Verification status table",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 42},
+      "targets": [
+        {"expr": "time() - bloodraven_backup_verified_timestamp_seconds{group=~\"$group\", profile=~\"$profile\"}", "refId": "A", "format": "table", "instant": true},
+        {"expr": "time() - bloodraven_backup_verification_last_attempt_timestamp_seconds{group=~\"$group\", profile=~\"$profile\"}", "refId": "B", "format": "table", "instant": true},
+        {"expr": "bloodraven_backup_verification_replay_lag_seconds{group=~\"$group\", profile=~\"$profile\"}", "refId": "C", "format": "table", "instant": true}
+      ],
+      "transformations": [
+        {"id": "merge"},
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "namespace": true}, "renameByName": {"Value #A": "verified_age_s", "Value #B": "attempt_age_s", "Value #C": "replay_lag_s"}}}
+      ]
+    }
+  ]
+}

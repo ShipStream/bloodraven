@@ -1,0 +1,46 @@
+{{- /*
+One ConfigMap per dashboard JSON file.
+
+Why one-per-file instead of a single multi-key ConfigMap:
+  * Grafana's dashboard-sidecar (used by kube-prometheus-stack and the upstream
+    grafana/grafana chart) loads each ConfigMap independently. A broken or
+    oversized JSON in a multi-key CM can stop the sidecar mid-load; splitting
+    keeps blast radius to a single dashboard.
+  * Keeps each ConfigMap well under the 1 MiB etcd object limit even if a
+    dashboard grows large.
+
+The `grafana_dashboard: "1"` label is the default selector the sidecar watches
+for. If your Grafana install uses a different label or namespace, override
+`grafanaDashboards.label`, `grafanaDashboards.labelValue`, and/or
+`grafanaDashboards.namespace` in values.yaml.
+*/ -}}
+{{- if .Values.grafanaDashboards.enabled }}
+{{- $root := . -}}
+{{- $label := .Values.grafanaDashboards.label | default "grafana_dashboard" -}}
+{{- $labelValue := .Values.grafanaDashboards.labelValue | default "1" -}}
+{{- $folder := .Values.grafanaDashboards.folder | default "Bloodraven" -}}
+{{- $ns := .Values.grafanaDashboards.namespace | default .Release.Namespace -}}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+{{- $name := base $path | trimSuffix ".json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-dashboard-%s" (include "bloodraven.fullname" $root) $name | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "bloodraven.labels" $root | nindent 4 }}
+    {{- with $root.Values.grafanaDashboards.extraLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{ $label }}: {{ $labelValue | quote }}
+  annotations:
+    grafana_folder: {{ $folder | quote }}
+    {{- with $root.Values.grafanaDashboards.extraAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  {{ $name }}.json: |-
+    {{- $root.Files.Get $path | nindent 4 }}
+{{- end }}
+{{- end }}

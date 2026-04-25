@@ -1,0 +1,276 @@
+{
+  "title": "Bloodraven — Overview",
+  "uid": "bloodraven-overview",
+  "tags": ["bloodraven", "mysql", "failover"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "",
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "graphTooltip": 1,
+  "links": [
+    {"title": "Failover & Topology", "type": "link", "url": "/d/bloodraven-failover", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true},
+    {"title": "Replication & Recovery", "type": "link", "url": "/d/bloodraven-replication", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true},
+    {"title": "Backups", "type": "link", "url": "/d/bloodraven-backups", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true},
+    {"title": "PITR Archiver", "type": "link", "url": "/d/bloodraven-archiver", "icon": "external link", "tags": ["bloodraven"], "keepTime": true, "includeVars": true}
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {"text": "Prometheus", "value": "Prometheus"},
+        "hide": 0,
+        "refresh": 1,
+        "regex": ""
+      },
+      {
+        "name": "site",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {"query": "label_values(bloodraven_site_state, site)", "refId": "site"},
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Health at a glance",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Writable sites (should be exactly 1 per group)",
+      "description": "If 0: no primary. If >1: split brain. Healthy: 1.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 1},
+      "targets": [
+        {"expr": "sum(bloodraven_site_state{state=\"writable\"} == 1)", "refId": "A", "legendFormat": "writable"}
+      ],
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "auto"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null},
+            {"color": "green", "value": 1},
+            {"color": "red", "value": 2}
+          ]},
+          "mappings": [{"type": "value", "options": {"0": {"text": "NO PRIMARY", "color": "red"}}}]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Unreachable sites",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 1},
+      "targets": [
+        {"expr": "sum(bloodraven_site_state{state=\"unreachable\"} == 1)", "refId": "A"}
+      ],
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "red", "value": 1}
+      ]}}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Replication threads down",
+      "description": "Count of io/sql threads currently reporting 0.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 1},
+      "targets": [
+        {"expr": "sum(bloodraven_replication_running == 0)", "refId": "A"}
+      ],
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "red", "value": 1}
+      ]}}}
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Divergent transactions (any site)",
+      "description": ">0 means emergency failover left an old primary ahead of the new one — reclone required.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 1},
+      "targets": [
+        {"expr": "sum(bloodraven_divergent_transactions)", "refId": "A"}
+      ],
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "red", "value": 1}
+      ]}}}
+    },
+    {
+      "id": 10,
+      "type": "state-timeline",
+      "title": "Site state over time",
+      "description": "State-set per site. Flipping often ⇒ flapping.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 6},
+      "targets": [
+        {"expr": "bloodraven_site_state{site=~\"$site\"} == 1", "refId": "A", "legendFormat": "{{site}} / {{state}}"}
+      ],
+      "options": {"showValue": "auto", "mergeValues": true, "rowHeight": 0.9, "legend": {"displayMode": "list"}},
+      "fieldConfig": {"defaults": {"mappings": [
+        {"type": "value", "options": {"1": {"text": "active", "color": "blue"}}}
+      ], "color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [
+        {"color": "transparent", "value": null},
+        {"color": "blue", "value": 1}
+      ]}}}
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "Failover activity",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 15}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Failovers (auto + planned) per hour",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "sum by (target_site) (increase(bloodraven_failovers_total[1h]))", "refId": "A", "legendFormat": "auto → {{target_site}}"},
+        {"expr": "sum by (target_site, result) (increase(bloodraven_planned_failovers_total[1h]))", "refId": "B", "legendFormat": "planned → {{target_site}} ({{result}})"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "bars", "lineWidth": 1, "fillOpacity": 50}, "unit": "short"}}
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "State transitions/s per site",
+      "description": "Spikes = frequent flipping.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {"expr": "sum by (site) (rate(bloodraven_state_transitions_total[5m]))", "refId": "A", "legendFormat": "{{site}}"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 10}, "unit": "ops"}}
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Replication",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 24}
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Replication lag (s)",
+      "description": "-1 means the site is not replicating.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 25},
+      "targets": [
+        {"expr": "bloodraven_replication_lag_seconds{site=~\"$site\"}", "refId": "A", "legendFormat": "{{site}}"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}, "unit": "s", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "yellow", "value": 30},
+        {"color": "red", "value": 300}
+      ]}}}
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Poll latency p99 per site",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 25},
+      "targets": [
+        {"expr": "histogram_quantile(0.99, sum by (site, le) (rate(bloodraven_poll_latency_seconds_bucket{site=~\"$site\"}[5m])))", "refId": "A", "legendFormat": "p99 {{site}}"}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 10}, "unit": "s"}}
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Durability",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 33}
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "Age of last successful backup (per profile)",
+      "description": "time() - bloodraven_backup_last_success_timestamp_seconds",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 34},
+      "targets": [
+        {"expr": "time() - bloodraven_backup_last_success_timestamp_seconds", "refId": "A", "legendFormat": "{{group}}/{{profile}}"}
+      ],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "auto"},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "yellow", "value": 86400},
+        {"color": "red", "value": 172800}
+      ]}}}
+    },
+    {
+      "id": 32,
+      "type": "stat",
+      "title": "Age of last verified backup (per profile)",
+      "description": "time() - bloodraven_backup_verified_timestamp_seconds — this is the one you actually alert on.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 34},
+      "targets": [
+        {"expr": "time() - bloodraven_backup_verified_timestamp_seconds", "refId": "A", "legendFormat": "{{group}}/{{profile}}"}
+      ],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "yellow", "value": 172800},
+        {"color": "red", "value": 604800}
+      ]}}}
+    },
+    {
+      "id": 33,
+      "type": "stat",
+      "title": "Archiver backlog (sealed binlogs not yet uploaded)",
+      "description": ">0 ⇒ RPO drifting.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 41},
+      "targets": [
+        {"expr": "bloodraven_archiver_backlog_files", "refId": "A", "legendFormat": "{{namespace}}/{{group}}/{{site}}"}
+      ],
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "yellow", "value": 1},
+        {"color": "red", "value": 10}
+      ]}}}
+    },
+    {
+      "id": 34,
+      "type": "stat",
+      "title": "Age of last PITR archive upload",
+      "description": "time() - bloodraven_archiver_last_upload_timestamp_seconds",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 41},
+      "targets": [
+        {"expr": "time() - bloodraven_archiver_last_upload_timestamp_seconds{site=~\"$site\"}", "refId": "A", "legendFormat": "{{namespace}}/{{group}}/{{site}}"}
+      ],
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [
+        {"color": "green", "value": null},
+        {"color": "yellow", "value": 300},
+        {"color": "red", "value": 900}
+      ]}}}
+    }
+  ]
+}
