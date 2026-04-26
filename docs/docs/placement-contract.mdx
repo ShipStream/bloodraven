@@ -4,7 +4,7 @@ sidebar_position: 5
 
 # Placement Contract
 
-Bloodraven uses node labels and taints to control where MySQL pods run and to evict application workloads during failover. This page describes the labeling requirements that cluster administrators must satisfy.
+Bloodraven uses node labels and taints to control where MySQL pods run and to evict application workloads during failover. This page describes the labeling contract cluster administrators must satisfy.
 
 ## Why node labeling matters
 
@@ -12,30 +12,37 @@ When the operator performs a failover, it taints nodes at the old active site wi
 
 ## Required node labels
 
-Every node that participates in a failover group must carry two labels:
+Each site declares the exact nodes it controls with `spec.sites[].taintNodeSelector`:
 
-| Label | Value | Example |
-|---|---|---|
-| `shipstream.io/failover-group` | The failover group name | `orders` |
-| `shipstream.io/site` | The site name | `iad` |
+```yaml
+spec:
+  sites:
+    - name: iad
+      zone: us-east-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
+```
 
-Apply them with:
+The selector is required. Bloodraven does not infer taint targets from the failover group name or site name.
+
+Apply matching labels to every node that should receive the site's taint:
 
 ```bash
 kubectl label node node-iad-1 \
-  shipstream.io/failover-group=orders \
-  shipstream.io/site=iad
+  shipstream.io/failover-group.orders=true \
+  shipstream.io/site.orders=iad
 
 kubectl label node node-pdx-1 \
-  shipstream.io/failover-group=orders \
-  shipstream.io/site=pdx
+  shipstream.io/failover-group.orders=true \
+  shipstream.io/site.orders=pdx
 ```
 
-You can label multiple nodes per site. The operator will taint or untaint all nodes matching the label selector for a given failover group and site.
+You can label multiple nodes per site. The operator taints or untaints every node matching the selector for that site.
 
 ## Taint behavior
 
-When a site loses its primary role (either through failover or because it becomes unreachable), the operator applies a per-group taint to all nodes at that site:
+When a site loses its primary role, the operator applies a per-group taint to all nodes selected by that site's `taintNodeSelector`:
 
 ```
 shipstream.io/db-readonly-<group>=true:NoExecute
@@ -47,14 +54,14 @@ For example, for a failover group named `orders`:
 shipstream.io/db-readonly-orders=true:NoExecute
 ```
 
-When a site becomes the active primary, the operator removes this taint from its nodes.
+When a site becomes the active primary, the operator removes this taint from its selected nodes.
 
 ### Effect on pods
 
 The `NoExecute` effect means:
 
-- Pods that **do not** tolerate the taint are immediately evicted
-- Pods that **do** tolerate the taint continue running
+- Pods that do not tolerate the taint are immediately evicted
+- Pods that do tolerate the taint continue running
 
 This gives you two categories of workloads:
 
@@ -65,47 +72,54 @@ This gives you two categories of workloads:
 
 ## Shared-node support
 
-Because taints are scoped per failover group, multiple groups can share nodes in the same node pool. A failover in `orders` applies `shipstream.io/db-readonly-orders=true:NoExecute`, which only evicts pods that do not tolerate that specific taint. Pods belonging to `inventory` are unaffected — as long as they tolerate the `orders` taint.
+Because taints and selectors are scoped per failover group, multiple groups can share the same physical nodes. Put one label pair per failover group on each shared node:
+
+```bash
+kubectl label node node-iad-1 \
+  shipstream.io/failover-group.orders=true \
+  shipstream.io/site.orders=iad \
+  shipstream.io/failover-group.inventory=true \
+  shipstream.io/site.inventory=iad
+```
+
+Then configure each group with its own selector:
+
+```yaml
+# orders MysqlFailoverGroup
+spec:
+  sites:
+    - name: iad
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
+
+# inventory MysqlFailoverGroup
+spec:
+  sites:
+    - name: iad
+      taintNodeSelector:
+        shipstream.io/failover-group.inventory: "true"
+        shipstream.io/site.inventory: iad
+```
+
+A failover in `orders` applies `shipstream.io/db-readonly-orders=true:NoExecute` only. Pods for `inventory` are unaffected if they tolerate other groups' taints.
 
 ### Cross-group tolerations
 
-On shared nodes, application pods must tolerate taint keys from **other** failover groups but **not** their own. This ensures they are only evicted by their own group's failover:
+On shared nodes, application pods must tolerate taint keys from other failover groups but not their own. This ensures they are only evicted by their own group's failover:
 
 ```yaml
 # Pod for the "orders" group on nodes shared with "inventory"
 spec:
   tolerations:
-    # Tolerate other groups' taints so this pod is not evicted by their failovers
     - key: shipstream.io/db-readonly-inventory
       operator: Exists
       effect: NoExecute
-    # Do NOT tolerate orders' taint — this pod should be evicted on orders failover
+    # Do not tolerate shipstream.io/db-readonly-orders.
 ```
 
 A mutating admission webhook or Helm template can automate generating these tolerations across groups.
 
-### Dedicated nodes
-
-If you prefer dedicated nodes per group (the simplest model), no cross-group tolerations are needed. Each node only receives taints for its labeled group, so only that group's pods are affected.
-
 ## Scheduling MySQL pods
 
-The operator schedules MySQL pods using the site's `zone` field (via `topology.kubernetes.io/zone` node selector). You do not need to manually configure this placement -- the operator handles it.
-
-The `shipstream.io/failover-group` and `shipstream.io/site` node labels described above are used by the operator to identify which nodes to taint or untaint during failover, not as scheduling constraints for MySQL pods.
-
-## Multiple failover groups
-
-Multiple failover groups can share nodes in the same pool. Each node is labeled with the failover group it serves:
-
-```bash
-# Group: orders
-kubectl label node node-a shipstream.io/failover-group=orders shipstream.io/site=iad
-kubectl label node node-b shipstream.io/failover-group=orders shipstream.io/site=pdx
-
-# Group: inventory
-kubectl label node node-c shipstream.io/failover-group=inventory shipstream.io/site=iad
-kubectl label node node-d shipstream.io/failover-group=inventory shipstream.io/site=pdx
-```
-
-A failover in `orders` taints nodes `node-a`/`node-b` with `shipstream.io/db-readonly-orders=true:NoExecute`. Nodes `node-c`/`node-d` are unaffected because they belong to the `inventory` group's selector.
+The operator schedules MySQL pods using the site's `zone` field via `topology.kubernetes.io/zone`. The `taintNodeSelector` controls application-node tainting; it is not used as the MySQL pod scheduler selector.

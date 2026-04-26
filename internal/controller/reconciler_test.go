@@ -44,9 +44,10 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 			Image: "mysql:9.6",
 			Sites: []v1alpha1.SiteSpec{
 				{
-					Name: "dc1",
-					Zone: "lion-dc1",
-					LBIP: "203.0.113.1",
+					Name:              "dc1",
+					Zone:              "lion-dc1",
+					LBIP:              "203.0.113.1",
+					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc1"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "local-dc1",
 						Size:             resource.MustParse("100Gi"),
@@ -59,9 +60,10 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 					},
 				},
 				{
-					Name: "dc2",
-					Zone: "lion-dc2",
-					LBIP: "203.0.113.2",
+					Name:              "dc2",
+					Zone:              "lion-dc2",
+					LBIP:              "203.0.113.2",
+					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc2"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "local-dc2",
 						Size:             resource.MustParse("100Gi"),
@@ -219,7 +221,7 @@ func TestReconcile_CreatesDeployments(t *testing.T) {
 		expectedKey := platform.TaintKeyForGroup("lion")
 		found := false
 		for _, tol := range tolerations {
-			if tol.Key == expectedKey {
+			if tol.Key == expectedKey && tol.Effect == corev1.TaintEffectNoExecute {
 				found = true
 				break
 			}
@@ -447,6 +449,12 @@ func TestCRConfigToTopologyConfig(t *testing.T) {
 	if time.Duration(tc.PollInterval) != 2*time.Second {
 		t.Errorf("expected poll interval 2s, got %v", time.Duration(tc.PollInterval))
 	}
+	if tc.Sites[0].TaintSelector != "shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc1" {
+		t.Errorf("expected dc1 taint selector, got %q", tc.Sites[0].TaintSelector)
+	}
+	if tc.Sites[1].TaintSelector != "shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc2" {
+		t.Errorf("expected dc2 taint selector, got %q", tc.Sites[1].TaintSelector)
+	}
 }
 
 func TestCRConfigToTopologyConfig_Defaults(t *testing.T) {
@@ -501,8 +509,8 @@ func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 	fg.DeletionTimestamp = &now
 
 	tainter := testutil.NewFakeTainter()
-	tainter.Taints["shipstream.io/failover-group=lion,shipstream.io/site=dc1"] = true
-	tainter.Taints["shipstream.io/failover-group=lion,shipstream.io/site=dc2"] = true
+	tainter.Taints["shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc1"] = true
+	tainter.Taints["shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc2"] = true
 
 	scheme := testScheme()
 	allObjs := []client.Object{newTestSecret(), fg}
@@ -522,10 +530,10 @@ func TestReconcile_GracefulShutdownOnDeletion(t *testing.T) {
 	}
 
 	// Verify taints were removed for both sites
-	if tainter.IsTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
+	if tainter.IsTainted("shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc1") {
 		t.Error("expected taint to be removed for dc1")
 	}
-	if tainter.IsTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
+	if tainter.IsTainted("shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc2") {
 		t.Error("expected taint to be removed for dc2")
 	}
 

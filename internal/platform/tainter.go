@@ -15,7 +15,6 @@ import (
 )
 
 const (
-	LegacyTaintKey = "shipstream.io/db-readonly"
 	TaintKeyPrefix = "shipstream.io/db-readonly-"
 	TaintValue     = "true"
 )
@@ -25,8 +24,8 @@ func TaintKeyForGroup(group string) string {
 }
 
 // NodeTainter manages node taints for failover group site failover.
-// The selector parameter is a Kubernetes label selector string, e.g.
-// "shipstream.io/failover-group=orders,shipstream.io/site=iad".
+// The selector parameter is a Kubernetes label selector string, usually
+// produced from spec.sites[].taintNodeSelector.
 // The group parameter is the failover group name, used to derive the
 // per-group taint key (e.g. "shipstream.io/db-readonly-orders").
 type NodeTainter interface {
@@ -68,26 +67,23 @@ func (t *nodeTainter) SetTaint(ctx context.Context, selector string, group strin
 }
 
 func (t *nodeTainter) patchNodeTaint(ctx context.Context, node corev1.Node, taintKey string, apply bool) error {
-	var hasTaint, hasLegacy bool
+	var hasTaint bool
 	for _, taint := range node.Spec.Taints {
-		switch taint.Key {
-		case taintKey:
+		if taint.Key == taintKey {
 			hasTaint = true
-		case LegacyTaintKey:
-			hasLegacy = true
 		}
 	}
 
-	if apply && hasTaint && !hasLegacy {
+	if apply && hasTaint {
 		return nil
 	}
-	if !apply && !hasTaint && !hasLegacy {
+	if !apply && !hasTaint {
 		return nil
 	}
 
 	newTaints := make([]corev1.Taint, 0, len(node.Spec.Taints)+1)
 	for _, taint := range node.Spec.Taints {
-		if taint.Key != taintKey && taint.Key != LegacyTaintKey {
+		if taint.Key != taintKey {
 			newTaints = append(newTaints, taint)
 		}
 	}
@@ -95,7 +91,7 @@ func (t *nodeTainter) patchNodeTaint(ctx context.Context, node corev1.Node, tain
 		newTaints = append(newTaints, corev1.Taint{
 			Key:    taintKey,
 			Value:  TaintValue,
-			Effect: corev1.TaintEffectNoSchedule,
+			Effect: corev1.TaintEffectNoExecute,
 		})
 		t.logger.Info("applying taint", "node", node.Name, "key", taintKey)
 	} else {

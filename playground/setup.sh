@@ -100,12 +100,12 @@ if [[ ${#WORKERS[@]} -lt 2 ]]; then
 fi
 
 kubectl label node "${WORKERS[0]}" topology.kubernetes.io/zone=zone-iad --overwrite
-kubectl label node "${WORKERS[0]}" shipstream.io/failover-group=playground --overwrite
-kubectl label node "${WORKERS[0]}" shipstream.io/site=iad --overwrite
+kubectl label node "${WORKERS[0]}" shipstream.io/failover-group.playground=true --overwrite
+kubectl label node "${WORKERS[0]}" shipstream.io/site.playground=iad --overwrite
 
 kubectl label node "${WORKERS[1]}" topology.kubernetes.io/zone=zone-pdx --overwrite
-kubectl label node "${WORKERS[1]}" shipstream.io/failover-group=playground --overwrite
-kubectl label node "${WORKERS[1]}" shipstream.io/site=pdx --overwrite
+kubectl label node "${WORKERS[1]}" shipstream.io/failover-group.playground=true --overwrite
+kubectl label node "${WORKERS[1]}" shipstream.io/site.playground=pdx --overwrite
 ok "Nodes labeled: ${WORKERS[0]}=iad, ${WORKERS[1]}=pdx"
 
 # ── 3. Build images ──────────────────────────────────────────────────────

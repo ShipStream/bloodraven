@@ -5065,6 +5065,16 @@ spec:
                       - size
                       - storageClassName
                       type: object
+                    taintNodeSelector:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        TaintNodeSelector identifies the Kubernetes nodes that receive this
+                        failover group's db-readonly taint when this site is not writable. Use
+                        group-scoped labels so one physical node can participate in multiple
+                        failover groups at the same site.
+                      minProperties: 1
+                      type: object
                     zone:
                       description: Zone is the Kubernetes topology zone for node selection.
                       minLength: 1
@@ -5073,6 +5083,7 @@ spec:
                   - lbIP
                   - name
                   - storage
+                  - taintNodeSelector
                   - zone
                   type: object
                 maxItems: 16
@@ -5157,8 +5168,8 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: exactly one of secretName or credentials must be set
-              rule: (has(self.secretName) && self.secretName != '' && !has(self.credentials))
-                || ((!has(self.secretName) || self.secretName == '') && has(self.credentials))
+              rule: (has(self.secretName) && self.secretName != "" && !has(self.credentials))
+                || ((!has(self.secretName) || self.secretName == "") && has(self.credentials))
             - message: spec.sites[].name must be unique
               rule: self.sites.all(x, self.sites.filter(y, y.name == x.name).size()
                 == 1)

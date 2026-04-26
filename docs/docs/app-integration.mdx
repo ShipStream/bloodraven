@@ -49,7 +49,7 @@ Best for applications that run on **dedicated or shared nodes** and should be fu
 
 **Application requirements:**
 
-- Deploy on nodes labeled with `shipstream.io/failover-group=<name>` and `shipstream.io/site=<site>`
+- Deploy on nodes selected by `spec.sites[].taintNodeSelector`, such as `shipstream.io/failover-group.orders=true` and `shipstream.io/site.orders=iad`
 - Do **not** add a toleration for `shipstream.io/db-readonly-<name>:NoExecute` (your own group's taint)
 - On shared nodes, **add** tolerations for other groups' taints (see [Placement Contract](./placement-contract.mdx#cross-group-tolerations))
 - Use `mysql-orders-primary` for writes (the Service follows the active site)

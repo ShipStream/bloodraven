@@ -23,6 +23,9 @@ type SiteTopologyConfig struct {
 	Zone string
 	LBIP string
 	Role state.SiteRole
+	// TaintSelector is the Kubernetes label selector used to find nodes
+	// that should receive this failover group's readonly taint for the site.
+	TaintSelector string
 	// Host is the MySQL service hostname (without port) for this site.
 	// Used as the donor/source host for clone and replication setup.
 	Host string
@@ -128,6 +131,7 @@ type siteTracker struct {
 	zone          string // topology.kubernetes.io/zone value
 	lbIP          string
 	role          state.SiteRole
+	taintSelector string
 	host          string
 	mysql         mysql.Checker
 	state         state.SiteState
@@ -297,13 +301,14 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, siteCheckers []mysql.Checke
 			role = state.SiteRolePrimaryCandidate
 		}
 		sites[i] = siteTracker{
-			name:  s.Name,
-			zone:  s.Zone,
-			lbIP:  s.LBIP,
-			role:  role,
-			host:  s.Host,
-			mysql: siteCheckers[i],
-			state: state.StateUnknown,
+			name:          s.Name,
+			zone:          s.Zone,
+			lbIP:          s.LBIP,
+			role:          role,
+			taintSelector: s.TaintSelector,
+			host:          s.Host,
+			mysql:         siteCheckers[i],
+			state:         state.StateUnknown,
 		}
 	}
 	return &TopologyManager{
@@ -796,7 +801,7 @@ func (tm *TopologyManager) computeState(site *siteTracker, readOnly bool, err er
 
 // taintSelector returns the label selector for tainting nodes belonging to a site.
 func (tm *TopologyManager) taintSelector(site *siteTracker) string {
-	return fmt.Sprintf("shipstream.io/failover-group=%s,shipstream.io/site=%s", tm.cfg.Name, site.name)
+	return site.taintSelector
 }
 
 func (tm *TopologyManager) applyPerSiteAction(ctx context.Context, site *siteTracker, action state.Action) {

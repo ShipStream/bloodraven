@@ -61,12 +61,18 @@ spec:
   sites:
     - name: iad
       zone: us-east-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
       lbIP: 10.0.1.1
       storage:
         size: 50Gi
         storageClassName: gp3
     - name: pdx
       zone: us-west-2a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: pdx
       lbIP: 10.0.2.1
       storage:
         size: 50Gi

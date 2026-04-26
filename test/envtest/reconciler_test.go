@@ -28,18 +28,20 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 			Image: "mysql:9.6",
 			Sites: []v1alpha1.SiteSpec{
 				{
-					Name: "dc1",
-					Zone: "lion-dc1",
-					LBIP: "203.0.113.1",
+					Name:              "dc1",
+					Zone:              "lion-dc1",
+					LBIP:              "203.0.113.1",
+					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc1"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "standard",
 						Size:             resource.MustParse("10Gi"),
 					},
 				},
 				{
-					Name: "dc2",
-					Zone: "lion-dc2",
-					LBIP: "203.0.113.2",
+					Name:              "dc2",
+					Zone:              "lion-dc2",
+					LBIP:              "203.0.113.2",
+					TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc2"},
 					Storage: v1alpha1.StorageSpec{
 						StorageClassName: "standard",
 						Size:             resource.MustParse("10Gi"),

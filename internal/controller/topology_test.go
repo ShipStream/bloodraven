@@ -163,15 +163,15 @@ func (m *mockDNS) getLastIP() string {
 // taintSelector returns the expected taint selector for a given site name,
 // matching the format produced by TopologyManager.taintSelector.
 func taintSelector(siteName string) string {
-	return "shipstream.io/failover-group=lion,shipstream.io/site=" + siteName
+	return "shipstream.io/failover-group.lion=true,shipstream.io/site.lion=" + siteName
 }
 
 func testTopologyConfig() TopologyConfig {
 	return TopologyConfig{
 		Name: "lion",
 		Sites: []SiteTopologyConfig{
-			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate},
-			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate},
+			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("dc1")},
+			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("dc2")},
 		},
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,

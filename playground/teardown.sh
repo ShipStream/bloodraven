@@ -28,8 +28,8 @@ kubectl delete -f "$SCRIPT_DIR/manifests/mysql-secret.yaml" --ignore-not-found
 kubectl delete -f "$SCRIPT_DIR/manifests/storageclass.yaml" --ignore-not-found
 
 info "Removing node labels..."
-for node in $(kubectl get nodes -l shipstream.io/failover-group=playground -o name); do
-  kubectl label "$node" topology.kubernetes.io/zone- shipstream.io/failover-group- shipstream.io/site- 2>/dev/null || true
+for node in $(kubectl get nodes -l shipstream.io/failover-group.playground=true -o name); do
+  kubectl label "$node" topology.kubernetes.io/zone- shipstream.io/failover-group.playground- shipstream.io/site.playground- 2>/dev/null || true
 done
 
 info "Deleting namespace..."

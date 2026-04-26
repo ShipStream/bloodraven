@@ -328,12 +328,18 @@ spec:
   sites:
     - name: iad
       zone: iad-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
       lbIP: 10.0.1.10
       storage:
         storageClassName: mysql-retained
         size: 500Gi
     - name: pdx
       zone: pdx-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: pdx
       lbIP: 10.0.2.10
       storage:
         storageClassName: mysql-retained

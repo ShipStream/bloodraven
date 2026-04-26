@@ -64,13 +64,13 @@ The operator needs to know which nodes belong to which site. Label at least one 
 ```bash
 # Site: iad
 kubectl label node node-iad-1 \
-  shipstream.io/failover-group=orders \
-  shipstream.io/site=iad
+  shipstream.io/failover-group.orders=true \
+  shipstream.io/site.orders=iad
 
 # Site: pdx
 kubectl label node node-pdx-1 \
-  shipstream.io/failover-group=orders \
-  shipstream.io/site=pdx
+  shipstream.io/failover-group.orders=true \
+  shipstream.io/site.orders=pdx
 ```
 
 See [Placement Contract](./placement-contract.mdx) for full details on node labeling requirements.
@@ -90,12 +90,18 @@ spec:
   sites:
     - name: iad
       zone: us-east-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
       lbIP: 10.0.1.1
       storage:
         storageClassName: fast-ssd
         size: 100Gi
     - name: pdx
       zone: us-west-2a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: pdx
       lbIP: 10.0.2.1
       storage:
         storageClassName: fast-ssd

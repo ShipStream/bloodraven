@@ -10,7 +10,14 @@ failover, split-brain, and recovery paths and are not repeated here.
 
 1. k3d cluster, operator image, and dashboard already deployed per
    `playground/setup.sh`.
-2. Swap the default 2-site manifest for the 3-site variant:
+2. Label a node for the `fra` site. In a three-worker k3d cluster, use
+   the third worker; in a smaller lab, reuse a worker node intentionally.
+   ```bash
+   kubectl label node <fra-node> topology.kubernetes.io/zone=zone-fra --overwrite
+   kubectl label node <fra-node> shipstream.io/failover-group.playground=true --overwrite
+   kubectl label node <fra-node> shipstream.io/site.playground=fra --overwrite
+   ```
+3. Swap the default 2-site manifest for the 3-site variant:
    ```bash
    NS=bloodraven-playground
    kubectl -n $NS apply -f playground/manifests/failovergroup-3site.yaml
@@ -18,14 +25,14 @@ failover, split-brain, and recovery paths and are not repeated here.
    The variant declares three sites: `iad` and `pdx` as
    `primary-candidate`, `fra` as `dr-only`, with
    `spec.splitBrainPolicy.sitePriorities: [iad, pdx]`.
-3. Wait for initial bootstrap to finish. Expected healthy state:
+4. Wait for initial bootstrap to finish. Expected healthy state:
    ```
    kubectl -n $NS get mfg playground -o wide
    # ACTIVE=iad  READY=True
    kubectl -n $NS get mfg playground -o jsonpath='{.status.sites[*].state}'
    # writable read-only read-only     (iad, pdx, fra respectively)
    ```
-4. Verify the star topology wired up: both `pdx` and `fra` should be
+5. Verify the star topology wired up: both `pdx` and `fra` should be
    replicating from the `mysql-playground-iad` service.
    ```bash
    for SITE in pdx fra; do
@@ -438,7 +445,7 @@ NS=bloodraven-playground
 # otherwise local-path-provisioner helper pods get evicted.
 NODE=$(kubectl -n $NS get pods -l shipstream.io/site=fra \
   -o jsonpath='{.items[0].spec.nodeName}')
-kubectl taint nodes $NODE shipstream.io/db-readonly- 2>/dev/null || true
+kubectl taint nodes $NODE shipstream.io/db-readonly-playground- 2>/dev/null || true
 
 # Stop fra, wipe its PVC, let it respawn.
 kubectl -n $NS scale deployment mysql-playground-fra --replicas=0
@@ -485,6 +492,7 @@ kubectl -n $NS apply -f playground/manifests/failovergroup.yaml
 kubectl -n $NS patch mfg playground --type json -p '[
   {"op":"add","path":"/spec/sites/-","value":{
     "name":"fra","role":"dr-only","zone":"zone-fra","lbIP":"10.96.100.30",
+    "taintNodeSelector":{"shipstream.io/failover-group.playground":"true","shipstream.io/site.playground":"fra"},
     "storage":{"storageClassName":"playground-fast","size":"1Gi"},
     "resources":{
       "requests":{"cpu":"100m","memory":"256Mi"},

@@ -92,12 +92,8 @@ cmd_cordon() {
 
 cmd_uncordon() {
   info "Uncordoning all playground nodes..."
-  for site in iad pdx; do
-    local node
-    node=$(site_node "$site" 2>/dev/null || true)
-    if [[ -n "$node" ]]; then
-      kubectl uncordon "$node" 2>/dev/null || true
-    fi
+  for node in $(kubectl get nodes -l 'shipstream.io/site.playground' -o name 2>/dev/null); do
+    kubectl uncordon "$node" 2>/dev/null || true
   done
   ok "All playground nodes uncordoned"
 }
@@ -142,19 +138,13 @@ cmd_recover() {
   # Remove chaos NetworkPolicies
   kubectl -n "$NAMESPACE" delete networkpolicy -l app=chaos-partition 2>/dev/null || true
 
-  # Clean up any leftover chaos pods (from older iptables-based partitions)
-  for site in iad pdx; do
-    kubectl -n "$NAMESPACE" delete pod "chaos-netblock-${site}" --ignore-not-found --grace-period=0 --force 2>/dev/null || true
-    kubectl -n "$NAMESPACE" delete pod "chaos-netcleanup-${site}" --ignore-not-found --grace-period=0 --force 2>/dev/null || true
-  done
-
   ok "All chaos recovered (nodes uncordoned, network partitions removed)"
 }
 
 cmd_status() {
   echo ""
   info "Nodes:"
-  kubectl get nodes -o wide -L topology.kubernetes.io/zone,shipstream.io/site
+  kubectl get nodes -o wide -L topology.kubernetes.io/zone,shipstream.io/site.playground
   echo ""
   info "MysqlFailoverGroup:"
   kubectl -n "$NAMESPACE" get mysqlfailovergroups -o wide 2>/dev/null || echo "  (none found)"
@@ -166,7 +156,7 @@ cmd_status() {
   kubectl -n "$NAMESPACE" get dnsendpoints -o yaml 2>/dev/null | grep -E "dnsName|targets|recordType" || echo "  (none found)"
   echo ""
   info "Node taints:"
-  for node in $(kubectl get nodes -l 'shipstream.io/site' -o name 2>/dev/null); do
+  for node in $(kubectl get nodes -l 'shipstream.io/site.playground' -o name 2>/dev/null); do
     taints=$(kubectl get "$node" -o jsonpath='{.spec.taints[*].key}' 2>/dev/null)
     echo "  $node: ${taints:-<none>}"
   done
