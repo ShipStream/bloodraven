@@ -1058,7 +1058,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					{
 						Key:      platform.TaintKeyForGroup(fg.Name),
 						Operator: corev1.TolerationOpExists,
-						Effect:   corev1.TaintEffectNoExecute,
 					},
 				},
 				InitContainers: append([]corev1.Container{

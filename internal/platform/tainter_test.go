@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -160,6 +161,85 @@ func TestNodeTainter_PerGroupIsolation(t *testing.T) {
 	n, _ = client.CoreV1().Nodes().Get(ctx, "shared-node", metav1.GetOptions{})
 	if hasTaintForGroup(n.Spec.Taints, "orders") {
 		t.Error("orders taint should be removed")
+	}
+}
+
+func TestNodeTainter_RejectsEmptySelector(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1"}})
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	tainter := NewNodeTainter(client, logger)
+
+	err := tainter.SetTaint(context.Background(), " ", "orders", true)
+	if err == nil || !strings.Contains(err.Error(), "empty selector") {
+		t.Fatalf("expected empty selector error, got %v", err)
+	}
+}
+
+func TestNodeTainter_ConvertsExistingGroupTaintToNoExecute(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node1",
+			Labels: map[string]string{
+				"shipstream.io/failover-group.orders": "true",
+				"shipstream.io/site.orders":           "iad",
+			},
+		},
+		Spec: corev1.NodeSpec{
+			Taints: []corev1.Taint{
+				{Key: TaintKeyForGroup("orders"), Value: "old", Effect: corev1.TaintEffectNoSchedule},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(node)
+	installPatchReactor(client)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	tainter := NewNodeTainter(client, logger)
+
+	selector := "shipstream.io/failover-group.orders=true,shipstream.io/site.orders=iad"
+	if err := tainter.SetTaint(context.Background(), selector, "orders", true); err != nil {
+		t.Fatalf("apply taint: %v", err)
+	}
+
+	out, _ := client.CoreV1().Nodes().Get(context.Background(), "node1", metav1.GetOptions{})
+	if len(out.Spec.Taints) != 1 {
+		t.Fatalf("expected exactly 1 taint, got %v", out.Spec.Taints)
+	}
+	if taint := out.Spec.Taints[0]; taint.Key != TaintKeyForGroup("orders") || taint.Value != TaintValue || taint.Effect != corev1.TaintEffectNoExecute {
+		t.Fatalf("expected canonical NoExecute taint, got %v", taint)
+	}
+}
+
+func TestNodeTainter_RemovesLegacyTaint(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node1",
+			Labels: map[string]string{
+				"shipstream.io/failover-group.orders": "true",
+				"shipstream.io/site.orders":           "iad",
+			},
+		},
+		Spec: corev1.NodeSpec{
+			Taints: []corev1.Taint{
+				{Key: LegacyTaintKey, Value: TaintValue, Effect: corev1.TaintEffectNoExecute},
+				{Key: TaintKeyForGroup("orders"), Value: TaintValue, Effect: corev1.TaintEffectNoExecute},
+			},
+		},
+	}
+	client := fake.NewSimpleClientset(node)
+	installPatchReactor(client)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	tainter := NewNodeTainter(client, logger)
+
+	selector := "shipstream.io/failover-group.orders=true,shipstream.io/site.orders=iad"
+	if err := tainter.SetTaint(context.Background(), selector, "orders", false); err != nil {
+		t.Fatalf("remove taint: %v", err)
+	}
+
+	out, _ := client.CoreV1().Nodes().Get(context.Background(), "node1", metav1.GetOptions{})
+	for _, taint := range out.Spec.Taints {
+		if taint.Key == LegacyTaintKey || taint.Key == TaintKeyForGroup("orders") {
+			t.Fatalf("expected readonly taints removed, got %v", out.Spec.Taints)
+		}
 	}
 }
 

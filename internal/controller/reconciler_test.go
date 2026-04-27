@@ -221,7 +221,7 @@ func TestReconcile_CreatesDeployments(t *testing.T) {
 		expectedKey := platform.TaintKeyForGroup("lion")
 		found := false
 		for _, tol := range tolerations {
-			if tol.Key == expectedKey && tol.Effect == corev1.TaintEffectNoExecute {
+			if tol.Key == expectedKey && tol.Operator == corev1.TolerationOpExists && tol.Effect == "" {
 				found = true
 				break
 			}

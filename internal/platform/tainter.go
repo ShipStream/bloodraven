@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,6 +16,7 @@ import (
 )
 
 const (
+	LegacyTaintKey = "shipstream.io/db-readonly"
 	TaintKeyPrefix = "shipstream.io/db-readonly-"
 	TaintValue     = "true"
 )
@@ -42,6 +44,10 @@ func NewNodeTainter(client kubernetes.Interface, logger *slog.Logger) NodeTainte
 }
 
 func (t *nodeTainter) SetTaint(ctx context.Context, selector string, group string, taint bool) error {
+	if strings.TrimSpace(selector) == "" {
+		return fmt.Errorf("refusing to update node taints for empty selector")
+	}
+
 	taintKey := TaintKeyForGroup(group)
 	nodes, err := t.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
@@ -67,32 +73,34 @@ func (t *nodeTainter) SetTaint(ctx context.Context, selector string, group strin
 }
 
 func (t *nodeTainter) patchNodeTaint(ctx context.Context, node corev1.Node, taintKey string, apply bool) error {
-	var hasTaint bool
-	for _, taint := range node.Spec.Taints {
-		if taint.Key == taintKey {
-			hasTaint = true
-		}
+	desiredTaint := corev1.Taint{
+		Key:    taintKey,
+		Value:  TaintValue,
+		Effect: corev1.TaintEffectNoExecute,
 	}
 
-	if apply && hasTaint {
-		return nil
-	}
-	if !apply && !hasTaint {
-		return nil
-	}
-
+	var removedTaints, desiredTaints int
 	newTaints := make([]corev1.Taint, 0, len(node.Spec.Taints)+1)
 	for _, taint := range node.Spec.Taints {
-		if taint.Key != taintKey {
-			newTaints = append(newTaints, taint)
+		if taint.Key == taintKey || taint.Key == LegacyTaintKey {
+			removedTaints++
+			if taint == desiredTaint {
+				desiredTaints++
+			}
+			continue
 		}
+		newTaints = append(newTaints, taint)
 	}
+
+	if apply && removedTaints == 1 && desiredTaints == 1 {
+		return nil
+	}
+	if !apply && removedTaints == 0 {
+		return nil
+	}
+
 	if apply {
-		newTaints = append(newTaints, corev1.Taint{
-			Key:    taintKey,
-			Value:  TaintValue,
-			Effect: corev1.TaintEffectNoExecute,
-		})
+		newTaints = append(newTaints, desiredTaint)
 		t.logger.Info("applying taint", "node", node.Name, "key", taintKey)
 	} else {
 		t.logger.Info("removing taint", "node", node.Name, "key", taintKey)
