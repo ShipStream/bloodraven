@@ -32,10 +32,10 @@ func TestSplitBrain_BothWritable_NoAction(t *testing.T) {
 	}
 
 	// Neither should be tainted (both are writable).
-	if h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
+	if h.tainter.isTainted(taintSelector("dc1")) {
 		t.Error("dc1 should not be tainted (writable)")
 	}
-	if h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
+	if h.tainter.isTainted(taintSelector("dc2")) {
 		t.Error("dc2 should not be tainted (writable)")
 	}
 }
@@ -50,10 +50,10 @@ func TestDoubleReadOnly_NoPromotion(t *testing.T) {
 	h.pollN(2)
 
 	// Both should be tainted.
-	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
+	if !h.tainter.isTainted(taintSelector("dc1")) {
 		t.Error("dc1 should be tainted (read-only)")
 	}
-	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
+	if !h.tainter.isTainted(taintSelector("dc2")) {
 		t.Error("dc2 should be tainted (read-only)")
 	}
 
@@ -82,10 +82,10 @@ func TestTotalLoss_BothUnreachable(t *testing.T) {
 	h.pollN(3)
 
 	// Both should be tainted.
-	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
+	if !h.tainter.isTainted(taintSelector("dc1")) {
 		t.Error("dc1 should be tainted")
 	}
-	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
+	if !h.tainter.isTainted(taintSelector("dc2")) {
 		t.Error("dc2 should be tainted")
 	}
 
@@ -187,7 +187,7 @@ func TestSplitBrain_OneGoesDown(t *testing.T) {
 	h.pollN(3) // failure threshold
 
 	// DC2 should be tainted.
-	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
+	if !h.tainter.isTainted(taintSelector("dc2")) {
 		t.Error("dc2 should be tainted after going down")
 	}
 

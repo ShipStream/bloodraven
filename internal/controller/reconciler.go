@@ -15,6 +15,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -388,10 +389,10 @@ func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v
 	// Record event
 	r.Recorder.Event(fg, corev1.EventTypeNormal, "GracefulShutdown", "Starting graceful shutdown sequence")
 
-	// Remove taints for both site selectors
+	// Remove taints for all configured site selectors.
 	if r.Tainter != nil {
 		for _, site := range fg.Spec.Sites {
-			selector := fmt.Sprintf("shipstream.io/failover-group=%s,shipstream.io/site=%s", fg.Name, site.Name)
+			selector := taintNodeSelectorString(site.TaintNodeSelector)
 			if err := r.Tainter.SetTaint(ctx, selector, fg.Name, false); err != nil {
 				logger.Error(err, "failed to remove taint during shutdown", "site", site.Name)
 				// Continue cleanup despite taint removal failure
@@ -1057,7 +1058,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					{
 						Key:      platform.TaintKeyForGroup(fg.Name),
 						Operator: corev1.TolerationOpExists,
-						Effect:   corev1.TaintEffectNoSchedule,
 					},
 				},
 				InitContainers: append([]corev1.Container{
@@ -1502,11 +1502,12 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 	sites := make([]SiteTopologyConfig, len(fg.Spec.Sites))
 	for i, s := range fg.Spec.Sites {
 		sites[i] = SiteTopologyConfig{
-			Name: s.Name,
-			Zone: s.Zone,
-			LBIP: s.LBIP,
-			Role: state.SiteRole(s.EffectiveRole()),
-			Host: fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, s.Name, fg.Namespace),
+			Name:          s.Name,
+			Zone:          s.Zone,
+			LBIP:          s.LBIP,
+			Role:          state.SiteRole(s.EffectiveRole()),
+			TaintSelector: taintNodeSelectorString(s.TaintNodeSelector),
+			Host:          fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, s.Name, fg.Namespace),
 		}
 	}
 
@@ -1520,6 +1521,10 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 		FailoverCooldown:  failoverCooldown,
 		SitePriorities:    sitePriorities,
 	}
+}
+
+func taintNodeSelectorString(selector map[string]string) string {
+	return labels.SelectorFromSet(labels.Set(selector)).String()
 }
 
 // ReconcileSiteDeployment reconciles a single site's Deployment to match the

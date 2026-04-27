@@ -21,11 +21,11 @@ func TestNormalOperation_DC1Primary(t *testing.T) {
 	}
 
 	// dc1 should NOT be tainted (it is the primary).
-	if h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
+	if h.tainter.isTainted(taintSelector("dc1")) {
 		t.Error("dc1 should not be tainted when writable")
 	}
 	// dc2 should be tainted (read-only replica).
-	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
+	if !h.tainter.isTainted(taintSelector("dc2")) {
 		t.Error("dc2 should be tainted when read-only")
 	}
 
@@ -57,10 +57,10 @@ func TestNormalOperation_DC2Primary(t *testing.T) {
 	}
 
 	// dc1 tainted, dc2 not tainted.
-	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
+	if !h.tainter.isTainted(taintSelector("dc1")) {
 		t.Error("dc1 should be tainted when read-only")
 	}
-	if h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
+	if h.tainter.isTainted(taintSelector("dc2")) {
 		t.Error("dc2 should not be tainted when writable")
 	}
 

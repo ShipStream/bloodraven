@@ -290,10 +290,14 @@ func newTestHarnessWithMySQL(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 func defaultTwoSiteConfig() []controller.SiteTopologyConfig {
 	return []controller.SiteTopologyConfig{
 		{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate,
-			Host: "mysql-lion-dc1.default.svc.cluster.local"},
+			TaintSelector: taintSelector("dc1"), Host: "mysql-lion-dc1.default.svc.cluster.local"},
 		{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate,
-			Host: "mysql-lion-dc2.default.svc.cluster.local"},
+			TaintSelector: taintSelector("dc2"), Host: "mysql-lion-dc2.default.svc.cluster.local"},
 	}
+}
+
+func taintSelector(siteName string) string {
+	return "shipstream.io/failover-group.lion=true,shipstream.io/site.lion=" + siteName
 }
 
 // newTestHarnessWithPriorities creates a harness where both sites start

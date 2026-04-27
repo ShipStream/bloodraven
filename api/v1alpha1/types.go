@@ -31,7 +31,7 @@ type MysqlFailoverGroupList struct {
 }
 
 // MysqlFailoverGroupSpec defines the desired state of MysqlFailoverGroup.
-// +kubebuilder:validation:XValidation:rule="(has(self.secretName) && self.secretName != '' && !has(self.credentials)) || ((!has(self.secretName) || self.secretName == '') && has(self.credentials))",message="exactly one of secretName or credentials must be set"
+// +kubebuilder:validation:XValidation:rule="(has(self.secretName) && self.secretName != \"\" && !has(self.credentials)) || ((!has(self.secretName) || self.secretName == \"\") && has(self.credentials))",message="exactly one of secretName or credentials must be set"
 // +kubebuilder:validation:XValidation:rule="self.sites.all(x, self.sites.filter(y, y.name == x.name).size() == 1)",message="spec.sites[].name must be unique"
 // +kubebuilder:validation:XValidation:rule="self.sites.filter(s, s.role == 'primary-candidate').size() >= 2",message="spec.sites must contain at least two sites with role 'primary-candidate'"
 // +kubebuilder:validation:XValidation:rule="!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities) || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'primary-candidate'))",message="splitBrainPolicy.sitePriorities entries must match the names of sites with role 'primary-candidate'"
@@ -277,6 +277,13 @@ type SiteSpec struct {
 	// Zone is the Kubernetes topology zone for node selection.
 	// +kubebuilder:validation:MinLength=1
 	Zone string `json:"zone"`
+
+	// TaintNodeSelector identifies the Kubernetes nodes that receive this
+	// failover group's db-readonly taint when this site is not writable. Use
+	// group-scoped labels so one physical node can participate in multiple
+	// failover groups at the same site.
+	// +kubebuilder:validation:MinProperties=1
+	TaintNodeSelector map[string]string `json:"taintNodeSelector"`
 
 	// LBIP is the load balancer IP for DNS failover.
 	// +kubebuilder:validation:MinLength=1

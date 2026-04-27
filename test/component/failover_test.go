@@ -34,7 +34,7 @@ func TestFailover_DC1Down_PromoteDC2(t *testing.T) {
 	}
 
 	// 4. Verify: dc1 is tainted.
-	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc1") {
+	if !h.tainter.isTainted(taintSelector("dc1")) {
 		t.Error("dc1 should be tainted after going unreachable")
 	}
 
@@ -79,7 +79,7 @@ func TestFailover_DC2Down_PromoteDC1(t *testing.T) {
 	// Failure threshold.
 	h.pollN(3)
 
-	if !h.tainter.isTainted("shipstream.io/failover-group=lion,shipstream.io/site=dc2") {
+	if !h.tainter.isTainted(taintSelector("dc2")) {
 		t.Error("dc2 should be tainted")
 	}
 

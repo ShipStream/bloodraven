@@ -50,6 +50,7 @@ Each entry in `spec.sites` defines one site in the failover group.
 | `name` | string | Yes | -- | Unique site identifier (e.g. `iad`, `pdx`). Used in Service names and labels. MaxLength=253. |
 | `role` | string | No | `primary-candidate` | Promotion eligibility: `primary-candidate` (can be auto-promoted on failover) or `dr-only` (passive replica; never auto-promoted). At least two `primary-candidate` sites are required. |
 | `zone` | string | Yes | -- | Availability zone or region for pod scheduling |
+| `taintNodeSelector` | map[string]string | Yes | -- | Label selector used to find nodes that receive this group's `db-readonly` taint for this site. Use group-scoped labels such as `shipstream.io/failover-group.orders=true` and `shipstream.io/site.orders=iad` for shared nodes. |
 | `lbIP` | string | Yes | -- | Load balancer IP address. Used for DNS A-record steering on failover. |
 | `storage` | StorageSpec | Yes | -- | Persistent storage configuration for this site |
 | `resources` | ResourceRequirements | No | -- | Compute resources (requests/limits) for the MySQL container at this site |
@@ -263,6 +264,9 @@ spec:
   sites:
     - name: iad
       zone: us-east-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
       lbIP: 10.0.1.1
       storage:
         storageClassName: fast-ssd
@@ -276,6 +280,9 @@ spec:
           memory: "16Gi"
     - name: pdx
       zone: us-west-2a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: pdx
       lbIP: 10.0.2.1
       storage:
         storageClassName: fast-ssd
@@ -351,12 +358,18 @@ spec:
   sites:
     - name: iad
       zone: us-east-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
       lbIP: 10.0.1.1
       storage:
         storageClassName: fast-ssd
         size: 100Gi
     - name: pdx
       zone: us-west-2a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: pdx
       lbIP: 10.0.2.1
       storage:
         storageClassName: fast-ssd

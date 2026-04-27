@@ -9,7 +9,7 @@
 - [ ] 30. Public repo, license, release cadence
 - [ ] 31. Documentation publishing parity
 - [ ] 32. Real-cluster E2E CI gate
-- [ ] 33. True shared-node placement model
+- [x] 33. True shared-node placement model
 
 ## P0 — Production adoption blockers
 
@@ -23,7 +23,7 @@
 
 **9. Restore duration and size metrics.** Add `bloodraven_restore_duration_seconds` and `bloodraven_restore_last_success_timestamp_seconds`, plus per-restore GTID and binlog-replay coordinates in status. DR confidence requires knowing your actual measured restore time, not estimated.
 
-**33. True shared-node placement model.** The docs now describe per-group taints, but node discovery still relies on single-valued `shipstream.io/failover-group=<group>` and `shipstream.io/site=<site>` labels. That prevents one physical node from participating in multiple failover groups at the same site. Replace or extend this with a multi-valued-compatible selector model, such as per-group labels (`shipstream.io/failover-group.orders=true`, `shipstream.io/site.orders=iad`) or explicit `spec.sites[].taintNodeSelector`. Update tainting, cleanup, docs, and tests so failover in one group does not require dedicated node pools or affect unrelated tenants.
+**33. True shared-node placement model.** Done: each site now declares an explicit required `spec.sites[].taintNodeSelector`, allowing per-group labels such as `shipstream.io/failover-group.orders=true` and `shipstream.io/site.orders=iad`. Tainting, cleanup, docs, tests, and playground manifests use the selector model so failover in one group does not require dedicated node pools or affect unrelated tenants.
 
 ## P2 — Observability and operability
 
@@ -39,6 +39,6 @@
 
 ## Suggested sequencing
 
-- **Production adoption gate:** #31, #32, #33
+- **Production adoption gate:** #31, #32
 - **Next quarter:** #7, #9, #18 (DR muscle + day-2 ergonomics)
 - **When stable enough for external use:** #30 (open-source prep if that's the path)

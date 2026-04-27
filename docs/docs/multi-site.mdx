@@ -101,16 +101,25 @@ spec:
     - name: iad
       role: primary-candidate
       zone: iad-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
       lbIP: 10.0.0.10
       storage: { storageClassName: gp3, size: 500Gi }
     - name: pdx
       role: primary-candidate
       zone: pdx-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: pdx
       lbIP: 10.1.0.10
       storage: { storageClassName: gp3, size: 500Gi }
     - name: fra
       role: dr-only
       zone: fra-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: fra
       lbIP: 10.2.0.10
       storage: { storageClassName: gp3, size: 500Gi }
   splitBrainPolicy:

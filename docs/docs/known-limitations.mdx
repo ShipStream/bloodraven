@@ -41,15 +41,11 @@ matches your expectations.
 
 ## Placement and shared nodes
 
-- Taints are scoped per failover group, but node discovery currently
-  uses single-valued node labels (`shipstream.io/failover-group` and
-  `shipstream.io/site`). One physical node cannot cleanly advertise
-  membership in multiple failover groups at the same site with that
-  label shape.
-- For now, the simplest production model is dedicated node pools per
-  failover group/site, or a carefully managed shared-node setup where
-  each node is assigned to one group selector.
-- A true shared-node selector model is still on the wishlist.
+- Taints and node discovery are scoped per failover group with
+  `spec.sites[].taintNodeSelector`, so one physical node can advertise
+  membership in multiple failover groups at the same site.
+- Application workloads on shared nodes must tolerate other groups'
+  readonly taints but not their own group's taint.
 
 ## Backups and restore
 

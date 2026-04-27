@@ -15,7 +15,7 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 - **Relay log drain**: Failover takes ~37s total when primary is dead (30s drain timeout + detection + promotion). Plan wait times accordingly.
 - **Replication user**: Survives pod restarts but not PVC wipes. After `reset-mysql.sh` the init-users script recreates it on MySQL first boot.
 - **Verify replication between scenarios**: After any failover, always verify replication is actually working (`SELECT SERVICE_STATE FROM performance_schema.replication_connection_status` should show `ON`) before proceeding. GTID divergence from the respawn race (see scenario 1 note) can silently break replication, causing false results in subsequent scenarios.
-- **db-readonly taint blocks PVC provisioning**: The operator applies `shipstream.io/db-readonly:NoExecute` to non-writable nodes. The local-path-provisioner's helper pod does not tolerate this taint and gets evicted, blocking PVC creation. After `reset-mysql.sh`, always check for and clear this taint on both nodes: `kubectl taint nodes k3d-bloodraven-agent-0 shipstream.io/db-readonly- 2>/dev/null; kubectl taint nodes k3d-bloodraven-agent-1 shipstream.io/db-readonly- 2>/dev/null`
+- **db-readonly taint blocks PVC provisioning**: The operator applies `shipstream.io/db-readonly-playground:NoExecute` to non-writable nodes. The local-path-provisioner's helper pod does not tolerate this taint and gets evicted, blocking PVC creation. After `reset-mysql.sh`, always check for and clear this taint on both nodes: `kubectl taint nodes k3d-bloodraven-agent-0 shipstream.io/db-readonly-playground- 2>/dev/null; kubectl taint nodes k3d-bloodraven-agent-1 shipstream.io/db-readonly-playground- 2>/dev/null`
 - **Distroless containers**: The sidecar and operator images use distroless base images with no shell or userspace tools. Use `kubectl debug --target=<container> --image=busybox` to get a shell with tools like `kill`, `ps`, etc.
 - **JSON patch vs merge patch**: When patching the MysqlFailoverGroup CR, always use `--type json` (JSON Patch). Merge patches on the `spec.sites` array drop required fields (lbIP, storage, zone) and fail validation.
 
@@ -241,7 +241,7 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
 
 **Verify**: New operator either waits for the in-progress clone to finish (MySQL tracks clone state in `performance_schema.clone_status`) or starts a fresh clone. End state: healthy primary/replica pair. No stuck bootstrap phase.
 
-**Caution**: Before deleting the replica PVC, clear the `shipstream.io/db-readonly` taint from the replica's node. Otherwise the local-path-provisioner's helper pod gets evicted by the NoExecute taint and the replacement PVC never provisions, leaving the replica pod stuck in Pending.
+**Caution**: Before deleting the replica PVC, clear the `shipstream.io/db-readonly-playground` taint from the replica's node. Otherwise the local-path-provisioner's helper pod gets evicted by the NoExecute taint and the replacement PVC never provisions, leaving the replica pod stuck in Pending.
 
 ---
 
@@ -467,7 +467,149 @@ kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.la
 
 **Important — sync interval**: The runner re-reads CRs every 30s, so the annotation may sit briefly before being processed. If you see no event after 5s, wait up to 35s before concluding rejection isn't firing.
 
-**Cleanup**: `./playground/reset-mysql.sh` is advisable after sub-case D to restore a clean matrix for subsequent scenarios. Clear the `shipstream.io/db-readonly` taint from both nodes after the reset.
+**Cleanup**: `./playground/reset-mysql.sh` is advisable after sub-case D to restore a clean matrix for subsequent scenarios. Clear the `shipstream.io/db-readonly-playground` taint from both nodes after the reset.
+
+---
+
+### 20. Shared-Node Selector Isolation
+**Category**: Placement / multi-tenant isolation | **Risk**: Low
+
+**Hypothesis**: A node can advertise membership in multiple failover groups at the same site, and a failover for `playground` only applies `shipstream.io/db-readonly-playground`. Workloads for an unrelated group that tolerate `playground`'s taint are not evicted.
+
+**Injection**:
+```bash
+NS=bloodraven-playground
+FG=playground
+PRIMARY=$(kubectl -n $NS get mfg $FG -o jsonpath='{.status.activeSite}')
+NODE=$(kubectl get nodes -l "shipstream.io/failover-group.playground=true,shipstream.io/site.playground=$PRIMARY" -o jsonpath='{.items[0].metadata.name}')
+
+# Mark the same physical node as also serving an unrelated inventory group.
+kubectl label node $NODE \
+  shipstream.io/failover-group.inventory=true \
+  shipstream.io/site.inventory=$PRIMARY \
+  --overwrite
+
+# Simulated inventory workload: it tolerates playground's taint because
+# playground failovers should not evict inventory pods on shared nodes.
+cat <<YAML | kubectl -n $NS apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inventory-shared-node-canary
+  labels:
+    app: inventory-shared-node-canary
+spec:
+  nodeSelector:
+    shipstream.io/failover-group.inventory: "true"
+    shipstream.io/site.inventory: "$PRIMARY"
+  tolerations:
+    - key: shipstream.io/db-readonly-playground
+      operator: Exists
+      effect: NoExecute
+  containers:
+    - name: sleep
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
+YAML
+
+kubectl -n $NS wait --for=condition=Ready pod/inventory-shared-node-canary --timeout=60s
+./playground/chaos.sh kill-site $PRIMARY
+sleep 45
+```
+
+**Verify**:
+```bash
+# The old-primary node should have the playground taint only.
+kubectl get node $NODE -o jsonpath='{.spec.taints[*].key}{"\n"}'
+# Expected includes: shipstream.io/db-readonly-playground
+# Expected excludes: shipstream.io/db-readonly-inventory
+
+# The unrelated inventory pod should still be running on the shared node.
+kubectl -n $NS get pod inventory-shared-node-canary -o wide
+# Expected: STATUS=Running, NODE=$NODE
+```
+
+**Cleanup**:
+```bash
+kubectl -n $NS delete pod inventory-shared-node-canary --ignore-not-found
+kubectl label node $NODE shipstream.io/failover-group.inventory- shipstream.io/site.inventory- 2>/dev/null || true
+./playground/chaos.sh recover
+```
+
+---
+
+### 21. NoExecute Eviction Semantics
+**Category**: Placement / eviction contract | **Risk**: Low
+
+**Hypothesis**: During failover, the old active site's selected nodes receive `shipstream.io/db-readonly-playground=true:NoExecute`. Pods without that toleration are evicted; pods with the toleration remain.
+
+**Injection**:
+```bash
+NS=bloodraven-playground
+FG=playground
+PRIMARY=$(kubectl -n $NS get mfg $FG -o jsonpath='{.status.activeSite}')
+
+cat <<YAML | kubectl -n $NS apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: noexecute-evict-canary
+  labels:
+    app: noexecute-evict-canary
+spec:
+  nodeSelector:
+    shipstream.io/failover-group.playground: "true"
+    shipstream.io/site.playground: "$PRIMARY"
+  containers:
+    - name: sleep
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: noexecute-tolerate-canary
+  labels:
+    app: noexecute-tolerate-canary
+spec:
+  nodeSelector:
+    shipstream.io/failover-group.playground: "true"
+    shipstream.io/site.playground: "$PRIMARY"
+  tolerations:
+    - key: shipstream.io/db-readonly-playground
+      operator: Exists
+      effect: NoExecute
+  containers:
+    - name: sleep
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
+YAML
+
+kubectl -n $NS wait --for=condition=Ready pod/noexecute-evict-canary --timeout=60s
+kubectl -n $NS wait --for=condition=Ready pod/noexecute-tolerate-canary --timeout=60s
+./playground/chaos.sh kill-site $PRIMARY
+sleep 45
+```
+
+**Verify**:
+```bash
+kubectl -n $NS get pods noexecute-evict-canary noexecute-tolerate-canary -o wide
+# Expected: noexecute-evict-canary is gone/Failed or has a deletion timestamp.
+# Expected: noexecute-tolerate-canary remains Running on the old-primary node.
+
+kubectl -n $NS get pod noexecute-evict-canary >/dev/null 2>&1 && \
+  kubectl -n $NS get pod noexecute-evict-canary -o jsonpath='{.metadata.deletionTimestamp}{"\n"}' || \
+  echo "noexecute-evict-canary removed as expected"
+
+kubectl -n $NS get pod noexecute-tolerate-canary -o jsonpath='{.status.phase}{"\n"}'
+# Expected: Running
+```
+
+**Cleanup**:
+```bash
+kubectl -n $NS delete pod noexecute-evict-canary noexecute-tolerate-canary --ignore-not-found --grace-period=0 --force
+./playground/chaos.sh recover
+```
 
 ---
 
@@ -477,7 +619,7 @@ kubectl -n $NS get events --field-selector involvedObject.name=$FG --sort-by=.la
 2. **Run scenarios 1-10 first** (core failure modes, each builds confidence for later ones)
 3. **Run 11-18** (advanced, may need reset between scenarios)
 4. **Run 19 immediately after scenario 8** (scenario 8 leaves behind the divergent state it needs as a prerequisite — don't reset in between)
-5. **Between scenarios**: `./playground/chaos.sh status` to confirm clean state; `./playground/reset-mysql.sh` if topology is broken
-6. **For each scenario**: Document actual vs. expected, note timing and any bugs
-7. **After code fixes**: `./playground/rebuild.sh operator` (or `sidecar`), then re-run affected scenario
-
+5. **Run 20-21 after a clean reset** (placement selector and `NoExecute` eviction semantics)
+6. **Between scenarios**: `./playground/chaos.sh status` to confirm clean state; `./playground/reset-mysql.sh` if topology is broken
+7. **For each scenario**: Document actual vs. expected, note timing and any bugs
+8. **After code fixes**: `./playground/rebuild.sh operator` (or `sidecar`), then re-run affected scenario
