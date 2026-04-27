@@ -1,0 +1,41 @@
+---
+sidebar_position: 1
+---
+
+# Operations Overview
+
+Use this page during operational work to choose the safest runbook quickly.
+
+## Decision table
+
+| Situation | Use | Do not start with |
+|---|---|---|
+| Planned maintenance on active site | [Planned Failover](./planned-failover.mdx) | Emergency promotion |
+| Active site is unreachable | [Failover](./failover.mdx), then [Runbooks](./runbooks.mdx) | Reclone before confirming the new primary |
+| Both sites appear writable | [Network Partitions](./network-partitions.mdx) and [Runbooks](./runbooks.mdx#split-brain-recovery) | App restarts only |
+| Old primary has divergent GTIDs | [Runbooks](./runbooks.mdx#divergent-old-primary-recovery) | Auto-rejoin |
+| Backup failed | [Troubleshooting](./troubleshooting.mdx#backup-job-failing) | Delete all old backups |
+| Restore failed | [Troubleshooting](./troubleshooting.mdx#restore-job-failing) | Retrying without checking source and credentials |
+| Operator unavailable | [Operator Availability](./operator-availability.mdx) | Disabling sidecar fencing |
+| DNS not moving | [Troubleshooting](./troubleshooting.mdx#dns-not-changing-after-failover) | Manual DB promotion |
+
+## On-call path
+
+1. Check the alert in [Alert to Runbook Map](./alert-runbook-map.mdx).
+2. Check `MysqlFailoverGroup` status and Kubernetes Events.
+3. Run the matching runbook header checklist before taking action.
+4. Verify active site, DNS, replication, and application writes after remediation.
+
+```bash
+kubectl get mysqlfailovergroup orders -n orders -o wide
+kubectl describe mysqlfailovergroup orders -n orders
+kubectl get events -n orders --sort-by=.lastTimestamp
+```
+
+## Related references
+
+- [Operations](./operations.mdx)
+- [Runbooks](./runbooks.mdx)
+- [Failure Mode Matrix](./failure-mode-matrix.mdx)
+- [Log Schema](./log-schema.mdx)
+- [Monitoring](./monitoring.mdx)

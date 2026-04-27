@@ -1,12 +1,27 @@
 ---
-sidebar_position: 9.5
+sidebar_position: 9
 ---
 
 # Production hardening checklist
 
-Work through this before labeling a Bloodraven deployment "production".
-Each bullet links to the page with the setting's detail. Items are
-grouped; within a group, order doesn't matter.
+Work through this before labeling a Bloodraven deployment "production". Each bullet links to the page with the setting's detail. Items are grouped; within a group, order doesn't matter.
+
+Requirement levels:
+
+| Level | Meaning |
+|---|---|
+| Required | Must be satisfied before production traffic. |
+| Recommended | Strong default unless your platform has an equivalent control. |
+| Environment-specific | Required only when that feature or environment applies. |
+
+Owner hints:
+
+| Owner | Typical responsibilities |
+|---|---|
+| Platform | Operator install, CRDs, RBAC, node labels, NetworkPolicy, monitoring |
+| Database | MySQL sizing, backup, restore, PITR, failover drills |
+| App team | Connection pools, DNS caching, write/read endpoint use, app alerts |
+| Security | Secrets, TLS, image provenance, network boundaries |
 
 ## Image supply chain
 
@@ -196,3 +211,28 @@ grouped; within a group, order doesn't matter.
       with it leads to split-brain. Use the manual-promotion
       procedure in [Operations → Manual promotion](./operations.mdx#manual-promotion-fallback-operator-unreachable)
       if you truly need to override.
+
+## Go-live gate
+
+Copy this checklist into the production release ticket:
+
+- [ ] CRDs installed and owned by the correct deployment system.
+- [ ] Operator image pinned.
+- [ ] Sidecar image pinned.
+- [ ] MySQL image pinned.
+- [ ] Backup image pinned.
+- [ ] Node labels correct for every site.
+- [ ] StorageClass tested for scheduling, expansion, and reclaim behavior.
+- [ ] external-dns tested with the production DNS provider.
+- [ ] TLS enabled for MySQL.
+- [ ] Per-role credentials configured.
+- [ ] Backups scheduled.
+- [ ] Restore verified.
+- [ ] PITR enabled if required by RPO.
+- [ ] Prometheus scraping enabled.
+- [ ] Grafana dashboards installed.
+- [ ] Minimum alerts installed and linked to runbooks.
+- [ ] NetworkPolicy installed.
+- [ ] Failover tested.
+- [ ] Application connection behavior tested.
+- [ ] On-call runbooks reviewed by responders.

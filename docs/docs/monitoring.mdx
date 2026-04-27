@@ -6,6 +6,34 @@ sidebar_position: 8
 
 Bloodraven exposes Prometheus metrics, a REST status API, and a WebSocket endpoint for real-time status streaming. For the structured-log field set and the stable `msg` vocabulary that downstream log pipelines key off of, see the [Log schema contract](./log-schema.mdx).
 
+:::tip Setup guides
+Use [Prometheus Setup](./monitoring-prometheus.mdx) and [Grafana Dashboards](./monitoring-grafana.mdx) for installation. This page is the complete observability reference.
+:::
+
+## Minimum alert set
+
+| Signal | Why it matters | Runbook |
+|---|---|---|
+| Operator down | Reconciliation and DNS updates stop | [Operator unavailable](./runbooks.mdx#operator-unavailable) |
+| No writable site | Application writes are unavailable | [Emergency manual promotion](./runbooks.mdx#emergency-manual-promotion) |
+| Split-brain detected | More than one site may accept writes | [Split-brain recovery](./runbooks.mdx#split-brain-recovery) |
+| Replication lag high | RPO risk is increasing | [Replication lag high](./troubleshooting.mdx#replication-lag-high) |
+| Divergent transactions | Old primary cannot safely rejoin | [Divergent recovery](./runbooks.mdx#divergent-old-primary-recovery) |
+| Backup stale | Recovery point is aging | [Failed backup](./runbooks.mdx#failed-backup) |
+| Verification stale | Backups are not proven restorable | [Backup Verification](./backup-verification.mdx) |
+| PITR archive lagging | PITR RPO target may be missed | [Backup And Restore](./backup-restore.mdx) |
+
+## Operator health
+
+Check these before debugging individual failover groups:
+
+```bash
+kubectl rollout status deployment/bloodraven -n bloodraven
+kubectl logs -n bloodraven deploy/bloodraven
+kubectl port-forward -n bloodraven deploy/bloodraven 8080:8080
+curl http://localhost:8080/metrics | grep '^bloodraven_'
+```
+
 ## Prometheus metrics
 
 Metrics are served on `:8080/metrics` in standard Prometheus exposition format.

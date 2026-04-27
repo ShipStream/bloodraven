@@ -6,6 +6,10 @@ sidebar_position: 3
 
 This guide walks through installing Bloodraven and creating your first `MysqlFailoverGroup`.
 
+:::tip Scope
+This is the shortest successful path. For production dependencies, CRD ownership, image pinning, monitoring, and NetworkPolicy, use [Production Install](./install-production.mdx).
+:::
+
 ## Prerequisites
 
 - Kubernetes 1.27+
@@ -172,7 +176,30 @@ kubectl port-forward -n bloodraven deploy/bloodraven 8082:8082
 curl http://localhost:8082/status
 ```
 
+Smoke-test MySQL through the primary Service:
+
+```bash
+kubectl run mysql-client -n default --rm -it --restart=Never \
+  --image=mysql:9.6 -- \
+  mysql -h mysql-orders-primary.default.svc.cluster.local \
+  -u app -papp-password \
+  -e 'SELECT @@hostname, @@read_only, @@super_read_only;'
+```
+
+Verify DNS after the first active site is selected:
+
+```bash
+kubectl get dnsendpoint -A | grep orders.az.example.com
+dig orders.az.example.com
+```
+
+:::info If this fails
+Use [Troubleshooting](./troubleshooting.mdx) for symptom-oriented checks. The most common first-run issues are missing node labels, unavailable StorageClass, missing Secret keys, and external-dns not watching the namespace.
+:::
+
 ## ArgoCD integration
+
+Production GitOps guidance now lives in [GitOps Guidance](./gitops.mdx). The short summary remains here because Argo CD users often hit health status immediately after the first install.
 
 By default, ArgoCD does not know how to assess the health of `MysqlFailoverGroup` or `MysqlBackup` custom resources — they will show **Unknown** in the ArgoCD UI. Bloodraven ships lua health check scripts in the chart's `argocd/` directory that teach ArgoCD to map CR status conditions to health states:
 
@@ -251,3 +278,5 @@ Your `MysqlFailoverGroup` and `MysqlBackup` resources should now show proper hea
 - [App Integration](./app-integration.mdx) -- Connect your applications to the failover group
 - [Failover](./failover.mdx) -- Understand how failover detection and promotion work
 - [Monitoring](./monitoring.mdx) -- Set up Prometheus metrics and alerting
+- [Production Install](./install-production.mdx) -- Move from quick start to production
+- [Production Hardening](./production-hardening.mdx) -- Go-live checklist

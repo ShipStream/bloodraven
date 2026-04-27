@@ -1,0 +1,57 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: orders-mysql-tls
+  namespace: orders
+spec:
+  secretName: orders-mysql-tls
+  issuerRef:
+    name: mysql-ca
+    kind: ClusterIssuer
+  commonName: orders.az.example.com
+  dnsNames:
+    - orders.az.example.com
+    - mysql-orders-primary.orders.svc.cluster.local
+    - mysql-orders-replicas.orders.svc.cluster.local
+---
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: orders
+spec:
+  image: mysql:9.6
+  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:0.1.6
+  credentials:
+    operatorSecret: orders-mysql-operator
+    appSecret: orders-mysql-app
+    readOnlySecret: orders-mysql-readonly
+    monitorSecret: orders-mysql-monitor
+    backupSecret: orders-mysql-backup
+  tls:
+    issuerRef:
+      name: mysql-ca
+      kind: ClusterIssuer
+    secretName: orders-mysql-tls
+  dns:
+    hostname: orders.az.example.com
+    ttl: 60
+  sites:
+    - name: iad
+      zone: us-east-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
+      lbIP: 10.0.1.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
+    - name: pdx
+      zone: us-west-2a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: pdx
+      lbIP: 10.0.2.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi

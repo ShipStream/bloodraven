@@ -1,0 +1,151 @@
+---
+sidebar_position: 3
+---
+
+# Runbooks
+
+Every runbook starts with the same incident header. Fill it in before making changes.
+
+| Field | Value |
+|---|---|
+| Severity | Set from paging policy |
+| Expected impact | Read/write outage, degraded failover, backup risk, or no user impact |
+| Data loss risk | None, possible async lag loss, or unknown |
+| Prerequisites | `kubectl`, namespace access, MySQL credentials if SQL is needed |
+| Required permissions | Read CRs/Events/logs; write CR annotations only when runbook says so |
+| Estimated time | Record expected and actual time |
+| Rollback path | Document before action |
+| Verification command | Always include active site, DNS, and app write check when relevant |
+
+## Planned failover
+
+Use [Planned Failover](./planned-failover.mdx) for controlled maintenance. Do not use during split-brain or when the target replica is unhealthy.
+
+```bash
+kubectl annotate mysqlfailovergroup orders -n orders \
+  bloodraven.shipstream.io/planned-failover=pdx --overwrite
+kubectl get mysqlfailovergroup orders -n orders -o wide
+```
+
+Verify DNS and application writes before starting maintenance on the old active site.
+
+## Emergency manual promotion
+
+Use only when automation cannot complete and you have confirmed the old primary cannot accept writes.
+
+1. Preserve Events and logs.
+2. Confirm old primary is unreachable or fenced.
+3. Confirm candidate has the best GTID/replication position available.
+4. Promote using your approved MySQL operational procedure.
+5. Update or unblock Bloodraven reconciliation only after state is consistent.
+
+Verification:
+
+```bash
+kubectl get mysqlfailovergroup orders -n orders -o yaml
+dig orders.az.example.com
+```
+
+## Split-brain recovery
+
+Use when more than one site can accept writes.
+
+1. Stop application writes if possible.
+2. Identify all writable sites.
+3. Choose the authoritative site using business ownership and GTID evidence.
+4. Fence losing sites by ensuring `super_read_only=ON` and blocking application traffic.
+5. Preserve divergent data for manual reconciliation.
+6. Reclone losing sites only after data owners approve.
+
+Do not skip GTIDs to make replication look green.
+
+## Divergent old primary recovery
+
+Use when the old primary contains transactions absent from the promoted site.
+
+1. Export evidence from the old primary.
+2. Ask the data owner whether divergent rows must be recovered manually.
+3. Keep the old primary fenced.
+4. Reclone from the active primary when approved.
+5. Verify replication returns to healthy.
+
+```bash
+kubectl describe mysqlfailovergroup orders -n orders
+kubectl get events -n orders --sort-by=.lastTimestamp | grep -i divergent
+```
+
+## PVC loss recovery
+
+Use when a MySQL data PVC is deleted or corrupted.
+
+1. Confirm whether the affected site is active.
+2. If active, stop application writes and follow emergency recovery policy.
+3. If standby, reclone from the active primary.
+4. If both sites are lost, restore from backup.
+
+See [Backup And Restore](./backup-restore.mdx) for restore workflows.
+
+## Total site loss
+
+Use when all nodes/storage/network for a site are gone.
+
+1. Confirm surviving site is writable and healthy.
+2. Confirm DNS points to the surviving site.
+3. Disable app scheduling to the lost site.
+4. Rebuild site infrastructure.
+5. Rejoin via clone or restore.
+
+Expected impact is bounded by failover detection, relay-log drain, DNS TTL, and application reconnect behavior.
+
+## Network partition diagnosis
+
+Use [Network Partitions](./network-partitions.mdx). Prioritize preventing two writable sites.
+
+```bash
+kubectl get mysqlfailovergroup orders -n orders -o yaml
+kubectl get endpoints,networkpolicy -n orders
+kubectl get events -n orders --sort-by=.lastTimestamp
+```
+
+## Failed backup
+
+1. Keep the last successful backup.
+2. Inspect `MysqlBackup` status and Job logs.
+3. Fix credentials, storage, or MySQL source health.
+4. Trigger a manual backup.
+5. Verify the new backup.
+
+```bash
+kubectl get mysqlbackup -n orders
+kubectl describe mysqlbackup -n orders <backup-name>
+```
+
+## Failed restore
+
+1. Confirm this is a recovery environment or approved destructive action.
+2. Inspect restore Job logs.
+3. Validate source path and decryption Secret.
+4. Recreate the recovery failover group if bootstrap partially initialized MySQL.
+
+## Operator unavailable
+
+Use [Operator Availability](./operator-availability.mdx). Sidecar self-fencing is part of the safety model; do not disable it during diagnosis.
+
+```bash
+kubectl rollout status deployment/bloodraven -n bloodraven
+kubectl logs -n bloodraven deploy/bloodraven
+kubectl get lease -A | grep bloodraven
+```
+
+## DNS failover stuck
+
+1. Confirm `status.activeSite` changed.
+2. Inspect `DNSEndpoint` and external-dns logs.
+3. Confirm provider record and TTL.
+4. If applications still write old site, fence the old site and restart affected clients.
+
+```bash
+kubectl get dnsendpoint -A | grep orders
+kubectl logs -n external-dns deploy/external-dns
+dig orders.az.example.com
+```

@@ -1,0 +1,21 @@
+---
+sidebar_position: 1
+---
+
+# Example Manifests
+
+Complete example manifests live in the repository `examples/` directory so they can be reviewed and validated separately from prose.
+
+| Example | File |
+|---|---|
+| Minimal failover group | [`examples/minimal-failovergroup.yaml`](https://github.com/ShipStream/bloodraven/blob/main/examples/minimal-failovergroup.yaml) |
+| Per-role credentials | [`examples/per-role-credentials.yaml`](https://github.com/ShipStream/bloodraven/blob/main/examples/per-role-credentials.yaml) |
+| TLS-enabled failover group | [`examples/tls-enabled-failovergroup.yaml`](https://github.com/ShipStream/bloodraven/blob/main/examples/tls-enabled-failovergroup.yaml) |
+| S3 backups with scheduled verification | [`examples/s3-backups-with-verification.yaml`](https://github.com/ShipStream/bloodraven/blob/main/examples/s3-backups-with-verification.yaml) |
+| PVC backups | [`examples/pvc-backups.yaml`](https://github.com/ShipStream/bloodraven/blob/main/examples/pvc-backups.yaml) |
+| Production Helm values | [`examples/production-values.yaml`](https://github.com/ShipStream/bloodraven/blob/main/examples/production-values.yaml) |
+| NetworkPolicy | [`examples/networkpolicy.yaml`](https://github.com/ShipStream/bloodraven/blob/main/examples/networkpolicy.yaml) |
+| PrometheusRule | [`examples/prometheusrule.yaml`](https://github.com/ShipStream/bloodraven/blob/main/examples/prometheusrule.yaml) |
+| Argo CD Application | [`examples/argocd-application.yaml`](https://github.com/ShipStream/bloodraven/blob/main/examples/argocd-application.yaml) |
+
+Use these files as starting points, not as production-ready manifests. Replace placeholder passwords, image tags, bucket names, DNS names, node labels, and StorageClasses before applying them.

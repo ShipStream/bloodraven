@@ -1,5 +1,5 @@
 ---
-sidebar_position: 9.6
+sidebar_position: 5
 ---
 
 # Production install examples
@@ -7,6 +7,19 @@ sidebar_position: 9.6
 These examples are starting points for production installs. They are not
 a substitute for environment-specific review, but they capture the
 manifests operators otherwise have to assemble by hand.
+
+:::tip Guided install
+Use [Production Install](./install-production.mdx) for the ordered production installation path. This page keeps larger snippets that are referenced from that guide.
+:::
+
+## When to use these examples
+
+| Example | Use when |
+|---|---|
+| Helm values overlay | Platform team installs the operator with monitoring and private images. |
+| NetworkPolicy | Cluster enforces namespace or pod network boundaries. |
+| Per-role credentials | New production failover group. |
+| Full combined example | Reviewing all moving parts in one manifest set. |
 
 ## Helm values overlay
 

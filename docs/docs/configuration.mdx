@@ -1,0 +1,47 @@
+---
+sidebar_position: 1
+---
+
+# Configuration Overview
+
+Use this section when you already know what Bloodraven does and need to choose the right configuration surface.
+
+## Pick the right page
+
+| Need | Start here |
+|---|---|
+| Smallest working manifest | [Getting Started](./getting-started.mdx) |
+| Production installation path | [Production Install](./install-production.mdx) |
+| Every CRD field and default | [CRD Reference](./crd-reference.mdx) |
+| Per-role users and MySQL TLS | [Credentials and TLS](./credentials-and-tls.mdx) |
+| Node labels, zones, and taints | [Placement Contract](./placement-contract.mdx) |
+| Application connection behavior | [App Integration](./app-integration.mdx) |
+| Security boundaries and network surfaces | [Security Model](./security-model.mdx) |
+| Go-live requirements | [Production Hardening](./production-hardening.mdx) |
+
+## Configuration model
+
+Bloodraven has three layers:
+
+| Layer | Resource | Owner |
+|---|---|---|
+| Operator install | Helm release, CRDs, RBAC, metrics Service | Platform team |
+| Failover group | `MysqlFailoverGroup` | Database/platform team |
+| Application access | MySQL Services, Secrets, DNS name | Application team with platform guardrails |
+
+## Recommended production baseline
+
+- Use `spec.credentials` instead of legacy `spec.secretName`.
+- Use distinct Secrets for operator, app, read-only, monitor, and backup users.
+- Set `spec.tls` and require client TLS in application connection strings.
+- Pin operator, sidecar, MySQL, and backup images.
+- Configure backups before production traffic starts.
+- Enable Prometheus scraping, Grafana dashboards, and alerts.
+- Link alerts to [Runbooks](./runbooks.mdx).
+
+## Related pages
+
+- [Production Install](./install-production.mdx)
+- [Credentials and TLS](./credentials-and-tls.mdx)
+- [CRD Reference](./crd-reference.mdx)
+- [Production Hardening](./production-hardening.mdx)

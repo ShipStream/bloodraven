@@ -6,6 +6,22 @@ sidebar_position: 4
 
 Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/v1alpha1`).
 
+## Common fields quick reference
+
+| Field | Use most often for | Guide |
+|---|---|---|
+| `spec.sites` | Site topology, placement, storage, LB IPs | [Placement Contract](./placement-contract.mdx) |
+| `spec.credentials` | Per-role MySQL users | [Credentials And TLS](./credentials-and-tls.mdx) |
+| `spec.tls` | MySQL TLS Secret and issuer | [Credentials And TLS](./credentials-and-tls.mdx) |
+| `spec.dns` | external-dns hostname and TTL | [Production Install](./install-production.mdx) |
+| `spec.backup` | Backup profiles, schedules, PITR | [Backup Overview](./backup-overview.mdx) |
+| `spec.initFromBackup` | Bootstrap restore into a new group | [Backup And Restore](./backup-restore.mdx) |
+| `spec.plannedFailover` | Defaults for planned failover API | [Planned Failover](./planned-failover.mdx) |
+
+:::danger Destructive and high-risk fields
+Review runbooks before changing `spec.restoreInPlace`, restore-related `confirm` tokens, reclone controls, and any field that changes `spec.sites`, `spec.credentials`, `spec.tls`, or MySQL images. Restore and reclone operations can replace data; image and credential changes can trigger restarts or failed reconnects.
+:::
+
 ## Spec
 
 ### Top-level fields

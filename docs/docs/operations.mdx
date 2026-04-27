@@ -6,6 +6,20 @@ sidebar_position: 9
 
 Day-2 operations guide for managing Bloodraven failover groups, including manual intervention, recovery procedures, and maintenance tasks. Before rolling Bloodraven out to production, also walk through the [Production hardening checklist](./production-hardening.mdx) and keep the [Failure-mode matrix](./failure-mode-matrix.mdx) open during incidents. The [Log schema contract](./log-schema.mdx) lists the stable `msg` strings to filter on when correlating an incident in your log aggregator.
 
+:::tip Incident entry point
+Use [Operations Overview](./operations-overview.mdx), [Runbooks](./runbooks.mdx), and [Alert To Runbook Map](./alert-runbook-map.mdx) during active incidents. This page remains the detailed operations reference.
+:::
+
+## Operations decision table
+
+| Task | Use when | Do not use when | Verify with |
+|---|---|---|---|
+| Planned failover | Healthy target and scheduled maintenance | Split-brain or target lagging | `status.plannedFailover`, DNS, app writes |
+| Manual promotion | Operator unavailable and old primary fenced | Operator is healthy | active site, GTIDs, DNS |
+| Split-brain recovery | Multiple writable sites | Only DNS is stale | writable state and GTID comparison |
+| Reclone old primary | Divergence accepted or no data to recover | Data owner has not reviewed divergence | replication running and lag low |
+| Backup restore | Production recovery or drill | Source artifact unverified | MySQL smoke test and app validation |
+
 ## Planned failover (graceful switchover)
 
 To promote a replica during planned maintenance, annotate the `MysqlFailoverGroup` with the target site name. The operator drains writes on the current primary, waits for the target to catch up, and promotes it atomically -- no `kubectl exec` required.

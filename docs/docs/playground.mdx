@@ -8,6 +8,8 @@ The playground deploys a fully working Bloodraven setup on your local machine so
 
 No cloud account, no DNS provider, no production infrastructure required.
 
+The playground is the recommended learning path before production. It lets you see failover, DNS steering, taints, backup, restore, and dashboard state without touching real infrastructure.
+
 <img src={require('/static/img/playground.png').default} alt="Bloodraven Playground showing the dashboard and counter app" />
 
 ## What you get
@@ -84,6 +86,37 @@ This single script handles everything:
 8. Deploys the dashboard and counter app
 
 Setup takes about 2 minutes depending on your machine.
+
+## Expected timings
+
+| Action | Typical time |
+|---|---|
+| Full setup | About 2 minutes |
+| Pod-kill failover | About 30-45 seconds when relay-log drain waits on a dead primary |
+| Operator rebuild | About 30-90 seconds after image build |
+| Sidecar rebuild | Several minutes because MySQL pods restart |
+| Local backup test | Depends on data size; small playground data is usually under 1 minute |
+| Local restore test | Depends on data size; small playground data is usually a few minutes |
+
+## Script to production concept map
+
+| Script | Production concept |
+|---|---|
+| `./playground/setup.sh` | CRD install, Helm install, tenant failover group bootstrap |
+| `./playground/rebuild.sh operator` | Operator rollout after controller changes |
+| `./playground/rebuild.sh sidecar` | MySQL pod rolling update after sidecar changes |
+| `./playground/chaos.sh kill-site iad` | Primary crash and emergency failover |
+| `./playground/chaos.sh cordon pdx` | Site capacity or scheduling failure |
+| `./playground/chaos.sh recover` | Infrastructure recovery after an incident |
+| `./playground/reset-mysql.sh` | Destructive lab reset, not a production recovery command |
+
+## Reset when things go wrong
+
+```bash
+./playground/chaos.sh recover
+./playground/reset-mysql.sh
+./playground/rebuild.sh operator sidecar
+```
 
 ## Access the apps
 

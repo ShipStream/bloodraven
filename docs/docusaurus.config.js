@@ -104,16 +104,24 @@ const config = {
             title: 'Documentation',
             items: [
               {
-                label: 'Getting Started',
+                label: 'Get Started',
                 to: '/docs/getting-started',
               },
               {
-                label: 'CRD Reference',
-                to: '/docs/crd-reference',
+                label: 'Production Install',
+                to: '/docs/install-production',
               },
               {
-                label: 'Operations',
-                to: '/docs/operations',
+                label: 'Runbooks',
+                to: '/docs/runbooks',
+              },
+              {
+                label: 'Backup And Restore',
+                to: '/docs/backup-overview',
+              },
+              {
+                label: 'Observability',
+                to: '/docs/observability-overview',
               },
             ],
           },

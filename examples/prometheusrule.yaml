@@ -1,0 +1,25 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bloodraven-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: bloodraven
+      rules:
+        - alert: BloodravenOperatorDown
+          expr: up{job=~".*bloodraven.*"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Bloodraven operator metrics target is down
+            runbook_url: https://bloodraven.readthedocs.io/en/latest/docs/runbooks/#operator-unavailable
+        - alert: BloodravenBackupVerificationStale
+          expr: time() - bloodraven_backup_verified_timestamp_seconds > 172800
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Bloodraven backup verification is stale
+            runbook_url: https://bloodraven.readthedocs.io/en/latest/docs/backup-verification/

@@ -7,6 +7,33 @@ slug: /
 
 Bloodraven is a Kubernetes operator for managing MySQL async replication failover groups across two sites. It automates failover detection, promotion, DNS steering, and application workload migration so that a site-level MySQL outage is resolved without human intervention.
 
+## Who this is for
+
+| Reader | Use these docs to |
+|---|---|
+| New user | Try Bloodraven locally and create a first failover group. |
+| Platform operator | Install the operator, define production guardrails, and run go-live checks. |
+| Application developer | Connect safely and handle failover reconnect behavior. |
+| On-call responder | Map alerts to runbooks and verify recovery under pressure. |
+| Backup owner | Configure, verify, and restore backups without reading the full CRD reference first. |
+
+## What Bloodraven does not do
+
+- It does not provide synchronous replication or zero RPO after sudden primary loss.
+- It does not replace external-dns, cert-manager, Prometheus, Grafana, or your object store.
+- It does not make application connection pools failover-aware automatically.
+- It does not reconcile divergent writes for you after split-brain.
+- It does not make PVC-local backups durable after cluster or storage loss.
+
+## User journeys
+
+| Journey | Path |
+|---|---|
+| New user | [Getting Started](./getting-started.mdx) → [Playground](./playground.mdx) → [App Integration](./app-integration.mdx) |
+| Platform operator | [Production Install](./install-production.mdx) → [Production Hardening](./production-hardening.mdx) → [Monitoring](./monitoring.mdx) |
+| On-call | [Operations Overview](./operations-overview.mdx) → [Failure Mode Matrix](./failure-mode-matrix.mdx) → [Runbooks](./runbooks.mdx) |
+| Backup owner | [Backup Overview](./backup-overview.mdx) → [S3](./backup-s3.mdx) or [PVC](./backup-pvc.mdx) → [Verification](./backup-verification.mdx) → [Restore](./backup-restore.mdx) |
+
 ## What it does
 
 - **Monitors** two MySQL instances (one per site) via a 2-second polling loop with configurable failure and recovery thresholds
@@ -81,8 +108,10 @@ spec:
 
 ## Next steps
 
-- [Architecture](./architecture.mdx) -- How the operator, sidecars, and MySQL instances interact
-- [Getting Started](./getting-started.mdx) -- Install the operator and create your first failover group
-- [Playground](./playground.mdx) -- Try Bloodraven locally on k3d, kind, or minikube with a live dashboard and chaos tools
-- [Backup and restore](./backup-restore.mdx) -- Scheduled dumps to S3 or PVC, bootstrap-only restore, retention, metrics
-- [CRD Reference](./crd-reference.mdx) -- Complete spec and status field reference
+- [Architecture](./architecture.mdx) -- How the operator, sidecars, and MySQL instances interact.
+- [Getting Started](./getting-started.mdx) -- Install the operator and create your first failover group.
+- [Production Install](./install-production.mdx) -- Production dependencies, Helm values, CRD ownership, and verification.
+- [Playground](./playground.mdx) -- Try Bloodraven locally on k3d, kind, or minikube with a live dashboard and chaos tools.
+- [Backup Overview](./backup-overview.mdx) -- Choose S3 or PVC, configure schedules, and verify recoverability.
+- [Runbooks](./runbooks.mdx) -- Incident response entry points.
+- [CRD Reference](./crd-reference.mdx) -- Complete spec and status field reference.

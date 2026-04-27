@@ -1,0 +1,44 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: bloodraven-operator-ingress
+  namespace: bloodraven
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: bloodraven
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orders-mysql-ingress
+  namespace: orders
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bloodraven
+      ports:
+        - protocol: TCP
+          port: 3306
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 3306

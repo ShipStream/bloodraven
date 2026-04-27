@@ -1,0 +1,44 @@
+---
+sidebar_position: 5
+---
+
+# Alert To Runbook Map
+
+Keep this table synchronized with your PrometheusRule package. Alert annotations should link to the matching page or heading.
+
+## Alerts
+
+| Alert | Primary runbook | First checks |
+|---|---|---|
+| `BloodravenOperatorDown` | [Operator unavailable](./runbooks.mdx#operator-unavailable) | Deployment, leader election, logs |
+| `BloodravenNoWritableSite` | [Emergency manual promotion](./runbooks.mdx#emergency-manual-promotion) or [Total site loss](./runbooks.mdx#total-site-loss) | Active site, pod reachability, fencing |
+| `BloodravenFailoverOccurred` | [Failover](./failover.mdx) | DNS, app writes, old primary state |
+| `BloodravenDivergentTransactions` | [Divergent old primary recovery](./runbooks.mdx#divergent-old-primary-recovery) | Events, GTIDs, old primary fenced |
+| `BloodravenReplicationLagging` | [Replication lag high](./troubleshooting.mdx#replication-lag-high) | lag metric, MySQL replica status |
+| `BloodravenBackupStale` | [Failed backup](./runbooks.mdx#failed-backup) | latest `MysqlBackup`, Job logs |
+| `BloodravenBackupVerificationStale` | [Backup Verification](./backup-verification.mdx) | verification CRs, restore logs |
+| `BloodravenPITRArchiveLagging` | [Backup And Restore](./backup-restore.mdx) | archiver metrics, object storage |
+| `BloodravenDNSUpdateFailed` | [DNS failover stuck](./runbooks.mdx#dns-failover-stuck) | `DNSEndpoint`, external-dns logs |
+| `BloodravenSplitBrainDetected` | [Split-brain recovery](./runbooks.mdx#split-brain-recovery) | writable sites, app traffic, GTIDs |
+
+## Kubernetes Events
+
+| Event category | Expected operator action | Runbook |
+|---|---|---|
+| Planned failover requested/started/completed | Drain writes, promote target, update DNS | [Planned Failover](./planned-failover.mdx) |
+| Emergency failover started/completed | Promote best candidate, taint old site, update DNS | [Failover](./failover.mdx) |
+| Reclone started/completed/failed | Rebuild replica from active primary | [Divergent old primary recovery](./runbooks.mdx#divergent-old-primary-recovery) |
+| Backup started/completed/failed | Create/update `MysqlBackup` Job and status | [Failed backup](./runbooks.mdx#failed-backup) |
+| Restore started/completed/failed | Gate bootstrap or restore workflow | [Failed restore](./runbooks.mdx#failed-restore) |
+| Verification started/completed/failed | Restore backup into ephemeral MySQL | [Backup Verification](./backup-verification.mdx) |
+| DNS update created/failed | Write `DNSEndpoint` for external-dns | [DNS failover stuck](./runbooks.mdx#dns-failover-stuck) |
+| Split-brain or recovery pending | Fence losers or wait for manual recovery | [Split-brain recovery](./runbooks.mdx#split-brain-recovery) |
+
+## Minimum alert annotations
+
+Each alert should include:
+
+- `summary` with the failing group and namespace.
+- `description` with immediate user impact.
+- `runbook_url` pointing to this docs site.
+- `dashboard_url` pointing to the relevant Grafana dashboard.

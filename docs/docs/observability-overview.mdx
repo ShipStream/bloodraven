@@ -1,0 +1,32 @@
+---
+sidebar_position: 1
+---
+
+# Observability Overview
+
+Bloodraven exposes operational state through Kubernetes status, Events, structured logs, Prometheus metrics, and Grafana dashboards.
+
+## Signals by audience
+
+| Audience | Primary signals |
+|---|---|
+| On-call | Alerts, runbooks, `MysqlFailoverGroup` conditions, Events |
+| Platform | Operator health, reconcile errors, RBAC errors, DNS updates |
+| Database owner | Replication lag, backup freshness, verification freshness, PITR archive lag |
+| App team | Active-site DNS, connection errors, write success rate, pool reconnect behavior |
+
+## Setup path
+
+1. Enable the metrics Service in the Helm chart.
+2. Configure Prometheus scraping with a `ServiceMonitor` or raw scrape config.
+3. Install Grafana dashboards.
+4. Install the alert package used by your environment.
+5. Link each alert to [Runbooks](./runbooks.mdx).
+
+## Pages
+
+- [Monitoring Reference](./monitoring.mdx)
+- [Prometheus Setup](./monitoring-prometheus.mdx)
+- [Grafana Dashboards](./monitoring-grafana.mdx)
+- [Alert To Runbook Map](./alert-runbook-map.mdx)
+- [Log Schema](./log-schema.mdx)

@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: orders-s3-backup
+  namespace: orders
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: replace-with-access-key
+  AWS_SECRET_ACCESS_KEY: replace-with-secret-key
+  AWS_REGION: us-east-1
+---
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: orders
+spec:
+  backup:
+    image: container-registry.oracle.com/mysql/community-server:9.6
+    maxLagSecondsForSource: 300
+    profiles:
+      - name: s3-daily
+        storage:
+          type: S3
+          s3:
+            bucket: orders-mysql-backups
+            prefix: prod/orders
+            region: us-east-1
+            credentialsSecret: orders-s3-backup
+        dump:
+          threads: 4
+          compression: zstd
+        retentionPolicy:
+          count: 14
+          maxAgeDays: 35
+          minKeep: 2
+        verification:
+          enabled: true
+          schedule: "30 8 * * *"
+          timeZone: Etc/UTC
+    schedules:
+      - name: nightly
+        profileName: s3-daily
+        schedule: "0 6 * * *"
+        timeZone: Etc/UTC
+        concurrencyPolicy: Forbid

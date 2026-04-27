@@ -1,0 +1,120 @@
+---
+sidebar_position: 4
+---
+
+# Production Install
+
+This guide installs Bloodraven for production. For a short first run, use [Getting Started](./getting-started.mdx) or the [Playground](./playground.mdx) first.
+
+## Prerequisites
+
+- Kubernetes 1.27 or newer.
+- Helm 3.
+- Nodes labelled by site as described in [Placement Contract](./placement-contract.mdx).
+- A tested StorageClass for MySQL PVCs.
+- external-dns and the `externaldns.k8s.io/v1alpha1` `DNSEndpoint` CRD.
+- cert-manager when using `spec.tls.issuerRef`.
+- Prometheus and Grafana if you want the shipped monitoring path.
+- Object storage or PVC storage for backups.
+
+## Namespace layout
+
+| Namespace | Contains |
+|---|---|
+| `bloodraven` | Operator Deployment, RBAC, metrics Service |
+| `orders` | `MysqlFailoverGroup`, MySQL pods, app-facing Services, backup Jobs |
+| `monitoring` | Prometheus, Grafana, alert rules, dashboard ConfigMaps |
+
+## Install CRDs
+
+GitOps users should choose one owner for CRDs. Do not let both Helm and a separate CRD application race to own the same files.
+
+```bash
+helm upgrade --install bloodraven bloodraven/bloodraven \
+  --namespace bloodraven \
+  --create-namespace \
+  --set installCRDs=true
+```
+
+If CRDs are managed separately:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/ShipStream/bloodraven/main/config/crd/bases/shipstream.io_mysqlfailovergroups.yaml
+kubectl apply -f https://raw.githubusercontent.com/ShipStream/bloodraven/main/config/crd/bases/shipstream.io_mysqlbackups.yaml
+kubectl apply -f https://raw.githubusercontent.com/ShipStream/bloodraven/main/config/crd/bases/shipstream.io_mysqlbackupverifications.yaml
+```
+
+Then install the operator with `--set installCRDs=false`.
+
+## Helm values
+
+```yaml
+image:
+  repository: ghcr.io/shipstream/bloodraven
+  tag: "0.1.6"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+leaderElection:
+  enabled: true
+
+metrics:
+  service:
+    enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    labels:
+      release: kube-prometheus-stack
+
+grafanaDashboards:
+  enabled: true
+  namespace: monitoring
+  folder: Bloodraven
+
+auxiliary:
+  service:
+    enabled: false
+    wsAllowedOrigins: "https://dashboard.example.com"
+```
+
+Apply:
+
+```bash
+helm upgrade --install bloodraven bloodraven/bloodraven \
+  --namespace bloodraven \
+  --create-namespace \
+  --values bloodraven-values.yaml
+```
+
+## NetworkPolicy recommendations
+
+Allow only these paths:
+
+| Source | Destination | Port | Why |
+|---|---|---|---|
+| Operator | Kubernetes API | 443 | Reconcile CRDs, Services, Events, Jobs |
+| Operator | MySQL pods | 3306 | Health, promotion, user management |
+| MySQL sidecar | Kubernetes API | 443 | Lease and fencing coordination |
+| Prometheus | Operator metrics Service | 8080 | Metrics scraping |
+| Applications | Primary and replica Services | 3306 | Data plane |
+| Backup Jobs | S3 endpoint | 443 | Backup artifacts |
+
+## Post-install verification
+
+```bash
+kubectl rollout status deployment/bloodraven -n bloodraven
+kubectl get crd mysqlfailovergroups.shipstream.io mysqlbackups.shipstream.io mysqlbackupverifications.shipstream.io
+kubectl get service -n bloodraven
+kubectl auth can-i list mysqlfailovergroups.shipstream.io --as=system:serviceaccount:bloodraven:bloodraven
+```
+
+## Before production traffic
+
+- Complete [Production Hardening](./production-hardening.mdx).
+- Create per-role credentials with [Credentials and TLS](./credentials-and-tls.mdx).
+- Configure [Prometheus](./monitoring-prometheus.mdx) and [Grafana](./monitoring-grafana.mdx).
+- Configure [S3 backups](./backup-s3.mdx) or [PVC backups](./backup-pvc.mdx).
+- Run a planned failover in a staging environment.

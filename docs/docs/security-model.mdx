@@ -1,5 +1,5 @@
 ---
-sidebar_position: 9.7
+sidebar_position: 8
 ---
 
 # Security model
@@ -16,6 +16,25 @@ It is not a zero-trust system on its own. It relies on the hosting
 Kubernetes cluster for authentication, namespace isolation, and network
 policy. The guarantees below all assume a competent cluster operator is
 running it.
+
+## Security quick wins
+
+- Use `spec.credentials` with five distinct role Secrets.
+- Enable `spec.tls` and require TLS in MySQL clients.
+- Keep `auxiliary.service.enabled=false` unless a dashboard or integration needs it.
+- Add NetworkPolicy for operator, sidecar, MySQL, Prometheus, app, and backup paths.
+- Pin and mirror operator, sidecar, MySQL, and backup images.
+- Link Secret rotation to [Credentials And TLS](./credentials-and-tls.mdx).
+
+## Threat-model assumptions
+
+| Assumption | Consequence |
+|---|---|
+| Kubernetes API authn/authz is trusted | RBAC boundaries are meaningful. |
+| CNI enforces NetworkPolicy correctly | Unauthenticated sidecar and auxiliary endpoints can be isolated. |
+| Secret storage is protected | MySQL, TLS, S3, and encryption secrets remain confidential. |
+| Node administrators are trusted | A node admin can read mounted Secrets and MySQL data on that node. |
+| Application workloads are less trusted than the operator | Apps should only receive app or read-only MySQL credentials. |
 
 ## Trust model at a glance
 

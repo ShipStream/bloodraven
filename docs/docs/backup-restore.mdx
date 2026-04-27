@@ -10,6 +10,32 @@ configurable S3 or PVC destination. Restores are bootstrap-only in v1:
 populate a brand-new `MysqlFailoverGroup` from a previous dump before
 cross-site replication starts.
 
+:::tip Quick setup guides
+Use [S3 Backups](./backup-s3.mdx) or [PVC Backups](./backup-pvc.mdx) for copy-paste setup. This page is the deep behavior reference for source selection, retention, verification, PITR, restore semantics, and failure modes.
+:::
+
+## Backup decision table
+
+| Need | Use |
+|---|---|
+| Durable off-cluster recovery | S3 profile |
+| Local lab or short-lived staging copy | PVC profile |
+| Lower RPO than full backup cadence | PITR binlog archival |
+| Proof that backups load | `MysqlBackupVerification` |
+| Compliance-grade application-level encryption | `spec.backup.profiles[].encryption` |
+
+## Restore workflow checklist
+
+- Confirm whether this is a new recovery group or a destructive in-place restore.
+- Confirm source artifact, namespace, bucket/PVC path, and decryption Secret.
+- Disable production traffic to the recovery DNS name until validation completes.
+- Verify MySQL starts, expected schemas exist, and application smoke tests pass.
+- Only then move traffic or update application configuration.
+
+## Recovery time and sizing considerations
+
+Restore time depends on dump size, compression, object-store or PVC throughput, `loadOptions.threads`, MySQL startup time, and any PITR replay window. Size staging volumes and verification PVCs for at least the compressed artifact plus restore working space; production teams should measure this with a full-size backup before go-live.
+
 ## Concepts
 
 - **Backup profile** &mdash; a named, reusable configuration living on

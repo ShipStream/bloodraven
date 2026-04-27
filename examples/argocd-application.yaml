@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: bloodraven
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://raw.githubusercontent.com/shipstream/bloodraven/gh-pages
+    chart: bloodraven
+    targetRevision: 0.1.6
+    helm:
+      values: |
+        installCRDs: false
+        metrics:
+          service:
+            enabled: true
+          serviceMonitor:
+            enabled: true
+        grafanaDashboards:
+          enabled: true
+          namespace: monitoring
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: bloodraven
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
