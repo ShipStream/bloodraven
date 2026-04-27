@@ -10,6 +10,12 @@ permissions:
   packages: write
   id-token: write
 
+env:
+  OPERATOR_IMAGE_REPOSITORY: ghcr.io/shipstream/bloodraven
+  SIDECAR_IMAGE_REPOSITORY: ghcr.io/shipstream/bloodraven-sidecar
+  HELM_REPOSITORY_URL: https://shipstream.github.io/bloodraven
+  HELM_OCI_REPOSITORY: oci://ghcr.io/shipstream/bloodraven/helm
+
 jobs:
   # ci-gate mirrors the core checks from .github/workflows/ci.yml so a
   # tag push is subject to the same bar as a main-branch merge. Without
@@ -61,10 +67,36 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Generate release body
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > release-body.md <<EOF
+          Release ${GITHUB_REF_NAME}
+
+          Operator image: \`${OPERATOR_IMAGE_REPOSITORY}:${VERSION}\`
+          Sidecar image: \`${SIDECAR_IMAGE_REPOSITORY}:${VERSION}\`
+
+          Helm chart:
+          - Helm repo: \`${HELM_REPOSITORY_URL}\`
+          - OCI: \`${HELM_OCI_REPOSITORY}\`
+
+          Install from the Helm repo:
+          \`\`\`bash
+          helm repo add bloodraven ${HELM_REPOSITORY_URL}
+          helm repo update
+          helm install bloodraven bloodraven/bloodraven --version ${VERSION}
+          \`\`\`
+
+          Install from OCI:
+          \`\`\`bash
+          helm install bloodraven ${HELM_OCI_REPOSITORY}/bloodraven --version ${VERSION}
+          \`\`\`
+          EOF
       - name: Create draft GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           draft: true
+          body_path: release-body.md
           generate_release_notes: true
 
   docker:
@@ -143,6 +175,10 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v5
 
+      - name: Log in to GitHub Container Registry for Helm
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+
       - name: Create gh-pages branch if missing
         run: |
           git fetch origin gh-pages || true
@@ -163,6 +199,10 @@ jobs:
       - name: Package Helm chart
         run: |
           helm package charts/bloodraven -d .cr-release-packages
+
+      - name: Publish Helm chart to GHCR OCI
+        run: |
+          helm push ".cr-release-packages/bloodraven-${GITHUB_REF_NAME#v}.tgz" "${HELM_OCI_REPOSITORY}"
 
       - name: Publish Helm chart to gh-pages
         run: |

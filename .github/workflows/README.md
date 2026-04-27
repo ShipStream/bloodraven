@@ -34,13 +34,34 @@ Runs the full PR gate suite in parallel:
 
 Steps:
 
-1. **Draft release** — Creates a draft GitHub Release with auto-generated notes.
+1. **Draft release** — Creates a draft GitHub Release with image locations, Helm chart locations, install examples, and auto-generated notes.
 2. **Docker images** — Builds multi-arch (`linux/amd64` + `linux/arm64`) images for both targets:
    - `ghcr.io/shipstream/bloodraven:{version}` and `:latest`
    - `ghcr.io/shipstream/bloodraven-sidecar:{version}` and `:latest`
 3. **Cosign image signing** — Keyless OIDC signing via Sigstore (no secrets required).
-4. **Helm chart** — Updates `Chart.yaml` `version`/`appVersion` from the tag, then publishes to the `gh-pages` branch as a Helm chart repository via `helm/chart-releaser-action`.
+4. **Helm chart** — Updates `Chart.yaml` `version`/`appVersion` from the tag, packages the chart, then publishes it to both GitHub Pages and GHCR OCI.
 5. **Publish release** — After Docker and Helm jobs both succeed, the draft release is published. If either fails, the release remains in draft state.
+
+Release output locations:
+
+- Operator image: `ghcr.io/shipstream/bloodraven:{version}`
+- Sidecar image: `ghcr.io/shipstream/bloodraven-sidecar:{version}`
+- Helm repo: `https://shipstream.github.io/bloodraven`
+- Helm OCI repo: `oci://ghcr.io/shipstream/bloodraven/helm`
+
+Helm repo install example:
+
+```bash
+helm repo add bloodraven https://shipstream.github.io/bloodraven
+helm repo update
+helm install bloodraven bloodraven/bloodraven --version 1.2.3
+```
+
+Helm OCI install example:
+
+```bash
+helm install bloodraven oci://ghcr.io/shipstream/bloodraven/helm/bloodraven --version 1.2.3
+```
 
 #### How to trigger a release
 
@@ -49,7 +70,7 @@ git tag v1.2.3
 git push origin v1.2.3
 ```
 
-This publishes Docker images, creates a GitHub Release, and updates the Helm chart repository automatically.
+This publishes Docker images, creates a GitHub Release, updates the GitHub Pages Helm chart repository, and pushes the chart to GHCR as an OCI artifact automatically.
 
 #### Required setup for Helm chart publishing
 
