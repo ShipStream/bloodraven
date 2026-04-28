@@ -60,6 +60,8 @@ func ClassifySiteRole(info ReplicationInfo, reachable bool, mySite, expectedActi
 //
 // Readiness requires:
 //   - master link is up
+//   - replica has received at least one byte from the master
+//     (master_last_io_seconds_ago != -1)
 //   - no full-sync transfer in progress
 //   - replica is not loading from disk
 //   - replica's applied offset has reached or exceeded the source's
@@ -70,8 +72,17 @@ func ClassifySiteRole(info ReplicationInfo, reachable bool, mySite, expectedActi
 //
 // sourceOffset is typically the master_repl_offset captured on the source
 // after Bloodraven set super_read_only and stopped accepting writes.
+//
+// The MasterLastIOSecondsAgo gate is load-bearing: Dragonfly reports
+// link_status=up the moment the TCP handshake completes, before any
+// replication payload has been transferred. A "never-synced" replica
+// reaching this function would otherwise pass the gate and be promoted
+// as an empty master, silently losing every cached value.
 func CandidateSyncReady(info ReplicationInfo, persistence PersistenceInfo, sourceOffset int64) bool {
 	if info.MasterLinkStatus != "up" {
+		return false
+	}
+	if info.MasterLastIOSecondsAgo < 0 {
 		return false
 	}
 	if info.MasterSyncInProgress {

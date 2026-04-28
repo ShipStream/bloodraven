@@ -77,10 +77,17 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 		if len(sts.OwnerReferences) == 0 || sts.OwnerReferences[0].Kind != "MysqlFailoverGroup" {
 			t.Errorf("%s: missing owner reference", siteName)
 		}
-		// Container args carry --port, --admin_port, --maxmemory, --proactor_threads.
+		// Container args carry the operator-managed flags, including the
+		// load-bearing --break_replication_on_master_restart guard.
 		args := sts.Spec.Template.Spec.Containers[0].Args
 		joined := joinArgs(args)
-		for _, want := range []string{"--port=6379", "--admin_port=9999", "--maxmemory=256mb", "--proactor_threads=2"} {
+		for _, want := range []string{
+			"--port=6379",
+			"--admin_port=9999",
+			"--maxmemory=256mb",
+			"--proactor_threads=2",
+			"--break_replication_on_master_restart",
+		} {
 			if !contains(joined, want) {
 				t.Errorf("%s: args missing %q (got %v)", siteName, want, args)
 			}

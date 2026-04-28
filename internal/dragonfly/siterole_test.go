@@ -115,6 +115,15 @@ func TestCandidateSyncReady(t *testing.T) {
 			sourceOffset: 100,
 			want:         false,
 		},
+		{
+			name: "not ready: link up but never received any IO",
+			// MasterLastIOSecondsAgo=-1 is Dragonfly's "never synced"
+			// sentinel — link_status flips to "up" the moment TCP
+			// handshakes, well before any replication payload arrives.
+			info:         ReplicationInfo{MasterLinkStatus: "up", MasterLastIOSecondsAgo: -1, SlaveReplOffset: 100},
+			sourceOffset: 100,
+			want:         false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

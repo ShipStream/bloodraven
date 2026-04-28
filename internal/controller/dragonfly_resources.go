@@ -213,14 +213,25 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSet(ctx context
 
 // buildDragonflyArgs assembles the Dragonfly container command-line. The
 // operator owns --port, --admin_port, --maxmemory, --proactor_threads,
-// and --requirepass (when auth is configured); user-supplied args are
-// appended last.
+// --break_replication_on_master_restart, and --requirepass (when auth
+// is configured); user-supplied args are appended last.
 func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []string {
 	args := []string{
 		"--port=" + strconv.Itoa(int(port)),
 		"--admin_port=" + strconv.Itoa(int(adminPort)),
 		// Bind on all interfaces; cluster networking handles isolation.
 		"--bind=0.0.0.0",
+		// Without this flag, a restarted master pod silently re-attaches
+		// its old replicas — and because Dragonfly does not version-check
+		// the replication stream, the replicas accept divergent data
+		// from the new master with no warning. This is the canonical
+		// "split brain after master crash-restart" failure described in
+		// upstream PR dragonflydb/dragonfly#386. We rely on Kubernetes +
+		// the planned/emergency failover state machines (not Dragonfly's
+		// own re-attach behavior) to drive recovery, so the right
+		// posture is to break replication on master restart and let the
+		// DragonflyManager re-issue REPLICAOF on the next tick.
+		"--break_replication_on_master_restart",
 	}
 	if spec.MaxMemoryMb > 0 {
 		args = append(args, fmt.Sprintf("--maxmemory=%dmb", spec.MaxMemoryMb))
