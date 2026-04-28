@@ -1274,6 +1274,182 @@ spec:
                 required:
                 - hostname
                 type: object
+              dragonfly:
+                description: |-
+                  Dragonfly configures an optional per-site Dragonfly cluster
+                  co-managed with MySQL. When omitted or disabled, no Dragonfly
+                  resources are created.
+                properties:
+                  adminPort:
+                    default: 9999
+                    description: 'AdminPort is the admin port used for operator-side
+                      commands. Default: 9999.'
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  args:
+                    description: |-
+                      Args are additional command-line arguments appended to the
+                      Dragonfly container command. Operator-managed flags (--port,
+                      --admin_port, --maxmemory, --proactor_threads, --requirepass,
+                      --replicaof) take precedence and may be overridden here only with
+                      caution.
+                    items:
+                      type: string
+                    type: array
+                  auth:
+                    description: |-
+                      Auth references a Secret containing the Dragonfly password. When
+                      set, the operator wires --requirepass and authenticates its own
+                      connections.
+                    properties:
+                      passwordKey:
+                        default: password
+                        description: |-
+                          PasswordKey is the key inside the Secret that holds the password.
+                          Default: "password".
+                        type: string
+                      secretName:
+                        description: SecretName is the name of the Secret containing
+                          the password.
+                        minLength: 1
+                        type: string
+                    required:
+                    - secretName
+                    type: object
+                  enabled:
+                    default: false
+                    description: |-
+                      Enabled toggles Dragonfly co-management. When false (default), no
+                      Dragonfly resources are created and existing MySQL-only behavior
+                      is preserved.
+                    type: boolean
+                  image:
+                    description: |-
+                      Image is the pinned Dragonfly container image. Required when
+                      Enabled is true. Tag ":latest" is rejected.
+                    type: string
+                  maxMemoryMb:
+                    description: |-
+                      MaxMemoryMb caps Dragonfly's memory budget per pod. Translates to
+                      the --maxmemory flag. 0 means leave unset (Dragonfly default).
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  plannedFailover:
+                    description: PlannedFailover configures planned-switchover behavior.
+                    properties:
+                      maxSyncWait:
+                        default: 30s
+                        description: |-
+                          MaxSyncWait bounds the time the planned-failover state machine
+                          waits in WaitingForDragonflySync for the target replica to catch
+                          up to the source's replication offset. The same duration is used
+                          as the REPLTAKEOVER timeout argument during PromotingDragonfly.
+                          Default: 30s.
+                        type: string
+                      onSyncTimeout:
+                        default: proceed
+                        description: |-
+                          OnSyncTimeout governs behavior when the target replica fails to
+                          reach the source's offset within MaxSyncWait, or when REPLTAKEOVER
+                          fails:
+                            - "proceed" (default): continue with MySQL promotion, stamp
+                              sessionsPreserved=false. Cache/session continuity is best-effort.
+                            - "fail": abort planned failover before MySQL promotion, roll
+                              back the source MySQL fence, leave activeSite unchanged.
+                        enum:
+                        - proceed
+                        - fail
+                        type: string
+                    type: object
+                  port:
+                    default: 6379
+                    description: 'Port is the client (Redis-compatible) port. Default:
+                      6379.'
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  proactorThreads:
+                    description: |-
+                      ProactorThreads sets Dragonfly's --proactor_threads flag. 0 means
+                      leave unset (Dragonfly default: one per CPU).
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  resources:
+                    description: Resources defines the compute resources for the Dragonfly
+                      container.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: spec.dragonfly.image is required when spec.dragonfly.enabled
+                    is true
+                  rule: '!self.enabled || (has(self.image) && self.image != '''')'
+                - message: spec.dragonfly.image must be pinned (no :latest)
+                  rule: '!self.enabled || !self.image.endsWith('':latest'')'
+                - message: spec.dragonfly.auth.secretName is required when auth is
+                    set
+                  rule: '!has(self.auth) || (has(self.auth.secretName) && self.auth.secretName
+                    != '''')'
               extraContainers:
                 description: |-
                   ExtraContainers are additional containers injected into every MySQL pod.
@@ -5306,6 +5482,109 @@ spec:
                   - type
                   type: object
                 type: array
+              dragonfly:
+                description: |-
+                  Dragonfly is the observed state of the Dragonfly subsystem when
+                  spec.dragonfly is configured.
+                properties:
+                  activeSite:
+                    description: |-
+                      ActiveSite is the site currently acting as Dragonfly master.
+                      Normally equal to status.activeSite (MySQL active); during a
+                      planned-failover Dragonfly promotion the two may briefly diverge.
+                    type: string
+                  enabled:
+                    description: |-
+                      Enabled mirrors spec.dragonfly.enabled at the time of the last
+                      observation.
+                    type: boolean
+                  lastPromotionTarget:
+                    description: |-
+                      LastPromotionTarget is the site promoted in the most recent
+                      successful Dragonfly promotion.
+                    type: string
+                  lastPromotionTime:
+                    description: |-
+                      LastPromotionTime is the timestamp of the most recent successful
+                      Dragonfly promotion (planned or emergency).
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is a human-readable status line.
+                    type: string
+                  phase:
+                    description: Phase is the high-level Dragonfly state.
+                    enum:
+                    - ""
+                    - Disabled
+                    - Reconciling
+                    - ConfiguringReplication
+                    - Ready
+                    - Degraded
+                    - Promoting
+                    type: string
+                  sites:
+                    description: |-
+                      Sites is the per-site Dragonfly observation, parallel in spirit
+                      to status.sites for MySQL.
+                    items:
+                      description: |-
+                        DragonflySiteStatus describes the observed state of one site's Dragonfly
+                        instance.
+                      properties:
+                        linkStatus:
+                          description: |-
+                            LinkStatus is the parsed master_link_status field from INFO
+                            replication on a replica. Empty on a master.
+                          type: string
+                        message:
+                          description: Message is a human-readable status line for
+                            this site.
+                          type: string
+                        name:
+                          description: Name is the site identifier, mirrored from
+                            spec for convenience.
+                          type: string
+                        podName:
+                          description: PodName is the Dragonfly pod name.
+                          type: string
+                        reachable:
+                          description: |-
+                            Reachable is true when the operator successfully connected and
+                            completed an INFO replication call on the most recent poll.
+                          type: boolean
+                        ready:
+                          description: |-
+                            Ready reports operator-level readiness: a master must be reachable
+                            and accepting writes; a replica must additionally have its link up,
+                            not be syncing, and not be loading.
+                          type: boolean
+                        replicationState:
+                          description: ReplicationState is the parsed "role" field
+                            from INFO replication.
+                          type: string
+                        role:
+                          description: Role is the site's observed Dragonfly role.
+                          enum:
+                          - unknown
+                          - master
+                          - replica
+                          - stale-master
+                          - unconfigured
+                          - unreachable
+                          type: string
+                        serviceName:
+                          description: ServiceName is the site-local Dragonfly Service
+                            name.
+                          type: string
+                        syncInProgress:
+                          description: |-
+                            SyncInProgress is the parsed master_sync_in_progress field from
+                            INFO replication on a replica.
+                          type: boolean
+                      type: object
+                    type: array
+                type: object
               lastBackupTime:
                 description: |-
                   LastBackupTime is the completion time of the most recent successful
@@ -5388,6 +5667,62 @@ spec:
                       a terminal phase.
                     format: date-time
                     type: string
+                  dragonfly:
+                    description: |-
+                      Dragonfly tracks Dragonfly-specific outcome of this planned
+                      failover attempt. Populated only when spec.dragonfly is enabled.
+                    properties:
+                      enabled:
+                        description: |-
+                          Enabled mirrors spec.dragonfly.enabled at the moment the
+                          state machine entered the Dragonfly phases.
+                        type: boolean
+                      message:
+                        description: Message is a human-readable line for kubectl
+                          describe.
+                        type: string
+                      promotionMethod:
+                        description: |-
+                          PromotionMethod records how the target was promoted. First slice
+                          always uses "REPLTAKEOVER"; reserved values include
+                          "REPLICAOF NO ONE" (fallback path) and "skipped" (no promotion
+                          attempted, e.g., spec.dragonfly disabled at fail time).
+                        type: string
+                      reason:
+                        description: |-
+                          Reason is a machine-readable tag explaining a non-success outcome.
+                          Examples: "DragonflySyncTimeout", "DragonflyPromotionFailed",
+                          "DragonflyDisabled".
+                        type: string
+                      sessionsPreserved:
+                        description: |-
+                          SessionsPreserved is a tri-state: true if Dragonfly promotion
+                          completed cleanly with replica caught up; false if sessions were
+                          lost (timeout-with-proceed, REPLTAKEOVER failure, empty-master
+                          fallback); nil when the field is unknown (e.g., Dragonfly disabled
+                          for this attempt).
+                        type: boolean
+                      sourceOffsetAtDrain:
+                        description: |-
+                          SourceOffsetAtDrain is the source Dragonfly's master replication
+                          offset captured immediately before WaitingForDragonflySync begins
+                          polling. Used as the catch-up target for the replica.
+                        format: int64
+                        type: integer
+                      syncWaitSeconds:
+                        description: |-
+                          SyncWaitSeconds is the time spent in WaitingForDragonflySync,
+                          from phase entry until either CandidateSyncReady passed or
+                          MaxSyncWait expired.
+                        format: int64
+                        type: integer
+                      targetOffsetAtPromotion:
+                        description: |-
+                          TargetOffsetAtPromotion is the target Dragonfly's slave/master
+                          replication offset captured at the moment REPLTAKEOVER returned.
+                        format: int64
+                        type: integer
+                    type: object
                   drainStartTime:
                     description: |-
                       DrainStartTime is when the reconciler entered the Draining phase
@@ -5431,6 +5766,8 @@ spec:
                     - Validating
                     - Draining
                     - WaitingForLag
+                    - WaitingForDragonflySync
+                    - PromotingDragonfly
                     - Promoting
                     - Resuming
                     - Succeeded

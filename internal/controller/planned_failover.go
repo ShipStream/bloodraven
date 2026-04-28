@@ -334,6 +334,8 @@ func plannedFailoverFencesSourcePrimary(fg *v1alpha1.MysqlFailoverGroup) bool {
 	switch pf.Phase {
 	case v1alpha1.PlannedFailoverPhaseDraining,
 		v1alpha1.PlannedFailoverPhaseWaitingForLag,
+		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
+		v1alpha1.PlannedFailoverPhasePromotingDragonfly,
 		v1alpha1.PlannedFailoverPhasePromoting:
 		return true
 	}

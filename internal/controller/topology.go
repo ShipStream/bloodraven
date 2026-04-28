@@ -56,6 +56,11 @@ type TopologyConfig struct {
 	// CredentialHash is a hash of the operator secret data. A change
 	// triggers a topology manager restart with new MySQL connections.
 	CredentialHash string
+
+	// DragonflyEnabled mirrors spec.dragonfly.enabled at the time the
+	// config was extracted. A change triggers a manager restart so the
+	// DragonflyManager goroutine is started or stopped to match.
+	DragonflyEnabled bool
 }
 
 // Equal reports whether two TopologyConfig values have the same field
@@ -254,6 +259,14 @@ type TopologyManager struct {
 	// ReplicationBroken, Updating, ...) are not inadvertently cleared by a
 	// partially-populated TopologySnapshot during an async bootstrap run.
 	BootstrapStatusCallback func(phase, errMsg, source string)
+
+	// EmergencyFailoverCallback is invoked synchronously after a
+	// successful emergency failover Execute, on the same goroutine that
+	// drove the failover. The runner wires this to a best-effort
+	// DragonflyManager.TryEmergencyPromote so the cache subsystem
+	// follows the durable promotion. The callback must not return errors
+	// — emergency MySQL failover safety is unconditional.
+	EmergencyFailoverCallback func(ctx context.Context, target, oldPrimary string)
 
 	mu           sync.RWMutex
 	lastPollTime time.Time
@@ -993,6 +1006,13 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		tm.promotedSite = candidate.name
 		tm.lastFailover = tm.clock.Now()
 		tm.lastFailoverTarget = candidate.name
+
+		// Best-effort: ask the Dragonfly subsystem (when wired) to
+		// follow the MySQL promotion. The callback enforces its own
+		// budget and never blocks the topology poll.
+		if tm.EmergencyFailoverCallback != nil {
+			tm.EmergencyFailoverCallback(ctx, candidate.name, oldPrimaryName)
+		}
 	}
 }
 

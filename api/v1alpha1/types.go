@@ -183,6 +183,12 @@ type MysqlFailoverGroupSpec struct {
 	// into every kubectl annotate.
 	// +optional
 	PlannedFailover *PlannedFailoverSpec `json:"plannedFailover,omitempty"`
+
+	// Dragonfly configures an optional per-site Dragonfly cluster
+	// co-managed with MySQL. When omitted or disabled, no Dragonfly
+	// resources are created.
+	// +optional
+	Dragonfly *DragonflySpec `json:"dragonfly,omitempty"`
 }
 
 // SplitBrainPolicySpec configures automated split-brain resolution.
@@ -486,6 +492,11 @@ type MysqlFailoverGroupStatus struct {
 	// tells the story of a switchover after the fact.
 	// +optional
 	PlannedFailover *PlannedFailoverStatus `json:"plannedFailover,omitempty"`
+
+	// Dragonfly is the observed state of the Dragonfly subsystem when
+	// spec.dragonfly is configured.
+	// +optional
+	Dragonfly *DragonflyStatus `json:"dragonfly,omitempty"`
 }
 
 // SiteStatus describes the observed state of a single site.

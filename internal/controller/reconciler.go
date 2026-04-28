@@ -79,6 +79,12 @@ type MysqlFailoverGroupReconciler struct {
 	// waitForDeploymentRollout. Tests set this to a small value so the timeout
 	// path exercises the ticker quickly.
 	rolloutPollInterval time.Duration
+
+	// dragonflyConnector overrides the production net.Dial-based dialer
+	// used by the planned-failover Dragonfly handlers. Tests inject a
+	// scripted fake; production wiring leaves this nil so realDragonflyConnector
+	// is used.
+	dragonflyConnector DragonflyConnector
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups,verbs=get;list;watch;create;update;patch;delete
@@ -86,6 +92,7 @@ type MysqlFailoverGroupReconciler struct {
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps;services;persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
@@ -227,6 +234,13 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile pdb: %w", err)
 	}
 
+	// Reconcile per-site Dragonfly resources when spec.dragonfly is enabled.
+	// No-op otherwise so MySQL-only deployments are unaffected. Owner-reference
+	// garbage collection cleans up resources when enabled flips to false.
+	if err := r.reconcileDragonflyResources(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly resources: %w", err)
+	}
+
 	// Reconcile MySQL users for credentials mode.
 	if fg.Spec.UsesCredentials() {
 		if err := r.reconcileCredentials(ctx, &fg); err != nil {
@@ -313,6 +327,13 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
 	}
 
+	// Mirror the same sweep for Dragonfly pods so the active service
+	// selector follows the active site (or the in-flight planned-
+	// failover target). No-op when spec.dragonfly is disabled.
+	if err := r.syncDragonflyPodLabels(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("sync dragonfly pod labels: %w", err)
+	}
+
 	if backupRequeue > 0 {
 		return ctrl.Result{RequeueAfter: backupRequeue}, nil
 	}
@@ -330,6 +351,7 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlFailoverGroup{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
@@ -1520,6 +1542,7 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 		RecoveryThreshold: int(recoveryThreshold),
 		FailoverCooldown:  failoverCooldown,
 		SitePriorities:    sitePriorities,
+		DragonflyEnabled:  dragonflyEnabled(fg),
 	}
 }
 

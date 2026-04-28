@@ -54,3 +54,24 @@ spec:
     peerCheckInterval: 5s
   replication:
     maxLagSeconds: 30
+  # Playground-only Dragonfly co-management. Bloodraven creates one
+  # Dragonfly StatefulSet per site and configures the non-active site
+  # as a replica of the active site. Disable by removing this block or
+  # setting enabled=false; the rest of the failover group is unaffected.
+  dragonfly:
+    enabled: true
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.25.5
+    port: 6379
+    adminPort: 9999
+    maxMemoryMb: 256
+    proactorThreads: 2
+    plannedFailover:
+      maxSyncWait: 30s
+      onSyncTimeout: proceed
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi

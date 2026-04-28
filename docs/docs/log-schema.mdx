@@ -182,6 +182,30 @@ Emitted by the sidecar's `BinlogArchiver`.
 
 Per-upload success/failure is also reflected in the `bloodraven_archiver_upload_failures` and `bloodraven_archiver_last_upload_timestamp_seconds` metrics — prefer those for alerting.
 
+### Dragonfly
+
+Bloodraven optionally co-manages per-site Dragonfly instances and emits the following events when `spec.dragonfly.enabled=true`. Mirrored by the `bloodraven_dragonfly_site_up` gauge and the `bloodraven_dragonfly_promotions_total{result}` counter, plus the matching `Dragonfly*` Kubernetes Events on the `MysqlFailoverGroup`.
+
+| Level | `msg` | Fields | Notes |
+|---|---|---|---|
+| INFO | `dragonfly: configured replica` | `site`, `host`, `port`, `fg` | Operator issued `REPLICAOF` against a non-active site to align it with the active master. |
+| WARN | `dragonfly: stale master on non-active site` | `site`, `active`, `fg` | A site reports `role=master` but is not the active site. Operator does not auto-fence in this version (see wishlist 44); apps continue routing to the active master via the label selector. |
+| INFO | `dragonfly emergency: REPLTAKEOVER succeeded` | `site`, `fg` | After an emergency MySQL failover, Dragonfly was promoted with sessions preserved. |
+| WARN | `dragonfly emergency: REPLTAKEOVER failed; falling back` | `site`, `error`, `fg` | Emergency promote could not preserve sessions; falling back to `REPLICAOF NO ONE`. |
+| INFO | `dragonfly emergency: target promoted via REPLICAOF NO ONE (sessions lost)` | `site`, `fg` | Emergency promote completed with empty cache. |
+| WARN | `dragonfly emergency: REPLICAOF NO ONE failed` | `site`, `error`, `fg` | Both promotion paths failed; cache is unavailable. MySQL emergency failover was not affected. |
+| WARN | `dragonfly emergency: target unreachable; skipping promotion` | `site`, `error`, `fg` | Bounded budget expired before the operator could reach the target. |
+
+Kubernetes Event reasons emitted on the `MysqlFailoverGroup` (visible via `kubectl describe`):
+
+| Reason | When |
+|---|---|
+| `DragonflyPromotionStarted` | Planned-failover state machine entered `PromotingDragonfly`. |
+| `DragonflyPromotionCompleted` | Dragonfly target was promoted (planned or emergency). |
+| `DragonflyPromotionFailed` | Promotion command failed; behavior depends on `spec.dragonfly.plannedFailover.onSyncTimeout` (planned) or is best-effort (emergency). |
+| `DragonflyStaleMasterDetected` | A non-active site reports master role. Logged + dedup'd in 5-minute windows. |
+| `DragonflySyncTimeout` | `WaitingForDragonflySync` exhausted `spec.dragonfly.plannedFailover.maxSyncWait`. |
+
 ### Lifecycle
 
 | Level | `msg` | Fields |

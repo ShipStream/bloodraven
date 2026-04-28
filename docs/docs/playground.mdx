@@ -168,6 +168,53 @@ For more advanced scenarios, use the chaos script:
 ./playground/chaos.sh recover            # Undo all chaos
 ```
 
+## Dragonfly co-management
+
+The playground `MysqlFailoverGroup` enables `spec.dragonfly`, so Bloodraven also creates one Dragonfly StatefulSet per site (`playground-dragonfly-iad`, `playground-dragonfly-pdx`) plus a single app-facing `playground-dragonfly` Service whose endpoints follow the active site via the `shipstream.io/dragonfly-role=master` label. Disable Dragonfly by removing the `spec.dragonfly` block.
+
+Verify the cache subsystem before exercising failover:
+
+```bash
+# Both per-site StatefulSets reach Ready
+kubectl -n bloodraven-playground get statefulset -l app.kubernetes.io/name=dragonfly
+
+# The active-site Dragonfly is master; the other site is replica
+kubectl -n bloodraven-playground exec deploy/playground-iad -- \
+  redis-cli -h playground-dragonfly-iad info replication | grep '^role'
+kubectl -n bloodraven-playground exec deploy/playground-iad -- \
+  redis-cli -h playground-dragonfly-pdx info replication | grep '^role'
+
+# The app-facing Service routes to the master endpoint
+kubectl -n bloodraven-playground get endpoints playground-dragonfly
+```
+
+Exercise a planned failover that includes Dragonfly session preservation:
+
+```bash
+# Set a key on the active master before the switch
+kubectl -n bloodraven-playground exec deploy/playground-iad -- \
+  redis-cli -h playground-dragonfly SET demo "before-failover"
+
+# Trigger a planned failover to pdx
+kubectl -n bloodraven-playground annotate mysqlfailovergroup playground \
+  bloodraven.shipstream.io/planned-failover=pdx
+
+# Watch the planned-failover status walk WaitingForLag → WaitingForDragonflySync
+# → PromotingDragonfly → Promoting → Resuming → Succeeded.
+kubectl -n bloodraven-playground get mysqlfailovergroup playground \
+  -o jsonpath='{.status.plannedFailover.phase}{"\n"}'
+
+# After Succeeded, sessionsPreserved should be true on the success path.
+kubectl -n bloodraven-playground get mysqlfailovergroup playground \
+  -o jsonpath='{.status.plannedFailover.dragonfly}{"\n"}'
+
+# Read the key back via the active service — it should still be there.
+kubectl -n bloodraven-playground exec deploy/playground-pdx -- \
+  redis-cli -h playground-dragonfly GET demo
+```
+
+Emergency Dragonfly behavior is best-effort. Killing the active MySQL pod while Dragonfly is healthy still completes the MySQL emergency failover; Dragonfly is promoted via REPLTAKEOVER (sessions preserved when reachable) or `REPLICAOF NO ONE` (sessions lost), and never blocks MySQL recovery past a 10-second budget.
+
 ## Exercise backup verification
 
 The playground's `minio` backup profile ships with scheduled verification enabled (`*/30 * * * *`). The operator materializes a CronJob that fires `bloodraven trigger-verification` on the schedule, which creates a `MysqlBackupVerification` CR against the latest Succeeded `MysqlBackup` and copies the profile's `verification` block (`sanityCheck`, etc.) onto the CR.

@@ -40,6 +40,14 @@ type managedTopology struct {
 	// nil only if the runner hasn't finished wiring yet.
 	archiver *archiverPoller
 
+	// dragonfly observes per-site Dragonfly state and reconciles
+	// replication wiring. nil when spec.dragonfly is disabled at start
+	// time. Currently the runner does not respawn this on enable=true
+	// flips during a manager's lifetime; a CR edit that toggles
+	// dragonfly.enabled changes the TopologyConfig hash and restarts
+	// the manager via sync().
+	dragonfly *DragonflyManager
+
 	// lastTopologyDegradedReason tracks the most recent topology-level
 	// Degraded reason so transition events are not confused by replication
 	// reasons that overwrite the shared Degraded condition.
@@ -136,6 +144,9 @@ func (r *TopologyManagerRunner) SetPlannedFailoverActive(nn types.NamespacedName
 		return false
 	}
 	mt.tm.SetPlannedFailoverActive(active)
+	if mt.dragonfly != nil {
+		mt.dragonfly.SetPaused(active)
+	}
 	return true
 }
 
@@ -286,6 +297,9 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
 			existing.tm.SetTopologyFrozen(frozen)
 			existing.tm.SetPlannedFailoverActive(plannedActive)
+			if existing.dragonfly != nil {
+				existing.dragonfly.SetPaused(plannedActive)
+			}
 			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
 			// Detect spec drift for ordered rolling updates.
 			r.checkSpecDrift(ctx, fg, existing.tm)
@@ -310,6 +324,9 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
 			mt.tm.SetTopologyFrozen(frozen)
 			mt.tm.SetPlannedFailoverActive(plannedActive)
+			if mt.dragonfly != nil {
+				mt.dragonfly.SetPaused(plannedActive)
+			}
 			r.handleRecloneAnnotation(ctx, fg, nn, mt.tm)
 		}
 	}
@@ -552,6 +569,29 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		}
 	}
 
+	var dfMgr *DragonflyManager
+	if dragonflyEnabled(fg) {
+		dfPollInterval := time.Duration(cfg.PollInterval)
+		if dfPollInterval <= 0 {
+			dfPollInterval = 2 * time.Second
+		}
+		dfMgr = NewDragonflyManager(r.client, r.recorder, r.logger.With("fg", nn.String(), "subsystem", "dragonfly"), nn, dfPollInterval)
+		// Mirror the planned-failover guard so the dragonfly manager
+		// stops issuing REPLICAOF while a planned switchover is in
+		// flight (the state machine handles its own promotion).
+		dfMgr.SetPaused(plannedFailoverInFlight(fg.Status.PlannedFailover))
+	}
+
+	// Wire the best-effort emergency Dragonfly promotion. Runs only
+	// after MySQL emergency failover Execute has succeeded; failures
+	// here are logged and never propagate back to MySQL.
+	if dfMgr != nil {
+		dfMgrLocal := dfMgr
+		tm.EmergencyFailoverCallback = func(emCtx context.Context, target, oldPrimary string) {
+			dfMgrLocal.TryEmergencyPromote(emCtx, target, oldPrimary)
+		}
+	}
+
 	tmCtx, cancel := context.WithCancel(ctx)
 
 	siteNames := make([]string, len(fg.Spec.Sites))
@@ -563,10 +603,11 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 
 	r.mu.Lock()
 	r.managers[nn] = &managedTopology{
-		tm:       tm,
-		cancel:   cancel,
-		cfg:      cfg,
-		archiver: archiver,
+		tm:        tm,
+		cancel:    cancel,
+		cfg:       cfg,
+		archiver:  archiver,
+		dragonfly: dfMgr,
 	}
 	r.mu.Unlock()
 
@@ -580,6 +621,14 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	}()
 
 	go archiver.Run(tmCtx)
+
+	if dfMgr != nil {
+		go func() {
+			r.logger.Info("starting dragonfly manager", "fg", nn)
+			dfMgr.Run(tmCtx)
+			r.logger.Info("dragonfly manager stopped", "fg", nn)
+		}()
+	}
 
 	return nil
 }

@@ -44,7 +44,7 @@ type PlannedFailoverSpec struct {
 // progresses through. The reconciler advances the state machine by one
 // step per reconcile so that operator restarts land on a well-defined
 // observable state.
-// +kubebuilder:validation:Enum="";Pending;Deferred;Validating;Draining;WaitingForLag;Promoting;Resuming;Succeeded;Failed
+// +kubebuilder:validation:Enum="";Pending;Deferred;Validating;Draining;WaitingForLag;WaitingForDragonflySync;PromotingDragonfly;Promoting;Resuming;Succeeded;Failed
 type PlannedFailoverPhase string
 
 const (
@@ -74,6 +74,19 @@ const (
 	// the target's GTID_EXECUTED until it covers the source's fenced
 	// GTID_EXECUTED, bounded by spec.plannedFailover.maxLagWait.
 	PlannedFailoverPhaseWaitingForLag PlannedFailoverPhase = "WaitingForLag"
+
+	// PlannedFailoverPhaseWaitingForDragonflySync means the reconciler
+	// is polling the target Dragonfly replica until its replication
+	// offset reaches the source's offset captured at drain time, bounded
+	// by spec.dragonfly.plannedFailover.maxSyncWait. Skipped when
+	// spec.dragonfly is unset or disabled.
+	PlannedFailoverPhaseWaitingForDragonflySync PlannedFailoverPhase = "WaitingForDragonflySync"
+
+	// PlannedFailoverPhasePromotingDragonfly means the reconciler is
+	// issuing REPLTAKEOVER against the target Dragonfly to promote it
+	// before MySQL promotion runs. Skipped when spec.dragonfly is unset
+	// or disabled.
+	PlannedFailoverPhasePromotingDragonfly PlannedFailoverPhase = "PromotingDragonfly"
 
 	// PlannedFailoverPhasePromoting means FailoverController.Execute is
 	// running against the target.
@@ -168,4 +181,62 @@ type PlannedFailoverStatus struct {
 	// out of Deferred.
 	// +optional
 	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
+
+	// Dragonfly tracks Dragonfly-specific outcome of this planned
+	// failover attempt. Populated only when spec.dragonfly is enabled.
+	// +optional
+	Dragonfly *PlannedFailoverDragonflyStatus `json:"dragonfly,omitempty"`
+}
+
+// PlannedFailoverDragonflyStatus captures the Dragonfly-specific outcome of
+// a planned-failover attempt. Subset of the full design (PLANS doc §42)
+// needed to debug the first slice; additional fields can be added later
+// without breaking compatibility.
+type PlannedFailoverDragonflyStatus struct {
+	// Enabled mirrors spec.dragonfly.enabled at the moment the
+	// state machine entered the Dragonfly phases.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// SourceOffsetAtDrain is the source Dragonfly's master replication
+	// offset captured immediately before WaitingForDragonflySync begins
+	// polling. Used as the catch-up target for the replica.
+	// +optional
+	SourceOffsetAtDrain *int64 `json:"sourceOffsetAtDrain,omitempty"`
+
+	// TargetOffsetAtPromotion is the target Dragonfly's slave/master
+	// replication offset captured at the moment REPLTAKEOVER returned.
+	// +optional
+	TargetOffsetAtPromotion *int64 `json:"targetOffsetAtPromotion,omitempty"`
+
+	// SyncWaitSeconds is the time spent in WaitingForDragonflySync,
+	// from phase entry until either CandidateSyncReady passed or
+	// MaxSyncWait expired.
+	// +optional
+	SyncWaitSeconds *int64 `json:"syncWaitSeconds,omitempty"`
+
+	// SessionsPreserved is a tri-state: true if Dragonfly promotion
+	// completed cleanly with replica caught up; false if sessions were
+	// lost (timeout-with-proceed, REPLTAKEOVER failure, empty-master
+	// fallback); nil when the field is unknown (e.g., Dragonfly disabled
+	// for this attempt).
+	// +optional
+	SessionsPreserved *bool `json:"sessionsPreserved,omitempty"`
+
+	// PromotionMethod records how the target was promoted. First slice
+	// always uses "REPLTAKEOVER"; reserved values include
+	// "REPLICAOF NO ONE" (fallback path) and "skipped" (no promotion
+	// attempted, e.g., spec.dragonfly disabled at fail time).
+	// +optional
+	PromotionMethod string `json:"promotionMethod,omitempty"`
+
+	// Reason is a machine-readable tag explaining a non-success outcome.
+	// Examples: "DragonflySyncTimeout", "DragonflyPromotionFailed",
+	// "DragonflyDisabled".
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// Message is a human-readable line for kubectl describe.
+	// +optional
+	Message string `json:"message,omitempty"`
 }

@@ -37,7 +37,7 @@ rules:
     resources: [secrets]
     verbs: [create, delete, get, list, patch, update, watch]
   - apiGroups: [apps]
-    resources: [deployments]
+    resources: [deployments, statefulsets]
     verbs: [create, delete, get, list, patch, update, watch]
   - apiGroups: [batch]
     resources: [jobs, cronjobs]
