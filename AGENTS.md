@@ -82,5 +82,8 @@ Lessons from running chaos scenarios against a live k3d cluster:
 ### Rebuilding after code changes
 `./playground/rebuild.sh operator` builds, imports to k3d, and restarts the operator deployment. For sidecar changes, use `./playground/rebuild.sh sidecar` (restarts MySQL pods). Both can be combined: `./playground/rebuild.sh operator sidecar`.
 
+### Automated chaos runner
+A subset of `playground/chaos-scenarios.md` is automated by `cmd/playground-chaos` and exposed as Make targets: `make chaos-list`, `make chaos-check`, `make chaos-run SCENARIO=<id>`, `make chaos-run-all`. The runner refuses to mutate any kubectl context outside the `_guard.sh` allowlist; on assertion failure it captures cluster YAML + pods + events + operator/sidecar logs + raw `/metrics` under `playground/chaos-results/<timestamp>/<scenario-id>/` for triage. Use `--no-cleanup` to keep injected state in place for forensics.
+
 ## Architecture & Configuration Notes
 This project is a Go 1.26 Kubernetes operator built around a single custom resource and two binaries. When making material changes to reconciliation, failover, CRD types, sidecar behavior, or deployment model, update the relevant documentation in `docs/` to keep code and docs aligned.

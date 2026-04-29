@@ -1,0 +1,153 @@
+// Package logs streams a pod container's logs into a ring-buffered
+// matcher so scenarios can wait for documented msg= lines from the
+// public log contract (docs/docs/log-schema.mdx).
+package logs
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"sync"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+
+	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
+)
+
+// Source identifies the pod and container a Tailer is attached to.
+type Source struct {
+	Namespace string
+	Pod       string
+	Container string
+}
+
+// Match is one line that satisfied a pattern, with the time the line
+// was observed (not parsed from the line itself).
+type Match struct {
+	Time time.Time
+	Line string
+}
+
+// Tailer streams a single container's logs. Lines are buffered into
+// a ring; matchers block until a line satisfying their predicate
+// arrives or the context expires.
+type Tailer struct {
+	Source Source
+
+	mu   sync.Mutex
+	cond *sync.Cond
+	ring []Match
+	cap  int
+	done bool
+	err  error
+}
+
+// New creates a Tailer with a ring buffer of capacity cap.
+func New(src Source, cap int) *Tailer {
+	if cap <= 0 {
+		cap = 4096
+	}
+	t := &Tailer{Source: src, cap: cap}
+	t.cond = sync.NewCond(&t.mu)
+	return t
+}
+
+// Snapshot returns a copy of the ring buffer. Used by forensic
+// capture to emit the last N matched lines.
+func (t *Tailer) Snapshot() []Match {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]Match, len(t.ring))
+	copy(out, t.ring)
+	return out
+}
+
+// Start opens a streaming log read on the source pod and feeds lines
+// into the ring buffer. Returns immediately; cancel ctx to stop.
+//
+// On EOF (pod restart, e.g. after operator-kill), Start retries the
+// stream every second until ctx is done. Lines are timestamped with
+// the local clock at observation time; the runner does not parse
+// the structured slog timestamps because we mostly care about
+// "happened after step N injected".
+func (t *Tailer) Start(ctx context.Context, k *pgkube.Client) {
+	go t.run(ctx, k)
+}
+
+func (t *Tailer) run(ctx context.Context, k *pgkube.Client) {
+	for {
+		if ctx.Err() != nil {
+			t.markDone(ctx.Err())
+			return
+		}
+		err := t.readOne(ctx, k)
+		if err != nil && ctx.Err() != nil {
+			t.markDone(ctx.Err())
+			return
+		}
+		// Brief backoff on restart so we do not hammer the API
+		// server when the pod is bouncing.
+		select {
+		case <-ctx.Done():
+			t.markDone(ctx.Err())
+			return
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func (t *Tailer) markDone(err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.done = true
+	t.err = err
+	t.cond.Broadcast()
+}
+
+func (t *Tailer) readOne(ctx context.Context, k *pgkube.Client) error {
+	follow := true
+	opts := &corev1.PodLogOptions{
+		Container: t.Source.Container,
+		Follow:    follow,
+	}
+	req := k.Kubernetes.CoreV1().Pods(t.Source.Namespace).GetLogs(t.Source.Pod, opts)
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+	r := bufio.NewReader(stream)
+	for {
+		line, err := r.ReadString('\n')
+		if line != "" {
+			t.append(Match{Time: time.Now(), Line: trimNewline(line)})
+		}
+		if err != nil {
+			if err == io.EOF || ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("read log line: %w", err)
+		}
+	}
+}
+
+func trimNewline(s string) string {
+	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+func (t *Tailer) append(m Match) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.ring) == t.cap {
+		copy(t.ring, t.ring[1:])
+		t.ring[len(t.ring)-1] = m
+	} else {
+		t.ring = append(t.ring, m)
+	}
+	t.cond.Broadcast()
+}
