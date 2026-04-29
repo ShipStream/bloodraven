@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgchaos "github.com/shipstream/bloodraven/internal/playground/chaos"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
@@ -81,7 +82,7 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 	cap := &Capture{Dir: captureDir}
 	res.CapturePath = captureDir
 
-	env, envCloser, err := e.buildEnv(scenarioCtx, logger, cap)
+	env, envCloser, err := e.buildEnv(scenarioCtx, logger, cap, res.StartTime)
 	if err != nil {
 		res.Failure = "build env: " + err.Error()
 		res.Phase = PhasePrecheck
@@ -146,7 +147,7 @@ func (e *Executor) runWithLog(ctx context.Context, env *Env, phase Phase, name s
 }
 
 func (e *Executor) cleanup(env *Env, s Scenario) error {
-	cleanCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	cleanCtx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	var errs []error
 	if err := env.Chaos.Revert(cleanCtx); err != nil {
@@ -160,10 +161,46 @@ func (e *Executor) cleanup(env *Env, s Scenario) error {
 	if err := env.Chaos.GlobalRecover(cleanCtx); err != nil {
 		errs = append(errs, fmt.Errorf("global recover: %w", err))
 	}
+	// Wait for the cluster to converge back to a healthy two-site
+	// state so the next scenario's Precheck does not race a still-
+	// recovering cluster (run-all surfaced this: scenario N's chaos
+	// scales a site to 0; scenario N+1 starts before that pod has
+	// even gone Ready). The cleanup context has the budget; if we
+	// time out, that's logged but the per-scenario result is still
+	// recorded as the success/failure that occurred BEFORE cleanup.
+	if err := waitForClusterReconverge(cleanCtx, env); err != nil {
+		errs = append(errs, fmt.Errorf("post-cleanup reconverge: %w", err))
+	}
 	return errors.Join(errs...)
 }
 
-func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Capture) (*Env, func(), error) {
+// waitForClusterReconverge polls the MFG until both sites are in
+// {writable, read-only} (i.e. the operator has finished any in-flight
+// promotion/recovery) and the cluster reports Ready=True. We keep the
+// invariant simple — this is a "is the playground stable enough for
+// the next scenario to run?" check, not a full health audit.
+func waitForClusterReconverge(ctx context.Context, env *Env) error {
+	_, err := env.Wait.UntilCR(ctx, env.Namespace, "cluster reconverged after chaos cleanup",
+		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			ready := pgkube.ReadyCondition(mfg) == "True"
+			var bad []string
+			for _, s := range mfg.Status.Sites {
+				if s.State != "writable" && s.State != "read-only" {
+					bad = append(bad, fmt.Sprintf("%s=%s", s.Name, s.State))
+				}
+				if s.RecoveryState == "RecoveryBlocked" {
+					bad = append(bad, fmt.Sprintf("%s=blocked", s.Name))
+				}
+			}
+			done := ready && len(bad) == 0 && mfg.Status.ActiveSite != ""
+			msg := fmt.Sprintf("ready=%v active=%q bad=%v", ready, mfg.Status.ActiveSite, bad)
+			return done, msg, nil
+		},
+	)
+	return err
+}
+
+func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Capture, startTime time.Time) (*Env, func(), error) {
 	creds, err := pgmysql.LoadCredentials(ctx, e.K, e.Cfg.Namespace)
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("load credentials: %w", err)
@@ -248,7 +285,12 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		default:
 			return nil, fmt.Errorf("unknown log component %q", component)
 		}
-		t := pglogs.New(pglogs.Source{Namespace: e.Cfg.Namespace, Pod: pod, Container: container}, 4096)
+		t := pglogs.New(pglogs.Source{
+			Namespace: e.Cfg.Namespace,
+			Pod:       pod,
+			Container: container,
+			SinceTime: startTime,
+		}, 4096)
 		t.Start(tailerCtx, e.K)
 		mu.Lock()
 		tailerMap[component] = t
@@ -259,6 +301,7 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 	env := &Env{
 		Namespace: e.Cfg.Namespace,
 		FG:        e.Cfg.FG,
+		StartTime: startTime,
 		Kube:      e.K,
 		Chaos:     pgchaos.New(e.K, e.Cfg.Namespace, e.Cfg.FG),
 		Wait:      pgwait.NewHelper(e.K, logger),

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 )
@@ -21,6 +22,12 @@ type Source struct {
 	Namespace string
 	Pod       string
 	Container string
+	// SinceTime, when non-zero, is forwarded to the kube API as
+	// PodLogOptions.SinceTime so the stream skips lines emitted
+	// before that moment. Used by the runner to scope each
+	// scenario's tailer to its own start time, preventing log lines
+	// from prior scenarios from contaminating the ring buffer.
+	SinceTime time.Time
 }
 
 // Match is one line that satisfied a pattern, with the time the line
@@ -111,6 +118,9 @@ func (t *Tailer) readOne(ctx context.Context, k *pgkube.Client) error {
 	opts := &corev1.PodLogOptions{
 		Container: t.Source.Container,
 		Follow:    follow,
+	}
+	if !t.Source.SinceTime.IsZero() {
+		opts.SinceTime = &metav1.Time{Time: t.Source.SinceTime}
 	}
 	req := k.Kubernetes.CoreV1().Pods(t.Source.Namespace).GetLogs(t.Source.Pod, opts)
 	stream, err := req.Stream(ctx)

@@ -100,7 +100,7 @@ func verifySelfFenceLog() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
-			_, err = env.Wait.UntilLog(waitCtx, tail, time.Time{},
+			_, err = env.Wait.UntilLog(waitCtx, tail, env.StartTime,
 				`SELF-FENCED log msg`,
 				pglogs.Substring(`SELF-FENCED`),
 			)

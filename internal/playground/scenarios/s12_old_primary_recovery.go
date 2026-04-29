@@ -3,11 +3,13 @@ package scenarios
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
+	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
 )
 
 func init() {
@@ -16,15 +18,23 @@ func init() {
 
 // scenario12OldPrimaryRecovery scales the active primary down, waits
 // for failover, scales it back up, and asserts the operator's
-// "no GTID divergence, auto-recovering old primary as replica" path:
-//   1. The old primary's site state returns to "read-only".
-//   2. Replication is configured and running on the old primary.
+// "no GTID divergence, auto-recovering old primary as replica" path.
+//
+// The assertions are invariant-based, not identity-based on the
+// originally-killed site. The operator may auto-fail-back to the
+// returning site (we have observed this on the playground), in which
+// case the *peer* — not the originally-killed site — ends up as the
+// recovered replica. Either ordering is a correct outcome of the
+// recovery codepath; the invariant we care about is "exactly one
+// writable site, exactly one read-only site with replica IO+SQL
+// threads running, and no divergent transactions reported anywhere."
 func scenario12OldPrimaryRecovery() runner.Scenario {
 	return runner.Scenario{
 		ID:    "12-old-primary-recovery-no-divergence",
 		Title: "Old primary recovers without divergence after failover",
 		Hypothesis: "After a clean failover, scaling the old primary back up triggers " +
-			"'no GTID divergence, auto-recovering old primary as replica' and the site rejoins as a replica.",
+			"'no GTID divergence, auto-recovering old primary as replica' and the cluster " +
+			"reconverges to one writable + one replicating read-only site, with no divergent transactions.",
 		Risk:    "low",
 		DocLink: "playground/chaos-scenarios.md#12-old-primary-recovery-no-divergence",
 		Timeout: 5 * time.Minute,
@@ -33,9 +43,9 @@ func scenario12OldPrimaryRecovery() runner.Scenario {
 			injectScaleZeroStash(),
 			observeFailoverFlip(),
 			injectScaleBackUp(),
-			observeOldPrimaryReadOnly(),
+			observeClusterReconvergence(),
 			verifyAutoRecoveryLog(),
-			verifyReplicationRunningOnOldPrimary(),
+			verifyReplicaThreadsRunning(),
 		},
 	}
 }
@@ -100,19 +110,50 @@ func injectScaleBackUp() runner.Step {
 	}
 }
 
-func observeOldPrimaryReadOnly() runner.Step {
+// observeClusterReconvergence waits for the cluster to settle into a
+// healthy two-site state after the recovery, regardless of which site
+// the operator picks as primary. This tolerates the operator's
+// auto-fail-back behavior: after a returning site comes up writable,
+// the operator may pick either site as primary; what we care about is
+// that the system converges to a single primary + a single replicating
+// replica, with no divergence reported.
+func observeClusterReconvergence() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "old primary site returns to read-only state",
+		Name:  "cluster reconverges to one writable + one read-only with no divergence",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			original := ctxFetch(env, "originalPrimary")
 			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				fmt.Sprintf("site %s state==read-only", original),
+				"sites: writable=1 read-only=1 divergent=0",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					st := stateOf(mfg, original)
-					return st == "read-only", fmt.Sprintf("site %s state=%q", original, st), nil
+					var writable, readOnly, other []string
+					var divergent int64
+					var blocked []string
+					for _, s := range mfg.Status.Sites {
+						switch s.State {
+						case "writable":
+							writable = append(writable, s.Name)
+						case "read-only":
+							readOnly = append(readOnly, s.Name)
+						default:
+							other = append(other, fmt.Sprintf("%s=%s", s.Name, s.State))
+						}
+						if s.DivergentTransactionCount != nil {
+							divergent += *s.DivergentTransactionCount
+						}
+						if s.RecoveryState == "RecoveryBlocked" {
+							blocked = append(blocked, s.Name)
+						}
+					}
+					sort.Strings(writable)
+					sort.Strings(readOnly)
+					msg := fmt.Sprintf(
+						"writable=%v read-only=%v other=%v divergent=%d blocked=%v",
+						writable, readOnly, other, divergent, blocked,
+					)
+					done := len(writable) == 1 && len(readOnly) == 1 && divergent == 0 && len(blocked) == 0
+					return done, msg, nil
 				},
 			)
 			return err
@@ -131,7 +172,7 @@ func verifyAutoRecoveryLog() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
-			_, err = env.Wait.UntilLog(waitCtx, tail, time.Time{},
+			_, err = env.Wait.UntilLog(waitCtx, tail, env.StartTime,
 				`"no GTID divergence, auto-recovering" log msg`,
 				pglogs.Substring(`no GTID divergence, auto-recovering`),
 			)
@@ -140,35 +181,51 @@ func verifyAutoRecoveryLog() runner.Step {
 	}
 }
 
-func verifyReplicationRunningOnOldPrimary() runner.Step {
+// verifyReplicaThreadsRunning probes the sidecar /status of whichever
+// site is currently read-only and asserts replica_io_running &&
+// replica_sql_running. We probe the sidecar (not the CR's
+// status.sites[].replicating field) because the CR is enriched by the
+// operator on a slow cadence and may lag the live MySQL state. We
+// resolve the read-only site dynamically because auto-fail-back means
+// either site could be the recovered replica — see the scenario
+// docstring.
+func verifyReplicaThreadsRunning() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "replication thread running on old primary",
+		Name:  "replica site has replica_io_running && replica_sql_running",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			original := ctxFetch(env, "originalPrimary")
+			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			if err != nil {
+				return err
+			}
+			var replica string
+			for _, s := range mfg.Status.Sites {
+				if s.State == "read-only" {
+					replica = s.Name
+					break
+				}
+			}
+			if replica == "" {
+				return fmt.Errorf("no read-only site present at verify time (sites=%+v)", mfg.Status.Sites)
+			}
+			env.Capture.Note(fmt.Sprintf("probing sidecar /status on read-only site: %s (originalPrimary=%s)",
+				replica, ctxFetch(env, "originalPrimary")))
+			probe, err := env.Sidecar(replica)
+			if err != nil {
+				return fmt.Errorf("open sidecar probe for %s: %w", replica, err)
+			}
 			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			defer cancel()
-			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				fmt.Sprintf("status.sites[%s].replicating==true", original),
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					for _, s := range mfg.Status.Sites {
-						if s.Name == original {
-							return s.Replicating, fmt.Sprintf("replicating=%v", s.Replicating), nil
-						}
-					}
-					return false, "site missing from status", nil
+			return env.Wait.UntilSidecarStatus(waitCtx, probe,
+				fmt.Sprintf("site %s replica_io_running && replica_sql_running", replica),
+				func(st *pgsidecar.StatusResponse) (bool, string) {
+					msg := fmt.Sprintf(
+						"role=%s read_only=%v replica_io=%v replica_sql=%v",
+						st.Role, st.ReadOnly, st.ReplicaIORunning, st.ReplicaSQLRunning,
+					)
+					return st.ReplicaIORunning && st.ReplicaSQLRunning, msg
 				},
 			)
-			return err
 		},
 	}
-}
-
-func stateOf(mfg *v1alpha1.MysqlFailoverGroup, site string) string {
-	for _, s := range mfg.Status.Sites {
-		if s.Name == site {
-			return s.State
-		}
-	}
-	return ""
 }

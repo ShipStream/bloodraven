@@ -80,6 +80,20 @@ func observePlannedFailoverSucceeded() runner.Step {
 					if pf == nil {
 						return false, "no plannedFailover status yet", nil
 					}
+					// Ignore stale plannedFailover blocks left over from
+					// prior runs / prior operator lifecycles. We only care
+					// about phases for the in-flight attempt this scenario
+					// just kicked off — identified by StartTime within a
+					// tolerance window of the scenario's own start time.
+					// PlannedFailoverStatus.StartTime is serialized as
+					// metav1.Time which truncates to whole seconds, so a
+					// pf.StartTime up to 1s before env.StartTime can still
+					// be the new run; we use 2s of slack.
+					staleCutoff := env.StartTime.Add(-2 * time.Second)
+					if pf.StartTime == nil || pf.StartTime.Time.Before(staleCutoff) {
+						return false, fmt.Sprintf("ignoring stale plannedFailover (startTime=%v, scenario startTime=%v)",
+							pf.StartTime, env.StartTime), nil
+					}
 					msg := fmt.Sprintf("phase=%q target=%s reason=%q", pf.Phase, pf.Target, pf.Reason)
 					if pf.Phase == v1alpha1.PlannedFailoverPhaseFailed {
 						return false, msg, fmt.Errorf("planned failover entered Failed: %s (%s)", pf.Reason, pf.Message)

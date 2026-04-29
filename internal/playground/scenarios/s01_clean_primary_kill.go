@@ -121,7 +121,7 @@ func verifyFailoverLog() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
-			_, err = env.Wait.UntilLog(waitCtx, tail, time.Time{}, `"failover complete"`,
+			_, err = env.Wait.UntilLog(waitCtx, tail, env.StartTime, `"failover complete"`,
 				pglogs.Substring(`failover complete`))
 			return err
 		},

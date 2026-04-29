@@ -38,6 +38,14 @@ type Env struct {
 	Namespace string
 	FG        string
 
+	// StartTime is captured at the top of Executor.Run, before any
+	// step executes. Scenarios pass this as the `since` argument to
+	// Wait.UntilLog so matches do not bleed in from prior runs whose
+	// lines may still be in the operator/sidecar log history. The
+	// tailer also uses it as PodLogOptions.SinceTime so kube pre-filters
+	// at the source.
+	StartTime time.Time
+
 	Kube    *pgkube.Client
 	Chaos   *pgchaos.Actions
 	Wait    *pgwait.Helper

@@ -161,7 +161,7 @@ func verifyAutoResolveLog() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
-			_, err = env.Wait.UntilLog(waitCtx, tail, time.Time{},
+			_, err = env.Wait.UntilLog(waitCtx, tail, env.StartTime,
 				`"split-brain auto-resolve" log msg`,
 				pglogs.Substring(`split-brain auto-resolve`),
 			)
