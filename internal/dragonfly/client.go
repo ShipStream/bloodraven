@@ -138,12 +138,19 @@ func (c *Client) ReplicaOfNoOne(ctx context.Context) error {
 //
 // timeout is rounded up to the next millisecond and clamped to a
 // non-zero positive value (Dragonfly rejects 0).
+//
+// The per-call client read deadline is set to timeout + 5s so that the
+// client does not time out before the server has used its full drain
+// budget. Otherwise the client could give up while the server is still
+// (or has just) accepted the takeover, leaving the connection in an
+// unknown state and the caller unsure whether promotion happened.
 func (c *Client) ReplTakeover(ctx context.Context, timeout time.Duration) error {
 	ms := timeout.Milliseconds()
 	if ms <= 0 {
 		ms = 1
 	}
-	return c.exec(ctx, "REPLTAKEOVER", strconv.FormatInt(ms, 10))
+	_, err := c.execReplyWithIOTimeout(ctx, timeout+5*time.Second, "REPLTAKEOVER", strconv.FormatInt(ms, 10))
+	return err
 }
 
 // ClientKillType issues `CLIENT KILL TYPE <kind>` against the connected
@@ -165,17 +172,25 @@ func (c *Client) exec(ctx context.Context, args ...string) error {
 	return err
 }
 
-// execReply sends a command and returns the reply body. Applies the
-// configured I/O deadlines and respects ctx cancellation.
+// execReply sends a command and returns the reply body using the
+// configured per-call IOTimeout.
 func (c *Client) execReply(ctx context.Context, args ...string) (string, error) {
+	return c.execReplyWithIOTimeout(ctx, c.cfg.IOTimeout, args...)
+}
+
+// execReplyWithIOTimeout is the core write-then-read primitive. Callers
+// that need a different read deadline than DefaultIOTimeout — e.g.
+// ReplTakeover, which legitimately blocks for tens of seconds while the
+// server drains replication — pass an explicit ioTimeout. Zero or
+// negative ioTimeout falls back to DefaultIOTimeout.
+func (c *Client) execReplyWithIOTimeout(ctx context.Context, ioTimeout time.Duration, args ...string) (string, error) {
 	if c.conn == nil {
 		return "", fmt.Errorf("dragonfly: client closed")
 	}
-	io := c.cfg.IOTimeout
-	if io == 0 {
-		io = DefaultIOTimeout
+	if ioTimeout <= 0 {
+		ioTimeout = DefaultIOTimeout
 	}
-	deadline := time.Now().Add(io)
+	deadline := time.Now().Add(ioTimeout)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}

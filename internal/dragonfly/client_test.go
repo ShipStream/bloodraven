@@ -23,6 +23,11 @@ type fakeServer struct {
 	password   string // when non-empty, AUTH is required first
 	responses  map[string]string
 	authedOnly map[string]bool
+	// delays maps the uppercased first command word ("REPLTAKEOVER") to
+	// a sleep duration the server inserts before replying. Used to
+	// simulate slow server-side operations (replication drain) without
+	// fixed delays in tests that don't need them.
+	delays map[string]time.Duration
 
 	commandsCh chan []string
 }
@@ -38,6 +43,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 		listener:   l,
 		responses:  map[string]string{},
 		authedOnly: map[string]bool{},
+		delays:     map[string]time.Duration{},
 		commandsCh: make(chan []string, 64),
 	}
 	go s.serve()
@@ -61,6 +67,16 @@ func (s *fakeServer) requireAuth(password string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.password = password
+}
+
+// delay registers a sleep applied before the server replies to any
+// command whose first word matches verb (case-insensitive). Used by
+// TestClientReplTakeoverHonorsServerDrainBudget to simulate a slow
+// REPLTAKEOVER without sleeping in unrelated tests.
+func (s *fakeServer) delay(verb string, d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.delays[strings.ToUpper(verb)] = d
 }
 
 func (s *fakeServer) serve() {
@@ -96,7 +112,11 @@ func (s *fakeServer) handle(conn net.Conn) {
 		needPassword := s.password != ""
 		password := s.password
 		canned, hasCanned := s.responses[key]
+		delay := s.delays[strings.ToUpper(args[0])]
 		s.mu.Unlock()
+		if delay > 0 {
+			time.Sleep(delay)
+		}
 
 		if needPassword && !authed && strings.ToUpper(args[0]) != "AUTH" {
 			_, _ = bw.WriteString("-NOAUTH Authentication required.\r\n")
@@ -294,6 +314,39 @@ func TestClientKillType(t *testing.T) {
 	got := <-srv.commandsCh
 	if want := []string{"CLIENT", "KILL", "TYPE", "NORMAL"}; !equalSlices(got, want) {
 		t.Errorf("got command %v, want %v", got, want)
+	}
+}
+
+// TestClientReplTakeoverHonorsServerDrainBudget regression-tests the
+// fix for the bug where REPLTAKEOVER inherited DefaultIOTimeout (5s)
+// even though its `timeout` argument is the server-side drain budget
+// (up to 30s). Without the fix, the client times out at 5s while the
+// server may have already accepted the takeover, leaving the operator
+// uncertain about promotion state.
+//
+// The fake server sleeps for slightly over the client's IOTimeout
+// before replying. With the fix, ReplTakeover's per-call deadline is
+// timeout+5s, so the call succeeds. Without it, the call times out.
+func TestClientReplTakeoverHonorsServerDrainBudget(t *testing.T) {
+	const (
+		ioTimeout    = 200 * time.Millisecond
+		serverDelay  = 400 * time.Millisecond
+		drainBudget  = 1 * time.Second
+	)
+	srv := newFakeServer(t)
+	srv.delay("REPLTAKEOVER", serverDelay)
+	srv.reply("REPLTAKEOVER 1000", "+OK\r\n")
+	c, err := New(context.Background(), Config{Addr: srv.addr(), DialTimeout: time.Second, IOTimeout: ioTimeout})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close()
+	start := time.Now()
+	if err := c.ReplTakeover(context.Background(), drainBudget); err != nil {
+		t.Fatalf("ReplTakeover: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < serverDelay {
+		t.Errorf("ReplTakeover returned in %s, expected at least %s server delay", elapsed, serverDelay)
 	}
 }
 

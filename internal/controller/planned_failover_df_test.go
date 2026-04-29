@@ -10,6 +10,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
@@ -278,6 +282,70 @@ func TestPlannedFailoverPromotingDragonfly_StripFails_ProceedsWithFailureHandler
 	}
 	if got.Status.PlannedFailover.Dragonfly.PromotionMethod != "" {
 		t.Errorf("promotionMethod = %q, want empty (takeover failed → effectiveDragonflyMasterSite must keep returning source)", got.Status.PlannedFailover.Dragonfly.PromotionMethod)
+	}
+}
+
+// TestPlannedFailoverPromotingDragonfly_DemoteFails_DoesNotRestoreSourceTraffic
+// regression-tests the bug where the success path restored the source's
+// traffic label after a failed role-demote patch. The result was a pod
+// still labelled dragonfly-role=master with traffic=enabled — selectable
+// by the active Service alongside the newly-promoted target. Split-brain
+// at the routing layer.
+//
+// We inject a fake-client interceptor that errors on Update of the
+// source pod when the demote role label is being set, and assert the
+// source's traffic label remains stripped (no restore).
+func TestPlannedFailoverPromotingDragonfly_DemoteFails_DoesNotRestoreSourceTraffic(t *testing.T) {
+	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
+	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
+	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
+	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
+
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg, newTestSecret(), sourcePod, targetPod).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				// Fail the demote patch: source pod being updated with
+				// dragonfly-role=replica. Let everything else through —
+				// strip (delete traffic label) and target master-stamp
+				// must still succeed.
+				if pod, ok := obj.(*corev1.Pod); ok && pod.Name == sourcePod.Name {
+					if pod.Labels[labelDragonflyRole] == "replica" {
+						return errors.New("simulated demote-patch failure")
+					}
+				}
+				return underlying.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &MysqlFailoverGroupReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+
+	target := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 200}}
+	source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+	installFakeDragonflyConn(t, r, map[string]*fakeDragonflyConn{
+		"lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379": target,
+		"lion-dragonfly-iad.shared-lion.svc.cluster.local:6379": source,
+	})
+	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), fg, fgNN(fg)); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	// Demote failed → source must NOT have its traffic label restored.
+	// Otherwise it sits with role=master+traffic=enabled and joins the
+	// active Service alongside the new master.
+	var gotSource corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); err != nil {
+		t.Fatalf("get source pod: %v", err)
+	}
+	if _, has := gotSource.Labels[labelDragonflyTraffic]; has {
+		t.Errorf("source traffic label = %q, want absent (demote failed → must not restore traffic)", gotSource.Labels[labelDragonflyTraffic])
 	}
 }
 

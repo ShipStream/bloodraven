@@ -76,15 +76,19 @@ func formatInt(p int32) string {
 // fakeConnector returns connections programmed by the test. Keyed on the
 // addr the manager dials.
 type fakeConnector struct {
-	mu    sync.Mutex
-	byAdd map[string]*fakeDragonflyConn
+	mu       sync.Mutex
+	byAdd    map[string]*fakeDragonflyConn
+	queues   map[string][]*fakeDragonflyConn
 	dialErrs map[string]error
+	dials    map[string]int
 }
 
 func newFakeConnector() *fakeConnector {
 	return &fakeConnector{
 		byAdd:    map[string]*fakeDragonflyConn{},
+		queues:   map[string][]*fakeDragonflyConn{},
 		dialErrs: map[string]error{},
+		dials:    map[string]int{},
 	}
 }
 
@@ -94,17 +98,41 @@ func (f *fakeConnector) program(addr string, conn *fakeDragonflyConn) {
 	f.byAdd[addr] = conn
 }
 
+// programQueue programs a FIFO of conns for an addr. Each call to
+// connect(addr, ...) returns and removes the front of the queue. After
+// the queue empties the next dial errors. Use this to verify code paths
+// that re-dial on the same addr (e.g. emergency promote dialing fresh
+// after a REPLTAKEOVER error).
+func (f *fakeConnector) programQueue(addr string, conns ...*fakeDragonflyConn) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queues[addr] = append(f.queues[addr], conns...)
+}
+
 func (f *fakeConnector) dialFails(addr string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dialErrs[addr] = err
 }
 
+// dialCount returns how many times connect was called for the addr.
+func (f *fakeConnector) dialCount(addr string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dials[addr]
+}
+
 func (f *fakeConnector) connect(_ context.Context, addr, _ string) (DragonflyConnection, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.dials[addr]++
 	if err, ok := f.dialErrs[addr]; ok {
 		return nil, err
+	}
+	if q, ok := f.queues[addr]; ok && len(q) > 0 {
+		next := q[0]
+		f.queues[addr] = q[1:]
+		return next, nil
 	}
 	conn, ok := f.byAdd[addr]
 	if !ok {
@@ -421,6 +449,39 @@ func TestDragonflyManager_TryEmergencyPromote_TakeoverFailsFallsBack(t *testing.
 	}
 	if !found {
 		t.Errorf("did not see REPLICAOF NO ONE fallback event; events=%v", got)
+	}
+}
+
+// TestDragonflyManager_TryEmergencyPromote_RedialsAfterTakeoverError
+// regression-tests the bug where the emergency promotion path reused the
+// post-REPLTAKEOVER connection for REPLICAOF NO ONE. RESP has no
+// req/reply correlation: a late server reply for the failed REPLTAKEOVER
+// could be consumed as the REPLICAOF NO ONE reply, producing a spurious
+// success or failure event. The fix re-dials a fresh connection.
+func TestDragonflyManager_TryEmergencyPromote_RedialsAfterTakeoverError(t *testing.T) {
+	fg := fgWithDragonflyEnabledAndActive()
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.Build()
+	rec := record.NewFakeRecorder(8)
+	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
+
+	first := &fakeDragonflyConn{
+		info:            dragonfly.ReplicationInfo{Role: "slave"},
+		replTakeoverErr: errors.New("replication still active"),
+	}
+	second := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+	conn := newFakeConnector()
+	addr := "lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379"
+	conn.programQueue(addr, first, second)
+	mgr.SetConnector(conn.connect)
+
+	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
+
+	if !first.closed {
+		t.Errorf("first conn (post-REPLTAKEOVER error) was not closed")
+	}
+	if dials := conn.dialCount(addr); dials < 2 {
+		t.Errorf("dialCount(%q) = %d, want >= 2 (a fresh dial after REPLTAKEOVER error)", addr, dials)
 	}
 }
 

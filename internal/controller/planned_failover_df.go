@@ -321,13 +321,21 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromotingDragonfly(ctx con
 		log.FromContext(ctx).Error(err, "post-promotion: stamp target traffic=enabled", "site", cur.Target)
 	}
 	if cur.SourcePrimary != "" {
+		// Demote MUST succeed before we restore the source's traffic
+		// label. If demote fails the source pod still carries
+		// dragonfly-role=master; restoring traffic would re-attach a
+		// pod with the master role to the active Service alongside the
+		// newly-promoted target — split-brain at the routing layer.
 		if err := r.setDragonflyRoleOnSite(ctx, fg, cur.SourcePrimary, "replica"); err != nil {
-			log.FromContext(ctx).Error(err, "post-promotion: stamp source role=replica", "site", cur.SourcePrimary)
-		}
-		// Restore the source's traffic label so it rejoins the cluster
-		// as a healthy replica (the active Service still ignores it
-		// because role=replica).
-		if err := r.setDragonflyTrafficOnSite(ctx, fg, cur.SourcePrimary, true); err != nil {
+			log.FromContext(ctx).Error(err, "post-promotion: stamp source role=replica; leaving source out of active Service to avoid split-brain", "site", cur.SourcePrimary)
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed,
+				"post-promotion demote of source %q failed (%v); source kept out of active Service to avoid split-brain. Manual intervention required.",
+				cur.SourcePrimary, err)
+		} else if err := r.setDragonflyTrafficOnSite(ctx, fg, cur.SourcePrimary, true); err != nil {
+			// Demote succeeded; the active Service ignores the source
+			// because role=replica, so traffic-label drift is cosmetic.
+			// Log only; the next reconcile's syncDragonflyPodLabels
+			// sweep will retry.
 			log.FromContext(ctx).Error(err, "post-promotion: restore source traffic=enabled", "site", cur.SourcePrimary)
 		}
 	}

@@ -494,10 +494,15 @@ func (m *DragonflyManager) TryEmergencyPromote(ctx context.Context, target, oldS
 		m.stampPromotion(emCtx, target)
 		return
 	}
-	defer func() { _ = conn.Close() }()
 
 	maxWait := effectiveDragonflyMaxSyncWaitFromFG(&fg)
-	if takeoverErr := conn.ReplTakeover(emCtx, maxWait/2); takeoverErr == nil {
+	takeoverErr := conn.ReplTakeover(emCtx, maxWait/2)
+	// RESP has no req/reply correlation. After a REPLTAKEOVER error the
+	// underlying connection may have a late server reply pending in the
+	// read buffer; reusing it for REPLICAOF NO ONE would either consume
+	// that stale reply or interleave with one. Close and dial fresh.
+	_ = conn.Close()
+	if takeoverErr == nil {
 		m.logger.Info("dragonfly emergency: REPLTAKEOVER succeeded", "site", target)
 		metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "success").Inc()
 		if m.recorder != nil {
@@ -508,11 +513,23 @@ func (m *DragonflyManager) TryEmergencyPromote(ctx context.Context, target, oldS
 		m.bestEffortEmergencyClientKill(emCtx, &fg, oldSource, password)
 		m.stampPromotion(emCtx, target)
 		return
-	} else {
-		m.logger.Warn("dragonfly emergency: REPLTAKEOVER failed; falling back", "site", target, "error", takeoverErr)
 	}
+	m.logger.Warn("dragonfly emergency: REPLTAKEOVER failed; falling back", "site", target, "error", takeoverErr)
 
-	if noOneErr := conn.ReplicaOfNoOne(emCtx); noOneErr != nil {
+	freshConn, freshErr := m.connector(emCtx, addr, password)
+	if freshErr != nil {
+		m.logger.Warn("dragonfly emergency: re-dial for REPLICAOF NO ONE failed", "site", target, "error", freshErr)
+		metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "failed").Inc()
+		if m.recorder != nil {
+			m.recorder.Eventf(&fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed,
+				"emergency: target Dragonfly %q failed to promote (REPLTAKEOVER failed; re-dial for fallback also failed)", target)
+		}
+		m.stampPromotion(emCtx, target)
+		return
+	}
+	noOneErr := freshConn.ReplicaOfNoOne(emCtx)
+	_ = freshConn.Close()
+	if noOneErr != nil {
 		m.logger.Warn("dragonfly emergency: REPLICAOF NO ONE failed", "site", target, "error", noOneErr)
 		metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "failed").Inc()
 		if m.recorder != nil {
