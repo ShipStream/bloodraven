@@ -221,6 +221,121 @@ func TestReconcileDragonflyResources_DisabledIsNoOp(t *testing.T) {
 	}
 }
 
+// TestReconcileDragonflyResources_DisabledTearsDownPriorResources
+// regression-tests B4: flipping spec.dragonfly.enabled=false used to
+// be a no-op, leaving orphan StatefulSets and Services routing live
+// traffic. Owner-ref GC only fires when the owning object is deleted,
+// not when its .spec mutates. Verify reconcileDragonflyResources now
+// actively deletes the per-site StatefulSets, the per-site Services,
+// and the active Service when disabled.
+func TestReconcileDragonflyResources_DisabledTearsDownPriorResources(t *testing.T) {
+	fg := fgWithDragonfly()
+	r, c := newReconciler(fg)
+	ctx := context.Background()
+	if err := r.reconcileDragonflyResources(ctx, fg); err != nil {
+		t.Fatalf("reconcile (enabled): %v", err)
+	}
+	// Verify StatefulSets and Services exist before disable.
+	var sts appsv1.StatefulSet
+	if err := c.Get(ctx, types.NamespacedName{Name: "lion-dragonfly-dc1", Namespace: "shared-lion"}, &sts); err != nil {
+		t.Fatalf("pre-disable: dc1 StatefulSet missing: %v", err)
+	}
+
+	// Now flip enabled=false (simulating user mutation).
+	fg.Spec.Dragonfly.Enabled = false
+	if err := r.reconcileDragonflyResources(ctx, fg); err != nil {
+		t.Fatalf("reconcile (disabled): %v", err)
+	}
+	// All Dragonfly StatefulSets must be gone.
+	var stsList appsv1.StatefulSetList
+	if err := c.List(ctx, &stsList); err != nil {
+		t.Fatalf("list statefulsets: %v", err)
+	}
+	for _, s := range stsList.Items {
+		if s.Labels[labelAppName] == dragonflyAppName {
+			t.Errorf("StatefulSet %q survived disable", s.Name)
+		}
+	}
+	// All Dragonfly Services (per-site + active) must be gone.
+	var svcList corev1.ServiceList
+	if err := c.List(ctx, &svcList); err != nil {
+		t.Fatalf("list services: %v", err)
+	}
+	for _, s := range svcList.Items {
+		if s.Labels[labelAppName] == dragonflyAppName {
+			t.Errorf("Service %q survived disable", s.Name)
+		}
+	}
+}
+
+// TestBuildDragonflyArgs_FiltersOperatorOwnedFlags regression-tests
+// B9: user-supplied spec.Args containing operator-owned safety flags
+// could override them under gflags last-wins parsing — most notably
+// --break_replication_on_master_restart=false would silently disable
+// the split-brain guard. Verify the filter strips matching flags.
+func TestBuildDragonflyArgs_FiltersOperatorOwnedFlags(t *testing.T) {
+	spec := &v1alpha1.DragonflySpec{
+		MaxMemoryMb: 256,
+		Args: []string{
+			// Forms gflags accepts: try both for each flag we filter.
+			"--break_replication_on_master_restart=false",
+			"--bind=192.168.1.1",
+			"--port", "9999",
+			"--admin_port=8888",
+			"--requirepass=letmein",
+			// Innocent passthrough flag (must survive).
+			"--cluster_mode=emulated",
+		},
+	}
+	args := buildDragonflyArgs(spec, 6379, 9999)
+	joined := joinArgs(args)
+	for _, banned := range []string{
+		"--break_replication_on_master_restart=false",
+		"--bind=192.168.1.1",
+		"--admin_port=8888",
+		"--requirepass=letmein",
+	} {
+		if contains(joined, banned) {
+			t.Errorf("operator-owned flag leaked through filter: %q in %q", banned, joined)
+		}
+	}
+	// `--port` followed by a value is the space-separated form; both
+	// the flag and its value should be stripped.
+	for i, a := range args {
+		if a == "--port" && i+1 < len(args) && args[i+1] == "9999" {
+			t.Errorf("space-separated --port 9999 leaked through filter: %v", args)
+		}
+	}
+	// Innocent passthrough preserved.
+	if !contains(joined, "--cluster_mode=emulated") {
+		t.Errorf("innocent user arg dropped; args = %q", joined)
+	}
+	// Operator's own --break_replication_on_master_restart still
+	// present (the safety guard is the whole point of B9).
+	if !contains(joined, "--break_replication_on_master_restart") {
+		t.Errorf("operator safety flag missing from args; got %q", joined)
+	}
+}
+
+// TestBuildDragonflyEnv_EmptySecretNameOmitsEnv regression-tests B8:
+// when auth.SecretName is empty (unset by partial in-place patch or
+// admission-webhook bypass), the env var must not be emitted with an
+// empty SecretKeyRef name — that produces a pod that fails to start
+// with a secret-not-found event rather than a clean reconcile error.
+// The corresponding --requirepass arg must also be omitted.
+func TestBuildDragonflyEnv_EmptySecretNameOmitsEnv(t *testing.T) {
+	spec := &v1alpha1.DragonflySpec{
+		Auth: &v1alpha1.DragonflyAuthSpec{SecretName: ""},
+	}
+	if env := buildDragonflyEnv(spec); env != nil {
+		t.Errorf("expected nil env when SecretName empty; got %+v", env)
+	}
+	args := buildDragonflyArgs(spec, 6379, 9999)
+	if contains(joinArgs(args), "--requirepass") {
+		t.Errorf("--requirepass emitted with empty SecretName; args = %q", joinArgs(args))
+	}
+}
+
 func joinArgs(args []string) string {
 	out := ""
 	for _, a := range args {

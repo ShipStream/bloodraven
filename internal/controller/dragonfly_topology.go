@@ -552,9 +552,16 @@ func (m *DragonflyManager) TryEmergencyPromote(ctx context.Context, target, oldS
 
 // applyEmergencyPromotionLabels stamps role=master+traffic=enabled on
 // the target site and demotes the old source to role=replica with its
-// traffic label restored. All errors are logged and discarded; the
-// reconciler's syncDragonflyPodLabels sweep will re-converge if any
-// patch fails.
+// traffic label restored.
+//
+// Demote MUST succeed before we restore the source's traffic label.
+// Otherwise the source pod stays labelled dragonfly-role=master with
+// traffic=enabled and gets selected by the active Service alongside
+// the newly-promoted target — split-brain at the routing layer.
+//
+// Other patches are logged-and-dropped because the reconciler's
+// syncDragonflyPodLabels sweep will re-converge any cosmetic drift
+// once the role flip succeeded.
 func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string) {
 	if err := m.setRoleLabel(ctx, fg, target, "master"); err != nil {
 		m.logger.Info("emergency: stamp target role=master", "site", target, "error", err)
@@ -562,16 +569,22 @@ func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg
 	if err := m.setTrafficLabel(ctx, fg, target, true); err != nil {
 		m.logger.Info("emergency: stamp target traffic=enabled", "site", target, "error", err)
 	}
-	if oldSource != "" {
-		if err := m.setRoleLabel(ctx, fg, oldSource, "replica"); err != nil {
-			m.logger.Info("emergency: stamp old source role=replica", "site", oldSource, "error", err)
+	if oldSource == "" {
+		return
+	}
+	if err := m.setRoleLabel(ctx, fg, oldSource, "replica"); err != nil {
+		m.logger.Warn("emergency: stamp old source role=replica failed; leaving traffic stripped to avoid split-brain", "site", oldSource, "error", err)
+		if m.recorder != nil {
+			m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed,
+				"emergency: demote of old source %q failed (%v); source kept out of active Service to avoid split-brain. Manual intervention required.",
+				oldSource, err)
 		}
-		// Restore the source's traffic label so it rejoins as a healthy
-		// pod once it comes back. The active Service still ignores it
-		// because role=replica.
-		if err := m.setTrafficLabel(ctx, fg, oldSource, true); err != nil {
-			m.logger.Info("emergency: restore old source traffic=enabled", "site", oldSource, "error", err)
-		}
+		return
+	}
+	if err := m.setTrafficLabel(ctx, fg, oldSource, true); err != nil {
+		// Demote succeeded so the active Service ignores the source
+		// (role=replica). Traffic-label drift is cosmetic; log only.
+		m.logger.Info("emergency: restore old source traffic=enabled", "site", oldSource, "error", err)
 	}
 }
 

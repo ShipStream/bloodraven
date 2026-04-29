@@ -13,7 +13,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
@@ -482,6 +484,57 @@ func TestDragonflyManager_TryEmergencyPromote_RedialsAfterTakeoverError(t *testi
 	}
 	if dials := conn.dialCount(addr); dials < 2 {
 		t.Errorf("dialCount(%q) = %d, want >= 2 (a fresh dial after REPLTAKEOVER error)", addr, dials)
+	}
+}
+
+// TestDragonflyManager_TryEmergencyPromote_DemoteFails_DoesNotRestoreSourceTraffic
+// regression-tests B5: applyEmergencyPromotionLabels used to log-and-
+// continue on demote failure, then restore the source's traffic
+// label — leaving a pod with role=master+traffic=enabled selectable by
+// the active Service alongside the new master. Split-brain at the
+// routing layer.
+//
+// We inject an interceptor that fails Updates of the source pod when
+// dragonfly-role=replica is being set, and assert the source's traffic
+// label remains stripped.
+func TestDragonflyManager_TryEmergencyPromote_DemoteFails_DoesNotRestoreSourceTraffic(t *testing.T) {
+	fg := fgWithDragonflyEnabledAndActive()
+	sourcePod := makeDragonflyPod(fg.Name, "dc1", "master", true)
+	targetPod := makeDragonflyPod(fg.Name, "dc2", "replica", true)
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg, newTestSecret(), sourcePod, targetPod).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if pod, ok := obj.(*corev1.Pod); ok && pod.Name == sourcePod.Name {
+					if pod.Labels[labelDragonflyRole] == "replica" {
+						return errors.New("simulated demote-patch failure")
+					}
+				}
+				return underlying.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	key := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+	rec := record.NewFakeRecorder(8)
+	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
+
+	target := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+	source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+	conn := newFakeConnector()
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", target)
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", source)
+	mgr.SetConnector(conn.connect)
+
+	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
+
+	var gotSource corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	if _, has := gotSource.Labels[labelDragonflyTraffic]; has {
+		t.Errorf("emergency: source traffic label = %q, want absent (demote failed → must not restore traffic)", gotSource.Labels[labelDragonflyTraffic])
 	}
 }
 

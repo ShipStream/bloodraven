@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -237,7 +239,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSet(ctx context
 // buildDragonflyArgs assembles the Dragonfly container command-line. The
 // operator owns --port, --admin_port, --maxmemory, --proactor_threads,
 // --break_replication_on_master_restart, and --requirepass (when auth
-// is configured); user-supplied args are appended last.
+// is configured); user-supplied args are appended last but with
+// safety-critical flags filtered out (see dragonflyOperatorOwnedFlags).
 func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []string {
 	args := []string{
 		"--port=" + strconv.Itoa(int(port)),
@@ -262,18 +265,74 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 	if spec.ProactorThreads > 0 {
 		args = append(args, fmt.Sprintf("--proactor_threads=%d", spec.ProactorThreads))
 	}
-	if spec.Auth != nil {
+	// Auth flag emitted only when a usable Secret reference exists; an
+	// empty SecretName would cause the pod to fail to start with a
+	// secret-not-found event rather than a clean reconcile error.
+	if spec.Auth != nil && spec.Auth.SecretName != "" {
 		// $(VAR) syntax is expanded by the kubelet from the env block.
 		args = append(args, "--requirepass=$("+DragonflyAuthEnvVar+")")
 	}
-	args = append(args, spec.Args...)
+	args = append(args, filterDragonflyUserArgs(spec.Args)...)
 	return args
 }
 
+// dragonflyOperatorOwnedFlags lists Dragonfly flags whose values are a
+// safety contract owned by Bloodraven. User-supplied spec.Args matching
+// any of these prefixes are stripped before being appended to the
+// operator's args. Dragonfly uses gflags (last-wins parsing), so a user
+// who set `spec.Args = ["--break_replication_on_master_restart=false"]`
+// would otherwise override the safety guard the operator just emitted.
+var dragonflyOperatorOwnedFlags = []string{
+	"--break_replication_on_master_restart",
+	"--bind",
+	"--port",
+	"--admin_port",
+	"--requirepass",
+}
+
+// filterDragonflyUserArgs drops args that target operator-owned flags.
+// Match is by exact equality on the flag verb or by "<flag>=" prefix
+// (gflags accepts both `--flag value` and `--flag=value` forms).
+func filterDragonflyUserArgs(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	skipNext := false
+	for _, arg := range in {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		drop := false
+		for _, owned := range dragonflyOperatorOwnedFlags {
+			if arg == owned {
+				// `--flag value` form: drop this arg AND the next one.
+				drop = true
+				skipNext = true
+				break
+			}
+			if strings.HasPrefix(arg, owned+"=") {
+				// `--flag=value` form: drop only this arg.
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out = append(out, arg)
+		}
+	}
+	return out
+}
+
 // buildDragonflyEnv wires the auth password into the container's env from
-// the configured Secret, leaving env empty when auth is not set.
+// the configured Secret, leaving env empty when auth is not set or when
+// the SecretName is empty (CRD validation typically catches the latter
+// but partial in-place patches can still produce it; emitting an
+// EnvVar with an empty SecretName makes the pod fail to start with a
+// secret-not-found event rather than a clean reconcile error).
 func buildDragonflyEnv(spec *v1alpha1.DragonflySpec) []corev1.EnvVar {
-	if spec.Auth == nil {
+	if spec.Auth == nil || spec.Auth.SecretName == "" {
 		return nil
 	}
 	key := spec.Auth.PasswordKey
@@ -387,12 +446,17 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyActiveService(ctx conte
 
 // reconcileDragonflyResources is the entry point called from Reconcile().
 // It creates or updates per-site StatefulSets/Services and the active
-// Service when spec.dragonfly is enabled. When disabled it is a no-op;
-// owner-reference garbage collection cleans up resources if the user
-// flips enabled=true to false (followed by deleting spec.dragonfly).
+// Service when spec.dragonfly is enabled.
+//
+// When disabled, it actively tears down any Dragonfly resources that
+// were previously created. K8s owner-reference GC only fires when the
+// owning object is deleted, not when its .spec mutates — flipping
+// spec.dragonfly.enabled=false would otherwise leave orphan
+// StatefulSets, per-site Services, and the active Service routing live
+// traffic to a Dragonfly the operator no longer manages.
 func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	if !dragonflyEnabled(fg) {
-		return nil
+		return r.teardownDragonflyResources(ctx, fg)
 	}
 	for _, site := range fg.Spec.Sites {
 		if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
@@ -404,6 +468,36 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.C
 	}
 	if err := r.reconcileDragonflyActiveService(ctx, fg); err != nil {
 		return fmt.Errorf("reconcile dragonfly active service: %w", err)
+	}
+	return nil
+}
+
+// teardownDragonflyResources deletes Dragonfly StatefulSets, per-site
+// Services, and the active Service for the given FG, identified by the
+// Bloodraven app=dragonfly + instance=<fg> label pair. Deletes are
+// label-scoped so only resources Bloodraven created are removed.
+//
+// Idempotent: an FG that never had Dragonfly enabled has no matching
+// resources, and DeleteAllOf returns no error in that case.
+func (r *MysqlFailoverGroupReconciler) teardownDragonflyResources(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	selector := client.MatchingLabels{
+		labelAppName:  dragonflyAppName,
+		labelInstance: fg.Name,
+	}
+	inNs := client.InNamespace(fg.Namespace)
+	if err := r.DeleteAllOf(ctx, &appsv1.StatefulSet{}, inNs, selector); err != nil {
+		return fmt.Errorf("teardown dragonfly statefulsets: %w", err)
+	}
+	// Service has no DeleteAllOf support in client-go for typed
+	// resources; list-and-delete instead.
+	var svcs corev1.ServiceList
+	if err := r.List(ctx, &svcs, inNs, selector); err != nil {
+		return fmt.Errorf("teardown: list dragonfly services: %w", err)
+	}
+	for i := range svcs.Items {
+		if err := r.Delete(ctx, &svcs.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("teardown: delete service %s: %w", svcs.Items[i].Name, err)
+		}
 	}
 	return nil
 }
