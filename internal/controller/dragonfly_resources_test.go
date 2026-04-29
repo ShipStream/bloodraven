@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -344,11 +345,7 @@ func joinArgs(args []string) string {
 	return out
 }
 
-func contains(haystack, needle string) bool {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
-}
+// contains is a thin wrapper around strings.Contains; kept as a named
+// helper because several test files in this package call it. New tests
+// can use strings.Contains directly.
+func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }

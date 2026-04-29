@@ -439,23 +439,27 @@ func (r *MysqlFailoverGroupReconciler) bestEffortRestoreSourceTraffic(ctx contex
 // bestEffortClientKillSource issues `CLIENT KILL TYPE NORMAL` against
 // the old master so application clients reconnect through the active
 // Service. Bounded context, all errors logged and dropped.
+//
+// Log lines include `fg` per the docs/docs/log-schema.mdx Event
+// reference contract — downstream pipelines filter on `fg`.
 func (r *MysqlFailoverGroupReconciler) bestEffortClientKillSource(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sourceSite string) {
 	if sourceSite == "" {
 		return
 	}
+	fgKey := fg.Namespace + "/" + fg.Name
 	killCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	conn, err := r.dragonflyDial(killCtx, fg, sourceSite)
 	if err != nil {
-		log.FromContext(ctx).Info("client-kill: source unreachable; skipping", "site", sourceSite, "error", err)
+		log.FromContext(ctx).Info("client-kill: source unreachable; skipping", "fg", fgKey, "site", sourceSite, "error", err)
 		return
 	}
 	defer func() { _ = conn.Close() }()
 	if err := conn.ClientKillType(killCtx, "NORMAL"); err != nil {
-		log.FromContext(ctx).Info("client-kill: source rejected CLIENT KILL", "site", sourceSite, "error", err)
+		log.FromContext(ctx).Info("client-kill: source rejected CLIENT KILL", "fg", fgKey, "site", sourceSite, "error", err)
 		return
 	}
-	log.FromContext(ctx).Info("client-kill: evicted clients from old master", "site", sourceSite)
+	log.FromContext(ctx).Info("client-kill: evicted clients from old master", "fg", fgKey, "site", sourceSite)
 }
 
 // dragonflyPromoteFailHandler reacts to REPLTAKEOVER failure. Same

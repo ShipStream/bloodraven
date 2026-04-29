@@ -183,6 +183,10 @@ func (c *Client) execReply(ctx context.Context, args ...string) (string, error) 
 // ReplTakeover, which legitimately blocks for tens of seconds while the
 // server drains replication — pass an explicit ioTimeout. Zero or
 // negative ioTimeout falls back to DefaultIOTimeout.
+//
+// ctx cancellation is honored mid-I/O: a watchdog goroutine fires
+// SetDeadline(now) on cancel so a blocked read or write unwinds to a
+// timeout error promptly instead of waiting for the full ioTimeout.
 func (c *Client) execReplyWithIOTimeout(ctx context.Context, ioTimeout time.Duration, args ...string) (string, error) {
 	if c.conn == nil {
 		return "", fmt.Errorf("dragonfly: client closed")
@@ -197,8 +201,37 @@ func (c *Client) execReplyWithIOTimeout(ctx context.Context, ioTimeout time.Dura
 	if err := c.conn.SetDeadline(deadline); err != nil {
 		return "", err
 	}
+	stopWatch := c.watchCancel(ctx)
+	defer stopWatch()
 	if err := writeCommand(c.bw, args...); err != nil {
 		return "", err
 	}
 	return readReply(c.br)
+}
+
+// watchCancel arms a goroutine that aborts the in-flight I/O on
+// ctx.Done(). Returns a stop function the caller defers to release the
+// goroutine on the happy path. The abort sets a deadline in the past,
+// which causes any pending Read/Write on the underlying conn to return
+// promptly with a deadline-exceeded error.
+func (c *Client) watchCancel(ctx context.Context) func() {
+	if ctx.Done() == nil {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-ctx.Done():
+			if c.conn != nil {
+				_ = c.conn.SetDeadline(time.Unix(1, 0))
+			}
+		case <-stop:
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
 }

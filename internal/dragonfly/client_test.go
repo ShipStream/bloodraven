@@ -363,6 +363,58 @@ func TestClientReplTakeoverClampsZero(t *testing.T) {
 	}
 }
 
+// TestClientRespBulkStringSizeCap regression-tests B19: a wedged or
+// malicious server returning an oversized bulk-string length used to
+// allocate that many bytes before the read failed. The client now
+// caps the allocation at MaxBulkStringSize and returns an error
+// before the make().
+func TestClientRespBulkStringSizeCap(t *testing.T) {
+	srv := newFakeServer(t)
+	// Reply with a length larger than the cap, but only send 0 bytes
+	// of body. The client must error out on the length check before
+	// it tries to read the body.
+	huge := MaxBulkStringSize + 1
+	srv.reply("PING", fmt.Sprintf("$%d\r\n", huge))
+	c := mustNewClient(t, srv.addr(), "")
+	defer c.Close()
+	err := c.Ping(context.Background())
+	if err == nil {
+		t.Fatal("expected error from oversized bulk-string reply")
+	}
+	if !strings.Contains(err.Error(), "exceeds cap") {
+		t.Errorf("expected cap-exceeded error, got %v", err)
+	}
+}
+
+// TestClientHonorsContextCancellation regression-tests B18: ctx
+// cancellation used to be ignored mid-I/O — only the deadline was
+// propagated. A cancelled ctx now aborts the in-flight read promptly
+// via SetDeadline(now-in-the-past).
+func TestClientHonorsContextCancellation(t *testing.T) {
+	srv := newFakeServer(t)
+	// Server delays beyond what we want to wait for; cancellation
+	// should cut the call short well before the delay elapses.
+	srv.delay("PING", 5*time.Second)
+	c, err := New(context.Background(), Config{Addr: srv.addr(), DialTimeout: time.Second, IOTimeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	if err := c.Ping(ctx); err == nil {
+		t.Fatalf("expected error from cancelled ctx; nil after %s", time.Since(start))
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("Ping returned after %s; want <2s (ctx cancel must abort I/O promptly)", elapsed)
+	}
+}
+
 func TestClientCloseIdempotent(t *testing.T) {
 	srv := newFakeServer(t)
 	c := mustNewClient(t, srv.addr(), "")

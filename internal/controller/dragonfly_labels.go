@@ -108,7 +108,22 @@ func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Contex
 // the active-Service selector is an exists-and-equals check on
 // "enabled" — a missing key sheds the endpoint without ambiguity.
 func (r *MysqlFailoverGroupReconciler) setDragonflyTrafficOnSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string, set bool) error {
-	pods, err := r.listDragonflyPodsForSite(ctx, fg, siteName)
+	return setDragonflyTrafficOnSite(ctx, r.Client, fg, siteName, set)
+}
+
+// setDragonflyRoleOnSite forces the role label on every Dragonfly pod
+// for the named site to the given value. Used by the planned-failover
+// PromotingDragonfly handler so role transitions land deterministically
+// in-phase rather than waiting for the next reconcile sweep.
+func (r *MysqlFailoverGroupReconciler) setDragonflyRoleOnSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName, role string) error {
+	return setDragonflyRoleOnSite(ctx, r.Client, fg, siteName, role)
+}
+
+// setDragonflyTrafficOnSite is the package-level helper. Both the
+// reconciler and the DragonflyManager call this directly; previously
+// each had its own copy that drifted. Callers pass a client.Client.
+func setDragonflyTrafficOnSite(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, siteName string, set bool) error {
+	pods, err := listDragonflyPodsForSite(ctx, c, fg, siteName)
 	if err != nil {
 		return err
 	}
@@ -120,16 +135,14 @@ func (r *MysqlFailoverGroupReconciler) setDragonflyTrafficOnSite(ctx context.Con
 			if has && current == dragonflyTrafficEnabled {
 				continue
 			}
-		} else {
-			if !has {
-				continue
-			}
+		} else if !has {
+			continue
 		}
 		podName := pod.Name
 		podNamespace := pod.Namespace
 		if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 			var fresh corev1.Pod
-			if err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: podNamespace}, &fresh); err != nil {
+			if err := c.Get(ctx, types.NamespacedName{Name: podName, Namespace: podNamespace}, &fresh); err != nil {
 				return err
 			}
 			if fresh.Labels == nil {
@@ -140,7 +153,7 @@ func (r *MysqlFailoverGroupReconciler) setDragonflyTrafficOnSite(ctx context.Con
 			} else {
 				delete(fresh.Labels, labelDragonflyTraffic)
 			}
-			return r.Update(ctx, &fresh)
+			return c.Update(ctx, &fresh)
 		}); err != nil {
 			return fmt.Errorf("update dragonfly traffic label on pod %s: %w", podName, err)
 		}
@@ -149,12 +162,9 @@ func (r *MysqlFailoverGroupReconciler) setDragonflyTrafficOnSite(ctx context.Con
 	return nil
 }
 
-// setDragonflyRoleOnSite forces the role label on every Dragonfly pod
-// for the named site to the given value. Used by the planned-failover
-// PromotingDragonfly handler so role transitions land deterministically
-// in-phase rather than waiting for the next reconcile sweep.
-func (r *MysqlFailoverGroupReconciler) setDragonflyRoleOnSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName, role string) error {
-	pods, err := r.listDragonflyPodsForSite(ctx, fg, siteName)
+// setDragonflyRoleOnSite is the package-level helper.
+func setDragonflyRoleOnSite(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, siteName, role string) error {
+	pods, err := listDragonflyPodsForSite(ctx, c, fg, siteName)
 	if err != nil {
 		return err
 	}
@@ -168,14 +178,14 @@ func (r *MysqlFailoverGroupReconciler) setDragonflyRoleOnSite(ctx context.Contex
 		podNamespace := pod.Namespace
 		if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 			var fresh corev1.Pod
-			if err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: podNamespace}, &fresh); err != nil {
+			if err := c.Get(ctx, types.NamespacedName{Name: podName, Namespace: podNamespace}, &fresh); err != nil {
 				return err
 			}
 			if fresh.Labels == nil {
 				fresh.Labels = map[string]string{}
 			}
 			fresh.Labels[labelDragonflyRole] = role
-			return r.Update(ctx, &fresh)
+			return c.Update(ctx, &fresh)
 		}); err != nil {
 			return fmt.Errorf("update dragonfly role label on pod %s: %w", podName, err)
 		}
@@ -187,9 +197,9 @@ func (r *MysqlFailoverGroupReconciler) setDragonflyRoleOnSite(ctx context.Contex
 // listDragonflyPodsForSite returns the Dragonfly pods belonging to the
 // given site for a failover group. Centralized so the label helpers
 // share the same selector and don't drift.
-func (r *MysqlFailoverGroupReconciler) listDragonflyPodsForSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string) ([]corev1.Pod, error) {
+func listDragonflyPodsForSite(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, siteName string) ([]corev1.Pod, error) {
 	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods,
+	if err := c.List(ctx, pods,
 		client.InNamespace(fg.Namespace),
 		client.MatchingLabels{
 			labelAppName:  dragonflyAppName,

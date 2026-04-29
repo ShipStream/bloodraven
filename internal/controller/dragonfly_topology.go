@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -631,114 +632,41 @@ func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg
 // bestEffortEmergencyClientKill issues CLIENT KILL TYPE NORMAL against
 // the old source, if reachable, to evict any clients still attached.
 // Bounded context, all errors logged and dropped.
+//
+// Log lines include `fg` per the docs/docs/log-schema.mdx Event
+// reference contract.
 func (m *DragonflyManager) bestEffortEmergencyClientKill(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, oldSource, password string) {
 	if oldSource == "" {
 		return
 	}
+	fgKey := fg.Namespace + "/" + fg.Name
 	addr := dragonflyAddr(fg, oldSource)
 	dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	conn, err := m.connector(dialCtx, addr, password)
 	if err != nil {
-		m.logger.Info("emergency client-kill: old source unreachable; skipping", "site", oldSource, "error", err)
+		m.logger.Info("emergency client-kill: old source unreachable; skipping", "fg", fgKey, "site", oldSource, "error", err)
 		return
 	}
 	defer func() { _ = conn.Close() }()
 	if err := conn.ClientKillType(dialCtx, "NORMAL"); err != nil {
-		m.logger.Info("emergency client-kill: old source rejected CLIENT KILL", "site", oldSource, "error", err)
+		m.logger.Info("emergency client-kill: old source rejected CLIENT KILL", "fg", fgKey, "site", oldSource, "error", err)
 		return
 	}
-	m.logger.Info("emergency client-kill: evicted clients from old source", "site", oldSource)
+	m.logger.Info("emergency client-kill: evicted clients from old source", "fg", fgKey, "site", oldSource)
 }
 
 // setRoleLabel patches the dragonfly-role label on every pod for the
-// given site. Mirrors MysqlFailoverGroupReconciler.setDragonflyRoleOnSite
-// for the manager's separate codepath.
+// given site. Delegates to the package-level helper so the manager and
+// reconciler share one implementation.
 func (m *DragonflyManager) setRoleLabel(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName, role string) error {
-	pods, err := m.listPodsForSite(ctx, fg, siteName)
-	if err != nil {
-		return err
-	}
-	for i := range pods {
-		pod := &pods[i]
-		if pod.Labels[labelDragonflyRole] == role {
-			continue
-		}
-		podName := pod.Name
-		podNamespace := pod.Namespace
-		if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
-			var fresh corev1.Pod
-			if err := m.client.Get(ctx, types.NamespacedName{Name: podName, Namespace: podNamespace}, &fresh); err != nil {
-				return err
-			}
-			if fresh.Labels == nil {
-				fresh.Labels = map[string]string{}
-			}
-			fresh.Labels[labelDragonflyRole] = role
-			return m.client.Update(ctx, &fresh)
-		}); err != nil {
-			return fmt.Errorf("set role label on pod %s: %w", podName, err)
-		}
-	}
-	return nil
+	return setDragonflyRoleOnSite(ctx, m.client, fg, siteName, role)
 }
 
 // setTrafficLabel sets or removes the dragonfly-traffic label on every
-// pod for the given site. Mirrors
-// MysqlFailoverGroupReconciler.setDragonflyTrafficOnSite for the
-// manager's separate codepath.
+// pod for the given site. Delegates to the package-level helper.
 func (m *DragonflyManager) setTrafficLabel(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string, set bool) error {
-	pods, err := m.listPodsForSite(ctx, fg, siteName)
-	if err != nil {
-		return err
-	}
-	for i := range pods {
-		pod := &pods[i]
-		_, has := pod.Labels[labelDragonflyTraffic]
-		if set && has && pod.Labels[labelDragonflyTraffic] == dragonflyTrafficEnabled {
-			continue
-		}
-		if !set && !has {
-			continue
-		}
-		podName := pod.Name
-		podNamespace := pod.Namespace
-		if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
-			var fresh corev1.Pod
-			if err := m.client.Get(ctx, types.NamespacedName{Name: podName, Namespace: podNamespace}, &fresh); err != nil {
-				return err
-			}
-			if fresh.Labels == nil {
-				fresh.Labels = map[string]string{}
-			}
-			if set {
-				fresh.Labels[labelDragonflyTraffic] = dragonflyTrafficEnabled
-			} else {
-				delete(fresh.Labels, labelDragonflyTraffic)
-			}
-			return m.client.Update(ctx, &fresh)
-		}); err != nil {
-			return fmt.Errorf("set traffic label on pod %s: %w", podName, err)
-		}
-	}
-	return nil
-}
-
-// listPodsForSite returns Dragonfly pods for the given site.
-// Internal helper for the manager's label-patching helpers.
-func (m *DragonflyManager) listPodsForSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string) ([]corev1.Pod, error) {
-	var pods corev1.PodList
-	if err := m.client.List(ctx, &pods,
-		client.InNamespace(fg.Namespace),
-		client.MatchingLabels{
-			labelAppName:  dragonflyAppName,
-			labelInstance: fg.Name,
-			labelSite:     siteName,
-		},
-	); err != nil {
-		return nil, fmt.Errorf("list dragonfly pods for site %s: %w", siteName, err)
-	}
-	return pods.Items, nil
+	return setDragonflyTrafficOnSite(ctx, m.client, fg, siteName, set)
 }
 
 // effectiveDragonflyMaxSyncWaitFromFG mirrors the planned-failover
@@ -807,13 +735,19 @@ func dragonflyAddr(fg *v1alpha1.MysqlFailoverGroup, siteName string) string {
 		dragonflySiteServiceName(fg.Name, siteName), fg.Namespace, dragonflyPort(fg.Spec.Dragonfly))
 }
 
-// splitHostPort returns the hostname and configured port for a
+// splitHostPort returns the hostname and parsed port for a
 // dragonflyAddr. Used when issuing REPLICAOF on a follower site.
+// Falls back to defaultPort if the addr has no `:` separator or the
+// suffix is not a valid integer port.
 func splitHostPort(addr string, defaultPort int32) (string, int32) {
 	// dragonflyAddr always renders ":<port>" suffix, but be defensive.
 	for i := len(addr) - 1; i >= 0; i-- {
 		if addr[i] == ':' {
-			return addr[:i], defaultPort
+			port, err := strconv.Atoi(addr[i+1:])
+			if err != nil || port <= 0 || port > 65535 {
+				return addr[:i], defaultPort
+			}
+			return addr[:i], int32(port)
 		}
 	}
 	return addr, defaultPort

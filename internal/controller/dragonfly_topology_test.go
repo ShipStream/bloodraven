@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,8 @@ type fakeDragonflyConn struct {
 	replicaOfErr  error
 	replicaOfArgs []string
 
+	replicaOfNoOneErr error
+
 	replTakeoverErr error
 
 	clientKillTypes []string
@@ -58,7 +61,7 @@ func (c *fakeDragonflyConn) ReplicaOf(_ context.Context, host string, port int32
 	return c.replicaOfErr
 }
 
-func (c *fakeDragonflyConn) ReplicaOfNoOne(_ context.Context) error { return nil }
+func (c *fakeDragonflyConn) ReplicaOfNoOne(_ context.Context) error { return c.replicaOfNoOneErr }
 
 func (c *fakeDragonflyConn) ReplTakeover(_ context.Context, _ time.Duration) error {
 	return c.replTakeoverErr
@@ -71,13 +74,12 @@ func (c *fakeDragonflyConn) ClientKillType(_ context.Context, kind string) error
 
 func (c *fakeDragonflyConn) Close() error { c.closed = true; return nil }
 
-func formatInt(p int32) string {
-	switch p {
-	case 6379:
-		return "6379"
-	}
-	return ""
-}
+// formatInt formats an int32 port for the test stubs. Mirrors the
+// real strconv.Itoa(int(p)) used in production. Previously hard-coded
+// to 6379 (the default port), which caused tests using a non-default
+// port to silently produce empty REPLICAOF args — a fake-vs-real
+// divergence noted in B22.
+func formatInt(p int32) string { return strconv.Itoa(int(p)) }
 
 // fakeConnector returns connections programmed by the test. Keyed on the
 // addr the manager dials.
@@ -458,6 +460,49 @@ func TestDragonflyManager_TryEmergencyPromote_TakeoverFailsFallsBack(t *testing.
 	}
 }
 
+// TestDragonflyManager_TryEmergencyPromote_BothPathsFailed_StampsFailureEvent
+// regression-tests B23: when REPLTAKEOVER and the fallback REPLICAOF
+// NO ONE both fail, the manager must emit a Warning event clearly
+// stating both attempts failed and increment the failed-promotion
+// counter, so operators can debug the cache-continuity loss.
+func TestDragonflyManager_TryEmergencyPromote_BothPathsFailed_StampsFailureEvent(t *testing.T) {
+	fg := fgWithDragonflyEnabledAndActive()
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.Build()
+	rec := record.NewFakeRecorder(8)
+	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
+
+	// First conn fails REPLTAKEOVER. Re-dial succeeds; second conn
+	// fails REPLICAOF NO ONE via replicaOfErr.
+	first := &fakeDragonflyConn{
+		info:            dragonfly.ReplicationInfo{Role: "slave"},
+		replTakeoverErr: errors.New("replication still active"),
+	}
+	second := &fakeDragonflyConn{
+		info:              dragonfly.ReplicationInfo{Role: "slave"},
+		replicaOfNoOneErr: errors.New("REPLICAOF NO ONE rejected"),
+	}
+	conn := newFakeConnector()
+	conn.programQueue("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", first, second)
+	mgr.SetConnector(conn.connect)
+
+	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
+
+	// Drain events; expect one Warning DragonflyPromotionFailed
+	// containing both verbs.
+	got := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
+	found := false
+	for _, ev := range got {
+		if strings.Contains(ev, "REPLTAKEOVER") && strings.Contains(ev, "REPLICAOF NO ONE") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected event mentioning both REPLTAKEOVER and REPLICAOF NO ONE failed; got %v", got)
+	}
+}
+
 // TestDragonflyManager_TryEmergencyPromote_RedialsAfterTakeoverError
 // regression-tests the bug where the emergency promotion path reused the
 // post-REPLTAKEOVER connection for REPLICAOF NO ONE. RESP has no
@@ -721,6 +766,34 @@ func drainEventsCh(ch <-chan string, max int, wait time.Duration) []string {
 		}
 	}
 	return out
+}
+
+// TestSplitHostPort regression-tests B20: the helper used to discard
+// the parsed port and always return the defaultPort. Real callers go
+// through dragonflyAddr which always uses the FG's configured port,
+// so the bug was silent for the common path; but a non-default-port
+// REPLICAOF (e.g. when callers eventually pass a separately-configured
+// port) would silently rewire to the wrong port.
+func TestSplitHostPort(t *testing.T) {
+	cases := []struct {
+		addr    string
+		dflt    int32
+		host    string
+		port    int32
+	}{
+		{"foo.bar.svc:6379", 1234, "foo.bar.svc", 6379},
+		{"foo.bar.svc:9999", 1234, "foo.bar.svc", 9999},
+		{"foo.bar.svc", 1234, "foo.bar.svc", 1234}, // no port → default
+		{"foo.bar.svc:", 1234, "foo.bar.svc", 1234},
+		{"foo.bar.svc:notanint", 1234, "foo.bar.svc", 1234},
+		{"foo.bar.svc:0", 1234, "foo.bar.svc", 1234}, // out of range
+	}
+	for _, tc := range cases {
+		gotHost, gotPort := splitHostPort(tc.addr, tc.dflt)
+		if gotHost != tc.host || gotPort != tc.port {
+			t.Errorf("splitHostPort(%q, %d) = %q,%d; want %q,%d", tc.addr, tc.dflt, gotHost, gotPort, tc.host, tc.port)
+		}
+	}
 }
 
 func TestDragonflyManager_Tick_DisabledIsNoOp(t *testing.T) {

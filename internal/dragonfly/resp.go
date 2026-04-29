@@ -16,6 +16,14 @@ import (
 // command set is six commands wide and we benefit from owning the
 // connection lifecycle and timeout policy directly.
 
+// MaxBulkStringSize caps the bulk-string length we will allocate
+// per reply. Bloodraven only issues INFO replication / persistence
+// (≤32KB on real Dragonfly) and short OK replies, so 4MB is generous
+// even with future-proofing. The cap is a defense-in-depth measure
+// against a wedged or malicious server returning a huge n that would
+// otherwise allocate unbounded memory before the read fails.
+const MaxBulkStringSize = 4 << 20 // 4 MiB
+
 // writeCommand writes an array-of-bulk-strings command, e.g.:
 //
 //	*2\r\n$4\r\nPING\r\n$5\r\nhello\r\n
@@ -63,6 +71,9 @@ func readReply(r *bufio.Reader) (string, error) {
 		}
 		if n < 0 {
 			return "", nil
+		}
+		if n > MaxBulkStringSize {
+			return "", fmt.Errorf("dragonfly: bulk-string length %d exceeds cap %d", n, MaxBulkStringSize)
 		}
 		buf := make([]byte, n)
 		if _, err := io.ReadFull(r, buf); err != nil {
