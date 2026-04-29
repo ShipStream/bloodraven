@@ -122,6 +122,44 @@ func TestPlannedFailoverWaitingForDragonflySync_HappyPath(t *testing.T) {
 	}
 }
 
+// TestPlannedFailoverWaitingForDragonflySync_StampsFreshStartTime
+// regression-tests B2: the previous code computed the maxSyncWait
+// budget against LagWaitStartTime, which is stamped on entry to
+// WaitingForLag (not WaitingForDragonflySync). When the MySQL lag wait
+// took longer than the Dragonfly budget the sync window was
+// pre-expired on the first poll, silently breaking session
+// preservation under proceed mode and causing spurious rollback under
+// fail mode.
+//
+// We simulate the scenario by setting LagWaitStartTime far enough in
+// the past that the budget would be exhausted, but with no Dragonfly
+// status block yet. The first reconcile must stamp a fresh
+// SyncWaitStartTime; subsequent reconciles must measure elapsed
+// against that stamp, not against the borrowed lag-wait clock.
+func TestPlannedFailoverWaitingForDragonflySync_StampsFreshStartTime(t *testing.T) {
+	fg := plannedFailoverFGWithDragonfly("proceed")
+	// Lag-wait was long: borrowing this clock would pre-expire the
+	// 100ms maxSyncWait budget set by plannedFailoverFGWithDragonfly.
+	longAgo := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	fg.Status.PlannedFailover.LagWaitStartTime = &longAgo
+	fg.Status.PlannedFailover.StartTime = &longAgo
+	r, _ := newReconciler(fg)
+
+	// Tick 1: initialise the dragonfly status block. Must stamp
+	// SyncWaitStartTime to ~now.
+	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
+		t.Fatalf("tick1: %v", err)
+	}
+	got := fetchFG(t, r, fgNN(fg))
+	if got.Status.PlannedFailover.Dragonfly == nil || got.Status.PlannedFailover.Dragonfly.SyncWaitStartTime == nil {
+		t.Fatalf("SyncWaitStartTime not stamped: %+v", got.Status.PlannedFailover.Dragonfly)
+	}
+	stamped := got.Status.PlannedFailover.Dragonfly.SyncWaitStartTime.Time
+	if age := time.Since(stamped); age > 5*time.Second {
+		t.Errorf("SyncWaitStartTime is %s old; expected ~now (lag-wait stamp must NOT be borrowed)", age)
+	}
+}
+
 func TestPlannedFailoverWaitingForDragonflySync_TimeoutProceedAdvances(t *testing.T) {
 	fg := plannedFailoverFGWithDragonfly("proceed")
 	// Force the lag-wait start far enough in the past that the budget
@@ -161,6 +199,60 @@ func TestPlannedFailoverWaitingForDragonflySync_TimeoutProceedAdvances(t *testin
 	}
 	if got.Status.PlannedFailover.Dragonfly.Reason != ReasonDragonflySyncTimeout {
 		t.Errorf("reason = %q, want %q", got.Status.PlannedFailover.Dragonfly.Reason, ReasonDragonflySyncTimeout)
+	}
+}
+
+// TestPlannedFailoverWaitingForDragonflySync_OffsetCaptureFails_ProceedsWithSessionsLost
+// regression-tests B6: the previous code stamped SourceOffsetAtDrain=0
+// when the source dial or INFO replication failed at drain capture.
+// CandidateSyncReady(target offset, persistence, sourceOffset=0)
+// returned true unconditionally because target offset >= 0 always
+// holds — so the state machine advanced to PromotingDragonfly with
+// sessionsPreserved=true, falsely claiming session continuity.
+//
+// The fix flags OffsetCaptureFailed instead. The proceed-mode
+// timeout handler sets sessionsPreserved=false and advances; the
+// fail-mode handler rolls back. We verify the proceed branch here.
+func TestPlannedFailoverWaitingForDragonflySync_OffsetCaptureFails_ProceedsWithSessionsLost(t *testing.T) {
+	fg := plannedFailoverFGWithDragonfly("proceed")
+	// Pre-populate the Dragonfly status block (skipping the init tick).
+	now := metav1.Now()
+	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{
+		Enabled:           true,
+		SyncWaitStartTime: &now,
+	}
+	r, _ := newReconciler(fg)
+	// No connector programmed for the source addr → dial fails.
+	r.dragonflyConnector = func(_ context.Context, addr, _ string) (DragonflyConnection, error) {
+		return nil, errors.New("source unreachable: " + addr)
+	}
+
+	// Tick: capture step. Must mark OffsetCaptureFailed and not stamp a
+	// misleading zero offset.
+	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
+		t.Fatalf("tick capture: %v", err)
+	}
+	fg = fetchFG(t, r, fgNN(fg))
+	if !fg.Status.PlannedFailover.Dragonfly.OffsetCaptureFailed {
+		t.Fatalf("OffsetCaptureFailed not set: %+v", fg.Status.PlannedFailover.Dragonfly)
+	}
+	if fg.Status.PlannedFailover.Dragonfly.SourceOffsetAtDrain != nil {
+		t.Errorf("SourceOffsetAtDrain stamped despite capture-fail: %v", *fg.Status.PlannedFailover.Dragonfly.SourceOffsetAtDrain)
+	}
+
+	// Tick: with capture-failed sentinel set, we must skip the
+	// sync-readiness gate entirely and route through the timeout
+	// handler. proceed mode → sessionsPreserved=false, advance to
+	// PromotingDragonfly.
+	if _, err := r.plannedFailoverWaitingForDragonflySync(context.Background(), fg, fgNN(fg)); err != nil {
+		t.Fatalf("tick post-capture: %v", err)
+	}
+	got := fetchFG(t, r, fgNN(fg))
+	if got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly {
+		t.Errorf("phase = %q, want PromotingDragonfly (proceed after capture-fail)", got.Status.PlannedFailover.Phase)
+	}
+	if got.Status.PlannedFailover.Dragonfly.SessionsPreserved == nil || *got.Status.PlannedFailover.Dragonfly.SessionsPreserved {
+		t.Errorf("expected sessionsPreserved=false on capture-fail proceed; got %+v", got.Status.PlannedFailover.Dragonfly)
 	}
 }
 
@@ -256,32 +348,73 @@ func TestPlannedFailoverPromotingDragonfly_Success(t *testing.T) {
 	}
 }
 
+// TestPlannedFailoverPromotingDragonfly_StripFails_ProceedsWithFailureHandler
+// regression-tests B14: the previous version of this test left the
+// source pod absent and asserted only on phase advance — so the strip
+// step succeeded vacuously (no pods to patch) and the failure handler
+// ran because the takeover dial failed. The strip-fail control path
+// (which must skip the takeover entirely and never call dragonflyDial)
+// was not exercised.
+//
+// Inject a fake-client interceptor that errors on Update of the source
+// pod when the strip step removes the traffic label, and assert:
+//   - The takeover dial is NEVER invoked (strip-fail short-circuits the
+//     promotion sequence).
+//   - The proceed-mode failure handler advances phase to Promoting and
+//     the failure reason is the strip error.
 func TestPlannedFailoverPromotingDragonfly_StripFails_ProceedsWithFailureHandler(t *testing.T) {
-	// When the K8s strip patch fails, we must invoke the failure
-	// handler rather than try the takeover (the strip is the
-	// dual-master guard; without it the dual-master window the strip
-	// exists to close becomes possible).
-	//
-	// We approximate "strip fails" by leaving the source pod absent —
-	// the helper completes (no pods to patch) so the strip succeeds
-	// vacuously. To genuinely exercise the strip-fail path we'd need a
-	// fake client that errors on List/Update. Skip; covered by
-	// reading-test of the handler control flow.
 	fg := plannedFailoverFGWithDragonfly("proceed")
 	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
 	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
-	r, _ := newReconciler(fg) // no pods; takeover is what we exercise here
+	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
+	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
 
-	// Target dial fails → failure handler in proceed mode advances to Promoting.
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg, newTestSecret(), sourcePod, targetPod).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				// Fail the strip step: source pod being updated with the
+				// dragonfly-traffic label absent (i.e. removed).
+				if pod, ok := obj.(*corev1.Pod); ok && pod.Name == sourcePod.Name {
+					if _, has := pod.Labels[labelDragonflyTraffic]; !has {
+						return errors.New("simulated strip-patch failure")
+					}
+				}
+				return underlying.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &MysqlFailoverGroupReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+	dialAttempts := 0
+	r.dragonflyConnector = func(_ context.Context, addr, _ string) (DragonflyConnection, error) {
+		dialAttempts++
+		return nil, errors.New("must not dial: strip should have failed first (addr=" + addr + ")")
+	}
+
 	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), fg, fgNN(fg)); err != nil {
 		t.Fatalf("err: %v", err)
+	}
+	if dialAttempts != 0 {
+		t.Errorf("dragonflyDial called %d times after strip-fail; want 0 (strip-fail must short-circuit the promotion)", dialAttempts)
 	}
 	got := fetchFG(t, r, fgNN(fg))
 	if got.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePromoting {
 		t.Errorf("phase = %q, want Promoting (proceed)", got.Status.PlannedFailover.Phase)
 	}
 	if got.Status.PlannedFailover.Dragonfly.PromotionMethod != "" {
-		t.Errorf("promotionMethod = %q, want empty (takeover failed → effectiveDragonflyMasterSite must keep returning source)", got.Status.PlannedFailover.Dragonfly.PromotionMethod)
+		t.Errorf("promotionMethod = %q, want empty (strip failed → effectiveDragonflyMasterSite must keep returning source)", got.Status.PlannedFailover.Dragonfly.PromotionMethod)
+	}
+	if got.Status.PlannedFailover.Dragonfly.Reason != ReasonDragonflyPromotionFailed {
+		t.Errorf("reason = %q, want %q", got.Status.PlannedFailover.Dragonfly.Reason, ReasonDragonflyPromotionFailed)
+	}
+	if got.Status.PlannedFailover.Dragonfly.Message == "" || !contains(got.Status.PlannedFailover.Dragonfly.Message, "strip source traffic label") {
+		t.Errorf("expected strip-fail wording in message; got %q", got.Status.PlannedFailover.Dragonfly.Message)
 	}
 }
 

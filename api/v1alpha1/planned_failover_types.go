@@ -198,11 +198,32 @@ type PlannedFailoverDragonflyStatus struct {
 	// +optional
 	Enabled bool `json:"enabled,omitempty"`
 
+	// SyncWaitStartTime is when the reconciler entered the
+	// WaitingForDragonflySync phase. The maxSyncWait budget is measured
+	// against this stamp so it is independent from the (often-expired)
+	// MySQL lag-wait budget.
+	// +optional
+	SyncWaitStartTime *metav1.Time `json:"syncWaitStartTime,omitempty"`
+
 	// SourceOffsetAtDrain is the source Dragonfly's master replication
 	// offset captured immediately before WaitingForDragonflySync begins
-	// polling. Used as the catch-up target for the replica.
+	// polling. Used as the catch-up target for the replica. nil means
+	// not yet captured (still within the capture step). Once a value is
+	// stamped, OffsetCaptureFailed distinguishes a real captured offset
+	// from an "unknown" fallback.
 	// +optional
 	SourceOffsetAtDrain *int64 `json:"sourceOffsetAtDrain,omitempty"`
+
+	// OffsetCaptureFailed marks that the source Dragonfly was
+	// unreachable or failed to respond to INFO replication when the
+	// drain offset would normally be captured. The state machine
+	// proceeds best-effort with sessions flagged unpreserved; the
+	// per-target sync-readiness check is skipped because there is no
+	// trustworthy comparator. SourceOffsetAtDrain may be set to a
+	// sentinel zero alongside this flag — readers MUST consult this
+	// field, not the offset value.
+	// +optional
+	OffsetCaptureFailed bool `json:"offsetCaptureFailed,omitempty"`
 
 	// TargetOffsetAtPromotion is the target Dragonfly's slave/master
 	// replication offset captured at the moment REPLTAKEOVER returned.

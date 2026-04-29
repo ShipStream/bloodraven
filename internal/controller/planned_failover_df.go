@@ -103,12 +103,17 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForDragonflySync(ct
 		return r.advancePastDragonflyPhases(ctx, fg, cur, "", "skipped: dragonfly not enabled")
 	}
 
-	// Initialise the dragonfly status block on first entry.
+	// Initialise the dragonfly status block on first entry. Stamp a
+	// fresh phase-entry timestamp so the maxSyncWait budget is
+	// measured from WaitingForDragonflySync entry, not from the
+	// (likely-expired) MySQL lag-wait window.
 	if cur.Dragonfly == nil {
+		now := metav1.Now()
 		next := cur.DeepCopy()
 		next.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{
-			Enabled: true,
-			Message: fmt.Sprintf("waiting for target %q replica to catch up", cur.Target),
+			Enabled:           true,
+			SyncWaitStartTime: &now,
+			Message:           fmt.Sprintf("waiting for target %q replica to catch up", cur.Target),
 		}
 		if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
 			return 0, err
@@ -118,17 +123,21 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForDragonflySync(ct
 
 	// Capture the source offset on first entry by querying the source.
 	// We use the master_repl_offset from `INFO replication`. If we
-	// cannot reach the source we proceed (the source is fenced and may
-	// be on its way to becoming a stale master); session preservation
-	// is best-effort.
-	if cur.Dragonfly.SourceOffsetAtDrain == nil {
+	// cannot reach the source — or INFO replication errors after the
+	// dial succeeded — we mark the capture as failed: the state
+	// machine still proceeds best-effort to PromotingDragonfly with
+	// sessionsPreserved=false, but the per-target sync-readiness gate
+	// must be skipped because there is no comparator. Stamping a
+	// sentinel zero offset (the previous behaviour) made
+	// CandidateSyncReady return true unconditionally, falsely claiming
+	// session preservation.
+	if cur.Dragonfly.SourceOffsetAtDrain == nil && !cur.Dragonfly.OffsetCaptureFailed {
 		conn, err := r.dragonflyDial(ctx, fg, cur.SourcePrimary)
 		if err != nil {
-			log.FromContext(ctx).Info("dragonfly: source unreachable at drain capture; proceeding without offset", "error", err)
-			zero := int64(0)
+			log.FromContext(ctx).Info("dragonfly: source unreachable at drain capture; cannot prove sync", "error", err)
 			next := cur.DeepCopy()
-			next.Dragonfly.SourceOffsetAtDrain = &zero
-			next.Dragonfly.Message = "source dragonfly unreachable at drain capture"
+			next.Dragonfly.OffsetCaptureFailed = true
+			next.Dragonfly.Message = fmt.Sprintf("source dragonfly unreachable at drain capture: %v", err)
 			if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
 				return 0, err
 			}
@@ -136,10 +145,17 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForDragonflySync(ct
 		}
 		info, infoErr := conn.InfoReplication(ctx)
 		_ = conn.Close()
-		offset := int64(0)
-		if infoErr == nil {
-			offset = info.MasterReplOffset
+		if infoErr != nil {
+			log.FromContext(ctx).Info("dragonfly: INFO replication failed at drain capture; cannot prove sync", "error", infoErr)
+			next := cur.DeepCopy()
+			next.Dragonfly.OffsetCaptureFailed = true
+			next.Dragonfly.Message = fmt.Sprintf("INFO replication failed at drain capture: %v", infoErr)
+			if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+				return 0, err
+			}
+			return dragonflySyncPollInterval, nil
 		}
+		offset := info.MasterReplOffset
 		next := cur.DeepCopy()
 		next.Dragonfly.SourceOffsetAtDrain = &offset
 		next.Dragonfly.Message = fmt.Sprintf("source offset %d captured; polling target", offset)
@@ -149,10 +165,16 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForDragonflySync(ct
 		return dragonflySyncPollInterval, nil
 	}
 
-	// Determine elapsed against the lag-wait stamp; the same stamp is
-	// reused so we don't add yet another time field.
+	// Determine elapsed against the WaitingForDragonflySync entry
+	// stamp. Falling back to LagWaitStartTime or StartTime would
+	// borrow an already-elapsed clock from MySQL phases — the prior
+	// behaviour silently pre-expired the maxSyncWait budget on the
+	// first poll whenever the MySQL lag-wait took longer than the
+	// Dragonfly budget.
 	var start time.Time
 	switch {
+	case cur.Dragonfly.SyncWaitStartTime != nil:
+		start = cur.Dragonfly.SyncWaitStartTime.Time
 	case cur.LagWaitStartTime != nil:
 		start = cur.LagWaitStartTime.Time
 	case cur.StartTime != nil:
@@ -163,6 +185,16 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForDragonflySync(ct
 	maxWait := effectiveDragonflyMaxSyncWait(fg)
 	elapsed := time.Since(start)
 
+	// If we never captured the source offset, there is no comparator
+	// to gate sync readiness on. Advance immediately to
+	// PromotingDragonfly with sessions flagged unpreserved; REPLTAKEOVER
+	// will still be attempted (its server-side drain budget is
+	// independent of our offset gate). proceed/fail policy applies.
+	if cur.Dragonfly.OffsetCaptureFailed {
+		return r.dragonflySyncTimeoutHandler(ctx, fg, nn, cur, elapsed,
+			"source offset could not be captured; cannot prove target sync")
+	}
+
 	// Poll the target.
 	conn, err := r.dragonflyDial(ctx, fg, cur.Target)
 	if err != nil {
@@ -172,14 +204,19 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForDragonflySync(ct
 		return dragonflySyncPollInterval, nil
 	}
 	info, infoErr := conn.InfoReplication(ctx)
-	persist, _ := conn.InfoPersistence(ctx)
-	_ = conn.Close()
 	if infoErr != nil {
+		// InfoReplication failed: the RESP buffer is in an unknown
+		// state, so we must not issue InfoPersistence on the same
+		// conn (it could parse the late reply from INFO replication
+		// as the persistence response). Skip persistence.
+		_ = conn.Close()
 		if elapsed >= maxWait {
 			return r.dragonflySyncTimeoutHandler(ctx, fg, nn, cur, elapsed, fmt.Sprintf("INFO replication failed: %v", infoErr))
 		}
 		return dragonflySyncPollInterval, nil
 	}
+	persist, _ := conn.InfoPersistence(ctx)
+	_ = conn.Close()
 	sourceOffset := int64(0)
 	if cur.Dragonfly.SourceOffsetAtDrain != nil {
 		sourceOffset = *cur.Dragonfly.SourceOffsetAtDrain
