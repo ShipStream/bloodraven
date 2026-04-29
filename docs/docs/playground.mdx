@@ -24,7 +24,7 @@ The playground is the recommended learning path before production. It lets you s
 
 You need three tools installed:
 
-- **podman** or **docker** — for building container images (podman preferred — it runs rootless without a daemon)
+- **docker** or **podman** — for building container images. Docker is preferred because k3d's podman support is experimental and the image-load path is faster on docker. Set `BLOODRAVEN_CONTAINER_RUNTIME=podman` to force podman if both are installed.
 - **kubectl** — for talking to your cluster
 - **helm** — for deploying the operator
 
@@ -230,7 +230,7 @@ When you change Go code in the operator, sidecar, or any playground app, use the
 ./playground/rebuild.sh operator sidecar   # operator + sidecar
 ```
 
-The script builds the container images (using podman if available, otherwise docker), loads them into your cluster, restarts the affected deployments, and waits for rollout to complete.
+The script builds the container images (using docker if available, otherwise podman; set `BLOODRAVEN_CONTAINER_RUNTIME=podman` to force podman), loads them into your cluster, restarts the affected deployments, and waits for rollout to complete.
 
 Valid component names: `operator`, `sidecar`, `counter`, `dashboard`, `dns-webhook`.
 
