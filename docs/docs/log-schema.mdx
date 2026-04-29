@@ -189,7 +189,10 @@ Bloodraven optionally co-manages per-site Dragonfly instances and emits the foll
 | Level | `msg` | Fields | Notes |
 |---|---|---|---|
 | INFO | `dragonfly: configured replica` | `site`, `host`, `port`, `fg` | Operator issued `REPLICAOF` against a non-active site to align it with the active master. |
-| WARN | `dragonfly: stale master on non-active site` | `site`, `active`, `fg` | A site reports `role=master` but is not the active site. Operator does not auto-fence in this version (see wishlist 44); apps continue routing to the active master via the label selector. |
+| WARN | `dragonfly: stale master on non-active site` | `site`, `active`, `fg` | A site reports `role=master` but is not the active site. Auto-rejoin is attempted only when the stale instance has `connected_slaves=0` AND `master_repl_offset=0` (provably never accepted writes); otherwise the stale master is shed from the active Service via the traffic-label gate and left for human intervention. |
+| INFO | `stale-master reconfigure: REPLICAOF applied` | `site`, `host`, `port`, `fg` | Auto-rejoin succeeded: the stale master is now linked as a replica of the active master. |
+| WARN | `stale-master reconfigure: REPLICAOF failed` | `site`, `host`, `port`, `error`, `fg` | Auto-rejoin attempt failed; the next tick retries. |
+| INFO | `client-kill: evicted clients from old master` | `site`, `fg` | After a planned-failover Dragonfly promotion, the operator issued `CLIENT KILL TYPE NORMAL` against the demoted source so application clients reconnect through the active Service. |
 | INFO | `dragonfly emergency: REPLTAKEOVER succeeded` | `site`, `fg` | After an emergency MySQL failover, Dragonfly was promoted with sessions preserved. |
 | WARN | `dragonfly emergency: REPLTAKEOVER failed; falling back` | `site`, `error`, `fg` | Emergency promote could not preserve sessions; falling back to `REPLICAOF NO ONE`. |
 | INFO | `dragonfly emergency: target promoted via REPLICAOF NO ONE (sessions lost)` | `site`, `fg` | Emergency promote completed with empty cache. |
@@ -203,7 +206,8 @@ Kubernetes Event reasons emitted on the `MysqlFailoverGroup` (visible via `kubec
 | `DragonflyPromotionStarted` | Planned-failover state machine entered `PromotingDragonfly`. |
 | `DragonflyPromotionCompleted` | Dragonfly target was promoted (planned or emergency). |
 | `DragonflyPromotionFailed` | Promotion command failed; behavior depends on `spec.dragonfly.plannedFailover.onSyncTimeout` (planned) or is best-effort (emergency). |
-| `DragonflyStaleMasterDetected` | A non-active site reports master role. Logged + dedup'd in 5-minute windows. |
+| `DragonflyStaleMasterDetected` | A non-active site reports master role. Logged + dedup'd in 5-minute windows. Auto-rejoin is attempted in `reconcileReplication` when `connected_slaves=0 AND master_repl_offset=0`. |
+| `DragonflyOldSiteReconfigured` | A stale master passed the auto-rejoin gate and was attached as a replica of the active master via `REPLICAOF`. |
 | `DragonflySyncTimeout` | `WaitingForDragonflySync` exhausted `spec.dragonfly.plannedFailover.maxSyncWait`. |
 
 ### Lifecycle

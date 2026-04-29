@@ -31,6 +31,9 @@ type fakeDragonflyConn struct {
 
 	replTakeoverErr error
 
+	clientKillTypes []string
+	clientKillErr   error
+
 	closed bool
 }
 
@@ -53,6 +56,11 @@ func (c *fakeDragonflyConn) ReplicaOfNoOne(_ context.Context) error { return nil
 
 func (c *fakeDragonflyConn) ReplTakeover(_ context.Context, _ time.Duration) error {
 	return c.replTakeoverErr
+}
+
+func (c *fakeDragonflyConn) ClientKillType(_ context.Context, kind string) error {
+	c.clientKillTypes = append(c.clientKillTypes, kind)
+	return c.clientKillErr
 }
 
 func (c *fakeDragonflyConn) Close() error { c.closed = true; return nil }
@@ -186,8 +194,10 @@ func TestDragonflyManager_Tick_StaleMasterEmitsEvent(t *testing.T) {
 	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
 
 	// Both sites report master role; only dc1 should be valid master.
+	// dc2 has connected_slaves > 0 so it does NOT pass the auto-rejoin
+	// gate — only the StaleMasterDetected event should fire.
 	dc1Conn := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}
-	dc2Conn := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 50}}
+	dc2Conn := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 50, ConnectedSlaves: 1}}
 	conn := newFakeConnector()
 	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", dc1Conn)
 	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", dc2Conn)
@@ -203,14 +213,63 @@ func TestDragonflyManager_Tick_StaleMasterEmitsEvent(t *testing.T) {
 		t.Errorf("Phase = %q, want Degraded", got.Status.Dragonfly.Phase)
 	}
 
-	// The Event recorder is buffered; non-blocking drain.
-	select {
-	case ev := <-rec.Events:
-		if !contains(ev, ReasonDragonflyStaleMasterDetected) {
-			t.Errorf("event = %q, want substring %q", ev, ReasonDragonflyStaleMasterDetected)
+	events := drainEventsCh(rec.Events, 8, 100*time.Millisecond)
+	foundStale := false
+	foundReconfigured := false
+	for _, ev := range events {
+		if contains(ev, ReasonDragonflyStaleMasterDetected) {
+			foundStale = true
 		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("no DragonflyStaleMasterDetected event emitted")
+		if contains(ev, ReasonDragonflyOldSiteReconfigured) {
+			foundReconfigured = true
+		}
+	}
+	if !foundStale {
+		t.Errorf("did not see DragonflyStaleMasterDetected event; events=%v", events)
+	}
+	if foundReconfigured {
+		t.Errorf("saw DragonflyOldSiteReconfigured event despite connected_slaves>0; events=%v", events)
+	}
+	if dc2Conn.replicaOfArgs != nil {
+		t.Errorf("expected no REPLICAOF on stale master with connected_slaves>0, got %v", dc2Conn.replicaOfArgs)
+	}
+}
+
+func TestDragonflyManager_Tick_StaleMasterAutoReconfigures(t *testing.T) {
+	// Stale master with connected_slaves=0 AND master_repl_offset=0:
+	// provably never accepted writes. Manager should auto-attach it as
+	// a replica of the active master and emit the reconfigured event.
+	fg := fgWithDragonflyEnabledAndActive()
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.Build()
+	rec := record.NewFakeRecorder(8)
+	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
+
+	dc1Conn := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}
+	dc2Conn := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 0, ConnectedSlaves: 0}}
+	conn := newFakeConnector()
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", dc1Conn)
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", dc2Conn)
+	mgr.SetConnector(conn.connect)
+
+	mgr.Tick(context.Background())
+
+	if dc2Conn.replicaOfArgs == nil {
+		t.Fatal("expected REPLICAOF on stale master with connected_slaves=0,master_repl_offset=0")
+	}
+	if !contains(dc2Conn.replicaOfArgs[0], "lion-dragonfly-dc1.shared-lion.svc.cluster.local") {
+		t.Errorf("REPLICAOF host = %q, want dc1 svc", dc2Conn.replicaOfArgs[0])
+	}
+
+	events := drainEventsCh(rec.Events, 8, 100*time.Millisecond)
+	foundReconfigured := false
+	for _, ev := range events {
+		if contains(ev, ReasonDragonflyOldSiteReconfigured) {
+			foundReconfigured = true
+		}
+	}
+	if !foundReconfigured {
+		t.Errorf("did not see DragonflyOldSiteReconfigured event; events=%v", events)
 	}
 }
 
@@ -377,6 +436,54 @@ func TestDragonflyManager_TryEmergencyPromote_TargetUnreachableDoesNotPanic(t *t
 	mgr.SetConnector(conn.connect)
 
 	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1") // must not panic
+}
+
+func TestDragonflyManager_TryEmergencyPromote_AppliesLabelsAndKills(t *testing.T) {
+	// Steady-state pods with default labels; emergency promote should
+	// strip old-source traffic, set target=master+traffic, demote
+	// old-source role + restore traffic, and CLIENT KILL the old source.
+	fg := fgWithDragonflyEnabledAndActive()
+	sourcePod := makeDragonflyPod(fg.Name, "dc1", "master", true)
+	targetPod := makeDragonflyPod(fg.Name, "dc2", "replica", true)
+	cb := fake.NewClientBuilder().WithScheme(testScheme()).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg, newTestSecret(), sourcePod, targetPod)
+	c := cb.Build()
+	key := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+	rec := record.NewFakeRecorder(8)
+	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
+
+	target := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+	source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+	conn := newFakeConnector()
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", target)
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", source)
+	mgr.SetConnector(conn.connect)
+
+	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
+
+	var gotSource, gotTarget corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); err != nil {
+		t.Fatalf("get source: %v", err)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: targetPod.Name, Namespace: targetPod.Namespace}, &gotTarget); err != nil {
+		t.Fatalf("get target: %v", err)
+	}
+	if gotTarget.Labels[labelDragonflyRole] != "master" {
+		t.Errorf("target role = %q, want master", gotTarget.Labels[labelDragonflyRole])
+	}
+	if gotTarget.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
+		t.Errorf("target traffic = %q, want enabled", gotTarget.Labels[labelDragonflyTraffic])
+	}
+	if gotSource.Labels[labelDragonflyRole] != "replica" {
+		t.Errorf("source role = %q, want replica", gotSource.Labels[labelDragonflyRole])
+	}
+	if gotSource.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
+		t.Errorf("source traffic = %q, want enabled (restored after takeover)", gotSource.Labels[labelDragonflyTraffic])
+	}
+	if len(source.clientKillTypes) == 0 {
+		t.Errorf("expected CLIENT KILL on old source, got none")
+	}
 }
 
 func drainEventsCh(ch <-chan string, max int, wait time.Duration) []string {

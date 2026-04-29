@@ -23,6 +23,20 @@ func TestParseInfoReplication(t *testing.T) {
 				Role:                   "master",
 				MasterLastIOSecondsAgo: -1,
 				MasterReplOffset:       123456789,
+				ConnectedSlaves:        1,
+			},
+		},
+		{
+			// Dragonfly's `connected_replicas` alias resolves to the
+			// same field as `connected_slaves` so the auto-rejoin
+			// gate does not depend on which Dragonfly version is
+			// emitting INFO.
+			name: "connected_replicas alias",
+			body: "# Replication\nrole:master\nconnected_replicas:3\nmaster_repl_offset:0\n",
+			want: ReplicationInfo{
+				Role:                   "master",
+				MasterLastIOSecondsAgo: -1,
+				ConnectedSlaves:        3,
 			},
 		},
 		{

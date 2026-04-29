@@ -279,6 +279,24 @@ func TestClientReplTakeover(t *testing.T) {
 	}
 }
 
+func TestClientKillType(t *testing.T) {
+	srv := newFakeServer(t)
+	// Real Dragonfly returns the count of killed connections as an
+	// integer reply. Programme that explicitly so we exercise the
+	// integer-reply branch in readReply rather than falling through to
+	// the default "+OK\r\n".
+	srv.reply("CLIENT KILL TYPE NORMAL", ":7\r\n")
+	c := mustNewClient(t, srv.addr(), "")
+	defer c.Close()
+	if err := c.ClientKillType(context.Background(), "NORMAL"); err != nil {
+		t.Fatalf("ClientKillType: %v", err)
+	}
+	got := <-srv.commandsCh
+	if want := []string{"CLIENT", "KILL", "TYPE", "NORMAL"}; !equalSlices(got, want) {
+		t.Errorf("got command %v, want %v", got, want)
+	}
+}
+
 func TestClientReplTakeoverClampsZero(t *testing.T) {
 	srv := newFakeServer(t)
 	c := mustNewClient(t, srv.addr(), "")

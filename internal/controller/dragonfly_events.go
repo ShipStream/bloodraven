@@ -9,4 +9,9 @@ const (
 	ReasonDragonflyPromotionFailed     = "DragonflyPromotionFailed"
 	ReasonDragonflyStaleMasterDetected = "DragonflyStaleMasterDetected"
 	ReasonDragonflySyncTimeout         = "DragonflySyncTimeout"
+	// ReasonDragonflyOldSiteReconfigured fires when DragonflyManager
+	// auto-attaches a stale-master pod as a replica of the active
+	// master after verifying it provably never accepted writes
+	// (connected_slaves=0 && master_repl_offset=0).
+	ReasonDragonflyOldSiteReconfigured = "DragonflyOldSiteReconfigured"
 )

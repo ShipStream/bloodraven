@@ -167,7 +167,7 @@ func TestReconcileDragonflySiteService(t *testing.T) {
 	}
 }
 
-func TestReconcileDragonflyActiveService_SelectsMasterRole(t *testing.T) {
+func TestReconcileDragonflyActiveService_SelectsMasterRoleAndTraffic(t *testing.T) {
 	fg := fgWithDragonfly()
 	r, c := newReconciler(fg)
 	if err := r.reconcileDragonflyActiveService(context.Background(), fg); err != nil {
@@ -177,15 +177,34 @@ func TestReconcileDragonflyActiveService_SelectsMasterRole(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "lion-dragonfly", Namespace: "shared-lion"}, &svc); err != nil {
 		t.Fatalf("active service not created: %v", err)
 	}
-	// Selector includes dragonfly-role=master so endpoints follow the
-	// label flip during failover.
+	// Selector AND-gates role=master AND traffic=enabled. Both labels
+	// must be present so that removing the traffic label sheds an
+	// endpoint atomically without depending on role-flip ordering.
 	if got := svc.Spec.Selector[labelDragonflyRole]; got != "master" {
 		t.Errorf("active service selector dragonfly-role = %q, want master", got)
+	}
+	if got := svc.Spec.Selector[labelDragonflyTraffic]; got != dragonflyTrafficEnabled {
+		t.Errorf("active service selector dragonfly-traffic = %q, want %q", got, dragonflyTrafficEnabled)
 	}
 	// Selector does NOT pin a specific site (the active site is
 	// determined by which pod carries the master label).
 	if _, ok := svc.Spec.Selector[labelSite]; ok {
 		t.Errorf("active service selector unexpectedly pins labelSite")
+	}
+}
+
+func TestReconcileDragonflyStatefulSet_PodTemplateSeedsTrafficEnabled(t *testing.T) {
+	fg := fgWithDragonfly()
+	r, c := newReconciler(fg)
+	if err := r.reconcileDragonflyStatefulSet(context.Background(), fg, fg.Spec.Sites[0]); err != nil {
+		t.Fatalf("reconcileDragonflyStatefulSet: %v", err)
+	}
+	var sts appsv1.StatefulSet
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "lion-dragonfly-dc1", Namespace: "shared-lion"}, &sts); err != nil {
+		t.Fatalf("statefulset not created: %v", err)
+	}
+	if got := sts.Spec.Template.ObjectMeta.Labels[labelDragonflyTraffic]; got != dragonflyTrafficEnabled {
+		t.Errorf("pod template traffic label = %q, want %q", got, dragonflyTrafficEnabled)
 	}
 }
 

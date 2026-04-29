@@ -60,6 +60,11 @@ type DragonflyConnection interface {
 	ReplicaOf(ctx context.Context, host string, port int32) error
 	ReplicaOfNoOne(ctx context.Context) error
 	ReplTakeover(ctx context.Context, timeout time.Duration) error
+	// ClientKillType issues `CLIENT KILL TYPE <kind>` against the
+	// connected instance. Used best-effort to evict in-flight client
+	// connections from the (now-demoted) old master after a planned
+	// failover, mirroring upstream Dragonfly operator PR #436.
+	ClientKillType(ctx context.Context, kind string) error
 	Close() error
 }
 
@@ -350,10 +355,22 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 		switch snap.ClassifiedRole {
 		case dragonfly.RoleStaleMaster:
 			m.recordStaleMaster(fg, snap.Name)
-			// Do not auto-reconfigure stale masters in the first slice.
-			// The DragonflyManager observes and reports; the planned
-			// or emergency failover paths handle the promotion side
-			// of the labels. Wishlist 44 will close the loop.
+			// Defense-in-depth: ensure the stale master is shed from
+			// the active Service even if its labels somehow drift.
+			// This is independent of the auto-reconfigure attempt below
+			// — a stale master that fails the connected_slaves/offset
+			// gate must still not serve client traffic.
+			if err := m.setTrafficLabel(ctx, fg, snap.Name, false); err != nil {
+				m.logger.Info("dragonfly: strip stale-master traffic", "site", snap.Name, "error", err)
+			}
+			// Auto-reconfigure only when the stale master provably
+			// never accepted writes since restart: connected_slaves=0
+			// AND master_repl_offset=0. Anything else risks rebinding
+			// a master that has divergent data, so we leave it for
+			// human intervention.
+			if snap.Info.ConnectedSlaves == 0 && snap.Info.MasterReplOffset == 0 {
+				m.attemptStaleMasterReconfigure(ctx, fg, snap.Name, password, masterHost, masterPort)
+			}
 			continue
 		case dragonfly.RoleReplica:
 			// Already a replica; verify it points at the right master.
@@ -368,6 +385,35 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 			}
 			m.applyReplicaOf(ctx, fg, snap.Name, password, masterHost, masterPort)
 		}
+	}
+}
+
+// attemptStaleMasterReconfigure tries to attach a provably-empty stale
+// master back to the active master as a replica. The caller must have
+// already gated this on connected_slaves=0 AND master_repl_offset=0
+// (snap.Info), which is the upstream-blessed signal that the pod has
+// not accepted any writes since restart.
+//
+// Best-effort: errors are logged but not propagated. The next tick
+// retries until the stale master becomes a replica or the operator
+// manually intervenes.
+func (m *DragonflyManager) attemptStaleMasterReconfigure(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName, password, masterHost string, masterPort int32) {
+	addr := dragonflyAddr(fg, siteName)
+	conn, err := m.connector(ctx, addr, password)
+	if err != nil {
+		m.logger.Info("stale-master reconfigure: dial failed", "site", siteName, "error", err)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.ReplicaOf(ctx, masterHost, masterPort); err != nil {
+		m.logger.Warn("stale-master reconfigure: REPLICAOF failed", "site", siteName, "host", masterHost, "port", masterPort, "error", err)
+		return
+	}
+	m.logger.Info("stale-master reconfigure: REPLICAOF applied", "site", siteName, "host", masterHost, "port", masterPort)
+	if m.recorder != nil {
+		m.recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyOldSiteReconfigured,
+			"stale Dragonfly master on site %q auto-reconfigured as replica of %s:%d (connected_slaves=0, master_repl_offset=0 — provably never accepted writes)",
+			siteName, masterHost, masterPort)
 	}
 }
 
@@ -395,13 +441,19 @@ func (m *DragonflyManager) applyReplicaOf(ctx context.Context, fg *v1alpha1.Mysq
 // caller, never blocks longer than a small bounded budget, and never
 // leaves Dragonfly in a state that affects MySQL durability.
 //
-// Strategy:
-//  1. Try REPLTAKEOVER on the target. If that succeeds, sessions are
+// Strategy mirrors the planned-failover sequence with looser
+// timeouts and tolerance for an unreachable old source:
+//  1. Best-effort strip the old source's traffic label so the active
+//     Service sheds it before we promote. Skipped silently if the
+//     source pod is gone.
+//  2. Try REPLTAKEOVER on the target. If that succeeds, sessions are
 //     preserved (best case).
-//  2. On failure, try REPLICAOF NO ONE on the target so application
+//  3. On failure, try REPLICAOF NO ONE on the target so application
 //     traffic can resume against an empty master. Sessions are lost
 //     in this branch.
-//  3. If the target is unreachable, give up; the next reconcile cycle
+//  4. On any successful target promotion, stamp role+traffic on the
+//     target pod and best-effort CLIENT KILL the old source.
+//  5. If the target is unreachable, give up; the next reconcile cycle
 //     of the DragonflyManager will continue trying.
 //
 // In all cases, status.dragonfly.lastPromotionTime/lastPromotionTarget
@@ -421,6 +473,15 @@ func (m *DragonflyManager) TryEmergencyPromote(ctx context.Context, target, oldS
 	}
 	password := m.fetchPassword(emCtx, &fg)
 	addr := dragonflyAddr(&fg, target)
+
+	// Step 1: strip old source traffic. Always safe even if the source
+	// is dead — the K8s API call still succeeds (label patch on a pod
+	// that may already be gone is a no-op).
+	if oldSource != "" {
+		if err := m.setTrafficLabel(emCtx, &fg, oldSource, false); err != nil {
+			m.logger.Info("dragonfly emergency: strip old source traffic failed (proceeding)", "site", oldSource, "error", err)
+		}
+	}
 
 	conn, err := m.connector(emCtx, addr, password)
 	if err != nil {
@@ -443,8 +504,9 @@ func (m *DragonflyManager) TryEmergencyPromote(ctx context.Context, target, oldS
 			m.recorder.Eventf(&fg, corev1.EventTypeNormal, ReasonDragonflyPromotionCompleted,
 				"emergency: target Dragonfly %q promoted via REPLTAKEOVER (best-effort)", target)
 		}
+		m.applyEmergencyPromotionLabels(emCtx, &fg, target, oldSource)
+		m.bestEffortEmergencyClientKill(emCtx, &fg, oldSource, password)
 		m.stampPromotion(emCtx, target)
-		_ = oldSource // currently unused; reserved for stale-master fence in wishlist 44
 		return
 	} else {
 		m.logger.Warn("dragonfly emergency: REPLTAKEOVER failed; falling back", "site", target, "error", takeoverErr)
@@ -466,7 +528,147 @@ func (m *DragonflyManager) TryEmergencyPromote(ctx context.Context, target, oldS
 		m.recorder.Eventf(&fg, corev1.EventTypeWarning, ReasonDragonflyPromotionCompleted,
 			"emergency: target Dragonfly %q promoted via REPLICAOF NO ONE (sessions lost)", target)
 	}
+	m.applyEmergencyPromotionLabels(emCtx, &fg, target, oldSource)
+	m.bestEffortEmergencyClientKill(emCtx, &fg, oldSource, password)
 	m.stampPromotion(emCtx, target)
+}
+
+// applyEmergencyPromotionLabels stamps role=master+traffic=enabled on
+// the target site and demotes the old source to role=replica with its
+// traffic label restored. All errors are logged and discarded; the
+// reconciler's syncDragonflyPodLabels sweep will re-converge if any
+// patch fails.
+func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string) {
+	if err := m.setRoleLabel(ctx, fg, target, "master"); err != nil {
+		m.logger.Info("emergency: stamp target role=master", "site", target, "error", err)
+	}
+	if err := m.setTrafficLabel(ctx, fg, target, true); err != nil {
+		m.logger.Info("emergency: stamp target traffic=enabled", "site", target, "error", err)
+	}
+	if oldSource != "" {
+		if err := m.setRoleLabel(ctx, fg, oldSource, "replica"); err != nil {
+			m.logger.Info("emergency: stamp old source role=replica", "site", oldSource, "error", err)
+		}
+		// Restore the source's traffic label so it rejoins as a healthy
+		// pod once it comes back. The active Service still ignores it
+		// because role=replica.
+		if err := m.setTrafficLabel(ctx, fg, oldSource, true); err != nil {
+			m.logger.Info("emergency: restore old source traffic=enabled", "site", oldSource, "error", err)
+		}
+	}
+}
+
+// bestEffortEmergencyClientKill issues CLIENT KILL TYPE NORMAL against
+// the old source, if reachable, to evict any clients still attached.
+// Bounded context, all errors logged and dropped.
+func (m *DragonflyManager) bestEffortEmergencyClientKill(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, oldSource, password string) {
+	if oldSource == "" {
+		return
+	}
+	addr := dragonflyAddr(fg, oldSource)
+	dialCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	conn, err := m.connector(dialCtx, addr, password)
+	if err != nil {
+		m.logger.Info("emergency client-kill: old source unreachable; skipping", "site", oldSource, "error", err)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.ClientKillType(dialCtx, "NORMAL"); err != nil {
+		m.logger.Info("emergency client-kill: old source rejected CLIENT KILL", "site", oldSource, "error", err)
+		return
+	}
+	m.logger.Info("emergency client-kill: evicted clients from old source", "site", oldSource)
+}
+
+// setRoleLabel patches the dragonfly-role label on every pod for the
+// given site. Mirrors MysqlFailoverGroupReconciler.setDragonflyRoleOnSite
+// for the manager's separate codepath.
+func (m *DragonflyManager) setRoleLabel(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName, role string) error {
+	pods, err := m.listPodsForSite(ctx, fg, siteName)
+	if err != nil {
+		return err
+	}
+	for i := range pods {
+		pod := &pods[i]
+		if pod.Labels[labelDragonflyRole] == role {
+			continue
+		}
+		podName := pod.Name
+		podNamespace := pod.Namespace
+		if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+			var fresh corev1.Pod
+			if err := m.client.Get(ctx, types.NamespacedName{Name: podName, Namespace: podNamespace}, &fresh); err != nil {
+				return err
+			}
+			if fresh.Labels == nil {
+				fresh.Labels = map[string]string{}
+			}
+			fresh.Labels[labelDragonflyRole] = role
+			return m.client.Update(ctx, &fresh)
+		}); err != nil {
+			return fmt.Errorf("set role label on pod %s: %w", podName, err)
+		}
+	}
+	return nil
+}
+
+// setTrafficLabel sets or removes the dragonfly-traffic label on every
+// pod for the given site. Mirrors
+// MysqlFailoverGroupReconciler.setDragonflyTrafficOnSite for the
+// manager's separate codepath.
+func (m *DragonflyManager) setTrafficLabel(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string, set bool) error {
+	pods, err := m.listPodsForSite(ctx, fg, siteName)
+	if err != nil {
+		return err
+	}
+	for i := range pods {
+		pod := &pods[i]
+		_, has := pod.Labels[labelDragonflyTraffic]
+		if set && has && pod.Labels[labelDragonflyTraffic] == dragonflyTrafficEnabled {
+			continue
+		}
+		if !set && !has {
+			continue
+		}
+		podName := pod.Name
+		podNamespace := pod.Namespace
+		if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+			var fresh corev1.Pod
+			if err := m.client.Get(ctx, types.NamespacedName{Name: podName, Namespace: podNamespace}, &fresh); err != nil {
+				return err
+			}
+			if fresh.Labels == nil {
+				fresh.Labels = map[string]string{}
+			}
+			if set {
+				fresh.Labels[labelDragonflyTraffic] = dragonflyTrafficEnabled
+			} else {
+				delete(fresh.Labels, labelDragonflyTraffic)
+			}
+			return m.client.Update(ctx, &fresh)
+		}); err != nil {
+			return fmt.Errorf("set traffic label on pod %s: %w", podName, err)
+		}
+	}
+	return nil
+}
+
+// listPodsForSite returns Dragonfly pods for the given site.
+// Internal helper for the manager's label-patching helpers.
+func (m *DragonflyManager) listPodsForSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string) ([]corev1.Pod, error) {
+	var pods corev1.PodList
+	if err := m.client.List(ctx, &pods,
+		client.InNamespace(fg.Namespace),
+		client.MatchingLabels{
+			labelAppName:  dragonflyAppName,
+			labelInstance: fg.Name,
+			labelSite:     siteName,
+		},
+	); err != nil {
+		return nil, fmt.Errorf("list dragonfly pods for site %s: %w", siteName, err)
+	}
+	return pods.Items, nil
 }
 
 // effectiveDragonflyMaxSyncWaitFromFG mirrors the planned-failover
@@ -511,8 +713,13 @@ func (m *DragonflyManager) recordStaleMaster(fg *v1alpha1.MysqlFailoverGroup, si
 	m.lastStaleMasterAt[siteName] = now
 	m.logger.Warn("dragonfly: stale master on non-active site", "site", siteName, "active", fg.Status.ActiveSite)
 	if m.recorder != nil {
+		// Auto-reconfigure is attempted in reconcileReplication when
+		// connected_slaves=0 AND master_repl_offset=0; this Event fires
+		// on every detection regardless of whether the auto-rejoin gate
+		// passed.
 		m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyStaleMasterDetected,
-			"stale Dragonfly master detected on site %q (active=%q); not auto-reconfigured in this version", siteName, fg.Status.ActiveSite)
+			"stale Dragonfly master detected on site %q (active=%q); auto-rejoin attempted only when connected_slaves=0 AND master_repl_offset=0",
+			siteName, fg.Status.ActiveSite)
 	}
 }
 

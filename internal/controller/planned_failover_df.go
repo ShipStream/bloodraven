@@ -25,6 +25,43 @@ const defaultDragonflySyncWait = 30 * time.Second
 // poll cadence so phase transitions feel symmetrical to operators.
 const dragonflySyncPollInterval = 1 * time.Second
 
+// plannedFailoverDragonflyStripActive reports whether the planned-
+// failover state machine has transiently stripped the traffic label
+// from the source Dragonfly pod and not yet completed the takeover.
+//
+// While true, syncDragonflyPodLabels must NOT re-stamp the traffic
+// label on the source pod, otherwise it would re-attach the soon-to-be-
+// demoted master to the active Service mid-REPLTAKEOVER and re-introduce
+// the dual-master selector window the strip exists to close.
+//
+// The predicate is "phase is PromotingDragonfly AND PromotionMethod is
+// not yet stamped." Both success and failure exits stamp PromotionMethod
+// (or advance phase entirely), so the gate releases atomically with
+// the transition.
+func plannedFailoverDragonflyStripActive(fg *v1alpha1.MysqlFailoverGroup) bool {
+	if fg == nil || fg.Status.PlannedFailover == nil {
+		return false
+	}
+	pf := fg.Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly {
+		return false
+	}
+	if pf.Dragonfly == nil {
+		return true
+	}
+	return pf.Dragonfly.PromotionMethod == ""
+}
+
+// plannedFailoverSourceSite returns the source-primary site name from
+// the in-flight planned-failover status, or "" if no planned failover
+// is active.
+func plannedFailoverSourceSite(fg *v1alpha1.MysqlFailoverGroup) string {
+	if fg == nil || fg.Status.PlannedFailover == nil {
+		return ""
+	}
+	return fg.Status.PlannedFailover.SourcePrimary
+}
+
 // effectiveDragonflyOnSyncTimeout returns the configured policy or the
 // default ("proceed") when none is set. Centralized so the handlers
 // stay terse.
@@ -201,11 +238,35 @@ func (r *MysqlFailoverGroupReconciler) dragonflySyncTimeoutHandler(ctx context.C
 	return 1 * time.Second, nil
 }
 
-// plannedFailoverPromotingDragonfly issues REPLTAKEOVER against the
-// target Dragonfly. On success it stamps sessionsPreserved=true (unless
-// already false from sync timeout proceed-path), records the target
-// offset, and advances to Promoting (MySQL). On failure it follows the
-// onSyncTimeout policy (consistent with the sync phase).
+// plannedFailoverPromotingDragonfly executes the four-step planned
+// promotion sequence atomically within one reconcile pass:
+//
+//  1. Strip the dragonfly-traffic label from the source pod. The active
+//     Service selector requires (role=master AND traffic=enabled), so
+//     this atomically sheds the source endpoint regardless of the
+//     pending role-label flip.
+//
+//  2. Issue REPLTAKEOVER against the target Dragonfly. This is a
+//     blocking call that can take up to MaxSyncWait (~30s default).
+//
+//  3. On success, stamp role+traffic labels on the target (master,
+//     enabled) and demote the source to role=replica with its traffic
+//     label restored. The DragonflyManager will then keep the source
+//     wired as a replica via REPLICAOF on its next tick.
+//
+//  4. Best-effort CLIENT KILL TYPE NORMAL on the now-demoted source so
+//     application clients reconnect through the active Service and
+//     land on the new master. Failure here is non-fatal.
+//
+// On REPLTAKEOVER failure the source's traffic label is restored before
+// the failure handler runs, so the active Service can keep routing
+// (proceed mode) or the rollback path returns to a known good state.
+//
+// PromotionMethod is the gate that releases syncDragonflyPodLabels'
+// restraint on the source's traffic label (see plannedFailoverDragonflyStripActive).
+// Setting PromotionMethod after step 3 means a syncDragonflyPodLabels
+// run later in the same reconcile is harmless: target+source labels
+// already reflect the desired steady state.
 func (r *MysqlFailoverGroupReconciler) plannedFailoverPromotingDragonfly(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) (time.Duration, error) {
 	cur := fg.Status.PlannedFailover
 
@@ -216,23 +277,70 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromotingDragonfly(ctx con
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyPromotionStarted,
 		"promoting Dragonfly target %q via REPLTAKEOVER", cur.Target)
 
+	// Step 1: strip the source's traffic label. Idempotent on retries
+	// (operator restart between strip and takeover lands here again).
+	if cur.SourcePrimary != "" {
+		if err := r.setDragonflyTrafficOnSite(ctx, fg, cur.SourcePrimary, false); err != nil {
+			// Label patch is the only K8s-side step before REPLTAKEOVER.
+			// A patch failure means the source might still be in the
+			// active Service when we promote the target — the dual-master
+			// window we're trying to close. Treat as a promotion failure.
+			return r.dragonflyPromoteFailHandler(ctx, fg, nn, cur, fmt.Sprintf("strip source traffic label: %v", err))
+		}
+	}
+
 	timeout := effectiveDragonflyMaxSyncWait(fg)
 
+	// Step 2: REPLTAKEOVER on target.
 	conn, err := r.dragonflyDial(ctx, fg, cur.Target)
 	if err != nil {
+		// Restore source traffic before invoking the failure handler so
+		// the active Service still routes to the source on proceed-mode
+		// best-effort, and the rollback path returns to a clean state.
+		r.bestEffortRestoreSourceTraffic(ctx, fg, cur.SourcePrimary)
 		return r.dragonflyPromoteFailHandler(ctx, fg, nn, cur, fmt.Sprintf("dial target: %v", err))
 	}
 	if takeoverErr := conn.ReplTakeover(ctx, timeout); takeoverErr != nil {
 		_ = conn.Close()
+		r.bestEffortRestoreSourceTraffic(ctx, fg, cur.SourcePrimary)
 		return r.dragonflyPromoteFailHandler(ctx, fg, nn, cur, fmt.Sprintf("REPLTAKEOVER: %v", takeoverErr))
 	}
 	// Capture the post-promotion offset best-effort.
 	postInfo, _ := conn.InfoReplication(ctx)
 	_ = conn.Close()
 
+	// Step 3: re-label target as master+traffic, source as replica with
+	// traffic restored. Both are best-effort writes against the
+	// kubeapi server; partial success is fine because syncDragonflyPodLabels
+	// will reconcile the steady state on the next reconcile pass once
+	// PromotionMethod is set.
+	if err := r.setDragonflyRoleOnSite(ctx, fg, cur.Target, "master"); err != nil {
+		log.FromContext(ctx).Error(err, "post-promotion: stamp target role=master", "site", cur.Target)
+	}
+	if err := r.setDragonflyTrafficOnSite(ctx, fg, cur.Target, true); err != nil {
+		log.FromContext(ctx).Error(err, "post-promotion: stamp target traffic=enabled", "site", cur.Target)
+	}
+	if cur.SourcePrimary != "" {
+		if err := r.setDragonflyRoleOnSite(ctx, fg, cur.SourcePrimary, "replica"); err != nil {
+			log.FromContext(ctx).Error(err, "post-promotion: stamp source role=replica", "site", cur.SourcePrimary)
+		}
+		// Restore the source's traffic label so it rejoins the cluster
+		// as a healthy replica (the active Service still ignores it
+		// because role=replica).
+		if err := r.setDragonflyTrafficOnSite(ctx, fg, cur.SourcePrimary, true); err != nil {
+			log.FromContext(ctx).Error(err, "post-promotion: restore source traffic=enabled", "site", cur.SourcePrimary)
+		}
+	}
+
+	// Step 4: best-effort CLIENT KILL on the old master. Forces app
+	// clients to reconnect through the active Service and land on the
+	// new master rather than keep talking to the demoted pod via cached
+	// pod IPs. Wrapped in its own context so a slow/unreachable old
+	// master never holds the reconcile.
+	r.bestEffortClientKillSource(ctx, fg, cur.SourcePrimary)
+
 	// Stamp success on the dragonfly sub-status.
-	preservedAny := true
-	preservedFinal := preservedAny
+	preservedFinal := true
 	if cur.Dragonfly != nil && cur.Dragonfly.SessionsPreserved != nil && !*cur.Dragonfly.SessionsPreserved {
 		// A previous sync timeout already marked sessions lost; keep that.
 		preservedFinal = false
@@ -266,9 +374,48 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromotingDragonfly(ctx con
 	return 1 * time.Second, nil
 }
 
+// bestEffortRestoreSourceTraffic restores the source pod's traffic
+// label after a promotion failure so the active Service still has an
+// endpoint (proceed-mode) or the rollback path lands in a clean state
+// (fail-mode). Logs but never propagates errors — this is recovery
+// from a partial failure, not a fresh failure path.
+func (r *MysqlFailoverGroupReconciler) bestEffortRestoreSourceTraffic(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sourceSite string) {
+	if sourceSite == "" {
+		return
+	}
+	if err := r.setDragonflyTrafficOnSite(ctx, fg, sourceSite, true); err != nil {
+		log.FromContext(ctx).Error(err, "restore source traffic label after promotion failure",
+			"site", sourceSite)
+	}
+}
+
+// bestEffortClientKillSource issues `CLIENT KILL TYPE NORMAL` against
+// the old master so application clients reconnect through the active
+// Service. Bounded context, all errors logged and dropped.
+func (r *MysqlFailoverGroupReconciler) bestEffortClientKillSource(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sourceSite string) {
+	if sourceSite == "" {
+		return
+	}
+	killCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	conn, err := r.dragonflyDial(killCtx, fg, sourceSite)
+	if err != nil {
+		log.FromContext(ctx).Info("client-kill: source unreachable; skipping", "site", sourceSite, "error", err)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.ClientKillType(killCtx, "NORMAL"); err != nil {
+		log.FromContext(ctx).Info("client-kill: source rejected CLIENT KILL", "site", sourceSite, "error", err)
+		return
+	}
+	log.FromContext(ctx).Info("client-kill: evicted clients from old master", "site", sourceSite)
+}
+
 // dragonflyPromoteFailHandler reacts to REPLTAKEOVER failure. Same
 // policy as the sync timeout: "proceed" continues to MySQL promotion
-// flagged unpreserved; "fail" rolls back.
+// flagged unpreserved; "fail" rolls back. Callers MUST have already
+// restored the source's traffic label (via bestEffortRestoreSourceTraffic)
+// before invoking this so the steady-state Service has an endpoint.
 func (r *MysqlFailoverGroupReconciler) dragonflyPromoteFailHandler(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, cur *v1alpha1.PlannedFailoverStatus, why string) (time.Duration, error) {
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, cur.Target, "failed").Inc()
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionFailed, "%s", why)
@@ -288,6 +435,10 @@ func (r *MysqlFailoverGroupReconciler) dragonflyPromoteFailHandler(ctx context.C
 	next.Dragonfly.SessionsPreserved = &preserved
 	next.Dragonfly.Reason = ReasonDragonflyPromotionFailed
 	next.Dragonfly.Message = "REPLTAKEOVER failed; continuing best-effort: " + why
+	// Leave PromotionMethod empty: effectiveDragonflyMasterSite branches
+	// on it to decide whether the target has actually been promoted.
+	// Stamping anything non-empty here would re-route the active Service
+	// selector to the target, which never took over.
 	next.Phase = v1alpha1.PlannedFailoverPhasePromoting
 	if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
 		return 0, err

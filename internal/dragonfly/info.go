@@ -40,6 +40,14 @@ type ReplicationInfo struct {
 	// masters and replicas publish a value; the master's is the
 	// authoritative high-water mark for catch-up.
 	MasterReplOffset int64
+
+	// ConnectedSlaves is the count of replicas currently linked to this
+	// instance. Reported on masters; meaningless on replicas. Used to
+	// gate stale-master auto-reconfigure: a stale master with
+	// connected_slaves=0 has provably never been used by any replica
+	// since restart, which combined with master_repl_offset=0 is the
+	// upstream-blessed signal that no writes were accepted.
+	ConnectedSlaves int
 }
 
 // PersistenceInfo is the parsed subset of `INFO persistence` used to detect
@@ -90,6 +98,8 @@ func ParseInfoReplication(body string) ReplicationInfo {
 			info.SlaveReplOffset = atoi64OrZero(value)
 		case "master_repl_offset":
 			info.MasterReplOffset = atoi64OrZero(value)
+		case "connected_slaves", "connected_replicas":
+			info.ConnectedSlaves = atoiOrZero(value)
 		}
 	}
 	return info

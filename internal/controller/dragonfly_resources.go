@@ -22,9 +22,25 @@ const (
 	dragonflyAppName = "dragonfly"
 
 	// labelDragonflyRole identifies the operator-assigned Dragonfly role
-	// on a pod. Values: "master", "replica". The active Service selects
-	// on this label so endpoint cutover happens at the label patch.
+	// on a pod. Values: "master", "replica". The active Service AND-gates
+	// this with labelDragonflyTraffic, so the role label alone is not
+	// enough to attract client traffic.
 	labelDragonflyRole = "shipstream.io/dragonfly-role"
+
+	// labelDragonflyTraffic gates whether a pod is eligible for the
+	// active app-facing Service. Default value "enabled" is set by the
+	// StatefulSet template; the planned-failover sequence transiently
+	// removes it from the source pod before issuing REPLTAKEOVER so the
+	// Service atomically sheds the old endpoint without depending on
+	// label-flip ordering. Restored once the new master is in place.
+	//
+	// Only "enabled" is recognized by the active-Service selector;
+	// "disabled" or absent both shed traffic.
+	labelDragonflyTraffic = "shipstream.io/dragonfly-traffic"
+
+	// dragonflyTrafficEnabled is the only meaningful value of
+	// labelDragonflyTraffic. Centralized so we don't repeat the literal.
+	dragonflyTrafficEnabled = "enabled"
 
 	dragonflyDefaultPort      = int32(6379)
 	dragonflyDefaultAdminPort = int32(9999)
@@ -166,15 +182,22 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSet(ctx context
 		}
 
 		// Pod labels include the operator-assigned dragonfly-role
-		// (default "replica"). The DragonflyManager rewrites this on the
-		// active site after promotion. Static labels here must not depend
-		// on mutable status, otherwise every status change would trigger
-		// a rollout.
-		podLabels := make(map[string]string, len(labels)+1)
+		// (default "replica") and dragonfly-traffic=enabled. The
+		// DragonflyManager / planned-failover handlers rewrite these on
+		// the active site during promotion. Static labels here must not
+		// depend on mutable status, otherwise every status change would
+		// trigger a rollout. A pod that loses the traffic label
+		// transiently during a strip→takeover→restore sequence is
+		// re-stamped at the end of that sequence; if the StatefulSet
+		// recreates the pod for any reason, the freshly-rendered
+		// template's traffic=enabled brings it back into the Service
+		// without operator intervention.
+		podLabels := make(map[string]string, len(labels)+2)
 		for k, v := range labels {
 			podLabels[k] = v
 		}
 		podLabels[labelDragonflyRole] = "replica"
+		podLabels[labelDragonflyTraffic] = dragonflyTrafficEnabled
 
 		sts.Spec.Replicas = &replicas
 		sts.Spec.ServiceName = dragonflySiteServiceName(fg.Name, site.Name)
@@ -341,10 +364,17 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyActiveService(ctx conte
 		applyServiceAnnotations(svc, fg.Spec.ServiceTemplate)
 		svc.Spec = corev1.ServiceSpec{
 			Type: corev1.ServiceTypeClusterIP,
+			// AND-gate of role+traffic. The traffic label is the
+			// canonical "this pod serves writes" gate: removing it
+			// atomically sheds the endpoint, which is how the
+			// planned-failover sequence avoids a window where both the
+			// old and new master would match the selector during a
+			// REPLTAKEOVER.
 			Selector: map[string]string{
-				labelAppName:       dragonflyAppName,
-				labelInstance:      fg.Name,
-				labelDragonflyRole: "master",
+				labelAppName:          dragonflyAppName,
+				labelInstance:         fg.Name,
+				labelDragonflyRole:    "master",
+				labelDragonflyTraffic: dragonflyTrafficEnabled,
 			},
 			Ports: []corev1.ServicePort{
 				{Name: "client", Port: port, TargetPort: intstr.FromInt32(port), Protocol: corev1.ProtocolTCP},

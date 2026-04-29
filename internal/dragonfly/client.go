@@ -146,6 +146,19 @@ func (c *Client) ReplTakeover(ctx context.Context, timeout time.Duration) error 
 	return c.exec(ctx, "REPLTAKEOVER", strconv.FormatInt(ms, 10))
 }
 
+// ClientKillType issues `CLIENT KILL TYPE <kind>` against the connected
+// instance, which terminates all client connections of the given kind.
+// Used after a planned-failover Dragonfly promotion to force application
+// clients off the (now-demoted) old master so they reconnect through the
+// active Service and land on the new master.
+//
+// Best-effort: callers ignore errors from this call. Dragonfly returns
+// the count of killed connections; the count is discarded — the operator
+// only cares that the kick was attempted.
+func (c *Client) ClientKillType(ctx context.Context, kind string) error {
+	return c.exec(ctx, "CLIENT", "KILL", "TYPE", kind)
+}
+
 // exec sends a command and expects "+OK\r\n" or any non-error reply.
 func (c *Client) exec(ctx context.Context, args ...string) error {
 	_, err := c.execReply(ctx, args...)
