@@ -304,6 +304,15 @@ var (
 		Name: "bloodraven_dragonfly_promotions_total",
 		Help: "Number of Dragonfly promotion attempts labelled by result (success|failed|skipped).",
 	}, []string{"group", "target_site", "result"})
+
+	// DragonflyManagerPanicsTotal counts panics recovered in the
+	// DragonflyManager polling loop. A non-zero value means a Tick
+	// would have killed the goroutine without the recovery guard;
+	// alert and inspect the stack trace logged alongside.
+	DragonflyManagerPanicsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_dragonfly_manager_panics_total",
+		Help: "Number of panics recovered in DragonflyManager.Tick (per group).",
+	}, []string{"namespace", "name"})
 )
 
 // AllStates is the set of possible site states, used to emit the full state-set.
@@ -324,7 +333,7 @@ func Register(reg prometheus.Registerer) {
 		HTTPRequestsTotal, HTTPRequestDurationSeconds,
 		BackupEncryptDurationSeconds, BackupDecryptDurationSeconds,
 		BackupEncryptBytesTotal, BackupEncryptFailuresTotal,
-		DragonflySiteUp, DragonflyPromotionsTotal)
+		DragonflySiteUp, DragonflyPromotionsTotal, DragonflyManagerPanicsTotal)
 }
 
 // StatusClass returns "2xx", "3xx", "4xx", "5xx" for an HTTP status

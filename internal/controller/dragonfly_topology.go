@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -103,6 +104,13 @@ func (m *DragonflyManager) SetConnector(c DragonflyConnector) {
 }
 
 // Run launches the polling loop. Returns when ctx is canceled.
+//
+// Each Tick is wrapped in a panic-recovery guard so a single bad
+// observation (NPE in observe, missing nilcheck in reconcileReplication,
+// etc.) cannot kill the goroutine for the operator's lifetime — the
+// runner's start/stop logic only fires on TopologyConfig changes, so
+// without recovery a panic would silently stop all Dragonfly
+// observation+replication until the operator pod restarts.
 func (m *DragonflyManager) Run(ctx context.Context) {
 	if m.pollInterval <= 0 {
 		m.pollInterval = 2 * time.Second
@@ -111,15 +119,31 @@ func (m *DragonflyManager) Run(ctx context.Context) {
 	defer ticker.Stop()
 	// Tick immediately so freshly-created Dragonfly resources get their
 	// first status observation without waiting a full pollInterval.
-	m.Tick(ctx)
+	m.safeTick(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.Tick(ctx)
+			m.safeTick(ctx)
 		}
 	}
+}
+
+// safeTick wraps Tick in a panic-recovery guard. Panics are logged with
+// the recovered value and a stack trace; the loop continues with the
+// next tick.
+func (m *DragonflyManager) safeTick(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("dragonfly: panic recovered in Tick",
+				"recovered", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+			metrics.DragonflyManagerPanicsTotal.WithLabelValues(m.fgKey.Namespace, m.fgKey.Name).Inc()
+		}
+	}()
+	m.Tick(ctx)
 }
 
 // Tick performs one observation+reconciliation cycle. Exposed so tests
@@ -174,7 +198,15 @@ func (m *DragonflyManager) observe(ctx context.Context, fg *v1alpha1.MysqlFailov
 		// the client itself enforces an IOTimeout per call.
 		info, err := conn.InfoReplication(ctx)
 		if err != nil {
+			// Dial succeeded but INFO failed: the Dragonfly process is
+			// up enough to accept TCP but not enough to answer commands
+			// (e.g. AUTH wedge, mid-load, deadlocked). The gauge MUST
+			// flip to 0 here — Prometheus gauges retain their last
+			// value, so without this the up-but-stuck condition this
+			// metric exists to alert on would silently report up=1
+			// indefinitely.
 			snap.ClassifiedRole = dragonfly.RoleUnreachable
+			metrics.DragonflySiteUp.WithLabelValues(fg.Name, site.Name).Set(0)
 			_ = conn.Close()
 			out = append(out, snap)
 			continue
@@ -197,8 +229,11 @@ func (m *DragonflyManager) observe(ctx context.Context, fg *v1alpha1.MysqlFailov
 }
 
 // fetchPassword reads the Dragonfly auth password from the configured
-// Secret. Returns empty string when auth is not configured or the secret
-// cannot be read; the caller treats empty as "no AUTH".
+// Secret. Returns empty string when auth is not configured. Secret-read
+// failures and missing keys are logged at Warn (not Debug) so a wedged
+// AUTH never disappears silently — but the manager still returns an
+// empty password so it can dial and fail loudly via the resulting AUTH
+// error rather than swallowing the cause entirely.
 func (m *DragonflyManager) fetchPassword(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) string {
 	auth := fg.Spec.Dragonfly.Auth
 	if auth == nil || auth.SecretName == "" {
@@ -210,10 +245,15 @@ func (m *DragonflyManager) fetchPassword(ctx context.Context, fg *v1alpha1.Mysql
 	}
 	var secret corev1.Secret
 	if err := m.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: auth.SecretName}, &secret); err != nil {
-		m.logger.Debug("dragonfly: secret not readable yet", "secret", auth.SecretName, "error", err)
+		m.logger.Warn("dragonfly: read auth secret", "secret", auth.SecretName, "error", err)
 		return ""
 	}
-	return string(secret.Data[key])
+	raw, ok := secret.Data[key]
+	if !ok {
+		m.logger.Warn("dragonfly: auth secret missing key", "secret", auth.SecretName, "key", key)
+		return ""
+	}
+	return string(raw)
 }
 
 // patchStatus writes the observed snapshot into status.dragonfly. We
@@ -712,21 +752,27 @@ func effectiveDragonflyMaxSyncWaitFromFG(fg *v1alpha1.MysqlFailoverGroup) time.D
 }
 
 // stampPromotion writes status.dragonfly.lastPromotionTime/Target as a
-// best-effort patch. Failures are logged.
+// best-effort patch. Wrapped in RetryOnConflict so a concurrent
+// patchStatus write from the manager's own poll loop or the
+// reconciler's syncDragonflyPodLabels sweep doesn't silently drop the
+// promotion timestamp.
 func (m *DragonflyManager) stampPromotion(ctx context.Context, target string) {
-	var fg v1alpha1.MysqlFailoverGroup
-	if err := m.client.Get(ctx, m.fgKey, &fg); err != nil {
-		m.logger.Debug("stampPromotion: get fg", "error", err)
-		return
-	}
-	if fg.Status.Dragonfly == nil {
-		fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true}
-	}
 	now := metav1.Now()
-	fg.Status.Dragonfly.LastPromotionTime = &now
-	fg.Status.Dragonfly.LastPromotionTarget = target
-	if err := m.client.Status().Update(ctx, &fg); err != nil {
-		m.logger.Debug("stampPromotion: status update", "error", err)
+	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+		var fg v1alpha1.MysqlFailoverGroup
+		if err := m.client.Get(ctx, m.fgKey, &fg); err != nil {
+			return err
+		}
+		base := fg.DeepCopy()
+		if fg.Status.Dragonfly == nil {
+			fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true}
+		}
+		fg.Status.Dragonfly.LastPromotionTime = &now
+		fg.Status.Dragonfly.LastPromotionTarget = target
+		return m.client.Status().Patch(ctx, &fg, client.MergeFrom(base))
+	})
+	if err != nil {
+		m.logger.Warn("stampPromotion: status patch", "error", err)
 	}
 }
 

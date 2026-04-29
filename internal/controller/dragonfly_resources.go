@@ -512,6 +512,11 @@ var _ client.Object = &appsv1.StatefulSet{}
 // call; the operator polls infrequently and Dragonfly handles short-
 // lived connections cheaply.
 //
+// Secret read errors are surfaced — silently dialing with an empty
+// password against an auth-enabled Dragonfly would AUTH-fail anyway,
+// but with a less obvious error and no log of the underlying RBAC or
+// missing-secret cause.
+//
 // Tests inject a fake by overwriting r.dragonflyConnector.
 func (r *MysqlFailoverGroupReconciler) dragonflyDial(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string) (DragonflyConnection, error) {
 	if !dragonflyEnabled(fg) {
@@ -528,9 +533,14 @@ func (r *MysqlFailoverGroupReconciler) dragonflyDial(ctx context.Context, fg *v1
 			key = "password"
 		}
 		var s corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: auth.SecretName}, &s); err == nil {
-			password = string(s.Data[key])
+		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: auth.SecretName}, &s); err != nil {
+			return nil, fmt.Errorf("dragonfly: read auth secret %s: %w", auth.SecretName, err)
 		}
+		raw, ok := s.Data[key]
+		if !ok {
+			return nil, fmt.Errorf("dragonfly: auth secret %s missing key %q", auth.SecretName, key)
+		}
+		password = string(raw)
 	}
 	addr := dragonflyAddr(fg, siteName)
 	return connector(ctx, addr, password)

@@ -6,9 +6,12 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	io_prometheus_client "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -19,6 +22,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
+	"github.com/shipstream/bloodraven/internal/metrics"
 )
 
 // fakeDragonflyConn is a hand-rolled stub for DragonflyConnection. Each
@@ -599,6 +603,110 @@ func TestDragonflyManager_TryEmergencyPromote_AppliesLabelsAndKills(t *testing.T
 		t.Errorf("expected CLIENT KILL on old source, got none")
 	}
 }
+
+// TestDragonflyManager_Tick_InfoFailureSetsGaugeToZero regression-tests
+// B10: when the dial succeeded but InfoReplication failed (AUTH wedge,
+// process mid-load, etc.), observe used to fall through without
+// touching the gauge. Prometheus gauges retain their last value, so
+// the up-but-stuck condition this metric exists to alert on would
+// silently report up=1 indefinitely. The gauge must flip to 0 on
+// InfoReplication error.
+func TestDragonflyManager_Tick_InfoFailureSetsGaugeToZero(t *testing.T) {
+	fg := fgWithDragonflyEnabledAndActive()
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.Build()
+	rec := record.NewFakeRecorder(8)
+	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
+
+	// Pre-set the gauge to 1 to simulate a previous successful tick.
+	metrics.DragonflySiteUp.WithLabelValues(fg.Name, "dc1").Set(1)
+	metrics.DragonflySiteUp.WithLabelValues(fg.Name, "dc2").Set(1)
+
+	// Both sites: dial OK but InfoReplication errors.
+	dc1 := &fakeDragonflyConn{infoErr: errors.New("AUTH wedge")}
+	dc2 := &fakeDragonflyConn{infoErr: errors.New("AUTH wedge")}
+	conn := newFakeConnector()
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", dc1)
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", dc2)
+	mgr.SetConnector(conn.connect)
+
+	mgr.Tick(context.Background())
+
+	// Read gauge values via Prometheus testing helper.
+	for _, site := range []string{"dc1", "dc2"} {
+		got := readGauge(t, metrics.DragonflySiteUp.WithLabelValues(fg.Name, site))
+		if got != 0 {
+			t.Errorf("DragonflySiteUp[%s] = %v, want 0 (InfoReplication failed)", site, got)
+		}
+	}
+}
+
+// readGauge extracts the current value of a Prometheus Gauge via the
+// metric collector's Write+ToFloat64 pattern. Prometheus does not
+// expose a direct Get method on Gauge, so this helper centralises the
+// dance.
+func readGauge(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	var m io_prometheus_client.Metric
+	if err := g.Write(&m); err != nil {
+		t.Fatalf("read gauge: %v", err)
+	}
+	if m.Gauge == nil {
+		t.Fatalf("metric has no gauge value")
+	}
+	return *m.Gauge.Value
+}
+
+// TestDragonflyManager_Run_PanicRecovery regression-tests B12: a
+// panic in observe (e.g. NPE from a nil-info from a faulty connector)
+// used to propagate up and kill the goroutine for the operator's
+// lifetime. The runner only restarts the manager on TopologyConfig
+// changes, so observation+replication would silently stop until the
+// pod restarted. safeTick must catch the panic, log + meter it, and
+// continue the loop.
+func TestDragonflyManager_Run_PanicRecovery(t *testing.T) {
+	fg := fgWithDragonflyEnabledAndActive()
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.Build()
+	rec := record.NewFakeRecorder(8)
+	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 5*time.Millisecond)
+
+	// Connector that returns a non-nil conn whose InfoReplication
+	// panics. observe -> conn.InfoReplication panics -> safeTick
+	// recovers; the next tick attempts again.
+	var ticks atomic.Int32
+	mgr.SetConnector(func(_ context.Context, _ string, _ string) (DragonflyConnection, error) {
+		ticks.Add(1)
+		return &panicOnInfoConn{}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	mgr.Run(ctx) // returns when ctx times out
+	if got := ticks.Load(); got < 2 {
+		t.Errorf("connector called %d times; want >=2 (panic recovery must allow loop to continue)", got)
+	}
+}
+
+// panicOnInfoConn is a DragonflyConnection whose InfoReplication
+// panics. Used by the panic-recovery test to simulate a wedged Tick
+// without bringing down the test process.
+type panicOnInfoConn struct{}
+
+func (panicOnInfoConn) Ping(_ context.Context) error { return nil }
+func (panicOnInfoConn) InfoReplication(_ context.Context) (dragonfly.ReplicationInfo, error) {
+	panic("simulated observe panic")
+}
+func (panicOnInfoConn) InfoPersistence(_ context.Context) (dragonfly.PersistenceInfo, error) {
+	return dragonfly.PersistenceInfo{}, nil
+}
+func (panicOnInfoConn) ReplicaOf(_ context.Context, _ string, _ int32) error { return nil }
+func (panicOnInfoConn) ReplicaOfNoOne(_ context.Context) error               { return nil }
+func (panicOnInfoConn) ReplTakeover(_ context.Context, _ time.Duration) error {
+	return nil
+}
+func (panicOnInfoConn) ClientKillType(_ context.Context, _ string) error { return nil }
+func (panicOnInfoConn) Close() error                                      { return nil }
 
 func drainEventsCh(ch <-chan string, max int, wait time.Duration) []string {
 	out := make([]string, 0, max)
