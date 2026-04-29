@@ -10,6 +10,8 @@
 - [ ] 31. Documentation publishing parity
 - [ ] 32. Real-cluster E2E CI gate
 - [x] 33. True shared-node placement model
+- [ ] 34. Investigate using [Scorecard](https://sdk.operatorframework.io/docs/testing-operators/scorecard/) to test Bloodraven operator.
+- [ ] 35. Read the [Operator SDK Best Practices](https://sdk.operatorframework.io/docs/best-practices/) and see if there are any lessons we can learn and apply to Bloodraven.
 
 ## P0 — Production adoption blockers
 
