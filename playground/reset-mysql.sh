@@ -16,11 +16,17 @@ warn()  { echo -e "\033[1;33m!!\033[0m $*"; }
 source "$SCRIPT_DIR/_guard.sh"
 require_playground_context
 
-# Prefer podman (rootless, no daemon) over docker
-if command -v podman >/dev/null 2>&1; then
-  RUNTIME=podman
+# Prefer docker over podman. k3d's podman support is experimental.
+# Override with BLOODRAVEN_CONTAINER_RUNTIME=podman if needed. Falls back
+# to empty (the data-wipe step then defaults to docker at use-site, which
+# matches the legacy behavior on machines with neither runtime installed
+# and no live cluster to wipe data from anyway).
+if [[ -n "${BLOODRAVEN_CONTAINER_RUNTIME:-}" ]]; then
+  RUNTIME="${BLOODRAVEN_CONTAINER_RUNTIME}"
 elif command -v docker >/dev/null 2>&1; then
   RUNTIME=docker
+elif command -v podman >/dev/null 2>&1; then
+  RUNTIME=podman
 else
   RUNTIME=""
 fi
