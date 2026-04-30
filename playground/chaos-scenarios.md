@@ -21,6 +21,7 @@ Currently automated:
 - `04-data-integrity-on-failover` (§4; seeds rows, blocks on `WAIT_FOR_EXECUTED_GTID_SET`, kills primary, asserts `GTID_SUBSET(pre, post)=1` and full row count on the new primary)
 - `05-split-brain-auto-resolve` (requires `spec.splitBrainPolicy.sitePriorities` set)
 - `06-self-fence-isolated-primary` (§6; scales operator AND peer to 0 — true isolation path, complements `09-`)
+- `08-gtid-divergence-detection` (§8; manufactures a rogue write on the old primary, asserts `recoveryState=RecoveryBlocked` + `divergentTransactionCount>0` + `divergence detected` log; auto-reclones in cleanup)
 - `09-network-partition-self-fence` (§3 of this doc, NetworkPolicy partition path)
 - `11-total-loss-recovery` (§11; scales both sites to 0, asserts `TOTAL LOSS: all sites are unreachable` log + reconvergence)
 - `12-old-primary-recovery-no-divergence` (§7 of this doc; recovery without divergence)
