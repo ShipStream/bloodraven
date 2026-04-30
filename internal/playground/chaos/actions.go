@@ -211,6 +211,38 @@ func (a *Actions) KillSidecarPID1(ctx context.Context, site string) (string, err
 	return pod.Name, nil
 }
 
+// LabelNode adds labels to a node via JSON merge patch and registers
+// a reverter that removes only those keys (other labels are
+// untouched). Used by placement scenarios that simulate multi-tenant
+// nodes serving more than one failover group.
+func (a *Actions) LabelNode(ctx context.Context, name string, labels map[string]string) error {
+	if err := a.K.AddNodeLabels(ctx, name, labels); err != nil {
+		return fmt.Errorf("label node %s: %w", name, err)
+	}
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	a.push(fmt.Sprintf("remove %d labels from node %s", len(keys), name), func(ctx context.Context) error {
+		return a.K.RemoveNodeLabels(ctx, name, keys)
+	})
+	return nil
+}
+
+// CreateCanaryPod applies a Pod manifest to the namespace and
+// registers a reverter that deletes it. The pod is expected to be a
+// short-lived sleep canary, not a managed workload.
+func (a *Actions) CreateCanaryPod(ctx context.Context, namespace string, pod *corev1.Pod) error {
+	if err := a.K.CreatePod(ctx, namespace, pod); err != nil {
+		return fmt.Errorf("create canary pod %s/%s: %w", namespace, pod.Name, err)
+	}
+	name := pod.Name
+	a.push(fmt.Sprintf("delete canary pod %s/%s", namespace, name), func(ctx context.Context) error {
+		return a.K.DeletePodByName(ctx, namespace, name)
+	})
+	return nil
+}
+
 // GlobalRecover is the safety-net cleanup the runner runs after every
 // scenario, regardless of outcome. Mirrors `chaos.sh recover`:
 // removes every chaos-partition NetworkPolicy and scales every MySQL
