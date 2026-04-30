@@ -92,14 +92,30 @@ podman_save() {
 }
 
 if command -v k3d >/dev/null 2>&1 && k3d cluster list 2>/dev/null | grep -q .; then
-  K3D_CLUSTER=$(k3d cluster list -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['name'])" 2>/dev/null || echo "")
+  # Prefer the cluster kubectl is currently pointing at. Without this,
+  # multiple coexisting k3d clusters cause images to be imported into
+  # whichever cluster JSON parsing returned first — usually not the one
+  # being targeted.
+  K3D_CTX=$(kubectl config current-context 2>/dev/null || echo "")
+  if [[ "$K3D_CTX" == k3d-* ]]; then
+    K3D_CLUSTER="${K3D_CTX#k3d-}"
+  else
+    K3D_CLUSTER=$(k3d cluster list -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['name'])" 2>/dev/null || echo "")
+  fi
   if [[ -n "$K3D_CLUSTER" ]]; then
     info "Loading ${#IMAGES[@]} image(s) into k3d cluster '$K3D_CLUSTER'..."
+    # --mode direct forces k3d to replace the image in each node's
+    # containerd. The default mode ("auto") can short-circuit when an
+    # image with the same tag already exists, leaving the cluster
+    # running stale code while reporting success — and with
+    # imagePullPolicy=Never on the playground deployments, kubelet
+    # never tries to pull a fresh copy. This was a real bug:
+    # rebuild.sh would report success against an unchanged binary.
     if [[ "$RUNTIME" == "podman" ]]; then
       podman_save
-      k3d image import "$TARFILE" -c "$K3D_CLUSTER"
+      k3d image import --mode direct "$TARFILE" -c "$K3D_CLUSTER"
     else
-      k3d image import "${IMAGES[@]}" -c "$K3D_CLUSTER"
+      k3d image import --mode direct "${IMAGES[@]}" -c "$K3D_CLUSTER"
     fi
     ok "Images loaded (k3d)"
   fi
@@ -133,4 +149,79 @@ done
 for dep in "${UNIQUE_DEPS[@]}"; do
   kubectl -n "$NAMESPACE" rollout status "deployment/$dep" --timeout=120s
 done
+
+# Verify each pod is actually running the freshly-built image. Without
+# this, a cached/stale image in the cluster's containerd produces a
+# successful rollout against unchanged code — see comment on `k3d image
+# import --mode direct` above. The expected ID format is "sha256:<hash>"
+# in containerStatuses, while $RUNTIME image inspect returns the bare
+# hash; we compare the bare-hash forms.
+info "Verifying rolled pods are running the freshly-built image..."
+verify_failures=()
+for img in "${IMAGES[@]}"; do
+  expected=$($RUNTIME image inspect "$img" --format '{{.Id}}' 2>/dev/null \
+    | sed 's/^sha256://')
+  if [[ -z "$expected" ]]; then
+    warn "could not read local image ID for $img — skipping verification"
+    continue
+  fi
+  # Map image → label selector. Mirrors the deployment names selected
+  # above; "bloodraven" needs the app.kubernetes.io/name selector since
+  # the operator pod also has other labels.
+  case "$img" in
+    bloodraven:playground)               sel="app.kubernetes.io/name=bloodraven" ;;
+    bloodraven-sidecar:playground)       sel="app.kubernetes.io/name=mysql" ;;
+    bloodraven-counter:playground)       sel="app=counter-app" ;;
+    bloodraven-dashboard:playground)     sel="app=dashboard" ;;
+    bloodraven-dns-webhook:playground)   sel="app=external-dns" ;;
+    *)                                   sel="" ;;
+  esac
+  [[ -z "$sel" ]] && continue
+  pod_ids=$(kubectl -n "$NAMESPACE" get pods -l "$sel" \
+    -o jsonpath='{range .items[*].status.containerStatuses[*]}{.image}={.imageID}{"\n"}{end}' 2>/dev/null \
+    | grep -F "$img=" \
+    | sed 's|^.*=sha256:||' \
+    | sort -u)
+  if [[ -z "$pod_ids" ]]; then
+    warn "no running pods found for $img (selector: $sel)"
+    continue
+  fi
+  match=0
+  while read -r got; do
+    if [[ "$got" == "$expected"* || "$expected" == "$got"* ]]; then
+      match=1
+      break
+    fi
+  done <<<"$pod_ids"
+  if [[ $match -eq 1 ]]; then
+    ok "$img → ${expected:0:12}"
+  else
+    verify_failures+=("$img: expected ${expected:0:12}, got $(echo "$pod_ids" | head -1 | cut -c1-12)")
+  fi
+done
+
+if [[ ${#verify_failures[@]} -gt 0 ]]; then
+  echo
+  for f in "${verify_failures[@]}"; do
+    echo -e "\033[1;31mERR\033[0m image mismatch: $f" >&2
+  done
+  cat >&2 <<'EOF'
+
+The cluster's containerd is running a stale image. This usually means
+"k3d image import" silently no-op'd (despite the script using --mode
+direct, which should prevent it) or that a deployment selector is wrong.
+
+To force the new image into k3d:
+  kubectl -n bloodraven-playground delete pod -l <selector>   # forces re-pull from local cache
+  ./playground/rebuild.sh <component>
+
+If that doesn't help, fully evict the stale image:
+  for n in $(k3d node list -o json | python3 -c 'import sys,json; [print(x["name"]) for x in json.load(sys.stdin) if x.get("role")!="loadbalancer"]'); do
+    docker exec "$n" crictl rmi <image> 2>/dev/null || true
+  done
+  ./playground/rebuild.sh <component>
+EOF
+  exit 1
+fi
+
 ok "All done"

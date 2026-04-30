@@ -146,11 +146,15 @@ if command -v k3d >/dev/null 2>&1 && k3d cluster list 2>/dev/null | grep -q .; t
   fi
   if [[ -n "$K3D_CLUSTER" ]]; then
     info "Loading images into k3d cluster '$K3D_CLUSTER'..."
+    # --mode direct forces k3d to replace images in each node's
+    # containerd. The default ("auto") can no-op when an image with the
+    # same tag already exists, leaving the cluster running stale code
+    # with no warning.
     if [[ "$RUNTIME" == "podman" ]]; then
       podman_save
-      k3d image import "$TARFILE" -c "$K3D_CLUSTER"
+      k3d image import --mode direct "$TARFILE" -c "$K3D_CLUSTER"
     else
-      k3d image import "${IMAGES[@]}" -c "$K3D_CLUSTER"
+      k3d image import --mode direct "${IMAGES[@]}" -c "$K3D_CLUSTER"
     fi
     ok "Images loaded (k3d)"
   fi
