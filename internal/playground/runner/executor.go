@@ -12,6 +12,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgchaos "github.com/shipstream/bloodraven/internal/playground/chaos"
+	pgdragonfly "github.com/shipstream/bloodraven/internal/playground/dragonfly"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
@@ -219,10 +220,11 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 	}
 
 	var (
-		mu         sync.Mutex
-		mysqlMap   = map[string]*pgmysql.SiteClient{}
-		sidecarMap = map[string]*pgsidecar.Probe{}
-		tailerMap  = map[string]*pglogs.Tailer{}
+		mu          sync.Mutex
+		mysqlMap    = map[string]*pgmysql.SiteClient{}
+		sidecarMap  = map[string]*pgsidecar.Probe{}
+		tailerMap   = map[string]*pglogs.Tailer{}
+		dragonflies []*pgdragonfly.SiteClient // tracked for executor-driven Close
 	)
 	tailerCtx, cancelTailers := context.WithCancel(context.Background())
 
@@ -306,6 +308,23 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		return t, nil
 	}
 
+	openDragonfly := func(site string) (*pgdragonfly.SiteClient, error) {
+		// Each call dials a fresh client. The active Service's
+		// selected pod can flip mid-scenario (master-kill,
+		// failover) and a cached client would stay pinned to a
+		// stale pod identity, hiding the very routing flip a
+		// Dragonfly scenario is meant to observe. The executor
+		// closes any client still open at scenario exit.
+		c, err := pgdragonfly.Open(ctx, e.K, e.Cfg.Namespace, e.Cfg.FG, site, "")
+		if err != nil {
+			return nil, err
+		}
+		mu.Lock()
+		dragonflies = append(dragonflies, c)
+		mu.Unlock()
+		return c, nil
+	}
+
 	env := &Env{
 		Namespace: e.Cfg.Namespace,
 		FG:        e.Cfg.FG,
@@ -320,6 +339,7 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		MySQL:     openMySQL,
 		Sidecar:   openSidecar,
 		Logs:      openLogs,
+		Dragonfly: openDragonfly,
 	}
 	e.tailers = tailerMap
 
@@ -332,6 +352,9 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		}
 		for _, p := range sidecarMap {
 			p.Close()
+		}
+		for _, c := range dragonflies {
+			_ = c.Close()
 		}
 		scraper.Close()
 	}

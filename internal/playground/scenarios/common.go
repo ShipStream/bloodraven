@@ -42,6 +42,56 @@ func AssertHealthyBaseline(ctx context.Context, env *runner.Env) error {
 		!plannedTerminal(mfg.Status.PlannedFailover.Phase) {
 		return fmt.Errorf("baseline unhealthy: planned failover in non-terminal phase %q", mfg.Status.PlannedFailover.Phase)
 	}
+	if err := assertDragonflyBaselineHealthy(mfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+// assertDragonflyBaselineHealthy is a no-op when spec.dragonfly is
+// disabled. When enabled it requires that status.dragonfly.phase is
+// Ready, that exactly one site is the master, and that every other
+// site is a replica with master_link_status="up". This folds the D1
+// (replica attachment / LOADING bug) and D9 (silent key loss) baseline
+// checks into the standard precheck rather than separate scenarios —
+// every Dragonfly chaos scenario inherits them.
+func assertDragonflyBaselineHealthy(mfg *v1alpha1.MysqlFailoverGroup) error {
+	if mfg.Spec.Dragonfly == nil || !mfg.Spec.Dragonfly.Enabled {
+		return nil
+	}
+	dfStat := mfg.Status.Dragonfly
+	if dfStat == nil {
+		return fmt.Errorf("baseline unhealthy: spec.dragonfly enabled but status.dragonfly not yet populated (waiting for first reconcile)")
+	}
+	if dfStat.Phase != v1alpha1.DragonflyPhaseReady {
+		return fmt.Errorf("baseline unhealthy: status.dragonfly.phase=%q (want Ready)", dfStat.Phase)
+	}
+	if dfStat.ActiveSite == "" {
+		return fmt.Errorf("baseline unhealthy: status.dragonfly.activeSite is empty")
+	}
+	masters := 0
+	for _, s := range dfStat.Sites {
+		switch s.Role {
+		case v1alpha1.DragonflyRoleMaster:
+			masters++
+			if s.Name != dfStat.ActiveSite {
+				return fmt.Errorf("baseline unhealthy: dragonfly site %q reports role=master but activeSite=%q (split-brain or stale-master)",
+					s.Name, dfStat.ActiveSite)
+			}
+		case v1alpha1.DragonflyRoleReplica:
+			if s.LinkStatus != "up" {
+				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has linkStatus=%q (want up)", s.Name, s.LinkStatus)
+			}
+			if s.SyncInProgress {
+				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has syncInProgress=true", s.Name)
+			}
+		case v1alpha1.DragonflyRoleUnreachable:
+			return fmt.Errorf("baseline unhealthy: dragonfly site %q is unreachable", s.Name)
+		}
+	}
+	if masters != 1 {
+		return fmt.Errorf("baseline unhealthy: expected exactly 1 dragonfly master, got %d", masters)
+	}
 	return nil
 }
 

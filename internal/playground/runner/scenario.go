@@ -9,6 +9,7 @@ import (
 	"time"
 
 	pgchaos "github.com/shipstream/bloodraven/internal/playground/chaos"
+	pgdragonfly "github.com/shipstream/bloodraven/internal/playground/dragonfly"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
@@ -64,6 +65,15 @@ type Env struct {
 	// Sidecar returns a sidecar Probe for a site, with the same
 	// caching semantics as MySQL.
 	Sidecar func(site string) (*pgsidecar.Probe, error)
+
+	// Dragonfly returns a *pgdragonfly.SiteClient connected to the
+	// named site's Dragonfly pod. Each call dials a fresh
+	// port-forward — Dragonfly scenarios deliberately re-open after
+	// pod restarts (master-kill, demote-and-rejoin) so the pinned
+	// SPDY tunnel stays bound to the right pod identity. The
+	// executor closes any clients still open when the scenario
+	// exits via a tracker registered through this opener.
+	Dragonfly func(site string) (*pgdragonfly.SiteClient, error)
 
 	// Logs returns a Tailer for a component. "operator" tails the
 	// operator pod; "sidecar:<site>" tails a site's sidecar; "mysql:<site>"

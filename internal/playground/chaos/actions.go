@@ -243,10 +243,53 @@ func (a *Actions) CreateCanaryPod(ctx context.Context, namespace string, pod *co
 	return nil
 }
 
+// KillDragonflyPod force-deletes the named site's Dragonfly pod. The
+// StatefulSet respawns it within seconds. No reverter — recovery is
+// autonomous (and the regression target of scenario D7).
+func (a *Actions) KillDragonflyPod(ctx context.Context, site string) error {
+	zero := int64(0)
+	return a.K.DeleteSiteDragonflyPod(ctx, a.Namespace, a.FG, site, &zero)
+}
+
+// ScaleDragonflyToZero scales a site's Dragonfly StatefulSet to 0
+// replicas, holding the site's Dragonfly offline past the brief
+// StatefulSet-respawn window. Reverter scales back to 1.
+//
+// Mirrors ScaleSiteToZero for MySQL but on the Dragonfly StatefulSet.
+// Used by emergency-failover scenarios that need a sustained
+// Dragonfly outage to prove MySQL recovery does not depend on
+// Dragonfly availability.
+func (a *Actions) ScaleDragonflyToZero(ctx context.Context, site string) error {
+	if err := a.K.ScaleDragonflyStatefulSet(ctx, a.Namespace, a.FG, site, 0); err != nil {
+		return fmt.Errorf("scale dragonfly %s to 0: %w", site, err)
+	}
+	a.push(fmt.Sprintf("scale dragonfly %s back to 1", site), func(ctx context.Context) error {
+		return a.K.ScaleDragonflyStatefulSet(ctx, a.Namespace, a.FG, site, 1)
+	})
+	return nil
+}
+
+// ScaleAllDragonflyToZero scales every site's Dragonfly StatefulSet
+// to 0. Used by scenario D5 (emergency MySQL failover with all
+// Dragonfly unreachable). Reverter restores each scaled-down site.
+func (a *Actions) ScaleAllDragonflyToZero(ctx context.Context) error {
+	mfg, err := a.K.GetMFG(ctx, a.Namespace)
+	if err != nil {
+		return fmt.Errorf("read MFG for scale-all-dragonfly: %w", err)
+	}
+	for _, s := range mfg.Spec.Sites {
+		if err := a.ScaleDragonflyToZero(ctx, s.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // GlobalRecover is the safety-net cleanup the runner runs after every
 // scenario, regardless of outcome. Mirrors `chaos.sh recover`:
 // removes every chaos-partition NetworkPolicy and scales every MySQL
-// site back to 1 replica. Idempotent.
+// site back to 1 replica, plus every Dragonfly StatefulSet back to
+// 1 replica. Idempotent.
 func (a *Actions) GlobalRecover(ctx context.Context) error {
 	var errs []error
 	if err := a.K.RemoveAllChaosNetworkPolicies(ctx, a.Namespace); err != nil {
@@ -258,6 +301,15 @@ func (a *Actions) GlobalRecover(ctx context.Context) error {
 			dep := pgkube.MysqlDeploymentName(a.FG, s.Name)
 			if err := a.K.ScaleDeployment(ctx, a.Namespace, dep, 1); err != nil {
 				errs = append(errs, fmt.Errorf("scale %s back to 1: %w", dep, err))
+			}
+			// Dragonfly is only reconciled when spec.dragonfly is
+			// enabled. Calling ScaleDragonflyStatefulSet on a missing
+			// StatefulSet returns a NotFound that we want to surface
+			// so a misconfigured playground is loud.
+			if mfg.Spec.Dragonfly != nil && mfg.Spec.Dragonfly.Enabled {
+				if err := a.K.ScaleDragonflyStatefulSet(ctx, a.Namespace, a.FG, s.Name, 1); err != nil {
+					errs = append(errs, fmt.Errorf("scale dragonfly %s back to 1: %w", s.Name, err))
+				}
 			}
 		}
 	} else {
