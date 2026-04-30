@@ -155,10 +155,14 @@ cmd_dragonfly_status() {
 
   echo ""
   info "Dragonfly pod labels:"
+  # Use -o custom-columns instead of -L + positional awk: the default
+  # kubectl pod columns include a RESTARTS field that becomes "1 (5m ago)"
+  # after the first restart, which silently shifts every column to the
+  # right and makes positional parsing print things like "site=ago)".
   kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=dragonfly \
-    -L shipstream.io/site,shipstream.io/dragonfly-role,shipstream.io/dragonfly-traffic \
+    -o "custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,SITE:.metadata.labels['shipstream\.io/site'],ROLE:.metadata.labels['shipstream\.io/dragonfly-role'],TRAFFIC:.metadata.labels['shipstream\.io/dragonfly-traffic']" \
     --no-headers 2>/dev/null \
-    | awk '{printf "  %-32s ready=%-5s site=%-3s role=%-7s traffic=%s\n", $1, $2, $6, $7, $8}'
+    | awk '{printf "  %-32s ready=%-5s site=%-4s role=%-8s traffic=%s\n", $1, $2, $3, $4, $5}'
 
   echo ""
   info "Active Service endpoints (writes go here):"

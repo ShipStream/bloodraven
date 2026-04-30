@@ -333,13 +333,20 @@ if [[ "$DF_ENABLED" == "true" ]]; then
     fi
   done
 
-  # Surface the operator's view of which site holds the master.
-  DF_ACTIVE=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground \
-    -o jsonpath='{.status.dragonfly.activeSite}' 2>/dev/null || echo "")
+  # Surface the operator's view of which site holds the master. The
+  # StatefulSets reach Ready before the operator finishes its first
+  # promotion tick, so poll briefly instead of warning on the first miss.
+  DF_ACTIVE=""
+  for _ in $(seq 1 30); do
+    DF_ACTIVE=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground \
+      -o jsonpath='{.status.dragonfly.activeSite}' 2>/dev/null || echo "")
+    [[ -n "$DF_ACTIVE" ]] && break
+    sleep 2
+  done
   if [[ -n "$DF_ACTIVE" ]]; then
     ok "Dragonfly active site: $DF_ACTIVE (Service: playground-dragonfly:6379)"
   else
-    warn "Dragonfly status.activeSite not set yet — operator may still be electing the first master"
+    warn "Dragonfly status.activeSite not set after 60s — check operator logs and 'kubectl describe mysqlfailovergroup playground'"
   fi
 fi
 

@@ -396,6 +396,45 @@ func TestDragonflyManager_Tick_ReplicasOfMisalignedReplica(t *testing.T) {
 	}
 }
 
+// TestDragonflyManager_Tick_ReplicaWithLinkDownReissuesReplicaOf is a
+// regression test for the post-master-pod-restart case: a replica that
+// is configured with the right master host:port but whose underlying
+// TCP connection has dropped (master_link_status="down"). Before the
+// fix, reconcileReplication short-circuited on the host:port match and
+// the replica silently stayed disconnected forever — same shape as
+// upstream issue #2044. The fix re-issues REPLICAOF whenever the link
+// is anything other than "up".
+func TestDragonflyManager_Tick_ReplicaWithLinkDownReissuesReplicaOf(t *testing.T) {
+	fg := fgWithDragonflyEnabledAndActive()
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.Build()
+	rec := record.NewFakeRecorder(8)
+	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
+
+	dc1Conn := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100}}
+	// dc2 points at the right master but the link is broken.
+	dc2Conn := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{
+		Role:                   "slave",
+		MasterHost:             "lion-dragonfly-dc1.shared-lion.svc.cluster.local",
+		MasterPort:             6379,
+		MasterLinkStatus:       "down",
+		MasterLastIOSecondsAgo: 60,
+	}}
+	conn := newFakeConnector()
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", dc1Conn)
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", dc2Conn)
+	mgr.SetConnector(conn.connect)
+
+	mgr.Tick(context.Background())
+
+	if dc2Conn.replicaOfArgs == nil {
+		t.Fatal("manager did not re-issue REPLICAOF on replica with link=down")
+	}
+	if !contains(dc2Conn.replicaOfArgs[0], "lion-dragonfly-dc1.shared-lion.svc.cluster.local") {
+		t.Errorf("REPLICAOF host = %q, want dc1 svc", dc2Conn.replicaOfArgs[0])
+	}
+}
+
 func TestDragonflyManager_TryEmergencyPromote_Success(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
 	cb, key := newDragonflyFakeClient(fg)

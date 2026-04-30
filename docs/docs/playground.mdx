@@ -118,6 +118,25 @@ Setup takes about 2 minutes depending on your machine.
 ./playground/rebuild.sh operator sidecar
 ```
 
+### First-run divergence (one-time reclone)
+
+On a brand-new cluster, both MySQL pods come up writable before the operator picks an active site. The pod that loses the election may have already executed a few transactions of its own (server UUID), which the operator surfaces as `RecoveryPending` with a non-zero `divergentTransactionCount`. Until that's cleared, planned failover to the loser will be rejected with "site is read-only but not replicating".
+
+To resolve, copy the divergent-GTID prefix from `kubectl get mysqlfailovergroup playground -o yaml` (look for `divergentGtid`) and confirm the reclone:
+
+```bash
+# Inspect the divergence
+kubectl -n bloodraven-playground get mysqlfailovergroup playground -o yaml \
+  | grep -A1 divergentGtid
+
+# Annotate with <site>:<first-segment-of-divergent-gtid> as the confirmation token.
+# Example: divergentGtid 61553741-443a-11f1-... → reclone-site=pdx:61553741
+kubectl -n bloodraven-playground annotate mysqlfailovergroup playground \
+  bloodraven.shipstream.io/reclone-site=pdx:61553741 --overwrite
+```
+
+The reclone takes ~60s. Expected outcome: `state=read-only`, `replicating=true`, `recoveryState` cleared. After that the planned failover demo below will work.
+
 ## Access the apps
 
 Use `kubectl port-forward` to access the dashboard and counter app:

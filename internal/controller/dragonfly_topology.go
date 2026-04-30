@@ -414,8 +414,24 @@ func (m *DragonflyManager) reconcileReplication(ctx context.Context, fg *v1alpha
 			}
 			continue
 		case dragonfly.RoleReplica:
-			// Already a replica; verify it points at the right master.
-			if snap.Info.MasterHost == masterHost && snap.Info.MasterPort == int(masterPort) {
+			// Already a replica; re-issue REPLICAOF if either:
+			//  (a) it points at the wrong master, or
+			//  (b) the link to the right master is down.
+			//
+			// (b) covers the master-pod-restart case: the Service-backed
+			// hostname stays the same but the underlying TCP connection to
+			// the killed pod's IP dies. Dragonfly's auto-reconnect doesn't
+			// always recover (especially after the operator's
+			// --break_replication_on_master_restart kicks in on the new
+			// master pod), so without this branch the replica silently
+			// stays disconnected forever — same shape as upstream issue
+			// #2044 (orphaned downstream replicas after topology change).
+			// REPLICAOF to the same target is idempotent at the engine
+			// level, so re-issuing on every tick while the link is down
+			// is safe.
+			pointedRight := snap.Info.MasterHost == masterHost && snap.Info.MasterPort == int(masterPort)
+			linkUp := snap.Info.MasterLinkStatus == "up"
+			if pointedRight && linkUp {
 				continue
 			}
 			m.applyReplicaOf(ctx, fg, snap.Name, password, masterHost, masterPort)
