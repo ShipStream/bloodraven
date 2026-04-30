@@ -45,13 +45,22 @@ func (t *Tailer) Wait(ctx context.Context, since time.Time, pred Predicate) (Mat
 	defer t.mu.Unlock()
 
 	scanIdx := 0
-	// Watcher goroutine that wakes us when the context fires.
+	// Watcher goroutine that wakes us when the context fires. The
+	// watcher must take t.mu before broadcasting: otherwise the
+	// broadcast could race the moment between this goroutine's
+	// ctx.Err() check and t.cond.Wait(), get delivered while no
+	// goroutine is parked on the cond, and leave us blocked
+	// indefinitely. Acquiring t.mu serializes the broadcast against
+	// cond.Wait()'s atomic unlock+park, guaranteeing the wakeup
+	// either reaches us or precedes the next ctx.Err() check.
 	stopWatcher := make(chan struct{})
 	defer close(stopWatcher)
 	go func() {
 		select {
 		case <-deadlineCh:
+			t.mu.Lock()
 			t.cond.Broadcast()
+			t.mu.Unlock()
 		case <-stopWatcher:
 		}
 	}()

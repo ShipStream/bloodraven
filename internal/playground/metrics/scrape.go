@@ -4,11 +4,11 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
@@ -90,7 +90,7 @@ func (s *Scraper) Scrape(ctx context.Context) (*Snapshot, error) {
 // Exposed so tests can feed golden fixtures.
 func ParseSnapshot(body []byte) (*Snapshot, error) {
 	parser := expfmt.NewTextParser(model.UTF8Validation)
-	families, err := parser.TextToMetricFamilies(strings.NewReader(string(body)))
+	families, err := parser.TextToMetricFamilies(bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("parse metrics: %w", err)
 	}

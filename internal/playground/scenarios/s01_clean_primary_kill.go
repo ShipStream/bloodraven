@@ -130,13 +130,15 @@ func verifyFailoverLog() runner.Step {
 
 // ctxStash / ctxFetch are tiny per-scenario state helpers. They live
 // on the Capture's notes for forensic purposes and on a small in-memory
-// map keyed by the env pointer.
+// map keyed by the env pointer. All map access is performed under the
+// stashMu lock so concurrent scenario goroutines (or the race detector)
+// see consistent state.
 func ctxStash(_ context.Context, env *runner.Env, key, value string) error {
-	getStash(env)[key] = value
+	stashSet(env, key, value)
 	env.Capture.Note(fmt.Sprintf("stash %s=%s", key, value))
 	return nil
 }
 
 func ctxFetch(env *runner.Env, key string) string {
-	return getStash(env)[key]
+	return stashGet(env, key)
 }

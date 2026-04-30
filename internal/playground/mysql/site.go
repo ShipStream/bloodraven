@@ -150,9 +150,10 @@ func (c *SiteClient) GtidExecuted(ctx context.Context) (string, error) {
 	return strings.TrimSpace(v), nil
 }
 
-// SetSuperReadOnly forces @@super_read_only=ON. Used to re-fence a
-// site when a scenario needs to set up split-brain or self-fence
-// preconditions.
+// SetSuperReadOnly toggles @@super_read_only. When on is false, it
+// also clears @@read_only so writes succeed (used by split-brain
+// scenarios). When on is true, it asserts super_read_only and the
+// engine clears read_only implicitly.
 func (c *SiteClient) SetSuperReadOnly(ctx context.Context, on bool) error {
 	q := "SET GLOBAL super_read_only = ON"
 	if !on {

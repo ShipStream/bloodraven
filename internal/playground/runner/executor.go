@@ -100,7 +100,15 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 			"scenario %s failed in phase=%s step=%q\n%s",
 			s.ID, phase, stepName, msg,
 		)
-		_ = cap.Persist(scenarioCtx, e.K, e.Cfg.Namespace, env.Metrics, e.tailers, failureBlock)
+		// Forensic capture must run on a fresh context: scenario-level
+		// timeouts (the most common failure mode) cancel scenarioCtx
+		// before fail() runs, which would leave Persist unable to
+		// fetch pods/events/logs/metrics — exactly when we need them
+		// most. Use a bounded background context so the capture is
+		// best-effort but still happens.
+		forensicsCtx, forensicsCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer forensicsCancel()
+		_ = cap.Persist(forensicsCtx, e.K, e.Cfg.Namespace, env.Metrics, e.tailers, failureBlock)
 		if !e.Cfg.NoCleanup {
 			res.CleanupErr = e.cleanup(env, s)
 		}

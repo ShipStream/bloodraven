@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,9 +77,12 @@ func (t *Tailer) Snapshot() []Match {
 //
 // On EOF (pod restart, e.g. after operator-kill), Start retries the
 // stream every second until ctx is done. Lines are timestamped with
-// the local clock at observation time; the runner does not parse
-// the structured slog timestamps because we mostly care about
-// "happened after step N injected".
+// the kubelet's server-side timestamp (PodLogOptions.Timestamps=true)
+// so callers' Wait(since=...) filtering reflects the *emission* time
+// of the log line, not when our reader happened to drain it. Without
+// server-side timestamps, backlog lines appended to the ring during
+// initial buffering would be tagged with time.Now() and could falsely
+// satisfy a Wait whose `since` predates the inject step.
 func (t *Tailer) Start(ctx context.Context, k *pgkube.Client) {
 	go t.run(ctx, k)
 }
@@ -116,8 +120,9 @@ func (t *Tailer) markDone(err error) {
 func (t *Tailer) readOne(ctx context.Context, k *pgkube.Client) error {
 	follow := true
 	opts := &corev1.PodLogOptions{
-		Container: t.Source.Container,
-		Follow:    follow,
+		Container:  t.Source.Container,
+		Follow:     follow,
+		Timestamps: true,
 	}
 	if !t.Source.SinceTime.IsZero() {
 		opts.SinceTime = &metav1.Time{Time: t.Source.SinceTime}
@@ -132,7 +137,8 @@ func (t *Tailer) readOne(ctx context.Context, k *pgkube.Client) error {
 	for {
 		line, err := r.ReadString('\n')
 		if line != "" {
-			t.append(Match{Time: time.Now(), Line: trimNewline(line)})
+			ts, body := splitTimestamp(trimNewline(line))
+			t.append(Match{Time: ts, Line: body})
 		}
 		if err != nil {
 			if err == io.EOF || ctx.Err() != nil {
@@ -148,6 +154,23 @@ func trimNewline(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// splitTimestamp parses the kubelet-prepended RFC3339Nano timestamp
+// from `<ts> <body>`. Falls back to time.Now() and the unmodified
+// line if the prefix is malformed (defensive: the kubelet's format
+// is documented but a future server quirk shouldn't drop log lines
+// on the floor).
+func splitTimestamp(s string) (time.Time, string) {
+	sp := strings.IndexByte(s, ' ')
+	if sp <= 0 {
+		return time.Now(), s
+	}
+	ts, err := time.Parse(time.RFC3339Nano, s[:sp])
+	if err != nil {
+		return time.Now(), s
+	}
+	return ts, s[sp+1:]
 }
 
 func (t *Tailer) append(m Match) {

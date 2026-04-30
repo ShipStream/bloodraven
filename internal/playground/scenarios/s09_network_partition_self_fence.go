@@ -50,9 +50,6 @@ func injectPartitionActive() runner.Step {
 			if err := ctxStash(ctx, env, "partitionedSite", active); err != nil {
 				return err
 			}
-			if err := ctxStash(ctx, env, "partitionStartTime", time.Now().Format(time.RFC3339Nano)); err != nil {
-				return err
-			}
 			// Open a sidecar log tailer BEFORE the partition lands so we
 			// catch the SELF-FENCED line. The partition will block our
 			// port-forward to the sidecar HTTP, but log streams come

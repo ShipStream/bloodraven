@@ -2,14 +2,11 @@
 // Bloodraven playground cluster (k3d/kind/minikube). It refuses to
 // mutate any context that does not match the playground allowlist.
 //
-// See playground/chaos-scenarios.md for scenario documentation and
-// /home/colin/.claude/plans/look-at-playground-chaos-scenarios-twinkling-hartmanis.md
-// for the design.
+// See playground/chaos-scenarios.md for scenario documentation.
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -172,7 +169,7 @@ func check(kubeconfig, kctx, namespace string) int {
 	k, err := loadKube(kubeconfig, kctx, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		if errors.Is(err, errGuard) || isGuardErr(err) {
+		if isGuardErr(err) {
 			return exitGuard
 		}
 		return exitEnvironment
@@ -313,16 +310,11 @@ func printResult(r runner.Result) {
 	}
 }
 
-// errGuard sentinel marker — guard errors are matched by string
-// rather than wrapping (the kube package's RequirePlaygroundContext
-// uses fmt.Errorf for richer messaging) so we use a small isGuardErr
-// helper that recognizes the prefix.
-var errGuard = errors.New("playground:")
-
+// isGuardErr recognizes the "playground:" prefix the kube package's
+// RequirePlaygroundContext uses for context-allowlist rejections.
 func isGuardErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := err.Error()
-	return len(s) >= 11 && s[:11] == "playground:"
+	return strings.HasPrefix(err.Error(), "playground:")
 }

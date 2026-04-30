@@ -21,8 +21,9 @@ func init() {
 // emits the auto-resolve metric, and logs the canonical msg string.
 //
 // Precondition: spec.splitBrainPolicy.sitePriorities must be set on the
-// MFG. The playground manifest does not set it by default; the precheck
-// reports a useful skip message in that case rather than failing.
+// MFG. The playground manifest does not set it by default; without it
+// the precheck fails the scenario with a message that points at the
+// missing config (the runner has no first-class skip mechanism today).
 func scenario05SplitBrainAutoResolve() runner.Scenario {
 	return runner.Scenario{
 		ID:    "05-split-brain-auto-resolve",
@@ -43,7 +44,7 @@ func scenario05SplitBrainAutoResolve() runner.Scenario {
 			}
 			if mfg.Spec.SplitBrainPolicy == nil || len(mfg.Spec.SplitBrainPolicy.SitePriorities) == 0 {
 				return fmt.Errorf(
-					"baseline unhealthy: spec.splitBrainPolicy.sitePriorities is empty " +
+					"precondition not met: spec.splitBrainPolicy.sitePriorities is empty " +
 						"(this scenario requires an automated split-brain policy; add it to the playground MFG)",
 				)
 			}
@@ -55,11 +56,10 @@ func scenario05SplitBrainAutoResolve() runner.Scenario {
 			verifyAutoResolveMetric(),
 			verifyAutoResolveLog(),
 		},
-		Cleanup: func(ctx context.Context, env *runner.Env) error {
-			// Make sure neither site is left with super_read_only forced
-			// off — operator will repair the standby on the next reconcile.
-			return nil
-		},
+		// No scenario-level Cleanup: the executor's GlobalRecover runs
+		// unconditionally, and the operator re-asserts super_read_only
+		// on the standby during its next reconcile pass — no extra
+		// teardown is needed for the writable-flip we injected.
 	}
 }
 

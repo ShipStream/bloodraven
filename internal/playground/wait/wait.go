@@ -117,12 +117,19 @@ func (h *Helper) UntilCR(ctx context.Context, namespace, what string, cond CRCon
 type LogCondition = pglogs.Predicate
 
 // UntilLog blocks until the tailer observes a line satisfying pred,
-// scoped to lines emitted at or after since.
+// scoped to lines emitted at or after since. Only ctx-deadline
+// expirations are reported as TimeoutError; other failures (tailer
+// stream errors, kube API errors surfaced through Tailer.Wait) are
+// returned with their underlying type intact so triage can tell a
+// timeout from an environmental fault.
 func (h *Helper) UntilLog(ctx context.Context, t *pglogs.Tailer, since time.Time, what string, pred LogCondition) (pglogs.Match, error) {
 	start := time.Now()
 	m, err := t.Wait(ctx, since, pred)
 	if err != nil {
-		return pglogs.Match{}, &TimeoutError{What: what, LastMessage: "no matching log line observed", Elapsed: time.Since(start)}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return pglogs.Match{}, &TimeoutError{What: what, LastMessage: "no matching log line observed", Elapsed: time.Since(start)}
+		}
+		return pglogs.Match{}, fmt.Errorf("wait %s: %w", what, err)
 	}
 	h.Logger.Info("matched log", "what", what, "line", m.Line, "elapsed", time.Since(start).Round(time.Millisecond))
 	return m, nil
