@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -537,6 +539,164 @@ func TestPlannedFailoverPromotingDragonfly_FailureProceeds(t *testing.T) {
 	}
 	if got.Status.PlannedFailover.Dragonfly.Reason != ReasonDragonflyPromotionFailed {
 		t.Errorf("reason = %q, want %q", got.Status.PlannedFailover.Dragonfly.Reason, ReasonDragonflyPromotionFailed)
+	}
+}
+
+// takeoverHookConn embeds fakeDragonflyConn and fires onTakeover at
+// the moment ReplTakeover would commit on the server side. Used by
+// regression tests that need to flip a "real Dragonfly master"
+// pointer in lockstep with the protocol-level takeover.
+type takeoverHookConn struct {
+	*fakeDragonflyConn
+	onTakeover func()
+}
+
+func (c *takeoverHookConn) ReplTakeover(ctx context.Context, t time.Duration) error {
+	if c.onTakeover != nil {
+		c.onTakeover()
+	}
+	return c.fakeDragonflyConn.ReplTakeover(ctx, t)
+}
+
+// TestPlannedFailoverPromotingDragonfly_NoReadOnlyMidFlight is the
+// regression guard for the safety invariant called out in
+// PLANS-Bloodraven-Dragonfly.md "Required Before Next Slice": during
+// the strip → REPLTAKEOVER → re-label sequence, the active Service
+// selector (role=master AND traffic=enabled) must never match a
+// Dragonfly pod that is not the real Dragonfly master at that
+// instant.
+//
+// "READONLY mid-flight" is the failure mode in which an application
+// write reaches a Dragonfly pod that is currently a replica — either
+// because REPLTAKEOVER hasn't happened yet (so the pod the selector
+// points to is still a replica) or because the post-takeover
+// demotion of the old master raced ahead of the active-Service
+// label flip (so two pods match while one is now a replica).
+//
+// The test intercepts every Pod Update against the fake client and
+// re-evaluates the selector after each label patch. The "real
+// Dragonfly master" pointer flips inside ReplTakeover, mirroring
+// server-side semantics. Any selector match against a pod whose
+// site is not the current real master is recorded as an invariant
+// violation.
+//
+// This is a unit-level proxy for the deferred k3d e2e test that runs
+// continuous writes against the active Service through a real
+// failover; the unit-level coverage exercises the label/state
+// transitions but not the live kube-proxy/endpoint controller. The
+// remaining live-cluster scenario lives in
+// PLANS-Dragonfly-Chaos-Scenarios.md (D3).
+func TestPlannedFailoverPromotingDragonfly_NoReadOnlyMidFlight(t *testing.T) {
+	fg := plannedFailoverFGWithDragonfly("proceed")
+	fg.Status.PlannedFailover.Phase = v1alpha1.PlannedFailoverPhasePromotingDragonfly
+	fg.Status.PlannedFailover.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
+	sourcePod := makeDragonflyPod(fg.Name, "iad", "master", true)
+	targetPod := makeDragonflyPod(fg.Name, "pdx", "replica", true)
+
+	// realMaster tracks which site is the real Dragonfly master at any
+	// given instant. It flips inside the target's ReplTakeover hook.
+	// violations is appended to whenever the selector matches a pod
+	// that isn't the real master.
+	var (
+		invMu      sync.Mutex
+		realMaster = "iad"
+		violations []string
+		checks     int
+	)
+
+	checkActiveServiceInvariant := func(c client.Reader, label string) {
+		var pods corev1.PodList
+		if err := c.List(context.Background(), &pods,
+			client.InNamespace(sourcePod.Namespace),
+			client.MatchingLabels{
+				labelAppName:          dragonflyAppName,
+				labelInstance:         fg.Name,
+				labelDragonflyRole:    "master",
+				labelDragonflyTraffic: dragonflyTrafficEnabled,
+			}); err != nil {
+			return
+		}
+		invMu.Lock()
+		defer invMu.Unlock()
+		checks++
+		for _, p := range pods.Items {
+			site := p.Labels[labelSite]
+			if site != realMaster {
+				violations = append(violations, fmt.Sprintf(
+					"after %s: pod %q (site=%s) matches active-Service selector but real Dragonfly master is %q (READONLY mid-flight)",
+					label, p.Name, site, realMaster))
+			}
+		}
+	}
+
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg, newTestSecret(), sourcePod, targetPod).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, underlying client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if err := underlying.Update(ctx, obj, opts...); err != nil {
+					return err
+				}
+				if pod, ok := obj.(*corev1.Pod); ok {
+					checkActiveServiceInvariant(underlying, "update "+pod.Name)
+				}
+				return nil
+			},
+		}).
+		Build()
+	r := &MysqlFailoverGroupReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(20),
+	}
+
+	target := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 200}}
+	targetWithHook := &takeoverHookConn{
+		fakeDragonflyConn: target,
+		onTakeover: func() {
+			invMu.Lock()
+			realMaster = "pdx"
+			invMu.Unlock()
+		},
+	}
+	source := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
+	r.dragonflyConnector = func(_ context.Context, addr, _ string) (DragonflyConnection, error) {
+		switch addr {
+		case "lion-dragonfly-pdx.shared-lion.svc.cluster.local:6379":
+			return targetWithHook, nil
+		case "lion-dragonfly-iad.shared-lion.svc.cluster.local:6379":
+			return source, nil
+		}
+		return nil, errors.New("no programmed conn for " + addr)
+	}
+
+	// Initial state must already hold the invariant: the source pod
+	// (iad) matches the selector and is the real master.
+	checkActiveServiceInvariant(c, "initial")
+
+	if _, err := r.plannedFailoverPromotingDragonfly(context.Background(), fg, fgNN(fg)); err != nil {
+		t.Fatalf("plannedFailoverPromotingDragonfly: %v", err)
+	}
+
+	// Final state: only target should match the selector, and it is
+	// the real master. Intermediate states are covered by the Update
+	// interceptor.
+	checkActiveServiceInvariant(c, "final")
+
+	invMu.Lock()
+	defer invMu.Unlock()
+	for _, v := range violations {
+		t.Errorf("invariant violation: %s", v)
+	}
+	// Sanity: at least the initial, the strip-update, the target role
+	// flip, the source role flip, the source traffic restore, and the
+	// final check should each have been observed. Five mutating Pod
+	// Updates plus initial + final = 7. Use a relaxed lower bound to
+	// stay tolerant to idempotent-skip optimisations in the label
+	// helpers, but assert the interceptor actually fired.
+	if checks < 4 {
+		t.Errorf("invariant checker only fired %d times; expected several Pod-Update interceptions plus initial+final", checks)
 	}
 }
 
