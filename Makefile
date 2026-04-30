@@ -1,6 +1,6 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar test test-unit test-component test-envtest test-e2e test-integration fmt vet lint docker-build
+.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos test test-unit test-component test-envtest test-e2e test-integration fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all
 
 ##@ General
 
@@ -16,6 +16,9 @@ build-bloodraven: ## Build the operator binary
 
 build-sidecar: ## Build the sidecar binary
 	go build -o bin/sidecar ./cmd/sidecar
+
+build-playground-chaos: ## Build the playground chaos test runner
+	go build -o bin/playground-chaos ./cmd/playground-chaos
 
 docker-build: ## Build Docker images for both operator and sidecar
 	docker build --target bloodraven -t bloodraven .
@@ -64,3 +67,18 @@ vet: ## Run go vet
 
 lint: ## Run golangci-lint (must be installed separately)
 	golangci-lint run ./...
+
+##@ Playground
+
+chaos-list: build-playground-chaos ## List registered chaos scenarios
+	./bin/playground-chaos list
+
+chaos-check: build-playground-chaos ## Verify the playground baseline is healthy
+	./bin/playground-chaos check
+
+chaos-run: build-playground-chaos ## Run a single scenario (SCENARIO=<id>)
+	@if [ -z "$(SCENARIO)" ]; then echo "usage: make chaos-run SCENARIO=01-clean-primary-kill"; exit 2; fi
+	./bin/playground-chaos run $(SCENARIO)
+
+chaos-run-all: build-playground-chaos ## Run every registered chaos scenario in order
+	./bin/playground-chaos run-all

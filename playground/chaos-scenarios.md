@@ -1,5 +1,28 @@
 # Bloodraven Chaos Testing Scenarios
 
+## Automated runner
+
+A subset of the scenarios below are wired into a deterministic Go test runner at `cmd/playground-chaos`. The runner injects failure, polls the live cluster (CR status, sidecar HTTP, operator metrics, structured logs), and asserts the documented outcomes with deadlines. It bails on the first assertion failure and dumps a forensic capture (`cluster.yaml`, `pods.yaml`, `events.yaml`, `operator.log`, `sidecar-<site>.log`, `metrics.txt`, `scenario.log`, `failure.txt`) under `playground/chaos-results/<timestamp>/<scenario-id>/` for an operator or AI agent to triage.
+
+Run from the repo root:
+
+```
+make chaos-list                           # list registered scenarios
+make chaos-check                          # verify the playground baseline is healthy
+make chaos-run SCENARIO=01-clean-primary-kill
+make chaos-run-all                        # bail on first failure (default)
+```
+
+Currently automated:
+
+- `01-clean-primary-kill` (§1 below; uses `scale --replicas=0` for determinism, asserts failover only)
+- `02-planned-switchover` (planned-failover state machine)
+- `05-split-brain-auto-resolve` (requires `spec.splitBrainPolicy.sitePriorities` set)
+- `09-network-partition-self-fence` (§9)
+- `12-old-primary-recovery-no-divergence` (§12)
+
+The runner refuses to mutate any kubectl context that does not match the same allowlist as `playground/_guard.sh` (`k3d-*`, `kind-*`, `minikube*`, or names listed in `BLOODRAVEN_PLAYGROUND_CONTEXTS`). Markdown is the source of truth for hypotheses and prose; the runner's assertions are the operational ones documented under each scenario's "Verify" section.
+
 ## Prerequisites
 
 1. Create k3d cluster: `k3d cluster create bloodraven --agents 2 --k3s-arg '--tls-san=<hostname>@server:0'`
