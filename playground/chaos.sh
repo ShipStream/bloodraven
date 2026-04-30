@@ -2,9 +2,11 @@
 # Bloodraven Playground — Chaos Monkey
 #
 # Usage:
-#   ./playground/chaos.sh kill-site <iad|pdx>       Kill MySQL pod at a site
+#   ./playground/chaos.sh kill-site <iad|pdx>       Kill MySQL+Dragonfly pods at a site
 #   ./playground/chaos.sh kill-operator              Kill the operator pod
 #   ./playground/chaos.sh kill-counter               Kill the counter app pod
+#   ./playground/chaos.sh kill-dragonfly <iad|pdx>   Kill the Dragonfly pod at a site (StatefulSet recreates)
+#   ./playground/chaos.sh dragonfly-status           Show Dragonfly status, pod roles, active endpoints
 #   ./playground/chaos.sh cordon <iad|pdx>           Cordon the node for a site
 #   ./playground/chaos.sh uncordon                   Uncordon all nodes
 #   ./playground/chaos.sh network-partition <iad|pdx> Simulate network partition (drop MySQL traffic)
@@ -29,9 +31,11 @@ usage() {
   echo "Usage: $0 <command> [args]"
   echo ""
   echo "Commands:"
-  echo "  kill-site <iad|pdx>          Delete MySQL pod at the given site"
+  echo "  kill-site <iad|pdx>          Delete MySQL+Dragonfly pods at the given site"
   echo "  kill-operator                Delete the Bloodraven operator pod"
   echo "  kill-counter                 Delete the counter app pod"
+  echo "  kill-dragonfly <iad|pdx>     Delete the Dragonfly pod at the given site"
+  echo "  dragonfly-status             Show Dragonfly status, pod roles, and active endpoints"
   echo "  cordon <iad|pdx>             Cordon the node hosting the given site"
   echo "  uncordon                     Uncordon all playground nodes"
   echo "  network-partition <iad|pdx>  Block MySQL traffic on a site's node via exec into a debug pod"
@@ -129,6 +133,42 @@ EOF
   echo "  To remove: ./playground/chaos.sh recover"
 }
 
+cmd_kill_dragonfly() {
+  local site="${1:?Usage: kill-dragonfly <iad|pdx>}"
+  info "Killing Dragonfly pod at site '$site' (StatefulSet will recreate)..."
+  # StatefulSet pods are named -<ordinal>; we have replicas=1 so it's always -0.
+  local pod="playground-dragonfly-${site}-0"
+  kubectl -n "$NAMESPACE" delete pod "$pod" --grace-period=0 --force 2>/dev/null || \
+    kubectl -n "$NAMESPACE" delete pod "$pod"
+  ok "Dragonfly pod $pod killed"
+}
+
+cmd_dragonfly_status() {
+  echo ""
+  info "Dragonfly status (from MysqlFailoverGroup):"
+  kubectl -n "$NAMESPACE" get mysqlfailovergroup playground \
+    -o jsonpath='{.status.dragonfly}' 2>/dev/null \
+    | python3 -m json.tool 2>/dev/null \
+    || kubectl -n "$NAMESPACE" get mysqlfailovergroup playground -o yaml 2>/dev/null \
+    | sed -n '/^  dragonfly:/,/^  [a-z]/p' \
+    | sed '$d'
+
+  echo ""
+  info "Dragonfly pod labels:"
+  kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=dragonfly \
+    -L shipstream.io/site,shipstream.io/dragonfly-role,shipstream.io/dragonfly-traffic \
+    --no-headers 2>/dev/null \
+    | awk '{printf "  %-32s ready=%-5s site=%-3s role=%-7s traffic=%s\n", $1, $2, $6, $7, $8}'
+
+  echo ""
+  info "Active Service endpoints (writes go here):"
+  kubectl -n "$NAMESPACE" get endpointslice \
+    -l kubernetes.io/service-name=playground-dragonfly \
+    -o jsonpath='{range .items[*].endpoints[*]}  pod={.targetRef.name} ip={.addresses[*]} ready={.conditions.ready}{"\n"}{end}' 2>/dev/null \
+    || warn "  (no endpoints — active master may be electing)"
+  echo ""
+}
+
 cmd_recover() {
   info "Recovering from all chaos..."
 
@@ -173,6 +213,8 @@ case "${1:-}" in
   kill-site)          cmd_kill_site "${2:-}" ;;
   kill-operator)      cmd_kill_operator ;;
   kill-counter)       cmd_kill_counter ;;
+  kill-dragonfly)     cmd_kill_dragonfly "${2:-}" ;;
+  dragonfly-status)   cmd_dragonfly_status ;;
   cordon)             cmd_cordon "${2:-}" ;;
   uncordon)           cmd_uncordon ;;
   network-partition)  cmd_network_partition "${2:-}" ;;

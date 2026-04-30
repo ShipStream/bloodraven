@@ -33,6 +33,10 @@
     <div><span class="status" id="statusDot"></span>DB Host: <span id="host">--</span></div>
     <div>Read-Only: <span id="ro">--</span></div>
     <div>Last Update: <span id="ts">--</span></div>
+    <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #334155;">
+      Cache (Dragonfly): <span id="cacheValue">--</span>
+      <span id="cacheStatus" style="font-size: 0.75rem; color: #64748b;"></span>
+    </div>
   </div>
 </div>
 <script>
@@ -75,6 +79,8 @@ function render(d) {
   $('ts').textContent = d.updatedAt;
   $('statusDot').className = 'status ' + (d.readOnly ? 'ro' : 'ok');
   $('incr').disabled = d.readOnly;
+  $('cacheValue').textContent = d.cacheValue;
+  $('cacheStatus').textContent = d.cacheError ? '(' + d.cacheError + ')' : '';
 }
 
 fetchCounter();

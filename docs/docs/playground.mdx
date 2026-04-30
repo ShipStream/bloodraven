@@ -161,11 +161,13 @@ kubectl uncordon $(kubectl get nodes -o name | tr '\n' ' ')
 For more advanced scenarios, use the chaos script:
 
 ```bash
-./playground/chaos.sh kill-site iad      # Kill a site's MySQL pod
+./playground/chaos.sh kill-site iad           # Kill MySQL+Dragonfly pods at a site
 ./playground/chaos.sh kill-site pdx
-./playground/chaos.sh cordon iad         # Cordon a site's node
-./playground/chaos.sh network-partition iad  # Simulate a network partition
-./playground/chaos.sh recover            # Undo all chaos
+./playground/chaos.sh cordon iad              # Cordon a site's node
+./playground/chaos.sh network-partition iad   # Simulate a network partition
+./playground/chaos.sh kill-dragonfly iad      # Kill only the Dragonfly pod at a site
+./playground/chaos.sh dragonfly-status        # Print Dragonfly roles, traffic labels, and active endpoints
+./playground/chaos.sh recover                 # Undo all chaos
 ```
 
 ## Dragonfly co-management
@@ -178,22 +180,24 @@ Verify the cache subsystem before exercising failover:
 # Both per-site StatefulSets reach Ready
 kubectl -n bloodraven-playground get statefulset -l app.kubernetes.io/name=dragonfly
 
-# The active-site Dragonfly is master; the other site is replica
-kubectl -n bloodraven-playground exec deploy/playground-iad -- \
-  redis-cli -h playground-dragonfly-iad info replication | grep '^role'
-kubectl -n bloodraven-playground exec deploy/playground-iad -- \
-  redis-cli -h playground-dragonfly-pdx info replication | grep '^role'
-
-# The app-facing Service routes to the master endpoint
-kubectl -n bloodraven-playground get endpoints playground-dragonfly
+# Operator's view of which site is master, plus pod role/traffic labels
+# and the active Service endpoints
+./playground/chaos.sh dragonfly-status
 ```
+
+For ad-hoc Redis-protocol queries (replication state, GET/SET against a key), launch a one-shot pod with `redis-cli`:
+
+```bash
+kubectl -n bloodraven-playground run redis-cli --rm -it --restart=Never \
+  --image=redis:7-alpine -- redis-cli -h playground-dragonfly INFO replication
+```
+
+The counter app (`http://localhost:8090` after port-forward) writes to **both** MySQL and Dragonfly on every increment. The MySQL counter is durable; the Dragonfly counter (shown as "Cache (Dragonfly)" below the main number) is the session/cache continuity signal. After a planned failover with `sessionsPreserved=true`, the Dragonfly counter survives. After an emergency failover, it usually resets to 0 because the new master may have been an unsynced replica or a freshly-promoted empty pod.
 
 Exercise a planned failover that includes Dragonfly session preservation:
 
 ```bash
-# Set a key on the active master before the switch
-kubectl -n bloodraven-playground exec deploy/playground-iad -- \
-  redis-cli -h playground-dragonfly SET demo "before-failover"
+# Click "+ Increment" a few times in the counter UI so both counters are non-zero.
 
 # Trigger a planned failover to pdx
 kubectl -n bloodraven-playground annotate mysqlfailovergroup playground \
@@ -208,9 +212,8 @@ kubectl -n bloodraven-playground get mysqlfailovergroup playground \
 kubectl -n bloodraven-playground get mysqlfailovergroup playground \
   -o jsonpath='{.status.plannedFailover.dragonfly}{"\n"}'
 
-# Read the key back via the active service — it should still be there.
-kubectl -n bloodraven-playground exec deploy/playground-pdx -- \
-  redis-cli -h playground-dragonfly GET demo
+# Reload the counter UI — both the MySQL and the Dragonfly counter should
+# be unchanged. The active Service now resolves to the pdx Dragonfly pod.
 ```
 
 Emergency Dragonfly behavior is best-effort. Killing the active MySQL pod while Dragonfly is healthy still completes the MySQL emergency failover; Dragonfly is promoted via REPLTAKEOVER (sessions preserved when reachable) or `REPLICAOF NO ONE` (sessions lost), and never blocks MySQL recovery past a 10-second budget.

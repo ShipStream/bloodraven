@@ -134,7 +134,16 @@ podman_save() {
 }
 
 if command -v k3d >/dev/null 2>&1 && k3d cluster list 2>/dev/null | grep -q .; then
-  K3D_CLUSTER=$(k3d cluster list --no-headers 2>/dev/null | awk 'NR==1 {print $1}' || echo "")
+  # Prefer the cluster kubectl is currently pointing at (k3d contexts are
+  # named "k3d-<cluster>"), so multiple coexisting k3d clusters don't end
+  # up importing images into the wrong one. Falls back to the first
+  # cluster listed if the context is something other than k3d.
+  K3D_CTX=$(kubectl config current-context 2>/dev/null || echo "")
+  if [[ "$K3D_CTX" == k3d-* ]]; then
+    K3D_CLUSTER="${K3D_CTX#k3d-}"
+  else
+    K3D_CLUSTER=$(k3d cluster list --no-headers 2>/dev/null | awk 'NR==1 {print $1}' || echo "")
+  fi
   if [[ -n "$K3D_CLUSTER" ]]; then
     info "Loading images into k3d cluster '$K3D_CLUSTER'..."
     if [[ "$RUNTIME" == "podman" ]]; then
@@ -313,6 +322,27 @@ info "Waiting for remaining pods..."
 kubectl -n "$NAMESPACE" wait --for=condition=available deployment/external-dns --timeout=120s 2>/dev/null || true
 kubectl -n "$NAMESPACE" wait --for=condition=available deployment/dashboard --timeout=120s 2>/dev/null || true
 
+# ── 13. Wait for Dragonfly StatefulSets (when enabled) ──────────────────
+DF_ENABLED=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground \
+  -o jsonpath='{.spec.dragonfly.enabled}' 2>/dev/null || echo "")
+if [[ "$DF_ENABLED" == "true" ]]; then
+  info "Waiting for Dragonfly StatefulSets (one per site)..."
+  for site in iad pdx; do
+    if ! kubectl -n "$NAMESPACE" rollout status statefulset/playground-dragonfly-$site --timeout=120s 2>/dev/null; then
+      warn "Dragonfly StatefulSet for $site did not become ready in 120s — check 'kubectl describe statefulset playground-dragonfly-$site'"
+    fi
+  done
+
+  # Surface the operator's view of which site holds the master.
+  DF_ACTIVE=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground \
+    -o jsonpath='{.status.dragonfly.activeSite}' 2>/dev/null || echo "")
+  if [[ -n "$DF_ACTIVE" ]]; then
+    ok "Dragonfly active site: $DF_ACTIVE (Service: playground-dragonfly:6379)"
+  else
+    warn "Dragonfly status.activeSite not set yet — operator may still be electing the first master"
+  fi
+fi
+
 echo ""
 echo "=============================================="
 echo "  Bloodraven Playground is ready!"
@@ -333,11 +363,20 @@ echo "    kubectl -n $NAMESPACE get pods"
 echo "    kubectl -n $NAMESPACE get dnsendpoints"
 echo "    kubectl -n $NAMESPACE logs -l app.kubernetes.io/name=bloodraven -f"
 echo ""
+if [[ "$DF_ENABLED" == "true" ]]; then
+  echo "  Dragonfly:"
+  echo "    kubectl -n $NAMESPACE port-forward --address 0.0.0.0 svc/playground-dragonfly 6379:6379"
+  echo "    then: redis-cli -h localhost INFO replication"
+  echo "    or per-site: kubectl -n $NAMESPACE port-forward svc/playground-dragonfly-iad 6380:6379"
+  echo ""
+fi
 echo "  Chaos monkey:"
 echo "    ./playground/chaos.sh kill-site iad"
 echo "    ./playground/chaos.sh kill-site pdx"
 echo "    ./playground/chaos.sh cordon iad"
 echo "    ./playground/chaos.sh network-partition iad"
+echo "    ./playground/chaos.sh kill-dragonfly iad"
+echo "    ./playground/chaos.sh dragonfly-status"
 echo "    ./playground/chaos.sh recover"
 echo ""
 echo "  Teardown:"
