@@ -18,6 +18,7 @@ Currently automated:
 - `01-clean-primary-kill` (§1 below; uses `scale --replicas=0` for determinism, asserts failover only)
 - `02-operator-kill-restart` (§2; negative-assertion — verifies activeSite stable and no SELF-FENCING during operator restart)
 - `02-planned-switchover` (planned-failover state machine)
+- `04-data-integrity-on-failover` (§4; seeds rows, blocks on `WAIT_FOR_EXECUTED_GTID_SET`, kills primary, asserts `GTID_SUBSET(pre, post)=1` and full row count on the new primary)
 - `05-split-brain-auto-resolve` (requires `spec.splitBrainPolicy.sitePriorities` set)
 - `06-self-fence-isolated-primary` (§6; scales operator AND peer to 0 — true isolation path, complements `09-`)
 - `09-network-partition-self-fence` (§3 of this doc, NetworkPolicy partition path)
