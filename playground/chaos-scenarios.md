@@ -29,6 +29,7 @@ Currently automated:
 - `17-partition-replica-no-failover` (§17; asymmetric partition — asserts NO failover and NO self-fence on read-only site)
 - `19-reclone-interlock` (§19; self-contained — manufactures divergence, then exercises rejected/accepted reclone annotation cases)
 - `20-shared-node-selector-isolation` (§20; labels primary node into a fake `inventory` FG and asserts that a playground failover taints only `db-readonly-playground`, leaving `db-readonly-inventory` absent and the inventory canary still Running)
+- `21-noexecute-eviction-semantics` (§21; deploys tolerating + non-tolerating canaries on the primary's node, asserts the non-tolerating one is deletion-marked or gone post-failover and the tolerating one stays Running)
 
 The runner refuses to mutate any kubectl context that does not match the same allowlist as `playground/_guard.sh` (`k3d-*`, `kind-*`, `minikube*`, or names listed in `BLOODRAVEN_PLAYGROUND_CONTEXTS`). Markdown is the source of truth for hypotheses and prose; the runner's assertions are the operational ones documented under each scenario's "Verify" section.
 
