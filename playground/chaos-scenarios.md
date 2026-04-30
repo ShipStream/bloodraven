@@ -25,6 +25,7 @@ Currently automated:
 - `09-network-partition-self-fence` (§3 of this doc, NetworkPolicy partition path)
 - `11-total-loss-recovery` (§11; scales both sites to 0, asserts `TOTAL LOSS: all sites are unreachable` log + reconvergence)
 - `12-old-primary-recovery-no-divergence` (§7 of this doc; recovery without divergence)
+- `15-sidecar-crash-no-failover` (§15; ephemeral container `kill 1` against the sidecar PID namespace, asserts restartCount increments and activeSite/SELF-FENC/failover all stay quiet)
 - `17-partition-replica-no-failover` (§17; asymmetric partition — asserts NO failover and NO self-fence on read-only site)
 - `19-reclone-interlock` (§19; self-contained — manufactures divergence, then exercises rejected/accepted reclone annotation cases)
 

@@ -158,6 +158,47 @@ func (c *Client) RemoveAllChaosNetworkPolicies(ctx context.Context, namespace st
 	)
 }
 
+// AddEphemeralContainer appends an ephemeral container to a pod via
+// the ephemeralcontainers subresource. Ephemeral containers cannot be
+// removed once added; the caller is responsible for picking a unique
+// Name per invocation if the same pod may be targeted multiple times.
+//
+// Mirrors the wire-level path that `kubectl debug` uses: GET the pod,
+// append to spec.ephemeralContainers, PUT to the subresource.
+func (c *Client) AddEphemeralContainer(ctx context.Context, namespace, podName string, ec corev1.EphemeralContainer) error {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	pod, err := c.Kubernetes.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get pod %s/%s: %w", namespace, podName, err)
+	}
+	pod.Spec.EphemeralContainers = append(pod.Spec.EphemeralContainers, ec)
+	if _, err := c.Kubernetes.CoreV1().Pods(namespace).UpdateEphemeralContainers(ctx, podName, pod, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update ephemeralcontainers on %s/%s: %w", namespace, podName, err)
+	}
+	return nil
+}
+
+// SidecarRestartCount returns the restart count for the sidecar
+// container in the named pod, or an error if the pod or container is
+// missing.
+func (c *Client) SidecarRestartCount(ctx context.Context, namespace, podName string) (int32, error) {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	pod, err := c.Kubernetes.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("get pod %s/%s: %w", namespace, podName, err)
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "sidecar" {
+			return cs.RestartCount, nil
+		}
+	}
+	return 0, fmt.Errorf("no sidecar container status on pod %s/%s", namespace, podName)
+}
+
 // PodLogTailLines reads the most recent N lines from a pod's
 // container. Used by forensic capture; live tailing lives in the
 // playground/logs package.

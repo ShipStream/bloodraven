@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
@@ -171,6 +173,42 @@ func (a *Actions) AnnotatePlannedFailover(ctx context.Context, target string) er
 		return a.K.AnnotateMFG(ctx, a.Namespace, key, "")
 	})
 	return nil
+}
+
+// KillSidecarPID1 attaches an ephemeral container to the named site's
+// MySQL pod that targets the sidecar's PID namespace and runs `kill 1`.
+// SIGTERM is the default — the kernel ignores SIGKILL on PID 1 from
+// within the same PID namespace, so signal 9 silently fails. Sane Go
+// binaries handle SIGTERM and exit, which causes the kubelet to
+// restart the sidecar container (kept the pod alive, so MySQL on
+// port 3306 is unaffected).
+//
+// No reverter is pushed: ephemeral containers cannot be removed once
+// added, and the kill is one-shot. The unique name suffix lets the
+// same scenario run twice on the same pod without name collision
+// (ephemeral container names must be unique within a pod).
+//
+// Returns the pod name we mutated so callers can poll the sidecar's
+// containerStatus.restartCount on the same pod identity.
+func (a *Actions) KillSidecarPID1(ctx context.Context, site string) (string, error) {
+	pod, err := a.K.GetSiteMysqlPod(ctx, a.Namespace, a.FG, site)
+	if err != nil {
+		return "", err
+	}
+	ecName := fmt.Sprintf("chaos-s15-killer-%d", time.Now().UnixMilli())
+	ec := corev1.EphemeralContainer{
+		EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+			Name:            ecName,
+			Image:           "busybox:1.36",
+			Command:         []string{"sh", "-c", "kill 1"},
+			ImagePullPolicy: corev1.PullIfNotPresent,
+		},
+		TargetContainerName: "sidecar",
+	}
+	if err := a.K.AddEphemeralContainer(ctx, a.Namespace, pod.Name, ec); err != nil {
+		return "", fmt.Errorf("add ephemeral container to %s: %w", pod.Name, err)
+	}
+	return pod.Name, nil
 }
 
 // GlobalRecover is the safety-net cleanup the runner runs after every
