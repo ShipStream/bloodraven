@@ -8,7 +8,10 @@
 # Prerequisites:
 #   - kubectl pointing at a cluster with at least 2 nodes
 #   - helm
-#   - podman or docker (podman preferred — rootless, no daemon required)
+#   - docker or podman (docker preferred — k3d's podman support is
+#     experimental, and the image-load path is faster on docker).
+#     Set BLOODRAVEN_CONTAINER_RUNTIME=podman to force podman if both
+#     are installed.
 #
 # Cluster setup (do once, before running this script):
 #
@@ -58,13 +61,19 @@ done
 source "$SCRIPT_DIR/_guard.sh"
 require_playground_context
 
-# Prefer podman (rootless, no daemon) over docker
-if command -v podman >/dev/null 2>&1; then
-  RUNTIME=podman
+# Prefer docker over podman. k3d's podman support is experimental and the
+# tar-archive image-load path is slower than docker's native import.
+# Override with BLOODRAVEN_CONTAINER_RUNTIME=podman if you actually want
+# podman (e.g. on a rootless setup with no docker installed).
+if [[ -n "${BLOODRAVEN_CONTAINER_RUNTIME:-}" ]]; then
+  RUNTIME="$BLOODRAVEN_CONTAINER_RUNTIME"
+  command -v "$RUNTIME" >/dev/null 2>&1 || fail "BLOODRAVEN_CONTAINER_RUNTIME=$RUNTIME but '$RUNTIME' is not on PATH"
 elif command -v docker >/dev/null 2>&1; then
   RUNTIME=docker
+elif command -v podman >/dev/null 2>&1; then
+  RUNTIME=podman
 else
-  fail "Neither podman nor docker found"
+  fail "Neither docker nor podman found"
 fi
 info "Using container runtime: $RUNTIME"
 

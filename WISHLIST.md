@@ -10,6 +10,11 @@
 - [ ] 31. Documentation publishing parity
 - [ ] 32. Real-cluster E2E CI gate
 - [x] 33. True shared-node placement model
+- [ ] 34. Investigate using [Scorecard](https://sdk.operatorframework.io/docs/testing-operators/scorecard/) to test Bloodraven operator.
+- [ ] 35. Read the [Operator SDK Best Practices](https://sdk.operatorframework.io/docs/best-practices/) and see if there are any lessons we can learn and apply to Bloodraven.
+- [ ] 36. CR replication enrichment stalls after in-lifecycle recovery
+- [ ] 37. Auto-fail-back to returning original primary is undocumented
+- [ ] 38. `status.lastFailoverTarget` not durable across operator restart
 
 ## P0 — Production adoption blockers
 
@@ -24,6 +29,12 @@
 **9. Restore duration and size metrics.** Add `bloodraven_restore_duration_seconds` and `bloodraven_restore_last_success_timestamp_seconds`, plus per-restore GTID and binlog-replay coordinates in status. DR confidence requires knowing your actual measured restore time, not estimated.
 
 **33. True shared-node placement model.** Done: each site now declares an explicit required `spec.sites[].taintNodeSelector`, allowing per-group labels such as `shipstream.io/failover-group.orders=true` and `shipstream.io/site.orders=iad`. Tainting, cleanup, docs, tests, and playground manifests use the selector model so failover in one group does not require dedicated node pools or affect unrelated tenants.
+
+**36. CR replication enrichment stalls after in-lifecycle recovery.** *(Surfaced 2026-04-29 by the `cmd/playground-chaos` runner.)* After any operator-driven recovery — emergency failover, auto-fail-back, "no GTID divergence" recovery — `MysqlFailoverGroup.status.sites[].replicating` and `gtidExecuted` stop populating on the post-recovery read-only site, and stay null for the rest of the operator lifecycle. The topology manager keeps polling (state transitions still log) and the sidecar `/status` endpoint correctly reports `replica_io_running=true,replica_sql_running=true`, but `siteRepl[i]` for the recovered replica is never re-populated; only an operator restart fixes it. The Ready condition is unaffected because `replicationHealthy` defaults true when all `Replication` snapshots are nil (`internal/controller/runner.go:702-712`), so the gap is silent. Impact: `internal/controller/planned_failover.go:209` reads `targetStatus.Replicating` directly as a safety check, so any planned switchover after the first chaos event in the same lifecycle is rejected as `TargetUnhealthy` even though replication is healthy. Investigate `internal/controller/topology.go` poll path — likely a stale internal role or condition gates the replica check after promotion/recovery transitions. Add a regression test in the chaos runner that asserts `replicating=true` becomes visible within ~30s after `01-clean-primary-kill` cleanup, without requiring a restart.
+
+**37. Auto-fail-back to returning original primary is undocumented.** *(Surfaced 2026-04-29 by scenario `12-old-primary-recovery-no-divergence`.)* When the original primary is scaled to 0 and a peer is promoted, scaling the original back up causes the operator to fail *back* to it rather than rejoining it as a replica. The peer is then demoted, and the "no GTID divergence, auto-recovering" recovery path runs on the *peer* (now the new old primary), not on the originally-killed site. The cluster still converges to one primary + one replica, but identity-based test assertions and runbooks that say "old primary becomes a replica" are wrong. Either: (a) document the fail-back rule and the conditions under which it triggers (anti-flap cooldown, GTID-freshness winner, `lastFailoverTarget` recency, etc.), or (b) suppress fail-back unless an explicit `spec.failbackPolicy` opt-in is set so the system stays where the most-recent failover left it.
+
+**38. `status.lastFailoverTarget` not durable across operator restart.** Documented in `CLAUDE.md` and `playground/chaos-results.md` but worth tracking: after an operator restart, `lastFailoverTarget` is restored from the CR (so it survives), but related anti-flap state and old-primary-recovery dispatch keys are in-memory only. Recovery for an old primary won't re-trigger until the next failover within the new operator lifecycle. Reproducible via `kubectl rollout restart deployment bloodraven` mid-recovery. Likely fix: persist the relevant in-flight recovery dispatch keys to `status` rather than only memory, or recompute them from CR on startup.
 
 ## P2 — Observability and operability
 
@@ -40,5 +51,7 @@
 ## Suggested sequencing
 
 - **Production adoption gate:** #31, #32
+- **Operator correctness (fix before next release):** #36, #38 — silent post-chaos data gaps in the CR
+- **Operator semantics to nail down:** #37 — pick a fail-back rule and document it
 - **Next quarter:** #7, #9, #18 (DR muscle + day-2 ergonomics)
 - **When stable enough for external use:** #30 (open-source prep if that's the path)

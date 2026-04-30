@@ -2,3 +2,4 @@ orchestrator
 bin/
 
 k3d-default.yaml
+playground/chaos-results/

@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -21,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -113,8 +113,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Register metrics
-	metrics.Register(prometheus.DefaultRegisterer)
+	// Register operator metrics into controller-runtime's registry so
+	// they appear on the same `/metrics` endpoint controller-runtime
+	// already serves at metrics.bindAddress (default ":8080"). The
+	// ctrl-runtime registry is a private prometheus.Registry distinct
+	// from prometheus.DefaultRegisterer; if we registered there, our
+	// custom metrics would never reach the dashboards documented at
+	// charts/bloodraven/dashboards/README.md.
+	metrics.Register(ctrlmetrics.Registry)
 
 	// Create the hub for websocket connections
 	hub := platform.NewHub(logger)
