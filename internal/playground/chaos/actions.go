@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"sync"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
+	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 )
 
 // Actions is the per-scenario chaos handle. Methods are not safe for
@@ -93,6 +96,52 @@ func (a *Actions) ScaleSiteToZero(ctx context.Context, site string) error {
 func (a *Actions) DeleteSitePod(ctx context.Context, site string) error {
 	zero := int64(0)
 	return a.K.DeleteSitePod(ctx, a.Namespace, a.FG, site, &zero)
+}
+
+// ScaleOperatorToZero scales the operator Deployment to 0 replicas,
+// holding the operator offline until Revert restores replicas=1. Used
+// by self-fencing scenarios that need a sustained operator outage past
+// the sidecar lease timeout (kill-pod isn't enough — the Deployment
+// respawns the operator within seconds).
+//
+// The operator deployment name is hard-coded to "bloodraven", which
+// matches the playground Helm release. If the playground is ever
+// installed under a non-default release name, this needs updating.
+func (a *Actions) ScaleOperatorToZero(ctx context.Context) error {
+	const dep = "bloodraven"
+	if err := a.K.ScaleDeployment(ctx, a.Namespace, dep, 0); err != nil {
+		return fmt.Errorf("scale %s to 0: %w", dep, err)
+	}
+	a.push(fmt.Sprintf("scale %s back to 1", dep), func(ctx context.Context) error {
+		return a.K.ScaleDeployment(ctx, a.Namespace, dep, 1)
+	})
+	return nil
+}
+
+// KillOperator force-deletes every operator pod (label
+// app.kubernetes.io/name=bloodraven). The Deployment respawns the pod
+// on its own, so no reverter is pushed — the cluster recovers without
+// operator intervention. Mirrors `chaos.sh kill-operator`.
+func (a *Actions) KillOperator(ctx context.Context) error {
+	pods, err := a.K.Kubernetes.CoreV1().Pods(a.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: pgmetrics.OperatorPodSelector,
+	})
+	if err != nil {
+		return fmt.Errorf("list operator pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return fmt.Errorf("no operator pod found (selector=%s)", pgmetrics.OperatorPodSelector)
+	}
+	zero := int64(0)
+	for i := range pods.Items {
+		name := pods.Items[i].Name
+		if err := a.K.Kubernetes.CoreV1().Pods(a.Namespace).Delete(ctx, name, metav1.DeleteOptions{
+			GracePeriodSeconds: &zero,
+		}); err != nil {
+			return fmt.Errorf("delete operator pod %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // PartitionSite applies a deny-all NetworkPolicy that blocks the

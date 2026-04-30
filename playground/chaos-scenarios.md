@@ -16,10 +16,15 @@ make chaos-run-all                        # bail on first failure (default)
 Currently automated:
 
 - `01-clean-primary-kill` (§1 below; uses `scale --replicas=0` for determinism, asserts failover only)
+- `02-operator-kill-restart` (§2; negative-assertion — verifies activeSite stable and no SELF-FENCING during operator restart)
 - `02-planned-switchover` (planned-failover state machine)
 - `05-split-brain-auto-resolve` (requires `spec.splitBrainPolicy.sitePriorities` set)
-- `09-network-partition-self-fence` (§9)
-- `12-old-primary-recovery-no-divergence` (§12)
+- `06-self-fence-isolated-primary` (§6; scales operator AND peer to 0 — true isolation path, complements `09-`)
+- `09-network-partition-self-fence` (§3 of this doc, NetworkPolicy partition path)
+- `11-total-loss-recovery` (§11; scales both sites to 0, asserts `TOTAL LOSS: all sites are unreachable` log + reconvergence)
+- `12-old-primary-recovery-no-divergence` (§7 of this doc; recovery without divergence)
+- `17-partition-replica-no-failover` (§17; asymmetric partition — asserts NO failover and NO self-fence on read-only site)
+- `19-reclone-interlock` (§19; self-contained — manufactures divergence, then exercises rejected/accepted reclone annotation cases)
 
 The runner refuses to mutate any kubectl context that does not match the same allowlist as `playground/_guard.sh` (`k3d-*`, `kind-*`, `minikube*`, or names listed in `BLOODRAVEN_PLAYGROUND_CONTEXTS`). Markdown is the source of truth for hypotheses and prose; the runner's assertions are the operational ones documented under each scenario's "Verify" section.
 

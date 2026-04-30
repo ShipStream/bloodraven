@@ -7,9 +7,11 @@ package scenarios
 import (
 	"context"
 	"fmt"
+	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
+	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -74,4 +76,22 @@ func PeerOf(mfg *v1alpha1.MysqlFailoverGroup, site string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no peer site found for %q", site)
+}
+
+// firstMatchSince scans a tailer's ring buffer once for the first line
+// at or after `since` that satisfies pred. Used by negative-assertion
+// scenarios that want to confirm a forbidden log line did NOT appear
+// inside the observation window — Wait.UntilLog is the wrong tool
+// because it blocks until match-or-deadline, but here we want a single
+// snapshot scan of "anything that already happened".
+func firstMatchSince(t *pglogs.Tailer, since time.Time, pred pglogs.Predicate) (bool, string) {
+	for _, m := range t.Snapshot() {
+		if !since.IsZero() && m.Time.Before(since) {
+			continue
+		}
+		if pred(m.Line) {
+			return true, m.Line
+		}
+	}
+	return false, ""
 }
