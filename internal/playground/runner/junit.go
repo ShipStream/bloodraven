@@ -4,7 +4,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"os"
-	"time"
 )
 
 // JUnitTestSuite is the surefire-flavor JUnit XML structure.
@@ -69,6 +68,5 @@ func WriteJUnit(path string, results []Result) error {
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		return err
 	}
-	_ = time.Now() // silence unused import warning if xml import drifts
 	return nil
 }

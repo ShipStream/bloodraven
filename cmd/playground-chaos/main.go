@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,7 +52,14 @@ func main() {
 	kctx := rootFlags.String("context", "", "kubectl context to use (default: current-context)")
 
 	// Subcommand parsing: first positional is the subcommand.
-	// Syntax: playground-chaos [flags] <subcmd> [args]
+	// Syntax: playground-chaos [flags] <subcmd> [args] [flags]
+	//
+	// Go's stdlib flag package stops at the first non-flag arg, so
+	// after `Parse(os.Args[1:])` only flags BEFORE the subcommand
+	// have been consumed. To accept the cobra-style ordering
+	// (`playground-chaos run-all --junit-out=foo`) without silently
+	// dropping post-subcommand flags, we re-parse the remainder and
+	// concatenate the resulting positionals.
 	if err := rootFlags.Parse(os.Args[1:]); err != nil {
 		os.Exit(exitFlagParse)
 	}
@@ -61,7 +69,19 @@ func main() {
 		os.Exit(exitFlagParse)
 	}
 	subcmd := args[0]
-	subArgs := args[1:]
+	rest := args[1:]
+	var subArgs []string
+	for len(rest) > 0 {
+		if !strings.HasPrefix(rest[0], "-") {
+			subArgs = append(subArgs, rest[0])
+			rest = rest[1:]
+			continue
+		}
+		if err := rootFlags.Parse(rest); err != nil {
+			os.Exit(exitFlagParse)
+		}
+		rest = rootFlags.Args()
+	}
 
 	logger := buildLogger(*verbose)
 	slog.SetDefault(logger)
