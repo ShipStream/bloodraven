@@ -651,6 +651,40 @@ kubectl -n $NS delete pod noexecute-evict-canary noexecute-tolerate-canary --ign
 
 ---
 
+## Scenarios 22-23: Status durability regressions (from WISHLIST)
+
+These scenarios were extracted from `WISHLIST.md` items #36 and #38 — both flag specific contracts that the chaos runner was not previously asserting. They are registered with the same `playground-chaos` runner as 1–21 and follow the same Inject → Observe → Verify shape.
+
+### 22. Replication Status After Recovery
+**Category**: CR-status enrichment regression | **Risk**: Low
+
+**Hypothesis**: After a clean primary kill and old-primary auto-recovery, the read-only site's `status.sites[].replicating` becomes true within 30s — without requiring an operator restart. This is the contract that `internal/controller/planned_failover.go`'s `TargetUnhealthy` safety check depends on.
+
+**Why this regression test exists**: WISHLIST #36 documents that `replicating` and `gtidExecuted` stop being populated on a post-recovery read-only site even though the sidecar `/status` endpoint reports replication threads running. The bug silently breaks any planned switchover after the first chaos event in the same operator lifecycle. This scenario fails until that gap is fixed.
+
+**Injection**: `make chaos-run SCENARIO=22-replication-status-after-recovery`. The runner scales the active primary to 0, waits for failover, scales it back up, waits for re-convergence, then reads the CR.
+
+**Verify**: Within 30s of `writable=1 read-only=1`, `mfg.Status.Sites[i].Replicating == true` for the read-only site. The scenario also probes the sidecar `/status` endpoint as a cross-check; if the sidecar reports replication running but the CR field is false, that is exactly the bug WISHLIST #36 describes.
+
+**Cleanup**: Standard runner cleanup. No manual steps required.
+
+---
+
+### 23. Failover State Durability
+**Category**: CR-status persistence | **Risk**: Low
+
+**Hypothesis**: After a clean failover, killing and restarting the operator pod must NOT clear `status.lastFailoverTarget` or `status.lastFailover`. The post-restart operator must rehydrate both fields from the CR; `activeSite` must remain at the post-failover primary.
+
+**Why this regression test exists**: WISHLIST #38 notes that `lastFailoverTarget` is restored from the CR (so it survives) but related anti-flap state and old-primary-recovery dispatch keys are in-memory only. This scenario asserts the bare CR contract — both fields persist across operator restart — which is the foundation any in-memory rehydration relies on. Future work on durable anti-flap state can extend this scenario without reshaping it.
+
+**Injection**: `make chaos-run SCENARIO=23-failover-state-durability`. The runner scales the primary to 0, waits for failover, snapshots `lastFailoverTarget` / `lastFailover` / `activeSite`, kills the operator pod, sleeps 30s for the new pod to come up and reconcile, then re-reads the CR.
+
+**Verify**: Post-restart values match the pre-restart snapshot. `lastFailover` is allowed to advance by up to 90s within tolerance (a status-enrichment loop may rewrite the field with a slightly later timestamp); a regression to zero or a "fresh failover happened just now" jump is rejected.
+
+**Cleanup**: Standard runner cleanup. The operator's auto-recovery brings the original primary back up as a replica.
+
+---
+
 ## Execution Plan
 
 1. **Setup**: `k3d cluster create` + `./playground/setup.sh`
@@ -658,6 +692,7 @@ kubectl -n $NS delete pod noexecute-evict-canary noexecute-tolerate-canary --ign
 3. **Run 11-18** (advanced, may need reset between scenarios)
 4. **Run 19 immediately after scenario 8** (scenario 8 leaves behind the divergent state it needs as a prerequisite — don't reset in between)
 5. **Run 20-21 after a clean reset** (placement selector and `NoExecute` eviction semantics)
-6. **Between scenarios**: `./playground/chaos.sh status` to confirm clean state; `./playground/reset-mysql.sh` if topology is broken
-7. **For each scenario**: Document actual vs. expected, note timing and any bugs
-8. **After code fixes**: `./playground/rebuild.sh operator` (or `sidecar`), then re-run affected scenario
+6. **Run 22-23 anywhere they fit** (CR-status regressions; both expect a healthy baseline and clean up after themselves; 22 fails until WISHLIST #36 is addressed and is itself the signal that the gap still exists)
+7. **Between scenarios**: `./playground/chaos.sh status` to confirm clean state; `./playground/reset-mysql.sh` if topology is broken
+8. **For each scenario**: Document actual vs. expected, note timing and any bugs
+9. **After code fixes**: `./playground/rebuild.sh operator` (or `sidecar`), then re-run affected scenario
