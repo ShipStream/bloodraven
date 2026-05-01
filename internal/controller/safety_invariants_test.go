@@ -170,6 +170,102 @@ func TestInvariant_NeverPromoteDuringCooldown(t *testing.T) {
 	}
 }
 
+// INVARIANT 4b: Anti-flap cooldown survives operator restart.
+//
+// After a process restart, a fresh TopologyManager starts with
+// tm.lastFailover == time.Time{} (zero), which makes the cooldown
+// branch in topology.go a no-op. The runner.startManager hydration
+// path MUST call SetLastFailover from fg.Status.LastFailover so the
+// cooldown still applies in the restarted operator process. Without
+// this, a fast restart inside the cooldown window lets the new
+// operator ping-pong promote — exactly the failure mode WISHLIST #38
+// describes.
+//
+// This test simulates the restart by constructing a fresh
+// TopologyManager (the invariant under test is "SetLastFailover is
+// honoured by the cooldown branch") and verifies no promotion fires
+// while the rehydrated cooldown is active.
+func TestInvariant_CooldownSurvivesOperatorRestart(t *testing.T) {
+	// Simulate the cluster state seen by a freshly-started operator:
+	// site0 (the previously-killed primary) is unreachable, site1 was
+	// promoted and is writable. The new primary is now also gone (the
+	// scenario s09b-anti-flap-cooldown shape: peer fails inside the
+	// cooldown), so site0 has been brought back as a read-only candidate.
+	site0 := &mockMySQL{readOnly: true}                           // candidate
+	site1 := &mockMySQL{readOnly: false, err: errors.New("down")} // unreachable
+
+	cfg := testTopologyConfig()
+	cfg.FailoverCooldown = int64(1 * time.Hour)
+	tainter := newMockTainter()
+	hub := platform.NewHub(testLogger())
+	dns := &mockDNS{}
+	fc := NewFailoverController(testLogger())
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	tm := NewTopologyManagerWithClock(cfg, []internalmysql.Checker{site0, site1}, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger(), clk)
+
+	// Rehydrate as runner.startManager does: lastFailoverTarget +
+	// lastFailover from the CR. The "previous" failover happened 30
+	// minutes ago and the cooldown is 1 hour, so the cooldown is still
+	// active.
+	tm.SetLastFailoverTarget("dc2")
+	tm.SetLastFailover(start.Add(-30 * time.Minute))
+
+	// Drive the topology manager. With site0=read-only and
+	// site1=unreachable + writable=0, EvalCrossSite returns
+	// PromotionCandidates=[dc1]. The cooldown branch must reject the
+	// promotion despite this being a fresh in-memory state.
+	pollN(tm, 5)
+
+	site0.mu.Lock()
+	site0RO := site0.readOnly
+	site0.mu.Unlock()
+	if !site0RO {
+		t.Error("SAFETY VIOLATION: site0 was promoted by a restarted operator inside the rehydrated cooldown window")
+	}
+	if dns.getLastIP() != "" {
+		t.Errorf("SAFETY VIOLATION: DNS flipped during rehydrated cooldown (lastIP=%q)", dns.getLastIP())
+	}
+}
+
+// INVARIANT 4c: After the rehydrated cooldown has elapsed, the
+// restarted operator may promote normally. This is the partner of
+// INVARIANT 4b: it confirms the rehydration is not a permanent
+// "block all promotions forever" — the timestamp + cooldown duration
+// together must permit promotions once the wall clock advances past
+// the window.
+func TestInvariant_CooldownHonouredButExpiresAfterRestart(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true}                           // candidate
+	site1 := &mockMySQL{readOnly: false, err: errors.New("down")} // unreachable
+
+	cfg := testTopologyConfig()
+	cfg.FailoverCooldown = int64(5 * time.Minute)
+	tainter := newMockTainter()
+	hub := platform.NewHub(testLogger())
+	dns := &mockDNS{}
+	fc := NewFailoverController(testLogger())
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	tm := NewTopologyManagerWithClock(cfg, []internalmysql.Checker{site0, site1}, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger(), clk)
+
+	// Rehydrate: previous failover happened 6 minutes ago, cooldown is
+	// 5 minutes, so it has already expired.
+	tm.SetLastFailoverTarget("dc2")
+	tm.SetLastFailover(start.Add(-6 * time.Minute))
+
+	pollN(tm, 5)
+
+	site0.mu.Lock()
+	site0RO := site0.readOnly
+	site0.mu.Unlock()
+	if site0RO {
+		t.Error("SAFETY VIOLATION: cooldown remained active despite the rehydrated timestamp being older than the cooldown duration")
+	}
+	if dns.getLastIP() == "" {
+		t.Error("expected DNS flip after rehydrated cooldown expired")
+	}
+}
+
 // INVARIANT 5: Never self-fence a replica.
 //
 // The fencing monitor must check IsReadOnly first. If the instance is
