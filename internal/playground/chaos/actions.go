@@ -229,6 +229,150 @@ func (a *Actions) LabelNode(ctx context.Context, name string, labels map[string]
 	return nil
 }
 
+// WipeSiteData scales the named site's MySQL deployment to 0, clears
+// the operator-applied `db-readonly-<fg>` taint from every node so the
+// local-path-provisioner helper pod can run, deletes the site's data
+// PVC, and waits for the PVC to actually disappear. The reverter scales
+// the site back to 1 — at which point the operator's reconciler creates
+// a fresh PVC and the empty datadir trips the fresh-deploy bootstrap.
+//
+// Why scrub taints across all nodes (not just the replica's): the
+// readonly taint is per-FG, and it's applied to every non-writable
+// site's node. The replica node usually carries it, and the
+// local-path-provisioner helper that fulfills a PVC does not tolerate
+// it. Clearing it on every node is cheap, idempotent, and side-effect-
+// free — the operator re-applies the taint on its next reconcile after
+// the bootstrap is complete and the site is back in `read-only`.
+//
+// No taint reverter is pushed: the operator owns the taint lifecycle
+// and will re-establish it once the cluster is healthy. Same for the
+// PVC: the operator's reconcilePVC re-creates it.
+func (a *Actions) WipeSiteData(ctx context.Context, site, fgGroup string) error {
+	dep := pgkube.MysqlDeploymentName(a.FG, site)
+	pvc := pgkube.MysqlPVCName(a.FG, site)
+	// Capture the original PVC UID before we delete. The operator's
+	// reconcile recreates the PVC almost instantly with the same name
+	// but a fresh UID, so we wait on UID-change rather than absence.
+	originalUID, err := a.K.PVCUID(ctx, a.Namespace, pvc)
+	if err != nil {
+		return fmt.Errorf("read pvc %s uid: %w", pvc, err)
+	}
+	if originalUID == "" {
+		return fmt.Errorf("pvc %s does not exist; nothing to wipe", pvc)
+	}
+	if err := a.K.ScaleDeployment(ctx, a.Namespace, dep, 0); err != nil {
+		return fmt.Errorf("scale %s to 0: %w", dep, err)
+	}
+	a.push(fmt.Sprintf("scale %s back to 1", dep), func(ctx context.Context) error {
+		return a.K.ScaleDeployment(ctx, a.Namespace, dep, 1)
+	})
+	// Wait for the pod to actually go away — kubelet must release the
+	// volume before PVC deletion can complete cleanly.
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		n, err := a.K.PodCount(ctx, a.Namespace, pgkube.MysqlPodSelector(a.FG, site))
+		if err == nil && n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("waiting for site %s pod to terminate: pods=%d err=%v", site, n, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	// Clear the readonly taint from every node so the local-path-
+	// provisioner helper pod can run when the new PVC is created.
+	taintKey := "shipstream.io/db-readonly-" + fgGroup
+	nodes, err := a.K.ListNodes(ctx)
+	if err != nil {
+		return fmt.Errorf("list nodes: %w", err)
+	}
+	for i := range nodes.Items {
+		if err := a.K.RemoveNodeTaint(ctx, nodes.Items[i].Name, taintKey); err != nil {
+			return fmt.Errorf("remove %s taint from node %s: %w", taintKey, nodes.Items[i].Name, err)
+		}
+	}
+	if err := a.K.DeletePVC(ctx, a.Namespace, pvc); err != nil {
+		return fmt.Errorf("delete pvc %s: %w", pvc, err)
+	}
+	// Local-path-provisioner finalises PVC deletion by spawning a
+	// helper pod that runs `rm -rf` on the host backing directory; on
+	// a busy k3d node this is 1–3s. The operator's reconcile re-
+	// creates the PVC almost instantly, so we wait for the UID to
+	// change rather than for the PVC to be absent.
+	deadline = time.Now().Add(5 * time.Minute)
+	for {
+		curUID, err := a.K.PVCUID(ctx, a.Namespace, pvc)
+		if err == nil && curUID != "" && curUID != originalUID {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("waiting for pvc %s to be replaced: originalUID=%s currentUID=%s err=%v",
+				pvc, originalUID, curUID, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// PatchSitesMemoryRequest applies a JSON Patch that replaces every
+// site's resources.requests.memory in spec.sites with newMemory. The
+// reverter restores the previous values per-site (sites may have had
+// different originals). Returns the per-site original values for
+// scenarios that want to assert "memory ended up at newMemory" later.
+func (a *Actions) PatchSitesMemoryRequest(ctx context.Context, newMemory string) (map[string]string, error) {
+	mfg, err := a.K.GetMFG(ctx, a.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	originals := map[string]string{}
+	var ops []pgkube.JSONPatchOp
+	for i, s := range mfg.Spec.Sites {
+		var orig string
+		if mem, ok := s.Resources.Requests[corev1.ResourceMemory]; ok {
+			orig = mem.String()
+		}
+		originals[s.Name] = orig
+		ops = append(ops, pgkube.JSONPatchOp{
+			Op:    "replace",
+			Path:  fmt.Sprintf("/spec/sites/%d/resources/requests/memory", i),
+			Value: newMemory,
+		})
+	}
+	if err := a.K.PatchMFG(ctx, a.Namespace, ops); err != nil {
+		return nil, err
+	}
+	a.push(fmt.Sprintf("restore memory request originals (%v)", originals), func(ctx context.Context) error {
+		// Re-read the MFG: the operator may have mutated other fields
+		// since our patch (failover bumps activeSite, etc.) so we
+		// re-derive site indexes from spec.sites by name.
+		current, err := a.K.GetMFG(ctx, a.Namespace)
+		if err != nil {
+			return err
+		}
+		var revertOps []pgkube.JSONPatchOp
+		for i, s := range current.Spec.Sites {
+			orig, ok := originals[s.Name]
+			if !ok || orig == "" {
+				continue
+			}
+			revertOps = append(revertOps, pgkube.JSONPatchOp{
+				Op:    "replace",
+				Path:  fmt.Sprintf("/spec/sites/%d/resources/requests/memory", i),
+				Value: orig,
+			})
+		}
+		return a.K.PatchMFG(ctx, a.Namespace, revertOps)
+	})
+	return originals, nil
+}
+
 // CreateCanaryPod applies a Pod manifest to the namespace and
 // registers a reverter that deletes it. The pod is expected to be a
 // short-lived sleep canary, not a managed workload.

@@ -180,6 +180,80 @@ func (c *Client) AddEphemeralContainer(ctx context.Context, namespace, podName s
 	return nil
 }
 
+// MysqlPVCName returns the PVC name the operator's reconcilePVC creates
+// for a site's data directory. Mirrors `resourceName(fg, site) + "-data"`
+// in internal/controller/reconciler.go.
+func MysqlPVCName(fg, site string) string {
+	return MysqlDeploymentName(fg, site) + "-data"
+}
+
+// DeletePVC deletes a PVC by name. Returns nil if the PVC is already
+// gone (idempotent). The operator-owned MFG controller recreates the
+// PVC on its next reconcile.
+func (c *Client) DeletePVC(ctx context.Context, namespace, name string) error {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	err := c.Kubernetes.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// PVCExists reports whether the named PVC is present in the namespace.
+// Used by chaos cleanup to wait for a PVC to actually disappear after
+// the deployment has been scaled to 0 (terminating pods can keep a
+// volume bound for a few seconds).
+func (c *Client) PVCExists(ctx context.Context, namespace, name string) (bool, error) {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	_, err := c.Kubernetes.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// PVCUID returns the metadata.uid of the named PVC, or "" if it does
+// not exist. Used by chaos primitives that need to detect "the PVC has
+// been replaced with a fresh one" — the operator's reconcile re-creates
+// the PVC almost immediately after a delete, so a race-free check needs
+// to compare UIDs rather than wait for absence.
+func (c *Client) PVCUID(ctx context.Context, namespace, name string) (string, error) {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	pvc, err := c.Kubernetes.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(pvc.UID), nil
+}
+
+// PodCount returns the number of pods matching a label selector in a
+// namespace. Used by chaos primitives that need to wait for a pod to
+// actually disappear after a scale-to-0 (the pod terminates async).
+func (c *Client) PodCount(ctx context.Context, namespace, labelSelector string) (int, error) {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	pods, err := c.Kubernetes.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(pods.Items), nil
+}
+
 // SidecarRestartCount returns the restart count for the sidecar
 // container in the named pod, or an error if the pod or container is
 // missing.
@@ -197,6 +271,26 @@ func (c *Client) SidecarRestartCount(ctx context.Context, namespace, podName str
 		}
 	}
 	return 0, fmt.Errorf("no sidecar container status on pod %s/%s", namespace, podName)
+}
+
+// MysqlContainerRestartCount returns the restartCount for the mysql
+// container in the named pod, or an error if the pod or container is
+// missing. Counterpart to SidecarRestartCount used by scenarios that
+// kill mysqld and want to confirm the container actually restarted.
+func (c *Client) MysqlContainerRestartCount(ctx context.Context, namespace, podName string) (int32, error) {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	pod, err := c.Kubernetes.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("get pod %s/%s: %w", namespace, podName, err)
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "mysql" {
+			return cs.RestartCount, nil
+		}
+	}
+	return 0, fmt.Errorf("no mysql container status on pod %s/%s", namespace, podName)
 }
 
 // PodLogTailLines reads the most recent N lines from a pod's
