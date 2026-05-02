@@ -174,24 +174,8 @@ func s23VerifyStateSurvivedRestart() runner.Step {
 				return fmt.Errorf("lastFailover cleared across operator restart: pre=%q post=<nil>", expectedStamp)
 			}
 			postStamp := mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano)
-			// We allow the stamp to advance — a status enrichment
-			// loop may rewrite it with the same value at a slightly
-			// later time — but it must not regress to zero or jump to
-			// a "fresh failover happened just now" value.
 			if postStamp != expectedStamp {
-				preTime, errPre := time.Parse(time.RFC3339Nano, expectedStamp)
-				postTime, errPost := time.Parse(time.RFC3339Nano, postStamp)
-				if errPre != nil || errPost != nil {
-					return fmt.Errorf("lastFailover stamp parse error: pre=%q post=%q errs=(%v,%v)",
-						expectedStamp, postStamp, errPre, errPost)
-				}
-				delta := postTime.Sub(preTime)
-				if delta < 0 || delta > 90*time.Second {
-					return fmt.Errorf("lastFailover stamp moved suspiciously across restart: pre=%s post=%s delta=%s",
-						expectedStamp, postStamp, delta.Round(time.Millisecond))
-				}
-				env.Capture.Note(fmt.Sprintf("lastFailover stamp updated within tolerance: delta=%s",
-					delta.Round(time.Millisecond)))
+				return fmt.Errorf("lastFailover stamp changed across operator restart: pre=%s post=%s", expectedStamp, postStamp)
 			}
 			env.Capture.Note(fmt.Sprintf("post-restart CR matches: active=%s target=%s stamp=%s",
 				mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, postStamp))

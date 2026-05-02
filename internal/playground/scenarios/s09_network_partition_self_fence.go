@@ -24,9 +24,9 @@ func scenario09NetworkPartitionSelfFence() runner.Scenario {
 		Title: "Network partition forces sidecar self-fence + failover",
 		Hypothesis: "A deny-all NetworkPolicy on the active site for >leaseTimeout causes the sidecar to " +
 			"self-fence (super_read_only=ON, SELF-FENCED log) and the operator to fail over to the peer.",
-		Risk:    "medium",
-		DocLink: "playground/chaos-scenarios.md#9-network-partition-self-fence",
-		Timeout: 4 * time.Minute,
+		Risk:     "medium",
+		DocLink:  "playground/chaos-scenarios.md#9-network-partition-self-fence",
+		Timeout:  4 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectPartitionActive(),
@@ -68,13 +68,24 @@ func observeFailoverDuringPartition() runner.Step {
 		Name:  "operator fails over while partition holds",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			original := ctxFetch(env, "partitionedSite")
+			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			if err != nil {
+				return err
+			}
+			expected, err := PeerOf(mfg, original)
+			if err != nil {
+				return err
+			}
 			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
-			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
+			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("activeSite flips away from partitioned site %s", original),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q", mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
 					if mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original {
+						if mfg.Status.ActiveSite != expected {
+							return false, msg, fmt.Errorf("activeSite=%q, want expected peer %q", mfg.Status.ActiveSite, expected)
+						}
 						return true, msg, nil
 					}
 					return false, msg, nil

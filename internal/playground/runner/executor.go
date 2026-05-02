@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -28,6 +29,10 @@ type ExecutorConfig struct {
 	ResultsDir string
 	NoCleanup  bool
 	Logger     *slog.Logger
+
+	// Force, when true, deletes any existing chaos in-progress marker
+	// before preflight runs. Surfaces a "stomping prior run" banner.
+	Force bool
 }
 
 // Executor runs a single Scenario against a live playground cluster.
@@ -118,9 +123,30 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 
 	cap.Note(fmt.Sprintf("scenario %s start: %s", s.ID, s.Title))
 
+	// Preflight: marker check + (on --force) delete prior marker. Runs
+	// before the scenario's own Precheck so a prior run's leftover state
+	// surfaces with a specific error and remediation, not a generic
+	// converge timeout.
+	if err := e.preflight(scenarioCtx, env, s.ID, captureDir); err != nil {
+		return fail(PhasePrecheck, "Preflight", err.Error())
+	}
+
 	if s.Precheck != nil {
 		if err := e.runWithLog(scenarioCtx, env, PhasePrecheck, "Precheck", s.Precheck); err != nil {
 			return fail(PhasePrecheck, "Precheck", err.Error())
+		}
+	}
+
+	// Set in-progress marker after Precheck has confirmed the cluster
+	// is healthy enough to actually run. Skipped under NoCleanup so
+	// `--no-cleanup` (forensics mode) leaves the marker behind for the
+	// next run to find.
+	if !e.Cfg.NoCleanup {
+		if err := e.setMarker(scenarioCtx, s.ID, captureDir); err != nil {
+			env.Logger.Warn("set chaos marker failed", "err", err)
+			env.Capture.Note(fmt.Sprintf("preflight: set chaos marker failed: %v", err))
+			// Non-fatal: a marker we can't set is a UX regression for
+			// the next run, not a reason to abort this one.
 		}
 	}
 
@@ -134,7 +160,30 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 	res.Duration = time.Since(res.StartTime)
 	cap.Note(fmt.Sprintf("scenario %s passed (elapsed=%s)", s.ID, res.Duration.Round(time.Millisecond)))
 	if !e.Cfg.NoCleanup {
+		// Clear marker on the pass path. Failures clear in cleanup()
+		// (best-effort, appended to errs). NoCleanup skips both — the
+		// `--no-cleanup` contract is "leave forensics behind" and the
+		// marker is part of that.
+		clearCtx, cancelClear := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := e.K.ClearChaosMarker(clearCtx, e.Cfg.Namespace); err != nil {
+			env.Logger.Warn("clear chaos marker failed", "err", err)
+		}
+		cancelClear()
 		res.CleanupErr = e.cleanup(env, s)
+		if res.CleanupErr != nil {
+			res.Passed = false
+			res.Phase = PhaseCleanup
+			res.StepName = "Cleanup"
+			res.Failure = "cleanup failed: " + res.CleanupErr.Error()
+			res.Duration = time.Since(res.StartTime)
+			failureBlock := fmt.Sprintf(
+				"scenario %s failed in phase=%s step=%q\n%s",
+				s.ID, res.Phase, res.StepName, res.Failure,
+			)
+			forensicsCtx, forensicsCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer forensicsCancel()
+			_ = cap.Persist(forensicsCtx, e.K, e.Cfg.Namespace, env.Metrics, e.tailers, failureBlock)
+		}
 	}
 	return res
 }
@@ -180,7 +229,85 @@ func (e *Executor) cleanup(env *Env, s Scenario) error {
 	if err := waitForClusterReconverge(cleanCtx, env); err != nil {
 		errs = append(errs, fmt.Errorf("post-cleanup reconverge: %w", err))
 	}
+	// Clear the in-progress marker last. Best-effort: append to errs
+	// rather than fail the whole cleanup, since a stuck marker only
+	// matters for the next run's preflight.
+	if err := e.K.ClearChaosMarker(cleanCtx, e.Cfg.Namespace); err != nil {
+		errs = append(errs, fmt.Errorf("clear chaos marker: %w", err))
+	}
 	return errors.Join(errs...)
+}
+
+// preflight runs before Precheck. It honors --force (delete any prior
+// marker, banner) and otherwise refuses to start if a live or
+// abandoned marker is present, with an error that names the exact
+// remediation flag.
+func (e *Executor) preflight(ctx context.Context, env *Env, scenarioID, captureDir string) error {
+	if e.Cfg.Force {
+		if err := e.K.ClearChaosMarker(ctx, e.Cfg.Namespace); err != nil {
+			env.Logger.Warn("force-clear chaos marker failed", "err", err)
+		} else {
+			env.Logger.Warn("--force: deleted prior chaos in-progress marker")
+			env.Capture.Note("preflight: --force deleted prior chaos in-progress marker")
+		}
+		return nil
+	}
+
+	m, err := e.K.ReadChaosMarker(ctx, e.Cfg.Namespace)
+	if err != nil {
+		// Don't refuse a run because of a parse error on the marker;
+		// surface it but keep going. A malformed marker is a chaos
+		// runner bug, not a state-of-the-cluster problem.
+		env.Logger.Warn("read chaos marker failed", "err", err)
+		return nil
+	}
+	if m == nil {
+		return nil
+	}
+
+	age := time.Since(m.StartedAt).Round(time.Second)
+	host, _ := os.Hostname()
+	switch {
+	case m.Host == host && m.PID > 0 && processAlive(m.PID):
+		return fmt.Errorf("in-progress: scenario %s started %s ago on host %s (pid %d) — wait for it to finish, or pass --force to override",
+			m.Scenario, age, m.Host, m.PID)
+	case m.Host == host && m.PID > 0:
+		return fmt.Errorf("abandoned chaos run: scenario %s died at %s (pid %d, host %s), capture in %s — re-run with --force, --auto-reset, or ./playground/reset-mysql.sh",
+			m.Scenario, m.StartedAt.UTC().Format(time.RFC3339), m.PID, m.Host, m.CaptureDir)
+	default:
+		// Different host. We can't kill -0 across machines, so treat as live.
+		return fmt.Errorf("in-progress: scenario %s started %s ago on host %s (pid %d) — wait for it to finish, or pass --force to override",
+			m.Scenario, age, m.Host, m.PID)
+	}
+}
+
+// setMarker writes the in-progress marker on the MFG. Called after
+// Precheck succeeds. Surfaces ErrChaosMarkerConflict as a specific
+// error so the caller can produce a better message.
+func (e *Executor) setMarker(ctx context.Context, scenarioID, captureDir string) error {
+	host, _ := os.Hostname()
+	m := pgkube.ChaosMarker{
+		Scenario:   scenarioID,
+		StartedAt:  time.Now().UTC(),
+		PID:        os.Getpid(),
+		Host:       host,
+		CaptureDir: captureDir,
+	}
+	return e.K.SetChaosMarker(ctx, e.Cfg.Namespace, m)
+}
+
+// processAlive reports whether a pid on the local host is still
+// alive. Mirrors `kill -0 pid`.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// On Unix os.FindProcess always succeeds; signal 0 probes liveness.
+	return p.Signal(nil) == nil
 }
 
 // waitForClusterReconverge polls the MFG until both sites are in

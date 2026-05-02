@@ -32,9 +32,9 @@ func scenario17PartitionReplicaNoFailover() runner.Scenario {
 		Hypothesis: "A deny-all NetworkPolicy on the read-only site does NOT change activeSite and does " +
 			"NOT cause the replica's sidecar to emit SELF-FENCING/SELF-FENCED — read-only sites are " +
 			"excluded from the lease-timeout self-fence rule.",
-		Risk:    "medium",
-		DocLink: "playground/chaos-scenarios.md#17-network-partition-of-replica-not-primary",
-		Timeout: 3 * time.Minute,
+		Risk:     "medium",
+		DocLink:  "playground/chaos-scenarios.md#17-network-partition-of-replica-not-primary",
+		Timeout:  3 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectPartitionReplica(),
@@ -122,6 +122,9 @@ func verifyActivePrimaryUnchanged() runner.Step {
 			if primaryState != "writable" {
 				return fmt.Errorf("expected primary %s state=writable, got %q", original, primaryState)
 			}
+			if replicaState != "unreachable" {
+				return fmt.Errorf("replica partition did not take effect: site %s state=%q, want unreachable", replica, replicaState)
+			}
 			env.Capture.Note(fmt.Sprintf("primary %s state=%s, replica %s state=%s", original, primaryState, replica, replicaState))
 			// Sanity check: the operator must not have flipped the
 			// failover-target field as if it were preparing one.
@@ -150,4 +153,3 @@ func verifyReplicaDidNotSelfFence() runner.Step {
 		},
 	}
 }
-

@@ -84,6 +84,12 @@ func injectForceBothWritable() runner.Step {
 			if err := ctxStash(ctx, env, "splitBrainSite", peer); err != nil {
 				return err
 			}
+			prefer := mfg.Spec.SplitBrainPolicy.SitePriorities[0]
+			if err := stashMetricCounter(ctx, env, "splitBrainAutoResolveBefore", "bloodraven_split_brain_auto_resolve_total", map[string]string{
+				"prefer_site": prefer,
+			}); err != nil {
+				return err
+			}
 			peerDB, err := env.MySQL(peer)
 			if err != nil {
 				return err
@@ -96,6 +102,18 @@ func injectForceBothWritable() runner.Step {
 			if err := peerDB.SetSuperReadOnly(ctx, false); err != nil {
 				return fmt.Errorf("clear super_read_only on %s: %w", peer, err)
 			}
+			superReadOnly, err := peerDB.SuperReadOnly(ctx)
+			if err != nil {
+				return fmt.Errorf("verify super_read_only on %s: %w", peer, err)
+			}
+			readOnly, err := peerDB.ReadOnly(ctx)
+			if err != nil {
+				return fmt.Errorf("verify read_only on %s: %w", peer, err)
+			}
+			if superReadOnly || readOnly {
+				return fmt.Errorf("split-brain injection did not make %s writable: super_read_only=%v read_only=%v", peer, superReadOnly, readOnly)
+			}
+			env.Capture.Note(fmt.Sprintf("split-brain injection verified: %s super_read_only=false read_only=false", peer))
 			return nil
 		},
 	}
@@ -135,15 +153,19 @@ func verifyAutoResolveMetric() runner.Step {
 				return err
 			}
 			prefer := mfg.Spec.SplitBrainPolicy.SitePriorities[0]
+			before, err := fetchStashedFloat(env, "splitBrainAutoResolveBefore")
+			if err != nil {
+				return err
+			}
 			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			return env.Wait.UntilMetric(waitCtx, env.Metrics,
-				fmt.Sprintf("bloodraven_split_brain_auto_resolve_total{prefer_site=%q} >= 1", prefer),
+				fmt.Sprintf("bloodraven_split_brain_auto_resolve_total{prefer_site=%q} increments from %g", prefer, before),
 				func(snap *pgmetrics.Snapshot) (bool, string) {
 					v, _ := snap.Counter("bloodraven_split_brain_auto_resolve_total", map[string]string{
 						"prefer_site": prefer,
 					})
-					return v >= 1, fmt.Sprintf("counter=%g", v)
+					return v > before, fmt.Sprintf("counter=%g before=%g delta=%g", v, before, v-before)
 				},
 			)
 		},

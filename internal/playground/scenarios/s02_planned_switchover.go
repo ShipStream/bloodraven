@@ -24,9 +24,9 @@ func scenario02PlannedSwitchover() runner.Scenario {
 		Title: "Planned switchover via annotation",
 		Hypothesis: "Annotating the MFG with bloodraven.shipstream.io/planned-failover=<peer> walks the " +
 			"PlannedFailoverStatus through Validating→Draining→WaitingForLag→Promoting→Resuming→Succeeded with transactionsLost==0.",
-		Risk:    "low",
-		DocLink: "playground/chaos-scenarios.md (planned-failover section)",
-		Timeout: 4 * time.Minute,
+		Risk:     "low",
+		DocLink:  "playground/chaos-scenarios.md (planned-failover section)",
+		Timeout:  4 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectPlannedFailoverAnnotation(),
@@ -58,6 +58,12 @@ func injectPlannedFailoverAnnotation() runner.Step {
 				return err
 			}
 			if err := ctxStash(ctx, env, "switchoverTarget", peer); err != nil {
+				return err
+			}
+			if err := stashMetricCounter(ctx, env, "plannedFailoversBefore", "bloodraven_planned_failovers_total", map[string]string{
+				"target_site": peer,
+				"result":      "success",
+			}); err != nil {
 				return err
 			}
 			return env.Chaos.AnnotatePlannedFailover(ctx, peer)
@@ -139,19 +145,23 @@ func verifyTransactionsLostZero() runner.Step {
 func verifyPlannedFailoverMetric() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  `bloodraven_planned_failovers_total{result="success"} >= 1`,
+		Name:  `bloodraven_planned_failovers_total{result="success"} increments`,
 		Do: func(ctx context.Context, env *runner.Env) error {
 			target := ctxFetch(env, "switchoverTarget")
+			before, err := fetchStashedFloat(env, "plannedFailoversBefore")
+			if err != nil {
+				return err
+			}
 			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			return env.Wait.UntilMetric(waitCtx, env.Metrics,
-				fmt.Sprintf(`planned_failovers_total{target_site=%q,result="success"} >= 1`, target),
+				fmt.Sprintf(`planned_failovers_total{target_site=%q,result="success"} increments from %g`, target, before),
 				func(snap *pgmetrics.Snapshot) (bool, string) {
 					v, _ := snap.Counter("bloodraven_planned_failovers_total", map[string]string{
 						"target_site": target,
 						"result":      "success",
 					})
-					return v >= 1, fmt.Sprintf("counter=%g", v)
+					return v > before, fmt.Sprintf("counter=%g before=%g delta=%g", v, before, v-before)
 				},
 			)
 		},

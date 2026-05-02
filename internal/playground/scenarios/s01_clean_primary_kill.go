@@ -29,9 +29,9 @@ func scenario01CleanPrimaryKill() runner.Scenario {
 		Title: "Clean primary kill — failover to peer",
 		Hypothesis: "Scaling the active primary deployment to 0 triggers an emergency failover within ~45s. " +
 			"Status.activeSite flips, bloodraven_failovers_total increments, and 'failover complete' is logged.",
-		Risk:    "low",
-		DocLink: "playground/chaos-scenarios.md#1-clean-primary-failure",
-		Timeout: 3 * time.Minute,
+		Risk:     "low",
+		DocLink:  "playground/chaos-scenarios.md#1-clean-primary-failure",
+		Timeout:  3 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectScaleZero(),
@@ -52,7 +52,17 @@ func injectScaleZero() runner.Step {
 				return err
 			}
 			active := mfg.Status.ActiveSite
+			peer, err := PeerOf(mfg, active)
+			if err != nil {
+				return err
+			}
 			env.Capture.Note(fmt.Sprintf("active primary at start: %s", active))
+			if err := ctxStash(ctx, env, "expectedNewPrimary", peer); err != nil {
+				return err
+			}
+			if err := stashMetricCounter(ctx, env, "failoversBefore", "bloodraven_failovers_total", map[string]string{"target_site": peer}); err != nil {
+				return err
+			}
 			env.Logger.Info("injecting", "action", "scale=0", "site", active)
 			if err := env.Chaos.ScaleSiteToZero(ctx, active); err != nil {
 				return err
@@ -97,13 +107,21 @@ func verifyFailoverMetric() runner.Step {
 				return err
 			}
 			newPrimary := mfg.Status.ActiveSite
+			expected := ctxFetch(env, "expectedNewPrimary")
+			if newPrimary != expected {
+				return fmt.Errorf("activeSite=%q, want failover target %q", newPrimary, expected)
+			}
+			before, err := fetchStashedFloat(env, "failoversBefore")
+			if err != nil {
+				return err
+			}
 			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			return env.Wait.UntilMetric(waitCtx, env.Metrics,
-				fmt.Sprintf("bloodraven_failovers_total{target_site=%q} >= 1", newPrimary),
+				fmt.Sprintf("bloodraven_failovers_total{target_site=%q} increments from %g", newPrimary, before),
 				func(snap *pgmetrics.Snapshot) (bool, string) {
 					v, _ := snap.Counter("bloodraven_failovers_total", map[string]string{"target_site": newPrimary})
-					return v >= 1, fmt.Sprintf("counter=%g", v)
+					return v > before, fmt.Sprintf("counter=%g before=%g delta=%g", v, before, v-before)
 				},
 			)
 		},

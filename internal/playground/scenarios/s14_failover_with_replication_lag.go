@@ -151,19 +151,43 @@ func s14InjectLagAndSeed() runner.Step {
 				return err
 			}
 
-			// Verify the lag built up: the replica should have fetched
-			// the relay logs (IO running, Retrieved_Gtid_Set advances)
-			// but applied few/none (SQL stopped, row count on replica
-			// is much less than s14RowCount). We don't fail the inject
-			// on a missing pre-kill verification — the post-failover
-			// drain check is the assertion that matters.
+			// Verify the lag built up before killing the source. Without
+			// this hard precondition the scenario could pass after testing
+			// an already-caught-up replica instead of relay-log drain.
 			rs, err := replicaClient.ShowReplicaStatus(ctx)
-			if err == nil {
-				env.Capture.Note(fmt.Sprintf("replica retrieved=%q executed=%q running=io:%v sql:%v",
-					rs.RetrievedGtidSet, rs.ExecutedGtidSet, rs.IORunning, rs.SQLRunning))
+			if err != nil {
+				return fmt.Errorf("show replica status on %s: %w", replica, err)
 			}
-			rowsApplied, _ := replicaClient.ScalarInt(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", s14DBName, s14TableName))
-			env.Capture.Note(fmt.Sprintf("replica row count pre-kill: %d/%d (lag confirmed if << %d)", rowsApplied, s14RowCount, s14RowCount))
+			env.Capture.Note(fmt.Sprintf("replica retrieved=%q executed=%q running=io:%v sql:%v",
+				rs.RetrievedGtidSet, rs.ExecutedGtidSet, rs.IORunning, rs.SQLRunning))
+			if !rs.Configured {
+				return fmt.Errorf("replica %s has no replication configured", replica)
+			}
+			if !rs.IORunning || rs.SQLRunning {
+				return fmt.Errorf("lag precondition not met on %s: want IO running and SQL stopped, got io=%v sql=%v",
+					replica, rs.IORunning, rs.SQLRunning)
+			}
+			subset, err := replicaClient.ScalarInt(ctx, "SELECT GTID_SUBSET(?, ?)", postGtid, rs.RetrievedGtidSet)
+			if err != nil {
+				return fmt.Errorf("verify retrieved GTID set on %s: %w", replica, err)
+			}
+			if subset != 1 {
+				return fmt.Errorf("replica %s has not fetched all post-write GTIDs: GTID_SUBSET(post, retrieved)=%d post=%q retrieved=%q",
+					replica, subset, postGtid, rs.RetrievedGtidSet)
+			}
+			rowsApplied, err := replicaClient.ScalarInt(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", s14DBName, s14TableName))
+			if err != nil {
+				// If the CREATE TABLE DDL is still only in the relay log,
+				// the read fails. That is valid evidence that the applier
+				// has not caught up.
+				env.Capture.Note(fmt.Sprintf("replica row count pre-kill unavailable, treating as 0 applied: %v", err))
+				rowsApplied = 0
+			}
+			if rowsApplied >= s14RowCount {
+				return fmt.Errorf("lag precondition not met on %s: replica already applied %d/%d rows",
+					replica, rowsApplied, s14RowCount)
+			}
+			env.Capture.Note(fmt.Sprintf("lag precondition verified: replica row count pre-kill %d/%d", rowsApplied, s14RowCount))
 
 			env.Capture.Note(fmt.Sprintf("scaling primary %s to 0", active))
 			return env.Chaos.ScaleSiteToZero(ctx, active)

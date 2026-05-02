@@ -38,6 +38,7 @@ func init() {
 //   - activeSite unchanged AND still writable (no failover happened).
 //   - activeSite flipped AND new primary writable, old primary recovers
 //     to read-only or still down.
+//
 // Forbid: zero writable sites for more than 60s, or two writable sites
 // at any point.
 func scenario16MysqlProcessKill() runner.Scenario {
@@ -157,17 +158,7 @@ func s16ObserveContainerRestarted() runner.Step {
 						return nil
 					}
 				} else {
-					// If the pod itself was deleted (e.g. operator scaled
-					// the deployment away to handle the failure), the
-					// "original pod" identity is gone. Treat that as a
-					// stronger signal: the kubelet replaced the pod, so
-					// MySQL definitely went away. Not the assertion we
-					// wanted, but acceptable.
 					lastObs = "get pod failed: " + err.Error()
-					if strings.Contains(strings.ToLower(err.Error()), "not found") {
-						env.Capture.Note("original pod was replaced (NotFound) — treating as stronger restart signal")
-						return nil
-					}
 				}
 				if time.Now().After(deadline) {
 					return fmt.Errorf("mysql container did not restart within 120s (last: %s)", lastObs)
@@ -183,18 +174,9 @@ func s16ObserveContainerRestarted() runner.Step {
 }
 
 // s16VerifyNoSplitBrain waits for the cluster to converge after the
-// SHUTDOWN and asserts the *final* state is sane: exactly one writable
-// site, one read-only site, no RecoveryBlocked.
-//
-// Brief intermediate split-brain (`>1 writable`) is EXPECTED and not a
-// failure: when mysqld restarts, MySQL boots up writable (no fencing)
-// while the operator may have already promoted the peer in response to
-// the connection loss. The operator's split-brain handler then
-// re-fences the old primary back to read-only — typically inside ~30s
-// in the playground. We only fail if split-brain persists past the
-// convergence deadline (3 min) or if any site reports RecoveryBlocked
-// at any point (which would indicate a stuck condition that won't
-// resolve without operator intervention).
+// SHUTDOWN and fails immediately if the CR ever reports more than one
+// writable site. A transient split-brain is still a split-brain for this
+// scenario's safety contract.
 func s16VerifyNoSplitBrain() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
@@ -203,7 +185,6 @@ func s16VerifyNoSplitBrain() runner.Step {
 			deadline := time.Now().Add(3 * time.Minute)
 			tick := time.NewTicker(2 * time.Second)
 			defer tick.Stop()
-			var observedSplitBrain bool
 			for {
 				mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
 				if err == nil {
@@ -225,22 +206,17 @@ func s16VerifyNoSplitBrain() runner.Step {
 						return fmt.Errorf("site(s) stuck in RecoveryBlocked: %v", blocked)
 					}
 					if len(writable) > 1 {
-						observedSplitBrain = true
-						env.Capture.Note(fmt.Sprintf("transient split-brain observed: writable=%v (waiting for resolution)", writable))
+						return fmt.Errorf("split-brain observed after mysqld SHUTDOWN: writable=%v", writable)
 					}
 					if len(writable) == 1 && len(readOnly) == 1 {
-						note := fmt.Sprintf("converged: writable=%v read-only=%v", writable, readOnly)
-						if observedSplitBrain {
-							note += " (transient split-brain was observed and resolved)"
-						}
-						env.Capture.Note(note)
+						env.Capture.Note(fmt.Sprintf("converged: writable=%v read-only=%v", writable, readOnly))
 						return nil
 					}
 				}
 				if time.Now().After(deadline) {
 					last, lerr := env.Kube.GetMFG(ctx, env.Namespace)
-					return fmt.Errorf("cluster did not converge to 1 writable + 1 read-only within 3m (last fetch err=%v sites=%+v observedSplitBrain=%v)",
-						lerr, summarizeSites(last), observedSplitBrain)
+					return fmt.Errorf("cluster did not converge to 1 writable + 1 read-only within 3m (last fetch err=%v sites=%+v)",
+						lerr, summarizeSites(last))
 				}
 				select {
 				case <-ctx.Done():
