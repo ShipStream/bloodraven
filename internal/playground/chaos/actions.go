@@ -285,6 +285,103 @@ func (a *Actions) ScaleAllDragonflyToZero(ctx context.Context) error {
 	return nil
 }
 
+// PatchDragonflySyncBudget overrides
+// spec.dragonfly.plannedFailover.{maxSyncWait,onSyncTimeout} on the MFG
+// and pushes a reverter that restores the original values. Both fields
+// must already exist in spec — callers that hand it a value of "" for
+// onSyncTimeout skip patching that field.
+//
+// Used by scenario D4 to drive the planned-failover state machine into
+// the WaitingForDragonflySync timeout branch deterministically: a 1ms
+// budget plus a target Dragonfly that has been scaled to 0 forces both
+// the offset-poll-against-target and the REPLTAKEOVER step to fail,
+// independently of master/replica replication latency in the cluster.
+//
+// The values pass through metav1.Duration's JSON UnmarshalJSON, so
+// maxSyncWait must be a Go duration string ("1ms", "30s"). Empty
+// onSyncTimeout means "leave as-is, do not patch".
+func (a *Actions) PatchDragonflySyncBudget(ctx context.Context, maxSyncWait, onSyncTimeout string) error {
+	if maxSyncWait == "" && onSyncTimeout == "" {
+		return nil
+	}
+	mfg, err := a.K.GetMFG(ctx, a.Namespace)
+	if err != nil {
+		return fmt.Errorf("read MFG for sync-budget patch: %w", err)
+	}
+	df := mfg.Spec.Dragonfly
+	if df == nil || df.PlannedFailover == nil {
+		// Without an existing plannedFailover object an `add` to a
+		// missing parent path silently no-ops on some patch
+		// implementations and errors on others. Refuse loudly so a
+		// misconfigured playground does not present as a flaky
+		// timeout test.
+		return fmt.Errorf("spec.dragonfly.plannedFailover must already exist on the playground MFG; got dragonfly=%v", df)
+	}
+
+	// Capture the originals BEFORE we mutate, so the reverter can
+	// restore them faithfully even if a later step mutates the same
+	// fields (e.g. a future PatchDragonflySyncBudget call).
+	var originalMaxSyncWait *string
+	if df.PlannedFailover.MaxSyncWait != nil {
+		s := df.PlannedFailover.MaxSyncWait.Duration.String()
+		originalMaxSyncWait = &s
+	}
+	originalOnSyncTimeout := df.PlannedFailover.OnSyncTimeout
+
+	var ops []pgkube.JSONPatchOp
+	if maxSyncWait != "" {
+		ops = append(ops, pgkube.JSONPatchOp{
+			Op:    "add",
+			Path:  "/spec/dragonfly/plannedFailover/maxSyncWait",
+			Value: maxSyncWait,
+		})
+	}
+	if onSyncTimeout != "" {
+		ops = append(ops, pgkube.JSONPatchOp{
+			Op:    "add",
+			Path:  "/spec/dragonfly/plannedFailover/onSyncTimeout",
+			Value: onSyncTimeout,
+		})
+	}
+	if err := a.K.PatchMFG(ctx, a.Namespace, ops); err != nil {
+		return fmt.Errorf("patch dragonfly sync budget: %w", err)
+	}
+
+	a.push("restore dragonfly sync budget", func(ctx context.Context) error {
+		var revOps []pgkube.JSONPatchOp
+		if maxSyncWait != "" {
+			if originalMaxSyncWait != nil {
+				revOps = append(revOps, pgkube.JSONPatchOp{
+					Op:    "add",
+					Path:  "/spec/dragonfly/plannedFailover/maxSyncWait",
+					Value: *originalMaxSyncWait,
+				})
+			} else {
+				revOps = append(revOps, pgkube.JSONPatchOp{
+					Op:   "remove",
+					Path: "/spec/dragonfly/plannedFailover/maxSyncWait",
+				})
+			}
+		}
+		if onSyncTimeout != "" {
+			if originalOnSyncTimeout != "" {
+				revOps = append(revOps, pgkube.JSONPatchOp{
+					Op:    "add",
+					Path:  "/spec/dragonfly/plannedFailover/onSyncTimeout",
+					Value: originalOnSyncTimeout,
+				})
+			} else {
+				revOps = append(revOps, pgkube.JSONPatchOp{
+					Op:   "remove",
+					Path: "/spec/dragonfly/plannedFailover/onSyncTimeout",
+				})
+			}
+		}
+		return a.K.PatchMFG(ctx, a.Namespace, revOps)
+	})
+	return nil
+}
+
 // GlobalRecover is the safety-net cleanup the runner runs after every
 // scenario, regardless of outcome. Mirrors `chaos.sh recover`:
 // removes every chaos-partition NetworkPolicy and scales every MySQL
