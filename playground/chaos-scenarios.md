@@ -13,6 +13,13 @@ make chaos-run SCENARIO=01-clean-primary-kill
 make chaos-run-all                        # bail on first failure (default)
 ```
 
+The runner stamps an in-progress marker (`chaos.playground.bloodraven.io/in-progress` annotation on the MFG) after Precheck and clears it on cleanup or on the pass path. A subsequent run that finds a leftover marker refuses to start and tells you whether the prior owner is still alive (same host + live pid), abandoned (same host + dead pid), or on another host. Override with:
+
+- `--force` — delete any prior marker before preflight (banner printed).
+- `--auto-reset` — on Precheck failure, shell out to `./playground/reset-mysql.sh && ./playground/setup.sh`, then retry the scenario once. Wipes data; 3-second confirmation pause unless `CI=1`.
+
+`chaos-check` runs the same structural baseline scenarios use (stuck scale-to-0 deployments, bogus `lastFailoverTarget`, anti-flap cooldown still ticking, both-sites-read-only `NoPrimary` symptom, replication off on a non-active candidate) and prints `inProgress: yes/no + summary`. Each error includes the exact remediation command, so `chaos-check` is the fastest way to decide whether to re-run, `--force`, or reset.
+
 Currently automated:
 
 - `01-clean-primary-kill` (§1 below; uses `scale --replicas=0` for determinism, asserts failover only)
@@ -53,7 +60,8 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 - **Relay log drain**: Failover takes ~37s total when primary is dead (30s drain timeout + detection + promotion). Plan wait times accordingly.
 - **Replication user**: Survives pod restarts but not PVC wipes. After `reset-mysql.sh` the init-users script recreates it on MySQL first boot.
 - **Verify replication between scenarios**: After any failover, always verify replication is actually working (`SELECT SERVICE_STATE FROM performance_schema.replication_connection_status` should show `ON`) before proceeding. GTID divergence from the respawn race (see scenario 1 note) can silently break replication, causing false results in subsequent scenarios.
-- **db-readonly taint blocks PVC provisioning**: The operator applies `shipstream.io/db-readonly-playground:NoExecute` to non-writable nodes. The local-path-provisioner's helper pod does not tolerate this taint and gets evicted, blocking PVC creation. After `reset-mysql.sh`, always check for and clear this taint on both nodes: `kubectl taint nodes k3d-bloodraven-agent-0 shipstream.io/db-readonly-playground- 2>/dev/null; kubectl taint nodes k3d-bloodraven-agent-1 shipstream.io/db-readonly-playground- 2>/dev/null`
+- **db-readonly taint blocks PVC provisioning**: The operator applies `shipstream.io/db-readonly-playground:NoExecute` to non-writable nodes. The local-path-provisioner's helper pod does not tolerate this taint and gets evicted, blocking PVC creation. `reset-mysql.sh` now scales the operator to 0 before stripping taints (single-shot, no race), so a manual taint clear after a reset is no longer needed. If you wipe state by hand, mirror the same order: scale operator → 0, scale MySQL → 0, delete PVCs, strip taints, scale MySQL → 1, clear stale `status.lastFailover{,Target}`/`promotionGtidExecuted`/`plannedFailover`, scale operator → 1.
+- **`reset-mysql.sh` dumps on timeout**: If the post-reset wait loop times out without both pods Ready, the script writes pods/events/PVC+PV/node-taint/per-container-log forensics under `playground/chaos-results/reset-<timestamp>/` and exits non-zero — no more "two commands you should have remembered" footer.
 - **Distroless containers**: The sidecar and operator images use distroless base images with no shell or userspace tools. Use `kubectl debug --target=<container> --image=busybox` to get a shell with tools like `kill`, `ps`, etc.
 - **JSON patch vs merge patch**: When patching the MysqlFailoverGroup CR, always use `--type json` (JSON Patch). Merge patches on the `spec.sites` array drop required fields (lbIP, storage, zone) and fail validation.
 
