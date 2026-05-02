@@ -346,6 +346,15 @@ func (tm *TopologyManager) SetLastFailoverTarget(target string) {
 	tm.lastFailoverTarget = target
 }
 
+// SetLastFailover restores the failover timestamp from persisted CR status.
+// Called once at startup so the anti-flap cooldown window survives operator
+// restart instead of silently resetting to zero (which would let a fresh
+// operator process ping-pong promote inside the cooldown that the prior
+// process intended to enforce).
+func (tm *TopologyManager) SetLastFailover(t time.Time) {
+	tm.lastFailover = t
+}
+
 // activeSiteLocked returns the name of the single writable site, or ""
 // if zero or more than one site is writable. Must be called with tm.mu
 // held.

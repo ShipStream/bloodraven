@@ -548,6 +548,19 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		tm.SetLastFailoverTarget(fg.Status.LastFailoverTarget)
 		r.logger.Info("restored lastFailoverTarget from CR status", "fg", nn, "target", fg.Status.LastFailoverTarget)
 	}
+	// Restore the lastFailover timestamp too so the anti-flap cooldown
+	// window survives operator restart. Without this, an operator pod
+	// restart inside the cooldown silently resets the in-memory timer to
+	// zero and the topology.go cooldown branch becomes a no-op until the
+	// next failover stamps a fresh value — meaning a fast restart-then-
+	// peer-failure could ping-pong promotions that the original process
+	// would have blocked. The CR's status.lastFailover IS already
+	// persisted (see updateCRStatus → status.LastFailover); we just
+	// weren't reading it back. Tracked in WISHLIST #38.
+	if fg.Status.LastFailover != nil && !fg.Status.LastFailover.IsZero() {
+		tm.SetLastFailover(fg.Status.LastFailover.Time)
+		r.logger.Info("restored lastFailover from CR status", "fg", nn, "lastFailover", fg.Status.LastFailover.Time)
+	}
 
 	// Set the status callback to update the CR status subresource on state changes.
 	tm.StatusCallback = func(snap TopologySnapshot) {
