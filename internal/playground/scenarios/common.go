@@ -51,7 +51,8 @@ func AssertHealthyBaseline(ctx context.Context, env *runner.Env) error {
 // assertDragonflyBaselineHealthy is a no-op when spec.dragonfly is
 // disabled. When enabled it requires that status.dragonfly.phase is
 // Ready, that exactly one site is the master, and that every other
-// site is a replica with master_link_status="up". This folds the D1
+// site is a replica with master_link_status="up" and observed master IO.
+// This folds the D1
 // (replica attachment / LOADING bug) and D9 (silent key loss) baseline
 // checks into the standard precheck rather than separate scenarios —
 // every Dragonfly chaos scenario inherits them.
@@ -81,6 +82,9 @@ func assertDragonflyBaselineHealthy(mfg *v1alpha1.MysqlFailoverGroup) error {
 		case v1alpha1.DragonflyRoleReplica:
 			if s.LinkStatus != "up" {
 				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has linkStatus=%q (want up)", s.Name, s.LinkStatus)
+			}
+			if s.LastIOSecondsAgo < 0 {
+				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has lastIOSecondsAgo=%d (never synced)", s.Name, s.LastIOSecondsAgo)
 			}
 			if s.SyncInProgress {
 				return fmt.Errorf("baseline unhealthy: dragonfly replica site %q has syncInProgress=true", s.Name)

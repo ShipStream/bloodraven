@@ -28,7 +28,7 @@ func plannedFailoverFGWithDragonfly(activePolicy string) *v1alpha1.MysqlFailover
 	fg := plannedFailoverFG("")
 	fg.Spec.Dragonfly = &v1alpha1.DragonflySpec{
 		Enabled:   true,
-		Image:     "docker.dragonflydb.io/dragonflydb/dragonfly:v1.25.5",
+		Image:     "docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0",
 		Port:      6379,
 		AdminPort: 9999,
 		PlannedFailover: &v1alpha1.DragonflyPlannedFailoverSpec{

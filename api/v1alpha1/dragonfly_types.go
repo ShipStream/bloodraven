@@ -11,9 +11,9 @@ import (
 // participates in planned and emergency failover. Dragonfly is treated as
 // non-durable cache/session state: emergency failover never blocks on it.
 //
-// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.image) && self.image != '')",message="spec.dragonfly.image is required when spec.dragonfly.enabled is true"
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.image) && self.image.size() > 0)",message="spec.dragonfly.image is required when spec.dragonfly.enabled is true"
 // +kubebuilder:validation:XValidation:rule="!self.enabled || !self.image.endsWith(':latest')",message="spec.dragonfly.image must be pinned (no :latest)"
-// +kubebuilder:validation:XValidation:rule="!has(self.auth) || (has(self.auth.secretName) && self.auth.secretName != '')",message="spec.dragonfly.auth.secretName is required when auth is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.auth) || (has(self.auth.secretName) && self.auth.secretName.size() > 0)",message="spec.dragonfly.auth.secretName is required when auth is set"
 type DragonflySpec struct {
 	// Enabled toggles Dragonfly co-management. When false (default), no
 	// Dragonfly resources are created and existing MySQL-only behavior
@@ -233,9 +233,16 @@ type DragonflySiteStatus struct {
 	// +optional
 	SyncInProgress bool `json:"syncInProgress,omitempty"`
 
+	// LastIOSecondsAgo is the parsed master_last_io_seconds_ago field from
+	// INFO replication on a replica. A value of -1 means the replica has
+	// never received data from its master.
+	// +optional
+	LastIOSecondsAgo int `json:"lastIOSecondsAgo,omitempty"`
+
 	// Ready reports operator-level readiness: a master must be reachable
 	// and accepting writes; a replica must additionally have its link up,
-	// not be syncing, and not be loading.
+	// have received at least one byte from the master, not be syncing, and
+	// not be loading.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 

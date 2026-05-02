@@ -1443,13 +1443,14 @@ spec:
                 x-kubernetes-validations:
                 - message: spec.dragonfly.image is required when spec.dragonfly.enabled
                     is true
-                  rule: '!self.enabled || (has(self.image) && self.image != '''')'
+                  rule: '!self.enabled || (has(self.image) && self.image.size() >
+                    0)'
                 - message: spec.dragonfly.image must be pinned (no :latest)
                   rule: '!self.enabled || !self.image.endsWith('':latest'')'
                 - message: spec.dragonfly.auth.secretName is required when auth is
                     set
-                  rule: '!has(self.auth) || (has(self.auth.secretName) && self.auth.secretName
-                    != '''')'
+                  rule: '!has(self.auth) || (has(self.auth.secretName) && self.auth.secretName.size()
+                    > 0)'
               extraContainers:
                 description: |-
                   ExtraContainers are additional containers injected into every MySQL pod.
@@ -5532,6 +5533,12 @@ spec:
                         DragonflySiteStatus describes the observed state of one site's Dragonfly
                         instance.
                       properties:
+                        lastIOSecondsAgo:
+                          description: |-
+                            LastIOSecondsAgo is the parsed master_last_io_seconds_ago field from
+                            INFO replication on a replica. A value of -1 means the replica has
+                            never received data from its master.
+                          type: integer
                         linkStatus:
                           description: |-
                             LinkStatus is the parsed master_link_status field from INFO
@@ -5557,7 +5564,8 @@ spec:
                           description: |-
                             Ready reports operator-level readiness: a master must be reachable
                             and accepting writes; a replica must additionally have its link up,
-                            not be syncing, and not be loading.
+                            have received at least one byte from the master, not be syncing, and
+                            not be loading.
                           type: boolean
                         replicationState:
                           description: ReplicationState is the parsed "role" field

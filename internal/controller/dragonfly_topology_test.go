@@ -179,12 +179,13 @@ func TestDragonflyManager_Tick_HappyPath(t *testing.T) {
 	}
 	dc2Conn := &fakeDragonflyConn{
 		info: dragonfly.ReplicationInfo{
-			Role:             "slave",
-			MasterHost:       "lion-dragonfly-dc1.shared-lion.svc.cluster.local",
-			MasterPort:       6379,
-			MasterLinkStatus: "up",
-			SlaveReplOffset:  100,
-			MasterReplOffset: 100,
+			Role:                   "slave",
+			MasterHost:             "lion-dragonfly-dc1.shared-lion.svc.cluster.local",
+			MasterPort:             6379,
+			MasterLinkStatus:       "up",
+			MasterLastIOSecondsAgo: 0,
+			SlaveReplOffset:        100,
+			MasterReplOffset:       100,
 		},
 	}
 	conn := newFakeConnector()
@@ -220,6 +221,51 @@ func TestDragonflyManager_Tick_HappyPath(t *testing.T) {
 	if gotRoles["dc2"] != v1alpha1.DragonflyRoleReplica {
 		t.Errorf("dc2 role = %q, want replica", gotRoles["dc2"])
 	}
+}
+
+func TestDragonflyManager_Tick_ReplicaNeverSyncedNotReady(t *testing.T) {
+	fg := fgWithDragonflyEnabledAndActive()
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.Build()
+	mgr := NewDragonflyManager(c, record.NewFakeRecorder(8), slog.Default(), key, 50*time.Millisecond)
+
+	conn := newFakeConnector()
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{
+		info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100},
+	})
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{
+		info: dragonfly.ReplicationInfo{
+			Role:                   "slave",
+			MasterHost:             "lion-dragonfly-dc1.shared-lion.svc.cluster.local",
+			MasterPort:             6379,
+			MasterLinkStatus:       "up",
+			MasterLastIOSecondsAgo: -1,
+			SlaveReplOffset:        100,
+		},
+	})
+	mgr.SetConnector(conn.connect)
+
+	mgr.Tick(context.Background())
+
+	var got v1alpha1.MysqlFailoverGroup
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get fg: %v", err)
+	}
+	if got.Status.Dragonfly.Phase != v1alpha1.DragonflyPhaseConfiguringReplication {
+		t.Errorf("Phase = %q, want ConfiguringReplication", got.Status.Dragonfly.Phase)
+	}
+	for _, s := range got.Status.Dragonfly.Sites {
+		if s.Name == "dc2" {
+			if s.Ready {
+				t.Fatal("dc2 Ready = true, want false for never-synced replica")
+			}
+			if s.LastIOSecondsAgo != -1 {
+				t.Fatalf("dc2 LastIOSecondsAgo = %d, want -1", s.LastIOSecondsAgo)
+			}
+			return
+		}
+	}
+	t.Fatal("dc2 status not found")
 }
 
 func TestDragonflyManager_Tick_StaleMasterEmitsEvent(t *testing.T) {
@@ -790,7 +836,7 @@ func (panicOnInfoConn) ReplTakeover(_ context.Context, _ time.Duration) error {
 	return nil
 }
 func (panicOnInfoConn) ClientKillType(_ context.Context, _ string) error { return nil }
-func (panicOnInfoConn) Close() error                                      { return nil }
+func (panicOnInfoConn) Close() error                                     { return nil }
 
 func drainEventsCh(ch <-chan string, max int, wait time.Duration) []string {
 	out := make([]string, 0, max)
@@ -815,10 +861,10 @@ func drainEventsCh(ch <-chan string, max int, wait time.Duration) []string {
 // port) would silently rewire to the wrong port.
 func TestSplitHostPort(t *testing.T) {
 	cases := []struct {
-		addr    string
-		dflt    int32
-		host    string
-		port    int32
+		addr string
+		dflt int32
+		host string
+		port int32
 	}{
 		{"foo.bar.svc:6379", 1234, "foo.bar.svc", 6379},
 		{"foo.bar.svc:9999", 1234, "foo.bar.svc", 9999},

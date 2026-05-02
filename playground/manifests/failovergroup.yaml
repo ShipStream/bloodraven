@@ -60,7 +60,7 @@ spec:
   # setting enabled=false; the rest of the failover group is unaffected.
   dragonfly:
     enabled: true
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.25.5
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0
     port: 6379
     adminPort: 9999
     maxMemoryMb: 256

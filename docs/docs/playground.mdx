@@ -193,6 +193,12 @@ For more advanced scenarios, use the chaos script:
 
 The playground `MysqlFailoverGroup` enables `spec.dragonfly`, so Bloodraven also creates one Dragonfly StatefulSet per site (`playground-dragonfly-iad`, `playground-dragonfly-pdx`) plus a single app-facing `playground-dragonfly` Service whose endpoints follow the active site. The Service selector AND-gates `shipstream.io/dragonfly-role=master` AND `shipstream.io/dragonfly-traffic=enabled`: removing the traffic label sheds an endpoint atomically, which is how planned failover avoids a window where both the old and new master would match the selector during `REPLTAKEOVER`. Disable Dragonfly by removing the `spec.dragonfly` block.
 
+Bloodraven supports Dragonfly `v1.38.0+` for managed deployments. The playground pins `docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0`; avoid older tags because several replication, snapshot, and expiry bugs were fixed before this baseline.
+
+Bloodraven treats Dragonfly as cache/session state, not durable application data. The operator provisions ephemeral storage, does not manage Dragonfly backups or snapshot schedules, and does not support `DFLY LOAD` against a live master with attached replicas because loaded data bypasses the replication journal. Topology changes can force full replica resyncs and briefly increase master latency, so schedule planned failovers and Dragonfly image rollouts the same way you would schedule cache-impacting maintenance.
+
+The operator owns the safety-critical Dragonfly flags it emits (`--port`, `--admin_port`, `--requirepass`, `--break_replication_on_master_restart`, and related sizing knobs). Extra `spec.dragonfly.args` are an escape hatch for site-specific tuning; do not use them to enable tiered storage, ACL files, Lua compatibility relaxations, TLS replication, snapshot scheduling, or load/import workflows unless the operational tradeoff is documented for that deployment.
+
 Verify the cache subsystem before exercising failover:
 
 ```bash

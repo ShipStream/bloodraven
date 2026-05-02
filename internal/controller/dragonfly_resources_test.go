@@ -20,7 +20,7 @@ func fgWithDragonfly(opts ...func(*v1alpha1.MysqlFailoverGroup)) *v1alpha1.Mysql
 	fg := newTestFG()
 	fg.Spec.Dragonfly = &v1alpha1.DragonflySpec{
 		Enabled:         true,
-		Image:           "docker.dragonflydb.io/dragonflydb/dragonfly:v1.25.5",
+		Image:           "docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0",
 		Port:            6379,
 		AdminPort:       9999,
 		MaxMemoryMb:     256,

@@ -44,8 +44,8 @@ type DragonflyManager struct {
 
 	// stale-master events are deduplicated per (site, role) so we don't
 	// spam the Event stream while the state persists.
-	mu                 sync.Mutex
-	lastStaleMasterAt  map[string]time.Time
+	mu                  sync.Mutex
+	lastStaleMasterAt   map[string]time.Time
 	staleMasterEventTTL time.Duration
 }
 
@@ -169,10 +169,10 @@ func (m *DragonflyManager) Tick(ctx context.Context) {
 
 // DragonflySiteSnapshot is the internal observation for one site at one tick.
 type DragonflySiteSnapshot struct {
-	Name       string
-	Reachable  bool
-	Info       dragonfly.ReplicationInfo
-	Persist    dragonfly.PersistenceInfo
+	Name           string
+	Reachable      bool
+	Info           dragonfly.ReplicationInfo
+	Persist        dragonfly.PersistenceInfo
 	ClassifiedRole dragonfly.SiteRole
 }
 
@@ -306,7 +306,7 @@ func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySite
 			mastersOnExpected++
 			ready = s.Reachable
 		case dragonfly.RoleReplica:
-			ready = s.Reachable && s.Info.MasterLinkStatus == "up" && !s.Info.MasterSyncInProgress && !s.Persist.Loading
+			ready = s.Reachable && s.Info.MasterLinkStatus == "up" && s.Info.MasterLastIOSecondsAgo >= 0 && !s.Info.MasterSyncInProgress && !s.Persist.Loading
 		case dragonfly.RoleStaleMaster:
 			stale++
 		case dragonfly.RoleUnreachable:
@@ -323,6 +323,7 @@ func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySite
 			ReplicationState: s.Info.Role,
 			LinkStatus:       linkStatus,
 			SyncInProgress:   s.Info.MasterSyncInProgress,
+			LastIOSecondsAgo: s.Info.MasterLastIOSecondsAgo,
 			Ready:            ready,
 			Message:          dragonflySiteMessage(s),
 		})
@@ -799,4 +800,3 @@ func dragonflyStatusEqual(a, b *v1alpha1.DragonflyStatus) bool {
 	}
 	return true
 }
-
