@@ -62,6 +62,7 @@ type DragonflyConnection interface {
 	ReplicaOf(ctx context.Context, host string, port int32) error
 	ReplicaOfNoOne(ctx context.Context) error
 	ReplTakeover(ctx context.Context, timeout time.Duration) error
+	Save(ctx context.Context) error
 	// ClientKillType issues `CLIENT KILL TYPE <kind>` against the
 	// connected instance. Used best-effort to evict in-flight client
 	// connections from the (now-demoted) old master after a planned
@@ -353,6 +354,7 @@ func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySite
 	if fg.Status.Dragonfly != nil {
 		st.LastPromotionTime = fg.Status.Dragonfly.LastPromotionTime
 		st.LastPromotionTarget = fg.Status.Dragonfly.LastPromotionTarget
+		st.Upgrade = fg.Status.Dragonfly.Upgrade
 	}
 	return st
 }

@@ -197,6 +197,8 @@ Bloodraven supports Dragonfly `v1.38.0+` for managed deployments. The playground
 
 Bloodraven treats Dragonfly as cache/session state, not durable application data. The operator provisions ephemeral storage, does not manage Dragonfly backups or snapshot schedules, and does not support `DFLY LOAD` against a live master with attached replicas because loaded data bypasses the replication journal. Topology changes can force full replica resyncs and briefly increase master latency, so schedule planned failovers and Dragonfly image rollouts the same way you would schedule cache-impacting maintenance.
 
+The playground also deploys RustFS (`rustfs/rustfs:latest`) as an in-cluster S3-compatible target and creates the `dragonfly` bucket. Dragonfly snapshots are configured to `s3://dragonfly/playground` with credentials from `dragonfly-s3-credentials` and endpoint `rustfs.bloodraven-playground.svc.cluster.local:9000`, so the D6a snapshot-restore upgrade path can run without external AWS resources.
+
 The operator owns the safety-critical Dragonfly flags it emits (`--port`, `--admin_port`, `--requirepass`, `--break_replication_on_master_restart`, and related sizing knobs). Extra `spec.dragonfly.args` are an escape hatch for site-specific tuning; do not use them to enable tiered storage, ACL files, Lua compatibility relaxations, TLS replication, snapshot scheduling, or load/import workflows unless the operational tradeoff is documented for that deployment.
 
 Verify the cache subsystem before exercising failover:
@@ -242,6 +244,20 @@ kubectl -n bloodraven-playground get mysqlfailovergroup playground \
 ```
 
 Emergency Dragonfly behavior is best-effort. Killing the active MySQL pod while Dragonfly is healthy still completes the MySQL emergency failover; Dragonfly is promoted via REPLTAKEOVER (sessions preserved when reachable) or `REPLICAOF NO ONE` (sessions lost), and never blocks MySQL recovery past a 10-second budget.
+
+Exercise the D6a snapshot-restore upgrade path against RustFS:
+
+```bash
+make chaos-run SCENARIO=29-dragonfly-snapshot-upgrade
+
+# Or trigger it manually with the current image to force a snapshot/restart/restore cycle.
+IMAGE=$(kubectl -n bloodraven-playground get mfg playground -o jsonpath='{.spec.dragonfly.image}')
+kubectl -n bloodraven-playground annotate --overwrite mfg playground \
+  bloodraven.shipstream.io/dragonfly-snapshot-upgrade="$IMAGE"
+
+kubectl -n bloodraven-playground get mfg playground \
+  -o jsonpath='{.status.dragonfly.upgrade.phase}{"\n"}'
+```
 
 ## Exercise backup verification
 

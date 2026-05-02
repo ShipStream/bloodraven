@@ -1439,6 +1439,49 @@ spec:
                           More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                         type: object
                     type: object
+                  snapshot:
+                    description: |-
+                      Snapshot configures Dragonfly snapshot persistence. When Dir is an
+                      s3:// URI, Dragonfly writes snapshots to that bucket/prefix and
+                      restores from it when a replacement pod starts. Bloodraven treats this
+                      as a planned-maintenance continuity mechanism, not durable application
+                      backup.
+                    properties:
+                      credentialsSecretName:
+                        description: |-
+                          CredentialsSecretName is a Secret projected into Dragonfly pods as
+                          environment variables for S3-compatible snapshot access. Typical keys
+                          are AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION. Optional
+                          when ServiceAccountName provides credentials through cloud IAM.
+                        type: string
+                      dir:
+                        description: |-
+                          Dir is passed to Dragonfly as --dir. Use s3://bucket[/prefix] for S3
+                          snapshot/restore support. Empty leaves Dragonfly's default data dir.
+                        type: string
+                      s3Endpoint:
+                        description: |-
+                          S3Endpoint is passed to Dragonfly as --s3_endpoint for S3-compatible
+                          services such as RustFS or MinIO. Leave empty for AWS S3.
+                        type: string
+                      s3SignPayload:
+                        description: |-
+                          S3SignPayload controls Dragonfly's --s3_sign_payload flag. Leave nil
+                          for Dragonfly's default.
+                        type: boolean
+                      s3UseHTTPS:
+                        description: |-
+                          S3UseHTTPS controls Dragonfly's --s3_use_https flag. Leave nil for
+                          Dragonfly's default. Set false for in-cluster HTTP services like the
+                          playground RustFS deployment.
+                        type: boolean
+                      serviceAccountName:
+                        description: |-
+                          ServiceAccountName is assigned to Dragonfly pods so cloud IAM systems
+                          such as EKS IRSA can grant access to the snapshot bucket without static
+                          credentials. Empty uses the namespace default ServiceAccount.
+                        type: string
+                    type: object
                 type: object
                 x-kubernetes-validations:
                 - message: spec.dragonfly.image is required when spec.dragonfly.enabled
@@ -5592,6 +5635,59 @@ spec:
                           type: boolean
                       type: object
                     type: array
+                  upgrade:
+                    description: |-
+                      Upgrade tracks an explicit Dragonfly snapshot-restore upgrade
+                      requested by annotation. It is separate from normal spec reconciliation
+                      because this workflow intentionally creates a short cache outage while
+                      preserving sessions through a pre-upgrade snapshot.
+                    properties:
+                      activeSite:
+                        description: ActiveSite is the site that was active when the
+                          request was accepted.
+                        type: string
+                      completionTime:
+                        description: CompletionTime is set on Succeeded or Failed.
+                        format: date-time
+                        type: string
+                      message:
+                        description: Message is a human-readable status line.
+                        type: string
+                      phase:
+                        description: Phase is the current upgrade phase.
+                        enum:
+                        - Pending
+                        - SavingSnapshot
+                        - UpdatingActive
+                        - WaitingForActiveRestore
+                        - ReattachingReplicas
+                        - Succeeded
+                        - Failed
+                        type: string
+                      reason:
+                        description: Reason is a machine-readable terminal or waiting
+                          reason.
+                        type: string
+                      snapshotDir:
+                        description: SnapshotDir is the Dragonfly --dir used for SAVE
+                          and startup restore.
+                        type: string
+                      snapshotTime:
+                        description: SnapshotTime is when SAVE completed successfully.
+                        format: date-time
+                        type: string
+                      sourceImage:
+                        description: SourceImage is the image in use when the request
+                          was accepted.
+                        type: string
+                      startTime:
+                        description: StartTime is when the upgrade request was accepted.
+                        format: date-time
+                        type: string
+                      targetImage:
+                        description: TargetImage is the requested replacement image.
+                        type: string
+                    type: object
                 type: object
               lastBackupTime:
                 description: |-

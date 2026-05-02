@@ -435,6 +435,11 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		return t, nil
 	}
 
+	dragonflyPassword, err := pgdragonfly.LoadPassword(ctx, e.K, e.Cfg.Namespace)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("load dragonfly password: %w", err)
+	}
+
 	openDragonfly := func(site string) (*pgdragonfly.SiteClient, error) {
 		// Each call dials a fresh client. The active Service's
 		// selected pod can flip mid-scenario (master-kill,
@@ -442,7 +447,7 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		// stale pod identity, hiding the very routing flip a
 		// Dragonfly scenario is meant to observe. The executor
 		// closes any client still open at scenario exit.
-		c, err := pgdragonfly.Open(ctx, e.K, e.Cfg.Namespace, e.Cfg.FG, site, "")
+		c, err := pgdragonfly.Open(ctx, e.K, e.Cfg.Namespace, e.Cfg.FG, site, dragonflyPassword)
 		if err != nil {
 			return nil, err
 		}

@@ -140,6 +140,66 @@ func TestReconcileDragonflyStatefulSet_AuthEnvWiredFromSecret(t *testing.T) {
 	}
 }
 
+func TestReconcileDragonflyStatefulSet_SnapshotS3WiresDirAndServiceAccount(t *testing.T) {
+	fg := fgWithDragonfly(func(fg *v1alpha1.MysqlFailoverGroup) {
+		useHTTPS := false
+		signPayload := false
+		fg.Spec.Dragonfly.Snapshot = &v1alpha1.DragonflySnapshotSpec{
+			Dir:                   "s3://tenant-dragonfly/orders/prod",
+			ServiceAccountName:    "dragonfly-backup",
+			CredentialsSecretName: "dragonfly-s3",
+			S3Endpoint:            "rustfs.bloodraven-playground.svc.cluster.local:9000",
+			S3UseHTTPS:            &useHTTPS,
+			S3SignPayload:         &signPayload,
+		}
+		fg.Spec.Dragonfly.Args = []string{"--dir=/tmp/ignored", "--s3_endpoint=ignored"}
+	})
+	r, c := newReconciler(fg)
+	if err := r.reconcileDragonflyStatefulSet(context.Background(), fg, fg.Spec.Sites[0]); err != nil {
+		t.Fatalf("reconcileDragonflyStatefulSet: %v", err)
+	}
+
+	var sts appsv1.StatefulSet
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "lion-dragonfly-dc1", Namespace: "shared-lion"}, &sts); err != nil {
+		t.Fatalf("statefulset not created: %v", err)
+	}
+	if got := sts.Spec.Template.Spec.ServiceAccountName; got != "dragonfly-backup" {
+		t.Errorf("serviceAccountName=%q want dragonfly-backup", got)
+	}
+	joined := joinArgs(sts.Spec.Template.Spec.Containers[0].Args)
+	if !contains(joined, "--dir=s3://tenant-dragonfly/orders/prod") {
+		t.Errorf("args missing snapshot dir: %v", sts.Spec.Template.Spec.Containers[0].Args)
+	}
+	if contains(joined, "--dir=/tmp/ignored") {
+		t.Errorf("user-supplied --dir overrode operator-owned snapshot dir: %v", sts.Spec.Template.Spec.Containers[0].Args)
+	}
+	for _, want := range []string{
+		"--s3_endpoint=rustfs.bloodraven-playground.svc.cluster.local:9000",
+		"--s3_use_https=false",
+		"--s3_sign_payload=false",
+	} {
+		if !contains(joined, want) {
+			t.Errorf("args missing %q: %v", want, sts.Spec.Template.Spec.Containers[0].Args)
+		}
+	}
+	if contains(joined, "--s3_endpoint=ignored") {
+		t.Errorf("user-supplied --s3_endpoint overrode operator-owned endpoint: %v", sts.Spec.Template.Spec.Containers[0].Args)
+	}
+	env := sts.Spec.Template.Spec.Containers[0].Env
+	if !hasEnvFromSecret(env, "AWS_ACCESS_KEY_ID", "dragonfly-s3") || !hasEnvFromSecret(env, "AWS_SECRET_ACCESS_KEY", "dragonfly-s3") {
+		t.Errorf("snapshot credentials env not wired from dragonfly-s3: %#v", env)
+	}
+}
+
+func hasEnvFromSecret(env []corev1.EnvVar, name, secret string) bool {
+	for _, e := range env {
+		if e.Name == name && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil && e.ValueFrom.SecretKeyRef.Name == secret {
+			return true
+		}
+	}
+	return false
+}
+
 func TestReconcileDragonflySiteService(t *testing.T) {
 	fg := fgWithDragonfly()
 	r, c := newReconciler(fg)

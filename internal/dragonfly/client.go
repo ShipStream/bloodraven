@@ -166,6 +166,14 @@ func (c *Client) ClientKillType(ctx context.Context, kind string) error {
 	return c.exec(ctx, "CLIENT", "KILL", "TYPE", kind)
 }
 
+// Save asks Dragonfly to synchronously persist a snapshot to its configured
+// --dir. When --dir is an s3:// URI, Dragonfly writes the snapshot to S3.
+// Callers should use a context with a maintenance-sized timeout because SAVE
+// can legitimately take longer than ordinary INFO/REPLICAOF commands.
+func (c *Client) Save(ctx context.Context) error {
+	return c.exec(ctx, "SAVE")
+}
+
 // exec sends a command and expects "+OK\r\n" or any non-error reply.
 func (c *Client) exec(ctx context.Context, args ...string) error {
 	_, err := c.execReply(ctx, args...)

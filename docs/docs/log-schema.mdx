@@ -209,6 +209,12 @@ Kubernetes Event reasons emitted on the `MysqlFailoverGroup` (visible via `kubec
 | `DragonflyStaleMasterDetected` | A non-active site reports master role. Logged + dedup'd in 5-minute windows. Auto-rejoin is attempted in `reconcileReplication` when `connected_slaves=0 AND master_repl_offset=0`. |
 | `DragonflyOldSiteReconfigured` | A stale master passed the auto-rejoin gate and was attached as a replica of the active master via `REPLICAOF`. |
 | `DragonflySyncTimeout` | `WaitingForDragonflySync` exhausted `spec.dragonfly.plannedFailover.maxSyncWait`. |
+| `DragonflyUpgradeStarted` | Snapshot-restore Dragonfly upgrade annotation was accepted and `status.dragonfly.upgrade` was initialized. |
+| `DragonflyUpgradeRejected` | Snapshot-restore upgrade request was invalid or another coordinated operation was running. |
+| `DragonflyUpgradeSnapshotStarted` | Active Dragonfly traffic was shed and the operator is about to issue `SAVE`. |
+| `DragonflyUpgradeSnapshotCompleted` | `SAVE` completed against the active Dragonfly master using `spec.dragonfly.snapshot.dir`. |
+| `DragonflyUpgradeCompleted` | Active and replica Dragonfly pods are on the target image, active traffic is restored, and replicas are linked. |
+| `DragonflyUpgradeFailed` | Snapshot-restore upgrade reached a terminal failure; the operator best-effort restored active traffic. |
 
 ### Lifecycle
 

@@ -42,6 +42,12 @@ Currently automated:
 - `19-reclone-interlock` (§19; self-contained — manufactures divergence, then exercises rejected/accepted reclone annotation cases)
 - `20-shared-node-selector-isolation` (§20; labels primary node into a fake `inventory` FG and asserts that a playground failover taints only `db-readonly-playground`, leaving `db-readonly-inventory` absent and the inventory canary still Running)
 - `21-noexecute-eviction-semantics` (§21; deploys tolerating + non-tolerating canaries on the primary's node, asserts the non-tolerating one is deletion-marked or gone post-failover and the tolerating one stays Running)
+- `22-planned-dragonfly-switchover` (§24; planned MySQL+Dragonfly failover, session-preservation status, active Service endpoint convergence, and Dragonfly promotion metrics)
+- `23-dragonfly-master-kill` (§25; Dragonfly-only master kill promotes the replica without changing MySQL activeSite)
+- `24-emergency-mysql-dragonfly-down` (§26; all Dragonfly StatefulSets scaled to 0, MySQL emergency failover still completes)
+- `25-operator-restart-mid-dragonfly-failover` (§27; operator restart while planned failover is in Dragonfly sync/promotion phase resumes safely)
+- `26-planned-dragonfly-sync-timeout-proceed` (§28; `onSyncTimeout=proceed` marks sessions not preserved and still completes MySQL failover)
+- `29-dragonfly-snapshot-upgrade` (§29; D6a snapshot-restore upgrade using the playground RustFS bucket)
 
 The runner refuses to mutate any kubectl context that does not match the same allowlist as `playground/_guard.sh` (`k3d-*`, `kind-*`, `minikube*`, or names listed in `BLOODRAVEN_PLAYGROUND_CONTEXTS`). Markdown is the source of truth for hypotheses and prose; the runner's assertions are the operational ones documented under each scenario's "Verify" section.
 
@@ -690,6 +696,83 @@ These scenarios were extracted from `WISHLIST.md` items #36 and #38 — both fla
 **Verify**: Post-restart values match the pre-restart snapshot. `lastFailover` is allowed to advance by up to 90s within tolerance (a status-enrichment loop may rewrite the field with a slightly later timestamp); a regression to zero or a "fresh failover happened just now" jump is rejected.
 
 **Cleanup**: Standard runner cleanup. The operator's auto-recovery brings the original primary back up as a replica.
+
+---
+
+## Scenarios 24-28: Dragonfly integration
+
+These scenarios cover the Bloodraven-owned Dragonfly topology enabled by `spec.dragonfly`. They assume the playground MFG has Dragonfly enabled and that the baseline check reports `status.dragonfly.phase=Ready`, one master, linked replicas, and no unreachable sites.
+
+### 24. Planned Dragonfly Switchover
+**Category**: Coordinated planned failover | **Risk**: Medium
+
+**Hypothesis**: A planned failover promotes the target Dragonfly replica with `REPLTAKEOVER`, preserves the seeded session key, flips `status.dragonfly.activeSite`, and converges the active Service endpoints to the new master pod.
+
+**Injection**: `make chaos-run SCENARIO=22-planned-dragonfly-switchover`
+
+**Verify**: `plannedFailover.phase=Succeeded`, `plannedFailover.dragonfly.PromotionMethod=REPLTAKEOVER`, `SessionsPreserved=true`, the seeded key is readable on the target, active Service endpoints select only the target Dragonfly pod, and `bloodraven_dragonfly_promotions_total{result="success"}` increments.
+
+---
+
+### 25. Dragonfly Master Kill
+**Category**: Dragonfly-only HA | **Risk**: Low
+
+**Hypothesis**: Force-deleting the active Dragonfly pod promotes the surviving replica and leaves MySQL untouched.
+
+**Injection**: `make chaos-run SCENARIO=23-dragonfly-master-kill`
+
+**Verify**: `status.dragonfly.activeSite` flips to the peer, MySQL `status.activeSite` remains unchanged, the seeded key survives on the promoted replica, the respawned old master rejoins as `role=replica` with `linkStatus=up`, and the Dragonfly promotion metric increments.
+
+---
+
+### 26. Emergency MySQL Failover With Dragonfly Down
+**Category**: Emergency fallback | **Risk**: High
+
+**Hypothesis**: Scaling every Dragonfly StatefulSet to 0 does not block emergency MySQL promotion.
+
+**Injection**: `make chaos-run SCENARIO=24-emergency-mysql-dragonfly-down`
+
+**Verify**: `status.dragonfly.phase` leaves `Ready`, the active MySQL pod is deleted, and MySQL `status.activeSite` flips to the peer within the normal emergency budget. Dragonfly recovery is handled by cleanup and global recovery, not by the MySQL critical path.
+
+---
+
+### 27. Operator Restart Mid-Dragonfly Failover
+**Category**: Operator resilience | **Risk**: Medium
+
+**Hypothesis**: If the operator restarts while planned failover is waiting for Dragonfly sync or promoting Dragonfly, the replacement operator resumes from CR status and converges without swapping targets or leaving split-brain Dragonfly state.
+
+**Injection**: `make chaos-run SCENARIO=25-operator-restart-mid-dragonfly-failover`
+
+**Verify**: Planned failover reaches `Succeeded` with the original target, MySQL and Dragonfly active sites both equal that target, and `status.dragonfly.phase` returns to `Ready` with exactly one master.
+
+---
+
+### 28. Planned Dragonfly Sync Timeout Proceeds
+**Category**: Degraded planned failover | **Risk**: Medium
+
+**Hypothesis**: With `maxSyncWait=1ms`, target Dragonfly scaled to 0, and `onSyncTimeout=proceed`, the planned failover does not claim session preservation but still completes MySQL promotion.
+
+**Injection**: `make chaos-run SCENARIO=26-planned-dragonfly-sync-timeout-proceed`
+
+**Verify**: Planned failover reaches `Succeeded`, MySQL `status.activeSite` flips to the target, `plannedFailover.dragonfly.SessionsPreserved=false`, the reason is `DragonflySyncTimeout` or `DragonflyPromotionFailed`, and `bloodraven_dragonfly_promotions_total{result="failed"}` increments.
+
+---
+
+### 29. Dragonfly Snapshot-Restore Upgrade (D6a)
+**Category**: Planned maintenance | **Risk**: Medium
+
+**Hypothesis**: With `spec.dragonfly.snapshot.dir` configured to an S3-compatible bucket and the Dragonfly pods running under a ServiceAccount that can read/write it, Bloodraven can perform a short-outage planned upgrade by saving a snapshot, replacing the active Dragonfly pod on the target image, waiting for restore, then replacing and reattaching replicas.
+
+**Injection**:
+
+```bash
+kubectl -n bloodraven-playground annotate --overwrite mysqlfailovergroup playground \
+  bloodraven.shipstream.io/dragonfly-snapshot-upgrade=docker.dragonflydb.io/dragonflydb/dragonfly:<target>
+```
+
+**Verify**: `status.dragonfly.upgrade.phase` walks `Pending → SavingSnapshot → UpdatingActive → WaitingForActiveRestore → ReattachingReplicas → Succeeded`; the active Service has no endpoints while restore is in progress; `SAVE` completes before the active pod is deleted; final Dragonfly pods run the target image; `status.dragonfly.phase` returns to `Ready`; the seeded key is present after restore.
+
+**Automation status**: Registered as `29-dragonfly-snapshot-upgrade`. The playground provisions RustFS and a `dragonfly` bucket during setup.
 
 ---
 

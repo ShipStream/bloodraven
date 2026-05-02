@@ -234,6 +234,12 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile pdb: %w", err)
 	}
 
+	if dfUpgradeRequeue, err := r.reconcileDragonflySnapshotUpgrade(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly snapshot upgrade: %w", err)
+	} else if dfUpgradeRequeue > 0 {
+		return ctrl.Result{RequeueAfter: dfUpgradeRequeue}, nil
+	}
+
 	// Reconcile per-site Dragonfly resources when spec.dragonfly is enabled.
 	// No-op otherwise so MySQL-only deployments are unaffected. Owner-reference
 	// garbage collection cleans up resources when enabled flips to false.

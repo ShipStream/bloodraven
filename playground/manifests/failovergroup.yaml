@@ -68,6 +68,12 @@ spec:
     plannedFailover:
       maxSyncWait: 30s
       onSyncTimeout: proceed
+    snapshot:
+      dir: s3://dragonfly/playground
+      credentialsSecretName: dragonfly-s3-credentials
+      s3Endpoint: rustfs.bloodraven-playground.svc.cluster.local:9000
+      s3UseHTTPS: false
+      s3SignPayload: false
     resources:
       requests:
         cpu: 100m

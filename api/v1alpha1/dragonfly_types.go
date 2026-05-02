@@ -74,6 +74,51 @@ type DragonflySpec struct {
 	// PlannedFailover configures planned-switchover behavior.
 	// +optional
 	PlannedFailover *DragonflyPlannedFailoverSpec `json:"plannedFailover,omitempty"`
+
+	// Snapshot configures Dragonfly snapshot persistence. When Dir is an
+	// s3:// URI, Dragonfly writes snapshots to that bucket/prefix and
+	// restores from it when a replacement pod starts. Bloodraven treats this
+	// as a planned-maintenance continuity mechanism, not durable application
+	// backup.
+	// +optional
+	Snapshot *DragonflySnapshotSpec `json:"snapshot,omitempty"`
+}
+
+// DragonflySnapshotSpec configures Dragonfly's native snapshot location.
+type DragonflySnapshotSpec struct {
+	// Dir is passed to Dragonfly as --dir. Use s3://bucket[/prefix] for S3
+	// snapshot/restore support. Empty leaves Dragonfly's default data dir.
+	// +optional
+	Dir string `json:"dir,omitempty"`
+
+	// ServiceAccountName is assigned to Dragonfly pods so cloud IAM systems
+	// such as EKS IRSA can grant access to the snapshot bucket without static
+	// credentials. Empty uses the namespace default ServiceAccount.
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// CredentialsSecretName is a Secret projected into Dragonfly pods as
+	// environment variables for S3-compatible snapshot access. Typical keys
+	// are AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION. Optional
+	// when ServiceAccountName provides credentials through cloud IAM.
+	// +optional
+	CredentialsSecretName string `json:"credentialsSecretName,omitempty"`
+
+	// S3Endpoint is passed to Dragonfly as --s3_endpoint for S3-compatible
+	// services such as RustFS or MinIO. Leave empty for AWS S3.
+	// +optional
+	S3Endpoint string `json:"s3Endpoint,omitempty"`
+
+	// S3UseHTTPS controls Dragonfly's --s3_use_https flag. Leave nil for
+	// Dragonfly's default. Set false for in-cluster HTTP services like the
+	// playground RustFS deployment.
+	// +optional
+	S3UseHTTPS *bool `json:"s3UseHTTPS,omitempty"`
+
+	// S3SignPayload controls Dragonfly's --s3_sign_payload flag. Leave nil
+	// for Dragonfly's default.
+	// +optional
+	S3SignPayload *bool `json:"s3SignPayload,omitempty"`
 }
 
 // DragonflyAuthSpec references a Secret containing the Dragonfly password.
@@ -194,6 +239,72 @@ type DragonflyStatus struct {
 	// to status.sites for MySQL.
 	// +optional
 	Sites []DragonflySiteStatus `json:"sites,omitempty"`
+
+	// Upgrade tracks an explicit Dragonfly snapshot-restore upgrade
+	// requested by annotation. It is separate from normal spec reconciliation
+	// because this workflow intentionally creates a short cache outage while
+	// preserving sessions through a pre-upgrade snapshot.
+	// +optional
+	Upgrade *DragonflyUpgradeStatus `json:"upgrade,omitempty"`
+}
+
+// DragonflyUpgradePhase describes the D6a snapshot-restore planned upgrade
+// state machine.
+// +kubebuilder:validation:Enum=Pending;SavingSnapshot;UpdatingActive;WaitingForActiveRestore;ReattachingReplicas;Succeeded;Failed
+type DragonflyUpgradePhase string
+
+const (
+	DragonflyUpgradePhasePending                 DragonflyUpgradePhase = "Pending"
+	DragonflyUpgradePhaseSavingSnapshot          DragonflyUpgradePhase = "SavingSnapshot"
+	DragonflyUpgradePhaseUpdatingActive          DragonflyUpgradePhase = "UpdatingActive"
+	DragonflyUpgradePhaseWaitingForActiveRestore DragonflyUpgradePhase = "WaitingForActiveRestore"
+	DragonflyUpgradePhaseReattachingReplicas     DragonflyUpgradePhase = "ReattachingReplicas"
+	DragonflyUpgradePhaseSucceeded               DragonflyUpgradePhase = "Succeeded"
+	DragonflyUpgradePhaseFailed                  DragonflyUpgradePhase = "Failed"
+)
+
+// DragonflyUpgradeStatus is the observable audit trail for a one-shot
+// snapshot-restore Dragonfly upgrade.
+type DragonflyUpgradeStatus struct {
+	// Phase is the current upgrade phase.
+	// +optional
+	Phase DragonflyUpgradePhase `json:"phase,omitempty"`
+
+	// SourceImage is the image in use when the request was accepted.
+	// +optional
+	SourceImage string `json:"sourceImage,omitempty"`
+
+	// TargetImage is the requested replacement image.
+	// +optional
+	TargetImage string `json:"targetImage,omitempty"`
+
+	// ActiveSite is the site that was active when the request was accepted.
+	// +optional
+	ActiveSite string `json:"activeSite,omitempty"`
+
+	// SnapshotDir is the Dragonfly --dir used for SAVE and startup restore.
+	// +optional
+	SnapshotDir string `json:"snapshotDir,omitempty"`
+
+	// StartTime is when the upgrade request was accepted.
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+
+	// SnapshotTime is when SAVE completed successfully.
+	// +optional
+	SnapshotTime *metav1.Time `json:"snapshotTime,omitempty"`
+
+	// CompletionTime is set on Succeeded or Failed.
+	// +optional
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// Reason is a machine-readable terminal or waiting reason.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// Message is a human-readable status line.
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // DragonflySiteStatus describes the observed state of one site's Dragonfly

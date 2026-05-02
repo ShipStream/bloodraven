@@ -262,6 +262,14 @@ sed "s|image: bloodraven-dns-webhook|image: ${IMG_PREFIX}bloodraven-dns-webhook|
   "$SCRIPT_DIR/manifests/external-dns.yaml" | kubectl apply -f -
 kubectl apply -f "$SCRIPT_DIR/manifests/dashboard-rbac.yaml"
 
+info "Deploying RustFS S3-compatible snapshot target for Dragonfly..."
+kubectl apply -f "$SCRIPT_DIR/manifests/rustfs.yaml"
+kubectl -n "$NAMESPACE" rollout status deployment/rustfs --timeout=180s
+kubectl -n "$NAMESPACE" delete job rustfs-create-dragonfly-bucket --ignore-not-found >/dev/null 2>&1 || true
+kubectl apply -f "$SCRIPT_DIR/manifests/rustfs.yaml"
+kubectl -n "$NAMESPACE" wait --for=condition=complete job/rustfs-create-dragonfly-bucket --timeout=120s
+ok "RustFS ready (bucket: s3://dragonfly/playground)"
+
 # ── 8. Deploy the operator via Helm ──────────────────────────────────────
 info "Deploying Bloodraven operator via Helm..."
 helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \

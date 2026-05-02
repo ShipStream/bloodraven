@@ -208,6 +208,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSet(ctx context
 				Labels: podLabels,
 			},
 			Spec: corev1.PodSpec{
+				ServiceAccountName: dragonflyServiceAccountName(spec),
 				NodeSelector: map[string]string{
 					"topology.kubernetes.io/zone": site.Zone,
 				},
@@ -265,6 +266,18 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 	if spec.ProactorThreads > 0 {
 		args = append(args, fmt.Sprintf("--proactor_threads=%d", spec.ProactorThreads))
 	}
+	if spec.Snapshot != nil && spec.Snapshot.Dir != "" {
+		args = append(args, "--dir="+spec.Snapshot.Dir)
+		if spec.Snapshot.S3Endpoint != "" {
+			args = append(args, "--s3_endpoint="+spec.Snapshot.S3Endpoint)
+		}
+		if spec.Snapshot.S3UseHTTPS != nil {
+			args = append(args, "--s3_use_https="+strconv.FormatBool(*spec.Snapshot.S3UseHTTPS))
+		}
+		if spec.Snapshot.S3SignPayload != nil {
+			args = append(args, "--s3_sign_payload="+strconv.FormatBool(*spec.Snapshot.S3SignPayload))
+		}
+	}
 	// Auth flag emitted only when a usable Secret reference exists; an
 	// empty SecretName would cause the pod to fail to start with a
 	// secret-not-found event rather than a clean reconcile error.
@@ -274,6 +287,13 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 	}
 	args = append(args, filterDragonflyUserArgs(spec.Args)...)
 	return args
+}
+
+func dragonflyServiceAccountName(spec *v1alpha1.DragonflySpec) string {
+	if spec == nil || spec.Snapshot == nil {
+		return ""
+	}
+	return spec.Snapshot.ServiceAccountName
 }
 
 // dragonflyOperatorOwnedFlags lists Dragonfly flags whose values are a
@@ -287,6 +307,10 @@ var dragonflyOperatorOwnedFlags = []string{
 	"--bind",
 	"--port",
 	"--admin_port",
+	"--dir",
+	"--s3_endpoint",
+	"--s3_use_https",
+	"--s3_sign_payload",
 	"--requirepass",
 }
 
@@ -333,13 +357,13 @@ func filterDragonflyUserArgs(in []string) []string {
 // secret-not-found event rather than a clean reconcile error).
 func buildDragonflyEnv(spec *v1alpha1.DragonflySpec) []corev1.EnvVar {
 	if spec.Auth == nil || spec.Auth.SecretName == "" {
-		return nil
+		return buildDragonflySnapshotEnv(spec)
 	}
 	key := spec.Auth.PasswordKey
 	if key == "" {
 		key = "password"
 	}
-	return []corev1.EnvVar{
+	env := []corev1.EnvVar{
 		{
 			Name: DragonflyAuthEnvVar,
 			ValueFrom: &corev1.EnvVarSource{
@@ -350,7 +374,32 @@ func buildDragonflyEnv(spec *v1alpha1.DragonflySpec) []corev1.EnvVar {
 			},
 		},
 	}
+	return append(env, buildDragonflySnapshotEnv(spec)...)
 }
+
+func buildDragonflySnapshotEnv(spec *v1alpha1.DragonflySpec) []corev1.EnvVar {
+	if spec == nil || spec.Snapshot == nil || spec.Snapshot.CredentialsSecretName == "" {
+		return nil
+	}
+	secret := spec.Snapshot.CredentialsSecretName
+	keys := []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION"}
+	env := make([]corev1.EnvVar, 0, len(keys))
+	for _, key := range keys {
+		env = append(env, corev1.EnvVar{
+			Name: key,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secret},
+					Key:                  key,
+					Optional:             dragonflyBoolPtr(true),
+				},
+			},
+		})
+	}
+	return env
+}
+
+func dragonflyBoolPtr(v bool) *bool { return &v }
 
 // reconcileDragonflySiteService creates or updates the per-site headless
 // Service used for replication wiring and debugging.
@@ -569,4 +618,3 @@ func effectiveDragonflyMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
 	}
 	return fg.Status.ActiveSite
 }
-

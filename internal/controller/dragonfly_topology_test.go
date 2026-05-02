@@ -39,6 +39,8 @@ type fakeDragonflyConn struct {
 	replicaOfNoOneErr error
 
 	replTakeoverErr error
+	saveCalls       int
+	saveErr         error
 
 	clientKillTypes []string
 	clientKillErr   error
@@ -65,6 +67,11 @@ func (c *fakeDragonflyConn) ReplicaOfNoOne(_ context.Context) error { return c.r
 
 func (c *fakeDragonflyConn) ReplTakeover(_ context.Context, _ time.Duration) error {
 	return c.replTakeoverErr
+}
+
+func (c *fakeDragonflyConn) Save(_ context.Context) error {
+	c.saveCalls++
+	return c.saveErr
 }
 
 func (c *fakeDragonflyConn) ClientKillType(_ context.Context, kind string) error {
@@ -835,6 +842,7 @@ func (panicOnInfoConn) ReplicaOfNoOne(_ context.Context) error               { r
 func (panicOnInfoConn) ReplTakeover(_ context.Context, _ time.Duration) error {
 	return nil
 }
+func (panicOnInfoConn) Save(_ context.Context) error                     { return nil }
 func (panicOnInfoConn) ClientKillType(_ context.Context, _ string) error { return nil }
 func (panicOnInfoConn) Close() error                                     { return nil }
 
