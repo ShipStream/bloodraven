@@ -228,10 +228,8 @@ func s13ObserveClusterReconverged() runner.Step {
 	}
 }
 
-// s13VerifyReplicaThreadsRunning probes whichever site is currently
-// read-only (which may or may not be the originally-wiped site,
-// depending on whether the operator restart triggered an auto-fail-
-// back) and asserts replica_io && replica_sql.
+// s13VerifyReplicaThreadsRunning probes the originally-wiped site and
+// asserts it is the read-only replica with replica_io && replica_sql.
 func s13VerifyReplicaThreadsRunning() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
@@ -242,25 +240,28 @@ func s13VerifyReplicaThreadsRunning() runner.Step {
 			if err != nil {
 				return err
 			}
-			var replica string
+			var wipedState string
 			for _, s := range mfg.Status.Sites {
-				if s.State == "read-only" {
-					replica = s.Name
+				if s.Name == wiped {
+					wipedState = s.State
 					break
 				}
 			}
-			if replica == "" {
-				return fmt.Errorf("no read-only site present at verify time (sites=%+v)", mfg.Status.Sites)
+			if wipedState == "" {
+				return fmt.Errorf("wiped site %q missing at verify time (sites=%+v)", wiped, mfg.Status.Sites)
 			}
-			env.Capture.Note(fmt.Sprintf("probing read-only site %s (originally wiped %s)", replica, wiped))
-			probe, err := env.Sidecar(replica)
+			if wipedState != "read-only" {
+				return fmt.Errorf("wiped site %s state=%q, want read-only replicating replica", wiped, wipedState)
+			}
+			env.Capture.Note(fmt.Sprintf("probing wiped read-only site %s", wiped))
+			probe, err := env.Sidecar(wiped)
 			if err != nil {
-				return fmt.Errorf("open sidecar probe for %s: %w", replica, err)
+				return fmt.Errorf("open sidecar probe for %s: %w", wiped, err)
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			defer cancel()
 			return env.Wait.UntilSidecarStatus(waitCtx, probe,
-				fmt.Sprintf("site %s replica_io_running && replica_sql_running", replica),
+				fmt.Sprintf("site %s replica_io_running && replica_sql_running", wiped),
 				func(st *pgsidecar.StatusResponse) (bool, string) {
 					msg := fmt.Sprintf(
 						"role=%s read_only=%v replica_io=%v replica_sql=%v",

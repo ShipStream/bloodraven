@@ -134,6 +134,20 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 	cap.Note(fmt.Sprintf("scenario %s passed (elapsed=%s)", s.ID, res.Duration.Round(time.Millisecond)))
 	if !e.Cfg.NoCleanup {
 		res.CleanupErr = e.cleanup(env, s)
+		if res.CleanupErr != nil {
+			res.Passed = false
+			res.Phase = PhaseCleanup
+			res.StepName = "Cleanup"
+			res.Failure = "cleanup failed: " + res.CleanupErr.Error()
+			res.Duration = time.Since(res.StartTime)
+			failureBlock := fmt.Sprintf(
+				"scenario %s failed in phase=%s step=%q\n%s",
+				s.ID, res.Phase, res.StepName, res.Failure,
+			)
+			forensicsCtx, forensicsCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer forensicsCancel()
+			_ = cap.Persist(forensicsCtx, e.K, e.Cfg.Namespace, env.Metrics, e.tailers, failureBlock)
+		}
 	}
 	return res
 }

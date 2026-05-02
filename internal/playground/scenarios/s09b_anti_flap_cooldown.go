@@ -286,7 +286,7 @@ func s09bSettleObservationWindow() runner.Step {
 func s09bVerifyNoPingPongAndCaptureLog() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "failovers_total delta ≤ 1 across all sites; log scan for cooldown line",
+		Name:  "failovers_total delta == 1 across all sites; log scan for cooldown line",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			before, err := stashFetchMap(env, "failoversBefore")
 			if err != nil {
@@ -329,9 +329,9 @@ func s09bVerifyNoPingPongAndCaptureLog() runner.Step {
 				}
 			}
 
-			if totalDelta > 1 {
-				return fmt.Errorf("anti-flap protection failed: failovers_total incremented by %g across sites %v "+
-					"(expected exactly 1 from the initial failover) — ping-pong promotion bypassed cooldown",
+			if totalDelta != 1 {
+				return fmt.Errorf("anti-flap assertion failed: failovers_total incremented by %g across sites %v "+
+					"(expected exactly 1 from the initial failover and 0 from the blocked second failure)",
 					totalDelta, deltas)
 			}
 			return nil

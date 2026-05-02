@@ -7,6 +7,7 @@ package scenarios
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -94,4 +95,33 @@ func firstMatchSince(t *pglogs.Tailer, since time.Time, pred pglogs.Predicate) (
 		}
 	}
 	return false, ""
+}
+
+func stashMetricCounter(ctx context.Context, env *runner.Env, stashKey, name string, labels map[string]string) error {
+	v, err := metricCounter(ctx, env, name, labels)
+	if err != nil {
+		return err
+	}
+	return ctxStash(ctx, env, stashKey, strconv.FormatFloat(v, 'g', -1, 64))
+}
+
+func fetchStashedFloat(env *runner.Env, key string) (float64, error) {
+	raw := ctxFetch(env, key)
+	if raw == "" {
+		return 0, fmt.Errorf("stash %s not set", key)
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse stash %s=%q: %w", key, raw, err)
+	}
+	return v, nil
+}
+
+func metricCounter(ctx context.Context, env *runner.Env, name string, labels map[string]string) (float64, error) {
+	snap, err := env.Metrics.Scrape(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("scrape metrics: %w", err)
+	}
+	v, _ := snap.Counter(name, labels)
+	return v, nil
 }
