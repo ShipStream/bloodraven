@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -19,11 +20,7 @@ import (
 
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
-
-	// Import the scenarios package for its side-effect: each
-	// scenario file's init() registers itself with
-	// runner.DefaultRegistry. The blank import is intentional.
-	_ "github.com/shipstream/bloodraven/internal/playground/scenarios"
+	"github.com/shipstream/bloodraven/internal/playground/scenarios"
 )
 
 // Exit codes (CLI surface, see plan §7).
@@ -42,6 +39,8 @@ func main() {
 	resultsDir := rootFlags.String("results-dir", "./playground/chaos-results", "directory to write forensic captures into on failure")
 	timeout := rootFlags.Duration("timeout", 0, "override per-scenario timeout (default: scenario-defined or 5m)")
 	noCleanup := rootFlags.Bool("no-cleanup", false, "skip revert + global recover after the scenario (loud warning printed)")
+	force := rootFlags.Bool("force", false, "delete any prior chaos in-progress marker before preflight (run, run-all)")
+	autoReset := rootFlags.Bool("auto-reset", false, "on precheck failure: shell out to reset-mysql.sh + setup.sh, then retry once (3s pause unless CI=1)")
 	continueOnFailure := rootFlags.Bool("continue-on-failure", false, "run-all only: keep going past the first failure")
 	junitOut := rootFlags.String("junit-out", "", "run-all only: write JUnit XML report to this path")
 	verbose := rootFlags.Bool("verbose", false, "verbose logging")
@@ -88,15 +87,15 @@ func main() {
 		listScenarios()
 		return
 	case "check":
-		os.Exit(check(*kubeconfig, *kctx, *namespace))
+		os.Exit(check(*kubeconfig, *kctx, *namespace, *fg))
 	case "run":
 		if len(subArgs) != 1 {
 			fmt.Fprintln(os.Stderr, "usage: playground-chaos run <scenario-id>")
 			os.Exit(exitFlagParse)
 		}
-		os.Exit(runOne(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *noCleanup, subArgs[0], logger))
+		os.Exit(runOne(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *noCleanup, *force, *autoReset, subArgs[0], logger))
 	case "run-all":
-		os.Exit(runAll(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *noCleanup, *continueOnFailure, *junitOut, logger))
+		os.Exit(runAll(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *noCleanup, *force, *autoReset, *continueOnFailure, *junitOut, logger))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", subcmd)
 		usage()
@@ -117,6 +116,8 @@ Flags:
   --results-dir          forensic capture root (default: ./playground/chaos-results)
   --timeout              override per-scenario timeout (default: scenario-defined or 5m)
   --no-cleanup           skip revert + global recover (loud warning)
+  --force                delete any prior chaos in-progress marker before preflight
+  --auto-reset           on precheck failure: reset-mysql.sh + setup.sh, retry once
   --continue-on-failure  run-all only: keep going past first failure
   --junit-out            run-all only: write JUnit XML to path
   --verbose              verbose logging
@@ -165,7 +166,7 @@ func loadKube(kubeconfig, kctx string, skipGuard bool) (*pgkube.Client, error) {
 	})
 }
 
-func check(kubeconfig, kctx, namespace string) int {
+func check(kubeconfig, kctx, namespace, fg string) int {
 	k, err := loadKube(kubeconfig, kctx, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -188,20 +189,37 @@ func check(kubeconfig, kctx, namespace string) int {
 	for _, s := range mfg.Status.Sites {
 		fmt.Printf("  site %-6s state=%s replicating=%v\n", s.Name, s.State, s.Replicating)
 	}
-	if pgkube.ReadyCondition(mfg) != "True" {
-		fmt.Fprintln(os.Stderr, "check: cluster is not Ready — run ./playground/setup.sh and wait for bootstrap")
+
+	// inProgress: <yes/no + summary>. Read the marker even before we
+	// run structural checks — it's the most useful signal when a prior
+	// run was interrupted, and it doesn't depend on the cluster being
+	// otherwise healthy.
+	marker, mErr := k.ReadChaosMarker(ctx, namespace)
+	switch {
+	case mErr != nil:
+		fmt.Printf("inProgress: <read failed: %v>\n", mErr)
+	case marker == nil:
+		fmt.Println("inProgress: no")
+	default:
+		age := time.Since(marker.StartedAt).Round(time.Second)
+		fmt.Printf("inProgress: yes — scenario=%s host=%s pid=%d age=%s capture=%s\n",
+			marker.Scenario, marker.Host, marker.PID, age, marker.CaptureDir)
+	}
+
+	// Run the same structural checks scenarios use as a Precheck.
+	// Anything subtle (stuck scale-to-0, bothReadOnly NoPrimary, off
+	// replication, anti-flap cooldown still ticking, lastFailoverTarget
+	// pointing at a nonexistent site) surfaces here with its
+	// remediation hint, instead of waiting for a 4-min converge timeout.
+	if err := scenarios.CheckBaseline(ctx, k, namespace, fg); err != nil {
+		fmt.Fprintln(os.Stderr, "check:", err)
 		return exitEnvironment
 	}
-	for _, s := range mfg.Status.Sites {
-		if s.State == "" || s.State == "unknown" || s.State == "unreachable" {
-			fmt.Fprintf(os.Stderr, "check: site %s in state %q — run ./playground/reset-mysql.sh and retry\n", s.Name, s.State)
-			return exitEnvironment
-		}
-	}
+	fmt.Println("baseline:   ok")
 	return exitOK
 }
 
-func runOne(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Duration, noCleanup bool, id string, logger *slog.Logger) int {
+func runOne(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Duration, noCleanup, force, autoReset bool, id string, logger *slog.Logger) int {
 	scen, ok := runner.DefaultRegistry.Get(id)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown scenario: %s — try `playground-chaos list`\n", id)
@@ -218,19 +236,13 @@ func runOne(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 		}
 		return exitEnvironment
 	}
-	exec := &runner.Executor{
-		K: k,
-		Cfg: runner.ExecutorConfig{
-			Namespace:  namespace,
-			FG:         fg,
-			ResultsDir: resultsDir,
-			NoCleanup:  noCleanup,
-			Logger:     logger,
-		},
+	if force {
+		fmt.Fprintln(os.Stderr, "!! --force: will delete any prior chaos in-progress marker before preflight")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	res := exec.Run(ctx, scen)
+
+	res := runScenarioWithAutoReset(ctx, k, scen, namespace, fg, resultsDir, noCleanup, force, autoReset, logger)
 	printResult(res)
 	if !res.Passed {
 		return exitFailure
@@ -238,7 +250,64 @@ func runOne(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 	return exitOK
 }
 
-func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Duration, noCleanup, continueOnFailure bool, junitOut string, logger *slog.Logger) int {
+// runScenarioWithAutoReset runs a single scenario, and on a Precheck
+// failure with --auto-reset set, shells out to reset-mysql.sh + setup.sh
+// and retries once. The retry has --auto-reset disabled so we can never
+// reset more than once per scenario invocation.
+func runScenarioWithAutoReset(ctx context.Context, k *pgkube.Client, scen runner.Scenario, namespace, fg, resultsDir string, noCleanup, force, autoReset bool, logger *slog.Logger) runner.Result {
+	executor := &runner.Executor{
+		K: k,
+		Cfg: runner.ExecutorConfig{
+			Namespace:  namespace,
+			FG:         fg,
+			ResultsDir: resultsDir,
+			NoCleanup:  noCleanup,
+			Force:      force,
+			Logger:     logger,
+		},
+	}
+	res := executor.Run(ctx, scen)
+	if res.Passed || !autoReset || res.Phase != runner.PhasePrecheck {
+		return res
+	}
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "!! --auto-reset: precheck failed, will run ./playground/reset-mysql.sh && ./playground/setup.sh")
+	fmt.Fprintln(os.Stderr, "!! this will WIPE MySQL data — set CI=1 to skip the 3-second pause")
+	if os.Getenv("CI") == "" {
+		select {
+		case <-time.After(3 * time.Second):
+		case <-ctx.Done():
+			return res
+		}
+	}
+	if err := runResetAndSetup(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "!! --auto-reset: shell-out failed:", err)
+		return res
+	}
+	// Retry exactly once. Pass force=true so any leftover marker from
+	// the prior failed precheck is dropped — autoReset implies "I want
+	// this to run regardless of stale state".
+	executor.Cfg.Force = true
+	return executor.Run(ctx, scen)
+}
+
+// runResetAndSetup shells out to ./playground/reset-mysql.sh followed
+// by ./playground/setup.sh. Streams output through to stdout/stderr so
+// the user can watch the reset progress.
+func runResetAndSetup(ctx context.Context) error {
+	for _, script := range []string{"./playground/reset-mysql.sh", "./playground/setup.sh"} {
+		fmt.Fprintln(os.Stderr, "==>", script)
+		cmd := exec.CommandContext(ctx, "bash", script)
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("%s: %w", script, err)
+		}
+	}
+	return nil
+}
+
+func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Duration, noCleanup, force, autoReset, continueOnFailure bool, junitOut string, logger *slog.Logger) int {
 	k, err := loadKube(kubeconfig, kctx, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -247,31 +316,24 @@ func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 		}
 		return exitEnvironment
 	}
-	scenarios := runner.DefaultRegistry.List()
-	if len(scenarios) == 0 {
+	scens := runner.DefaultRegistry.List()
+	if len(scens) == 0 {
 		fmt.Fprintln(os.Stderr, "no scenarios registered")
 		return exitFailure
+	}
+	if force {
+		fmt.Fprintln(os.Stderr, "!! --force: will delete any prior chaos in-progress marker before each scenario's preflight")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	var results []runner.Result
 	exitCode := exitOK
-	for _, s := range scenarios {
+	for _, s := range scens {
 		if timeout > 0 {
 			s.Timeout = timeout
 		}
-		exec := &runner.Executor{
-			K: k,
-			Cfg: runner.ExecutorConfig{
-				Namespace:  namespace,
-				FG:         fg,
-				ResultsDir: resultsDir,
-				NoCleanup:  noCleanup,
-				Logger:     logger,
-			},
-		}
-		res := exec.Run(ctx, s)
+		res := runScenarioWithAutoReset(ctx, k, s, namespace, fg, resultsDir, noCleanup, force, autoReset, logger)
 		results = append(results, res)
 		printResult(res)
 		if !res.Passed {
