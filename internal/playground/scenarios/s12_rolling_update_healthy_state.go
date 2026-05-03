@@ -158,7 +158,7 @@ func s12VerifyDeploymentsRolled() runner.Step {
 			if err != nil {
 				return fmt.Errorf("parse expected memory: %w", err)
 			}
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -200,7 +200,7 @@ func s12VerifyClusterHealthy() runner.Step {
 		Phase: runner.PhaseVerify,
 		Name:  "cluster is healthy: Ready=True, no RecoveryBlocked",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

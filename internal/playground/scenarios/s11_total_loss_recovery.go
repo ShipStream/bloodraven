@@ -35,9 +35,9 @@ func scenario11TotalLossRecovery() runner.Scenario {
 			"log line containing `TOTAL LOSS: all sites are unreachable` and does NOT crash. After both " +
 			"sites are restored, the cluster reconverges to one writable + one read-only with no " +
 			"RecoveryBlocked sites.",
-		Risk:    "high",
-		DocLink: "playground/chaos-scenarios.md#11-simultaneous-both-site-kill",
-		Timeout: 6 * time.Minute,
+		Risk:     "high",
+		DocLink:  "playground/chaos-scenarios.md#11-simultaneous-both-site-kill",
+		Timeout:  6 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectScaleAllSitesZero(),
@@ -53,7 +53,7 @@ func injectScaleAllSitesZero() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "scale every spec.sites MySQL deployment to 0",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

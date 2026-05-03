@@ -18,12 +18,12 @@ func init() {
 }
 
 const (
-	s20InventoryGroup        = "inventory"
-	s20InventoryGroupLabel   = "shipstream.io/failover-group.inventory"
-	s20InventorySiteLabel    = "shipstream.io/site.inventory"
-	s20PlaygroundReadOnly    = "shipstream.io/db-readonly-playground"
-	s20InventoryReadOnly     = "shipstream.io/db-readonly-inventory"
-	s20InventoryCanaryName   = "inventory-shared-node-canary"
+	s20InventoryGroup         = "inventory"
+	s20InventoryGroupLabel    = "shipstream.io/failover-group.inventory"
+	s20InventorySiteLabel     = "shipstream.io/site.inventory"
+	s20PlaygroundReadOnly     = "shipstream.io/db-readonly-playground"
+	s20InventoryReadOnly      = "shipstream.io/db-readonly-inventory"
+	s20InventoryCanaryName    = "inventory-shared-node-canary"
 	s20PostFailoverWaitWindow = 60 * time.Second
 )
 
@@ -70,7 +70,7 @@ func s20InjectMultiTenantTopology() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "label active-site node into a fake inventory group, deploy a tolerating canary",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

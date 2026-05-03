@@ -66,7 +66,7 @@ func s16InjectShutdown() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "issue SHUTDOWN against the active site's mysqld",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -186,7 +186,7 @@ func s16VerifyNoSplitBrain() runner.Step {
 			tick := time.NewTicker(2 * time.Second)
 			defer tick.Stop()
 			for {
-				mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+				mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 				if err == nil {
 					var writable, readOnly, blocked []string
 					for _, s := range mfg.Status.Sites {
@@ -214,7 +214,7 @@ func s16VerifyNoSplitBrain() runner.Step {
 					}
 				}
 				if time.Now().After(deadline) {
-					last, lerr := env.Kube.GetMFG(ctx, env.Namespace)
+					last, lerr := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 					return fmt.Errorf("cluster did not converge to 1 writable + 1 read-only within 3m (last fetch err=%v sites=%+v)",
 						lerr, summarizeSites(last))
 				}

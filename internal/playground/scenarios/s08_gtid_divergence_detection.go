@@ -119,7 +119,7 @@ func s08VerifyDivergenceLog() runner.Step {
 // rejects RecoveryBlocked sites and the next scenario in a run-all
 // session fails its precheck.
 func s08AutoRecloneCleanup(ctx context.Context, env *runner.Env) error {
-	mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
 		return fmt.Errorf("cleanup: get MFG: %w", err)
 	}
@@ -141,7 +141,7 @@ func s08AutoRecloneCleanup(ctx context.Context, env *runner.Env) error {
 	}
 	value := fmt.Sprintf("%s:%s", divergent, gtid[:8])
 	env.Capture.Note(fmt.Sprintf("cleanup: submitting reclone-site=%s to clear divergence", value))
-	if err := env.Kube.AnnotateMFG(ctx, env.Namespace, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
 		return fmt.Errorf("cleanup: set reclone annotation: %w", err)
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)

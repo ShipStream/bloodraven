@@ -50,7 +50,7 @@ func injectPartitionReplica() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "open replica sidecar tailer, apply deny-all NetworkPolicy to replica",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -99,7 +99,7 @@ func verifyActivePrimaryUnchanged() runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			original := ctxFetch(env, "originalPrimary")
 			replica := ctxFetch(env, "replicaSite")
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

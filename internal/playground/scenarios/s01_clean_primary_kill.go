@@ -39,6 +39,7 @@ func scenario01CleanPrimaryKill() runner.Scenario {
 			verifyFailoverMetric(),
 			verifyFailoverLog(),
 		},
+		Cleanup: s08AutoRecloneCleanup,
 	}
 }
 
@@ -47,7 +48,7 @@ func injectScaleZero() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "scale active primary to 0 replicas",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -102,7 +103,7 @@ func verifyFailoverMetric() runner.Step {
 		Phase: runner.PhaseVerify,
 		Name:  "bloodraven_failovers_total increments for new primary",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

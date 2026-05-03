@@ -11,21 +11,37 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// MFGKey returns the controller-runtime key for the playground MFG
-// in the given namespace. Pass an empty namespace to default to the
+// MFGKey returns the controller-runtime key for the default playground
+// MFG in the given namespace. Pass an empty namespace to default to the
 // playground namespace.
 func MFGKey(namespace string) client.ObjectKey {
+	return MFGKeyForName(namespace, FailoverGroupName)
+}
+
+// MFGKeyForName returns the controller-runtime key for a named
+// MysqlFailoverGroup. Empty namespace/name values default to the
+// playground namespace and failover group name.
+func MFGKeyForName(namespace, name string) client.ObjectKey {
 	if namespace == "" {
 		namespace = PlaygroundNamespace
 	}
-	return client.ObjectKey{Namespace: namespace, Name: FailoverGroupName}
+	if name == "" {
+		name = FailoverGroupName
+	}
+	return client.ObjectKey{Namespace: namespace, Name: name}
 }
 
 // GetMFG fetches the playground MysqlFailoverGroup. The returned
 // object is a fresh deep copy — safe to read without locks.
 func (c *Client) GetMFG(ctx context.Context, namespace string) (*v1alpha1.MysqlFailoverGroup, error) {
+	return c.GetMFGNamed(ctx, namespace, FailoverGroupName)
+}
+
+// GetMFGNamed fetches the named MysqlFailoverGroup. The returned
+// object is a fresh deep copy — safe to read without locks.
+func (c *Client) GetMFGNamed(ctx context.Context, namespace, name string) (*v1alpha1.MysqlFailoverGroup, error) {
 	mfg := &v1alpha1.MysqlFailoverGroup{}
-	if err := c.Controller.Get(ctx, MFGKey(namespace), mfg); err != nil {
+	if err := c.Controller.Get(ctx, MFGKeyForName(namespace, name), mfg); err != nil {
 		return nil, fmt.Errorf("get MysqlFailoverGroup: %w", err)
 	}
 	return mfg, nil
@@ -45,6 +61,11 @@ type JSONPatchOp struct {
 // kubectl is a reliable way to turn a single chaos action into a
 // reconciliation storm.
 func (c *Client) PatchMFG(ctx context.Context, namespace string, ops []JSONPatchOp) error {
+	return c.PatchMFGNamed(ctx, namespace, FailoverGroupName, ops)
+}
+
+// PatchMFGNamed applies a JSON Patch to the named MysqlFailoverGroup.
+func (c *Client) PatchMFGNamed(ctx context.Context, namespace, name string, ops []JSONPatchOp) error {
 	if len(ops) == 0 {
 		return nil
 	}
@@ -53,11 +74,9 @@ func (c *Client) PatchMFG(ctx context.Context, namespace string, ops []JSONPatch
 		return fmt.Errorf("marshal JSON Patch: %w", err)
 	}
 	mfg := &v1alpha1.MysqlFailoverGroup{}
-	mfg.Namespace = namespace
-	if mfg.Namespace == "" {
-		mfg.Namespace = PlaygroundNamespace
-	}
-	mfg.Name = FailoverGroupName
+	key := MFGKeyForName(namespace, name)
+	mfg.Namespace = key.Namespace
+	mfg.Name = key.Name
 	patch := client.RawPatch(types.JSONPatchType, body)
 	if err := c.Controller.Patch(ctx, mfg, patch); err != nil {
 		return fmt.Errorf("patch MysqlFailoverGroup: %w", err)
@@ -70,9 +89,11 @@ func (c *Client) PatchMFG(ctx context.Context, namespace string, ops []JSONPatch
 // spec.sites; metadata annotations are safe to merge-patch). Use
 // empty value to delete the annotation key.
 func (c *Client) AnnotateMFG(ctx context.Context, namespace, key, value string) error {
-	if namespace == "" {
-		namespace = PlaygroundNamespace
-	}
+	return c.AnnotateMFGNamed(ctx, namespace, FailoverGroupName, key, value)
+}
+
+// AnnotateMFGNamed sets a single annotation key/value on the named MFG.
+func (c *Client) AnnotateMFGNamed(ctx context.Context, namespace, name, key, value string) error {
 	patch := map[string]any{
 		"metadata": map[string]any{
 			"annotations": map[string]any{
@@ -88,8 +109,9 @@ func (c *Client) AnnotateMFG(ctx context.Context, namespace, key, value string) 
 		return fmt.Errorf("marshal annotation patch: %w", err)
 	}
 	mfg := &v1alpha1.MysqlFailoverGroup{}
-	mfg.Namespace = namespace
-	mfg.Name = FailoverGroupName
+	objKey := MFGKeyForName(namespace, name)
+	mfg.Namespace = objKey.Namespace
+	mfg.Name = objKey.Name
 	rp := client.RawPatch(types.MergePatchType, body)
 	if err := c.Controller.Patch(ctx, mfg, rp); err != nil {
 		return fmt.Errorf("annotate MysqlFailoverGroup: %w", err)

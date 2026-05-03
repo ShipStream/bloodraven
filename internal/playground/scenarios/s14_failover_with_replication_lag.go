@@ -77,7 +77,7 @@ func s14InjectLagAndSeed() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "stop replica SQL_THREAD, write rows on primary, then scale primary to 0",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -204,7 +204,7 @@ func s14VerifyDrainRecoveredAll() runner.Step {
 			if postGtid == "" {
 				return fmt.Errorf("postWriteGtid not stashed")
 			}
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -256,7 +256,7 @@ func s14VerifyDrainRecoveredAll() runner.Step {
 // connection, we skip and let the next reset handle it. Failing here
 // would obscure the actual scenario result.
 func s14ResetReplicationDelay(ctx context.Context, env *runner.Env) error {
-	mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
 		return fmt.Errorf("cleanup: get MFG: %w", err)
 	}

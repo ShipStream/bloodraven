@@ -24,7 +24,7 @@ type Actions struct {
 	Namespace string
 	FG        string
 
-	mu      sync.Mutex
+	mu       sync.Mutex
 	revStack []reverter
 }
 
@@ -166,11 +166,11 @@ func (a *Actions) PartitionSite(ctx context.Context, site string) error {
 // PlannedFailoverSpec.OnCooldown.
 func (a *Actions) AnnotatePlannedFailover(ctx context.Context, target string) error {
 	const key = "bloodraven.shipstream.io/planned-failover"
-	if err := a.K.AnnotateMFG(ctx, a.Namespace, key, target); err != nil {
+	if err := a.K.AnnotateMFGNamed(ctx, a.Namespace, a.FG, key, target); err != nil {
 		return fmt.Errorf("set planned-failover annotation: %w", err)
 	}
 	a.push("clear planned-failover annotation", func(ctx context.Context) error {
-		return a.K.AnnotateMFG(ctx, a.Namespace, key, "")
+		return a.K.AnnotateMFGNamed(ctx, a.Namespace, a.FG, key, "")
 	})
 	return nil
 }
@@ -327,7 +327,7 @@ func (a *Actions) WipeSiteData(ctx context.Context, site, fgGroup string) error 
 // different originals). Returns the per-site original values for
 // scenarios that want to assert "memory ended up at newMemory" later.
 func (a *Actions) PatchSitesMemoryRequest(ctx context.Context, newMemory string) (map[string]string, error) {
-	mfg, err := a.K.GetMFG(ctx, a.Namespace)
+	mfg, err := a.K.GetMFGNamed(ctx, a.Namespace, a.FG)
 	if err != nil {
 		return nil, err
 	}
@@ -345,14 +345,14 @@ func (a *Actions) PatchSitesMemoryRequest(ctx context.Context, newMemory string)
 			Value: newMemory,
 		})
 	}
-	if err := a.K.PatchMFG(ctx, a.Namespace, ops); err != nil {
+	if err := a.K.PatchMFGNamed(ctx, a.Namespace, a.FG, ops); err != nil {
 		return nil, err
 	}
 	a.push(fmt.Sprintf("restore memory request originals (%v)", originals), func(ctx context.Context) error {
 		// Re-read the MFG: the operator may have mutated other fields
 		// since our patch (failover bumps activeSite, etc.) so we
 		// re-derive site indexes from spec.sites by name.
-		current, err := a.K.GetMFG(ctx, a.Namespace)
+		current, err := a.K.GetMFGNamed(ctx, a.Namespace, a.FG)
 		if err != nil {
 			return err
 		}
@@ -368,7 +368,7 @@ func (a *Actions) PatchSitesMemoryRequest(ctx context.Context, newMemory string)
 				Value: orig,
 			})
 		}
-		return a.K.PatchMFG(ctx, a.Namespace, revertOps)
+		return a.K.PatchMFGNamed(ctx, a.Namespace, a.FG, revertOps)
 	})
 	return originals, nil
 }
@@ -536,7 +536,7 @@ func (a *Actions) GlobalRecover(ctx context.Context) error {
 	if err := a.K.RemoveAllChaosNetworkPolicies(ctx, a.Namespace); err != nil {
 		errs = append(errs, fmt.Errorf("remove chaos NetworkPolicies: %w", err))
 	}
-	mfg, err := a.K.GetMFG(ctx, a.Namespace)
+	mfg, err := a.K.GetMFGNamed(ctx, a.Namespace, a.FG)
 	if err == nil {
 		for _, s := range mfg.Spec.Sites {
 			dep := pgkube.MysqlDeploymentName(a.FG, s.Name)

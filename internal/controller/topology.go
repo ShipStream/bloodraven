@@ -584,6 +584,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 
 	// Check replication status on every read-only site.
 	siteRepl := make([]*mysql.ReplicaStatus, len(tm.sites))
+	replicationChanged := false
 	const replicatingStreakThreshold = 2
 	for i := range tm.sites {
 		if tm.sites[i].state != state.StateReadOnly {
@@ -595,14 +596,19 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		if err != nil {
 			tm.logger.Warn("failed to check replica status", "site", tm.sites[i].name, "error", err)
 			tm.mu.Lock()
+			wasReplicating := tm.sites[i].replicating
 			tm.sites[i].replicating = false
 			tm.sites[i].replicatingStreak = 0
+			if wasReplicating {
+				replicationChanged = true
+			}
 			tm.mu.Unlock()
 			continue
 		}
 		siteRepl[i] = rs
 		healthy := rs != nil && rs.IORunning && rs.SQLRunning && rs.SourceHost != ""
 		tm.mu.Lock()
+		wasReplicating := tm.sites[i].replicating
 		if healthy {
 			tm.sites[i].replicatingStreak++
 			if tm.sites[i].replicatingStreak >= replicatingStreakThreshold {
@@ -611,6 +617,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		} else {
 			tm.sites[i].replicating = false
 			tm.sites[i].replicatingStreak = 0
+		}
+		if tm.sites[i].replicating != wasReplicating {
+			replicationChanged = true
 		}
 		tm.mu.Unlock()
 	}
@@ -668,7 +677,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 
 	// Notify the status callback on any state change, recovery event, or update event.
-	if (anyTransition || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted) && tm.StatusCallback != nil {
+	if (anyTransition || replicationChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted) && tm.StatusCallback != nil {
 		tm.StatusCallback(tm.buildSnapshot(siteRepl, alertMsg, degradedReason))
 	}
 
