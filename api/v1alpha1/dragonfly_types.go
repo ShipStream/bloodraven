@@ -54,10 +54,10 @@ type DragonflySpec struct {
 	ProactorThreads int32 `json:"proactorThreads,omitempty"`
 
 	// Args are additional command-line arguments appended to the
-	// Dragonfly container command. Operator-managed flags (--port,
-	// --admin_port, --maxmemory, --proactor_threads, --requirepass,
-	// --replicaof) take precedence and may be overridden here only with
-	// caution.
+	// Dragonfly container command. Operator-managed flags (for example
+	// --port, --admin_port, --maxmemory, --proactor_threads,
+	// --requirepass, and --replicaof) are reserved for the operator and
+	// cannot be overridden via spec.dragonfly.args.
 	// +optional
 	Args []string `json:"args,omitempty"`
 
