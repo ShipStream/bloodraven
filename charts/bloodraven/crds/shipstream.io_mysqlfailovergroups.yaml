@@ -1293,8 +1293,8 @@ spec:
                       Args are additional command-line arguments appended to the
                       Dragonfly container command. Operator-managed flags (--port,
                       --admin_port, --maxmemory, --proactor_threads, --requirepass,
-                      --replicaof) take precedence and may be overridden here only with
-                      caution.
+                      --replicaof) are reserved by the operator and are filtered out
+                      if supplied here.
                     items:
                       type: string
                     type: array
