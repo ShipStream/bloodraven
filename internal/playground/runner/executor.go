@@ -345,6 +345,11 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("metrics scraper: %w", err)
 	}
+	dragonflyPassword, err := pgdragonfly.LoadPassword(ctx, e.K, e.Cfg.Namespace)
+	if err != nil {
+		scraper.Close()
+		return nil, func() {}, fmt.Errorf("load dragonfly password: %w", err)
+	}
 
 	var (
 		mu          sync.Mutex
@@ -433,11 +438,6 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		tailerMap[component] = t
 		mu.Unlock()
 		return t, nil
-	}
-
-	dragonflyPassword, err := pgdragonfly.LoadPassword(ctx, e.K, e.Cfg.Namespace)
-	if err != nil {
-		return nil, func() {}, fmt.Errorf("load dragonfly password: %w", err)
 	}
 
 	openDragonfly := func(site string) (*pgdragonfly.SiteClient, error) {
