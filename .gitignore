@@ -3,3 +3,9 @@ bin/
 
 k3d-default.yaml
 playground/chaos-results/
+
+.claude/
+.gocache/
+.golangci-cache/
+.gomodcache/
+
