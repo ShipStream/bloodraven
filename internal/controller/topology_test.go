@@ -1085,6 +1085,103 @@ func TestPoll_ClearsReplicatingWhenReplicationStopped(t *testing.T) {
 	}
 }
 
+func TestPoll_StatusCallbackFiresWhenReplicationBecomesHealthy(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{
+		readOnly: true,
+		replicaStatusVal: &mysql.ReplicaStatus{
+			IORunning:  false,
+			SQLRunning: false,
+			SourceHost: "",
+		},
+	}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	// Settle site states with replication still unhealthy, then start
+	// counting callbacks so the assertion is about replication-only status.
+	pollN(tm, 3)
+
+	var callbacks int
+	var captured TopologySnapshot
+	tm.StatusCallback = func(snap TopologySnapshot) {
+		callbacks++
+		captured = snap
+	}
+
+	site1.mu.Lock()
+	site1.replicaStatusVal = &mysql.ReplicaStatus{
+		IORunning:  true,
+		SQLRunning: true,
+		SourceHost: "dc1",
+	}
+	site1.mu.Unlock()
+
+	pollN(tm, 1)
+	if callbacks != 0 {
+		t.Fatalf("first healthy replication tick is debounce-only, got %d callbacks", callbacks)
+	}
+	pollN(tm, 1)
+	if callbacks != 1 {
+		t.Fatalf("replication-only health change should trigger one callback, got %d", callbacks)
+	}
+	if captured.Sites[1].State != state.StateReadOnly {
+		t.Fatalf("site1 state = %s, want read-only", captured.Sites[1].State)
+	}
+	if captured.Sites[1].Replication == nil || !captured.Sites[1].Replication.IORunning || !captured.Sites[1].Replication.SQLRunning {
+		t.Fatalf("callback snapshot did not include healthy replication: %#v", captured.Sites[1].Replication)
+	}
+}
+
+func TestPoll_StatusCallbackFiresWhenReplicaStatusErrorsAfterHealthy(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{
+		readOnly: true,
+		replicaStatusVal: &mysql.ReplicaStatus{
+			IORunning:  true,
+			SQLRunning: true,
+			SourceHost: "dc1",
+		},
+	}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	pollN(tm, 4)
+
+	tm.mu.RLock()
+	replicating := tm.sites[1].replicating
+	tm.mu.RUnlock()
+	if !replicating {
+		t.Fatal("setup: expected site1.replicating=true before replica-status error")
+	}
+
+	var callbacks int
+	var captured TopologySnapshot
+	tm.StatusCallback = func(snap TopologySnapshot) {
+		callbacks++
+		captured = snap
+	}
+
+	site1.mu.Lock()
+	site1.replicaStatusErr = errors.New("replica status unavailable")
+	site1.mu.Unlock()
+
+	pollN(tm, 1)
+
+	if callbacks != 1 {
+		t.Fatalf("replica-status error after healthy state should trigger one callback, got %d", callbacks)
+	}
+	if captured.Sites[1].State != state.StateReadOnly {
+		t.Fatalf("site1 state = %s, want read-only", captured.Sites[1].State)
+	}
+	if captured.Sites[1].Replication != nil {
+		t.Fatalf("replication snapshot on error = %#v, want nil", captured.Sites[1].Replication)
+	}
+	tm.mu.RLock()
+	replicating = tm.sites[1].replicating
+	tm.mu.RUnlock()
+	if replicating {
+		t.Fatal("replicating should be false after replica-status error")
+	}
+}
+
 // TestCheckUpdate_DefersWhenStandbyNotReplicating verifies the issue #46 gate:
 // even with spec drift and both sites in the right states, checkUpdate must NOT
 // start an ordered update against a stale standby.

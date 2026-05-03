@@ -23,9 +23,9 @@ func init() {
 // not depend on scenario 8 having been run), then submits three
 // annotation values and asserts the operator reaction:
 //
-//   A) bare site name      — REJECTED (RecloneRejected event), annotation cleared
-//   B) site:wrongprefix    — REJECTED (RecloneRejected event), annotation cleared
-//   C) site:correctprefix  — ACCEPTED (RecloneRequested event), Bootstrapping condition cycles to Done
+//	A) bare site name      — REJECTED (RecloneRejected event), annotation cleared
+//	B) site:wrongprefix    — REJECTED (RecloneRejected event), annotation cleared
+//	C) site:correctprefix  — ACCEPTED (RecloneRequested event), Bootstrapping condition cycles to Done
 //
 // The cold-reclone "must include :confirm=<fg-name>" interlock branch
 // is intentionally NOT exercised here — sub-case C drives the divergent
@@ -45,9 +45,9 @@ func scenario19RecloneInterlock() runner.Scenario {
 			"(A) bare site name is REJECTED with RecloneRejected event; " +
 			"(B) wrong GTID prefix is REJECTED with RecloneRejected event; " +
 			"(C) correct 8-char prefix is ACCEPTED with RecloneRequested event and clone runs to completion.",
-		Risk:    "medium",
-		DocLink: "playground/chaos-scenarios.md#19-reclone-safety-interlock",
-		Timeout: 8 * time.Minute,
+		Risk:     "medium",
+		DocLink:  "playground/chaos-scenarios.md#19-reclone-safety-interlock",
+		Timeout:  8 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectDivergenceViaFailover(),
@@ -70,7 +70,7 @@ func injectDivergenceViaFailover() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "force a failover then write a rogue transaction on the old primary",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -248,7 +248,7 @@ func verifyRecloneAcceptedMatching() runner.Step {
 			value := site + ":" + prefix
 			env.Capture.Note(fmt.Sprintf("submitting reclone-site=%s (gtid prefix from %q)", value, gtid))
 			before := time.Now()
-			if err := env.Kube.AnnotateMFG(ctx, env.Namespace, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
 				return fmt.Errorf("set reclone annotation: %w", err)
 			}
 			// Expect a RecloneRequested event within the operator's
@@ -301,7 +301,7 @@ func verifyRecloneAcceptedMatching() runner.Step {
 func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expectedSnippet string) error {
 	env.Capture.Note(fmt.Sprintf("submitting reclone-site=%q (expecting rejection: %q)", value, expectedSnippet))
 	before := time.Now()
-	if err := env.Kube.AnnotateMFG(ctx, env.Namespace, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
 		return fmt.Errorf("set reclone annotation: %w", err)
 	}
 	// Operator sync ticker is 30s; allow 60s of slack.
@@ -319,7 +319,7 @@ func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expec
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for {
-		mfg, err := env.Kube.GetMFG(clearCtx, env.Namespace)
+		mfg, err := env.Kube.GetMFGNamed(clearCtx, env.Namespace, env.FG)
 		if err == nil {
 			if _, present := mfg.GetAnnotations()["bloodraven.shipstream.io/reclone-site"]; !present {
 				return nil

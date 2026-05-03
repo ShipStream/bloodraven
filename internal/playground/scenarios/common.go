@@ -31,7 +31,7 @@ func AssertHealthyBaseline(ctx context.Context, env *runner.Env) error {
 // Used by the chaos CLI's `check` subcommand to run structural checks
 // without a full Env. Scenarios should keep using AssertHealthyBaseline.
 func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) error {
-	mfg, err := k.GetMFG(ctx, namespace)
+	mfg, err := k.GetMFGNamed(ctx, namespace, fg)
 	if err != nil {
 		return fmt.Errorf("baseline: get MFG: %w", err)
 	}

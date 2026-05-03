@@ -44,14 +44,23 @@ type Helper struct {
 	Kube     *pgkube.Client
 	Logger   *slog.Logger
 	Interval time.Duration
+	FG       string
 }
 
 // NewHelper builds a Helper with sensible defaults.
 func NewHelper(k *pgkube.Client, logger *slog.Logger) *Helper {
+	return NewHelperForFG(k, logger, pgkube.FailoverGroupName)
+}
+
+// NewHelperForFG builds a Helper bound to a named MysqlFailoverGroup.
+func NewHelperForFG(k *pgkube.Client, logger *slog.Logger, fg string) *Helper {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Helper{Kube: k, Logger: logger, Interval: time.Second}
+	if fg == "" {
+		fg = pgkube.FailoverGroupName
+	}
+	return &Helper{Kube: k, Logger: logger, Interval: time.Second, FG: fg}
 }
 
 func (h *Helper) interval() time.Duration {
@@ -78,7 +87,7 @@ func (h *Helper) UntilCR(ctx context.Context, namespace, what string, cond CRCon
 	defer progress.Stop()
 
 	check := func() (*v1alpha1.MysqlFailoverGroup, bool, error) {
-		mfg, err := h.Kube.GetMFG(ctx, namespace)
+		mfg, err := h.Kube.GetMFGNamed(ctx, namespace, h.FG)
 		if err != nil {
 			last = "get MFG failed: " + err.Error()
 			return nil, false, nil

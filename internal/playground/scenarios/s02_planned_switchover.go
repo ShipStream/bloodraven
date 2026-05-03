@@ -42,7 +42,7 @@ func injectPlannedFailoverAnnotation() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "annotate planned-failover with peer site",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -123,7 +123,7 @@ func verifyTransactionsLostZero() runner.Step {
 		Phase: runner.PhaseVerify,
 		Name:  "transactionsLost == 0",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

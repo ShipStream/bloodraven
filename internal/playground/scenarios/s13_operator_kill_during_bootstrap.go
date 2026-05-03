@@ -72,7 +72,7 @@ func s13InjectWipePVC() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "scale read-only site to 0, clear taints, delete PVC, scale back up",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -236,7 +236,7 @@ func s13VerifyReplicaThreadsRunning() runner.Step {
 		Name:  "wiped site is replicating: replica_io_running && replica_sql_running",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			wiped := ctxFetch(env, "wipedSite")
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

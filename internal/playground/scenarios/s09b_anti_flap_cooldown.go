@@ -99,7 +99,7 @@ func s09bSnapshotFailoverCounts() runner.Step {
 			if err != nil {
 				return fmt.Errorf("scrape metrics: %w", err)
 			}
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -122,7 +122,7 @@ func s09bInjectKillPrimary() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "force-delete active primary pod (Deployment respawns it within ~5s)",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -296,7 +296,7 @@ func s09bVerifyNoPingPongAndCaptureLog() runner.Step {
 			if err != nil {
 				return fmt.Errorf("scrape metrics: %w", err)
 			}
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

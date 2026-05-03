@@ -38,7 +38,7 @@ func scenario05SplitBrainAutoResolve() runner.Scenario {
 			if err := AssertHealthyBaseline(ctx, env); err != nil {
 				return err
 			}
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -68,7 +68,7 @@ func injectForceBothWritable() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "clear super_read_only on the read-only site",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -148,7 +148,7 @@ func verifyAutoResolveMetric() runner.Step {
 		Phase: runner.PhaseVerify,
 		Name:  "bloodraven_split_brain_auto_resolve_total increments",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
+	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -60,7 +63,7 @@ func assertReplicationRunningPrecheck(ctx context.Context, env *runner.Env) erro
 	if err := AssertHealthyBaseline(ctx, env); err != nil {
 		return err
 	}
-	mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
 		return fmt.Errorf("precheck: get MFG: %w", err)
 	}
@@ -94,7 +97,7 @@ func s04InjectSeedAndKill() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "seed marker rows on primary, wait for replica catch-up, scale primary to 0",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -172,7 +175,7 @@ func s04VerifyDataIntegrity() runner.Step {
 				return fmt.Errorf("preFailoverGtid not stashed")
 			}
 			originalPrimary := ctxFetch(env, "originalPrimary")
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -217,34 +220,68 @@ func s04VerifyDataIntegrity() runner.Step {
 	}
 }
 
-// s04DropMarkerSchema runs as the scenario.Cleanup hook (after
-// Chaos.Revert scales the original primary back up but before
-// GlobalRecover). Drops the test schema on whichever site is currently
-// writable. If neither site is writable yet (mid-converge after a
-// failure), we skip — the next setup or reset will clean up.
+// s04DropMarkerSchema runs as the scenario.Cleanup hook after
+// Chaos.Revert scales the original primary back up. Wait for old-primary
+// recovery first: dropping the schema on the promoted primary while the
+// old primary is still offline creates a new GTID that the returning old
+// primary lacks, which turns a cleanup step into RecoveryBlocked state.
 func s04DropMarkerSchema(ctx context.Context, env *runner.Env) error {
-	mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+	waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	mfg, err := waitForS04CleanupBaseline(waitCtx, env)
 	if err != nil {
-		return fmt.Errorf("cleanup: get MFG: %w", err)
+		return err
 	}
-	var writable string
-	for _, s := range mfg.Status.Sites {
-		if s.State == "writable" {
-			writable = s.Name
-			break
-		}
+	writable := mfg.Status.ActiveSite
+	replica, err := PeerOf(mfg, writable)
+	if err != nil {
+		return fmt.Errorf("cleanup: resolve replica for %s: %w", writable, err)
 	}
-	if writable == "" {
-		env.Capture.Note("cleanup: no writable site found; skipping schema drop")
-		return nil
-	}
-	client, err := env.MySQL(writable)
+
+	primary, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, writable, env.Creds)
 	if err != nil {
 		return fmt.Errorf("cleanup: open %s: %w", writable, err)
 	}
-	if _, err := client.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", s04DBName)); err != nil {
-		return fmt.Errorf("cleanup: drop database %s: %w", s04DBName, err)
+	defer primary.Close()
+	if _, err := primary.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", s04DBName)); err != nil {
+		return fmt.Errorf("cleanup: drop database %s on %s: %w", s04DBName, writable, err)
 	}
-	env.Capture.Note(fmt.Sprintf("cleanup: dropped %s on %s", s04DBName, writable))
+	gtid, err := primary.GtidExecuted(ctx)
+	if err != nil {
+		return fmt.Errorf("cleanup: read post-drop gtid on %s: %w", writable, err)
+	}
+	replicaClient, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, replica, env.Creds)
+	if err != nil {
+		return fmt.Errorf("cleanup: open replica %s: %w", replica, err)
+	}
+	defer replicaClient.Close()
+	if rc, err := replicaClient.ScalarInt(waitCtx, "SELECT WAIT_FOR_EXECUTED_GTID_SET(?, 30)", gtid); err != nil {
+		return fmt.Errorf("cleanup: wait for schema drop on replica %s: %w", replica, err)
+	} else if rc != 0 {
+		return fmt.Errorf("cleanup: replica %s did not apply schema drop gtid within 30s (rc=%d gtid=%q)", replica, rc, gtid)
+	}
+	env.Capture.Note(fmt.Sprintf("cleanup: dropped %s on %s and replicated to %s", s04DBName, writable, replica))
 	return nil
+}
+
+func waitForS04CleanupBaseline(ctx context.Context, env *runner.Env) (*v1alpha1.MysqlFailoverGroup, error) {
+	return env.Wait.UntilCR(ctx, env.Namespace, "s04 cleanup waits for old-primary recovery before schema drop",
+		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			ready := pgkube.ReadyCondition(mfg) == "True"
+			var bad []string
+			for _, s := range mfg.Status.Sites {
+				if s.State != "writable" && s.State != "read-only" {
+					bad = append(bad, fmt.Sprintf("%s=%s", s.Name, s.State))
+				}
+				if s.RecoveryState == "RecoveryBlocked" {
+					bad = append(bad, fmt.Sprintf("%s=blocked", s.Name))
+				}
+				if s.Name != mfg.Status.ActiveSite && isPromotableSite(mfg, s.Name) && !s.Replicating {
+					bad = append(bad, fmt.Sprintf("%s=not-replicating", s.Name))
+				}
+			}
+			return ready && mfg.Status.ActiveSite != "" && len(bad) == 0,
+				fmt.Sprintf("ready=%v active=%q bad=%v", ready, mfg.Status.ActiveSite, bad), nil
+		},
+	)
 }

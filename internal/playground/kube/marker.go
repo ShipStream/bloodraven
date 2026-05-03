@@ -41,7 +41,13 @@ var ErrChaosMarkerConflict = errors.New("chaos marker: resourceVersion conflict 
 // if no marker is present. Returns an error only on API failure or a
 // malformed payload.
 func (c *Client) ReadChaosMarker(ctx context.Context, namespace string) (*ChaosMarker, error) {
-	mfg, err := c.GetMFG(ctx, namespace)
+	return c.ReadChaosMarkerNamed(ctx, namespace, FailoverGroupName)
+}
+
+// ReadChaosMarkerNamed returns the parsed marker on the named MFG, or
+// (nil, nil) if no marker is present.
+func (c *Client) ReadChaosMarkerNamed(ctx context.Context, namespace, name string) (*ChaosMarker, error) {
+	mfg, err := c.GetMFGNamed(ctx, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +72,12 @@ func (c *Client) ReadChaosMarker(ctx context.Context, namespace string) (*ChaosM
 // second chaos process is racing us, which is exactly the case the
 // marker is meant to detect.
 func (c *Client) SetChaosMarker(ctx context.Context, namespace string, m ChaosMarker) error {
-	mfg, err := c.GetMFG(ctx, namespace)
+	return c.SetChaosMarkerNamed(ctx, namespace, FailoverGroupName, m)
+}
+
+// SetChaosMarkerNamed installs the in-progress marker on the named MFG.
+func (c *Client) SetChaosMarkerNamed(ctx context.Context, namespace, name string, m ChaosMarker) error {
+	mfg, err := c.GetMFGNamed(ctx, namespace, name)
 	if err != nil {
 		return err
 	}
@@ -98,7 +109,7 @@ func (c *Client) SetChaosMarker(ctx context.Context, namespace string, m ChaosMa
 		Value: string(payload),
 	})
 
-	if err := c.PatchMFG(ctx, namespace, ops); err != nil {
+	if err := c.PatchMFGNamed(ctx, namespace, name, ops); err != nil {
 		if isPatchTestOpFailure(err) {
 			return ErrChaosMarkerConflict
 		}
@@ -111,11 +122,16 @@ func (c *Client) SetChaosMarker(ctx context.Context, namespace string, m ChaosMa
 // not an error (idempotent); a "remove" op against a non-existent path
 // is swallowed. Returns the underlying API error otherwise.
 func (c *Client) ClearChaosMarker(ctx context.Context, namespace string) error {
+	return c.ClearChaosMarkerNamed(ctx, namespace, FailoverGroupName)
+}
+
+// ClearChaosMarkerNamed removes the marker from the named MFG.
+func (c *Client) ClearChaosMarkerNamed(ctx context.Context, namespace, name string) error {
 	// Use a merge patch with the key set to nil — this is the
 	// idempotent "delete annotation" pattern that AnnotateMFG already
 	// relies on, and it sidesteps the JSON-Patch "remove on missing
 	// path fails" trap.
-	return c.AnnotateMFG(ctx, namespace, ChaosInProgressAnnotation, "")
+	return c.AnnotateMFGNamed(ctx, namespace, name, ChaosInProgressAnnotation, "")
 }
 
 // isPatchTestOpFailure recognizes the apierrors.StatusError shape
