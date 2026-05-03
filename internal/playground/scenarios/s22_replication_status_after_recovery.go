@@ -68,7 +68,7 @@ func s22InjectKillPrimary() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "scale active primary to 0 then back up to drive failover + recovery",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -203,7 +203,7 @@ func s22VerifySidecarReplicatingTrue() runner.Step {
 		Phase: runner.PhaseVerify,
 		Name:  "sidecar /status reports replica_io && replica_sql on the read-only site",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

@@ -60,7 +60,7 @@ func s15InjectSidecarKill() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "open log tailers, record baseline restartCount, kill sidecar PID 1",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -163,7 +163,7 @@ func s15VerifyActiveSiteUnchanged() runner.Step {
 		Name:  "status.activeSite unchanged across the sidecar restart",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			original := ctxFetch(env, "originalPrimary")
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -245,4 +245,3 @@ func s15VerifySidecarHealthy() runner.Step {
 		},
 	}
 }
-

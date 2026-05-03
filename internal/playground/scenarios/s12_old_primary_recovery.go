@@ -35,9 +35,9 @@ func scenario12OldPrimaryRecovery() runner.Scenario {
 		Hypothesis: "After a clean failover, scaling the old primary back up triggers " +
 			"'no GTID divergence, auto-recovering old primary as replica' and the cluster " +
 			"reconverges to one writable + one replicating read-only site, with no divergent transactions.",
-		Risk:    "low",
-		DocLink: "playground/chaos-scenarios.md#12-old-primary-recovery-no-divergence",
-		Timeout: 5 * time.Minute,
+		Risk:     "low",
+		DocLink:  "playground/chaos-scenarios.md#12-old-primary-recovery-no-divergence",
+		Timeout:  5 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectScaleZeroStash(),
@@ -55,7 +55,7 @@ func injectScaleZeroStash() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "scale active primary to 0 and remember it",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -194,7 +194,7 @@ func verifyReplicaThreadsRunning() runner.Step {
 		Phase: runner.PhaseVerify,
 		Name:  "replica site has replica_io_running && replica_sql_running",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

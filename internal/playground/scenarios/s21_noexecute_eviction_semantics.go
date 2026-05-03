@@ -66,7 +66,7 @@ func s21InjectCanaries() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "deploy non-tolerating + tolerating canaries on the active site's node",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

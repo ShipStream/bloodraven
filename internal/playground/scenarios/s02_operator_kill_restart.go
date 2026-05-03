@@ -31,9 +31,9 @@ func scenario02OperatorKillRestart() runner.Scenario {
 		Hypothesis: "Killing the operator pod while the cluster is healthy is absorbed within the sidecar " +
 			"lease timeout: the Deployment respawns the operator, status.activeSite does not change, and " +
 			"neither sidecar self-fences.",
-		Risk:    "low",
-		DocLink: "playground/chaos-scenarios.md#2-operator-kill-and-restart",
-		Timeout: 3 * time.Minute,
+		Risk:     "low",
+		DocLink:  "playground/chaos-scenarios.md#2-operator-kill-and-restart",
+		Timeout:  3 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectOperatorKill(),
@@ -49,7 +49,7 @@ func injectOperatorKill() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "delete operator pod, open sidecar log tailers",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -100,7 +100,7 @@ func verifyActiveSiteUnchanged() runner.Step {
 		Name:  "status.activeSite is unchanged",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			original := ctxFetch(env, "originalPrimary")
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

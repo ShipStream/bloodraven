@@ -113,7 +113,7 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 		// best-effort but still happens.
 		forensicsCtx, forensicsCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer forensicsCancel()
-		_ = cap.Persist(forensicsCtx, e.K, e.Cfg.Namespace, env.Metrics, e.tailers, failureBlock)
+		_ = cap.Persist(forensicsCtx, e.K, e.Cfg.Namespace, e.Cfg.FG, env.Metrics, e.tailers, failureBlock)
 		if !e.Cfg.NoCleanup {
 			res.CleanupErr = e.cleanup(env, s)
 		}
@@ -164,7 +164,7 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 		// `--no-cleanup` contract is "leave forensics behind" and the
 		// marker is part of that.
 		clearCtx, cancelClear := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := e.K.ClearChaosMarker(clearCtx, e.Cfg.Namespace); err != nil {
+		if err := e.K.ClearChaosMarkerNamed(clearCtx, e.Cfg.Namespace, e.Cfg.FG); err != nil {
 			env.Logger.Warn("clear chaos marker failed", "err", err)
 		}
 		cancelClear()
@@ -181,7 +181,7 @@ func (e *Executor) Run(ctx context.Context, s Scenario) Result {
 			)
 			forensicsCtx, forensicsCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer forensicsCancel()
-			_ = cap.Persist(forensicsCtx, e.K, e.Cfg.Namespace, env.Metrics, e.tailers, failureBlock)
+			_ = cap.Persist(forensicsCtx, e.K, e.Cfg.Namespace, e.Cfg.FG, env.Metrics, e.tailers, failureBlock)
 		}
 	}
 	return res
@@ -231,7 +231,7 @@ func (e *Executor) cleanup(env *Env, s Scenario) error {
 	// Clear the in-progress marker last. Best-effort: append to errs
 	// rather than fail the whole cleanup, since a stuck marker only
 	// matters for the next run's preflight.
-	if err := e.K.ClearChaosMarker(cleanCtx, e.Cfg.Namespace); err != nil {
+	if err := e.K.ClearChaosMarkerNamed(cleanCtx, e.Cfg.Namespace, e.Cfg.FG); err != nil {
 		errs = append(errs, fmt.Errorf("clear chaos marker: %w", err))
 	}
 	return errors.Join(errs...)
@@ -243,7 +243,7 @@ func (e *Executor) cleanup(env *Env, s Scenario) error {
 // remediation flag.
 func (e *Executor) preflight(ctx context.Context, env *Env, scenarioID, captureDir string) error {
 	if e.Cfg.Force {
-		if err := e.K.ClearChaosMarker(ctx, e.Cfg.Namespace); err != nil {
+		if err := e.K.ClearChaosMarkerNamed(ctx, e.Cfg.Namespace, e.Cfg.FG); err != nil {
 			env.Logger.Warn("force-clear chaos marker failed", "err", err)
 		} else {
 			env.Logger.Warn("--force: deleted prior chaos in-progress marker")
@@ -252,7 +252,7 @@ func (e *Executor) preflight(ctx context.Context, env *Env, scenarioID, captureD
 		return nil
 	}
 
-	m, err := e.K.ReadChaosMarker(ctx, e.Cfg.Namespace)
+	m, err := e.K.ReadChaosMarkerNamed(ctx, e.Cfg.Namespace, e.Cfg.FG)
 	if err != nil {
 		// Don't refuse a run because of a parse error on the marker;
 		// surface it but keep going. A malformed marker is a chaos
@@ -292,7 +292,7 @@ func (e *Executor) setMarker(ctx context.Context, scenarioID, captureDir string)
 		Host:       host,
 		CaptureDir: captureDir,
 	}
-	return e.K.SetChaosMarker(ctx, e.Cfg.Namespace, m)
+	return e.K.SetChaosMarkerNamed(ctx, e.Cfg.Namespace, e.Cfg.FG, m)
 }
 
 // processAlive reports whether a pid on the local host is still
@@ -457,7 +457,7 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		StartTime: startTime,
 		Kube:      e.K,
 		Chaos:     pgchaos.New(e.K, e.Cfg.Namespace, e.Cfg.FG),
-		Wait:      pgwait.NewHelper(e.K, logger),
+		Wait:      pgwait.NewHelperForFG(e.K, logger, e.Cfg.FG),
 		Metrics:   scraper,
 		Logger:    logger,
 		Capture:   cap,

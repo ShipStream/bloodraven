@@ -353,10 +353,8 @@ for site in iad pdx; do
      CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
      GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
      FLUSH PRIVILEGES;" 2>/dev/null; then
-    if [[ "$READ_ONLY" == "1" || "$SUPER_READ_ONLY" == "1" ]]; then
-      kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
-        mysql "-uroot" "-p${ROOT_PASS}" -e "SET GLOBAL read_only=ON; SET GLOBAL super_read_only=ON;" 2>/dev/null || true
-    fi
+    kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+      mysql "-uroot" "-p${ROOT_PASS}" -e "SET GLOBAL read_only=${READ_ONLY}; SET GLOBAL super_read_only=${SUPER_READ_ONLY};" 2>/dev/null || true
     ok "Replication user created on $site"
   else
     warn "Failed to create replication user on $site"

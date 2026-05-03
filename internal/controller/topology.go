@@ -583,8 +583,12 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		if err != nil {
 			tm.logger.Warn("failed to check replica status", "site", tm.sites[i].name, "error", err)
 			tm.mu.Lock()
+			wasReplicating := tm.sites[i].replicating
 			tm.sites[i].replicating = false
 			tm.sites[i].replicatingStreak = 0
+			if wasReplicating {
+				replicationChanged = true
+			}
 			tm.mu.Unlock()
 			continue
 		}

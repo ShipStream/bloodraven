@@ -21,8 +21,8 @@ import (
 type Capture struct {
 	Dir string
 
-	mu       sync.Mutex
-	notes    []string
+	mu        sync.Mutex
+	notes     []string
 	persisted bool
 }
 
@@ -53,7 +53,7 @@ func (c *Capture) WriteFile(name string, body []byte) error {
 // Persist gathers cluster state into the capture dir. Best-effort:
 // errors fetching individual artifacts are recorded in scenario.log
 // rather than aborting capture.
-func (c *Capture) Persist(ctx context.Context, k *pgkube.Client, namespace string, scraper *pgmetrics.Scraper, tailers map[string]*pglogs.Tailer, failure string) error {
+func (c *Capture) Persist(ctx context.Context, k *pgkube.Client, namespace, fg string, scraper *pgmetrics.Scraper, tailers map[string]*pglogs.Tailer, failure string) error {
 	c.mu.Lock()
 	if c.persisted {
 		c.mu.Unlock()
@@ -66,7 +66,7 @@ func (c *Capture) Persist(ctx context.Context, k *pgkube.Client, namespace strin
 		return err
 	}
 
-	if mfg, err := k.GetMFG(ctx, namespace); err == nil {
+	if mfg, err := k.GetMFGNamed(ctx, namespace, fg); err == nil {
 		if data, err := yaml.Marshal(mfg); err == nil {
 			_ = c.WriteFile("cluster.yaml", data)
 		} else {

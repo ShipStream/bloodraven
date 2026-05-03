@@ -35,10 +35,10 @@ const (
 // runtime's retry behavior may dedupe them).
 //
 // The end-state invariants are the assertion:
-//  - exactly one site has state=writable, exactly one has state=read-only
-//  - no sites are RecoveryBlocked
-//  - the final memory request matches the LAST patch we applied
-//    (s18PatchBaseMi + (s18PatchCount-1)*10)
+//   - exactly one site has state=writable, exactly one has state=read-only
+//   - no sites are RecoveryBlocked
+//   - the final memory request matches the LAST patch we applied
+//     (s18PatchBaseMi + (s18PatchCount-1)*10)
 //
 // We do NOT assert the path through phases — what matters is that the
 // reconciliation storm does not break the convergence guarantee.
@@ -68,7 +68,7 @@ func s18InjectFailoverAndPatchStorm() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "kill primary then apply 5 rapid memory-request patches",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -113,7 +113,7 @@ func s18InjectFailoverAndPatchStorm() runner.Step {
 				}
 				memMi := s18PatchBaseMi + i*10
 				memValue := fmt.Sprintf("%dMi", memMi)
-				current, err := env.Kube.GetMFG(ctx, env.Namespace)
+				current, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 				if err != nil {
 					return fmt.Errorf("get MFG before patch %d: %w", i+1, err)
 				}
@@ -125,7 +125,7 @@ func s18InjectFailoverAndPatchStorm() runner.Step {
 						Value: memValue,
 					})
 				}
-				if err := env.Kube.PatchMFG(ctx, env.Namespace, ops); err != nil {
+				if err := env.Kube.PatchMFGNamed(ctx, env.Namespace, env.FG, ops); err != nil {
 					return fmt.Errorf("patch %d (%s): %w", i+1, memValue, err)
 				}
 				env.Capture.Note(fmt.Sprintf("patch %d/%d applied: memory=%s", i+1, s18PatchCount, memValue))
@@ -207,7 +207,7 @@ func s18VerifyFinalMemoryRequest() runner.Step {
 			if err != nil {
 				return fmt.Errorf("parse finalMemoryValue %q: %w", finalMem, err)
 			}
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -256,7 +256,7 @@ func s18RestoreOriginalMemory(ctx context.Context, env *runner.Env) error {
 	if len(originals) == 0 {
 		return nil
 	}
-	current, err := env.Kube.GetMFG(ctx, env.Namespace)
+	current, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
 		return fmt.Errorf("cleanup: get MFG: %w", err)
 	}
@@ -275,7 +275,7 @@ func s18RestoreOriginalMemory(ctx context.Context, env *runner.Env) error {
 	if len(ops) == 0 {
 		return nil
 	}
-	if err := env.Kube.PatchMFG(ctx, env.Namespace, ops); err != nil {
+	if err := env.Kube.PatchMFGNamed(ctx, env.Namespace, env.FG, ops); err != nil {
 		return fmt.Errorf("cleanup: restore memory requests: %w", err)
 	}
 	env.Capture.Note(fmt.Sprintf("cleanup: restored memory originals %v", originals))

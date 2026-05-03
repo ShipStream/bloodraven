@@ -40,7 +40,7 @@ func main() {
 	timeout := rootFlags.Duration("timeout", 0, "override per-scenario timeout (default: scenario-defined or 5m)")
 	noCleanup := rootFlags.Bool("no-cleanup", false, "skip revert + global recover after the scenario (loud warning printed)")
 	force := rootFlags.Bool("force", false, "delete any prior chaos in-progress marker before preflight (run, run-all)")
-	autoReset := rootFlags.Bool("auto-reset", false, "on precheck failure: shell out to reset-mysql.sh + setup.sh, then retry once (3s pause unless CI=1)")
+	autoReset := rootFlags.Bool("auto-reset", false, "on precheck failure: run playground-chaos reset, then retry once (3s pause unless CI=1)")
 	continueOnFailure := rootFlags.Bool("continue-on-failure", false, "run-all only: keep going past the first failure")
 	junitOut := rootFlags.String("junit-out", "", "run-all only: write JUnit XML report to this path")
 	verbose := rootFlags.Bool("verbose", false, "verbose logging")
@@ -120,7 +120,7 @@ Flags:
   --timeout              override per-scenario timeout (default: scenario-defined or 5m)
   --no-cleanup           skip revert + global recover (loud warning)
   --force                delete any prior chaos in-progress marker before preflight
-  --auto-reset           on precheck failure: reset-mysql.sh + setup.sh, retry once
+  --auto-reset           on precheck failure: playground-chaos reset, retry once
   --continue-on-failure  run-all only: keep going past first failure
   --junit-out            run-all only: write JUnit XML to path
   --verbose              verbose logging
@@ -180,7 +180,7 @@ func check(kubeconfig, kctx, namespace, fg string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	mfg, err := k.GetMFG(ctx, namespace)
+	mfg, err := k.GetMFGNamed(ctx, namespace, fg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "check: get MFG:", err)
 		return exitEnvironment
@@ -197,7 +197,7 @@ func check(kubeconfig, kctx, namespace, fg string) int {
 	// run structural checks — it's the most useful signal when a prior
 	// run was interrupted, and it doesn't depend on the cluster being
 	// otherwise healthy.
-	marker, mErr := k.ReadChaosMarker(ctx, namespace)
+	marker, mErr := k.ReadChaosMarkerNamed(ctx, namespace, fg)
 	switch {
 	case mErr != nil:
 		fmt.Printf("inProgress: <read failed: %v>\n", mErr)
@@ -254,9 +254,9 @@ func runOne(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 }
 
 // runScenarioWithAutoReset runs a single scenario, and on a Precheck
-// failure with --auto-reset set, shells out to reset-mysql.sh + setup.sh
-// and retries once. The retry has --auto-reset disabled so we can never
-// reset more than once per scenario invocation.
+// failure with --auto-reset set, shells out to this binary's reset
+// subcommand and retries once. The retry has --auto-reset disabled so
+// we can never reset more than once per scenario invocation.
 func runScenarioWithAutoReset(ctx context.Context, k *pgkube.Client, kubeconfig, kctx string, scen runner.Scenario, namespace, fg, resultsDir string, noCleanup, force, autoReset bool, logger *slog.Logger) runner.Result {
 	executor := &runner.Executor{
 		K: k,

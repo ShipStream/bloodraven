@@ -30,11 +30,12 @@ import (
 )
 
 const (
-	operatorDeployment = "bloodraven"
-	mysqlSelector      = "app.kubernetes.io/name=mysql"
-	operatorSelector   = "app.kubernetes.io/name=bloodraven"
-	readonlyTaintKey   = "shipstream.io/db-readonly-playground"
-	legacyTaintKey     = "shipstream.io/db-readonly"
+	operatorDeployment          = "bloodraven"
+	mysqlSelector               = "app.kubernetes.io/name=mysql"
+	operatorSelector            = "app.kubernetes.io/name=bloodraven"
+	readonlyTaintKey            = "shipstream.io/db-readonly-playground"
+	legacyTaintKey              = "shipstream.io/db-readonly"
+	resetBaselineStableDuration = 20 * time.Second
 )
 
 type resetter struct {
@@ -85,7 +86,7 @@ func resetPlayground(kubeconfig, kctx, namespace, fg, resultsDir string, logger 
 
 func (r *resetter) run(ctx context.Context) error {
 	r.info("context %s", r.k.CurrentCtx)
-	mfg, err := r.k.GetMFG(ctx, r.namespace)
+	mfg, err := r.k.GetMFGNamed(ctx, r.namespace, r.fg)
 	if err != nil {
 		return fmt.Errorf("get MFG: %w", err)
 	}
@@ -154,14 +155,10 @@ func (r *resetter) scaleMysqlDown(ctx context.Context, sites []v1alpha1.SiteSpec
 }
 
 func (r *resetter) clearTransientState(ctx context.Context, _ []v1alpha1.SiteSpec) error {
-	var errs []error
-	if err := r.k.ClearChaosMarker(ctx, r.namespace); err != nil {
-		errs = append(errs, fmt.Errorf("clear chaos marker: %w", err))
+	if err := r.k.ClearChaosMarkerNamed(ctx, r.namespace, r.fg); err != nil {
+		return fmt.Errorf("clear chaos marker: %w", err)
 	}
-	if err := r.clearReadOnlyTaints(ctx); err != nil {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
+	return nil
 }
 
 func (r *resetter) deleteStorage(ctx context.Context, _ []v1alpha1.SiteSpec) error {
@@ -170,42 +167,50 @@ func (r *resetter) deleteStorage(ctx context.Context, _ []v1alpha1.SiteSpec) err
 	if err != nil {
 		return err
 	}
+	ownedPVCs := pvcNameSet(pvcs.Items)
 	for i := range pvcs.Items {
 		pvc := &pvcs.Items[i]
-		if len(pvc.Finalizers) > 0 {
-			if err := r.patchPVCFinalizers(ctx, pvc.Name, nil); err != nil {
-				errs = append(errs, fmt.Errorf("patch pvc %s finalizers: %w", pvc.Name, err))
-			}
-		}
 		if err := r.k.Kubernetes.CoreV1().PersistentVolumeClaims(r.namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			errs = append(errs, fmt.Errorf("delete pvc %s: %w", pvc.Name, err))
 		}
 	}
-	if err := r.waitPVCsGone(ctx, 60*time.Second); err != nil {
-		errs = append(errs, err)
+	if err := r.waitNamedPVCsGone(ctx, ownedPVCs, 60*time.Second); err != nil {
+		if forceErr := r.forceDeleteStuckPVCs(ctx, ownedPVCs); forceErr != nil {
+			errs = append(errs, err)
+			errs = append(errs, forceErr)
+		} else if waitErr := r.waitNamedPVCsGone(ctx, ownedPVCs, 30*time.Second); waitErr != nil {
+			errs = append(errs, err)
+			errs = append(errs, waitErr)
+		}
 	}
 	pvs, err := r.k.Kubernetes.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return errors.Join(append(errs, err)...)
 	}
+	ownedPVs := map[string]struct{}{}
 	for i := range pvs.Items {
 		pv := &pvs.Items[i]
-		if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != r.namespace {
+		if !pvClaimOwnedBy(pv, r.namespace, ownedPVCs) {
 			continue
 		}
-		if len(pv.Finalizers) > 0 {
-			if err := r.patchPVFinalizers(ctx, pv.Name, nil); err != nil {
-				errs = append(errs, fmt.Errorf("patch pv %s finalizers: %w", pv.Name, err))
-			}
-		}
+		ownedPVs[pv.Name] = struct{}{}
 		if err := r.k.Kubernetes.CoreV1().PersistentVolumes().Delete(ctx, pv.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			errs = append(errs, fmt.Errorf("delete pv %s: %w", pv.Name, err))
+		}
+	}
+	if err := r.waitNamedPVsGone(ctx, ownedPVs, 60*time.Second); err != nil {
+		if forceErr := r.forceDeleteStuckPVs(ctx, ownedPVs); forceErr != nil {
+			errs = append(errs, err)
+			errs = append(errs, forceErr)
+		} else if waitErr := r.waitNamedPVsGone(ctx, ownedPVs, 30*time.Second); waitErr != nil {
+			errs = append(errs, err)
+			errs = append(errs, waitErr)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (r *resetter) wipeNodeStorage(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) wipeNodeStorage(ctx context.Context, sites []v1alpha1.SiteSpec) error {
 	if r.runtime == "" {
 		r.warn("no docker/podman runtime found; skipping k3d hostPath wipe")
 		return nil
@@ -219,7 +224,7 @@ func (r *resetter) wipeNodeStorage(ctx context.Context, _ []v1alpha1.SiteSpec) e
 		if !strings.HasPrefix(node.Name, "k3d-") {
 			continue
 		}
-		cmd := exec.CommandContext(ctx, r.runtime, "exec", node.Name, "sh", "-c", "rm -rf /var/lib/rancher/k3s/storage/pvc-* /var/lib/rancher/k3s/storage/manual-mysql-playground-*")
+		cmd := exec.CommandContext(ctx, r.runtime, "exec", node.Name, "sh", "-c", "rm -rf "+strings.Join(r.nodeStorageWipePaths(sites), " "))
 		if out, err := cmd.CombinedOutput(); err != nil {
 			errs = append(errs, fmt.Errorf("%s exec %s: %w: %s", r.runtime, node.Name, err, strings.TrimSpace(string(out))))
 		}
@@ -253,12 +258,7 @@ func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1alpha1.SiteSpec
 	if err := yaml.Unmarshal(body, secret); err != nil {
 		return err
 	}
-	if secret.Namespace == "" {
-		secret.Namespace = r.namespace
-	}
-	secret.ResourceVersion = ""
-	secret.UID = ""
-	secret.ManagedFields = nil
+	prepareSecretForApply(secret, r.namespace)
 	_, err = r.k.Kubernetes.CoreV1().Secrets(secret.Namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		current, getErr := r.k.Kubernetes.CoreV1().Secrets(secret.Namespace).Get(ctx, secret.Name, metav1.GetOptions{})
@@ -272,7 +272,7 @@ func (r *resetter) reapplyMysqlSecret(ctx context.Context, _ []v1alpha1.SiteSpec
 }
 
 func (r *resetter) clearMFGStatus(ctx context.Context, _ []v1alpha1.SiteSpec) error {
-	mfg, err := r.k.GetMFG(ctx, r.namespace)
+	mfg, err := r.k.GetMFGNamed(ctx, r.namespace, r.fg)
 	if apierrors.IsNotFound(err) {
 		r.warn("MFG %s not found; skipping status clear", r.fg)
 		return nil
@@ -318,7 +318,7 @@ func (r *resetter) recreatePVCs(ctx context.Context, sites []v1alpha1.SiteSpec) 
 	if err := r.scaleOperatorDown(ctx, sites); err != nil {
 		return err
 	}
-	return r.clearReadOnlyTaints(ctx)
+	return nil
 }
 
 func (r *resetter) bindPVs(ctx context.Context, sites []v1alpha1.SiteSpec) error {
@@ -380,18 +380,30 @@ func (r *resetter) startOperator(ctx context.Context, _ []v1alpha1.SiteSpec) err
 	return r.waitDeploymentAvailable(ctx, r.namespace, operatorDeployment, 2*time.Minute)
 }
 
-func (r *resetter) waitBaseline(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+func (r *resetter) waitBaseline(ctx context.Context, sites []v1alpha1.SiteSpec) error {
 	deadline := time.Now().Add(4 * time.Minute)
 	var last error
+	var healthySince time.Time
 	for time.Now().Before(deadline) {
 		if err := scenarios.CheckBaseline(ctx, r.k, r.namespace, r.fg); err == nil {
-			mfg, _ := r.k.GetMFG(ctx, r.namespace)
-			if mfg != nil {
-				r.info("baseline ok: activeSite=%s", mfg.Status.ActiveSite)
+			if err := r.mysqlDeploymentsStable(ctx, sites); err != nil {
+				last = err
+				healthySince = time.Time{}
+			} else if healthySince.IsZero() {
+				healthySince = time.Now()
+				last = fmt.Errorf("baseline healthy; waiting %s for stability", resetBaselineStableDuration)
+			} else if time.Since(healthySince) >= resetBaselineStableDuration {
+				mfg, _ := r.k.GetMFGNamed(ctx, r.namespace, r.fg)
+				if mfg != nil {
+					r.info("baseline ok: activeSite=%s", mfg.Status.ActiveSite)
+				}
+				return nil
+			} else {
+				last = fmt.Errorf("baseline healthy for %s/%s", time.Since(healthySince).Round(time.Second), resetBaselineStableDuration)
 			}
-			return nil
 		} else {
 			last = err
+			healthySince = time.Time{}
 		}
 		select {
 		case <-ctx.Done():
@@ -400,6 +412,24 @@ func (r *resetter) waitBaseline(ctx context.Context, _ []v1alpha1.SiteSpec) erro
 		}
 	}
 	return fmt.Errorf("timed out waiting for healthy baseline: %w", last)
+}
+
+func (r *resetter) mysqlDeploymentsStable(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+	for _, site := range sites {
+		name := pgkube.MysqlDeploymentName(r.fg, site.Name)
+		dep, err := r.k.Kubernetes.AppsV1().Deployments(r.namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get deployment %s: %w", name, err)
+		}
+		if dep.Status.ObservedGeneration < dep.Generation {
+			return fmt.Errorf("deployment %s has unapplied generation observed=%d want=%d", name, dep.Status.ObservedGeneration, dep.Generation)
+		}
+		want := desiredReplicas(dep)
+		if dep.Status.UpdatedReplicas < want || dep.Status.AvailableReplicas < want {
+			return fmt.Errorf("deployment %s not settled: %s", name, deploymentSummary(dep))
+		}
+	}
+	return nil
 }
 
 func (r *resetter) scaleDeploymentIfExists(ctx context.Context, name string, replicas int32) error {
@@ -454,13 +484,37 @@ func (r *resetter) waitPodsGone(ctx context.Context, selector string, timeout ti
 	})
 }
 
-func (r *resetter) waitPVCsGone(ctx context.Context, timeout time.Duration) error {
+func (r *resetter) waitNamedPVCsGone(ctx context.Context, names map[string]struct{}, timeout time.Duration) error {
+	if len(names) == 0 {
+		return nil
+	}
 	return pollUntil(ctx, timeout, time.Second, func(ctx context.Context) (bool, string, error) {
-		pvcs, err := r.k.Kubernetes.CoreV1().PersistentVolumeClaims(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: mysqlSelector})
-		if err != nil {
-			return false, "list pvcs failed: " + err.Error(), nil
+		var remain []string
+		for name := range names {
+			if _, err := r.k.Kubernetes.CoreV1().PersistentVolumeClaims(r.namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
+				remain = append(remain, name)
+			} else if !apierrors.IsNotFound(err) {
+				return false, "get pvc failed: " + err.Error(), nil
+			}
 		}
-		return len(pvcs.Items) == 0, fmt.Sprintf("%d mysql PVCs remain", len(pvcs.Items)), nil
+		return len(remain) == 0, fmt.Sprintf("PVCs remain=%v", remain), nil
+	})
+}
+
+func (r *resetter) waitNamedPVsGone(ctx context.Context, names map[string]struct{}, timeout time.Duration) error {
+	if len(names) == 0 {
+		return nil
+	}
+	return pollUntil(ctx, timeout, time.Second, func(ctx context.Context) (bool, string, error) {
+		var remain []string
+		for name := range names {
+			if _, err := r.k.Kubernetes.CoreV1().PersistentVolumes().Get(ctx, name, metav1.GetOptions{}); err == nil {
+				remain = append(remain, name)
+			} else if !apierrors.IsNotFound(err) {
+				return false, "get pv failed: " + err.Error(), nil
+			}
+		}
+		return len(remain) == 0, fmt.Sprintf("PVs remain=%v", remain), nil
 	})
 }
 
@@ -612,7 +666,7 @@ func (r *resetter) createReplicationUser(ctx context.Context, db *sql.DB, replUs
 }
 
 func escapeSQLString(s string) string {
-	s = strings.ReplaceAll(s, `\\`, `\\\\`)
+	s = strings.ReplaceAll(s, `\`, `\\`)
 	return strings.ReplaceAll(s, `'`, `''`)
 }
 
@@ -628,6 +682,96 @@ func (r *resetter) patchPVFinalizers(ctx context.Context, name string, finalizer
 	return err
 }
 
+func (r *resetter) forceDeleteStuckPVCs(ctx context.Context, names map[string]struct{}) error {
+	var errs []error
+	for name := range names {
+		pvc, err := r.k.Kubernetes.CoreV1().PersistentVolumeClaims(r.namespace).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("get pvc %s: %w", name, err))
+			continue
+		}
+		if !stuckWithFinalizers(pvc.ObjectMeta) {
+			continue
+		}
+		if err := r.patchPVCFinalizers(ctx, name, nil); err != nil {
+			errs = append(errs, fmt.Errorf("patch pvc %s finalizers: %w", name, err))
+			continue
+		}
+		if err := r.k.Kubernetes.CoreV1().PersistentVolumeClaims(r.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete pvc %s after finalizer patch: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (r *resetter) forceDeleteStuckPVs(ctx context.Context, names map[string]struct{}) error {
+	var errs []error
+	for name := range names {
+		pv, err := r.k.Kubernetes.CoreV1().PersistentVolumes().Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("get pv %s: %w", name, err))
+			continue
+		}
+		if !stuckWithFinalizers(pv.ObjectMeta) {
+			continue
+		}
+		if err := r.patchPVFinalizers(ctx, name, nil); err != nil {
+			errs = append(errs, fmt.Errorf("patch pv %s finalizers: %w", name, err))
+			continue
+		}
+		if err := r.k.Kubernetes.CoreV1().PersistentVolumes().Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete pv %s after finalizer patch: %w", name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (r *resetter) nodeStorageWipePaths(sites []v1alpha1.SiteSpec) []string {
+	paths := []string{"/var/lib/rancher/k3s/storage/pvc-*"}
+	for _, site := range sites {
+		path := "/var/lib/rancher/k3s/storage/manual-" + pgkube.MysqlPVCName(r.fg, site.Name)
+		paths = append(paths, shellQuote(path))
+	}
+	return paths
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func pvcNameSet(pvcs []corev1.PersistentVolumeClaim) map[string]struct{} {
+	names := make(map[string]struct{}, len(pvcs))
+	for i := range pvcs {
+		names[pvcs[i].Name] = struct{}{}
+	}
+	return names
+}
+
+func pvClaimOwnedBy(pv *corev1.PersistentVolume, namespace string, pvcNames map[string]struct{}) bool {
+	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != namespace {
+		return false
+	}
+	_, ok := pvcNames[pv.Spec.ClaimRef.Name]
+	return ok
+}
+
+func stuckWithFinalizers(meta metav1.ObjectMeta) bool {
+	return meta.DeletionTimestamp != nil && len(meta.Finalizers) > 0
+}
+
+func prepareSecretForApply(secret *corev1.Secret, namespace string) {
+	secret.Namespace = namespace
+	secret.ResourceVersion = ""
+	secret.UID = ""
+	secret.ManagedFields = nil
+}
+
 func (r *resetter) persistFailure(ctx context.Context, failure error) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -639,7 +783,7 @@ func (r *resetter) persistFailure(ctx context.Context, failure error) error {
 		_ = os.WriteFile(filepath.Join(dir, name), body, 0o644)
 	}
 	write("failure.txt", []byte(failure.Error()+"\n"))
-	if mfg, err := r.k.GetMFG(ctx, r.namespace); err == nil {
+	if mfg, err := r.k.GetMFGNamed(ctx, r.namespace, r.fg); err == nil {
 		if body, err := yaml.Marshal(mfg); err == nil {
 			write("cluster.yaml", body)
 		}

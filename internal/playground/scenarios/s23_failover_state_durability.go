@@ -65,7 +65,7 @@ func s23InjectKillPrimary() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "scale active primary to 0 to trigger failover",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -158,7 +158,7 @@ func s23VerifyStateSurvivedRestart() runner.Step {
 			expectedTarget := ctxFetch(env, "preRestartTarget")
 			expectedActive := ctxFetch(env, "preRestartActive")
 			expectedStamp := ctxFetch(env, "preRestartStamp")
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

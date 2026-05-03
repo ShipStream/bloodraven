@@ -63,7 +63,7 @@ func assertReplicationRunningPrecheck(ctx context.Context, env *runner.Env) erro
 	if err := AssertHealthyBaseline(ctx, env); err != nil {
 		return err
 	}
-	mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
 		return fmt.Errorf("precheck: get MFG: %w", err)
 	}
@@ -97,7 +97,7 @@ func s04InjectSeedAndKill() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "seed marker rows on primary, wait for replica catch-up, scale primary to 0",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
@@ -175,7 +175,7 @@ func s04VerifyDataIntegrity() runner.Step {
 				return fmt.Errorf("preFailoverGtid not stashed")
 			}
 			originalPrimary := ctxFetch(env, "originalPrimary")
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}

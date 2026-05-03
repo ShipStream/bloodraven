@@ -34,9 +34,9 @@ func scenario06SelfFenceIsolatedPrimary() runner.Scenario {
 		Hypothesis: "With the operator scaled to 0 AND the peer site scaled to 0, the active primary's " +
 			"sidecar exceeds leaseTimeout with no reachable Bloodraven and no reachable peer, sets " +
 			"super_read_only=ON, and logs SELF-FENCED.",
-		Risk:    "medium",
-		DocLink: "playground/chaos-scenarios.md#6-self-fencing-validation",
-		Timeout: 4 * time.Minute,
+		Risk:     "medium",
+		DocLink:  "playground/chaos-scenarios.md#6-self-fencing-validation",
+		Timeout:  4 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectIsolatePrimary(),
@@ -51,7 +51,7 @@ func injectIsolatePrimary() runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "open tailers, scale operator and peer to 0",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
