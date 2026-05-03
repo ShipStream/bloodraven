@@ -94,7 +94,7 @@ type MysqlFailoverGroupReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -244,8 +244,10 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// When Dragonfly is disabled, reconcileDragonflyResources actively removes
 	// any previously managed Dragonfly resources so MySQL-only deployments are
 	// unaffected.
-	if err := r.reconcileDragonflyResources(ctx, &fg); err != nil {
+	if dragonflyRequeue, err := r.reconcileDragonflyResources(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly resources: %w", err)
+	} else if dragonflyRequeue > 0 {
+		return ctrl.Result{RequeueAfter: dragonflyRequeue}, nil
 	}
 
 	// Reconcile MySQL users for credentials mode.
@@ -362,6 +364,7 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&batchv1.Job{}).
 		Owns(&batchv1.CronJob{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToFailoverGroup)).
@@ -700,7 +703,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			}
 		}
 	}
-	specHash := computeSpecHash(fg, site, tlsSecretData, credSecretData)
+	specHash := ComputeSpecHash(fg, site, tlsSecretData, credSecretData)
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		if err := controllerutil.SetControllerReference(fg, deploy, r.Scheme); err != nil {
@@ -1425,10 +1428,10 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 	return nil
 }
 
-// computeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
+// ComputeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
 // tlsSecretData is the raw data from the TLS Secret (nil when TLS is not configured).
 // credSecretData is a map of secret-name→data for credential secrets (nil in legacy mode).
-func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsSecretData map[string][]byte, credSecretData map[string]map[string][]byte) string {
+func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsSecretData map[string][]byte, credSecretData map[string]map[string][]byte) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
 	fmt.Fprintf(h, "sidecar=%s\n", fg.Spec.SidecarImage)

@@ -3,11 +3,15 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -129,112 +133,108 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSet(ctx context
 	}
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sts, func() error {
-		if err := controllerutil.SetControllerReference(fg, sts, r.Scheme); err != nil {
-			return err
-		}
-
-		labels := dragonflyCommonLabels(fg.Name, site.Name)
-		sts.Labels = labels
-
-		var replicas int32 = 1
-		port := dragonflyPort(spec)
-		adminPort := dragonflyAdminPort(spec)
-
-		args := buildDragonflyArgs(spec, port, adminPort)
-		env := buildDragonflyEnv(spec)
-
-		container := corev1.Container{
-			Name:  dragonflyContainerName,
-			Image: spec.Image,
-			Args:  args,
-			Env:   env,
-			Ports: []corev1.ContainerPort{
-				{Name: "client", ContainerPort: port, Protocol: corev1.ProtocolTCP},
-				{Name: "admin", ContainerPort: adminPort, Protocol: corev1.ProtocolTCP},
-			},
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: "data", MountPath: "/data"},
-			},
-			Resources: spec.Resources,
-			LivenessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
-				},
-				InitialDelaySeconds: 5,
-				PeriodSeconds:       10,
-			},
-			ReadinessProbe: &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
-				},
-				InitialDelaySeconds: 2,
-				PeriodSeconds:       5,
-			},
-		}
-
-		// Selector is immutable on a StatefulSet. Only set it on create.
-		if sts.Spec.Selector == nil {
-			sts.Spec.Selector = &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					labelAppName:  dragonflyAppName,
-					labelInstance: fg.Name,
-					labelSite:     site.Name,
-				},
-			}
-		}
-
-		// Pod labels include the operator-assigned dragonfly-role
-		// (default "replica") and dragonfly-traffic=enabled. The
-		// DragonflyManager / planned-failover handlers rewrite these on
-		// the active site during promotion. Static labels here must not
-		// depend on mutable status, otherwise every status change would
-		// trigger a rollout. A pod that loses the traffic label
-		// transiently during a strip→takeover→restore sequence is
-		// re-stamped at the end of that sequence; if the StatefulSet
-		// recreates the pod for any reason, the freshly-rendered
-		// template's traffic=enabled brings it back into the Service
-		// without operator intervention.
-		podLabels := make(map[string]string, len(labels)+2)
-		for k, v := range labels {
-			podLabels[k] = v
-		}
-		podLabels[labelDragonflyRole] = "replica"
-		podLabels[labelDragonflyTraffic] = dragonflyTrafficEnabled
-
-		sts.Spec.Replicas = &replicas
-		sts.Spec.ServiceName = dragonflySiteServiceName(fg.Name, site.Name)
-		sts.Spec.Template = corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{
-				Labels: podLabels,
-			},
-			Spec: corev1.PodSpec{
-				ServiceAccountName: dragonflyServiceAccountName(spec),
-				NodeSelector: map[string]string{
-					"topology.kubernetes.io/zone": site.Zone,
-				},
-				// Tolerate the failover group's db-readonly taint so
-				// Dragonfly stays resident through site read-only states
-				// — same contract as MySQL.
-				Tolerations: []corev1.Toleration{
-					{
-						Key:      platform.TaintKeyForGroup(fg.Name),
-						Operator: corev1.TolerationOpExists,
-					},
-				},
-				Containers: []corev1.Container{container},
-				Volumes: []corev1.Volume{
-					{
-						Name: "data",
-						VolumeSource: corev1.VolumeSource{
-							EmptyDir: &corev1.EmptyDirVolumeSource{},
-						},
-					},
-				},
-			},
-		}
-		return nil
+		return r.applyDragonflyStatefulSetSpec(fg, site, sts)
 	})
 	return err
+}
+
+func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, sts *appsv1.StatefulSet) error {
+	spec := fg.Spec.Dragonfly
+	if err := controllerutil.SetControllerReference(fg, sts, r.Scheme); err != nil {
+		return err
+	}
+
+	labels := dragonflyCommonLabels(fg.Name, site.Name)
+	sts.Labels = labels
+
+	var replicas int32 = 1
+	port := dragonflyPort(spec)
+	adminPort := dragonflyAdminPort(spec)
+
+	args := buildDragonflyArgs(spec, port, adminPort)
+	env := buildDragonflyEnv(spec)
+
+	container := corev1.Container{
+		Name:  dragonflyContainerName,
+		Image: spec.Image,
+		Args:  args,
+		Env:   env,
+		Ports: []corev1.ContainerPort{
+			{Name: "client", ContainerPort: port, Protocol: corev1.ProtocolTCP},
+			{Name: "admin", ContainerPort: adminPort, Protocol: corev1.ProtocolTCP},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "data", MountPath: "/data"},
+		},
+		Resources: spec.Resources,
+		LivenessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
+			},
+			InitialDelaySeconds: 5,
+			PeriodSeconds:       10,
+		},
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
+			},
+			InitialDelaySeconds: 2,
+			PeriodSeconds:       5,
+		},
+	}
+
+	// Selector is immutable on a StatefulSet. Only set it on create.
+	if sts.Spec.Selector == nil {
+		sts.Spec.Selector = &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				labelAppName:  dragonflyAppName,
+				labelInstance: fg.Name,
+				labelSite:     site.Name,
+			},
+		}
+	}
+
+	// Pod labels include the operator-assigned dragonfly-role (default
+	// "replica") and dragonfly-traffic=enabled. The DragonflyManager /
+	// planned-failover handlers rewrite these on the active site during
+	// promotion. Static labels here must not depend on mutable status,
+	// otherwise every status change would trigger a rollout.
+	podLabels := make(map[string]string, len(labels)+2)
+	for k, v := range labels {
+		podLabels[k] = v
+	}
+	podLabels[labelDragonflyRole] = "replica"
+	podLabels[labelDragonflyTraffic] = dragonflyTrafficEnabled
+
+	sts.Spec.Replicas = &replicas
+	sts.Spec.ServiceName = dragonflySiteServiceName(fg.Name, site.Name)
+	sts.Spec.Template = corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: podLabels,
+		},
+		Spec: corev1.PodSpec{
+			ServiceAccountName: dragonflyServiceAccountName(spec),
+			NodeSelector: map[string]string{
+				"topology.kubernetes.io/zone": site.Zone,
+			},
+			Tolerations: []corev1.Toleration{
+				{
+					Key:      platform.TaintKeyForGroup(fg.Name),
+					Operator: corev1.TolerationOpExists,
+				},
+			},
+			Containers: []corev1.Container{container},
+			Volumes: []corev1.Volume{
+				{
+					Name: "data",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
+			},
+		},
+	}
+	return nil
 }
 
 // buildDragonflyArgs assembles the Dragonfly container command-line. The
@@ -493,6 +493,37 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyActiveService(ctx conte
 	return err
 }
 
+func (r *MysqlFailoverGroupReconciler) reconcileDragonflyPDB(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dragonflyActiveServiceName(fg.Name),
+			Namespace: fg.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, pdb, func() error {
+		if err := controllerutil.SetControllerReference(fg, pdb, r.Scheme); err != nil {
+			return err
+		}
+		pdb.Labels = map[string]string{
+			labelAppName:       dragonflyAppName,
+			labelInstance:      fg.Name,
+			labelFailoverGroup: fg.Name,
+			labelManagedBy:     managerName,
+		}
+		pdb.Spec = policyv1.PodDisruptionBudgetSpec{
+			MinAvailable: &intstr.IntOrString{Type: intstr.Int, IntVal: 1},
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					labelAppName:  dragonflyAppName,
+					labelInstance: fg.Name,
+				},
+			},
+		}
+		return nil
+	})
+	return err
+}
+
 // reconcileDragonflyResources is the entry point called from Reconcile().
 // It creates or updates per-site StatefulSets/Services and the active
 // Service when spec.dragonfly is enabled.
@@ -503,22 +534,300 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyActiveService(ctx conte
 // spec.dragonfly.enabled=false would otherwise leave orphan
 // StatefulSets, per-site Services, and the active Service routing live
 // traffic to a Dragonfly the operator no longer manages.
-func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	if !dragonflyEnabled(fg) {
-		return r.teardownDragonflyResources(ctx, fg)
+		return 0, r.teardownDragonflyResources(ctx, fg)
 	}
 	for _, site := range fg.Spec.Sites {
-		if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
-			return fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
-		}
 		if err := r.reconcileDragonflySiteService(ctx, fg, site); err != nil {
-			return fmt.Errorf("reconcile dragonfly site service %s: %w", site.Name, err)
+			return 0, fmt.Errorf("reconcile dragonfly site service %s: %w", site.Name, err)
 		}
+	}
+	requeue, err := r.reconcileDragonflyStatefulSetsSerial(ctx, fg)
+	if err != nil {
+		return 0, err
 	}
 	if err := r.reconcileDragonflyActiveService(ctx, fg); err != nil {
-		return fmt.Errorf("reconcile dragonfly active service: %w", err)
+		return 0, fmt.Errorf("reconcile dragonfly active service: %w", err)
 	}
-	return nil
+	if err := r.reconcileDragonflyPDB(ctx, fg); err != nil {
+		return 0, fmt.Errorf("reconcile dragonfly pdb: %w", err)
+	}
+	return requeue, nil
+}
+
+func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
+	const requeueAfter = 2 * time.Second
+
+	activeSite := effectiveDragonflyMasterSite(fg)
+	var activeDrift *v1alpha1.SiteSpec
+
+	for i := range fg.Spec.Sites {
+		site := fg.Spec.Sites[i]
+		var current appsv1.StatefulSet
+		key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site.Name)}
+		if err := r.Get(ctx, key, &current); err != nil {
+			if apierrors.IsNotFound(err) {
+				if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
+					return 0, fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
+				}
+				continue
+			}
+			return 0, fmt.Errorf("get dragonfly statefulset %s: %w", site.Name, err)
+		}
+
+		desired, err := r.desiredDragonflyStatefulSet(fg, site)
+		if err != nil {
+			return 0, fmt.Errorf("build desired dragonfly statefulset %s: %w", site.Name, err)
+		}
+		if !dragonflyStatefulSetTemplateEqual(&current, desired) {
+			if site.Name == activeSite {
+				activeDrift = &fg.Spec.Sites[i]
+				continue
+			}
+			if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
+				return 0, fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
+			}
+			return requeueAfter, nil
+		}
+	}
+
+	if activeDrift != nil {
+		if plannedFailoverInFlight(fg.Status.PlannedFailover) {
+			return requeueAfter, nil
+		}
+		promotionTarget := ""
+		for _, site := range fg.Spec.Sites {
+			if site.Name == activeSite {
+				continue
+			}
+			var current appsv1.StatefulSet
+			key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site.Name)}
+			if err := r.Get(ctx, key, &current); err != nil {
+				return 0, fmt.Errorf("get dragonfly statefulset %s before active rollout: %w", site.Name, err)
+			}
+			if !dragonflyStatefulSetRolloutComplete(&current) {
+				return requeueAfter, nil
+			}
+			if promotionTarget == "" {
+				promotionTarget = site.Name
+			}
+		}
+		if promotionTarget != "" {
+			r.promoteDragonflyForRollout(ctx, fg, promotionTarget, activeSite)
+			return requeueAfter, nil
+		}
+		if err := r.reconcileDragonflyStatefulSet(ctx, fg, *activeDrift); err != nil {
+			return 0, fmt.Errorf("reconcile active dragonfly statefulset %s: %w", activeDrift.Name, err)
+		}
+		return requeueAfter, nil
+	}
+
+	for _, site := range fg.Spec.Sites {
+		if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
+			return 0, fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
+		}
+	}
+	return 0, nil
+}
+
+func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string) {
+	mgr := NewDragonflyManager(
+		r.Client,
+		r.Recorder,
+		slog.Default(),
+		types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name},
+		0,
+	)
+	if r.dragonflyConnector != nil {
+		mgr.SetConnector(r.dragonflyConnector)
+	}
+	mgr.TryEmergencyPromote(ctx, target, oldSource)
+}
+
+func (r *MysqlFailoverGroupReconciler) desiredDragonflyStatefulSet(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) (*appsv1.StatefulSet, error) {
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dragonflyStatefulSetName(fg.Name, site.Name),
+			Namespace: fg.Namespace,
+		},
+	}
+	if err := r.applyDragonflyStatefulSetSpec(fg, site, sts); err != nil {
+		return nil, err
+	}
+	return sts, nil
+}
+
+func dragonflyStatefulSetTemplateEqual(current, desired *appsv1.StatefulSet) bool {
+	if !stringMapEqual(current.Spec.Template.Labels, desired.Spec.Template.Labels) {
+		return false
+	}
+	curSpec := current.Spec.Template.Spec
+	wantSpec := desired.Spec.Template.Spec
+	if curSpec.ServiceAccountName != wantSpec.ServiceAccountName {
+		return false
+	}
+	if !stringMapEqual(curSpec.NodeSelector, wantSpec.NodeSelector) {
+		return false
+	}
+	if !corev1TolerationsEqual(curSpec.Tolerations, wantSpec.Tolerations) {
+		return false
+	}
+	if !corev1VolumesEqual(curSpec.Volumes, wantSpec.Volumes) {
+		return false
+	}
+	cur, ok := dragonflyContainerFromTemplate(curSpec)
+	if !ok {
+		return false
+	}
+	want, ok := dragonflyContainerFromTemplate(wantSpec)
+	if !ok {
+		return false
+	}
+	return dragonflyContainersOwnedFieldsEqual(cur, want)
+}
+
+func dragonflyContainerFromTemplate(spec corev1.PodSpec) (corev1.Container, bool) {
+	for _, c := range spec.Containers {
+		if c.Name == dragonflyContainerName {
+			return c, true
+		}
+	}
+	return corev1.Container{}, false
+}
+
+func dragonflyContainersOwnedFieldsEqual(cur, want corev1.Container) bool {
+	return cur.Image == want.Image &&
+		stringSliceEqual(cur.Args, want.Args) &&
+		corev1EnvVarsEqual(cur.Env, want.Env) &&
+		corev1ContainerPortsEqual(cur.Ports, want.Ports) &&
+		corev1VolumeMountsEqual(cur.VolumeMounts, want.VolumeMounts) &&
+		reflect.DeepEqual(cur.Resources, want.Resources) &&
+		probesEqual(cur.LivenessProbe, want.LivenessProbe) &&
+		probesEqual(cur.ReadinessProbe, want.ReadinessProbe)
+}
+
+func stringMapEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		if b[k] != av {
+			return false
+		}
+	}
+	return true
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func corev1EnvVarsEqual(a, b []corev1.EnvVar) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].Value != b[i].Value {
+			return false
+		}
+		if !envVarSourcesEqual(a[i].ValueFrom, b[i].ValueFrom) {
+			return false
+		}
+	}
+	return true
+}
+
+func envVarSourcesEqual(a, b *corev1.EnvVarSource) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if a.SecretKeyRef == nil || b.SecretKeyRef == nil {
+		return a.SecretKeyRef == nil && b.SecretKeyRef == nil
+	}
+	return a.SecretKeyRef.Name == b.SecretKeyRef.Name && a.SecretKeyRef.Key == b.SecretKeyRef.Key
+}
+
+func corev1ContainerPortsEqual(a, b []corev1.ContainerPort) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].ContainerPort != b[i].ContainerPort || a[i].Protocol != b[i].Protocol {
+			return false
+		}
+	}
+	return true
+}
+
+func corev1VolumeMountsEqual(a, b []corev1.VolumeMount) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].MountPath != b[i].MountPath || a[i].ReadOnly != b[i].ReadOnly {
+			return false
+		}
+	}
+	return true
+}
+
+func corev1TolerationsEqual(a, b []corev1.Toleration) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func corev1VolumesEqual(a, b []corev1.Volume) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name {
+			return false
+		}
+		if (a[i].EmptyDir == nil) != (b[i].EmptyDir == nil) {
+			return false
+		}
+	}
+	return true
+}
+
+func probesEqual(a, b *corev1.Probe) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.InitialDelaySeconds == b.InitialDelaySeconds &&
+		a.PeriodSeconds == b.PeriodSeconds &&
+		a.TCPSocket != nil &&
+		b.TCPSocket != nil &&
+		a.TCPSocket.Port == b.TCPSocket.Port
+}
+
+func dragonflyStatefulSetRolloutComplete(sts *appsv1.StatefulSet) bool {
+	desired := int32(1)
+	if sts.Spec.Replicas != nil {
+		desired = *sts.Spec.Replicas
+	}
+	return sts.Status.ObservedGeneration >= sts.Generation &&
+		sts.Status.Replicas == desired &&
+		sts.Status.UpdatedReplicas == desired &&
+		sts.Status.ReadyReplicas == desired &&
+		sts.Status.CurrentReplicas == desired
 }
 
 // teardownDragonflyResources deletes Dragonfly StatefulSets, per-site
@@ -536,6 +845,9 @@ func (r *MysqlFailoverGroupReconciler) teardownDragonflyResources(ctx context.Co
 	inNs := client.InNamespace(fg.Namespace)
 	if err := r.DeleteAllOf(ctx, &appsv1.StatefulSet{}, inNs, selector); err != nil {
 		return fmt.Errorf("teardown dragonfly statefulsets: %w", err)
+	}
+	if err := r.DeleteAllOf(ctx, &policyv1.PodDisruptionBudget{}, inNs, selector); err != nil {
+		return fmt.Errorf("teardown dragonfly pdbs: %w", err)
 	}
 	// Service has no DeleteAllOf support in client-go for typed
 	// resources; list-and-delete instead.
@@ -601,10 +913,12 @@ func (r *MysqlFailoverGroupReconciler) dragonflyDial(ctx context.Context, fg *v1
 // Normally that's status.activeSite. During the planned-failover window
 // where we have promoted the target Dragonfly but have not yet flipped
 // status.activeSite (PromotingDragonfly through Resuming), the target
-// already holds the master, so we return the target instead. Without
-// this branch syncDragonflyPodLabels would re-apply the label to the
-// stale source on every reconcile and fight the planned-failover state
-// machine.
+// already holds the master, so we return the target instead. A
+// Dragonfly-only emergency promotion can also intentionally diverge from
+// MySQL; in that case status.dragonfly.activeSite is authoritative for
+// cache routing until a later MySQL/Dragonfly promotion moves it again.
+// Without these branches syncDragonflyPodLabels would re-apply the label
+// to the stale source and fight the promotion path.
 func effectiveDragonflyMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
 	if pf := fg.Status.PlannedFailover; pf != nil {
 		switch pf.Phase {
@@ -615,6 +929,9 @@ func effectiveDragonflyMasterSite(fg *v1alpha1.MysqlFailoverGroup) string {
 				return pf.Target
 			}
 		}
+	}
+	if fg.Status.Dragonfly != nil && fg.Status.Dragonfly.ActiveSite != "" {
+		return fg.Status.Dragonfly.ActiveSite
 	}
 	return fg.Status.ActiveSite
 }

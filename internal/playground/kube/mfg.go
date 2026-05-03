@@ -84,6 +84,27 @@ func (c *Client) PatchMFGNamed(ctx context.Context, namespace, name string, ops 
 	return nil
 }
 
+// PatchMFGStatusNamed applies a JSON Patch to the named
+// MysqlFailoverGroup status subresource.
+func (c *Client) PatchMFGStatusNamed(ctx context.Context, namespace, name string, ops []JSONPatchOp) error {
+	if len(ops) == 0 {
+		return nil
+	}
+	body, err := json.Marshal(ops)
+	if err != nil {
+		return fmt.Errorf("marshal status JSON Patch: %w", err)
+	}
+	objKey := MFGKeyForName(namespace, name)
+	mfg := &v1alpha1.MysqlFailoverGroup{}
+	mfg.Namespace = objKey.Namespace
+	mfg.Name = objKey.Name
+	patch := client.RawPatch(types.JSONPatchType, body)
+	if err := c.Controller.Status().Patch(ctx, mfg, patch); err != nil {
+		return fmt.Errorf("patch MysqlFailoverGroup status: %w", err)
+	}
+	return nil
+}
+
 // AnnotateMFG sets a single annotation key/value on the MFG via
 // strategic-merge over metadata only (the mfg patch trap concerns
 // spec.sites; metadata annotations are safe to merge-patch). Use

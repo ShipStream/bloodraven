@@ -321,13 +321,9 @@ func TestPlannedFailoverPromotingDragonfly_Success(t *testing.T) {
 	}
 
 	// Pod labels should reflect the post-promotion topology: target is
-	// the new master with traffic enabled; source is demoted to replica
-	// with its traffic label restored (so it can rejoin without sitting
-	// in an inconsistent state).
-	var gotSource, gotTarget corev1.Pod
-	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); err != nil {
-		t.Fatalf("get source pod: %v", err)
-	}
+	// the new master with traffic enabled; source is deleted so the
+	// StatefulSet creates a fresh pod without kubelet CrashLoopBackOff.
+	var gotTarget corev1.Pod
 	if err := c.Get(context.Background(), types.NamespacedName{Name: targetPod.Name, Namespace: targetPod.Namespace}, &gotTarget); err != nil {
 		t.Fatalf("get target pod: %v", err)
 	}
@@ -337,11 +333,11 @@ func TestPlannedFailoverPromotingDragonfly_Success(t *testing.T) {
 	if gotTarget.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
 		t.Errorf("target traffic = %q, want enabled", gotTarget.Labels[labelDragonflyTraffic])
 	}
-	if gotSource.Labels[labelDragonflyRole] != "replica" {
-		t.Errorf("source role = %q, want replica", gotSource.Labels[labelDragonflyRole])
-	}
-	if gotSource.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
-		t.Errorf("source traffic = %q, want enabled (restored after takeover)", gotSource.Labels[labelDragonflyTraffic])
+	var gotSource corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); client.IgnoreNotFound(err) != nil {
+		t.Fatalf("get source pod: %v", err)
+	} else if err == nil {
+		t.Errorf("source pod still exists after takeover; want deleted to reset CrashLoopBackOff")
 	}
 
 	// CLIENT KILL was issued against the old master.

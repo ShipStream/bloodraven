@@ -359,6 +359,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromotingDragonfly(ctx con
 	if err := r.setDragonflyTrafficOnSite(ctx, fg, cur.Target, true); err != nil {
 		log.FromContext(ctx).Error(err, "post-promotion: stamp target traffic=enabled", "site", cur.Target)
 	}
+	sourceDemoted := cur.SourcePrimary == ""
 	if cur.SourcePrimary != "" {
 		// Demote MUST succeed before we restore the source's traffic
 		// label. If demote fails the source pod still carries
@@ -371,11 +372,14 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromotingDragonfly(ctx con
 				"post-promotion demote of source %q failed (%v); source kept out of active Service to avoid split-brain. Manual intervention required.",
 				cur.SourcePrimary, err)
 		} else if err := r.setDragonflyTrafficOnSite(ctx, fg, cur.SourcePrimary, true); err != nil {
+			sourceDemoted = true
 			// Demote succeeded; the active Service ignores the source
 			// because role=replica, so traffic-label drift is cosmetic.
 			// Log only; the next reconcile's syncDragonflyPodLabels
 			// sweep will retry.
 			log.FromContext(ctx).Error(err, "post-promotion: restore source traffic=enabled", "site", cur.SourcePrimary)
+		} else {
+			sourceDemoted = true
 		}
 	}
 
@@ -385,6 +389,9 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromotingDragonfly(ctx con
 	// pod IPs. Wrapped in its own context so a slow/unreachable old
 	// master never holds the reconcile.
 	r.bestEffortClientKillSource(ctx, fg, cur.SourcePrimary)
+	if sourceDemoted {
+		r.bestEffortRecreateTakeoverSource(ctx, fg, cur.SourcePrimary)
+	}
 
 	// Stamp success on the dragonfly sub-status.
 	preservedFinal := true
@@ -412,7 +419,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromotingDragonfly(ctx con
 		return 0, err
 	}
 
-	// Update the parent DragonflyStatus.lastPromotion fields (best-effort).
+	// Update the parent DragonflyStatus promotion fields (best-effort).
 	r.stampDragonflyLastPromotion(ctx, fg, cur.Target, now)
 
 	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, cur.Target, "success").Inc()
@@ -460,6 +467,21 @@ func (r *MysqlFailoverGroupReconciler) bestEffortClientKillSource(ctx context.Co
 		return
 	}
 	log.FromContext(ctx).Info("client-kill: evicted clients from old master", "fg", fgKey, "site", sourceSite)
+}
+
+// bestEffortRecreateTakeoverSource deletes the demoted source pod after a
+// successful REPLTAKEOVER. Dragonfly exits that process by design, and a
+// fresh pod avoids waiting through kubelet CrashLoopBackOff before replica
+// rejoin.
+func (r *MysqlFailoverGroupReconciler) bestEffortRecreateTakeoverSource(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sourceSite string) {
+	if sourceSite == "" {
+		return
+	}
+	if err := r.deleteDragonflyPodsForSite(ctx, fg, sourceSite); err != nil {
+		log.FromContext(ctx).Info("takeover source recreate: delete pod failed", "site", sourceSite, "error", err)
+		return
+	}
+	log.FromContext(ctx).Info("takeover source recreate: deleted demoted source pod", "site", sourceSite)
 }
 
 // dragonflyPromoteFailHandler reacts to REPLTAKEOVER failure. Same
@@ -518,8 +540,8 @@ func (r *MysqlFailoverGroupReconciler) advancePastDragonflyPhases(ctx context.Co
 }
 
 // stampDragonflyLastPromotion is a best-effort patch on
-// status.dragonfly.{lastPromotionTime,lastPromotionTarget}. Wrapped in
-// RetryOnConflict so a concurrent DragonflyManager status patch
+// status.dragonfly.{activeSite,lastPromotionTime,lastPromotionTarget}.
+// Wrapped in RetryOnConflict so a concurrent DragonflyManager status patch
 // doesn't silently drop the planned-failover promotion stamp.
 func (r *MysqlFailoverGroupReconciler) stampDragonflyLastPromotion(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string, when metav1.Time) {
 	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
@@ -531,6 +553,7 @@ func (r *MysqlFailoverGroupReconciler) stampDragonflyLastPromotion(ctx context.C
 		if fresh.Status.Dragonfly == nil {
 			fresh.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true}
 		}
+		fresh.Status.Dragonfly.ActiveSite = target
 		fresh.Status.Dragonfly.LastPromotionTime = &when
 		fresh.Status.Dragonfly.LastPromotionTarget = target
 		return r.Status().Patch(ctx, &fresh, client.MergeFrom(base))

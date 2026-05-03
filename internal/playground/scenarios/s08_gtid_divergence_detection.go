@@ -105,7 +105,7 @@ func s08VerifyDivergenceLog() runner.Step {
 				fmt.Sprintf(`"divergence detected" site=%s`, site),
 				pglogs.And(
 					pglogs.Substring("divergence detected"),
-					pglogs.Substring(fmt.Sprintf("site=%s", site)),
+					pglogs.Substring(fmt.Sprintf(`"site":"%s"`, site)),
 				),
 			)
 			return err

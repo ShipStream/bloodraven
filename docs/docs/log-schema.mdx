@@ -193,6 +193,7 @@ Bloodraven optionally co-manages per-site Dragonfly instances and emits the foll
 | INFO | `stale-master reconfigure: REPLICAOF applied` | `site`, `host`, `port`, `fg` | Auto-rejoin succeeded: the stale master is now linked as a replica of the active master. |
 | WARN | `stale-master reconfigure: REPLICAOF failed` | `site`, `host`, `port`, `error`, `fg` | Auto-rejoin attempt failed; the next tick retries. |
 | INFO | `client-kill: evicted clients from old master` | `site`, `fg` | After a planned-failover Dragonfly promotion, the operator issued `CLIENT KILL TYPE NORMAL` against the demoted source so application clients reconnect through the active Service. |
+| INFO | `dragonfly-only emergency: active master unreachable; promoting replica` | `oldSource`, `target`, `fg` | Dragonfly master failed without a MySQL failover; the manager is promoting the single healthy replica and leaving MySQL `status.activeSite` unchanged. |
 | INFO | `dragonfly emergency: REPLTAKEOVER succeeded` | `site`, `fg` | After an emergency MySQL failover, Dragonfly was promoted with sessions preserved. |
 | WARN | `dragonfly emergency: REPLTAKEOVER failed; falling back` | `site`, `error`, `fg` | Emergency promote could not preserve sessions; falling back to `REPLICAOF NO ONE`. |
 | INFO | `dragonfly emergency: target promoted via REPLICAOF NO ONE (sessions lost)` | `site`, `fg` | Emergency promote completed with empty cache. |

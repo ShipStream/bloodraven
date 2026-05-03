@@ -32,10 +32,10 @@ func scenario23DragonflyMasterKill() runner.Scenario {
 		Hypothesis: "Force-deleting the active Dragonfly pod causes Bloodraven to autonomously promote the surviving " +
 			"replica via TryEmergencyPromote: status.dragonfly.activeSite flips to the peer, MySQL status.activeSite " +
 			"is unchanged, and once the StatefulSet respawns the old pod it re-attaches as a healthy replica.",
-		Risk:    "low",
-		DocLink: "PLANS-Dragonfly-Chaos-Scenarios.md (D7)",
-		Timeout: 4 * time.Minute,
-		Precheck: AssertHealthyBaseline,
+		Risk:     "low",
+		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D7)",
+		Timeout:  4 * time.Minute,
+		Precheck: AssertDragonflyHealthyBaseline,
 		Steps: []runner.Step{
 			seedDragonflyCounterForMasterKill(),
 			injectDragonflyMasterKill(),
@@ -65,7 +65,7 @@ func seedDragonflyCounterForMasterKill() runner.Step {
 			if err != nil {
 				return err
 			}
-			peer, err := PeerOf(mfg, mfg.Status.ActiveSite)
+			peer, err := PeerOf(mfg, active)
 			if err != nil {
 				return err
 			}

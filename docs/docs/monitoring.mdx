@@ -22,6 +22,7 @@ Use [Prometheus Setup](./monitoring-prometheus.mdx) and [Grafana Dashboards](./m
 | Backup stale | Recovery point is aging | [Failed backup](./runbooks.mdx#failed-backup) |
 | Verification stale | Backups are not proven restorable | [Backup Verification](./backup-verification.mdx) |
 | PITR archive lagging | PITR RPO target may be missed | [Backup And Restore](./backup-restore.mdx) |
+| Dragonfly degraded | Cache/session continuity may be unavailable during planned failover | [Playground Dragonfly co-management](./playground#dragonfly-co-management) |
 
 ## Operator health
 
@@ -60,6 +61,18 @@ Metrics are served on `:8080/metrics` in standard Prometheus exposition format.
 | `bloodraven_backup_verification_runs_total` | Counter | `group`, `profile`, `result` | Terminal verification attempts labelled `success` or `failure`. |
 | `bloodraven_backup_verification_duration_seconds` | Histogram | `group`, `profile` | Wall-clock duration of a verification run. |
 | `bloodraven_backup_verification_replay_lag_seconds` | Gauge | `group`, `profile` | For verifications with PITR replay enabled: `completionTime − replayedThroughBinlog.timestamp`. A rising value means archived binlogs trail the live primary &mdash; alert below your RPO target. |
+| `bloodraven_dragonfly_site_up` | Gauge | `group`, `site` | Dragonfly site reachability from the operator's latest `INFO replication` poll (`1` reachable, `0` unreachable). |
+| `bloodraven_dragonfly_promotions_total` | Counter | `group`, `target_site`, `result` | Dragonfly promotion attempts labelled `success`, `failed`, or `skipped`. Failed promotions mean sessions/cache may have been discarded even if MySQL failover succeeded. |
+| `bloodraven_dragonfly_manager_panics_total` | Counter | `namespace`, `name` | Panics recovered inside the Dragonfly manager polling loop. Any increase should be investigated. |
+
+Dragonfly replica full-resync state is exposed on the CR as
+`status.dragonfly.sites[].syncInProgress`, with companion fields
+`linkStatus`, `lastIOSecondsAgo`, and `ready`. If you export custom-resource
+status with kube-state-metrics or another CRD status adapter, alert when
+`syncInProgress` remains true for longer than the expected warm-up window or
+when it toggles repeatedly outside planned failovers and Dragonfly image
+rollouts. Frequent full resyncs can spike master latency and reduce planned
+failover session-preservation confidence.
 
 ### Scrape configuration
 
@@ -172,6 +185,33 @@ groups:
           severity: critical
         annotations:
           summary: "No site is currently writable"
+
+      # Dragonfly site unavailable; MySQL remains authoritative, but planned
+      # session/cache continuity is at risk.
+      - alert: BloodravenDragonflySiteDown
+        expr: bloodraven_dragonfly_site_up == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dragonfly site {{ $labels.site }} is unreachable for {{ $labels.group }}"
+
+      # Failed Dragonfly promotion means the MySQL failover may have succeeded
+      # with sessions/cache discarded.
+      - alert: BloodravenDragonflyPromotionFailed
+        expr: increase(bloodraven_dragonfly_promotions_total{result="failed"}[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dragonfly promotion failed for {{ $labels.group }} target {{ $labels.target_site }}"
+
+      # A recovered panic keeps the manager alive, but it is still a bug signal.
+      - alert: BloodravenDragonflyManagerPanic
+        expr: increase(bloodraven_dragonfly_manager_panics_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Dragonfly manager recovered a panic for {{ $labels.namespace }}/{{ $labels.name }}"
 ```
 
 ## Grafana dashboards

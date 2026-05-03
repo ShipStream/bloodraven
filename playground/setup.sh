@@ -265,10 +265,7 @@ kubectl apply -f "$SCRIPT_DIR/manifests/dashboard-rbac.yaml"
 info "Deploying RustFS S3-compatible snapshot target for Dragonfly..."
 kubectl apply -f "$SCRIPT_DIR/manifests/rustfs.yaml"
 kubectl -n "$NAMESPACE" rollout status deployment/rustfs --timeout=180s
-kubectl -n "$NAMESPACE" delete job rustfs-create-dragonfly-bucket --ignore-not-found >/dev/null 2>&1 || true
-kubectl apply -f "$SCRIPT_DIR/manifests/rustfs.yaml"
-kubectl -n "$NAMESPACE" wait --for=condition=complete job/rustfs-create-dragonfly-bucket --timeout=120s
-ok "RustFS ready (bucket: s3://dragonfly/playground)"
+ok "RustFS ready (scenario 29 creates the dragonfly bucket on demand)"
 
 # ── 8. Deploy the operator via Helm ──────────────────────────────────────
 info "Deploying Bloodraven operator via Helm..."
@@ -278,6 +275,7 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set image.tag=playground \
   --set image.pullPolicy=Never \
   --set installCRDs=false \
+  --set auxiliary.service.enabled=true \
   --set 'nodeSelector=null' \
   --set 'tolerations[0].key=node.kubernetes.io/disk-pressure' \
   --set 'tolerations[0].operator=Exists' \

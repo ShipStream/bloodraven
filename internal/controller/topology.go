@@ -92,6 +92,12 @@ const (
 	BootstrapPhaseFailed     BootstrapPhase = "Failed"
 )
 
+const pendingPromotionActiveSiteTTL = 30 * time.Second
+
+func bootstrapIdlePhase(phase BootstrapPhase) bool {
+	return phase == BootstrapPhaseNone || phase == BootstrapPhaseDone || phase == BootstrapPhaseFailed
+}
+
 // PollIntervalDuration returns the poll interval as a time.Duration.
 func (c TopologyConfig) PollIntervalDuration() time.Duration {
 	return time.Duration(c.PollInterval)
@@ -187,6 +193,7 @@ type TopologyManager struct {
 
 	// Promotion state: tracks which site was promoted and is pending DNS flip.
 	promotedSite          string // empty = no pending promotion
+	promotedAt            time.Time
 	promotionGtidExecuted string // GTID set at last promotion
 
 	// Recovery state for old primary after failover.
@@ -355,6 +362,14 @@ func (tm *TopologyManager) SetLastFailover(t time.Time) {
 	tm.lastFailover = t
 }
 
+// SetRecoveryBlocked restores a persisted divergent-recovery marker from CR
+// status into the in-memory topology manager after an operator restart.
+func (tm *TopologyManager) SetRecoveryBlocked(site, divergentGtid string, divergentCount int64) {
+	tm.recoveryPendingSite = site
+	tm.recoveryDivergentGtid = divergentGtid
+	tm.recoveryDivergentCount = divergentCount
+}
+
 // activeSiteLocked returns the name of the single writable site, or ""
 // if zero or more than one site is writable. Must be called with tm.mu
 // held.
@@ -393,11 +408,61 @@ func (tm *TopologyManager) Status() StatusResponse {
 		}
 	}
 	return StatusResponse{
-		ActiveSite:            tm.activeSiteLocked(),
+		ActiveSite:            tm.effectiveActiveSiteLocked(),
 		Sites:                 sites,
 		PollTime:              tm.lastPollTime.Format(time.RFC3339),
 		PromotionGtidExecuted: tm.promotionGtidExecuted,
 	}
+}
+
+func (tm *TopologyManager) effectiveActiveSiteLocked() string {
+	if active := tm.activeSiteLocked(); active != "" {
+		return active
+	}
+	if tm.pendingPromotionFreshLocked() {
+		return tm.promotedSite
+	}
+	return ""
+}
+
+func (tm *TopologyManager) pendingPromotionFreshLocked() bool {
+	if tm.promotedSite == "" {
+		return false
+	}
+	if tm.promotedAt.IsZero() {
+		return false
+	}
+	return tm.clock.Since(tm.promotedAt) <= pendingPromotionActiveSiteTTL
+}
+
+// reconcilePendingPromotionLocked clears the short-lived promotion guard once
+// topology observations have caught up with the promotion result. It also
+// drops stale or superseded pending promotions so a future failover is not
+// blocked forever if recovery made a different site writable.
+func (tm *TopologyManager) reconcilePendingPromotionLocked() {
+	if tm.promotedSite == "" {
+		return
+	}
+	pending := tm.promotedSite
+	active := tm.activeSiteLocked()
+	switch {
+	case active == pending:
+		tm.logger.Info("promotion confirmed: site is writable", "site", pending)
+		tm.clearPendingPromotionLocked()
+	case active != "":
+		tm.logger.Warn("pending promotion superseded by different writable site; clearing guard",
+			"pendingSite", pending, "activeSite", active)
+		tm.clearPendingPromotionLocked()
+	case !tm.pendingPromotionFreshLocked():
+		tm.logger.Warn("pending promotion expired before writable confirmation; clearing guard",
+			"pendingSite", pending, "age", tm.clock.Since(tm.promotedAt))
+		tm.clearPendingPromotionLocked()
+	}
+}
+
+func (tm *TopologyManager) clearPendingPromotionLocked() {
+	tm.promotedSite = ""
+	tm.promotedAt = time.Time{}
 }
 
 // Ready returns true after the first successful poll cycle.
@@ -544,12 +609,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// failover trigger time; this block confirms the promoted site is writable
 	// and clears the guard flag to allow future failovers.
 	if tm.promotedSite != "" {
-		siteName := tm.promotedSite
-		site := tm.getSite(siteName)
-		if site != nil && site.state == state.StateWritable {
-			tm.logger.Info("promotion confirmed: site is writable", "site", site.name)
-			tm.promotedSite = ""
-		}
+		tm.mu.Lock()
+		tm.reconcilePendingPromotionLocked()
+		tm.mu.Unlock()
 	}
 
 	// Cross-site evaluation (only on state transitions to avoid repeated actions).
@@ -641,7 +703,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		suppressed := tm.autoBootstrapSuppressed
 		phase := tm.bootstrapPhase
 		tm.mu.RUnlock()
-		if !suppressed && (phase == BootstrapPhaseNone || phase == BootstrapPhaseFailed) {
+		if !suppressed && bootstrapIdlePhase(phase) {
 			if donor, empty := tm.detectEmptySite(ctx); donor != "" && empty != "" {
 				tm.startBootstrapByName(ctx, donor, empty, "auto-clone")
 				autoCloneStarted = true
@@ -894,7 +956,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		tm.mu.RUnlock()
 		if suppressed {
 			tm.logger.Info("auto-bootstrap suppressed (initFromBackup restore in flight)")
-		} else if phase == BootstrapPhaseNone || phase == BootstrapPhaseFailed {
+		} else if bootstrapIdlePhase(phase) {
 			if donor, empty := tm.detectEmptySite(ctx); donor != "" && empty != "" {
 				tm.startBootstrapByName(ctx, donor, empty, "auto-clone")
 				return
@@ -1022,6 +1084,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
 		tm.promotionGtidExecuted = promotionGtid
 		tm.promotedSite = candidate.name
+		tm.promotedAt = tm.clock.Now()
 		tm.lastFailover = tm.clock.Now()
 		tm.lastFailoverTarget = candidate.name
 
@@ -1337,6 +1400,7 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	tm.mu.Lock()
 	tm.promotionGtidExecuted = promotionGtid
 	tm.promotedSite = target
+	tm.promotedAt = tm.clock.Now()
 	tm.lastFailover = tm.clock.Now()
 	tm.lastFailoverTarget = target
 	tm.mu.Unlock()
@@ -1497,13 +1561,18 @@ func (tm *TopologyManager) isFreshDeploy(ctx context.Context) bool {
 	return true
 }
 
+type userSchemaChecker interface {
+	HasUserSchemas(context.Context) (bool, error)
+}
+
 // detectEmptySite looks for exactly one donor/recipient pair where a
-// single site is reachable but completely empty (empty GTID_EXECUTED,
-// no replication configured). Works for any number of sites; the
-// donor is the writable site with data, and the recipient is any
-// reachable empty site. When multiple sites are empty the operator
-// clones one per poll cycle. Returns ("", "") when no eligible pair
-// exists.
+// single site is reachable but has no replication metadata and no user
+// schemas. A freshly initialized MySQL datadir may have local GTIDs
+// from setup statements, so GTID emptiness alone is not a reliable
+// emptiness signal. Works for any number of sites; the donor is the
+// writable site, and the recipient is any reachable empty site. When
+// multiple sites are empty the operator clones one per poll cycle.
+// Returns ("", "") when no eligible pair exists.
 func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty string) {
 	// Every site must be reachable.
 	for i := range tm.sites {
@@ -1515,6 +1584,7 @@ func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty st
 
 	replStatus := make([]*mysql.ReplicaStatus, len(tm.sites))
 	gtidSets := make([]mysql.GTIDSet, len(tm.sites))
+	hasUserSchemas := make([]bool, len(tm.sites))
 	for i := range tm.sites {
 		rs, err := tm.sites[i].mysql.ShowReplicaStatus(ctx)
 		if err != nil {
@@ -1531,15 +1601,36 @@ func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty st
 			return "", ""
 		}
 		gtidSets[i] = parsed
+
+		if checker, ok := tm.sites[i].mysql.(userSchemaChecker); ok {
+			hasUserSchema, err := checker.HasUserSchemas(ctx)
+			if err != nil {
+				return "", ""
+			}
+			hasUserSchemas[i] = hasUserSchema
+		} else {
+			hasUserSchemas[i] = !parsed.IsEmpty()
+		}
 	}
 
-	// Locate the writable site with data (our donor). We only clone
-	// from a writable site to avoid copying from a stale replica.
+	// Locate the writable site that should donate data. Prefer a donor
+	// with GTIDs, but allow an empty writable donor so a freshly reset
+	// cluster can still bootstrap replication after a replica PVC wipe.
+	// We only clone from a writable site to avoid copying from a stale
+	// replica.
 	donorIdx := -1
 	for i := range tm.sites {
 		if tm.sites[i].state == state.StateWritable && !gtidSets[i].IsEmpty() {
 			donorIdx = i
 			break
+		}
+	}
+	if donorIdx < 0 {
+		for i := range tm.sites {
+			if tm.sites[i].state == state.StateWritable {
+				donorIdx = i
+				break
+			}
 		}
 	}
 	if donorIdx < 0 {
@@ -1555,7 +1646,8 @@ func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty st
 		if !reachable {
 			continue
 		}
-		if gtidSets[i].IsEmpty() && replStatus[i] == nil {
+		freshInitialized := tm.sites[i].state == state.StateReadOnly && !hasUserSchemas[i]
+		if replStatus[i] == nil && (gtidSets[i].IsEmpty() || freshInitialized) {
 			return tm.sites[donorIdx].name, tm.sites[i].name
 		}
 	}
@@ -1827,13 +1919,19 @@ func (tm *TopologyManager) recoveryStateLocked() string {
 // divergent sites are reported sequentially across poll cycles.
 // Returns true if recovery state changed this cycle.
 func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl []*mysql.ReplicaStatus) bool {
-	if tm.lastFailoverTarget == "" || tm.isBootstrapping() {
+	if tm.isBootstrapping() {
 		return false
 	}
 	if tm.isTopologyFrozen() {
 		return false
 	}
 	if tm.bootstrapCfg.ReplUser == "" {
+		return false
+	}
+	if tm.clearHealthyRecoverySite(siteRepl) {
+		return true
+	}
+	if tm.lastFailoverTarget == "" {
 		return false
 	}
 
@@ -1864,19 +1962,7 @@ func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl []*mysql.
 		if i < len(siteRepl) {
 			repl = siteRepl[i]
 		}
-		if repl != nil && (repl.IORunning || repl.SQLRunning) {
-			// Already replicating. If this site previously had
-			// recovery-blocked state (e.g. admin re-cloned), clear it.
-			if tm.recoveryPendingSite == other.name {
-				tm.mu.Lock()
-				tm.recoveryPendingSite = ""
-				tm.recoveryDivergentGtid = ""
-				tm.recoveryDivergentCount = 0
-				tm.mu.Unlock()
-				metrics.DivergentTransactions.WithLabelValues(other.name).Set(0)
-				tm.logger.Info("recovery state cleared (site is now replicating)", "site", other.name)
-				return true
-			}
+		if repl != nil && replicaStatusHealthy(repl) {
 			continue
 		}
 		// Already recorded as blocked — nothing to do.
@@ -1887,6 +1973,36 @@ func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl []*mysql.
 		return tm.initiateRecovery(ctx, i, activeIdx)
 	}
 	return false
+}
+
+func (tm *TopologyManager) clearHealthyRecoverySite(siteRepl []*mysql.ReplicaStatus) bool {
+	tm.mu.RLock()
+	pending := tm.recoveryPendingSite
+	tm.mu.RUnlock()
+	if pending == "" {
+		return false
+	}
+	for i := range tm.sites {
+		if tm.sites[i].name != pending || tm.sites[i].state != state.StateReadOnly {
+			continue
+		}
+		if i >= len(siteRepl) || !replicaStatusHealthy(siteRepl[i]) {
+			return false
+		}
+		tm.mu.Lock()
+		tm.recoveryPendingSite = ""
+		tm.recoveryDivergentGtid = ""
+		tm.recoveryDivergentCount = 0
+		tm.mu.Unlock()
+		metrics.DivergentTransactions.WithLabelValues(pending).Set(0)
+		tm.logger.Info("recovery state cleared (site is now replicating)", "site", pending)
+		return true
+	}
+	return false
+}
+
+func replicaStatusHealthy(repl *mysql.ReplicaStatus) bool {
+	return repl != nil && repl.IORunning && repl.SQLRunning && repl.SourceHost != ""
 }
 
 // initiateRecovery fences the old primary, compares GTID sets, and either
@@ -2033,14 +2149,8 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 
 	tm.mu.Lock()
 	tm.reclonePendingSite = ""
-	if tm.recoveryPendingSite == site {
-		tm.recoveryPendingSite = ""
-		tm.recoveryDivergentGtid = ""
-		tm.recoveryDivergentCount = 0
-	}
 	tm.mu.Unlock()
 
-	metrics.DivergentTransactions.WithLabelValues(site).Set(0)
 	metrics.RecloneOperations.WithLabelValues(site).Inc()
 
 	tm.startBootstrapByName(ctx, donor.name, recipient.name, "reclone")

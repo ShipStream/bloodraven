@@ -312,10 +312,16 @@ func processAlive(pid int) bool {
 
 // waitForClusterReconverge polls the MFG until both sites are in
 // {writable, read-only} (i.e. the operator has finished any in-flight
-// promotion/recovery) and the cluster reports Ready=True. We keep the
-// invariant simple — this is a "is the playground stable enough for
-// the next scenario to run?" check, not a full health audit.
+// promotion/recovery), the cluster reports Ready=True, and optional
+// Dragonfly topology has returned to Ready. This is the cleanup gate
+// for run-all; it must be at least as strict as the next scenario's
+// shared precheck for states that cleanup itself can leave behind.
 func waitForClusterReconverge(ctx context.Context, env *Env) error {
+	return waitForClusterReconvergeStable(ctx, env, 10*time.Second)
+}
+
+func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor time.Duration) error {
+	var healthySince time.Time
 	_, err := env.Wait.UntilCR(ctx, env.Namespace, "cluster reconverged after chaos cleanup",
 		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 			ready := pgkube.ReadyCondition(mfg) == "True"
@@ -325,6 +331,9 @@ func waitForClusterReconverge(ctx context.Context, env *Env) error {
 				if remaining > 0 {
 					bad = append(bad, fmt.Sprintf("cooldown=%s", remaining.Round(time.Second)))
 				}
+			}
+			if mfg.Status.UpdatePhase != "" {
+				bad = append(bad, fmt.Sprintf("updatePhase=%s", mfg.Status.UpdatePhase))
 			}
 			for _, s := range mfg.Status.Sites {
 				if s.State != "writable" && s.State != "read-only" {
@@ -337,12 +346,81 @@ func waitForClusterReconverge(ctx context.Context, env *Env) error {
 					bad = append(bad, fmt.Sprintf("%s=not-replicating", s.Name))
 				}
 			}
-			done := ready && len(bad) == 0 && mfg.Status.ActiveSite != ""
-			msg := fmt.Sprintf("ready=%v active=%q bad=%v", ready, mfg.Status.ActiveSite, bad)
+			bad = append(bad, dragonflyReconvergeProblems(mfg)...)
+			healthy := ready && len(bad) == 0 && mfg.Status.ActiveSite != ""
+			if healthy {
+				if healthySince.IsZero() {
+					healthySince = time.Now()
+				}
+			} else {
+				healthySince = time.Time{}
+			}
+			stable := time.Duration(0)
+			if !healthySince.IsZero() {
+				stable = time.Since(healthySince)
+			}
+			done := healthy && stable >= stableFor
+			msg := fmt.Sprintf("ready=%v active=%q bad=%v stableFor=%s/%s",
+				ready, mfg.Status.ActiveSite, bad, stable.Round(time.Second), stableFor)
 			return done, msg, nil
 		},
 	)
 	return err
+}
+
+func dragonflyReconvergeProblems(mfg *v1alpha1.MysqlFailoverGroup) []string {
+	if mfg.Spec.Dragonfly == nil || !mfg.Spec.Dragonfly.Enabled {
+		return nil
+	}
+	df := mfg.Status.Dragonfly
+	if df == nil {
+		return []string{"dragonfly=status-missing"}
+	}
+	var bad []string
+	if df.Phase != v1alpha1.DragonflyPhaseReady {
+		bad = append(bad, fmt.Sprintf("dragonfly.phase=%s", df.Phase))
+	}
+	if df.ActiveSite == "" {
+		bad = append(bad, "dragonfly.activeSite=empty")
+	} else if mfg.Status.ActiveSite != "" && df.ActiveSite != mfg.Status.ActiveSite {
+		bad = append(bad, fmt.Sprintf("dragonfly.activeSite=%s mysql.activeSite=%s", df.ActiveSite, mfg.Status.ActiveSite))
+	}
+	masters := 0
+	for _, s := range df.Sites {
+		switch s.Role {
+		case v1alpha1.DragonflyRoleMaster:
+			masters++
+			if s.Name != df.ActiveSite {
+				bad = append(bad, fmt.Sprintf("dragonfly.%s=master-active-mismatch", s.Name))
+			}
+			if !s.Ready || !s.Reachable {
+				bad = append(bad, fmt.Sprintf("dragonfly.%s=master-not-ready", s.Name))
+			}
+		case v1alpha1.DragonflyRoleReplica:
+			if !s.Ready || !s.Reachable {
+				bad = append(bad, fmt.Sprintf("dragonfly.%s=replica-not-ready", s.Name))
+			}
+			if s.LinkStatus != "up" {
+				bad = append(bad, fmt.Sprintf("dragonfly.%s.link=%s", s.Name, s.LinkStatus))
+			}
+			if s.SyncInProgress {
+				bad = append(bad, fmt.Sprintf("dragonfly.%s=syncing", s.Name))
+			}
+			if s.LastIOSecondsAgo < 0 {
+				bad = append(bad, fmt.Sprintf("dragonfly.%s=never-synced", s.Name))
+			}
+		case v1alpha1.DragonflyRoleUnreachable:
+			bad = append(bad, fmt.Sprintf("dragonfly.%s=unreachable", s.Name))
+		case v1alpha1.DragonflyRoleStaleMaster:
+			bad = append(bad, fmt.Sprintf("dragonfly.%s=stale-master", s.Name))
+		case v1alpha1.DragonflyRoleUnconfigured, v1alpha1.DragonflyRoleUnknown, "":
+			bad = append(bad, fmt.Sprintf("dragonfly.%s=%s", s.Name, s.Role))
+		}
+	}
+	if masters != 1 {
+		bad = append(bad, fmt.Sprintf("dragonfly.masters=%d", masters))
+	}
+	return bad
 }
 
 func isPromotableStatusSite(mfg *v1alpha1.MysqlFailoverGroup, siteName string) bool {
@@ -475,21 +553,38 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		return c, nil
 	}
 
-	env := &Env{
-		Namespace: e.Cfg.Namespace,
-		FG:        e.Cfg.FG,
-		StartTime: startTime,
-		Kube:      e.K,
-		Chaos:     pgchaos.New(e.K, e.Cfg.Namespace, e.Cfg.FG),
-		Wait:      pgwait.NewHelperForFG(e.K, logger, e.Cfg.FG),
-		Metrics:   scraper,
-		Logger:    logger,
-		Capture:   cap,
-		Creds:     creds,
-		MySQL:     openMySQL,
-		Sidecar:   openSidecar,
-		Logs:      openLogs,
-		Dragonfly: openDragonfly,
+	var env *Env
+	refreshMetrics := func(ctx context.Context) error {
+		fresh, err := pgmetrics.NewScraper(ctx, e.K, e.Cfg.Namespace)
+		if err != nil {
+			return fmt.Errorf("refresh metrics scraper: %w", err)
+		}
+		mu.Lock()
+		old := env.Metrics
+		env.Metrics = fresh
+		mu.Unlock()
+		if old != nil {
+			old.Close()
+		}
+		return nil
+	}
+
+	env = &Env{
+		Namespace:      e.Cfg.Namespace,
+		FG:             e.Cfg.FG,
+		StartTime:      startTime,
+		Kube:           e.K,
+		Chaos:          pgchaos.New(e.K, e.Cfg.Namespace, e.Cfg.FG),
+		Wait:           pgwait.NewHelperForFG(e.K, logger, e.Cfg.FG),
+		Metrics:        scraper,
+		RefreshMetrics: refreshMetrics,
+		Logger:         logger,
+		Capture:        cap,
+		Creds:          creds,
+		MySQL:          openMySQL,
+		Sidecar:        openSidecar,
+		Logs:           openLogs,
+		Dragonfly:      openDragonfly,
 	}
 	e.tailers = tailerMap
 
@@ -506,7 +601,9 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		for _, c := range dragonflies {
 			_ = c.Close()
 		}
-		scraper.Close()
+		if env.Metrics != nil {
+			env.Metrics.Close()
+		}
 	}
 	return env, closer, nil
 }

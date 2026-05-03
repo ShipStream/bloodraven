@@ -142,6 +142,35 @@ func TestSyncDragonflyPodLabels_RestoresAfterPromotionMethodSet(t *testing.T) {
 	}
 }
 
+func TestSyncDragonflyPodLabels_HonorsDragonflyOnlyActiveSite(t *testing.T) {
+	fg := fgWithDragonfly()
+	fg.Status.ActiveSite = "dc1"
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
+		Enabled:    true,
+		ActiveSite: "dc2",
+	}
+	dc1Pod := makeDragonflyPod(fg.Name, "dc1", "master", true)
+	dc2Pod := makeDragonflyPod(fg.Name, "dc2", "replica", true)
+	r, c := newReconciler(fg, dc1Pod, dc2Pod)
+
+	if err := r.syncDragonflyPodLabels(context.Background(), fg); err != nil {
+		t.Fatalf("syncDragonflyPodLabels: %v", err)
+	}
+	var got1, got2 corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Name: dc1Pod.Name, Namespace: dc1Pod.Namespace}, &got1); err != nil {
+		t.Fatalf("get dc1: %v", err)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: dc2Pod.Name, Namespace: dc2Pod.Namespace}, &got2); err != nil {
+		t.Fatalf("get dc2: %v", err)
+	}
+	if got1.Labels[labelDragonflyRole] != "replica" {
+		t.Errorf("dc1 role = %q, want replica", got1.Labels[labelDragonflyRole])
+	}
+	if got2.Labels[labelDragonflyRole] != "master" {
+		t.Errorf("dc2 role = %q, want master", got2.Labels[labelDragonflyRole])
+	}
+}
+
 func TestSetDragonflyTrafficOnSite_RemovesAndRestores(t *testing.T) {
 	fg := fgWithDragonfly()
 	pod := makeDragonflyPod(fg.Name, "dc1", "master", true)

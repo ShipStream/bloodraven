@@ -48,10 +48,10 @@ func scenario22PlannedDragonflySwitchover() runner.Scenario {
 			"and Dragonfly through coordinated promotion: dragonfly.activeSite flips to the target, " +
 			"PromotionMethod=REPLTAKEOVER, SessionsPreserved=true, the seed counter survives the failover " +
 			"reachable through the active Service, and the active Service's Endpoints converge to the new master pod.",
-		Risk:    "medium",
-		DocLink: "PLANS-Dragonfly-Chaos-Scenarios.md (D3)",
-		Timeout: 5 * time.Minute,
-		Precheck: AssertHealthyBaseline,
+		Risk:     "medium",
+		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D3)",
+		Timeout:  5 * time.Minute,
+		Precheck: AssertDragonflyHealthyBaseline,
 		Steps: []runner.Step{
 			seedDragonflyCounterOnActive(),
 			injectPlannedFailoverForDragonfly(),

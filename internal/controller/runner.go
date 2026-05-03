@@ -430,7 +430,7 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 
 	var driftSites []string
 	for _, site := range fg.Spec.Sites {
-		desiredHash := computeSpecHash(fg, site, tlsSecretData, credSecretData)
+		desiredHash := ComputeSpecHash(fg, site, tlsSecretData, credSecretData)
 
 		var deploy appsv1.Deployment
 		deployNN := types.NamespacedName{
@@ -560,6 +560,19 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	if fg.Status.LastFailover != nil && !fg.Status.LastFailover.IsZero() {
 		tm.SetLastFailover(fg.Status.LastFailover.Time)
 		r.logger.Info("restored lastFailover from CR status", "fg", nn, "lastFailover", fg.Status.LastFailover.Time)
+	}
+	for _, site := range fg.Status.Sites {
+		if site.RecoveryState != "RecoveryBlocked" && site.DivergentGtid == "" {
+			continue
+		}
+		var count int64
+		if site.DivergentTransactionCount != nil {
+			count = *site.DivergentTransactionCount
+		}
+		tm.SetRecoveryBlocked(site.Name, site.DivergentGtid, count)
+		r.logger.Info("restored recovery blocked state from CR status",
+			"fg", nn, "site", site.Name, "divergentGtid", site.DivergentGtid, "divergentTransactionCount", count)
+		break
 	}
 
 	// Set the status callback to update the CR status subresource on state changes.

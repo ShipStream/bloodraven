@@ -15,6 +15,7 @@ import (
 
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
+	pgrustfs "github.com/shipstream/bloodraven/internal/playground/rustfs"
 )
 
 // Actions is the per-scenario chaos handle. Methods are not safe for
@@ -89,6 +90,17 @@ func (a *Actions) ScaleSiteToZero(ctx context.Context, site string) error {
 	a.push(fmt.Sprintf("scale %s back to 1", dep), func(ctx context.Context) error {
 		return a.K.ScaleDeployment(ctx, a.Namespace, dep, 1)
 	})
+	return nil
+}
+
+// ScaleSiteToOne brings a site's MySQL Deployment back without draining the
+// scenario cleanup stack. Use this when an injection needs to reintroduce a
+// scaled-down site while keeping other temporary chaos state in place.
+func (a *Actions) ScaleSiteToOne(ctx context.Context, site string) error {
+	dep := pgkube.MysqlDeploymentName(a.FG, site)
+	if err := a.K.ScaleDeployment(ctx, a.Namespace, dep, 1); err != nil {
+		return fmt.Errorf("scale %s to 1: %w", dep, err)
+	}
 	return nil
 }
 
@@ -373,6 +385,67 @@ func (a *Actions) PatchSitesMemoryRequest(ctx context.Context, newMemory string)
 	return originals, nil
 }
 
+// PatchSplitBrainPriorities replaces spec.splitBrainPolicy.sitePriorities and
+// restores the previous policy during cleanup.
+func (a *Actions) PatchSplitBrainPriorities(ctx context.Context, priorities []string) error {
+	if len(priorities) == 0 {
+		return fmt.Errorf("split-brain priorities must not be empty")
+	}
+	mfg, err := a.K.GetMFGNamed(ctx, a.Namespace, a.FG)
+	if err != nil {
+		return err
+	}
+	var original []string
+	hadPolicy := mfg.Spec.SplitBrainPolicy != nil
+	hadPriorities := hadPolicy && mfg.Spec.SplitBrainPolicy.SitePriorities != nil
+	if hadPriorities {
+		original = append(original, mfg.Spec.SplitBrainPolicy.SitePriorities...)
+	}
+	var ops []pgkube.JSONPatchOp
+	if !hadPolicy {
+		ops = append(ops, pgkube.JSONPatchOp{
+			Op:    "add",
+			Path:  "/spec/splitBrainPolicy",
+			Value: map[string]any{"sitePriorities": priorities},
+		})
+	} else if !hadPriorities {
+		ops = append(ops, pgkube.JSONPatchOp{
+			Op:    "add",
+			Path:  "/spec/splitBrainPolicy/sitePriorities",
+			Value: priorities,
+		})
+	} else {
+		ops = append(ops, pgkube.JSONPatchOp{
+			Op:    "replace",
+			Path:  "/spec/splitBrainPolicy/sitePriorities",
+			Value: priorities,
+		})
+	}
+	if err := a.K.PatchMFGNamed(ctx, a.Namespace, a.FG, ops); err != nil {
+		return err
+	}
+	a.push("restore split-brain priorities", func(ctx context.Context) error {
+		if !hadPolicy {
+			return a.K.PatchMFGNamed(ctx, a.Namespace, a.FG, []pgkube.JSONPatchOp{{
+				Op:   "remove",
+				Path: "/spec/splitBrainPolicy",
+			}})
+		}
+		if !hadPriorities {
+			return a.K.PatchMFGNamed(ctx, a.Namespace, a.FG, []pgkube.JSONPatchOp{{
+				Op:   "remove",
+				Path: "/spec/splitBrainPolicy/sitePriorities",
+			}})
+		}
+		return a.K.PatchMFGNamed(ctx, a.Namespace, a.FG, []pgkube.JSONPatchOp{{
+			Op:    "replace",
+			Path:  "/spec/splitBrainPolicy/sitePriorities",
+			Value: original,
+		}})
+	})
+	return nil
+}
+
 // CreateCanaryPod applies a Pod manifest to the namespace and
 // registers a reverter that deletes it. The pod is expected to be a
 // short-lived sleep canary, not a managed workload.
@@ -522,6 +595,189 @@ func (a *Actions) PatchDragonflySyncBudget(ctx context.Context, maxSyncWait, onS
 			}
 		}
 		return a.K.PatchMFG(ctx, a.Namespace, revOps)
+	})
+	return nil
+}
+
+// PatchDragonflyImage patches spec.dragonfly.image and registers a reverter
+// to restore the original image after the scenario.
+func (a *Actions) PatchDragonflyImage(ctx context.Context, image string) error {
+	if image == "" {
+		return fmt.Errorf("dragonfly image must not be empty")
+	}
+	mfg, err := a.K.GetMFG(ctx, a.Namespace)
+	if err != nil {
+		return fmt.Errorf("read MFG for dragonfly image patch: %w", err)
+	}
+	if mfg.Spec.Dragonfly == nil || !mfg.Spec.Dragonfly.Enabled {
+		return fmt.Errorf("spec.dragonfly.enabled must be true")
+	}
+	original := mfg.Spec.Dragonfly.Image
+	if original == "" {
+		return fmt.Errorf("spec.dragonfly.image must be set before patching")
+	}
+	if original == image {
+		return fmt.Errorf("dragonfly image patch target equals current image %q", image)
+	}
+	ops := []pgkube.JSONPatchOp{{
+		Op:    "replace",
+		Path:  "/spec/dragonfly/image",
+		Value: image,
+	}}
+	if err := a.K.PatchMFG(ctx, a.Namespace, ops); err != nil {
+		return fmt.Errorf("patch dragonfly image: %w", err)
+	}
+	a.push("restore dragonfly image", func(ctx context.Context) error {
+		return a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{{
+			Op:    "replace",
+			Path:  "/spec/dragonfly/image",
+			Value: original,
+		}})
+	})
+	return nil
+}
+
+// EnsureRustFSDragonflyBucket creates the playground Dragonfly snapshot bucket
+// using a signed S3 request through a port-forward to the RustFS pod. This
+// replaces the old aws-cli bucket-init Job so scenario 29 does not depend on
+// pulling an additional image.
+func (a *Actions) EnsureRustFSDragonflyBucket(ctx context.Context) error {
+	const (
+		secretName = "dragonfly-s3-credentials"
+		bucket     = "dragonfly"
+		selector   = "app.kubernetes.io/name=rustfs"
+	)
+	secret, err := a.K.Kubernetes.CoreV1().Secrets(a.Namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("read RustFS credentials secret %s: %w", secretName, err)
+	}
+	creds := pgrustfs.Credentials{
+		AccessKey: string(secret.Data["AWS_ACCESS_KEY_ID"]),
+		SecretKey: string(secret.Data["AWS_SECRET_ACCESS_KEY"]),
+		Region:    string(secret.Data["AWS_REGION"]),
+	}
+	if err := a.restartRustFS(ctx, selector); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	var lastErr error
+	for {
+		pod, err := a.K.FindPodWithLabel(ctx, a.Namespace, selector)
+		if err != nil {
+			lastErr = fmt.Errorf("find RustFS pod: %w", err)
+		} else if pf, err := a.K.PortForwardPod(ctx, a.Namespace, pod.Name, 9000); err != nil {
+			lastErr = fmt.Errorf("port-forward RustFS: %w", err)
+		} else {
+			endpoint := fmt.Sprintf("http://127.0.0.1:%d", pf.LocalPort)
+			err := pgrustfs.EnsureBucket(ctx, endpoint, bucket, creds)
+			pf.Stop()
+			if err == nil {
+				return nil
+			}
+			lastErr = err
+		}
+		if lastErr == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("ensure RustFS bucket %q: %w", bucket, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func (a *Actions) restartRustFS(ctx context.Context, selector string) error {
+	var oldUID string
+	if pod, err := a.K.FindPodWithLabel(ctx, a.Namespace, selector); err == nil {
+		oldUID = string(pod.UID)
+		if err := a.K.DeletePodByName(ctx, a.Namespace, pod.Name); err != nil {
+			return fmt.Errorf("delete stale RustFS pod %s: %w", pod.Name, err)
+		}
+	}
+
+	deadline := time.Now().Add(90 * time.Second)
+	var last string
+	for {
+		pods, err := a.K.Kubernetes.CoreV1().Pods(a.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			last = err.Error()
+		} else {
+			for i := range pods.Items {
+				pod := &pods.Items[i]
+				if string(pod.UID) == oldUID || pod.DeletionTimestamp != nil {
+					continue
+				}
+				if pod.Status.Phase == corev1.PodRunning && podIsReady(pod) {
+					return nil
+				}
+				last = fmt.Sprintf("pod %s phase=%s ready=%v", pod.Name, pod.Status.Phase, podIsReady(pod))
+			}
+			if len(pods.Items) == 0 {
+				last = "no RustFS pods"
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("wait for RustFS restart: timed out (last: %s)", last)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func podIsReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			return cond.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// PatchDragonflySnapshot configures the playground MFG to use the in-cluster
+// RustFS bucket for Dragonfly snapshots and restores the previous snapshot
+// spec during cleanup.
+func (a *Actions) PatchDragonflySnapshot(ctx context.Context) error {
+	mfg, err := a.K.GetMFG(ctx, a.Namespace)
+	if err != nil {
+		return fmt.Errorf("read MFG for snapshot patch: %w", err)
+	}
+	if mfg.Spec.Dragonfly == nil || !mfg.Spec.Dragonfly.Enabled {
+		return fmt.Errorf("spec.dragonfly.enabled must be true")
+	}
+	original := mfg.Spec.Dragonfly.Snapshot
+	snapshot := map[string]any{
+		"dir":                   "s3://dragonfly/playground",
+		"credentialsSecretName": "dragonfly-s3-credentials",
+		"s3Endpoint":            "rustfs.bloodraven-playground.svc.cluster.local:9000",
+		"s3UseHTTPS":            false,
+		"s3SignPayload":         false,
+	}
+	if err := a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{{
+		Op:    "add",
+		Path:  "/spec/dragonfly/snapshot",
+		Value: snapshot,
+	}}); err != nil {
+		return fmt.Errorf("patch dragonfly snapshot: %w", err)
+	}
+	a.push("restore dragonfly snapshot spec", func(ctx context.Context) error {
+		if original == nil {
+			return a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{{
+				Op:   "remove",
+				Path: "/spec/dragonfly/snapshot",
+			}})
+		}
+		return a.K.PatchMFG(ctx, a.Namespace, []pgkube.JSONPatchOp{{
+			Op:    "add",
+			Path:  "/spec/dragonfly/snapshot",
+			Value: original,
+		}})
 	})
 	return nil
 }

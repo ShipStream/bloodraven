@@ -4,15 +4,15 @@
 
 Audit date: 2026-05-02. Scope assumption: Bloodraven supports only Dragonfly `v1.38.0+`; version-specific issues fixed before `v1.38.0` are treated as not relevant except where they imply a lasting config or documentation policy.
 
-### Still Open
+### Closed Actions
 
 - [x] Make the `v1.38.0+` support floor explicit in user-facing Dragonfly docs and examples, and update stale examples/tests that still name older images such as `v1.25.5`.
-- [ ] Decide whether to enforce the `v1.38.0+` floor in CRD validation/admission or leave it documented-only because image tags are operator-supplied strings.
+- [x] Decide whether to enforce the `v1.38.0+` floor in CRD validation/admission or leave it documented-only because image tags are operator-supplied strings. Decision: documented-only. The CRD rejects empty images and `:latest`, but does not parse arbitrary registry/tag/digest strings as semantic versions. User-facing docs and playground examples state the supported `v1.38.0+` floor.
 - [x] Document Bloodraven's opinionated Dragonfly config contract: ephemeral cache/session state, no operator-managed snapshots, no operator-supported `DFLY LOAD` on live masters, no tiered storage unless explicitly accepted by the operator, and user `spec.dragonfly.args` are escape hatches.
 - [x] Extend `status.dragonfly.sites[].ready` and the chaos baseline to include `master_last_io_seconds_ago != -1`, matching the planned-failover `CandidateSyncReady` gate.
-- [ ] Add an alert or documented metric guidance for unexpected/repeated full resyncs (`master_sync_in_progress=1` frequency/duration).
+- [x] Add an alert or documented metric guidance for unexpected/repeated full resyncs (`master_sync_in_progress=1` frequency/duration). `docs/docs/monitoring.mdx` now documents Dragonfly reachability/promotion/panic metrics and recommends alerting from CR status when `status.dragonfly.sites[].syncInProgress` persists or repeats unexpectedly.
 - [x] Document topology-change cost: every Dragonfly promotion/re-parent can force full resync and can cause master latency spikes, so planned failovers/rollouts should be scheduled accordingly.
-- [ ] Decide whether `spec.dragonfly.args` should block or warn on known-unsafe flags for Bloodraven-managed topologies, especially tiered-storage flags, snapshot scheduling, ACL files, Lua compatibility flags, and unsupported TLS-replication combinations.
+- [x] Decide whether `spec.dragonfly.args` should block or warn on known-unsafe flags for Bloodraven-managed topologies, especially tiered-storage flags, snapshot scheduling, ACL files, Lua compatibility flags, and unsupported TLS-replication combinations. Decision: block only operator-owned safety flags in code; document the rest as an explicit escape hatch requiring deployment-specific operational acceptance.
 
 ### Accounted For Or Not Relevant
 

@@ -2,8 +2,9 @@
 
 > **Partially runnable.** Core Dragonfly scenarios are registered in
 > `cmd/playground-chaos` and documented in `playground/chaos-scenarios.md`.
-> Remaining scenarios here are backlog/regression ideas informed by known engine and
-> operator bugs documented in `PLANS-Dragonfly-Upstream-Discoveries.md`.
+> D3/D4/D5/D7/D11 passed live k3d runs on May 3, 2026. Remaining scenarios
+> here are backlog/regression ideas informed by known engine and operator bugs
+> documented in `PLANS-Dragonfly-Upstream-Discoveries.md`.
 
 ---
 
@@ -101,14 +102,16 @@ incomplete. Document observed session loss window.
 emits a warning event but does not block MySQL promotion.
 
 **Injection**:
-1. Stop the Dragonfly replica's sync artificially (or set `maxSyncWait` to a very short value).
-2. Trigger a planned failover.
+1. Patch `spec.dragonfly.plannedFailover.maxSyncWait=1ms` and `onSyncTimeout=proceed`.
+2. Scale the target Dragonfly StatefulSet to 0.
+3. Trigger a planned failover.
 
 **Verify**:
-- Operator emits a Warning event like "Dragonfly sync timed out, proceeding with failover".
+- Planned failover reaches `Succeeded`.
 - MySQL promotes successfully.
-- New Dragonfly master starts serving (possibly with stale data).
-- `status.dragonfly` reflects the degraded sync state.
+- `status.plannedFailover.dragonfly.SessionsPreserved=false`.
+- Reason is `DragonflySyncTimeout` or `DragonflyPromotionFailed`.
+- `bloodraven_dragonfly_promotions_total{result="failed"}` increments.
 
 ---
 
@@ -134,7 +137,7 @@ afterward.
 
 ---
 
-### D6. Dragonfly Rolling Update (One Pod at a Time)
+### D6. Dragonfly Rolling Update (One Pod at a Time) (implemented: `27-dragonfly-rolling-image-update`)
 **Category**: Zero-downtime operations | **Risk**: Medium
 
 **Hypothesis**: When the Dragonfly image or config changes, pods roll one at a time — replica
@@ -151,6 +154,12 @@ unavailable.
 
 **Regression guard**: Upstream dragonfly-operator deleted all stale replicas in one pass
 (Issue #504, PR #507). Bloodraven must delete exactly one pod per reconcile pass and requeue.
+
+**Live status**: passing in k3d as of May 3, 2026: `PASS 27-dragonfly-rolling-image-update`,
+duration 16.159s. The scenario patches `spec.dragonfly.image` to the digest reference already cached
+by the running Dragonfly pod, so it exercises the image-rollout path without relying on an external
+image pull. The operator updates the non-active site first, waits for its StatefulSet rollout counters,
+promotes that updated replica, and only then updates the old active site's StatefulSet.
 
 ### D6a. Snapshot-Restore Planned Dragonfly Upgrade (Short Outage Accepted) (implemented: `29-dragonfly-snapshot-upgrade`)
 **Category**: Planned maintenance | **Risk**: Medium
@@ -169,8 +178,12 @@ driven: set `bloodraven.shipstream.io/dragonfly-snapshot-upgrade=<target-image>`
 the target image, waits for it to finish loading/restoring as master, updates replica StatefulSets,
 issues `REPLICAOF` as needed, and restores traffic only after replicas are linked.
 
-The playground deploys RustFS as the S3-compatible target and creates the `dragonfly` bucket during
-`./playground/setup.sh`, so the runner scenario can exercise this path without external AWS resources.
+**Live status**: passing in k3d as of May 3, 2026: `PASS 29-dragonfly-snapshot-upgrade`,
+duration 4m26.292s. The baseline playground manifest still omits `spec.dragonfly.snapshot`
+so ordinary Dragonfly startup does not depend on RustFS/S3. Scenario 29 provisions and validates the
+snapshot backend itself: it ensures the RustFS `dragonfly` bucket exists through the runner's
+SigV4 S3 client, temporarily patches `spec.dragonfly.snapshot`, waits for Dragonfly pods to run with
+`--dir=s3://dragonfly/playground`, then requests the upgrade.
 
 **Injection**: Annotate the MFG with a requested Dragonfly image:
 
@@ -272,13 +285,16 @@ restarted operator converges correctly — either completing the in-progress pro
 detecting an already-promoted master and reconciling from that state.
 
 **Injection**:
-1. Trigger a Dragonfly-only failover (e.g. kill the master pod).
-2. Kill the operator 1-2s later.
-3. Restart operator.
+1. Patch the Dragonfly sync budget to 45s and scale the planned-failover target's Dragonfly
+   StatefulSet to 0, creating a deterministic `WaitingForDragonflySync` window.
+2. Trigger a planned failover.
+3. Kill the operator after observing the fresh in-flight Dragonfly sync phase.
+4. Restore the target Dragonfly StatefulSet so the replacement operator can complete the failover.
 
 **Verify**:
+- Planned failover reaches `Succeeded` with the original target.
+- MySQL and Dragonfly active sites both equal that target.
 - No split-brain: exactly one Dragonfly pod has `role=master` after convergence.
-- `status.dragonfly.activeSite` is accurate after operator restart.
 - No manual intervention required.
 
 ---

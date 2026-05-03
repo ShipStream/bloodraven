@@ -342,6 +342,13 @@ func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 		if timeout > 0 {
 			s.Timeout = timeout
 		}
+		if s.ResetBeforeRunAll {
+			fmt.Fprintf(os.Stderr, "!! run-all: %s requires a pristine playground; running reset first\n", s.ID)
+			if err := runReset(ctx, kubeconfig, kctx, k.CurrentCtx, namespace, fg, resultsDir); err != nil {
+				fmt.Fprintf(os.Stderr, "run-all reset before %s failed: %v\n", s.ID, err)
+				return exitEnvironment
+			}
+		}
 		res := runScenarioWithAutoReset(ctx, k, kubeconfig, kctx, s, namespace, fg, resultsDir, noCleanup, force, autoReset, logger)
 		results = append(results, res)
 		printResult(res)

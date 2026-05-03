@@ -27,6 +27,23 @@ func AssertHealthyBaseline(ctx context.Context, env *runner.Env) error {
 	return CheckBaseline(ctx, env.Kube, env.Namespace, env.FG)
 }
 
+// AssertDragonflyHealthyBaseline is the precheck for Dragonfly-specific
+// scenarios. The shared baseline intentionally treats omitted
+// spec.dragonfly as a valid MySQL-only playground, but Dragonfly
+// scenarios need the subsystem enabled or their assertions can attach
+// to leftover pods and wait forever for status the operator will never
+// populate.
+func AssertDragonflyHealthyBaseline(ctx context.Context, env *runner.Env) error {
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return fmt.Errorf("dragonfly baseline: get MFG: %w", err)
+	}
+	if mfg.Spec.Dragonfly == nil || !mfg.Spec.Dragonfly.Enabled {
+		return fmt.Errorf("dragonfly baseline unhealthy: spec.dragonfly.enabled is not true — run ./playground/setup.sh or apply playground/manifests/failovergroup.yaml")
+	}
+	return CheckBaseline(ctx, env.Kube, env.Namespace, env.FG)
+}
+
 // CheckBaseline is the runner-Env-free form of AssertHealthyBaseline.
 // Used by the chaos CLI's `check` subcommand to run structural checks
 // without a full Env. Scenarios should keep using AssertHealthyBaseline.
@@ -76,6 +93,9 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 			remaining := (cd - elapsed).Round(time.Second)
 			return fmt.Errorf("baseline unhealthy: anti-flap cooldown active for another %s — wait or run ./playground/reset-mysql.sh", remaining)
 		}
+	}
+	if mfg.Status.UpdatePhase != "" {
+		return fmt.Errorf("baseline unhealthy: ordered update still in phase %q — wait for rollout to finish", mfg.Status.UpdatePhase)
 	}
 
 	if pgkube.ReadyCondition(mfg) != "True" {
@@ -152,6 +172,10 @@ func assertDragonflyBaselineHealthy(mfg *v1alpha1.MysqlFailoverGroup) error {
 	}
 	if dfStat.ActiveSite == "" {
 		return fmt.Errorf("baseline unhealthy: status.dragonfly.activeSite is empty")
+	}
+	if mfg.Status.ActiveSite != "" && dfStat.ActiveSite != mfg.Status.ActiveSite {
+		return fmt.Errorf("baseline unhealthy: status.dragonfly.activeSite=%q does not match status.activeSite=%q",
+			dfStat.ActiveSite, mfg.Status.ActiveSite)
 	}
 	masters := 0
 	for _, s := range dfStat.Sites {

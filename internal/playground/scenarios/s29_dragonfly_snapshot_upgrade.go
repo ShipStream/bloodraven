@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -26,8 +27,11 @@ func scenario29DragonflySnapshotUpgrade() runner.Scenario {
 		Risk:     "medium",
 		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D6a)",
 		Timeout:  8 * time.Minute,
-		Precheck: AssertHealthyBaseline,
+		Precheck: AssertDragonflyHealthyBaseline,
 		Steps: []runner.Step{
+			ensureRustFSBucketForSnapshotUpgrade(),
+			enableDragonflySnapshotForUpgrade(),
+			waitDragonflyReadyAfterSnapshotConfig(),
 			seedDragonflyCounterForSnapshotUpgrade(),
 			annotateDragonflySnapshotUpgrade(),
 			observeDragonflySnapshotUpgradeSucceeded(),
@@ -35,6 +39,93 @@ func scenario29DragonflySnapshotUpgrade() runner.Scenario {
 			verifyDragonflySnapshotUpgradeImages(),
 		},
 	}
+}
+
+func ensureRustFSBucketForSnapshotUpgrade() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "ensure RustFS dragonfly bucket exists",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			return env.Chaos.EnsureRustFSDragonflyBucket(ctx)
+		},
+	}
+}
+
+func enableDragonflySnapshotForUpgrade() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "enable Dragonfly snapshot config for upgrade",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			return env.Chaos.PatchDragonflySnapshot(ctx)
+		},
+	}
+}
+
+func waitDragonflyReadyAfterSnapshotConfig() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseSettle,
+		Name:  "dragonfly returns Ready with snapshot config",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+			defer cancel()
+			tick := time.NewTicker(time.Second)
+			defer tick.Stop()
+			var last string
+			for {
+				mfg, err := env.Kube.GetMFG(waitCtx, env.Namespace)
+				if err != nil {
+					last = err.Error()
+				} else if err := assertDragonflyBaselineHealthy(mfg); err != nil {
+					last = err.Error()
+				} else if ok, msg, err := dragonflyPodsHaveSnapshotArgs(waitCtx, env, mfg); err != nil {
+					return err
+				} else if ok {
+					return nil
+				} else {
+					last = msg
+				}
+				select {
+				case <-waitCtx.Done():
+					return fmt.Errorf("wait for Dragonfly snapshot-config rollout: %w (last: %s)", waitCtx.Err(), last)
+				case <-tick.C:
+				}
+			}
+		},
+	}
+}
+
+func dragonflyPodsHaveSnapshotArgs(ctx context.Context, env *runner.Env, mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	for _, site := range mfg.Spec.Sites {
+		pod, err := env.Kube.GetSiteDragonflyPod(ctx, env.Namespace, env.FG, site.Name)
+		if err != nil {
+			return false, "", err
+		}
+		if pod.Status.Phase != corev1.PodRunning || !podReady(pod) {
+			return false, fmt.Sprintf("site %s pod phase=%q ready=%v", site.Name, pod.Status.Phase, podReady(pod)), nil
+		}
+		if len(pod.Spec.Containers) == 0 || !argsContain(pod.Spec.Containers[0].Args, "--dir=s3://dragonfly/playground") {
+			return false, fmt.Sprintf("site %s pod does not have snapshot --dir arg yet", site.Name), nil
+		}
+	}
+	return true, "all dragonfly pods have snapshot args", nil
+}
+
+func podReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodReady {
+			return cond.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func argsContain(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func seedDragonflyCounterForSnapshotUpgrade() runner.Step {
@@ -98,6 +189,11 @@ func observeDragonflySnapshotUpgradeSucceeded() runner.Step {
 						return false, "no status.dragonfly.upgrade", nil
 					}
 					up := mfg.Status.Dragonfly.Upgrade
+					staleCutoff := env.StartTime.Add(-2 * time.Second)
+					if up.StartTime == nil || up.StartTime.Time.Before(staleCutoff) {
+						return false, fmt.Sprintf("ignoring stale upgrade (startTime=%v, scenario startTime=%v)",
+							up.StartTime, env.StartTime), nil
+					}
 					msg := fmt.Sprintf("phase=%q reason=%q msg=%q", up.Phase, up.Reason, up.Message)
 					if up.Phase == v1alpha1.DragonflyUpgradePhaseFailed {
 						return false, msg, fmt.Errorf("Dragonfly upgrade failed: %s", up.Message)

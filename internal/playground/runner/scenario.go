@@ -51,8 +51,11 @@ type Env struct {
 	Chaos   *pgchaos.Actions
 	Wait    *pgwait.Helper
 	Metrics *pgmetrics.Scraper
-	Logger  *slog.Logger
-	Capture *Capture
+	// RefreshMetrics reopens the operator /metrics port-forward after
+	// scenarios intentionally restart the operator pod.
+	RefreshMetrics func(context.Context) error
+	Logger         *slog.Logger
+	Capture        *Capture
 
 	Creds pgmysql.Credentials
 
@@ -96,7 +99,12 @@ type Scenario struct {
 	Risk       string
 	DocLink    string
 	Timeout    time.Duration
-	Precheck   func(ctx context.Context, env *Env) error
-	Steps      []Step
-	Cleanup    func(ctx context.Context, env *Env) error
+	// ResetBeforeRunAll tells the CLI that this scenario must start
+	// from a freshly reset playground when invoked by run-all. Single
+	// scenario runs still use Precheck to report the prerequisite
+	// explicitly instead of wiping data by surprise.
+	ResetBeforeRunAll bool
+	Precheck          func(ctx context.Context, env *Env) error
+	Steps             []Step
+	Cleanup           func(ctx context.Context, env *Env) error
 }

@@ -97,6 +97,8 @@ The `-primary` and `-replicas` Services use label selectors that the operator up
 
 Each failover group gets a `PodDisruptionBudget` named `mysql-<name>` with `minAvailable: 1`. This ensures at least one MySQL instance remains running during voluntary disruptions such as node drains and cluster upgrades.
 
+When `spec.dragonfly.enabled` is true, the operator also creates a group-level Dragonfly `PodDisruptionBudget` named `<name>-dragonfly` with `minAvailable: 1`, selecting all Bloodraven-managed Dragonfly pods for the group. This does not make Dragonfly durable, but it avoids voluntary disruptions taking every cache/session pod down at once.
+
 ## Labels
 
 All resources managed by the operator carry a standard set of labels:

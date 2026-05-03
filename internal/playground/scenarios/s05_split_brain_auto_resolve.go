@@ -2,10 +2,12 @@ package scenarios
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -51,6 +53,7 @@ func scenario05SplitBrainAutoResolve() runner.Scenario {
 			return nil
 		},
 		Steps: []runner.Step{
+			prepareSplitBrainAutoResolvePolicyPath(),
 			injectForceBothWritable(),
 			observeAutoResolve(),
 			verifyAutoResolveMetric(),
@@ -60,6 +63,128 @@ func scenario05SplitBrainAutoResolve() runner.Scenario {
 		// unconditionally, and the operator re-asserts super_read_only
 		// on the standby during its next reconcile pass — no extra
 		// teardown is needed for the writable-flip we injected.
+	}
+}
+
+func prepareSplitBrainAutoResolvePolicyPath() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "restart operator with empty failover history",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return err
+			}
+			active := mfg.Status.ActiveSite
+			peer, err := PeerOf(mfg, active)
+			if err != nil {
+				return err
+			}
+			env.Capture.Note(fmt.Sprintf(
+				"preparing split-brain policy path: active=%s peer=%s priorities=%v; clearing lastFailover history",
+				active, peer, mfg.Spec.SplitBrainPolicy.SitePriorities,
+			))
+
+			const operatorDeployment = "bloodraven"
+			if err := env.Kube.ScaleDeployment(ctx, env.Namespace, operatorDeployment, 0); err != nil {
+				return fmt.Errorf("scale operator to 0: %w", err)
+			}
+			scaledUp := false
+			defer func() {
+				if !scaledUp {
+					_ = env.Kube.ScaleDeployment(context.Background(), env.Namespace, operatorDeployment, 1)
+				}
+			}()
+			if err := waitOperatorReplicas(ctx, env, 0); err != nil {
+				return err
+			}
+			if err := clearFailoverHistoryStatus(ctx, env); err != nil {
+				return err
+			}
+			if err := env.Kube.ScaleDeployment(ctx, env.Namespace, operatorDeployment, 1); err != nil {
+				return fmt.Errorf("scale operator to 1: %w", err)
+			}
+			scaledUp = true
+			if err := waitOperatorReplicas(ctx, env, 1); err != nil {
+				return err
+			}
+			if env.RefreshMetrics != nil {
+				if err := env.RefreshMetrics(ctx); err != nil {
+					return err
+				}
+			}
+
+			waitCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
+				"operator restarted with empty lastFailoverTarget",
+				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					ready := pgkube.ReadyCondition(mfg)
+					msg := fmt.Sprintf("ready=%s active=%q lastFailoverTarget=%q",
+						ready, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
+					done := ready == "True" && mfg.Status.ActiveSite != "" && mfg.Status.LastFailoverTarget == ""
+					return done, msg, nil
+				},
+			)
+			return err
+		},
+	}
+}
+
+func clearFailoverHistoryStatus(ctx context.Context, env *runner.Env) error {
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return err
+	}
+	status, err := json.Marshal(mfg.Status)
+	if err != nil {
+		return err
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(status, &fields); err != nil {
+		return err
+	}
+	var ops []pgkube.JSONPatchOp
+	for _, field := range []string{"lastFailover", "lastFailoverTarget", "promotionGtidExecuted"} {
+		if _, ok := fields[field]; ok {
+			ops = append(ops, pgkube.JSONPatchOp{Op: "remove", Path: "/status/" + field})
+		}
+	}
+	if len(ops) == 0 {
+		return nil
+	}
+	return env.Kube.PatchMFGStatusNamed(ctx, env.Namespace, env.FG, ops)
+}
+
+func waitOperatorReplicas(ctx context.Context, env *runner.Env, want int32) error {
+	deadline := time.Now().Add(45 * time.Second)
+	var last string
+	for {
+		dep, err := env.Kube.GetDeployment(ctx, env.Namespace, "bloodraven")
+		if err != nil {
+			last = err.Error()
+		} else {
+			last = fmt.Sprintf("ready=%d available=%d replicas=%d generation=%d observed=%d",
+				dep.Status.ReadyReplicas, dep.Status.AvailableReplicas, dep.Status.Replicas,
+				dep.Generation, dep.Status.ObservedGeneration)
+			if want == 0 {
+				if dep.Status.Replicas == 0 && dep.Status.ReadyReplicas == 0 {
+					return nil
+				}
+			} else if dep.Status.ObservedGeneration >= dep.Generation &&
+				dep.Status.ReadyReplicas >= want &&
+				dep.Status.AvailableReplicas >= want {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("wait operator replicas=%d timed out (last: %s)", want, last)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
 	}
 }
 

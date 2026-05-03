@@ -230,6 +230,167 @@ func TestDragonflyManager_Tick_HappyPath(t *testing.T) {
 	}
 }
 
+func TestDragonflyManager_Tick_DragonflyOnlyMasterKillPromotesReplica(t *testing.T) {
+	fg := fgWithDragonflyEnabledAndActive()
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
+		Enabled:    true,
+		ActiveSite: "dc1",
+	}
+	sourcePod := makeDragonflyPod(fg.Name, "dc1", "master", true)
+	targetPod := makeDragonflyPod(fg.Name, "dc2", "replica", true)
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.WithObjects(sourcePod, targetPod).Build()
+	rec := record.NewFakeRecorder(8)
+	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
+
+	target := &fakeDragonflyConn{
+		info: dragonfly.ReplicationInfo{
+			Role:                   "slave",
+			MasterHost:             "lion-dragonfly-dc1.shared-lion.svc.cluster.local",
+			MasterPort:             6379,
+			MasterLinkStatus:       "down",
+			MasterLastIOSecondsAgo: 1,
+			SlaveReplOffset:        100,
+		},
+	}
+	conn := newFakeConnector()
+	conn.dialFails("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", errors.New("connection refused"))
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", target)
+	mgr.SetConnector(conn.connect)
+
+	mgr.Tick(context.Background())
+
+	var got v1alpha1.MysqlFailoverGroup
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get fg: %v", err)
+	}
+	if got.Status.ActiveSite != "dc1" {
+		t.Errorf("mysql activeSite = %q, want unchanged dc1", got.Status.ActiveSite)
+	}
+	if got.Status.Dragonfly == nil || got.Status.Dragonfly.ActiveSite != "dc2" {
+		t.Fatalf("dragonfly activeSite = %+v, want dc2", got.Status.Dragonfly)
+	}
+	if got.Status.Dragonfly.LastPromotionTarget != "dc2" {
+		t.Errorf("lastPromotionTarget = %q, want dc2", got.Status.Dragonfly.LastPromotionTarget)
+	}
+
+	var gotTarget corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Name: targetPod.Name, Namespace: targetPod.Namespace}, &gotTarget); err != nil {
+		t.Fatalf("get target pod: %v", err)
+	}
+	var gotSource corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); client.IgnoreNotFound(err) != nil {
+		t.Fatalf("get source pod: %v", err)
+	} else if err == nil {
+		t.Errorf("source pod still exists after takeover; want deleted to reset CrashLoopBackOff")
+	}
+	if gotTarget.Labels[labelDragonflyRole] != "master" {
+		t.Errorf("target role = %q, want master", gotTarget.Labels[labelDragonflyRole])
+	}
+
+	events := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
+	if !eventsContain(events, ReasonDragonflyPromotionStarted) {
+		t.Errorf("events = %v, want %s", events, ReasonDragonflyPromotionStarted)
+	}
+	if !eventsContain(events, ReasonDragonflyPromotionCompleted) {
+		t.Errorf("events = %v, want %s", events, ReasonDragonflyPromotionCompleted)
+	}
+}
+
+func TestDragonflyManager_Tick_SelfHealsStaleDragonflyActiveSite(t *testing.T) {
+	fg := fgWithDragonflyEnabledAndActive()
+	fg.Status.ActiveSite = "dc2"
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
+		Enabled:    true,
+		ActiveSite: "dc1",
+	}
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.Build()
+	mgr := NewDragonflyManager(c, record.NewFakeRecorder(8), slog.Default(), key, 50*time.Millisecond)
+
+	conn := newFakeConnector()
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{
+		info: dragonfly.ReplicationInfo{
+			Role:                   "slave",
+			MasterHost:             "lion-dragonfly-dc2.shared-lion.svc.cluster.local",
+			MasterPort:             6379,
+			MasterLinkStatus:       "up",
+			MasterLastIOSecondsAgo: 0,
+		},
+	})
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{
+		info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100},
+	})
+	mgr.SetConnector(conn.connect)
+
+	mgr.Tick(context.Background())
+
+	var got v1alpha1.MysqlFailoverGroup
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get fg: %v", err)
+	}
+	if got.Status.Dragonfly == nil {
+		t.Fatal("status.dragonfly not patched")
+	}
+	if got.Status.Dragonfly.ActiveSite != "dc2" {
+		t.Errorf("dragonfly activeSite = %q, want observed raw master dc2", got.Status.Dragonfly.ActiveSite)
+	}
+	if got.Status.Dragonfly.Phase != v1alpha1.DragonflyPhaseReady {
+		t.Errorf("phase = %q, want Ready", got.Status.Dragonfly.Phase)
+	}
+}
+
+func TestDragonflyManager_Tick_PromotesDragonflyToMatchMySQLActiveSite(t *testing.T) {
+	fg := fgWithDragonflyEnabledAndActive()
+	fg.Status.ActiveSite = "dc1"
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{
+		Enabled:    true,
+		ActiveSite: "dc2",
+	}
+	cb, key := newDragonflyFakeClient(fg)
+	c := cb.Build()
+	rec := record.NewFakeRecorder(8)
+	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
+
+	conn := newFakeConnector()
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{
+		info: dragonfly.ReplicationInfo{
+			Role:                   "slave",
+			MasterHost:             "lion-dragonfly-dc2.shared-lion.svc.cluster.local",
+			MasterPort:             6379,
+			MasterLinkStatus:       "up",
+			MasterLastIOSecondsAgo: 0,
+		},
+	})
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{
+		info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 100},
+	})
+	mgr.SetConnector(conn.connect)
+
+	mgr.Tick(context.Background())
+
+	var got v1alpha1.MysqlFailoverGroup
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get fg: %v", err)
+	}
+	if got.Status.ActiveSite != "dc1" {
+		t.Errorf("mysql activeSite = %q, want unchanged dc1", got.Status.ActiveSite)
+	}
+	if got.Status.Dragonfly == nil || got.Status.Dragonfly.ActiveSite != "dc1" {
+		t.Fatalf("dragonfly activeSite = %+v, want dc1", got.Status.Dragonfly)
+	}
+	if got.Status.Dragonfly.LastPromotionTarget != "dc1" {
+		t.Errorf("lastPromotionTarget = %q, want dc1", got.Status.Dragonfly.LastPromotionTarget)
+	}
+	events := drainEventsCh(rec.Events, 4, 100*time.Millisecond)
+	if !eventsContain(events, ReasonDragonflyPromotionStarted) {
+		t.Errorf("events = %v, want %s", events, ReasonDragonflyPromotionStarted)
+	}
+	if !eventsContain(events, ReasonDragonflyPromotionCompleted) {
+		t.Errorf("events = %v, want %s", events, ReasonDragonflyPromotionCompleted)
+	}
+}
+
 func TestDragonflyManager_Tick_ReplicaNeverSyncedNotReady(t *testing.T) {
 	fg := fgWithDragonflyEnabledAndActive()
 	cb, key := newDragonflyFakeClient(fg)
@@ -695,8 +856,9 @@ func TestDragonflyManager_TryEmergencyPromote_TargetUnreachableDoesNotPanic(t *t
 
 func TestDragonflyManager_TryEmergencyPromote_AppliesLabelsAndKills(t *testing.T) {
 	// Steady-state pods with default labels; emergency promote should
-	// strip old-source traffic, set target=master+traffic, demote
-	// old-source role + restore traffic, and CLIENT KILL the old source.
+	// infer the old Dragonfly source from status, strip old-source traffic,
+	// set target=master+traffic, demote old-source role, CLIENT KILL the
+	// old source, and delete it to reset kubelet CrashLoopBackOff.
 	fg := fgWithDragonflyEnabledAndActive()
 	sourcePod := makeDragonflyPod(fg.Name, "dc1", "master", true)
 	targetPod := makeDragonflyPod(fg.Name, "dc2", "replica", true)
@@ -715,12 +877,9 @@ func TestDragonflyManager_TryEmergencyPromote_AppliesLabelsAndKills(t *testing.T
 	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", source)
 	mgr.SetConnector(conn.connect)
 
-	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
+	mgr.TryEmergencyPromote(context.Background(), "dc2", "")
 
-	var gotSource, gotTarget corev1.Pod
-	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); err != nil {
-		t.Fatalf("get source: %v", err)
-	}
+	var gotTarget corev1.Pod
 	if err := c.Get(context.Background(), types.NamespacedName{Name: targetPod.Name, Namespace: targetPod.Namespace}, &gotTarget); err != nil {
 		t.Fatalf("get target: %v", err)
 	}
@@ -730,11 +889,11 @@ func TestDragonflyManager_TryEmergencyPromote_AppliesLabelsAndKills(t *testing.T
 	if gotTarget.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
 		t.Errorf("target traffic = %q, want enabled", gotTarget.Labels[labelDragonflyTraffic])
 	}
-	if gotSource.Labels[labelDragonflyRole] != "replica" {
-		t.Errorf("source role = %q, want replica", gotSource.Labels[labelDragonflyRole])
-	}
-	if gotSource.Labels[labelDragonflyTraffic] != dragonflyTrafficEnabled {
-		t.Errorf("source traffic = %q, want enabled (restored after takeover)", gotSource.Labels[labelDragonflyTraffic])
+	var gotSource corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Name: sourcePod.Name, Namespace: sourcePod.Namespace}, &gotSource); client.IgnoreNotFound(err) != nil {
+		t.Fatalf("get source: %v", err)
+	} else if err == nil {
+		t.Errorf("source pod still exists after takeover; want deleted to reset CrashLoopBackOff")
 	}
 	if len(source.clientKillTypes) == 0 {
 		t.Errorf("expected CLIENT KILL on old source, got none")
@@ -859,6 +1018,15 @@ func drainEventsCh(ch <-chan string, max int, wait time.Duration) []string {
 		}
 	}
 	return out
+}
+
+func eventsContain(events []string, needle string) bool {
+	for _, ev := range events {
+		if strings.Contains(ev, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestSplitHostPort regression-tests B20: the helper used to discard

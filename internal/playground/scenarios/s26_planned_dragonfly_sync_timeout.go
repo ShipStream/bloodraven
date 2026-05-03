@@ -50,10 +50,10 @@ func scenario26PlannedDragonflySyncTimeout() runner.Scenario {
 			"the WaitingForDragonflySync target-poll and the PromotingDragonfly REPLTAKEOVER to fail. " +
 			"With onSyncTimeout=proceed, the operator stamps SessionsPreserved=false, completes MySQL " +
 			"failover anyway, and increments dragonfly_promotions_total{result=\"failed\"}.",
-		Risk:    "medium",
-		DocLink: "PLANS-Dragonfly-Chaos-Scenarios.md (D4)",
-		Timeout: 5 * time.Minute,
-		Precheck: AssertHealthyBaseline,
+		Risk:     "medium",
+		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D4)",
+		Timeout:  5 * time.Minute,
+		Precheck: AssertDragonflyHealthyBaseline,
 		Steps: []runner.Step{
 			snapshotForS26(),
 			tightenS26SyncBudget(),
@@ -286,8 +286,10 @@ func verifyS26PromotionsFailedMetric() runner.Step {
 // master, got 2" or "site is unreachable".
 //
 // PhaseSettle (not PhaseCleanup) so a wait failure is reported as a
-// scenario failure rather than a cleanup-only error. The 2-minute
-// budget covers pod respawn + REPLICAOF + initial sync.
+// scenario failure rather than a cleanup-only error. The 4-minute
+// budget covers pod respawn + REPLICAOF + initial sync; this timeout
+// path can briefly stall status polling while the operator is also
+// reconciling MySQL recovery from the planned failover.
 func settleS26SourceDragonflyRejoinsAsReplica() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseSettle,
@@ -298,7 +300,7 @@ func settleS26SourceDragonflyRejoinsAsReplica() runner.Step {
 			if err := env.Chaos.KillDragonflyPod(ctx, source); err != nil {
 				return fmt.Errorf("kill source dragonfly pod: %w", err)
 			}
-			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("dragonfly site %s rejoined as healthy replica", source),

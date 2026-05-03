@@ -188,6 +188,22 @@ func (m *checker) GetGtidExecuted(ctx context.Context) (string, error) {
 	return strings.TrimSpace(gtid), nil
 }
 
+func (m *checker) HasUserSchemas(ctx context.Context) (bool, error) {
+	var exists int
+	err := m.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM information_schema.schemata
+			WHERE schema_name NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+			LIMIT 1
+		)
+	`).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("query user schemas: %w", err)
+	}
+	return exists == 1, nil
+}
+
 func (m *checker) ChangeReplicationSource(ctx context.Context, opts ReplicationSourceOpts) error {
 	q := fmt.Sprintf(
 		"CHANGE REPLICATION SOURCE TO SOURCE_HOST='%s', SOURCE_USER='%s', SOURCE_PASSWORD='%s', SOURCE_AUTO_POSITION=1",

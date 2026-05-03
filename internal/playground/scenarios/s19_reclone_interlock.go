@@ -7,10 +7,11 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
-	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
 )
 
 func init() {
@@ -50,13 +51,102 @@ func scenario19RecloneInterlock() runner.Scenario {
 		Timeout:  8 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
-			injectDivergenceViaFailover(),
+			seedRecloneInterlockDivergentStatus(),
 			observeDivergenceRecorded(),
 			verifyRecloneRejectedBare(),
 			verifyRecloneRejectedMismatch(),
 			verifyRecloneAcceptedMatching(),
 		},
+		Cleanup: cleanupRecloneInterlockReplica,
 	}
+}
+
+func seedRecloneInterlockDivergentStatus() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "seed standby status with a divergent GTID recovery block",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return err
+			}
+			active := mfg.Status.ActiveSite
+			if active == "" {
+				return fmt.Errorf("cannot seed divergent status: activeSite is empty")
+			}
+			target, err := PeerOf(mfg, active)
+			if err != nil {
+				return err
+			}
+			const divergentGtid = "00000000-0000-0000-0000-00000000f19a:1-3"
+			var count int64 = 3
+			sites := append([]v1alpha1.SiteStatus(nil), mfg.Status.Sites...)
+			found := false
+			for i := range sites {
+				if sites[i].Name != target {
+					continue
+				}
+				sites[i].RecoveryState = "RecoveryBlocked"
+				sites[i].DivergentGtid = divergentGtid
+				sites[i].DivergentTransactionCount = &count
+				found = true
+				break
+			}
+			if !found {
+				return fmt.Errorf("cannot seed divergent status: target site %s not present in status.sites", target)
+			}
+			if err := ctxStash(ctx, env, "divergentSite", target); err != nil {
+				return err
+			}
+			if err := ctxStash(ctx, env, "divergentGtid", divergentGtid); err != nil {
+				return err
+			}
+
+			db, err := env.MySQL(target)
+			if err != nil {
+				return fmt.Errorf("open mysql client for %s before synthetic status seed: %w", target, err)
+			}
+			if _, err := db.Exec(ctx, "STOP REPLICA"); err != nil {
+				return fmt.Errorf("stop replication on %s before synthetic recovery block: %w", target, err)
+			}
+
+			if err := env.Chaos.ScaleOperatorToZero(ctx); err != nil {
+				return fmt.Errorf("stop operator before synthetic status seed: %w", err)
+			}
+			if err := env.Kube.PatchMFGStatusNamed(ctx, env.Namespace, env.FG, []pgkube.JSONPatchOp{{
+				Op:    "replace",
+				Path:  "/status/sites",
+				Value: sites,
+			}}); err != nil {
+				return fmt.Errorf("patch divergent status on %s: %w", target, err)
+			}
+			if err := env.Chaos.Revert(ctx); err != nil {
+				return fmt.Errorf("restart operator after synthetic status seed: %w", err)
+			}
+			if env.RefreshMetrics != nil {
+				if err := env.RefreshMetrics(ctx); err != nil {
+					return fmt.Errorf("refresh metrics after operator restart: %w", err)
+				}
+			}
+			env.Capture.Note(fmt.Sprintf("stopped replication and seeded synthetic RecoveryBlocked status on %s with divergentGtid=%s", target, divergentGtid))
+			return nil
+		},
+	}
+}
+
+func cleanupRecloneInterlockReplica(ctx context.Context, env *runner.Env) error {
+	site := ctxFetch(env, "divergentSite")
+	if site == "" {
+		return nil
+	}
+	db, err := env.MySQL(site)
+	if err != nil {
+		return nil
+	}
+	if _, err := db.Exec(ctx, "START REPLICA"); err != nil {
+		env.Capture.Note(fmt.Sprintf("cleanup: START REPLICA on %s skipped/failed: %v", site, err))
+	}
+	return nil
 }
 
 // injectDivergenceViaFailover triggers a failover, then writes a
@@ -86,9 +176,6 @@ func injectDivergenceViaFailover() runner.Step {
 			if err := ctxStash(ctx, env, "newPrimarySite", peer); err != nil {
 				return err
 			}
-			if _, err := env.Logs("operator"); err != nil {
-				return err
-			}
 			// Step 1: trigger the failover by scaling the primary to 0.
 			if err := env.Chaos.ScaleSiteToZero(ctx, active); err != nil {
 				return err
@@ -106,36 +193,70 @@ func injectDivergenceViaFailover() runner.Step {
 			if err != nil {
 				return fmt.Errorf("waiting for failover: %w", err)
 			}
-			// Step 3: scale the old primary back up so we can write to it.
-			if err := env.Chaos.Revert(ctx); err != nil {
-				return fmt.Errorf("scale old primary back up: %w", err)
+			if err := env.Chaos.PatchSplitBrainPriorities(ctx, []string{peer, active}); err != nil {
+				return fmt.Errorf("patch split-brain priorities to prefer new primary %s over old primary %s: %w", peer, active, err)
 			}
-			// Step 4: wait until the old primary's sidecar /status responds.
-			// This proves MySQL is back up and the operator hasn't yet
-			// fenced or reconfigured replication on it.
-			oldProbe, err := env.Sidecar(active)
-			if err != nil {
-				return fmt.Errorf("open sidecar probe for %s: %w", active, err)
-			}
-			probeCtx, probeCancel := context.WithTimeout(ctx, 90*time.Second)
-			err = env.Wait.UntilSidecarStatus(probeCtx, oldProbe,
-				fmt.Sprintf("site %s sidecar /status responds", active),
-				func(st *pgsidecar.StatusResponse) (bool, string) {
-					return st != nil, fmt.Sprintf("uptime=%d role=%s", st.Uptime, st.Role)
+			env.Capture.Note(fmt.Sprintf("split-brain priorities patched to [%s %s] for divergence injection", peer, active))
+			waitCtx, cancel = context.WithTimeout(ctx, 90*time.Second)
+			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
+				fmt.Sprintf("new primary %s stable and cooldown clear before reintroducing old primary %s", peer, active),
+				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					peerState := "<missing>"
+					activeState := "<missing>"
+					for _, s := range mfg.Status.Sites {
+						switch s.Name {
+						case peer:
+							peerState = s.State
+						case active:
+							activeState = s.State
+						}
+					}
+					cooldownRemaining := time.Duration(0)
+					if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailover != nil {
+						cooldownRemaining = mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailover.Time)
+						if cooldownRemaining < 0 {
+							cooldownRemaining = 0
+						}
+					}
+					msg := fmt.Sprintf("activeSite=%q peerState=%s oldState=%s lastFailoverTarget=%q cooldownRemaining=%s",
+						mfg.Status.ActiveSite, peerState, activeState, mfg.Status.LastFailoverTarget, cooldownRemaining.Round(time.Second))
+					done := mfg.Status.ActiveSite == peer &&
+						mfg.Status.LastFailoverTarget == peer &&
+						peerState == "writable" &&
+						activeState != "writable" &&
+						cooldownRemaining == 0
+					return done, msg, nil
 				},
 			)
-			probeCancel()
+			cancel()
 			if err != nil {
-				return fmt.Errorf("waiting for old primary sidecar to respond: %w", err)
+				return fmt.Errorf("waiting for stable new primary before old-primary reentry: %w", err)
 			}
-			// Step 5: open a MySQL connection to the old primary and
+			// Step 3: scale the old primary back up so we can write to it.
+			if err := env.Chaos.ScaleSiteToOne(ctx, active); err != nil {
+				return fmt.Errorf("scale old primary back up: %w", err)
+			}
+			// Step 4: open a MySQL connection to the old primary and
 			// write rogue data with super_read_only cleared. We race the
-			// operator's auto-recovery here — STOP REPLICA first so the
-			// operator can't re-apply replication mid-write, then clear
-			// the read-only flags, then INSERT, then re-fence.
+			// operator's recovery loop here: if it recovers the site
+			// first, STOP REPLICA plus the rogue write still creates the
+			// divergent old-primary state for the next poll.
 			db, err := env.MySQL(active)
+			mysqlDeadline := time.Now().Add(45 * time.Second)
+			for err != nil && time.Now().Before(mysqlDeadline) {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(500 * time.Millisecond):
+				}
+				db, err = env.MySQL(active)
+			}
 			if err != nil {
-				return fmt.Errorf("open mysql client for %s: %w", active, err)
+				return fmt.Errorf("open mysql client for %s before sidecar lease timeout: %w", active, err)
+			}
+			oldGtidBefore, err := db.GtidExecuted(ctx)
+			if err != nil {
+				return fmt.Errorf("read pre-rogue GTID on %s: %w", active, err)
 			}
 			// STOP REPLICA is permitted under super_read_only; it just
 			// stops anything the operator may have started. Ignoring
@@ -144,20 +265,35 @@ func injectDivergenceViaFailover() runner.Step {
 			if err := db.SetSuperReadOnly(ctx, false); err != nil {
 				return fmt.Errorf("clear super_read_only on %s: %w", active, err)
 			}
+			if _, err := db.Exec(ctx, "SET SESSION sql_log_bin = 1"); err != nil {
+				return fmt.Errorf("enable sql_log_bin on %s: %w", active, err)
+			}
+			if _, err := db.Exec(ctx, "SET @@SESSION.GTID_NEXT = 'AUTOMATIC'"); err != nil {
+				return fmt.Errorf("set GTID_NEXT automatic on %s: %w", active, err)
+			}
 			rogueDDL := []string{
 				"CREATE DATABASE IF NOT EXISTS chaos_divergence",
 				"CREATE TABLE IF NOT EXISTS chaos_divergence.rogue (id INT PRIMARY KEY AUTO_INCREMENT, payload VARCHAR(64))",
-				"INSERT INTO chaos_divergence.rogue (payload) VALUES ('rogue-1'), ('rogue-2'), ('rogue-3')",
+				fmt.Sprintf("INSERT INTO chaos_divergence.rogue (payload) VALUES ('rogue-%d-1'), ('rogue-%d-2'), ('rogue-%d-3')",
+					time.Now().UnixNano(), time.Now().UnixNano(), time.Now().UnixNano()),
 			}
 			for _, q := range rogueDDL {
 				if _, err := db.Exec(ctx, q); err != nil {
 					return fmt.Errorf("rogue write %q on %s: %w", q, active, err)
 				}
 			}
-			if err := db.SetSuperReadOnly(ctx, true); err != nil {
-				return fmt.Errorf("re-set super_read_only on %s: %w", active, err)
+			oldGtidAfter, err := db.GtidExecuted(ctx)
+			if err != nil {
+				return fmt.Errorf("read post-rogue GTID on %s: %w", active, err)
 			}
-			env.Capture.Note(fmt.Sprintf("rogue transactions written to %s; awaiting divergence detection", active))
+			if oldGtidAfter == oldGtidBefore {
+				return fmt.Errorf("rogue write on %s did not advance gtid_executed (still %q)", active, oldGtidAfter)
+			}
+			if err := db.SetSuperReadOnly(ctx, true); err != nil {
+				return fmt.Errorf("re-fence divergent old primary %s after rogue write: %w", active, err)
+			}
+			env.Capture.Note(fmt.Sprintf("rogue write advanced %s GTID from %q to %q", active, oldGtidBefore, oldGtidAfter))
+			env.Capture.Note(fmt.Sprintf("rogue transactions written to %s and site re-fenced; awaiting divergence detection", active))
 			return nil
 		},
 	}
@@ -174,13 +310,30 @@ func observeDivergenceRecorded() runner.Step {
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("site %s has non-empty divergentGtid", site),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					var observed *v1alpha1.SiteStatus
 					for _, s := range mfg.Status.Sites {
-						if s.Name != site {
+						if s.DivergentGtid == "" {
 							continue
 						}
+						st := s
+						if s.Name == site {
+							observed = &st
+							break
+						}
+						if observed == nil {
+							observed = &st
+						}
+					}
+					if observed != nil {
 						msg := fmt.Sprintf("site=%s state=%s recoveryState=%s divergentGtid=%q",
-							s.Name, s.State, s.RecoveryState, s.DivergentGtid)
-						return s.DivergentGtid != "", msg, nil
+							observed.Name, observed.State, observed.RecoveryState, observed.DivergentGtid)
+						return true, msg, nil
+					}
+					for _, s := range mfg.Status.Sites {
+						if s.Name == site {
+							return false, fmt.Sprintf("site=%s state=%s recoveryState=%s divergentGtid=%q",
+								s.Name, s.State, s.RecoveryState, s.DivergentGtid), nil
+						}
 					}
 					return false, fmt.Sprintf("site %s not present in status.sites yet", site), nil
 				},
@@ -192,11 +345,17 @@ func observeDivergenceRecorded() runner.Step {
 			// the prefix; the divergent UUID:GNO is the same for the
 			// rest of the scenario.
 			for _, s := range mfg.Status.Sites {
-				if s.Name == site {
+				if s.DivergentGtid != "" {
+					if s.Name != site {
+						env.Capture.Note(fmt.Sprintf("divergent site changed from injected site %s to observed site %s", site, s.Name))
+						if err := ctxStash(ctx, env, "divergentSite", s.Name); err != nil {
+							return err
+						}
+					}
 					return ctxStash(ctx, env, "divergentGtid", s.DivergentGtid)
 				}
 			}
-			return fmt.Errorf("divergent site %s vanished from status.sites between waits", site)
+			return fmt.Errorf("divergent GTID vanished from status.sites between waits")
 		},
 	}
 }
@@ -265,8 +424,10 @@ func verifyRecloneAcceptedMatching() runner.Step {
 			// restart + replication setup is 30–60s in the playground.
 			doneCtx, doneCancel := context.WithTimeout(ctx, 4*time.Minute)
 			defer doneCancel()
+			var cleanSince time.Time
+			const stableWindow = 20 * time.Second
 			_, err = env.Wait.UntilCR(doneCtx, env.Namespace,
-				"divergence cleared, cluster healthy",
+				"divergence cleared, cluster healthy and stable",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, blocked, divergent []string
 					for _, s := range mfg.Status.Sites {
@@ -283,9 +444,32 @@ func verifyRecloneAcceptedMatching() runner.Step {
 							divergent = append(divergent, s.Name)
 						}
 					}
-					done := len(writable) == 1 && len(readOnly) == 1 && len(blocked) == 0 && len(divergent) == 0
-					msg := fmt.Sprintf("writable=%v read-only=%v blocked=%v divergent=%v",
-						writable, readOnly, blocked, divergent)
+					boot := findCondition(mfg.Status.Conditions, "Bootstrapping")
+					bootState := "<missing>"
+					bootDone := false
+					if boot != nil {
+						bootState = fmt.Sprintf("%s/%s", boot.Status, boot.Reason)
+						if boot.Status == metav1.ConditionFalse && boot.Reason == "Failed" {
+							return false, bootState, fmt.Errorf("reclone bootstrap failed: %s", boot.Message)
+						}
+						bootDone = boot.Status == metav1.ConditionFalse && boot.Reason == "Done"
+					}
+					clean := len(writable) == 1 && len(readOnly) == 1 && len(blocked) == 0 && len(divergent) == 0 && bootDone
+					now := time.Now()
+					if clean {
+						if cleanSince.IsZero() {
+							cleanSince = now
+						}
+					} else {
+						cleanSince = time.Time{}
+					}
+					stableFor := time.Duration(0)
+					if !cleanSince.IsZero() {
+						stableFor = now.Sub(cleanSince).Round(time.Second)
+					}
+					done := clean && stableFor >= stableWindow
+					msg := fmt.Sprintf("writable=%v read-only=%v blocked=%v divergent=%v boot=%s stableFor=%s/%s",
+						writable, readOnly, blocked, divergent, bootState, stableFor, stableWindow)
 					return done, msg, nil
 				},
 			)
@@ -360,7 +544,10 @@ func waitForMFGEvent(ctx context.Context, env *runner.Env, notBefore time.Time, 
 			if ts.IsZero() {
 				ts = ev.EventTime.Time
 			}
-			if ts.Before(notBefore) {
+			// core/v1 Event.LastTimestamp is second-granularity, so an event
+			// emitted immediately after the annotation can appear slightly
+			// before the caller's sub-second notBefore value.
+			if ts.Before(notBefore.Add(-2 * time.Second)) {
 				continue
 			}
 			if expectedSnippet != "" && !strings.Contains(ev.Message, expectedSnippet) {

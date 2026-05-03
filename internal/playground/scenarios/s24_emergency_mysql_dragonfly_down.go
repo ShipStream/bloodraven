@@ -38,10 +38,10 @@ func scenario24EmergencyMysqlDragonflyDown() runner.Scenario {
 		Hypothesis: "With every Dragonfly StatefulSet scaled to 0, an emergency MySQL failover (force-kill of " +
 			"the active primary pod) still completes within the normal failover SLA. Dragonfly availability " +
 			"is never on the MySQL critical path; status.dragonfly enters Degraded but does not block MySQL.",
-		Risk:    "high",
-		DocLink: "PLANS-Dragonfly-Chaos-Scenarios.md (D5)",
-		Timeout: 5 * time.Minute,
-		Precheck: AssertHealthyBaseline,
+		Risk:     "high",
+		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D5)",
+		Timeout:  5 * time.Minute,
+		Precheck: AssertDragonflyHealthyBaseline,
 		Steps: []runner.Step{
 			recordMysqlActiveSiteForD5(),
 			scaleAllDragonflyToZeroStep(),

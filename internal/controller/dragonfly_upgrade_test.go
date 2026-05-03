@@ -78,7 +78,7 @@ func TestDragonflySnapshotUpgrade_SaveThenUpdateActive(t *testing.T) {
 		StartTime:   &now,
 	}
 	r, c := newReconciler(fg)
-	if err := r.reconcileDragonflyResources(ctx, fg); err != nil {
+	if _, err := r.reconcileDragonflyResources(ctx, fg); err != nil {
 		t.Fatalf("reconcile resources: %v", err)
 	}
 	oldMasterPod := dragonflyPodForTest(fg, "dc1", fg.Spec.Dragonfly.Image, true)

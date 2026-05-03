@@ -14,7 +14,7 @@ rules:
     verbs: [create, patch]
   - apiGroups: [""]
     resources: [nodes, pods]
-    verbs: [get, list, patch, update, watch]
+    verbs: [delete, get, list, patch, update, watch]
   # pods/log is used by the MysqlBackup reconciler to tail the final
   # `BLOODRAVEN_DUMP_COMPLETE` sentinel line printed by the embedded
   # backup_script.py at the end of a successful mysqlsh dumpInstance run,

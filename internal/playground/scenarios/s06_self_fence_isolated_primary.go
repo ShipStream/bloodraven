@@ -43,6 +43,7 @@ func scenario06SelfFenceIsolatedPrimary() runner.Scenario {
 			observePrimarySelfFence(),
 			verifyPrimarySuperReadOnly(),
 		},
+		Cleanup: restoreSelfFencedPrimary,
 	}
 }
 
@@ -138,5 +139,33 @@ func verifyPrimarySuperReadOnly() runner.Step {
 				},
 			)
 		},
+	}
+}
+
+func restoreSelfFencedPrimary(ctx context.Context, env *runner.Env) error {
+	site := ctxFetch(env, "primarySite")
+	if site == "" {
+		return nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	var lastErr error
+	for {
+		client, err := env.MySQL(site)
+		if err == nil {
+			if _, err = client.Exec(waitCtx, "SET GLOBAL super_read_only=OFF"); err == nil {
+				_, err = client.Exec(waitCtx, "SET GLOBAL read_only=OFF")
+			}
+		}
+		if err == nil {
+			env.Capture.Note(fmt.Sprintf("cleanup: restored self-fenced primary %s to writable", site))
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("cleanup: restore self-fenced primary %s: %w (last error: %v)", site, waitCtx.Err(), lastErr)
+		case <-time.After(2 * time.Second):
+		}
 	}
 }

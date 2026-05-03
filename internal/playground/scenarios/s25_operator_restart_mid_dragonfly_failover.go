@@ -45,13 +45,16 @@ func scenario25OperatorRestartMidDragonflyFailover() runner.Scenario {
 			"before Promoting causes the respawned operator to pick up the in-flight planned failover from CR " +
 			"status and drive it to Succeeded. MySQL and Dragonfly active sites both end on the original target; " +
 			"status.dragonfly.phase converges to Ready.",
-		Risk:    "medium",
-		DocLink: "PLANS-Dragonfly-Chaos-Scenarios.md (D11)",
-		Timeout: 6 * time.Minute,
-		Precheck: AssertHealthyBaseline,
+		Risk:     "medium",
+		DocLink:  "PLANS-Dragonfly-Chaos-Scenarios.md (D11)",
+		Timeout:  6 * time.Minute,
+		Precheck: AssertDragonflyHealthyBaseline,
 		Steps: []runner.Step{
 			injectPlannedFailoverForOperatorRestart(),
+			stallDragonflyTargetForOperatorRestart(),
+			annotatePlannedFailoverForOperatorRestart(),
 			killOperatorWhenWaitingForDragonflySync(),
+			restoreDragonflyTargetForOperatorRestart(),
 			observePlannedFailoverConverges(),
 			verifyMysqlAndDragonflyActiveFlipped(),
 			verifyDragonflyReadyAfterResume(),
@@ -59,15 +62,14 @@ func scenario25OperatorRestartMidDragonflyFailover() runner.Scenario {
 	}
 }
 
-// injectPlannedFailoverForOperatorRestart computes the failover target
-// and stamps the planned-failover annotation. The target is stashed for
-// the verify steps; the original primary is stashed so the assertions
-// can confirm the active site actually moved (not just appeared
-// unchanged because the operator never started the work).
+// injectPlannedFailoverForOperatorRestart computes the failover target. The
+// target is stashed for the verify steps; the original primary is stashed so
+// the assertions can confirm the active site actually moved (not just
+// appeared unchanged because the operator never started the work).
 func injectPlannedFailoverForOperatorRestart() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "annotate planned-failover with peer site",
+		Name:  "choose planned-failover peer site",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
 			if err != nil {
@@ -87,7 +89,53 @@ func injectPlannedFailoverForOperatorRestart() runner.Step {
 				return err
 			}
 			env.Capture.Note(fmt.Sprintf("planned switchover (D11): %s -> %s", mfg.Status.ActiveSite, peer))
-			return env.Chaos.AnnotatePlannedFailover(ctx, peer)
+			return nil
+		},
+	}
+}
+
+func stallDragonflyTargetForOperatorRestart() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "hold target Dragonfly offline to create a deterministic sync window",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			target := ctxFetch(env, "switchoverTarget")
+			if err := env.Chaos.PatchDragonflySyncBudget(ctx, "45s", "proceed"); err != nil {
+				return err
+			}
+			if err := env.Chaos.ScaleDragonflyToZero(ctx, target); err != nil {
+				return err
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
+				fmt.Sprintf("dragonfly target %s is unreachable before planned failover", target),
+				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					if mfg.Status.Dragonfly == nil {
+						return false, "no status.dragonfly", nil
+					}
+					for _, s := range mfg.Status.Dragonfly.Sites {
+						if s.Name == target {
+							return !s.Reachable,
+								fmt.Sprintf("target=%s reachable=%v role=%q phase=%q", target, s.Reachable, s.Role, mfg.Status.Dragonfly.Phase),
+								nil
+						}
+					}
+					return false, fmt.Sprintf("target %s not in status.dragonfly.sites", target), nil
+				},
+			)
+			return err
+		},
+	}
+}
+
+func annotatePlannedFailoverForOperatorRestart() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "annotate planned-failover with peer site",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			target := ctxFetch(env, "switchoverTarget")
+			return env.Chaos.AnnotatePlannedFailover(ctx, target)
 		},
 	}
 }
@@ -126,6 +174,15 @@ func killOperatorWhenWaitingForDragonflySync() runner.Step {
 					return fmt.Errorf("get MFG while waiting for Dragonfly-prep phase: %w", err)
 				}
 				if pf := mfg.Status.PlannedFailover; pf != nil {
+					staleCutoff := env.StartTime.Add(-2 * time.Second)
+					if pf.StartTime == nil || pf.StartTime.Time.Before(staleCutoff) {
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-tick.C:
+							continue
+						}
+					}
 					lastPhase = pf.Phase
 					switch pf.Phase {
 					case v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
@@ -150,6 +207,20 @@ func killOperatorWhenWaitingForDragonflySync() runner.Step {
 				case <-tick.C:
 				}
 			}
+		},
+	}
+}
+
+func restoreDragonflyTargetForOperatorRestart() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "restore target Dragonfly so resumed failover can finish",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			target := ctxFetch(env, "switchoverTarget")
+			if err := env.Chaos.K.ScaleDragonflyStatefulSet(ctx, env.Namespace, env.Chaos.FG, target, 1); err != nil {
+				return fmt.Errorf("restore target dragonfly %s: %w", target, err)
+			}
+			return nil
 		},
 	}
 }
@@ -215,21 +286,24 @@ func verifyMysqlAndDragonflyActiveFlipped() runner.Step {
 		Name:  "MySQL and Dragonfly active sites both flipped to target",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			target := ctxFetch(env, "switchoverTarget")
-			mfg, err := env.Kube.GetMFG(ctx, env.Namespace)
-			if err != nil {
-				return err
-			}
-			if mfg.Status.ActiveSite != target {
-				return fmt.Errorf("MySQL status.activeSite=%q want %q", mfg.Status.ActiveSite, target)
-			}
-			if mfg.Status.Dragonfly == nil {
-				return fmt.Errorf("status.dragonfly missing on Succeeded planned failover")
-			}
-			if mfg.Status.Dragonfly.ActiveSite != target {
-				return fmt.Errorf("dragonfly status.activeSite=%q want %q (cutover skewed between MySQL and Dragonfly after resume)",
-					mfg.Status.Dragonfly.ActiveSite, target)
-			}
-			return nil
+			waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			defer cancel()
+			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
+				fmt.Sprintf("MySQL and Dragonfly active sites == %s after resumed planned failover", target),
+				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					if mfg.Status.Dragonfly == nil {
+						return false, "status.dragonfly missing on Succeeded planned failover", nil
+					}
+					siteStates := make([]string, 0, len(mfg.Status.Sites))
+					for _, s := range mfg.Status.Sites {
+						siteStates = append(siteStates, fmt.Sprintf("%s=%s", s.Name, s.State))
+					}
+					msg := fmt.Sprintf("mysql.activeSite=%q dragonfly.activeSite=%q dragonfly.phase=%q sites=%v",
+						mfg.Status.ActiveSite, mfg.Status.Dragonfly.ActiveSite, mfg.Status.Dragonfly.Phase, siteStates)
+					return mfg.Status.ActiveSite == target && mfg.Status.Dragonfly.ActiveSite == target, msg, nil
+				},
+			)
+			return err
 		},
 	}
 }

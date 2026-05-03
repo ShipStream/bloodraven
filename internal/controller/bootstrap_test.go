@@ -13,16 +13,16 @@ import (
 // bootstrapMock is a mock MySQL for bootstrap tests, tracking calls and allowing
 // individual methods to be configured to fail.
 type bootstrapMock struct {
-	mu              sync.Mutex
-	calls           []string
-	readOnly        bool
+	mu               sync.Mutex
+	calls            []string
+	readOnly         bool
 	checkReadOnlyErr error
-	setDonorErr     error
-	cloneErr            error
-	cloneTimeoutSec     int
-	superReadOnlyErr    error
-	changeSourceErr     error
-	startReplicaErr     error
+	setDonorErr      error
+	cloneErr         error
+	cloneTimeoutSec  int
+	superReadOnlyErr error
+	changeSourceErr  error
+	startReplicaErr  error
 }
 
 func (b *bootstrapMock) record(name string) {
@@ -147,7 +147,7 @@ func TestBootstrapReplica_HappyPath(t *testing.T) {
 		Primary:      primary,
 		Replica:      replica,
 		PrimaryHost:  "primary.example.com",
-		ReplicaSite:    "dc2",
+		ReplicaSite:  "dc2",
 		ReplUser:     "repl",
 		ReplPassword: "secret",
 		UseSSL:       true,
@@ -163,9 +163,9 @@ func TestBootstrapReplica_HappyPath(t *testing.T) {
 		t.Errorf("primary calls: got %v, want [CheckReadOnly]", pCalls)
 	}
 
-	// Replica should have SetCloneDonorList, KillAppConnections, and CloneInstance called
+	// Replica should be thawed before clone, then cloned.
 	rCalls := replica.getCalls()
-	expected := []string{"SetCloneDonorList", "KillAppConnections", "CloneInstance"}
+	expected := []string{"SetSuperReadOnly(OFF)", "SetReadOnly", "SetCloneDonorList", "KillAppConnections", "CloneInstance"}
 	if len(rCalls) != len(expected) {
 		t.Fatalf("replica calls: got %v, want %v", rCalls, expected)
 	}
@@ -185,7 +185,7 @@ func TestBootstrapReplica_PrimaryReadOnly(t *testing.T) {
 		Primary:      primary,
 		Replica:      replica,
 		PrimaryHost:  "primary.example.com",
-		ReplicaSite:    "dc2",
+		ReplicaSite:  "dc2",
 		ReplUser:     "repl",
 		ReplPassword: "secret",
 		CloneTimeout: 30 * time.Minute,
@@ -213,7 +213,7 @@ func TestBootstrapReplica_CheckReadOnlyFails(t *testing.T) {
 		Primary:      primary,
 		Replica:      replica,
 		PrimaryHost:  "primary.example.com",
-		ReplicaSite:    "dc2",
+		ReplicaSite:  "dc2",
 		ReplUser:     "repl",
 		ReplPassword: "secret",
 		CloneTimeout: 30 * time.Minute,
@@ -237,7 +237,7 @@ func TestBootstrapReplica_SetCloneDonorListFails(t *testing.T) {
 		Primary:      primary,
 		Replica:      replica,
 		PrimaryHost:  "primary.example.com",
-		ReplicaSite:    "dc2",
+		ReplicaSite:  "dc2",
 		ReplUser:     "repl",
 		ReplPassword: "secret",
 		CloneTimeout: 30 * time.Minute,
@@ -264,13 +264,17 @@ func TestBootstrapReplica_CloneFails(t *testing.T) {
 		Primary:      primary,
 		Replica:      replica,
 		PrimaryHost:  "primary.example.com",
-		ReplicaSite:    "dc2",
+		ReplicaSite:  "dc2",
 		ReplUser:     "repl",
 		ReplPassword: "secret",
 		CloneTimeout: 30 * time.Minute,
 	})
 	if err == nil {
 		t.Fatal("expected error when CloneInstance fails")
+	}
+	rCalls := replica.getCalls()
+	if got, want := rCalls[len(rCalls)-1], "SetSuperReadOnly(ON)"; got != want {
+		t.Errorf("last replica call: got %q, want %q; calls=%v", got, want, rCalls)
 	}
 }
 
@@ -283,7 +287,7 @@ func TestBootstrapReplica_PassesCloneTimeout(t *testing.T) {
 		Primary:      primary,
 		Replica:      replica,
 		PrimaryHost:  "primary.example.com",
-		ReplicaSite:    "dc2",
+		ReplicaSite:  "dc2",
 		ReplUser:     "repl",
 		ReplPassword: "secret",
 		UseSSL:       true,
@@ -312,7 +316,7 @@ func TestBootstrapReplica_DefaultCloneTimeout(t *testing.T) {
 		Primary:      primary,
 		Replica:      replica,
 		PrimaryHost:  "primary.example.com",
-		ReplicaSite:    "dc2",
+		ReplicaSite:  "dc2",
 		ReplUser:     "repl",
 		ReplPassword: "secret",
 		CloneTimeout: 0,
@@ -347,7 +351,7 @@ func TestSetupReplication_HappyPath(t *testing.T) {
 	}
 
 	calls := replica.getCalls()
-	expected := []string{"SetSuperReadOnly(ON)", "ChangeReplicationSource", "StartReplica"}
+	expected := []string{"SetSuperReadOnly(ON)", "StopReplica", "ResetReplicaAll", "ChangeReplicationSource", "StartReplica"}
 	if len(calls) != len(expected) {
 		t.Fatalf("calls: got %v, want %v", calls, expected)
 	}
@@ -417,10 +421,10 @@ func TestSetupReplication_StartReplicaFails(t *testing.T) {
 
 	// Verify we got as far as StartReplica
 	calls := replica.getCalls()
-	if len(calls) != 3 {
-		t.Fatalf("expected 3 calls, got %v", calls)
+	if len(calls) != 5 {
+		t.Fatalf("expected 5 calls, got %v", calls)
 	}
-	if calls[2] != "StartReplica" {
-		t.Errorf("call[2]: got %q, want StartReplica", calls[2])
+	if calls[4] != "StartReplica" {
+		t.Errorf("call[4]: got %q, want StartReplica", calls[4])
 	}
 }

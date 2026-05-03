@@ -28,9 +28,10 @@ const (
 //     the SQL applier is paused so they're not yet applied.
 //  3. Write s14RowCount rows on the primary spread over s14WriteDuration.
 //     Capture the resulting gtid_executed.
-//  4. Verify the replica has the relay logs (Retrieved_Gtid_Set
-//     contains the post-write GTID set) but has NOT yet applied them
-//     (row count on the replica is below s14RowCount).
+//  4. Verify the replica has all primary GTIDs across its already
+//     applied set plus relay logs (Executed_Gtid_Set + Retrieved_Gtid_Set)
+//     but has NOT yet applied the new rows (row count on the replica is
+//     below s14RowCount).
 //  5. Scale the primary deployment to 0 — the relay logs are intact on
 //     the replica, only the source is unavailable.
 //  6. Wait for activeSite to flip and the operator to complete failover.
@@ -167,13 +168,18 @@ func s14InjectLagAndSeed() runner.Step {
 				return fmt.Errorf("lag precondition not met on %s: want IO running and SQL stopped, got io=%v sql=%v",
 					replica, rs.IORunning, rs.SQLRunning)
 			}
-			subset, err := replicaClient.ScalarInt(ctx, "SELECT GTID_SUBSET(?, ?)", postGtid, rs.RetrievedGtidSet)
+			replicaAvailableGtid := rs.ExecutedGtidSet
+			if replicaAvailableGtid != "" && rs.RetrievedGtidSet != "" {
+				replicaAvailableGtid += ","
+			}
+			replicaAvailableGtid += rs.RetrievedGtidSet
+			subset, err := replicaClient.ScalarInt(ctx, "SELECT GTID_SUBSET(?, ?)", postGtid, replicaAvailableGtid)
 			if err != nil {
-				return fmt.Errorf("verify retrieved GTID set on %s: %w", replica, err)
+				return fmt.Errorf("verify fetched GTID set on %s: %w", replica, err)
 			}
 			if subset != 1 {
-				return fmt.Errorf("replica %s has not fetched all post-write GTIDs: GTID_SUBSET(post, retrieved)=%d post=%q retrieved=%q",
-					replica, subset, postGtid, rs.RetrievedGtidSet)
+				return fmt.Errorf("replica %s has not fetched all post-write GTIDs: GTID_SUBSET(post, executed+retrieved)=%d post=%q executed=%q retrieved=%q",
+					replica, subset, postGtid, rs.ExecutedGtidSet, rs.RetrievedGtidSet)
 			}
 			rowsApplied, err := replicaClient.ScalarInt(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", s14DBName, s14TableName))
 			if err != nil {

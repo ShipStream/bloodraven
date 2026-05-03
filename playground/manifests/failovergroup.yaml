@@ -11,6 +11,8 @@ spec:
   failureThreshold: 3
   recoveryThreshold: 2
   failoverCooldown: 30s # short for playground experimentation
+  splitBrainPolicy:
+    sitePriorities: [iad, pdx]
   dns:
     hostname: playground-db.example.local
     ttl: 10
@@ -28,10 +30,10 @@ spec:
       resources:
         requests:
           cpu: 100m
-          memory: 256Mi
+          memory: 384Mi
         limits:
           cpu: 500m
-          memory: 512Mi
+          memory: 1Gi
     - name: pdx
       role: primary-candidate
       zone: zone-pdx
@@ -45,10 +47,10 @@ spec:
       resources:
         requests:
           cpu: 100m
-          memory: 256Mi
+          memory: 384Mi
         limits:
           cpu: 500m
-          memory: 512Mi
+          memory: 1Gi
   sidecar:
     leaseTimeout: 20s
     peerCheckInterval: 5s
@@ -64,16 +66,10 @@ spec:
     port: 6379
     adminPort: 9999
     maxMemoryMb: 256
-    proactorThreads: 2
+    proactorThreads: 1
     plannedFailover:
       maxSyncWait: 30s
       onSyncTimeout: proceed
-    snapshot:
-      dir: s3://dragonfly/playground
-      credentialsSecretName: dragonfly-s3-credentials
-      s3Endpoint: rustfs.bloodraven-playground.svc.cluster.local:9000
-      s3UseHTTPS: false
-      s3SignPayload: false
     resources:
       requests:
         cpu: 100m
