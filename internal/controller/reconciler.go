@@ -241,8 +241,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// Reconcile per-site Dragonfly resources when spec.dragonfly is enabled.
-	// No-op otherwise so MySQL-only deployments are unaffected. Owner-reference
-	// garbage collection cleans up resources when enabled flips to false.
+	// When Dragonfly is disabled, reconcileDragonflyResources actively removes
+	// any previously managed Dragonfly resources so MySQL-only deployments are
+	// unaffected.
 	if err := r.reconcileDragonflyResources(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly resources: %w", err)
 	}
