@@ -39,6 +39,7 @@ func scenario01CleanPrimaryKill() runner.Scenario {
 			verifyFailoverMetric(),
 			verifyFailoverLog(),
 		},
+		Cleanup: s08AutoRecloneCleanup,
 	}
 }
 

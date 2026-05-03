@@ -319,12 +319,21 @@ func waitForClusterReconverge(ctx context.Context, env *Env) error {
 		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 			ready := pgkube.ReadyCondition(mfg) == "True"
 			var bad []string
+			if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailover != nil {
+				remaining := mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailover.Time)
+				if remaining > 0 {
+					bad = append(bad, fmt.Sprintf("cooldown=%s", remaining.Round(time.Second)))
+				}
+			}
 			for _, s := range mfg.Status.Sites {
 				if s.State != "writable" && s.State != "read-only" {
 					bad = append(bad, fmt.Sprintf("%s=%s", s.Name, s.State))
 				}
 				if s.RecoveryState == "RecoveryBlocked" {
 					bad = append(bad, fmt.Sprintf("%s=blocked", s.Name))
+				}
+				if s.Name != mfg.Status.ActiveSite && isPromotableStatusSite(mfg, s.Name) && !s.Replicating {
+					bad = append(bad, fmt.Sprintf("%s=not-replicating", s.Name))
 				}
 			}
 			done := ready && len(bad) == 0 && mfg.Status.ActiveSite != ""
@@ -333,6 +342,15 @@ func waitForClusterReconverge(ctx context.Context, env *Env) error {
 		},
 	)
 	return err
+}
+
+func isPromotableStatusSite(mfg *v1alpha1.MysqlFailoverGroup, siteName string) bool {
+	for _, site := range mfg.Spec.Sites {
+		if site.Name == siteName {
+			return site.IsPromotable()
+		}
+	}
+	return false
 }
 
 func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Capture, startTime time.Time) (*Env, func(), error) {

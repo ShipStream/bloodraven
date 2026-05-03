@@ -25,11 +25,11 @@ import (
 
 // Exit codes (CLI surface, see plan §7).
 const (
-	exitOK           = 0
-	exitFailure      = 1
-	exitFlagParse    = 2
-	exitGuard        = 3
-	exitEnvironment  = 4
+	exitOK          = 0
+	exitFailure     = 1
+	exitFlagParse   = 2
+	exitGuard       = 3
+	exitEnvironment = 4
 )
 
 func main() {
@@ -88,6 +88,8 @@ func main() {
 		return
 	case "check":
 		os.Exit(check(*kubeconfig, *kctx, *namespace, *fg))
+	case "reset":
+		os.Exit(resetPlayground(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, logger))
 	case "run":
 		if len(subArgs) != 1 {
 			fmt.Fprintln(os.Stderr, "usage: playground-chaos run <scenario-id>")
@@ -105,9 +107,10 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `Usage:
-  playground-chaos [flags] list                 List registered scenarios
-  playground-chaos [flags] check                Verify baseline health
-  playground-chaos [flags] run <scenario-id>    Run a single scenario
+	playground-chaos [flags] list                 List registered scenarios
+	playground-chaos [flags] check                Verify baseline health
+	playground-chaos [flags] reset                Wipe and re-bootstrap MySQL playground state
+	playground-chaos [flags] run <scenario-id>    Run a single scenario
   playground-chaos [flags] run-all              Run all scenarios
 
 Flags:
@@ -242,7 +245,7 @@ func runOne(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	res := runScenarioWithAutoReset(ctx, k, scen, namespace, fg, resultsDir, noCleanup, force, autoReset, logger)
+	res := runScenarioWithAutoReset(ctx, k, kubeconfig, kctx, scen, namespace, fg, resultsDir, noCleanup, force, autoReset, logger)
 	printResult(res)
 	if !res.Passed {
 		return exitFailure
@@ -254,7 +257,7 @@ func runOne(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 // failure with --auto-reset set, shells out to reset-mysql.sh + setup.sh
 // and retries once. The retry has --auto-reset disabled so we can never
 // reset more than once per scenario invocation.
-func runScenarioWithAutoReset(ctx context.Context, k *pgkube.Client, scen runner.Scenario, namespace, fg, resultsDir string, noCleanup, force, autoReset bool, logger *slog.Logger) runner.Result {
+func runScenarioWithAutoReset(ctx context.Context, k *pgkube.Client, kubeconfig, kctx string, scen runner.Scenario, namespace, fg, resultsDir string, noCleanup, force, autoReset bool, logger *slog.Logger) runner.Result {
 	executor := &runner.Executor{
 		K: k,
 		Cfg: runner.ExecutorConfig{
@@ -271,7 +274,7 @@ func runScenarioWithAutoReset(ctx context.Context, k *pgkube.Client, scen runner
 		return res
 	}
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "!! --auto-reset: precheck failed, will run ./playground/reset-mysql.sh && ./playground/setup.sh")
+	fmt.Fprintln(os.Stderr, "!! --auto-reset: precheck failed, will run playground-chaos reset with the same kube context")
 	fmt.Fprintln(os.Stderr, "!! this will WIPE MySQL data — set CI=1 to skip the 3-second pause")
 	if os.Getenv("CI") == "" {
 		select {
@@ -280,7 +283,7 @@ func runScenarioWithAutoReset(ctx context.Context, k *pgkube.Client, scen runner
 			return res
 		}
 	}
-	if err := runResetAndSetup(ctx); err != nil {
+	if err := runReset(ctx, kubeconfig, kctx, k.CurrentCtx, namespace, fg, resultsDir); err != nil {
 		fmt.Fprintln(os.Stderr, "!! --auto-reset: shell-out failed:", err)
 		return res
 	}
@@ -291,18 +294,24 @@ func runScenarioWithAutoReset(ctx context.Context, k *pgkube.Client, scen runner
 	return executor.Run(ctx, scen)
 }
 
-// runResetAndSetup shells out to ./playground/reset-mysql.sh followed
-// by ./playground/setup.sh. Streams output through to stdout/stderr so
-// the user can watch the reset progress.
-func runResetAndSetup(ctx context.Context) error {
-	for _, script := range []string{"./playground/reset-mysql.sh", "./playground/setup.sh"} {
-		fmt.Fprintln(os.Stderr, "==>", script)
-		cmd := exec.CommandContext(ctx, "bash", script)
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("%s: %w", script, err)
-		}
+// runReset shells out to this same binary's reset subcommand. Streams
+// output through to stderr so the user can watch reset progress.
+func runReset(ctx context.Context, kubeconfig, kctx, currentCtx, namespace, fg, resultsDir string) error {
+	args := []string{"reset", "--namespace", namespace, "--fg", fg, "--results-dir", resultsDir}
+	if kubeconfig != "" {
+		args = append(args, "--kubeconfig", kubeconfig)
+	}
+	if kctx != "" {
+		args = append(args, "--context", kctx)
+	} else if currentCtx != "" {
+		args = append(args, "--context", currentCtx)
+	}
+	fmt.Fprintln(os.Stderr, "==>", os.Args[0], strings.Join(args, " "))
+	cmd := exec.CommandContext(ctx, os.Args[0], args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("playground-chaos reset: %w", err)
 	}
 	return nil
 }
@@ -333,7 +342,7 @@ func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 		if timeout > 0 {
 			s.Timeout = timeout
 		}
-		res := runScenarioWithAutoReset(ctx, k, s, namespace, fg, resultsDir, noCleanup, force, autoReset, logger)
+		res := runScenarioWithAutoReset(ctx, k, kubeconfig, kctx, s, namespace, fg, resultsDir, noCleanup, force, autoReset, logger)
 		results = append(results, res)
 		printResult(res)
 		if !res.Passed {

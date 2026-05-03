@@ -16,6 +16,10 @@ source "$SCRIPT_DIR/_guard.sh"
 require_playground_context
 
 info "Uninstalling Bloodraven Helm release..."
+kubectl -n "$NAMESPACE" delete mysqlfailovergroup --all --ignore-not-found --timeout=30s 2>/dev/null || true
+for mfg in $(kubectl -n "$NAMESPACE" get mysqlfailovergroup -o name 2>/dev/null); do
+  kubectl -n "$NAMESPACE" patch "$mfg" --type merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+done
 helm uninstall bloodraven -n "$NAMESPACE" 2>/dev/null || true
 
 info "Deleting playground manifests..."

@@ -289,7 +289,33 @@ sed "s|image: bloodraven-dashboard|image: ${IMG_PREFIX}bloodraven-dashboard|" \
   "$SCRIPT_DIR/manifests/dashboard.yaml" | kubectl apply -f -
 
 # ── 11. Wait for MySQL pods and create replication user ─────────────────
+info "Waiting for MySQL PVCs to bind..."
+PVCS_BOUND=0
+for i in $(seq 1 180); do
+  # Clear taints each second: local-path helper pods do not tolerate the
+  # operator's readonly taint, and one eviction can stall provisioning.
+  for node in $(kubectl get nodes -o name 2>/dev/null); do
+    kubectl taint "$node" shipstream.io/db-readonly-playground- 2>/dev/null || true
+    kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
+  done
+  PVCS_BOUND=$(kubectl -n "$NAMESPACE" get pvc -l app.kubernetes.io/name=mysql \
+    -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null \
+    | grep -c '^Bound$' || true)
+  if [[ "$PVCS_BOUND" -ge 2 ]]; then
+    ok "Both MySQL PVCs are bound"
+    break
+  fi
+  sleep 1
+done
+if [[ "$PVCS_BOUND" -lt 2 ]]; then
+  warn "Timed out waiting for MySQL PVCs to bind"
+  kubectl -n "$NAMESPACE" get pvc -o wide 2>/dev/null || true
+  kubectl -n "$NAMESPACE" describe pvc 2>/dev/null || true
+  exit 1
+fi
+
 info "Waiting for MySQL pods to become ready (this may take a few minutes)..."
+READY=0
 for i in $(seq 1 36); do
   # Clear taints each iteration — operator may apply them before pods are ready
   for node in $(kubectl get nodes -o name 2>/dev/null); do
@@ -303,22 +329,39 @@ for i in $(seq 1 36); do
     ok "Both MySQL pods are ready"
     break
   fi
-  if [[ "$i" -eq 36 ]]; then
-    warn "Timed out waiting for MySQL pods — replication user may need manual creation"
-  fi
   sleep 5
 done
+if [[ "$READY" -lt 2 ]]; then
+  warn "Timed out waiting for MySQL pods"
+  kubectl -n "$NAMESPACE" get pods,pvc -o wide 2>/dev/null || true
+  kubectl -n "$NAMESPACE" describe pods -l app.kubernetes.io/name=mysql 2>/dev/null || true
+  exit 1
+fi
 
 info "Creating replication user on both MySQL sites..."
 REPL_USER=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_USER}' | base64 -d)
 REPL_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_PASSWORD}' | base64 -d)
 ROOT_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | base64 -d)
 for site in iad pdx; do
-  kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+  READ_ONLY=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+    mysql "-uroot" "-p${ROOT_PASS}" -Nse "SELECT @@global.read_only" 2>/dev/null || echo 0)
+  SUPER_READ_ONLY=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+    mysql "-uroot" "-p${ROOT_PASS}" -Nse "SELECT @@global.super_read_only" 2>/dev/null || echo 0)
+  if kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
     mysql "-uroot" "-p${ROOT_PASS}" -e \
-    "CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
+    "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; \
+     CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
      GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
-     FLUSH PRIVILEGES;" 2>/dev/null && ok "Replication user created on $site" || warn "Failed to create replication user on $site"
+     FLUSH PRIVILEGES;" 2>/dev/null; then
+    if [[ "$READ_ONLY" == "1" || "$SUPER_READ_ONLY" == "1" ]]; then
+      kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+        mysql "-uroot" "-p${ROOT_PASS}" -e "SET GLOBAL read_only=ON; SET GLOBAL super_read_only=ON;" 2>/dev/null || true
+    fi
+    ok "Replication user created on $site"
+  else
+    warn "Failed to create replication user on $site"
+    exit 1
+  fi
 done
 
 # ── 12. Wait for remaining pods and print access info ───────────────────
