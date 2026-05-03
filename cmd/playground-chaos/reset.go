@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -728,9 +727,4 @@ func (r *resetter) warn(format string, args ...any) {
 	if r.logger != nil {
 		r.logger.Warn(line)
 	}
-}
-
-func compactYAML(v any) []byte {
-	body, _ := yaml.Marshal(v)
-	return bytes.TrimSpace(body)
 }
