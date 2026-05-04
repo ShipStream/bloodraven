@@ -5,7 +5,7 @@ slug: /
 
 # Bloodraven
 
-Bloodraven is a Kubernetes operator for managing MySQL async replication failover groups across two sites. It automates failover detection, promotion, DNS steering, and application workload migration so that a site-level MySQL outage is resolved without human intervention.
+Bloodraven is a Kubernetes operator for MySQL async replication failover groups across sites. It automates failover detection, promotion, DNS steering, and application workload migration so a site-level MySQL outage can recover without human intervention.
 
 ## Who this is for
 
@@ -40,7 +40,7 @@ Bloodraven is a Kubernetes operator for managing MySQL async replication failove
 - **Detects** when the active primary becomes unreachable and **promotes** the standby replica to primary
 - **Steers traffic** by updating a DNSEndpoint CR (consumed by external-dns) to point to the new primary's load balancer IP
 - **Migrates workloads** by tainting nodes at the failed site so Kubernetes evicts application pods
-- **Prevents split-brain** with sidecar self-fencing: if both the operator and peer are unreachable, the sidecar sets `super_read_only=ON` as a safety net (see [Operator availability](./operator-availability.mdx) and [Durability and RPO](./durability-and-rpo.mdx) for exact behaviour and bounds)
+- **Prevents split-brain** with sidecar self-fencing: if both the operator and peer are unreachable, the sidecar sets `super_read_only=ON` as a safety net (see [Operator availability](./operator-availability.mdx) and [Durability and RPO](./durability-and-rpo.mdx) for exact behavior and bounds)
 - **Broadcasts status** over a WebSocket API for dashboards and alerting integrations
 - **Backs up and restores** via mysqlsh `util.dumpInstance()` / `util.loadDump()` to S3 or PVC, with scheduled CronJobs, structured retention, retries, and automatic artifact cleanup
 
@@ -67,11 +67,11 @@ to make sure the tradeoffs match your use case.
 | `bloodraven` | The operator binary. Runs as a Deployment, watches `MysqlFailoverGroup` CRs, reconciles MySQL state. |
 | `bloodraven-sidecar` | Runs alongside each MySQL container. Provides health probes and self-fencing when the operator is unreachable. |
 
-## Custom Resource
+## Custom resource
 
 Bloodraven introduces a single CRD:
 
-- **`MysqlFailoverGroup`** (`shipstream.io/v1alpha1`) -- Declares a pair of MySQL instances across two named sites, their storage, networking, DNS, TLS, and failover tuning.
+- **`MysqlFailoverGroup`** (`shipstream.io/v1alpha1`) -- Declares MySQL instances across named sites, their storage, networking, DNS, transport layer security (TLS), and failover tuning.
 
 ```yaml
 apiVersion: shipstream.io/v1alpha1

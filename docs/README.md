@@ -1,41 +1,46 @@
-# Website
+# Bloodraven documentation site
 
-This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
+This directory contains the Docusaurus source for the Bloodraven documentation site.
 
-## Installation
-
-```bash
-yarn
-```
-
-## Local Development
+## Install dependencies
 
 ```bash
-yarn start
+npm install
 ```
 
-This command starts a local development server and opens up a browser window. Most changes are reflected live without having to restart the server.
+## Run locally
+
+```bash
+npm start
+```
+
+The development server serves the docs at `http://localhost:3000/` by default.
 
 ## Build
 
 ```bash
-yarn build
+npm run build
 ```
 
-This command generates static content into the `build` directory and can be served using any static contents hosting service.
+The build writes static files to `docs/build/`.
 
-## Deployment
+## Edit docs
 
-Using SSH:
+- Put user-facing pages in `docs/docs/`.
+- Update `docs/sidebars.js` when you add, remove, or rename a page.
+- Use one page type per page: tutorial, how-to guide, reference, or explanation.
+- Keep code examples copy-pasteable, and show expected output when verification matters.
+- Prefer links to canonical pages over repeating the same operational facts in multiple files.
 
-```bash
-USE_SSH=true yarn deploy
-```
+## Important pages
 
-Not using SSH:
+| Page | Use it for |
+|---|---|
+| `docs/docs/intro.mdx` | Documentation landing page and reader journeys. |
+| `docs/docs/getting-started.mdx` | First `MysqlFailoverGroup` setup. |
+| `docs/docs/install-production.mdx` | Production install path. |
+| `docs/docs/runbooks.mdx` | On-call remediation procedures. |
+| `docs/docs/crd-reference.mdx` | Custom resource fields and status reference. |
+| `docs/docs/log-schema.mdx` | Stable structured log messages and fields. |
 
-```bash
-GIT_USER=<Your GitHub username> yarn deploy
-```
-
-If you are using GitHub pages for hosting, this command is a convenient way to build the website and push to the `gh-pages` branch.
+When you change structured log messages or documented log fields, update `docs/docs/log-schema.mdx` in the same pull request.

@@ -59,7 +59,7 @@ const sidebars = {
     },
     {
       type: 'category',
-      label: 'Backup And Restore',
+      label: 'Backup and restore',
       items: [
         'backup-overview',
         'backup-restore',

@@ -2,9 +2,9 @@
 sidebar_position: 10
 ---
 
-# GitOps Guidance
+# GitOps guidance
 
-Use this page for Argo CD or Flux-managed Bloodraven installs.
+Use this page for Argo CD or Flux-managed Bloodraven installs. It covers resource ownership, sync order, custom health checks, and upgrade sequencing.
 
 ## CRD ownership
 
@@ -31,7 +31,22 @@ Recommended order:
 
 ## Argo CD health checks
 
-The chart ships health scripts in `charts/bloodraven/argocd/` for `MysqlFailoverGroup` and `MysqlBackup`. Install them into `argocd-cm` so Argo CD does not show these CRs as Unknown.
+Argo CD does not know how to evaluate `MysqlFailoverGroup` or `MysqlBackup` custom resources by default. Without custom health checks, the resources show **Unknown** in the Argo CD UI.
+
+Bloodraven ships Lua health scripts in `charts/bloodraven/argocd/` that map custom resource (CR) status to Argo CD health:
+
+| CR | Condition or field | Argo CD health |
+|---|---|---|
+| `MysqlFailoverGroup` | `Degraded=True`, `RecoveryPending=True`, or `Bootstrapping=True` with `reason=Failed` | **Degraded** |
+| `MysqlFailoverGroup` | `Bootstrapping=True` or `Updating=True` | **Progressing** |
+| `MysqlFailoverGroup` | `Ready=True` | **Healthy** |
+| `MysqlBackup` | `phase: Succeeded` | **Healthy** |
+| `MysqlBackup` | `phase: Failed` | **Degraded** |
+| `MysqlBackup` | `phase: Pending` or `Running` | **Progressing** |
+
+### Patch argocd-cm directly
+
+Extract the chart and apply the patch file:
 
 ```bash
 helm pull bloodraven/bloodraven --untar
@@ -39,6 +54,49 @@ kubectl patch configmap argocd-cm -n argocd \
   --patch-file bloodraven/argocd/argocd-cm-patch.yaml
 kubectl rollout restart deployment argocd-application-controller -n argocd
 ```
+
+### Use Argo CD Helm chart values
+
+If you deploy Argo CD with its Helm chart, extract the Lua scripts from the Bloodraven chart:
+
+```bash
+helm pull bloodraven/bloodraven --untar
+```
+
+Then copy the contents of `bloodraven/argocd/health-mysqlfailovergroup.lua` and `bloodraven/argocd/health-mysqlbackup.lua` into your Argo CD values:
+
+```yaml
+configs:
+  cm:
+    resource.customizations.health.shipstream.io_MysqlFailoverGroup: |
+      # paste contents of bloodraven/argocd/health-mysqlfailovergroup.lua
+    resource.customizations.health.shipstream.io_MysqlBackup: |
+      # paste contents of bloodraven/argocd/health-mysqlbackup.lua
+```
+
+### Use a Kustomize overlay
+
+If you manage Argo CD with Kustomize, extract the patch from the chart and add it as a strategic merge patch:
+
+```bash
+helm pull bloodraven/bloodraven --untar
+cp bloodraven/argocd/argocd-cm-patch.yaml .
+```
+
+```yaml
+patchesStrategicMerge:
+  - argocd-cm-patch.yaml
+```
+
+### Verify Argo CD health checks
+
+Check that `argocd-cm` contains Bloodraven customizations:
+
+```bash
+kubectl get configmap argocd-cm -n argocd -o yaml | grep shipstream
+```
+
+After Argo CD refreshes the application, `MysqlFailoverGroup` and `MysqlBackup` resources should show **Healthy**, **Progressing**, or **Degraded** instead of **Unknown**.
 
 ## Ignore status fields
 

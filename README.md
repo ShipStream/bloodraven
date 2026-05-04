@@ -1,19 +1,95 @@
 # Bloodraven
 
-A Kubernetes operator for MySQL async replication failover groups across two or more sites. Bloodraven owns the full MySQL lifecycle: pod creation, configuration, health monitoring, automated failover between primary candidates (with optional DR-only followers), clone-based bootstrapping, and platform reactions (node taints, DNS failover via external-dns, WebSocket broadcasts).
+With Bloodraven you can run MySQL async replication failover groups across Kubernetes sites. Bloodraven owns pod creation, MySQL configuration, health monitoring, promotion, DNS steering through external-dns, node taints, clone-based bootstrap, and sidecar self-fencing.
 
-Single controller, single source of truth, no coordination problems.
+Bloodraven is built for site-level failover where applications can accept non-zero recovery point objective (RPO) after sudden primary loss. It does not provide synchronous replication, zero RPO, or automatic conflict repair after divergent writes.
 
-**[Documentation](https://bloodraven.readthedocs.io/en/latest/)** -- installation, operations, CRD reference, app integration, and more.
+**[Documentation](https://bloodraven.readthedocs.io/en/latest/)** - installation, operations, custom resource definition (CRD) reference, application integration, and more.
 
-## Architecture
+## Choose your path
+
+| Goal | Start here |
+|---|---|
+| Try the full demo locally | [Playground](https://bloodraven.readthedocs.io/en/latest/docs/playground) |
+| Create a first failover group | [Getting Started](https://bloodraven.readthedocs.io/en/latest/docs/getting-started) |
+| Install for production | [Production Install](https://bloodraven.readthedocs.io/en/latest/docs/install-production) |
+| Connect an application | [App Integration](https://bloodraven.readthedocs.io/en/latest/docs/app-integration) |
+| Handle an alert | [Operations Overview](https://bloodraven.readthedocs.io/en/latest/docs/operations-overview) |
+| Configure backups | [Backup Overview](https://bloodraven.readthedocs.io/en/latest/docs/backup-overview) |
+
+## Quickstart
+
+The playground deploys a two-site MySQL failover group on k3d, kind, or minikube with a dashboard, counter app, DNS visualization, and chaos tools.
+
+```bash
+# Create a local cluster. This example uses k3d.
+k3d cluster create bloodraven --agents 2
+
+# Build and deploy the operator, sidecars, MySQL pods, and demo apps.
+./playground/setup.sh
+
+# Trigger a simulated site failure.
+./playground/chaos.sh kill-site iad
+
+# Remove playground resources.
+./playground/teardown.sh
+```
+
+See the [Playground guide](https://bloodraven.readthedocs.io/en/latest/docs/playground) for the full walkthrough.
+
+## What Bloodraven manages
+
+- MySQL primary and replica Deployments, Services, ConfigMaps, and persistent volume claims (PVCs).
+- Per-site placement, taints, and failover-aware node reactions.
+- MySQL clone bootstrap and asynchronous replication.
+- Primary promotion, replica reconfiguration, and anti-flap cooldown.
+- DNSEndpoint updates for external-dns.
+- Operator metrics, status endpoints, and WebSocket status broadcasts.
+- Backup and restore Jobs for S3 or PVC artifact storage.
+
+## Development
+
+```bash
+make help                # Show all available targets
+
+# Build
+make build               # Both operator and sidecar
+make build-bloodraven    # Operator only
+make build-sidecar       # Sidecar only
+make docker-build        # Docker images for both
+
+# Test
+make test                # Fast tests: unit and component
+make test-unit           # Unit tests only, with no network listeners
+make test-component      # Component tests with fakes
+make test-envtest        # envtest controller tests with a real API server
+make test-integration    # Integration tests with network listeners
+
+# Code quality
+make fmt                 # Format Go source files
+make vet                 # Run go vet
+make lint                # Run golangci-lint
+
+# Code generation
+make generate            # Regenerate deep-copy code
+make manifests           # Generate CRD and RBAC manifests
+```
+
+### Dependencies
+
+- Go 1.26
+- controller-runtime v0.23.3
+- k8s.io/api v0.35.3
+- MySQL 9.6 with clone plugin
+
+## Architecture snapshot
 
 ```mermaid
 graph TB
     subgraph "Kubernetes Cluster"
         BR["Bloodraven Controller<br/>:8080 metrics | :8081 probes | :8082 ws/status"]
 
-        subgraph "Site A (e.g. iad)"
+        subgraph "Site A (for example, iad)"
             D1["Deployment<br/>mysql-main-iad"]
             S1["Sidecar :8080<br/>/health /status /peer/ping"]
             M1[("MySQL Primary<br/>read_only=0")]
@@ -21,7 +97,7 @@ graph TB
             SVC1["Service<br/>mysql-main-iad:3306"]
         end
 
-        subgraph "Site B (e.g. pdx)"
+        subgraph "Site B (for example, pdx)"
             D2["Deployment<br/>mysql-main-pdx"]
             S2["Sidecar :8080<br/>/health /status /peer/ping"]
             M2[("MySQL Replica<br/>read_only=1")]
@@ -56,62 +132,7 @@ graph TB
 
 See the [Architecture](https://bloodraven.readthedocs.io/en/latest/docs/architecture) and [Failover](https://bloodraven.readthedocs.io/en/latest/docs/failover) docs for the state machine, failover sequences, and split-brain prevention layers.
 
-## Playground
-
-Try Bloodraven locally with a single command. The playground spins up a full two-site MySQL failover group on k3d, kind, or minikube — complete with a real-time dashboard, a counter app for testing writes, DNS visualization, and a chaos monkey for triggering failovers.
-
-```bash
-# Create a local cluster (k3d example)
-k3d cluster create bloodraven --agents 2
-
-# Build and deploy everything
-./playground/setup.sh
-
-# Trigger chaos
-./playground/chaos.sh kill-site iad
-
-# Tear it down
-./playground/teardown.sh
-```
-
-See the [Playground guide](https://bloodraven.readthedocs.io/en/latest/docs/playground) for the full walkthrough.
-
-## Development
-
-```bash
-make help                # Show all available targets
-
-# Build
-make build               # Both operator and sidecar
-make build-bloodraven    # Operator only
-make build-sidecar       # Sidecar only
-make docker-build        # Docker images for both
-
-# Test
-make test                # Fast tests (unit + component)
-make test-unit           # Unit tests only (no network listeners)
-make test-component      # Component tests (cross-package with fakes)
-make test-envtest        # envtest controller tests (real API server)
-make test-integration    # Integration tests (network listeners)
-
-# Code quality
-make fmt                 # Format Go source files
-make vet                 # Run go vet
-make lint                # Run golangci-lint
-
-# Code generation
-make generate            # Regenerate deep copy code
-make manifests           # Generate CRD and RBAC manifests
-```
-
-### Dependencies
-
-- Go 1.26
-- controller-runtime v0.23.3
-- k8s.io/api v0.35.3
-- MySQL 9.6 with clone plugin
-
-## Design Decisions
+## Design decisions
 
 **Deployments, not StatefulSets.** Each site has its own storage class, zone affinity, and role. StatefulSets assume homogeneous replicas -- our pods are fundamentally different (one primary, one replica, different zones). Separate Deployments with `replicas: 1` give us per-site control without fighting StatefulSet semantics.
 
@@ -119,6 +140,6 @@ make manifests           # Generate CRD and RBAC manifests
 
 **DNS flip deferred until confirmed.** After promoting a candidate, Bloodraven doesn't immediately update DNS. It waits for the next poll to confirm `read_only=0` on the promoted site. This prevents pointing DNS at a node that failed promotion.
 
-**Relay log drain is best-effort.** The 30-second drain timeout is non-fatal. If relay logs can't be fully applied (e.g., SQL thread error), failover proceeds anyway. Data in the relay log may be lost, but the alternative -- blocking failover indefinitely -- is worse for availability.
+**Relay log drain is best-effort.** The 30-second drain timeout is non-fatal. If relay logs can't be fully applied, such as after a SQL thread error, failover proceeds anyway. Data in the relay log may be lost, but the alternative -- blocking failover indefinitely -- is worse for availability.
 
 **Anti-flap cooldown.** After a failover, further failovers are blocked for 5 minutes by default (configurable via `failoverCooldown`). This prevents cascading failovers when infrastructure is unstable.
