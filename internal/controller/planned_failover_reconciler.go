@@ -62,6 +62,8 @@ func plannedFailoverInFlight(s *v1alpha1.PlannedFailoverStatus) bool {
 		v1alpha1.PlannedFailoverPhaseValidating,
 		v1alpha1.PlannedFailoverPhaseDraining,
 		v1alpha1.PlannedFailoverPhaseWaitingForLag,
+		v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync,
+		v1alpha1.PlannedFailoverPhasePromotingDragonfly,
 		v1alpha1.PlannedFailoverPhasePromoting,
 		v1alpha1.PlannedFailoverPhaseResuming:
 		return true
@@ -141,6 +143,10 @@ func (r *MysqlFailoverGroupReconciler) reconcilePlannedFailover(ctx context.Cont
 		return r.plannedFailoverDraining(ctx, fg, nn)
 	case v1alpha1.PlannedFailoverPhaseWaitingForLag:
 		return r.plannedFailoverWaitingForLag(ctx, fg, nn)
+	case v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync:
+		return r.plannedFailoverWaitingForDragonflySync(ctx, fg, nn)
+	case v1alpha1.PlannedFailoverPhasePromotingDragonfly:
+		return r.plannedFailoverPromotingDragonfly(ctx, fg, nn)
 	case v1alpha1.PlannedFailoverPhasePromoting:
 		return r.plannedFailoverPromoting(ctx, fg, nn)
 	case v1alpha1.PlannedFailoverPhaseResuming:
@@ -610,15 +616,23 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForLag(ctx context.
 
 	if caughtUp {
 		next := cur.DeepCopy()
-		next.Phase = v1alpha1.PlannedFailoverPhasePromoting
+		// Insert the Dragonfly sync/promote phases between MySQL lag-OK
+		// and MySQL promotion when the subsystem is enabled. Disabled
+		// failover groups keep the original two-step (lag-OK → promote).
+		if dragonflyEnabled(fg) {
+			next.Phase = v1alpha1.PlannedFailoverPhaseWaitingForDragonflySync
+			next.Message = fmt.Sprintf("target %q caught up in %s; waiting for Dragonfly replica", cur.Target, truncateDur(elapsed))
+		} else {
+			next.Phase = v1alpha1.PlannedFailoverPhasePromoting
+			next.Message = fmt.Sprintf("target %q caught up in %s; promoting", cur.Target, truncateDur(elapsed))
+		}
 		next.TargetGtidAtPromotion = targetGtid
-		next.Message = fmt.Sprintf("target %q caught up in %s; promoting", cur.Target, truncateDur(elapsed))
 		if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
 			return 0, err
 		}
 		metrics.PlannedFailoverLagWaitSeconds.WithLabelValues(cur.Target).Observe(elapsed.Seconds())
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "PlannedFailoverLagOK",
-			"target %q caught up after %s; proceeding to promote", cur.Target, truncateDur(elapsed))
+			"target %q caught up after %s; proceeding", cur.Target, truncateDur(elapsed))
 		return 1 * time.Second, nil
 	}
 

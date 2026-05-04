@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
@@ -30,20 +31,61 @@ func (p *Probe) Close() {
 
 // Open opens a sidecar probe for a site.
 func Open(ctx context.Context, k *pgkube.Client, namespace, fg, site string) (*Probe, error) {
-	pod, err := k.GetSiteMysqlPod(ctx, namespace, fg, site)
-	if err != nil {
-		return nil, err
+	deadline := time.Now().Add(30 * time.Second)
+	var last error
+	for {
+		pod, err := k.GetSiteMysqlPod(ctx, namespace, fg, site)
+		if err != nil {
+			last = err
+		} else {
+			pf, err := k.PortForwardPod(ctx, namespace, pod.Name, 8080)
+			if err == nil {
+				probe := &Probe{
+					Site: site,
+					pf:   pf,
+					cli:  &http.Client{Timeout: 4 * time.Second},
+					base: fmt.Sprintf("http://127.0.0.1:%d", pf.LocalPort),
+				}
+				healthCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+				ok, body, healthErr := probe.Health(healthCtx)
+				cancel()
+				if healthErr == nil && ok {
+					return probe, nil
+				}
+				probe.Close()
+				if healthErr != nil {
+					last = fmt.Errorf("sidecar health check for site %s: %w", site, healthErr)
+				} else {
+					last = fmt.Errorf("sidecar health check for site %s returned not ready: %s", site, body)
+				}
+			} else {
+				last = fmt.Errorf("port-forward sidecar for site %s: %w", site, err)
+				if !retryableOpenError(err) {
+					return nil, last
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, last
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("open sidecar probe for site %s: %w (last: %v)", site, ctx.Err(), last)
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
-	pf, err := k.PortForwardPod(ctx, namespace, pod.Name, 8080)
-	if err != nil {
-		return nil, fmt.Errorf("port-forward sidecar for site %s: %w", site, err)
+}
+
+func retryableOpenError(err error) bool {
+	if err == nil {
+		return false
 	}
-	return &Probe{
-		Site: site,
-		pf:   pf,
-		cli:  &http.Client{Timeout: 4 * time.Second},
-		base: fmt.Sprintf("http://127.0.0.1:%d", pf.LocalPort),
-	}, nil
+	msg := err.Error()
+	return strings.Contains(msg, "pod not found") ||
+		strings.Contains(msg, "unable to upgrade connection") ||
+		strings.Contains(msg, "failed before ready") ||
+		strings.Contains(msg, "network namespace for sandbox") ||
+		strings.Contains(msg, "connection refused")
 }
 
 // Health calls GET /health and returns true on 200.

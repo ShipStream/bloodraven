@@ -18,6 +18,33 @@ ok()    { echo -e "\033[1;32m OK\033[0m $*"; }
 warn()  { echo -e "\033[1;33m!!\033[0m $*"; }
 fail()  { echo -e "\033[1;31mERR\033[0m $*" >&2; exit 1; }
 
+local_image_ids() {
+  local img="$1"
+  $RUNTIME image inspect "$img" --format '{{.Id}}' 2>/dev/null | sed 's/^sha256://'
+
+  # Docker BuildKit can leave a local tag pointing at an OCI image
+  # index. Kubernetes reports the running container's config digest in
+  # status.containerStatuses[*].imageID, so comparing only .Id creates
+  # false "stale image" failures. The docker-save manifest exposes the
+  # config digest for the same local tag.
+  if [[ "$RUNTIME" == "docker" ]]; then
+    local tarfile
+    tarfile=$(mktemp "${TMPDIR:-/tmp}/bloodraven-image-XXXXXX.tar")
+    if docker image save "$img" -o "$tarfile" 2>/dev/null; then
+      tar -xOf "$tarfile" manifest.json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    cfg = json.load(sys.stdin)[0].get("Config", "")
+except Exception:
+    cfg = ""
+if cfg:
+    print(cfg.rsplit("/", 1)[-1].removesuffix(".json"))
+'
+    fi
+    rm -f "$tarfile"
+  fi
+}
+
 # Refuse to run outside a known-local cluster context (AUDIT M7).
 # shellcheck source=playground/_guard.sh
 source "$SCRIPT_DIR/_guard.sh"
@@ -110,18 +137,17 @@ if command -v k3d >/dev/null 2>&1 && k3d cluster list 2>/dev/null | grep -q .; t
   fi
   if [[ -n "$K3D_CLUSTER" ]]; then
     info "Loading ${#IMAGES[@]} image(s) into k3d cluster '$K3D_CLUSTER'..."
-    # --mode direct forces k3d to replace the image in each node's
-    # containerd. The default mode ("auto") can short-circuit when an
-    # image with the same tag already exists, leaving the cluster
-    # running stale code while reporting success — and with
-    # imagePullPolicy=Never on the playground deployments, kubelet
-    # never tries to pull a fresh copy. This was a real bug:
-    # rebuild.sh would report success against an unchanged binary.
+    # tools-node import loads the freshly built image tarball into each
+    # node's containerd. Avoid k3d's auto mode here: it can short-circuit
+    # when an image with the same tag already exists, leaving the cluster
+    # running stale code while reporting success. Direct mode also
+    # replaces node images, but it can hang on Docker socket stream
+    # failures in this playground environment.
     if [[ "$RUNTIME" == "podman" ]]; then
       podman_save
-      k3d image import --mode direct "$TARFILE" -c "$K3D_CLUSTER"
+      k3d image import --mode tools-node "$TARFILE" -c "$K3D_CLUSTER"
     else
-      k3d image import --mode direct "${IMAGES[@]}" -c "$K3D_CLUSTER"
+      k3d image import --mode tools-node "${IMAGES[@]}" -c "$K3D_CLUSTER"
     fi
     ok "Images loaded (k3d)"
   fi
@@ -165,9 +191,9 @@ done
 info "Verifying rolled pods are running the freshly-built image..."
 verify_failures=()
 for img in "${IMAGES[@]}"; do
-  expected=$($RUNTIME image inspect "$img" --format '{{.Id}}' 2>/dev/null \
-    | sed 's/^sha256://')
-  if [[ -z "$expected" ]]; then
+  expected_ids=$(local_image_ids "$img" | sed '/^$/d' | sort -u)
+  expected=$(echo "$expected_ids" | head -1)
+  if [[ -z "$expected_ids" ]]; then
     warn "could not read local image ID for $img — skipping verification"
     continue
   fi
@@ -194,10 +220,13 @@ for img in "${IMAGES[@]}"; do
   fi
   match=0
   while read -r got; do
-    if [[ "$got" == "$expected"* || "$expected" == "$got"* ]]; then
-      match=1
-      break
-    fi
+    while read -r expected_id; do
+      if [[ "$got" == "$expected_id"* || "$expected_id" == "$got"* ]]; then
+        match=1
+        break
+      fi
+    done <<<"$expected_ids"
+    [[ $match -eq 1 ]] && break
   done <<<"$pod_ids"
   if [[ $match -eq 1 ]]; then
     ok "$img → ${expected:0:12}"

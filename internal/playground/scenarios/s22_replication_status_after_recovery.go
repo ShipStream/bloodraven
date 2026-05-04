@@ -38,10 +38,8 @@ func init() {
 // (~2s × failureThreshold + the enrichment loop's tick) so any
 // genuine "field will populate, just slowly" recovery still passes.
 //
-// Until WISHLIST #36 is fixed this scenario is expected to FAIL —
-// that is the point of a regression test. It guards future work from
-// silently bringing the bug back, and it gives a CI-reachable signal
-// the moment the fix lands.
+// This scenario guards the WISHLIST #36 fix so future changes cannot
+// silently bring the bug back.
 func scenario22ReplicationStatusAfterRecovery() runner.Scenario {
 	return runner.Scenario{
 		ID:    "22-replication-status-after-recovery",

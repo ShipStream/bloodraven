@@ -2,10 +2,12 @@ package scenarios
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -51,6 +53,7 @@ func scenario05SplitBrainAutoResolve() runner.Scenario {
 			return nil
 		},
 		Steps: []runner.Step{
+			prepareSplitBrainAutoResolvePolicyPath(),
 			injectForceBothWritable(),
 			observeAutoResolve(),
 			verifyAutoResolveMetric(),
@@ -61,6 +64,85 @@ func scenario05SplitBrainAutoResolve() runner.Scenario {
 		// on the standby during its next reconcile pass — no extra
 		// teardown is needed for the writable-flip we injected.
 	}
+}
+
+func prepareSplitBrainAutoResolvePolicyPath() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "restart operator with empty failover history",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return err
+			}
+			active := mfg.Status.ActiveSite
+			peer, err := PeerOf(mfg, active)
+			if err != nil {
+				return err
+			}
+			env.Capture.Note(fmt.Sprintf(
+				"preparing split-brain policy path: active=%s peer=%s priorities=%v; clearing lastFailover history",
+				active, peer, mfg.Spec.SplitBrainPolicy.SitePriorities,
+			))
+
+			if err := env.Chaos.ScaleOperatorToZero(ctx); err != nil {
+				return err
+			}
+			defer func() {
+				_ = env.Chaos.Revert(context.Background())
+			}()
+			if err := clearFailoverHistoryStatus(ctx, env); err != nil {
+				return err
+			}
+			if err := env.Chaos.Revert(ctx); err != nil {
+				return fmt.Errorf("restart operator after clearing failover history: %w", err)
+			}
+			if env.RefreshMetrics != nil {
+				if err := env.RefreshMetrics(ctx); err != nil {
+					return err
+				}
+			}
+
+			waitCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
+				"operator restarted with empty lastFailoverTarget",
+				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					ready := pgkube.ReadyCondition(mfg)
+					msg := fmt.Sprintf("ready=%s active=%q lastFailoverTarget=%q",
+						ready, mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
+					done := ready == "True" && mfg.Status.ActiveSite != "" && mfg.Status.LastFailoverTarget == ""
+					return done, msg, nil
+				},
+			)
+			return err
+		},
+	}
+}
+
+func clearFailoverHistoryStatus(ctx context.Context, env *runner.Env) error {
+	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+	if err != nil {
+		return err
+	}
+	status, err := json.Marshal(mfg.Status)
+	if err != nil {
+		return err
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(status, &fields); err != nil {
+		return err
+	}
+	var ops []pgkube.JSONPatchOp
+	for _, field := range []string{"lastFailover", "lastFailoverTarget", "promotionGtidExecuted"} {
+		if _, ok := fields[field]; ok {
+			ops = append(ops, pgkube.JSONPatchOp{Op: "remove", Path: "/status/" + field})
+		}
+	}
+	if len(ops) == 0 {
+		return nil
+	}
+	return env.Kube.PatchMFGStatusNamed(ctx, env.Namespace, env.FG, ops)
 }
 
 func injectForceBothWritable() runner.Step {

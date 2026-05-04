@@ -56,6 +56,7 @@ func scenario18RapidCRSpecChanges() runner.Scenario {
 		Steps: []runner.Step{
 			s18InjectFailoverAndPatchStorm(),
 			s18ObserveActiveSiteFlip(),
+			s18ScaleOldPrimaryBackUp(),
 			s18ObserveConvergence(),
 			s18VerifyFinalMemoryRequest(),
 		},
@@ -156,6 +157,21 @@ func s18ObserveActiveSiteFlip() runner.Step {
 	}
 }
 
+func s18ScaleOldPrimaryBackUp() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseInject,
+		Name:  "scale old primary back to 1",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			original := ctxFetch(env, "originalPrimary")
+			if err := env.Chaos.ScaleSiteToOne(ctx, original); err != nil {
+				return fmt.Errorf("scale old primary back up: %w", err)
+			}
+			env.Capture.Note("old primary scaled back to 1; waiting for convergence")
+			return nil
+		},
+	}
+}
+
 // s18ObserveConvergence waits for the cluster to settle: exactly one
 // writable site, exactly one read-only site, no RecoveryBlocked, and
 // status.updatePhase empty (the rolling-update controller may engage
@@ -207,36 +223,43 @@ func s18VerifyFinalMemoryRequest() runner.Step {
 			if err != nil {
 				return fmt.Errorf("parse finalMemoryValue %q: %w", finalMem, err)
 			}
-			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			waitCtx, cancel := context.WithTimeout(ctx, 8*time.Minute)
+			defer cancel()
+			_, err = env.Wait.UntilCR(waitCtx, env.Namespace,
+				fmt.Sprintf("deployments memory=%s", expected.String()),
+				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					var bad []string
+					for _, s := range mfg.Spec.Sites {
+						dep, err := env.Kube.GetDeployment(ctx, env.Namespace, fmt.Sprintf("mysql-%s-%s", env.FG, s.Name))
+						if err != nil {
+							bad = append(bad, fmt.Sprintf("%s=get-deployment: %v", s.Name, err))
+							continue
+						}
+						var got *resource.Quantity
+						for _, c := range dep.Spec.Template.Spec.Containers {
+							if c.Name != "mysql" {
+								continue
+							}
+							if mem, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+								q := mem
+								got = &q
+							}
+						}
+						if got == nil {
+							bad = append(bad, fmt.Sprintf("%s=missing", s.Name))
+							continue
+						}
+						if got.Cmp(expected) != 0 {
+							bad = append(bad, fmt.Sprintf("%s=%s (want %s)", s.Name, got.String(), expected.String()))
+						}
+					}
+					sort.Strings(bad)
+					msg := fmt.Sprintf("updatePhase=%q bad=%v", mfg.Status.UpdatePhase, bad)
+					return len(bad) == 0, msg, nil
+				},
+			)
 			if err != nil {
 				return err
-			}
-			var bad []string
-			for _, s := range mfg.Spec.Sites {
-				dep, err := env.Kube.GetDeployment(ctx, env.Namespace, fmt.Sprintf("mysql-%s-%s", env.FG, s.Name))
-				if err != nil {
-					return fmt.Errorf("get deployment for %s: %w", s.Name, err)
-				}
-				var got *resource.Quantity
-				for _, c := range dep.Spec.Template.Spec.Containers {
-					if c.Name != "mysql" {
-						continue
-					}
-					if mem, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
-						q := mem
-						got = &q
-					}
-				}
-				if got == nil {
-					bad = append(bad, fmt.Sprintf("%s=missing", s.Name))
-					continue
-				}
-				if got.Cmp(expected) != 0 {
-					bad = append(bad, fmt.Sprintf("%s=%s (want %s)", s.Name, got.String(), expected.String()))
-				}
-			}
-			if len(bad) > 0 {
-				return fmt.Errorf("deployments did not converge to last-applied memory: %v", bad)
 			}
 			env.Capture.Note(fmt.Sprintf("all deployments at final memory=%s", expected.String()))
 			return nil

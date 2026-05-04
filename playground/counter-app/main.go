@@ -23,6 +23,11 @@ var (
 	mu    sync.RWMutex
 	db    *sql.DB
 	dbErr error = fmt.Errorf("connecting to MySQL...")
+
+	// rdb is set when REDIS_HOST is configured; nil otherwise.
+	// The Dragonfly counter is opt-in: a counter-app pod still
+	// works when Bloodraven is deployed without spec.dragonfly.
+	rdb *redisClient
 )
 
 func getDB() (*sql.DB, error) {
@@ -43,6 +48,19 @@ func main() {
 
 	// Connect to MySQL in the background so the HTTP server starts immediately.
 	go connectLoop(dsn)
+
+	// Optional Dragonfly counter for demonstrating session/cache continuity
+	// across Bloodraven failovers. When REDIS_HOST is unset, /api/counter
+	// returns cacheValue=0 with cacheError="not configured" and increments
+	// only touch MySQL.
+	if host := os.Getenv("REDIS_HOST"); host != "" {
+		port := os.Getenv("REDIS_PORT")
+		if port == "" {
+			port = "6379"
+		}
+		rdb = newRedisClient(host + ":" + port)
+		log.Printf("dragonfly counter enabled at %s:%s", host, port)
+	}
 
 	http.HandleFunc("/", serveIndex)
 	http.HandleFunc("/healthz", handleHealthz)
@@ -133,6 +151,14 @@ type counterResponse struct {
 	UpdatedAt string `json:"updatedAt"`
 	DBHost    string `json:"dbHost"`
 	ReadOnly  bool   `json:"readOnly"`
+
+	// Dragonfly counter — independent of the MySQL value. Survives
+	// planned failover when sessions are preserved; resets to 0 if the
+	// active site changes via emergency failover or if Dragonfly was
+	// never configured.
+	CacheValue int64  `json:"cacheValue"`
+	CacheHost  string `json:"cacheHost,omitempty"`
+	CacheError string `json:"cacheError,omitempty"`
 }
 
 func handleCounter(w http.ResponseWriter, _ *http.Request) {
@@ -160,6 +186,19 @@ func handleCounter(w http.ResponseWriter, _ *http.Request) {
 		resp.DBHost = host
 	}
 
+	// Dragonfly counter (best-effort; surface error rather than 500-ing).
+	if rdb != nil {
+		resp.CacheHost = rdb.host()
+		v, gerr := rdb.get("counter:cache")
+		if gerr != nil {
+			resp.CacheError = gerr.Error()
+		} else {
+			resp.CacheValue = v
+		}
+	} else {
+		resp.CacheError = "not configured"
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
@@ -181,5 +220,15 @@ func handleIncrement(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Mirror the increment into Dragonfly. Best-effort: a failure here
+	// must not roll back the MySQL increment (cache is not the source
+	// of truth) — handleCounter will surface the error to the UI.
+	if rdb != nil {
+		if _, ierr := rdb.incr("counter:cache"); ierr != nil {
+			log.Printf("dragonfly INCR failed: %v", ierr)
+		}
+	}
+
 	handleCounter(w, r)
 }

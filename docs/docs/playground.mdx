@@ -118,6 +118,25 @@ Setup takes about 2 minutes depending on your machine.
 ./playground/rebuild.sh operator sidecar
 ```
 
+### First-run divergence (one-time reclone)
+
+On a brand-new cluster, both MySQL pods come up writable before the operator picks an active site. The pod that loses the election may have already executed a few transactions of its own (server UUID), which the operator surfaces as `RecoveryPending` with a non-zero `divergentTransactionCount`. Until that's cleared, planned failover to the loser will be rejected with "site is read-only but not replicating".
+
+To resolve, copy the divergent-GTID prefix from `kubectl get mysqlfailovergroup playground -o yaml` (look for `divergentGtid`) and confirm the reclone:
+
+```bash
+# Inspect the divergence
+kubectl -n bloodraven-playground get mysqlfailovergroup playground -o yaml \
+  | grep -A1 divergentGtid
+
+# Annotate with <site>:<first-segment-of-divergent-gtid> as the confirmation token.
+# Example: divergentGtid 61553741-443a-11f1-... → reclone-site=pdx:61553741
+kubectl -n bloodraven-playground annotate mysqlfailovergroup playground \
+  bloodraven.shipstream.io/reclone-site=pdx:61553741 --overwrite
+```
+
+The reclone takes ~60s. Expected outcome: `state=read-only`, `replicating=true`, `recoveryState` cleared. After that the planned failover demo below will work.
+
 ## Access the apps
 
 Use `kubectl port-forward` to access the dashboard and counter app:
@@ -161,11 +180,81 @@ kubectl uncordon $(kubectl get nodes -o name | tr '\n' ' ')
 For more advanced scenarios, use the chaos script:
 
 ```bash
-./playground/chaos.sh kill-site iad      # Kill a site's MySQL pod
+./playground/chaos.sh kill-site iad           # Kill MySQL+Dragonfly pods at a site
 ./playground/chaos.sh kill-site pdx
-./playground/chaos.sh cordon iad         # Cordon a site's node
-./playground/chaos.sh network-partition iad  # Simulate a network partition
-./playground/chaos.sh recover            # Undo all chaos
+./playground/chaos.sh cordon iad              # Cordon a site's node
+./playground/chaos.sh network-partition iad   # Simulate a network partition
+./playground/chaos.sh kill-dragonfly iad      # Kill only the Dragonfly pod at a site
+./playground/chaos.sh dragonfly-status        # Print Dragonfly roles, traffic labels, and active endpoints
+./playground/chaos.sh recover                 # Undo all chaos
+```
+
+## Dragonfly co-management
+
+The playground `MysqlFailoverGroup` enables `spec.dragonfly`, so Bloodraven also creates one Dragonfly StatefulSet per site (`playground-dragonfly-iad`, `playground-dragonfly-pdx`), a group-level Dragonfly PodDisruptionBudget (`playground-dragonfly`), and a single app-facing `playground-dragonfly` Service whose endpoints follow the active site. The Service selector AND-gates `shipstream.io/dragonfly-role=master` AND `shipstream.io/dragonfly-traffic=enabled`: removing the traffic label sheds an endpoint atomically, which is how planned failover avoids a window where both the old and new master would match the selector during `REPLTAKEOVER`. Disable Dragonfly by removing the `spec.dragonfly` block.
+
+Bloodraven supports Dragonfly `v1.38.0+` for managed deployments. The playground pins `docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0`; avoid older tags because several replication, snapshot, and expiry bugs were fixed before this baseline.
+
+Bloodraven treats Dragonfly as cache/session state, not durable application data. The operator provisions ephemeral storage, does not manage Dragonfly backups or snapshot schedules, and does not support `DFLY LOAD` against a live master with attached replicas because loaded data bypasses the replication journal. Topology changes can force full replica resyncs and briefly increase master latency, so schedule planned failovers and Dragonfly image rollouts the same way you would schedule cache-impacting maintenance.
+
+The baseline playground does not enable `spec.dragonfly.snapshot`. That keeps normal Dragonfly pods independent of the optional RustFS/S3 path; Dragonfly v1.38 exits during startup when an S3 snapshot directory is configured but the bucket or credentials are unavailable. The D6a snapshot-restore upgrade scenario provisions the RustFS bucket on demand, temporarily enables the snapshot config, and validates that Dragonfly pods restart with the S3 snapshot directory before it requests the upgrade.
+
+The operator owns the safety-critical Dragonfly flags it emits (`--port`, `--admin_port`, `--requirepass`, `--break_replication_on_master_restart`, and related sizing knobs). Extra `spec.dragonfly.args` are an escape hatch for site-specific tuning; do not use them to enable tiered storage, ACL files, Lua compatibility relaxations, TLS replication, snapshot scheduling, or load/import workflows unless the operational tradeoff is documented for that deployment.
+
+Verify the cache subsystem before exercising failover:
+
+```bash
+# Both per-site StatefulSets reach Ready
+kubectl -n bloodraven-playground get statefulset -l app.kubernetes.io/name=dragonfly
+
+# Operator's view of which site is master, plus pod role/traffic labels
+# and the active Service endpoints
+./playground/chaos.sh dragonfly-status
+```
+
+For ad-hoc Redis-protocol queries (replication state, GET/SET against a key), launch a one-shot pod with `redis-cli`:
+
+```bash
+kubectl -n bloodraven-playground run redis-cli --rm -it --restart=Never \
+  --image=redis:7-alpine -- redis-cli -h playground-dragonfly INFO replication
+```
+
+The counter app (`http://localhost:8090` after port-forward) writes to **both** MySQL and Dragonfly on every increment. The MySQL counter is durable; the Dragonfly counter (shown as "Cache (Dragonfly)" below the main number) is the session/cache continuity signal. After a planned failover with `sessionsPreserved=true`, the Dragonfly counter survives. After an emergency failover, it usually resets to 0 because the new master may have been an unsynced replica or a freshly-promoted empty pod.
+
+Exercise a planned failover that includes Dragonfly session preservation:
+
+```bash
+# Click "+ Increment" a few times in the counter UI so both counters are non-zero.
+
+# Trigger a planned failover to pdx
+kubectl -n bloodraven-playground annotate mysqlfailovergroup playground \
+  bloodraven.shipstream.io/planned-failover=pdx
+
+# Watch the planned-failover status walk WaitingForLag → WaitingForDragonflySync
+# → PromotingDragonfly → Promoting → Resuming → Succeeded.
+kubectl -n bloodraven-playground get mysqlfailovergroup playground \
+  -o jsonpath='{.status.plannedFailover.phase}{"\n"}'
+
+# After Succeeded, sessionsPreserved should be true on the success path.
+kubectl -n bloodraven-playground get mysqlfailovergroup playground \
+  -o jsonpath='{.status.plannedFailover.dragonfly}{"\n"}'
+
+# Reload the counter UI — both the MySQL and the Dragonfly counter should
+# be unchanged. The active Service now resolves to the pdx Dragonfly pod.
+```
+
+Emergency Dragonfly behavior is best-effort. Killing the active MySQL pod while Dragonfly is healthy still completes the MySQL emergency failover; Dragonfly is promoted via REPLTAKEOVER (sessions preserved when reachable) or `REPLICAOF NO ONE` (sessions lost), and never blocks MySQL recovery past a 10-second budget.
+
+The D6a snapshot-restore upgrade path can be exercised directly:
+
+```bash
+make chaos-run SCENARIO=29-dragonfly-snapshot-upgrade
+```
+
+The ordinary Dragonfly image rollout path is covered separately and patches the image to a cached digest reference so it does not depend on pulling a new external tag:
+
+```bash
+make chaos-run SCENARIO=27-dragonfly-rolling-image-update
 ```
 
 ## Exercise backup verification

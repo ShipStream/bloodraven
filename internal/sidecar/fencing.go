@@ -281,7 +281,10 @@ func (f *FencingMonitor) checkActiveSite(ctx context.Context) {
 	}
 	if body.ActiveSite == "" {
 		// Operator admits it has no active site (e.g. quorum not yet
-		// established). Leave cache alone.
+		// established). Clear any older active-site view so a stale
+		// cache cannot self-fence a newly promoted site during the
+		// promotion-confirmation gap.
+		f.topology.Set("", f.clock.Now())
 		return
 	}
 	f.topology.Set(body.ActiveSite, f.clock.Now())
@@ -348,16 +351,21 @@ func (f *FencingMonitor) latestPeerSeen() time.Time {
 }
 
 func (f *FencingMonitor) evaluate(ctx context.Context) {
-	// Already fenced, nothing more to do.
-	if f.fenced {
-		return
-	}
-
 	// Only the primary should self-fence. If MySQL is already read-only, skip.
 	readOnly, err := f.mysql.IsReadOnly(ctx)
 	if err != nil {
 		f.logger.Warn("fencing: could not check read_only status", "error", err)
 		return
+	}
+	if f.fenced {
+		if readOnly {
+			return
+		}
+		f.logger.Info("fencing: MySQL is writable after prior self-fence; rearming monitor")
+		f.fenced = false
+		if f.topologyEnabled() {
+			f.topology.Set("", f.clock.Now())
+		}
 	}
 	if readOnly {
 		return

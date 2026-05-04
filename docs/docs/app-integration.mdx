@@ -76,6 +76,56 @@ For a `MysqlFailoverGroup` named `orders` in namespace `default`, the operator c
 | `mysql-orders-iad` | `mysql-orders-iad.default.svc.cluster.local:3306` | Direct access to the `iad` site instance. |
 | `mysql-orders-pdx` | `mysql-orders-pdx.default.svc.cluster.local:3306` | Direct access to the `pdx` site instance. |
 
+When `spec.dragonfly.enabled=true`, Bloodraven also owns the cache/session endpoints for the same failover group:
+
+| Service | DNS name | Purpose |
+|---|---|---|
+| `orders-dragonfly` | `orders-dragonfly.default.svc.cluster.local:6379` | Application Redis-compatible endpoint. Always selects the active Dragonfly master. |
+| `orders-dragonfly-iad` | `orders-dragonfly-iad.default.svc.cluster.local:6379` | Direct `iad` Dragonfly pod access for operator control and debugging. |
+| `orders-dragonfly-pdx` | `orders-dragonfly-pdx.default.svc.cluster.local:6379` | Direct `pdx` Dragonfly pod access for operator control and debugging. |
+
+Do not deploy separate tenant-chart Dragonfly CRs for a failover group where Bloodraven has `spec.dragonfly.enabled=true`. Bloodraven is the owner of the StatefulSets, Services, replication role labels, active Service selector, and planned/emergency promotion status. Tenant charts should either omit their Dragonfly templates or gate them behind a disabled-by-default value, then point application settings at the Bloodraven-created `orders-dragonfly` Service.
+
+Recommended app-facing environment variables:
+
+```yaml
+- name: REDIS_HOST
+  value: orders-dragonfly.default.svc.cluster.local
+- name: REDIS_PORT
+  value: "6379"
+- name: REDIS_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: tenant-dragonfly
+      key: password
+```
+
+Redis/Dragonfly clients must reconnect after connection drops. During planned failover Bloodraven may remove the old master from the active Service and issue `CLIENT KILL TYPE NORMAL` so clients reconnect to the newly promoted site instead of holding stale sockets.
+
+For planned Dragonfly image upgrades that can tolerate a short cache/session outage, configure native snapshot restore before using the future snapshot-upgrade workflow:
+
+```yaml
+spec:
+  dragonfly:
+    snapshot:
+      dir: s3://tenant-dragonfly/orders/prod
+      serviceAccountName: dragonfly-backup
+      credentialsSecretName: dragonfly-s3
+      s3Endpoint: rustfs.default.svc.cluster.local:9000
+      s3UseHTTPS: false
+```
+
+Bloodraven passes `snapshot.dir` to Dragonfly as `--dir`, renders S3-compatible flags such as `--s3_endpoint` and `--s3_use_https`, projects `snapshot.credentialsSecretName` as AWS credential environment variables when set, and assigns `snapshot.serviceAccountName` to the Dragonfly pods so cloud IAM systems such as EKS IRSA can grant bucket access. Treat this as session-continuity insurance for planned maintenance, not as the durable backup for application state.
+
+To run the planned snapshot-restore upgrade, annotate the failover group with the target image:
+
+```bash
+kubectl -n default annotate --overwrite mysqlfailovergroup orders \
+  bloodraven.shipstream.io/dragonfly-snapshot-upgrade=docker.dragonflydb.io/dragonflydb/dragonfly:<target>
+```
+
+Track progress in `status.dragonfly.upgrade`. During `SavingSnapshot`, `UpdatingActive`, and `WaitingForActiveRestore`, Bloodraven intentionally removes the active Dragonfly endpoint so clients see a planned cache outage instead of writing to a half-restored pod.
+
 ### Default connection pattern
 
 For workloads that should move with the active database site:

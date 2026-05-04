@@ -41,6 +41,7 @@ func (m *mockFencer) IsReadOnly(_ context.Context) (bool, error) {
 
 func (m *mockFencer) SetSuperReadOnly(_ context.Context) error {
 	m.superReadOnly = true
+	m.readOnly = true
 	select {
 	case m.setReadOnlyCh <- struct{}{}:
 	default:
@@ -210,6 +211,62 @@ func TestEvaluateDoesNotReFenceWhenAlreadyFenced(t *testing.T) {
 
 	if f.superReadOnly {
 		t.Error("should not re-fence when already fenced (setSuperReadOnly should not be called again)")
+	}
+}
+
+func TestEvaluateRearmsAfterExternalRestore(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false) // primary
+	fm := newTestFencingMonitor(f, clk)
+
+	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
+	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
+
+	fm.evaluate(context.Background())
+	if !fm.fenced {
+		t.Fatal("should have fenced")
+	}
+
+	// Bloodraven is the only actor allowed to restore writability. Once
+	// that external restore is visible, the sidecar must re-arm so a
+	// later isolation event can self-fence again.
+	f.readOnly = false
+	f.superReadOnly = false
+	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
+	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
+
+	fm.evaluate(context.Background())
+
+	if !fm.fenced {
+		t.Fatal("should have re-fenced after external restore and renewed isolation")
+	}
+	if !f.superReadOnly {
+		t.Error("should set super_read_only again after external restore")
+	}
+}
+
+func TestEvaluateRearmClearsStaleTopologyCache(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false) // externally restored to writable
+	cache := &TopologyCache{}
+	cache.Set("pdx", clk.Now().Add(-10*time.Second))
+	fm := newTopologyFencingMonitor(f, clk, cache, nil)
+	fm.fenced = true
+	fm.lastBloodravenOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
+
+	fm.evaluate(context.Background())
+
+	if fm.fenced {
+		t.Fatal("should rearm without immediately fencing on stale topology")
+	}
+	if snap := cache.Snapshot(); snap.ActiveSite != "" {
+		t.Fatalf("topology cache activeSite = %q, want cleared on rearm", snap.ActiveSite)
+	}
+	if f.superReadOnly {
+		t.Error("should not set super_read_only from stale topology after external restore")
 	}
 }
 
@@ -436,6 +493,31 @@ func TestCheckActiveSite_PopulatesCache(t *testing.T) {
 	}
 }
 
+func TestCheckActiveSite_ClearsCacheOnEmptyActiveSite(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false)
+	cache := &TopologyCache{}
+	cache.Set("pdx", start.Add(-5*time.Second))
+
+	routes := []routingRoute{
+		{pathPrefix: "/active-site", handler: jsonResponse(200, map[string]string{
+			"activeSite": "",
+		})},
+	}
+	fm := newTopologyFencingMonitor(f, clk, cache, routes)
+
+	fm.checkActiveSite(context.Background())
+
+	snap := cache.Snapshot()
+	if snap.ActiveSite != "" {
+		t.Errorf("activeSite = %q, want cache cleared", snap.ActiveSite)
+	}
+	if !snap.ObservedAt.Equal(clk.Now()) {
+		t.Errorf("observedAt = %v, want %v", snap.ObservedAt, clk.Now())
+	}
+}
+
 // TestCheckActiveSite_PassesIdentityParams verifies that the
 // /active-site URL carries the namespace and group as query params.
 // The operator returns 400 without them.
@@ -523,7 +605,7 @@ func TestCheckPeerTopology_IgnoresOlderSnapshot(t *testing.T) {
 	cache.Set("pdx", start) // fresh
 
 	peerSnap := TopologySnapshot{
-		ActiveSite: "iad",                     // stale
+		ActiveSite: "iad", // stale
 		ObservedAt: start.Add(-30 * time.Second),
 	}
 	routes := []routingRoute{

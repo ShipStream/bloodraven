@@ -40,13 +40,28 @@ func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts Bootstr
 		return fmt.Errorf("primary is read-only, cannot bootstrap from it")
 	}
 
-	// Step 2: Set clone donor list
+	// Step 2: CLONE INSTANCE is a destructive administrative operation, but
+	// MySQL rejects it while the recipient has super_read_only enabled.
+	if err := opts.Replica.SetSuperReadOnly(ctx, false); err != nil {
+		return fmt.Errorf("disable replica super_read_only for clone: %w", err)
+	}
+	if err := opts.Replica.SetReadOnly(ctx, false); err != nil {
+		if fenceErr := opts.Replica.SetSuperReadOnly(ctx, true); fenceErr != nil {
+			b.logger.Warn("failed to re-enable super_read_only after read_only disable failed", "error", fenceErr)
+		}
+		return fmt.Errorf("disable replica read_only for clone: %w", err)
+	}
+
+	// Step 3: Set clone donor list
 	donorAddr := fmt.Sprintf("%s:3306", opts.PrimaryHost)
 	if err := opts.Replica.SetCloneDonorList(ctx, donorAddr); err != nil {
+		if fenceErr := opts.Replica.SetSuperReadOnly(ctx, true); fenceErr != nil {
+			b.logger.Warn("failed to re-enable super_read_only after clone donor setup failed", "error", fenceErr)
+		}
 		return fmt.Errorf("set clone donor list: %w", err)
 	}
 
-	// Step 3: Kill other connections on the replica so CLONE's DROP DATA
+	// Step 4: Kill other connections on the replica so CLONE's DROP DATA
 	// phase can proceed without waiting on open table handles.
 	if killed, err := opts.Replica.KillAppConnections(ctx); err != nil {
 		b.logger.Warn("failed to kill connections before clone", "error", err)
@@ -54,7 +69,7 @@ func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts Bootstr
 		b.logger.Info("killed connections before clone", "count", killed)
 	}
 
-	// Step 4: Clone from primary (this may take a long time)
+	// Step 5: Clone from primary (this may take a long time)
 	b.logger.Info("cloning from primary", "donor", opts.PrimaryHost)
 	cloneTimeout := opts.CloneTimeout
 	if cloneTimeout <= 0 {
@@ -64,6 +79,11 @@ func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts Bootstr
 	defer cancel()
 	cloneTimeoutSec := int(cloneTimeout.Seconds())
 	if err := opts.Replica.CloneInstance(cloneCtx, opts.ReplUser, opts.PrimaryHost, opts.ReplPassword, opts.UseSSL, cloneTimeoutSec); err != nil {
+		if !isCloneConnectionDrop(err) {
+			if fenceErr := opts.Replica.SetSuperReadOnly(ctx, true); fenceErr != nil {
+				b.logger.Warn("failed to re-enable super_read_only after clone failed", "error", fenceErr)
+			}
+		}
 		return fmt.Errorf("clone instance: %w", err)
 	}
 
@@ -83,6 +103,13 @@ func (b *BootstrapController) SetupReplication(ctx context.Context, replica mysq
 	// Ensure replica is read-only
 	if err := replica.SetSuperReadOnly(ctx, true); err != nil {
 		return fmt.Errorf("set super_read_only: %w", err)
+	}
+
+	if err := replica.StopReplica(ctx); err != nil {
+		b.logger.Info("stop replica before replication setup skipped", "error", err)
+	}
+	if err := replica.ResetReplicaAll(ctx); err != nil {
+		b.logger.Info("reset replica metadata before replication setup skipped", "error", err)
 	}
 
 	// Configure replication source
@@ -108,10 +135,10 @@ func (b *BootstrapController) SetupReplication(ctx context.Context, replica mysq
 type BootstrapOpts struct {
 	Primary      mysql.Checker
 	Replica      mysql.Checker
-	PrimaryHost  string        // hostname of the primary MySQL
-	ReplicaSite  string        // name of the replica site (for logging)
-	ReplUser     string        // replication user
-	ReplPassword string        // replication password
+	PrimaryHost  string // hostname of the primary MySQL
+	ReplicaSite  string // name of the replica site (for logging)
+	ReplUser     string // replication user
+	ReplPassword string // replication password
 	UseSSL       bool
 	CloneTimeout time.Duration // timeout for clone operation (default 30m)
 }

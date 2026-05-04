@@ -48,10 +48,11 @@ func scenario13OperatorKillDuringBootstrap() runner.Scenario {
 			"clone: the restarted operator either resumes the in-flight clone or starts a fresh one, the " +
 			"Bootstrapping condition eventually reaches Status=False Reason=Done, and the wiped site rejoins " +
 			"as a replica with replica_io_running && replica_sql_running.",
-		Risk:     "high",
-		DocLink:  "playground/chaos-scenarios.md#13-operator-kill-during-bootstrap",
-		Timeout:  10 * time.Minute,
-		Precheck: s10AssertPristine,
+		Risk:              "high",
+		DocLink:           "playground/chaos-scenarios.md#13-operator-kill-during-bootstrap",
+		Timeout:           10 * time.Minute,
+		ResetBeforeRunAll: true,
+		Precheck:          s10AssertPristine,
 		Steps: []runner.Step{
 			s13InjectWipePVC(),
 			s13ObserveBootstrapStarted(),

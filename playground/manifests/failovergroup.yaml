@@ -11,6 +11,8 @@ spec:
   failureThreshold: 3
   recoveryThreshold: 2
   failoverCooldown: 30s # short for playground experimentation
+  splitBrainPolicy:
+    sitePriorities: [iad, pdx]
   dns:
     hostname: playground-db.example.local
     ttl: 10
@@ -28,10 +30,10 @@ spec:
       resources:
         requests:
           cpu: 100m
-          memory: 256Mi
+          memory: 384Mi
         limits:
           cpu: 500m
-          memory: 512Mi
+          memory: 1Gi
     - name: pdx
       role: primary-candidate
       zone: zone-pdx
@@ -45,12 +47,33 @@ spec:
       resources:
         requests:
           cpu: 100m
-          memory: 256Mi
+          memory: 384Mi
         limits:
           cpu: 500m
-          memory: 512Mi
+          memory: 1Gi
   sidecar:
     leaseTimeout: 20s
     peerCheckInterval: 5s
   replication:
     maxLagSeconds: 30
+  # Playground-only Dragonfly co-management. Bloodraven creates one
+  # Dragonfly StatefulSet per site and configures the non-active site
+  # as a replica of the active site. Disable by removing this block or
+  # setting enabled=false; the rest of the failover group is unaffected.
+  dragonfly:
+    enabled: true
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0
+    port: 6379
+    adminPort: 9999
+    maxMemoryMb: 256
+    proactorThreads: 1
+    plannedFailover:
+      maxSyncWait: 30s
+      onSyncTimeout: proceed
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi

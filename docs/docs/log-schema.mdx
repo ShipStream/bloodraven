@@ -182,6 +182,42 @@ Emitted by the sidecar's `BinlogArchiver`.
 
 Per-upload success/failure is also reflected in the `bloodraven_archiver_upload_failures` and `bloodraven_archiver_last_upload_timestamp_seconds` metrics — prefer those for alerting.
 
+### Dragonfly
+
+Bloodraven optionally co-manages per-site Dragonfly instances and emits the following events when `spec.dragonfly.enabled=true`. Mirrored by the `bloodraven_dragonfly_site_up` gauge and the `bloodraven_dragonfly_promotions_total{result}` counter, plus the matching `Dragonfly*` Kubernetes Events on the `MysqlFailoverGroup`.
+
+| Level | `msg` | Fields | Notes |
+|---|---|---|---|
+| INFO | `dragonfly: configured replica` | `site`, `host`, `port`, `fg` | Operator issued `REPLICAOF` against a non-active site to align it with the active master. |
+| WARN | `dragonfly: stale master on non-active site` | `site`, `active`, `fg` | A site reports `role=master` but is not the active site. Auto-rejoin is attempted only when the stale instance has `connected_slaves=0` AND `master_repl_offset=0` (provably never accepted writes); otherwise the stale master is shed from the active Service via the traffic-label gate and left for human intervention. |
+| INFO | `stale-master reconfigure: REPLICAOF applied` | `site`, `host`, `port`, `fg` | Auto-rejoin succeeded: the stale master is now linked as a replica of the active master. |
+| WARN | `stale-master reconfigure: REPLICAOF failed` | `site`, `host`, `port`, `error`, `fg` | Auto-rejoin attempt failed; the next tick retries. |
+| INFO | `client-kill: evicted clients from old master` | `site`, `fg` | After a planned-failover Dragonfly promotion, the operator issued `CLIENT KILL TYPE NORMAL` against the demoted source so application clients reconnect through the active Service. |
+| INFO | `dragonfly/mysql active-site drift: promoting Dragonfly replica to match MySQL` | `oldSource`, `target`, `mysqlActiveSite`, `fg` | MySQL active site and Dragonfly master diverged; the manager is promoting the synced Dragonfly replica on the MySQL active site. |
+| INFO | `dragonfly-only emergency: active master unreachable; promoting replica` | `oldSource`, `target`, `fg` | Dragonfly master failed without a MySQL failover; the manager is promoting the single healthy replica and leaving MySQL `status.activeSite` unchanged. |
+| INFO | `dragonfly emergency: REPLTAKEOVER succeeded` | `site`, `fg` | After an emergency MySQL failover, Dragonfly was promoted with sessions preserved. |
+| WARN | `dragonfly emergency: REPLTAKEOVER failed; falling back` | `site`, `error`, `fg` | Emergency promote could not preserve sessions; falling back to `REPLICAOF NO ONE`. |
+| INFO | `dragonfly emergency: target promoted via REPLICAOF NO ONE (sessions lost)` | `site`, `fg` | Emergency promote completed with empty cache. |
+| WARN | `dragonfly emergency: REPLICAOF NO ONE failed` | `site`, `error`, `fg` | Both promotion paths failed; cache is unavailable. MySQL emergency failover was not affected. |
+| WARN | `dragonfly emergency: target unreachable; skipping promotion` | `site`, `error`, `fg` | Bounded budget expired before the operator could reach the target. |
+
+Kubernetes Event reasons emitted on the `MysqlFailoverGroup` (visible via `kubectl describe`):
+
+| Reason | When |
+|---|---|
+| `DragonflyPromotionStarted` | Planned-failover state machine entered `PromotingDragonfly`. |
+| `DragonflyPromotionCompleted` | Dragonfly target was promoted (planned or emergency). |
+| `DragonflyPromotionFailed` | Promotion command failed; behavior depends on `spec.dragonfly.plannedFailover.onSyncTimeout` (planned) or is best-effort (emergency). |
+| `DragonflyStaleMasterDetected` | A non-active site reports master role. Logged + dedup'd in 5-minute windows. Auto-rejoin is attempted in `reconcileReplication` when `connected_slaves=0 AND master_repl_offset=0`. |
+| `DragonflyOldSiteReconfigured` | A stale master passed the auto-rejoin gate and was attached as a replica of the active master via `REPLICAOF`. |
+| `DragonflySyncTimeout` | `WaitingForDragonflySync` exhausted `spec.dragonfly.plannedFailover.maxSyncWait`. |
+| `DragonflyUpgradeStarted` | Snapshot-restore Dragonfly upgrade annotation was accepted and `status.dragonfly.upgrade` was initialized. |
+| `DragonflyUpgradeRejected` | Snapshot-restore upgrade request was invalid or another coordinated operation was running. |
+| `DragonflyUpgradeSnapshotStarted` | Active Dragonfly traffic was shed and the operator is about to issue `SAVE`. |
+| `DragonflyUpgradeSnapshotCompleted` | `SAVE` completed against the active Dragonfly master using `spec.dragonfly.snapshot.dir`. |
+| `DragonflyUpgradeCompleted` | Active and replica Dragonfly pods are on the target image, active traffic is restored, and replicas are linked. |
+| `DragonflyUpgradeFailed` | Snapshot-restore upgrade reached a terminal failure; the operator best-effort restored active traffic. |
+
 ### Lifecycle
 
 | Level | `msg` | Fields |

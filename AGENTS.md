@@ -18,6 +18,10 @@ Run commands from the repository root:
 ## Coding Style & Naming Conventions
 Use standard Go formatting: run `gofmt` on changed files and keep imports organized. Follow existing package boundaries and keep Kubernetes-facing types explicit and stable. Exported names use `CamelCase`; unexported helpers use `camelCase`; tests follow `TestXxx`. Prefer descriptive file names like `failover.go`, `fencing.go`, and `matrix_test.go` that match one responsibility.
 
+**Avoid `_<goos>` filename suffixes.** Go interprets a trailing `_<recognized-goos>.go` as a build-tag constraint and silently drops the file from the build (it appears in `IgnoredGoFiles` with no error message — there is no compile error to lead you to the cause). The recognized GOOS list includes obvious entries (`linux`, `darwin`, `windows`) and several unobvious ones — most relevantly `dragonfly`, but also `solaris`, `plan9`, `aix`, `js`, `ios`, `android`. A file named `planned_failover_dragonfly.go` will compile only on DragonflyBSD; rename it (e.g. `planned_failover_df.go`) so the constraint isn't applied. The same trap applies to GOARCH suffixes (`_amd64`, `_arm64`, etc.).
+
+**Test-helper name collisions across files in the same package** are easy to hit because `go test` builds every `*_test.go` file in the package together. If you add a helper like `contains` or `drainEvents` in a new test file, grep the package first — duplicates produce a confusing build error that points only at the redeclaration site, not at the cause.
+
 Structured-log `msg` strings and field names listed in `docs/docs/log-schema.mdx` are a public stability contract — downstream log pipelines filter on them. When you touch a log call site whose `msg` appears in that doc's Event reference, either preserve the `msg` string and the documented field set exactly, or update `docs/docs/log-schema.mdx` in the same PR and call out the break in the PR description. The same applies to field naming: log keys are `camelCase` (per the contract), not `snake_case`.
 
 ## Testing Guidelines

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -79,6 +80,26 @@ type MysqlFailoverGroupReconciler struct {
 	// waitForDeploymentRollout. Tests set this to a small value so the timeout
 	// path exercises the ticker quickly.
 	rolloutPollInterval time.Duration
+
+	// dragonflyConnector overrides the production net.Dial-based dialer
+	// used by the planned-failover Dragonfly handlers. Tests inject a
+	// scripted fake; production wiring leaves this nil so realDragonflyConnector
+	// is used.
+	dragonflyConnector DragonflyConnector
+
+	dragonflyRolloutMu      sync.Mutex
+	dragonflyRolloutBackoff map[dragonflyRolloutKey]dragonflyRolloutState
+}
+
+type dragonflyRolloutKey struct {
+	fg     types.NamespacedName
+	target string
+	source string
+}
+
+type dragonflyRolloutState struct {
+	attempts    int
+	lastFailure time.Time
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups,verbs=get;list;watch;create;update;patch;delete
@@ -86,8 +107,9 @@ type MysqlFailoverGroupReconciler struct {
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=configmaps;services;persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -227,6 +249,23 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconcile pdb: %w", err)
 	}
 
+	if dfUpgradeRequeue, err := r.reconcileDragonflySnapshotUpgrade(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly snapshot upgrade: %w", err)
+	} else if dfUpgradeRequeue > 0 {
+		return ctrl.Result{RequeueAfter: dfUpgradeRequeue}, nil
+	}
+
+	// Reconcile per-site Dragonfly resources when spec.dragonfly is enabled.
+	// When Dragonfly is disabled, reconcileDragonflyResources actively removes
+	// any previously managed Dragonfly resources so MySQL-only deployments are
+	// unaffected.
+	deferredRequeue := time.Duration(0)
+	if dragonflyRequeue, err := r.reconcileDragonflyResources(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly resources: %w", err)
+	} else if dragonflyRequeue > 0 {
+		deferredRequeue = minPositiveDuration(deferredRequeue, dragonflyRequeue)
+	}
+
 	// Reconcile MySQL users for credentials mode.
 	if fg.Spec.UsesCredentials() {
 		if err := r.reconcileCredentials(ctx, &fg); err != nil {
@@ -313,10 +352,28 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
 	}
 
-	if backupRequeue > 0 {
-		return ctrl.Result{RequeueAfter: backupRequeue}, nil
+	// Mirror the same sweep for Dragonfly pods so the active service
+	// selector follows the active site (or the in-flight planned-
+	// failover target). No-op when spec.dragonfly is disabled.
+	if err := r.syncDragonflyPodLabels(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("sync dragonfly pod labels: %w", err)
+	}
+
+	deferredRequeue = minPositiveDuration(deferredRequeue, backupRequeue)
+	if deferredRequeue > 0 {
+		return ctrl.Result{RequeueAfter: deferredRequeue}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+func minPositiveDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 || a < b {
+		return a
+	}
+	return b
 }
 
 func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -330,9 +387,11 @@ func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlFailoverGroup{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&batchv1.Job{}).
 		Owns(&batchv1.CronJob{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToFailoverGroup)).
@@ -671,7 +730,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			}
 		}
 	}
-	specHash := computeSpecHash(fg, site, tlsSecretData, credSecretData)
+	specHash := ComputeSpecHash(fg, site, tlsSecretData, credSecretData)
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		if err := controllerutil.SetControllerReference(fg, deploy, r.Scheme); err != nil {
@@ -1396,10 +1455,10 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 	return nil
 }
 
-// computeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
+// ComputeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
 // tlsSecretData is the raw data from the TLS Secret (nil when TLS is not configured).
 // credSecretData is a map of secret-name→data for credential secrets (nil in legacy mode).
-func computeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsSecretData map[string][]byte, credSecretData map[string]map[string][]byte) string {
+func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsSecretData map[string][]byte, credSecretData map[string]map[string][]byte) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
 	fmt.Fprintf(h, "sidecar=%s\n", fg.Spec.SidecarImage)
@@ -1520,6 +1579,7 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 		RecoveryThreshold: int(recoveryThreshold),
 		FailoverCooldown:  failoverCooldown,
 		SitePriorities:    sitePriorities,
+		DragonflyEnabled:  dragonflyEnabled(fg),
 	}
 }
 

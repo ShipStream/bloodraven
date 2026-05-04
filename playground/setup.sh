@@ -143,7 +143,16 @@ podman_save() {
 }
 
 if command -v k3d >/dev/null 2>&1 && k3d cluster list 2>/dev/null | grep -q .; then
-  K3D_CLUSTER=$(k3d cluster list --no-headers 2>/dev/null | awk 'NR==1 {print $1}' || echo "")
+  # Prefer the cluster kubectl is currently pointing at (k3d contexts are
+  # named "k3d-<cluster>"), so multiple coexisting k3d clusters don't end
+  # up importing images into the wrong one. Falls back to the first
+  # cluster listed if the context is something other than k3d.
+  K3D_CTX=$(kubectl config current-context 2>/dev/null || echo "")
+  if [[ "$K3D_CTX" == k3d-* ]]; then
+    K3D_CLUSTER="${K3D_CTX#k3d-}"
+  else
+    K3D_CLUSTER=$(k3d cluster list --no-headers 2>/dev/null | awk 'NR==1 {print $1}' || echo "")
+  fi
   if [[ -n "$K3D_CLUSTER" ]]; then
     info "Loading images into k3d cluster '$K3D_CLUSTER'..."
     # --mode direct forces k3d to replace images in each node's
@@ -253,6 +262,11 @@ sed "s|image: bloodraven-dns-webhook|image: ${IMG_PREFIX}bloodraven-dns-webhook|
   "$SCRIPT_DIR/manifests/external-dns.yaml" | kubectl apply -f -
 kubectl apply -f "$SCRIPT_DIR/manifests/dashboard-rbac.yaml"
 
+info "Deploying RustFS S3-compatible snapshot target for Dragonfly..."
+kubectl apply -f "$SCRIPT_DIR/manifests/rustfs.yaml"
+kubectl -n "$NAMESPACE" rollout status deployment/rustfs --timeout=180s
+ok "RustFS ready (scenario 29 creates the dragonfly bucket on demand)"
+
 # ── 8. Deploy the operator via Helm ──────────────────────────────────────
 info "Deploying Bloodraven operator via Helm..."
 helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
@@ -261,6 +275,7 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set image.tag=playground \
   --set image.pullPolicy=Never \
   --set installCRDs=false \
+  --set auxiliary.service.enabled=true \
   --set 'nodeSelector=null' \
   --set 'tolerations[0].key=node.kubernetes.io/disk-pressure' \
   --set 'tolerations[0].operator=Exists' \
@@ -367,6 +382,34 @@ info "Waiting for remaining pods..."
 kubectl -n "$NAMESPACE" wait --for=condition=available deployment/external-dns --timeout=120s 2>/dev/null || true
 kubectl -n "$NAMESPACE" wait --for=condition=available deployment/dashboard --timeout=120s 2>/dev/null || true
 
+# ── 13. Wait for Dragonfly StatefulSets (when enabled) ──────────────────
+DF_ENABLED=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground \
+  -o jsonpath='{.spec.dragonfly.enabled}' 2>/dev/null || echo "")
+if [[ "$DF_ENABLED" == "true" ]]; then
+  info "Waiting for Dragonfly StatefulSets (one per site)..."
+  for site in iad pdx; do
+    if ! kubectl -n "$NAMESPACE" rollout status statefulset/playground-dragonfly-$site --timeout=120s 2>/dev/null; then
+      warn "Dragonfly StatefulSet for $site did not become ready in 120s — check 'kubectl describe statefulset playground-dragonfly-$site'"
+    fi
+  done
+
+  # Surface the operator's view of which site holds the master. The
+  # StatefulSets reach Ready before the operator finishes its first
+  # promotion tick, so poll briefly instead of warning on the first miss.
+  DF_ACTIVE=""
+  for _ in $(seq 1 30); do
+    DF_ACTIVE=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground \
+      -o jsonpath='{.status.dragonfly.activeSite}' 2>/dev/null || echo "")
+    [[ -n "$DF_ACTIVE" ]] && break
+    sleep 2
+  done
+  if [[ -n "$DF_ACTIVE" ]]; then
+    ok "Dragonfly active site: $DF_ACTIVE (Service: playground-dragonfly:6379)"
+  else
+    warn "Dragonfly status.activeSite not set after 60s — check operator logs and 'kubectl describe mysqlfailovergroup playground'"
+  fi
+fi
+
 echo ""
 echo "=============================================="
 echo "  Bloodraven Playground is ready!"
@@ -387,11 +430,20 @@ echo "    kubectl -n $NAMESPACE get pods"
 echo "    kubectl -n $NAMESPACE get dnsendpoints"
 echo "    kubectl -n $NAMESPACE logs -l app.kubernetes.io/name=bloodraven -f"
 echo ""
+if [[ "$DF_ENABLED" == "true" ]]; then
+  echo "  Dragonfly:"
+  echo "    kubectl -n $NAMESPACE port-forward --address 0.0.0.0 svc/playground-dragonfly 6379:6379"
+  echo "    then: redis-cli -h localhost INFO replication"
+  echo "    or per-site: kubectl -n $NAMESPACE port-forward svc/playground-dragonfly-iad 6380:6379"
+  echo ""
+fi
 echo "  Chaos monkey:"
 echo "    ./playground/chaos.sh kill-site iad"
 echo "    ./playground/chaos.sh kill-site pdx"
 echo "    ./playground/chaos.sh cordon iad"
 echo "    ./playground/chaos.sh network-partition iad"
+echo "    ./playground/chaos.sh kill-dragonfly iad"
+echo "    ./playground/chaos.sh dragonfly-status"
 echo "    ./playground/chaos.sh recover"
 echo ""
 echo "  Teardown:"

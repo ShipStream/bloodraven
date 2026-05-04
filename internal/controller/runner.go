@@ -40,6 +40,14 @@ type managedTopology struct {
 	// nil only if the runner hasn't finished wiring yet.
 	archiver *archiverPoller
 
+	// dragonfly observes per-site Dragonfly state and reconciles
+	// replication wiring. nil when spec.dragonfly is disabled at start
+	// time. Currently the runner does not respawn this on enable=true
+	// flips during a manager's lifetime; a CR edit that toggles
+	// dragonfly.enabled changes the TopologyConfig hash and restarts
+	// the manager via sync().
+	dragonfly *DragonflyManager
+
 	// lastTopologyDegradedReason tracks the most recent topology-level
 	// Degraded reason so transition events are not confused by replication
 	// reasons that overwrite the shared Degraded condition.
@@ -136,6 +144,9 @@ func (r *TopologyManagerRunner) SetPlannedFailoverActive(nn types.NamespacedName
 		return false
 	}
 	mt.tm.SetPlannedFailoverActive(active)
+	if mt.dragonfly != nil {
+		mt.dragonfly.SetPaused(active)
+	}
 	return true
 }
 
@@ -151,6 +162,15 @@ func (r *TopologyManagerRunner) plannedFailoverManager(nn types.NamespacedName) 
 		return nil, fmt.Errorf("planned-failover: no topology manager running for %s", nn)
 	}
 	return mt.tm, nil
+}
+
+func (r *TopologyManagerRunner) dragonflyManager(nn types.NamespacedName) *DragonflyManager {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if mt, ok := r.managers[nn]; ok {
+		return mt.dragonfly
+	}
+	return nil
 }
 
 // PlannedFailoverFence applies super_read_only=ON on the named site
@@ -286,6 +306,9 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
 			existing.tm.SetTopologyFrozen(frozen)
 			existing.tm.SetPlannedFailoverActive(plannedActive)
+			if existing.dragonfly != nil {
+				existing.dragonfly.SetPaused(plannedActive)
+			}
 			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
 			// Detect spec drift for ordered rolling updates.
 			r.checkSpecDrift(ctx, fg, existing.tm)
@@ -310,6 +333,9 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
 			mt.tm.SetTopologyFrozen(frozen)
 			mt.tm.SetPlannedFailoverActive(plannedActive)
+			if mt.dragonfly != nil {
+				mt.dragonfly.SetPaused(plannedActive)
+			}
 			r.handleRecloneAnnotation(ctx, fg, nn, mt.tm)
 		}
 	}
@@ -413,7 +439,7 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 
 	var driftSites []string
 	for _, site := range fg.Spec.Sites {
-		desiredHash := computeSpecHash(fg, site, tlsSecretData, credSecretData)
+		desiredHash := ComputeSpecHash(fg, site, tlsSecretData, credSecretData)
 
 		var deploy appsv1.Deployment
 		deployNN := types.NamespacedName{
@@ -544,6 +570,20 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		tm.SetLastFailover(fg.Status.LastFailover.Time)
 		r.logger.Info("restored lastFailover from CR status", "fg", nn, "lastFailover", fg.Status.LastFailover.Time)
 	}
+	for _, site := range fg.Status.Sites {
+		if site.RecoveryState != "RecoveryBlocked" && site.DivergentGtid == "" {
+			continue
+		}
+		var count int64
+		if site.DivergentTransactionCount != nil {
+			count = *site.DivergentTransactionCount
+		}
+		tm.SetRecoveryBlocked(site.Name, site.DivergentGtid, count)
+		r.logger.Info("restored recovery blocked state from CR status",
+			"fg", nn, "site", site.Name, "divergentGtid", site.DivergentGtid, "divergentTransactionCount", count)
+		// TopologyManager tracks a single pending recovery site.
+		break
+	}
 
 	// Set the status callback to update the CR status subresource on state changes.
 	tm.StatusCallback = func(snap TopologySnapshot) {
@@ -565,6 +605,29 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		}
 	}
 
+	var dfMgr *DragonflyManager
+	if dragonflyEnabled(fg) {
+		dfPollInterval := time.Duration(cfg.PollInterval)
+		if dfPollInterval <= 0 {
+			dfPollInterval = 2 * time.Second
+		}
+		dfMgr = NewDragonflyManager(r.client, r.recorder, r.logger.With("fg", nn.String(), "subsystem", "dragonfly"), nn, dfPollInterval)
+		// Mirror the planned-failover guard so the dragonfly manager
+		// stops issuing REPLICAOF while a planned switchover is in
+		// flight (the state machine handles its own promotion).
+		dfMgr.SetPaused(plannedFailoverInFlight(fg.Status.PlannedFailover))
+	}
+
+	// Wire the best-effort emergency Dragonfly promotion. Runs only
+	// after MySQL emergency failover Execute has succeeded; failures
+	// here are logged and never propagate back to MySQL.
+	if dfMgr != nil {
+		dfMgrLocal := dfMgr
+		tm.EmergencyFailoverCallback = func(emCtx context.Context, target, oldPrimary string) {
+			dfMgrLocal.TryEmergencyPromote(emCtx, target, oldPrimary)
+		}
+	}
+
 	tmCtx, cancel := context.WithCancel(ctx)
 
 	siteNames := make([]string, len(fg.Spec.Sites))
@@ -576,10 +639,11 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 
 	r.mu.Lock()
 	r.managers[nn] = &managedTopology{
-		tm:       tm,
-		cancel:   cancel,
-		cfg:      cfg,
-		archiver: archiver,
+		tm:        tm,
+		cancel:    cancel,
+		cfg:       cfg,
+		archiver:  archiver,
+		dragonfly: dfMgr,
 	}
 	r.mu.Unlock()
 
@@ -593,6 +657,14 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	}()
 
 	go archiver.Run(tmCtx)
+
+	if dfMgr != nil {
+		go func() {
+			r.logger.Info("starting dragonfly manager", "fg", nn)
+			dfMgr.Run(tmCtx)
+			r.logger.Info("dragonfly manager stopped", "fg", nn)
+		}()
+	}
 
 	return nil
 }

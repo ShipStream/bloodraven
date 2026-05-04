@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
@@ -35,19 +36,46 @@ func NewScraper(ctx context.Context, k *pgkube.Client, namespace string) (*Scrap
 	if namespace == "" {
 		namespace = pgkube.PlaygroundNamespace
 	}
-	pod, err := k.FindPodWithLabel(ctx, namespace, OperatorPodSelector)
-	if err != nil {
-		return nil, fmt.Errorf("find operator pod: %w", err)
+	deadline := time.Now().Add(20 * time.Second)
+	var last error
+	for {
+		pod, err := k.FindPodWithLabel(ctx, namespace, OperatorPodSelector)
+		if err != nil {
+			last = fmt.Errorf("find operator pod: %w", err)
+		} else {
+			pf, err := k.PortForwardPod(ctx, namespace, pod.Name, 8080)
+			if err == nil {
+				return &Scraper{
+					pf:  pf,
+					cli: &http.Client{Timeout: 4 * time.Second},
+					url: fmt.Sprintf("http://127.0.0.1:%d/metrics", pf.LocalPort),
+				}, nil
+			}
+			last = fmt.Errorf("port-forward operator metrics: %w", err)
+			if !retryablePortForwardError(err) {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("operator metrics scraper: %w (last: %v)", ctx.Err(), last)
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
-	pf, err := k.PortForwardPod(ctx, namespace, pod.Name, 8080)
-	if err != nil {
-		return nil, fmt.Errorf("port-forward operator metrics: %w", err)
+	return nil, last
+}
+
+func retryablePortForwardError(err error) bool {
+	if err == nil {
+		return false
 	}
-	return &Scraper{
-		pf:  pf,
-		cli: &http.Client{Timeout: 4 * time.Second},
-		url: fmt.Sprintf("http://127.0.0.1:%d/metrics", pf.LocalPort),
-	}, nil
+	msg := err.Error()
+	return strings.Contains(msg, "pod not found") ||
+		strings.Contains(msg, "unable to upgrade connection") ||
+		strings.Contains(msg, "failed before ready")
 }
 
 // Close releases the SPDY tunnel.

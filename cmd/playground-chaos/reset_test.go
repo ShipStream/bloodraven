@@ -37,7 +37,6 @@ func TestNodeStorageWipePathsUsesFailoverGroup(t *testing.T) {
 
 	got := r.nodeStorageWipePaths(sites)
 	want := []string{
-		"/var/lib/rancher/k3s/storage/pvc-*",
 		"'/var/lib/rancher/k3s/storage/manual-mysql-dragonfly-iad-data'",
 		"'/var/lib/rancher/k3s/storage/manual-mysql-dragonfly-pdx-data'",
 	}
@@ -47,6 +46,9 @@ func TestNodeStorageWipePathsUsesFailoverGroup(t *testing.T) {
 	for _, path := range got {
 		if path == "'/var/lib/rancher/k3s/storage/manual-mysql-playground-*'" {
 			t.Fatalf("wipe path still targets default playground glob: %#v", got)
+		}
+		if path == "/var/lib/rancher/k3s/storage/pvc-*" {
+			t.Fatalf("wipe path must not delete unrelated local-path PVC data: %#v", got)
 		}
 	}
 }

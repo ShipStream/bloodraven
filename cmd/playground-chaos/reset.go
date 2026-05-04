@@ -101,6 +101,7 @@ func (r *resetter) run(ctx context.Context) error {
 	}{
 		{"scale operator down", r.scaleOperatorDown},
 		{"scale MySQL down", r.scaleMysqlDown},
+		{"sync MySQL deployment specs", r.syncMySQLDeploymentSpecs},
 		{"clear chaos marker and taints", r.clearTransientState},
 		{"delete PVCs and PVs", r.deleteStorage},
 		{"wipe k3d node storage", r.wipeNodeStorage},
@@ -150,6 +151,36 @@ func (r *resetter) scaleMysqlDown(ctx context.Context, sites []v1alpha1.SiteSpec
 			}
 		}
 		return r.waitPodsGone(ctx, mysqlSelector, 45*time.Second)
+	}
+	return nil
+}
+
+func (r *resetter) syncMySQLDeploymentSpecs(ctx context.Context, _ []v1alpha1.SiteSpec) error {
+	mfg, err := r.k.GetMFGNamed(ctx, r.namespace, r.fg)
+	if err != nil {
+		return fmt.Errorf("get MFG: %w", err)
+	}
+
+	for _, site := range mfg.Spec.Sites {
+		name := pgkube.MysqlDeploymentName(r.fg, site.Name)
+		dep, err := r.k.Kubernetes.AppsV1().Deployments(r.namespace).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("get deployment %s: %w", name, err)
+		}
+		for i := range dep.Spec.Template.Spec.Containers {
+			switch dep.Spec.Template.Spec.Containers[i].Name {
+			case "mysql":
+				dep.Spec.Template.Spec.Containers[i].Resources = site.Resources
+			case "sidecar":
+				dep.Spec.Template.Spec.Containers[i].Resources = mfg.Spec.SidecarResources
+			}
+		}
+		if _, err := r.k.Kubernetes.AppsV1().Deployments(r.namespace).Update(ctx, dep, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update deployment %s: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -733,7 +764,7 @@ func (r *resetter) forceDeleteStuckPVs(ctx context.Context, names map[string]str
 }
 
 func (r *resetter) nodeStorageWipePaths(sites []v1alpha1.SiteSpec) []string {
-	paths := []string{"/var/lib/rancher/k3s/storage/pvc-*"}
+	paths := make([]string, 0, len(sites))
 	for _, site := range sites {
 		path := "/var/lib/rancher/k3s/storage/manual-" + pgkube.MysqlPVCName(r.fg, site.Name)
 		paths = append(paths, shellQuote(path))

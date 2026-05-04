@@ -72,7 +72,15 @@ func injectPartitionReplica() runner.Step {
 			if _, err := env.Logs("sidecar:" + replica); err != nil {
 				return fmt.Errorf("open sidecar tailer for %s: %w", replica, err)
 			}
-			return env.Chaos.PartitionSite(ctx, replica)
+			if err := env.Chaos.PartitionSite(ctx, replica); err != nil {
+				return err
+			}
+			// NetworkPolicy does not necessarily break already-open
+			// MySQL TCP connections from the operator. Restart it so
+			// subsequent probes use fresh connections that the policy
+			// must deny.
+			env.Capture.Note("restarting operator to drop existing MySQL connections to the replica")
+			return env.Chaos.KillOperator(ctx)
 		},
 	}
 }

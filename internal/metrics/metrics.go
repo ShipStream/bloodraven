@@ -289,6 +289,30 @@ var (
 		Name: "bloodraven_backup_encrypt_failures_total",
 		Help: "Total failures in the encrypt/decrypt data plane labelled by (group, profile, stage).",
 	}, []string{"group", "profile", "stage"})
+
+	// DragonflySiteUp is 1 when the operator's most recent poll
+	// successfully completed INFO replication against a site's
+	// Dragonfly instance, 0 otherwise.
+	DragonflySiteUp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_dragonfly_site_up",
+		Help: "Dragonfly site reachability (1=reachable, 0=unreachable) per (group, site).",
+	}, []string{"group", "site"})
+
+	// DragonflyPromotionsTotal counts Dragonfly promotion attempts and
+	// their outcome. Result labels: "success", "failed", "skipped".
+	DragonflyPromotionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_dragonfly_promotions_total",
+		Help: "Number of Dragonfly promotion attempts labelled by result (success|failed|skipped).",
+	}, []string{"group", "target_site", "result"})
+
+	// DragonflyManagerPanicsTotal counts panics recovered in the
+	// DragonflyManager polling loop. A non-zero value means a Tick
+	// would have killed the goroutine without the recovery guard;
+	// alert and inspect the stack trace logged alongside.
+	DragonflyManagerPanicsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_dragonfly_manager_panics_total",
+		Help: "Number of panics recovered in DragonflyManager.Tick (per group).",
+	}, []string{"namespace", "name"})
 )
 
 // AllStates is the set of possible site states, used to emit the full state-set.
@@ -308,7 +332,8 @@ func Register(reg prometheus.Registerer) {
 		ArchiverUploadFailures, ArchiverLastUploadTimestamp, ArchiverBacklogFiles,
 		HTTPRequestsTotal, HTTPRequestDurationSeconds,
 		BackupEncryptDurationSeconds, BackupDecryptDurationSeconds,
-		BackupEncryptBytesTotal, BackupEncryptFailuresTotal)
+		BackupEncryptBytesTotal, BackupEncryptFailuresTotal,
+		DragonflySiteUp, DragonflyPromotionsTotal, DragonflyManagerPanicsTotal)
 }
 
 // StatusClass returns "2xx", "3xx", "4xx", "5xx" for an HTTP status

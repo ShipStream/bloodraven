@@ -778,14 +778,14 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 func TestComputeSpecHash_StableWithoutTLS(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
-	h1 := computeSpecHash(fg, site, nil, nil)
-	h2 := computeSpecHash(fg, site, nil, nil)
+	h1 := ComputeSpecHash(fg, site, nil, nil)
+	h2 := ComputeSpecHash(fg, site, nil, nil)
 	if h1 != h2 {
 		t.Errorf("hash should be stable: got %s and %s", h1, h2)
 	}
 
 	// Adding TLS data should change the hash.
-	h3 := computeSpecHash(fg, site, map[string][]byte{"tls.crt": []byte("cert")}, nil)
+	h3 := ComputeSpecHash(fg, site, map[string][]byte{"tls.crt": []byte("cert")}, nil)
 	if h3 == h1 {
 		t.Error("hash should differ when TLS data is provided")
 	}
@@ -794,12 +794,12 @@ func TestComputeSpecHash_StableWithoutTLS(t *testing.T) {
 func TestComputeSpecHash_IncludesCredentialData(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
-	h1 := computeSpecHash(fg, site, nil, nil)
+	h1 := ComputeSpecHash(fg, site, nil, nil)
 
 	credData := map[string]map[string][]byte{
 		"op-secret": {"username": []byte("admin"), "password": []byte("pass1")},
 	}
-	h2 := computeSpecHash(fg, site, nil, credData)
+	h2 := ComputeSpecHash(fg, site, nil, credData)
 	if h2 == h1 {
 		t.Error("hash should differ when credential data is provided")
 	}
@@ -807,7 +807,7 @@ func TestComputeSpecHash_IncludesCredentialData(t *testing.T) {
 	credData2 := map[string]map[string][]byte{
 		"op-secret": {"username": []byte("admin"), "password": []byte("pass2")},
 	}
-	h3 := computeSpecHash(fg, site, nil, credData2)
+	h3 := ComputeSpecHash(fg, site, nil, credData2)
 	if h3 == h2 {
 		t.Error("hash should differ when password changes")
 	}

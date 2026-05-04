@@ -49,6 +49,14 @@ spec:
               value: "root:playground-root-pw@tcp(mysql-playground-primary.bloodraven-playground.svc.cluster.local:3306)/?parseTime=true&timeout=5s"
             - name: LISTEN_ADDR
               value: ":8090"
+            # Dragonfly active Service — Bloodraven re-routes this Service's
+            # endpoints to whichever site's Dragonfly pod currently holds
+            # dragonfly-role=master AND dragonfly-traffic=enabled. Empty when
+            # spec.dragonfly.enabled is false; the counter-app handles that.
+            - name: REDIS_HOST
+              value: "playground-dragonfly.bloodraven-playground.svc.cluster.local"
+            - name: REDIS_PORT
+              value: "6379"
           resources:
             requests:
               cpu: 50m

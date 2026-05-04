@@ -41,10 +41,11 @@ func scenario10FullBootstrapAfterDataWipe() runner.Scenario {
 		Hypothesis: "Deleting the read-only site's PVC and scaling it back up triggers the operator's " +
 			"fresh-deploy bootstrap: Bootstrapping condition cycles Cloning → WaitingForRestart → " +
 			"SetupReplication → Done with replica replication threads ON at the end.",
-		Risk:     "high",
-		DocLink:  "playground/chaos-scenarios.md#10-full-bootstrap-after-data-wipe-clone-instance",
-		Timeout:  8 * time.Minute,
-		Precheck: s10AssertPristine,
+		Risk:              "high",
+		DocLink:           "playground/chaos-scenarios.md#10-full-bootstrap-after-data-wipe-clone-instance",
+		Timeout:           8 * time.Minute,
+		ResetBeforeRunAll: true,
+		Precheck:          s10AssertPristine,
 		Steps: []runner.Step{
 			s10InjectWipeReplicaPVC(),
 			s10ObserveBootstrapStarted(),

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	pgchaos "github.com/shipstream/bloodraven/internal/playground/chaos"
+	pgdragonfly "github.com/shipstream/bloodraven/internal/playground/dragonfly"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
@@ -50,8 +51,11 @@ type Env struct {
 	Chaos   *pgchaos.Actions
 	Wait    *pgwait.Helper
 	Metrics *pgmetrics.Scraper
-	Logger  *slog.Logger
-	Capture *Capture
+	// RefreshMetrics reopens the operator /metrics port-forward after
+	// scenarios intentionally restart the operator pod.
+	RefreshMetrics func(context.Context) error
+	Logger         *slog.Logger
+	Capture        *Capture
 
 	Creds pgmysql.Credentials
 
@@ -64,6 +68,15 @@ type Env struct {
 	// Sidecar returns a sidecar Probe for a site, with the same
 	// caching semantics as MySQL.
 	Sidecar func(site string) (*pgsidecar.Probe, error)
+
+	// Dragonfly returns a *pgdragonfly.SiteClient connected to the
+	// named site's Dragonfly pod. Each call dials a fresh
+	// port-forward — Dragonfly scenarios deliberately re-open after
+	// pod restarts (master-kill, demote-and-rejoin) so the pinned
+	// SPDY tunnel stays bound to the right pod identity. The
+	// executor closes any clients still open when the scenario
+	// exits via a tracker registered through this opener.
+	Dragonfly func(site string) (*pgdragonfly.SiteClient, error)
 
 	// Logs returns a Tailer for a component. "operator" tails the
 	// operator pod; "sidecar:<site>" tails a site's sidecar; "mysql:<site>"
@@ -86,7 +99,12 @@ type Scenario struct {
 	Risk       string
 	DocLink    string
 	Timeout    time.Duration
-	Precheck   func(ctx context.Context, env *Env) error
-	Steps      []Step
-	Cleanup    func(ctx context.Context, env *Env) error
+	// ResetBeforeRunAll tells the CLI that this scenario must start
+	// from a freshly reset playground when invoked by run-all. Single
+	// scenario runs still use Precheck to report the prerequisite
+	// explicitly instead of wiping data by surprise.
+	ResetBeforeRunAll bool
+	Precheck          func(ctx context.Context, env *Env) error
+	Steps             []Step
+	Cleanup           func(ctx context.Context, env *Env) error
 }

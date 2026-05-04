@@ -13,8 +13,11 @@ rules:
     resources: [events]
     verbs: [create, patch]
   - apiGroups: [""]
-    resources: [nodes, pods]
+    resources: [nodes]
     verbs: [get, list, patch, update, watch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete, get, list, patch, update, watch]
   # pods/log is used by the MysqlBackup reconciler to tail the final
   # `BLOODRAVEN_DUMP_COMPLETE` sentinel line printed by the embedded
   # backup_script.py at the end of a successful mysqlsh dumpInstance run,
@@ -37,7 +40,7 @@ rules:
     resources: [secrets]
     verbs: [create, delete, get, list, patch, update, watch]
   - apiGroups: [apps]
-    resources: [deployments]
+    resources: [deployments, statefulsets]
     verbs: [create, delete, get, list, patch, update, watch]
   - apiGroups: [batch]
     resources: [jobs, cronjobs]
