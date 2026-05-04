@@ -98,18 +98,23 @@ func TestReconcileDragonflyStatefulSet_CreatesPerSite(t *testing.T) {
 		}
 	}
 
-	var pdb policyv1.PodDisruptionBudget
-	if err := c.Get(ctx, types.NamespacedName{Name: "lion-dragonfly", Namespace: "shared-lion"}, &pdb); err != nil {
-		t.Fatalf("dragonfly PDB not created: %v", err)
-	}
-	if pdb.Spec.MinAvailable == nil || pdb.Spec.MinAvailable.IntVal != 1 {
-		t.Fatalf("dragonfly PDB minAvailable=%v, want 1", pdb.Spec.MinAvailable)
-	}
-	if got := pdb.Spec.Selector.MatchLabels[labelAppName]; got != dragonflyAppName {
-		t.Errorf("dragonfly PDB selector app=%q, want %q", got, dragonflyAppName)
-	}
-	if got := pdb.Spec.Selector.MatchLabels[labelInstance]; got != fg.Name {
-		t.Errorf("dragonfly PDB selector instance=%q, want %q", got, fg.Name)
+	for _, siteName := range []string{"dc1", "dc2"} {
+		var pdb policyv1.PodDisruptionBudget
+		if err := c.Get(ctx, types.NamespacedName{Name: "lion-dragonfly-" + siteName, Namespace: "shared-lion"}, &pdb); err != nil {
+			t.Fatalf("dragonfly PDB %s not created: %v", siteName, err)
+		}
+		if pdb.Spec.MinAvailable == nil || pdb.Spec.MinAvailable.IntVal != 1 {
+			t.Fatalf("dragonfly PDB %s minAvailable=%v, want 1", siteName, pdb.Spec.MinAvailable)
+		}
+		if got := pdb.Spec.Selector.MatchLabels[labelAppName]; got != dragonflyAppName {
+			t.Errorf("dragonfly PDB %s selector app=%q, want %q", siteName, got, dragonflyAppName)
+		}
+		if got := pdb.Spec.Selector.MatchLabels[labelInstance]; got != fg.Name {
+			t.Errorf("dragonfly PDB %s selector instance=%q, want %q", siteName, got, fg.Name)
+		}
+		if got := pdb.Spec.Selector.MatchLabels[labelSite]; got != siteName {
+			t.Errorf("dragonfly PDB %s selector site=%q, want %q", siteName, got, siteName)
+		}
 	}
 }
 
@@ -361,8 +366,8 @@ func TestReconcileDragonflyResources_SerializesImageRolloutReplicaBeforeActive(t
 	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc1", Phase: v1alpha1.DragonflyPhaseReady}
 	r, c := newReconciler(fg)
 	conn := newFakeConnector()
-	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}})
-	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}})
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 10}})
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0, SlaveReplOffset: 10}})
 	r.dragonflyConnector = conn.connect
 	ctx := context.Background()
 	if _, err := r.reconcileDragonflyResources(ctx, fg); err != nil {

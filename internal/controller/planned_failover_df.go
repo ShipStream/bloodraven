@@ -8,8 +8,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	k8sretry "k8s.io/client-go/util/retry"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -544,21 +542,8 @@ func (r *MysqlFailoverGroupReconciler) advancePastDragonflyPhases(ctx context.Co
 // Wrapped in RetryOnConflict so a concurrent DragonflyManager status patch
 // doesn't silently drop the planned-failover promotion stamp.
 func (r *MysqlFailoverGroupReconciler) stampDragonflyLastPromotion(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string, when metav1.Time) {
-	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
-		var fresh v1alpha1.MysqlFailoverGroup
-		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &fresh); err != nil {
-			return err
-		}
-		base := fresh.DeepCopy()
-		if fresh.Status.Dragonfly == nil {
-			fresh.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true}
-		}
-		fresh.Status.Dragonfly.ActiveSite = target
-		fresh.Status.Dragonfly.LastPromotionTime = &when
-		fresh.Status.Dragonfly.LastPromotionTarget = target
-		return r.Status().Patch(ctx, &fresh, client.MergeFrom(base))
-	})
-	if err != nil {
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	if err := stampDragonflyPromotionStatus(ctx, r.Client, nn, target, when, true); err != nil {
 		log.FromContext(ctx).Error(err, "stampDragonflyLastPromotion: status patch")
 	}
 }

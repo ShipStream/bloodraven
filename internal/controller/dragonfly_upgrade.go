@@ -354,12 +354,16 @@ func (r *MysqlFailoverGroupReconciler) updateDragonflyStatefulSetImage(ctx conte
 }
 
 func (r *MysqlFailoverGroupReconciler) deleteDragonflyPodsForSite(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, siteName string) error {
-	pods, err := listDragonflyPodsForSite(ctx, r.Client, fg, siteName)
+	return deleteDragonflyPodsForSite(ctx, r.Client, fg, siteName)
+}
+
+func deleteDragonflyPodsForSite(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup, siteName string) error {
+	pods, err := listDragonflyPodsForSite(ctx, c, fg, siteName)
 	if err != nil {
 		return err
 	}
 	for i := range pods {
-		if err := r.Delete(ctx, &pods[i]); err != nil && !apierrors.IsNotFound(err) {
+		if err := c.Delete(ctx, &pods[i]); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}

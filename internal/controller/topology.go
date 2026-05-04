@@ -608,11 +608,11 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// Check for pending promotion confirmation: DNS was already flipped at
 	// failover trigger time; this block confirms the promoted site is writable
 	// and clears the guard flag to allow future failovers.
+	tm.mu.Lock()
 	if tm.promotedSite != "" {
-		tm.mu.Lock()
 		tm.reconcilePendingPromotionLocked()
-		tm.mu.Unlock()
 	}
+	tm.mu.Unlock()
 
 	// Cross-site evaluation (only on state transitions to avoid repeated actions).
 	var alertMsg, degradedReason string

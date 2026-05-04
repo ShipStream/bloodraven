@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -85,6 +86,20 @@ type MysqlFailoverGroupReconciler struct {
 	// scripted fake; production wiring leaves this nil so realDragonflyConnector
 	// is used.
 	dragonflyConnector DragonflyConnector
+
+	dragonflyRolloutMu      sync.Mutex
+	dragonflyRolloutBackoff map[dragonflyRolloutKey]dragonflyRolloutState
+}
+
+type dragonflyRolloutKey struct {
+	fg     types.NamespacedName
+	target string
+	source string
+}
+
+type dragonflyRolloutState struct {
+	attempts    int
+	lastFailure time.Time
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlfailovergroups,verbs=get;list;watch;create;update;patch;delete
@@ -244,10 +259,11 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// When Dragonfly is disabled, reconcileDragonflyResources actively removes
 	// any previously managed Dragonfly resources so MySQL-only deployments are
 	// unaffected.
+	deferredRequeue := time.Duration(0)
 	if dragonflyRequeue, err := r.reconcileDragonflyResources(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile dragonfly resources: %w", err)
 	} else if dragonflyRequeue > 0 {
-		return ctrl.Result{RequeueAfter: dragonflyRequeue}, nil
+		deferredRequeue = minPositiveDuration(deferredRequeue, dragonflyRequeue)
 	}
 
 	// Reconcile MySQL users for credentials mode.
@@ -343,10 +359,21 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("sync dragonfly pod labels: %w", err)
 	}
 
-	if backupRequeue > 0 {
-		return ctrl.Result{RequeueAfter: backupRequeue}, nil
+	deferredRequeue = minPositiveDuration(deferredRequeue, backupRequeue)
+	if deferredRequeue > 0 {
+		return ctrl.Result{RequeueAfter: deferredRequeue}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+func minPositiveDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 || a < b {
+		return a
+	}
+	return b
 }
 
 func (r *MysqlFailoverGroupReconciler) SetupWithManager(mgr ctrl.Manager) error {

@@ -85,28 +85,17 @@ func prepareSplitBrainAutoResolvePolicyPath() runner.Step {
 				active, peer, mfg.Spec.SplitBrainPolicy.SitePriorities,
 			))
 
-			const operatorDeployment = "bloodraven"
-			if err := env.Kube.ScaleDeployment(ctx, env.Namespace, operatorDeployment, 0); err != nil {
-				return fmt.Errorf("scale operator to 0: %w", err)
-			}
-			scaledUp := false
-			defer func() {
-				if !scaledUp {
-					_ = env.Kube.ScaleDeployment(context.Background(), env.Namespace, operatorDeployment, 1)
-				}
-			}()
-			if err := waitOperatorReplicas(ctx, env, 0); err != nil {
+			if err := env.Chaos.ScaleOperatorToZero(ctx); err != nil {
 				return err
 			}
+			defer func() {
+				_ = env.Chaos.Revert(context.Background())
+			}()
 			if err := clearFailoverHistoryStatus(ctx, env); err != nil {
 				return err
 			}
-			if err := env.Kube.ScaleDeployment(ctx, env.Namespace, operatorDeployment, 1); err != nil {
-				return fmt.Errorf("scale operator to 1: %w", err)
-			}
-			scaledUp = true
-			if err := waitOperatorReplicas(ctx, env, 1); err != nil {
-				return err
+			if err := env.Chaos.Revert(ctx); err != nil {
+				return fmt.Errorf("restart operator after clearing failover history: %w", err)
 			}
 			if env.RefreshMetrics != nil {
 				if err := env.RefreshMetrics(ctx); err != nil {
@@ -154,38 +143,6 @@ func clearFailoverHistoryStatus(ctx context.Context, env *runner.Env) error {
 		return nil
 	}
 	return env.Kube.PatchMFGStatusNamed(ctx, env.Namespace, env.FG, ops)
-}
-
-func waitOperatorReplicas(ctx context.Context, env *runner.Env, want int32) error {
-	deadline := time.Now().Add(45 * time.Second)
-	var last string
-	for {
-		dep, err := env.Kube.GetDeployment(ctx, env.Namespace, "bloodraven")
-		if err != nil {
-			last = err.Error()
-		} else {
-			last = fmt.Sprintf("ready=%d available=%d replicas=%d generation=%d observed=%d",
-				dep.Status.ReadyReplicas, dep.Status.AvailableReplicas, dep.Status.Replicas,
-				dep.Generation, dep.Status.ObservedGeneration)
-			if want == 0 {
-				if dep.Status.Replicas == 0 && dep.Status.ReadyReplicas == 0 {
-					return nil
-				}
-			} else if dep.Status.ObservedGeneration >= dep.Generation &&
-				dep.Status.ReadyReplicas >= want &&
-				dep.Status.AvailableReplicas >= want {
-				return nil
-			}
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("wait operator replicas=%d timed out (last: %s)", want, last)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-	}
 }
 
 func injectForceBothWritable() runner.Step {

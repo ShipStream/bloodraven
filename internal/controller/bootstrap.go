@@ -46,6 +46,9 @@ func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts Bootstr
 		return fmt.Errorf("disable replica super_read_only for clone: %w", err)
 	}
 	if err := opts.Replica.SetReadOnly(ctx, false); err != nil {
+		if fenceErr := opts.Replica.SetSuperReadOnly(ctx, true); fenceErr != nil {
+			b.logger.Warn("failed to re-enable super_read_only after read_only disable failed", "error", fenceErr)
+		}
 		return fmt.Errorf("disable replica read_only for clone: %w", err)
 	}
 

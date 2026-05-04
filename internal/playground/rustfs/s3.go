@@ -1,17 +1,12 @@
 package rustfs
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -73,73 +68,4 @@ func EnsureBucket(ctx context.Context, endpoint, bucket string, creds Credential
 		}
 		return fmt.Errorf("create bucket %q: %w", bucket, err)
 	}
-}
-
-func signS3Request(req *http.Request, creds Credentials, now *time.Time) {
-	t := time.Now().UTC()
-	if now != nil {
-		t = now.UTC()
-	}
-	amzDate := t.Format("20060102T150405Z")
-	dateStamp := t.Format("20060102")
-	payloadHash := sha256Hex(nil)
-
-	req.Header.Set("X-Amz-Date", amzDate)
-	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
-
-	canonicalURI := req.URL.EscapedPath()
-	if canonicalURI == "" {
-		canonicalURI = "/"
-	}
-	host := req.URL.Host
-	canonicalHeaders := "host:" + host + "\n" +
-		"x-amz-content-sha256:" + payloadHash + "\n" +
-		"x-amz-date:" + amzDate + "\n"
-	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
-	canonicalRequest := strings.Join([]string{
-		req.Method,
-		canonicalURI,
-		req.URL.RawQuery,
-		canonicalHeaders,
-		signedHeaders,
-		payloadHash,
-	}, "\n")
-
-	scope := dateStamp + "/" + creds.Region + "/s3/aws4_request"
-	stringToSign := strings.Join([]string{
-		"AWS4-HMAC-SHA256",
-		amzDate,
-		scope,
-		sha256Hex([]byte(canonicalRequest)),
-	}, "\n")
-	signature := hex.EncodeToString(hmacSHA256(signingKey(creds.SecretKey, dateStamp, creds.Region), []byte(stringToSign)))
-	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential="+creds.AccessKey+"/"+scope+
-		", SignedHeaders="+signedHeaders+", Signature="+signature)
-}
-
-func signingKey(secret, date, region string) []byte {
-	kDate := hmacSHA256([]byte("AWS4"+secret), []byte(date))
-	kRegion := hmacSHA256(kDate, []byte(region))
-	kService := hmacSHA256(kRegion, []byte("s3"))
-	return hmacSHA256(kService, []byte("aws4_request"))
-}
-
-func hmacSHA256(key, data []byte) []byte {
-	h := hmac.New(sha256.New, key)
-	_, _ = h.Write(data)
-	return h.Sum(nil)
-}
-
-func sha256Hex(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-func canonicalRequestForTest(method, endpoint, bucket string, creds Credentials, at time.Time) (string, string, error) {
-	req, err := http.NewRequest(method, strings.TrimRight(endpoint, "/")+"/"+bucket, bytes.NewReader(nil))
-	if err != nil {
-		return "", "", err
-	}
-	signS3Request(req, creds, &at)
-	return req.Header.Get("Authorization"), req.Header.Get("X-Amz-Date"), nil
 }

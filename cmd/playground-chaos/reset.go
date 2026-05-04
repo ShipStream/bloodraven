@@ -24,7 +24,6 @@ import (
 	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/scenarios"
@@ -162,29 +161,6 @@ func (r *resetter) syncMySQLDeploymentSpecs(ctx context.Context, _ []v1alpha1.Si
 		return fmt.Errorf("get MFG: %w", err)
 	}
 
-	var tlsSecretData map[string][]byte
-	if mfg.Spec.TLS != nil {
-		secret, err := r.k.Kubernetes.CoreV1().Secrets(r.namespace).Get(ctx, mfg.Spec.TLS.SecretName, metav1.GetOptions{})
-		if err == nil {
-			tlsSecretData = secret.Data
-		} else if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("get TLS secret %s: %w", mfg.Spec.TLS.SecretName, err)
-		}
-	}
-
-	var credSecretData map[string]map[string][]byte
-	if mfg.Spec.UsesCredentials() {
-		credSecretData = make(map[string]map[string][]byte)
-		for _, name := range mfg.Spec.AllReferencedSecretNames() {
-			secret, err := r.k.Kubernetes.CoreV1().Secrets(r.namespace).Get(ctx, name, metav1.GetOptions{})
-			if err == nil {
-				credSecretData[name] = secret.Data
-			} else if !apierrors.IsNotFound(err) {
-				return fmt.Errorf("get credential secret %s: %w", name, err)
-			}
-		}
-	}
-
 	for _, site := range mfg.Spec.Sites {
 		name := pgkube.MysqlDeploymentName(r.fg, site.Name)
 		dep, err := r.k.Kubernetes.AppsV1().Deployments(r.namespace).Get(ctx, name, metav1.GetOptions{})
@@ -194,10 +170,6 @@ func (r *resetter) syncMySQLDeploymentSpecs(ctx context.Context, _ []v1alpha1.Si
 		if err != nil {
 			return fmt.Errorf("get deployment %s: %w", name, err)
 		}
-		if dep.Annotations == nil {
-			dep.Annotations = make(map[string]string)
-		}
-		dep.Annotations["shipstream.io/spec-hash"] = brcontroller.ComputeSpecHash(mfg, site, tlsSecretData, credSecretData)
 		for i := range dep.Spec.Template.Spec.Containers {
 			switch dep.Spec.Template.Spec.Containers[i].Name {
 			case "mysql":

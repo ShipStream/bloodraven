@@ -113,7 +113,7 @@ func observeDragonflyRollingImageUpdate() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 			defer cancel()
-			tick := time.NewTicker(time.Second)
+			tick := time.NewTicker(100 * time.Millisecond)
 			defer tick.Stop()
 			var last string
 			for {

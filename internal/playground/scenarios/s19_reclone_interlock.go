@@ -10,7 +10,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
-	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -19,9 +18,10 @@ func init() {
 }
 
 // scenario19RecloneInterlock exercises the bloodraven.shipstream.io/reclone-site
-// annotation safety interlock end-to-end. It first manufactures a
-// divergent-GTID condition (this scenario is self-contained — it does
-// not depend on scenario 8 having been run), then submits three
+// annotation safety interlock end-to-end. It first produces a
+// divergent-GTID condition through an actual failover and old-primary
+// rogue write (this scenario is self-contained — it does not depend on
+// scenario 8 having been run), then submits three
 // annotation values and asserts the operator reaction:
 //
 //	A) bare site name      — REJECTED (RecloneRejected event), annotation cleared
@@ -51,86 +51,13 @@ func scenario19RecloneInterlock() runner.Scenario {
 		Timeout:  8 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
-			seedRecloneInterlockDivergentStatus(),
+			injectDivergenceViaFailover(),
 			observeDivergenceRecorded(),
 			verifyRecloneRejectedBare(),
 			verifyRecloneRejectedMismatch(),
 			verifyRecloneAcceptedMatching(),
 		},
 		Cleanup: cleanupRecloneInterlockReplica,
-	}
-}
-
-func seedRecloneInterlockDivergentStatus() runner.Step {
-	return runner.Step{
-		Phase: runner.PhaseInject,
-		Name:  "seed standby status with a divergent GTID recovery block",
-		Do: func(ctx context.Context, env *runner.Env) error {
-			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
-			if err != nil {
-				return err
-			}
-			active := mfg.Status.ActiveSite
-			if active == "" {
-				return fmt.Errorf("cannot seed divergent status: activeSite is empty")
-			}
-			target, err := PeerOf(mfg, active)
-			if err != nil {
-				return err
-			}
-			const divergentGtid = "00000000-0000-0000-0000-00000000f19a:1-3"
-			var count int64 = 3
-			sites := append([]v1alpha1.SiteStatus(nil), mfg.Status.Sites...)
-			found := false
-			for i := range sites {
-				if sites[i].Name != target {
-					continue
-				}
-				sites[i].RecoveryState = "RecoveryBlocked"
-				sites[i].DivergentGtid = divergentGtid
-				sites[i].DivergentTransactionCount = &count
-				found = true
-				break
-			}
-			if !found {
-				return fmt.Errorf("cannot seed divergent status: target site %s not present in status.sites", target)
-			}
-			if err := ctxStash(ctx, env, "divergentSite", target); err != nil {
-				return err
-			}
-			if err := ctxStash(ctx, env, "divergentGtid", divergentGtid); err != nil {
-				return err
-			}
-
-			db, err := env.MySQL(target)
-			if err != nil {
-				return fmt.Errorf("open mysql client for %s before synthetic status seed: %w", target, err)
-			}
-			if _, err := db.Exec(ctx, "STOP REPLICA"); err != nil {
-				return fmt.Errorf("stop replication on %s before synthetic recovery block: %w", target, err)
-			}
-
-			if err := env.Chaos.ScaleOperatorToZero(ctx); err != nil {
-				return fmt.Errorf("stop operator before synthetic status seed: %w", err)
-			}
-			if err := env.Kube.PatchMFGStatusNamed(ctx, env.Namespace, env.FG, []pgkube.JSONPatchOp{{
-				Op:    "replace",
-				Path:  "/status/sites",
-				Value: sites,
-			}}); err != nil {
-				return fmt.Errorf("patch divergent status on %s: %w", target, err)
-			}
-			if err := env.Chaos.Revert(ctx); err != nil {
-				return fmt.Errorf("restart operator after synthetic status seed: %w", err)
-			}
-			if env.RefreshMetrics != nil {
-				if err := env.RefreshMetrics(ctx); err != nil {
-					return fmt.Errorf("refresh metrics after operator restart: %w", err)
-				}
-			}
-			env.Capture.Note(fmt.Sprintf("stopped replication and seeded synthetic RecoveryBlocked status on %s with divergentGtid=%s", target, divergentGtid))
-			return nil
-		},
 	}
 }
 

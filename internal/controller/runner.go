@@ -164,6 +164,15 @@ func (r *TopologyManagerRunner) plannedFailoverManager(nn types.NamespacedName) 
 	return mt.tm, nil
 }
 
+func (r *TopologyManagerRunner) dragonflyManager(nn types.NamespacedName) *DragonflyManager {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if mt, ok := r.managers[nn]; ok {
+		return mt.dragonfly
+	}
+	return nil
+}
+
 // PlannedFailoverFence applies super_read_only=ON on the named site
 // and returns its GTID_EXECUTED after the fence takes effect.
 func (r *TopologyManagerRunner) PlannedFailoverFence(ctx context.Context, nn types.NamespacedName, site string) (string, error) {
@@ -572,6 +581,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		tm.SetRecoveryBlocked(site.Name, site.DivergentGtid, count)
 		r.logger.Info("restored recovery blocked state from CR status",
 			"fg", nn, "site", site.Name, "divergentGtid", site.DivergentGtid, "divergentTransactionCount", count)
+		// TopologyManager tracks a single pending recovery site.
 		break
 	}
 

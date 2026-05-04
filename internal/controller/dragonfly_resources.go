@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -12,14 +11,17 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/dragonfly"
 	"github.com/shipstream/bloodraven/internal/platform"
 )
 
@@ -493,10 +495,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyActiveService(ctx conte
 	return err
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileDragonflyPDB(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func (r *MysqlFailoverGroupReconciler) reconcileDragonflyPDB(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
 	pdb := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dragonflyActiveServiceName(fg.Name),
+			Name:      dragonflyStatefulSetName(fg.Name, site.Name),
 			Namespace: fg.Namespace,
 		},
 	}
@@ -508,6 +510,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyPDB(ctx context.Context
 			labelAppName:       dragonflyAppName,
 			labelInstance:      fg.Name,
 			labelFailoverGroup: fg.Name,
+			labelSite:          site.Name,
 			labelManagedBy:     managerName,
 		}
 		pdb.Spec = policyv1.PodDisruptionBudgetSpec{
@@ -516,6 +519,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyPDB(ctx context.Context
 				MatchLabels: map[string]string{
 					labelAppName:  dragonflyAppName,
 					labelInstance: fg.Name,
+					labelSite:     site.Name,
 				},
 			},
 		}
@@ -550,10 +554,25 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyResources(ctx context.C
 	if err := r.reconcileDragonflyActiveService(ctx, fg); err != nil {
 		return 0, fmt.Errorf("reconcile dragonfly active service: %w", err)
 	}
-	if err := r.reconcileDragonflyPDB(ctx, fg); err != nil {
-		return 0, fmt.Errorf("reconcile dragonfly pdb: %w", err)
+	if err := r.deleteLegacyDragonflyGroupPDB(ctx, fg); err != nil {
+		return 0, fmt.Errorf("delete legacy dragonfly pdb: %w", err)
+	}
+	for _, site := range fg.Spec.Sites {
+		if err := r.reconcileDragonflyPDB(ctx, fg, site); err != nil {
+			return 0, fmt.Errorf("reconcile dragonfly pdb %s: %w", site.Name, err)
+		}
 	}
 	return requeue, nil
+}
+
+func (r *MysqlFailoverGroupReconciler) deleteLegacyDragonflyGroupPDB(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	pdb := &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dragonflyActiveServiceName(fg.Name),
+			Namespace: fg.Namespace,
+		},
+	}
+	return client.IgnoreNotFound(r.Delete(ctx, pdb))
 }
 
 func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
@@ -614,7 +633,26 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 			}
 		}
 		if promotionTarget != "" {
-			r.promoteDragonflyForRollout(ctx, fg, promotionTarget, activeSite)
+			ready, err := r.dragonflyRolloutCandidateSyncReady(ctx, fg, promotionTarget, activeSite)
+			if err != nil {
+				log.FromContext(ctx).Info("dragonfly rollout: sync-readiness check failed", "target", promotionTarget, "source", activeSite, "error", err)
+				return requeueAfter, nil
+			}
+			if !ready {
+				return requeueAfter, nil
+			}
+			if wait := r.dragonflyRolloutPromotionBackoff(fg, promotionTarget, activeSite); wait > 0 {
+				return wait, nil
+			}
+			if r.promoteDragonflyForRollout(ctx, fg, promotionTarget, activeSite) {
+				r.clearDragonflyRolloutPromotionBackoff(fg, promotionTarget, activeSite)
+			} else if r.recordDragonflyRolloutPromotionFailure(fg, promotionTarget, activeSite) >= 3 {
+				log.FromContext(ctx).Info("dragonfly rollout: promotion failed repeatedly; applying active StatefulSet update", "target", promotionTarget, "source", activeSite)
+				if err := r.reconcileDragonflyStatefulSet(ctx, fg, *activeDrift); err != nil {
+					return 0, fmt.Errorf("reconcile active dragonfly statefulset %s after promotion failures: %w", activeDrift.Name, err)
+				}
+				r.clearDragonflyRolloutPromotionBackoff(fg, promotionTarget, activeSite)
+			}
 			return requeueAfter, nil
 		}
 		if err := r.reconcileDragonflyStatefulSet(ctx, fg, *activeDrift); err != nil {
@@ -623,26 +661,90 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 		return requeueAfter, nil
 	}
 
-	for _, site := range fg.Spec.Sites {
-		if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
-			return 0, fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
-		}
-	}
 	return 0, nil
 }
 
-func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string) {
-	mgr := NewDragonflyManager(
-		r.Client,
-		r.Recorder,
-		slog.Default(),
-		types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name},
-		0,
-	)
+func (r *MysqlFailoverGroupReconciler) promoteDragonflyForRollout(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, oldSource string) bool {
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	if r.Runner != nil {
+		if mgr := r.Runner.dragonflyManager(nn); mgr != nil {
+			return mgr.TryEmergencyPromote(ctx, target, oldSource)
+		}
+	}
+	mgr := NewDragonflyManager(r.Client, r.Recorder, slog.Default().With("fg", nn.String(), "subsystem", "dragonfly-rollout"), nn, 0)
 	if r.dragonflyConnector != nil {
 		mgr.SetConnector(r.dragonflyConnector)
 	}
-	mgr.TryEmergencyPromote(ctx, target, oldSource)
+	return mgr.TryEmergencyPromote(ctx, target, oldSource)
+}
+
+func (r *MysqlFailoverGroupReconciler) dragonflyRolloutCandidateSyncReady(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, source string) (bool, error) {
+	sourceConn, err := r.dragonflyDial(ctx, fg, source)
+	if err != nil {
+		return false, fmt.Errorf("dial source: %w", err)
+	}
+	sourceInfo, err := sourceConn.InfoReplication(ctx)
+	_ = sourceConn.Close()
+	if err != nil {
+		return false, fmt.Errorf("source INFO replication: %w", err)
+	}
+
+	targetConn, err := r.dragonflyDial(ctx, fg, target)
+	if err != nil {
+		return false, fmt.Errorf("dial target: %w", err)
+	}
+	targetInfo, err := targetConn.InfoReplication(ctx)
+	if err != nil {
+		_ = targetConn.Close()
+		return false, fmt.Errorf("target INFO replication: %w", err)
+	}
+	targetPersist, _ := targetConn.InfoPersistence(ctx)
+	_ = targetConn.Close()
+
+	return dragonfly.CandidateSyncReady(targetInfo, targetPersist, sourceInfo.MasterReplOffset), nil
+}
+
+func (r *MysqlFailoverGroupReconciler) dragonflyRolloutPromotionBackoff(fg *v1alpha1.MysqlFailoverGroup, target, source string) time.Duration {
+	key := dragonflyRolloutKey{fg: types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, target: target, source: source}
+	r.dragonflyRolloutMu.Lock()
+	defer r.dragonflyRolloutMu.Unlock()
+	st, ok := r.dragonflyRolloutBackoff[key]
+	if !ok || st.attempts <= 0 {
+		return 0
+	}
+	wait := time.Duration(1<<minInt(st.attempts-1, 5)) * time.Second
+	if remaining := wait - time.Since(st.lastFailure); remaining > 0 {
+		return remaining
+	}
+	return 0
+}
+
+func (r *MysqlFailoverGroupReconciler) recordDragonflyRolloutPromotionFailure(fg *v1alpha1.MysqlFailoverGroup, target, source string) int {
+	key := dragonflyRolloutKey{fg: types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, target: target, source: source}
+	r.dragonflyRolloutMu.Lock()
+	defer r.dragonflyRolloutMu.Unlock()
+	if r.dragonflyRolloutBackoff == nil {
+		r.dragonflyRolloutBackoff = make(map[dragonflyRolloutKey]dragonflyRolloutState)
+	}
+	st := r.dragonflyRolloutBackoff[key]
+	st.attempts++
+	st.lastFailure = time.Now()
+	r.dragonflyRolloutBackoff[key] = st
+	return st.attempts
+}
+
+func (r *MysqlFailoverGroupReconciler) clearDragonflyRolloutPromotionBackoff(fg *v1alpha1.MysqlFailoverGroup, target, source string) {
+	key := dragonflyRolloutKey{fg: types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, target: target, source: source}
+	r.dragonflyRolloutMu.Lock()
+	defer r.dragonflyRolloutMu.Unlock()
+	delete(r.dragonflyRolloutBackoff, key)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (r *MysqlFailoverGroupReconciler) desiredDragonflyStatefulSet(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) (*appsv1.StatefulSet, error) {
@@ -659,7 +761,7 @@ func (r *MysqlFailoverGroupReconciler) desiredDragonflyStatefulSet(fg *v1alpha1.
 }
 
 func dragonflyStatefulSetTemplateEqual(current, desired *appsv1.StatefulSet) bool {
-	if !stringMapEqual(current.Spec.Template.Labels, desired.Spec.Template.Labels) {
+	if !equality.Semantic.DeepEqual(current.Spec.Template.Labels, desired.Spec.Template.Labels) {
 		return false
 	}
 	curSpec := current.Spec.Template.Spec
@@ -667,13 +769,13 @@ func dragonflyStatefulSetTemplateEqual(current, desired *appsv1.StatefulSet) boo
 	if curSpec.ServiceAccountName != wantSpec.ServiceAccountName {
 		return false
 	}
-	if !stringMapEqual(curSpec.NodeSelector, wantSpec.NodeSelector) {
+	if !equality.Semantic.DeepEqual(curSpec.NodeSelector, wantSpec.NodeSelector) {
 		return false
 	}
-	if !corev1TolerationsEqual(curSpec.Tolerations, wantSpec.Tolerations) {
+	if !equality.Semantic.DeepEqual(curSpec.Tolerations, wantSpec.Tolerations) {
 		return false
 	}
-	if !corev1VolumesEqual(curSpec.Volumes, wantSpec.Volumes) {
+	if !equality.Semantic.DeepEqual(curSpec.Volumes, wantSpec.Volumes) {
 		return false
 	}
 	cur, ok := dragonflyContainerFromTemplate(curSpec)
@@ -698,124 +800,13 @@ func dragonflyContainerFromTemplate(spec corev1.PodSpec) (corev1.Container, bool
 
 func dragonflyContainersOwnedFieldsEqual(cur, want corev1.Container) bool {
 	return cur.Image == want.Image &&
-		stringSliceEqual(cur.Args, want.Args) &&
-		corev1EnvVarsEqual(cur.Env, want.Env) &&
-		corev1ContainerPortsEqual(cur.Ports, want.Ports) &&
-		corev1VolumeMountsEqual(cur.VolumeMounts, want.VolumeMounts) &&
-		reflect.DeepEqual(cur.Resources, want.Resources) &&
-		probesEqual(cur.LivenessProbe, want.LivenessProbe) &&
-		probesEqual(cur.ReadinessProbe, want.ReadinessProbe)
-}
-
-func stringMapEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, av := range a {
-		if b[k] != av {
-			return false
-		}
-	}
-	return true
-}
-
-func stringSliceEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func corev1EnvVarsEqual(a, b []corev1.EnvVar) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Name != b[i].Name || a[i].Value != b[i].Value {
-			return false
-		}
-		if !envVarSourcesEqual(a[i].ValueFrom, b[i].ValueFrom) {
-			return false
-		}
-	}
-	return true
-}
-
-func envVarSourcesEqual(a, b *corev1.EnvVarSource) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	if a.SecretKeyRef == nil || b.SecretKeyRef == nil {
-		return a.SecretKeyRef == nil && b.SecretKeyRef == nil
-	}
-	return a.SecretKeyRef.Name == b.SecretKeyRef.Name && a.SecretKeyRef.Key == b.SecretKeyRef.Key
-}
-
-func corev1ContainerPortsEqual(a, b []corev1.ContainerPort) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Name != b[i].Name || a[i].ContainerPort != b[i].ContainerPort || a[i].Protocol != b[i].Protocol {
-			return false
-		}
-	}
-	return true
-}
-
-func corev1VolumeMountsEqual(a, b []corev1.VolumeMount) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Name != b[i].Name || a[i].MountPath != b[i].MountPath || a[i].ReadOnly != b[i].ReadOnly {
-			return false
-		}
-	}
-	return true
-}
-
-func corev1TolerationsEqual(a, b []corev1.Toleration) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func corev1VolumesEqual(a, b []corev1.Volume) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Name != b[i].Name {
-			return false
-		}
-		if (a[i].EmptyDir == nil) != (b[i].EmptyDir == nil) {
-			return false
-		}
-	}
-	return true
-}
-
-func probesEqual(a, b *corev1.Probe) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.InitialDelaySeconds == b.InitialDelaySeconds &&
-		a.PeriodSeconds == b.PeriodSeconds &&
-		a.TCPSocket != nil &&
-		b.TCPSocket != nil &&
-		a.TCPSocket.Port == b.TCPSocket.Port
+		equality.Semantic.DeepEqual(cur.Args, want.Args) &&
+		equality.Semantic.DeepEqual(cur.Env, want.Env) &&
+		equality.Semantic.DeepEqual(cur.Ports, want.Ports) &&
+		equality.Semantic.DeepEqual(cur.VolumeMounts, want.VolumeMounts) &&
+		equality.Semantic.DeepEqual(cur.Resources, want.Resources) &&
+		equality.Semantic.DeepEqual(cur.LivenessProbe, want.LivenessProbe) &&
+		equality.Semantic.DeepEqual(cur.ReadinessProbe, want.ReadinessProbe)
 }
 
 func dragonflyStatefulSetRolloutComplete(sts *appsv1.StatefulSet) bool {
