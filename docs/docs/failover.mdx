@@ -4,7 +4,7 @@ sidebar_position: 7
 
 # Failover
 
-This page covers the state machine that drives failover decisions, the exact sequence of operations during a failover, the anti-flap cooldown, and ordered updates for zero-downtime rollouts. For the bounded-RPO contract and the exact set of transactions that can be lost on emergency failover, see [Durability and RPO](./durability-and-rpo.mdx). For what happens when the operator itself is unavailable during a failure, see [Operator availability](./operator-availability.mdx).
+This page covers the state machine that drives MySQL failover decisions, the exact sequence of operations during a failover, Dragonfly follow-along behavior when enabled, the anti-flap cooldown, and ordered updates for zero-downtime rollouts. For the bounded-RPO contract and the exact set of transactions that can be lost on emergency failover, see [Durability and RPO](./durability-and-rpo.mdx). For what happens when the operator itself is unavailable during a failure, see [Operator availability](./operator-availability.mdx).
 
 ## State machine
 
@@ -84,6 +84,21 @@ When the operator decides to fail over to a candidate site, it executes these st
 9. **Update node taints**
    - Taint old active site nodes: `shipstream.io/db-readonly-<group>=true:NoExecute`
    - Untaint new active site nodes: remove the `shipstream.io/db-readonly-<group>` taint
+
+## Dragonfly during failover
+
+When `spec.dragonfly.enabled=true`, Dragonfly follows the MySQL failover group but remains best-effort cache/session state, not durable data.
+
+During **planned failover**, Bloodraven inserts two Dragonfly phases before MySQL promotion:
+
+1. `WaitingForDragonflySync` captures the source Dragonfly replication offset and waits for the target Dragonfly replica to catch up, bounded by `spec.dragonfly.plannedFailover.maxSyncWait` (default `30s`).
+2. `PromotingDragonfly` removes the source pod's `shipstream.io/dragonfly-traffic` label, promotes the target with `REPLTAKEOVER`, stamps the target as `shipstream.io/dragonfly-role=master`, and best-effort kills old-master clients so they reconnect through the active Dragonfly Service.
+
+If sync or `REPLTAKEOVER` fails, `spec.dragonfly.plannedFailover.onSyncTimeout` controls the outcome. The default `proceed` continues MySQL promotion and records `status.plannedFailover.dragonfly.sessionsPreserved=false`. `fail` rolls back before MySQL promotion and leaves the original MySQL primary active.
+
+During **emergency failover**, MySQL promotion is the priority. After MySQL promotion succeeds, the operator attempts to promote Dragonfly on the new MySQL active site within a bounded budget. It first tries `REPLTAKEOVER` to preserve sessions; if that fails, it falls back to `REPLICAOF NO ONE`, which restores a writable Dragonfly master but discards cache/session continuity. If Dragonfly is unreachable, MySQL recovery still completes.
+
+The Dragonfly manager also handles Dragonfly-only failures. If the active Dragonfly master dies while MySQL remains healthy, the manager can promote the single healthy Dragonfly replica and leave `status.activeSite` for MySQL unchanged.
 
 ## Old primary recovery
 

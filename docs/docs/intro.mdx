@@ -5,7 +5,7 @@ slug: /
 
 # Bloodraven
 
-Bloodraven is a Kubernetes operator for MySQL async replication failover groups across sites. It automates failover detection, promotion, DNS steering, and application workload migration so a site-level MySQL outage can recover without human intervention.
+Bloodraven is a Kubernetes operator for MySQL async replication failover groups across sites. It automates failover detection, promotion, DNS steering, application workload migration, and optional Dragonfly cache/session sidekicks that follow the active MySQL site so a site-level outage can recover without human intervention.
 
 ## Who this is for
 
@@ -24,6 +24,7 @@ Bloodraven is a Kubernetes operator for MySQL async replication failover groups 
 - It does not make application connection pools failover-aware automatically.
 - It does not reconcile divergent writes for you after split-brain.
 - It does not make PVC-local backups durable after cluster or storage loss.
+- It does not treat Dragonfly as durable application storage; managed Dragonfly is for cache/session continuity.
 
 ## User journeys
 
@@ -43,6 +44,7 @@ Bloodraven is a Kubernetes operator for MySQL async replication failover groups 
 - **Prevents split-brain** with sidecar self-fencing: if both the operator and peer are unreachable, the sidecar sets `super_read_only=ON` as a safety net (see [Operator availability](./operator-availability.mdx) and [Durability and RPO](./durability-and-rpo.mdx) for exact behavior and bounds)
 - **Broadcasts status** over a WebSocket API for dashboards and alerting integrations
 - **Backs up and restores** via mysqlsh `util.dumpInstance()` / `util.loadDump()` to S3 or PVC, with scheduled CronJobs, structured retention, retries, and automatic artifact cleanup
+- **Optionally co-manages Dragonfly** by creating one Dragonfly StatefulSet per site, steering a Redis-compatible active Service, and promoting Dragonfly during planned or emergency MySQL failover
 
 :::tip
 **Using an AI agent?** This documentation is available as `llms.txt` and `llms-full.txt` at the site root for consumption by LLM-based tools. Give your agent context with a prompt like:
@@ -66,12 +68,13 @@ to make sure the tradeoffs match your use case.
 |---|---|
 | `bloodraven` | The operator binary. Runs as a Deployment, watches `MysqlFailoverGroup` CRs, reconciles MySQL state. |
 | `bloodraven-sidecar` | Runs alongside each MySQL container. Provides health probes and self-fencing when the operator is unreachable. |
+| Managed Dragonfly | Optional per-site Dragonfly pods created when `spec.dragonfly.enabled=true`. Applications use the active `dragonfly` Service for Redis-compatible cache/session traffic. |
 
 ## Custom resource
 
 Bloodraven introduces a single CRD:
 
-- **`MysqlFailoverGroup`** (`shipstream.io/v1alpha1`) -- Declares MySQL instances across named sites, their storage, networking, DNS, transport layer security (TLS), and failover tuning.
+- **`MysqlFailoverGroup`** (`shipstream.io/v1alpha1`) -- Declares MySQL instances across named sites, their storage, networking, DNS, transport layer security (TLS), failover tuning, and optional Dragonfly co-management.
 
 ```yaml
 apiVersion: shipstream.io/v1alpha1
@@ -108,7 +111,7 @@ spec:
 
 ## Next steps
 
-- [Architecture](./architecture.mdx) -- How the operator, sidecars, and MySQL instances interact.
+- [Architecture](./architecture.mdx) -- How the operator, sidecars, MySQL instances, and optional Dragonfly sidekicks interact.
 - [Getting Started](./getting-started.mdx) -- Install the operator and create your first failover group.
 - [Production Install](./install-production.mdx) -- Production dependencies, Helm values, CRD ownership, and verification.
 - [Playground](./playground.mdx) -- Try Bloodraven locally on k3d, kind, or minikube with a live dashboard and chaos tools.

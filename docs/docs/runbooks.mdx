@@ -17,6 +17,8 @@ Every runbook starts with the same incident header. Fill it in before making cha
 | Rollback path | Document before action |
 | Verification command | Always include active site, DNS, and app write check when relevant |
 
+If `spec.dragonfly.enabled=true`, include `status.dragonfly.phase`, active Dragonfly Service endpoints, and a Redis-compatible cache/session read/write check in the same incident record.
+
 ## Planned failover
 
 Use [Planned Failover](./planned-failover.mdx) for controlled maintenance. Do not use during split-brain or when the target replica is unhealthy.
@@ -28,6 +30,31 @@ kubectl get mysqlfailovergroup orders -n orders -o wide
 ```
 
 Verify DNS and application writes before starting maintenance on the old active site.
+
+If Dragonfly is enabled, also verify `status.plannedFailover.dragonfly.sessionsPreserved` and confirm the active Dragonfly Service points at the new site.
+
+```bash
+kubectl get mysqlfailovergroup orders -n orders \
+  -o jsonpath='{.status.plannedFailover.dragonfly}{"\n"}'
+kubectl get endpoints orders-dragonfly -n orders
+```
+
+## Dragonfly degraded
+
+Use when `status.dragonfly.phase=Degraded`, `bloodraven_dragonfly_site_up==0`, or Dragonfly promotion failed. MySQL is still authoritative; this runbook protects cache/session continuity.
+
+1. Confirm MySQL `status.activeSite` and application writes are healthy.
+2. Inspect `status.dragonfly.sites[]` for unreachable, stale-master, syncing, or link-down sites.
+3. Check the active Dragonfly Service endpoints and pod role/traffic labels.
+4. Restart or reschedule only the affected Dragonfly pod if the stale site has not accepted writes.
+5. If a stale master may have accepted writes, keep it out of the active Service and decide whether cache/session data can be discarded.
+
+```bash
+kubectl get mysqlfailovergroup orders -n orders \
+  -o jsonpath='{.status.dragonfly}{"\n"}'
+kubectl get pod -n orders -l app.kubernetes.io/name=dragonfly --show-labels
+kubectl get endpoints orders-dragonfly -n orders
+```
 
 ## Emergency manual promotion
 

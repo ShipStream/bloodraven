@@ -24,6 +24,7 @@ running it.
 - Keep `auxiliary.service.enabled=false` unless a dashboard or integration needs it.
 - Add NetworkPolicy for operator, sidecar, MySQL, Prometheus, app, and backup paths.
 - Pin and mirror operator, sidecar, MySQL, and backup images.
+- If Dragonfly is enabled, protect its password Secret, active Service, and admin port with the same care as the MySQL data plane.
 - Link Secret rotation to [Credentials And TLS](./credentials-and-tls.mdx).
 
 ## Threat-model assumptions
@@ -32,13 +33,13 @@ running it.
 |---|---|
 | Kubernetes API authn/authz is trusted | RBAC boundaries are meaningful. |
 | CNI enforces NetworkPolicy correctly | Unauthenticated sidecar and auxiliary endpoints can be isolated. |
-| Secret storage is protected | MySQL, TLS, S3, and encryption secrets remain confidential. |
+| Secret storage is protected | MySQL, Dragonfly, TLS, S3, and encryption secrets remain confidential. |
 | Node administrators are trusted | A node admin can read mounted Secrets and MySQL data on that node. |
 | Application workloads are less trusted than the operator | Apps should only receive app or read-only MySQL credentials. |
 
 ## Trust model at a glance
 
-Four identities participate in the data path. Everything else in the
+Four identities participate in the required MySQL data path. Managed Dragonfly adds an optional cache/session data path when enabled. Everything else in the
 cluster is considered untrusted.
 
 | Identity | What it is | Trust level |
@@ -46,6 +47,7 @@ cluster is considered untrusted.
 | **Operator** | Single-replica Deployment running `bloodraven`, bound to a cluster-wide ServiceAccount. Owns the reconcile loop and DNS writes. | Fully trusted — it is the control plane. |
 | **Sidecar** | Per-MySQL-pod container running `bloodraven-sidecar`. Serves read-only status HTTP, manages MySQL startup, writes binlog manifests, and self-fences its MySQL. | Trusted for the single pod it runs in. |
 | **MySQL** | `mysqld` itself, with the per-role users Bloodraven creates (`operator`, `app`, `readonly`, `monitor`, `backup`). | Trusted for query execution; each MySQL user is trusted only for its role's grants. |
+| **Dragonfly** | Optional per-site Dragonfly pods created when `spec.dragonfly.enabled=true`. The operator configures replication, role/traffic labels, and promotion. | Trusted for cache/session data only. Do not store durable application state here. |
 | **Application** | Workloads that connect to the primary/replica Services using `appSecret` / `readOnlySecret`. | Untrusted by the operator — apps are tenants. |
 
 All intra-cluster traffic between these identities flows over the pod
@@ -107,11 +109,16 @@ operator acts on are:
   [Failover → Reclone flow](./failover.mdx#divergence-detected-manual-intervention-required).
 - `bloodraven.shipstream.io/planned-failover=<site>` — Drains writes,
   honours the anti-flap cooldown, waits for the target to catch up, and
-  promotes the named site.
+  promotes the named site. When Dragonfly is enabled, this also drives
+  the Dragonfly sync and `REPLTAKEOVER` phases.
+- `bloodraven.shipstream.io/dragonfly-snapshot-upgrade=<image>` — Runs
+  the Dragonfly snapshot-restore upgrade workflow when
+  `spec.dragonfly.snapshot` is configured.
 
 An attacker with `patch mysqlfailovergroups` in the target namespace
 can therefore cause a data wipe of one site (bounded by the GTID
-confirmation interlock) or an unscheduled failover. RBAC on the CRD
+confirmation interlock), an unscheduled failover, or a planned Dragonfly
+cache/session outage during snapshot-restore upgrade. RBAC on the CRD
 is the only gate — scope `MysqlFailoverGroup` edit rights as tightly
 as you would scope `kubectl delete pvc`.
 
@@ -124,6 +131,8 @@ as you would scope `kubectl delete pvc`.
 | Operator auxiliary HTTP | `:8082` | No | `/status`, `/active-site`, `/pitr-cutoff`, `/ws/status` (WebSocket). Consumed by the dashboard and by sidecars that check which site is active. |
 | Sidecar HTTP | `:8080` | No | `/health`, `/status`, `/peer/ping`, `/archiver/status`. Consumed by the operator and the peer sidecar. |
 | MySQL | `:3306` | Yes (password; TLS if `spec.tls` set) | Data plane. |
+| Dragonfly client | `:6379` by default | Password when `spec.dragonfly.auth` is set | Optional Redis-compatible cache/session data plane. |
+| Dragonfly admin | `:9999` by default | Password when `spec.dragonfly.auth` is set | Optional operator control surface for replication, promotion, and snapshot commands. |
 
 **None of the HTTP surfaces above authenticate callers.** They expose
 read-only status and GTID coordinates; none accept state-changing
@@ -160,6 +169,11 @@ plaintext connections from anything on the pod network.
   Secret to exist. Use a cert-manager `Certificate` resource to
   populate it.
 
+Dragonfly traffic is not covered by `spec.tls`; configure NetworkPolicy
+and, where required, Dragonfly-native TLS or a service mesh outside
+Bloodraven's managed flags. Do not expose the Dragonfly admin port to
+applications.
+
 ## Secrets at rest and in memory
 
 - **Nothing is written to disk that wasn't already on disk.** The
@@ -176,6 +190,10 @@ plaintext connections from anything on the pod network.
   no longer required and could be unset, but the operator keeps them
   in the pod spec for simplicity. Anything that can `kubectl exec` or
   `kubectl describe pod` can see them.
+- **Dragonfly auth is optional but recommended for shared namespaces.**
+  When `spec.dragonfly.auth` is set, the operator projects the password
+  Secret into Dragonfly pods as an environment variable and uses it for
+  its own Redis-protocol connections.
 
 ## Compromise scenarios
 
@@ -196,7 +214,9 @@ cluster access, an attacker can:
    public DNS zone, enabling a DNS-hijack attack against any name
    external-dns manages (not just MySQL names).
 4. **Exfiltrate PVC contents** by scheduling a pod that mounts the
-   target PVC — the ServiceAccount can create pods and PVC mounts.
+    target PVC — the ServiceAccount can create pods and PVC mounts.
+5. **Create or patch Dragonfly StatefulSets and Services** when the
+   feature is enabled, including changing cache/session routing labels.
 
 **Mitigations.** Pin the chart's `serviceAccountName`, bind it to a
 namespace-scoped Role where possible, run the operator in its own

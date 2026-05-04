@@ -17,6 +17,7 @@ Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/
 | `spec.backup` | Backup profiles, schedules, PITR | [Backup Overview](./backup-overview.mdx) |
 | `spec.initFromBackup` | Bootstrap restore into a new group | [Backup And Restore](./backup-restore.mdx) |
 | `spec.plannedFailover` | Defaults for planned failover API | [Planned Failover](./planned-failover.mdx) |
+| `spec.dragonfly` | Optional Dragonfly cache/session co-management | [App Integration](./app-integration.mdx#connection-endpoints) |
 
 :::danger Destructive and high-risk fields
 Review runbooks before changing `spec.restoreInPlace`, restore-related `confirm` tokens, reclone controls, and any field that changes `spec.sites`, `spec.credentials`, `spec.tls`, or MySQL images. Restore and reclone operations can replace data; image and credential changes can trigger restarts or failed reconnects.
@@ -56,6 +57,7 @@ Review runbooks before changing `spec.restoreInPlace`, restore-related `confirm`
 | `initFromBackup` | InitFromBackupSpec | No | -- | One-shot restore-on-first-boot before normal bootstrap completes. See [InitFromBackupSpec](#initfrombackupspec-specinitfrombackup). |
 | `restoreInPlace` | RestoreInPlaceSpec | No | -- | Re-triggerable destructive restore against the active primary. Bumping `confirm` to a newer RFC 3339 timestamp re-arms. See [RestoreInPlaceSpec](#restoreinplacespec-specrestoreinplace). |
 | `plannedFailover` | PlannedFailoverSpec | No | -- | Cluster-wide defaults for the graceful planned-failover API (triggered via `bloodraven.shipstream.io/planned-failover=<site>`). |
+| `dragonfly` | DragonflySpec | No | -- | Optional per-site Dragonfly cache/session co-management. When enabled, the operator creates one Dragonfly StatefulSet per site, an active Redis-compatible Service, replication wiring, promotion status, and optional snapshot-restore upgrade support. See [DragonflySpec](#dragonflyspec-specdragonfly). |
 
 ### SiteSpec
 
@@ -267,6 +269,51 @@ time of the full dump — otherwise there is no archive to replay.
 | `stopDatetime` | string | Yes | Replay target. Accepts RFC 3339 (`2026-04-15T09:30:00Z`) or MySQL's native form (`2026-04-15 09:30:00`). |
 | `excludeGtids` | string | No | Forwarded verbatim as `mysqlbinlog --exclude-gtids=...` to surgically skip known-bad transactions while replaying everything else. |
 
+### DragonflySpec (`spec.dragonfly`)
+
+Optional cache/session sidekick management. Omitting this field or setting
+`enabled: false` preserves MySQL-only behavior and removes previously
+managed Dragonfly resources.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `enabled` | bool | No | `false` | Creates and manages one Dragonfly StatefulSet per site when true. |
+| `image` | string | Yes when enabled | -- | Pinned Dragonfly image. `:latest` is rejected. Use Dragonfly `v1.38.0+`. |
+| `port` | int | No | `6379` | Redis-compatible client port. |
+| `adminPort` | int | No | `9999` | Admin/control port used by the operator. |
+| `maxMemoryMb` | int | No | -- | Renders Dragonfly `--maxmemory=<value>mb` when non-zero. |
+| `proactorThreads` | int | No | -- | Renders Dragonfly `--proactor_threads=<value>` when non-zero. |
+| `args` | []string | No | -- | Extra Dragonfly args. Operator-owned flags such as `--port`, `--admin_port`, `--requirepass`, `--dir`, S3 flags, and `--break_replication_on_master_restart` are filtered out. |
+| `auth` | DragonflyAuthSpec | No | -- | Secret reference for the Dragonfly password. The operator renders `--requirepass` and authenticates its own connections. |
+| `resources` | ResourceRequirements | No | -- | Compute resources for each Dragonfly container. |
+| `plannedFailover` | DragonflyPlannedFailoverSpec | No | `{maxSyncWait: 30s, onSyncTimeout: proceed}` | Planned-failover sync and timeout behavior. |
+| `snapshot` | DragonflySnapshotSpec | No | -- | Native Dragonfly snapshot directory and optional S3-compatible settings for planned snapshot-restore upgrades. |
+
+#### DragonflyAuthSpec
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `secretName` | string | Yes | -- | Secret containing the Dragonfly password. |
+| `passwordKey` | string | No | `password` | Secret key containing the password. |
+
+#### DragonflyPlannedFailoverSpec
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `maxSyncWait` | duration | No | `30s` | Maximum time to wait for target Dragonfly replica catch-up. Also used as the `REPLTAKEOVER` timeout. |
+| `onSyncTimeout` | string | No | `proceed` | `proceed` continues MySQL promotion and records `sessionsPreserved=false`; `fail` rolls back before MySQL promotion. |
+
+#### DragonflySnapshotSpec
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `dir` | string | No | Passed to Dragonfly as `--dir`. Use `s3://bucket[/prefix]` for S3-compatible snapshot/restore support. |
+| `serviceAccountName` | string | No | ServiceAccount assigned to Dragonfly pods for cloud IAM access. |
+| `credentialsSecretName` | string | No | Secret projected as AWS credential environment variables for S3-compatible snapshot access. |
+| `s3Endpoint` | string | No | S3-compatible endpoint passed as `--s3_endpoint`. |
+| `s3UseHTTPS` | bool | No | Passed as `--s3_use_https` when set. |
+| `s3SignPayload` | bool | No | Passed as `--s3_sign_payload` when set. |
+
 ## Full example
 
 ```yaml
@@ -338,6 +385,12 @@ spec:
   replication:
     maxLagSeconds: 300
   updateStrategy: OrderedUpdate
+  dragonfly:
+    enabled: true
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0
+    plannedFailover:
+      maxSyncWait: 30s
+      onSyncTimeout: proceed
   cloneTimeout: 3600
   podLabels:
     cost-center: platform
@@ -442,6 +495,7 @@ The operator writes the following status fields.
 | `lastBackupTime` | timestamp | Completion time of the most recent successful MysqlBackup across all profiles, regardless of whether it was scheduled or on-demand. |
 | `pitr` | PITRStatus | Summary of the continuous binlog archive, populated by the operator from periodic polls of each sidecar's `/archiver/status` endpoint. Present when `spec.backup.pitr.enabled=true`. |
 | `plannedFailover` | PlannedFailoverStatus | Most-recent planned (admin-triggered) failover attempt. Retained until a newer annotation replaces it; how `kubectl describe` tells the story of a switchover after the fact. |
+| `dragonfly` | DragonflyStatus | Observed Dragonfly subsystem state when `spec.dragonfly.enabled=true`: active site, phase, per-site roles, reachability, replication health, last promotion, and snapshot-upgrade status. |
 
 ### SiteStatus
 
@@ -466,11 +520,42 @@ The operator writes the following status fields.
 | `RecoveryPending` | `True` when an old primary has divergent transactions and requires manual intervention. Reason is `DivergentTransactions`. Use the reclone annotation to recover. |
 | `Bootstrapping` | `True` when a clone operation is in progress (fresh-deploy, auto-clone, or reclone). Reason indicates the phase. |
 
+### DragonflyStatus
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | bool | Mirrors `spec.dragonfly.enabled` at last observation. |
+| `activeSite` | string | Site currently acting as Dragonfly master. Usually matches `status.activeSite`; may briefly diverge during planned failover. |
+| `phase` | string | `Disabled`, `Reconciling`, `ConfiguringReplication`, `Ready`, `Degraded`, or `Promoting`. |
+| `message` | string | Human-readable status summary. |
+| `lastPromotionTime` | timestamp | Last successful Dragonfly promotion time. |
+| `lastPromotionTarget` | string | Site promoted in the last successful Dragonfly promotion. |
+| `sites` | []DragonflySiteStatus | Per-site Dragonfly observation. |
+| `upgrade` | DragonflyUpgradeStatus | Snapshot-restore upgrade progress when requested by annotation. |
+
+### DragonflySiteStatus
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Site identifier. |
+| `role` | string | `master`, `replica`, `stale-master`, `unconfigured`, `unreachable`, or `unknown`. |
+| `reachable` | bool | Whether the operator completed an `INFO replication` call on the latest poll. |
+| `serviceName` | string | Site-local Dragonfly Service name. |
+| `podName` | string | Dragonfly pod name when known. |
+| `replicationState` | string | Raw Dragonfly `role` value from `INFO replication`. |
+| `linkStatus` | string | Replica `master_link_status`; empty on a master. |
+| `syncInProgress` | bool | Whether Dragonfly reports a full sync in progress. |
+| `lastIOSecondsAgo` | int | Seconds since the replica last received data from its master; `-1` means never. |
+| `ready` | bool | Operator-level readiness for the Dragonfly role. |
+| `message` | string | Human-readable per-site status. |
+
 ### Annotations
 
 | Annotation | Description |
 |---|---|
 | `bloodraven.shipstream.io/reclone-site` | Triggers a `CLONE INSTANCE` from the current primary to the named site. Value format depends on the target's state: `<site>:confirm=<group-name>` for a cold reclone (no divergent GTID recorded), or `<site>:<gtid-prefix>` when `status.sites[].divergentGtid` is non-empty — the prefix must be 8+ characters and match the observed divergent GTID. Both forms act as a fat-finger interlock (cold path added by AUDIT L3 / WISHLIST #5). Invalid annotations are rejected with a `RecloneRejected` Warning Event and cleared. Valid ones emit `RecloneRequested` and report progress via the `Bootstrapping` condition. |
+| `bloodraven.shipstream.io/planned-failover` | Starts a planned failover to the named site. When Dragonfly is enabled, the planned-failover status includes a `dragonfly` substatus with session-preservation details. |
+| `bloodraven.shipstream.io/dragonfly-snapshot-upgrade` | Starts the Dragonfly snapshot-restore upgrade workflow to the target image. Requires `spec.dragonfly.snapshot` to be configured. |
 
 ### Example status
 
@@ -495,4 +580,19 @@ status:
       status: "False"
   lastFailover: "2025-01-01T00:00:00Z"
   lastFailoverTarget: iad
+  dragonfly:
+    enabled: true
+    activeSite: iad
+    phase: Ready
+    message: all sites ready
+    sites:
+      - name: iad
+        role: master
+        reachable: true
+        ready: true
+      - name: pdx
+        role: replica
+        reachable: true
+        linkStatus: up
+        ready: true
 ```

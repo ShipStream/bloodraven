@@ -96,6 +96,26 @@ dig orders.az.example.com
 
 **See also:** [Runbooks](./runbooks.mdx#dns-failover-stuck), [App Integration](./app-integration.mdx).
 
+## Dragonfly degraded or active Service empty
+
+**Symptoms:** `status.dragonfly.phase=Degraded`, `bloodraven_dragonfly_site_up==0`, `orders-dragonfly` has no endpoints, or Events mention `DragonflyPromotionFailed`.
+
+**Likely causes:** Dragonfly pod down, NetworkPolicy blocking port `6379` or admin port `9999`, auth Secret mismatch, target replica syncing/loading, stale master kept out of the active Service, or snapshot restore in progress.
+
+**Inspect:**
+
+```bash
+kubectl get mysqlfailovergroup orders -n orders \
+  -o jsonpath='{.status.dragonfly}{"\n"}'
+kubectl get pod -n orders -l app.kubernetes.io/name=dragonfly --show-labels
+kubectl get endpoints orders-dragonfly -n orders
+kubectl get events -n orders --sort-by=.lastTimestamp | grep -i dragonfly
+```
+
+**Safe remediation:** restore the failed Dragonfly pod or network path first. Do not force a stale master back into the active Service unless you have decided its cache/session contents are authoritative. MySQL remains authoritative for durable data.
+
+**See also:** [Runbooks](./runbooks.mdx#dragonfly-degraded), [App Integration](./app-integration.mdx), [Monitoring](./monitoring.mdx#available-metrics).
+
 ## App still writing to old site
 
 **Symptoms:** application errors or writes appear on the old primary after failover.

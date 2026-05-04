@@ -14,8 +14,13 @@ flowchart LR
   DNS --> PrimarySvc[Primary Service]
   PrimarySvc --> IAD[(MySQL iad primary)]
   PDX[(MySQL pdx replica)] --> IAD
+  App --> DragonflySvc[orders-dragonfly Service]
+  DragonflySvc --> DFIAD[(Dragonfly iad master)]
+  DFPDX[(Dragonfly pdx replica)] --> DFIAD
   Operator[Bloodraven Operator] --> IAD
   Operator --> PDX
+  Operator --> DFIAD
+  Operator --> DFPDX
   Operator --> DNSEndpoint[DNSEndpoint]
   DNSEndpoint --> ExternalDNS[external-dns]
   Prom[Prometheus] --> Metrics[Operator metrics]
@@ -28,12 +33,16 @@ sequenceDiagram
   participant O as Operator
   participant A as iad primary
   participant B as pdx replica
+  participant DA as Dragonfly iad master
+  participant DB as Dragonfly pdx replica
   participant D as DNS
   participant K as Kubernetes
   O->>A: poll health
   A--xO: unreachable
   O->>B: check replication and read-only state
   O->>B: promote to writable
+  O->>DB: best-effort REPLTAKEOVER
+  O->>DB: fallback REPLICAOF NO ONE if needed
   O->>D: update DNSEndpoint to pdx LB IP
   O->>K: taint old-site nodes
   O->>B: verify writable
@@ -47,11 +56,29 @@ sequenceDiagram
   participant O as Operator
   participant A as Current primary
   participant B as Target replica
+  participant DA as Current Dragonfly master
+  participant DB as Target Dragonfly replica
   Admin->>O: annotate planned-failover=pdx
   O->>B: wait for lag to drain
   O->>A: fence writes
+  O->>DB: wait for Dragonfly sync
+  O->>DB: REPLTAKEOVER
   O->>B: promote
   O->>O: update status.activeSite
+```
+
+## Dragonfly active Service
+
+```mermaid
+flowchart LR
+  App[Redis-compatible clients] --> ActiveSvc[orders-dragonfly Service]
+  ActiveSvc --> Selector{role=master AND traffic=enabled}
+  Selector --> Active[(Dragonfly active site)]
+  Replica[(Dragonfly replica site)] --> Active
+  Operator[Bloodraven Operator] --> Active
+  Operator --> Replica
+  Operator --> Labels[role/traffic labels]
+  Labels --> Selector
 ```
 
 ## Sidecar self-fencing

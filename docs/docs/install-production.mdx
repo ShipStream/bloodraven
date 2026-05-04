@@ -16,6 +16,7 @@ This guide installs Bloodraven for production. For a short first run, use [Getti
 - cert-manager when using `spec.tls.issuerRef`.
 - Prometheus and Grafana if you want the shipped monitoring path.
 - Object storage or PVC storage for backups.
+- Dragonfly `v1.38.0+` image access if you enable `spec.dragonfly` for cache/session co-management.
 
 ## Namespace layout
 
@@ -97,9 +98,11 @@ Allow only these paths:
 |---|---|---|---|
 | Operator | Kubernetes API | 443 | Reconcile CRDs, Services, Events, Jobs |
 | Operator | MySQL pods | 3306 | Health, promotion, user management |
+| Operator | Dragonfly Services | 6379, admin port 9999 by default | Optional Dragonfly observation, replication wiring, promotion, and snapshot upgrade |
 | MySQL sidecar | Kubernetes API | 443 | Lease and fencing coordination |
 | Prometheus | Operator metrics Service | 8080 | Metrics scraping |
 | Applications | Primary and replica Services | 3306 | Data plane |
+| Applications | Active Dragonfly Service | 6379 | Optional Redis-compatible cache/session data plane |
 | Backup Jobs | S3 endpoint | 443 | Backup artifacts |
 
 ## Post-install verification
@@ -117,4 +120,5 @@ kubectl auth can-i list mysqlfailovergroups.shipstream.io --as=system:serviceacc
 - Create per-role credentials with [Credentials and TLS](./credentials-and-tls.mdx).
 - Configure [Prometheus](./monitoring-prometheus.mdx) and [Grafana](./monitoring-grafana.mdx).
 - Configure [S3 backups](./backup-s3.mdx) or [PVC backups](./backup-pvc.mdx).
+- If using Dragonfly, configure application Redis clients to use `<group>-dragonfly` and validate `status.dragonfly.phase=Ready`.
 - Run a planned failover in a staging environment.

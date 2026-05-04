@@ -20,6 +20,9 @@ Keep this table synchronized with your PrometheusRule package. Alert annotations
 | `BloodravenPITRArchiveLagging` | [Backup And Restore](./backup-restore.mdx) | archiver metrics, object storage |
 | `BloodravenDNSUpdateFailed` | [DNS failover stuck](./runbooks.mdx#dns-failover-stuck) | `DNSEndpoint`, external-dns logs |
 | `BloodravenSplitBrainDetected` | [Split-brain recovery](./runbooks.mdx#split-brain-recovery) | writable sites, app traffic, GTIDs |
+| `BloodravenDragonflySiteDown` | [Dragonfly degraded](./runbooks.mdx#dragonfly-degraded) | `status.dragonfly.sites[]`, Dragonfly pods, active Service endpoints |
+| `BloodravenDragonflyPromotionFailed` | [Dragonfly degraded](./runbooks.mdx#dragonfly-degraded) | planned-failover Dragonfly status, Events, Redis client impact |
+| `BloodravenDragonflyManagerPanic` | [Dragonfly degraded](./runbooks.mdx#dragonfly-degraded) | operator logs, panic counter, current `status.dragonfly` |
 
 ## Kubernetes Events
 
@@ -33,6 +36,7 @@ Keep this table synchronized with your PrometheusRule package. Alert annotations
 | Verification started/completed/failed | Restore backup into ephemeral MySQL | [Backup Verification](./backup-verification.mdx) |
 | DNS update created/failed | Write `DNSEndpoint` for external-dns | [DNS failover stuck](./runbooks.mdx#dns-failover-stuck) |
 | Split-brain or recovery pending | Fence losers or wait for manual recovery | [Split-brain recovery](./runbooks.mdx#split-brain-recovery) |
+| Dragonfly promotion/sync/upgrade events | Preserve or restore cache/session continuity while MySQL remains authoritative | [Dragonfly degraded](./runbooks.mdx#dragonfly-degraded) |
 
 ## Minimum alert annotations
 

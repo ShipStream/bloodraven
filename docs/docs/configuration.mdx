@@ -27,7 +27,7 @@ Bloodraven has three layers:
 |---|---|---|
 | Operator install | Helm release, CRDs, RBAC, metrics Service | Platform team |
 | Failover group | `MysqlFailoverGroup` | Database/platform team |
-| Application access | MySQL Services, Secrets, DNS name | Application team with platform guardrails |
+| Application access | MySQL Services, optional Dragonfly Service, Secrets, DNS name | Application team with platform guardrails |
 
 ## Recommended production baseline
 
@@ -35,6 +35,7 @@ Bloodraven has three layers:
 - Use distinct Secrets for operator, app, read-only, monitor, and backup users.
 - Set `spec.tls` and require client TLS in application connection strings.
 - Pin operator, sidecar, MySQL, and backup images.
+- If you enable `spec.dragonfly`, pin `spec.dragonfly.image` to Dragonfly `v1.38.0+` and route applications to the Bloodraven-created active Dragonfly Service.
 - Configure backups before production traffic starts.
 - Enable Prometheus scraping, Grafana dashboards, and alerts.
 - Link alerts to [Runbooks](./runbooks.mdx).

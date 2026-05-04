@@ -4,13 +4,15 @@ sidebar_position: 6
 
 # App Integration
 
-This page explains how applications connect to a MySQL failover group and handle failover events.
+This page explains how applications connect to a MySQL failover group, optional Dragonfly cache/session endpoint, and handle failover events.
 
 ## Application checklist
 
 - Use `mysql-<group>-primary` or the external active-site DNS name for writes.
+- If `spec.dragonfly.enabled=true`, use `<group>-dragonfly` for Redis-compatible cache/session traffic.
 - Keep DNS and connection-pool lifetimes short enough for your failover target.
 - Retry connection establishment and failed transactions that are safe to retry.
+- Configure Redis/Dragonfly clients to reconnect after socket drops; planned failover may intentionally close old-master client connections.
 - Do not pin writes to a site-local Service unless you are implementing warm-standby logic deliberately.
 - Alert on application write failures, connection pool exhaustion, and repeated read-only errors.
 
@@ -102,7 +104,7 @@ Recommended app-facing environment variables:
 
 Redis/Dragonfly clients must reconnect after connection drops. During planned failover Bloodraven may remove the old master from the active Service and issue `CLIENT KILL TYPE NORMAL` so clients reconnect to the newly promoted site instead of holding stale sockets.
 
-For planned Dragonfly image upgrades that can tolerate a short cache/session outage, configure native snapshot restore before using the future snapshot-upgrade workflow:
+For planned Dragonfly image upgrades that can tolerate a short cache/session outage, configure native snapshot restore before using the snapshot-upgrade workflow:
 
 ```yaml
 spec:

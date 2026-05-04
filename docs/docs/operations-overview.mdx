@@ -18,13 +18,14 @@ Use this page during operational work to choose the safest runbook quickly.
 | Restore failed | [Troubleshooting](./troubleshooting.mdx#restore-job-failing) | Retrying without checking source and credentials |
 | Operator unavailable | [Operator Availability](./operator-availability.mdx) | Disabling sidecar fencing |
 | DNS not moving | [Troubleshooting](./troubleshooting.mdx#dns-not-changing-after-failover) | Manual DB promotion |
+| Dragonfly degraded | [Runbooks](./runbooks.mdx#dragonfly-degraded) and [Monitoring](./monitoring.mdx#available-metrics) | MySQL emergency promotion if MySQL is healthy |
 
 ## On-call path
 
 1. Check the alert in [Alert to Runbook Map](./alert-runbook-map.mdx).
 2. Check `MysqlFailoverGroup` status and Kubernetes Events.
 3. Run the matching runbook header checklist before taking action.
-4. Verify active site, DNS, replication, and application writes after remediation.
+4. Verify active site, DNS, replication, application writes, and Dragonfly status when enabled after remediation.
 
 ```bash
 kubectl get mysqlfailovergroup orders -n orders -o wide

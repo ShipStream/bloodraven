@@ -191,7 +191,7 @@ For more advanced scenarios, use the chaos script:
 
 ## Dragonfly co-management
 
-The playground `MysqlFailoverGroup` enables `spec.dragonfly`, so Bloodraven also creates one Dragonfly StatefulSet per site (`playground-dragonfly-iad`, `playground-dragonfly-pdx`), a group-level Dragonfly PodDisruptionBudget (`playground-dragonfly`), and a single app-facing `playground-dragonfly` Service whose endpoints follow the active site. The Service selector AND-gates `shipstream.io/dragonfly-role=master` AND `shipstream.io/dragonfly-traffic=enabled`: removing the traffic label sheds an endpoint atomically, which is how planned failover avoids a window where both the old and new master would match the selector during `REPLTAKEOVER`. Disable Dragonfly by removing the `spec.dragonfly` block.
+The playground `MysqlFailoverGroup` enables `spec.dragonfly`, so Bloodraven also creates one Dragonfly StatefulSet per site (`playground-dragonfly-iad`, `playground-dragonfly-pdx`), one Dragonfly PodDisruptionBudget per site, and a single app-facing `playground-dragonfly` Service whose endpoints follow the active site. The Service selector AND-gates `shipstream.io/dragonfly-role=master` AND `shipstream.io/dragonfly-traffic=enabled`: removing the traffic label sheds an endpoint atomically, which is how planned failover avoids a window where both the old and new master would match the selector during `REPLTAKEOVER`. Disable Dragonfly by removing the `spec.dragonfly` block.
 
 Bloodraven supports Dragonfly `v1.38.0+` for managed deployments. The playground pins `docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0`; avoid older tags because several replication, snapshot, and expiry bugs were fixed before this baseline.
 

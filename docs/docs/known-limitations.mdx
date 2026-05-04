@@ -59,6 +59,20 @@ matches your expectations.
   committed transactions that only existed on the lost PVC are gone.
   See [Operations](./operations.mdx#pvc-loss-recovery-runbook).
 
+## Dragonfly co-management
+
+- Managed Dragonfly is optional and intended for cache/session continuity,
+  not durable application state.
+- Dragonfly pods use ephemeral storage unless you configure
+  `spec.dragonfly.snapshot` for planned snapshot-restore maintenance.
+  Bloodraven does not schedule Dragonfly backups as durable data backups.
+- Emergency MySQL failover never blocks on Dragonfly. If Dragonfly sync or
+  promotion fails, sessions/cache may be discarded while MySQL recovery
+  completes.
+- `spec.tls` applies to MySQL, not Dragonfly. Protect Dragonfly with
+  NetworkPolicy, Dragonfly auth, and any external TLS/service-mesh controls
+  your environment requires.
+
 ## Network partitions
 
 - The failure-mode matrix covers common partition classes, but a
