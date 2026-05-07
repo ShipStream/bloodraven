@@ -11,7 +11,7 @@
 - [ ] 32. Real-cluster E2E CI gate
 - [x] 33. True shared-node placement model
 - [ ] 34. Investigate using [Scorecard](https://sdk.operatorframework.io/docs/testing-operators/scorecard/) to test Bloodraven operator.
-- [ ] 35. Read the [Operator SDK Best Practices](https://sdk.operatorframework.io/docs/best-practices/) and see if there are any lessons we can learn and apply to Bloodraven.
+- [x] 35. Read the [Operator SDK Best Practices](https://sdk.operatorframework.io/docs/best-practices/) and see if there are any lessons we can learn and apply to Bloodraven.
 - [x] 36. CR replication enrichment stalls after in-lifecycle recovery
 - [x] 37. Auto-fail-back to returning original primary is undocumented
 - [x] 38. `status.lastFailoverTarget` not durable across operator restart
@@ -45,6 +45,8 @@
 **27. Backup/restore performance guide.** For a 500 GB dataset, how long does `util.dumpInstance` take with what `threads`/`bytesPerChunk`? How long does `loadDump` take? At what `maxLagSeconds` does your replica-as-source fallback trigger and what's the primary-impact if it does? Users need ballparks before they commit.
 
 **30. Public repo, license, release cadence.** If this isn't going external, skip. If it might — Apache-2.0, semver on the CRD and the operator separately, `CHANGELOG.md`, GitHub releases with signed images, published Helm chart index. The bar for "a real project someone else will adopt" is higher than the bar for "our internal tool."
+
+**35. Operator SDK Best Practices review.** Done: the reviewed Operator SDK best-practices pages are captured in the [Operator SDK Best Practices Assessment](docs/docs/operator-sdk-best-practices-assessment.mdx), with applicability decisions for controller shape, namespaces, CRDs/status, resources and security context, pruning, multitenancy, lean watches, observability, and follow-up tradeoffs such as the broad `Secret` watch.
 
 ---
 
