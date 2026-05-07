@@ -674,10 +674,12 @@ kubectl -n $NS delete pod noexecute-evict-canary noexecute-tolerate-canary --ign
 
 These scenarios were extracted from `WISHLIST.md` items #36 and #38 — both flag specific contracts that the chaos runner was not previously asserting. They are registered with the same `playground-chaos` runner as 1–21 and follow the same Inject → Observe → Verify shape.
 
+Fail-back behavior is intentionally GTID-freshest/current-state-driven. When an original primary returns, it is not treated specially as "the old primary that must rejoin as a replica"; it can become writable again only by winning the same promotion candidate selection used for any failover, subject to anti-flap cooldown and configured site-priority tie-breaking. Scenario assertions should therefore track the current writable site and current healthy replica, not fixed site identities.
+
 ### 22. Replication Status After Recovery
 **Category**: CR-status enrichment regression | **Risk**: Low
 
-**Hypothesis**: After a clean primary kill and old-primary auto-recovery, the read-only site's `status.sites[].replicating` becomes true within 30s — without requiring an operator restart. This is the contract that `internal/controller/planned_failover.go`'s `TargetUnhealthy` safety check depends on.
+**Hypothesis**: After a clean primary kill and old-primary auto-recovery, the read-only site's `status.sites[].replicating` becomes true within 30s — without requiring an operator restart. During recovery, `status.sites[].recoveryState=RecoveryInProgress` may be visible until MySQL reports healthy replication. This is the contract that `internal/controller/planned_failover.go`'s `TargetUnhealthy` safety check depends on.
 
 **Why this regression test exists**: WISHLIST #36 documented that `replicating` and `gtidExecuted` stopped being populated on a post-recovery read-only site even though the sidecar `/status` endpoint reported replication threads running. The bug silently broke any planned switchover after the first chaos event in the same operator lifecycle. This scenario now guards that status-enrichment contract.
 
@@ -692,9 +694,9 @@ These scenarios were extracted from `WISHLIST.md` items #36 and #38 — both fla
 ### 23. Failover State Durability
 **Category**: CR-status persistence | **Risk**: Low
 
-**Hypothesis**: After a clean failover, killing and restarting the operator pod must NOT clear `status.lastFailoverTarget` or `status.lastFailover`. The post-restart operator must rehydrate both fields from the CR; `activeSite` must remain at the post-failover primary.
+**Hypothesis**: After a clean failover, killing and restarting the operator pod must NOT clear `status.lastFailoverTarget`, `status.lastFailover`, or an in-flight old-primary `RecoveryInProgress` marker. The post-restart operator must rehydrate those fields from the CR; `activeSite` must remain at the post-failover primary, and old-primary recovery must either clear when replication is healthy or retry when it is not.
 
-**Why this regression test exists**: WISHLIST #38 notes that `lastFailoverTarget` is restored from the CR (so it survives) but related anti-flap state and old-primary-recovery dispatch keys are in-memory only. This scenario asserts the bare CR contract — both fields persist across operator restart — which is the foundation any in-memory rehydration relies on. Future work on durable anti-flap state can extend this scenario without reshaping it.
+**Why this regression test exists**: WISHLIST #38 noted that failover history and old-primary-recovery dispatch keys were partly in-memory. The operator now persists and rehydrates failover timestamps plus `RecoveryInProgress`/`RecoveryBlocked`, so a restart during recovery keeps the CR-visible lifecycle and retries safely instead of waiting for another failover.
 
 **Injection**: `make chaos-run SCENARIO=23-failover-state-durability`. The runner scales the primary to 0, waits for failover, snapshots `lastFailoverTarget` / `lastFailover` / `activeSite`, kills the operator pod, sleeps 30s for the new pod to come up and reconcile, then re-reads the CR.
 

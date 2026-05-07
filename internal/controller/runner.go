@@ -571,8 +571,13 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		r.logger.Info("restored lastFailover from CR status", "fg", nn, "lastFailover", fg.Status.LastFailover.Time)
 	}
 	for _, site := range fg.Status.Sites {
-		if site.RecoveryState != "RecoveryBlocked" && site.DivergentGtid == "" {
+		if site.RecoveryState != recoveryStateBlocked && site.RecoveryState != recoveryStateInProgress && site.DivergentGtid == "" {
 			continue
+		}
+		if site.RecoveryState == recoveryStateInProgress {
+			tm.SetRecoveryInProgress(site.Name)
+			r.logger.Info("restored recovery in-progress state from CR status", "fg", nn, "site", site.Name)
+			break
 		}
 		var count int64
 		if site.DivergentTransactionCount != nil {
@@ -906,7 +911,16 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	// RecoveryPending condition.
-	if snap.RecoveryState == "RecoveryBlocked" {
+	if snap.RecoveryState == recoveryStateInProgress {
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
+			Type:               "RecoveryPending",
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: freshFG.Generation,
+			LastTransitionTime: now,
+			Reason:             "RecoveryInProgress",
+			Message:            fmt.Sprintf("Old primary %s is being reconfigured as a replica", snap.RecoverySite),
+		})
+	} else if snap.RecoveryState == recoveryStateBlocked {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               "RecoveryPending",
 			Status:             metav1.ConditionTrue,
@@ -1067,16 +1081,21 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	}
 
 	// Data loss detected: RecoveryBlocked appeared where it wasn't before.
+	oldRecoveryActive := false
+	oldRecoverySite := ""
 	oldBlocked := false
-	var oldBlockedSite string
 	for _, s := range existingStatus.Sites {
-		if s.RecoveryState == "RecoveryBlocked" {
+		if s.RecoveryState == recoveryStateInProgress || s.RecoveryState == recoveryStateBlocked {
+			oldRecoveryActive = true
+			oldRecoverySite = s.Name
+		}
+		if s.RecoveryState == recoveryStateBlocked {
 			oldBlocked = true
-			oldBlockedSite = s.Name
 			break
 		}
 	}
-	newBlocked := snap.RecoveryState == "RecoveryBlocked"
+	newBlocked := snap.RecoveryState == recoveryStateBlocked
+	newRecoveryActive := snap.RecoveryState == recoveryStateInProgress || snap.RecoveryState == recoveryStateBlocked
 
 	if newBlocked && !oldBlocked {
 		r.recorder.Eventf(fg, corev1.EventTypeWarning, "DataLossDetected",
@@ -1084,10 +1103,10 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 			snap.DivergentTxnCount, snap.RecoverySite)
 	}
 
-	// Recovery complete: RecoveryBlocked cleared.
-	if oldBlocked && !newBlocked {
+	// Recovery complete: RecoveryInProgress/RecoveryBlocked cleared.
+	if oldRecoveryActive && !newRecoveryActive {
 		r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecoveryComplete",
-			"Old primary %s recovered and is now replicating", oldBlockedSite)
+			"Old primary %s recovered and is now replicating", oldRecoverySite)
 	}
 }
 

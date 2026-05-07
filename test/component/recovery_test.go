@@ -324,6 +324,13 @@ func TestRecovery_StatusCleared_AfterAutoRecovery(t *testing.T) {
 
 	h.pollN(2)
 
+	// RecoveryInProgress remains visible until the recovered site reports
+	// healthy replication. Simulate MySQL's replica threads coming online.
+	dc1.mu.Lock()
+	dc1.replicaStatus = &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc2", ExecutedGtidSet: "uuid1:1-10"}
+	dc1.mu.Unlock()
+	h.pollN(1)
+
 	s := h.tm.Status()
 
 	// No recovery fields should be set (auto-recovered).

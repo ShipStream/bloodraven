@@ -124,7 +124,7 @@ Split brain means both sites accepted writes independently. You may need to reco
 
 ## Recovering a divergent old primary
 
-After an emergency failover, the old primary may come back with transactions that never replicated. When this happens, the operator automatically detects the divergence, fences the site, and sets the `RecoveryPending` condition to `True`.
+After an emergency failover, the old primary may come back with transactions that never replicated. If GTID sets match, the operator sets `RecoveryPending=True` with reason `RecoveryInProgress`, reconfigures the old primary as a replica, and clears the condition after replication is healthy. If the old primary has divergent transactions, the operator fences the site and sets `RecoveryPending=True` with reason `DivergentTransactions`.
 
 Check the divergence details:
 
@@ -224,7 +224,7 @@ Expected condition flow:
 | Requested | `RecloneRequested` Event on the `MysqlFailoverGroup`. |
 | Bootstrapping | `Bootstrapping=True`; the target site pod may restart while `CLONE INSTANCE` replaces the data directory. |
 | Recovering | The cloned site comes back read-only and replication is configured from the active primary. |
-| Healthy | `Bootstrapping=False`, `RecoveryPending=False`, target `state=read-only`, replication running, and `divergentGtid` empty. |
+| Healthy | `Bootstrapping=False`, `RecoveryPending=False`, target `state=read-only`, `recoveryState` empty, replication running, and `divergentGtid` empty. |
 
 Clone time is proportional to dataset size and storage throughput. Small
 playground datasets finish in minutes; production datasets can take much

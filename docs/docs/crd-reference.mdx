@@ -507,7 +507,7 @@ The operator writes the following status fields.
 | `replicating` | bool | Whether this site is replicating from another site |
 | `secondsBehindSource` | int | Replication lag in seconds (only set when replicating) |
 | `gtidExecuted` | string | GTID set executed on this site |
-| `recoveryState` | string | Old-primary recovery state: empty (no recovery needed) or `RecoveryBlocked` (divergent transactions detected — trigger a reclone to recover) |
+| `recoveryState` | string | Old-primary recovery state: empty (no recovery needed), `RecoveryInProgress` (the operator is reconfiguring or waiting for the site to stabilize as a replica), or `RecoveryBlocked` (divergent transactions detected — trigger a reclone to recover) |
 | `divergentGtid` | string | GTID set of transactions on this site that diverge from the current primary. Populated when `recoveryState` is `RecoveryBlocked`. |
 | `divergentTransactionCount` | int | Number of divergent transactions. Populated when `recoveryState` is `RecoveryBlocked`. |
 
@@ -517,7 +517,7 @@ The operator writes the following status fields.
 |---|---|
 | `Ready` | `True` when the failover group has one writable primary and all replicas are healthy |
 | `Degraded` | `True` when replication is broken, lag exceeds `maxLagSeconds`, or a site is unreachable |
-| `RecoveryPending` | `True` when an old primary has divergent transactions and requires manual intervention. Reason is `DivergentTransactions`. Use the reclone annotation to recover. |
+| `RecoveryPending` | `True` while old-primary recovery is running (`RecoveryInProgress`) or when an old primary has divergent transactions (`DivergentTransactions`). Use the reclone annotation only for `DivergentTransactions`. |
 | `Bootstrapping` | `True` when a clone operation is in progress (fresh-deploy, auto-clone, or reclone). Reason indicates the phase. |
 
 ### DragonflyStatus

@@ -120,10 +120,11 @@ If the new primary's GTID set contains all transactions from the old primary, th
 
 1. `SET GLOBAL super_read_only=ON`
 2. `STOP REPLICA`
-3. `CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1`
-4. `START REPLICA`
+3. `RESET REPLICA ALL`
+4. `CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1`
+5. `START REPLICA`
 
-The site resumes normal replication and the operator clears recovery state.
+While the sequence runs, `status.sites[].recoveryState` is `RecoveryInProgress` and the `RecoveryPending` condition is `True` with reason `RecoveryInProgress`. The operator keeps that state until MySQL reports healthy replication, then writes `replicating=true` and `gtidExecuted` for the read-only site and clears recovery state.
 
 ### Divergence detected (manual intervention required)
 

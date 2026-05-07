@@ -79,7 +79,8 @@ Lessons from running chaos scenarios against a live k3d cluster:
 - **Sandbox blocks kubectl**: If running inside a sandboxed environment (e.g. Claude Code), kubectl needs network access to the k3d API server port. Use `dangerouslyDisableSandbox` or whitelist the port.
 
 ### Known operator behaviors during testing
-- After operator restart, `lastFailoverTarget` is lost (volatile). Old primary recovery won't trigger until the next failover within the new operator lifecycle. This is a known gap (see `playground/chaos-results.md`).
+- After operator restart, `lastFailoverTarget`, `lastFailover`, and old-primary `RecoveryInProgress`/`RecoveryBlocked` state are rehydrated from CR status. A restarted operator clears `RecoveryInProgress` once replication is healthy, or retries old-primary recovery if replication is still unhealthy.
+- Fail-back is current-state-driven, not identity-driven: a returning original primary can be promoted again only if it wins the normal GTID-freshest candidate path after cooldown/tie-break policy. Runbooks and tests should assert one writable + healthy replicas, not that the originally killed site always rejoins as the replica.
 - Fresh-deploy bootstrap (`isFreshDeploy`) checks `SHOW REPLICA STATUS` — if a previous failed clone left replication metadata, bootstrap won't trigger. Fix: `STOP REPLICA; RESET REPLICA ALL;` on the stuck site, then restart operator.
 - CLONE INSTANCE in Docker returns Error 3707 ("Restart server failed") because there's no mysqld supervisor. This is handled as an expected connection drop — Kubernetes restarts the container.
 

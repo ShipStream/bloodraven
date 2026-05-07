@@ -535,7 +535,8 @@ field names work for either consumer.
 | `Ready=False`, `Degraded=True` | A site is unreachable or replication is broken | Check `status.sites[].state` and MySQL pod logs |
 | `Ready=False`, both sites `read-only` | No primary exists (may follow a failed failover) | See [Operations: Manual promotion](./operations.mdx#manual-promotion-fallback-operator-unreachable) |
 | `Ready=False`, both sites `writable` | Split brain | See [Operations: Split brain recovery](./operations.mdx#split-brain-recovery) |
-| `RecoveryPending=True` | Old primary returned with divergent transactions | Check `status.sites[].divergentGtid`, then trigger a reclone: `kubectl annotate mysqlfailovergroup <name> bloodraven.shipstream.io/reclone-site=<site>`. See [Failover: Old primary recovery](./failover.mdx#old-primary-recovery). |
+| `RecoveryPending=True`, reason `RecoveryInProgress` | Old primary is being reconfigured as a replica | Wait for the condition to clear. If it stays true, check operator logs and `status.sites[].replicating`. See [Failover: Old primary recovery](./failover.mdx#old-primary-recovery). |
+| `RecoveryPending=True`, reason `DivergentTransactions` | Old primary returned with divergent transactions | Check `status.sites[].divergentGtid`, then trigger a reclone: `kubectl annotate mysqlfailovergroup <name> bloodraven.shipstream.io/reclone-site=<site>`. See [Failover: Old primary recovery](./failover.mdx#old-primary-recovery). |
 | Repeated failovers | Flapping network or unstable MySQL | Check `bloodraven_state_transitions_total` and consider increasing `failureThreshold` or `failoverCooldown` |
 | High replication lag | Slow network, heavy write load, or undersized replica | Check `bloodraven_replication_lag_seconds` and MySQL performance metrics |
 
