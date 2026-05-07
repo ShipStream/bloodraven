@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -17,16 +18,20 @@ import (
 // --- Mock MySQL ---
 
 type mockMySQL struct {
-	mu               sync.Mutex
-	readOnly         bool
-	err              error
-	promoted         bool
-	replicaStatusVal *mysql.ReplicaStatus
-	replicaStatusErr error
-	gtidExecuted     string
-	gtidExecutedErr  error
-	hasUserSchemas   *bool
-	userSchemasErr   error
+	mu                sync.Mutex
+	readOnly          bool
+	err               error
+	promoted          bool
+	replicaStatusVal  *mysql.ReplicaStatus
+	replicaStatusErr  error
+	gtidExecuted      string
+	gtidExecutedErr   error
+	hasUserSchemas    *bool
+	userSchemasErr    error
+	stopReplicaCalls  int
+	resetReplicaCalls int
+	changeSourceCalls int
+	startReplicaCalls int
 }
 
 func testBoolPtr(v bool) *bool {
@@ -51,8 +56,18 @@ func (m *mockMySQL) Close() error { return nil }
 
 func (m *mockMySQL) SetSuperReadOnly(_ context.Context, _ bool) error  { return nil }
 func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) { return 0, nil }
-func (m *mockMySQL) StopReplica(_ context.Context) error               { return nil }
-func (m *mockMySQL) ResetReplicaAll(_ context.Context) error           { return nil }
+func (m *mockMySQL) StopReplica(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopReplicaCalls++
+	return nil
+}
+func (m *mockMySQL) ResetReplicaAll(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resetReplicaCalls++
+	return nil
+}
 func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -65,9 +80,17 @@ func (m *mockMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, 
 	return m.replicaStatusVal, m.replicaStatusErr
 }
 func (m *mockMySQL) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.changeSourceCalls++
 	return nil
 }
-func (m *mockMySQL) StartReplica(_ context.Context) error          { return nil }
+func (m *mockMySQL) StartReplica(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.startReplicaCalls++
+	return nil
+}
 func (m *mockMySQL) StartReplicaSQLThread(_ context.Context) error { return nil }
 func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
@@ -120,6 +143,12 @@ func (m *mockMySQL) setGtidExecuted(gtid string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.gtidExecuted = gtid
+}
+
+func (m *mockMySQL) startReplicaCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.startReplicaCalls
 }
 
 // --- Mock Tainter ---
@@ -226,6 +255,33 @@ func newTestTopologyManagerWithBootstrap(site0, site1 *mockMySQL) (*TopologyMana
 	tm := NewTopologyManager(cfg, []mysql.Checker{site0, site1}, fc, nil, bc, bcfg, tainter, hub, dns, testLogger())
 	tm.failoverCooldown = 0
 	return tm, tainter, dns
+}
+
+func newTestTopologyManagerWithBootstrapClock(site0, site1 *mockMySQL, clk *clock.FakeClock) (*TopologyManager, *mockTainter, *mockDNS) {
+	cfg := testTopologyConfig()
+	cfg.Sites[0].Host = "mysql-dc1"
+	cfg.Sites[1].Host = "mysql-dc2"
+	tainter := newMockTainter()
+	hub := platform.NewHub(testLogger())
+	dns := &mockDNS{}
+	fc := NewFailoverController(testLogger())
+	bc := NewBootstrapController(testLogger())
+	bcfg := BootstrapConfig{
+		ReplUser:     "repl",
+		ReplPassword: "replpass",
+		CloneTimeout: 10 * time.Second,
+	}
+	tm := NewTopologyManagerWithClock(cfg, []mysql.Checker{site0, site1}, fc, nil, bc, bcfg, tainter, hub, dns, testLogger(), clk)
+	tm.failoverCooldown = 0
+	return tm, tainter, dns
+}
+
+func setRecoveredTopology(tm *TopologyManager) {
+	tm.mu.Lock()
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateReadOnly
+	tm.lastFailoverTarget = "dc1"
+	tm.mu.Unlock()
 }
 
 // pollN runs n poll cycles synchronously.
@@ -1052,6 +1108,7 @@ func TestReclone_PreservesRecoveryStateUntilReplicationHealthy(t *testing.T) {
 	// Simulate RecoveryBlocked state on dc2.
 	tm.mu.Lock()
 	tm.recoveryPendingSite = "dc2"
+	tm.recoveryState = recoveryStateBlocked
 	tm.recoveryDivergentGtid = "aaaa:50-55"
 	tm.recoveryDivergentCount = 6
 	tm.mu.Unlock()
@@ -1086,6 +1143,7 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutLastFailoverTarget(t *tes
 
 	tm.mu.Lock()
 	tm.recoveryPendingSite = "dc2"
+	tm.recoveryState = recoveryStateBlocked
 	tm.recoveryDivergentGtid = "aaaa:50-55"
 	tm.recoveryDivergentCount = 6
 	tm.lastFailoverTarget = ""
@@ -1094,7 +1152,7 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutLastFailoverTarget(t *tes
 	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{
 		nil,
 		{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"},
-	})
+	}, "", "")
 	if !changed {
 		t.Fatal("checkRecovery should report a status change after clearing healthy recovery state")
 	}
@@ -1106,6 +1164,97 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutLastFailoverTarget(t *tes
 	tm.mu.RUnlock()
 	if recoverySite != "" || divergentGtid != "" || divergentCount != 0 {
 		t.Fatalf("recovery state not cleared: site=%q divergentGtid=%q count=%d", recoverySite, divergentGtid, divergentCount)
+	}
+}
+
+func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutReplicationCredentials(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	tm.mu.Lock()
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateReadOnly
+	tm.recoveryPendingSite = "dc2"
+	tm.recoveryState = recoveryStateInProgress
+	tm.lastFailoverTarget = "dc1"
+	tm.bootstrapCfg = BootstrapConfig{}
+	tm.mu.Unlock()
+
+	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{
+		nil,
+		{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"},
+	}, "", "")
+	if !changed {
+		t.Fatal("checkRecovery should clear healthy recovery state even when retry credentials are unavailable")
+	}
+
+	tm.mu.RLock()
+	recoverySite := tm.recoveryPendingSite
+	recoveryState := tm.recoveryState
+	tm.mu.RUnlock()
+	if recoverySite != "" || recoveryState != "" {
+		t.Fatalf("recovery state not cleared: site=%q state=%q", recoverySite, recoveryState)
+	}
+}
+
+func TestCheckRecovery_PersistsInProgressAndSuppressesImmediateRetry(t *testing.T) {
+	gtid := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: gtid}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: gtid}
+	clk := clock.NewFakeClock(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC))
+	tm, _, _ := newTestTopologyManagerWithBootstrapClock(site0, site1, clk)
+	setRecoveredTopology(tm)
+
+	var snapshots []TopologySnapshot
+	tm.StatusCallback = func(s TopologySnapshot) {
+		snapshots = append(snapshots, s)
+	}
+
+	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}, "", "")
+	if !changed {
+		t.Fatal("expected recovery to start")
+	}
+	if got := site1.startReplicaCallCount(); got != 1 {
+		t.Fatalf("expected one recovery sequence, got %d", got)
+	}
+	if len(snapshots) == 0 || snapshots[0].RecoverySite != "dc2" || snapshots[0].RecoveryState != recoveryStateInProgress {
+		t.Fatalf("expected RecoveryInProgress snapshot before recovery, got %#v", snapshots)
+	}
+
+	changed = tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}, "", "")
+	if changed {
+		t.Fatal("recovery should not retry during stabilization window")
+	}
+	if got := site1.startReplicaCallCount(); got != 1 {
+		t.Fatalf("expected recovery sequence to remain suppressed, got %d", got)
+	}
+
+	clk.Advance(recoveryRetryDelay + time.Second)
+	changed = tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}, "", "")
+	if !changed {
+		t.Fatal("expected recovery retry after stabilization window")
+	}
+	if got := site1.startReplicaCallCount(); got != 2 {
+		t.Fatalf("expected recovery sequence to retry once, got %d", got)
+	}
+}
+
+func TestCheckRecovery_RestoredInProgressRetriesImmediatelyWhenUnhealthy(t *testing.T) {
+	gtid := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: gtid}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: gtid}
+	clk := clock.NewFakeClock(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC))
+	tm, _, _ := newTestTopologyManagerWithBootstrapClock(site0, site1, clk)
+	setRecoveredTopology(tm)
+	tm.SetRecoveryInProgress("dc2")
+
+	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}, "", "")
+	if !changed {
+		t.Fatal("expected restored in-progress recovery to retry when unhealthy")
+	}
+	if got := site1.startReplicaCallCount(); got != 1 {
+		t.Fatalf("expected one recovery sequence after rehydrate, got %d", got)
 	}
 }
 

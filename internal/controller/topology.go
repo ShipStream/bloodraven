@@ -130,8 +130,8 @@ type TopologySnapshot struct {
 	BootstrapSource    string // "fresh-deploy", "auto-clone", or "reclone"
 
 	PromotionGtidExecuted string // GTID set at the moment of the most recent promotion
-	RecoverySite          string // site name when recovery is blocked due to divergence
-	RecoveryState         string // "" or "RecoveryBlocked"
+	RecoverySite          string // site name when old-primary recovery is active or blocked
+	RecoveryState         string // "", "RecoveryInProgress", or "RecoveryBlocked"
 	DivergentGtid         string
 	DivergentTxnCount     int64
 }
@@ -197,7 +197,9 @@ type TopologyManager struct {
 	promotionGtidExecuted string // GTID set at last promotion
 
 	// Recovery state for old primary after failover.
-	recoveryPendingSite    string // site name with blocked recovery ("" = none)
+	recoveryPendingSite    string // site name with active or blocked recovery ("" = none)
+	recoveryState          string // recoveryStateInProgress or recoveryStateBlocked
+	recoveryRetryAfter     time.Time
 	recoveryDivergentGtid  string
 	recoveryDivergentCount int64
 
@@ -299,6 +301,15 @@ type StatusResponse struct {
 	PromotionGtidExecuted string            `json:"promotionGtidExecuted,omitempty"`
 }
 
+const (
+	recoveryStateInProgress = "RecoveryInProgress"
+	recoveryStateBlocked    = "RecoveryBlocked"
+	// recoveryRetryDelay is the stabilization window after RecoverOldPrimary.
+	// During this window the operator waits for replication to report healthy
+	// instead of immediately resetting replica metadata again on the next poll.
+	recoveryRetryDelay = 30 * time.Second
+)
+
 // NewTopologyManager creates a TopologyManager for the given configuration.
 // siteCheckers must be parallel to cfg.Sites.
 func NewTopologyManager(cfg TopologyConfig, siteCheckers []mysql.Checker, failover *FailoverController, updater *UpdateController, bootstrap *BootstrapController, bootstrapCfg BootstrapConfig, tainter platform.NodeTainter, hub *platform.Hub, dns platform.DNSUpdater, logger *slog.Logger) *TopologyManager {
@@ -366,8 +377,23 @@ func (tm *TopologyManager) SetLastFailover(t time.Time) {
 // status into the in-memory topology manager after an operator restart.
 func (tm *TopologyManager) SetRecoveryBlocked(site, divergentGtid string, divergentCount int64) {
 	tm.recoveryPendingSite = site
+	tm.recoveryState = recoveryStateBlocked
+	tm.recoveryRetryAfter = time.Time{}
 	tm.recoveryDivergentGtid = divergentGtid
 	tm.recoveryDivergentCount = divergentCount
+}
+
+// SetRecoveryInProgress restores a persisted no-divergence recovery marker
+// from CR status into the in-memory topology manager after an operator restart.
+// The retry timestamp is deliberately left zero so the restarted process can
+// immediately either clear the marker if replication is healthy or retry the
+// idempotent recovery sequence if it is not.
+func (tm *TopologyManager) SetRecoveryInProgress(site string) {
+	tm.recoveryPendingSite = site
+	tm.recoveryState = recoveryStateInProgress
+	tm.recoveryRetryAfter = time.Time{}
+	tm.recoveryDivergentGtid = ""
+	tm.recoveryDivergentCount = 0
 }
 
 // activeSiteLocked returns the name of the single writable site, or ""
@@ -400,8 +426,10 @@ func (tm *TopologyManager) Status() StatusResponse {
 		}
 		if tm.recoveryPendingSite == tm.sites[i].name {
 			sites[i].RecoveryState = tm.recoveryStateLocked()
-			sites[i].DivergentGtid = tm.recoveryDivergentGtid
-			if tm.recoveryDivergentCount > 0 {
+			if tm.recoveryState == recoveryStateBlocked {
+				sites[i].DivergentGtid = tm.recoveryDivergentGtid
+			}
+			if tm.recoveryState == recoveryStateBlocked && tm.recoveryDivergentCount > 0 {
 				c := tm.recoveryDivergentCount
 				sites[i].DivergentTransactionCount = &c
 			}
@@ -687,7 +715,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 
 	// Check if old primary recovery is needed.
-	recoveryChanged := tm.checkRecovery(ctx, siteRepl)
+	recoveryChanged := tm.checkRecovery(ctx, siteRepl, alertMsg, degradedReason)
 
 	// Process pending reclone annotation.
 	recloneStarted := tm.checkReclone(ctx)
@@ -836,8 +864,10 @@ func (tm *TopologyManager) broadcastTopology(siteRepl []*mysql.ReplicaStatus, al
 		}
 		if tm.recoveryPendingSite == tm.sites[i].name {
 			s.RecoveryState = tm.recoveryStateLocked()
-			s.DivergentGtid = tm.recoveryDivergentGtid
-			if tm.recoveryDivergentCount > 0 {
+			if tm.recoveryState == recoveryStateBlocked {
+				s.DivergentGtid = tm.recoveryDivergentGtid
+			}
+			if tm.recoveryState == recoveryStateBlocked && tm.recoveryDivergentCount > 0 {
 				c := tm.recoveryDivergentCount
 				s.DivergentTransactionCount = &c
 			}
@@ -1907,7 +1937,7 @@ func isCloneConnectionDrop(err error) bool {
 // reporting. Must be called with tm.mu held (at least RLock).
 func (tm *TopologyManager) recoveryStateLocked() string {
 	if tm.recoveryPendingSite != "" {
-		return "RecoveryBlocked"
+		return tm.recoveryState
 	}
 	return ""
 }
@@ -1918,18 +1948,18 @@ func (tm *TopologyManager) recoveryStateLocked() string {
 // non-active site and pick the first one that needs recovery; multiple
 // divergent sites are reported sequentially across poll cycles.
 // Returns true if recovery state changed this cycle.
-func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl []*mysql.ReplicaStatus) bool {
+func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl []*mysql.ReplicaStatus, alert, degradedReason string) bool {
 	if tm.isBootstrapping() {
 		return false
 	}
 	if tm.isTopologyFrozen() {
 		return false
 	}
-	if tm.bootstrapCfg.ReplUser == "" {
-		return false
-	}
 	if tm.clearHealthyRecoverySite(siteRepl) {
 		return true
+	}
+	if tm.bootstrapCfg.ReplUser == "" {
+		return false
 	}
 	if tm.lastFailoverTarget == "" {
 		return false
@@ -1965,12 +1995,22 @@ func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl []*mysql.
 		if repl != nil && replicaStatusHealthy(repl) {
 			continue
 		}
-		// Already recorded as blocked — nothing to do.
-		if tm.recoveryPendingSite == other.name {
-			continue
+		// Already recorded as blocked or still stabilizing — nothing to do.
+		tm.mu.RLock()
+		pendingRecoverySite := tm.recoveryPendingSite
+		recoveryState := tm.recoveryState
+		retryAfter := tm.recoveryRetryAfter
+		tm.mu.RUnlock()
+		if pendingRecoverySite == other.name {
+			if recoveryState == recoveryStateBlocked {
+				continue
+			}
+			if recoveryState == recoveryStateInProgress && !retryAfter.IsZero() && tm.clock.Now().Before(retryAfter) {
+				continue
+			}
 		}
 		// Read-only with no active replication after a prior failover: start recovery.
-		return tm.initiateRecovery(ctx, i, activeIdx)
+		return tm.initiateRecovery(ctx, i, activeIdx, siteRepl, alert, degradedReason)
 	}
 	return false
 }
@@ -1991,6 +2031,8 @@ func (tm *TopologyManager) clearHealthyRecoverySite(siteRepl []*mysql.ReplicaSta
 		}
 		tm.mu.Lock()
 		tm.recoveryPendingSite = ""
+		tm.recoveryState = ""
+		tm.recoveryRetryAfter = time.Time{}
 		tm.recoveryDivergentGtid = ""
 		tm.recoveryDivergentCount = 0
 		tm.mu.Unlock()
@@ -2008,7 +2050,7 @@ func replicaStatusHealthy(repl *mysql.ReplicaStatus) bool {
 // initiateRecovery fences the old primary, compares GTID sets, and either
 // auto-recovers (no divergence) or blocks with metadata (divergence).
 // Returns true if recovery state changed.
-func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, newPrimaryIdx int) bool {
+func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, newPrimaryIdx int, siteRepl []*mysql.ReplicaStatus, alert, degradedReason string) bool {
 	oldPrimary := &tm.sites[oldPrimaryIdx]
 	newPrimary := &tm.sites[newPrimaryIdx]
 
@@ -2044,6 +2086,21 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 
 	if newGtid.Contains(oldGtid) {
 		tm.logger.Info("no GTID divergence, auto-recovering old primary as replica", "site", oldPrimary.name)
+		tm.mu.Lock()
+		tm.recoveryPendingSite = oldPrimary.name
+		tm.recoveryState = recoveryStateInProgress
+		tm.recoveryRetryAfter = tm.clock.Now().Add(recoveryRetryDelay)
+		tm.recoveryDivergentGtid = ""
+		tm.recoveryDivergentCount = 0
+		tm.mu.Unlock()
+		metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
+		// Persist RecoveryInProgress before RecoverOldPrimary starts. The
+		// poll-level callback also fires after initiateRecovery returns, but this
+		// early write is the durable handoff for operator restarts that happen
+		// inside the STOP/RESET/CHANGE/START sequence.
+		if tm.StatusCallback != nil {
+			tm.StatusCallback(tm.buildSnapshot(siteRepl, alert, degradedReason))
+		}
 		tm.executeRecovery(ctx, oldPrimaryIdx, newPrimaryIdx)
 		return true
 	}
@@ -2059,6 +2116,8 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 
 	tm.mu.Lock()
 	tm.recoveryPendingSite = oldPrimary.name
+	tm.recoveryState = recoveryStateBlocked
+	tm.recoveryRetryAfter = time.Time{}
 	tm.recoveryDivergentGtid = divergent.String()
 	tm.recoveryDivergentCount = count
 	tm.mu.Unlock()
@@ -2078,12 +2137,6 @@ func (tm *TopologyManager) executeRecovery(ctx context.Context, oldPrimaryIdx, n
 		tm.logger.Error("old primary recovery failed", "site", oldPrimary.name, "error", err)
 		return
 	}
-
-	tm.mu.Lock()
-	tm.recoveryPendingSite = ""
-	tm.recoveryDivergentGtid = ""
-	tm.recoveryDivergentCount = 0
-	tm.mu.Unlock()
 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
 	tm.logger.Info("old primary recovery complete", "site", oldPrimary.name, "source", newPrimaryHost)

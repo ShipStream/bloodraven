@@ -6070,10 +6070,13 @@ spec:
                     recoveryState:
                       description: |-
                         RecoveryState tracks old-primary recovery progress after failover.
-                        Empty when no recovery is needed. RecoveryBlocked means divergent
-                        transactions were detected and the site must be re-cloned.
+                        Empty when no recovery is needed. RecoveryInProgress means the site is
+                        being reconfigured, or is stabilizing, as a replica of the current primary.
+                        RecoveryBlocked means divergent transactions were detected and the site
+                        must be re-cloned.
                       enum:
                       - ""
+                      - RecoveryInProgress
                       - RecoveryBlocked
                       type: string
                     replicating:

@@ -521,9 +521,11 @@ type SiteStatus struct {
 	SecondsBehindSource *int64 `json:"secondsBehindSource,omitempty"`
 
 	// RecoveryState tracks old-primary recovery progress after failover.
-	// Empty when no recovery is needed. RecoveryBlocked means divergent
-	// transactions were detected and the site must be re-cloned.
-	// +kubebuilder:validation:Enum="";RecoveryBlocked
+	// Empty when no recovery is needed. RecoveryInProgress means the site is
+	// being reconfigured, or is stabilizing, as a replica of the current primary.
+	// RecoveryBlocked means divergent transactions were detected and the site
+	// must be re-cloned.
+	// +kubebuilder:validation:Enum="";RecoveryInProgress;RecoveryBlocked
 	// +optional
 	RecoveryState string `json:"recoveryState,omitempty"`
 
