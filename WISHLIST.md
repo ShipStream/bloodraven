@@ -3,7 +3,7 @@
 ## Checklist
 
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
-- [ ] 9. Restore duration and size metrics
+- [x] 9. Restore duration and size metrics
 - [ ] 18. `kubectl` plugin
 - [ ] 27. Backup/restore performance guide
 - [ ] 30. Public repo, license, release cadence
@@ -26,7 +26,7 @@
 
 **7. Cross-region/cross-cluster DR as a first-class feature.** Today DR = "create a new MysqlFailoverGroup with `initFromBackup` in another cluster." This works but is ad-hoc. Consider a `MysqlDRTarget` CR that continuously ships backups + binlogs to a designated target cluster/bucket and can be promoted with one command. At minimum, document the recommended multi-cluster DR topology with a runbook.
 
-**9. Restore duration and size metrics.** Add `bloodraven_restore_duration_seconds` and `bloodraven_restore_last_success_timestamp_seconds`, plus per-restore GTID and binlog-replay coordinates in status. DR confidence requires knowing your actual measured restore time, not estimated.
+**9. Restore duration and size metrics.** Done: restores now publish data-plane duration, last-success timestamp, and last-source-size metrics with bounded labels. Both bootstrap and in-place restore status surfaces source backup size/coordinates, target GTID/binlog coordinates, and PITR replay summary when available.
 
 **33. True shared-node placement model.** Done: each site now declares an explicit required `spec.sites[].taintNodeSelector`, allowing per-group labels such as `shipstream.io/failover-group.orders=true` and `shipstream.io/site.orders=iad`. Tainting, cleanup, docs, tests, and playground manifests use the selector model so failover in one group does not require dedicated node pools or affect unrelated tenants.
 

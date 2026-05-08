@@ -210,6 +210,31 @@ var (
 		Help: "Difference in seconds between the verification completion time and the timestamp of the last replayed binlog event.",
 	}, []string{"group", "profile"})
 
+	// --- Restore metrics ----------------------------------------------
+	//
+	// Restore metrics are emitted once per successful restore Job. Labels
+	// are bounded to (namespace, group, restore_kind, target_site), where
+	// restore_kind is "init_from_backup" or "in_place".
+
+	RestoreDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "bloodraven_restore_duration_seconds",
+		Help: "Data-plane duration of a successful restore Job from Job StartTime to terminal success observation.",
+		Buckets: []float64{
+			15, 30, 60, 120, 300, 600, 900, 1800,
+			3600, 7200, 14400, 28800,
+		},
+	}, []string{"namespace", "group", "restore_kind", "target_site"})
+
+	RestoreLastSuccessTimestamp = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_restore_last_success_timestamp_seconds",
+		Help: "Unix timestamp of the last successful restore Job observation per restore target.",
+	}, []string{"namespace", "group", "restore_kind", "target_site"})
+
+	RestoreLastSourceSizeBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_restore_last_source_size_bytes",
+		Help: "Source backup artifact size in bytes for the most recent successful restore when known.",
+	}, []string{"namespace", "group", "restore_kind", "target_site"})
+
 	// --- PITR archiver metrics ----------------------------------------
 	//
 	// These three gauges mirror per-site sidecar archiver state that the
@@ -329,6 +354,7 @@ func Register(reg prometheus.Registerer) {
 		BackupVerifiedTimestamp, BackupVerificationLastAttemptTimestamp,
 		BackupVerificationRunsTotal, BackupVerificationDurationSeconds,
 		BackupVerificationReplayLagSeconds,
+		RestoreDurationSeconds, RestoreLastSuccessTimestamp, RestoreLastSourceSizeBytes,
 		ArchiverUploadFailures, ArchiverLastUploadTimestamp, ArchiverBacklogFiles,
 		HTTPRequestsTotal, HTTPRequestDurationSeconds,
 		BackupEncryptDurationSeconds, BackupDecryptDurationSeconds,

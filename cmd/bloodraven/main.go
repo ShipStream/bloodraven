@@ -139,6 +139,7 @@ func main() {
 		Recorder:  recorder,
 		Runner:    runner,
 		Tainter:   tainter,
+		Clientset: clientset,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error("unable to create controller", "error", err)
@@ -290,9 +291,9 @@ func (r *statusRecorder) WriteHeader(code int) {
 // pitrCutoffCache is a tiny TTL cache in front of the /pitr-cutoff
 // handler. Keyed by (namespace, group, profile). Concurrent-safe.
 type pitrCutoffCache struct {
-	ttl   time.Duration
-	mu    sync.Mutex
-	data  map[string]pitrCutoffEntry
+	ttl  time.Duration
+	mu   sync.Mutex
+	data map[string]pitrCutoffEntry
 }
 
 type pitrCutoffEntry struct {
@@ -414,8 +415,8 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sC
 		// filters for us; falls back to full-namespace only when
 		// labels are absent (handled in the filter loop below).
 		if err := k8sClient.List(ctx, &list, client.InNamespace(ns), client.MatchingLabels{
-			"shipstream.io/failover-group":  group,
-			"shipstream.io/backup-profile":  profile,
+			"shipstream.io/failover-group": group,
+			"shipstream.io/backup-profile": profile,
 		}); err != nil {
 			rw.WriteHeader(http.StatusInternalServerError)
 			// Don't echo raw API errors to unauthenticated callers.

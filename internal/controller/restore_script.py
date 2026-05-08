@@ -61,6 +61,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.parse
 
 import mysqlsh  # type: ignore
 
@@ -103,6 +104,17 @@ def _read_cred_file(dirpath, key):
             return f.read().strip()
     except OSError:
         return None
+
+
+def _int_env(name):
+    try:
+        return int(os.environ.get(name, "0") or "0")
+    except ValueError:
+        return 0
+
+
+def _escape_token(value):
+    return urllib.parse.quote(str(value or ""), safe="")
 
 
 def _resolve_credentials():
@@ -328,7 +340,7 @@ def _run_pitr(host, port, user, password, stop_datetime, exclude_gtids, local_di
     if not files:
         print("BLOODRAVEN_PITR_NOOP: no archived binlogs in {}; dump load is final state".format(
               local_dir), flush=True)
-        return
+        return "", 0
 
     binlog_cmd = ["mysqlbinlog", "--stop-datetime=" + stop_datetime]
     if exclude_gtids:
@@ -367,6 +379,49 @@ def _run_pitr(host, port, user, password, stop_datetime, exclude_gtids, local_di
         sys.exit(2)
     print("BLOODRAVEN_PITR_COMPLETE stop_datetime={}".format(stop_datetime),
           flush=True)
+    return files[-1], len(files)
+
+
+def _target_coordinates(session):
+    gtid = ""
+    try:
+        row = session.run_sql("SELECT @@global.gtid_executed").fetch_one()
+        if row and row[0] is not None:
+            gtid = str(row[0]).replace("\n", "")
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_COORDINATES_GTID_IGNORED: {}".format(e), flush=True)
+
+    binlog_file = ""
+    binlog_pos = 0
+    try:
+        try:
+            row = session.run_sql("SHOW BINARY LOG STATUS").fetch_one()
+        except Exception:  # noqa: BLE001
+            row = session.run_sql("SHOW MASTER STATUS").fetch_one()
+        if row:
+            binlog_file = str(row[0] or "")
+            binlog_pos = int(row[1] or 0)
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_COORDINATES_BINLOG_IGNORED: {}".format(e), flush=True)
+    return gtid, binlog_file, binlog_pos
+
+
+def _print_restore_complete(session, pitr_stop_datetime, pitr_file, pitr_count):
+    target_gtid, target_file, target_pos = _target_coordinates(session)
+    parts = [
+        "BLOODRAVEN_RESTORE_COMPLETE",
+        "sourceSizeBytes={}".format(_int_env("BLOODRAVEN_SOURCE_SIZE_BYTES")),
+        "sourceGtidExecuted={}".format(_escape_token(os.environ.get("BLOODRAVEN_SOURCE_GTID_EXECUTED", ""))),
+        "sourceBinlogFile={}".format(_escape_token(os.environ.get("BLOODRAVEN_SOURCE_BINLOG_FILE", ""))),
+        "sourceBinlogPos={}".format(_int_env("BLOODRAVEN_SOURCE_BINLOG_POS")),
+        "targetGtidExecuted={}".format(_escape_token(target_gtid)),
+        "targetBinlogFile={}".format(_escape_token(target_file)),
+        "targetBinlogPos={}".format(target_pos),
+        "pitrStopDatetime={}".format(_escape_token(pitr_stop_datetime)),
+        "pitrReplayedBinlogFile={}".format(_escape_token(pitr_file)),
+        "pitrReplayedBinlogCount={}".format(int(pitr_count or 0)),
+    ]
+    print(" ".join(parts), flush=True)
 
 
 # --------------------------------------------------------------------
@@ -435,13 +490,20 @@ def main():
 
     # Optional PITR replay on top of the loaded dump.
     stop_dt = os.environ.get("BLOODRAVEN_PITR_STOP_DATETIME")
+    pitr_stop_datetime = ""
+    pitr_file = ""
+    pitr_count = 0
     if stop_dt:
         stop_dt_mysql = _parse_pitr_target(stop_dt)
+        pitr_stop_datetime = stop_dt_mysql
         exclude_gtids = os.environ.get("BLOODRAVEN_PITR_EXCLUDE_GTIDS", "")
         local_dir = os.environ.get("BLOODRAVEN_PITR_LOCAL_DIR", "/pitr-binlogs")
         filter_db = os.environ.get("BLOODRAVEN_PITR_FILTER_DATABASE", "")
-        _run_pitr(host_only, port, user, password, stop_dt_mysql, exclude_gtids,
-                  local_dir, filter_db)
+        pitr_file, pitr_count = _run_pitr(host_only, port, user, password,
+                                          stop_dt_mysql, exclude_gtids,
+                                          local_dir, filter_db)
+
+    _print_restore_complete(session, pitr_stop_datetime, pitr_file, pitr_count)
 
 
 if __name__ == "__main__":

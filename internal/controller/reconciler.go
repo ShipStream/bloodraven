@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 	k8sretry "k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -61,10 +62,11 @@ const (
 // MysqlFailoverGroupReconciler reconciles a MysqlFailoverGroup object.
 type MysqlFailoverGroupReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
-	Runner   *TopologyManagerRunner
-	Tainter  platform.NodeTainter // optional, for taint cleanup during deletion
+	Scheme    *runtime.Scheme
+	Recorder  record.EventRecorder
+	Runner    *TopologyManagerRunner
+	Tainter   platform.NodeTainter // optional, for taint cleanup during deletion
+	Clientset kubernetes.Interface // optional, for tailing restore Job logs
 
 	// APIReader is an uncached reader for paths that cannot tolerate a stale
 	// cache view — specifically waitForDeploymentRollout, which must observe
