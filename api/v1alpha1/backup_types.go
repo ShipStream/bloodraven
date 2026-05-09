@@ -838,6 +838,37 @@ type RestoreInPlaceStatus struct {
 	// CompletionTime is when the restore reached a terminal phase.
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
+	// SourceSizeBytes is the source backup artifact size in bytes when
+	// known from a referenced MysqlBackup. 0 means unknown.
+	SourceSizeBytes int64 `json:"sourceSizeBytes,omitempty"`
+
+	// SourceGtidExecuted is the referenced MysqlBackup GTID set when known.
+	SourceGtidExecuted string `json:"sourceGtidExecuted,omitempty"`
+
+	// SourceBinlogFile is the referenced MysqlBackup binary log file when known.
+	SourceBinlogFile string `json:"sourceBinlogFile,omitempty"`
+
+	// SourceBinlogPos is the referenced MysqlBackup binary log position when known.
+	SourceBinlogPos int64 `json:"sourceBinlogPos,omitempty"`
+
+	// TargetGtidExecuted is @@global.gtid_executed on the target after load and optional PITR.
+	TargetGtidExecuted string `json:"targetGtidExecuted,omitempty"`
+
+	// TargetBinlogFile is the target binary log file after load and optional PITR.
+	TargetBinlogFile string `json:"targetBinlogFile,omitempty"`
+
+	// TargetBinlogPos is the target binary log position after load and optional PITR.
+	TargetBinlogPos int64 `json:"targetBinlogPos,omitempty"`
+
+	// PitrStopDatetime is the normalized mysqlbinlog --stop-datetime used for PITR.
+	PitrStopDatetime string `json:"pitrStopDatetime,omitempty"`
+
+	// PitrReplayedBinlogFile is the final archived binlog passed to mysqlbinlog.
+	PitrReplayedBinlogFile string `json:"pitrReplayedBinlogFile,omitempty"`
+
+	// PitrReplayedBinlogCount is the number of archived binlogs passed to mysqlbinlog.
+	PitrReplayedBinlogCount int32 `json:"pitrReplayedBinlogCount,omitempty"`
+
 	// Message is a human-readable status line.
 	Message string `json:"message,omitempty"`
 }
@@ -858,6 +889,37 @@ type RestoreStatus struct {
 
 	// CompletionTime is when the restore Job reached a terminal state.
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// SourceSizeBytes is the source backup artifact size in bytes when
+	// known from a referenced MysqlBackup. 0 means unknown.
+	SourceSizeBytes int64 `json:"sourceSizeBytes,omitempty"`
+
+	// SourceGtidExecuted is the referenced MysqlBackup GTID set when known.
+	SourceGtidExecuted string `json:"sourceGtidExecuted,omitempty"`
+
+	// SourceBinlogFile is the referenced MysqlBackup binary log file when known.
+	SourceBinlogFile string `json:"sourceBinlogFile,omitempty"`
+
+	// SourceBinlogPos is the referenced MysqlBackup binary log position when known.
+	SourceBinlogPos int64 `json:"sourceBinlogPos,omitempty"`
+
+	// TargetGtidExecuted is @@global.gtid_executed on the target after load and optional PITR.
+	TargetGtidExecuted string `json:"targetGtidExecuted,omitempty"`
+
+	// TargetBinlogFile is the target binary log file after load and optional PITR.
+	TargetBinlogFile string `json:"targetBinlogFile,omitempty"`
+
+	// TargetBinlogPos is the target binary log position after load and optional PITR.
+	TargetBinlogPos int64 `json:"targetBinlogPos,omitempty"`
+
+	// PitrStopDatetime is the normalized mysqlbinlog --stop-datetime used for PITR.
+	PitrStopDatetime string `json:"pitrStopDatetime,omitempty"`
+
+	// PitrReplayedBinlogFile is the final archived binlog passed to mysqlbinlog.
+	PitrReplayedBinlogFile string `json:"pitrReplayedBinlogFile,omitempty"`
+
+	// PitrReplayedBinlogCount is the number of archived binlogs passed to mysqlbinlog.
+	PitrReplayedBinlogCount int32 `json:"pitrReplayedBinlogCount,omitempty"`
 
 	// Message is a human-readable status message.
 	Message string `json:"message,omitempty"`

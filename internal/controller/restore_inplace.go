@@ -245,12 +245,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 		}
 		scope, _ := inPlaceRestoreScope(spec)
 		now := metav1.Now()
-		r.setInPlaceRestoreStatus(ctx, fg, &v1alpha1.RestoreInPlaceStatus{
+		next := &v1alpha1.RestoreInPlaceStatus{
 			Phase:     v1alpha1.RestoreInPlacePreflight,
 			Scope:     scope,
 			StartTime: &now,
 			Message:   "validating preconditions",
-		})
+		}
+		applyRestoreMetadataToInPlaceStatus(next, r.restoreSourceMetadata(ctx, fg, spec.Source))
+		r.setInPlaceRestoreStatus(ctx, fg, next)
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceStarted",
 			"starting in-place restore (scope=%s, confirm=%s)", scope, spec.Confirm)
 		return 5 * time.Second, nil
@@ -281,12 +283,14 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 	cur := fg.Status.RestoreInPlace
 
 	if fg.Status.ActiveSite == "" {
-		r.setInPlaceRestoreStatus(ctx, fg, &v1alpha1.RestoreInPlaceStatus{
+		next := &v1alpha1.RestoreInPlaceStatus{
 			Phase:     v1alpha1.RestoreInPlacePreflight,
 			Scope:     cur.Scope,
 			StartTime: cur.StartTime,
 			Message:   "waiting for status.activeSite to be populated",
-		})
+		}
+		applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
+		r.setInPlaceRestoreStatus(ctx, fg, next)
 		return 15 * time.Second, nil
 	}
 	target := fg.Status.ActiveSite
@@ -307,14 +311,16 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		if activeStatus != nil {
 			observedState = activeStatus.State
 		}
-		r.setInPlaceRestoreStatus(ctx, fg, &v1alpha1.RestoreInPlaceStatus{
+		next := &v1alpha1.RestoreInPlaceStatus{
 			Phase:      v1alpha1.RestoreInPlacePreflight,
 			TargetSite: target,
 			Scope:      cur.Scope,
 			StartTime:  cur.StartTime,
 			Message: fmt.Sprintf("waiting for active site %q to be writable (observed: %s)",
 				target, observedState),
-		})
+		}
+		applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
+		r.setInPlaceRestoreStatus(ctx, fg, next)
 		return 15 * time.Second, nil
 	}
 
@@ -323,13 +329,15 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		return 0, nil
 	}
 
-	r.setInPlaceRestoreStatus(ctx, fg, &v1alpha1.RestoreInPlaceStatus{
+	next := &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceFencing,
 		TargetSite: target,
 		Scope:      cur.Scope,
 		StartTime:  cur.StartTime,
 		Message:    "applying pre-restore fence",
-	})
+	}
+	applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
+	r.setInPlaceRestoreStatus(ctx, fg, next)
 	return 2 * time.Second, nil
 }
 
@@ -354,13 +362,15 @@ func (r *MysqlFailoverGroupReconciler) inPlaceFencing(ctx context.Context, fg *v
 		return 2 * time.Second, nil
 	}
 
-	r.setInPlaceRestoreStatus(ctx, fg, &v1alpha1.RestoreInPlaceStatus{
+	next := &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceRestoring,
 		TargetSite: cur.TargetSite,
 		Scope:      cur.Scope,
 		StartTime:  cur.StartTime,
 		Message:    "creating restore Job",
-	})
+	}
+	applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
+	r.setInPlaceRestoreStatus(ctx, fg, next)
 	return 2 * time.Second, nil
 }
 
@@ -399,14 +409,16 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		if err := r.Create(ctx, built); err != nil {
 			return 0, fmt.Errorf("create in-place restore job: %w", err)
 		}
-		r.setInPlaceRestoreStatus(ctx, fg, &v1alpha1.RestoreInPlaceStatus{
+		next := &v1alpha1.RestoreInPlaceStatus{
 			Phase:      v1alpha1.RestoreInPlaceRestoring,
 			JobName:    built.Name,
 			TargetSite: target,
 			Scope:      cur.Scope,
 			StartTime:  cur.StartTime,
 			Message:    "restore Job created",
-		})
+		}
+		applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
+		r.setInPlaceRestoreStatus(ctx, fg, next)
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceJobCreated",
 			"created in-place restore Job %s targeting site %s (scope=%s)",
 			built.Name, target, cur.Scope)
@@ -419,16 +431,36 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	}
 
 	if phase == v1alpha1.BackupPhaseSucceeded {
+		now := metav1.Now()
+		meta := r.restoreSourceMetadata(ctx, fg, spec.Source)
+		curMeta := restoreMetadataFromInPlaceStatus(cur)
+		if curMeta.SourceSizeBytes > 0 || curMeta.SourceGtidExecuted != "" || curMeta.SourceBinlogFile != "" || curMeta.SourceBinlogPos > 0 {
+			meta = curMeta
+		}
+		if parsed, ok := r.tailRestoreCompletion(ctx, &job); ok {
+			meta = parsed
+		}
+		jobStart := job.Status.StartTime
+		if jobStart == nil {
+			jobStart = cur.StartTime
+		}
+		if jobStart == nil {
+			jobStart = &now
+		}
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceLoaded",
 			"in-place restore Job %s completed: %s", job.Name, message)
-		r.setInPlaceRestoreStatus(ctx, fg, &v1alpha1.RestoreInPlaceStatus{
+		next := &v1alpha1.RestoreInPlaceStatus{
 			Phase:      v1alpha1.RestoreInPlaceResuming,
 			JobName:    job.Name,
 			TargetSite: target,
 			Scope:      cur.Scope,
 			StartTime:  cur.StartTime,
 			Message:    "load complete; lifting fence",
-		})
+		}
+		applyRestoreMetadataToInPlaceStatus(next, meta)
+		if r.setInPlaceRestoreStatus(ctx, fg, next) {
+			emitRestoreSuccessMetrics(fg, "in_place", target, next.SourceSizeBytes, jobStart, now)
+		}
 		return 2 * time.Second, nil
 	}
 
@@ -482,7 +514,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceResuming(ctx context.Context, fg *
 	}
 
 	now := metav1.Now()
-	r.setInPlaceRestoreStatus(ctx, fg, &v1alpha1.RestoreInPlaceStatus{
+	next := &v1alpha1.RestoreInPlaceStatus{
 		Phase:            v1alpha1.RestoreInPlaceSucceeded,
 		JobName:          cur.JobName,
 		TargetSite:       target,
@@ -491,18 +523,23 @@ func (r *MysqlFailoverGroupReconciler) inPlaceResuming(ctx context.Context, fg *
 		StartTime:        cur.StartTime,
 		CompletionTime:   &now,
 		Message:          "in-place restore complete",
-	})
+	}
+	applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
+	r.setInPlaceRestoreStatus(ctx, fg, next)
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceSucceeded",
 		"in-place restore complete (scope=%s, site=%s)", cur.Scope, target)
 	return 0, nil
 }
 
 // setInPlaceRestoreStatus patches fg.status.restoreInPlace.
-func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, s *v1alpha1.RestoreInPlaceStatus) {
+func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, s *v1alpha1.RestoreInPlaceStatus) bool {
 	patch := client.MergeFrom(fg.DeepCopy())
 	fg.Status.RestoreInPlace = s
 	if err := r.Status().Patch(ctx, fg, patch); err != nil && !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "update in-place restore status", "fg", fg.Name)
+		return false
+	} else if apierrors.IsNotFound(err) {
+		return false
 	}
 	// Push the freeze state to the topology manager directly so it
 	// takes effect on the next poll cycle rather than waiting for the
@@ -520,6 +557,7 @@ func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Conte
 			inPlaceRestoreInFlight(fg),
 		)
 	}
+	return true
 }
 
 // stampTerminalFailure writes a Failed status with the given message
@@ -536,7 +574,7 @@ func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context,
 	if start == nil {
 		start = &now
 	}
-	r.setInPlaceRestoreStatus(ctx, fg, &v1alpha1.RestoreInPlaceStatus{
+	next := &v1alpha1.RestoreInPlaceStatus{
 		Phase:          v1alpha1.RestoreInPlaceFailed,
 		JobName:        jobName,
 		TargetSite:     target,
@@ -544,7 +582,9 @@ func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context,
 		StartTime:      start,
 		CompletionTime: &now,
 		Message:        msg,
-	})
+	}
+	applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
+	r.setInPlaceRestoreStatus(ctx, fg, next)
 	if eventReason != "" {
 		r.Recorder.Eventf(fg, corev1.EventTypeWarning, eventReason, "%s", msg)
 	}

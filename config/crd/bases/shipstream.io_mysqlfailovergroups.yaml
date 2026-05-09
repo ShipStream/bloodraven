@@ -5975,9 +5975,54 @@ spec:
                     - Succeeded
                     - Failed
                     type: string
+                  pitrReplayedBinlogCount:
+                    description: PitrReplayedBinlogCount is the number of archived
+                      binlogs passed to mysqlbinlog.
+                    format: int32
+                    type: integer
+                  pitrReplayedBinlogFile:
+                    description: PitrReplayedBinlogFile is the final archived binlog
+                      passed to mysqlbinlog.
+                    type: string
+                  pitrStopDatetime:
+                    description: PitrStopDatetime is the normalized mysqlbinlog --stop-datetime
+                      used for PITR.
+                    type: string
+                  sourceBinlogFile:
+                    description: SourceBinlogFile is the referenced MysqlBackup binary
+                      log file when known.
+                    type: string
+                  sourceBinlogPos:
+                    description: SourceBinlogPos is the referenced MysqlBackup binary
+                      log position when known.
+                    format: int64
+                    type: integer
+                  sourceGtidExecuted:
+                    description: SourceGtidExecuted is the referenced MysqlBackup
+                      GTID set when known.
+                    type: string
+                  sourceSizeBytes:
+                    description: |-
+                      SourceSizeBytes is the source backup artifact size in bytes when
+                      known from a referenced MysqlBackup. 0 means unknown.
+                    format: int64
+                    type: integer
                   startTime:
                     description: StartTime is when the restore Job was created.
                     format: date-time
+                    type: string
+                  targetBinlogFile:
+                    description: TargetBinlogFile is the target binary log file after
+                      load and optional PITR.
+                    type: string
+                  targetBinlogPos:
+                    description: TargetBinlogPos is the target binary log position
+                      after load and optional PITR.
+                    format: int64
+                    type: integer
+                  targetGtidExecuted:
+                    description: TargetGtidExecuted is @@global.gtid_executed on the
+                      target after load and optional PITR.
                     type: string
                   targetSite:
                     description: TargetSite is the site name whose MySQL instance
@@ -6021,14 +6066,59 @@ spec:
                     - Succeeded
                     - Failed
                     type: string
+                  pitrReplayedBinlogCount:
+                    description: PitrReplayedBinlogCount is the number of archived
+                      binlogs passed to mysqlbinlog.
+                    format: int32
+                    type: integer
+                  pitrReplayedBinlogFile:
+                    description: PitrReplayedBinlogFile is the final archived binlog
+                      passed to mysqlbinlog.
+                    type: string
+                  pitrStopDatetime:
+                    description: PitrStopDatetime is the normalized mysqlbinlog --stop-datetime
+                      used for PITR.
+                    type: string
                   scope:
                     description: |-
                       Scope is a human-readable tag: "full" for a full-instance
                       restore, or "schema:<name>" for a per-schema restore.
                     type: string
+                  sourceBinlogFile:
+                    description: SourceBinlogFile is the referenced MysqlBackup binary
+                      log file when known.
+                    type: string
+                  sourceBinlogPos:
+                    description: SourceBinlogPos is the referenced MysqlBackup binary
+                      log position when known.
+                    format: int64
+                    type: integer
+                  sourceGtidExecuted:
+                    description: SourceGtidExecuted is the referenced MysqlBackup
+                      GTID set when known.
+                    type: string
+                  sourceSizeBytes:
+                    description: |-
+                      SourceSizeBytes is the source backup artifact size in bytes when
+                      known from a referenced MysqlBackup. 0 means unknown.
+                    format: int64
+                    type: integer
                   startTime:
                     description: StartTime is when the restore entered Preflight.
                     format: date-time
+                    type: string
+                  targetBinlogFile:
+                    description: TargetBinlogFile is the target binary log file after
+                      load and optional PITR.
+                    type: string
+                  targetBinlogPos:
+                    description: TargetBinlogPos is the target binary log position
+                      after load and optional PITR.
+                    format: int64
+                    type: integer
+                  targetGtidExecuted:
+                    description: TargetGtidExecuted is @@global.gtid_executed on the
+                      target after load and optional PITR.
                     type: string
                   targetSite:
                     description: |-

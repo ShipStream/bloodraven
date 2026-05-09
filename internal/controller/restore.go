@@ -1,8 +1,12 @@
 package controller
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 )
 
 // filterOutVolumeByName returns a copy of vols with the entry whose
@@ -91,6 +96,264 @@ func restoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 		return true
 	}
 	return fg.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded
+}
+
+type restoreCompletionMetadata struct {
+	SourceSizeBytes         int64
+	SourceGtidExecuted      string
+	SourceBinlogFile        string
+	SourceBinlogPos         int64
+	TargetGtidExecuted      string
+	TargetBinlogFile        string
+	TargetBinlogPos         int64
+	PitrStopDatetime        string
+	PitrReplayedBinlogFile  string
+	PitrReplayedBinlogCount int32
+}
+
+// Keep restoreCompletionMetadata, the status copy helpers below, and the
+// BLOODRAVEN_RESTORE_COMPLETE parser/script fields in lockstep.
+func restoreMetadataFromBackupStatus(status v1alpha1.MysqlBackupStatus) restoreCompletionMetadata {
+	return restoreCompletionMetadata{
+		SourceSizeBytes:    status.SizeBytes,
+		SourceGtidExecuted: status.GtidExecuted,
+		SourceBinlogFile:   status.BinlogFile,
+		SourceBinlogPos:    status.BinlogPos,
+	}
+}
+
+func (r *MysqlFailoverGroupReconciler) restoreSourceMetadata(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource) restoreCompletionMetadata {
+	if src.MysqlBackupRef == nil {
+		return restoreCompletionMetadata{}
+	}
+	var ref v1alpha1.MysqlBackup
+	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: src.MysqlBackupRef.Name}, &ref); err != nil {
+		return restoreCompletionMetadata{}
+	}
+	return restoreMetadataFromBackupStatus(ref.Status)
+}
+
+func applyRestoreMetadataToStatus(rs *v1alpha1.RestoreStatus, meta restoreCompletionMetadata) {
+	rs.SourceSizeBytes = meta.SourceSizeBytes
+	rs.SourceGtidExecuted = meta.SourceGtidExecuted
+	rs.SourceBinlogFile = meta.SourceBinlogFile
+	rs.SourceBinlogPos = meta.SourceBinlogPos
+	rs.TargetGtidExecuted = meta.TargetGtidExecuted
+	rs.TargetBinlogFile = meta.TargetBinlogFile
+	rs.TargetBinlogPos = meta.TargetBinlogPos
+	rs.PitrStopDatetime = meta.PitrStopDatetime
+	rs.PitrReplayedBinlogFile = meta.PitrReplayedBinlogFile
+	rs.PitrReplayedBinlogCount = meta.PitrReplayedBinlogCount
+}
+
+func applyRestoreMetadataToInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus, meta restoreCompletionMetadata) {
+	rs.SourceSizeBytes = meta.SourceSizeBytes
+	rs.SourceGtidExecuted = meta.SourceGtidExecuted
+	rs.SourceBinlogFile = meta.SourceBinlogFile
+	rs.SourceBinlogPos = meta.SourceBinlogPos
+	rs.TargetGtidExecuted = meta.TargetGtidExecuted
+	rs.TargetBinlogFile = meta.TargetBinlogFile
+	rs.TargetBinlogPos = meta.TargetBinlogPos
+	rs.PitrStopDatetime = meta.PitrStopDatetime
+	rs.PitrReplayedBinlogFile = meta.PitrReplayedBinlogFile
+	rs.PitrReplayedBinlogCount = meta.PitrReplayedBinlogCount
+}
+
+func restoreMetadataFromInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus) restoreCompletionMetadata {
+	if rs == nil {
+		return restoreCompletionMetadata{}
+	}
+	return restoreCompletionMetadata{
+		SourceSizeBytes:         rs.SourceSizeBytes,
+		SourceGtidExecuted:      rs.SourceGtidExecuted,
+		SourceBinlogFile:        rs.SourceBinlogFile,
+		SourceBinlogPos:         rs.SourceBinlogPos,
+		TargetGtidExecuted:      rs.TargetGtidExecuted,
+		TargetBinlogFile:        rs.TargetBinlogFile,
+		TargetBinlogPos:         rs.TargetBinlogPos,
+		PitrStopDatetime:        rs.PitrStopDatetime,
+		PitrReplayedBinlogFile:  rs.PitrReplayedBinlogFile,
+		PitrReplayedBinlogCount: rs.PitrReplayedBinlogCount,
+	}
+}
+
+func parseRestoreCompleteLine(line string) (restoreCompletionMetadata, bool) {
+	const prefix = "BLOODRAVEN_RESTORE_COMPLETE"
+	if !strings.HasPrefix(line, prefix) {
+		return restoreCompletionMetadata{}, false
+	}
+	var meta restoreCompletionMetadata
+	for _, f := range strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, prefix))) {
+		eq := strings.IndexByte(f, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := f[:eq]
+		rawVal := f[eq+1:]
+		switch key {
+		case "sourceSizeBytes":
+			if n, err := strconv.ParseInt(rawVal, 10, 64); err == nil {
+				meta.SourceSizeBytes = n
+			}
+		case "sourceGtidExecuted":
+			if val, ok := decodeRestoreToken(rawVal); ok {
+				meta.SourceGtidExecuted = strings.ReplaceAll(val, " ", "")
+			}
+		case "sourceBinlogFile":
+			if val, ok := decodeRestoreToken(rawVal); ok {
+				meta.SourceBinlogFile = val
+			}
+		case "sourceBinlogPos":
+			if n, err := strconv.ParseInt(rawVal, 10, 64); err == nil {
+				meta.SourceBinlogPos = n
+			}
+		case "targetGtidExecuted":
+			if val, ok := decodeRestoreToken(rawVal); ok {
+				meta.TargetGtidExecuted = strings.ReplaceAll(val, " ", "")
+			}
+		case "targetBinlogFile":
+			if val, ok := decodeRestoreToken(rawVal); ok {
+				meta.TargetBinlogFile = val
+			}
+		case "targetBinlogPos":
+			if n, err := strconv.ParseInt(rawVal, 10, 64); err == nil {
+				meta.TargetBinlogPos = n
+			}
+		case "pitrStopDatetime":
+			if val, ok := decodeRestoreToken(rawVal); ok {
+				meta.PitrStopDatetime = val
+			}
+		case "pitrReplayedBinlogFile":
+			if val, ok := decodeRestoreToken(rawVal); ok {
+				meta.PitrReplayedBinlogFile = val
+			}
+		case "pitrReplayedBinlogCount":
+			if n, err := strconv.ParseInt(rawVal, 10, 32); err == nil {
+				meta.PitrReplayedBinlogCount = int32(n)
+			}
+		}
+	}
+	return meta, true
+}
+
+func decodeRestoreToken(raw string) (string, bool) {
+	val, err := url.QueryUnescape(raw)
+	if err != nil {
+		return "", false
+	}
+	return val, true
+}
+
+func (r *MysqlFailoverGroupReconciler) tailRestoreCompletion(ctx context.Context, job *batchv1.Job) (restoreCompletionMetadata, bool) {
+	if r.Clientset == nil {
+		return restoreCompletionMetadata{}, false
+	}
+	var pod *corev1.Pod
+	pods, ok := r.restoreJobPods(ctx, job)
+	if !ok {
+		return restoreCompletionMetadata{}, false
+	}
+	for i := range pods {
+		p := &pods[i]
+		if p.Status.Phase == corev1.PodSucceeded && podBelongsToJob(p, job) {
+			pod = p
+			break
+		}
+	}
+	if pod == nil {
+		return restoreCompletionMetadata{}, false
+	}
+	candidates := []string{backupJobContainerName}
+	if len(pod.Spec.Containers) > 0 && pod.Spec.Containers[0].Name != backupJobContainerName {
+		candidates = append(candidates, pod.Spec.Containers[0].Name)
+	}
+	for _, container := range candidates {
+		meta, ok := r.tailRestoreContainer(ctx, job.Namespace, pod.Name, container)
+		if ok {
+			return meta, true
+		}
+	}
+	return restoreCompletionMetadata{}, false
+}
+
+func (r *MysqlFailoverGroupReconciler) restoreJobPods(ctx context.Context, job *batchv1.Job) ([]corev1.Pod, bool) {
+	if job == nil {
+		return nil, false
+	}
+	var out []corev1.Pod
+	selectors := []client.MatchingLabels{
+		{"batch.kubernetes.io/job-name": job.Name},
+		{"job-name": job.Name},
+	}
+	for _, selector := range selectors {
+		var pods corev1.PodList
+		if err := r.List(ctx, &pods, client.InNamespace(job.Namespace), selector); err != nil {
+			return nil, false
+		}
+		out = append(out, pods.Items...)
+	}
+	return out, len(out) > 0
+}
+
+func podBelongsToJob(pod *corev1.Pod, job *batchv1.Job) bool {
+	if pod == nil || job == nil {
+		return false
+	}
+	if pod.Labels["batch.kubernetes.io/job-name"] == job.Name || pod.Labels["job-name"] == job.Name {
+		return true
+	}
+	for _, owner := range pod.OwnerReferences {
+		if job.UID != "" && owner.UID == job.UID {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *MysqlFailoverGroupReconciler) tailRestoreContainer(ctx context.Context, namespace, podName, container string) (restoreCompletionMetadata, bool) {
+	req := r.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: container,
+		TailLines: ptr64(50),
+	})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return restoreCompletionMetadata{}, false
+	}
+	defer func() { _ = stream.Close() }()
+
+	var (
+		last restoreCompletionMetadata
+		ok   bool
+	)
+	sc := bufio.NewScanner(stream)
+	sc.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		if meta, hit := parseRestoreCompleteLine(sc.Text()); hit {
+			last = meta
+			ok = true
+		}
+	}
+	if err := sc.Err(); err != nil && err != io.EOF {
+		log.FromContext(ctx).Error(err, "tail restore completion log", "pod", podName, "container", container)
+		return restoreCompletionMetadata{}, false
+	}
+	return last, ok
+}
+
+func emitRestoreSuccessMetrics(fg *v1alpha1.MysqlFailoverGroup, restoreKind, targetSite string, sourceSizeBytes int64, start *metav1.Time, completion metav1.Time) {
+	if fg == nil || targetSite == "" {
+		return
+	}
+	labels := []string{fg.Namespace, fg.Name, restoreKind, targetSite}
+	if start != nil && completion.Time.After(start.Time) {
+		bmetrics.RestoreDurationSeconds.WithLabelValues(labels...).Observe(completion.Time.Sub(start.Time).Seconds())
+	}
+	bmetrics.RestoreLastSuccessTimestamp.WithLabelValues(labels...).Set(float64(completion.Unix()))
+	if sourceSizeBytes > 0 {
+		bmetrics.RestoreLastSourceSizeBytes.WithLabelValues(labels...).Set(float64(sourceSizeBytes))
+	} else {
+		bmetrics.RestoreLastSourceSizeBytes.DeleteLabelValues(labels...)
+	}
 }
 
 // restoreTargetSite chooses the site that will receive a bootstrap
@@ -218,6 +481,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 			return 0, fmt.Errorf("get restore job: %w", err)
 		}
 
+		sourceMeta := r.restoreSourceMetadata(ctx, fg, fg.Spec.InitFromBackup.Source)
 		built, err := r.buildRestoreJob(ctx, fg, targetSite, credsName)
 		if err != nil {
 			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreBuildFailed", "%s", err.Error())
@@ -235,13 +499,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 			return 0, fmt.Errorf("create restore job: %w", err)
 		}
 		now := metav1.Now()
-		r.setRestoreStatus(ctx, fg, &v1alpha1.RestoreStatus{
+		running := &v1alpha1.RestoreStatus{
 			Phase:      v1alpha1.BackupPhaseRunning,
 			JobName:    built.Name,
 			TargetSite: targetSite,
 			StartTime:  &now,
 			Message:    "restore Job created",
-		})
+		}
+		applyRestoreMetadataToStatus(running, sourceMeta)
+		r.setRestoreStatus(ctx, fg, running)
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreStarted",
 			"created restore Job %s targeting site %s", built.Name, targetSite)
 		return 15 * time.Second, nil
@@ -254,6 +520,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 	}
 
 	now := metav1.Now()
+	meta := r.restoreSourceMetadata(ctx, fg, fg.Spec.InitFromBackup.Source)
+	if phase == v1alpha1.BackupPhaseSucceeded {
+		if parsed, ok := r.tailRestoreCompletion(ctx, &job); ok {
+			meta = parsed
+		}
+	}
+
 	rs := &v1alpha1.RestoreStatus{
 		Phase:          phase,
 		JobName:        job.Name,
@@ -262,6 +535,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		CompletionTime: &now,
 		Message:        message,
 	}
+	applyRestoreMetadataToStatus(rs, meta)
 	if rs.StartTime == nil {
 		if fg.Status.Restore != nil && fg.Status.Restore.StartTime != nil {
 			rs.StartTime = fg.Status.Restore.StartTime
@@ -269,9 +543,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 			rs.StartTime = &now
 		}
 	}
-	r.setRestoreStatus(ctx, fg, rs)
+	patched := r.setRestoreStatus(ctx, fg, rs)
 
 	if phase == v1alpha1.BackupPhaseSucceeded {
+		if patched {
+			emitRestoreSuccessMetrics(fg, "init_from_backup", targetSite, rs.SourceSizeBytes, rs.StartTime, now)
+		}
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreSucceeded",
 			"restore Job %s completed: %s", job.Name, message)
 		return 0, nil
@@ -309,13 +586,17 @@ func deploymentRolledOut(deploy *appsv1.Deployment) bool {
 // places inside reconcileRestoreJob and we want the main Job-observation
 // path to keep running rather than crash-looping the reconciler on a
 // transient status write failure.
-func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, rs *v1alpha1.RestoreStatus) {
+func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, rs *v1alpha1.RestoreStatus) bool {
 	patch := client.MergeFrom(fg.DeepCopy())
 	fg.Status.Restore = rs
 	if err := r.Status().Patch(ctx, fg, patch); err != nil && !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "update restore status",
 			"fg", fg.Name, "phase", rs.Phase)
+		return false
+	} else if apierrors.IsNotFound(err) {
+		return false
 	}
+	return true
 }
 
 // ensureRestoreCredsSecret creates or updates the derived Secret used by
@@ -439,11 +720,11 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	}
 
 	var (
-		inputURL           string
-		extraEnv           []corev1.EnvVar
-		extraVolumes       []corev1.Volume
-		extraMounts        []corev1.VolumeMount
-		awsCredsSecret     string
+		inputURL       string
+		extraEnv       []corev1.EnvVar
+		extraVolumes   []corev1.Volume
+		extraMounts    []corev1.VolumeMount
+		awsCredsSecret string
 		// Encryption-aware fields, populated when the source is an
 		// encrypted MysqlBackup or a direct S3/PVC source where the
 		// caller supplied a decryption passphrase. decryptSourceKind
@@ -459,6 +740,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		// Resolved passphrase Secret reference for the source (may
 		// come from in.Decryption or from the source profile itself).
 		passphraseRef *v1alpha1.PassphraseSecretRef
+		sourceMeta    restoreCompletionMetadata
 	)
 
 	switch {
@@ -471,6 +753,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			return nil, fmt.Errorf("referenced mysqlbackup %s is not Succeeded or has no location", ref.Name)
 		}
 		inputURL = ensureTrailingSlash(ref.Status.Location)
+		sourceMeta = restoreMetadataFromBackupStatus(ref.Status)
 
 		// Prefer the structured StorageType set by the backup
 		// reconciler; fall back to the old heuristic for pre-upgrade
@@ -663,6 +946,10 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		{Name: "BLOODRAVEN_INPUT_URL", Value: inputURL},
 		{Name: "BLOODRAVEN_LOAD_OPTIONS", Value: loadOptsJSON},
 		{Name: "BLOODRAVEN_MYSQL_CREDS_DIR", Value: backupCredsMountPath},
+		{Name: "BLOODRAVEN_SOURCE_SIZE_BYTES", Value: strconv.FormatInt(sourceMeta.SourceSizeBytes, 10)},
+		{Name: "BLOODRAVEN_SOURCE_GTID_EXECUTED", Value: sourceMeta.SourceGtidExecuted},
+		{Name: "BLOODRAVEN_SOURCE_BINLOG_FILE", Value: sourceMeta.SourceBinlogFile},
+		{Name: "BLOODRAVEN_SOURCE_BINLOG_POS", Value: strconv.FormatInt(sourceMeta.SourceBinlogPos, 10)},
 		{Name: "HOME", Value: mysqlshHomeMountPath},
 	}
 	if fg.Spec.TLS != nil {
