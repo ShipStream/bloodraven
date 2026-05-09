@@ -217,6 +217,26 @@ func TestReconcileRestoreJob_JobFailed_DoesNotEmitSuccessMetrics(t *testing.T) {
 	}
 }
 
+func TestEmitRestoreSuccessMetrics_UnknownSizeClearsStaleSourceSize(t *testing.T) {
+	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "lion-metrics-unknown-size", Namespace: "ns"}}
+	labels := []string{"ns", fg.Name, "init_from_backup", "iad"}
+	defer bmetrics.RestoreDurationSeconds.DeleteLabelValues(labels...)
+	defer bmetrics.RestoreLastSuccessTimestamp.DeleteLabelValues(labels...)
+	defer bmetrics.RestoreLastSourceSizeBytes.DeleteLabelValues(labels...)
+
+	start := metav1.NewTime(time.Now().Add(-time.Minute))
+	completion := metav1.NewTime(time.Now())
+	emitRestoreSuccessMetrics(fg, "init_from_backup", "iad", 2048, &start, completion)
+	if got := testutil.ToFloat64(bmetrics.RestoreLastSourceSizeBytes.WithLabelValues(labels...)); got != 2048 {
+		t.Fatalf("source size after known restore = %v", got)
+	}
+
+	emitRestoreSuccessMetrics(fg, "init_from_backup", "iad", 0, &start, completion)
+	if got := testutil.ToFloat64(bmetrics.RestoreLastSourceSizeBytes.WithLabelValues(labels...)); got != 0 {
+		t.Fatalf("source size after unknown restore = %v, want cleared/0", got)
+	}
+}
+
 func TestInPlaceRestorePreservesMetadataThroughResuming(t *testing.T) {
 	fg := fgInPlaceRestore("")
 	fg.Name = "lion-metrics-inplace"

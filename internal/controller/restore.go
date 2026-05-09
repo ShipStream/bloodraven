@@ -248,13 +248,13 @@ func (r *MysqlFailoverGroupReconciler) tailRestoreCompletion(ctx context.Context
 	if r.Clientset == nil {
 		return restoreCompletionMetadata{}, false
 	}
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(job.Namespace)); err != nil {
+	var pod *corev1.Pod
+	pods, ok := r.restoreJobPods(ctx, job)
+	if !ok {
 		return restoreCompletionMetadata{}, false
 	}
-	var pod *corev1.Pod
-	for i := range pods.Items {
-		p := &pods.Items[i]
+	for i := range pods {
+		p := &pods[i]
 		if p.Status.Phase == corev1.PodSucceeded && podBelongsToJob(p, job) {
 			pod = p
 			break
@@ -274,6 +274,25 @@ func (r *MysqlFailoverGroupReconciler) tailRestoreCompletion(ctx context.Context
 		}
 	}
 	return restoreCompletionMetadata{}, false
+}
+
+func (r *MysqlFailoverGroupReconciler) restoreJobPods(ctx context.Context, job *batchv1.Job) ([]corev1.Pod, bool) {
+	if job == nil {
+		return nil, false
+	}
+	var out []corev1.Pod
+	selectors := []client.MatchingLabels{
+		{"batch.kubernetes.io/job-name": job.Name},
+		{"job-name": job.Name},
+	}
+	for _, selector := range selectors {
+		var pods corev1.PodList
+		if err := r.List(ctx, &pods, client.InNamespace(job.Namespace), selector); err != nil {
+			return nil, false
+		}
+		out = append(out, pods.Items...)
+	}
+	return out, len(out) > 0
 }
 
 func podBelongsToJob(pod *corev1.Pod, job *batchv1.Job) bool {
@@ -332,6 +351,8 @@ func emitRestoreSuccessMetrics(fg *v1alpha1.MysqlFailoverGroup, restoreKind, tar
 	bmetrics.RestoreLastSuccessTimestamp.WithLabelValues(labels...).Set(float64(completion.Unix()))
 	if sourceSizeBytes > 0 {
 		bmetrics.RestoreLastSourceSizeBytes.WithLabelValues(labels...).Set(float64(sourceSizeBytes))
+	} else {
+		bmetrics.RestoreLastSourceSizeBytes.DeleteLabelValues(labels...)
 	}
 }
 
