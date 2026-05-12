@@ -12,9 +12,11 @@ build:
 
   commands:
     # Install Docusaurus dependencies
-    - cd docs/ && npm install
+    - cd docs/ && npm ci
     # Build the site
     - cd docs/ && npm run build
+    # Confirm the LLM bundle includes every docs page before publishing
+    - cd docs/ && npm run verify:llms
     # Copy generated files into Read the Docs directory
     - mkdir --parents $READTHEDOCS_OUTPUT/html/
     - cp --recursive docs/build/* $READTHEDOCS_OUTPUT/html/

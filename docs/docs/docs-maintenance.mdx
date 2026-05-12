@@ -71,7 +71,25 @@ Use these terms consistently:
 - Check upgrade policy.
 - Check known limitations.
 - Build docs locally with `npm run build` from `docs/`.
+- Verify `llms-full.txt` with `npm run verify:llms` from `docs/`.
 - Review examples against the release tag.
+
+## Publishing automation
+
+GitHub Actions treats the documentation site as a release artifact:
+
+| Gate | Workflow | What it proves |
+|---|---|---|
+| Pull requests and `main` pushes | `.github/workflows/ci.yml` | Docusaurus builds and `llms-full.txt` includes every page under `docs/docs/`. |
+| Release tags | `.github/workflows/release.yml` | The release candidate passes the same docs build and `llms-full.txt` coverage check before images and charts publish. |
+| `main` pushes and manual runs | `.github/workflows/docs-publish.yml` | ReadTheDocs builds the `latest` version from the merged commit. |
+| Nightly and after publish | `.github/workflows/docs-publish.yml` | The public site under `https://bloodraven.readthedocs.io/en/latest/` has no same-site broken links. |
+
+Configure the repository secret `READTHEDOCS_TOKEN` before requiring the
+publishing workflow in branch protection. The workflow defaults to the
+ReadTheDocs project `bloodraven` and version `latest`; override them with
+the repository variables `READTHEDOCS_PROJECT_SLUG` and
+`READTHEDOCS_VERSION_SLUG` only if the project slug changes.
 
 ## Validation checklist
 

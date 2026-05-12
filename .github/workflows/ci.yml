@@ -125,6 +125,9 @@ jobs:
       - name: Build docs
         working-directory: docs
         run: npm run build
+      - name: Verify llms-full coverage
+        working-directory: docs
+        run: npm run verify:llms
 
   all-checks:
     name: All Checks

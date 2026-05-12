@@ -24,6 +24,15 @@ npm run build
 
 The build writes static files to `docs/build/`.
 
+Verify the generated LLM bundle after each build:
+
+```bash
+npm run verify:llms
+```
+
+This checks that `docs/build/llms-full.txt` includes every page under
+`docs/docs/`.
+
 ## Edit docs
 
 - Put user-facing pages in `docs/docs/`.
@@ -44,3 +53,16 @@ The build writes static files to `docs/build/`.
 | `docs/docs/log-schema.mdx` | Stable structured log messages and fields. |
 
 When you change structured log messages or documented log fields, update `docs/docs/log-schema.mdx` in the same pull request.
+
+## Publishing checks
+
+Pull requests build the Docusaurus site and verify `llms-full.txt`.
+Pushes to `main` trigger a ReadTheDocs `latest` build through
+`.github/workflows/docs-publish.yml`, then crawl the published site for
+same-site broken links. The workflow needs the `READTHEDOCS_TOKEN`
+repository secret. Optional repository variables:
+
+| Variable | Default |
+|---|---|
+| `READTHEDOCS_PROJECT_SLUG` | `bloodraven` |
+| `READTHEDOCS_VERSION_SLUG` | `latest` |

@@ -7,7 +7,7 @@
 - [ ] 18. `kubectl` plugin
 - [ ] 27. Backup/restore performance guide
 - [ ] 30. Public repo, license, release cadence
-- [ ] 31. Documentation publishing parity
+- [x] 31. Documentation publishing parity
 - [ ] 32. Real-cluster E2E CI gate
 - [x] 33. True shared-node placement model
 - [ ] 34. Investigate using [Scorecard](https://sdk.operatorframework.io/docs/testing-operators/scorecard/) to test Bloodraven operator.
@@ -22,7 +22,7 @@
 
 ## P0 — Production adoption blockers
 
-**31. Documentation publishing parity.** The public ReadTheDocs site has lagged behind `main`, causing current features such as planned failover, multi-site, backup verification/encryption, dashboards, and security docs to appear missing or 404 during external evaluation. Make docs publishing part of CI/release: build Docusaurus on every PR, publish on merge to `main`, verify `llms-full.txt` includes all current docs, and add a link-check job for the public site. The docs site must be a trustworthy source of truth before anyone evaluates Bloodraven for production.
+**31. Documentation publishing parity.** Done: PR and release gates build Docusaurus and verify `llms-full.txt` includes every page under `docs/docs/`; pushes to `main` trigger and wait for the ReadTheDocs `latest` build; and a public-site link check runs after publish and nightly against `https://bloodraven.readthedocs.io/en/latest/`. The workflow and required `READTHEDOCS_TOKEN` setup are documented in `docs/README.md`, `docs/docs/docs-maintenance.mdx`, and `.github/workflows/README.md`.
 
 **32. Real-cluster E2E CI gate.** Unit/component/envtest coverage is not enough for a MySQL failover operator. Add an optional-but-required-before-release k3d/kind CI job that installs the chart and exercises real MySQL pods, PVCs, Services, DNS/DNSEndpoint behavior, taints, planned failover, emergency failover, operator restart, PVC loss, NetworkPolicy partition, backup restore, and PITR verification. This should run at least on release tags and nightly; if cost is acceptable, run a reduced smoke subset on PRs.
 
