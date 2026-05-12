@@ -53,8 +53,8 @@ containers picked up a default.
 
 | Workload | Container | Resource source |
 |---|---|---|
-| MySQL StatefulSet | `mysql` | `spec.sites[].resources` (user-supplied) |
-| MySQL StatefulSet | `sidecar` | `spec.sidecarResources` (user-supplied) |
+| MySQL Deployment (per site) | `mysql` | `spec.sites[].resources` (user-supplied) |
+| MySQL Deployment (per site) | `sidecar` | `spec.sidecarResources` (user-supplied) |
 | Dragonfly StatefulSet | `dragonfly` | `spec.dragonfly.resources` (user-supplied) |
 | Backup Job | `mysqlsh` / `mysqlsh-dump` / `backup-encrypt-upload` | `spec.backup.resources` |
 | Cleanup Job | `mysqlsh` | `spec.backup.resources` |
@@ -77,15 +77,15 @@ future workload needs a separate budget, we add a dedicated field then.
 ## Security context defaults
 
 Two new opt-in fields let cluster operators apply Kubernetes Restricted PSS
-to the MySQL and Dragonfly StatefulSets without forcing a uid/gid migration
+to the MySQL Deployments and Dragonfly StatefulSets without forcing a uid/gid migration
 on existing clusters:
 
 - `spec.podSecurityContext` and `spec.containerSecurityContext` — applied
-  to the MySQL StatefulSet pod and to its `mysql` and `sidecar` containers.
+  to the MySQL Deployment pod and to its `mysql` and `sidecar` containers.
 - `spec.dragonfly.podSecurityContext` and `spec.dragonfly.containerSecurityContext`
   — applied to the Dragonfly StatefulSet.
 
-When these fields are nil (the default), Bloodraven leaves the StatefulSet
+When these fields are nil (the default), Bloodraven leaves the workload's
 PodSpec untouched; existing CRs render identical pods to before. When they
 are set, the operator applies the value verbatim — it does **not** merge
 with internal hardened defaults. The user owns the uid, gid, fsGroup,

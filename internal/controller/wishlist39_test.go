@@ -2,8 +2,8 @@ package controller
 
 // Tests for WISHLIST #39: default resource requests on
 // cleanup/restore/init containers, AutomountServiceAccountToken=false on
-// execution Jobs, and opt-in MySQL + Dragonfly StatefulSet security
-// contexts.
+// execution Jobs, and opt-in MySQL Deployment + Dragonfly StatefulSet
+// security contexts.
 //
 // Helper-name collisions: envMap, fgWithBackup, fgWithEncryptedBackup,
 // fgWithDragonfly, fgInitFromMysqlBackup, succeededSeedBackup,
@@ -25,6 +25,15 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
+
+// hasResourceRequests is a test-only helper that reports whether the
+// supplied ResourceRequirements carries at least one non-zero entry in
+// Requests. Limits are NOT considered — use hasAnyResourceSpec for the
+// broader "user supplied anything" gate. This helper is kept in test
+// code because it has no production callers.
+func hasResourceRequests(r corev1.ResourceRequirements) bool {
+	return hasAnyNonZero(r.Requests)
+}
 
 // --- defaults.go --------------------------------------------------------
 
@@ -479,7 +488,7 @@ func TestReconcileVerificationSchedules_TriggerCronJob_LeavesAutomountUnset(t *t
 	}
 }
 
-// --- MySQL StatefulSet security context (B3) ----------------------------
+// --- MySQL Deployment security context (B3) ----------------------------
 
 func TestReconcileDeployment_NilSecurityContext_PreservesLegacyShape(t *testing.T) {
 	fg := newTestFG()

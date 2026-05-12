@@ -73,14 +73,6 @@ type backupResourcesSource struct {
 	Resources corev1.ResourceRequirements
 }
 
-// hasResourceRequests reports whether the supplied ResourceRequirements
-// carries at least one non-zero entry in `Requests`. A nil/zero block
-// is treated as "unset". Limits are NOT considered — use
-// hasAnyResourceSpec for the broader "user supplied anything" gate.
-func hasResourceRequests(r corev1.ResourceRequirements) bool {
-	return hasAnyNonZero(r.Requests)
-}
-
 // hasAnyResourceSpec reports whether the supplied ResourceRequirements
 // carries any non-zero quantity in either Requests or Limits. Used to
 // preserve user intent when only Limits are set (Kubernetes will then

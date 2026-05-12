@@ -191,7 +191,7 @@ type MysqlFailoverGroupSpec struct {
 	Dragonfly *DragonflySpec `json:"dragonfly,omitempty"`
 
 	// PodSecurityContext optionally sets the pod-level security context for
-	// the MySQL StatefulSet. When nil (default), no security context is
+	// the MySQL Deployment. When nil (default), no security context is
 	// set on the pod; this preserves backward compatibility with existing
 	// clusters whose PVCs were created without FSGroup. Setting this field
 	// will apply the value as-is to the pod; the operator does not merge it
@@ -202,7 +202,7 @@ type MysqlFailoverGroupSpec struct {
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 
 	// ContainerSecurityContext optionally sets the container-level security
-	// context for the MySQL StatefulSet's `mysql` and `sidecar` containers.
+	// context for the MySQL Deployment's `mysql` and `sidecar` containers.
 	// Same backward-compatibility semantics as PodSecurityContext.
 	// +optional
 	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`

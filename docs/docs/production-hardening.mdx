@@ -202,7 +202,7 @@ Owner hints:
 
 ## Opt-in Restricted PSS for MySQL and Dragonfly
 
-The MySQL and Dragonfly StatefulSets render with **no** pod-level or
+The MySQL Deployments and Dragonfly StatefulSets render with **no** pod-level or
 container-level `securityContext` by default, preserving backward compat
 with existing PVCs whose files were created under the image's default uid.
 Existing clusters keep their current PodSpec unchanged on upgrade.
@@ -210,7 +210,7 @@ Existing clusters keep their current PodSpec unchanged on upgrade.
 When you are ready to put the MySQL and Dragonfly pods under the
 [Kubernetes Restricted Pod Security Standard](https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted),
 fill in the new opt-in fields on the `MysqlFailoverGroup` CR. The operator
-applies the value **verbatim** to the StatefulSet — it does not merge it
+applies the value **verbatim** to the workload — it does not merge it
 with hardened defaults, because the right uid/gid depend on the image you
 run. The examples below target the upstream `mysql:9.6` and Dragonfly
 images, both of which run as uid 999.
