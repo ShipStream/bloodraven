@@ -20,9 +20,24 @@ Runs the full PR gate suite in parallel:
 | `test-component` | `make test-component` — component tests under `./test/component/` |
 | `test-envtest` | `make test-envtest` — controller tests using envtest (real API server) |
 | `generate-check` | Runs `make generate && make manifests` and fails if files are stale |
+| `docs-build` | Builds Docusaurus and verifies `llms-full.txt` includes every docs page |
 | `all-checks` | Summary job — use this as the single branch-protection required status check |
 
 **Permissions:** `contents: read` (default)
+
+---
+
+### `docs-link-check.yml` — Public Documentation Link Check
+
+**Triggers:** Manual dispatch and nightly schedule.
+
+ReadTheDocs already watches this repository and publishes `main` to
+`https://bloodraven.readthedocs.io/en/latest/`. This workflow keeps the
+GitHub side deliberately small: it crawls the published site and fails on
+same-site broken links or missing assets.
+
+The workflow does not trigger ReadTheDocs builds and requires no
+repository secrets.
 
 ---
 
@@ -34,13 +49,14 @@ Runs the full PR gate suite in parallel:
 
 Steps:
 
-1. **Draft release** — Creates a draft GitHub Release with image locations, Helm chart locations, install examples, and auto-generated notes.
-2. **Docker images** — Builds multi-arch (`linux/amd64` + `linux/arm64`) images for both targets:
+1. **CI gate** — Runs lint, builds, tests, generate drift checks, chart CRD drift checks, docs build, and `llms-full.txt` coverage before any release artifact is published.
+2. **Draft release** — Creates a draft GitHub Release with image locations, Helm chart locations, install examples, and auto-generated notes.
+3. **Docker images** — Builds multi-arch (`linux/amd64` + `linux/arm64`) images for both targets:
    - `ghcr.io/shipstream/bloodraven:{version}` and `:latest`
    - `ghcr.io/shipstream/bloodraven-sidecar:{version}` and `:latest`
-3. **Cosign image signing** — Keyless OIDC signing via Sigstore (no secrets required).
-4. **Helm chart** — Updates `Chart.yaml` `version`/`appVersion` from the tag, packages the chart, then publishes it to both GitHub Pages and GHCR OCI.
-5. **Publish release** — After Docker and Helm jobs both succeed, the draft release is published. If either fails, the release remains in draft state.
+4. **Cosign image signing** — Keyless OIDC signing via Sigstore (no secrets required).
+5. **Helm chart** — Updates `Chart.yaml` `version`/`appVersion` from the tag, packages the chart, then publishes it to both GitHub Pages and GHCR OCI.
+6. **Publish release** — After Docker and Helm jobs both succeed, the draft release is published. If either fails, the release remains in draft state.
 
 Release output locations:
 
@@ -115,5 +131,4 @@ Weekly automated dependency updates for:
 | Name | Required by | Description |
 |---|---|---|
 | `GITHUB_TOKEN` | All workflows | Automatically provided by GitHub Actions |
-
-No additional secrets are required. Cosign signing uses keyless OIDC and relies only on `id-token: write` permission.
+Cosign signing uses keyless OIDC and relies only on `id-token: write` permission.

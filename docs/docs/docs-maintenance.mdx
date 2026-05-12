@@ -71,7 +71,22 @@ Use these terms consistently:
 - Check upgrade policy.
 - Check known limitations.
 - Build docs locally with `npm run build` from `docs/`.
+- Verify `llms-full.txt` with `npm run verify:llms` from `docs/`.
 - Review examples against the release tag.
+
+## Publishing automation
+
+GitHub Actions treats the documentation site as a release artifact:
+
+| Gate | Workflow | What it proves |
+|---|---|---|
+| Pull requests and `main` pushes | `.github/workflows/ci.yml` | Docusaurus builds and `llms-full.txt` includes every page under `docs/docs/`. |
+| Release tags | `.github/workflows/release.yml` | The release candidate passes the same docs build and `llms-full.txt` coverage check before images and charts publish. |
+| `main` pushes | ReadTheDocs project setting | ReadTheDocs watches the repository and publishes the `latest` version from the merged commit. |
+| Nightly and manual runs | `.github/workflows/docs-link-check.yml` | The public site under `https://bloodraven.readthedocs.io/en/latest/` has no same-site broken links. |
+
+Keep the ReadTheDocs project connected to the repository so merged
+changes publish without a GitHub Actions token or custom API trigger.
 
 ## Validation checklist
 
