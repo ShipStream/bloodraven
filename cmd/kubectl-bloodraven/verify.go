@@ -63,6 +63,9 @@ func runVerifyBackup(args []string, stdout, stderr *os.File) error {
 		return fmt.Errorf("verify-backup requires exactly one positional argument (group name)")
 	}
 	group := positional[0]
+	if group == "" {
+		return fmt.Errorf("group must be non-empty")
+	}
 	if profile == "" {
 		return fmt.Errorf("--profile is required")
 	}
@@ -93,6 +96,18 @@ func runVerifyBackup(args []string, stdout, stderr *os.File) error {
 			}
 			return fmt.Errorf("get MysqlBackup: %w", err)
 		}
+		// Catch a fat-finger combination client-side (e.g.
+		// --backup=orders-nightly-abcde --profile=weekly) so the
+		// verification doesn't spin up a pod that's only going to
+		// fail with a controller-side BackupGroupMismatch event.
+		if ref.Spec.FailoverGroupRef.Name != group {
+			return fmt.Errorf("MysqlBackup %s/%s belongs to failover group %q, not %q",
+				ns, backupName, ref.Spec.FailoverGroupRef.Name, group)
+		}
+		if ref.Spec.ProfileName != profile {
+			return fmt.Errorf("MysqlBackup %s/%s was taken with profile %q, not %q",
+				ns, backupName, ref.Spec.ProfileName, profile)
+		}
 	}
 
 	cr := buildVerificationCR(&fg, ns, group, profile, backupName, triggeredBy)
@@ -120,7 +135,7 @@ func buildVerificationCR(fg *v1alpha1.MysqlFailoverGroup, ns, group, profile, ba
 	}
 	cr := &v1alpha1.MysqlBackupVerification{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: fmt.Sprintf("%s-%s-verify-", group, profile),
+			GenerateName: generateNameWithInfix(group, profile, "verify"),
 			Namespace:    ns,
 			Labels: map[string]string{
 				"shipstream.io/failover-group": group,
@@ -173,12 +188,33 @@ func waitForVerification(stdout, stderr io.Writer, cl client.Client, ns, name st
 	defer tick.Stop()
 	startedAt := time.Now()
 	last := v1alpha1.VerificationPhase("")
+	consecutiveErrors := 0
 
 	for {
 		var v v1alpha1.MysqlBackupVerification
-		if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &v); err != nil {
-			return fmt.Errorf("get MysqlBackupVerification during wait: %w", err)
+		getCtx, getCancel := context.WithTimeout(ctx, 10*time.Second)
+		err := cl.Get(getCtx, client.ObjectKey{Namespace: ns, Name: name}, &v)
+		getCancel()
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("MysqlBackupVerification %s/%s disappeared during wait", ns, name)
+			}
+			if ctx.Err() != nil {
+				return fmt.Errorf("timed out after %s waiting for MysqlBackupVerification %s (last phase: %s)", timeout, name, last)
+			}
+			consecutiveErrors++
+			if consecutiveErrors >= maxWaitGetFailures {
+				return fmt.Errorf("get MysqlBackupVerification during wait: %w (gave up after %d consecutive failures)", err, consecutiveErrors)
+			}
+			fmt.Fprintf(stderr, "warning: get MysqlBackupVerification %s/%s failed: %v; retrying in 5s\n", ns, name, err)
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("timed out after %s waiting for MysqlBackupVerification %s (last phase: %s)", timeout, name, last)
+			case <-tick.C:
+				continue
+			}
 		}
+		consecutiveErrors = 0
 		if v.Status.Phase != last {
 			elapsed := time.Since(startedAt).Round(time.Second)
 			fmt.Fprintf(stdout, "[%s] phase: %s — %s\n", elapsed, emptyDash(string(v.Status.Phase)), v.Status.Message)

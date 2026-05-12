@@ -182,7 +182,7 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 			boolYesNo(st.Replicating),
 			lagString(st.SecondsBehindSource),
 			emptyDash(st.RecoveryState),
-			lastSeenAge(st.LastSeen),
+			timeAge(st.LastSeen),
 		)
 	}
 	if err := siteTw.Flush(); err != nil {

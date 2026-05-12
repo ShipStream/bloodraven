@@ -66,14 +66,86 @@ func TestBuildBackupCR(t *testing.T) {
 	}
 }
 
-func TestBackupGenerateNameTruncatesLongPrefix(t *testing.T) {
-	long := strings.Repeat("a", 200)
-	got := backupGenerateName(long, long, "manual")
-	if len(got) > 253-6 {
-		t.Errorf("GenerateName length = %d, want <= %d", len(got), 253-6)
+func TestBackupGenerateName(t *testing.T) {
+	const maxPrefix = 253 - 6
+
+	cases := []struct {
+		name    string
+		group   string
+		profile string
+		// wantLen is the exact expected length (0 means "no exact
+		// constraint; just check the upper bound").
+		wantLen        int
+		wantSuffixDash bool
+		wantPrefix     string // when set, asserts strings.HasPrefix
+	}{
+		{
+			name:           "short inputs are returned verbatim",
+			group:          "orders",
+			profile:        "nightly",
+			wantLen:        len("orders-nightly-"),
+			wantSuffixDash: true,
+			wantPrefix:     "orders-nightly-",
+		},
+		{
+			name:           "prefix exactly at the budget is not trimmed",
+			group:          strings.Repeat("g", maxPrefix/2-1),
+			profile:        strings.Repeat("p", maxPrefix-(maxPrefix/2-1)-2),
+			wantSuffixDash: true,
+		},
+		{
+			name:           "200/200 input is trimmed and ends in a single dash",
+			group:          strings.Repeat("a", 200),
+			profile:        strings.Repeat("b", 200),
+			wantSuffixDash: true,
+		},
+		{
+			name:           "trailing-dash collapse: trim that lands on a run of dashes yields a single trailing dash",
+			group:          strings.Repeat("a", maxPrefix-4) + "----",
+			profile:        "x",
+			wantSuffixDash: true,
+		},
 	}
-	if !strings.HasSuffix(got, "-") {
-		t.Errorf("GenerateName must end in '-'; got %q", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := backupGenerateName(tc.group, tc.profile)
+			if len(got) > maxPrefix {
+				t.Errorf("GenerateName length = %d, want <= %d (got %q)", len(got), maxPrefix, got)
+			}
+			if tc.wantLen != 0 && len(got) != tc.wantLen {
+				t.Errorf("GenerateName length = %d, want exactly %d (got %q)", len(got), tc.wantLen, got)
+			}
+			if tc.wantSuffixDash {
+				if !strings.HasSuffix(got, "-") {
+					t.Errorf("GenerateName must end in '-'; got %q", got)
+				}
+				if strings.HasSuffix(got, "--") {
+					t.Errorf("GenerateName must not end in '--'; got %q", got)
+				}
+			}
+			if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
+				t.Errorf("GenerateName = %q, want prefix %q", got, tc.wantPrefix)
+			}
+		})
+	}
+}
+
+func TestGenerateNameWithInfix(t *testing.T) {
+	const maxPrefix = 253 - 6
+
+	if got := generateNameWithInfix("orders", "nightly", ""); got != "orders-nightly-" {
+		t.Errorf("backup form = %q, want %q", got, "orders-nightly-")
+	}
+	if got := generateNameWithInfix("orders", "nightly", "verify"); got != "orders-nightly-verify-" {
+		t.Errorf("verify form = %q, want %q", got, "orders-nightly-verify-")
+	}
+	long := strings.Repeat("a", 200)
+	got := generateNameWithInfix(long, long, "verify")
+	if len(got) > maxPrefix {
+		t.Errorf("verify form long input length = %d, want <= %d", len(got), maxPrefix)
+	}
+	if !strings.HasSuffix(got, "-") || strings.HasSuffix(got, "--") {
+		t.Errorf("verify form must end in a single '-'; got %q", got)
 	}
 }
 

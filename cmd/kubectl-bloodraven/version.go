@@ -11,9 +11,12 @@ import (
 // -ldflags when built from a release tag; defaults to "dev" otherwise.
 var Version = "dev"
 
-func runVersion(args []string, stdout io.Writer) error {
+func runVersion(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("version", flag.ContinueOnError)
-	fs.SetOutput(stdout)
+	// Flag parse errors and --help text go to stderr for parity with
+	// the other subcommands; the version string itself stays on stdout
+	// so `v=$(kubectl bloodraven version --short)` keeps working.
+	fs.SetOutput(stderr)
 	short := fs.Bool("short", false, "print only the version string")
 	if err := fs.Parse(args); err != nil {
 		return err

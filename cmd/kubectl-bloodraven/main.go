@@ -17,6 +17,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -51,8 +52,10 @@ func main() {
 		// flag.ErrHelp is the sentinel `flag` returns when -h/--help is
 		// passed against a flag.ContinueOnError FlagSet. We've already
 		// printed the per-command usage at that point, so swallow the
-		// error and exit 0 like every other CLI does.
-		if err == flag.ErrHelp {
+		// error and exit 0 like every other CLI does. Use errors.Is
+		// so a wrapped ErrHelp (returned from a nested FlagSet) is
+		// also recognised.
+		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -72,7 +75,7 @@ func run(args []string, stdout, stderr *os.File) error {
 		fmt.Fprint(stdout, usage)
 		return nil
 	case "version":
-		return runVersion(args[1:], stdout)
+		return runVersion(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "promote":

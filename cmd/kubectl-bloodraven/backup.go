@@ -59,6 +59,9 @@ func runBackup(args []string, stdout, stderr *os.File) error {
 		return fmt.Errorf("backup requires exactly one positional argument (group name)")
 	}
 	group := positional[0]
+	if group == "" {
+		return fmt.Errorf("group must be non-empty")
+	}
 	if profile == "" {
 		return fmt.Errorf("--profile is required")
 	}
@@ -110,7 +113,7 @@ func buildBackupCR(ns, group, profile, sourceSite, triggeredBy string) *v1alpha1
 	}
 	return &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: backupGenerateName(group, profile, triggeredBy),
+			GenerateName: backupGenerateName(group, profile),
 			Namespace:    ns,
 			Labels: map[string]string{
 				"shipstream.io/failover-group": group,
@@ -128,15 +131,30 @@ func buildBackupCR(ns, group, profile, sourceSite, triggeredBy string) *v1alpha1
 }
 
 // backupGenerateName mirrors the controller-side trigger-backup helper:
-// "<group>-<profile>-". Kubernetes appends a 5-char random suffix to
-// GenerateName, so the final resource name length is GenerateName+5;
-// we trim the prefix to stay within the 253-char DNS label budget.
+// "<group>-<profile>-". Trimmed to fit the 253-char resource-name DNS
+// budget after Kubernetes appends a 5-char random suffix.
+func backupGenerateName(group, profile string) string {
+	return generateNameWithInfix(group, profile, "")
+}
+
+// generateNameWithInfix returns "<group>-<profile>-<infix>-" trimmed
+// to fit the 253-char DNS subdomain budget after Kubernetes appends
+// its 5-char random suffix. The infix is empty for `MysqlBackup` and
+// "verify" for `MysqlBackupVerification`.
+//
 // The operator does not require this name shape — only the labels
-// carry semantic meaning — but matching the controller's existing
-// convention keeps logs and dashboards consistent.
-func backupGenerateName(group, profile, triggeredBy string) string {
-	prefix := fmt.Sprintf("%s-%s-", group, profile)
-	// 5 chars for the server-generated suffix; we leave one extra byte
+// carry semantic meaning — but matching the controller's convention
+// keeps logs and dashboards consistent. We trim conservatively so a
+// long group+profile pair doesn't trigger an apiserver 422 ("must be
+// no more than 253 characters") that's painful to debug.
+func generateNameWithInfix(group, profile, infix string) string {
+	var prefix string
+	if infix == "" {
+		prefix = fmt.Sprintf("%s-%s-", group, profile)
+	} else {
+		prefix = fmt.Sprintf("%s-%s-%s-", group, profile, infix)
+	}
+	// 5 chars for the server-generated suffix; leave one extra byte
 	// of headroom for the trailing "-" we re-attach when truncating.
 	const maxPrefix = 253 - 6
 	if len(prefix) > maxPrefix {
@@ -145,7 +163,6 @@ func backupGenerateName(group, profile, triggeredBy string) string {
 		trimmed := strings.TrimRight(prefix[:maxPrefix-1], "-")
 		prefix = trimmed + "-"
 	}
-	_ = triggeredBy // kept in the signature for symmetry; only the label set encodes it.
 	return prefix
 }
 
@@ -169,12 +186,33 @@ func waitForBackup(stdout, stderr io.Writer, cl client.Client, ns, name string, 
 	defer tick.Stop()
 	startedAt := time.Now()
 	last := v1alpha1.BackupPhase("")
+	consecutiveErrors := 0
 
 	for {
 		var b v1alpha1.MysqlBackup
-		if err := cl.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &b); err != nil {
-			return fmt.Errorf("get MysqlBackup during wait: %w", err)
+		getCtx, getCancel := context.WithTimeout(ctx, 10*time.Second)
+		err := cl.Get(getCtx, client.ObjectKey{Namespace: ns, Name: name}, &b)
+		getCancel()
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf("MysqlBackup %s/%s disappeared during wait", ns, name)
+			}
+			if ctx.Err() != nil {
+				return fmt.Errorf("timed out after %s waiting for MysqlBackup %s (last phase: %s)", timeout, name, last)
+			}
+			consecutiveErrors++
+			if consecutiveErrors >= maxWaitGetFailures {
+				return fmt.Errorf("get MysqlBackup during wait: %w (gave up after %d consecutive failures)", err, consecutiveErrors)
+			}
+			fmt.Fprintf(stderr, "warning: get MysqlBackup %s/%s failed: %v; retrying in 5s\n", ns, name, err)
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("timed out after %s waiting for MysqlBackup %s (last phase: %s)", timeout, name, last)
+			case <-tick.C:
+				continue
+			}
 		}
+		consecutiveErrors = 0
 		if b.Status.Phase != last {
 			elapsed := time.Since(startedAt).Round(time.Second)
 			fmt.Fprintf(stdout, "[%s] phase: %s — %s\n", elapsed, emptyDash(string(b.Status.Phase)), b.Status.Message)

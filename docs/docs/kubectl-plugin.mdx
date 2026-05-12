@@ -50,7 +50,7 @@ you'd hit with raw `kubectl get/annotate/create`.
 | Command | What it does | Equivalent without the plugin |
 |---|---|---|
 | `status [group]` | One-shot health view for one group or every group in the namespace | `kubectl get mysqlfailovergroup -o wide` + `kubectl describe` |
-| `promote <group> <site>` | Apply the `planned-failover` annotation with optional `maxLagWait` / `drainTimeout` overrides | `kubectl annotate mysqlfailovergroup <group> bloodraven.shipstream.io/planned-failover=<site>:...` |
+| `promote <group> <site>` | Apply the `planned-failover` annotation with optional `--max-lag-wait` override | `kubectl annotate mysqlfailovergroup <group> bloodraven.shipstream.io/planned-failover=<site>:maxLagWait=...` |
 | `reclone <group> <site>` | Re-clone a divergent site; auto-fills the GTID prefix from `status.sites[].divergentGtid` | `kubectl annotate mysqlfailovergroup <group> bloodraven.shipstream.io/reclone-site=<site>:<prefix>` |
 | `backup <group> --profile <name>` | Create a `MysqlBackup` CR; optional `--source-site`, `--wait` | `kubectl create -f mysqlbackup.yaml` |
 | `verify-backup <group> --profile <name>` | Create a `MysqlBackupVerification` CR; optional `--backup`, `--wait` | `kubectl create -f mysqlbackupverification.yaml` |
@@ -95,14 +95,23 @@ kubectl bloodraven promote orders pdx -n orders
 
 # With per-request override and synchronous wait.
 kubectl bloodraven promote orders pdx \
-  --max-lag-wait 30s --drain-timeout 10s \
+  --max-lag-wait 30s \
   --wait --timeout 5m
 ```
 
+The only per-request annotation override the operator recognises is
+`maxLagWait`. `drainTimeout` is read from
+`spec.plannedFailover.drainTimeout` on the CR — set it there if you
+need a non-default value.
+
 `--wait` polls `.status.plannedFailover.phase` and prints one line per
 phase transition until the state machine reaches `Succeeded`, `Failed`,
-or `Deferred`. The exit code is 0 on `Succeeded` / `Deferred`,
-non-zero on `Failed` or wait timeout — so it's safe to script.
+or `Deferred`. **Exit code is 0 only on `Succeeded`.** `Failed`,
+`Deferred`, and wait timeout all return non-zero. `Deferred` means the
+operator has accepted the request but the anti-flap cooldown is still
+ticking — the operator will retry once the cooldown expires, but the
+promotion has *not* taken effect yet, so scripts that chain commands
+on success will get the right answer.
 
 See [Planned failover](./planned-failover.mdx) for the full lifecycle,
 rollback rules, and what happens when the target is unhealthy / the
@@ -111,11 +120,14 @@ anti-flap cooldown is active.
 ### reclone
 
 ```bash
-# Auto-fills the GTID prefix from status.sites[iad].divergentGtid.
+# Divergent-GTID case: plugin auto-fills the prefix from
+# status.sites[iad].divergentGtid.
 kubectl bloodraven reclone orders iad -n orders
 
-# Cold reclone of a site that has no divergent GTID (allowed; no prefix).
-kubectl bloodraven reclone orders iad -n orders --gtid-prefix=""
+# Cold reclone (no divergent GTID recorded). CLONE INSTANCE wipes the
+# datadir, so the operator requires an explicit confirm token —
+# `--cold` generates it for you from the group name.
+kubectl bloodraven reclone orders iad -n orders --cold
 
 # Explicit override (matching the documented 8-char minimum).
 kubectl bloodraven reclone orders iad -n orders --gtid-prefix=a1b2c3d4

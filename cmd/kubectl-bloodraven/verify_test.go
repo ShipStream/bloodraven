@@ -82,8 +82,13 @@ func TestBuildVerificationCR_HandlesMissingVerificationSpec(t *testing.T) {
 		},
 	}
 	cr := buildVerificationCR(fg, "default", "orders", "nightly", "", "manual")
+	// Log the pointer, not the dereferenced value — the failure branch
+	// only fires when KeepOnFailure is non-nil today, but using `*ptr`
+	// in the failure path is a panic waiting to happen on any future
+	// regression that produces a different invariant. `%+v` of a
+	// *bool prints "0x..." or "<nil>" without dereferencing.
 	if cr.Spec.KeepOnFailure != nil {
-		t.Errorf("KeepOnFailure should default to nil when no VerificationSpec is set; got %v", *cr.Spec.KeepOnFailure)
+		t.Errorf("KeepOnFailure should default to nil when no VerificationSpec is set; got %+v", cr.Spec.KeepOnFailure)
 	}
 	if cr.Spec.PointInTime != nil {
 		t.Errorf("PointInTime should default to nil; got %+v", cr.Spec.PointInTime)

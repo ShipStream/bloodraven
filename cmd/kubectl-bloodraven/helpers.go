@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
@@ -84,13 +85,6 @@ func timeAge(t *metav1.Time) string {
 	return age(t.Time)
 }
 
-func lastSeenAge(t *metav1.Time) string {
-	if t == nil {
-		return "-"
-	}
-	return age(t.Time)
-}
-
 func lagString(secs *int64) string {
 	if secs == nil {
 		return "-"
@@ -136,7 +130,12 @@ func siteCountSummary(fg *v1alpha1.MysqlFailoverGroup) string {
 			writable++
 		case "read-only":
 			readonly++
-		case "unreachable", "unknown":
+		default:
+			// Includes "unreachable", "unknown", and the empty
+			// string the controller writes before the first
+			// successful poll. Bucket them all into "unhealthy"
+			// so the running total always equals the number of
+			// known sites instead of silently dropping rows.
 			unhealthy++
 		}
 	}
@@ -166,19 +165,36 @@ func humanBytes(b int64) string {
 	return fmt.Sprintf("%.1f%ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
+// truncate returns s capped to at most max characters (runes), using
+// "…" as the elision marker when truncation actually happens. Rune-
+// safe: callers can pass arbitrary controller-supplied messages
+// (including non-ASCII MySQL error strings) without producing an
+// invalid-UTF-8 byte sequence on the wire — important for `status -o
+// json`, where downstream JSON parsers reject malformed UTF-8.
 func truncate(s string, max int) string {
-	if max <= 1 || len(s) <= max {
+	if max <= 1 {
 		return s
 	}
-	if max <= 3 {
-		return s[:max]
+	// Count runes, not bytes — len(s) counts bytes. For all-ASCII
+	// strings these are identical and the short-circuit is free; for
+	// the multi-byte case it's a single linear scan.
+	if utf8.RuneCountInString(s) <= max {
+		return s
 	}
-	return s[:max-1] + "…"
+	rs := []rune(s)
+	if max <= 3 {
+		return string(rs[:max])
+	}
+	return string(rs[:max-1]) + "…"
 }
 
 // joinKVs renders annotation key=value override clauses (deterministic
-// order). Used by the promote/reclone commands to build annotation
-// values like "<site>:maxLagWait=30s,drainTimeout=10s".
+// order). Used by the promote command to build annotation values like
+// "<site>:maxLagWait=30s". The operator's annotation parser
+// (internal/controller/planned_failover.go) splits the suffix on ':',
+// so the separator used here MUST be ':' — using ',' would produce a
+// single unparseable kv pair where the value contains the would-be
+// next key.
 func joinKVs(pairs []kv) string {
 	if len(pairs) == 0 {
 		return ""
@@ -187,7 +203,7 @@ func joinKVs(pairs []kv) string {
 	for _, p := range pairs {
 		out = append(out, p.k+"="+p.v)
 	}
-	return strings.Join(out, ",")
+	return strings.Join(out, ":")
 }
 
 type kv struct {

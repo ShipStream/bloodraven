@@ -15,7 +15,6 @@ func TestBuildPlannedFailoverValue(t *testing.T) {
 		name        string
 		site        string
 		maxLag      time.Duration
-		drain       time.Duration
 		want        string
 		wantErr     bool
 		wantErrText string
@@ -32,13 +31,6 @@ func TestBuildPlannedFailoverValue(t *testing.T) {
 			want:   "pdx:maxLagWait=30s",
 		},
 		{
-			name:   "both overrides — deterministic key order (maxLagWait first)",
-			site:   "pdx",
-			maxLag: 30 * time.Second,
-			drain:  10 * time.Second,
-			want:   "pdx:maxLagWait=30s,drainTimeout=10s",
-		},
-		{
 			name:        "empty site is rejected",
 			site:        "",
 			wantErr:     true,
@@ -47,7 +39,7 @@ func TestBuildPlannedFailoverValue(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := buildPlannedFailoverValue(tc.site, tc.maxLag, tc.drain)
+			got, err := buildPlannedFailoverValue(tc.site, tc.maxLag)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil; value=%q", got)

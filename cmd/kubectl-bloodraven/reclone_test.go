@@ -26,7 +26,7 @@ func TestAutoPullDivergentGtidPrefix(t *testing.T) {
 			want: "abcdef012345",
 		},
 		{
-			name: "shorter divergent GTID is preserved verbatim",
+			name: "GTID shorter than minRecloneGtidPrefix returns empty so the caller can refuse",
 			site: "iad",
 			fg: &v1alpha1.MysqlFailoverGroup{
 				Status: v1alpha1.MysqlFailoverGroupStatus{
@@ -35,7 +35,19 @@ func TestAutoPullDivergentGtidPrefix(t *testing.T) {
 					},
 				},
 			},
-			want: "ab12",
+			want: "",
+		},
+		{
+			name: "GTID exactly minRecloneGtidPrefix-long is preserved verbatim",
+			site: "iad",
+			fg: &v1alpha1.MysqlFailoverGroup{
+				Status: v1alpha1.MysqlFailoverGroupStatus{
+					Sites: []v1alpha1.SiteStatus{
+						{Name: "iad", DivergentGtid: "abcd1234"},
+					},
+				},
+			},
+			want: "abcd1234",
 		},
 		{
 			name: "no divergent GTID returns empty so cold reclone is allowed",
