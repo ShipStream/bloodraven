@@ -189,6 +189,23 @@ type MysqlFailoverGroupSpec struct {
 	// resources are created.
 	// +optional
 	Dragonfly *DragonflySpec `json:"dragonfly,omitempty"`
+
+	// PodSecurityContext optionally sets the pod-level security context for
+	// the MySQL Deployment. When nil (default), no security context is
+	// set on the pod; this preserves backward compatibility with existing
+	// clusters whose PVCs were created without FSGroup. Setting this field
+	// will apply the value as-is to the pod; the operator does not merge it
+	// with hardened defaults. To enable Restricted PSS, set the standard
+	// fields (RunAsNonRoot, RunAsUser, RunAsGroup, FSGroup, SeccompProfile).
+	// See docs/docs/production-hardening.mdx for the upgrade procedure.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// ContainerSecurityContext optionally sets the container-level security
+	// context for the MySQL Deployment's `mysql` and `sidecar` containers.
+	// Same backward-compatibility semantics as PodSecurityContext.
+	// +optional
+	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
 }
 
 // SplitBrainPolicySpec configures automated split-brain resolution.

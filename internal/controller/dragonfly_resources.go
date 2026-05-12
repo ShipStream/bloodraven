@@ -183,6 +183,13 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 			InitialDelaySeconds: 2,
 			PeriodSeconds:       5,
 		},
+		// Container-level security context applied verbatim from
+		// spec.dragonfly.containerSecurityContext (opt-in; nil-by-default
+		// to preserve backward-compat). See
+		// docs/docs/production-hardening.mdx for the rationale.
+		// DeepCopy so the cached spec pointer is not aliased in the
+		// rendered PodSpec (matches F4 fix on MySQL wiring).
+		SecurityContext: spec.ContainerSecurityContext.DeepCopy(),
 	}
 
 	// Selector is immutable on a StatefulSet. Only set it on create.
@@ -234,6 +241,11 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 					},
 				},
 			},
+			// Pod-level security context applied verbatim from
+			// spec.dragonfly.podSecurityContext (opt-in; nil-by-default).
+			// DeepCopy so the rendered PodSpec does not alias the
+			// cached spec pointer.
+			SecurityContext: spec.PodSecurityContext.DeepCopy(),
 		},
 	}
 	return nil
@@ -778,6 +790,13 @@ func dragonflyStatefulSetTemplateEqual(current, desired *appsv1.StatefulSet) boo
 	if !equality.Semantic.DeepEqual(curSpec.Volumes, wantSpec.Volumes) {
 		return false
 	}
+	// Pod-level SecurityContext is an opt-in user field
+	// (spec.dragonfly.podSecurityContext); a drifted live STS that
+	// silently kept the old value would defeat the user's hardening, so
+	// the comparison must include it.
+	if !equality.Semantic.DeepEqual(curSpec.SecurityContext, wantSpec.SecurityContext) {
+		return false
+	}
 	cur, ok := dragonflyContainerFromTemplate(curSpec)
 	if !ok {
 		return false
@@ -806,7 +825,11 @@ func dragonflyContainersOwnedFieldsEqual(cur, want corev1.Container) bool {
 		equality.Semantic.DeepEqual(cur.VolumeMounts, want.VolumeMounts) &&
 		equality.Semantic.DeepEqual(cur.Resources, want.Resources) &&
 		equality.Semantic.DeepEqual(cur.LivenessProbe, want.LivenessProbe) &&
-		equality.Semantic.DeepEqual(cur.ReadinessProbe, want.ReadinessProbe)
+		equality.Semantic.DeepEqual(cur.ReadinessProbe, want.ReadinessProbe) &&
+		// Container-level SecurityContext is opt-in
+		// (spec.dragonfly.containerSecurityContext) but must be
+		// drift-detected so a user's hardening actually rolls out.
+		equality.Semantic.DeepEqual(cur.SecurityContext, want.SecurityContext)
 }
 
 func dragonflyStatefulSetRolloutComplete(sts *appsv1.StatefulSet) bool {

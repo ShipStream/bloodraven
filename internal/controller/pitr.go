@@ -483,11 +483,20 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	// context — same UID/GID so the emptyDir is readable, same
 	// seccomp/capability profile.
 	_, initSC := mergeSecurityContexts(nil, nil)
+	// Resources flow through from spec.backup.resources when set;
+	// otherwise default to 100m/128Mi so the init container is admitted
+	// on LimitRange-gated clusters.
+	var initBackupSrc *backupResourcesSource
+	if fg.Spec.Backup != nil {
+		initBackupSrc = &backupResourcesSource{Resources: fg.Spec.Backup.Resources}
+	}
+	initResources := effectiveBackupResources(initBackupSrc, defaultInitContainerResources())
 	init := corev1.Container{
 		Name:            restorePITRInitContainerName,
 		Image:           image,
 		Command:         []string{"bloodraven", "pitr-download"},
 		Env:             initEnv,
+		Resources:       initResources,
 		VolumeMounts:    initMounts,
 		SecurityContext: initSC,
 	}

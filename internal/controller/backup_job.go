@@ -454,9 +454,14 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: bspec.ImagePullSecrets,
 					SecurityContext:  podSC,
-					InitContainers:   initContainers,
-					Containers:       []corev1.Container{mainContainer},
-					Volumes:          volumes,
+					// Backup execution Jobs run mysqlsh/bloodraven and
+					// never call the Kubernetes API, so we drop the
+					// auto-mounted ServiceAccount token to shrink the
+					// blast radius of a container compromise.
+					AutomountServiceAccountToken: boolPtr(false),
+					InitContainers:               initContainers,
+					Containers:                   []corev1.Container{mainContainer},
+					Volumes:                      volumes,
 				},
 			},
 		},

@@ -82,6 +82,23 @@ type DragonflySpec struct {
 	// backup.
 	// +optional
 	Snapshot *DragonflySnapshotSpec `json:"snapshot,omitempty"`
+
+	// PodSecurityContext optionally sets the pod-level security context for
+	// the Dragonfly StatefulSet. When nil (default), no security context is
+	// set on the pod; this preserves backward compatibility with existing
+	// clusters. Setting this field will apply the value as-is to the pod;
+	// the operator does not merge it with hardened defaults. To enable
+	// Restricted PSS, set the standard fields (RunAsNonRoot, RunAsUser,
+	// RunAsGroup, FSGroup, SeccompProfile). See
+	// docs/docs/production-hardening.mdx for the upgrade procedure.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
+
+	// ContainerSecurityContext optionally sets the container-level security
+	// context for the Dragonfly StatefulSet's `dragonfly` container. Same
+	// backward-compatibility semantics as PodSecurityContext.
+	// +optional
+	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
 }
 
 // DragonflySnapshotSpec configures Dragonfly's native snapshot location.

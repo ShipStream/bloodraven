@@ -1147,11 +1147,17 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		}
 
 		_, initSC := mergeSecurityContexts(nil, nil)
+		var initBackupSrc *backupResourcesSource
+		if fg.Spec.Backup != nil {
+			initBackupSrc = &backupResourcesSource{Resources: fg.Spec.Backup.Resources}
+		}
+		initResources := effectiveBackupResources(initBackupSrc, defaultInitContainerResources())
 		initContainers = append(initContainers, corev1.Container{
 			Name:            "decrypt-download",
 			Image:           operatorImageFromEnv,
 			Command:         []string{"bloodraven", "decrypt-download"},
 			Env:             decEnv,
+			Resources:       initResources,
 			VolumeMounts:    decMounts,
 			SecurityContext: initSC,
 		})
@@ -1198,6 +1204,17 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	if jobName == "" {
 		jobName = restoreJobName(fg.Name, targetSite)
 	}
+	// Main mysqlsh container resources flow through from
+	// spec.backup.resources when set; otherwise the helper returns the
+	// defaultRestoreResources() floor (100m/128Mi) so the Job is admitted
+	// on LimitRange-gated clusters even during a fresh-deploy bootstrap
+	// when spec.backup is unset.
+	var mainBackupSrc *backupResourcesSource
+	if fg.Spec.Backup != nil {
+		mainBackupSrc = &backupResourcesSource{Resources: fg.Spec.Backup.Resources}
+	}
+	mainResources := effectiveBackupResources(mainBackupSrc, defaultRestoreResources())
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -1213,13 +1230,19 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,
 					SecurityContext:  podSC,
-					InitContainers:   initContainers,
+					// Restore Jobs (bootstrap and in-place) run mysqlsh
+					// loadDump and the optional decrypt/pitr-download
+					// init containers; none of them talk to the
+					// Kubernetes API.
+					AutomountServiceAccountToken: boolPtr(false),
+					InitContainers:               initContainers,
 					Containers: []corev1.Container{
 						{
 							Name:            backupJobContainerName,
 							Image:           image,
 							Command:         []string{"mysqlsh", "--no-wizard", "--py", "-f", backupScriptsMountPath + "/restore.py"},
 							Env:             env,
+							Resources:       mainResources,
 							VolumeMounts:    mounts,
 							SecurityContext: containerSC,
 						},
