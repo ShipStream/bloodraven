@@ -4,6 +4,9 @@ sidebar_position: 7
 
 # Failover
 
+
+<img src={require('/static/img/infographics/failover.webp').default} alt="failover infographic" />
+
 This page covers the state machine that drives MySQL failover decisions, the exact sequence of operations during a failover, Dragonfly follow-along behavior when enabled, the anti-flap cooldown, and ordered updates for zero-downtime rollouts. For the bounded-RPO contract and the exact set of transactions that can be lost on emergency failover, see [Durability and RPO](./durability-and-rpo.mdx). For what happens when the operator itself is unavailable during a failure, see [Operator availability](./operator-availability.mdx).
 
 ## State machine

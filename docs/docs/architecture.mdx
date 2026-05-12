@@ -5,6 +5,9 @@ description: How the Bloodraven operator, sidecars, MySQL pods, optional Dragonf
 
 # Architecture
 
+
+<img src={require('/static/img/infographics/architecture.webp').default} alt="architecture infographic" />
+
 Bloodraven manages MySQL async replication failover groups. Each `MysqlFailoverGroup` resource describes **two or more sites**, each running a MySQL pod with a sidecar container. When `spec.dragonfly.enabled=true`, each site also gets a single-replica Dragonfly StatefulSet that acts as a cache/session sidekick for the same failover group. Sites carry explicit roles — `primary-candidate` (promotable on failover) or `dr-only` (passive replica) — and at least two primary-candidate sites are required so an active primary always has a promotion target. The operator continuously polls every site and takes corrective action when the topology deviates from the desired state.
 
 Bloodraven uses a **star replication topology** for MySQL: one site is the active primary, and every other site replicates from it. Managed Dragonfly uses the same active-site model: one Dragonfly pod is the master, and non-active sites are configured as replicas of that master. There are no replication chains. See [Multi-site topology](./multi-site.mdx) for the full role model and sizing guidance.

@@ -4,6 +4,9 @@ sidebar_position: 1
 
 # Backup And Restore Overview
 
+
+<img src={require('/static/img/infographics/backup-overview.webp').default} alt="backup overview infographic" />
+
 Bloodraven backs up MySQL with mysqlsh `util.dumpInstance()` and restores with `util.loadDump()`. Backups are configured on `MysqlFailoverGroup.spec.backup`; one-off backup runs use `MysqlBackup`.
 
 ## Choose a storage backend

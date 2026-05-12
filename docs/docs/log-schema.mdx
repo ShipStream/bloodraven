@@ -4,6 +4,9 @@ sidebar_position: 6
 
 # Log schema contract
 
+
+<img src={require('/static/img/infographics/log-schema.webp').default} alt="log schema infographic" />
+
 Bloodraven emits structured JSON logs from both the operator (`bloodraven`) and the per-MySQL sidecar (`bloodraven-sidecar`). This page is the contract that downstream log pipelines key off of: which fields are stable, what the `msg` values are for the events you care about, and what guarantees we make about changing them.
 
 If you only need one rule of thumb: **filter on `msg` for the event vocabulary in the [Event reference](#event-reference) below — those strings are stable. Everything else is best-effort.**
