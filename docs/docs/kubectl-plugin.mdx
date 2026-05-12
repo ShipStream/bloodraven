@@ -1,0 +1,203 @@
+---
+sidebar_position: 6
+---
+
+# kubectl bloodraven plugin
+
+`kubectl-bloodraven` is the operator's day-2 sidekick: a single static
+binary that wraps the annotation grammars and on-demand CR shapes
+the operator already understands. It is the recommended way to drive
+a planned failover, kick off an ad-hoc backup or verification, or
+peek at the current health of a `MysqlFailoverGroup` without
+reaching for raw `kubectl annotate` / `kubectl apply` incantations.
+
+The plugin only touches API objects — it never talks to MySQL
+directly. Any operator-side validation (cooldown, site role, divergent
+GTID prefix match, profile existence) still applies, so the safety
+properties documented under [Failover](./failover.mdx),
+[Planned failover](./planned-failover.mdx), and the backup pages are
+preserved.
+
+## Install
+
+The plugin follows the [`kubectl` plugin
+convention](https://kubernetes.io/docs/tasks/extend-kubectl/kubectl-plugins/):
+any executable named `kubectl-<name>` on `$PATH` is callable as
+`kubectl <name>`.
+
+```bash
+make build-kubectl-plugin       # produces bin/kubectl-bloodraven
+make install-kubectl-plugin     # copies it into ~/.local/bin (preferred)
+# or
+sudo install -m 0755 bin/kubectl-bloodraven /usr/local/bin/
+
+kubectl bloodraven version
+```
+
+Pinning a release tag at build time:
+
+```bash
+make build-kubectl-plugin KUBECTL_PLUGIN_VERSION=v0.2.0
+```
+
+The plugin reuses your existing kubeconfig (`$KUBECONFIG` /
+`~/.kube/config`), honours `--context` / `--namespace` (`-n`), and
+inherits the RBAC of the user invoking it — exactly the same surface
+you'd hit with raw `kubectl get/annotate/create`.
+
+## Commands
+
+| Command | What it does | Equivalent without the plugin |
+|---|---|---|
+| `status [group]` | One-shot health view for one group or every group in the namespace | `kubectl get mysqlfailovergroup -o wide` + `kubectl describe` |
+| `promote <group> <site>` | Apply the `planned-failover` annotation with optional `--max-lag-wait` override | `kubectl annotate mysqlfailovergroup <group> bloodraven.shipstream.io/planned-failover=<site>:maxLagWait=...` |
+| `reclone <group> <site>` | Re-clone a divergent site; auto-fills the GTID prefix from `status.sites[].divergentGtid` | `kubectl annotate mysqlfailovergroup <group> bloodraven.shipstream.io/reclone-site=<site>:<prefix>` |
+| `backup <group> --profile <name>` | Create a `MysqlBackup` CR; optional `--source-site`, `--wait` | `kubectl create -f mysqlbackup.yaml` |
+| `verify-backup <group> --profile <name>` | Create a `MysqlBackupVerification` CR; optional `--backup`, `--wait` | `kubectl create -f mysqlbackupverification.yaml` |
+
+Global flags accepted by every command:
+
+```
+--kubeconfig string   Path to kubeconfig (defaults to $KUBECONFIG or ~/.kube/config)
+--context string      Kubeconfig context to use
+--namespace, -n       Namespace (defaults to the kubeconfig context's namespace, or "default")
+--output, -o string   "table" (default), "wide", "json", "yaml" — for commands that print data
+```
+
+### status
+
+Per-group health, including site state, replication, recovery progress,
+planned-failover phase, in-flight restores, backup schedules, and PITR
+window.
+
+```bash
+# Detailed report for one group.
+kubectl bloodraven status orders -n orders
+
+# Whole-namespace table.
+kubectl bloodraven status -n orders
+
+# Wide table with planned-failover and recovery columns.
+kubectl bloodraven status -n orders -o wide
+
+# All namespaces.
+kubectl bloodraven status --all-namespaces
+
+# JSON/YAML for piping into other tools.
+kubectl bloodraven status orders -o json | jq '.status.activeSite'
+```
+
+### promote (planned failover)
+
+```bash
+# Same effect as `kubectl annotate ... planned-failover=pdx`.
+kubectl bloodraven promote orders pdx -n orders
+
+# With per-request override and synchronous wait.
+kubectl bloodraven promote orders pdx \
+  --max-lag-wait 30s \
+  --wait --timeout 5m
+```
+
+The only per-request annotation override the operator recognises is
+`maxLagWait`. `drainTimeout` is read from
+`spec.plannedFailover.drainTimeout` on the CR — set it there if you
+need a non-default value.
+
+`--wait` polls `.status.plannedFailover.phase` and prints one line per
+phase transition until the state machine reaches `Succeeded`, `Failed`,
+or `Deferred`. **Exit code is 0 only on `Succeeded`.** `Failed`,
+`Deferred`, and wait timeout all return non-zero. `Deferred` means the
+operator has accepted the request but the anti-flap cooldown is still
+ticking — the operator will retry once the cooldown expires, but the
+promotion has *not* taken effect yet, so scripts that chain commands
+on success will get the right answer.
+
+See [Planned failover](./planned-failover.mdx) for the full lifecycle,
+rollback rules, and what happens when the target is unhealthy / the
+anti-flap cooldown is active.
+
+### reclone
+
+```bash
+# Divergent-GTID case: plugin auto-fills the prefix from
+# status.sites[iad].divergentGtid.
+kubectl bloodraven reclone orders iad -n orders
+
+# Cold reclone (no divergent GTID recorded). CLONE INSTANCE wipes the
+# datadir, so the operator requires an explicit confirm token —
+# `--cold` generates it for you from the group name.
+kubectl bloodraven reclone orders iad -n orders --cold
+
+# Explicit override (matching the documented 8-char minimum).
+kubectl bloodraven reclone orders iad -n orders --gtid-prefix=a1b2c3d4
+```
+
+### backup
+
+```bash
+# Ad-hoc backup against the configured "nightly" profile.
+kubectl bloodraven backup orders --profile nightly -n orders
+
+# Pin the source site, e.g. for taking a dump from the new replica
+# right after a planned failover.
+kubectl bloodraven backup orders --profile ondemand --source-site iad -n orders
+
+# Block until done.
+kubectl bloodraven backup orders --profile nightly --wait --timeout 1h -n orders
+```
+
+The plugin validates that the profile exists in
+`spec.backup.profiles` and that any `--source-site` is in
+`spec.sites` before posting the CR — so a typo fails immediately
+instead of being deferred to the operator's reconcile loop.
+
+### verify-backup
+
+```bash
+# Verify the latest Succeeded MysqlBackup for the nightly profile.
+kubectl bloodraven verify-backup orders --profile nightly -n orders
+
+# Verify a specific backup with a blocking wait.
+kubectl bloodraven verify-backup orders --profile nightly \
+  --backup orders-nightly-abcde --wait --timeout 30m -n orders
+```
+
+When the profile carries a `verification` block with PITR /
+sanity-check options, those settings are copied onto the manual CR
+verbatim, so a manual run reproduces what the scheduled CronJob would
+do.
+
+## Why a plugin instead of raw `kubectl`?
+
+Three motivations:
+
+1. **Discoverability.** `kubectl bloodraven --help` lists every Bloodraven
+   capability without an admin having to grep CRD YAML.
+2. **Safety nets.** Pre-flight validation refuses obviously-broken
+   inputs (wrong site, wrong profile, missing CR) so the operator's
+   event log isn't polluted with `Failed{UnknownSite}` from typos.
+3. **Streaming `--wait`.** Long-running operations (planned failover,
+   backup, verification) emit one progress line per phase transition,
+   which makes CI/CD pipelines and runbooks dramatically easier than
+   polling `kubectl get -w` and parsing JSONPath.
+
+The plugin is intentionally thin: it never replaces the operator's
+authority over MySQL, never bypasses the cooldown, and never holds
+state of its own. Treat it as a typing aid that prints a useful
+summary at the end.
+
+## Troubleshooting
+
+* `error: MysqlFailoverGroup ... not found` — check `--namespace` (or
+  `--context`) and run `kubectl get mysqlfailovergroups -A` to confirm
+  the CR exists.
+* `error: site "..." is not defined in spec.sites` — list the sites
+  with `kubectl bloodraven status <group>`; spelling is case-sensitive.
+* `Planned failover failed: reason=CooldownActive` — the anti-flap
+  cooldown is still ticking. Wait for the indicated `retryAfter`, or
+  set `spec.plannedFailover.onCooldown: defer` to queue the request.
+* `timed out after Xs waiting for ...` — the operation is still in
+  progress on the server side; re-run `kubectl bloodraven status` to
+  inspect the current phase. `--wait --timeout` is the polling budget,
+  not the operator's budget.

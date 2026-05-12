@@ -1,6 +1,6 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos test test-unit test-component test-envtest test-e2e test-integration fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all
+.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-integration fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all
 
 ##@ General
 
@@ -19,6 +19,47 @@ build-sidecar: ## Build the sidecar binary
 
 build-playground-chaos: ## Build the playground chaos test runner
 	go build -o bin/playground-chaos ./cmd/playground-chaos
+
+# KUBECTL_PLUGIN_VERSION stamps the version string visible to
+# `kubectl bloodraven version`. Pass `make build-kubectl-plugin
+# KUBECTL_PLUGIN_VERSION=v0.2.0` at release time.
+KUBECTL_PLUGIN_VERSION ?= dev
+
+build-kubectl-plugin: ## Build the kubectl-bloodraven plugin binary
+	go build -ldflags "-X main.Version=$(KUBECTL_PLUGIN_VERSION)" -o bin/kubectl-bloodraven ./cmd/kubectl-bloodraven
+
+# install-kubectl-plugin drops the binary into the first writable
+# directory on $PATH that looks like a kubectl plugin location. We try
+# ~/.local/bin first (creating it if needed), then walk $PATH for any
+# user-writable directory, and only fall back to /usr/local/bin when
+# nothing else works — printing a clear message if even that requires
+# sudo. Override with `make install-kubectl-plugin DEST=/some/dir`.
+install-kubectl-plugin: build-kubectl-plugin ## Install the kubectl-bloodraven plugin onto $PATH
+	@dest="$(DEST)"; \
+	if [ -z "$$dest" ]; then \
+	  cand="$${HOME}/.local/bin"; \
+	  mkdir -p "$$cand" 2>/dev/null || true; \
+	  if [ -d "$$cand" ] && [ -w "$$cand" ]; then dest="$$cand"; fi; \
+	fi; \
+	if [ -z "$$dest" ]; then \
+	  IFS=:; for p in $$PATH; do \
+	    [ -z "$$p" ] && continue; \
+	    case "$$p" in /sbin|/usr/sbin|/bin|/usr/bin) continue;; esac; \
+	    if [ -d "$$p" ] && [ -w "$$p" ]; then dest="$$p"; break; fi; \
+	  done; unset IFS; \
+	fi; \
+	if [ -z "$$dest" ]; then \
+	  if [ -w /usr/local/bin ]; then dest=/usr/local/bin; \
+	  else \
+	    echo "no writable directory found on \$$PATH; pick one and re-run, e.g.:"; \
+	    echo "  sudo install -m 0755 bin/kubectl-bloodraven /usr/local/bin/kubectl-bloodraven"; \
+	    echo "  make install-kubectl-plugin DEST=\$$HOME/bin"; \
+	    exit 1; \
+	  fi; \
+	fi; \
+	echo "installing bin/kubectl-bloodraven into $$dest"; \
+	install -m 0755 bin/kubectl-bloodraven "$$dest/kubectl-bloodraven"; \
+	echo "run 'kubectl bloodraven version' to verify"
 
 docker-build: ## Build Docker images for both operator and sidecar
 	docker build --target bloodraven -t bloodraven .

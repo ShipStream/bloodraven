@@ -58,6 +58,8 @@ make build               # Both operator and sidecar
 make build-bloodraven    # Operator only
 make build-sidecar       # Sidecar only
 make docker-build        # Docker images for both
+make build-kubectl-plugin    # Build kubectl-bloodraven plugin
+make install-kubectl-plugin  # Build and install plugin onto $PATH
 
 # Test
 make test                # Fast tests: unit and component

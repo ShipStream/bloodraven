@@ -1,13 +1,14 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Primary code lives in the root Go module. `cmd/bloodraven` is the Kubernetes operator entrypoint; `cmd/sidecar` is the per-MySQL sidecar. API types live in `api/v1alpha1`, controller logic in `internal/controller`, and supporting packages in `internal/mysql`, `internal/platform`, `internal/sidecar`, `internal/state`, and `internal/metrics`. End-to-end and scenario-style tests live in `test/e2e`. Treat `bitpoke/` and `orchestrator/` as bundled upstream references, not the default place for new feature work.
+Primary code lives in the root Go module. `cmd/bloodraven` is the Kubernetes operator entrypoint; `cmd/sidecar` is the per-MySQL sidecar; `cmd/kubectl-bloodraven` is the day-2 `kubectl` plugin (status / promote / reclone / backup / verify-backup, built via `make build-kubectl-plugin`). API types live in `api/v1alpha1`, controller logic in `internal/controller`, and supporting packages in `internal/mysql`, `internal/platform`, `internal/sidecar`, `internal/state`, and `internal/metrics`. End-to-end and scenario-style tests live in `test/e2e`. Treat `bitpoke/` and `orchestrator/` as bundled upstream references, not the default place for new feature work.
 
 ## Build, Test, and Development Commands
 Run commands from the repository root:
 
 - `make build` builds the operator binary at `bin/bloodraven`.
 - `go build ./cmd/sidecar` builds the sidecar binary.
+- `make build-kubectl-plugin` builds `bin/kubectl-bloodraven` (the day-2 `kubectl` plugin). Override `KUBECTL_PLUGIN_VERSION=<tag>` to stamp a release; `make install-kubectl-plugin` drops the binary onto `$PATH`.
 - `make test` runs `go test ./...` across unit and e2e-style packages.
 - `make vet` runs `go vet ./...`.
 - `make lint` runs `golangci-lint run ./...`. `golangci-lint` is not vendored; install it with `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest` (it lands in `$(go env GOPATH)/bin`). CI installs the same tool with the same command in `.github/workflows/ci.yml`, so local and CI output match when you run this.

@@ -4,7 +4,7 @@
 
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
 - [x] 9. Restore duration and size metrics
-- [ ] 18. `kubectl` plugin
+- [x] 18. `kubectl` plugin
 - [ ] 27. Backup/restore performance guide
 - [ ] 30. Public repo, license, release cadence
 - [ ] 31. Documentation publishing parity
@@ -46,7 +46,7 @@
 
 ## P2 — Observability and operability
 
-**18. `kubectl` plugin.** `kubectl bloodraven status`, `kubectl bloodraven promote <group> <site>`, `kubectl bloodraven backup <group> --profile nightly`, `kubectl bloodraven verify-backup <name>`. Reduces the `kubectl exec ... mysql -e ...` surface area that's currently in the ops docs.
+**18. `kubectl` plugin.** Done: `cmd/kubectl-bloodraven` ships `status`, `promote`, `reclone`, `backup`, and `verify-backup`. Each writes only API objects the operator already understands, validates inputs before posting, and supports synchronous `--wait` on the long-running ones. Built via `make build-kubectl-plugin`; documented under [kubectl plugin](docs/docs/kubectl-plugin.mdx).
 
 ## P3 — Documentation deliverables
 
