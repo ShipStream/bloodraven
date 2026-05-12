@@ -1,0 +1,25 @@
+name: Docs Link Check
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 4 * * *'
+
+permissions:
+  contents: read
+
+env:
+  PUBLIC_DOCS_BASE_URL: https://bloodraven.readthedocs.io/en/latest/
+
+jobs:
+  public-link-check:
+    name: Public Docs Link Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+      - name: Check public docs links
+        working-directory: docs
+        run: npm run check:public-links

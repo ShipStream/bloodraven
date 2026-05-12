@@ -22,7 +22,7 @@
 
 ## P0 — Production adoption blockers
 
-**31. Documentation publishing parity.** Done: PR and release gates build Docusaurus and verify `llms-full.txt` includes every page under `docs/docs/`; pushes to `main` trigger and wait for the ReadTheDocs `latest` build; and a public-site link check runs after publish and nightly against `https://bloodraven.readthedocs.io/en/latest/`. The workflow and required `READTHEDOCS_TOKEN` setup are documented in `docs/README.md`, `docs/docs/docs-maintenance.mdx`, and `.github/workflows/README.md`.
+**31. Documentation publishing parity.** Done: PR and release gates build Docusaurus and verify `llms-full.txt` includes every page under `docs/docs/`; ReadTheDocs watches the repository and publishes `main`; and a public-site link check runs nightly and on demand against `https://bloodraven.readthedocs.io/en/latest/`. The CI checks and link-check workflow are documented in `docs/README.md`, `docs/docs/docs-maintenance.mdx`, and `.github/workflows/README.md`.
 
 **32. Real-cluster E2E CI gate.** Unit/component/envtest coverage is not enough for a MySQL failover operator. Add an optional-but-required-before-release k3d/kind CI job that installs the chart and exercises real MySQL pods, PVCs, Services, DNS/DNSEndpoint behavior, taints, planned failover, emergency failover, operator restart, PVC loss, NetworkPolicy partition, backup restore, and PITR verification. This should run at least on release tags and nightly; if cost is acceptable, run a reduced smoke subset on PRs.
 

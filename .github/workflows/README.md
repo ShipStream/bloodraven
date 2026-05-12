@@ -27,31 +27,17 @@ Runs the full PR gate suite in parallel:
 
 ---
 
-### `docs-publish.yml` — Documentation Publishing
+### `docs-link-check.yml` — Public Documentation Link Check
 
-**Triggers:** Push to `main`, manual dispatch, and nightly schedule.
+**Triggers:** Manual dispatch and nightly schedule.
 
-Jobs:
+ReadTheDocs already watches this repository and publishes `main` to
+`https://bloodraven.readthedocs.io/en/latest/`. This workflow keeps the
+GitHub side deliberately small: it crawls the published site and fails on
+same-site broken links or missing assets.
 
-1. **Publish ReadTheDocs** — On `main` pushes and manual runs, builds the
-   docs, verifies `llms-full.txt`, triggers the ReadTheDocs `latest` build,
-   and waits for it to finish.
-2. **Public Docs Link Check** — After publish, and nightly, crawls
-   `https://bloodraven.readthedocs.io/en/latest/` and fails on same-site
-   broken links or missing assets.
-
-Required repository secret:
-
-| Name | Description |
-|---|---|
-| `READTHEDOCS_TOKEN` | ReadTheDocs API token with permission to trigger builds for the `bloodraven` project. |
-
-Optional repository variables:
-
-| Name | Default |
-|---|---|
-| `READTHEDOCS_PROJECT_SLUG` | `bloodraven` |
-| `READTHEDOCS_VERSION_SLUG` | `latest` |
+The workflow does not trigger ReadTheDocs builds and requires no
+repository secrets.
 
 ---
 
@@ -145,6 +131,4 @@ Weekly automated dependency updates for:
 | Name | Required by | Description |
 |---|---|---|
 | `GITHUB_TOKEN` | All workflows | Automatically provided by GitHub Actions |
-| `READTHEDOCS_TOKEN` | `docs-publish.yml` | ReadTheDocs API token used to trigger the public docs build on `main` merges |
-
 Cosign signing uses keyless OIDC and relies only on `id-token: write` permission.

@@ -57,12 +57,7 @@ When you change structured log messages or documented log fields, update `docs/d
 ## Publishing checks
 
 Pull requests build the Docusaurus site and verify `llms-full.txt`.
-Pushes to `main` trigger a ReadTheDocs `latest` build through
-`.github/workflows/docs-publish.yml`, then crawl the published site for
-same-site broken links. The workflow needs the `READTHEDOCS_TOKEN`
-repository secret. Optional repository variables:
-
-| Variable | Default |
-|---|---|
-| `READTHEDOCS_PROJECT_SLUG` | `bloodraven` |
-| `READTHEDOCS_VERSION_SLUG` | `latest` |
+ReadTheDocs watches the repository and publishes `main` without a
+GitHub Actions trigger. `.github/workflows/docs-link-check.yml` crawls
+the published site nightly and on manual dispatch to catch same-site
+broken links.
