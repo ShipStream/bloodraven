@@ -200,6 +200,174 @@ Owner hints:
 - [ ] If you're using TLS with a private CA, mount the CA into the
       sidecar and operator pods so their MySQL connections trust it.
 
+## Opt-in Restricted PSS for MySQL and Dragonfly
+
+The MySQL and Dragonfly StatefulSets render with **no** pod-level or
+container-level `securityContext` by default, preserving backward compat
+with existing PVCs whose files were created under the image's default uid.
+Existing clusters keep their current PodSpec unchanged on upgrade.
+
+When you are ready to put the MySQL and Dragonfly pods under the
+[Kubernetes Restricted Pod Security Standard](https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted),
+fill in the new opt-in fields on the `MysqlFailoverGroup` CR. The operator
+applies the value **verbatim** to the StatefulSet — it does not merge it
+with hardened defaults, because the right uid/gid depend on the image you
+run. The examples below target the upstream `mysql:9.6` and Dragonfly
+images, both of which run as uid 999.
+
+### MySQL — `spec.podSecurityContext` / `spec.containerSecurityContext`
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+spec:
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+  # ...rest of spec unchanged
+```
+
+The container's `readOnlyRootFilesystem` is `false` because the upstream
+`mysql` image writes temp files outside the data PVC (`/tmp`,
+`/var/run/mysqld`, `/etc/mysql/conf.d` for entrypoint scratch). Leaving the
+root filesystem writable here is intentional; the PVC is what matters for
+durability. If your image supports a read-only root with explicit emptyDir
+mounts for those paths, set `readOnlyRootFilesystem: true` and add the
+mounts via your own pod template overlay.
+
+The `fsGroupChangePolicy: OnRootMismatch` setting tells Kubernetes to skip
+the recursive `chown` on the data volume when the top-level directory is
+already owned by `fsGroup`. On a fresh PVC the chown runs once; on a PVC
+that was already migrated it is a no-op. See [Upgrading existing
+clusters](#upgrading-existing-clusters) below for the migration path on a
+PVC that was created without an `fsGroup`.
+
+`spec.containerSecurityContext` is applied to both the `mysql` and the
+`sidecar` containers. The two containers share a uid/gid because they
+share the data volume.
+
+### Dragonfly — `spec.dragonfly.podSecurityContext` / `spec.dragonfly.containerSecurityContext`
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+spec:
+  dragonfly:
+    enabled: true
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      fsGroup: 999
+      fsGroupChangePolicy: OnRootMismatch
+      seccompProfile:
+        type: RuntimeDefault
+    containerSecurityContext:
+      runAsNonRoot: true
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
+    # ...rest of dragonfly spec unchanged
+```
+
+Dragonfly **does** support a read-only root filesystem in this
+configuration: its only writable path is the data volume where it
+persists its RDB snapshot. Set `readOnlyRootFilesystem: true`.
+
+### Upgrading existing clusters
+
+If you already run Bloodraven in production and your MySQL data PVCs were
+created **before** these fields existed, the files on disk are owned by
+whatever uid the image originally ran as (uid 999 for upstream `mysql:9.6`,
+something else for a fork). Naively applying `fsGroup: 999` to a PVC
+created by a pod that ran as uid 0 will trigger a recursive chown on every
+pod start that can take many minutes on a large data volume — Kubernetes
+holds the pod in `ContainerCreating` for the duration, which on a primary
+is a write outage.
+
+Two safe migration paths:
+
+**Option A — let Kubernetes handle it once with `OnRootMismatch`.** If you
+are willing to take one extended pod-start window per pod, set
+`fsGroupChangePolicy: OnRootMismatch` (as in the example above) and apply
+the spec change. Kubernetes will run the recursive chown the first time
+each pod restarts, then notice the root directory is already correct and
+skip on subsequent starts. Roll the StatefulSet one pod at a time during a
+maintenance window; do **not** restart both sites at once.
+
+**Option B — chown the data offline first.** For very large volumes (1 TB+)
+or operations teams that prefer to control the chown, run an offline Job
+against each MySQL PVC **after** scaling the StatefulSet down to zero, then
+apply the spec change. Example:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: orders-iad-chown
+  namespace: orders
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: chown
+          image: registry.k8s.io/build-image/debian-base:bookworm-v1.0.2
+          command:
+            - sh
+            - -c
+            - chown -R 999:999 /var/lib/mysql
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            # Adjust the claim name to the MysqlFailoverGroup's per-site PVC.
+            claimName: data-orders-iad-0
+```
+
+Apply the Job per site, wait for it to complete, then apply the
+`MysqlFailoverGroup` spec change and scale the StatefulSet back up. Repeat
+on the second site after the first one is healthy.
+
+### Service account tokens on backup, restore, cleanup, and verification Jobs
+
+Backup, restore, restore-in-place, cleanup, and verification execution Jobs
+now render with `automountServiceAccountToken: false`. None of these jobs
+call the Kubernetes API at runtime — they execute `mysqlsh`, `cleanup.py`,
+or `verify.sh` and communicate with MySQL over TCP — so the SA token has
+no purpose and is one less credential to leak from a compromised pod.
+
+Schedule-trigger CronJob pods (the `MysqlBackup` / `MysqlBackupVerification`
+creator pods, not the execution Jobs they create) keep the SA token
+because they POST a backup or verification CR through the in-cluster API
+and need their `ServiceAccount`'s create permission.
+
 ## Disaster readiness
 
 - [ ] Rehearse failover on the playground (`./playground/chaos.sh

@@ -43,6 +43,59 @@ Bloodraven has three layers:
 - Enable Prometheus scraping, Grafana dashboards, and alerts.
 - Link alerts to [Runbooks](./runbooks.mdx).
 
+## Resource defaults
+
+Bloodraven now sets a default `resources.requests` on every container it creates,
+so the operator's workloads can be scheduled on clusters that enforce a
+`ResourceQuota` or a `LimitRange` requiring requests. Where the user already
+has a CR override field, that field continues to win; only previously-unset
+containers picked up a default.
+
+| Workload | Container | Resource source |
+|---|---|---|
+| MySQL StatefulSet | `mysql` | `spec.sites[].resources` (user-supplied) |
+| MySQL StatefulSet | `sidecar` | `spec.sidecarResources` (user-supplied) |
+| Dragonfly StatefulSet | `dragonfly` | `spec.dragonfly.resources` (user-supplied) |
+| Backup Job | `mysqlsh` / `mysqlsh-dump` / `backup-encrypt-upload` | `spec.backup.resources` |
+| Cleanup Job | `mysqlsh` | `spec.backup.resources` |
+| Verification Job | `mysqlsh` | `spec.verification.resources` |
+| Verification Job init | `decrypt-download` | `spec.backup.resources` when set, else `100m` CPU / `128Mi` memory (requests only) |
+| Restore Job (bootstrap + in-place) | `mysqlsh` | `spec.backup.resources` when set, else `100m` CPU / `128Mi` memory (requests only) |
+| Restore Job init | `pitr-download`, `decrypt-download` | `spec.backup.resources` when set, else `100m` CPU / `128Mi` memory (requests only) |
+| Operator (Helm) | `operator` | `.Values.resources` in `charts/bloodraven/values.yaml` |
+
+The `100m`/`128Mi` init-container default matches the operator's own request
+in the Helm chart. It is intentionally conservative: the AES-GCM decrypt
+stream and the PITR archive walker tolerate small requests when the
+container can burst on the host. Override by setting `spec.backup.resources`
+on the failover group; the same value flows to the init containers.
+
+The cleanup Job reuses `spec.backup.resources` because it runs the same
+`cleanup.py` payload sized by the same backup profile parameters. If a
+future workload needs a separate budget, we add a dedicated field then.
+
+## Security context defaults
+
+Two new opt-in fields let cluster operators apply Kubernetes Restricted PSS
+to the MySQL and Dragonfly StatefulSets without forcing a uid/gid migration
+on existing clusters:
+
+- `spec.podSecurityContext` and `spec.containerSecurityContext` — applied
+  to the MySQL StatefulSet pod and to its `mysql` and `sidecar` containers.
+- `spec.dragonfly.podSecurityContext` and `spec.dragonfly.containerSecurityContext`
+  — applied to the Dragonfly StatefulSet.
+
+When these fields are nil (the default), Bloodraven leaves the StatefulSet
+PodSpec untouched; existing CRs render identical pods to before. When they
+are set, the operator applies the value verbatim — it does **not** merge
+with internal hardened defaults. The user owns the uid, gid, fsGroup,
+seccomp profile, and capability set, because the right values depend on
+which MySQL and Dragonfly images you run.
+
+See [Production Hardening → Opt-in Restricted PSS for MySQL and Dragonfly](./production-hardening.mdx#opt-in-restricted-pss-for-mysql-and-dragonfly)
+for worked examples and the upgrade procedure for existing clusters whose
+`/var/lib/mysql` PVCs were created without an `fsGroup`.
+
 ## Related pages
 
 - [Production Install](./install-production.mdx)

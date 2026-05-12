@@ -15,7 +15,7 @@
 - [x] 36. CR replication enrichment stalls after in-lifecycle recovery
 - [x] 37. Auto-fail-back to returning original primary is undocumented
 - [x] 38. `status.lastFailoverTarget` not durable across operator restart
-- [ ] 39. Default resource requests and security contexts audit
+- [x] 39. Default resource requests and security contexts audit
 - [ ] 40. Observability review gate for metrics and alerts
 - [ ] 41. Safe Secret watch narrowing design
 - [ ] 42. Namespace-scoped watch/cache mode evaluation
@@ -32,7 +32,7 @@
 
 **9. Restore duration and size metrics.** Done: restores now publish data-plane duration, last-success timestamp, and last-source-size metrics with bounded labels. Both bootstrap and in-place restore status surfaces source backup size/coordinates, target GTID/binlog coordinates, and PITR replay summary when available.
 
-**39. Default resource requests and security contexts audit.** High priority: review every operator-created Pod, Deployment, StatefulSet, Job, and CronJob path for default CPU/memory requests, security context defaults, and user override fields. Bloodraven exposes several resource override fields and backup/restore jobs have hardened defaults, but the Operator SDK guidance is stricter: production clusters with ResourceQuota or LimitRange may reject pods that omit requests. Add safe defaults where backward-compatible; otherwise document why callers must set them.
+**39. Default resource requests and security contexts audit.** Done: every operator-created Pod, Deployment, StatefulSet, Job, and CronJob path was inventoried for resource requests and security-context coverage. Resource gaps are filled on the cleanup, restore, and verification Jobs (main container reuses `spec.backup.resources`; init containers — `pitr-download`, `decrypt-download` — default to `100m`/`128Mi` requests, no limits, and accept the same override). Execution Jobs (backup, cleanup, restore, restore-in-place, verification) now set `automountServiceAccountToken: false`; schedule-trigger CronJob pods keep the token because they POST a CR through the in-cluster API. The Helm operator container picks up `seccompProfile: RuntimeDefault` to match the pod-level setting. New opt-in CR fields `spec.podSecurityContext`, `spec.containerSecurityContext`, `spec.dragonfly.podSecurityContext`, and `spec.dragonfly.containerSecurityContext` let cluster operators turn on Kubernetes Restricted PSS for the MySQL and Dragonfly StatefulSets on their own schedule; defaults stay unchanged so existing PVCs are not disrupted on upgrade. See `docs/docs/production-hardening.mdx` for the worked migration. Follow-up (#39-followup): tune `terminationGracePeriodSeconds` for MySQL and replace the conservative 100m/128Mi init-container default with profile-driven sizing.
 
 **40. Observability review gate for metrics and alerts.** High priority: add a repeatable release/PR checklist for new metrics, recording rules, alerts, dashboard panels, Events, and runbook links. Each new metric or alert should have documentation, label-cardinality review, and a mapped runbook or explicit reason one is not needed. This is cheap process work that prevents observability drift as new operator behaviors ship.
 

@@ -217,6 +217,17 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 		pullSecrets = bspec.ImagePullSecrets
 	}
 
+	// Resources flow through from spec.backup.resources when set. Falls
+	// back to defaultRestoreResources() (100m/128Mi) when the failover
+	// group has no spec.backup block, so the Job is admitted on
+	// LimitRange-gated clusters even on a fresh deploy.
+	var cleanupResources corev1.ResourceRequirements
+	if bspec != nil {
+		cleanupResources = effectiveBackupResources(&backupResourcesSource{Resources: bspec.Resources}, defaultRestoreResources())
+	} else {
+		cleanupResources = defaultRestoreResources()
+	}
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cleanupJobName(backup.Name),
@@ -232,12 +243,16 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,
 					SecurityContext:  podSC,
+					// Cleanup runs cleanup.py against storage; it never
+					// talks to the Kubernetes API.
+					AutomountServiceAccountToken: boolPtr(false),
 					Containers: []corev1.Container{
 						{
 							Name:            backupJobContainerName,
 							Image:           image,
 							Command:         []string{"mysqlsh", "--no-wizard", "--py", "-f", backupScriptsMountPath + "/cleanup.py"},
 							Env:             envVars,
+							Resources:       cleanupResources,
 							VolumeMounts:    volumeMounts,
 							SecurityContext: containerSC,
 						},

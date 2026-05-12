@@ -468,11 +468,20 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		})
 
 		_, initSC := mergeSecurityContexts(nil, nil)
+		// Use spec.backup.resources when set; otherwise the helper
+		// returns the 100m/128Mi default so the init container clears
+		// LimitRange admission.
+		var initBackupSrc *backupResourcesSource
+		if fg.Spec.Backup != nil {
+			initBackupSrc = &backupResourcesSource{Resources: fg.Spec.Backup.Resources}
+		}
+		initResources := effectiveBackupResources(initBackupSrc, defaultInitContainerResources())
 		initContainers = append(initContainers, corev1.Container{
 			Name:            "decrypt-download",
 			Image:           operatorImageFromEnv,
 			Command:         []string{"bloodraven", "decrypt-download"},
 			Env:             decEnv,
+			Resources:       initResources,
 			VolumeMounts:    decMounts,
 			SecurityContext: initSC,
 		})
@@ -510,7 +519,11 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,
 					SecurityContext:  podSC,
-					InitContainers:   initContainers,
+					// verify.sh and the optional decrypt init container
+					// both run against storage and never call the
+					// Kubernetes API.
+					AutomountServiceAccountToken: boolPtr(false),
+					InitContainers:               initContainers,
 					Containers: []corev1.Container{
 						{
 							Name:  backupJobContainerName,

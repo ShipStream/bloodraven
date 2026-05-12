@@ -856,6 +856,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				InitialDelaySeconds: 5,
 				PeriodSeconds:       5,
 			},
+			// Container-level security context is applied verbatim from
+			// spec.containerSecurityContext (opt-in; nil-by-default to
+			// preserve backward-compat with existing clusters). The
+			// operator does not merge with hardened defaults — see
+			// docs/docs/production-hardening.mdx for the rationale.
+			// DeepCopy so each container has an independent pointer
+			// (the cached spec pointer must not be shared across
+			// containers in the rendered PodSpec).
+			SecurityContext: fg.Spec.ContainerSecurityContext.DeepCopy(),
 		}
 
 		operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
@@ -1009,6 +1018,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				InitialDelaySeconds: 3,
 				PeriodSeconds:       5,
 			},
+			// Apply the same user-supplied container security context
+			// to the sidecar so the pod meets the same Restricted PSS
+			// gate as the mysql container (nil = backward compatible).
+			// DeepCopy to avoid pointer aliasing with the mysql
+			// container's SecurityContext (same source pointer
+			// otherwise — see F4 in WISHLIST #39 review).
+			SecurityContext: fg.Spec.ContainerSecurityContext.DeepCopy(),
 		}
 
 		containers := []corev1.Container{mysqlContainer, sidecarContainer}
@@ -1133,10 +1149,34 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 							{Name: "config", MountPath: "/etc/mysql/config-map"},
 							{Name: "conf", MountPath: "/etc/mysql/conf.d"},
 						},
+						// Mirror the main mysql container's user-supplied
+						// SecurityContext onto the operator-injected init
+						// container. Without this, Restricted PSS admission
+						// rejects the pod because the init container has no
+						// drop-ALL / runAsNonRoot / seccomp settings. nil
+						// stays nil (backward-compat). DeepCopy per F4 so
+						// the init container does not alias the mysql
+						// container's pointer.
+						SecurityContext: fg.Spec.ContainerSecurityContext.DeepCopy(),
+						// Default init-container resources so LimitRange
+						// admission accepts the pod. Users who need a
+						// different shape can override via the spec; this
+						// init container is operator-managed so we don't
+						// expose a separate field for it.
+						Resources: defaultInitContainerResources(),
 					},
 				}, fg.Spec.ExtraInitContainers...),
 				Containers: append(containers, fg.Spec.ExtraContainers...),
 				Volumes:    volumes,
+				// Pod-level security context is applied verbatim from
+				// spec.podSecurityContext (opt-in; nil-by-default to
+				// preserve backward-compat with existing clusters whose
+				// /var/lib/mysql PVCs were created without FSGroup). See
+				// docs/docs/production-hardening.mdx for the migration
+				// procedure to enable Restricted PSS. DeepCopy so the
+				// rendered PodSpec does not alias the cached spec
+				// pointer.
+				SecurityContext: fg.Spec.PodSecurityContext.DeepCopy(),
 			},
 		}
 		if fg.Spec.TerminationGracePeriodSeconds != nil {
@@ -1466,6 +1506,13 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 	fmt.Fprintf(h, "sidecar=%s\n", fg.Spec.SidecarImage)
 	fmt.Fprintf(h, "resources=%v\n", site.Resources)
 	fmt.Fprintf(h, "sidecarResources=%v\n", fg.Spec.SidecarResources)
+	// Opt-in security contexts must be part of the rolling-hash so that
+	// toggling spec.{pod,container}SecurityContext actually rolls the
+	// pods. The %v rendering of these corev1 structs is deterministic
+	// (no maps), which matches the hash-stability contract this helper
+	// already relies on for resources/sidecarResources.
+	fmt.Fprintf(h, "podSC=%v\n", fg.Spec.PodSecurityContext)
+	fmt.Fprintf(h, "containerSC=%v\n", fg.Spec.ContainerSecurityContext)
 	// Sort mysqlConf keys for deterministic hash
 	keys := make([]string, 0, len(fg.Spec.MysqlConf))
 	for k := range fg.Spec.MysqlConf {
