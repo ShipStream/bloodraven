@@ -47,6 +47,7 @@ const sidebars = {
       items: [
         'operations-overview',
         'operations',
+        'kubectl-plugin',
         'runbooks',
         'troubleshooting',
         'failover',

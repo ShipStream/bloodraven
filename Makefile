@@ -1,6 +1,6 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos test test-unit test-component test-envtest test-e2e test-integration fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all
+.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-integration fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all
 
 ##@ General
 
@@ -19,6 +19,24 @@ build-sidecar: ## Build the sidecar binary
 
 build-playground-chaos: ## Build the playground chaos test runner
 	go build -o bin/playground-chaos ./cmd/playground-chaos
+
+# KUBECTL_PLUGIN_VERSION stamps the version string visible to
+# `kubectl bloodraven version`. Pass `make build-kubectl-plugin
+# KUBECTL_PLUGIN_VERSION=v0.2.0` at release time.
+KUBECTL_PLUGIN_VERSION ?= dev
+
+build-kubectl-plugin: ## Build the kubectl-bloodraven plugin binary
+	go build -ldflags "-X main.Version=$(KUBECTL_PLUGIN_VERSION)" -o bin/kubectl-bloodraven ./cmd/kubectl-bloodraven
+
+# install-kubectl-plugin drops the binary into the first writable
+# directory on $PATH that looks like a kubectl plugin location. Falls
+# back to /usr/local/bin which always works with sudo.
+install-kubectl-plugin: build-kubectl-plugin ## Install the kubectl-bloodraven plugin onto $PATH
+	@dest="$${HOME}/.local/bin"; \
+	if [ ! -d "$$dest" ]; then dest=/usr/local/bin; fi; \
+	echo "installing bin/kubectl-bloodraven into $$dest"; \
+	install -m 0755 bin/kubectl-bloodraven "$$dest/kubectl-bloodraven"; \
+	echo "run 'kubectl bloodraven version' to verify"
 
 docker-build: ## Build Docker images for both operator and sidecar
 	docker build --target bloodraven -t bloodraven .
