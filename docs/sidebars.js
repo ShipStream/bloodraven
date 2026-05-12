@@ -87,7 +87,6 @@ const sidebars = {
       items: [
         'examples',
         'docs-maintenance',
-        'operator-sdk-best-practices-assessment',
       ],
     },
   ],
