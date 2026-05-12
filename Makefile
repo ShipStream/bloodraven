@@ -29,11 +29,34 @@ build-kubectl-plugin: ## Build the kubectl-bloodraven plugin binary
 	go build -ldflags "-X main.Version=$(KUBECTL_PLUGIN_VERSION)" -o bin/kubectl-bloodraven ./cmd/kubectl-bloodraven
 
 # install-kubectl-plugin drops the binary into the first writable
-# directory on $PATH that looks like a kubectl plugin location. Falls
-# back to /usr/local/bin which always works with sudo.
+# directory on $PATH that looks like a kubectl plugin location. We try
+# ~/.local/bin first (creating it if needed), then walk $PATH for any
+# user-writable directory, and only fall back to /usr/local/bin when
+# nothing else works — printing a clear message if even that requires
+# sudo. Override with `make install-kubectl-plugin DEST=/some/dir`.
 install-kubectl-plugin: build-kubectl-plugin ## Install the kubectl-bloodraven plugin onto $PATH
-	@dest="$${HOME}/.local/bin"; \
-	if [ ! -d "$$dest" ]; then dest=/usr/local/bin; fi; \
+	@dest="$(DEST)"; \
+	if [ -z "$$dest" ]; then \
+	  cand="$${HOME}/.local/bin"; \
+	  mkdir -p "$$cand" 2>/dev/null || true; \
+	  if [ -d "$$cand" ] && [ -w "$$cand" ]; then dest="$$cand"; fi; \
+	fi; \
+	if [ -z "$$dest" ]; then \
+	  IFS=:; for p in $$PATH; do \
+	    [ -z "$$p" ] && continue; \
+	    case "$$p" in /sbin|/usr/sbin|/bin|/usr/bin) continue;; esac; \
+	    if [ -d "$$p" ] && [ -w "$$p" ]; then dest="$$p"; break; fi; \
+	  done; unset IFS; \
+	fi; \
+	if [ -z "$$dest" ]; then \
+	  if [ -w /usr/local/bin ]; then dest=/usr/local/bin; \
+	  else \
+	    echo "no writable directory found on \$$PATH; pick one and re-run, e.g.:"; \
+	    echo "  sudo install -m 0755 bin/kubectl-bloodraven /usr/local/bin/kubectl-bloodraven"; \
+	    echo "  make install-kubectl-plugin DEST=\$$HOME/bin"; \
+	    exit 1; \
+	  fi; \
+	fi; \
 	echo "installing bin/kubectl-bloodraven into $$dest"; \
 	install -m 0755 bin/kubectl-bloodraven "$$dest/kubectl-bloodraven"; \
 	echo "run 'kubectl bloodraven version' to verify"

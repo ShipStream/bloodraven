@@ -30,7 +30,9 @@ Flags:
   --context string      Kubeconfig context to use
   --namespace, -n       Namespace (default: context namespace, or "default")
   --output, -o string   "table" (default), "wide", "json", or "yaml"
-  --all-namespaces, -A  List groups across all namespaces (output=table only)
+  --all-namespaces, -A  List groups across all namespaces (combines with
+                        any --output value; -A is ignored when a positional
+                        group name is given since the group is namespaced)
 `
 
 func runStatus(args []string, stdout, stderr *os.File) error {

@@ -3,7 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
+	"path/filepath"
+	"strings"
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -27,7 +28,13 @@ type commonFlags struct {
 }
 
 func registerCommonFlags(fs *flag.FlagSet, cf *commonFlags) {
-	fs.StringVar(&cf.kubeconfig, "kubeconfig", os.Getenv("KUBECONFIG"), "path to kubeconfig (defaults to $KUBECONFIG or ~/.kube/config)")
+	// Leave the default empty so resolve() can defer to
+	// NewDefaultClientConfigLoadingRules(), which already honours
+	// $KUBECONFIG including the colon/semicolon-separated path-list
+	// form (`a:b:c`). Defaulting to os.Getenv("KUBECONFIG") and then
+	// stuffing the value into loader.ExplicitPath would break that case
+	// — ExplicitPath only accepts a single file.
+	fs.StringVar(&cf.kubeconfig, "kubeconfig", "", "path to kubeconfig (defaults to $KUBECONFIG or ~/.kube/config; accepts a single file)")
 	fs.StringVar(&cf.context, "context", "", "kubeconfig context to use (default: current-context)")
 	fs.StringVar(&cf.namespace, "namespace", "", "namespace (default: context namespace, or \"default\")")
 	fs.StringVar(&cf.namespace, "n", "", "namespace (short flag for --namespace)")
@@ -39,10 +46,22 @@ func registerCommonFlags(fs *flag.FlagSet, cf *commonFlags) {
 // reading defaults from kubeconfig the same way kubectl does. We use
 // clientcmd directly rather than client-go's `InClusterConfig`
 // fallback because this plugin always runs outside the cluster.
+//
+// Kubeconfig source precedence (mirrors kubectl):
+//  1. --kubeconfig (if a single path is given, set as ExplicitPath; if
+//     the user explicitly hands us a path-list, split it into the
+//     loader Precedence the same way client-go does for $KUBECONFIG).
+//  2. $KUBECONFIG via NewDefaultClientConfigLoadingRules() — already
+//     handles the path-list form natively.
+//  3. ~/.kube/config (the default home rule from the loader).
 func (cf *commonFlags) resolve() (*rest.Config, string, error) {
 	loader := clientcmd.NewDefaultClientConfigLoadingRules()
 	if cf.kubeconfig != "" {
-		loader.ExplicitPath = cf.kubeconfig
+		if paths := splitKubeconfigPathList(cf.kubeconfig); len(paths) > 1 {
+			loader.Precedence = paths
+		} else {
+			loader.ExplicitPath = cf.kubeconfig
+		}
 	}
 	overrides := &clientcmd.ConfigOverrides{}
 	if cf.context != "" {
@@ -81,4 +100,20 @@ func (cf *commonFlags) newClient() (client.Client, string, error) {
 		return nil, "", fmt.Errorf("build client: %w", err)
 	}
 	return cl, ns, nil
+}
+
+// splitKubeconfigPathList splits a $KUBECONFIG-style path list using the
+// OS-appropriate separator (`:` on Unix, `;` on Windows). Empty segments
+// are dropped, matching client-go's loader behaviour. Returns a single-
+// element slice when the input contains no separator so callers can use
+// `len(...) > 1` as a quick "is this a list" check.
+func splitKubeconfigPathList(s string) []string {
+	parts := strings.Split(s, string(filepath.ListSeparator))
+	out := parts[:0]
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
