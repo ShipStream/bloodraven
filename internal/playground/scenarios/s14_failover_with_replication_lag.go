@@ -17,21 +17,29 @@ const (
 	s14TableName     = "lag_test"
 	s14RowCount      = 25
 	s14WriteDuration = 5 * time.Second
+	// s14SourceDelay must be comfortably larger than s14WriteDuration so
+	// every seeded row sits unapplied in the relay log when we kill the
+	// source. 15s gives the writes 5s to land, the kill ~1s to take
+	// effect, and still leaves ~9s of delay budget before the applier
+	// would have caught up on its own.
+	s14SourceDelay = 15 * time.Second
 )
 
 // scenario14FailoverWithReplicationLag quantifies the relay-log drain
 // behavior under async-replication lag. Procedure:
 //
 //  1. Pick the active primary and current read-only replica.
-//  2. `STOP REPLICA SQL_THREAD` on the replica. The IO thread keeps
-//     fetching from the primary so writes land in the relay log, but
-//     the SQL applier is paused so they're not yet applied.
-//  3. Write s14RowCount rows on the primary spread over s14WriteDuration.
-//     Capture the resulting gtid_executed.
-//  4. Verify the replica has all primary GTIDs across its already
-//     applied set plus relay logs (Executed_Gtid_Set + Retrieved_Gtid_Set)
-//     but has NOT yet applied the new rows (row count on the replica is
-//     below s14RowCount).
+//  2. `CHANGE REPLICATION SOURCE TO SOURCE_DELAY=<s14SourceDelay>` on
+//     the replica. Both IO and SQL threads keep running, but the
+//     applier intentionally lags the IO thread by that duration — the
+//     primary's writes land in the relay log immediately, but the
+//     applier won't commit them until the delay elapses.
+//  3. Write s14RowCount rows on the primary spread over s14WriteDuration
+//     (much shorter than s14SourceDelay). Capture the resulting
+//     gtid_executed.
+//  4. Verify the replica has all primary GTIDs in its retrieved/executed
+//     sets (relay log is complete) but has NOT yet applied the new rows
+//     (row count on the replica is below s14RowCount).
 //  5. Scale the primary deployment to 0 — the relay logs are intact on
 //     the replica, only the source is unavailable.
 //  6. Wait for activeSite to flip and the operator to complete failover.
@@ -40,16 +48,21 @@ const (
 //     promotion must have applied every transaction in the relay log
 //     before flipping super_read_only off.
 //
-// We use `STOP REPLICA SQL_THREAD` (the IO thread keeps running) rather
-// than the `SOURCE_DELAY` variant because the operator's checkRecovery
-// path actively repairs broken replication. Specifically: when both
-// IO and SQL threads stop on a read-only site, `RecoverOldPrimary`
-// runs `RESET REPLICA ALL` and re-establishes replication, which would
-// wipe any SOURCE_DELAY we set. With `STOP REPLICA SQL_THREAD` the IO
-// thread stays running, so the operator's `IORunning || SQLRunning`
-// idle check stays satisfied and it leaves us alone.
+// Why SOURCE_DELAY and NOT `STOP REPLICA SQL_THREAD`: the operator's
+// recovery path treats a read-only site as "broken" the moment
+// `replicaStatusHealthy(repl) == repl.IORunning && repl.SQLRunning &&
+// repl.SourceHost != ""` returns false. With the SQL thread stopped,
+// that check fails. If `status.lastFailoverTarget` is set (i.e. ANY
+// prior scenario already drove a failover this lifetime), the operator
+// will call `RecoverOldPrimary` → `STOP REPLICA + RESET REPLICA ALL +
+// CHANGE REPLICATION SOURCE + START REPLICA`, which restarts the SQL
+// thread inside our 5-second write window and turns the precondition
+// check into a flake (passes when run first, fails when run anywhere
+// after a failover scenario). SOURCE_DELAY keeps both threads running
+// so `replicaStatusHealthy` stays true and the operator does not
+// touch the replica.
 //
-// Cleanup restarts the SQL thread on whichever site ends up read-only
+// Cleanup clears the delay on whichever site ends up read-only
 // (auto-fail-back can make it the originally-primary site rather than
 // the originally-replica site).
 func scenario14FailoverWithReplicationLag() runner.Scenario {
@@ -99,13 +112,25 @@ func s14InjectLagAndSeed() runner.Step {
 			if err != nil {
 				return fmt.Errorf("open replica mysql: %w", err)
 			}
-			// STOP REPLICA SQL_THREAD: stops only the applier, IO
-			// continues fetching. The operator's checkRecovery condition
-			// is `IORunning || SQLRunning`, so leaving IO running keeps
-			// the operator from running RESET REPLICA ALL on us.
-			if _, err := replicaClient.Exec(ctx, "STOP REPLICA SQL_THREAD"); err != nil {
-				return fmt.Errorf("stop replica SQL_THREAD on %s: %w", replica, err)
+			// Set SOURCE_DELAY so both IO and SQL threads keep running
+			// (operator's replicaStatusHealthy stays true → no auto-
+			// recovery on us) but the applier waits the configured delay
+			// before committing each fetched transaction. This is the
+			// "alternative" path documented in chaos-scenarios.md §14 and
+			// the only one that's resilient to a non-empty
+			// status.lastFailoverTarget from a prior scenario in the same
+			// playground lifetime.
+			delaySQL := []string{
+				"STOP REPLICA",
+				fmt.Sprintf("CHANGE REPLICATION SOURCE TO SOURCE_DELAY = %d", int(s14SourceDelay.Seconds())),
+				"START REPLICA",
 			}
+			for _, stmt := range delaySQL {
+				if _, err := replicaClient.Exec(ctx, stmt); err != nil {
+					return fmt.Errorf("apply replication delay on %s (%q): %w", replica, stmt, err)
+				}
+			}
+			env.Capture.Note(fmt.Sprintf("SOURCE_DELAY=%ds applied on replica %s", int(s14SourceDelay.Seconds()), replica))
 
 			primary, err := env.MySQL(active)
 			if err != nil {
@@ -155,6 +180,9 @@ func s14InjectLagAndSeed() runner.Step {
 			// Verify the lag built up before killing the source. Without
 			// this hard precondition the scenario could pass after testing
 			// an already-caught-up replica instead of relay-log drain.
+			// SOURCE_DELAY keeps both threads RUNNING; the applier
+			// intentionally lags, so we check `executed_set ⊂ post_write`
+			// (applier hasn't caught up) rather than thread state.
 			rs, err := replicaClient.ShowReplicaStatus(ctx)
 			if err != nil {
 				return fmt.Errorf("show replica status on %s: %w", replica, err)
@@ -164,8 +192,8 @@ func s14InjectLagAndSeed() runner.Step {
 			if !rs.Configured {
 				return fmt.Errorf("replica %s has no replication configured", replica)
 			}
-			if !rs.IORunning || rs.SQLRunning {
-				return fmt.Errorf("lag precondition not met on %s: want IO running and SQL stopped, got io=%v sql=%v",
+			if !rs.IORunning || !rs.SQLRunning {
+				return fmt.Errorf("lag precondition not met on %s: SOURCE_DELAY keeps both threads running, got io=%v sql=%v (the operator may have auto-restarted broken replication mid-test)",
 					replica, rs.IORunning, rs.SQLRunning)
 			}
 			replicaAvailableGtid := rs.ExecutedGtidSet
@@ -251,16 +279,19 @@ func s14VerifyDrainRecoveredAll() runner.Step {
 	}
 }
 
-// s14RestartSQLThreadAndDropSchema starts the replica SQL thread on
-// whichever site is currently read-only (in case auto-fail-back made
-// the originally-primary site the new replica), and drops the test
-// schema from the writable site. Runs as the scenario's Cleanup hook
-// AFTER chaos.Revert (which scales the original primary back up) but
-// BEFORE GlobalRecover.
+// s14ResetReplicationDelay clears the SOURCE_DELAY on whichever site
+// is currently read-only (auto-fail-back can make it the originally-
+// primary site rather than the originally-replica site) and drops the
+// test schema from the writable site. Runs as the scenario's Cleanup
+// hook AFTER chaos.Revert (which scales the original primary back up)
+// but BEFORE GlobalRecover.
 //
 // Best-effort: if either site is mid-recovery and we can't open a
 // connection, we skip and let the next reset handle it. Failing here
-// would obscure the actual scenario result.
+// would obscure the actual scenario result. The operator's auto-
+// recovery path will also reset replication metadata if it fires (and
+// drop the SOURCE_DELAY along with it), so the worst case is that this
+// cleanup is a no-op.
 func s14ResetReplicationDelay(ctx context.Context, env *runner.Env) error {
 	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
@@ -272,14 +303,21 @@ func s14ResetReplicationDelay(ctx context.Context, env *runner.Env) error {
 		}
 		client, err := env.MySQL(s.Name)
 		if err != nil {
-			env.Capture.Note(fmt.Sprintf("cleanup: skip SQL_THREAD restart on %s: %v", s.Name, err))
+			env.Capture.Note(fmt.Sprintf("cleanup: skip SOURCE_DELAY clear on %s: %v", s.Name, err))
 			continue
 		}
-		// START is idempotent: if the SQL thread is already running, MySQL
-		// returns an error code we ignore. The operator may also resume
-		// it via the recovery path; this is just a safety net.
-		if _, err := client.Exec(ctx, "START REPLICA SQL_THREAD"); err != nil {
-			env.Capture.Note(fmt.Sprintf("cleanup: START REPLICA SQL_THREAD on %s: %v", s.Name, err))
+		// Clear the delay we set. STOP/CHANGE/START is idempotent — if
+		// the operator has already restarted replication during recovery
+		// the CHANGE just overwrites whatever it set.
+		resetSQL := []string{
+			"STOP REPLICA",
+			"CHANGE REPLICATION SOURCE TO SOURCE_DELAY = 0",
+			"START REPLICA",
+		}
+		for _, stmt := range resetSQL {
+			if _, err := client.Exec(ctx, stmt); err != nil {
+				env.Capture.Note(fmt.Sprintf("cleanup: %q on %s: %v", stmt, s.Name, err))
+			}
 		}
 	}
 	for _, s := range mfg.Status.Sites {

@@ -117,10 +117,22 @@ func s05InjectKillPrimaryThenOperator() runner.Step {
 // the kill via Revert as a safety net; replay it here so the cluster
 // sees the original primary back online while we still own the
 // scenario clock.
+//
+// Race trap (fixed): the original implementation polled status.sites[]
+// for `writable=1 read-only=1 ready=True` immediately after killing the
+// operator. The killed operator's last status write is still in the CR
+// (one writable, one read-only, Ready=True from the pre-kill state),
+// so the first poll matches and the scenario "passes" in ~100ms —
+// before the new operator has even started, let alone observed the
+// post-injection state. The cluster can then deadlock in `NoPrimary`
+// because the in-flight failover never completed. We now require the
+// new operator to have stamped a fresh observedGeneration tick AND for
+// the converged state to hold for a small dwell time so a transient
+// snapshot doesn't count.
 func s05ObserveSafeConvergence() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "scale primary back up; cluster reconverges to one writable + Ready=True",
+		Name:  "scale primary back up; cluster reconverges to one writable + Ready=True (stable for 10s)",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			// Replay the scale-back-up reverter now so convergence
 			// happens inside scenario scope. The runner's cleanup-time
@@ -130,10 +142,35 @@ func s05ObserveSafeConvergence() runner.Step {
 			}
 			env.Capture.Note("original primary scaled back to 1; awaiting safe convergence")
 
-			waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+			// Refresh the metrics port-forward because the operator pod
+			// was just respawned; the prior port-forward is bound to a
+			// dead pod identity.
+			if env.RefreshMetrics != nil {
+				_ = env.RefreshMetrics(ctx)
+			}
+
+			// Block until the new operator pod has rolled out and is
+			// Ready. Without this we race the old operator's stale
+			// status writes (which look healthy because they were taken
+			// before the kill). The Deployment respawns the operator
+			// within ~5–10s; allow 90s to absorb scheduler/network
+			// jitter on cold playgrounds.
+			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			defer cancel()
-			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				"writable=1 read-only=1 ready=True blocked=0",
+			if err := env.Chaos.WaitForOperatorAvailable(waitCtx); err != nil {
+				return fmt.Errorf("operator pod did not become available: %w", err)
+			}
+			env.Capture.Note("new operator pod is Available; waiting for stable converged state")
+
+			// Now wait for the cluster to actually converge. Require the
+			// state to hold for 10s so we cannot mistake a stale snapshot
+			// or a brief mid-promotion window for the final settled
+			// shape.
+			convergeCtx, convergeCancel := context.WithTimeout(ctx, 4*time.Minute)
+			defer convergeCancel()
+			var healthySince time.Time
+			_, err := env.Wait.UntilCR(convergeCtx, env.Namespace,
+				"writable=1 read-only=1 ready=True blocked=0 (stable for 10s)",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other, blocked []string
 					for _, s := range mfg.Status.Sites {
@@ -158,13 +195,25 @@ func s05ObserveSafeConvergence() runner.Step {
 							break
 						}
 					}
-					msg := fmt.Sprintf(
-						"active=%q writable=%v read-only=%v other=%v blocked=%v ready=%s",
-						mfg.Status.ActiveSite, writable, readOnly, other, blocked, ready,
-					)
-					done := mfg.Status.ActiveSite != "" &&
+					healthy := mfg.Status.ActiveSite != "" &&
 						len(writable) == 1 && len(readOnly) == 1 &&
 						len(blocked) == 0 && ready == "True"
+					if healthy {
+						if healthySince.IsZero() {
+							healthySince = time.Now()
+						}
+					} else {
+						healthySince = time.Time{}
+					}
+					stable := time.Duration(0)
+					if !healthySince.IsZero() {
+						stable = time.Since(healthySince)
+					}
+					done := healthy && stable >= 10*time.Second
+					msg := fmt.Sprintf(
+						"active=%q writable=%v read-only=%v other=%v blocked=%v ready=%s stable=%s/10s",
+						mfg.Status.ActiveSite, writable, readOnly, other, blocked, ready, stable.Round(time.Second),
+					)
 					return done, msg, nil
 				},
 			)

@@ -34,7 +34,7 @@ func scenario05SplitBrainAutoResolve() runner.Scenario {
 			"is configured, the operator fences the non-preferred site, increments " +
 			"bloodraven_split_brain_auto_resolve_total{prefer_site=...}, and logs 'split-brain auto-resolve'.",
 		Risk:    "medium",
-		DocLink: "playground/chaos-scenarios.md#5-split-brain-auto-resolve",
+		DocLink: "playground/chaos-scenarios.md#split-brain-auto-resolve",
 		Timeout: 3 * time.Minute,
 		Precheck: func(ctx context.Context, env *runner.Env) error {
 			if err := AssertHealthyBaseline(ctx, env); err != nil {

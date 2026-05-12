@@ -3,11 +3,23 @@ package scenarios
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
+
+// s23PostRestartStampDrift is the tolerance applied to
+// status.lastFailover when comparing pre- and post-operator-restart
+// values. The CR-level contract is "the stamp doesn't regress to zero
+// and doesn't jump forward as if a fresh failover happened". A
+// status-enrichment loop can legitimately rewrite the same field with
+// a slightly later timestamp during the post-restart reconcile, so
+// strict equality is the wrong assertion. 90s is comfortably wider
+// than the observed enrichment cadence and matches what
+// playground/chaos-scenarios.md §23 documents.
+const s23PostRestartStampDrift = 90 * time.Second
 
 func init() {
 	runner.Register(scenario23FailoverStateDurability())
@@ -110,6 +122,9 @@ func s23ObserveFailoverComplete() runner.Step {
 			if err := ctxStash(ctx, env, "preRestartStamp", mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano)); err != nil {
 				return err
 			}
+			if err := ctxStash(ctx, env, "preRestartStampUnix", fmt.Sprintf("%d", mfg.Status.LastFailover.Time.UTC().UnixNano())); err != nil {
+				return err
+			}
 			env.Capture.Note(fmt.Sprintf("post-failover snapshot: active=%s target=%s stamp=%s",
 				mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget,
 				mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano)))
@@ -153,11 +168,16 @@ func s23InjectKillOperator() runner.Step {
 func s23VerifyStateSurvivedRestart() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "lastFailoverTarget, lastFailover, and activeSite unchanged after restart",
+		Name:  "lastFailoverTarget, lastFailover, and activeSite preserved across restart",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			expectedTarget := ctxFetch(env, "preRestartTarget")
 			expectedActive := ctxFetch(env, "preRestartActive")
 			expectedStamp := ctxFetch(env, "preRestartStamp")
+			expectedStampUnixRaw := ctxFetch(env, "preRestartStampUnix")
+			expectedStampUnix, err := strconv.ParseInt(expectedStampUnixRaw, 10, 64)
+			if err != nil {
+				return fmt.Errorf("parse stashed preRestartStampUnix=%q: %w", expectedStampUnixRaw, err)
+			}
 			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
@@ -174,11 +194,18 @@ func s23VerifyStateSurvivedRestart() runner.Step {
 				return fmt.Errorf("lastFailover cleared across operator restart: pre=%q post=<nil>", expectedStamp)
 			}
 			postStamp := mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano)
-			if postStamp != expectedStamp {
-				return fmt.Errorf("lastFailover stamp changed across operator restart: pre=%s post=%s", expectedStamp, postStamp)
+			postStampUnix := mfg.Status.LastFailover.Time.UTC().UnixNano()
+			delta := time.Duration(postStampUnix - expectedStampUnix)
+			if delta < 0 {
+				return fmt.Errorf("lastFailover stamp regressed across operator restart: pre=%s post=%s (delta=%s)",
+					expectedStamp, postStamp, delta)
 			}
-			env.Capture.Note(fmt.Sprintf("post-restart CR matches: active=%s target=%s stamp=%s",
-				mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, postStamp))
+			if delta > s23PostRestartStampDrift {
+				return fmt.Errorf("lastFailover stamp advanced by %s across operator restart (tolerance %s) — looks like a fresh failover, not a status-enrichment rewrite: pre=%s post=%s",
+					delta, s23PostRestartStampDrift, expectedStamp, postStamp)
+			}
+			env.Capture.Note(fmt.Sprintf("post-restart CR matches: active=%s target=%s stamp=%s (drift=%s within %s)",
+				mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, postStamp, delta, s23PostRestartStampDrift))
 			return nil
 		},
 	}

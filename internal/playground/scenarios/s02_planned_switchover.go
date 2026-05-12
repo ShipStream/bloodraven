@@ -25,7 +25,7 @@ func scenario02PlannedSwitchover() runner.Scenario {
 		Hypothesis: "Annotating the MFG with bloodraven.shipstream.io/planned-failover=<peer> walks the " +
 			"PlannedFailoverStatus through Validating→Draining→WaitingForLag→Promoting→Resuming→Succeeded with transactionsLost==0.",
 		Risk:     "low",
-		DocLink:  "playground/chaos-scenarios.md (planned-failover section)",
+		DocLink:  "playground/chaos-scenarios.md#planned-switchover",
 		Timeout:  4 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{

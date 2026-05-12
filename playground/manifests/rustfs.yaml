@@ -5,9 +5,20 @@ metadata:
   namespace: bloodraven-playground
 type: Opaque
 stringData:
+  # AWS_* envs are what Dragonfly's S3 client reads.
   AWS_ACCESS_KEY_ID: rustfsadmin
   AWS_SECRET_ACCESS_KEY: rustfsadmin
   AWS_REGION: us-east-1
+  # RUSTFS_* envs are what the rustfs server binary reads. Holding both
+  # naming conventions in the same secret lets the rustfs Deployment
+  # use a single `envFrom` instead of two `valueFrom.secretKeyRef`
+  # entries — those secretKeyRef lookups have hit a kubelet
+  # secret-cache race on k3s/k3d that leaves the pod in
+  # CreateContainerConfigError indefinitely (the secret exists in the
+  # API server but the pod-scoped kubelet cache returns not-found and
+  # never invalidates).
+  RUSTFS_ACCESS_KEY: rustfsadmin
+  RUSTFS_SECRET_KEY: rustfsadmin
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -49,16 +60,19 @@ spec:
               value: :9000
             - name: RUSTFS_CONSOLE_ENABLE
               value: "true"
-            - name: RUSTFS_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: dragonfly-s3-credentials
-                  key: AWS_ACCESS_KEY_ID
-            - name: RUSTFS_SECRET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: dragonfly-s3-credentials
-                  key: AWS_SECRET_ACCESS_KEY
+          # RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY (rustfs server) and
+          # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (downstream
+          # Dragonfly S3 client) both live in this secret. envFrom is
+          # deliberately preferred over per-env valueFrom.secretKeyRef
+          # entries: the latter have been observed to stick in
+          # CreateContainerConfigError on k3s/k3d when the pod is
+          # scheduled before the kubelet's pod-scoped secret cache has
+          # observed the secret, with no recovery on subsequent secret
+          # writes. envFrom re-resolves the secret each time the
+          # container starts.
+          envFrom:
+            - secretRef:
+                name: dragonfly-s3-credentials
           ports:
             - name: s3
               containerPort: 9000

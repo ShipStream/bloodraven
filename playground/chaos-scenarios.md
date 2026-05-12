@@ -24,21 +24,24 @@ After each scenario, standard cleanup waits for the MFG `Ready=True` condition, 
 
 Some bootstrap scenarios exercise operator branches that only exist before any failover has stamped `status.lastFailoverTarget`. When `run-all` reaches those scenarios (`10-full-bootstrap-after-data-wipe` and `13-operator-kill-during-bootstrap`), the runner performs an explicit `reset` first so the precondition is real rather than hidden behind a broad auto-reset. Direct `run <scenario-id>` invocations still fail precheck on a non-pristine cluster and tell you to reset manually.
 
-Currently automated:
+Currently automated (every `runner.Register` entry in `internal/playground/scenarios/`):
 
 - `01-clean-primary-kill` (§1 below; uses `scale --replicas=0` for determinism, asserts failover only)
 - `02-operator-kill-restart` (§2; negative-assertion — verifies activeSite stable and no SELF-FENCING during operator restart)
-- `02-planned-switchover` (planned-failover state machine)
+- `02-planned-switchover` (§S; planned-failover state machine — annotates the MFG with `bloodraven.shipstream.io/planned-failover=<peer>`, asserts `Validating→Draining→WaitingForLag→Promoting→Resuming→Succeeded`, `transactionsLost==0`, and the `bloodraven_planned_failovers_total{result="success"}` increment)
 - `04-data-integrity-on-failover` (§4; seeds rows, blocks on `WAIT_FOR_EXECUTED_GTID_SET`, kills primary, asserts `GTID_SUBSET(pre, post)=1` and full row count on the new primary)
-- `05-split-brain-auto-resolve` (requires `spec.splitBrainPolicy.sitePriorities` set)
+- `05-operator-kill-during-failover` (§5; scales the active primary to 0, sleeps 1s, kills the operator pod, asserts the cluster reconverges to 1 writable + 1 read-only with `Ready=True` and neither sidecar emitted SELF-FENC during the operator-down gap)
+- `05-split-brain-auto-resolve` (§SBR; requires `spec.splitBrainPolicy.sitePriorities` set — clears `super_read_only` on the read-only site to force both writable, asserts the operator fences the non-preferred site, increments `bloodraven_split_brain_auto_resolve_total{prefer_site=...}`, and logs `split-brain auto-resolve`)
 - `06-self-fence-isolated-primary` (§6; scales operator AND peer to 0 — true isolation path, complements `09-`)
 - `08-gtid-divergence-detection` (§8; manufactures a rogue write on the old primary, asserts `recoveryState=RecoveryBlocked` + `divergentTransactionCount>0` + `divergence detected` log; auto-reclones in cleanup)
+- `09-anti-flap-cooldown` (§9; force-deletes the active primary, waits for failover + the original primary to come back as a reachable read-only candidate, then scales the new primary to 0 inside `failoverCooldown` and asserts `failovers_total` increments by exactly 1 across all sites — best-effort log scan for `failover blocked by anti-flap cooldown`)
 - `09-network-partition-self-fence` (§3 of this doc, NetworkPolicy partition path)
 - `10-full-bootstrap-after-data-wipe` (§10; scales replica to 0, scrubs the per-FG readonly taint from every node, deletes the replica's data PVC, and waits for the operator's `Bootstrapping` condition to cycle through `Cloning` → `WaitingForRestart` → `SetupReplication` → `Done` with replica IO+SQL threads ON at the end)
 - `11-total-loss-recovery` (§11; scales both sites to 0, asserts `TOTAL LOSS: all sites are unreachable` log + reconvergence)
 - `12-old-primary-recovery-no-divergence` (§7 of this doc; recovery without divergence)
 - `12-rolling-update-healthy-state` (§12; patches `spec.sites[*].resources.requests.memory` and asserts `status.updatePhase` engages then returns to empty, both deployments end at the new memory request, no `TOTAL LOSS` log fires during the roll)
-- `14-failover-with-replication-lag` (§14; sets `SOURCE_DELAY=10` on the replica, seeds rows over 5s on the primary so they sit in the relay log unapplied, then scales the primary to 0 and asserts the new primary's relay-log drain recovered every transaction — `GTID_SUBSET(post-write, current)=1` and full row count)
+- `13-operator-kill-during-bootstrap` (§13; wipes the read-only site's PVC, scales it back up, then kills the operator pod once `Bootstrapping=True` and asserts the replacement operator drives the clone to `Status=False Reason=Done` with replica IO+SQL threads ON — runs `ResetBeforeRunAll` so `lastFailoverTarget` is empty when the precondition gate runs)
+- `14-failover-with-replication-lag` (§14; pauses the replica SQL applier, seeds rows over 5s on the primary so they sit in the relay log unapplied, then scales the primary to 0 and asserts the new primary's relay-log drain recovered every transaction — `GTID_SUBSET(post-write, current)=1` and full row count)
 - `15-sidecar-crash-no-failover` (§15; ephemeral container `kill 1` against the sidecar PID namespace, asserts restartCount increments and activeSite/SELF-FENC/failover all stay quiet)
 - `16-mysql-process-kill` (§16; issues SQL `SHUTDOWN` against the active site's mysqld and asserts the mysql container restartCount increments and the cluster never enters split-brain — accepts either "no failover" or "failover" outcomes, but rejects `>1 writable`, `RecoveryBlocked`, or sustained zero-writable)
 - `17-partition-replica-no-failover` (§17; asymmetric partition — asserts NO failover and NO self-fence on read-only site)
@@ -47,12 +50,18 @@ Currently automated:
 - `20-shared-node-selector-isolation` (§20; labels primary node into a fake `inventory` FG and asserts that a playground failover taints only `db-readonly-playground`, leaving `db-readonly-inventory` absent and the inventory canary still Running)
 - `21-noexecute-eviction-semantics` (§21; deploys tolerating + non-tolerating canaries on the primary's node, asserts the non-tolerating one is deletion-marked or gone post-failover and the tolerating one stays Running)
 - `22-planned-dragonfly-switchover` (§24; planned MySQL+Dragonfly failover, session-preservation status, active Service endpoint convergence, and Dragonfly promotion metrics)
+- `22-replication-status-after-recovery` (§22; WISHLIST #36 guard — clean primary kill + old-primary auto-recovery, asserts the read-only site's `status.sites[].replicating` becomes true within 30s without an operator restart and cross-checks against the sidecar `/status` endpoint)
 - `23-dragonfly-master-kill` (§25; Dragonfly-only master kill promotes the replica without changing MySQL activeSite)
+- `23-failover-state-durability` (§23; WISHLIST #38 guard — clean failover, then kills the operator pod; asserts post-restart `lastFailoverTarget`, `activeSite`, and `lastFailover` survive, with up to 90s tolerance on the stamp to absorb a status-enrichment rewrite)
 - `24-emergency-mysql-dragonfly-down` (§26; all Dragonfly StatefulSets scaled to 0, MySQL emergency failover still completes)
 - `25-operator-restart-mid-dragonfly-failover` (§27; operator restart while planned failover is in Dragonfly sync/promotion phase resumes safely)
 - `26-planned-dragonfly-sync-timeout-proceed` (§28; `onSyncTimeout=proceed` marks sessions not preserved and still completes MySQL failover)
 - `27-dragonfly-rolling-image-update` (§30; ordinary `spec.dragonfly.image` patch rolls one pod at a time and promotes the updated replica before rolling the old active pod)
 - `29-dragonfly-snapshot-upgrade` (§29; D6a snapshot-restore upgrade using the playground RustFS bucket)
+
+`make chaos-list` is the authoritative inventory — when adding a scenario, also append it here so the doc and the registry stay in lock-step.
+
+Sections marked `§S` (planned-switchover) and `§SBR` (split-brain auto-resolve) are documented as appendix-style sections below — they exist as scenarios but don't fit the §1-§30 numbered failure-mode grid.
 
 The runner refuses to mutate any kubectl context that does not match the same allowlist as `playground/_guard.sh` (`k3d-*`, `kind-*`, `minikube*`, or names listed in `BLOODRAVEN_PLAYGROUND_CONTEXTS`). Markdown is the source of truth for hypotheses and prose; the runner's assertions are the operational ones documented under each scenario's "Verify" section.
 
@@ -801,6 +810,52 @@ kubectl -n bloodraven-playground annotate --overwrite mysqlfailovergroup playgro
 The scenario patches `spec.dragonfly.image` to the digest reference already reported by a running Dragonfly pod. That changes the pod template and exercises the image rollout path without depending on a new external image pull.
 
 **Verify**: No more than one Dragonfly pod is unavailable at any observed point; both StatefulSets and pods reach the target image; `status.dragonfly.phase` returns to `Ready`; and the runner cleanup restores the original tag image.
+
+---
+
+## Appendix scenarios (state-machine coverage)
+
+These two scenarios cover state-machine paths that don't fit the §1-§30 emergency-failover grid. They are registered with the same `playground-chaos` runner and follow the same Inject → Observe → Verify shape; their cited `§S` and `§SBR` anchors are referenced from the "Currently automated" list above.
+
+### S. Planned Switchover (`02-planned-switchover`) {#planned-switchover}
+**Category**: Planned-failover state machine | **Risk**: Low
+
+**Hypothesis**: Annotating the MFG with `bloodraven.shipstream.io/planned-failover=<peer>` walks `status.plannedFailover.phase` through `Validating → Draining → WaitingForLag → Promoting → Resuming → Succeeded` with `status.plannedFailover.transactionsLost == 0` (committed-and-replicated rows survive a planned switchover by construction).
+
+**Injection**: `make chaos-run SCENARIO=02-planned-switchover`. The scenario picks the peer of the current active site as the target and patches the annotation.
+
+**Verify**:
+
+- `status.plannedFailover.phase` reaches `Succeeded` with `target=<peer>` (stale plannedFailover blocks left over from prior runs are ignored via the `StartTime` check, so this assertion is robust under rerun).
+- `status.plannedFailover.transactionsLost` is populated and equals 0.
+- `bloodraven_planned_failovers_total{target_site=<peer>,result="success"}` increments.
+
+**Note**: Single-scenario `run` will fail precheck if the cluster already has an in-flight `plannedFailover` in a non-terminal phase. The runner's standard cleanup waits for `Ready=True` before the next scenario starts, so `run-all` does not need to reset between this and the next entry.
+
+---
+
+### SBR. Split-Brain Auto-Resolve (`05-split-brain-auto-resolve`) {#split-brain-auto-resolve}
+**Category**: Split-brain auto-resolve | **Risk**: Medium
+
+**Hypothesis**: With `spec.splitBrainPolicy.sitePriorities` set, forcing both sites simultaneously writable (clear `super_read_only` on the standby) makes the operator fence the non-preferred site within one reconcile, increment `bloodraven_split_brain_auto_resolve_total{prefer_site=<preferred>}`, and emit the canonical `split-brain auto-resolve` log line.
+
+**Precondition**: `spec.splitBrainPolicy.sitePriorities` is empty on the baseline `playground` MFG. The scenario's `Precheck` returns a specific error when it is missing — set it before running:
+
+```bash
+kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json \
+  -p '[{"op":"add","path":"/spec/splitBrainPolicy","value":{"sitePriorities":["iad","pdx"]}}]'
+```
+
+**Injection**: `make chaos-run SCENARIO=05-split-brain-auto-resolve`. The scenario also briefly scales the operator to 0 to clear `status.lastFailover{,Target}` so the cooldown branch does not suppress the auto-resolve.
+
+**Verify**:
+
+- The non-preferred site stops being writable; only the priority site remains `state=writable`.
+- `status.activeSite` equals `spec.splitBrainPolicy.sitePriorities[0]`.
+- The `bloodraven_split_brain_auto_resolve_total{prefer_site=...}` counter increments above the pre-injection baseline.
+- The operator log contains `split-brain auto-resolve` (canonical msg from `internal/controller/topology.go`).
+
+**Cleanup**: None scenario-level — the runner's `GlobalRecover` and the operator's next reconcile re-assert `super_read_only` on the standby.
 
 ---
 

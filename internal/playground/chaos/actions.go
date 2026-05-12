@@ -132,6 +132,38 @@ func (a *Actions) ScaleOperatorToZero(ctx context.Context) error {
 	return nil
 }
 
+// WaitForOperatorAvailable polls the operator Deployment until its
+// available-replicas count matches the desired count, signalling that
+// the replacement pod has rolled out and passed its readiness probe.
+// Use this after KillOperator + Revert to avoid racing the new
+// operator's first reconcile cycle: until at least one operator
+// replica is Available, the CR status visible to callers is whatever
+// the killed operator last wrote, which can be a stale "looks healthy"
+// snapshot from before the chaos injection.
+//
+// Returns nil only when an Available replica exists. Honors the
+// caller's context for timeout / cancellation. Deliberately reuses the
+// same `bloodraven` deployment name and namespace that the rest of the
+// chaos surface assumes; callers that want a different deployment
+// should add a dedicated helper instead of parameterising this one.
+func (a *Actions) WaitForOperatorAvailable(ctx context.Context) error {
+	const dep = "bloodraven"
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		ready, err := a.K.DeploymentHasAvailableReplica(ctx, a.Namespace, dep)
+		if err == nil && ready {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operator deployment %s/%s did not report an available replica: %w (last poll err=%v)",
+				a.Namespace, dep, ctx.Err(), err)
+		case <-tick.C:
+		}
+	}
+}
+
 // KillOperator force-deletes every operator pod (label
 // app.kubernetes.io/name=bloodraven). The Deployment respawns the pod
 // on its own, so no reverter is pushed — the cluster recovers without

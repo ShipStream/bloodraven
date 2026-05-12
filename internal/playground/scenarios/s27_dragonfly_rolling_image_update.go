@@ -113,7 +113,19 @@ func observeDragonflyRollingImageUpdate() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 			defer cancel()
-			tick := time.NewTicker(100 * time.Millisecond)
+			// Poll every 500ms (was 100ms). Each tick issues ~5 API
+			// requests (one GetMFG + two GetPod + two GetStatefulSet);
+			// at 100ms that is 50 QPS, which is exactly the client-go
+			// default rate limit. Under load (concurrent scenarios or a
+			// slow Dragonfly roll) the rate limiter exhausts and every
+			// subsequent request blocks until its tokens are restored,
+			// which then races the parent context's deadline and the
+			// step fails with `rate: Wait(n=1) would exceed context
+			// deadline`. 500ms gives ~10 QPS, well below the limit, and
+			// is still fast enough to catch a "two pods unavailable"
+			// window because RollingUpdate Pod terminations take
+			// seconds, not milliseconds.
+			tick := time.NewTicker(500 * time.Millisecond)
 			defer tick.Stop()
 			var last string
 			for {

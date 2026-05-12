@@ -89,6 +89,19 @@ func (c *Client) GetDeployment(ctx context.Context, namespace, name string) (*ap
 	return c.Kubernetes.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
+// DeploymentHasAvailableReplica reports whether the Deployment has at
+// least one available replica (passed readiness probe and is counted
+// in `.status.availableReplicas`). Callers can poll this to know that
+// a freshly-rolled-out replacement pod is actually serving — distinct
+// from "pod scheduled" or "container running".
+func (c *Client) DeploymentHasAvailableReplica(ctx context.Context, namespace, name string) (bool, error) {
+	dep, err := c.GetDeployment(ctx, namespace, name)
+	if err != nil {
+		return false, err
+	}
+	return dep.Status.AvailableReplicas > 0, nil
+}
+
 // ApplyDenyAllNetworkPolicy creates a NetworkPolicy that blocks all
 // ingress and egress for the MySQL pod at a site. This is the
 // pod-network-level partition that kube-proxy DNAT cannot bypass —
