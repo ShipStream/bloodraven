@@ -40,6 +40,7 @@ This checks that `docs/build/llms-full.txt` includes every page under
 - Use one page type per page: tutorial, how-to guide, reference, or explanation.
 - Keep code examples copy-pasteable, and show expected output when verification matters.
 - Prefer links to canonical pages over repeating the same operational facts in multiple files.
+- Use `docs/docs/observability-change-checklist.mdx` for changes to metrics, recording rules, alerts, dashboard panels, Kubernetes Events, structured-log Events, or runbook links.
 
 ## Important pages
 
@@ -50,6 +51,7 @@ This checks that `docs/build/llms-full.txt` includes every page under
 | `docs/docs/install-production.mdx` | Production install path. |
 | `docs/docs/runbooks.mdx` | On-call remediation procedures. |
 | `docs/docs/crd-reference.mdx` | Custom resource fields and status reference. |
+| `docs/docs/observability-change-checklist.mdx` | Review gate for observability-affecting changes. |
 | `docs/docs/log-schema.mdx` | Stable structured log messages and fields. |
 
 When you change structured log messages or documented log fields, update `docs/docs/log-schema.mdx` in the same pull request.
