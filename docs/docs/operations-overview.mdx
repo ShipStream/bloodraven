@@ -43,3 +43,69 @@ kubectl get events -n orders --sort-by=.lastTimestamp
 - [Failure Mode Matrix](./failure-mode-matrix.mdx)
 - [Log Schema](./log-schema.mdx)
 - [Monitoring](./monitoring.mdx)
+
+## Test strategy and Operator SDK Scorecard
+
+Bloodraven's test pyramid is unit tests (`internal/**/*_test.go`),
+cross-package component tests with fakes (`test/component/`), envtest
+controller tests against a real API server (`test/envtest/`), and a
+Go-based chaos runner against a live k3d cluster (`cmd/playground-chaos`,
+exposed via `make chaos-list`, `make chaos-run SCENARIO=<id>`, and
+`make chaos-run-all`). CI runs lint, build, unit, component, envtest,
+generate-check, and docs-build on every PR (`.github/workflows/ci.yml`).
+The real-cluster end-to-end gate is tracked separately as WISHLIST #32.
+
+We evaluated the [Operator SDK Scorecard](https://sdk.operatorframework.io/docs/testing-operators/scorecard/)
+as an additional tier and **declined adoption** today. Scorecard is a
+containerized test runner that takes an OLM bundle as input and runs tests
+as Pods against a Kubernetes cluster. Its built-in OLM suite (five tests)
+all read a `ClusterServiceVersion`; its built-in basic suite is the single
+`basic-check-spec-test`; custom and kuttl scorecard paths both require a
+bundle plus a live-cluster gate.
+
+### Why we declined today
+
+We chose decline only after every condition below held against the
+repository at the time of the decision. If any becomes false, reopen
+WISHLIST #34 and re-run this rubric.
+
+| ID | Condition | Today |
+|---|---|---|
+| R1 | No `bundle.Dockerfile`, no `ClusterServiceVersion`, no `bundle/` directory, no `config/scorecard/` kustomize templates exist. | True |
+| R2 | No `PROJECT` file at the repo root (no `operator-sdk init` retrofit has been done). | True |
+| R3 | No active plan to publish Bloodraven to OperatorHub or any OLM-distributed catalog (WISHLIST #30 remains open and explicitly conditional P3). | True |
+| R4 | No external consumer of `scapiv1alpha3.TestStatus` JSON in the Bloodraven release pipeline, sibling repos, or platform tooling. | True |
+| R5 | The existing pyramid (unit + component + envtest + the `cmd/playground-chaos` runner) already covers the failure modes Scorecard's basic and OLM suites would surface against a CSV-less, non-OLM operator, and emits richer forensic output (events, logs, raw `/metrics`) than `scapiv1alpha3.TestStatus`. | True |
+
+The basic `basic-check-spec-test` payoff is trivial: it would not surface
+a real defect against any custom resource sample shipped under
+`examples/`. The OLM tests cannot run because we ship no CSV. The custom
+and kuttl paths require both a bundle stub and a live-cluster gate
+(WISHLIST #32), and the resulting harness duplicates work the existing
+Go-based suites already do with richer output.
+
+### When to reopen WISHLIST #34
+
+Reopen if any of the following becomes true:
+
+- **T1.** Bloodraven publishes or commits to publish an OLM bundle —
+  `bundle.Dockerfile`, CSV, or `config/scorecard/` kustomize templates
+  land in the repo. (Falsifies R1.)
+- **T2.** A `PROJECT` file is introduced or `operator-sdk init` is run on
+  the repository. (Falsifies R2.)
+- **T3.** Bloodraven adopts an external-distribution path that lists it on
+  OperatorHub or an equivalent OLM catalog (e.g. WISHLIST #30 closes with
+  that path chosen). (Falsifies R3.)
+- **T4.** A downstream tool (CI, `platform/`, sibling repo, certification
+  flow) starts consuming `scapiv1alpha3.TestStatus` JSON. (Falsifies R4.)
+- **T5.** The real-cluster E2E gate (WISHLIST #32) ships and there is a
+  documented argument that wrapping a subset of its assertions as
+  scorecard custom tests is cheaper than maintaining them in Go.
+  (R5 becomes worth re-evaluating.)
+- **T6.** The Operator SDK project ships a meaningful basic-suite
+  expansion (beyond `basic-check-spec-test`) that delivers signal a
+  non-OLM operator could consume without a CSV.
+
+When any trigger fires, the reopener should (a) flip the relevant rubric
+row in this table to False with a one-line citation, (b) reopen #34 in
+`WISHLIST.md`, and (c) cite this section as the prior art.
