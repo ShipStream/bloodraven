@@ -47,13 +47,16 @@ kubectl get events -n orders --sort-by=.lastTimestamp
 ## Test strategy and Operator SDK Scorecard
 
 Bloodraven's test pyramid is unit tests (`internal/**/*_test.go`),
-cross-package component tests with fakes (`test/component/`), envtest
-controller tests against a real API server (`test/envtest/`), and a
-Go-based chaos runner against a live k3d cluster (`cmd/playground-chaos`,
-exposed via `make chaos-list`, `make chaos-run SCENARIO=<id>`, and
-`make chaos-run-all`). CI runs lint, build, unit, component, envtest,
-generate-check, and docs-build on every PR (`.github/workflows/ci.yml`).
-The real-cluster end-to-end gate is tracked separately as WISHLIST #32.
+cross-package component tests with fakes (`test/component/`),
+integration tests behind the Go `integration` build tag (run with
+`make test-integration`), envtest controller tests against a real API
+server (`test/envtest/`), and a Go-based chaos runner against a live k3d
+cluster (`cmd/playground-chaos`, exposed via `make chaos-list`,
+`make chaos-run SCENARIO=<id>`, and `make chaos-run-all`). CI runs lint,
+build, unit, component, envtest, generate-check, and docs-build on every
+PR (`.github/workflows/ci.yml`). Integration tests exist in the repo but
+are not part of the default PR gate. The real-cluster end-to-end gate is
+tracked separately as WISHLIST #32.
 
 We evaluated the [Operator SDK Scorecard](https://sdk.operatorframework.io/docs/testing-operators/scorecard/)
 as an additional tier and **declined adoption** today. Scorecard is a
