@@ -79,6 +79,7 @@ const sidebars = {
         'monitoring-prometheus',
         'monitoring-grafana',
         'alert-runbook-map',
+        'observability-change-checklist',
         'log-schema',
       ],
     },

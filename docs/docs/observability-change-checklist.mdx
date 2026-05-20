@@ -1,0 +1,130 @@
+---
+sidebar_position: 6
+---
+
+# Observability Change Checklist
+
+Use this checklist for pull requests and releases that add, remove, or change observability signals. It applies to metrics, recording rules, alerts, dashboard panels, Kubernetes Events, structured-log Events, and runbook links.
+
+If a pull request does not affect any of those artifact classes, say so in the PR description and skip the rest of the checklist.
+
+## Documentation destinations
+
+| Artifact | Required destination |
+|---|---|
+| Prometheus metrics | [Monitoring Reference](./monitoring.mdx) |
+| Recording rules | [Monitoring Reference](./monitoring.mdx) or the rule package docs |
+| Alerts | [Alert To Runbook Map](./alert-runbook-map.mdx) and the alert package docs |
+| Dashboard panels | [Grafana Dashboards](./monitoring-grafana.mdx) and shipped JSON under `charts/bloodraven/dashboards/` |
+| Kubernetes Events | [Monitoring Reference](./monitoring.mdx) for the Event reason registry; [Alert To Runbook Map](./alert-runbook-map.mdx) when the Event needs operator action |
+| Structured-log Events | [Log Schema](./log-schema.mdx) |
+| Runbook links | [Runbooks](./runbooks.mdx), page-specific runbooks, and [Alert To Runbook Map](./alert-runbook-map.mdx) |
+
+## Metrics
+
+For each new, renamed, or behavior-changing metric, document:
+
+- Metric name.
+- Prometheus type: counter, gauge, histogram, or summary.
+- Units, or `1` for dimensionless values.
+- Full label list.
+- Stability expectations and any deprecation path for renamed or removed metrics.
+- Cardinality evidence for every label.
+
+Cardinality evidence must include:
+
+- Label name.
+- Expected value domain.
+- Whether values are bounded or unbounded.
+- Expected upper bound per `MysqlFailoverGroup`, namespace, cluster, or other relevant scope.
+- Justification for high-cardinality labels, or a change that removes them.
+
+## Recording rules
+
+Complete this section only when the change adds, removes, or changes recording rules. A PR with no recording-rule changes does not need placeholder entries.
+
+For each changed rule, document:
+
+- Rule name.
+- Source expression.
+- Output labels.
+- Dependency on raw metrics or other recording rules.
+- Consumer: alert, dashboard panel, runbook, or external SLO tooling.
+- Migration notes if the rule name or label set changes.
+
+## Alerts
+
+For each new, renamed, or behavior-changing alert, document:
+
+- Alert name and severity.
+- Expression and duration.
+- User impact in plain language.
+- Required metric or recording-rule dependencies.
+- Expected false-positive or flap controls.
+- Runbook mapping in [Alert To Runbook Map](./alert-runbook-map.mdx), or a specific no-runbook rationale.
+
+Each alert must include these annotations:
+
+- `summary` with the failing group and namespace.
+- `description` with immediate user impact.
+- `runbook_url` pointing to this docs site, unless the PR gives a specific no-runbook rationale.
+- `dashboard_url` pointing to the relevant Grafana dashboard, unless no dashboard exists and the PR explains why.
+
+See [Runbook links](#runbook-links) for no-runbook rationale requirements. Do not use a bare `N/A`.
+
+## Dashboard panels
+
+For each new, removed, or behavior-changing dashboard panel, document:
+
+- Dashboard and panel name.
+- Metrics, recording rules, or log queries used by the panel.
+- Label filters and template variables.
+- Expected visual behavior during healthy, degraded, and failing states.
+- Screenshot, local preview, or other manual verification evidence.
+
+Manual verification is required unless the repository has an automated dashboard validator for the changed artifact. If an automated validator exists, link the command and result in the PR.
+
+## Kubernetes Events
+
+Kubernetes Events are API-server Events emitted for cluster operators and on-call workflows. They are distinct from structured-log Events.
+
+For each changed Kubernetes Event, document:
+
+- Event reason and type.
+- Object the Event is attached to.
+- Trigger condition.
+- Expected operator action, if any.
+- Runbook link when the Event indicates an actionable failure or recovery workflow.
+
+## Structured-log Events
+
+Structured-log Events are stable log `msg` strings and fields consumed by downstream log pipelines. They are documented in [Log Schema](./log-schema.mdx) and are a public stability contract.
+
+For each changed structured-log Event, document:
+
+- Stable `msg` string.
+- Field names and meanings.
+- Whether the change adds, removes, or renames fields.
+- Compatibility impact for log pipelines.
+- Any matching update to [Log Schema](./log-schema.mdx).
+
+## Runbook links
+
+Every alert, actionable Kubernetes Event, and operational dashboard panel should link to a runbook or an explanatory operations page.
+
+When a runbook is not required, the PR must state the specific reason, such as:
+
+- The signal is informational only and does not require operator action.
+- The signal is only an implementation detail for another documented alert.
+- The signal is experimental and hidden from production alerting.
+
+## PR evidence
+
+Include the following in the PR description for observability-affecting changes:
+
+- Artifact classes changed.
+- Documentation pages updated.
+- Cardinality evidence, consumer mapping, and migration notes for metrics and recording rules.
+- Alert annotation and runbook status.
+- Dashboard verification evidence.
+- Kubernetes Event and structured-log Event compatibility notes.

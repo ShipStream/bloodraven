@@ -7,7 +7,7 @@ sidebar_position: 5
 
 <img src={require('/static/img/infographics/alert-runbook-map.webp').default} alt="alert runbook map infographic" />
 
-Keep this table synchronized with your PrometheusRule package. Alert annotations should link to the matching page or heading.
+Keep this table synchronized with your PrometheusRule package. Alert annotations should link to the matching page or heading. Use the [Observability Change Checklist](./observability-change-checklist.mdx) when adding, removing, or changing alerts, alert annotations, runbook links, dashboard links, or actionable Events.
 
 ## Alerts
 
@@ -49,3 +49,5 @@ Each alert should include:
 - `description` with immediate user impact.
 - `runbook_url` pointing to this docs site.
 - `dashboard_url` pointing to the relevant Grafana dashboard.
+
+If an alert intentionally has no runbook or dashboard link, the change must include a specific operational rationale in the pull request. Do not use a bare `N/A`.
