@@ -10,7 +10,7 @@
 - [x] 31. Documentation publishing parity
 - [ ] 32. Real-cluster E2E CI gate
 - [x] 33. True shared-node placement model
-- [ ] 34. Investigate using [Scorecard](https://sdk.operatorframework.io/docs/testing-operators/scorecard/) to test Bloodraven operator.
+- [x] 34. Investigate using [Scorecard](https://sdk.operatorframework.io/docs/testing-operators/scorecard/) to test Bloodraven operator.
 - [x] 35. Read the [Operator SDK Best Practices](https://sdk.operatorframework.io/docs/best-practices/) and see if there are any lessons we can learn and apply to Bloodraven.
 - [x] 36. CR replication enrichment stalls after in-lifecycle recovery
 - [x] 37. Auto-fail-back to returning original primary is undocumented
@@ -53,6 +53,8 @@
 **27. Backup/restore performance guide.** For a 500 GB dataset, how long does `util.dumpInstance` take with what `threads`/`bytesPerChunk`? How long does `loadDump` take? At what `maxLagSeconds` does your replica-as-source fallback trigger and what's the primary-impact if it does? Users need ballparks before they commit.
 
 **30. Public repo, license, release cadence.** If this isn't going external, skip. If it might — Apache-2.0, semver on the CRD and the operator separately, `CHANGELOG.md`, GitHub releases with signed images, published Helm chart index. The bar for "a real project someone else will adopt" is higher than the bar for "our internal tool."
+
+**34. Investigate Operator SDK Scorecard.** Done: declined. Bloodraven is non-OLM (no `bundle.Dockerfile`, no CSV, no `config/scorecard/`, no `PROJECT` file), has no OperatorHub roadmap (#30 remains conditional P3), and has no downstream consumer of `scapiv1alpha3.TestStatus` JSON. The five OLM scorecard tests all read a CSV we do not ship; the basic suite's single `basic-check-spec-test` would not surface a real defect against the CRs in `examples/`; custom and kuttl scorecard paths both require an OLM bundle plus a live-cluster gate (#32) we have deferred. The existing pyramid — unit + component + integration + envtest + the `cmd/playground-chaos` runner — already covers the same failure modes with richer forensic output. See [Test strategy and Operator SDK Scorecard](docs/docs/operations-overview.mdx#test-strategy-and-operator-sdk-scorecard) for the rubric, today's evaluation, and revisit triggers.
 
 **35. Operator SDK Best Practices review.** Done: the Operator SDK best-practices review was converted into internal follow-ups in this wishlist. High-priority follow-ups are #39 and #40; lower-priority follow-ups are #41 and #42. NetworkPolicy ownership is intentionally not a follow-up: Bloodraven should continue treating tenant NetworkPolicy as platform-owned rather than operator-owned by default.
 
