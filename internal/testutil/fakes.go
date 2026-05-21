@@ -190,6 +190,13 @@ func (m *FakeMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) err
 	return m.DrainErr
 }
 
+func (m *FakeMySQL) EnsureClonePlugin(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("EnsureClonePlugin")
+	return nil
+}
+
 func (m *FakeMySQL) SetCloneDonorList(_ context.Context, donor string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

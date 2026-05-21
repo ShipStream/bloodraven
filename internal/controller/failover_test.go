@@ -115,6 +115,11 @@ func (t *trackingMock) WaitForRelayLogDrain(_ context.Context, _ time.Duration) 
 	return err
 }
 
+func (t *trackingMock) EnsureClonePlugin(_ context.Context) error {
+	t.record("EnsureClonePlugin")
+	return nil
+}
+
 func (t *trackingMock) SetCloneDonorList(_ context.Context, donor string) error {
 	t.record("SetCloneDonorList")
 	return nil

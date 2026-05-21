@@ -586,6 +586,7 @@ func (f *flappingChecker) StartReplicaSQLThread(_ context.Context) error { retur
 func (f *flappingChecker) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
+func (f *flappingChecker) EnsureClonePlugin(_ context.Context) error           { return nil }
 func (f *flappingChecker) SetCloneDonorList(_ context.Context, _ string) error { return nil }
 func (f *flappingChecker) GetGtidExecuted(_ context.Context) (string, error)   { return "", nil }
 func (f *flappingChecker) KillAppConnections(_ context.Context) (int, error)   { return 0, nil }
@@ -622,9 +623,12 @@ func (r *replicaStatusErrorChecker) StartReplicaSQLThread(_ context.Context) err
 func (r *replicaStatusErrorChecker) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
+func (r *replicaStatusErrorChecker) EnsureClonePlugin(_ context.Context) error           { return nil }
 func (r *replicaStatusErrorChecker) SetCloneDonorList(_ context.Context, _ string) error { return nil }
-func (r *replicaStatusErrorChecker) GetGtidExecuted(_ context.Context) (string, error)   { return "", nil }
-func (r *replicaStatusErrorChecker) KillAppConnections(_ context.Context) (int, error)   { return 0, nil }
+func (r *replicaStatusErrorChecker) GetGtidExecuted(_ context.Context) (string, error) {
+	return "", nil
+}
+func (r *replicaStatusErrorChecker) KillAppConnections(_ context.Context) (int, error) { return 0, nil }
 func (r *replicaStatusErrorChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return nil
 }

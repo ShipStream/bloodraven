@@ -32,6 +32,7 @@ type Checker interface {
 	GetGtidExecuted(ctx context.Context) (string, error)
 
 	// Clone plugin methods:
+	EnsureClonePlugin(ctx context.Context) error
 	SetCloneDonorList(ctx context.Context, donor string) error
 	CloneInstance(ctx context.Context, user, host, password string, useSSL bool, cloneTimeoutSec int) error
 }

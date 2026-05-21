@@ -116,6 +116,11 @@ func (b *bootstrapMock) WaitForRelayLogDrain(_ context.Context, _ time.Duration)
 	return nil
 }
 
+func (b *bootstrapMock) EnsureClonePlugin(_ context.Context) error {
+	b.record("EnsureClonePlugin")
+	return nil
+}
+
 func (b *bootstrapMock) SetCloneDonorList(_ context.Context, donor string) error {
 	b.record("SetCloneDonorList")
 	b.mu.Lock()
@@ -159,13 +164,13 @@ func TestBootstrapReplica_HappyPath(t *testing.T) {
 
 	// Primary should have CheckReadOnly called
 	pCalls := primary.getCalls()
-	if len(pCalls) != 1 || pCalls[0] != "CheckReadOnly" {
-		t.Errorf("primary calls: got %v, want [CheckReadOnly]", pCalls)
+	if len(pCalls) != 2 || pCalls[0] != "CheckReadOnly" || pCalls[1] != "EnsureClonePlugin" {
+		t.Errorf("primary calls: got %v, want [CheckReadOnly EnsureClonePlugin]", pCalls)
 	}
 
 	// Replica should be thawed before clone, then cloned.
 	rCalls := replica.getCalls()
-	expected := []string{"SetSuperReadOnly(OFF)", "SetReadOnly", "SetCloneDonorList", "KillAppConnections", "CloneInstance"}
+	expected := []string{"EnsureClonePlugin", "SetSuperReadOnly(OFF)", "SetReadOnly", "SetCloneDonorList", "KillAppConnections", "CloneInstance"}
 	if len(rCalls) != len(expected) {
 		t.Fatalf("replica calls: got %v, want %v", rCalls, expected)
 	}

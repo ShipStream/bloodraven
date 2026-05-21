@@ -28,7 +28,7 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 		cloneTimeoutSec = 3600
 	}
 
-	if err := m.ensureClonePlugin(ctx); err != nil {
+	if err := m.EnsureClonePlugin(ctx); err != nil {
 		return fmt.Errorf("ensure clone plugin: %w", err)
 	}
 
@@ -67,7 +67,7 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 	return nil
 }
 
-func (m *checker) ensureClonePlugin(ctx context.Context) error {
+func (m *checker) EnsureClonePlugin(ctx context.Context) error {
 	var installed int
 	if err := m.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME = 'clone'").Scan(&installed); err != nil {
 		return fmt.Errorf("check clone plugin: %w", err)

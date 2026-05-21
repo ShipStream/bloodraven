@@ -40,7 +40,17 @@ func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts Bootstr
 		return fmt.Errorf("primary is read-only, cannot bootstrap from it")
 	}
 
-	// Step 2: CLONE INSTANCE is a destructive administrative operation, but
+	// Step 2: Ensure the clone plugin is loaded on both sides. MySQL executes
+	// CLONE INSTANCE on the recipient, but the donor also needs the plugin or
+	// the recipient returns Error 3862 with donor Error 1524.
+	if err := opts.Primary.EnsureClonePlugin(ctx); err != nil {
+		return fmt.Errorf("ensure primary clone plugin: %w", err)
+	}
+	if err := opts.Replica.EnsureClonePlugin(ctx); err != nil {
+		return fmt.Errorf("ensure replica clone plugin: %w", err)
+	}
+
+	// Step 3: CLONE INSTANCE is a destructive administrative operation, but
 	// MySQL rejects it while the recipient has super_read_only enabled.
 	if err := opts.Replica.SetSuperReadOnly(ctx, false); err != nil {
 		return fmt.Errorf("disable replica super_read_only for clone: %w", err)
