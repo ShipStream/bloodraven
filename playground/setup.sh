@@ -295,6 +295,12 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set 'tolerations[0].key=node.kubernetes.io/disk-pressure' \
   --set 'tolerations[0].operator=Exists' \
   --set 'tolerations[0].effect=NoSchedule' \
+  --set 'tolerations[1].key=shipstream.io/db-readonly-playground' \
+  --set 'tolerations[1].operator=Exists' \
+  --set 'tolerations[1].effect=NoSchedule' \
+  --set 'tolerations[2].key=shipstream.io/db-readonly' \
+  --set 'tolerations[2].operator=Exists' \
+  --set 'tolerations[2].effect=NoSchedule' \
   --set leaderElection.enabled=false \
   --timeout=180s
 # Don't use --wait; the operator may take a moment to pass readiness after
