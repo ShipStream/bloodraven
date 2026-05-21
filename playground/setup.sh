@@ -106,8 +106,8 @@ info "Labeling nodes as site zones..."
 # Pick first two worker nodes (skip control-plane-only if possible)
 WORKERS=()
 for n in "${NODES[@]}"; do
-  role=$(kubectl get node "$n" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}' 2>/dev/null || true)
-  if [[ -z "$role" ]]; then
+  labels=$(kubectl get node "$n" --show-labels --no-headers 2>/dev/null || true)
+  if [[ "$labels" != *"node-role.kubernetes.io/control-plane"* && "$labels" != *"node-role.kubernetes.io/master"* ]]; then
     WORKERS+=("$n")
   fi
 done

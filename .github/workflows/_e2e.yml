@@ -75,7 +75,9 @@ jobs:
           kind load docker-image bloodraven:playground bloodraven-sidecar:playground bloodraven-counter:playground bloodraven-dashboard:playground bloodraven-dns-webhook:playground --name bloodraven-e2e
 
       - name: Deploy playground
-        run: ./playground/setup.sh 2>&1 | tee playground/setup.log
+        run: |
+          set -o pipefail
+          ./playground/setup.sh 2>&1 | tee playground/setup.log
         timeout-minutes: 10
 
       - name: Run E2E (${{ inputs.profile }} profile)
