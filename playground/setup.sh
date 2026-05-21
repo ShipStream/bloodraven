@@ -61,6 +61,14 @@ done
 source "$SCRIPT_DIR/_guard.sh"
 require_playground_context
 
+HELM_INSTALL_CRDS=false
+case "${BLOODRAVEN_SETUP_HELM_INSTALL_CRDS:-}" in
+  1|true|TRUE|yes|YES) HELM_INSTALL_CRDS=true ;;
+esac
+if [[ "$HELM_INSTALL_CRDS" == "true" ]] && helm status bloodraven -n "$NAMESPACE" >/dev/null 2>&1; then
+  fail "BLOODRAVEN_SETUP_HELM_INSTALL_CRDS=1 requires a fresh Helm release. Helm installs CRDs from charts/bloodraven/crds only on first install and will not upgrade or repair them on helm upgrade; unset BLOODRAVEN_SETUP_HELM_INSTALL_CRDS to apply CRDs explicitly before upgrading."
+fi
+
 # Prefer docker over podman. k3d's podman support is experimental and the
 # tar-archive image-load path is slower than docker's native import.
 # Override with BLOODRAVEN_CONTAINER_RUNTIME=podman if you actually want
@@ -98,8 +106,8 @@ info "Labeling nodes as site zones..."
 # Pick first two worker nodes (skip control-plane-only if possible)
 WORKERS=()
 for n in "${NODES[@]}"; do
-  role=$(kubectl get node "$n" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}' 2>/dev/null || true)
-  if [[ -z "$role" ]]; then
+  labels=$(kubectl get node "$n" --show-labels --no-headers 2>/dev/null || true)
+  if [[ "$labels" != *"node-role.kubernetes.io/control-plane"* && "$labels" != *"node-role.kubernetes.io/master"* ]]; then
     WORKERS+=("$n")
   fi
 done
@@ -118,19 +126,23 @@ kubectl label node "${WORKERS[1]}" shipstream.io/site.playground=pdx --overwrite
 ok "Nodes labeled: ${WORKERS[0]}=iad, ${WORKERS[1]}=pdx"
 
 # ── 3. Build images ──────────────────────────────────────────────────────
-info "Building operator and sidecar images..."
-$RUNTIME build --target bloodraven -t bloodraven:playground "$PROJECT_ROOT"
-$RUNTIME build --target sidecar -t bloodraven-sidecar:playground "$PROJECT_ROOT"
+if [[ -n "${SKIP_IMAGE_BUILD:-}" ]]; then
+  info "SKIP_IMAGE_BUILD is set — skipping image builds (CI mode: images pre-built or pre-loaded)"
+else
+  info "Building operator and sidecar images..."
+  $RUNTIME build --target bloodraven -t bloodraven:playground "$PROJECT_ROOT"
+  $RUNTIME build --target sidecar -t bloodraven-sidecar:playground "$PROJECT_ROOT"
 
-info "Building counter-app image..."
-$RUNTIME build -t bloodraven-counter:playground "$SCRIPT_DIR/counter-app"
+  info "Building counter-app image..."
+  $RUNTIME build -t bloodraven-counter:playground "$SCRIPT_DIR/counter-app"
 
-info "Building dashboard image..."
-$RUNTIME build -t bloodraven-dashboard:playground "$SCRIPT_DIR/dashboard"
+  info "Building dashboard image..."
+  $RUNTIME build -t bloodraven-dashboard:playground "$SCRIPT_DIR/dashboard"
 
-info "Building dns-webhook image..."
-$RUNTIME build -t bloodraven-dns-webhook:playground "$SCRIPT_DIR/dns-webhook"
-ok "All images built"
+  info "Building dns-webhook image..."
+  $RUNTIME build -t bloodraven-dns-webhook:playground "$SCRIPT_DIR/dns-webhook"
+  ok "All images built"
+fi
 
 # ── 4. Auto-detect cluster tool and load images ──────────────────────────
 IMAGES=(bloodraven:playground bloodraven-sidecar:playground bloodraven-counter:playground bloodraven-dashboard:playground bloodraven-dns-webhook:playground)
@@ -239,9 +251,13 @@ EOF
 ok "DNSEndpoint CRD installed"
 
 # ── 6. Install Bloodraven CRDs ───────────────────────────────────────────
-info "Installing Bloodraven CRDs..."
-kubectl apply -f "$PROJECT_ROOT/charts/bloodraven/crds/"
-ok "Bloodraven CRDs installed"
+if [[ "$HELM_INSTALL_CRDS" == "true" ]]; then
+  info "Skipping manual Bloodraven CRD install; fresh Helm install will install chart CRDs from charts/bloodraven/crds"
+else
+  info "Installing Bloodraven CRDs..."
+  kubectl apply -f "$PROJECT_ROOT/charts/bloodraven/crds/"
+  ok "Bloodraven CRDs installed"
+fi
 
 # ── 7. Create namespace and deploy manifests ─────────────────────────────
 info "Creating namespace and deploying manifests..."
@@ -274,12 +290,23 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set image.repository="${IMG_PREFIX}bloodraven" \
   --set image.tag=playground \
   --set image.pullPolicy=Never \
-  --set installCRDs=false \
   --set auxiliary.service.enabled=true \
   --set 'nodeSelector=null' \
   --set 'tolerations[0].key=node.kubernetes.io/disk-pressure' \
   --set 'tolerations[0].operator=Exists' \
   --set 'tolerations[0].effect=NoSchedule' \
+  --set 'tolerations[1].key=shipstream.io/db-readonly-playground' \
+  --set 'tolerations[1].operator=Exists' \
+  --set 'tolerations[1].effect=NoSchedule' \
+  --set 'tolerations[2].key=shipstream.io/db-readonly' \
+  --set 'tolerations[2].operator=Exists' \
+  --set 'tolerations[2].effect=NoSchedule' \
+  --set 'tolerations[3].key=shipstream.io/db-readonly-playground' \
+  --set 'tolerations[3].operator=Exists' \
+  --set 'tolerations[3].effect=NoExecute' \
+  --set 'tolerations[4].key=shipstream.io/db-readonly' \
+  --set 'tolerations[4].operator=Exists' \
+  --set 'tolerations[4].effect=NoExecute' \
   --set leaderElection.enabled=false \
   --timeout=180s
 # Don't use --wait; the operator may take a moment to pass readiness after
@@ -358,21 +385,50 @@ REPL_USER=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.
 REPL_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_PASSWORD}' | base64 -d)
 ROOT_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | base64 -d)
 for site in iad pdx; do
-  READ_ONLY=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
-    mysql "-uroot" "-p${ROOT_PASS}" -Nse "SELECT @@global.read_only" 2>/dev/null || echo 0)
-  SUPER_READ_ONLY=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
-    mysql "-uroot" "-p${ROOT_PASS}" -Nse "SELECT @@global.super_read_only" 2>/dev/null || echo 0)
-  if kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
-    mysql "-uroot" "-p${ROOT_PASS}" -e \
-    "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; \
-     CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
-     GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
-     FLUSH PRIVILEGES;" 2>/dev/null; then
-    kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
-      mysql "-uroot" "-p${ROOT_PASS}" -e "SET GLOBAL read_only=${READ_ONLY}; SET GLOBAL super_read_only=${SUPER_READ_ONLY};" 2>/dev/null || true
-    ok "Replication user created on $site"
-  else
+  CREATED=false
+  LAST_ERR=""
+  for attempt in $(seq 1 12); do
+    READ_ONLY=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+      env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -Nse "SELECT @@global.read_only" 2>/dev/null || echo 0)
+    SUPER_READ_ONLY=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+      env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -Nse "SELECT @@global.super_read_only" 2>/dev/null || echo 0)
+    LAST_ERR=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+      env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -e \
+      "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; \
+       INSTALL PLUGIN clone SONAME 'mysql_clone.so'; \
+       CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
+       GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
+       FLUSH PRIVILEGES;" 2>&1) && CREATED=true || CREATED=false
+    if [[ "$CREATED" != "true" ]] && grep -Eq "(Function|Plugin) 'clone' already exists|already installed" <<<"$LAST_ERR"; then
+      LAST_ERR=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+        env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -e \
+        "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; \
+         CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
+         GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
+         FLUSH PRIVILEGES;" 2>&1) && CREATED=true || CREATED=false
+    fi
+    if [[ "$CREATED" == "true" ]]; then
+      kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+        env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -e "SET GLOBAL read_only=${READ_ONLY}; SET GLOBAL super_read_only=${SUPER_READ_ONLY};" 2>/dev/null || true
+      ok "Replication user created on $site"
+      break
+    fi
+
+    # The operator init script also creates this user. If our explicit setup
+    # races with early bootstrap but the user is already present, keep going.
+    if kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+      env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -Nse "SELECT CONCAT(user_exists, ':', clone_loaded) FROM (SELECT COUNT(*) AS user_exists FROM mysql.user WHERE user='${REPL_USER}' AND host='%') u CROSS JOIN (SELECT COUNT(*) AS clone_loaded FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone') p" 2>/dev/null | grep -q '^1:1$'; then
+      ok "Replication user and clone plugin already exist on $site"
+      CREATED=true
+      break
+    fi
+
+    warn "Replication user setup on $site failed (attempt $attempt/12); retrying..."
+    sleep 5
+  done
+  if [[ "$CREATED" != "true" ]]; then
     warn "Failed to create replication user on $site"
+    echo "$LAST_ERR" >&2
     exit 1
   fi
 done

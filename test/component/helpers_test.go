@@ -123,6 +123,10 @@ func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) err
 	return nil
 }
 
+func (m *mockMySQL) EnsureClonePlugin(_ context.Context) error {
+	return nil
+}
+
 func (m *mockMySQL) SetCloneDonorList(_ context.Context, donor string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

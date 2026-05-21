@@ -43,6 +43,7 @@ func main() {
 	autoReset := rootFlags.Bool("auto-reset", false, "on precheck failure: run playground-chaos reset, then retry once (3s pause unless CI=1)")
 	continueOnFailure := rootFlags.Bool("continue-on-failure", false, "run-all only: keep going past the first failure")
 	junitOut := rootFlags.String("junit-out", "", "run-all only: write JUnit XML report to this path")
+	profile := rootFlags.String("profile", string(runner.DefaultProfile), "run-all only: scenario subset (smoke|release|full)")
 	verbose := rootFlags.Bool("verbose", false, "verbose logging")
 	kubeconfig := rootFlags.String("kubeconfig", "", "kubeconfig path (default: KUBECONFIG / ~/.kube/config)")
 	kctx := rootFlags.String("context", "", "kubectl context to use (default: current-context)")
@@ -97,7 +98,12 @@ func main() {
 		}
 		os.Exit(runOne(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *noCleanup, *force, *autoReset, subArgs[0], logger))
 	case "run-all":
-		os.Exit(runAll(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *noCleanup, *force, *autoReset, *continueOnFailure, *junitOut, logger))
+		p := runner.Profile(*profile)
+		if !p.IsValid() {
+			fmt.Fprintf(os.Stderr, "invalid profile %q; valid: smoke, release, full\n", p)
+			os.Exit(exitFlagParse)
+		}
+		os.Exit(runAll(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *noCleanup, *force, *autoReset, *continueOnFailure, *junitOut, p, logger))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", subcmd)
 		usage()
@@ -123,6 +129,7 @@ Flags:
   --auto-reset           on precheck failure: playground-chaos reset, retry once
   --continue-on-failure  run-all only: keep going past first failure
   --junit-out            run-all only: write JUnit XML to path
+  --profile              run-all only: scenario subset (smoke|release|full)
   --verbose              verbose logging
   --kubeconfig           kubeconfig path
   --context              kubectl context
@@ -316,7 +323,7 @@ func runReset(ctx context.Context, kubeconfig, kctx, currentCtx, namespace, fg, 
 	return nil
 }
 
-func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Duration, noCleanup, force, autoReset, continueOnFailure bool, junitOut string, logger *slog.Logger) int {
+func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Duration, noCleanup, force, autoReset, continueOnFailure bool, junitOut string, profile runner.Profile, logger *slog.Logger) int {
 	k, err := loadKube(kubeconfig, kctx, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -325,10 +332,13 @@ func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 		}
 		return exitEnvironment
 	}
-	scens := runner.DefaultRegistry.List()
+	scens := runner.SelectForProfile(runner.DefaultRegistry.List(), profile)
 	if len(scens) == 0 {
-		fmt.Fprintln(os.Stderr, "no scenarios registered")
+		fmt.Fprintf(os.Stderr, "no scenarios selected for profile %q\n", profile)
 		return exitFailure
+	}
+	if profile != runner.ProfileFull && profile != "" {
+		fmt.Fprintf(os.Stderr, "Running profile %q: %d of %d scenarios\n", profile, len(scens), len(runner.DefaultRegistry.List()))
 	}
 	if force {
 		fmt.Fprintln(os.Stderr, "!! --force: will delete any prior chaos in-progress marker before each scenario's preflight")

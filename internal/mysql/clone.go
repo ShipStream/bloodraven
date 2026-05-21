@@ -2,12 +2,22 @@ package mysql
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 func (m *checker) SetCloneDonorList(ctx context.Context, donor string) error {
 	_, err := m.db.ExecContext(ctx, "SET GLOBAL clone_valid_donor_list = ?", donor)
 	if err != nil {
+		var mysqlErr *mysqldriver.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 {
+			// MySQL 8.4+ no longer exposes clone_valid_donor_list even when
+			// the clone plugin is available. Older versions require this allowlist;
+			// newer versions can proceed directly to CLONE INSTANCE.
+			return nil
+		}
 		return fmt.Errorf("set clone donor list: %w", err)
 	}
 	return nil
@@ -16,6 +26,10 @@ func (m *checker) SetCloneDonorList(ctx context.Context, donor string) error {
 func (m *checker) CloneInstance(ctx context.Context, user, host, password string, useSSL bool, cloneTimeoutSec int) error {
 	if cloneTimeoutSec <= 0 {
 		cloneTimeoutSec = 3600
+	}
+
+	if err := m.EnsureClonePlugin(ctx); err != nil {
+		return fmt.Errorf("ensure clone plugin: %w", err)
 	}
 
 	// Set connection-level and global timeouts before cloning.
@@ -30,6 +44,12 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 	}
 	for _, s := range timeoutStmts {
 		if _, err := m.db.ExecContext(ctx, s); err != nil {
+			var mysqlErr *mysqldriver.MySQLError
+			if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 && s == fmt.Sprintf("SET GLOBAL clone_ddl_timeout = %d", cloneTimeoutSec) {
+				// clone_ddl_timeout was removed in newer MySQL releases; the
+				// connection-level timeouts above still apply, so continue.
+				continue
+			}
 			return fmt.Errorf("set clone timeout (%s): %w", s, err)
 		}
 	}
@@ -43,6 +63,28 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 	_, err := m.db.ExecContext(ctx, stmt)
 	if err != nil {
 		return fmt.Errorf("clone instance: %w", err)
+	}
+	return nil
+}
+
+func (m *checker) EnsureClonePlugin(ctx context.Context) error {
+	var installed int
+	if err := m.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME = 'clone'").Scan(&installed); err != nil {
+		return fmt.Errorf("check clone plugin: %w", err)
+	}
+	if installed > 0 {
+		return nil
+	}
+
+	_, err := m.db.ExecContext(ctx, "INSTALL PLUGIN clone SONAME 'mysql_clone.so'")
+	if err != nil {
+		var mysqlErr *mysqldriver.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1125 {
+			// Another bootstrap/setup path may have installed the plugin between
+			// the INFORMATION_SCHEMA check and this statement.
+			return nil
+		}
+		return fmt.Errorf("install clone plugin: %w", err)
 	}
 	return nil
 }

@@ -105,6 +105,28 @@ Then enable GitHub Pages for the repository pointing at the `gh-pages` branch. T
 
 ---
 
+### `e2e.yml` / `_e2e.yml` — Real-Cluster E2E
+
+**Triggers:**
+- Nightly schedule (release profile)
+- Manual dispatch with profile selection (smoke / release / full)
+- Pull requests with the `e2e` label (smoke profile)
+
+The reusable workflow (`_e2e.yml`) creates a kind cluster with Calico CNI, deploys the playground, and runs `playground-chaos run-all` with the selected profile. It uploads JUnit results, chaos forensics, setup logs, and kind logs as artifacts.
+
+Profiles:
+| Profile | Scenarios | Use case |
+|---|---|---|
+| `smoke` | 3 (~3-5 min) | PR label gate, fast feedback |
+| `release` | 10 (~20-30 min) | Release and nightly gate |
+| `full` | All registered | Full regression (manual only) |
+
+The release workflow (`.github/workflows/release.yml`) blocks Docker image builds and Helm chart publishing on the E2E release-profile gate. This ensures every tagged release is validated against real MySQL failover scenarios (WISHLIST #32).
+
+**Permissions:** `contents: read` (default)
+
+---
+
 ### `scan.yml` — Trivy Security Scan
 
 **Triggers:** Pull requests targeting `main`

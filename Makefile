@@ -1,6 +1,6 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-integration fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all
+.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile
 
 ##@ General
 
@@ -90,10 +90,15 @@ test-component: ## Run component tests (cross-package with fakes, no real cluste
 test-envtest: ## Run envtest controller tests (real API server, no cluster)
 	go test -race -tags envtest ./test/envtest/
 
-test-e2e: ## Run real cluster end-to-end tests (requires kind/k3d — Phase 4, not yet implemented)
-	@echo "Real cluster e2e tests are not yet implemented (Testing 2.0 Phase 4)."
-	@echo "See TESTING_2.0.md for the planned scenarios."
-	@exit 1
+E2E_PROFILE ?= release
+E2E_JUNIT_OUT ?= playground/chaos-results/e2e-$(E2E_PROFILE)-junit.xml
+E2E_ARGS ?=
+
+test-e2e: build-playground-chaos ## Run real-cluster E2E tests (E2E_PROFILE=release|smoke|full; requires kind/k3d)
+	./bin/playground-chaos run-all --profile=$(E2E_PROFILE) --auto-reset --continue-on-failure --junit-out=$(E2E_JUNIT_OUT) $(E2E_ARGS)
+
+test-e2e-smoke: build-playground-chaos ## Run real-cluster E2E smoke (smoke profile — requires kind/k3d)
+	$(MAKE) test-e2e E2E_PROFILE=smoke E2E_JUNIT_OUT=playground/chaos-results/e2e-smoke-junit.xml
 
 test-integration: ## Run integration tests (network listener tests)
 	go test -tags integration -race ./internal/platform/ ./test/component/
@@ -123,3 +128,7 @@ chaos-run: build-playground-chaos ## Run a single scenario (SCENARIO=<id>)
 
 chaos-run-all: build-playground-chaos ## Run every registered chaos scenario in order
 	./bin/playground-chaos run-all
+
+chaos-run-all-profile: build-playground-chaos ## Run chaos scenarios filtered by profile (PROFILE=smoke|release|full)
+	@if [ -z "$(PROFILE)" ]; then echo "usage: make chaos-run-all-profile PROFILE=smoke"; exit 2; fi
+	./bin/playground-chaos run-all --profile=$(PROFILE)

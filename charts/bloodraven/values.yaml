@@ -161,6 +161,3 @@ auxiliary:
     # Beyond this limit, additional upgrades are rejected with 429.
     # Defends against an attacker pinning the hub's clients map.
     wsMaxClients: 100
-
-# -- Install CRDs. Set to false if CRDs are managed externally.
-installCRDs: true

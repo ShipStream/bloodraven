@@ -586,7 +586,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileConfigMap(ctx context.Context, f
 			labelManagedBy:     managerName,
 		}
 		cm.Data = map[string]string{
-			"my.cnf": generateMyCnf(fg),
+			"bloodraven.cnf": generateMyCnf(fg),
 		}
 		return nil
 	})
@@ -826,9 +826,20 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			})
 		}
 
+		mysqlArgs := []string{
+			fmt.Sprintf("--server-id=%d", serverID),
+			"--gtid-mode=ON",
+			"--enforce-gtid-consistency=ON",
+			"--log-bin=/var/lib/mysql/mysql-bin",
+			"--log-replica-updates=ON",
+			"--skip-replica-start=ON",
+			"--plugin-load-add=mysql_clone.so",
+		}
+
 		mysqlContainer := corev1.Container{
 			Name:  "mysql",
 			Image: image,
+			Args:  mysqlArgs,
 			Ports: []corev1.ContainerPort{
 				{
 					Name:          "mysql",
@@ -1143,7 +1154,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 						Image: image,
 						Command: []string{
 							"sh", "-c",
-							fmt.Sprintf("cp /etc/mysql/config-map/* /etc/mysql/conf.d/ && printf '[mysqld]\\nserver-id=%d\\n' > /etc/mysql/conf.d/server-id.cnf", serverID),
+							fmt.Sprintf("cp /etc/mysql/config-map/bloodraven.cnf /etc/mysql/conf.d/bloodraven.cnf && printf '[mysqld]\\nserver-id=%d\\n' > /etc/mysql/conf.d/server-id.cnf", serverID),
 						},
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "config", MountPath: "/etc/mysql/config-map"},

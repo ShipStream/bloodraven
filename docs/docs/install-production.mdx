@@ -36,11 +36,10 @@ GitOps users should choose one owner for CRDs. Do not let both Helm and a separa
 ```bash
 helm upgrade --install bloodraven bloodraven/bloodraven \
   --namespace bloodraven \
-  --create-namespace \
-  --set installCRDs=true
+  --create-namespace
 ```
 
-If CRDs are managed separately:
+Helm installs CRDs from the chart's `crds/` directory on first install. If CRDs are managed separately:
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/ShipStream/bloodraven/main/config/crd/bases/shipstream.io_mysqlfailovergroups.yaml
@@ -48,7 +47,7 @@ kubectl apply -f https://raw.githubusercontent.com/ShipStream/bloodraven/main/co
 kubectl apply -f https://raw.githubusercontent.com/ShipStream/bloodraven/main/config/crd/bases/shipstream.io_mysqlbackupverifications.yaml
 ```
 
-Then install the operator with `--set installCRDs=false`.
+Then install the operator chart after the platform CRD app has applied the CRDs. Helm does not upgrade CRDs in `crds/`; apply CRD updates explicitly during upgrades.
 
 ## Helm values
 

@@ -68,8 +68,6 @@ auxiliary:
     type: ClusterIP
     wsAllowedOrigins: https://dashboard.example.com
     wsMaxClients: 100
-
-installCRDs: true
 ```
 
 Install with:
@@ -80,8 +78,7 @@ helm upgrade --install bloodraven bloodraven/bloodraven \
   -f values-production.yaml
 ```
 
-If Argo CD owns CRDs separately, set `installCRDs: false` and commit the
-CRDs under `charts/bloodraven/crds/` or your platform CRD app.
+If Argo CD owns CRDs separately, commit the CRDs under `charts/bloodraven/crds/` or your platform CRD app and install the operator chart after that CRD app syncs. Helm installs chart CRDs on first install but does not upgrade them automatically.
 
 ## NetworkPolicy
 

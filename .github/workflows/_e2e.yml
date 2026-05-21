@@ -1,0 +1,125 @@
+# Reusable E2E workflow — creates a kind cluster, deploys the playground,
+# and runs playground-chaos with the selected profile.
+#
+# Called by:
+#   .github/workflows/e2e.yml (nightly, manual, PR label)
+#   .github/workflows/release.yml (release gate)
+name: E2E (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "Chaos profile (smoke|release|full)"
+        required: false
+        default: "release"
+        type: string
+      timeout-minutes:
+        description: "Job timeout in minutes"
+        required: false
+        default: 90
+        type: number
+
+permissions:
+  contents: read
+
+env:
+  BLOODRAVEN_SETUP_HELM_INSTALL_CRDS: "1"
+  SKIP_IMAGE_BUILD: "1"
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}-${{ inputs.profile }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Real-cluster E2E (${{ inputs.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build playground-chaos
+        run: make build-playground-chaos
+
+      - name: Build Docker images
+        run: |
+          docker build --target bloodraven -t bloodraven:playground .
+          docker build --target sidecar -t bloodraven-sidecar:playground .
+          docker build -t bloodraven-counter:playground playground/counter-app
+          docker build -t bloodraven-dashboard:playground playground/dashboard
+          docker build -t bloodraven-dns-webhook:playground playground/dns-webhook
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: bloodraven-e2e
+          config: .github/kind/e2e-calico.yaml
+          # CNI is disabled in this kind config, so nodes cannot become
+          # Ready until Calico is installed in the next step.
+          wait: 0s
+
+      - name: Install Calico CNI
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+          kubectl -n kube-system rollout status daemonset/calico-node --timeout=180s
+          kubectl wait nodes --all --for=condition=Ready --timeout=180s
+
+      - name: Load images into kind
+        run: |
+          kind load docker-image bloodraven:playground bloodraven-sidecar:playground bloodraven-counter:playground bloodraven-dashboard:playground bloodraven-dns-webhook:playground --name bloodraven-e2e
+
+      - name: Deploy playground
+        run: |
+          set -o pipefail
+          ./playground/setup.sh 2>&1 | tee playground/setup.log
+        timeout-minutes: 10
+
+      - name: Run E2E (${{ inputs.profile }} profile)
+        run: make test-e2e E2E_PROFILE=${{ inputs.profile }} E2E_JUNIT_OUT=playground/chaos-results/e2e-${{ inputs.profile }}-junit.xml
+        timeout-minutes: ${{ inputs.timeout-minutes }}
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ inputs.profile }}-junit
+          path: playground/chaos-results/e2e-${{ inputs.profile }}-junit.xml
+          retention-days: 30
+
+      - name: Upload chaos forensics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ inputs.profile }}-forensics
+          path: playground/chaos-results/
+          retention-days: 30
+
+      - name: Upload kind logs
+        if: failure()
+        run: |
+          mkdir -p /tmp/kind-logs
+          kind export logs --name=bloodraven-e2e /tmp/kind-logs || true
+        continue-on-error: true
+
+      - name: Upload kind logs artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ inputs.profile }}-kind-logs
+          path: /tmp/kind-logs/
+          retention-days: 14
+        continue-on-error: true
+
+      - name: Upload setup logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ inputs.profile }}-setup-logs
+          path: playground/setup.log
+          retention-days: 14

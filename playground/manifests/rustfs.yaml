@@ -6,8 +6,8 @@ metadata:
 type: Opaque
 stringData:
   # AWS_* envs are what Dragonfly's S3 client reads.
-  AWS_ACCESS_KEY_ID: rustfsadmin
-  AWS_SECRET_ACCESS_KEY: rustfsadmin
+  AWS_ACCESS_KEY_ID: bloodraven-rustfs-access
+  AWS_SECRET_ACCESS_KEY: bloodraven-rustfs-secret
   AWS_REGION: us-east-1
   # RUSTFS_* envs are what the rustfs server binary reads. Holding both
   # naming conventions in the same secret lets the rustfs Deployment
@@ -17,8 +17,8 @@ stringData:
   # CreateContainerConfigError indefinitely (the secret exists in the
   # API server but the pod-scoped kubelet cache returns not-found and
   # never invalidates).
-  RUSTFS_ACCESS_KEY: rustfsadmin
-  RUSTFS_SECRET_KEY: rustfsadmin
+  RUSTFS_ACCESS_KEY: bloodraven-rustfs-access
+  RUSTFS_SECRET_KEY: bloodraven-rustfs-secret
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

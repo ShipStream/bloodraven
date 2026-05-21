@@ -27,5 +27,3 @@ auxiliary:
   service:
     enabled: false
     wsAllowedOrigins: "https://dashboard.example.com"
-
-installCRDs: true

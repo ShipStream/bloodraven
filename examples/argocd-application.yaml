@@ -11,7 +11,6 @@ spec:
     targetRevision: 0.1.6
     helm:
       values: |
-        installCRDs: false
         metrics:
           service:
             enabled: true

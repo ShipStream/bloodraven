@@ -5,13 +5,16 @@
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
 - [ ] 27. Backup/restore performance guide
 - [ ] 30. Public repo, license, release cadence
-- [ ] 32. Real-cluster E2E CI gate
+- [x] 32. Real-cluster E2E CI gate
 - [ ] 41. Safe Secret watch narrowing design
 - [ ] 42. Namespace-scoped watch/cache mode evaluation
+- [ ] 43. Dedicated backup/PITR real-cluster E2E scenarios
 
 ## P0 — Production adoption blockers
 
-**32. Real-cluster E2E CI gate.** Unit/component/envtest coverage is not enough for a MySQL failover operator. Add an optional-but-required-before-release k3d/kind CI job that installs the chart and exercises real MySQL pods, PVCs, Services, DNS/DNSEndpoint behavior, taints, planned failover, emergency failover, operator restart, PVC loss, NetworkPolicy partition, backup restore, and PITR verification. This should run at least on release tags and nightly; if cost is acceptable, run a reduced smoke subset on PRs.
+**32. Real-cluster E2E CI gate.** Done: `make test-e2e` runs the release profile of `playground-chaos run-all` against a real cluster instead of the former placeholder. `make test-e2e-smoke` runs a fast smoke subset (3 scenarios). Three profiles (`smoke`/`release`/`full`) filter scenarios via `--profile` on `playground-chaos run-all` and `make chaos-run-all-profile PROFILE=`. CI uses a reusable workflow (`_e2e.yml`) that creates a kind cluster with Calico CNI, deploys the playground, and runs the selected profile. Nightly and manual runs use the release profile; PRs with the `e2e` label trigger a smoke run. Release publishing blocks on the E2E release-profile gate. JUnit, forensics, setup logs, and kind logs are uploaded as artifacts. Dedicated MySQL backup restore and PITR verification scenarios are split out as follow-up #43 so the gate can start enforcing the existing real-cluster chaos suite now without misrepresenting that coverage.
+
+**43. Dedicated backup/PITR real-cluster E2E scenarios.** Follow-up to #32: add release-profile playground-chaos scenarios that configure the playground backup profile against RustFS, trigger a real `MysqlBackup`, verify restore via `MysqlBackupVerification`, then enable PITR/binlog archival and verify a point-in-time replay with deterministic marker rows. The #32 gate now exists and is release-blocking, but this backup/PITR coverage should be added before claiming the E2E release profile exercises every backup/restore path.
 
 ## P1 — DR and operational completeness
 

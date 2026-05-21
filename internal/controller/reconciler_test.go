@@ -134,9 +134,9 @@ func TestReconcile_CreatesConfigMap(t *testing.T) {
 		t.Fatalf("configmap not created: %v", err)
 	}
 
-	myCnf, ok := cm.Data["my.cnf"]
+	myCnf, ok := cm.Data["bloodraven.cnf"]
 	if !ok {
-		t.Fatal("my.cnf not found in configmap data")
+		t.Fatal("bloodraven.cnf not found in configmap data")
 	}
 
 	// Check for key config values
@@ -363,7 +363,7 @@ func TestReconcile_TLSConfig(t *testing.T) {
 		t.Fatalf("configmap not found: %v", err)
 	}
 
-	myCnf := cm.Data["my.cnf"]
+	myCnf := cm.Data["bloodraven.cnf"]
 	if !strings.Contains(myCnf, "require-secure-transport=ON") {
 		t.Error("TLS-enabled config should contain require-secure-transport=ON")
 	}
@@ -394,7 +394,7 @@ func TestReconcile_MysqlConfOverrides(t *testing.T) {
 		t.Fatalf("configmap not found: %v", err)
 	}
 
-	myCnf := cm.Data["my.cnf"]
+	myCnf := cm.Data["bloodraven.cnf"]
 	if !strings.Contains(myCnf, "max-connections=1000") {
 		t.Error("override max-connections=1000 should be present")
 	}

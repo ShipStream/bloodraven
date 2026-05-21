@@ -66,6 +66,17 @@ if [ -z "${MYSQL_REPLICATION_USER:-}" ] || [ -z "${MYSQL_REPLICATION_PASSWORD:-}
     exit 0
 fi
 
+install_clone_plugin() {
+    local installed
+    installed=$(MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root -Nse "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone'" 2>/dev/null || echo 0)
+    if [ "$installed" = "0" ]; then
+        echo "bloodraven-init: installing MySQL clone plugin"
+        MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';"
+    fi
+}
+
+install_clone_plugin
+
 REPL_USER=$(escape_sql "$MYSQL_REPLICATION_USER")
 REPL_PASS=$(escape_sql "$MYSQL_REPLICATION_PASSWORD")
 
@@ -93,6 +104,15 @@ escape_sql() {
     printf '%s' "$val"
 }
 
+install_clone_plugin() {
+    local installed
+    installed=$(MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root -Nse "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone'" 2>/dev/null || echo 0)
+    if [ "$installed" = "0" ]; then
+        echo "bloodraven-init: installing MySQL clone plugin"
+        MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';"
+    fi
+}
+
 create_user_with_grants() {
     local user pass grants
     user=$(escape_sql "$(read_cred "$1" username)")
@@ -113,7 +133,9 @@ EOSQL
 
 `
 	// Operator user — full admin for topology management, replication, cloning.
-	script += `create_user_with_grants operator "GRANT ALL PRIVILEGES ON *.* TO '__USER__'@'%' WITH GRANT OPTION;"
+	script += `install_clone_plugin
+
+create_user_with_grants operator "GRANT ALL PRIVILEGES ON *.* TO '__USER__'@'%' WITH GRANT OPTION;"
 `
 
 	if fg.Spec.Credentials.AppSecret != "" {
