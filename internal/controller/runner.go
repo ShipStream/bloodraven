@@ -368,7 +368,7 @@ func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg 
 	if err := validateRecloneRequest(fg, req); err != nil {
 		r.logger.Warn("reclone annotation rejected", "fg", nn, "value", raw, "error", err.Error())
 		if r.recorder != nil {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "RecloneRejected", err.Error())
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, "RecloneRejected", "%s", err.Error())
 		}
 		// Clear the annotation so the admin sees a single rejection and
 		// can re-apply with the correct value. Leaving it would spam
