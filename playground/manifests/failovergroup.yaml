@@ -4,7 +4,7 @@ metadata:
   name: playground
   namespace: bloodraven-playground
 spec:
-  image: mysql:8.4
+  image: mysql:9.6
   sidecarImage: bloodraven-sidecar:playground
   secretName: mysql-credentials
   pollInterval: 2s
