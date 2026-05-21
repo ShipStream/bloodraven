@@ -3,26 +3,13 @@
 ## Checklist
 
 - [ ] 7. Cross-region/cross-cluster DR as a first-class feature
-- [x] 9. Restore duration and size metrics
-- [x] 18. `kubectl` plugin
 - [ ] 27. Backup/restore performance guide
 - [ ] 30. Public repo, license, release cadence
-- [x] 31. Documentation publishing parity
 - [ ] 32. Real-cluster E2E CI gate
-- [x] 33. True shared-node placement model
-- [x] 34. Investigate using [Scorecard](https://sdk.operatorframework.io/docs/testing-operators/scorecard/) to test Bloodraven operator.
-- [x] 35. Read the [Operator SDK Best Practices](https://sdk.operatorframework.io/docs/best-practices/) and see if there are any lessons we can learn and apply to Bloodraven.
-- [x] 36. CR replication enrichment stalls after in-lifecycle recovery
-- [x] 37. Auto-fail-back to returning original primary is undocumented
-- [x] 38. `status.lastFailoverTarget` not durable across operator restart
-- [x] 39. Default resource requests and security contexts audit
-- [x] 40. Observability review gate for metrics and alerts
 - [ ] 41. Safe Secret watch narrowing design
 - [ ] 42. Namespace-scoped watch/cache mode evaluation
 
 ## P0 — Production adoption blockers
-
-**31. Documentation publishing parity.** Done: PR and release gates build Docusaurus and verify `llms-full.txt` includes every page under `docs/docs/`; ReadTheDocs watches the repository and publishes `main`; and a public-site link check runs nightly and on demand against `https://bloodraven.readthedocs.io/en/latest/`. The CI checks and link-check workflow are documented in `docs/README.md`, `docs/docs/docs-maintenance.mdx`, and `.github/workflows/README.md`.
 
 **32. Real-cluster E2E CI gate.** Unit/component/envtest coverage is not enough for a MySQL failover operator. Add an optional-but-required-before-release k3d/kind CI job that installs the chart and exercises real MySQL pods, PVCs, Services, DNS/DNSEndpoint behavior, taints, planned failover, emergency failover, operator restart, PVC loss, NetworkPolicy partition, backup restore, and PITR verification. This should run at least on release tags and nightly; if cost is acceptable, run a reduced smoke subset on PRs.
 
@@ -30,33 +17,11 @@
 
 **7. Cross-region/cross-cluster DR as a first-class feature.** Today DR = "create a new MysqlFailoverGroup with `initFromBackup` in another cluster." This works but is ad-hoc. Consider a `MysqlDRTarget` CR that continuously ships backups + binlogs to a designated target cluster/bucket and can be promoted with one command. At minimum, document the recommended multi-cluster DR topology with a runbook.
 
-**9. Restore duration and size metrics.** Done: restores now publish data-plane duration, last-success timestamp, and last-source-size metrics with bounded labels. Both bootstrap and in-place restore status surfaces source backup size/coordinates, target GTID/binlog coordinates, and PITR replay summary when available.
-
-**39. Default resource requests and security contexts audit.** Done: every operator-created Pod, Deployment, StatefulSet, Job, and CronJob path was inventoried for resource requests and security-context coverage. Resource gaps are filled on the cleanup, restore, and verification Jobs (main container reuses `spec.backup.resources`; init containers — `pitr-download`, `decrypt-download` — default to `100m`/`128Mi` requests, no limits, and accept the same override). Execution Jobs (backup, cleanup, restore, restore-in-place, verification) now set `automountServiceAccountToken: false`; schedule-trigger CronJob pods keep the token because they POST a CR through the in-cluster API. The Helm operator container picks up `seccompProfile: RuntimeDefault` to match the pod-level setting. New opt-in CR fields `spec.podSecurityContext`, `spec.containerSecurityContext`, `spec.dragonfly.podSecurityContext`, and `spec.dragonfly.containerSecurityContext` let cluster operators turn on Kubernetes Restricted PSS for the MySQL and Dragonfly StatefulSets on their own schedule; defaults stay unchanged so existing PVCs are not disrupted on upgrade. See `docs/docs/production-hardening.mdx` for the worked migration. Follow-up (#39-followup): tune `terminationGracePeriodSeconds` for MySQL and replace the conservative 100m/128Mi init-container default with profile-driven sizing.
-
-**40. Observability review gate for metrics and alerts.** Done: `docs/docs/observability-change-checklist.mdx` is the canonical PR/release gate for metrics, recording rules, alerts, dashboard panels, Kubernetes Events, structured-log Events, and runbook links. It defines documentation destinations, metric label-cardinality evidence, minimum alert annotations, runbook/no-runbook requirements, dashboard verification evidence, and the distinction between Kubernetes Events and stable structured-log Events. The checklist is linked from the Observability docs navigation, observability overview, alert/runbook map, docs contributor README, and pull request template.
-
-**33. True shared-node placement model.** Done: each site now declares an explicit required `spec.sites[].taintNodeSelector`, allowing per-group labels such as `shipstream.io/failover-group.orders=true` and `shipstream.io/site.orders=iad`. Tainting, cleanup, docs, tests, and playground manifests use the selector model so failover in one group does not require dedicated node pools or affect unrelated tenants.
-
-**36. CR replication enrichment stalls after in-lifecycle recovery.** Done: no-divergence old-primary recovery now persists `status.sites[].recoveryState=RecoveryInProgress` before running `RecoverOldPrimary`, keeps that state through a stabilization window, suppresses immediate recovery re-entry, and clears it only after healthy replication is observed so `replicating` and `gtidExecuted` are written back to CR status.
-
-**37. Auto-fail-back to returning original primary is undocumented.** Done: the current contract is documented as GTID-freshest/current-state-driven rather than identity-driven. A returning original primary can be promoted again only through the normal candidate selection path, with anti-flap cooldown and site-priority tie-breaking still applying.
-
-**38. `status.lastFailoverTarget` not durable across operator restart.** Done: `runner.startManager` rehydrates `lastFailoverTarget`, `lastFailover`, `RecoveryBlocked`, and `RecoveryInProgress` from CR status. A restarted operator clears in-progress recovery if replication is already healthy, or retries recovery immediately if it is still unhealthy.
-
-## P2 — Observability and operability
-
-**18. `kubectl` plugin.** Done: `cmd/kubectl-bloodraven` ships `status`, `promote`, `reclone`, `backup`, and `verify-backup`. Each writes only API objects the operator already understands, validates inputs before posting, and supports synchronous `--wait` on the long-running ones. Built via `make build-kubectl-plugin`; documented under [kubectl plugin](docs/docs/kubectl-plugin.mdx).
-
 ## P3 — Documentation deliverables
 
 **27. Backup/restore performance guide.** For a 500 GB dataset, how long does `util.dumpInstance` take with what `threads`/`bytesPerChunk`? How long does `loadDump` take? At what `maxLagSeconds` does your replica-as-source fallback trigger and what's the primary-impact if it does? Users need ballparks before they commit.
 
 **30. Public repo, license, release cadence.** If this isn't going external, skip. If it might — Apache-2.0, semver on the CRD and the operator separately, `CHANGELOG.md`, GitHub releases with signed images, published Helm chart index. The bar for "a real project someone else will adopt" is higher than the bar for "our internal tool."
-
-**34. Investigate Operator SDK Scorecard.** Done: declined. Bloodraven is non-OLM (no `bundle.Dockerfile`, no CSV, no `config/scorecard/`, no `PROJECT` file), has no OperatorHub roadmap (#30 remains conditional P3), and has no downstream consumer of `scapiv1alpha3.TestStatus` JSON. The five OLM scorecard tests all read a CSV we do not ship; the basic suite's single `basic-check-spec-test` would not surface a real defect against the CRs in `examples/`; custom and kuttl scorecard paths both require an OLM bundle plus a live-cluster gate (#32) we have deferred. The existing pyramid — unit + component + integration + envtest + the `cmd/playground-chaos` runner — already covers the same failure modes with richer forensic output. See [Test strategy and Operator SDK Scorecard](docs/docs/operations-overview.mdx#test-strategy-and-operator-sdk-scorecard) for the rubric, today's evaluation, and revisit triggers.
-
-**35. Operator SDK Best Practices review.** Done: the Operator SDK best-practices review was converted into internal follow-ups in this wishlist. High-priority follow-ups are #39 and #40; lower-priority follow-ups are #41 and #42. NetworkPolicy ownership is intentionally not a follow-up: Bloodraven should continue treating tenant NetworkPolicy as platform-owned rather than operator-owned by default.
 
 **41. Safe Secret watch narrowing design.** Low priority: evaluate whether the broad `Secret` watch in `MysqlFailoverGroupReconciler.SetupWithManager` can be narrowed safely without missing credential or TLS rotation. Possible approaches include labels for Bloodraven-managed or referenceable Secrets, field indexes, a narrower event predicate, or cache selectors. Do not change behavior without controller or envtest coverage for every Secret reference path.
 
@@ -66,9 +31,8 @@
 
 ## Suggested sequencing
 
-- **Production adoption gate:** #31, #32
-- **Operator correctness (fix before next release):** #36, #38 — silent post-chaos data gaps in the CR
-- **Operator semantics to nail down:** #37 — pick a fail-back rule and document it
-- **Operator SDK follow-ups:** #39, #40 first; #41, #42 later if install scale or tenant constraints require them
-- **Next quarter:** #7, #9, #18 (DR muscle + day-2 ergonomics)
+- **Production adoption gate:** #32
+- **DR muscle:** #7
+- **Operator SDK follow-ups:** #41, #42 if install scale or tenant constraints require them
+- **Documentation:** #27
 - **When stable enough for external use:** #30 (open-source prep if that's the path)
