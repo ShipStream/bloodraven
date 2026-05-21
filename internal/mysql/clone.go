@@ -2,12 +2,22 @@ package mysql
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 func (m *checker) SetCloneDonorList(ctx context.Context, donor string) error {
 	_, err := m.db.ExecContext(ctx, "SET GLOBAL clone_valid_donor_list = ?", donor)
 	if err != nil {
+		var mysqlErr *mysqldriver.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 {
+			// MySQL 8.4+ no longer exposes clone_valid_donor_list even when
+			// the clone plugin is available. Older versions require this allowlist;
+			// newer versions can proceed directly to CLONE INSTANCE.
+			return nil
+		}
 		return fmt.Errorf("set clone donor list: %w", err)
 	}
 	return nil
