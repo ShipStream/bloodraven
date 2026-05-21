@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   # Skip PR-triggered runs unless the "e2e" label is present.
-  smoke:
+  e2e:
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||

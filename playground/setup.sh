@@ -65,6 +65,9 @@ HELM_INSTALL_CRDS=false
 case "${BLOODRAVEN_SETUP_HELM_INSTALL_CRDS:-}" in
   1|true|TRUE|yes|YES) HELM_INSTALL_CRDS=true ;;
 esac
+if [[ "$HELM_INSTALL_CRDS" == "true" ]] && helm status bloodraven -n "$NAMESPACE" >/dev/null 2>&1; then
+  fail "BLOODRAVEN_SETUP_HELM_INSTALL_CRDS=1 requires a fresh Helm release. Helm installs CRDs from charts/bloodraven/crds only on first install and will not upgrade or repair them on helm upgrade; unset BLOODRAVEN_SETUP_HELM_INSTALL_CRDS to apply CRDs explicitly before upgrading."
+fi
 
 # Prefer docker over podman. k3d's podman support is experimental and the
 # tar-archive image-load path is slower than docker's native import.
