@@ -40,6 +40,12 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 	}
 	for _, s := range timeoutStmts {
 		if _, err := m.db.ExecContext(ctx, s); err != nil {
+			var mysqlErr *mysqldriver.MySQLError
+			if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 && s == fmt.Sprintf("SET GLOBAL clone_ddl_timeout = %d", cloneTimeoutSec) {
+				// clone_ddl_timeout was removed in newer MySQL releases; the
+				// connection-level timeouts above still apply, so continue.
+				continue
+			}
 			return fmt.Errorf("set clone timeout (%s): %w", s, err)
 		}
 	}
