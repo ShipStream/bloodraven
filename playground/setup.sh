@@ -395,9 +395,18 @@ for site in iad pdx; do
     LAST_ERR=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
       env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -e \
       "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; \
+       INSTALL PLUGIN clone SONAME 'mysql_clone.so'; \
        CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
        GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
        FLUSH PRIVILEGES;" 2>&1) && CREATED=true || CREATED=false
+    if [[ "$CREATED" != "true" ]] && grep -Eq "(Function|Plugin) 'clone' already exists|already installed" <<<"$LAST_ERR"; then
+      LAST_ERR=$(kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
+        env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -e \
+        "SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; \
+         CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}'; \
+         GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%'; \
+         FLUSH PRIVILEGES;" 2>&1) && CREATED=true || CREATED=false
+    fi
     if [[ "$CREATED" == "true" ]]; then
       kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
         env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -e "SET GLOBAL read_only=${READ_ONLY}; SET GLOBAL super_read_only=${SUPER_READ_ONLY};" 2>/dev/null || true
@@ -408,8 +417,8 @@ for site in iad pdx; do
     # The operator init script also creates this user. If our explicit setup
     # races with early bootstrap but the user is already present, keep going.
     if kubectl -n "$NAMESPACE" exec "deploy/mysql-playground-$site" -c mysql -- \
-      env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -Nse "SELECT 1 FROM mysql.user WHERE user='${REPL_USER}' AND host='%'" 2>/dev/null | grep -q '^1$'; then
-      ok "Replication user already exists on $site"
+      env MYSQL_PWD="$ROOT_PASS" mysql -h127.0.0.1 -uroot -Nse "SELECT CONCAT(user_exists, ':', clone_loaded) FROM (SELECT COUNT(*) AS user_exists FROM mysql.user WHERE user='${REPL_USER}' AND host='%') u CROSS JOIN (SELECT COUNT(*) AS clone_loaded FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone') p" 2>/dev/null | grep -q '^1:1$'; then
+      ok "Replication user and clone plugin already exist on $site"
       CREATED=true
       break
     fi
