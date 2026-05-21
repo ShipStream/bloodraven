@@ -157,6 +157,12 @@ func (m *checker) ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error)
 	if v, ok := colMap["Last_Error"]; ok && v.Valid {
 		rs.LastError = v.String
 	}
+	if v, ok := colMap["Last_IO_Error"]; ok && v.Valid && rs.LastError == "" {
+		rs.LastError = v.String
+	}
+	if v, ok := colMap["Last_SQL_Error"]; ok && v.Valid && rs.LastError == "" {
+		rs.LastError = v.String
+	}
 	if v, ok := colMap["Last_Errno"]; ok && v.Valid && rs.LastError == "" {
 		// fallback
 	}
@@ -211,6 +217,12 @@ func (m *checker) ChangeReplicationSource(ctx context.Context, opts ReplicationS
 	)
 	if opts.UseSSL {
 		q += ", SOURCE_SSL=1"
+	} else {
+		// MySQL 8's default caching_sha2_password authentication needs
+		// the source's RSA public key for non-TLS replication channels.
+		// Without this, START REPLICA succeeds but the IO thread exits
+		// asynchronously, leaving the site permanently not-replicating.
+		q += ", GET_SOURCE_PUBLIC_KEY=1"
 	}
 	if _, err := m.db.ExecContext(ctx, q); err != nil {
 		return fmt.Errorf("change replication source: %w", err)
