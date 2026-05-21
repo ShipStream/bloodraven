@@ -1,0 +1,22 @@
+# kind cluster configuration for Bloodraven E2E tests.
+# Uses Calico CNI so NetworkPolicy resources are enforced (the default
+# kindnet CNI does not implement NetworkPolicy, which means partition /
+# self-fencing scenarios would silently pass without actually testing
+# policy behaviour).
+#
+# Usage:
+#   kind create cluster --config=.github/kind/e2e-calico.yaml
+#   # then install Calico:
+#   kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: bloodraven-e2e
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
+networking:
+  # Disable kindnet so Calico can manage CNI instead.
+  disableDefaultCNI: true
+  # Match the stock Calico manifest's default IPv4 pool.
+  podSubnet: "192.168.0.0/16"

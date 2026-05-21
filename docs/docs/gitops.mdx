@@ -13,10 +13,10 @@ Use this page for Argo CD or Flux-managed Bloodraven installs. It covers resourc
 
 Pick one CRD owner:
 
-| Owner | Helm value | Notes |
-|---|---|---|
-| Bloodraven Helm release | `installCRDs=true` | Simple, but Helm CRD upgrades need care |
-| Platform CRD app | `installCRDs=false` | Better for centralized CRD review and ordering |
+| Owner | Notes |
+|---|---|
+| Bloodraven Helm release | Simple first install because Helm applies files in `charts/bloodraven/crds/`; CRD upgrades still need explicit review/application because Helm does not upgrade CRDs automatically. |
+| Platform CRD app | Better for centralized CRD review and ordering; install the operator chart after the CRD app syncs. |
 
 Do not manage the same CRDs in both places.
 

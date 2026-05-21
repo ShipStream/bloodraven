@@ -61,6 +61,11 @@ done
 source "$SCRIPT_DIR/_guard.sh"
 require_playground_context
 
+HELM_INSTALL_CRDS=false
+case "${BLOODRAVEN_SETUP_HELM_INSTALL_CRDS:-}" in
+  1|true|TRUE|yes|YES) HELM_INSTALL_CRDS=true ;;
+esac
+
 # Prefer docker over podman. k3d's podman support is experimental and the
 # tar-archive image-load path is slower than docker's native import.
 # Override with BLOODRAVEN_CONTAINER_RUNTIME=podman if you actually want
@@ -118,19 +123,23 @@ kubectl label node "${WORKERS[1]}" shipstream.io/site.playground=pdx --overwrite
 ok "Nodes labeled: ${WORKERS[0]}=iad, ${WORKERS[1]}=pdx"
 
 # ── 3. Build images ──────────────────────────────────────────────────────
-info "Building operator and sidecar images..."
-$RUNTIME build --target bloodraven -t bloodraven:playground "$PROJECT_ROOT"
-$RUNTIME build --target sidecar -t bloodraven-sidecar:playground "$PROJECT_ROOT"
+if [[ -n "${SKIP_IMAGE_BUILD:-}" ]]; then
+  info "SKIP_IMAGE_BUILD is set — skipping image builds (CI mode: images pre-built or pre-loaded)"
+else
+  info "Building operator and sidecar images..."
+  $RUNTIME build --target bloodraven -t bloodraven:playground "$PROJECT_ROOT"
+  $RUNTIME build --target sidecar -t bloodraven-sidecar:playground "$PROJECT_ROOT"
 
-info "Building counter-app image..."
-$RUNTIME build -t bloodraven-counter:playground "$SCRIPT_DIR/counter-app"
+  info "Building counter-app image..."
+  $RUNTIME build -t bloodraven-counter:playground "$SCRIPT_DIR/counter-app"
 
-info "Building dashboard image..."
-$RUNTIME build -t bloodraven-dashboard:playground "$SCRIPT_DIR/dashboard"
+  info "Building dashboard image..."
+  $RUNTIME build -t bloodraven-dashboard:playground "$SCRIPT_DIR/dashboard"
 
-info "Building dns-webhook image..."
-$RUNTIME build -t bloodraven-dns-webhook:playground "$SCRIPT_DIR/dns-webhook"
-ok "All images built"
+  info "Building dns-webhook image..."
+  $RUNTIME build -t bloodraven-dns-webhook:playground "$SCRIPT_DIR/dns-webhook"
+  ok "All images built"
+fi
 
 # ── 4. Auto-detect cluster tool and load images ──────────────────────────
 IMAGES=(bloodraven:playground bloodraven-sidecar:playground bloodraven-counter:playground bloodraven-dashboard:playground bloodraven-dns-webhook:playground)
@@ -239,9 +248,13 @@ EOF
 ok "DNSEndpoint CRD installed"
 
 # ── 6. Install Bloodraven CRDs ───────────────────────────────────────────
-info "Installing Bloodraven CRDs..."
-kubectl apply -f "$PROJECT_ROOT/charts/bloodraven/crds/"
-ok "Bloodraven CRDs installed"
+if [[ "$HELM_INSTALL_CRDS" == "true" ]]; then
+  info "Skipping manual Bloodraven CRD install; fresh Helm install will install chart CRDs from charts/bloodraven/crds"
+else
+  info "Installing Bloodraven CRDs..."
+  kubectl apply -f "$PROJECT_ROOT/charts/bloodraven/crds/"
+  ok "Bloodraven CRDs installed"
+fi
 
 # ── 7. Create namespace and deploy manifests ─────────────────────────────
 info "Creating namespace and deploying manifests..."
@@ -274,7 +287,6 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set image.repository="${IMG_PREFIX}bloodraven" \
   --set image.tag=playground \
   --set image.pullPolicy=Never \
-  --set installCRDs=false \
   --set auxiliary.service.enabled=true \
   --set 'nodeSelector=null' \
   --set 'tolerations[0].key=node.kubernetes.io/disk-pressure' \

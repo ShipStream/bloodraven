@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // JUnitTestSuite is the surefire-flavor JUnit XML structure.
@@ -19,10 +20,10 @@ type JUnitTestSuite struct {
 
 // JUnitTestCase is one scenario.
 type JUnitTestCase struct {
-	XMLName   xml.Name `xml:"testcase"`
-	Name      string   `xml:"name,attr"`
-	Classname string   `xml:"classname,attr"`
-	Time      float64  `xml:"time,attr"`
+	XMLName   xml.Name      `xml:"testcase"`
+	Name      string        `xml:"name,attr"`
+	Classname string        `xml:"classname,attr"`
+	Time      float64       `xml:"time,attr"`
 	Failure   *junitFailure `xml:"failure,omitempty"`
 }
 
@@ -49,7 +50,7 @@ func WriteJUnit(path string, results []Result) error {
 		if !r.Passed {
 			suite.Failures++
 			tc.Failure = &junitFailure{
-				Type: fmt.Sprintf("%s/%s", r.Phase, r.StepName),
+				Type:    fmt.Sprintf("%s/%s", r.Phase, r.StepName),
 				Message: r.Failure,
 				Body: fmt.Sprintf("phase=%s step=%q\n%s\n\nForensics: %s",
 					r.Phase, r.StepName, r.Failure, r.CapturePath),
@@ -65,6 +66,11 @@ func WriteJUnit(path string, results []Result) error {
 	body = append([]byte(xml.Header), body...)
 	body = append(body, '\n')
 
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		return err
 	}

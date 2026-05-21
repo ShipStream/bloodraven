@@ -1,0 +1,39 @@
+# E2E trigger workflow — nightly, manual, and PR-label-gated.
+# The reusable workflow is in .github/workflows/_e2e.yml.
+name: E2E
+
+on:
+  # Nightly release-profile run
+  schedule:
+    - cron: "0 5 * * *" # 05:00 UTC daily
+
+  # Manual dispatch with profile selection
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Chaos profile (smoke|release|full)"
+        required: false
+        default: "release"
+        type: choice
+        options:
+          - smoke
+          - release
+          - full
+
+  # PR label gate: run smoke while the "e2e" label is present.
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  # Skip PR-triggered runs unless the "e2e" label is present.
+  smoke:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e'))
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      profile: ${{ github.event_name == 'pull_request' && 'smoke' || (github.event.inputs.profile || 'release') }}

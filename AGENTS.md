@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Primary code lives in the root Go module. `cmd/bloodraven` is the Kubernetes operator entrypoint; `cmd/sidecar` is the per-MySQL sidecar; `cmd/kubectl-bloodraven` is the day-2 `kubectl` plugin (status / promote / reclone / backup / verify-backup, built via `make build-kubectl-plugin`). API types live in `api/v1alpha1`, controller logic in `internal/controller`, and supporting packages in `internal/mysql`, `internal/platform`, `internal/sidecar`, `internal/state`, and `internal/metrics`. End-to-end and scenario-style tests live in `test/e2e`. Treat `bitpoke/` and `orchestrator/` as bundled upstream references, not the default place for new feature work.
+Primary code lives in the root Go module. `cmd/bloodraven` is the Kubernetes operator entrypoint; `cmd/sidecar` is the per-MySQL sidecar; `cmd/kubectl-bloodraven` is the day-2 `kubectl` plugin (status / promote / reclone / backup / verify-backup, built via `make build-kubectl-plugin`). API types live in `api/v1alpha1`, controller logic in `internal/controller`, and supporting packages in `internal/mysql`, `internal/platform`, `internal/sidecar`, `internal/state`, and `internal/metrics`. Real-cluster scenario tests live under `internal/playground/scenarios` and run through `cmd/playground-chaos`; faster cross-component tests live under `test/component`, with API-server/envtest coverage under `test/envtest`. Treat `bitpoke/` and `orchestrator/` as bundled upstream references, not the default place for new feature work.
 
 ## Build, Test, and Development Commands
 Run commands from the repository root:
@@ -10,6 +10,8 @@ Run commands from the repository root:
 - `go build ./cmd/sidecar` builds the sidecar binary.
 - `make build-kubectl-plugin` builds `bin/kubectl-bloodraven` (the day-2 `kubectl` plugin). Override `KUBECTL_PLUGIN_VERSION=<tag>` to stamp a release; `make install-kubectl-plugin` drops the binary onto `$PATH`.
 - `make test` runs `go test ./...` across unit and e2e-style packages.
+- `make test-e2e` runs the release profile of real-cluster E2E tests against the current playground cluster (requires kind/k3d/minikube context prepared with `./playground/setup.sh`; CI creates kind and runs setup first).
+- `make test-e2e-smoke` runs the smoke profile (~3 scenarios, fast feedback).
 - `make vet` runs `go vet ./...`.
 - `make lint` runs `golangci-lint run ./...`. `golangci-lint` is not vendored; install it with `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest` (it lands in `$(go env GOPATH)/bin`). CI installs the same tool with the same command in `.github/workflows/ci.yml`, so local and CI output match when you run this.
 - `make generate` refreshes API deep-copy code in `api/v1alpha1`.
@@ -26,7 +28,7 @@ Use standard Go formatting: run `gofmt` on changed files and keep imports organi
 Structured-log `msg` strings and field names listed in `docs/docs/log-schema.mdx` are a public stability contract — downstream log pipelines filter on them. When you touch a log call site whose `msg` appears in that doc's Event reference, either preserve the `msg` string and the documented field set exactly, or update `docs/docs/log-schema.mdx` in the same PR and call out the break in the PR description. The same applies to field naming: log keys are `camelCase` (per the contract), not `snake_case`.
 
 ## Testing Guidelines
-Add table-driven unit tests beside the code they cover, using the existing `*_test.go` layout under `internal/`. Put cross-component behavior tests in `test/e2e`. Some tests create local HTTP listeners with `httptest`, so restricted sandboxes may fail even when local developer runs pass.
+Add table-driven unit tests beside the code they cover, using the existing `*_test.go` layout under `internal/`. Put cross-component behavior tests in `test/component`, API-server/controller-runtime tests in `test/envtest`, and real-cluster playground scenarios in `internal/playground/scenarios` through `cmd/playground-chaos`. Some tests create local HTTP listeners with `httptest`, so restricted sandboxes may fail even when local developer runs pass.
 
 ### Pre-PR gate (required, do not skip)
 Before pushing a branch that opens or updates a PR, run all of the following from the repo root and fix anything they report. Do **not** push expecting CI to find problems you could have caught locally — CI failures on lint or generate drift are round-trip latency and reviewer noise.
@@ -89,7 +91,7 @@ Lessons from running chaos scenarios against a live k3d cluster:
 `./playground/rebuild.sh operator` builds, imports to k3d, and restarts the operator deployment. For sidecar changes, use `./playground/rebuild.sh sidecar` (restarts MySQL pods). Both can be combined: `./playground/rebuild.sh operator sidecar`.
 
 ### Automated chaos runner
-A subset of `playground/chaos-scenarios.md` is automated by `cmd/playground-chaos` and exposed as Make targets: `make chaos-list`, `make chaos-check`, `make chaos-run SCENARIO=<id>`, `make chaos-run-all`. The runner refuses to mutate any kubectl context outside the `_guard.sh` allowlist; on assertion failure it captures cluster YAML + pods + events + operator/sidecar logs + raw `/metrics` under `playground/chaos-results/<timestamp>/<scenario-id>/` for triage. Use `--no-cleanup` to keep injected state in place for forensics.
+A subset of `playground/chaos-scenarios.md` is automated by `cmd/playground-chaos` and exposed as Make targets: `make chaos-list`, `make chaos-check`, `make chaos-run SCENARIO=<id>`, `make chaos-run-all`, `make chaos-run-all-profile PROFILE=smoke|release|full`. The runner supports three E2E profiles (`--profile=smoke|release|full`) that filter which scenarios run. The runner refuses to mutate any kubectl context outside the `_guard.sh` allowlist; on assertion failure it captures cluster YAML + pods + events + operator/sidecar logs + raw `/metrics` under `playground/chaos-results/<timestamp>/<scenario-id>/` for triage. Use `--no-cleanup` to keep injected state in place for forensics.
 
 The runner stamps an in-progress marker on the MFG (`chaos.playground.bloodraven.io/in-progress`) after Precheck and clears it on cleanup. A subsequent run that finds a leftover marker refuses to start with a specific reason (live owner / abandoned / different host). Override with `--force` (delete the marker before preflight) or `--auto-reset` (on Precheck failure, shell out to `reset-mysql.sh + setup.sh` and retry once; 3s pause unless `CI=1`). `chaos-check` runs the same structural baseline scenarios use — stuck scale-to-0 deployments, bogus `lastFailoverTarget`, anti-flap cooldown still ticking, `NoPrimary` (both-sites-read-only), replication off on a non-active candidate — each with the exact remediation command in the error.
 

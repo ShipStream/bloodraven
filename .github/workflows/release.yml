@@ -73,10 +73,21 @@ jobs:
         working-directory: docs
         run: npm run verify:llms
 
+  # E2E release gate — runs the release-profile real-cluster E2E before
+  # any publishing jobs. This ensures that every tagged release has been
+  # validated against real MySQL pods, PVCs, DNS, taints, failover, and
+  # network partition scenarios (WISHLIST #32).
+  e2e-gate:
+    name: E2E gate (release profile)
+    needs: ci-gate
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      profile: release
+
   draft-release:
     name: Create Draft Release
     runs-on: ubuntu-latest
-    needs: ci-gate
+    needs: [ci-gate, e2e-gate]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -116,7 +127,7 @@ jobs:
   docker:
     name: Build and Push Docker Images
     runs-on: ubuntu-latest
-    needs: [ci-gate, draft-release]
+    needs: [ci-gate, e2e-gate, draft-release]
     strategy:
       matrix:
         include:
