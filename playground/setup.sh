@@ -301,6 +301,12 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set 'tolerations[2].key=shipstream.io/db-readonly' \
   --set 'tolerations[2].operator=Exists' \
   --set 'tolerations[2].effect=NoSchedule' \
+  --set 'tolerations[3].key=shipstream.io/db-readonly-playground' \
+  --set 'tolerations[3].operator=Exists' \
+  --set 'tolerations[3].effect=NoExecute' \
+  --set 'tolerations[4].key=shipstream.io/db-readonly' \
+  --set 'tolerations[4].operator=Exists' \
+  --set 'tolerations[4].effect=NoExecute' \
   --set leaderElection.enabled=false \
   --timeout=180s
 # Don't use --wait; the operator may take a moment to pass readiness after
