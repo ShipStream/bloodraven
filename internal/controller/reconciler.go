@@ -826,9 +826,20 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			})
 		}
 
+		mysqlArgs := []string{
+			fmt.Sprintf("--server-id=%d", serverID),
+			"--gtid-mode=ON",
+			"--enforce-gtid-consistency=ON",
+			"--log-bin=/var/lib/mysql/mysql-bin",
+			"--log-replica-updates=ON",
+			"--skip-replica-start=ON",
+			"--plugin-load-add=mysql_clone.so",
+		}
+
 		mysqlContainer := corev1.Container{
 			Name:  "mysql",
 			Image: image,
+			Args:  mysqlArgs,
 			Ports: []corev1.ContainerPort{
 				{
 					Name:          "mysql",
