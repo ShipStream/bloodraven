@@ -28,6 +28,10 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 		cloneTimeoutSec = 3600
 	}
 
+	if err := m.ensureClonePlugin(ctx); err != nil {
+		return fmt.Errorf("ensure clone plugin: %w", err)
+	}
+
 	// Set connection-level and global timeouts before cloning.
 	// net_read_timeout and net_write_timeout are session-scoped and prevent the
 	// server from dropping the connection during a long clone transfer.
@@ -59,6 +63,28 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 	_, err := m.db.ExecContext(ctx, stmt)
 	if err != nil {
 		return fmt.Errorf("clone instance: %w", err)
+	}
+	return nil
+}
+
+func (m *checker) ensureClonePlugin(ctx context.Context) error {
+	var installed int
+	if err := m.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME = 'clone'").Scan(&installed); err != nil {
+		return fmt.Errorf("check clone plugin: %w", err)
+	}
+	if installed > 0 {
+		return nil
+	}
+
+	_, err := m.db.ExecContext(ctx, "INSTALL PLUGIN clone SONAME 'mysql_clone.so'")
+	if err != nil {
+		var mysqlErr *mysqldriver.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1125 {
+			// Another bootstrap/setup path may have installed the plugin between
+			// the INFORMATION_SCHEMA check and this statement.
+			return nil
+		}
+		return fmt.Errorf("install clone plugin: %w", err)
 	}
 	return nil
 }
