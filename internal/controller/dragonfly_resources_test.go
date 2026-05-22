@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
@@ -210,6 +211,42 @@ func TestReconcileDragonflyStatefulSet_SnapshotS3WiresDirAndServiceAccount(t *te
 	env := sts.Spec.Template.Spec.Containers[0].Env
 	if !hasEnvFromSecret(env, "AWS_ACCESS_KEY_ID", "dragonfly-s3") || !hasEnvFromSecret(env, "AWS_SECRET_ACCESS_KEY", "dragonfly-s3") {
 		t.Errorf("snapshot credentials env not wired from dragonfly-s3: %#v", env)
+	}
+}
+
+func TestDesiredDragonflyStatefulSet_ProbeDefaultsAreExplicit(t *testing.T) {
+	fg := fgWithDragonfly()
+	r, _ := newReconciler(fg)
+	sts, err := r.desiredDragonflyStatefulSet(fg, fg.Spec.Sites[0])
+	if err != nil {
+		t.Fatalf("desiredDragonflyStatefulSet: %v", err)
+	}
+	container := sts.Spec.Template.Spec.Containers[0]
+	for name, probe := range map[string]*corev1.Probe{
+		"liveness":  container.LivenessProbe,
+		"readiness": container.ReadinessProbe,
+	} {
+		if probe == nil {
+			t.Fatalf("%s probe is nil", name)
+		}
+		if probe.TimeoutSeconds != 1 || probe.SuccessThreshold != 1 || probe.FailureThreshold != 3 {
+			t.Fatalf("%s probe defaults: timeout=%d success=%d failure=%d, want 1/1/3",
+				name, probe.TimeoutSeconds, probe.SuccessThreshold, probe.FailureThreshold)
+		}
+	}
+}
+
+func TestDragonflyStatefulSetTemplateEqual_TreatsDefaultedPodSecurityContextAsEmpty(t *testing.T) {
+	fg := fgWithDragonfly()
+	r, _ := newReconciler(fg)
+	desired, err := r.desiredDragonflyStatefulSet(fg, fg.Spec.Sites[0])
+	if err != nil {
+		t.Fatalf("desiredDragonflyStatefulSet: %v", err)
+	}
+	current := desired.DeepCopy()
+	current.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{}
+	if !dragonflyStatefulSetTemplateEqual(current, desired) {
+		t.Fatal("template comparison treated API-defaulted empty pod securityContext as drift")
 	}
 }
 
@@ -424,6 +461,112 @@ func TestReconcileDragonflyResources_SerializesImageRolloutReplicaBeforeActive(t
 	}
 	if got := dragonflyStatefulSetImageForTest(t, c, "dc1"); got != fg.Spec.Dragonfly.Image {
 		t.Fatalf("old active image=%q, want target image after promotion", got)
+	}
+}
+
+func TestReconcileDragonflyResources_SerializesImageRolloutWhenActiveSiteIsSecond(t *testing.T) {
+	fg := fgWithDragonfly()
+	fg.Status.ActiveSite = "dc2"
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc2", Phase: v1alpha1.DragonflyPhaseReady}
+	r, c := newReconciler(fg)
+	conn := newFakeConnector()
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0, SlaveReplOffset: 2}})
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 0}})
+	r.dragonflyConnector = conn.connect
+	ctx := context.Background()
+	if _, err := r.reconcileDragonflyResources(ctx, fg); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	if err := c.Create(ctx, dragonflyPodForTest(fg, "dc1", fg.Spec.Dragonfly.Image, true)); err != nil {
+		t.Fatalf("create dc1 pod: %v", err)
+	}
+	if err := c.Create(ctx, dragonflyPodForTest(fg, "dc2", fg.Spec.Dragonfly.Image, true)); err != nil {
+		t.Fatalf("create dc2 pod: %v", err)
+	}
+
+	fg.Spec.Dragonfly.Image = "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0"
+	requeue, err := r.reconcileDragonflyResources(ctx, fg)
+	if err != nil {
+		t.Fatalf("first rollout reconcile: %v", err)
+	}
+	if requeue == 0 {
+		t.Fatal("first rollout reconcile requeue=0, want non-zero")
+	}
+	if got := dragonflyStatefulSetImageForTest(t, c, "dc1"); got != fg.Spec.Dragonfly.Image {
+		t.Fatalf("replica image=%q, want target image", got)
+	}
+	if got := dragonflyStatefulSetImageForTest(t, c, "dc2"); got == fg.Spec.Dragonfly.Image {
+		t.Fatalf("active image advanced before replica rollout completed")
+	}
+
+	markDragonflyStatefulSetRolledOutForTest(t, c, "dc1")
+	requeue, err = r.reconcileDragonflyResources(ctx, fg)
+	if err != nil {
+		t.Fatalf("second rollout reconcile: %v", err)
+	}
+	if requeue == 0 {
+		t.Fatal("second rollout reconcile requeue=0, want non-zero")
+	}
+	var promoted v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, &promoted); err != nil {
+		t.Fatalf("get promoted fg: %v", err)
+	}
+	if promoted.Status.Dragonfly == nil || promoted.Status.Dragonfly.ActiveSite != "dc1" {
+		t.Fatalf("dragonfly activeSite=%v, want dc1 after replica promotion", promoted.Status.Dragonfly)
+	}
+	if got := dragonflyStatefulSetImageForTest(t, c, "dc2"); got == fg.Spec.Dragonfly.Image {
+		t.Fatalf("old active image advanced in the same reconcile as promotion")
+	}
+}
+
+func TestReconcileDragonflyResources_UsesUncachedStatefulSetForActiveDrift(t *testing.T) {
+	fg := fgWithDragonfly()
+	fg.Status.ActiveSite = "dc2"
+	fg.Status.Dragonfly = &v1alpha1.DragonflyStatus{Enabled: true, ActiveSite: "dc2", Phase: v1alpha1.DragonflyPhaseReady}
+	r, c := newReconciler(fg)
+	conn := newFakeConnector()
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "slave", MasterLinkStatus: "up", MasterLastIOSecondsAgo: 0, SlaveReplOffset: 2}})
+	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master", MasterReplOffset: 0}})
+	r.dragonflyConnector = conn.connect
+	ctx := context.Background()
+	if _, err := r.reconcileDragonflyResources(ctx, fg); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+	if err := c.Create(ctx, dragonflyPodForTest(fg, "dc1", fg.Spec.Dragonfly.Image, true)); err != nil {
+		t.Fatalf("create dc1 pod: %v", err)
+	}
+	if err := c.Create(ctx, dragonflyPodForTest(fg, "dc2", fg.Spec.Dragonfly.Image, true)); err != nil {
+		t.Fatalf("create dc2 pod: %v", err)
+	}
+	markDragonflyStatefulSetRolledOutForTest(t, c, "dc1")
+
+	var actualReplica appsv1.StatefulSet
+	if err := c.Get(ctx, types.NamespacedName{Name: "lion-dragonfly-dc1", Namespace: "shared-lion"}, &actualReplica); err != nil {
+		t.Fatalf("get dc1 StatefulSet: %v", err)
+	}
+	var actualActive appsv1.StatefulSet
+	if err := c.Get(ctx, types.NamespacedName{Name: "lion-dragonfly-dc2", Namespace: "shared-lion"}, &actualActive); err != nil {
+		t.Fatalf("get dc2 StatefulSet: %v", err)
+	}
+	actualActive.Spec.Template.Spec.Containers[0].Image = "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0"
+	r.APIReader = fake.NewClientBuilder().
+		WithScheme(testScheme()).
+		WithObjects(actualReplica.DeepCopy(), actualActive.DeepCopy()).
+		Build()
+
+	requeue, err := r.reconcileDragonflyResources(ctx, fg)
+	if err != nil {
+		t.Fatalf("reconcile active drift from APIReader: %v", err)
+	}
+	if requeue == 0 {
+		t.Fatal("reconcile active drift requeue=0, want non-zero")
+	}
+	var promoted v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}, &promoted); err != nil {
+		t.Fatalf("get promoted fg: %v", err)
+	}
+	if promoted.Status.Dragonfly == nil || promoted.Status.Dragonfly.ActiveSite != "dc1" {
+		t.Fatalf("dragonfly activeSite=%v, want dc1 after uncached active drift", promoted.Status.Dragonfly)
 	}
 }
 

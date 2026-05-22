@@ -175,6 +175,9 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,
+			TimeoutSeconds:      1,
+			SuccessThreshold:    1,
+			FailureThreshold:    3,
 		},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -182,6 +185,9 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 			},
 			InitialDelaySeconds: 2,
 			PeriodSeconds:       5,
+			TimeoutSeconds:      1,
+			SuccessThreshold:    1,
+			FailureThreshold:    3,
 		},
 		// Container-level security context applied verbatim from
 		// spec.dragonfly.containerSecurityContext (opt-in; nil-by-default
@@ -590,6 +596,11 @@ func (r *MysqlFailoverGroupReconciler) deleteLegacyDragonflyGroupPDB(ctx context
 func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	const requeueAfter = 2 * time.Second
 
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+
 	activeSite := effectiveDragonflyMasterSite(fg)
 	var activeDrift *v1alpha1.SiteSpec
 
@@ -597,7 +608,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 		site := fg.Spec.Sites[i]
 		var current appsv1.StatefulSet
 		key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site.Name)}
-		if err := r.Get(ctx, key, &current); err != nil {
+		if err := reader.Get(ctx, key, &current); err != nil {
 			if apierrors.IsNotFound(err) {
 				if err := r.reconcileDragonflyStatefulSet(ctx, fg, site); err != nil {
 					return 0, fmt.Errorf("reconcile dragonfly statefulset %s: %w", site.Name, err)
@@ -634,7 +645,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflyStatefulSetsSerial(ctx 
 			}
 			var current appsv1.StatefulSet
 			key := types.NamespacedName{Namespace: fg.Namespace, Name: dragonflyStatefulSetName(fg.Name, site.Name)}
-			if err := r.Get(ctx, key, &current); err != nil {
+			if err := reader.Get(ctx, key, &current); err != nil {
 				return 0, fmt.Errorf("get dragonfly statefulset %s before active rollout: %w", site.Name, err)
 			}
 			if !dragonflyStatefulSetRolloutComplete(&current) {
@@ -794,7 +805,7 @@ func dragonflyStatefulSetTemplateEqual(current, desired *appsv1.StatefulSet) boo
 	// (spec.dragonfly.podSecurityContext); a drifted live STS that
 	// silently kept the old value would defeat the user's hardening, so
 	// the comparison must include it.
-	if !equality.Semantic.DeepEqual(curSpec.SecurityContext, wantSpec.SecurityContext) {
+	if !podSecurityContextEqual(curSpec.SecurityContext, wantSpec.SecurityContext) {
 		return false
 	}
 	cur, ok := dragonflyContainerFromTemplate(curSpec)
@@ -830,6 +841,16 @@ func dragonflyContainersOwnedFieldsEqual(cur, want corev1.Container) bool {
 		// (spec.dragonfly.containerSecurityContext) but must be
 		// drift-detected so a user's hardening actually rolls out.
 		equality.Semantic.DeepEqual(cur.SecurityContext, want.SecurityContext)
+}
+
+func podSecurityContextEqual(cur, want *corev1.PodSecurityContext) bool {
+	empty := func(sc *corev1.PodSecurityContext) bool {
+		return sc == nil || equality.Semantic.DeepEqual(sc, &corev1.PodSecurityContext{})
+	}
+	if empty(cur) && empty(want) {
+		return true
+	}
+	return equality.Semantic.DeepEqual(cur, want)
 }
 
 func dragonflyStatefulSetRolloutComplete(sts *appsv1.StatefulSet) bool {
