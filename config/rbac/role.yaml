@@ -121,6 +121,7 @@ rules:
   - mysqlbackups
   - mysqlbackupverifications
   - mysqlfailovergroups
+  - mysqlstandbyclusters
   verbs:
   - create
   - delete
@@ -135,6 +136,7 @@ rules:
   - mysqlbackups/finalizers
   - mysqlbackupverifications/finalizers
   - mysqlfailovergroups/finalizers
+  - mysqlstandbyclusters/finalizers
   verbs:
   - update
 - apiGroups:
@@ -143,6 +145,7 @@ rules:
   - mysqlbackups/status
   - mysqlbackupverifications/status
   - mysqlfailovergroups/status
+  - mysqlstandbyclusters/status
   verbs:
   - get
   - patch
