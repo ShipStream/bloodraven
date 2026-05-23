@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -73,6 +75,13 @@ func newStandbyReconciler(store sidecar.ArchiveStore) *controller.MysqlStandbyCl
 }
 
 // minimalEnvtestStandby returns a MysqlStandbyCluster suitable for envtest.
+//
+// The embedded template.spec MUST be a fully-valid MysqlFailoverGroupSpec
+// because the CRD's deferred-validation embeds the parent spec — admission
+// validates the template at standby-cluster create time, not only when the
+// MFG is materialized at Phase 3 activation. The fixture below mirrors
+// examples/minimal-failovergroup.yaml plus a credentialsSecret for the
+// archive S3 backend (required by MinLength=1 on S3Storage).
 func minimalEnvtestStandby(name, ns string) *v1alpha1.MysqlStandbyCluster {
 	return &v1alpha1.MysqlStandbyCluster{
 		ObjectMeta: metav1.ObjectMeta{
@@ -89,18 +98,83 @@ func minimalEnvtestStandby(name, ns string) *v1alpha1.MysqlStandbyCluster {
 					S3: &v1alpha1.S3Storage{
 						Bucket: "my-bucket",
 						Prefix: "orders",
-						// No CredentialsSecret: test uses injected store.
+						// CredentialsSecret is required by the CRD schema (MinLength=1
+						// in BackupStorage's S3 stanza). The reconciler's S3-cred
+						// resolution path is bypassed in envtest because the
+						// SetNewStoreFunc injection returns the fake store before
+						// resolveS3CredsToDir is reached, but admission still
+						// requires the field to be set.
+						CredentialsSecret: "envtest-s3-creds",
 					},
 				},
 			},
 			Template: v1alpha1.StandbyFailoverGroupTemplate{
-				Name: "orders-dr",
+				Name: name + "-dr",
 				Spec: v1alpha1.MysqlFailoverGroupSpec{
 					Image:      "mysql:9.6",
 					SecretName: "mysql-creds",
+					DNS: v1alpha1.DNSSpec{
+						Hostname: name + "-dr.az.example.com",
+						TTL:      60,
+					},
+					Sites: []v1alpha1.SiteSpec{
+						{
+							Name: "iad",
+							Zone: "us-east-1a",
+							TaintNodeSelector: map[string]string{
+								"shipstream.io/failover-group.orders": "true",
+								"shipstream.io/site.orders":           "iad",
+							},
+							LBIP: "10.0.1.1",
+							Storage: v1alpha1.StorageSpec{
+								StorageClassName: "fast-ssd",
+								Size:             resource.MustParse("100Gi"),
+							},
+						},
+						{
+							Name: "pdx",
+							Zone: "us-west-2a",
+							TaintNodeSelector: map[string]string{
+								"shipstream.io/failover-group.orders": "true",
+								"shipstream.io/site.orders":           "pdx",
+							},
+							LBIP: "10.0.2.1",
+							Storage: v1alpha1.StorageSpec{
+								StorageClassName: "fast-ssd",
+								Size:             resource.MustParse("100Gi"),
+							},
+						},
+					},
 				},
 			},
 		},
+	}
+}
+
+// ensureEnvtestS3CredsSecret creates the dummy AWS-credentials Secret that
+// the standby fixture references in spec.source.storage.s3.credentialsSecret.
+// The reconciler's resolveS3CredsToDir path always reads the Secret before
+// the SetNewStoreFunc-injected fake store is dispatched, so admission +
+// reconcile both require the Secret to exist. Idempotent across tests in
+// the same namespace.
+func ensureEnvtestS3CredsSecret(t *testing.T, ns, name string) {
+	t.Helper()
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+		},
+		StringData: map[string]string{
+			"AWS_ACCESS_KEY_ID":     "AKIAEXAMPLE",
+			"AWS_SECRET_ACCESS_KEY": "secret",
+		},
+	}
+	if err := k8sClient.Create(ctx, sec); err != nil {
+		// Already exists from a sibling test in this namespace — fine.
+		var existing corev1.Secret
+		if getErr := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &existing); getErr != nil {
+			t.Fatalf("create S3 creds Secret %q: %v (subsequent Get also failed: %v)", name, err, getErr)
+		}
 	}
 }
 
@@ -130,6 +204,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_StampsConditions(t *testing.T) {
 			`{"version":1,"site":"site1","files":[{"name":"b1","remotePath":"orders/binlogs/site1/b1","size":1024,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`),
 	}}
 
+	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
 	cr := minimalEnvtestStandby(scName, ns)
 	if err := k8sClient.Create(ctx, cr); err != nil {
 		t.Fatalf("create CR: %v", err)
@@ -198,6 +273,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_BucketUnreadable(t *testing.T) {
 		ListErr: errors.New("bucket not found"),
 	}
 
+	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
 	cr := minimalEnvtestStandby(scName, ns)
 	if err := k8sClient.Create(ctx, cr); err != nil {
 		t.Fatalf("create CR: %v", err)
@@ -238,6 +314,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_DiscoveryIntervalOverride(t *testing.
 
 	store := &envtestFakeStore{Objects: map[string][]byte{}}
 
+	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
 	cr := minimalEnvtestStandby(scName, ns)
 	customInterval := 3 * time.Minute
 	cr.Spec.Freshness = &v1alpha1.StandbyFreshnessSpec{
