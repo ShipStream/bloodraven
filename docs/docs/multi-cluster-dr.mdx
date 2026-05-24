@@ -209,13 +209,14 @@ Use at least two of these three signals before proceeding:
 **Signal 1 — Source operator `/active-site` endpoint returns 5xx:**
 
 ```bash
-curl -f http://<source-operator-svc>:8080/active-site
+curl -f 'http://<source-operator-aux-svc>:8082/active-site?namespace=orders&group=orders'
 # Healthy: {"activeSite":"iad"}
 # Down:    curl: (22) The requested URL returned error: 503
 ```
 
-The operator's auxiliary HTTP server (`cmd/bloodraven/main.go:361`)
-returns 503 when it cannot reach any writable site.
+The operator's auxiliary HTTP server (`cmd/bloodraven/main.go:361`) serves
+`/active-site` on port `8082` and requires `namespace` plus `group` query
+parameters. It returns 503 when it cannot reach any writable site.
 
 **Signal 2 — Source cluster API server is unreachable:**
 
@@ -584,9 +585,14 @@ spec:
     decryption:
       passphraseSecret:
         name: orders-backup-passphrase
-  # template and freshness/activate fields exist in the CRD but are
-  # consumed by Phase 2 (Restorable verification) and Phase 3 (activation).
-  # Phase 1 reads only source.storage to drive the discovery loop.
+  template:
+    name: orders-east-dr
+    spec:
+      image: mysql:9.6
+      secretName: orders-mysql-creds
+  # freshness/activate fields exist in the CRD but are consumed by later
+  # phases. Phase 1 reads source.storage and source.decryption to drive the
+  # discovery loop.
 ```
 
 Check status:

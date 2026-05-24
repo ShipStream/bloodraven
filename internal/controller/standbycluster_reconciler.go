@@ -57,11 +57,10 @@ const standbyDefaultDiscoveryInterval = 5 * time.Minute
 // metadata. Every dump directory contains exactly one "@.json" file.
 const standbyAtJSONSuffix = "@.json"
 
-// standbyMaxDumpCandidates is the maximum number of dump-directory candidates
-// for which we will read @.json to find the newest by end timestamp.
-// The candidates are the lexicographically last N entries — a reasonable
-// cost bound even for long-lived buckets with many historical backups.
-const standbyMaxDumpCandidates = 10
+// standbyDefaultScanTimeout bounds one object-store discovery scan. The timeout
+// prevents a stalled S3-compatible endpoint from tying up a controller worker
+// indefinitely while still leaving normal paginated scans room to complete.
+const standbyDefaultScanTimeout = 30 * time.Second
 
 // Reconcile is the main reconciliation loop.
 //
@@ -166,7 +165,9 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	// ---------------------------------------------------------------
 	// Step 3: Scan the bucket prefix
 	// ---------------------------------------------------------------
-	discovered, scanErr := r.scanBucket(ctx, logger, &sc, store, storePrefix)
+	scanCtx, cancelScan := context.WithTimeout(ctx, standbyScanTimeout(interval))
+	discovered, scanErr := r.scanBucket(scanCtx, logger, &sc, store, storePrefix)
+	cancelScan()
 	if scanErr != nil {
 		// scanErr here means a fatal List failure (not a metadata parse error).
 		logger.Error(scanErr, "bucket list failed", "prefix", storePrefix)
@@ -290,6 +291,14 @@ func (r *MysqlStandbyClusterReconciler) buildStoreCfg(ctx context.Context, sc *v
 			StorageType: "S3",
 			S3:          s3Cfg,
 		}
+		if sc.Spec.Source.Decryption != nil && sc.Spec.Source.Decryption.PassphraseSecret.Name != "" {
+			passphraseFile, dir, err := r.resolvePassphraseToFile(ctx, sc.Namespace, sc.Spec.Source.Decryption.PassphraseSecret, credsDir)
+			if err != nil {
+				return nil, "", dir, err
+			}
+			credsDir = dir
+			cfg.PassphraseFile = passphraseFile
+		}
 		return cfg, prefix, credsDir, nil
 
 	case v1alpha1.BackupStoragePVC:
@@ -324,7 +333,36 @@ func (r *MysqlStandbyClusterReconciler) buildS3PitrCfg(ctx context.Context, name
 		cfg.AWSCredsDir = credsDir
 	}
 
-	return cfg, s3.Prefix, credsDir, nil
+	return cfg, standbyNormalizePrefix(s3.Prefix), credsDir, nil
+}
+
+func (r *MysqlStandbyClusterReconciler) resolvePassphraseToFile(ctx context.Context, namespace string, ref v1alpha1.PassphraseSecretRef, dir string) (string, string, error) {
+	var secret corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: ref.Name}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", dir, fmt.Errorf("Secret %q not found", ref.Name)
+		}
+		return "", dir, fmt.Errorf("get Secret %q: %w", ref.Name, err)
+	}
+
+	key := ref.PassphraseSecretKeyOrDefault()
+	passphrase := strings.TrimSpace(string(secret.Data[key]))
+	if passphrase == "" {
+		return "", dir, fmt.Errorf("Secret %q key %q is missing or empty", ref.Name, key)
+	}
+
+	if dir == "" {
+		var err error
+		dir, err = os.MkdirTemp("", "bloodraven-standby-creds-*")
+		if err != nil {
+			return "", "", fmt.Errorf("create passphrase tempdir: %w", err)
+		}
+	}
+	passphraseFile := filepath.Join(dir, backupPassphraseFileName)
+	if err := os.WriteFile(passphraseFile, []byte(passphrase), 0o600); err != nil {
+		return "", dir, fmt.Errorf("write passphrase file: %w", err)
+	}
+	return passphraseFile, dir, nil
 }
 
 // resolveS3CredsToDir fetches the named Secret and writes its AWS credential
@@ -427,11 +465,10 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 	store sidecar.ArchiveStore,
 	prefix string,
 ) (*standbyScanResult, error) {
-	// List everything under the prefix. For large archives this may be
-	// many thousands of keys; ArchiveStore handles pagination internally.
-	keys, err := store.List(ctx, prefix)
+	listPrefix := standbyListPrefix(prefix)
+	keys, err := store.List(ctx, listPrefix)
 	if err != nil {
-		return nil, fmt.Errorf("list prefix %q: %w", prefix, err)
+		return nil, fmt.Errorf("list prefix %q: %w", listPrefix, err)
 	}
 
 	result := &standbyScanResult{}
@@ -444,11 +481,9 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 	// Backup names come from GenerateName with random base36 suffixes —
 	// they do NOT sort by time. We:
 	//   1. Collect all @.json-bearing directories.
-	//   2. Sort them lexicographically and keep the last N candidates
-	//      (cost bound: avoids reading @.json for every historical backup).
-	//   3. Read @.json for each candidate and pick the one with the largest
+	//   2. Read @.json for each candidate and pick the one with the largest
 	//      "end" timestamp.
-	//   4. Log if the timestamp-newest differs from the lex-newest.
+	//   3. Log if the timestamp-newest differs from the lex-newest.
 	// -------------------------------------------------------------------
 	var dumpDirs []string
 	for _, key := range keys {
@@ -457,9 +492,10 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 		}
 		// dir is "<prefix>/<backupName>".
 		dir := strings.TrimSuffix(key, "/"+standbyAtJSONSuffix)
-		// rel is the path component after the scan prefix.
-		rel := strings.TrimPrefix(dir, prefix)
-		rel = strings.TrimPrefix(rel, "/")
+		rel, ok := standbyRelUnderPrefix(dir, prefix)
+		if !ok {
+			continue
+		}
 		// Reject nested directories: a valid backup dir is exactly one
 		// level deep under the prefix (no slash in rel).
 		if rel != "" && !strings.Contains(rel, "/") {
@@ -471,18 +507,12 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 		sort.Strings(dumpDirs)
 		lexNewest := dumpDirs[len(dumpDirs)-1]
 
-		// Cap candidates to the last standbyMaxDumpCandidates.
-		candidates := dumpDirs
-		if len(candidates) > standbyMaxDumpCandidates {
-			candidates = candidates[len(candidates)-standbyMaxDumpCandidates:]
-		}
-
 		// Read @.json for each candidate; pick the one with the largest end time.
 		var bestDir string
 		var bestEnd time.Time
 		var bestMeta *standbyDumpMeta
 		var bestMetaErr error
-		for _, dir := range candidates {
+		for _, dir := range dumpDirs {
 			atKey := dir + "/" + standbyAtJSONSuffix
 			meta, metaErr := r.readDumpAtJSON(ctx, store, atKey)
 			if metaErr != nil {
@@ -510,7 +540,7 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 		// If every candidate failed to parse, fall back to lex-newest with warning.
 		if bestDir == "" {
 			bestDir = lexNewest
-			bestMetaErr = fmt.Errorf("all %d candidates had unreadable @.json", len(candidates))
+			bestMetaErr = fmt.Errorf("all %d candidates had unreadable @.json", len(dumpDirs))
 		}
 
 		result.DumpName = path.Base(bestDir)
@@ -582,6 +612,37 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 	}
 
 	return result, nil
+}
+
+func standbyScanTimeout(interval time.Duration) time.Duration {
+	if interval > 0 && interval < standbyDefaultScanTimeout {
+		return interval
+	}
+	return standbyDefaultScanTimeout
+}
+
+func standbyNormalizePrefix(prefix string) string {
+	return strings.Trim(prefix, "/")
+}
+
+func standbyListPrefix(prefix string) string {
+	prefix = standbyNormalizePrefix(prefix)
+	if prefix == "" {
+		return ""
+	}
+	return prefix + "/"
+}
+
+func standbyRelUnderPrefix(key, prefix string) (string, bool) {
+	prefix = standbyNormalizePrefix(prefix)
+	if prefix == "" {
+		return strings.TrimPrefix(key, "/"), true
+	}
+	boundary := prefix + "/"
+	if !strings.HasPrefix(key, boundary) {
+		return "", false
+	}
+	return strings.TrimPrefix(key, boundary), true
 }
 
 // mysqlshAtJSON is the raw JSON shape mysqlsh writes to the dump's @.json file.
@@ -692,16 +753,16 @@ func (r *MysqlStandbyClusterReconciler) stampConditionsAndRequeue(
 	sc.Status.ObservedGeneration = sc.Generation
 
 	if discovered != nil {
-		// R-5: only update LastScanAt (and emit BucketScanned event) when the
-		// substantive fields of Discovered actually change.
+		// R-5: LastScanAt is the wall-clock time of the most recent successful
+		// bucket scan. BucketScanned events remain suppressed unless substantive
+		// discovered content changes.
 		//
 		// Algorithm:
 		//   1. Build newDiscovered WITHOUT LastScanAt.
 		//   2. Build a copy of the existing Discovered WITHOUT its LastScanAt.
 		//   3. Deep-equal compare the two copies.
-		//   4. Only if they differ: set LastScanAt = now, replace sc.Status.Discovered,
-		//      and emit the BucketScanned event.
-		//   5. If equal: leave sc.Status.Discovered.LastScanAt untouched (no PATCH noise).
+		//   4. Always set LastScanAt = now and replace sc.Status.Discovered.
+		//   5. Only if they differ: emit the BucketScanned event.
 		newDiscovered := &v1alpha1.StandbyDiscovered{
 			DumpName:                 discovered.DumpName,
 			DumpLocation:             discovered.DumpLocation,
@@ -725,10 +786,9 @@ func (r *MysqlStandbyClusterReconciler) stampConditionsAndRequeue(
 			changed = !equality.Semantic.DeepEqual(prevNoScan, newDiscovered)
 		}
 
+		newDiscovered.LastScanAt = &now
+		sc.Status.Discovered = newDiscovered
 		if changed {
-			newDiscovered.LastScanAt = &now
-			sc.Status.Discovered = newDiscovered
-
 			// R-5 (BucketScanned event): emit only on a state transition
 			// (DumpName changed, ArchivedBinlogCount changed, or BucketReadable
 			// changed from False to True).
@@ -736,7 +796,6 @@ func (r *MysqlStandbyClusterReconciler) stampConditionsAndRequeue(
 				"scanned prefix: dump=%q manifests=%d binlogs=%d",
 				discovered.DumpName, discovered.ManifestCount, discovered.ArchivedBinlogCount)
 		}
-		// When unchanged: no PATCH to LastScanAt, no BucketScanned event.
 	}
 
 	if err := r.Status().Patch(ctx, sc, patch); err != nil {

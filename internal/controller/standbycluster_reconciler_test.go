@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -36,9 +37,9 @@ func (f *fakeStore) Put(_ context.Context, key string, r io.Reader, _ int64) err
 	f.Objects[key] = data
 	return nil
 }
-func (f *fakeStore) PutFile(_ context.Context, _, _ string) error    { return nil }
-func (f *fakeStore) Delete(_ context.Context, key string) error        { delete(f.Objects, key); return nil }
-func (f *fakeStore) GetFile(_ context.Context, _, _ string) error      { return nil }
+func (f *fakeStore) PutFile(_ context.Context, _, _ string) error { return nil }
+func (f *fakeStore) Delete(_ context.Context, key string) error   { delete(f.Objects, key); return nil }
+func (f *fakeStore) GetFile(_ context.Context, _, _ string) error { return nil }
 
 func (f *fakeStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 	v, ok := f.Objects[key]
@@ -217,8 +218,8 @@ func TestMysqlStandbyCluster_SuccessfulDiscovery(t *testing.T) {
 	manifestJSON := `{"version":1,"site":"dc1","files":[{"name":"mysql-bin.000001","remotePath":"orders/binlogs/dc1/mysql-bin.000001","size":4096,"firstEventTime":"2026-05-20T00:00:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`
 
 	store := &fakeStore{Objects: map[string][]byte{
-		"orders/orders-nightly-20260520/@.json":          []byte(atJSON),
-		"orders/binlogs/manifest-dc1.json":               []byte(manifestJSON),
+		"orders/orders-nightly-20260520/@.json": []byte(atJSON),
+		"orders/binlogs/manifest-dc1.json":      []byte(manifestJSON),
 	}}
 	r, recorder := newTestReconciler(t, []client.Object{cr}, store)
 
@@ -467,9 +468,9 @@ func TestMysqlStandbyCluster_MultiSiteManifests(t *testing.T) {
 	manifest2 := `{"version":1,"site":"dc2","files":[{"name":"b1","remotePath":"orders/binlogs/dc2/b1","size":200,"firstEventTime":"2026-05-20T01:30:00Z","lastEventTime":"2026-05-20T03:59:59Z","archivedAt":"2026-05-20T04:00:01Z"}]}`
 
 	store := &fakeStore{Objects: map[string][]byte{
-		"orders/dump-2026-05-20/@.json":       []byte(atJSON),
-		"orders/binlogs/manifest-dc1.json":    []byte(manifest1),
-		"orders/binlogs/manifest-dc2.json":    []byte(manifest2),
+		"orders/dump-2026-05-20/@.json":    []byte(atJSON),
+		"orders/binlogs/manifest-dc1.json": []byte(manifest1),
+		"orders/binlogs/manifest-dc2.json": []byte(manifest2),
 	}}
 	r, _ := newTestReconciler(t, []client.Object{cr}, store)
 
@@ -514,9 +515,9 @@ func TestMysqlStandbyCluster_NewestDumpSelected(t *testing.T) {
 	cr := minimalStandbyCR("test-sc", "default")
 
 	store := &fakeStore{Objects: map[string][]byte{
-		"orders/orders-2026-05-18/@.json": []byte(`{"end":"2026-05-18T04:00:00Z"}`),
-		"orders/orders-2026-05-19/@.json": []byte(`{"end":"2026-05-19T04:00:00Z"}`),
-		"orders/orders-2026-05-20/@.json": []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"newest:1-999"}`),
+		"orders/orders-2026-05-18/@.json":  []byte(`{"end":"2026-05-18T04:00:00Z"}`),
+		"orders/orders-2026-05-19/@.json":  []byte(`{"end":"2026-05-19T04:00:00Z"}`),
+		"orders/orders-2026-05-20/@.json":  []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"newest:1-999"}`),
 		"orders/binlogs/manifest-dc1.json": []byte(`{"version":1,"site":"dc1","files":[]}`),
 	}}
 	r, _ := newTestReconciler(t, []client.Object{cr}, store)
@@ -532,6 +533,106 @@ func TestMysqlStandbyCluster_NewestDumpSelected(t *testing.T) {
 	}
 	if d.DumpGtidExecuted != "newest:1-999" {
 		t.Errorf("GtidExecuted: want newest:1-999, got %q", d.DumpGtidExecuted)
+	}
+}
+
+func TestMysqlStandbyCluster_NewestDumpSelectedBeyondLexicographicTail(t *testing.T) {
+	cr := minimalStandbyCR("test-sc", "default")
+
+	objects := map[string][]byte{
+		"orders/binlogs/manifest-dc1.json": []byte(`{"version":1,"site":"dc1","files":[]}`),
+		"orders/z-dump-00/@.json":          []byte(`{"end":"2026-05-10T04:00:00Z"}`),
+		"orders/z-dump-01/@.json":          []byte(`{"end":"2026-05-11T04:00:00Z"}`),
+		"orders/z-dump-02/@.json":          []byte(`{"end":"2026-05-12T04:00:00Z"}`),
+		"orders/z-dump-03/@.json":          []byte(`{"end":"2026-05-13T04:00:00Z"}`),
+		"orders/z-dump-04/@.json":          []byte(`{"end":"2026-05-14T04:00:00Z"}`),
+		"orders/z-dump-05/@.json":          []byte(`{"end":"2026-05-15T04:00:00Z"}`),
+		"orders/z-dump-06/@.json":          []byte(`{"end":"2026-05-16T04:00:00Z"}`),
+		"orders/z-dump-07/@.json":          []byte(`{"end":"2026-05-17T04:00:00Z"}`),
+		"orders/z-dump-08/@.json":          []byte(`{"end":"2026-05-18T04:00:00Z"}`),
+		"orders/z-dump-09/@.json":          []byte(`{"end":"2026-05-19T04:00:00Z"}`),
+		"orders/z-dump-10/@.json":          []byte(`{"end":"2026-05-20T04:00:00Z"}`),
+		"orders/a-newest/@.json":           []byte(`{"end":"2026-05-21T04:00:00Z","gtidExecuted":"newest:1-999"}`),
+	}
+	store := &fakeStore{Objects: objects}
+	r, _ := newTestReconciler(t, []client.Object{cr}, store)
+
+	updated, _ := reconcileStandby(t, r, "test-sc", "default")
+
+	d := updated.Status.Discovered
+	if d == nil {
+		t.Fatal("status.discovered is nil")
+	}
+	if d.DumpName != "a-newest" {
+		t.Errorf("DumpName: want a-newest, got %q", d.DumpName)
+	}
+	if d.DumpGtidExecuted != "newest:1-999" {
+		t.Errorf("GtidExecuted: want newest:1-999, got %q", d.DumpGtidExecuted)
+	}
+}
+
+func TestMysqlStandbyCluster_SlashBoundedPrefix(t *testing.T) {
+	cr := minimalStandbyCR("test-sc", "default")
+	cr.Spec.Source.Storage.S3.Prefix = "orders/west"
+
+	store := &fakeStore{Objects: map[string][]byte{
+		"orders/west-old/other/@.json":        []byte(`{"end":"2026-05-21T04:00:00Z"}`),
+		"orders/west/current/@.json":          []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"current:1-100"}`),
+		"orders/west/binlogs/manifest-a.json": []byte(`{"version":1,"site":"a","files":[]}`),
+	}}
+	r, _ := newTestReconciler(t, []client.Object{cr}, store)
+
+	updated, _ := reconcileStandby(t, r, "test-sc", "default")
+
+	d := updated.Status.Discovered
+	if d == nil {
+		t.Fatal("status.discovered is nil")
+	}
+	if d.DumpName != "current" {
+		t.Errorf("DumpName: want current, got %q", d.DumpName)
+	}
+	if d.DumpGtidExecuted != "current:1-100" {
+		t.Errorf("GtidExecuted: want current:1-100, got %q", d.DumpGtidExecuted)
+	}
+}
+
+func TestMysqlStandbyCluster_DecryptionConfiguresPassphraseFile(t *testing.T) {
+	cr := minimalStandbyCR("test-sc", "default")
+	cr.Spec.Source.Decryption = &v1alpha1.BackupDecryptionSpec{
+		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "backup-passphrase", Key: "secret"},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "backup-passphrase", Namespace: "default"},
+		Data:       map[string][]byte{"secret": []byte("correct horse battery staple")},
+	}
+	scheme := newStandbyScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.MysqlStandbyCluster{}).WithObjects(cr, secret).Build()
+	store := &fakeStore{Objects: map[string][]byte{
+		"orders/orders-nightly/@.json":     []byte(`{"end":"2026-05-20T04:00:00Z"}`),
+		"orders/binlogs/manifest-dc1.json": []byte(`{"version":1,"site":"dc1","files":[]}`),
+	}}
+	var passphrase string
+	r := &MysqlStandbyClusterReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(32),
+		newStoreFunc: func(_ context.Context, cfg *sidecar.PITRConfig) (sidecar.ArchiveStore, error) {
+			if cfg.PassphraseFile == "" {
+				t.Fatal("PassphraseFile is empty")
+			}
+			data, err := os.ReadFile(cfg.PassphraseFile)
+			if err != nil {
+				t.Fatalf("read passphrase file: %v", err)
+			}
+			passphrase = string(data)
+			return store, nil
+		},
+	}
+
+	reconcileStandby(t, r, "test-sc", "default")
+
+	if passphrase != "correct horse battery staple" {
+		t.Errorf("passphrase: want secret data, got %q", passphrase)
 	}
 }
 
@@ -632,4 +733,3 @@ func TestMysqlStandbyCluster_NotFound(t *testing.T) {
 		t.Errorf("want empty result for missing CR, got %+v", res)
 	}
 }
-

@@ -285,8 +285,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_BucketUnreadable(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: scName, Namespace: ns},
 	})
 	if err != nil {
-		// A requeue error is acceptable here; the condition is the signal.
-		t.Logf("reconcile returned (expected) error: %v", err)
+		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 
 	var updated v1alpha1.MysqlStandbyCluster
