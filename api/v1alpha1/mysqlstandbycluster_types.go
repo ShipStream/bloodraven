@@ -123,8 +123,10 @@ type StandbySource struct {
 	// to. Reuses BackupStorage (api/v1alpha1/backup_types.go:388-444)
 	// for consistency; the controller refuses to write to it
 	// (except the dr-cursors/ subkey in Phase 2).
-	// PVC backends are accepted but only useful in colocated-cluster
-	// playground scenarios — production DR uses S3.
+	// Only S3-compatible storage is usable: the standby reconciler
+	// rejects PVC-backed sources with a ConfigError because the operator
+	// pod does not mount the source cluster's backup PVC (see buildStoreCfg
+	// in internal/controller/standbycluster_reconciler.go).
 	Storage BackupStorage `json:"storage"`
 
 	// ProfileName is the source backup profile under which dumps and
@@ -221,6 +223,18 @@ type StandbyFreshnessSpec struct {
 // Mirrors RestoreInPlaceSpec's confirm-token pattern
 // (api/v1alpha1/backup_types.go:723-732).
 type StandbyActivateSpec struct {
+	// PHASE 3 IMPLEMENTER GUARD (kept as a separate comment group, out of the
+	// doc comment below, so controller-gen does not fold it into the CRD field
+	// description): this field is live API as of Phase 1, so a confirm token
+	// can be persisted on a CR long before any activation code exists. In
+	// Phase 1 status.activation is never written, leaving confirmTokenUsed
+	// empty — so a pre-existing confirm would compare as strictly greater than
+	// "" and read as already-armed. When Phase 3 lands, the first reconcile on
+	// an activation-capable build MUST seed status.activation.confirmTokenUsed
+	// from the current spec.activate.confirm (record-not-fire) and treat only
+	// a subsequent bump as an activation request. Otherwise a months-old
+	// confirm fires an unintended promote the moment the operator is upgraded.
+
 	// Confirm is the required RFC3339 anti-fat-finger token. The
 	// controller refuses to activate unless Confirm parses and is
 	// strictly greater than status.activation.confirmTokenUsed. Bump

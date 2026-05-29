@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -43,6 +44,16 @@ type MysqlStandbyClusterReconciler struct {
 	// newStoreFunc is the factory for ArchiveStore instances. Overridable
 	// in tests to inject a fake store without network access.
 	newStoreFunc func(ctx context.Context, cfg *sidecar.PITRConfig) (sidecar.ArchiveStore, error)
+
+	// dumpMetaCache memoizes parsed dump @.json metadata keyed by the
+	// object's full key. Dump directories are immutable once written, so a
+	// cached parse never goes stale; this bounds each discovery scan's object
+	// GETs to dumps that appeared since the previous scan instead of
+	// re-reading every historical dump on every scan. Guarded by dumpMetaMu
+	// because controller-runtime may run reconciles concurrently when
+	// MaxConcurrentReconciles > 1.
+	dumpMetaMu    sync.Mutex
+	dumpMetaCache map[string]standbyDumpMeta
 }
 
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlstandbyclusters,verbs=get;list;watch;create;update;patch;delete
@@ -514,7 +525,7 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 		var bestMetaErr error
 		for _, dir := range dumpDirs {
 			atKey := dir + "/" + standbyAtJSONSuffix
-			meta, metaErr := r.readDumpAtJSON(ctx, store, atKey)
+			meta, metaErr := r.cachedDumpMeta(ctx, store, atKey)
 			if metaErr != nil {
 				// Record the error for the lex-newest; other candidates may still
 				// be readable.
@@ -562,6 +573,15 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 			result.DumpSizeBytes = bestMeta.DumpSizeBytes
 		}
 	}
+
+	// Prune memoized @.json metadata for dumps that no longer exist under
+	// this prefix (e.g. retention removed them), so the cache stays bounded
+	// by the live dump set rather than every dump ever observed.
+	seenAtKeys := make(map[string]struct{}, len(dumpDirs))
+	for _, dir := range dumpDirs {
+		seenAtKeys[dir+"/"+standbyAtJSONSuffix] = struct{}{}
+	}
+	r.pruneDumpMetaCache(listPrefix, seenAtKeys)
 
 	// -------------------------------------------------------------------
 	// Read per-site binlog manifests under <prefix>/binlogs/.
@@ -697,6 +717,74 @@ func (r *MysqlStandbyClusterReconciler) readDumpAtJSON(ctx context.Context, stor
 		}
 	}
 	return out, nil
+}
+
+// cachedDumpMeta returns the parsed @.json metadata for key, reading from the
+// object store only on a cache miss. Dump directories are immutable once
+// written, so a successful parse is memoized for the life of the controller
+// and reused across discovery scans — bounding each scan's GETs to the dumps
+// that appeared since the previous scan instead of re-reading every historical
+// dump every 5 minutes.
+//
+// Only a successful, non-empty parse is cached. A transient Get failure or a
+// malformed @.json (R-6) is returned uncached so it is retried on the next
+// scan — and, in the malformed case, keeps stamping
+// SourceConfigKnown=False/MetadataUnreadable.
+func (r *MysqlStandbyClusterReconciler) cachedDumpMeta(ctx context.Context, store sidecar.ArchiveStore, key string) (*standbyDumpMeta, error) {
+	r.dumpMetaMu.Lock()
+	if m, ok := r.dumpMetaCache[key]; ok {
+		r.dumpMetaMu.Unlock()
+		mc := m
+		return &mc, nil
+	}
+	r.dumpMetaMu.Unlock()
+
+	meta, err := r.readDumpAtJSON(ctx, store, key)
+	if err != nil {
+		return nil, err
+	}
+	// A present, parseable @.json populates at least one field. An all-zero
+	// result means the object was missing (a list/delete race) or empty; leave
+	// it uncached so a later appearance is picked up.
+	if meta != nil && (meta.DumpCompletionTime != nil || meta.DumpGtidExecuted != "" || meta.DumpSizeBytes != 0) {
+		r.dumpMetaMu.Lock()
+		if r.dumpMetaCache == nil {
+			r.dumpMetaCache = make(map[string]standbyDumpMeta)
+		}
+		r.dumpMetaCache[key] = *meta
+		r.dumpMetaMu.Unlock()
+	}
+	return meta, nil
+}
+
+// pruneDumpMetaCache drops memoized entries for dumps no longer present under
+// scopePrefix. seen holds the @.json keys observed in the current scan. Only
+// keys with this scan's one-level-deep shape ("<scopePrefix><backupName>/@.json")
+// are eligible, so a standby watching a nested prefix never evicts another
+// standby's entries.
+func (r *MysqlStandbyClusterReconciler) pruneDumpMetaCache(scopePrefix string, seen map[string]struct{}) {
+	if scopePrefix == "" {
+		// An empty prefix (bucket root) cannot be scoped against other
+		// standbys, so skip pruning. GETs are still bounded by the cache; only
+		// growth is unscoped, limited to dumps seen during this controller's
+		// uptime. Valid CRs always have a non-empty S3 prefix (enforced by the
+		// spec XValidation rule).
+		return
+	}
+	r.dumpMetaMu.Lock()
+	defer r.dumpMetaMu.Unlock()
+	for k := range r.dumpMetaCache {
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		rel := strings.TrimPrefix(k, scopePrefix)
+		if rel == k {
+			continue // belongs to a different prefix
+		}
+		if strings.Count(rel, "/") == 1 && strings.HasSuffix(rel, "/"+standbyAtJSONSuffix) {
+			delete(r.dumpMetaCache, k)
+		}
+	}
 }
 
 // ----------------------------------------------------------------------

@@ -585,11 +585,42 @@ spec:
     decryption:
       passphraseSecret:
         name: orders-backup-passphrase
+  # template declares the MysqlFailoverGroup to materialise on activate
+  # (Phase 3). It is validated as a full MysqlFailoverGroupSpec at create
+  # time — dns and at least two primary-candidate sites are required — so fill
+  # it in now, not during an incident. See examples/standby-cluster.yaml for
+  # the canonical reference.
   template:
     name: orders-east-dr
     spec:
       image: mysql:9.6
-      secretName: orders-mysql-creds
+      credentials:
+        operatorSecret: orders-mysql-operator
+        appSecret: orders-mysql-app
+      dns:
+        hostname: orders-east.example.com
+        ttl: 60
+      sites:
+        - name: east-az1
+          role: primary-candidate
+          zone: us-east-1a
+          taintNodeSelector:
+            shipstream.io/failover-group.orders: "true"
+            shipstream.io/site.orders: east-az1
+          lbIP: 10.0.1.1
+          storage:
+            storageClassName: fast-ssd
+            size: 100Gi
+        - name: east-az2
+          role: primary-candidate
+          zone: us-east-1b
+          taintNodeSelector:
+            shipstream.io/failover-group.orders: "true"
+            shipstream.io/site.orders: east-az2
+          lbIP: 10.0.2.1
+          storage:
+            storageClassName: fast-ssd
+            size: 100Gi
   # freshness/activate fields exist in the CRD but are consumed by later
   # phases. Phase 1 reads source.storage and source.decryption to drive the
   # discovery loop.

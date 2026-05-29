@@ -290,8 +290,10 @@ spec:
                       to. Reuses BackupStorage (api/v1alpha1/backup_types.go:388-444)
                       for consistency; the controller refuses to write to it
                       (except the dr-cursors/ subkey in Phase 2).
-                      PVC backends are accepted but only useful in colocated-cluster
-                      playground scenarios — production DR uses S3.
+                      Only S3-compatible storage is usable: the standby reconciler
+                      rejects PVC-backed sources with a ConfigError because the operator
+                      pod does not mount the source cluster's backup PVC (see buildStoreCfg
+                      in internal/controller/standbycluster_reconciler.go).
                     properties:
                       pvc:
                         description: PVC configures a local PVC destination.

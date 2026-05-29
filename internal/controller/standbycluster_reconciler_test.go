@@ -27,6 +27,10 @@ import (
 type fakeStore struct {
 	Objects map[string][]byte
 	ListErr error
+	// GetCalls counts Get invocations per key (lazy-initialized). Used by the
+	// dump-metadata cache tests to assert immutable @.json files are not
+	// re-fetched on every scan.
+	GetCalls map[string]int
 }
 
 func (f *fakeStore) Put(_ context.Context, key string, r io.Reader, _ int64) error {
@@ -42,6 +46,10 @@ func (f *fakeStore) Delete(_ context.Context, key string) error   { delete(f.Obj
 func (f *fakeStore) GetFile(_ context.Context, _, _ string) error { return nil }
 
 func (f *fakeStore) Get(_ context.Context, key string) ([]byte, bool, error) {
+	if f.GetCalls == nil {
+		f.GetCalls = map[string]int{}
+	}
+	f.GetCalls[key]++
 	v, ok := f.Objects[key]
 	return v, ok, nil
 }
@@ -731,5 +739,61 @@ func TestMysqlStandbyCluster_NotFound(t *testing.T) {
 	}
 	if res.RequeueAfter != 0 || res.Requeue {
 		t.Errorf("want empty result for missing CR, got %+v", res)
+	}
+}
+
+// --- TestMysqlStandbyCluster_DumpMetaCachedAcrossScans ----------------------
+
+// TestMysqlStandbyCluster_DumpMetaCachedAcrossScans verifies that an immutable
+// dump @.json is fetched once and served from cache on subsequent scans, so
+// discovery cost does not grow with historical backup count.
+func TestMysqlStandbyCluster_DumpMetaCachedAcrossScans(t *testing.T) {
+	cr := minimalStandbyCR("test-sc", "default")
+	atKey := "orders/orders-nightly-20260520/@.json"
+	store := &fakeStore{Objects: map[string][]byte{
+		atKey:                              []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"abc:1-100"}`),
+		"orders/binlogs/manifest-dc1.json": []byte(`{"version":1,"site":"dc1","files":[]}`),
+	}}
+	r, _ := newTestReconciler(t, []client.Object{cr}, store)
+
+	// Two scans against an unchanged bucket; the @.json must be read once.
+	reconcileStandby(t, r, "test-sc", "default")
+	reconcileStandby(t, r, "test-sc", "default")
+
+	if got := store.GetCalls[atKey]; got != 1 {
+		t.Errorf("@.json GET count across two scans: want 1 (cached after first scan), got %d", got)
+	}
+}
+
+// --- TestMysqlStandbyCluster_DumpMetaCachePrunedWhenDumpRemoved -------------
+
+// TestMysqlStandbyCluster_DumpMetaCachePrunedWhenDumpRemoved verifies that a
+// dump removed from the bucket (e.g. by retention) is evicted from the cache
+// on the next scan, keeping the memo bounded by the live dump set.
+func TestMysqlStandbyCluster_DumpMetaCachePrunedWhenDumpRemoved(t *testing.T) {
+	cr := minimalStandbyCR("test-sc", "default")
+	oldKey := "orders/orders-old/@.json"
+	newKey := "orders/orders-new/@.json"
+	store := &fakeStore{Objects: map[string][]byte{
+		oldKey:                             []byte(`{"end":"2026-05-19T04:00:00Z"}`),
+		newKey:                             []byte(`{"end":"2026-05-20T04:00:00Z"}`),
+		"orders/binlogs/manifest-dc1.json": []byte(`{"version":1,"site":"dc1","files":[]}`),
+	}}
+	r, _ := newTestReconciler(t, []client.Object{cr}, store)
+
+	reconcileStandby(t, r, "test-sc", "default")
+	if _, ok := r.dumpMetaCache[oldKey]; !ok {
+		t.Fatalf("expected %q cached after first scan", oldKey)
+	}
+
+	// Retention removes the old dump from the bucket.
+	delete(store.Objects, oldKey)
+	reconcileStandby(t, r, "test-sc", "default")
+
+	if _, ok := r.dumpMetaCache[oldKey]; ok {
+		t.Errorf("pruned dump %q still in cache after it disappeared from the bucket", oldKey)
+	}
+	if _, ok := r.dumpMetaCache[newKey]; !ok {
+		t.Errorf("present dump %q should remain cached", newKey)
 	}
 }
