@@ -78,7 +78,7 @@ rules:
   # MysqlStandbyCluster CRD
   - apiGroups: [shipstream.io]
     resources: [mysqlstandbyclusters]
-    verbs: [create, delete, get, list, patch, update, watch]
+    verbs: [get, list, watch]
   - apiGroups: [shipstream.io]
     resources: [mysqlstandbyclusters/finalizers]
     verbs: [update]

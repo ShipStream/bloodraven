@@ -141,7 +141,7 @@ func TestStandbyCluster_CredsDirFileModeAndCleanup(t *testing.T) {
 	cr := standbyCRWithCredsSecret("test-sc", "default", secretName)
 
 	var (
-		mu         sync.Mutex
+		mu          sync.Mutex
 		capturedDir string
 	)
 
@@ -201,7 +201,10 @@ func TestStandbyCluster_SecretNotFound(t *testing.T) {
 	}
 	r, _ := newTestReconcilerWithSecret(t, []client.Object{cr}, storeFunc)
 
-	updated, _, _ := reconcileStandbyExpectingError(t, r, "test-sc", "default")
+	updated, _, reconcileErr := reconcileStandbyExpectingError(t, r, "test-sc", "default")
+	if reconcileErr != nil {
+		t.Fatalf("reconcile returned unexpected error: %v", reconcileErr)
+	}
 	if updated == nil {
 		t.Fatal("CR should still be retrievable after config error")
 	}
@@ -240,7 +243,10 @@ func TestStandbyCluster_SecretMissingKey(t *testing.T) {
 	}
 	r, _ := newTestReconcilerWithSecret(t, []client.Object{cr, secret}, storeFunc)
 
-	updated, _, _ := reconcileStandbyExpectingError(t, r, "test-sc", "default")
+	updated, _, reconcileErr := reconcileStandbyExpectingError(t, r, "test-sc", "default")
+	if reconcileErr != nil {
+		t.Fatalf("reconcile returned unexpected error: %v", reconcileErr)
+	}
 	if updated == nil {
 		t.Fatal("CR should still be retrievable after config error")
 	}
@@ -383,9 +389,9 @@ func TestStandbyCluster_TransitionStates(t *testing.T) {
 // buildStoreCfg returns a ConfigError for invalid storage configurations.
 func TestStandbyCluster_BuildStoreCfg_Errors(t *testing.T) {
 	cases := []struct {
-		name        string
-		storage     v1alpha1.BackupStorage
-		wantErrSub  string
+		name       string
+		storage    v1alpha1.BackupStorage
+		wantErrSub string
 	}{
 		{
 			name: "S3 with nil s3 field",
@@ -436,7 +442,10 @@ func TestStandbyCluster_BuildStoreCfg_Errors(t *testing.T) {
 				},
 			}
 
-			updated, _, _ := reconcileStandbyExpectingError(t, r, "test-sc", "default")
+			updated, _, reconcileErr := reconcileStandbyExpectingError(t, r, "test-sc", "default")
+			if reconcileErr != nil {
+				t.Fatalf("reconcile returned unexpected error: %v", reconcileErr)
+			}
 			if updated == nil {
 				t.Fatal("CR should still be retrievable after config error")
 			}
@@ -519,8 +528,8 @@ func TestStandbyCluster_DumpSelectionByEndTime(t *testing.T) {
 	// z-dump is lex-last (would win under old sort.Strings logic)
 	// but its end time is 2026-05-18 — older than a-dump's 2026-05-20.
 	store := &fakeStore{Objects: map[string][]byte{
-		"orders/z-dump-OLDER/@.json": []byte(`{"end":"2026-05-18T04:00:00Z","gtidExecuted":"old:1-50","totalBytes":100}`),
-		"orders/a-dump-NEWER/@.json": []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"new:1-200","totalBytes":200}`),
+		"orders/z-dump-OLDER/@.json":       []byte(`{"end":"2026-05-18T04:00:00Z","gtidExecuted":"old:1-50","totalBytes":100}`),
+		"orders/a-dump-NEWER/@.json":       []byte(`{"end":"2026-05-20T04:00:00Z","gtidExecuted":"new:1-200","totalBytes":200}`),
 		"orders/binlogs/manifest-dc1.json": []byte(`{"version":1,"site":"dc1","files":[]}`),
 	}}
 	r, _ := newTestReconcilerRaw(t, []client.Object{cr}, store)

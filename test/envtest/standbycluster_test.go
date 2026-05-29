@@ -331,7 +331,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_DiscoveryIntervalOverride(t *testing.
 		NamespacedName: types.NamespacedName{Name: scName, Namespace: ns},
 	})
 	if err != nil {
-		t.Logf("reconcile error: %v", err)
+		t.Fatalf("reconcile returned unexpected error: %v", err)
 	}
 	if res.RequeueAfter != customInterval {
 		t.Errorf("requeue: want %v, got %v", customInterval, res.RequeueAfter)

@@ -797,3 +797,24 @@ func TestMysqlStandbyCluster_DumpMetaCachePrunedWhenDumpRemoved(t *testing.T) {
 		t.Errorf("present dump %q should remain cached", newKey)
 	}
 }
+
+// --- TestMysqlStandbyCluster_DiscoveryIntervalClampedToFloor ----------------
+
+// TestMysqlStandbyCluster_DiscoveryIntervalClampedToFloor verifies that a
+// sub-30s discoveryInterval that slipped past CRD admission (older client or a
+// hand-edited object) is clamped to the 30s floor, so RequeueAfter never
+// degenerates to 0 and silently stops the discovery loop.
+func TestMysqlStandbyCluster_DiscoveryIntervalClampedToFloor(t *testing.T) {
+	cr := minimalStandbyCR("test-sc", "default")
+	cr.Spec.Freshness = &v1alpha1.StandbyFreshnessSpec{
+		DiscoveryInterval: &metav1.Duration{Duration: time.Second}, // below the 30s floor
+	}
+	store := &fakeStore{Objects: map[string][]byte{}}
+	r, _ := newTestReconciler(t, []client.Object{cr}, store)
+
+	_, res := reconcileStandby(t, r, "test-sc", "default")
+
+	if res.RequeueAfter != standbyMinDiscoveryInterval {
+		t.Errorf("requeue: want clamp to %v, got %v", standbyMinDiscoveryInterval, res.RequeueAfter)
+	}
+}

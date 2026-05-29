@@ -223,7 +223,7 @@ type StandbyFreshnessSpec struct {
 // Mirrors RestoreInPlaceSpec's confirm-token pattern
 // (api/v1alpha1/backup_types.go:723-732).
 type StandbyActivateSpec struct {
-	// PHASE 3 IMPLEMENTER GUARD (kept as a separate comment group, out of the
+	// TODO(phase-3-activation) — IMPLEMENTER GUARD (kept as a separate comment group, out of the
 	// doc comment below, so controller-gen does not fold it into the CRD field
 	// description): this field is live API as of Phase 1, so a confirm token
 	// can be persisted on a CR long before any activation code exists. In

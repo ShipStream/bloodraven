@@ -121,7 +121,6 @@ rules:
   - mysqlbackups
   - mysqlbackupverifications
   - mysqlfailovergroups
-  - mysqlstandbyclusters
   verbs:
   - create
   - delete
@@ -150,3 +149,11 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - shipstream.io
+  resources:
+  - mysqlstandbyclusters
+  verbs:
+  - get
+  - list
+  - watch

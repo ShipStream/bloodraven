@@ -56,7 +56,7 @@ type MysqlStandbyClusterReconciler struct {
 	dumpMetaCache map[string]standbyDumpMeta
 }
 
-// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlstandbyclusters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=shipstream.io,resources=mysqlstandbyclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlstandbyclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlstandbyclusters/finalizers,verbs=update
 
@@ -72,6 +72,13 @@ const standbyAtJSONSuffix = "@.json"
 // prevents a stalled S3-compatible endpoint from tying up a controller worker
 // indefinitely while still leaving normal paginated scans room to complete.
 const standbyDefaultScanTimeout = 30 * time.Second
+
+// standbyMinDiscoveryInterval is the controller-side floor for the requeue
+// cadence, mirroring the 30s minimum the CRD enforces on
+// freshness.discoveryInterval. Applied as defense-in-depth so a value that
+// slipped past admission (older client, hand-edited object) can never set
+// RequeueAfter to 0 and silently stop the discovery loop.
+const standbyMinDiscoveryInterval = 30 * time.Second
 
 // Reconcile is the main reconciliation loop.
 //
@@ -102,6 +109,12 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	interval := standbyDefaultDiscoveryInterval
 	if sc.Spec.Freshness != nil && sc.Spec.Freshness.DiscoveryInterval != nil {
 		interval = sc.Spec.Freshness.DiscoveryInterval.Duration
+	}
+	// Defense-in-depth: the CRD enforces a 30s floor, but clamp here too so a
+	// value that slipped past admission cannot set RequeueAfter to 0 (which
+	// would stop scheduled discovery entirely).
+	if interval < standbyMinDiscoveryInterval {
+		interval = standbyMinDiscoveryInterval
 	}
 
 	// ---------------------------------------------------------------

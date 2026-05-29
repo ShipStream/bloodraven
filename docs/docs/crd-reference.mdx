@@ -665,7 +665,7 @@ provide.
 ### StandbyActivateSpec
 
 | Field | Type | Required | Default | Description |
-|---|---|---|---|
+|---|---|---|---|---|
 | `confirm` | string | Yes | -- | RFC 3339 anti-fat-finger token. Controller activates only when this parses and is strictly greater than `status.activation.confirmTokenUsed` (Phase 3). |
 | `pointInTime` | PointInTimeSpec | No | -- | Optional PITR stop time for binlog replay during activation. Mirrors `spec.initFromBackup.pointInTime` (Phase 3). |
 | `acceptUnverified` | bool | No | `false` | Bypass `Restorable=True` gate. Use only when a stale archive is better than no archive (Phase 3). |
