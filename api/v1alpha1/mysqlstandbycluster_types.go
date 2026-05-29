@@ -50,7 +50,7 @@ type MysqlStandbyClusterList struct {
 }
 
 // MysqlStandbyClusterSpec defines the desired state of MysqlStandbyCluster.
-// +kubebuilder:validation:XValidation:rule="self.transport != 'ObjectStore' || self.source.storage.type != 'S3' || (has(self.source.storage.s3.prefix) && self.source.storage.s3.prefix != '')",message="source.storage.s3.prefix must be non-empty when transport=ObjectStore and storage type=S3"
+// +kubebuilder:validation:XValidation:rule="self.transport != 'ObjectStore' || self.source.storage.type != 'S3' || (has(self.source.storage.s3.prefix) && size(self.source.storage.s3.prefix) > 0)",message="source.storage.s3.prefix must be non-empty when transport=ObjectStore and storage type=S3"
 type MysqlStandbyClusterSpec struct {
 	// Transport selects the DR data path. Only ObjectStore is honoured in
 	// v1alpha1; the Enum also lists Network, which is reserved for a future

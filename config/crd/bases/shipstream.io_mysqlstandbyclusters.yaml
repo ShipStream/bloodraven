@@ -6695,8 +6695,8 @@ spec:
             - message: source.storage.s3.prefix must be non-empty when transport=ObjectStore
                 and storage type=S3
               rule: self.transport != 'ObjectStore' || self.source.storage.type !=
-                'S3' || (has(self.source.storage.s3.prefix) && self.source.storage.s3.prefix
-                != '')
+                'S3' || (has(self.source.storage.s3.prefix) && size(self.source.storage.s3.prefix)
+                > 0)
           status:
             description: MysqlStandbyClusterStatus describes the observed state of
               a MysqlStandbyCluster.

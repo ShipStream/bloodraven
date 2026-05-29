@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -334,5 +335,30 @@ func TestMysqlStandbyCluster_EnvtestCreate_DiscoveryIntervalOverride(t *testing.
 	}
 	if res.RequeueAfter != customInterval {
 		t.Errorf("requeue: want %v, got %v", customInterval, res.RequeueAfter)
+	}
+}
+
+// TestMysqlStandbyCluster_EnvtestCreate_RejectsEmptyPrefix verifies that the
+// spec-level XValidation rule rejects an ObjectStore+S3 source with an empty
+// prefix at admission. S3Storage.Prefix has no MinLength of its own, so this
+// CEL rule is the sole guard. The rule uses size(prefix) > 0 rather than a
+// CEL empty-string-literal comparison, because gofmt rewrites that literal
+// into a curly quote (U+201D) that silently corrupts admission; this test
+// locks the rejection behavior in regardless of how the marker is formatted.
+func TestMysqlStandbyCluster_EnvtestCreate_RejectsEmptyPrefix(t *testing.T) {
+	ns := "default"
+	scName := "envtest-standby-emptyprefix"
+
+	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
+	cr := minimalEnvtestStandby(scName, ns)
+	cr.Spec.Source.Storage.S3.Prefix = "" // violates the non-empty-prefix rule
+
+	err := k8sClient.Create(ctx, cr)
+	if err == nil {
+		_ = k8sClient.Delete(ctx, cr) // clean up if it unexpectedly admitted
+		t.Fatal("expected admission to reject empty source.storage.s3.prefix, but Create succeeded")
+	}
+	if !strings.Contains(err.Error(), "prefix must be non-empty") {
+		t.Errorf("want non-empty-prefix CEL rule violation, got: %v", err)
 	}
 }
