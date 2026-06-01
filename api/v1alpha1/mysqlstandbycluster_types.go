@@ -415,8 +415,16 @@ const (
 const (
 	// StandbyConditionBucketReadable is True when the source
 	// bucket+prefix was successfully listed within the last discovery
-	// interval. Reason=ListSucceeded or ListFailed; Message carries
-	// the underlying error on False.
+	// interval. Message carries the underlying error on False.
+	//
+	// Reasons:
+	//   - ListSucceeded (True): the bucket prefix was listed.
+	//   - ListFailed (False): the List call returned a genuine error.
+	//   - ScanIncomplete (False): the List call did not complete before the
+	//     scan deadline (a context deadline/cancel during List, distinct from a
+	//     genuine ListFailed). The previous status.discovered is preserved.
+	//   - AuthFailed (False): archive-store construction failed.
+	//   - ConfigError (False): missing/invalid spec fields.
 	StandbyConditionBucketReadable = "BucketReadable"
 
 	// StandbyConditionSourceConfigKnown is True when the controller has
@@ -433,7 +441,14 @@ const (
 	//     source (no continuous binlog archival), or a brand-new source
 	//     whose first binlog manifest has not yet been uploaded. Recovery
 	//     is limited to the dump (no point-in-time window).
-	//   - MetadataUnreadable (False): the dump @.json could not be parsed.
+	//   - MetadataUnreadable (False): the dump @.json could not be parsed
+	//     (genuinely malformed metadata, not a deadline).
+	//   - ScanIncomplete (False): the scan was cut short by a context
+	//     deadline/cancel before it finished reading every dump @.json (or the
+	//     manifest loop). The selection would be partial, so it is NOT
+	//     published; the previous status.discovered is preserved (last-known-
+	//     good) and no BucketScanned event is emitted. Distinct from
+	//     MetadataUnreadable (which is genuine corruption) and ListFailed.
 	//   - ConfigError (False): propagated from a storage-backend error.
 	StandbyConditionSourceConfigKnown = "SourceConfigKnown"
 
