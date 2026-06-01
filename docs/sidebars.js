@@ -35,6 +35,7 @@ const sidebars = {
       items: [
         'architecture',
         'multi-site',
+        'multi-cluster-dr',
         'why-not-group-replication',
         'operator-availability',
         'durability-and-rpo',

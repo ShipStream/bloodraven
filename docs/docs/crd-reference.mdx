@@ -7,6 +7,21 @@ sidebar_position: 4
 
 <img src={require('/static/img/infographics/crd-reference.webp').default} alt="crd reference infographic" />
 
+Complete reference for Bloodraven custom resources (`shipstream.io/v1alpha1`).
+
+## CRDs at a glance
+
+| Kind | Short name | Scope | Description |
+|---|---|---|---|
+| `MysqlFailoverGroup` | `mfg` | Namespaced | Core resource. Declares a multi-site MySQL HA cluster with automatic failover. |
+| `MysqlBackup` | `mb` | Namespaced | One backup run. Created ad-hoc or by a schedule CronJob. Tracks phase, location, GTID, and binlog coordinates. |
+| `MysqlBackupVerification` | `mbv` | Namespaced | Periodic restore-of-latest-backup into a throwaway mysqld to prove a backup loads cleanly. See [Backup verification](./backup-verification.mdx). |
+| `MysqlStandbyCluster` | `msc` | Namespaced | **Phase 1 of WISHLIST #7.** Passive DR relationship descriptor: lives on the DR cluster, continuously monitors the source archive bucket, and stamps readiness conditions. See [Multi-cluster DR](./multi-cluster-dr.mdx). |
+
+---
+
+## `MysqlFailoverGroup`
+
 Complete reference for the `MysqlFailoverGroup` custom resource (`shipstream.io/v1alpha1`).
 
 ## Common fields quick reference
@@ -599,3 +614,79 @@ status:
         linkStatus: up
         ready: true
 ```
+
+---
+
+## `MysqlStandbyCluster`
+
+**Phase 1 of WISHLIST #7.** A passive DR relationship descriptor that
+lives on the DR cluster and continuously monitors a source
+`MysqlFailoverGroup`'s backup archive in a shared object store. The
+controller populates `status.discovered` and stamps readiness conditions
+on a configurable cadence. **No mysqld is started; no dump is loaded in
+Phase 1.**
+
+See [Multi-cluster DR](./multi-cluster-dr.mdx) for the end-to-end
+recovery runbook and a full explanation of what Phase 1 does and does not
+provide.
+
+### Top-level spec fields
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `transport` | string | No | `ObjectStore` | Transport mode. Only `ObjectStore` is honored in v1alpha1; `Network` is reserved. |
+| `source` | StandbySource | Yes | -- | Identifies the source archive: bucket, prefix, profile name, optional decryption. |
+| `template` | StandbyFailoverGroupTemplate | Yes | -- | Embedded `MysqlFailoverGroupSpec` the controller will materialize on activation (Phase 3). Declare this at standby-CR-create-time, not during an incident. |
+| `freshness` | StandbyFreshnessSpec | No | -- | Discovery cadence, verification schedule, staleness threshold, and cursor-refresh interval. |
+| `activate` | StandbyActivateSpec | No | -- | One-shot promote gate (Phase 3). Ignored until `spec.activate.confirm` is set to a fresh RFC 3339 timestamp. |
+
+### StandbySource
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `failoverGroupName` | string | Yes | Source `MysqlFailoverGroup` name. Informational; used in events and status. |
+| `namespace` | string | No | Source MFG namespace in its own cluster. Informational. |
+| `cluster` | string | No | Free-form source cluster identifier (e.g. `us-west-prod`). Informational. |
+| `storage` | BackupStorage | Yes | Object-store backend (same shape as `spec.backup.profiles[].storage`). The controller refuses to write to it. |
+| `profileName` | string | Yes | Backup profile name under which dumps and binlogs are stored. |
+| `decryption` | BackupDecryptionSpec | No | Passphrase Secret to decrypt source artifacts. Must exist in the DR namespace. |
+
+### StandbyFreshnessSpec
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `discoveryInterval` | duration | `5m` | How often the controller re-scans the bucket to refresh `status.discovered`. |
+| `verifySchedule` | string | `"0 4 * * *"` | Cron expression for scheduled restore-verification runs (Phase 2). |
+| `verifyTimeZone` | string | `"Etc/UTC"` | IANA timezone for `verifySchedule`. |
+| `maxStaleness` | duration | `48h` | Threshold past which `Restorable=False` is stamped when no recent verification has succeeded (Phase 2). |
+| `suspend` | bool | `false` | Pauses verification CronJob without deleting the CR. |
+| `retentionFloorRefresh` | duration | `5m` | How often `dr-cursors/<name>.json` is refreshed (Phase 2). |
+
+### StandbyActivateSpec
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `confirm` | string | Yes | -- | RFC 3339 anti-fat-finger token. Controller activates only when this parses and is strictly greater than `status.activation.confirmTokenUsed` (Phase 3). |
+| `pointInTime` | PointInTimeSpec | No | -- | Optional PITR stop time for binlog replay during activation. Mirrors `spec.initFromBackup.pointInTime` (Phase 3). |
+| `acceptUnverified` | bool | No | `false` | Bypass `Restorable=True` gate. Use only when a stale archive is better than no archive (Phase 3). |
+| `restoreTimeout` | duration | No | `2h` | Wall-clock cap on the materialized MFG reaching `Succeeded` before stamping `Failed` (Phase 3). |
+
+### Status
+
+| Field | Type | Description |
+|---|---|---|
+| `discovered` | StandbyDiscovered | Most recent successful bucket scan: dump location, name, completion time, GTID set, size, and binlog window timestamps. Encryption detection (BRV1 header) is deferred to Phase 2. |
+| `lastVerified` | StandbyLastVerified | Most recent terminal `MysqlBackupVerification` owned by this CR (Phase 2). |
+| `activation` | StandbyActivationStatus | One-shot promote audit trail: phase, source/target GTIDs, PITR stop datetime, replayed binlog count, active site, reason, message (Phase 3). |
+| `materializedFailoverGroup` | string | Name of the `MysqlFailoverGroup` created during activation. Empty until `Activated` (Phase 3). |
+| `conditions` | []Condition | Standard Kubernetes conditions. See below. |
+
+### Conditions
+
+| Type | Phase populated | Meaning |
+|---|---|---|
+| `BucketReadable` | Phase 1 | Bucket scan succeeded within the last discovery interval. Reason: `ListSucceeded` (True), `ListFailed` (False), `AuthFailed` (False — store construction failed, e.g. bad credentials), or `ConfigError` (False — missing/invalid spec fields). |
+| `SourceConfigKnown` | Phase 1 | At least one full dump and one binlog manifest were found. Reason: `DumpFound` (True), `NoDumpFound` (False), `NoBinlogManifests` (False — dump present but no binlog manifests under `<prefix>/binlogs/`), `MetadataUnreadable` (False — dump `@.json` present but cannot be parsed), or `ConfigError` (False — propagated from storage backend error). |
+| `Restorable` | Phase 2 | Most recent owned `MysqlBackupVerification` is Succeeded and within `freshness.maxStaleness`. |
+| `ActivationInProgress` | Phase 3 | True while activation phase is non-terminal. |
+| `Active` | Phase 3 | True when `status.activation.phase == Activated`. |

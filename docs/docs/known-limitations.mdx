@@ -61,6 +61,10 @@ matches your expectations.
 - PVC loss can be recovered by recloning from the current primary, but
   committed transactions that only existed on the lost PVC are gone.
   See [Operations](./operations.mdx#pvc-loss-recovery-runbook).
+- Total cluster loss (all nodes and PVCs destroyed) requires recovering
+  into a separate Kubernetes cluster from the source backup archive.
+  See [Multi-cluster DR](./multi-cluster-dr.mdx) for the end-to-end
+  runbook using `spec.initFromBackup` with optional PITR replay.
 
 ## Dragonfly co-management
 

@@ -20,6 +20,8 @@
 
 **7. Cross-region/cross-cluster DR as a first-class feature.** Today DR = "create a new MysqlFailoverGroup with `initFromBackup` in another cluster." This works but is ad-hoc. Consider a `MysqlDRTarget` CR that continuously ships backups + binlogs to a designated target cluster/bucket and can be promoted with one command. At minimum, document the recommended multi-cluster DR topology with a runbook.
 
+_In progress: branch `megamind/dr-7-phase-0-1`, Phase 0 + Phase 1 — `MysqlStandbyCluster` CRD, Phase 0 runbook (`docs/docs/multi-cluster-dr.mdx`), and Phase 1 bucket-discovery reconciler._
+
 ## P3 — Documentation deliverables
 
 **27. Backup/restore performance guide.** For a 500 GB dataset, how long does `util.dumpInstance` take with what `threads`/`bytesPerChunk`? How long does `loadDump` take? At what `maxLagSeconds` does your replica-as-source fallback trigger and what's the primary-impact if it does? Users need ballparks before they commit.

@@ -75,6 +75,16 @@ rules:
   - apiGroups: [shipstream.io]
     resources: [mysqlbackupverifications/status]
     verbs: [get, patch, update]
+  # MysqlStandbyCluster CRD
+  - apiGroups: [shipstream.io]
+    resources: [mysqlstandbyclusters]
+    verbs: [get, list, watch]
+  - apiGroups: [shipstream.io]
+    resources: [mysqlstandbyclusters/finalizers]
+    verbs: [update]
+  - apiGroups: [shipstream.io]
+    resources: [mysqlstandbyclusters/status]
+    verbs: [get, patch, update]
   # External DNS (DNSEndpoint updates for DNS failover)
   - apiGroups: [externaldns.k8s.io]
     resources: [dnsendpoints]

@@ -173,6 +173,14 @@ bringing the async-replication RPO below zero seconds. For that you
 would need synchronous replication, which is not in Bloodraven's
 design.
 
+**Cross-cluster recovery.** PITR also powers the cross-cluster DR path:
+when an entire cluster is lost, the DR cluster can bootstrap a new
+`MysqlFailoverGroup` from the source's S3 dump archive with an optional
+`pointInTime` replay window. The unarchived binlog tail on the lost PVC
+is still unrecoverable, but the RPO is bounded to that tail — not the
+entire last-backup interval. See
+[Multi-cluster DR](./multi-cluster-dr.mdx) for the end-to-end runbook.
+
 ## Tuning: what you control
 
 The relevant knobs for narrowing the async-replication RPO window, in

@@ -1,0 +1,90 @@
+# MysqlStandbyCluster — canonical onboarding sample.
+#
+# This manifest MUST be kubectl-apply-able as-is (after substituting the
+# placeholder values marked with <…>). Every field maps to a real
+# MysqlStandbyClusterSpec or MysqlFailoverGroupSpec field; fabricated names
+# will be rejected by the CRD admission webhook.
+#
+# Phase 1 ships: passive bucket discovery only. The controller scans the
+# configured prefix, populates status.discovered, and stamps the
+# BucketReadable and SourceConfigKnown conditions. No MySQL is started.
+#
+# Phase 2 (future): scheduled MysqlBackupVerification runs (freshness.*
+# fields become active). Phase 3 (future): one-shot activation via
+# spec.activate.confirm.
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlStandbyCluster
+metadata:
+  name: orders-east-from-west
+  namespace: orders
+spec:
+  # Only ObjectStore is supported in v1alpha1; Network is reserved for a future
+  # cross-cluster MySQL replication mode.
+  transport: ObjectStore
+  source:
+    # Informational identity of the source group (used in events/status).
+    failoverGroupName: orders
+    namespace: orders
+    cluster: us-west-prod
+    # profileName must match spec.backup.profiles[].name on the source group.
+    profileName: nightly-s3
+    storage:
+      type: S3
+      s3:
+        bucket: <shipstream-backups-bucket>
+        # prefix must be non-empty when transport=ObjectStore.
+        prefix: orders/west
+        region: us-west-2
+        # Secret with AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (read-only).
+        credentialsSecret: s3-dr-readonly-creds
+    # Required when the source profile has encryption enabled.
+    # The Secret must be copied to this namespace from the source cluster.
+    # See docs/docs/multi-cluster-dr.mdx — Passphrase distribution.
+    decryption:
+      passphraseSecret:
+        name: orders-backup-passphrase
+  # template declares the MysqlFailoverGroup to materialise on activate
+  # (Phase 3). Fill it in at standby-CR-creation time, not during an incident.
+  # Fields must match the real MysqlFailoverGroupSpec shape — see
+  # examples/minimal-failovergroup.yaml for the canonical reference.
+  template:
+    name: orders
+    spec:
+      image: mysql:9.6
+      sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:0.1.6
+      credentials:
+        operatorSecret: orders-mysql-operator
+        appSecret: orders-mysql-app
+      dns:
+        hostname: orders-east.example.com
+        ttl: 60
+      sites:
+        - name: east-az1
+          role: primary-candidate
+          zone: us-east-1a
+          taintNodeSelector:
+            shipstream.io/failover-group.orders: "true"
+            shipstream.io/site.orders: east-az1
+          lbIP: <10.0.1.1>
+          storage:
+            storageClassName: fast-ssd
+            size: 100Gi
+        - name: east-az2
+          role: primary-candidate
+          zone: us-east-1b
+          taintNodeSelector:
+            shipstream.io/failover-group.orders: "true"
+            shipstream.io/site.orders: east-az2
+          lbIP: <10.0.2.1>
+          storage:
+            storageClassName: fast-ssd
+            size: 100Gi
+  # freshness: Phase 1 only reads discoveryInterval (default 5m).
+  # Phase 2+ reads verifySchedule / maxStaleness / etc.
+  freshness:
+    discoveryInterval: 5m          # how often to re-scan the bucket (Phase 1)
+    verifySchedule: "0 */6 * * *"  # every 6h (Phase 2+)
+    maxStaleness: 24h              # (Phase 2+)
+  # activate: Phase 3+ only. Set confirm to an RFC3339 timestamp to fire.
+  # activate:
+  #   confirm: ""  # bump to RFC3339 (e.g. 2026-05-23T10:15:00Z) to promote

@@ -177,6 +177,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register the MysqlStandbyCluster reconciler. Phase 1 ships the
+	// passive bucket-discovery loop (BucketReadable + SourceConfigKnown
+	// conditions). Activation (Phase 3) and continuous verification
+	// (Phase 2) are follow-up PRs. See WISHLIST/#7.
+	standbyReconciler := &controller.MysqlStandbyClusterReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("bloodraven-standby"),
+	}
+	if err := standbyReconciler.SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create standby controller", "error", err)
+		os.Exit(1)
+	}
+
 	// Tell the schedule reconciler which operator image and ServiceAccount
 	// to embed into the CronJob pods it creates. These can be overridden
 	// via env vars to support kind/k3d playground runs where the operator

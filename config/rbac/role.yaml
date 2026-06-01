@@ -135,6 +135,7 @@ rules:
   - mysqlbackups/finalizers
   - mysqlbackupverifications/finalizers
   - mysqlfailovergroups/finalizers
+  - mysqlstandbyclusters/finalizers
   verbs:
   - update
 - apiGroups:
@@ -143,7 +144,16 @@ rules:
   - mysqlbackups/status
   - mysqlbackupverifications/status
   - mysqlfailovergroups/status
+  - mysqlstandbyclusters/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - shipstream.io
+  resources:
+  - mysqlstandbyclusters
+  verbs:
+  - get
+  - list
+  - watch
