@@ -659,8 +659,11 @@ provide.
 The Phase 2 verification cadence and staleness knobs (`verifySchedule`,
 `verifyTimeZone`, `maxStaleness`, `suspend`, `retentionFloorRefresh`) and the
 Phase 3 `spec.activate` block are **not** part of v1alpha1. They will be added
-back (backward-compatibly) when the code that consumes them ships; until then,
-setting any of those fields is rejected at admission as an unknown field.
+back (backward-compatibly) when the code that consumes them ships. Until then
+they are absent from the structural schema, so they have no effect: the API
+server prunes them (they are silently dropped and never persisted), and clients
+using strict server-side field validation — the default for `kubectl
+apply`/`create` since Kubernetes 1.25 — reject them outright.
 
 ### Status
 

@@ -12,7 +12,10 @@
 # Phase 2 (future): scheduled MysqlBackupVerification runs. Phase 3 (future):
 # one-shot activation. The spec fields that drive those phases are not part of
 # v1alpha1 yet and will be added back (backward-compatibly) when that code
-# lands; setting an unknown field is rejected at admission.
+# lands. Until then they are absent from the schema and have no effect: the API
+# server prunes unknown fields (silently dropped, never persisted), and strict
+# server-side field validation (the default for kubectl apply/create since 1.25)
+# rejects them.
 apiVersion: shipstream.io/v1alpha1
 kind: MysqlStandbyCluster
 metadata:
