@@ -2,7 +2,7 @@
 
 ## Checklist
 
-- [ ] 7. Cross-region/cross-cluster DR as a first-class feature
+- [x] 7. Cross-region/cross-cluster DR as a first-class feature
 - [ ] 27. Backup/restore performance guide
 - [ ] 30. Public repo, license, release cadence
 - [x] 32. Real-cluster E2E CI gate
