@@ -52,6 +52,21 @@ type MysqlStandbyClusterReconciler struct {
 	// re-reading every historical dump on every scan. Guarded by dumpMetaMu
 	// because controller-runtime may run reconciles concurrently when
 	// MaxConcurrentReconciles > 1.
+	//
+	// STEADY-STATE BOUND: once the operator has been up for one discovery
+	// interval, each scan reads at most the @.json of dumps that appeared
+	// since the previous scan (typically zero or one), regardless of how many
+	// historical dumps live under the prefix.
+	//
+	// KNOWN COLD-START / TIMEOUT RISK (Phase 2 hardening — WISHLIST follow-up):
+	// the cache starts empty, so the FIRST scan after an operator restart
+	// re-reads every historical dump's @.json (a GET burst proportional to the
+	// number of retained dumps), and the whole scan is capped by the fixed
+	// standbyDefaultScanTimeout (30s). On a very large bucket the cold-start
+	// burst can exceed that timeout and flap BucketReadable until the cache
+	// re-warms. The scan is intentionally left unchanged here; the cold-start
+	// burst + fixed-timeout flap is a tracked Phase 2 hardening item (adaptive
+	// timeout / paginated, time-bounded scan / persisted cache).
 	dumpMetaMu    sync.Mutex
 	dumpMetaCache map[string]standbyDumpMeta
 }
@@ -252,7 +267,12 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	} else if discovered.ManifestCount == 0 {
 		sourceKnown = metav1.ConditionFalse
 		sourceReason = "NoBinlogManifests"
-		sourceMsg = fmt.Sprintf("dump %q found but no binlog manifests under %q/%s/",
+		// Not a misconfiguration: the dump was found, but no PITR binlog
+		// archive exists yet (dump-only source, or a brand-new source whose
+		// first manifest has not been uploaded). Recovery is limited to the
+		// dump with no point-in-time window.
+		sourceMsg = fmt.Sprintf("dump %q found but no PITR binlog manifests under %q/%s/ yet; "+
+			"recovery is limited to the dump (no point-in-time window)",
 			discovered.DumpName, storePrefix, pitrBinlogSubprefix)
 	}
 

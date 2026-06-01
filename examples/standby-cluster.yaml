@@ -9,9 +9,10 @@
 # configured prefix, populates status.discovered, and stamps the
 # BucketReadable and SourceConfigKnown conditions. No MySQL is started.
 #
-# Phase 2 (future): scheduled MysqlBackupVerification runs (freshness.*
-# fields become active). Phase 3 (future): one-shot activation via
-# spec.activate.confirm.
+# Phase 2 (future): scheduled MysqlBackupVerification runs. Phase 3 (future):
+# one-shot activation. The spec fields that drive those phases are not part of
+# v1alpha1 yet and will be added back (backward-compatibly) when that code
+# lands; setting an unknown field is rejected at admission.
 apiVersion: shipstream.io/v1alpha1
 kind: MysqlStandbyCluster
 metadata:
@@ -79,12 +80,9 @@ spec:
           storage:
             storageClassName: fast-ssd
             size: 100Gi
-  # freshness: Phase 1 only reads discoveryInterval (default 5m).
-  # Phase 2+ reads verifySchedule / maxStaleness / etc.
+  # freshness: Phase 1 only has discoveryInterval (default 5m, minimum 30s).
+  # The Phase 2 verification cadence / staleness knobs and the Phase 3
+  # activate block are not part of v1alpha1 yet — they will be added back
+  # (backward-compatibly) when that code ships.
   freshness:
     discoveryInterval: 5m          # how often to re-scan the bucket (Phase 1)
-    verifySchedule: "0 */6 * * *"  # every 6h (Phase 2+)
-    maxStaleness: 24h              # (Phase 2+)
-  # activate: Phase 3+ only. Set confirm to an RFC3339 timestamp to fire.
-  # activate:
-  #   confirm: ""  # bump to RFC3339 (e.g. 2026-05-23T10:15:00Z) to promote

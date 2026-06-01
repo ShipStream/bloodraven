@@ -551,9 +551,16 @@ lives on the DR cluster and continuously monitors the source bucket.
 **What Phase 1 does NOT ship:**
 
 - Continuous restore verification (`Restorable` condition) — Phase 2.
-- One-command activation (`dr-activate` kubectl plugin, `spec.activate`
-  state machine) — Phase 3.
+- One-command activation (`dr-activate` kubectl plugin + a future
+  activate-request state machine) — Phase 3.
 - Failback tooling — Phase 4.
+
+The spec fields that drive Phase 2 verification and Phase 3 activation are
+**not** part of v1alpha1 yet. They will be added back (backward-compatibly)
+when that code ships, rather than shipping inert fields that enforce nothing
+today. The `template` field is the exception: it is required at create-time
+so the full activated topology is validated while the cluster is calm, not
+mid-incident during a promote.
 
 An on-call engineer recovering from a cluster loss still executes this
 runbook manually. Phase 1's value is operational visibility: you can see
@@ -621,9 +628,11 @@ spec:
           storage:
             storageClassName: fast-ssd
             size: 100Gi
-  # freshness/activate fields exist in the CRD but are consumed by later
-  # phases. Phase 1 reads source.storage and source.decryption to drive the
-  # discovery loop.
+  # freshness.discoveryInterval (default 5m) controls the scan cadence.
+  # The Phase 2 verification/staleness knobs and the Phase 3 activate block
+  # are not part of v1alpha1 yet — they will be added back
+  # (backward-compatibly) when that code ships. Phase 1 reads source.storage
+  # and source.decryption to drive the discovery loop.
 ```
 
 Check status:
@@ -645,9 +654,10 @@ and the `BucketReadable` and `SourceConfigKnown` conditions.
   premature binlog pruning. Prerequisite: WISHLIST #43 (PITR E2E
   scenarios).
 - **Phase 3** — One-command activation: `kubectl bloodraven dr-activate`
-  + the `spec.activate.confirm` confirm-token gate materializes a
-  writable `MysqlFailoverGroup` from the discovered dump. The activation
-  state machine is phase-stamped and durable across operator restarts.
+  + a future confirm-token gate materializes a writable
+  `MysqlFailoverGroup` from the discovered dump. The activation state
+  machine is phase-stamped and durable across operator restarts. The spec
+  field that carries the confirm token will be added when this lands.
 - **Phase 4** — Failback tooling: symmetric `MysqlStandbyCluster` on the
   returning source cluster + extended runbook.
 

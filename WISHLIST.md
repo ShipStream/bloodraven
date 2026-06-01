@@ -9,6 +9,7 @@
 - [ ] 41. Safe Secret watch narrowing design
 - [ ] 42. Namespace-scoped watch/cache mode evaluation
 - [ ] 43. Dedicated backup/PITR real-cluster E2E scenarios
+- [ ] 44. Harden the standby cold-start discovery scan (GET burst + fixed timeout)
 
 ## P0 — Production adoption blockers
 
@@ -20,7 +21,11 @@
 
 **7. Cross-region/cross-cluster DR as a first-class feature.** Today DR = "create a new MysqlFailoverGroup with `initFromBackup` in another cluster." This works but is ad-hoc. Consider a `MysqlDRTarget` CR that continuously ships backups + binlogs to a designated target cluster/bucket and can be promoted with one command. At minimum, document the recommended multi-cluster DR topology with a runbook.
 
+> **Rename note:** the originally-proposed `MysqlDRTarget` shipped as the `MysqlStandbyCluster` CR. The name was changed because the CR is a passive standby/observability descriptor for a DR relationship (it surfaces source-archive freshness via conditions), not merely a ship *target*. The `MysqlDRTarget` name is kept here for proposal history.
+
 _In progress: branch `megamind/dr-7-phase-0-1`, Phase 0 + Phase 1 — `MysqlStandbyCluster` CRD, Phase 0 runbook (`docs/docs/multi-cluster-dr.mdx`), and Phase 1 bucket-discovery reconciler._
+
+**44. Harden the standby cold-start discovery scan (Phase 2 follow-up to #7).** The Phase 1 `MysqlStandbyClusterReconciler` memoizes parsed dump `@.json` metadata (`dumpMetaCache` / `pruneDumpMetaCache`), so in steady state each discovery scan GETs only the dumps that appeared since the previous scan. Two residual risks remain and are deliberately deferred to Phase 2 (no behavior change in Phase 1): (a) the in-memory cache cold-starts empty, so the **first scan after an operator restart re-reads every historical dump's `@.json`** — a GET burst proportional to the number of retained dumps; and (b) the whole scan is capped by a **fixed 30s timeout** (`standbyDefaultScanTimeout`), so on a very large bucket the cold-start burst can exceed the timeout and flap `BucketReadable` until the cache re-warms. Harden with one or more of: an adaptive/relative scan timeout, a paginated time-bounded scan that makes progress across reconciles, or a persisted metadata cache that survives restarts. See the `dumpMetaCache` field comment in `internal/controller/standbycluster_reconciler.go` for the in-code paper trail.
 
 ## P3 — Documentation deliverables
 

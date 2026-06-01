@@ -25,9 +25,11 @@ import (
 // Phase 2 adds continuous restore verification: a scheduled
 // MysqlBackupVerification proves the latest dump+PITR window is
 // restorable and gates a Restorable condition.
-// Phase 3 adds one-command activation: an admin-confirmed activate
-// request (spec.activate.confirm) materialises a new MysqlFailoverGroup
-// in this namespace loaded from the source archive.
+// Phase 3 adds one-command activation: a future admin-confirmed activate
+// request materialises a new MysqlFailoverGroup in this namespace loaded
+// from the source archive. The spec fields that drive Phase 2/3 are not
+// part of v1alpha1 yet; they will be added (backward-compatibly) when
+// that code lands.
 //
 // One MysqlStandbyCluster per DR relationship per namespace. Designed
 // to be symmetric: failback uses a second MysqlStandbyCluster on the
@@ -51,6 +53,7 @@ type MysqlStandbyClusterList struct {
 
 // MysqlStandbyClusterSpec defines the desired state of MysqlStandbyCluster.
 // +kubebuilder:validation:XValidation:rule="self.transport != 'ObjectStore' || self.source.storage.type != 'S3' || (has(self.source.storage.s3.prefix) && size(self.source.storage.s3.prefix) > 0)",message="source.storage.s3.prefix must be non-empty when transport=ObjectStore and storage type=S3"
+// +kubebuilder:validation:XValidation:rule="self.transport != 'ObjectStore' || self.source.storage.type == 'S3'",message="source.storage.type must be S3 when transport=ObjectStore; PVC-backed sources are not supported for cross-cluster DR (the operator pod does not mount the source cluster's backup PVC)"
 type MysqlStandbyClusterSpec struct {
 	// Transport selects the DR data path. Only ObjectStore is honoured in
 	// v1alpha1; the Enum also lists Network, which is reserved for a future
@@ -72,20 +75,12 @@ type MysqlStandbyClusterSpec struct {
 	// standby-CR-creation time, not during an incident.
 	Template StandbyFailoverGroupTemplate `json:"template"`
 
-	// Freshness configures the continuous-restore verification cadence
-	// and the staleness threshold at which Restorable=False is set.
-	// Phase 1 only reads discoveryInterval; other fields are consumed
-	// by Phase 2+.
+	// Freshness configures the Phase 1 bucket-discovery cadence via
+	// discoveryInterval. The Phase 2 verification cadence and staleness
+	// knobs are not part of v1alpha1 yet; they will be added
+	// (backward-compatibly) when that code lands.
 	// +optional
 	Freshness *StandbyFreshnessSpec `json:"freshness,omitempty"`
-
-	// Activate is the one-shot promote contract (Phase 3). The
-	// controller ignores this block until spec.activate.confirm is set
-	// to an RFC3339 timestamp strictly greater than
-	// status.activation.confirmTokenUsed. See RestoreInPlaceSpec
-	// (api/v1alpha1/backup_types.go:723-732) for the prior art.
-	// +optional
-	Activate *StandbyActivateSpec `json:"activate,omitempty"`
 }
 
 // StandbyTransport selects the DR data path.
@@ -166,9 +161,13 @@ type StandbyFailoverGroupTemplate struct {
 	Spec MysqlFailoverGroupSpec `json:"spec"`
 }
 
-// StandbyFreshnessSpec configures the verification cadence.
-// Phase 1 reads discoveryInterval only; all other fields are reserved
-// for Phase 2 (scheduled MysqlBackupVerification runs).
+// StandbyFreshnessSpec configures the Phase 1 bucket-discovery cadence.
+// Only discoveryInterval exists in v1alpha1. The Phase 2 verification
+// cadence and staleness knobs (verifySchedule, verifyTimeZone,
+// maxStaleness, suspend, retentionFloorRefresh) are not shipped yet; they
+// will be added back (backward-compatibly) when the Phase 2 verification
+// code that consumes them lands, rather than shipping inert fields that
+// enforce nothing today.
 type StandbyFreshnessSpec struct {
 	// DiscoveryInterval controls how often the controller re-scans
 	// the source bucket to refresh status.discovered.
@@ -177,97 +176,6 @@ type StandbyFreshnessSpec struct {
 	// +kubebuilder:default="5m"
 	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s')",message="discoveryInterval must be at least 30s"
 	DiscoveryInterval *metav1.Duration `json:"discoveryInterval,omitempty"`
-
-	// VerifySchedule is the cron expression for scheduled
-	// MysqlBackupVerification runs against the most recently
-	// discovered dump. Evaluated in VerifyTimeZone.
-	// Default: "0 4 * * *" (daily at 04:00 UTC).
-	// Phase 2+ only.
-	// +kubebuilder:default="0 4 * * *"
-	VerifySchedule string `json:"verifySchedule,omitempty"`
-
-	// VerifyTimeZone is the IANA timezone name used to evaluate
-	// VerifySchedule. Defaults to "Etc/UTC" for the same
-	// reproducibility reasons as BackupSchedule.TimeZone
-	// (api/v1alpha1/backup_types.go:516-526).
-	// Phase 2+ only.
-	// +kubebuilder:default="Etc/UTC"
-	VerifyTimeZone string `json:"verifyTimeZone,omitempty"`
-
-	// MaxStaleness is the threshold past which Restorable=False is
-	// stamped because no recent Succeeded verification has occurred.
-	// Default: 48h. Minimum: 5m (a shorter freshness window is not
-	// meaningful for cross-cluster RPO purposes). Phase 2+ only.
-	// +kubebuilder:default="48h"
-	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('5m')",message="maxStaleness must be at least 5m"
-	MaxStaleness *metav1.Duration `json:"maxStaleness,omitempty"`
-
-	// Suspend pauses the verification CronJob without deleting the
-	// standby CR. Useful when the source bucket is temporarily
-	// unreadable and verification noise would obscure other signals.
-	// Phase 2+ only.
-	// +kubebuilder:default=false
-	Suspend bool `json:"suspend,omitempty"`
-
-	// RetentionFloorRefresh is how often the controller refreshes
-	// the dr-cursors/<name>.json bucket file that signals to the source
-	// operator the oldest binlog timestamp the DR cluster still needs.
-	// Default 5m; the file TTL is 60m (controller-side hard-coded).
-	// Minimum: 30s. Phase 2+ only.
-	// +kubebuilder:default="5m"
-	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('30s')",message="retentionFloorRefresh must be at least 30s"
-	RetentionFloorRefresh *metav1.Duration `json:"retentionFloorRefresh,omitempty"`
-}
-
-// StandbyActivateSpec gates the one-shot promote action (Phase 3).
-// Mirrors RestoreInPlaceSpec's confirm-token pattern
-// (api/v1alpha1/backup_types.go:723-732).
-type StandbyActivateSpec struct {
-	// TODO(phase-3-activation) — IMPLEMENTER GUARD (kept as a separate comment group, out of the
-	// doc comment below, so controller-gen does not fold it into the CRD field
-	// description): this field is live API as of Phase 1, so a confirm token
-	// can be persisted on a CR long before any activation code exists. In
-	// Phase 1 status.activation is never written, leaving confirmTokenUsed
-	// empty — so a pre-existing confirm would compare as strictly greater than
-	// "" and read as already-armed. When Phase 3 lands, the first reconcile on
-	// an activation-capable build MUST seed status.activation.confirmTokenUsed
-	// from the current spec.activate.confirm (record-not-fire) and treat only
-	// a subsequent bump as an activation request. Otherwise a months-old
-	// confirm fires an unintended promote the moment the operator is upgraded.
-
-	// Confirm is the required RFC3339 anti-fat-finger token. The
-	// controller refuses to activate unless Confirm parses and is
-	// strictly greater than status.activation.confirmTokenUsed. Bump
-	// to a fresh now() to retry after a Failed activation.
-	// Phase 3+ only.
-	// +kubebuilder:validation:MinLength=1
-	Confirm string `json:"confirm"`
-
-	// PointInTime, when set, instructs the controller to replay
-	// archived binlogs past the dump's GTID set up to the configured
-	// stopDatetime. Reuses PointInTimeSpec
-	// (api/v1alpha1/backup_types.go:191-210).
-	// Phase 3+ only.
-	// +optional
-	PointInTime *PointInTimeSpec `json:"pointInTime,omitempty"`
-
-	// AcceptUnverified, when true, lets the controller proceed even
-	// if status.conditions[Restorable] is not True or is older than
-	// freshness.maxStaleness. Use only when the world is on fire and
-	// a stale-but-present archive is better than no archive.
-	// Defaults to false.
-	// Phase 3+ only.
-	// +kubebuilder:default=false
-	AcceptUnverified bool `json:"acceptUnverified,omitempty"`
-
-	// RestoreTimeout caps the wall-clock duration the controller
-	// waits for the materialised group's restore to reach Succeeded
-	// before stamping ActivationFailed. Default 2h, matching the
-	// existing backup ActiveDeadlineSeconds default
-	// (api/v1alpha1/backup_types.go:62-65).
-	// Phase 3+ only.
-	// +kubebuilder:default="2h"
-	RestoreTimeout *metav1.Duration `json:"restoreTimeout,omitempty"`
 }
 
 // MysqlStandbyClusterStatus describes the observed state of a MysqlStandbyCluster.
@@ -410,10 +318,11 @@ type StandbyActivationStatus struct {
 	// Phase is one of the values in StandbyActivationPhase.
 	Phase StandbyActivationPhase `json:"phase,omitempty"`
 
-	// ConfirmTokenUsed is the spec.activate.confirm value of the most
-	// recent executed (or attempted) activation. Subsequent reconciles
-	// ignore any spec.confirm <= this value; bumping to a strictly
-	// greater RFC3339 timestamp re-arms.
+	// ConfirmTokenUsed records the RFC3339 confirm token of the most
+	// recent executed (or attempted) activation. A future activate
+	// request (Phase 3) re-arms by supplying a strictly greater token;
+	// subsequent reconciles ignore any token <= this value. (The spec
+	// field that carries the request token is not part of v1alpha1 yet.)
 	ConfirmTokenUsed string `json:"confirmTokenUsed,omitempty"`
 
 	// StartTime is when the controller entered Validating.
@@ -510,15 +419,27 @@ const (
 	// the underlying error on False.
 	StandbyConditionBucketReadable = "BucketReadable"
 
-	// StandbyConditionSourceConfigKnown is True when the controller
-	// has resolved at least one full dump and at least one binlog
-	// manifest under the configured prefix. Reason=DumpFound,
-	// NoDumpFound, or NoBinlogManifests.
+	// StandbyConditionSourceConfigKnown is True when the controller has
+	// resolved at least one full dump AND at least one binlog manifest
+	// under the configured prefix. The default `kubectl get` printcolumn
+	// surfaces this as the neutral `SourceKnown`.
+	//
+	// Reasons:
+	//   - DumpFound (True): a dump and at least one binlog manifest exist.
+	//   - NoDumpFound (False): no dump @.json under the prefix.
+	//   - NoBinlogManifests (False): a dump WAS found, but no PITR binlog
+	//     manifests exist under <prefix>/binlogs/ yet. This is NOT a
+	//     misconfiguration — it is the expected state for a dump-only
+	//     source (no continuous binlog archival), or a brand-new source
+	//     whose first binlog manifest has not yet been uploaded. Recovery
+	//     is limited to the dump (no point-in-time window).
+	//   - MetadataUnreadable (False): the dump @.json could not be parsed.
+	//   - ConfigError (False): propagated from a storage-backend error.
 	StandbyConditionSourceConfigKnown = "SourceConfigKnown"
 
 	// StandbyConditionRestorable is True when the most recent owned
-	// MysqlBackupVerification is Succeeded and within
-	// freshness.maxStaleness. Populated by Phase 2+.
+	// MysqlBackupVerification is Succeeded and within a future staleness
+	// threshold (Phase 2). Populated by Phase 2+.
 	// Reason=NoVerification, Stale, or VerificationFailed on False.
 	StandbyConditionRestorable = "Restorable"
 

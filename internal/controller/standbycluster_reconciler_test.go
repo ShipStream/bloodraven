@@ -385,6 +385,15 @@ func TestMysqlStandbyCluster_NoBinlogManifests(t *testing.T) {
 	if skc.Reason != "NoBinlogManifests" {
 		t.Errorf("Reason: want NoBinlogManifests, got %q", skc.Reason)
 	}
+	// D2: the NoBinlogManifests message must read as "dump found, no PITR
+	// window yet" rather than implying a misconfiguration. Assert the
+	// clarified wording so the dump-only semantics are locked in.
+	if !strings.Contains(skc.Message, "no PITR binlog manifests") {
+		t.Errorf("Message: want it to mention %q, got %q", "no PITR binlog manifests", skc.Message)
+	}
+	if !strings.Contains(skc.Message, "no point-in-time window") {
+		t.Errorf("Message: want it to mention %q (dump-only semantics), got %q", "no point-in-time window", skc.Message)
+	}
 	// Dump name should still be populated even when manifests are missing.
 	if updated.Status.Discovered == nil || updated.Status.Discovered.DumpName == "" {
 		t.Error("DumpName should be populated even when manifests are missing")
