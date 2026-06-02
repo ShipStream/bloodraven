@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -52,6 +54,38 @@ type MysqlStandbyClusterReconciler struct {
 	// re-reading every historical dump on every scan. Guarded by dumpMetaMu
 	// because controller-runtime may run reconciles concurrently when
 	// MaxConcurrentReconciles > 1.
+	//
+	// STEADY-STATE BOUND: once the operator has been up for one discovery
+	// interval, each scan reads at most the @.json of dumps that appeared
+	// since the previous scan (typically zero or one), regardless of how many
+	// historical dumps live under the prefix.
+	//
+	// COLD-START HARDENING (WISHLIST #44, shipped): the cache starts empty, so
+	// the FIRST scan after an operator restart re-reads every retained dump's
+	// @.json (a GET burst proportional to the number of retained dumps). Three
+	// mechanisms keep that burst safe and bounded:
+	//   1. Bounded-concurrency reads — the @.json GETs fan out through an
+	//      errgroup capped at standbyDumpMetaConcurrency (8), so wall time for N
+	//      retained dumps is roughly tList + ceil(N/8)*RTT (single-digit seconds
+	//      at the realistic scale of tens of dumps) instead of serial N*RTT.
+	//   2. Work-aware adaptive read timeout — after List returns and the work
+	//      size is known, the read phase gets standbyReadTimeout (perItem*work,
+	//      clamped to [standbyDefaultScanTimeout, interval]) instead of a fixed
+	//      30s, so a large cold start has up to the discovery interval to finish.
+	//   3. Incompleteness-awareness — if the scan is cut short by a context
+	//      deadline/cancel (during List or during the @.json/manifest reads), it
+	//      refuses to publish a partial/wrong newest-dump selection: it preserves
+	//      the previous status.discovered (last-known-good), stamps the
+	//      ScanIncomplete reason, and emits no BucketScanned event. A genuine
+	//      List failure (ListFailed) and a genuinely malformed @.json
+	//      (MetadataUnreadable) stay distinct from ScanIncomplete.
+	//
+	// WORKER-OCCUPANCY TRADE-OFF: because the read-phase budget (standbyReadTimeout)
+	// can grow up to the discovery interval, a very large cold-start scan can hold
+	// a controller worker for up to that interval before requeueing. This is an
+	// accepted trade-off at the stated scale (tens of dumps finish in single-digit
+	// seconds via the bounded fan-out); correctness over freshness wins over
+	// releasing the worker early on a genuinely slow endpoint.
 	dumpMetaMu    sync.Mutex
 	dumpMetaCache map[string]standbyDumpMeta
 }
@@ -68,10 +102,27 @@ const standbyDefaultDiscoveryInterval = 5 * time.Minute
 // metadata. Every dump directory contains exactly one "@.json" file.
 const standbyAtJSONSuffix = "@.json"
 
-// standbyDefaultScanTimeout bounds one object-store discovery scan. The timeout
+// standbyDefaultScanTimeout bounds the List phase of one object-store discovery
+// scan and serves as the FLOOR for the work-aware read-phase budget. The timeout
 // prevents a stalled S3-compatible endpoint from tying up a controller worker
 // indefinitely while still leaving normal paginated scans room to complete.
 const standbyDefaultScanTimeout = 30 * time.Second
+
+// standbyDumpMetaConcurrency caps the number of concurrent @.json GETs during a
+// discovery scan. A bounded fan-out turns the cold-start GET burst (one Get per
+// retained dump) from serial N*RTT into roughly ceil(N/concurrency)*RTT while
+// also capping concurrent load on the object-store endpoint. 8 keeps a tens-of-
+// dumps cold start to single-digit seconds without hammering the backend.
+const standbyDumpMetaConcurrency = 8
+
+// standbyPerItemScanBudget is the per-work-item time budget used to size the
+// read phase of a scan (the @.json fan-out + the manifest loop). Multiplied by
+// the work size (len(dumpDirs) + #manifest keys) and clamped to
+// [standbyDefaultScanTimeout, interval] by standbyReadTimeout. 1s per item is a
+// generous upper bound: with concurrency the reads finish far sooner, but the
+// budget must not under-provision a genuinely slow endpoint and trip a false
+// ScanIncomplete.
+const standbyPerItemScanBudget = 1 * time.Second
 
 // standbyMinDiscoveryInterval is the controller-side floor for the requeue
 // cadence, mirroring the 30s minimum the CRD enforces on
@@ -189,10 +240,35 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	// ---------------------------------------------------------------
 	// Step 3: Scan the bucket prefix
 	// ---------------------------------------------------------------
-	scanCtx, cancelScan := context.WithTimeout(ctx, standbyScanTimeout(interval))
-	discovered, scanErr := r.scanBucket(scanCtx, logger, &sc, store, storePrefix)
-	cancelScan()
+	// scanBucket manages its own two-phase budgets derived from the parent ctx
+	// and the discovery interval: a fixed List timeout, then a work-aware read
+	// timeout computed after List from the discovered work size (WISHLIST #44).
+	discovered, scanErr := r.scanBucket(ctx, logger, &sc, store, storePrefix, interval)
 	if scanErr != nil {
+		// A context error from scanBucket means List itself was cut short by a
+		// deadline/cancel (it never completed) — distinct from a genuine List
+		// failure. Refuse to publish anything: preserve last-known-good
+		// status.discovered, stamp ScanIncomplete, emit no BucketScanned event.
+		if isContextErr(scanErr) {
+			logger.Info("standby discovery scan incomplete: List did not complete before deadline",
+				"prefix", storePrefix, "err", scanErr.Error())
+			bucketMsg := fmt.Sprintf("bucket list did not complete before the scan deadline: %v", scanErr)
+			if sc.Status.Discovered != nil && sc.Status.Discovered.LastScanAt != nil {
+				bucketMsg = fmt.Sprintf("bucket list incomplete (deadline) since %s; last successful scan at %s: %v",
+					metav1.Now().UTC().Format(time.RFC3339),
+					sc.Status.Discovered.LastScanAt.UTC().Format(time.RFC3339),
+					scanErr)
+			}
+			return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
+				bucketReadable: metav1.ConditionFalse,
+				bucketReason:   "ScanIncomplete",
+				bucketMsg:      bucketMsg,
+				sourceKnown:    metav1.ConditionFalse,
+				sourceReason:   "ScanIncomplete",
+				sourceMsg:      "bucket scan did not complete before deadline; last-known-good discovered preserved",
+			}, interval, nil)
+		}
+
 		// scanErr here means a fatal List failure (not a metadata parse error).
 		logger.Error(scanErr, "bucket list failed", "prefix", storePrefix)
 		r.Recorder.Eventf(&sc, corev1.EventTypeWarning, "ListFailed",
@@ -214,6 +290,42 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 			sourceKnown:    metav1.ConditionFalse,
 			sourceReason:   "ListFailed",
 			sourceMsg:      "bucket not readable",
+		}, interval, nil)
+	}
+
+	// Incompleteness AFTER a successful List (deadline fired during the @.json
+	// fan-out or the manifest loop). List DID succeed, so BucketReadable stays
+	// True/ListSucceeded; but the scan saw only a partial view, so we must NOT
+	// publish a possibly-wrong newest-dump selection. Preserve last-known-good
+	// status.discovered, stamp SourceConfigKnown=False/ScanIncomplete, no event.
+	if discovered.Incomplete {
+		// Build a phase-accurate message. The dump @.json fan-out reports
+		// how many candidates were read; the manifest loop runs only after every
+		// dump @.json has been read, so it has no candidate ratio to report and
+		// must NOT borrow the dump-candidate counters (V1: misreporting "read
+		// N/N dump @.json candidates" for a manifest-phase stall misleads triage).
+		phase := discovered.IncompletePhase
+		if phase == "" {
+			phase = "read"
+		}
+		sourceMsg := fmt.Sprintf("scan %s phase incomplete (deadline); last-known-good discovered preserved", phase)
+		if discovered.IncompletePhase == "dump @.json" {
+			sourceMsg = fmt.Sprintf("scan dump @.json phase incomplete (deadline): read %d/%d dump @.json candidates; "+
+				"last-known-good discovered preserved",
+				discovered.CandidatesRead, discovered.CandidatesTotal)
+		}
+		logger.Info("standby discovery scan incomplete: read phase did not complete before deadline",
+			"prefix", storePrefix,
+			"phase", phase,
+			"candidatesRead", discovered.CandidatesRead,
+			"candidatesTotal", discovered.CandidatesTotal)
+		return r.stampConditionsAndRequeue(ctx, &sc, standbyConditionPair{
+			bucketReadable: metav1.ConditionTrue,
+			bucketReason:   "ListSucceeded",
+			bucketMsg:      "",
+			sourceKnown:    metav1.ConditionFalse,
+			sourceReason:   "ScanIncomplete",
+			sourceMsg:      sourceMsg,
 		}, interval, nil)
 	}
 
@@ -252,7 +364,12 @@ func (r *MysqlStandbyClusterReconciler) Reconcile(ctx context.Context, req ctrl.
 	} else if discovered.ManifestCount == 0 {
 		sourceKnown = metav1.ConditionFalse
 		sourceReason = "NoBinlogManifests"
-		sourceMsg = fmt.Sprintf("dump %q found but no binlog manifests under %q/%s/",
+		// Not a misconfiguration: the dump was found, but no PITR binlog
+		// archive exists yet (dump-only source, or a brand-new source whose
+		// first manifest has not been uploaded). Recovery is limited to the
+		// dump with no point-in-time window.
+		sourceMsg = fmt.Sprintf("dump %q found but no PITR binlog manifests under %q/%s/ yet; "+
+			"recovery is limited to the dump (no point-in-time window)",
 			discovered.DumpName, storePrefix, pitrBinlogSubprefix)
 	}
 
@@ -474,11 +591,41 @@ type standbyScanResult struct {
 	// MetadataErr is set when the chosen dump's @.json could not be parsed.
 	// The caller stamps SourceConfigKnown=False / MetadataUnreadable in that case.
 	MetadataErr error
+	// Incomplete is true when List succeeded but the scan was cut short by a
+	// context deadline/cancel during the @.json fan-out or the manifest loop.
+	// When set, the dump/manifest fields hold only a PARTIAL view and MUST NOT
+	// be published; the caller stamps SourceConfigKnown=False / ScanIncomplete
+	// and preserves the previous status.discovered (correctness over freshness).
+	// A ctx error during List is surfaced as a returned error instead, not here.
+	Incomplete bool
+	// IncompletePhase names the sub-phase that was cut short when Incomplete is
+	// true ("dump @.json" for the candidate fan-out, "manifest" for the manifest
+	// loop). It drives an accurate ScanIncomplete message so on-call triage is
+	// not misled about which read phase stalled. Empty when Incomplete is false.
+	IncompletePhase string
+	// CandidatesRead / CandidatesTotal are operator-correlation counters: how
+	// many dump @.json candidates were read versus the total discovered when an
+	// incomplete scan was detected during the @.json fan-out. Both zero when
+	// Incomplete is false or when the cut-short happened in the manifest phase
+	// (where every dump @.json had already been read).
+	CandidatesRead  int
+	CandidatesTotal int
 }
 
 // scanBucket lists the bucket under prefix, finds the newest dump and reads
 // binlog manifests. Returns a zero-value standbyScanResult on a clean-but-empty
 // bucket (not an error).
+//
+// Timeout model (WISHLIST #44): scanBucket derives its own two-phase budgets
+// from the parent ctx and the discovery interval, because the work size is not
+// known until List returns:
+//   - List runs under a fixed standbyListTimeout(interval) = min(interval, 30s).
+//     A ctx error here is returned to the caller (List did not complete) so it
+//     can stamp ScanIncomplete rather than a genuine ListFailed.
+//   - The read phase (@.json fan-out + manifest loop) runs under a work-aware
+//     standbyReadTimeout computed from the discovered work size and clamped to
+//     [30s, interval]. A ctx error here sets result.Incomplete=true; the caller
+//     preserves last-known-good status.discovered and stamps ScanIncomplete.
 //
 // logger and sc are used to emit a Warning event (R-4) when LoadManifest fails
 // for a specific manifest key.
@@ -488,9 +635,17 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 	sc *v1alpha1.MysqlStandbyCluster,
 	store sidecar.ArchiveStore,
 	prefix string,
+	interval time.Duration,
 ) (*standbyScanResult, error) {
 	listPrefix := standbyListPrefix(prefix)
-	keys, err := store.List(ctx, listPrefix)
+
+	// --- List phase: fixed timeout (min(interval, 30s)). ---
+	listCtx, cancelList := context.WithTimeout(ctx, standbyListTimeout(interval))
+	keys, err := store.List(listCtx, listPrefix)
+	// Cancel eagerly (not via defer): listCtx is dead once List returns, and an
+	// eager cancel keeps a future inserted early-return between here and the read
+	// phase from leaking the List context.
+	cancelList()
 	if err != nil {
 		return nil, fmt.Errorf("list prefix %q: %w", listPrefix, err)
 	}
@@ -527,21 +682,89 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 		}
 	}
 
+	// Count manifest keys now so the read-phase budget covers them too (the
+	// manifest loop reads one object per manifest key — V5).
+	binlogPrefix := path.Join(prefix, pitrBinlogSubprefix)
+	manifestPrefix := sidecar.ManifestKeyPrefix(binlogPrefix)
+	manifestKeyCount := 0
+	for _, key := range keys {
+		if strings.HasPrefix(key, manifestPrefix) && strings.HasSuffix(key, ".json") &&
+			sidecar.SiteFromManifestKey(key) != "" {
+			manifestKeyCount++
+		}
+	}
+
+	// --- Read phase: work-aware timeout, clamped to [30s, interval]. ---
+	workItems := len(dumpDirs) + manifestKeyCount
+	readCtx, cancelRead := context.WithTimeout(ctx, standbyReadTimeout(interval, workItems))
+	defer cancelRead()
+
 	if len(dumpDirs) > 0 {
 		sort.Strings(dumpDirs)
 		lexNewest := dumpDirs[len(dumpDirs)-1]
 
-		// Read @.json for each candidate; pick the one with the largest end time.
+		// Read @.json for every candidate with bounded concurrency. We gather
+		// per-dir (meta, err) FIRST, then perform the deterministic newest
+		// selection serially below — concurrency must not change the result.
+		type candidateResult struct {
+			meta *standbyDumpMeta
+			err  error
+		}
+		results := make([]candidateResult, len(dumpDirs))
+
+		g, gctx := errgroup.WithContext(readCtx)
+		g.SetLimit(standbyDumpMetaConcurrency)
+		for i, dir := range dumpDirs {
+			g.Go(func() error {
+				atKey := dir + "/" + standbyAtJSONSuffix
+				meta, metaErr := r.cachedDumpMeta(gctx, store, atKey)
+				results[i] = candidateResult{meta: meta, err: metaErr}
+				return nil
+			})
+		}
+		// All goroutines return nil, so Wait never errors; check it anyway to
+		// satisfy errcheck and to be robust if that invariant ever changes.
+		if err := g.Wait(); err != nil {
+			return nil, fmt.Errorf("dump metadata fan-out: %w", err)
+		}
+
+		// Incompleteness check: a ctx error on ANY candidate means the read
+		// phase was cut short — do NOT trust the partial selection (correctness
+		// over freshness). Count how many candidates we actually read for
+		// operator correlation.
+		candidatesRead := 0
+		for _, cr := range results {
+			if cr.err != nil && isContextErr(cr.err) {
+				result.Incomplete = true
+			} else {
+				candidatesRead++
+			}
+		}
+		if result.Incomplete {
+			result.IncompletePhase = "dump @.json"
+			result.CandidatesRead = candidatesRead
+			result.CandidatesTotal = len(dumpDirs)
+			// Still prune so the cache stays bounded; pruning only removes
+			// entries for dumps no longer present in this (successful) List, so
+			// it is safe even on a partial read.
+			r.pruneSeenDumpDirs(listPrefix, dumpDirs)
+			return result, nil
+		}
+
+		// Deterministic newest selection over the sorted dumpDirs. Largest end
+		// time wins; the comparison uses strict .After(), so on an EXACT end-time
+		// tie the lex-smallest dir (earliest in the sorted slice) is kept (V9).
+		// Iterating in sorted order makes this byte-identical to the prior serial
+		// implementation for any non-timeout input.
 		var bestDir string
 		var bestEnd time.Time
 		var bestMeta *standbyDumpMeta
 		var bestMetaErr error
-		for _, dir := range dumpDirs {
-			atKey := dir + "/" + standbyAtJSONSuffix
-			meta, metaErr := r.cachedDumpMeta(ctx, store, atKey)
+		for i, dir := range dumpDirs {
+			meta, metaErr := results[i].meta, results[i].err
 			if metaErr != nil {
-				// Record the error for the lex-newest; other candidates may still
-				// be readable.
+				// Non-ctx parse/Get error. Record it for the lex-newest; other
+				// candidates may still be readable.
 				if dir == lexNewest {
 					bestMetaErr = metaErr
 					bestDir = dir
@@ -590,20 +813,13 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 	// Prune memoized @.json metadata for dumps that no longer exist under
 	// this prefix (e.g. retention removed them), so the cache stays bounded
 	// by the live dump set rather than every dump ever observed.
-	seenAtKeys := make(map[string]struct{}, len(dumpDirs))
-	for _, dir := range dumpDirs {
-		seenAtKeys[dir+"/"+standbyAtJSONSuffix] = struct{}{}
-	}
-	r.pruneDumpMetaCache(listPrefix, seenAtKeys)
+	r.pruneSeenDumpDirs(listPrefix, dumpDirs)
 
 	// -------------------------------------------------------------------
 	// Read per-site binlog manifests under <prefix>/binlogs/.
 	// Layout: <prefix>/binlogs/manifest-<site>.json
 	// sidecar.ManifestKeyPrefix("<prefix>/binlogs") → "<prefix>/binlogs/manifest-"
 	// -------------------------------------------------------------------
-	binlogPrefix := path.Join(prefix, pitrBinlogSubprefix)
-	manifestPrefix := sidecar.ManifestKeyPrefix(binlogPrefix)
-
 	for _, key := range keys {
 		if !strings.HasPrefix(key, manifestPrefix) || !strings.HasSuffix(key, ".json") {
 			continue
@@ -613,8 +829,21 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 		if site == "" {
 			continue
 		}
-		m, err := sidecar.LoadManifest(ctx, store, binlogPrefix, site)
+		m, err := sidecar.LoadManifest(readCtx, store, binlogPrefix, site)
 		if err != nil {
+			// A ctx error means the read phase was cut short during the manifest
+			// loop — the manifest aggregates would be partial (undercounted
+			// ManifestCount, wrong newest/oldest binlog times). Flag the whole
+			// scan incomplete so the caller preserves last-known-good (V1/V5).
+			// The cut-short happened in the MANIFEST phase: every dump @.json was
+			// already read, so the dump-candidate counters stay zero — setting
+			// them to len(dumpDirs) here would misreport "read N/N dump @.json
+			// candidates" for a manifest-phase stall and mislead on-call triage.
+			if isContextErr(err) {
+				result.Incomplete = true
+				result.IncompletePhase = "manifest"
+				return result, nil
+			}
 			// R-4: do NOT increment ManifestCount for a failed LoadManifest.
 			// Emit a Warning event so corruption is visible in the event stream.
 			r.Recorder.Eventf(sc, corev1.EventTypeWarning, "ManifestParseFailed",
@@ -647,11 +876,49 @@ func (r *MysqlStandbyClusterReconciler) scanBucket(
 	return result, nil
 }
 
-func standbyScanTimeout(interval time.Duration) time.Duration {
+// pruneSeenDumpDirs prunes the @.json metadata cache to the dump dirs observed
+// in the current (successful) List under listPrefix. Pruning is best-effort and
+// only removes entries for dumps absent from this List; it never causes a wrong
+// selection because an absent dump cannot reappear in a later List (V8).
+func (r *MysqlStandbyClusterReconciler) pruneSeenDumpDirs(listPrefix string, dumpDirs []string) {
+	seenAtKeys := make(map[string]struct{}, len(dumpDirs))
+	for _, dir := range dumpDirs {
+		seenAtKeys[dir+"/"+standbyAtJSONSuffix] = struct{}{}
+	}
+	r.pruneDumpMetaCache(listPrefix, seenAtKeys)
+}
+
+// isContextErr reports whether err is (or wraps) a context cancellation or
+// deadline. Used to distinguish a scan cut short by a deadline (→ ScanIncomplete,
+// preserve last-known-good) from a genuine List/parse failure.
+func isContextErr(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+// standbyListTimeout bounds the List phase of one discovery scan. It mirrors the
+// historical fixed scan budget: min(interval, standbyDefaultScanTimeout).
+func standbyListTimeout(interval time.Duration) time.Duration {
 	if interval > 0 && interval < standbyDefaultScanTimeout {
 		return interval
 	}
 	return standbyDefaultScanTimeout
+}
+
+// standbyReadTimeout bounds the read phase (@.json fan-out + manifest loop) of a
+// discovery scan, sized to the work discovered by List. The budget is
+// perItem*workItems clamped to [standbyDefaultScanTimeout (floor), interval (cap)]:
+// the floor preserves the historical 30s minimum on a tiny bucket; the cap lets a
+// large cold start use up to the full discovery interval instead of flapping on a
+// fixed 30s. With bounded concurrency the reads finish well within this budget.
+func standbyReadTimeout(interval time.Duration, workItems int) time.Duration {
+	budget := standbyPerItemScanBudget * time.Duration(workItems)
+	if budget < standbyDefaultScanTimeout {
+		budget = standbyDefaultScanTimeout
+	}
+	if interval > 0 && budget > interval {
+		budget = interval
+	}
+	return budget
 }
 
 func standbyNormalizePrefix(prefix string) string {

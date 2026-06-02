@@ -338,6 +338,38 @@ func TestMysqlStandbyCluster_EnvtestCreate_DiscoveryIntervalOverride(t *testing.
 	}
 }
 
+// TestMysqlStandbyCluster_EnvtestCreate_RejectsPVCSource verifies that the
+// spec-level XValidation rule (D1) rejects a PVC-backed source at admission.
+// Cross-cluster DR requires S3-compatible storage because the operator pod
+// does not mount the source cluster's backup PVC; the CEL rule fails fast at
+// create time instead of letting a doomed CR error only at reconcile time
+// (the runtime ConfigError in buildStoreCfg remains as defense-in-depth).
+func TestMysqlStandbyCluster_EnvtestCreate_RejectsPVCSource(t *testing.T) {
+	ns := "default"
+	scName := "envtest-standby-pvc"
+
+	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
+	cr := minimalEnvtestStandby(scName, ns)
+	// Swap the S3 source for a PVC source. The BackupStorage union rule
+	// requires exactly one of s3/pvc matching the type discriminator, so we
+	// must clear S3 and set PVC.
+	cr.Spec.Source.Storage = v1alpha1.BackupStorage{
+		Type: v1alpha1.BackupStoragePVC,
+		PVC: &v1alpha1.PVCStorage{
+			ClaimName: "source-backup-pvc",
+		},
+	}
+
+	err := k8sClient.Create(ctx, cr)
+	if err == nil {
+		_ = k8sClient.Delete(ctx, cr) // clean up if it unexpectedly admitted
+		t.Fatal("expected admission to reject PVC-backed source, but Create succeeded")
+	}
+	if !strings.Contains(err.Error(), "source.storage.type must be S3") {
+		t.Errorf("want S3-only CEL rule violation, got: %v", err)
+	}
+}
+
 // TestMysqlStandbyCluster_EnvtestCreate_RejectsEmptyPrefix verifies that the
 // spec-level XValidation rule rejects an ObjectStore+S3 source with an empty
 // prefix at admission. S3Storage.Prefix has no MinLength of its own, so this

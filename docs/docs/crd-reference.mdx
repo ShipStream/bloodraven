@@ -636,9 +636,8 @@ provide.
 |---|---|---|---|---|
 | `transport` | string | No | `ObjectStore` | Transport mode. Only `ObjectStore` is honored in v1alpha1; `Network` is reserved. |
 | `source` | StandbySource | Yes | -- | Identifies the source archive: bucket, prefix, profile name, optional decryption. |
-| `template` | StandbyFailoverGroupTemplate | Yes | -- | Embedded `MysqlFailoverGroupSpec` the controller will materialize on activation (Phase 3). Declare this at standby-CR-create-time, not during an incident. |
-| `freshness` | StandbyFreshnessSpec | No | -- | Discovery cadence, verification schedule, staleness threshold, and cursor-refresh interval. |
-| `activate` | StandbyActivateSpec | No | -- | One-shot promote gate (Phase 3). Ignored until `spec.activate.confirm` is set to a fresh RFC 3339 timestamp. |
+| `template` | StandbyFailoverGroupTemplate | **Yes** | -- | Embedded `MysqlFailoverGroupSpec` the controller will materialize on activation (Phase 3). Required (not optional) so the full activated topology is validated at standby-CR-create-time while the cluster is calm, rather than failing late mid-incident during a promote. Declare it now, not during an outage. |
+| `freshness` | StandbyFreshnessSpec | No | -- | Phase 1 bucket-discovery cadence (`discoveryInterval` only). |
 
 ### StandbySource
 
@@ -655,21 +654,16 @@ provide.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `discoveryInterval` | duration | `5m` | How often the controller re-scans the bucket to refresh `status.discovered`. |
-| `verifySchedule` | string | `"0 4 * * *"` | Cron expression for scheduled restore-verification runs (Phase 2). |
-| `verifyTimeZone` | string | `"Etc/UTC"` | IANA timezone for `verifySchedule`. |
-| `maxStaleness` | duration | `48h` | Threshold past which `Restorable=False` is stamped when no recent verification has succeeded (Phase 2). |
-| `suspend` | bool | `false` | Pauses verification CronJob without deleting the CR. |
-| `retentionFloorRefresh` | duration | `5m` | How often `dr-cursors/<name>.json` is refreshed (Phase 2). |
+| `discoveryInterval` | duration | `5m` | How often the controller re-scans the bucket to refresh `status.discovered`. Minimum `30s`. |
 
-### StandbyActivateSpec
-
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `confirm` | string | Yes | -- | RFC 3339 anti-fat-finger token. Controller activates only when this parses and is strictly greater than `status.activation.confirmTokenUsed` (Phase 3). |
-| `pointInTime` | PointInTimeSpec | No | -- | Optional PITR stop time for binlog replay during activation. Mirrors `spec.initFromBackup.pointInTime` (Phase 3). |
-| `acceptUnverified` | bool | No | `false` | Bypass `Restorable=True` gate. Use only when a stale archive is better than no archive (Phase 3). |
-| `restoreTimeout` | duration | No | `2h` | Wall-clock cap on the materialized MFG reaching `Succeeded` before stamping `Failed` (Phase 3). |
+The Phase 2 verification cadence and staleness knobs (`verifySchedule`,
+`verifyTimeZone`, `maxStaleness`, `suspend`, `retentionFloorRefresh`) and the
+Phase 3 `spec.activate` block are **not** part of v1alpha1. They will be added
+back (backward-compatibly) when the code that consumes them ships. Until then
+they are absent from the structural schema, so they have no effect: the API
+server prunes them (they are silently dropped and never persisted), and clients
+using strict server-side field validation — the default for `kubectl
+apply`/`create` since Kubernetes 1.25 — reject them outright.
 
 ### Status
 
@@ -685,8 +679,8 @@ provide.
 
 | Type | Phase populated | Meaning |
 |---|---|---|
-| `BucketReadable` | Phase 1 | Bucket scan succeeded within the last discovery interval. Reason: `ListSucceeded` (True), `ListFailed` (False), `AuthFailed` (False — store construction failed, e.g. bad credentials), or `ConfigError` (False — missing/invalid spec fields). |
-| `SourceConfigKnown` | Phase 1 | At least one full dump and one binlog manifest were found. Reason: `DumpFound` (True), `NoDumpFound` (False), `NoBinlogManifests` (False — dump present but no binlog manifests under `<prefix>/binlogs/`), `MetadataUnreadable` (False — dump `@.json` present but cannot be parsed), or `ConfigError` (False — propagated from storage backend error). |
-| `Restorable` | Phase 2 | Most recent owned `MysqlBackupVerification` is Succeeded and within `freshness.maxStaleness`. |
+| `BucketReadable` | Phase 1 | Bucket scan succeeded within the last discovery interval. Reason: `ListSucceeded` (True), `ListFailed` (False), `ScanIncomplete` (False — the `List` call did not complete before the scan deadline; a context deadline/cancel during `List`, distinct from a genuine `ListFailed`. The previous `status.discovered` is preserved), `AuthFailed` (False — store construction failed, e.g. bad credentials), or `ConfigError` (False — missing/invalid spec fields). |
+| `SourceConfigKnown` | Phase 1 | At least one full dump and one binlog manifest were found. Reason: `DumpFound` (True), `NoDumpFound` (False), `NoBinlogManifests` (False — **dump found, no PITR window yet**: a dump exists but no binlog manifests are under `<prefix>/binlogs/`, so recovery is limited to the dump. This is the expected state for a dump-only source or a brand-new source, **not** a misconfiguration), `MetadataUnreadable` (False — dump `@.json` present but genuinely malformed/cannot be parsed), `ScanIncomplete` (False — the scan was cut short by a context deadline/cancel before reading every dump `@.json` or all manifests; the partial selection is **not** published, the previous `status.discovered` is preserved as last-known-good, and no `BucketScanned` event is emitted), or `ConfigError` (False — propagated from storage backend error). The default `kubectl get` printcolumn surfaces this as the neutral `SourceKnown`. |
+| `Restorable` | Phase 2 | Most recent owned `MysqlBackupVerification` is Succeeded and within a future staleness threshold (Phase 2). |
 | `ActivationInProgress` | Phase 3 | True while activation phase is non-terminal. |
 | `Active` | Phase 3 | True when `status.activation.phase == Activated`. |
