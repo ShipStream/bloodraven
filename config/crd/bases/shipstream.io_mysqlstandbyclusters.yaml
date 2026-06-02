@@ -54,9 +54,11 @@ spec:
           Phase 2 adds continuous restore verification: a scheduled
           MysqlBackupVerification proves the latest dump+PITR window is
           restorable and gates a Restorable condition.
-          Phase 3 adds one-command activation: an admin-confirmed activate
-          request (spec.activate.confirm) materialises a new MysqlFailoverGroup
-          in this namespace loaded from the source archive.
+          Phase 3 adds one-command activation: a future admin-confirmed activate
+          request materialises a new MysqlFailoverGroup in this namespace loaded
+          from the source archive. The spec fields that drive Phase 2/3 are not
+          part of v1alpha1 yet; they will be added (backward-compatibly) when
+          that code lands.
 
           One MysqlStandbyCluster per DR relationship per namespace. Designed
           to be symmetric: failback uses a second MysqlStandbyCluster on the
@@ -82,78 +84,12 @@ spec:
           spec:
             description: MysqlStandbyClusterSpec defines the desired state of MysqlStandbyCluster.
             properties:
-              activate:
-                description: |-
-                  Activate is the one-shot promote contract (Phase 3). The
-                  controller ignores this block until spec.activate.confirm is set
-                  to an RFC3339 timestamp strictly greater than
-                  status.activation.confirmTokenUsed. See RestoreInPlaceSpec
-                  (api/v1alpha1/backup_types.go:723-732) for the prior art.
-                properties:
-                  acceptUnverified:
-                    default: false
-                    description: |-
-                      AcceptUnverified, when true, lets the controller proceed even
-                      if status.conditions[Restorable] is not True or is older than
-                      freshness.maxStaleness. Use only when the world is on fire and
-                      a stale-but-present archive is better than no archive.
-                      Defaults to false.
-                      Phase 3+ only.
-                    type: boolean
-                  confirm:
-                    description: |-
-                      Confirm is the required RFC3339 anti-fat-finger token. The
-                      controller refuses to activate unless Confirm parses and is
-                      strictly greater than status.activation.confirmTokenUsed. Bump
-                      to a fresh now() to retry after a Failed activation.
-                      Phase 3+ only.
-                    minLength: 1
-                    type: string
-                  pointInTime:
-                    description: |-
-                      PointInTime, when set, instructs the controller to replay
-                      archived binlogs past the dump's GTID set up to the configured
-                      stopDatetime. Reuses PointInTimeSpec
-                      (api/v1alpha1/backup_types.go:191-210).
-                      Phase 3+ only.
-                    properties:
-                      excludeGtids:
-                        description: |-
-                          ExcludeGtids is an optional GTID set passed verbatim to
-                          mysqlbinlog --exclude-gtids. Useful for surgically skipping a
-                          known-bad transaction (e.g. an accidental DROP TABLE) while
-                          replaying everything else.
-                        type: string
-                      stopDatetime:
-                        description: |-
-                          StopDatetime is the MySQL-style datetime at which to stop
-                          replaying binlog events (forwarded to mysqlbinlog
-                          --stop-datetime). Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
-                          the MySQL native form ("2026-04-15 09:30:00"). Required.
-                        minLength: 1
-                        type: string
-                    required:
-                    - stopDatetime
-                    type: object
-                  restoreTimeout:
-                    default: 2h
-                    description: |-
-                      RestoreTimeout caps the wall-clock duration the controller
-                      waits for the materialised group's restore to reach Succeeded
-                      before stamping ActivationFailed. Default 2h, matching the
-                      existing backup ActiveDeadlineSeconds default
-                      (api/v1alpha1/backup_types.go:62-65).
-                      Phase 3+ only.
-                    type: string
-                required:
-                - confirm
-                type: object
               freshness:
                 description: |-
-                  Freshness configures the continuous-restore verification cadence
-                  and the staleness threshold at which Restorable=False is set.
-                  Phase 1 only reads discoveryInterval; other fields are consumed
-                  by Phase 2+.
+                  Freshness configures the Phase 1 bucket-discovery cadence via
+                  discoveryInterval. The Phase 2 verification cadence and staleness
+                  knobs are not part of v1alpha1 yet; they will be added
+                  (backward-compatibly) when that code lands.
                 properties:
                   discoveryInterval:
                     default: 5m
@@ -166,55 +102,6 @@ spec:
                     x-kubernetes-validations:
                     - message: discoveryInterval must be at least 30s
                       rule: duration(self) >= duration('30s')
-                  maxStaleness:
-                    default: 48h
-                    description: |-
-                      MaxStaleness is the threshold past which Restorable=False is
-                      stamped because no recent Succeeded verification has occurred.
-                      Default: 48h. Minimum: 5m (a shorter freshness window is not
-                      meaningful for cross-cluster RPO purposes). Phase 2+ only.
-                    type: string
-                    x-kubernetes-validations:
-                    - message: maxStaleness must be at least 5m
-                      rule: duration(self) >= duration('5m')
-                  retentionFloorRefresh:
-                    default: 5m
-                    description: |-
-                      RetentionFloorRefresh is how often the controller refreshes
-                      the dr-cursors/<name>.json bucket file that signals to the source
-                      operator the oldest binlog timestamp the DR cluster still needs.
-                      Default 5m; the file TTL is 60m (controller-side hard-coded).
-                      Minimum: 30s. Phase 2+ only.
-                    type: string
-                    x-kubernetes-validations:
-                    - message: retentionFloorRefresh must be at least 30s
-                      rule: duration(self) >= duration('30s')
-                  suspend:
-                    default: false
-                    description: |-
-                      Suspend pauses the verification CronJob without deleting the
-                      standby CR. Useful when the source bucket is temporarily
-                      unreadable and verification noise would obscure other signals.
-                      Phase 2+ only.
-                    type: boolean
-                  verifySchedule:
-                    default: 0 4 * * *
-                    description: |-
-                      VerifySchedule is the cron expression for scheduled
-                      MysqlBackupVerification runs against the most recently
-                      discovered dump. Evaluated in VerifyTimeZone.
-                      Default: "0 4 * * *" (daily at 04:00 UTC).
-                      Phase 2+ only.
-                    type: string
-                  verifyTimeZone:
-                    default: Etc/UTC
-                    description: |-
-                      VerifyTimeZone is the IANA timezone name used to evaluate
-                      VerifySchedule. Defaults to "Etc/UTC" for the same
-                      reproducibility reasons as BackupSchedule.TimeZone
-                      (api/v1alpha1/backup_types.go:516-526).
-                      Phase 2+ only.
-                    type: string
                 type: object
               source:
                 description: |-
@@ -6697,6 +6584,11 @@ spec:
               rule: self.transport != 'ObjectStore' || self.source.storage.type !=
                 'S3' || (has(self.source.storage.s3.prefix) && size(self.source.storage.s3.prefix)
                 > 0)
+            - message: source.storage.type must be S3 when transport=ObjectStore;
+                PVC-backed sources are not supported for cross-cluster DR (the operator
+                pod does not mount the source cluster's backup PVC)
+              rule: self.transport != 'ObjectStore' || self.source.storage.type ==
+                'S3'
           status:
             description: MysqlStandbyClusterStatus describes the observed state of
               a MysqlStandbyCluster.
@@ -6718,10 +6610,11 @@ spec:
                     type: string
                   confirmTokenUsed:
                     description: |-
-                      ConfirmTokenUsed is the spec.activate.confirm value of the most
-                      recent executed (or attempted) activation. Subsequent reconciles
-                      ignore any spec.confirm <= this value; bumping to a strictly
-                      greater RFC3339 timestamp re-arms.
+                      ConfirmTokenUsed records the RFC3339 confirm token of the most
+                      recent executed (or attempted) activation. A future activate
+                      request (Phase 3) re-arms by supplying a strictly greater token;
+                      subsequent reconciles ignore any token <= this value. (The spec
+                      field that carries the request token is not part of v1alpha1 yet.)
                     type: string
                   durationSeconds:
                     description: DurationSeconds is CompletionTime - StartTime, rounded.

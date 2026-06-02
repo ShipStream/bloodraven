@@ -9,6 +9,7 @@
 - [ ] 41. Safe Secret watch narrowing design
 - [ ] 42. Namespace-scoped watch/cache mode evaluation
 - [x] 43. Dedicated backup/PITR real-cluster E2E scenarios
+- [x] 44. Harden the standby cold-start discovery scan (GET burst + fixed timeout)
 
 ## P0 — Production adoption blockers
 
@@ -20,7 +21,13 @@
 
 **7. Cross-region/cross-cluster DR as a first-class feature.** Today DR = "create a new MysqlFailoverGroup with `initFromBackup` in another cluster." This works but is ad-hoc. Consider a `MysqlDRTarget` CR that continuously ships backups + binlogs to a designated target cluster/bucket and can be promoted with one command. At minimum, document the recommended multi-cluster DR topology with a runbook.
 
+> **Rename note:** the originally-proposed `MysqlDRTarget` shipped as the `MysqlStandbyCluster` CR. The name was changed because the CR is a passive standby/observability descriptor for a DR relationship (it surfaces source-archive freshness via conditions), not merely a ship *target*. The `MysqlDRTarget` name is kept here for proposal history.
+
 _In progress: branch `megamind/dr-7-phase-0-1`, Phase 0 + Phase 1 — `MysqlStandbyCluster` CRD, Phase 0 runbook (`docs/docs/multi-cluster-dr.mdx`), and Phase 1 bucket-discovery reconciler._
+
+**44. Harden the standby cold-start discovery scan (Phase 2 follow-up to #7).** Done: the `MysqlStandbyClusterReconciler` discovery scan is now timeout/incompleteness-aware, fans out `@.json` reads with bounded concurrency, and sizes its read budget to the work it finds. (1) **Incompleteness-awareness:** a context deadline/cancel anywhere in the scan never publishes a partial/wrong newest-dump selection. A new `ScanIncomplete` condition reason (no CRD/schema change) is stamped — `BucketReadable=False/ScanIncomplete` when `List` itself is cut short, `SourceConfigKnown=False/ScanIncomplete` when the read phase (`@.json` fan-out or manifest loop) is cut short — the previous `status.discovered` is preserved as last-known-good and no `BucketScanned` event fires. Genuine `ListFailed` and `MetadataUnreadable` (malformed `@.json`) stay distinct. (2) **Bounded-concurrency reads:** the serial candidate loop is replaced by an `errgroup` capped at `standbyDumpMetaConcurrency` (8); per-dir `(meta,err)` are gathered first, then the deterministic newest-`end` selection (`sort.Strings` + strict `.After()`, lex-smallest dir wins ties) runs serially so the result is byte-identical to the prior behavior for non-timeout inputs. (3) **Work-aware adaptive timeout:** the fixed 30s scan budget is split into a fixed `List` timeout `min(interval, standbyDefaultScanTimeout=30s)` and a read-phase timeout `clamp(standbyPerItemScanBudget(1s)*(len(dumpDirs)+#manifestKeys), floor=30s, cap=interval)` computed after `List`, so a large cold start gets up to the discovery interval to finish instead of flapping. With concurrency(8) the cold-start burst still completes in single-digit seconds at the realistic scale of tens of retained dumps. The `dumpMetaCache` field comment in `internal/controller/standbycluster_reconciler.go` documents the shipped behavior.
+>
+> Original proposal (kept for history): The Phase 1 reconciler memoizes parsed dump `@.json` metadata (`dumpMetaCache` / `pruneDumpMetaCache`), so in steady state each discovery scan GETs only the dumps that appeared since the previous scan. Two residual risks were deliberately deferred to Phase 2: (a) the in-memory cache cold-starts empty, so the first scan after an operator restart re-reads every historical dump's `@.json` — a GET burst proportional to the number of retained dumps; and (b) the whole scan was capped by a fixed 30s timeout (`standbyDefaultScanTimeout`), so on a very large bucket the cold-start burst could exceed the timeout and flap `BucketReadable` until the cache re-warmed. Suggested hardening was one or more of: an adaptive/relative scan timeout, a paginated time-bounded scan that makes progress across reconciles, or a persisted metadata cache that survives restarts. The shipped fix uses the adaptive-timeout + bounded-concurrency path (a persisted cache was rejected as over-engineered for the tens-of-dumps scale and because it does not fix the timeout).
 
 ## P3 — Documentation deliverables
 
