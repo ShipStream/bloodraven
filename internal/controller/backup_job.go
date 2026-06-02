@@ -616,7 +616,11 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 		if s3.Prefix != "" {
 			prefix = s3.Prefix + "/"
 		}
-		outputURL := fmt.Sprintf("%s%s/", prefix, backupName)
+		// MySQL Shell's S3 dump APIs treat BLOODRAVEN_OUTPUT_URL as a prefix and
+		// append their own separators while listing/writing dump objects. Passing a
+		// trailing slash yields a double-slash prefix ("name//") that S3-compatible
+		// stores such as RustFS reject with InvalidArgument.
+		outputURL := fmt.Sprintf("%s%s", prefix, backupName)
 		env := []corev1.EnvVar{
 			{Name: "BLOODRAVEN_S3_BUCKET", Value: s3.Bucket},
 		}

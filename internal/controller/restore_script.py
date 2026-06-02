@@ -301,12 +301,9 @@ def _parse_pitr_target(s):
     s = s.strip()
     if "T" in s:
         try:
-            if s.endswith("Z"):
-                dt = datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ")
-            else:
-                dt = datetime.datetime.fromisoformat(s)
-                if dt.tzinfo is not None:
-                    dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            dt = datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:
             pass

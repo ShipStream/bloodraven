@@ -550,6 +550,20 @@ func TestWaitForReplicaReady_ProbeErrorsAloneDoNotAbortAsWritable(t *testing.T) 
 	}
 }
 
+func TestWaitForReplicaReady_StartsStoppedReplicaThreads(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = time.Millisecond
+	checker := &startableReplicaChecker{}
+
+	if err := uc.waitForReplicaReady(context.Background(), checker, time.Second); err != nil {
+		t.Fatalf("waitForReplicaReady: %v", err)
+	}
+	if checker.starts == 0 {
+		t.Fatal("expected waitForReplicaReady to START REPLICA for stopped threads")
+	}
+}
+
 // flappingChecker is a minimal mysql.Checker that alternates writable responses
 // with probe errors to verify the fail-fast counter's reset-on-error behaviour.
 type flappingChecker struct {
@@ -594,6 +608,45 @@ func (f *flappingChecker) CloneInstance(_ context.Context, _, _, _ string, _ boo
 	return nil
 }
 func (f *flappingChecker) Close() error { return nil }
+
+type startableReplicaChecker struct {
+	starts int
+}
+
+func (s *startableReplicaChecker) CheckReadOnly(_ context.Context) (bool, error) { return true, nil }
+
+func (s *startableReplicaChecker) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
+	running := s.starts > 0
+	return &mysql.ReplicaStatus{
+		SourceHost:          "dc1",
+		IORunning:           running,
+		SQLRunning:          running,
+		SecondsBehindSource: int64Ptr(0),
+	}, nil
+}
+
+func (s *startableReplicaChecker) StartReplica(_ context.Context) error { s.starts++; return nil }
+
+func (s *startableReplicaChecker) Promote(_ context.Context) error                  { return nil }
+func (s *startableReplicaChecker) SetSuperReadOnly(_ context.Context, _ bool) error { return nil }
+func (s *startableReplicaChecker) SetReadOnly(_ context.Context, _ bool) error      { return nil }
+func (s *startableReplicaChecker) StopReplica(_ context.Context) error              { return nil }
+func (s *startableReplicaChecker) ResetReplicaAll(_ context.Context) error          { return nil }
+func (s *startableReplicaChecker) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
+	return nil
+}
+func (s *startableReplicaChecker) StartReplicaSQLThread(_ context.Context) error { return nil }
+func (s *startableReplicaChecker) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
+	return nil
+}
+func (s *startableReplicaChecker) EnsureClonePlugin(_ context.Context) error           { return nil }
+func (s *startableReplicaChecker) SetCloneDonorList(_ context.Context, _ string) error { return nil }
+func (s *startableReplicaChecker) GetGtidExecuted(_ context.Context) (string, error)   { return "", nil }
+func (s *startableReplicaChecker) KillAppConnections(_ context.Context) (int, error)   { return 0, nil }
+func (s *startableReplicaChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
+	return nil
+}
+func (s *startableReplicaChecker) Close() error { return nil }
 
 // replicaStatusErrorChecker always succeeds at CheckReadOnly but always fails
 // ShowReplicaStatus — exercising the case where the writable observation must

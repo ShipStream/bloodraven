@@ -51,9 +51,8 @@ func filterOutMountByName(mounts []corev1.VolumeMount, name string) []corev1.Vol
 	return out
 }
 
-// ensureTrailingSlash normalizes a dump prefix/location so it ends with
-// a forward slash. mysqlsh util.loadDump() expects the directory-style
-// prefix produced by util.dumpInstance().
+// ensureTrailingSlash normalizes a local/PVC dump prefix/location so it ends
+// with a forward slash. S3 inputs must use mysqlShellDumpInput instead.
 func ensureTrailingSlash(s string) string {
 	if s == "" {
 		return s
@@ -62,6 +61,18 @@ func ensureTrailingSlash(s string) string {
 		return s
 	}
 	return s + "/"
+}
+
+// mysqlShellDumpInput normalizes a dump location for mysqlsh util.loadDump.
+// Local/PVC paths historically need a trailing slash, but mysqlsh's S3 client
+// appends its own separator while listing object prefixes. S3-compatible stores
+// such as RustFS reject the resulting double-slash prefix, so S3 inputs must be
+// passed without a trailing slash.
+func mysqlShellDumpInput(location string, storageType v1alpha1.BackupStorageType) string {
+	if storageType == v1alpha1.BackupStorageS3 {
+		return strings.TrimRight(location, "/")
+	}
+	return ensureTrailingSlash(location)
 }
 
 // isS3Location heuristically detects when a MysqlBackup.status.location
@@ -752,7 +763,6 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if ref.Status.Phase != v1alpha1.BackupPhaseSucceeded || ref.Status.Location == "" {
 			return nil, fmt.Errorf("referenced mysqlbackup %s is not Succeeded or has no location", ref.Name)
 		}
-		inputURL = ensureTrailingSlash(ref.Status.Location)
 		sourceMeta = restoreMetadataFromBackupStatus(ref.Status)
 
 		// Prefer the structured StorageType set by the backup
@@ -763,6 +773,11 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if ref.Status.StorageType == "" {
 			wantsS3 = isS3Location(ref.Status.Location)
 			wantsPVC = !wantsS3
+		}
+		if wantsS3 {
+			inputURL = mysqlShellDumpInput(ref.Status.Location, v1alpha1.BackupStorageS3)
+		} else {
+			inputURL = mysqlShellDumpInput(ref.Status.Location, v1alpha1.BackupStoragePVC)
 		}
 
 		profile := findProfile(fg, ref.Spec.ProfileName)
@@ -851,7 +866,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		}
 
 	case src.S3 != nil:
-		inputURL = ensureTrailingSlash(src.S3.Prefix)
+		inputURL = mysqlShellDumpInput(src.S3.Prefix, v1alpha1.BackupStorageS3)
 		extraEnv = append(extraEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: src.S3.Bucket},
 		)

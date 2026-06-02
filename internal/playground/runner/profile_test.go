@@ -78,11 +78,13 @@ func TestSelectForProfileRelease(t *testing.T) {
 		{ID: "10-full-bootstrap-after-data-wipe"},
 		{ID: "12-old-primary-recovery-no-divergence"},
 		{ID: "23-failover-state-durability"},
+		{ID: "30-backup-verification-rustfs"},
+		{ID: "31-pitr-verification-rustfs"},
 		{ID: "05-split-brain-auto-resolve"}, // not in release
 	}
 	got := SelectForProfile(all, ProfileRelease)
-	if len(got) != 10 {
-		t.Fatalf("ProfileRelease: got %d scenarios, want 10; got %v", len(got), ids(got))
+	if len(got) != 12 {
+		t.Fatalf("ProfileRelease: got %d scenarios, want 12; got %v", len(got), ids(got))
 	}
 	for _, s := range got {
 		if !releaseScenarios[s.ID] {

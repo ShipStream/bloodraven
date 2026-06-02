@@ -8,8 +8,8 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -137,7 +137,7 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 			},
 			DNS: v1alpha1.DNSSpec{Hostname: "lion.example.com", TTL: 60},
 			Backup: &v1alpha1.BackupSpec{
-				Image:                 "mysql/mysql-shell:8.0.34",
+				Image:                  "mysql/mysql-shell:8.0.34",
 				MaxLagSecondsForSource: 60,
 				ActiveDeadlineSeconds:  3600,
 				BackoffLimit:           1,
@@ -224,7 +224,7 @@ func TestBuildBackupJob_S3_EnvAndConfig(t *testing.T) {
 	if envMap["AWS_REGION"] != "us-east-1" {
 		t.Errorf("want region env; got %v", envMap)
 	}
-	if !strings.HasPrefix(envMap["BLOODRAVEN_OUTPUT_URL"], "lion/lion-nightly-abc/") {
+	if !strings.HasPrefix(envMap["BLOODRAVEN_OUTPUT_URL"], "lion/lion-nightly-abc") {
 		t.Errorf("bad output url: %q", envMap["BLOODRAVEN_OUTPUT_URL"])
 	}
 	if envMap["BLOODRAVEN_DUMP_OPTIONS"] == "" || !strings.Contains(envMap["BLOODRAVEN_DUMP_OPTIONS"], `"threads":8`) {

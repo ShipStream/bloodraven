@@ -8,13 +8,13 @@
 - [x] 32. Real-cluster E2E CI gate
 - [ ] 41. Safe Secret watch narrowing design
 - [ ] 42. Namespace-scoped watch/cache mode evaluation
-- [ ] 43. Dedicated backup/PITR real-cluster E2E scenarios
+- [x] 43. Dedicated backup/PITR real-cluster E2E scenarios
 
 ## P0 — Production adoption blockers
 
 **32. Real-cluster E2E CI gate.** Done: `make test-e2e` runs the release profile of `playground-chaos run-all` against a real cluster instead of the former placeholder. `make test-e2e-smoke` runs a fast smoke subset (3 scenarios). Three profiles (`smoke`/`release`/`full`) filter scenarios via `--profile` on `playground-chaos run-all` and `make chaos-run-all-profile PROFILE=`. CI uses a reusable workflow (`_e2e.yml`) that creates a kind cluster with Calico CNI, deploys the playground, and runs the selected profile. Nightly and manual runs use the release profile; PRs with the `e2e` label trigger a smoke run. Release publishing blocks on the E2E release-profile gate. JUnit, forensics, setup logs, and kind logs are uploaded as artifacts. Dedicated MySQL backup restore and PITR verification scenarios are split out as follow-up #43 so the gate can start enforcing the existing real-cluster chaos suite now without misrepresenting that coverage.
 
-**43. Dedicated backup/PITR real-cluster E2E scenarios.** Follow-up to #32: add release-profile playground-chaos scenarios that configure the playground backup profile against RustFS, trigger a real `MysqlBackup`, verify restore via `MysqlBackupVerification`, then enable PITR/binlog archival and verify a point-in-time replay with deterministic marker rows. The #32 gate now exists and is release-blocking, but this backup/PITR coverage should be added before claiming the E2E release profile exercises every backup/restore path.
+**43. Dedicated backup/PITR real-cluster E2E scenarios.** Done: added release-profile playground-chaos scenarios `30-backup-verification-rustfs` and `31-pitr-verification-rustfs`. They configure the playground backup profile against RustFS with isolated per-run prefixes, create real `MysqlBackup` CRs, pin `MysqlBackupVerification.spec.backupRef` to the created backup, and assert deterministic marker rows after restore. Scenario 31 enables PITR/binlog archival, waits for sidecar archiver coverage, and verifies timestamp replay includes baseline + before-target rows while excluding the after-target row.
 
 ## P1 — DR and operational completeness
 
