@@ -63,7 +63,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 
 `make chaos-list` is the authoritative inventory — when adding a scenario, also append it here so the doc and the registry stay in lock-step.
 
-Sections marked `§S` (planned-switchover) and `§SBR` (split-brain auto-resolve) are documented as appendix-style sections below — they exist as scenarios but don't fit the §1-§31 numbered failure-mode grid.
+Sections marked `§S` (planned-switchover) and `§SBR` (split-brain auto-resolve) are documented as appendix-style sections below — they exist as scenarios but don't fit the §1-§32 numbered failure-mode grid.
 
 The runner refuses to mutate any kubectl context that does not match the same allowlist as `playground/_guard.sh` (`k3d-*`, `kind-*`, `minikube*`, or names listed in `BLOODRAVEN_PLAYGROUND_CONTEXTS`). Markdown is the source of truth for hypotheses and prose; the runner's assertions are the operational ones documented under each scenario's "Verify" section.
 
@@ -809,7 +809,7 @@ kubectl -n bloodraven-playground annotate --overwrite mysqlfailovergroup playgro
 
 The scenario creates/ensures bucket `bloodraven-backup-e2e`, patches only `MysqlFailoverGroup.spec.backup` with profile `rustfs-e2e`, and isolates objects under `e2e/30-backup-verification-rustfs/<run-stamp>/`. It seeds `chaos_s30_backup.marker`, waits for replica GTID catch-up, creates one named `MysqlBackup`, then creates one `MysqlBackupVerification` with `spec.backupRef.name` pinned to that backup instead of relying on latest-success resolution.
 
-**Verify**: The backup reaches `Succeeded` with `status.storageType=S3`, a RustFS `s3://bloodraven-backup-e2e/<prefix>/<backup>/` location, and a Job name. The verification reaches `Succeeded`, reports `status.backupRef.name` for the created backup, runs the sanity query, returns marker count `2`, and has `Verified=True`.
+**Verify**: The backup reaches `Succeeded` with `status.storageType=S3`, `status.location=<prefix>/<backup>`, and a Job name. The verification reaches `Succeeded`, reports `status.backupRef.name` for the created backup, runs the sanity query, returns marker count `2`, and has `Verified=True`.
 
 **Timing**: Scenario timeout is 18 minutes; backup and verification waits each have a 12-minute sub-budget. Cleanup deletes verification then backup CRs, drops `chaos_s30_backup`, restores the original `spec.backup`, and waits for a healthy baseline.
 

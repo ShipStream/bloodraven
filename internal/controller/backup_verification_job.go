@@ -153,7 +153,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		return nil, err
 	}
 
-	inputURL := mysqlShellDumpInput(backup.Status.Location, in.Profile.Storage.Type)
+	inputURL := mysqlShellDumpInput(backup.Status.Location, backup.Status.StorageType)
 
 	// PITR replay fragments (download init container + shared emptyDir
 	// + main-container env/mounts). buildRestorePITRFragmentsFor returns

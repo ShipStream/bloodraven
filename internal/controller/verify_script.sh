@@ -142,12 +142,18 @@ PITR_MODE="${BLOODRAVEN_VERIFY_PITR_MODE:-none}"
 if [[ "$PITR_MODE" != "none" && "$PITR_MODE" != "" ]]; then
     RESTORE_COMPLETE="$(grep 'BLOODRAVEN_RESTORE_COMPLETE' "$RESTORE_LOG" | tail -n 1 || true)"
     LAST_FILE=""
+    REPLAY_COUNT=""
     for f in $RESTORE_COMPLETE; do
         case "$f" in
             pitrReplayedBinlogFile=*) LAST_FILE="${f#pitrReplayedBinlogFile=}" ;;
+            pitrReplayedBinlogCount=*) REPLAY_COUNT="${f#pitrReplayedBinlogCount=}" ;;
         esac
     done
-    if [[ -z "$LAST_FILE" ]]; then
+    if [[ -z "$RESTORE_COMPLETE" ]]; then
+        log "PITR mode=$PITR_MODE but restore.py did not report restore completion"
+        exit 1
+    fi
+    if [[ -z "$LAST_FILE" && "$REPLAY_COUNT" != "0" ]]; then
         log "PITR mode=$PITR_MODE but restore.py did not report replayed binlogs"
         exit 1
     fi

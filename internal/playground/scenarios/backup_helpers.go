@@ -89,17 +89,13 @@ func patchBackupSpec(ctx context.Context, env *runner.Env, spec v1alpha1.BackupS
 		return fmt.Errorf("read MFG before backup spec patch: %w", err)
 	}
 	hadOriginal := mfg.Spec.Backup != nil
-	if err := ctxStash(ctx, env, backupOriginalHadKey, strconv.FormatBool(hadOriginal)); err != nil {
-		return err
-	}
+	originalJSON := ""
 	if hadOriginal {
 		body, err := json.Marshal(mfg.Spec.Backup.DeepCopy())
 		if err != nil {
 			return fmt.Errorf("marshal original backup spec: %w", err)
 		}
-		if err := ctxStash(ctx, env, backupOriginalSpecKey, string(body)); err != nil {
-			return err
-		}
+		originalJSON = string(body)
 	}
 	op := "add"
 	if hadOriginal {
@@ -111,6 +107,14 @@ func patchBackupSpec(ctx context.Context, env *runner.Env, spec v1alpha1.BackupS
 		Value: spec,
 	}}); err != nil {
 		return fmt.Errorf("patch backup spec: %w", err)
+	}
+	if err := ctxStash(ctx, env, backupOriginalHadKey, strconv.FormatBool(hadOriginal)); err != nil {
+		return err
+	}
+	if hadOriginal {
+		if err := ctxStash(ctx, env, backupOriginalSpecKey, originalJSON); err != nil {
+			return err
+		}
 	}
 	env.Capture.Note(fmt.Sprintf("patched spec.backup: hadOriginal=%v profile=%s bucket=%s", hadOriginal, backupE2EProfile, backupE2EBucket))
 	return nil

@@ -137,7 +137,7 @@ func TestBuildRestoreJob_S3Source_NormalizesTrailingSlash(t *testing.T) {
 		Source: v1alpha1.InitFromBackupSource{
 			S3: &v1alpha1.S3Storage{
 				Bucket:            "my-bucket",
-				Prefix:            "dumps/preprod",
+				Prefix:            "dumps/preprod/",
 				CredentialsSecret: "s3-creds",
 			},
 		},

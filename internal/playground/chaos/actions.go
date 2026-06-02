@@ -692,10 +692,22 @@ func (a *Actions) EnsureRustFSBucket(ctx context.Context, bucket string) error {
 	if err != nil {
 		return fmt.Errorf("read RustFS credentials secret %s: %w", secretName, err)
 	}
+	accessKey, ok := secret.Data["AWS_ACCESS_KEY_ID"]
+	if !ok || len(accessKey) == 0 {
+		return fmt.Errorf("RustFS credentials secret %s missing AWS_ACCESS_KEY_ID", secretName)
+	}
+	secretKey, ok := secret.Data["AWS_SECRET_ACCESS_KEY"]
+	if !ok || len(secretKey) == 0 {
+		return fmt.Errorf("RustFS credentials secret %s missing AWS_SECRET_ACCESS_KEY", secretName)
+	}
+	region, ok := secret.Data["AWS_REGION"]
+	if !ok || len(region) == 0 {
+		return fmt.Errorf("RustFS credentials secret %s missing AWS_REGION", secretName)
+	}
 	creds := pgrustfs.Credentials{
-		AccessKey: string(secret.Data["AWS_ACCESS_KEY_ID"]),
-		SecretKey: string(secret.Data["AWS_SECRET_ACCESS_KEY"]),
-		Region:    string(secret.Data["AWS_REGION"]),
+		AccessKey: string(accessKey),
+		SecretKey: string(secretKey),
+		Region:    string(region),
 	}
 	if err := a.restartRustFS(ctx, selector); err != nil {
 		return err

@@ -1577,20 +1577,22 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 		fmt.Fprintf(h, "pitr.maxBinlogSize=%s\n", effMaxBinlogSize)
 		fmt.Fprintf(h, "pitr.archivePollInterval=%s\n", effPollInterval)
 		fmt.Fprintf(h, "pitr.podRenderVersion=%s\n", pitrPodRenderVersion)
-		if profile := findProfile(fg, p.ProfileName); profile != nil {
-			fmt.Fprintf(h, "pitr.profile.storage.type=%s\n", profile.Storage.Type)
-			if s3 := profile.Storage.S3; s3 != nil {
-				fmt.Fprintf(h, "pitr.profile.s3.bucket=%s\n", s3.Bucket)
-				fmt.Fprintf(h, "pitr.profile.s3.prefix=%s\n", s3.Prefix)
-				fmt.Fprintf(h, "pitr.profile.s3.region=%s\n", s3.Region)
-				fmt.Fprintf(h, "pitr.profile.s3.endpointURL=%s\n", s3.EndpointURL)
-				fmt.Fprintf(h, "pitr.profile.s3.credentialsSecret=%s\n", s3.CredentialsSecret)
-			}
-			if pvc := profile.Storage.PVC; pvc != nil {
-				fmt.Fprintf(h, "pitr.profile.pvc.claimName=%s\n", pvc.ClaimName)
-				fmt.Fprintf(h, "pitr.profile.pvc.storageClassName=%s\n", pvc.StorageClassName)
-				fmt.Fprintf(h, "pitr.profile.pvc.size=%s\n", pvc.Size.String())
-				fmt.Fprintf(h, "pitr.profile.pvc.subPath=%s\n", pvc.SubPath)
+		if p.Enabled {
+			if profile := findProfile(fg, p.ProfileName); profile != nil {
+				fmt.Fprintf(h, "pitr.profile.storage.type=%s\n", profile.Storage.Type)
+				if s3 := profile.Storage.S3; s3 != nil {
+					fmt.Fprintf(h, "pitr.profile.s3.bucket=%s\n", s3.Bucket)
+					fmt.Fprintf(h, "pitr.profile.s3.prefix=%s\n", s3.Prefix)
+					fmt.Fprintf(h, "pitr.profile.s3.region=%s\n", s3.Region)
+					fmt.Fprintf(h, "pitr.profile.s3.endpointURL=%s\n", s3.EndpointURL)
+					fmt.Fprintf(h, "pitr.profile.s3.credentialsSecret=%s\n", s3.CredentialsSecret)
+				}
+				if pvc := profile.Storage.PVC; pvc != nil {
+					fmt.Fprintf(h, "pitr.profile.pvc.claimName=%s\n", pvc.ClaimName)
+					fmt.Fprintf(h, "pitr.profile.pvc.storageClassName=%s\n", pvc.StorageClassName)
+					fmt.Fprintf(h, "pitr.profile.pvc.size=%s\n", pvc.Size.String())
+					fmt.Fprintf(h, "pitr.profile.pvc.subPath=%s\n", pvc.SubPath)
+				}
 			}
 		}
 	}

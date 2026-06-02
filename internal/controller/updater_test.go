@@ -551,16 +551,31 @@ func TestWaitForReplicaReady_ProbeErrorsAloneDoNotAbortAsWritable(t *testing.T) 
 }
 
 func TestWaitForReplicaReady_StartsStoppedReplicaThreads(t *testing.T) {
-	logger := testutil.TestLogger()
-	uc := NewUpdateController(NewFailoverController(logger), logger)
-	uc.tickInterval = time.Millisecond
-	checker := &startableReplicaChecker{}
-
-	if err := uc.waitForReplicaReady(context.Background(), checker, time.Second); err != nil {
-		t.Fatalf("waitForReplicaReady: %v", err)
+	cases := []struct {
+		name           string
+		checker        *startableReplicaChecker
+		expectedStarts int
+	}{
+		{
+			name:           "stopped threads are started before readiness",
+			checker:        &startableReplicaChecker{},
+			expectedStarts: 1,
+		},
 	}
-	if checker.starts == 0 {
-		t.Fatal("expected waitForReplicaReady to START REPLICA for stopped threads")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := testutil.TestLogger()
+			uc := NewUpdateController(NewFailoverController(logger), logger)
+			uc.tickInterval = time.Millisecond
+
+			if err := uc.waitForReplicaReady(context.Background(), tc.checker, time.Second); err != nil {
+				t.Fatalf("waitForReplicaReady: %v", err)
+			}
+			if tc.checker.starts < tc.expectedStarts {
+				t.Fatalf("expected at least %d START REPLICA calls, got %d", tc.expectedStarts, tc.checker.starts)
+			}
+		})
 	}
 }
 
