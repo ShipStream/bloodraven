@@ -38,16 +38,14 @@ Bloodraven is a Kubernetes operator for MySQL async replication failover groups 
 | On-call | [Operations Overview](./operations-overview.mdx) → [Failure Mode Matrix](./failure-mode-matrix.mdx) → [Runbooks](./runbooks.mdx) |
 | Backup owner | [Backup Overview](./backup-overview.mdx) → [S3](./backup-s3.mdx) or [PVC](./backup-pvc.mdx) → [Verification](./backup-verification.mdx) → [Restore](./backup-restore.mdx) |
 
-## What it does
+## Standout features
 
-- **Monitors** two MySQL instances (one per site) via a 2-second polling loop with configurable failure and recovery thresholds
-- **Detects** when the active primary becomes unreachable and **promotes** the standby replica to primary
-- **Steers traffic** by updating a DNSEndpoint CR (consumed by external-dns) to point to the new primary's load balancer IP
-- **Migrates workloads** by tainting nodes at the failed site so Kubernetes evicts application pods
-- **Prevents split-brain** with sidecar self-fencing: if both the operator and peer are unreachable, the sidecar sets `super_read_only=ON` as a safety net (see [Operator availability](./operator-availability.mdx) and [Durability and RPO](./durability-and-rpo.mdx) for exact behavior and bounds)
-- **Broadcasts status** over a WebSocket API for dashboards and alerting integrations
-- **Backs up and restores** via mysqlsh `util.dumpInstance()` / `util.loadDump()` to S3 or PVC, with scheduled CronJobs, structured retention, retries, and automatic artifact cleanup
-- **Optionally co-manages Dragonfly** by creating one Dragonfly StatefulSet per site, steering a Redis-compatible active Service, and promoting Dragonfly during planned or emergency MySQL failover
+- **Automatic MySQL site failover**: If the active MySQL site dies, Bloodraven promotes another site, moves traffic, updates DNS, and helps the old primary rejoin safely.
+- **Split-brain protection**: If two sites might both accept writes, the operator and sidecars fence unsafe MySQL nodes so the cluster does not keep writing in two places.
+- **Graceful planned switchover**: An admin can move the primary site with one command; Bloodraven waits for the replica to catch up first, so planned moves can have zero data loss.
+- **Backup, restore, PITR, and verification**: Bloodraven can create backups, archive binlogs for point-in-time recovery, encrypt artifacts, restore from them, and test backups by loading them into a throwaway MySQL.
+- **Dragonfly cache/session failover**: Bloodraven can manage Dragonfly alongside MySQL, move the active cache/session endpoint during failover, and try to preserve sessions during planned moves.
+- **Chaos playground**: The local playground tests these failure modes in a real Kubernetes cluster before you trust them in production.
 
 :::tip
 **Using an AI agent?** This documentation is available as `llms.txt` and `llms-full.txt` at the site root for consumption by LLM-based tools. Give your agent context with a prompt like:

@@ -17,6 +17,15 @@ Bloodraven is built for site-level failover where applications can accept non-ze
 | Handle an alert | [Operations Overview](https://bloodraven.readthedocs.io/en/latest/docs/operations-overview) |
 | Configure backups | [Backup Overview](https://bloodraven.readthedocs.io/en/latest/docs/backup-overview) |
 
+## Standout features
+
+- **Automatic MySQL site failover**: If the active MySQL site dies, Bloodraven promotes another site, moves traffic, updates DNS, and helps the old primary rejoin safely.
+- **Split-brain protection**: If two sites might both accept writes, the operator and sidecars fence unsafe MySQL nodes so the cluster does not keep writing in two places.
+- **Graceful planned switchover**: An admin can move the primary site with one command; Bloodraven waits for the replica to catch up first, so planned moves can have zero data loss.
+- **Backup, restore, PITR, and verification**: Bloodraven can create backups, archive binlogs for point-in-time recovery, encrypt artifacts, restore from them, and test backups by loading them into a throwaway MySQL.
+- **Dragonfly cache/session failover**: Bloodraven can manage Dragonfly alongside MySQL, move the active cache/session endpoint during failover, and try to preserve sessions during planned moves.
+- **Chaos playground**: The local playground tests these failure modes in a real Kubernetes cluster before you trust them in production.
+
 ## Quickstart
 
 The playground deploys a two-site MySQL failover group on k3d, kind, or minikube with Dragonfly co-management enabled, plus a dashboard, counter app, DNS visualization, and chaos tools.
