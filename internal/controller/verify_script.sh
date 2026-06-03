@@ -121,8 +121,9 @@ unset BLOODRAVEN_TLS
 
 log "running restore.py against ephemeral mysqld"
 set +e
-mysqlsh --no-wizard --py -f "$SCRIPTS_DIR/restore.py"
-LOAD_RC=$?
+RESTORE_LOG="$(mktemp /tmp/bloodraven-restore.XXXXXX.log)"
+mysqlsh --no-wizard --py -f "$SCRIPTS_DIR/restore.py" 2>&1 | tee "$RESTORE_LOG"
+LOAD_RC=${PIPESTATUS[0]}
 set -e
 
 if [[ $LOAD_RC -ne 0 ]]; then
@@ -131,101 +132,33 @@ if [[ $LOAD_RC -ne 0 ]]; then
 fi
 
 # ---- PITR replay -----------------------------------------------------
-# When spec.pointInTime.mode is latest|timestamp, the controller wires a
-# pitr-download init container that dropped files into
-# $BLOODRAVEN_PITR_LOCAL_DIR. We stream them through mysqlbinlog into the
-# ephemeral mysqld over the local socket. Emits a single sentinel line
-# with the last applied file/position/timestamp so the reconciler can
-# stamp status.replayedThroughBinlog.
+# restore.py owns PITR replay for both restore and verification jobs.
+# Bridge its BLOODRAVEN_RESTORE_COMPLETE metadata into the verification
+# sentinel consumed by the reconciler. The restore sentinel does not
+# include exact replay position/timestamp, but a non-empty replay mark
+# still records that PITR replay ran and which archived binlog was last
+# reported by restore.py; the sanity query below proves target semantics.
 PITR_MODE="${BLOODRAVEN_VERIFY_PITR_MODE:-none}"
-PITR_DIR="${BLOODRAVEN_PITR_LOCAL_DIR:-}"
 if [[ "$PITR_MODE" != "none" && "$PITR_MODE" != "" ]]; then
-    if [[ -z "$PITR_DIR" || ! -d "$PITR_DIR" ]]; then
-        log "PITR mode=$PITR_MODE but BLOODRAVEN_PITR_LOCAL_DIR not populated; failing"
-        exit 1
-    fi
-    # The init container writes under <dir>/<site>/<file> when multiple
-    # sites are archived. Flatten into a single stable-sorted list.
-    mapfile -t BINLOGS < <(find "$PITR_DIR" -type f \( -name 'mysql-bin.*' -o -name 'binlog.*' -o -name '*.binlog' \) | sort)
-    if [[ ${#BINLOGS[@]} -eq 0 ]]; then
-        log "PITR mode=$PITR_MODE but no binlog files found under $PITR_DIR"
-        exit 1
-    fi
-
-    MB_ARGS=()
-    if [[ "$PITR_MODE" == "timestamp" ]]; then
-        if [[ -z "${BLOODRAVEN_PITR_STOP_DATETIME:-}" ]]; then
-            log "PITR mode=timestamp requires BLOODRAVEN_PITR_STOP_DATETIME"
-            exit 1
-        fi
-        # mysqlbinlog wants "YYYY-MM-DD HH:MM:SS" in the server's TZ; we
-        # pin the server to UTC via --default-time-zone below. Accept
-        # RFC3339 in any form (Z, +00:00, fractional seconds) as well as
-        # the bare MySQL datetime shape, and normalize to UTC via GNU
-        # `date`.
-        MB_STOP="$(date -u -d "$BLOODRAVEN_PITR_STOP_DATETIME" +"%Y-%m-%d %H:%M:%S" 2>/dev/null || true)"
-        if [[ -z "$MB_STOP" ]]; then
-            log "invalid BLOODRAVEN_PITR_STOP_DATETIME=$BLOODRAVEN_PITR_STOP_DATETIME"
-            exit 1
-        fi
-        MB_ARGS+=(--stop-datetime="$MB_STOP")
-    fi
-
-    log "replaying ${#BINLOGS[@]} archived binlog file(s) via mysqlbinlog"
+    RESTORE_COMPLETE="$(grep 'BLOODRAVEN_RESTORE_COMPLETE' "$RESTORE_LOG" | tail -n 1 || true)"
     LAST_FILE=""
-    LAST_POS=0
-    LAST_TS=""
-    set +e
-    mysqlbinlog --disable-log-bin "${MB_ARGS[@]}" "${BINLOGS[@]}" \
-        | mysql --socket="$SOCKET" --user=root --default-time-zone='+00:00'
-    REPLAY_RC=${PIPESTATUS[0]}
-    if [[ $REPLAY_RC -eq 0 ]]; then
-        REPLAY_RC=${PIPESTATUS[1]}
-    fi
-    set -e
-    if [[ $REPLAY_RC -ne 0 ]]; then
-        log "PITR replay failed rc=$REPLAY_RC"
-        exit "$REPLAY_RC"
-    fi
-
-    # Read the last applied coordinate from the replayed stream. Scan
-    # each binlog file in reverse with the same --stop-datetime filter
-    # used for replay so timestamp-mode runs report the last APPLIED
-    # event rather than end-of-file. The "#<datetime>" header and
-    # "# at <pos>" marker are stable across mysqlbinlog 8.0+. Output is
-    # "<pos>|<ts>"; parsed with bash param expansion (no `eval`, no
-    # gawk-only `%q`).
-    for ((i=${#BINLOGS[@]}-1; i>=0; i--)); do
-        f="${BINLOGS[i]}"
-        parsed=$(mysqlbinlog --no-defaults "${MB_ARGS[@]}" "$f" 2>/dev/null \
-            | awk '
-                /^# at [0-9]+/ { pos=$3 }
-                /^#[0-9]{6} / && NF>=2 {
-                    # ex: "#260420  1:59:57 server id 1 ..."
-                    d=$1; t=$2;
-                    ts=sprintf("20%s-%s-%s %s",
-                        substr(d,2,2), substr(d,4,2), substr(d,6,2), t);
-                    last_ts=ts
-                }
-                END {
-                    printf("%d|%s", pos+0, last_ts);
-                }')
-        LAST_POS="${parsed%%|*}"
-        LAST_TS="${parsed#*|}"
-        if [[ "$LAST_POS" -gt 0 && -n "$LAST_TS" ]]; then
-            LAST_FILE="$(basename "$f")"
-            break
-        fi
+    REPLAY_COUNT=""
+    for f in $RESTORE_COMPLETE; do
+        case "$f" in
+            pitrReplayedBinlogFile=*) LAST_FILE="${f#pitrReplayedBinlogFile=}" ;;
+            pitrReplayedBinlogCount=*) REPLAY_COUNT="${f#pitrReplayedBinlogCount=}" ;;
+        esac
     done
-    # Translate "YYYY-MM-DD HH:MM:SS" into RFC3339 UTC.
-    if [[ -n "$LAST_TS" ]]; then
-        LAST_TS_RFC="$(date -u -d "$LAST_TS UTC" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || printf '')"
-    else
-        LAST_TS_RFC=""
+    if [[ -z "$RESTORE_COMPLETE" ]]; then
+        log "PITR mode=$PITR_MODE but restore.py did not report restore completion"
+        exit 1
     fi
-
+    if [[ -z "$LAST_FILE" && "$REPLAY_COUNT" != "0" ]]; then
+        log "PITR mode=$PITR_MODE but restore.py did not report replayed binlogs"
+        exit 1
+    fi
     printf 'BLOODRAVEN_VERIFY_REPLAY_COMPLETE file=%s position=%s timestamp=%s\n' \
-        "$LAST_FILE" "${LAST_POS:-0}" "${LAST_TS_RFC:-}"
+        "$LAST_FILE" "0" ""
 fi
 
 # ---- Sanity check ----------------------------------------------------

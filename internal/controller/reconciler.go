@@ -51,6 +51,11 @@ const (
 
 	specHashAnnotation = "shipstream.io/spec-hash"
 
+	// Bump when the rendered MySQL Deployment pod spec changes without a
+	// corresponding user-facing spec field change, so existing pods roll
+	// forward to the new safe defaults.
+	deploymentPodRenderVersion = "deployment-pod-render-v2-stable-relay-log"
+
 	// RecloneAnnotation is set by an admin to trigger a reclone of a
 	// specific site from the current primary via CLONE INSTANCE.
 	RecloneAnnotation = "bloodraven.shipstream.io/reclone-site"
@@ -831,6 +836,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			"--gtid-mode=ON",
 			"--enforce-gtid-consistency=ON",
 			"--log-bin=/var/lib/mysql/mysql-bin",
+			"--relay-log=/var/lib/mysql/mysql-relay-bin",
+			"--relay-log-index=/var/lib/mysql/mysql-relay-bin.index",
 			"--log-replica-updates=ON",
 			"--skip-replica-start=ON",
 			"--plugin-load-add=mysql_clone.so",
@@ -996,6 +1003,20 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 		sidecarEnv = append(sidecarEnv, pitrFrags.SidecarEnv...)
 		sidecarVolumeMounts = append(sidecarVolumeMounts, pitrFrags.SidecarVolumeMounts...)
+		sidecarSecurityContext := fg.Spec.ContainerSecurityContext.DeepCopy()
+		if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled {
+			if sidecarSecurityContext == nil {
+				sidecarSecurityContext = &corev1.SecurityContext{}
+			}
+			if sidecarSecurityContext.RunAsUser == nil {
+				uid := mysqlDataUID
+				sidecarSecurityContext.RunAsUser = &uid
+			}
+			if sidecarSecurityContext.RunAsGroup == nil {
+				gid := mysqlDataGID
+				sidecarSecurityContext.RunAsGroup = &gid
+			}
+		}
 		sidecarContainer := corev1.Container{
 			Name:  "sidecar",
 			Image: sidecarImage,
@@ -1035,7 +1056,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			// DeepCopy to avoid pointer aliasing with the mysql
 			// container's SecurityContext (same source pointer
 			// otherwise — see F4 in WISHLIST #39 review).
-			SecurityContext: fg.Spec.ContainerSecurityContext.DeepCopy(),
+			SecurityContext: sidecarSecurityContext,
 		}
 
 		containers := []corev1.Container{mysqlContainer, sidecarContainer}
@@ -1513,6 +1534,7 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 // credSecretData is a map of secret-name→data for credential secrets (nil in legacy mode).
 func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsSecretData map[string][]byte, credSecretData map[string]map[string][]byte) string {
 	h := sha256.New()
+	fmt.Fprintf(h, "deploymentPodRenderVersion=%s\n", deploymentPodRenderVersion)
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
 	fmt.Fprintf(h, "sidecar=%s\n", fg.Spec.SidecarImage)
 	fmt.Fprintf(h, "resources=%v\n", site.Resources)
@@ -1554,6 +1576,25 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 		fmt.Fprintf(h, "pitr.profile=%s\n", p.ProfileName)
 		fmt.Fprintf(h, "pitr.maxBinlogSize=%s\n", effMaxBinlogSize)
 		fmt.Fprintf(h, "pitr.archivePollInterval=%s\n", effPollInterval)
+		fmt.Fprintf(h, "pitr.podRenderVersion=%s\n", pitrPodRenderVersion)
+		if p.Enabled {
+			if profile := findProfile(fg, p.ProfileName); profile != nil {
+				fmt.Fprintf(h, "pitr.profile.storage.type=%s\n", profile.Storage.Type)
+				if s3 := profile.Storage.S3; s3 != nil {
+					fmt.Fprintf(h, "pitr.profile.s3.bucket=%s\n", s3.Bucket)
+					fmt.Fprintf(h, "pitr.profile.s3.prefix=%s\n", s3.Prefix)
+					fmt.Fprintf(h, "pitr.profile.s3.region=%s\n", s3.Region)
+					fmt.Fprintf(h, "pitr.profile.s3.endpointURL=%s\n", s3.EndpointURL)
+					fmt.Fprintf(h, "pitr.profile.s3.credentialsSecret=%s\n", s3.CredentialsSecret)
+				}
+				if pvc := profile.Storage.PVC; pvc != nil {
+					fmt.Fprintf(h, "pitr.profile.pvc.claimName=%s\n", pvc.ClaimName)
+					fmt.Fprintf(h, "pitr.profile.pvc.storageClassName=%s\n", pvc.StorageClassName)
+					fmt.Fprintf(h, "pitr.profile.pvc.size=%s\n", pvc.Size.String())
+					fmt.Fprintf(h, "pitr.profile.pvc.subPath=%s\n", pvc.SubPath)
+				}
+			}
+		}
 	}
 	// Include TLS certificate data so cert rotation triggers a rolling update.
 	if len(tlsSecretData) > 0 {

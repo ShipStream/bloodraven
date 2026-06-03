@@ -674,19 +674,40 @@ func (a *Actions) PatchDragonflyImage(ctx context.Context, image string) error {
 // replaces the old aws-cli bucket-init Job so scenario 29 does not depend on
 // pulling an additional image.
 func (a *Actions) EnsureRustFSDragonflyBucket(ctx context.Context) error {
+	return a.EnsureRustFSBucket(ctx, "dragonfly")
+}
+
+// EnsureRustFSBucket creates a bucket in the playground RustFS deployment using
+// the shared Dragonfly S3 credentials Secret. Callers use distinct bucket/prefix
+// combinations for scenario isolation.
+func (a *Actions) EnsureRustFSBucket(ctx context.Context, bucket string) error {
 	const (
 		secretName = "dragonfly-s3-credentials"
-		bucket     = "dragonfly"
 		selector   = "app.kubernetes.io/name=rustfs"
 	)
+	if bucket == "" {
+		return fmt.Errorf("RustFS bucket name must not be empty")
+	}
 	secret, err := a.K.Kubernetes.CoreV1().Secrets(a.Namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("read RustFS credentials secret %s: %w", secretName, err)
 	}
+	accessKey, ok := secret.Data["AWS_ACCESS_KEY_ID"]
+	if !ok || len(accessKey) == 0 {
+		return fmt.Errorf("RustFS credentials secret %s missing AWS_ACCESS_KEY_ID", secretName)
+	}
+	secretKey, ok := secret.Data["AWS_SECRET_ACCESS_KEY"]
+	if !ok || len(secretKey) == 0 {
+		return fmt.Errorf("RustFS credentials secret %s missing AWS_SECRET_ACCESS_KEY", secretName)
+	}
+	region, ok := secret.Data["AWS_REGION"]
+	if !ok || len(region) == 0 {
+		return fmt.Errorf("RustFS credentials secret %s missing AWS_REGION", secretName)
+	}
 	creds := pgrustfs.Credentials{
-		AccessKey: string(secret.Data["AWS_ACCESS_KEY_ID"]),
-		SecretKey: string(secret.Data["AWS_SECRET_ACCESS_KEY"]),
-		Region:    string(secret.Data["AWS_REGION"]),
+		AccessKey: string(accessKey),
+		SecretKey: string(secretKey),
+		Region:    string(region),
 	}
 	if err := a.restartRustFS(ctx, selector); err != nil {
 		return err

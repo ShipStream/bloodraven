@@ -17,6 +17,18 @@ import (
 const (
 	defaultPITRMaxBinlogSize       = "100M"
 	defaultPITRArchivePollInterval = 60 * time.Second
+
+	// Bump when PITR pod rendering changes without a corresponding CRD
+	// field change. ComputeSpecHash includes this value so already-enabled
+	// PITR pods roll forward to pick up render-only fixes such as Secret
+	// volume modes.
+	pitrPodRenderVersion = "pitr-pod-render-v3-sidecar-mysql-uid"
+
+	// Official MySQL container images own /var/lib/mysql as uid/gid 999.
+	// PITR sidecars must read mysql-bin.index and sealed binlog files from
+	// that volume, which are not world-readable.
+	mysqlDataUID = int64(999)
+	mysqlDataGID = int64(999)
 )
 
 // PITR sidecar/pod fragments
@@ -137,15 +149,17 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 			})
 		}
 		if s3.CredentialsSecret != "" {
-			// Mount the AWS creds Secret as files (mode 0400), matching
-			// the backup Job's mount layout so credential handling is
-			// uniform across backup, restore, and archiver paths.
+			// Mount the AWS creds Secret as files readable by the sidecar's
+			// non-root process. Unlike backup/restore Jobs, the MySQL pod
+			// does not get the backup Job's fsGroup defaults, so mode 0400
+			// leaves root-owned Secret files unreadable and prevents the
+			// archiver from starting.
 			out.PodVolumes = append(out.PodVolumes, corev1.Volume{
 				Name: "pitr-aws-creds",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
 						SecretName:  s3.CredentialsSecret,
-						DefaultMode: ptr32(0o400),
+						DefaultMode: ptr32(0o444),
 					},
 				},
 			})
@@ -494,7 +508,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	init := corev1.Container{
 		Name:            restorePITRInitContainerName,
 		Image:           image,
-		Command:         []string{"bloodraven", "pitr-download"},
+		Command:         []string{"/bloodraven", "pitr-download"},
 		Env:             initEnv,
 		Resources:       initResources,
 		VolumeMounts:    initMounts,

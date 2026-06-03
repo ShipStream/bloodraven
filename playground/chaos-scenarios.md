@@ -56,12 +56,14 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `24-emergency-mysql-dragonfly-down` (§26; all Dragonfly StatefulSets scaled to 0, MySQL emergency failover still completes)
 - `25-operator-restart-mid-dragonfly-failover` (§27; operator restart while planned failover is in Dragonfly sync/promotion phase resumes safely)
 - `26-planned-dragonfly-sync-timeout-proceed` (§28; `onSyncTimeout=proceed` marks sessions not preserved and still completes MySQL failover)
-- `27-dragonfly-rolling-image-update` (§30; ordinary `spec.dragonfly.image` patch rolls one pod at a time and promotes the updated replica before rolling the old active pod)
+- `27-dragonfly-rolling-image-update` (§32; ordinary `spec.dragonfly.image` patch rolls one pod at a time and promotes the updated replica before rolling the old active pod)
 - `29-dragonfly-snapshot-upgrade` (§29; D6a snapshot-restore upgrade using the playground RustFS bucket)
+- `30-backup-verification-rustfs` (§30; configures a RustFS backup profile, creates a real `MysqlBackup`, pins `MysqlBackupVerification.spec.backupRef`, and asserts marker rows restore)
+- `31-pitr-verification-rustfs` (§31; enables RustFS PITR, archives sealed binlogs, verifies timestamp replay includes pre-target rows and excludes post-target rows)
 
 `make chaos-list` is the authoritative inventory — when adding a scenario, also append it here so the doc and the registry stay in lock-step.
 
-Sections marked `§S` (planned-switchover) and `§SBR` (split-brain auto-resolve) are documented as appendix-style sections below — they exist as scenarios but don't fit the §1-§30 numbered failure-mode grid.
+Sections marked `§S` (planned-switchover) and `§SBR` (split-brain auto-resolve) are documented as appendix-style sections below — they exist as scenarios but don't fit the §1-§32 numbered failure-mode grid.
 
 The runner refuses to mutate any kubectl context that does not match the same allowlist as `playground/_guard.sh` (`k3d-*`, `kind-*`, `minikube*`, or names listed in `BLOODRAVEN_PLAYGROUND_CONTEXTS`). Markdown is the source of truth for hypotheses and prose; the runner's assertions are the operational ones documented under each scenario's "Verify" section.
 
@@ -798,7 +800,37 @@ kubectl -n bloodraven-playground annotate --overwrite mysqlfailovergroup playgro
 
 ---
 
-### 30. Dragonfly Rolling Image Update (D6b)
+### 30. Backup Verification Against RustFS
+**Category**: Backup/restore verification | **Risk**: Medium
+
+**Hypothesis**: A one-off `MysqlBackup` written to the in-cluster RustFS bucket can be restored by a pinned `MysqlBackupVerification`, and the restored database contains deterministic marker rows from the full dump.
+
+**Injection**: `make chaos-run SCENARIO=30-backup-verification-rustfs`
+
+The scenario creates/ensures bucket `bloodraven-backup-e2e`, patches only `MysqlFailoverGroup.spec.backup` with profile `rustfs-e2e`, and isolates objects under `e2e/30-backup-verification-rustfs/<run-stamp>/`. It seeds `chaos_s30_backup.marker`, waits for replica GTID catch-up, creates one named `MysqlBackup`, then creates one `MysqlBackupVerification` with `spec.backupRef.name` pinned to that backup instead of relying on latest-success resolution.
+
+**Verify**: The backup reaches `Succeeded` with `status.storageType=S3`, `status.location=<prefix>/<backup>`, and a Job name. The verification reaches `Succeeded`, reports `status.backupRef.name` for the created backup, runs the sanity query, returns marker count `2`, and has `Verified=True`.
+
+**Timing**: Scenario timeout is 18 minutes; backup and verification waits each have a 12-minute sub-budget. Cleanup deletes verification then backup CRs, drops `chaos_s30_backup`, restores the original `spec.backup`, and waits for a healthy baseline.
+
+---
+
+### 31. PITR Verification Against RustFS
+**Category**: Backup/PITR verification | **Risk**: Medium
+
+**Hypothesis**: With PITR enabled against RustFS, Bloodraven archives sealed binlogs and a pinned `MysqlBackupVerification` can replay to a timestamp so baseline and before-target rows exist while after-target rows are absent.
+
+**Injection**: `make chaos-run SCENARIO=31-pitr-verification-rustfs`
+
+The scenario uses the same RustFS bucket/profile/credential Secret as scenario 30 but isolates objects under `e2e/31-pitr-verification-rustfs/<run-stamp>/` and enables `spec.backup.pitr` (`profileName=rustfs-e2e`, `maxBinlogSize=1M`, `archivePollInterval=2s`). It waits for the active sidecar `/archiver/status` endpoint to report `enabled=true`, `primary=true`, `storageType=S3`, and manifest prefix `<prefix>/binlogs` before taking the baseline backup.
+
+**Verify**: After the full backup succeeds, the scenario inserts a before-target marker row, captures a MySQL UTC timestamp, sleeps 2 seconds, inserts an after-target marker, executes `FLUSH BINARY LOGS`, and waits for sidecar archiver coverage with zero backlog. The pinned PITR verification uses `spec.pointInTime.mode=timestamp` and a sanity scalar that returns `1` only when baseline and before-target rows are present and the after-target row is absent. Success also requires `status.replayedThroughBinlog` and `Verified=True`.
+
+**Timing**: Scenario timeout is 24 minutes; PITR rollout/archiver readiness has a 6-minute sub-budget, archive coverage has 3 minutes, and backup/verification waits each have 12 minutes. Cleanup deletes CRs, drops `chaos_s31_pitr`, restores the original `spec.backup` so PITR does not leak to later scenarios, and waits for a healthy baseline.
+
+---
+
+### 32. Dragonfly Rolling Image Update (D6b)
 **Category**: Zero-downtime operations | **Risk**: Medium
 
 **Hypothesis**: A normal `spec.dragonfly.image` change rolls one Dragonfly pod at a time: the non-active site updates first, Bloodraven promotes that updated replica, and the old active site updates only after traffic has moved.

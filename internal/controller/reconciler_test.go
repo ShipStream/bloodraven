@@ -813,6 +813,66 @@ func TestComputeSpecHash_IncludesCredentialData(t *testing.T) {
 	}
 }
 
+func TestReconcileDeployment_UsesStableRelayLogNames(t *testing.T) {
+	fg := newTestFG()
+	r, c := newReconciler(fg)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace},
+	}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	var d appsv1.Deployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "mysql-lion-dc1", Namespace: fg.Namespace}, &d); err != nil {
+		t.Fatalf("deployment: %v", err)
+	}
+	args := strings.Join(d.Spec.Template.Spec.Containers[0].Args, "\n")
+	for _, want := range []string{
+		"--relay-log=/var/lib/mysql/mysql-relay-bin",
+		"--relay-log-index=/var/lib/mysql/mysql-relay-bin.index",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("mysql args missing %q; args:\n%s", want, args)
+		}
+	}
+}
+
+func TestComputeSpecHash_IncludesPITRProfileStorage(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.Backup = &v1alpha1.BackupSpec{
+		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly"},
+		Profiles: []v1alpha1.BackupProfile{{
+			Name: "nightly",
+			Storage: v1alpha1.BackupStorage{
+				Type: v1alpha1.BackupStorageS3,
+				S3: &v1alpha1.S3Storage{
+					Bucket:            "backups",
+					Prefix:            "pitr/a",
+					Region:            "us-east-1",
+					EndpointURL:       "https://s3.example.com",
+					CredentialsSecret: "aws-creds",
+				},
+			},
+		}},
+	}
+	site := fg.Spec.Sites[0]
+	h1 := ComputeSpecHash(fg, site, nil, nil)
+
+	fg2 := fg.DeepCopy()
+	fg2.Spec.Backup.Profiles[0].Storage.S3.Prefix = "pitr/b"
+	h2 := ComputeSpecHash(fg2, site, nil, nil)
+	if h2 == h1 {
+		t.Error("hash should differ when the PITR profile storage prefix changes")
+	}
+
+	fg3 := fg.DeepCopy()
+	fg3.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecret = "aws-creds-v2"
+	h3 := ComputeSpecHash(fg3, site, nil, nil)
+	if h3 == h1 {
+		t.Error("hash should differ when the PITR profile credentials secret changes")
+	}
+}
+
 func newTestFGWithCredentials() *v1alpha1.MysqlFailoverGroup {
 	fg := newTestFG()
 	fg.Spec.SecretName = ""

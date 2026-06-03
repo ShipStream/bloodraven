@@ -215,6 +215,15 @@ func (u *UpdateController) waitForReplicaReady(ctx context.Context, checker mysq
 						rs.SecondsBehindSource != nil && *rs.SecondsBehindSource < 5 {
 						return nil
 					}
+					if rs != nil && rs.SourceHost != "" && (!rs.IORunning || !rs.SQLRunning) {
+						// A standby pod restart preserves replication metadata but
+						// --skip-replica-start intentionally leaves the IO/SQL
+						// threads stopped. Ordered updates own this restart window,
+						// so restart the existing channel before continuing to wait.
+						if err := checker.StartReplica(ctx); err != nil {
+							u.logger.Warn("ordered update: failed to start standby replica", "error", err)
+						}
+					}
 					writableObservations = 0
 				}
 			}

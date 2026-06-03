@@ -5,11 +5,11 @@ package runner
 //
 //   - smoke:  short PR-label/manual subset covering emergency failover,
 //     planned switchover, and operator restart durability (~3 scenarios).
-//   - release: curated release/nightly subset covering the WISHLIST #32
+//   - release: curated release/nightly subset covering the WISHLIST #32/#43
 //     behaviours (emergency failover, planned switchover, operator restart,
 //     data integrity, operator kill during failover, self-fencing,
 //     network partition, PVC loss/re-bootstrap, old-primary recovery,
-//     failover state durability).
+//     failover state durability, backup verification, PITR verification).
 //   - full:   every registered scenario (existing run-all behaviour).
 type Profile string
 
@@ -37,7 +37,8 @@ var smokeScenarios = map[string]bool{
 // WISHLIST #32: real MySQL pods/PVCs/Services, DNS/DNSEndpoint, taints,
 // planned failover, emergency failover, operator restart, PVC loss and
 // re-bootstrap, network partition / self-fencing, old-primary recovery,
-// and failover state durability across operator restarts.
+// failover state durability across operator restarts, and dedicated RustFS
+// backup/PITR verification coverage.
 var releaseScenarios = map[string]bool{
 	// smoke scenarios (superset)
 	"01-clean-primary-kill":    true,
@@ -51,6 +52,8 @@ var releaseScenarios = map[string]bool{
 	"10-full-bootstrap-after-data-wipe":     true, // PVC loss → re-bootstrap
 	"12-old-primary-recovery-no-divergence": true, // old-primary recovery
 	"23-failover-state-durability":          true, // state survives operator restart
+	"30-backup-verification-rustfs":         true, // RustFS backup restore verification
+	"31-pitr-verification-rustfs":           true, // RustFS PITR replay verification
 }
 
 // Profiles returns the list of valid profile names for CLI help and

@@ -140,6 +140,48 @@ func (p *Probe) Status(ctx context.Context) (*StatusResponse, error) {
 	return &s, nil
 }
 
+// ArchiverStatusResponse mirrors internal/sidecar.Status. Duplicated here to
+// keep the playground probe decoupled from the sidecar implementation package.
+type ArchiverStatusResponse struct {
+	Enabled            bool      `json:"enabled"`
+	Primary            bool      `json:"primary"`
+	LastScanAt         time.Time `json:"lastScanAt"`
+	FilesArchived      int64     `json:"filesArchived"`
+	LastError          string    `json:"lastError"`
+	StorageType        string    `json:"storageType"`
+	ManifestPrefix     string    `json:"manifestPrefix"`
+	Site               string    `json:"site"`
+	UploadFailures     int64     `json:"uploadFailures"`
+	LastUploadAt       time.Time `json:"lastUploadAt"`
+	BacklogFiles       int64     `json:"backlogFiles"`
+	ManifestFileCount  int64     `json:"manifestFileCount"`
+	ManifestBytes      int64     `json:"manifestBytes"`
+	OldestArchivedTime time.Time `json:"oldestArchivedTime"`
+	NewestArchivedTime time.Time `json:"newestArchivedTime"`
+}
+
+// ArchiverStatus calls GET /archiver/status and decodes the JSON response.
+func (p *Probe) ArchiverStatus(ctx context.Context) (*ArchiverStatusResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+"/archiver/status", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := p.cli.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("sidecar /archiver/status returned %d: %s", resp.StatusCode, body)
+	}
+	var s ArchiverStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return nil, fmt.Errorf("decode archiver/status: %w", err)
+	}
+	return &s, nil
+}
+
 // PeerActiveSiteResponse mirrors internal/sidecar.TopologySnapshot.
 type PeerActiveSiteResponse struct {
 	ActiveSite string    `json:"activeSite"`

@@ -518,6 +518,53 @@ func TestReconcileDeployment_NilSecurityContext_PreservesLegacyShape(t *testing.
 	}
 }
 
+func TestReconcileDeployment_PITRSidecarDefaultsToMysqlDataUser(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.Backup = &v1alpha1.BackupSpec{
+		PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly"},
+		Profiles: []v1alpha1.BackupProfile{{
+			Name: "nightly",
+			Storage: v1alpha1.BackupStorage{
+				Type: v1alpha1.BackupStorageS3,
+				S3: &v1alpha1.S3Storage{
+					Bucket:            "backups",
+					CredentialsSecret: "aws-creds",
+				},
+			},
+		}},
+	}
+	r, c := newReconciler(fg)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace},
+	}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	var d appsv1.Deployment
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: "mysql-lion-dc1", Namespace: fg.Namespace,
+	}, &d); err != nil {
+		t.Fatalf("deployment: %v", err)
+	}
+
+	var mysqlSC, sidecarSC *corev1.SecurityContext
+	for _, ct := range d.Spec.Template.Spec.Containers {
+		switch ct.Name {
+		case "mysql":
+			mysqlSC = ct.SecurityContext
+		case "sidecar":
+			sidecarSC = ct.SecurityContext
+		}
+	}
+	if mysqlSC != nil {
+		t.Errorf("mysql container SC should remain nil when spec.containerSecurityContext is unset, got %+v", mysqlSC)
+	}
+	if sidecarSC == nil || sidecarSC.RunAsUser == nil || *sidecarSC.RunAsUser != mysqlDataUID ||
+		sidecarSC.RunAsGroup == nil || *sidecarSC.RunAsGroup != mysqlDataGID {
+		t.Fatalf("sidecar SC should default to mysql data uid/gid for PITR, got %+v", sidecarSC)
+	}
+}
+
 func TestReconcileDeployment_AppliesPodAndContainerSecurityContextVerbatim(t *testing.T) {
 	t1 := true
 	f1 := false

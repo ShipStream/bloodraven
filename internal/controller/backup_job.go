@@ -3,6 +3,7 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -612,11 +613,15 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 		if s3 == nil {
 			return "", nil, nil, nil, fmt.Errorf("profile %q storage.type=S3 but storage.s3 is nil", profile.Name)
 		}
-		prefix := ""
-		if s3.Prefix != "" {
-			prefix = s3.Prefix + "/"
+		prefix := strings.TrimRight(s3.Prefix, "/")
+		if prefix != "" {
+			prefix += "/"
 		}
-		outputURL := fmt.Sprintf("%s%s/", prefix, backupName)
+		// MySQL Shell's S3 dump APIs treat BLOODRAVEN_OUTPUT_URL as a prefix and
+		// append their own separators while listing/writing dump objects. Passing a
+		// trailing slash yields a double-slash prefix ("name//") that S3-compatible
+		// stores such as RustFS reject with InvalidArgument.
+		outputURL := fmt.Sprintf("%s%s", prefix, backupName)
 		env := []corev1.EnvVar{
 			{Name: "BLOODRAVEN_S3_BUCKET", Value: s3.Bucket},
 		}

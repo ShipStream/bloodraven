@@ -113,7 +113,7 @@ func TestReconcileRestoreJob_CreatesRestoreJob(t *testing.T) {
 	for _, e := range container.Env {
 		envMap[e.Name] = e.Value
 	}
-	if envMap["BLOODRAVEN_INPUT_URL"] != "lion/seed/" {
+	if envMap["BLOODRAVEN_INPUT_URL"] != "lion/seed" {
 		t.Errorf("want input url resolved from seed.status.location, got %q", envMap["BLOODRAVEN_INPUT_URL"])
 	}
 	if envMap["BLOODRAVEN_S3_BUCKET"] != "bloodraven-backups" {
@@ -137,7 +137,7 @@ func TestBuildRestoreJob_S3Source_NormalizesTrailingSlash(t *testing.T) {
 		Source: v1alpha1.InitFromBackupSource{
 			S3: &v1alpha1.S3Storage{
 				Bucket:            "my-bucket",
-				Prefix:            "dumps/preprod",
+				Prefix:            "dumps/preprod/",
 				CredentialsSecret: "s3-creds",
 			},
 		},
@@ -149,8 +149,8 @@ func TestBuildRestoreJob_S3Source_NormalizesTrailingSlash(t *testing.T) {
 	}
 	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
 		if e.Name == "BLOODRAVEN_INPUT_URL" {
-			if e.Value != "dumps/preprod/" {
-				t.Errorf("expected trailing slash normalization, got %q", e.Value)
+			if e.Value != "dumps/preprod" {
+				t.Errorf("expected S3 input without trailing slash, got %q", e.Value)
 			}
 			return
 		}

@@ -94,6 +94,9 @@ func TestBuildPITRSidecarFragments_S3(t *testing.T) {
 	if v.Name != "pitr-aws-creds" || v.Secret == nil || v.Secret.SecretName != "aws-creds" {
 		t.Errorf("unexpected pod volume: %+v", v)
 	}
+	if v.Secret.DefaultMode == nil || *v.Secret.DefaultMode != 0o444 {
+		t.Errorf("pitr aws creds mode: want 0444 for non-root sidecar readability, got %v", v.Secret.DefaultMode)
+	}
 }
 
 // TestBuildPITRSidecarFragments_PVC covers the alternate backend.
@@ -177,8 +180,8 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	if ic.Name != restorePITRInitContainerName {
 		t.Errorf("init container name: want %q, got %q", restorePITRInitContainerName, ic.Name)
 	}
-	if len(ic.Command) == 0 || ic.Command[0] != "bloodraven" || ic.Command[1] != "pitr-download" {
-		t.Errorf("init container command: want [bloodraven pitr-download ...], got %v", ic.Command)
+	if len(ic.Command) < 2 || ic.Command[0] != "/bloodraven" || ic.Command[1] != "pitr-download" {
+		t.Errorf("init container command: want [/bloodraven pitr-download ...], got %v", ic.Command)
 	}
 	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_STOP_DATETIME", "2026-04-15T09:30:00Z")
 	assertEnvEquals(t, ic.Env, "BLOODRAVEN_PITR_STORAGE_TYPE", "S3")

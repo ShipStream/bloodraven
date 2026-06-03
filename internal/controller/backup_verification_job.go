@@ -36,13 +36,13 @@ const (
 // verificationJobInputs bundles the resolved inputs for building the
 // verification Job. Mirrors BackupJobInputs in spirit.
 type verificationJobInputs struct {
-	FailoverGroup         *v1alpha1.MysqlFailoverGroup
-	Profile               v1alpha1.BackupProfile
-	Verification          *v1alpha1.MysqlBackupVerification
-	Backup                *v1alpha1.MysqlBackup
-	CredsSecretName       string
-	ScriptsConfigMapName  string
-	PVCName               string
+	FailoverGroup        *v1alpha1.MysqlFailoverGroup
+	Profile              v1alpha1.BackupProfile
+	Verification         *v1alpha1.MysqlBackupVerification
+	Backup               *v1alpha1.MysqlBackup
+	CredsSecretName      string
+	ScriptsConfigMapName string
+	PVCName              string
 }
 
 // buildVerificationPVC constructs the ephemeral datadir PVC for a
@@ -153,7 +153,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		return nil, err
 	}
 
-	inputURL := ensureTrailingSlash(backup.Status.Location)
+	inputURL := mysqlShellDumpInput(backup.Status.Location, backup.Status.StorageType)
 
 	// PITR replay fragments (download init container + shared emptyDir
 	// + main-container env/mounts). buildRestorePITRFragmentsFor returns

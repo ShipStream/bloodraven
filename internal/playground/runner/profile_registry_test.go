@@ -19,8 +19,8 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 	}
 
 	release := runner.SelectForProfile(all, runner.ProfileRelease)
-	if len(release) != 10 {
-		t.Fatalf("release profile selected %d scenarios, want 10", len(release))
+	if len(release) != 12 {
+		t.Fatalf("release profile selected %d scenarios, want 12", len(release))
 	}
 
 	full := runner.SelectForProfile(all, runner.ProfileFull)
