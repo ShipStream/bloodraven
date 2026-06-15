@@ -83,6 +83,20 @@ func New(opts LoadOptions) (*Client, error) {
 		return nil, fmt.Errorf("build rest config: %w", err)
 	}
 
+	// Raise the client-side rate limits well above the client-go defaults
+	// (5 QPS / 10 burst). The chaos runner fans out many short-lived reads
+	// and patches (poll loops, log tailers, cleanup reverters, reset's
+	// scale/sync/patch sequence) against a single client; at the defaults
+	// those queue behind the limiter and surface as
+	//   "client rate limiter Wait returned an error: context deadline exceeded"
+	// which fails cleanup/reset and aborts otherwise-passing E2E runs.
+	if restCfg.QPS < 50 {
+		restCfg.QPS = 50
+	}
+	if restCfg.Burst < 100 {
+		restCfg.Burst = 100
+	}
+
 	kc, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return nil, fmt.Errorf("build kubernetes client: %w", err)
