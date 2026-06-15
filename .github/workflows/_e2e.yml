@@ -86,7 +86,7 @@ jobs:
 
       - name: Upload JUnit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-${{ inputs.profile }}-junit
           path: playground/chaos-results/e2e-${{ inputs.profile }}-junit.xml
@@ -94,7 +94,7 @@ jobs:
 
       - name: Upload chaos forensics
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-${{ inputs.profile }}-forensics
           path: playground/chaos-results/
@@ -109,7 +109,7 @@ jobs:
 
       - name: Upload kind logs artifact
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-${{ inputs.profile }}-kind-logs
           path: /tmp/kind-logs/
@@ -118,7 +118,7 @@ jobs:
 
       - name: Upload setup logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-${{ inputs.profile }}-setup-logs
           path: playground/setup.log
