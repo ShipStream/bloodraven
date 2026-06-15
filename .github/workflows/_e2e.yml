@@ -56,7 +56,7 @@ jobs:
           docker build -t bloodraven-dns-webhook:playground playground/dns-webhook
 
       - name: Create kind cluster
-        uses: helm/kind-action@v1.12.0
+        uses: helm/kind-action@v1.14.0
         with:
           cluster_name: bloodraven-e2e
           config: .github/kind/e2e-calico.yaml
