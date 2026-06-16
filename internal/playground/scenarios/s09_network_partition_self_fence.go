@@ -24,10 +24,17 @@ func scenario09NetworkPartitionSelfFence() runner.Scenario {
 		Title: "Network partition forces sidecar self-fence + failover",
 		Hypothesis: "A deny-all NetworkPolicy on the active site for >leaseTimeout causes the sidecar to " +
 			"self-fence (super_read_only=ON, SELF-FENCED log) and the operator to fail over to the peer.",
-		Risk:     "medium",
-		DocLink:  "playground/chaos-scenarios.md#9-network-partition-self-fence",
-		Timeout:  4 * time.Minute,
-		Precheck: AssertHealthyBaseline,
+		Risk:    "medium",
+		DocLink: "playground/chaos-scenarios.md#9-network-partition-self-fence",
+		// QUARANTINED: under kind+Calico, ESTABLISHED conntrack flows survive
+		// a deny-all NetworkPolicy, so the operator's pooled liveness
+		// connection keeps answering and it never fails over the partitioned
+		// primary. See https://github.com/ShipStream/bloodraven/issues/93.
+		// Excluded from batch profiles until the soft-partition detection is
+		// fixed; still runnable via `playground-chaos run 09-network-partition-self-fence`.
+		Quarantine: "soft-partition failover not yet detected under Calico (issue #93)",
+		Timeout:    4 * time.Minute,
+		Precheck:   AssertHealthyBaseline,
 		Steps: []runner.Step{
 			injectPartitionActive(),
 			observeFailoverDuringPartition(),

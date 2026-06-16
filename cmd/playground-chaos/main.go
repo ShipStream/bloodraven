@@ -158,7 +158,14 @@ func listScenarios() {
 		return
 	}
 	for _, s := range scenarios {
-		fmt.Printf("%s  %s\n", s.ID, s.Title)
+		marker := ""
+		if s.Quarantine != "" {
+			marker = "  [QUARANTINED]"
+		}
+		fmt.Printf("%s  %s%s\n", s.ID, s.Title, marker)
+		if s.Quarantine != "" {
+			fmt.Printf("    quarantined: %s\n", s.Quarantine)
+		}
 		if s.DocLink != "" {
 			fmt.Printf("    doc: %s\n", s.DocLink)
 		}
@@ -332,13 +339,21 @@ func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 		}
 		return exitEnvironment
 	}
-	scens := runner.SelectForProfile(runner.DefaultRegistry.List(), profile)
+	registered := runner.DefaultRegistry.List()
+	scens := runner.SelectForProfile(registered, profile)
 	if len(scens) == 0 {
 		fmt.Fprintf(os.Stderr, "no scenarios selected for profile %q\n", profile)
 		return exitFailure
 	}
 	if profile != runner.ProfileFull && profile != "" {
-		fmt.Fprintf(os.Stderr, "Running profile %q: %d of %d scenarios\n", profile, len(scens), len(runner.DefaultRegistry.List()))
+		fmt.Fprintf(os.Stderr, "Running profile %q: %d of %d scenarios\n", profile, len(scens), len(registered))
+	}
+	// Surface any quarantined scenarios excluded from this run so a green
+	// suite is never mistaken for full coverage.
+	for _, s := range registered {
+		if s.Quarantine != "" {
+			fmt.Fprintf(os.Stderr, "!! quarantined (skipped): %s — %s\n", s.ID, s.Quarantine)
+		}
 	}
 	if force {
 		fmt.Fprintln(os.Stderr, "!! --force: will delete any prior chaos in-progress marker before each scenario's preflight")

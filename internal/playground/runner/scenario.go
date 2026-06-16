@@ -104,7 +104,13 @@ type Scenario struct {
 	// scenario runs still use Precheck to report the prerequisite
 	// explicitly instead of wiping data by surprise.
 	ResetBeforeRunAll bool
-	Precheck          func(ctx context.Context, env *Env) error
-	Steps             []Step
-	Cleanup           func(ctx context.Context, env *Env) error
+	// Quarantine, when non-empty, marks a scenario as known-failing and
+	// excludes it from every batch profile (smoke/release/full) so it
+	// cannot redden the suite or wedge the cluster for later scenarios.
+	// The string is the reason (cite the tracking issue). Quarantined
+	// scenarios remain runnable individually via `run <id>` for debugging.
+	Quarantine string
+	Precheck   func(ctx context.Context, env *Env) error
+	Steps      []Step
+	Cleanup    func(ctx context.Context, env *Env) error
 }

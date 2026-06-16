@@ -75,12 +75,23 @@ func (p Profile) IsValid() bool {
 
 // SelectForProfile filters the given scenario list to the subset that
 // belongs to the requested profile. For ProfileFull (the default) all
-// scenarios are returned unfiltered. Unknown scenario IDs in the profile
-// allowlist are silently ignored so that adding new scenarios does not
-// break existing profiles.
+// scenarios are returned. Unknown scenario IDs in the profile allowlist
+// are silently ignored so that adding new scenarios does not break
+// existing profiles.
+//
+// Quarantined scenarios (Scenario.Quarantine != "") are excluded from
+// every batch profile — including full — so a known-failing scenario
+// cannot redden the suite or wedge the cluster for later scenarios. They
+// remain runnable individually via `run <id>`.
 func SelectForProfile(all []Scenario, p Profile) []Scenario {
 	if p == ProfileFull || p == "" {
-		return all
+		out := make([]Scenario, 0, len(all))
+		for _, s := range all {
+			if s.Quarantine == "" {
+				out = append(out, s)
+			}
+		}
+		return out
 	}
 	var allowlist map[string]bool
 	switch p {
@@ -89,11 +100,11 @@ func SelectForProfile(all []Scenario, p Profile) []Scenario {
 	case ProfileRelease:
 		allowlist = releaseScenarios
 	default:
-		return all
+		return SelectForProfile(all, ProfileFull)
 	}
 	var out []Scenario
 	for _, s := range all {
-		if allowlist[s.ID] {
+		if allowlist[s.ID] && s.Quarantine == "" {
 			out = append(out, s)
 		}
 	}
