@@ -86,6 +86,48 @@ func TestPrimaryDSNRejectsGarbage(t *testing.T) {
 	}
 }
 
+// TestCloneDSNStripsIOTimeoutsAndBoundsDial verifies cloneDSN removes any
+// read/write deadline inherited from a caller-supplied DSN — CLONE INSTANCE
+// legitimately blocks for minutes — while keeping the dial bounded: an explicit
+// caller dial timeout is preserved, and a bounded default is supplied when the
+// DSN sets none so an unreachable host cannot wedge bootstrap.
+func TestCloneDSNStripsIOTimeoutsAndBoundsDial(t *testing.T) {
+	// A DSN carrying read/write deadlines plus an explicit dial timeout.
+	cdsn, err := cloneDSN("user:pass@tcp(127.0.0.1:3306)/?timeout=5s&readTimeout=10s&writeTimeout=10s")
+	if err != nil {
+		t.Fatalf("cloneDSN returned error: %v", err)
+	}
+	cfg, err := mysql.ParseDSN(cdsn)
+	if err != nil {
+		t.Fatalf("ParseDSN(clone dsn) returned error: %v", err)
+	}
+	if cfg.ReadTimeout != 0 {
+		t.Errorf("clone ReadTimeout = %s, want 0 (CLONE INSTANCE blocks for minutes)", cfg.ReadTimeout)
+	}
+	if cfg.WriteTimeout != 0 {
+		t.Errorf("clone WriteTimeout = %s, want 0", cfg.WriteTimeout)
+	}
+	if cfg.Timeout != 5*time.Second {
+		t.Errorf("clone dial Timeout = %s, want 5s (explicit caller value preserved)", cfg.Timeout)
+	}
+
+	// A DSN with no dial timeout gets a bounded default.
+	cdsn2, err := cloneDSN("user:pass@tcp(127.0.0.1:3306)/")
+	if err != nil {
+		t.Fatalf("cloneDSN (no timeout) returned error: %v", err)
+	}
+	cfg2, err := mysql.ParseDSN(cdsn2)
+	if err != nil {
+		t.Fatalf("ParseDSN returned error: %v", err)
+	}
+	if cfg2.Timeout != statusNetTimeout {
+		t.Errorf("clone dial Timeout = %s, want %s (bounded default when DSN sets none)", cfg2.Timeout, statusNetTimeout)
+	}
+	if cfg2.ReadTimeout != 0 || cfg2.WriteTimeout != 0 {
+		t.Errorf("clone R/W timeouts must be 0, got read=%s write=%s", cfg2.ReadTimeout, cfg2.WriteTimeout)
+	}
+}
+
 // TestNewCheckerConfiguresPools verifies NewChecker builds a usable checker with
 // both pools wired (sql.Open is lazy, so no server is needed): the primary pool
 // carries the read deadline, the clone pool deliberately does not, and Close

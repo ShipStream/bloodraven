@@ -133,13 +133,37 @@ func openPrimaryDB(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
-// openCloneDB opens the clone pool from the unmodified DSN (no I/O deadline) and
-// pins it to a single connection. CloneInstance sets session-scoped
-// net_read_timeout/net_write_timeout immediately before issuing CLONE INSTANCE;
-// MaxOpenConns=1 guarantees those settings and the clone run on the same
-// connection.
+// openCloneDB opens the clone pool and pins it to a single connection.
+// CloneInstance sets session-scoped net_read_timeout/net_write_timeout
+// immediately before issuing CLONE INSTANCE; MaxOpenConns=1 guarantees those
+// settings and the clone run on the same connection.
+//
+// The clone pool must NOT carry socket read/write deadlines: CLONE INSTANCE is a
+// single statement that legitimately blocks for minutes, so any ReadTimeout /
+// WriteTimeout inherited from a caller-supplied DSN (credentials mode never sets
+// them, but a raw `dsn` secret could) is stripped. The initial dial must still
+// be bounded so an unreachable host fails fast instead of wedging bootstrap, so
+// an explicit caller dial timeout is preserved and a default supplied when the
+// DSN sets none.
+func cloneDSN(dsn string) (string, error) {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return "", fmt.Errorf("parse clone dsn: %w", err)
+	}
+	cfg.ReadTimeout = 0
+	cfg.WriteTimeout = 0
+	if cfg.Timeout == 0 {
+		cfg.Timeout = statusNetTimeout
+	}
+	return cfg.FormatDSN(), nil
+}
+
 func openCloneDB(dsn string) (*sql.DB, error) {
-	db, err := sql.Open("mysql", dsn)
+	cdsn, err := cloneDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("mysql", cdsn)
 	if err != nil {
 		return nil, fmt.Errorf("open clone mysql: %w", err)
 	}
