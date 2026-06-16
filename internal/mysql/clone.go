@@ -37,13 +37,18 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 	// server from dropping the connection during a long clone transfer.
 	// clone_ddl_timeout is GLOBAL-only (session scope is not supported) and
 	// controls how long the clone waits on conflicting DDL statements.
+	// The session-scoped timeouts and CLONE INSTANCE itself run on the
+	// dedicated clone pool (m.cloneDB), which has no driver-level read deadline
+	// — a clone legitimately blocks for minutes, so it cannot use the primary
+	// pool's statusNetTimeout. m.cloneDB is pinned to a single connection so the
+	// SET SESSION values below apply to the connection that runs the clone.
 	timeoutStmts := []string{
 		fmt.Sprintf("SET SESSION net_read_timeout = %d", cloneTimeoutSec),
 		fmt.Sprintf("SET SESSION net_write_timeout = %d", cloneTimeoutSec),
 		fmt.Sprintf("SET GLOBAL clone_ddl_timeout = %d", cloneTimeoutSec),
 	}
 	for _, s := range timeoutStmts {
-		if _, err := m.db.ExecContext(ctx, s); err != nil {
+		if _, err := m.cloneDB.ExecContext(ctx, s); err != nil {
 			var mysqlErr *mysqldriver.MySQLError
 			if errors.As(err, &mysqlErr) && mysqlErr.Number == 1193 && s == fmt.Sprintf("SET GLOBAL clone_ddl_timeout = %d", cloneTimeoutSec) {
 				// clone_ddl_timeout was removed in newer MySQL releases; the
@@ -60,7 +65,7 @@ func (m *checker) CloneInstance(ctx context.Context, user, host, password string
 		stmt += " REQUIRE SSL"
 	}
 	// Clone may take a very long time, use the context for cancellation
-	_, err := m.db.ExecContext(ctx, stmt)
+	_, err := m.cloneDB.ExecContext(ctx, stmt)
 	if err != nil {
 		return fmt.Errorf("clone instance: %w", err)
 	}
