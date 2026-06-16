@@ -104,7 +104,7 @@ func (r *resetter) run(ctx context.Context) error {
 		{"sync MySQL deployment specs", r.syncMySQLDeploymentSpecs},
 		{"clear chaos marker and taints", r.clearTransientState},
 		{"delete PVCs and PVs", r.deleteStorage},
-		{"wipe k3d node storage", r.wipeNodeStorage},
+		{"wipe node hostPath storage", r.wipeNodeStorage},
 		{"restart local-path-provisioner", r.restartLocalPathProvisioner},
 		{"reapply mysql secret", r.reapplyMysqlSecret},
 		{"clear MFG status", r.clearMFGStatus},
@@ -243,7 +243,7 @@ func (r *resetter) deleteStorage(ctx context.Context, _ []v1alpha1.SiteSpec) err
 
 func (r *resetter) wipeNodeStorage(ctx context.Context, sites []v1alpha1.SiteSpec) error {
 	if r.runtime == "" {
-		r.warn("no docker/podman runtime found; skipping k3d hostPath wipe")
+		r.warn("no docker/podman runtime found; skipping node hostPath wipe")
 		return nil
 	}
 	nodes, err := r.k.ListNodes(ctx)
@@ -251,16 +251,40 @@ func (r *resetter) wipeNodeStorage(ctx context.Context, sites []v1alpha1.SiteSpe
 		return err
 	}
 	var errs []error
+	wiped := 0
 	for _, node := range nodes.Items {
-		if !strings.HasPrefix(node.Name, "k3d-") {
+		// k3d AND kind both name the node's kubelet container exactly after
+		// the Kubernetes node, so HasPrefix("k3d-") wrongly skipped every
+		// kind node — leaving the manual PV's stale (divergent) MySQL data
+		// at /var/lib/rancher/k3s/storage/... behind, so the reset never
+		// reached a healthy baseline on kind/CI (#96).
+		if !r.nodeIsLocalContainer(ctx, node.Name) {
 			continue
 		}
 		cmd := exec.CommandContext(ctx, r.runtime, "exec", node.Name, "sh", "-c", "rm -rf "+strings.Join(r.nodeStorageWipePaths(sites), " "))
 		if out, err := cmd.CombinedOutput(); err != nil {
 			errs = append(errs, fmt.Errorf("%s exec %s: %w: %s", r.runtime, node.Name, err, strings.TrimSpace(string(out))))
+		} else {
+			wiped++
 		}
 	}
+	if wiped == 0 && len(errs) == 0 {
+		r.warn("node hostPath wipe matched no local container nodes; MySQL data may not have been cleared")
+	}
 	return errors.Join(errs...)
+}
+
+// nodeIsLocalContainer reports whether the Kubernetes node is backed by a
+// local container the reset can exec into to wipe hostPath storage. k3d and
+// kind both name the kubelet container exactly after the Kubernetes node, so
+// a single container-inspect probe covers both. It returns false for
+// non-container nodes (a minikube VM, or a real cloud node — though the
+// context guard already restricts resets to local playground clusters).
+func (r *resetter) nodeIsLocalContainer(ctx context.Context, node string) bool {
+	if r.runtime == "" {
+		return false
+	}
+	return exec.CommandContext(ctx, r.runtime, "container", "inspect", node).Run() == nil
 }
 
 func (r *resetter) restartLocalPathProvisioner(ctx context.Context, _ []v1alpha1.SiteSpec) error {
@@ -358,7 +382,11 @@ func (r *resetter) bindPVs(ctx context.Context, sites []v1alpha1.SiteSpec) error
 		if err != nil {
 			return err
 		}
-		if r.runtime != "" && strings.HasPrefix(node, "k3d-") {
+		// Pre-create the manual PV's hostPath with world-writable perms so
+		// MySQL can initialize a fresh data dir. Covers k3d and kind alike
+		// (both back the node with a same-named local container); previously
+		// gated to k3d-prefixed nodes, which silently skipped kind (#96).
+		if r.nodeIsLocalContainer(ctx, node) {
 			hostPath := fmt.Sprintf("/var/lib/rancher/k3s/storage/manual-%s", pgkube.MysqlPVCName(r.fg, site.Name))
 			cmd := exec.CommandContext(ctx, r.runtime, "exec", node, "sh", "-c", "mkdir -p '"+hostPath+"' && chmod 0777 '"+hostPath+"'")
 			if out, err := cmd.CombinedOutput(); err != nil {
