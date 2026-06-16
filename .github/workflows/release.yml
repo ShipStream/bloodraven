@@ -73,16 +73,19 @@ jobs:
         working-directory: docs
         run: npm run verify:llms
 
-  # E2E release gate — runs the release-profile real-cluster E2E before
-  # any publishing jobs. This ensures that every tagged release has been
-  # validated against real MySQL pods, PVCs, DNS, taints, failover, and
-  # network partition scenarios (WISHLIST #32).
+  # E2E release gate — runs the *smoke* real-cluster E2E (core failover:
+  # clean primary kill, planned switchover, operator restart) before any
+  # publishing jobs. This blocks a tag from shipping if the critical
+  # failover path is broken, while staying fast (~5m) and resistant to a
+  # single broad-scenario flake stalling every release. The full
+  # release-profile suite runs as a post-publish stage (e2e-full below)
+  # and nightly (.github/workflows/e2e.yml).
   e2e-gate:
-    name: E2E gate (release profile)
+    name: E2E gate (smoke profile)
     needs: ci-gate
     uses: ./.github/workflows/_e2e.yml
     with:
-      profile: release
+      profile: smoke
 
   draft-release:
     name: Create Draft Release
@@ -252,3 +255,18 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           draft: false
+
+  # Post-release full E2E — runs the complete release-profile suite (real
+  # MySQL pods/PVCs/DNS/taints, emergency + planned failover, self-fencing,
+  # network partition, PVC loss/re-bootstrap, old-primary recovery, state
+  # durability, backup/PITR) AFTER the release is forged. By design this
+  # cannot block publishing (the artifacts are already out); a failure here
+  # is an alert to investigate or yank the release, not a gate. This gives
+  # every forged release the full validation the smoke gate trades away for
+  # speed, without one broad-scenario flake stalling the publish.
+  e2e-full:
+    name: Post-release E2E (release profile)
+    needs: publish-release
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      profile: release

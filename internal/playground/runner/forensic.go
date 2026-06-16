@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"sigs.k8s.io/yaml"
@@ -109,7 +110,12 @@ func (c *Capture) Persist(ctx context.Context, k *pgkube.Client, namespace, fg s
 			buf = append(buf, []byte(m.Line)...)
 			buf = append(buf, '\n')
 		}
-		_ = c.WriteFile(label+".log", buf)
+		// Tailer labels are component keys like "sidecar:iad" / "mysql:pdx".
+		// The ':' is illegal in a filename on NTFS and is rejected by
+		// actions/upload-artifact, which would fail the whole forensics
+		// upload (and hide every other capture in the dir). Sanitize to a
+		// filesystem- and artifact-safe name.
+		_ = c.WriteFile(sanitizeLogFilename(label)+".log", buf)
 	}
 
 	c.mu.Lock()
@@ -129,3 +135,20 @@ func (c *Capture) Persist(ctx context.Context, k *pgkube.Client, namespace, fg s
 }
 
 func listOpts() metav1ListOpts { return metav1ListOpts{} }
+
+// sanitizeLogFilename maps a tailer component label (e.g. "sidecar:iad")
+// to a filename component that is safe on all filesystems and accepted
+// by actions/upload-artifact. The blocked set mirrors the characters
+// upload-artifact rejects (" : < > | * ? \r \n) plus the path
+// separators; all are collapsed to '-'.
+func sanitizeLogFilename(label string) string {
+	repl := func(r rune) rune {
+		switch r {
+		case ':', '"', '<', '>', '|', '*', '?', '/', '\\', '\r', '\n':
+			return '-'
+		default:
+			return r
+		}
+	}
+	return strings.Map(repl, label)
+}

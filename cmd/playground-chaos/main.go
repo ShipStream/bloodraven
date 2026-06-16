@@ -355,8 +355,31 @@ func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 		if s.ResetBeforeRunAll {
 			fmt.Fprintf(os.Stderr, "!! run-all: %s requires a pristine playground; running reset first\n", s.ID)
 			if err := runReset(ctx, kubeconfig, kctx, k.CurrentCtx, namespace, fg, resultsDir); err != nil {
+				// A failed pre-scenario reset used to `return exitEnvironment`
+				// here, which aborted the whole suite mid-loop — bypassing
+				// --continue-on-failure AND the JUnit write below, so a single
+				// wedged scenario (e.g. 09 leaving the cluster unhealthy)
+				// produced a red job with no report. Record it as a synthetic
+				// failure for this scenario instead, so the result lands in
+				// JUnit and the run honors --continue-on-failure like any other
+				// failure.
 				fmt.Fprintf(os.Stderr, "run-all reset before %s failed: %v\n", s.ID, err)
-				return exitEnvironment
+				res := runner.Result{
+					ID:        s.ID,
+					Title:     s.Title,
+					Passed:    false,
+					Phase:     runner.PhasePrecheck,
+					StepName:  "ResetBeforeRunAll",
+					Failure:   fmt.Sprintf("pre-scenario reset failed: %v", err),
+					StartTime: time.Now(),
+				}
+				results = append(results, res)
+				printResult(res)
+				exitCode = exitFailure
+				if !continueOnFailure {
+					break
+				}
+				continue
 			}
 		}
 		res := runScenarioWithAutoReset(ctx, k, kubeconfig, kctx, s, namespace, fg, resultsDir, noCleanup, force, autoReset, logger)
