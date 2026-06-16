@@ -65,9 +65,14 @@ if [[ ! -d "${DATA_DIR}/mysql" ]]; then
     # create $DATA_DIR fresh — it refuses a pre-existing directory.
     rm -rf "$DATA_DIR"
     log "initializing ephemeral datadir at $DATA_DIR"
+    # Do NOT pass --user=mysql: the pod already pins a fixed non-root
+    # identity via RunAsUser/RunAsGroup/FSGroup (uid/gid 27), and the
+    # datadir emptyDir is owned by that fsGroup. --user makes mysqld
+    # setgid to the image's own "mysql" group (NOT 27 in the verify
+    # image), which loses group-write on the emptyDir and fails datadir
+    # creation with EACCES. Running as the container identity is correct.
     mysqld --initialize-insecure \
         --datadir="$DATA_DIR" \
-        --user=mysql \
         --log-error="$ERRLOG"
 fi
 
@@ -78,7 +83,6 @@ log "starting ephemeral mysqld"
 # the verify path uses the X protocol.
 mysqld \
     --datadir="$DATA_DIR" \
-    --user=mysql \
     --bind-address=127.0.0.1 \
     --socket="$SOCKET" \
     --pid-file="$DATA_DIR/mysqld.pid" \
