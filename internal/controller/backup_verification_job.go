@@ -16,8 +16,8 @@ import (
 
 const (
 	// verificationDataMountPath is where the verification Job mounts
-	// its ephemeral datadir PVC. The verify.sh script reads this path
-	// from BLOODRAVEN_DATA_DIR.
+	// its ephemeral datadir emptyDir. The verify.sh script reads this
+	// path from BLOODRAVEN_DATA_DIR.
 	verificationDataMountPath = "/var/lib/mysql-verify"
 
 	// verificationDefaultActiveDeadline is the fallback Job
@@ -42,51 +42,12 @@ type verificationJobInputs struct {
 	Backup               *v1alpha1.MysqlBackup
 	CredsSecretName      string
 	ScriptsConfigMapName string
-	PVCName              string
 }
 
-// buildVerificationPVC constructs the ephemeral datadir PVC for a
-// verification run. Size is taken from spec.storage.size when set,
-// otherwise auto-sized from the referenced backup's sizeBytes.
-func buildVerificationPVC(in verificationJobInputs) *corev1.PersistentVolumeClaim {
-	v := in.Verification
-
-	size := autoSizeVerificationPVC(v, in.Backup)
-
-	labels := map[string]string{
-		labelAppName:                 "mysql-verify",
-		labelInstance:                in.FailoverGroup.Name,
-		labelFailoverGroup:           in.FailoverGroup.Name,
-		labelBackupProfile:           in.Profile.Name,
-		labelMysqlBackupVerification: v.Name,
-		labelManagedBy:               managerName,
-		labelResourceKind:            verificationResourceKindCR,
-	}
-
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      verificationPVCName(v.Name),
-			Namespace: v.Namespace,
-			Labels:    labels,
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.VolumeResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: size,
-				},
-			},
-		},
-	}
-	if v.Spec.Storage != nil && v.Spec.Storage.StorageClassName != "" {
-		sc := v.Spec.Storage.StorageClassName
-		pvc.Spec.StorageClassName = &sc
-	}
-	return pvc
-}
-
-// autoSizeVerificationPVC returns the requested PVC capacity for a
-// verification run. Explicit spec.storage.size wins; otherwise we use
+// autoSizeVerificationPVC returns the requested capacity for the
+// verification run's ephemeral datadir. The result is used as the
+// emptyDir SizeLimit so node-disk usage stays bounded (~1.5x the backup
+// size). Explicit spec.storage.size wins; otherwise we use
 // max(verificationMinPVCSize, ceil(1.5 * backup.status.sizeBytes / 10 GiB) * 10 GiB).
 func autoSizeVerificationPVC(v *v1alpha1.MysqlBackupVerification, backup *v1alpha1.MysqlBackup) resource.Quantity {
 	if v.Spec.Storage != nil && !v.Spec.Storage.Size.IsZero() {
@@ -125,9 +86,6 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	}
 	if in.ScriptsConfigMapName == "" {
 		return nil, fmt.Errorf("verification job: scripts configmap name is empty")
-	}
-	if in.PVCName == "" {
-		return nil, fmt.Errorf("verification job: pvc name is empty")
 	}
 	if backup == nil {
 		return nil, fmt.Errorf("verification job: backup reference not resolved")
@@ -214,12 +172,21 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		)
 	}
 
+	// The ephemeral datadir lives on an emptyDir rather than a PVC.
+	// emptyDir always honors the pod's fsGroup, so the non-root mysqld
+	// user (uid 27) can write the datadir on every provisioner —
+	// including kind's local-path, whose hostPath-backed PVs are left
+	// root-owned because the kubelet does not apply fsGroup ownership to
+	// them. The SizeLimit caps node-disk usage at the auto-sized
+	// capacity (~1.5x the backup size); the volume self-cleans with the
+	// pod.
+	datadirSizeLimit := autoSizeVerificationPVC(v, backup)
 	volumes := []corev1.Volume{
 		{
 			Name: "datadir",
 			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: in.PVCName,
+				EmptyDir: &corev1.EmptyDirVolumeSource{
+					SizeLimit: &datadirSizeLimit,
 				},
 			},
 		},

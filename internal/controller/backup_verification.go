@@ -35,12 +35,6 @@ func verificationJobName(crName string) string {
 	return truncateDNS1123(fmt.Sprintf("mysqlverify-%s", crName))
 }
 
-// verificationPVCName returns the ephemeral datadir PVC name for a
-// given verification run. One PVC per run; never reused.
-func verificationPVCName(crName string) string {
-	return truncateDNS1123(fmt.Sprintf("mysqlverify-%s-data", crName))
-}
-
 // verificationCredsSecretName returns the derived Secret holding the
 // S3 / DSN credentials needed by the load script inside the verification
 // Job. Mirrors backupCredsSecretName's naming pattern.
