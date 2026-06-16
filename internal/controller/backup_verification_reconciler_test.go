@@ -135,9 +135,11 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	if _, ok := volByName["datadir"]; !ok {
 		t.Errorf("want datadir volume")
 	}
-	// The ephemeral datadir is an emptyDir (writable by uid 27 via
-	// fsGroup on every provisioner) capped at the auto-sized capacity.
-	// The 1Gi backup rounds up to the 10Gi minimum.
+	// The ephemeral datadir is an emptyDir (writable by uid 27 via fsGroup
+	// on every provisioner). It must NOT carry a SizeLimit: a size-limited
+	// emptyDir is set up as a separate mount that the CI runner's
+	// filesystem does not fsGroup-chown, leaving it root-owned so the
+	// non-root mysqld can't write it (errno 13).
 	datadir := volByName["datadir"]
 	if datadir.PersistentVolumeClaim != nil {
 		t.Errorf("datadir volume must not reference a PVC: %+v", datadir)
@@ -145,12 +147,8 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	switch dv := datadir.EmptyDir; {
 	case dv == nil:
 		t.Errorf("datadir volume is not an emptyDir: %+v", datadir)
-	case dv.SizeLimit == nil:
-		t.Errorf("datadir emptyDir has no sizeLimit: %+v", dv)
-	default:
-		if wantSize := autoSizeVerificationPVC(v, backup); dv.SizeLimit.Cmp(wantSize) != 0 {
-			t.Errorf("datadir emptyDir sizeLimit = %v, want %v", dv.SizeLimit, &wantSize)
-		}
+	case dv.SizeLimit != nil:
+		t.Errorf("datadir emptyDir must not set SizeLimit (breaks fsGroup on CI): %+v", dv)
 	}
 	if _, ok := volByName["scripts"]; !ok {
 		t.Errorf("want scripts volume")

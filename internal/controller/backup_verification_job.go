@@ -173,22 +173,22 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	}
 
 	// The ephemeral datadir lives on an emptyDir rather than a PVC.
-	// emptyDir always honors the pod's fsGroup, so the non-root mysqld
-	// user (uid 27) can write the datadir on every provisioner —
-	// including kind's local-path, whose hostPath-backed PVs are left
-	// root-owned because the kubelet does not apply fsGroup ownership to
-	// them. The SizeLimit caps node-disk usage at the auto-sized
-	// capacity (~1.5x the backup size); the volume self-cleans with the
-	// pod.
-	datadirSizeLimit := autoSizeVerificationPVC(v, backup)
+	// emptyDir honors the pod's fsGroup, so the non-root mysqld user
+	// (uid 27) can write the datadir on every provisioner — including
+	// kind's local-path, whose hostPath-backed PVs are left root-owned
+	// because the kubelet does not apply fsGroup ownership to them.
+	//
+	// Do NOT set EmptyDir.SizeLimit: a size-limited emptyDir is set up as
+	// a separate mount that the CI runner's filesystem does NOT
+	// fsGroup-chown, leaving it root-owned so the non-root mysqld fails to
+	// create its datadir (errno 13). The unlimited emptyDir IS fsGroup-owned
+	// and writable. (TODO: re-introduce node-disk bounding via a container
+	// ephemeral-storage limit once we confirm CI nodes have the headroom;
+	// autoSizeVerificationPVC stays available for that.)
 	volumes := []corev1.Volume{
 		{
-			Name: "datadir",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{
-					SizeLimit: &datadirSizeLimit,
-				},
-			},
+			Name:         "datadir",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 		{
 			Name: "scripts",
