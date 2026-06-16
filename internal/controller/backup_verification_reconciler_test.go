@@ -118,7 +118,6 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 		Backup:               backup,
 		CredsSecretName:      "mysqlverify-verify-happy-creds",
 		ScriptsConfigMapName: "mysql-lion-backup-scripts",
-		PVCName:              "mysqlverify-verify-happy-data",
 	})
 	if err != nil {
 		t.Fatalf("buildVerificationJob: %v", err)
@@ -136,8 +135,20 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	if _, ok := volByName["datadir"]; !ok {
 		t.Errorf("want datadir volume")
 	}
-	if dv := volByName["datadir"].PersistentVolumeClaim; dv == nil || dv.ClaimName != "mysqlverify-verify-happy-data" {
-		t.Errorf("datadir volume does not reference expected PVC: %+v", volByName["datadir"])
+	// The ephemeral datadir is an emptyDir (writable by uid 27 via fsGroup
+	// on every provisioner). It must NOT carry a SizeLimit: a size-limited
+	// emptyDir is set up as a separate mount that the CI runner's
+	// filesystem does not fsGroup-chown, leaving it root-owned so the
+	// non-root mysqld can't write it (errno 13).
+	datadir := volByName["datadir"]
+	if datadir.PersistentVolumeClaim != nil {
+		t.Errorf("datadir volume must not reference a PVC: %+v", datadir)
+	}
+	switch dv := datadir.EmptyDir; {
+	case dv == nil:
+		t.Errorf("datadir volume is not an emptyDir: %+v", datadir)
+	case dv.SizeLimit != nil:
+		t.Errorf("datadir emptyDir must not set SizeLimit (breaks fsGroup on CI): %+v", dv)
 	}
 	if _, ok := volByName["scripts"]; !ok {
 		t.Errorf("want scripts volume")
@@ -177,7 +188,6 @@ func TestBuildVerificationJob_PVCBackedBackup_MountsBackupPVC(t *testing.T) {
 		Backup:               backup,
 		CredsSecretName:      "mysqlverify-verify-pvc-creds",
 		ScriptsConfigMapName: "mysql-lion-backup-scripts",
-		PVCName:              verificationPVCName("verify-pvc"),
 	})
 	if err != nil {
 		t.Fatalf("buildVerificationJob: %v", err)
@@ -211,7 +221,6 @@ func TestBuildVerificationJob_MissingLocation_Errors(t *testing.T) {
 		Backup:               backup,
 		CredsSecretName:      "c",
 		ScriptsConfigMapName: "s",
-		PVCName:              "p",
 	})
 	if err == nil {
 		t.Fatal("expected error for backup without status.location")
@@ -296,7 +305,7 @@ func TestVerificationReconciler_NoSucceededBackup_TransitionsToFailed(t *testing
 	}
 }
 
-func TestVerificationReconciler_CreatesJobAndPVC(t *testing.T) {
+func TestVerificationReconciler_CreatesJobWithEmptyDirDatadir(t *testing.T) {
 	fg := verifyFG()
 	backup := successfulBackup("nightly-happy", "lion", "nightly-s3")
 	v := verifyCR("verify-happy", "lion", "nightly-s3")
@@ -321,11 +330,28 @@ func TestVerificationReconciler_CreatesJobAndPVC(t *testing.T) {
 		t.Fatalf("verification job not created: %v", err)
 	}
 
-	var pvc corev1.PersistentVolumeClaim
-	if err := c.Get(context.Background(), types.NamespacedName{
-		Name: verificationPVCName("verify-happy"), Namespace: "ns",
-	}, &pvc); err != nil {
-		t.Fatalf("verification pvc not created: %v", err)
+	// The ephemeral datadir is an emptyDir on the Job pod, not a
+	// standalone PVC. Confirm the Job carries an emptyDir datadir and
+	// that the reconciler provisioned no PVCs at all.
+	var datadir *corev1.Volume
+	for i := range job.Spec.Template.Spec.Volumes {
+		if job.Spec.Template.Spec.Volumes[i].Name == "datadir" {
+			datadir = &job.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	if datadir == nil || datadir.EmptyDir == nil {
+		t.Fatalf("datadir volume is not an emptyDir: %+v", datadir)
+	}
+	if datadir.PersistentVolumeClaim != nil {
+		t.Errorf("datadir volume must not reference a PVC: %+v", datadir)
+	}
+
+	var pvcs corev1.PersistentVolumeClaimList
+	if err := c.List(context.Background(), &pvcs, client.InNamespace("ns")); err != nil {
+		t.Fatalf("list pvcs: %v", err)
+	}
+	if len(pvcs.Items) != 0 {
+		t.Errorf("verification must not create any PVC, found %d: %+v", len(pvcs.Items), pvcs.Items)
 	}
 }
 
@@ -535,7 +561,6 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 		Backup:               backup,
 		CredsSecretName:      "c",
 		ScriptsConfigMapName: "s",
-		PVCName:              "p",
 	})
 	if err != nil {
 		t.Fatalf("buildVerificationJob: %v", err)
@@ -583,7 +608,6 @@ func TestBuildVerificationJob_PITRRequiresPITREnabled(t *testing.T) {
 		Backup:               backup,
 		CredsSecretName:      "c",
 		ScriptsConfigMapName: "s",
-		PVCName:              "p",
 	})
 	if err == nil {
 		t.Fatal("want error when pointInTime is set but PITR not enabled")
@@ -614,7 +638,6 @@ func TestBuildVerificationJob_SanityCheck_SetsEnvVars(t *testing.T) {
 		Backup:               backup,
 		CredsSecretName:      "c",
 		ScriptsConfigMapName: "s",
-		PVCName:              "p",
 	})
 	if err != nil {
 		t.Fatalf("buildVerificationJob: %v", err)
@@ -682,7 +705,6 @@ func TestBuildVerificationJob_SanityCheck_RejectsMultiStatement(t *testing.T) {
 		Backup:               backup,
 		CredsSecretName:      "c",
 		ScriptsConfigMapName: "s",
-		PVCName:              "p",
 	}); err == nil {
 		t.Fatal("expected multi-statement sanity query to be rejected")
 	}

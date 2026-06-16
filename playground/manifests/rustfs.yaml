@@ -49,6 +49,22 @@ spec:
       labels:
         app.kubernetes.io/name: rustfs
     spec:
+      # RustFS is the shared backup object store, not a MySQL client. It must
+      # not be evicted (or blocked from rescheduling) when a MySQL site node
+      # is fenced with the db-readonly NoExecute taint during a failover —
+      # otherwise chaos scenarios that restart RustFS (backup/PITR
+      # verification) get stuck with the pod Pending on tainted nodes. The
+      # disk-pressure toleration mirrors the other playground infra pods.
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+        - key: shipstream.io/db-readonly-playground
+          operator: Exists
+          effect: NoExecute
+        - key: shipstream.io/db-readonly
+          operator: Exists
+          effect: NoExecute
       containers:
         - name: rustfs
           image: rustfs/rustfs:latest

@@ -31,7 +31,7 @@ import (
 
 // Condition types on MysqlBackupVerification.status.conditions.
 const (
-	ConditionVerified          = "Verified"
+	ConditionVerified           = "Verified"
 	ConditionResourcesCleanedUp = "ResourcesCleanedUp"
 )
 
@@ -193,11 +193,9 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{}, fmt.Errorf("ensure verification creds: %w", err)
 	}
 
-	// Ensure ephemeral PVC.
-	pvcName := verificationPVCName(v.Name)
-	if err := r.ensureVerificationPVC(ctx, &v, *profile, backup); err != nil {
-		return r.failVerification(ctx, &v, "PVCProvisioningFailed", err.Error())
-	}
+	// The ephemeral datadir is an emptyDir baked into the verification
+	// Job pod spec (see buildVerificationJob), so there is no separate
+	// PVC to provision here.
 
 	// Phase transition: Pending → Provisioning on first pass.
 	if v.Status.Phase == "" || v.Status.Phase == v1alpha1.VerificationPhasePending {
@@ -205,7 +203,6 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 		patch := client.MergeFrom(v.DeepCopy())
 		v.Status.Phase = v1alpha1.VerificationPhaseProvisioning
 		v.Status.StartTime = &now
-		v.Status.PVCName = pvcName
 		v.Status.Message = "ephemeral resources provisioned"
 		v.Status.ObservedGeneration = v.Generation
 		if err := r.Status().Patch(ctx, &v, patch); err != nil {
@@ -229,7 +226,6 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 			Backup:               backup,
 			CredsSecretName:      credsName,
 			ScriptsConfigMapName: backupScriptsConfigMapName(fg.Name),
-			PVCName:              pvcName,
 		})
 		if err != nil {
 			return r.failVerification(ctx, &v, "BuildJobFailed", err.Error())
@@ -319,7 +315,6 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	next.Message = message
 	next.ObservedGeneration = v.Generation
 	next.JobName = job.Name
-	next.PVCName = pvcName
 
 	if v.Status.Phase == next.Phase && equality.Semantic.DeepEqual(&v.Status, &next) {
 		// Idempotent — just run post-terminal cleanup + retention.
@@ -367,7 +362,6 @@ func (r *MysqlBackupVerificationReconciler) SetupWithManager(mgr ctrl.Manager) e
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlBackupVerification{}).
 		Owns(&batchv1.Job{}).
-		Owns(&corev1.PersistentVolumeClaim{}).
 		Owns(&corev1.Secret{}).
 		Complete(r)
 }
@@ -463,35 +457,6 @@ func (r *MysqlBackupVerificationReconciler) findBlockingVerification(ctx context
 
 func verificationTerminal(p v1alpha1.VerificationPhase) bool {
 	return p == v1alpha1.VerificationPhaseSucceeded || p == v1alpha1.VerificationPhaseFailed
-}
-
-// ensureVerificationPVC provisions the ephemeral datadir PVC.
-func (r *MysqlBackupVerificationReconciler) ensureVerificationPVC(ctx context.Context, v *v1alpha1.MysqlBackupVerification, profile v1alpha1.BackupProfile, backup *v1alpha1.MysqlBackup) error {
-	pvc := buildVerificationPVC(verificationJobInputs{
-		FailoverGroup: &v1alpha1.MysqlFailoverGroup{
-			ObjectMeta: metav1.ObjectMeta{Name: v.Spec.FailoverGroupRef.Name, Namespace: v.Namespace},
-		},
-		Profile:      profile,
-		Verification: v,
-		Backup:       backup,
-	})
-	var existing corev1.PersistentVolumeClaim
-	if err := r.Get(ctx, types.NamespacedName{Namespace: pvc.Namespace, Name: pvc.Name}, &existing); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("get verification pvc: %w", err)
-		}
-		if err := controllerutil.SetControllerReference(v, pvc, r.Scheme); err != nil {
-			return fmt.Errorf("set pvc owner ref: %w", err)
-		}
-		if err := r.Create(ctx, pvc); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				return nil
-			}
-			return fmt.Errorf("create verification pvc: %w", err)
-		}
-		return nil
-	}
-	return nil
 }
 
 // ensureVerificationCredsSecret creates the derived Secret used by the
@@ -630,10 +595,12 @@ func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context
 	}
 
 	jobName := verificationJobName(v.Name)
-	pvcName := verificationPVCName(v.Name)
 	secretName := verificationCredsSecretName(v.Name)
 
-	// Job (propagation=Foreground so pods go with it).
+	// Job (propagation=Foreground so pods go with it). The ephemeral
+	// datadir is an emptyDir inside the Job pod, so deleting the Job
+	// reclaims the datadir storage too — there is no separate PVC to
+	// delete here.
 	var job batchv1.Job
 	if err := r.Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: jobName}, &job); err == nil {
 		fg := metav1.DeletePropagationForeground
@@ -642,16 +609,6 @@ func (r *MysqlBackupVerificationReconciler) cleanupEphemeral(ctx context.Context
 		}
 	} else if !apierrors.IsNotFound(err) {
 		return 0, fmt.Errorf("get verification job for cleanup: %w", err)
-	}
-
-	// PVC.
-	var pvc corev1.PersistentVolumeClaim
-	if err := r.Get(ctx, types.NamespacedName{Namespace: v.Namespace, Name: pvcName}, &pvc); err == nil {
-		if err := r.Delete(ctx, &pvc); err != nil && !apierrors.IsNotFound(err) {
-			return 0, fmt.Errorf("delete verification pvc: %w", err)
-		}
-	} else if !apierrors.IsNotFound(err) {
-		return 0, fmt.Errorf("get verification pvc for cleanup: %w", err)
 	}
 
 	// Derived creds Secret.

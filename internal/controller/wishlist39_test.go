@@ -271,7 +271,6 @@ func TestBuildVerificationJob_AutomountServiceAccountToken_False(t *testing.T) {
 		Backup:               backup,
 		CredsSecretName:      "x",
 		ScriptsConfigMapName: "y",
-		PVCName:              "verify-amt-data",
 	})
 	if err != nil {
 		t.Fatalf("buildVerificationJob: %v", err)
@@ -305,7 +304,6 @@ func TestBuildVerificationJob_EncryptedSource_InitContainerCarriesResources(t *t
 		Backup:               backup,
 		CredsSecretName:      "x",
 		ScriptsConfigMapName: "y",
-		PVCName:              "verify-enc-data",
 	})
 	if err != nil {
 		t.Fatalf("buildVerificationJob: %v", err)

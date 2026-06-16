@@ -195,9 +195,10 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 	}
 	nn := types.NamespacedName{Name: verify.Name, Namespace: ns}
 
-	// Reconcile until the Job exists — at that point the PVC + creds
-	// Secret must have been created and the phase must be at least
-	// Restoring.
+	// Reconcile until the Job exists — at that point the creds Secret must
+	// have been created and the phase must be at least Restoring. The
+	// ephemeral datadir is an emptyDir baked into the Job (no PVC is
+	// provisioned anymore), so no verify PVC object should exist.
 	jobKey := types.NamespacedName{Name: "mysqlverify-verify-provision", Namespace: ns}
 	reconcileUntil(t, r, nn, func() bool {
 		var j batchv1.Job
@@ -206,11 +207,8 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 
 	var pvc corev1.PersistentVolumeClaim
 	pvcKey := types.NamespacedName{Name: "mysqlverify-verify-provision-data", Namespace: ns}
-	if err := k8sClient.Get(ctx, pvcKey, &pvc); err != nil {
-		t.Fatalf("ephemeral PVC not created: %v", err)
-	}
-	if len(pvc.OwnerReferences) == 0 || pvc.OwnerReferences[0].Name != verify.Name {
-		t.Errorf("PVC owner ref missing or wrong: %+v", pvc.OwnerReferences)
+	if err := k8sClient.Get(ctx, pvcKey, &pvc); err == nil {
+		t.Errorf("verify PVC must NOT be provisioned (datadir is an emptyDir), but %s exists", pvc.Name)
 	}
 
 	var secret corev1.Secret
@@ -229,6 +227,23 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 	cmd := strings.Join(job.Spec.Template.Spec.Containers[0].Command, " ")
 	if !strings.Contains(cmd, "verify.sh") {
 		t.Errorf("verification Job container should invoke verify.sh, got %q", cmd)
+	}
+
+	// The ephemeral datadir must be an emptyDir, and must NOT set a
+	// SizeLimit — a size-limited emptyDir is set up as a separate mount the
+	// CI runner's filesystem does not fsGroup-chown, leaving it root-owned
+	// so the non-root mysqld can't create its datadir (errno 13).
+	var datadirVol *corev1.Volume
+	for i := range job.Spec.Template.Spec.Volumes {
+		if job.Spec.Template.Spec.Volumes[i].Name == "datadir" {
+			datadirVol = &job.Spec.Template.Spec.Volumes[i]
+			break
+		}
+	}
+	if datadirVol == nil || datadirVol.EmptyDir == nil {
+		t.Errorf("verification Job datadir volume must be an emptyDir, got %+v", datadirVol)
+	} else if datadirVol.EmptyDir.SizeLimit != nil {
+		t.Errorf("datadir emptyDir must not set SizeLimit (breaks fsGroup on CI): %+v", datadirVol.EmptyDir)
 	}
 
 	// The verification Job mounts the backup source read-only, so
