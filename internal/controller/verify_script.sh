@@ -35,10 +35,17 @@
 
 set -euo pipefail
 
-DATA_DIR="${BLOODRAVEN_DATA_DIR:-/var/lib/mysql-verify}"
+# The PVC is mounted at $MOUNT_DIR. mysqld --initialize refuses to
+# initialize into a directory that already exists (errno 17 EEXIST), and
+# some provisioners — notably kind's local-path, used in CI — pre-create
+# the PVC mount point. So the real datadir is a subdirectory mysqld creates
+# itself; the socket/errlog stay on the mount root (writable via fsGroup,
+# and they need no initialization).
+MOUNT_DIR="${BLOODRAVEN_DATA_DIR:-/var/lib/mysql-verify}"
+DATA_DIR="${MOUNT_DIR}/data"
 SCRIPTS_DIR="${BLOODRAVEN_SCRIPTS_DIR:-/scripts}"
-SOCKET="${DATA_DIR}/mysql.sock"
-ERRLOG="${DATA_DIR}/mysqld.err"
+SOCKET="${MOUNT_DIR}/mysql.sock"
+ERRLOG="${MOUNT_DIR}/mysqld.err"
 
 log() { printf '[verify] %s\n' "$*"; }
 
@@ -51,9 +58,12 @@ cleanup_mysqld() {
 }
 trap cleanup_mysqld EXIT
 
-mkdir -p "$DATA_DIR"
+mkdir -p "$MOUNT_DIR"
 
 if [[ ! -d "${DATA_DIR}/mysql" ]]; then
+    # Remove any partial datadir left by a prior Job attempt so mysqld can
+    # create $DATA_DIR fresh — it refuses a pre-existing directory.
+    rm -rf "$DATA_DIR"
     log "initializing ephemeral datadir at $DATA_DIR"
     mysqld --initialize-insecure \
         --datadir="$DATA_DIR" \
