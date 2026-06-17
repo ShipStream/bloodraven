@@ -135,11 +135,9 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	if _, ok := volByName["datadir"]; !ok {
 		t.Errorf("want datadir volume")
 	}
-	// The ephemeral datadir is an emptyDir, made writable to the non-root
-	// verify user by the prep-datadir init container's chown (fsGroup
-	// ownership is not applied to emptyDir on every runner). It must NOT
-	// carry a SizeLimit: a size-limited emptyDir is set up as a separate
-	// mount whose ownership the prep step would also have to track.
+	// The ephemeral datadir is an emptyDir (fsGroup makes it writable to the
+	// non-root verify user). It must NOT carry a SizeLimit (a size-limited
+	// emptyDir is a separate mount that is not always fsGroup-chowned).
 	datadir := volByName["datadir"]
 	if datadir.PersistentVolumeClaim != nil {
 		t.Errorf("datadir volume must not reference a PVC: %+v", datadir)
@@ -156,96 +154,29 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	if _, ok := volByName["aws-creds"]; !ok {
 		t.Errorf("S3-backed verification should mount aws-creds")
 	}
-
-	// A root prep-datadir init container must run first and chown every
-	// emptyDir to the non-root run-as user; without it the non-root
-	// containers cannot write the datadir where the kubelet does not apply
-	// fsGroup ownership to emptyDir.
-	initCs := job.Spec.Template.Spec.InitContainers
-	if len(initCs) == 0 || initCs[0].Name != "prep-datadir" {
-		var names []string
-		for _, ic := range initCs {
-			names = append(names, ic.Name)
-		}
-		t.Fatalf("want prep-datadir as first init container, got %v", names)
-	}
-	prep := initCs[0]
-	if prep.SecurityContext == nil || prep.SecurityContext.RunAsUser == nil || *prep.SecurityContext.RunAsUser != 0 {
-		t.Errorf("prep-datadir must run as root (uid 0): %+v", prep.SecurityContext)
-	}
-	hasChown := false
-	if prep.SecurityContext != nil && prep.SecurityContext.Capabilities != nil {
-		for _, c := range prep.SecurityContext.Capabilities.Add {
-			if c == "CHOWN" {
-				hasChown = true
-			}
-		}
-	}
-	if !hasChown {
-		t.Errorf("prep-datadir must add CHOWN capability: %+v", prep.SecurityContext)
-	}
-	// It must chown the datadir emptyDir (its mount must reference datadir).
-	prepMountsDatadir := false
-	for _, m := range prep.VolumeMounts {
-		if m.Name == "datadir" {
-			prepMountsDatadir = true
-		}
-	}
-	if !prepMountsDatadir {
-		t.Errorf("prep-datadir must mount the datadir emptyDir: %+v", prep.VolumeMounts)
+	// The mysqld socket/pid dir is a dedicated emptyDir at /run/mysqld.
+	if _, ok := volByName["run-mysqld"]; !ok {
+		t.Errorf("want run-mysqld volume for the socket/pid dir")
 	}
 
 	mountByName := map[string]corev1.VolumeMount{}
 	for _, m := range c.VolumeMounts {
 		mountByName[m.Name] = m
 	}
+	// The datadir must mount at /var/lib/mysql and the socket dir at
+	// /run/mysqld — the only paths the stock mysqld AppArmor profile permits
+	// for the datadir and unix socket respectively.
 	if m, ok := mountByName["datadir"]; !ok || m.MountPath != verificationDataMountPath {
 		t.Errorf("datadir not mounted at %s: %+v", verificationDataMountPath, m)
 	}
-}
-
-func TestBuildVerifyDatadirPrepContainer_UsesEffectiveOwnerAndFSGroup(t *testing.T) {
-	podUID := int64(1000)
-	podGID := int64(1001)
-	fsGID := int64(2000)
-	containerUID := int64(3000)
-	containerGID := int64(3001)
-	prep := buildVerifyDatadirPrepContainer(
-		[]corev1.Volume{{Name: "datadir", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
-		&corev1.PodSecurityContext{RunAsUser: &podUID, RunAsGroup: &podGID, FSGroup: &fsGID},
-		&corev1.SecurityContext{RunAsUser: &containerUID, RunAsGroup: &containerGID},
-		"verify-image",
-		corev1.ResourceRequirements{},
-	)
-	if prep == nil {
-		t.Fatal("want prep container")
+	if verificationDataMountPath != "/var/lib/mysql" {
+		t.Errorf("datadir mount path must be /var/lib/mysql (AppArmor), got %q", verificationDataMountPath)
 	}
-	if got := strings.Join(prep.Command, " "); got != "chown" {
-		t.Fatalf("want direct chown command, got %q", got)
+	if m, ok := mountByName["run-mysqld"]; !ok || m.MountPath != verificationRunMountPath {
+		t.Errorf("run-mysqld not mounted at %s: %+v", verificationRunMountPath, m)
 	}
-	if len(prep.Args) == 0 || prep.Args[0] != "3000:2000" {
-		t.Fatalf("want effective uid and fsGroup gid in chown args, got %v", prep.Args)
-	}
-	if len(prep.Args) != 2 || prep.Args[1] != "/prepvol/datadir" {
-		t.Fatalf("want datadir path in chown args, got %v", prep.Args)
-	}
-}
-
-func TestBuildVerifyDatadirPrepContainer_FallsBackToContainerGroupWithoutFSGroup(t *testing.T) {
-	containerUID := int64(3000)
-	containerGID := int64(3001)
-	prep := buildVerifyDatadirPrepContainer(
-		[]corev1.Volume{{Name: "datadir", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
-		&corev1.PodSecurityContext{},
-		&corev1.SecurityContext{RunAsUser: &containerUID, RunAsGroup: &containerGID},
-		"verify-image",
-		corev1.ResourceRequirements{},
-	)
-	if prep == nil {
-		t.Fatal("want prep container")
-	}
-	if len(prep.Args) == 0 || prep.Args[0] != "3000:3001" {
-		t.Fatalf("want container uid/gid in chown args, got %v", prep.Args)
+	if verificationRunMountPath != "/run/mysqld" {
+		t.Errorf("socket dir mount path must be /run/mysqld (AppArmor), got %q", verificationRunMountPath)
 	}
 }
 
@@ -648,17 +579,14 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildVerificationJob: %v", err)
 	}
-	// prep-datadir (chown) runs first, then the PITR download init container.
+	// The only init container is the PITR download container.
 	initCs := job.Spec.Template.Spec.InitContainers
-	if len(initCs) != 2 {
-		t.Fatalf("want 2 init containers (prep-datadir + pitr-download), got %d", len(initCs))
+	if len(initCs) != 1 {
+		t.Fatalf("want 1 init container (pitr-download), got %d", len(initCs))
 	}
-	if initCs[0].Name != "prep-datadir" {
-		t.Errorf("want prep-datadir first, got %q", initCs[0].Name)
-	}
-	if initCs[1].Name != restorePITRInitContainerName {
+	if initCs[0].Name != restorePITRInitContainerName {
 		t.Errorf("want init container %q, got %q",
-			restorePITRInitContainerName, initCs[1].Name)
+			restorePITRInitContainerName, initCs[0].Name)
 	}
 	var haveMode, haveLocalDir, haveStop bool
 	for _, e := range job.Spec.Template.Spec.Containers[0].Env {

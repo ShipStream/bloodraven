@@ -18,7 +18,23 @@ const (
 	// verificationDataMountPath is where the verification Job mounts
 	// its ephemeral datadir emptyDir. The verify.sh script reads this
 	// path from BLOODRAVEN_DATA_DIR.
-	verificationDataMountPath = "/var/lib/mysql-verify"
+	//
+	// It MUST be /var/lib/mysql. On hosts with the stock mysqld AppArmor
+	// profile loaded (e.g. GitHub-hosted Ubuntu runners), the kernel
+	// attaches that profile to our containerized mysqld by binary path
+	// (/usr/sbin/mysqld) — even though the pod is otherwise unconfined —
+	// and the profile only permits the datadir under /var/lib/mysql/**.
+	// A datadir anywhere else (the old /var/lib/mysql-verify) is denied
+	// with errno 13 before mysqld can even create it.
+	verificationDataMountPath = "/var/lib/mysql"
+
+	// verificationRunMountPath is where the verification Job mounts an
+	// emptyDir for mysqld's unix socket and pid file. The stock mysqld
+	// AppArmor profile permits the socket only under /run/mysqld/, and the
+	// image's /run/mysqld is not writable under readOnlyRootFilesystem, so
+	// we mount a fresh emptyDir there. verify.sh reads it from
+	// BLOODRAVEN_RUN_DIR.
+	verificationRunMountPath = "/run/mysqld"
 
 	// verificationDefaultActiveDeadline is the fallback Job
 	// activeDeadlineSeconds used when spec.backup.activeDeadlineSeconds
@@ -128,6 +144,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 
 	env := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_DATA_DIR", Value: verificationDataMountPath},
+		{Name: "BLOODRAVEN_RUN_DIR", Value: verificationRunMountPath},
 		{Name: "BLOODRAVEN_SCRIPTS_DIR", Value: backupScriptsMountPath},
 		{Name: "BLOODRAVEN_INPUT_URL", Value: inputURL},
 		{Name: "BLOODRAVEN_LOAD_OPTIONS", Value: loadOptsJSON},
@@ -172,28 +189,29 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		)
 	}
 
-	// The ephemeral datadir (and the mysqlsh HOME, /tmp, and any PITR /
-	// decrypt staging dirs) live on emptyDir volumes rather than PVCs.
-	// emptyDir volumes are created root-owned; the pod's fsGroup is meant
-	// to make them group-writable so the non-root verify containers
-	// (uid 27) can write them. But fsGroup ownership is NOT applied
-	// reliably across environments — kind's local-path PVCs never get it,
-	// and (observed) kind on GitHub-hosted runners does not apply it to
-	// emptyDir either, leaving the mounts root:root so mysqld --initialize
-	// fails to create its datadir with errno 13. The prep-datadir init
-	// container below chowns every emptyDir to the run-as user, which is
-	// robust regardless of whether the kubelet applied fsGroup, the
-	// default emptyDir mode, or the node umask.
+	// The ephemeral datadir, mysqld socket/pid dir, mysqlsh HOME, /tmp, and
+	// any PITR / decrypt staging dirs live on emptyDir volumes rather than
+	// PVCs (kind's local-path PVCs are left root-owned, so a non-root
+	// mysqld can't use them; emptyDir honors the pod's fsGroup). The
+	// datadir and socket paths are NOT arbitrary: where the stock mysqld
+	// AppArmor profile is loaded on the node, the kernel confines our
+	// containerized mysqld to /var/lib/mysql/** (datadir) and /run/mysqld/
+	// (socket) by binary path, so those mounts must land exactly there.
+	// /tmp must also be a writable emptyDir — InnoDB writes a temp file
+	// there during --initialize, which fails with EROFS otherwise.
 	//
 	// Do NOT set EmptyDir.SizeLimit: a size-limited emptyDir is set up as a
-	// separate mount whose ownership the prep step would also have to
-	// track, and on some runners it is not fsGroup-chowned at all. (TODO:
-	// re-introduce node-disk bounding via a container ephemeral-storage
-	// limit once we confirm CI nodes have the headroom;
-	// autoSizeVerificationPVC stays available for that.)
+	// separate mount that is not always fsGroup-chowned. (TODO: re-introduce
+	// node-disk bounding via a container ephemeral-storage limit once we
+	// confirm CI nodes have the headroom; autoSizeVerificationPVC stays
+	// available for that.)
 	volumes := []corev1.Volume{
 		{
 			Name:         "datadir",
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		},
+		{
+			Name:         "run-mysqld",
 			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
 		},
 		{
@@ -216,6 +234,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	}
 	mounts := []corev1.VolumeMount{
 		{Name: "datadir", MountPath: verificationDataMountPath},
+		{Name: "run-mysqld", MountPath: verificationRunMountPath},
 		{Name: "scripts", MountPath: backupScriptsMountPath, ReadOnly: true},
 		{Name: "mysqlsh-home", MountPath: mysqlshHomeMountPath},
 		{Name: "tmp", MountPath: tmpMountPath},
@@ -477,16 +496,6 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	}
 	podSC, containerSC := mergeSecurityContexts(userPod, userCont)
 
-	// Prepend a tiny root init container that chowns every emptyDir to the
-	// effective run-as user so the non-root verify containers can write them
-	// even where the kubelet does not apply fsGroup ownership (see the
-	// emptyDir note above). It runs before the PITR / decrypt init
-	// containers, which also write emptyDir staging dirs as the non-root
-	// user.
-	if prep := buildVerifyDatadirPrepContainer(volumes, podSC, containerSC, image, defaultInitContainerResources()); prep != nil {
-		initContainers = append([]corev1.Container{*prep}, initContainers...)
-	}
-
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      verificationJobName(v.Name),
@@ -526,87 +535,6 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		},
 	}
 	return job, nil
-}
-
-// buildVerifyDatadirPrepContainer returns an init container that chowns
-// every emptyDir-backed volume in the verification pod to the verify
-// container's effective run-as user and writable group, or nil if the pod
-// has no emptyDir volumes.
-//
-// The verification pod runs mysqld and mysqlsh as a non-root user (uid 27
-// by default) and must write its ephemeral datadir, mysqlsh HOME, /tmp,
-// and any PITR / decrypt staging dirs — all emptyDir volumes. emptyDir
-// volumes are created root-owned and only the pod's fsGroup is supposed to
-// make them writable to the non-root user; that ownership is not applied
-// reliably across kubelet/runtime/host combinations (observed: kind on
-// GitHub-hosted runners leaves them root:root, so mysqld --initialize
-// fails with errno 13). Chowning the volumes to the effective run-as user
-// and fsGroup is robust regardless of whether fsGroup was applied, the
-// default emptyDir mode, or the node umask.
-//
-// Each emptyDir is mounted at /prepvol/<name>; chowning through that mount
-// changes the underlying node directory, so the other containers see the
-// new ownership at their own mount paths. The container runs as root with
-// only CAP_CHOWN so the rest of the pod stays non-root and least-privilege.
-func buildVerifyDatadirPrepContainer(volumes []corev1.Volume, podSC *corev1.PodSecurityContext, containerSC *corev1.SecurityContext, image string, resources corev1.ResourceRequirements) *corev1.Container {
-	var mounts []corev1.VolumeMount
-	var paths []string
-	for _, v := range volumes {
-		if v.EmptyDir == nil {
-			continue
-		}
-		p := "/prepvol/" + v.Name
-		mounts = append(mounts, corev1.VolumeMount{Name: v.Name, MountPath: p})
-		paths = append(paths, p)
-	}
-	if len(mounts) == 0 {
-		return nil
-	}
-
-	uid := int64(27)
-	gid := int64(27)
-	if podSC != nil {
-		if podSC.RunAsUser != nil {
-			uid = *podSC.RunAsUser
-		}
-		if podSC.RunAsGroup != nil {
-			gid = *podSC.RunAsGroup
-		}
-		if podSC.FSGroup != nil {
-			gid = *podSC.FSGroup
-		}
-	}
-	if containerSC != nil {
-		if containerSC.RunAsUser != nil {
-			uid = *containerSC.RunAsUser
-		}
-		if containerSC.RunAsGroup != nil && (podSC == nil || podSC.FSGroup == nil) {
-			gid = *containerSC.RunAsGroup
-		}
-	}
-
-	root := int64(0)
-	f := false
-	t := true
-	return &corev1.Container{
-		Name:    "prep-datadir",
-		Image:   image,
-		Command: []string{"chown"},
-		Args:    append([]string{fmt.Sprintf("%d:%d", uid, gid)}, paths...),
-		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:                &root,
-			RunAsNonRoot:             &f,
-			AllowPrivilegeEscalation: &f,
-			ReadOnlyRootFilesystem:   &t,
-			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"ALL"},
-				Add:  []corev1.Capability{"CHOWN"},
-			},
-			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-		},
-		Resources:    resources,
-		VolumeMounts: mounts,
-	}
 }
 
 // validateSanityQuery enforces the CRD contract that

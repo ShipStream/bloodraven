@@ -14,9 +14,9 @@
 # mysql directory under the datadir.
 #
 # Required env:
-#   BLOODRAVEN_DATA_DIR     datadir path (must be writable; the emptyDir
-#                           is mounted here, chowned to this user by the
-#                           prep-datadir init container).
+#   BLOODRAVEN_DATA_DIR     datadir path (/var/lib/mysql; an fsGroup-writable
+#                           emptyDir is mounted here).
+#   BLOODRAVEN_RUN_DIR      mysqld socket/pid dir (/run/mysqld; emptyDir).
 #   BLOODRAVEN_SCRIPTS_DIR  mounted scripts ConfigMap (restore.py lives
 #                           at $BLOODRAVEN_SCRIPTS_DIR/restore.py).
 #
@@ -36,14 +36,20 @@
 
 set -euo pipefail
 
-# The emptyDir is mounted at $MOUNT_DIR. mysqld --initialize refuses to
-# initialize into a directory that already exists (errno 17 EEXIST), so the
-# real datadir is a subdirectory mysqld creates itself; the socket/errlog
-# stay on the mount root and need no initialization.
-MOUNT_DIR="${BLOODRAVEN_DATA_DIR:-/var/lib/mysql-verify}"
+# MOUNT_DIR is /var/lib/mysql and RUN_DIR is /run/mysqld — not arbitrary.
+# Where the stock mysqld AppArmor profile is loaded on the node it is
+# attached to our containerized mysqld by binary path, confining the datadir
+# to /var/lib/mysql/** and the unix socket to /run/mysqld/. mysqld
+# --initialize also refuses to initialize into a pre-existing directory
+# (errno 17 EEXIST), so the real datadir is a subdirectory mysqld creates
+# itself under MOUNT_DIR. The errlog stays under MOUNT_DIR (allowed); the
+# socket/pid go under RUN_DIR (the only socket path the profile permits, and
+# the image's /run/mysqld is read-only without this emptyDir).
+MOUNT_DIR="${BLOODRAVEN_DATA_DIR:-/var/lib/mysql}"
+RUN_DIR="${BLOODRAVEN_RUN_DIR:-/run/mysqld}"
 DATA_DIR="${MOUNT_DIR}/data"
 SCRIPTS_DIR="${BLOODRAVEN_SCRIPTS_DIR:-/scripts}"
-SOCKET="${MOUNT_DIR}/mysql.sock"
+SOCKET="${RUN_DIR}/mysqld.sock"
 ERRLOG="${MOUNT_DIR}/mysqld.err"
 
 log() { printf '[verify] %s\n' "$*"; }
@@ -65,26 +71,25 @@ if [[ ! -d "${DATA_DIR}/mysql" ]]; then
     rm -rf "$DATA_DIR"
     log "initializing ephemeral datadir at $DATA_DIR"
     # Do NOT pass --user=mysql: the pod already pins a fixed non-root
-    # identity via RunAsUser/RunAsGroup/FSGroup (uid/gid 27), and the
-    # datadir emptyDir is owned by that fsGroup. --user makes mysqld
-    # setgid to the image's own "mysql" group (NOT 27 in the verify
-    # image), which loses group-write on the emptyDir and fails datadir
-    # creation with EACCES. Running as the container identity is correct.
+    # identity (uid/gid 27) via the pod SecurityContext, and mysqld cannot
+    # switch users as a non-root process anyway. Running as the container
+    # identity is correct. (InnoDB also writes a temp file under /tmp during
+    # --initialize, which is why /tmp is a writable emptyDir.)
     mysqld --initialize-insecure \
         --datadir="$DATA_DIR" \
         --log-error="$ERRLOG"
 fi
 
 log "starting ephemeral mysqld"
-# Pid file and mysqlx socket must live on the writable datadir mount;
-# the default (/var/run/mysqld/) is not writable in the verification
-# Job container image. mysqlx is disabled outright since nothing in
-# the verify path uses the X protocol.
+# Socket and pid file live under RUN_DIR (/run/mysqld) — the only socket
+# path the stock mysqld AppArmor profile permits, and writable here only
+# because we mount a fresh emptyDir there. mysqlx is disabled outright
+# since nothing in the verify path uses the X protocol.
 mysqld \
     --datadir="$DATA_DIR" \
     --bind-address=127.0.0.1 \
     --socket="$SOCKET" \
-    --pid-file="$DATA_DIR/mysqld.pid" \
+    --pid-file="$RUN_DIR/mysqld.pid" \
     --mysqlx=OFF \
     --log-error="$ERRLOG" \
     --skip-log-bin \

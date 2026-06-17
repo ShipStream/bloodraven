@@ -229,10 +229,9 @@ func TestEnvtest_Verification_ReconcilerProvisionsEphemeralResources(t *testing.
 		t.Errorf("verification Job container should invoke verify.sh, got %q", cmd)
 	}
 
-	// The ephemeral datadir must be an emptyDir (made writable to the
-	// non-root verify user by the prep-datadir chown init container), and
-	// must NOT set a SizeLimit — a size-limited emptyDir is set up as a
-	// separate mount whose ownership the prep step would also have to track.
+	// The ephemeral datadir must be an emptyDir (fsGroup makes it writable to
+	// the non-root verify user) and must NOT set a SizeLimit — a size-limited
+	// emptyDir is set up as a separate mount that is not always fsGroup-chowned.
 	var datadirVol *corev1.Volume
 	for i := range job.Spec.Template.Spec.Volumes {
 		if job.Spec.Template.Spec.Volumes[i].Name == "datadir" {
