@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # Bloodraven verification script. Runs inside a MysqlBackupVerification
-# Job. Bootstraps an ephemeral mysqld on a dedicated PVC, waits for it
-# to accept connections, delegates the actual loadDump to the shared
+# Job. Bootstraps an ephemeral mysqld on a dedicated emptyDir, waits for
+# it to accept connections, delegates the actual loadDump to the shared
 # restore.py script (via BLOODRAVEN_MYSQL_HOST=127.0.0.1), optionally
 # replays archived binlogs on top, optionally runs a scalar sanity
 # query, then shuts mysqld down. Exits non-zero on the first failing
 # phase.
 #
-# The PVC is always dedicated per verification run; the datadir is
+# The emptyDir is always dedicated per verification run; the datadir is
 # initialized the first time this script runs (should be every time
-# since the PVC is fresh, but we guard for retries). We skip the
+# since the emptyDir is fresh, but we guard for retries). We skip the
 # privilege-tables recreate on subsequent runs by checking for the
 # mysql directory under the datadir.
 #
 # Required env:
-#   BLOODRAVEN_DATA_DIR     datadir path (must be writable; the PVC is
-#                           mounted here).
+#   BLOODRAVEN_DATA_DIR     datadir path (must be writable; the emptyDir
+#                           is mounted here, chowned to this user by the
+#                           prep-datadir init container).
 #   BLOODRAVEN_SCRIPTS_DIR  mounted scripts ConfigMap (restore.py lives
 #                           at $BLOODRAVEN_SCRIPTS_DIR/restore.py).
 #

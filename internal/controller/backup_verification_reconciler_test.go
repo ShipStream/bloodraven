@@ -135,11 +135,11 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	if _, ok := volByName["datadir"]; !ok {
 		t.Errorf("want datadir volume")
 	}
-	// The ephemeral datadir is an emptyDir (writable by uid 27 via fsGroup
-	// on every provisioner). It must NOT carry a SizeLimit: a size-limited
-	// emptyDir is set up as a separate mount that the CI runner's
-	// filesystem does not fsGroup-chown, leaving it root-owned so the
-	// non-root mysqld can't write it (errno 13).
+	// The ephemeral datadir is an emptyDir, made writable to the non-root
+	// verify user by the prep-datadir init container's chown (fsGroup
+	// ownership is not applied to emptyDir on every runner). It must NOT
+	// carry a SizeLimit: a size-limited emptyDir is set up as a separate
+	// mount whose ownership the prep step would also have to track.
 	datadir := volByName["datadir"]
 	if datadir.PersistentVolumeClaim != nil {
 		t.Errorf("datadir volume must not reference a PVC: %+v", datadir)
@@ -148,13 +148,51 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	case dv == nil:
 		t.Errorf("datadir volume is not an emptyDir: %+v", datadir)
 	case dv.SizeLimit != nil:
-		t.Errorf("datadir emptyDir must not set SizeLimit (breaks fsGroup on CI): %+v", dv)
+		t.Errorf("datadir emptyDir must not set SizeLimit: %+v", dv)
 	}
 	if _, ok := volByName["scripts"]; !ok {
 		t.Errorf("want scripts volume")
 	}
 	if _, ok := volByName["aws-creds"]; !ok {
 		t.Errorf("S3-backed verification should mount aws-creds")
+	}
+
+	// A root prep-datadir init container must run first and chown every
+	// emptyDir to the non-root run-as user; without it the non-root
+	// containers cannot write the datadir where the kubelet does not apply
+	// fsGroup ownership to emptyDir.
+	initCs := job.Spec.Template.Spec.InitContainers
+	if len(initCs) == 0 || initCs[0].Name != "prep-datadir" {
+		var names []string
+		for _, ic := range initCs {
+			names = append(names, ic.Name)
+		}
+		t.Fatalf("want prep-datadir as first init container, got %v", names)
+	}
+	prep := initCs[0]
+	if prep.SecurityContext == nil || prep.SecurityContext.RunAsUser == nil || *prep.SecurityContext.RunAsUser != 0 {
+		t.Errorf("prep-datadir must run as root (uid 0): %+v", prep.SecurityContext)
+	}
+	hasChown := false
+	if prep.SecurityContext != nil && prep.SecurityContext.Capabilities != nil {
+		for _, c := range prep.SecurityContext.Capabilities.Add {
+			if c == "CHOWN" {
+				hasChown = true
+			}
+		}
+	}
+	if !hasChown {
+		t.Errorf("prep-datadir must add CHOWN capability: %+v", prep.SecurityContext)
+	}
+	// It must chown the datadir emptyDir (its mount must reference datadir).
+	prepMountsDatadir := false
+	for _, m := range prep.VolumeMounts {
+		if m.Name == "datadir" {
+			prepMountsDatadir = true
+		}
+	}
+	if !prepMountsDatadir {
+		t.Errorf("prep-datadir must mount the datadir emptyDir: %+v", prep.VolumeMounts)
 	}
 
 	mountByName := map[string]corev1.VolumeMount{}
@@ -565,12 +603,17 @@ func TestBuildVerificationJob_PITRTimestamp_AddsInitContainer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildVerificationJob: %v", err)
 	}
-	if len(job.Spec.Template.Spec.InitContainers) != 1 {
-		t.Fatalf("want 1 init container, got %d", len(job.Spec.Template.Spec.InitContainers))
+	// prep-datadir (chown) runs first, then the PITR download init container.
+	initCs := job.Spec.Template.Spec.InitContainers
+	if len(initCs) != 2 {
+		t.Fatalf("want 2 init containers (prep-datadir + pitr-download), got %d", len(initCs))
 	}
-	if job.Spec.Template.Spec.InitContainers[0].Name != restorePITRInitContainerName {
+	if initCs[0].Name != "prep-datadir" {
+		t.Errorf("want prep-datadir first, got %q", initCs[0].Name)
+	}
+	if initCs[1].Name != restorePITRInitContainerName {
 		t.Errorf("want init container %q, got %q",
-			restorePITRInitContainerName, job.Spec.Template.Spec.InitContainers[0].Name)
+			restorePITRInitContainerName, initCs[1].Name)
 	}
 	var haveMode, haveLocalDir, haveStop bool
 	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
