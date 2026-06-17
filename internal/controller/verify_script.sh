@@ -36,12 +36,10 @@
 
 set -euo pipefail
 
-# The PVC is mounted at $MOUNT_DIR. mysqld --initialize refuses to
-# initialize into a directory that already exists (errno 17 EEXIST), and
-# some provisioners — notably kind's local-path, used in CI — pre-create
-# the PVC mount point. So the real datadir is a subdirectory mysqld creates
-# itself; the socket/errlog stay on the mount root (writable via fsGroup,
-# and they need no initialization).
+# The emptyDir is mounted at $MOUNT_DIR. mysqld --initialize refuses to
+# initialize into a directory that already exists (errno 17 EEXIST), so the
+# real datadir is a subdirectory mysqld creates itself; the socket/errlog
+# stay on the mount root and need no initialization.
 MOUNT_DIR="${BLOODRAVEN_DATA_DIR:-/var/lib/mysql-verify}"
 DATA_DIR="${MOUNT_DIR}/data"
 SCRIPTS_DIR="${BLOODRAVEN_SCRIPTS_DIR:-/scripts}"
@@ -78,7 +76,7 @@ if [[ ! -d "${DATA_DIR}/mysql" ]]; then
 fi
 
 log "starting ephemeral mysqld"
-# Pid file and mysqlx socket must live on the writable datadir PVC —
+# Pid file and mysqlx socket must live on the writable datadir mount;
 # the default (/var/run/mysqld/) is not writable in the verification
 # Job container image. mysqlx is disabled outright since nothing in
 # the verify path uses the X protocol.

@@ -204,6 +204,51 @@ func TestBuildVerificationJob_MountsDatadirAndScripts(t *testing.T) {
 	}
 }
 
+func TestBuildVerifyDatadirPrepContainer_UsesEffectiveOwnerAndFSGroup(t *testing.T) {
+	podUID := int64(1000)
+	podGID := int64(1001)
+	fsGID := int64(2000)
+	containerUID := int64(3000)
+	containerGID := int64(3001)
+	prep := buildVerifyDatadirPrepContainer(
+		[]corev1.Volume{{Name: "datadir", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+		&corev1.PodSecurityContext{RunAsUser: &podUID, RunAsGroup: &podGID, FSGroup: &fsGID},
+		&corev1.SecurityContext{RunAsUser: &containerUID, RunAsGroup: &containerGID},
+		"verify-image",
+		corev1.ResourceRequirements{},
+	)
+	if prep == nil {
+		t.Fatal("want prep container")
+	}
+	if got := strings.Join(prep.Command, " "); got != "chown" {
+		t.Fatalf("want direct chown command, got %q", got)
+	}
+	if len(prep.Args) == 0 || prep.Args[0] != "3000:2000" {
+		t.Fatalf("want effective uid and fsGroup gid in chown args, got %v", prep.Args)
+	}
+	if len(prep.Args) != 2 || prep.Args[1] != "/prepvol/datadir" {
+		t.Fatalf("want datadir path in chown args, got %v", prep.Args)
+	}
+}
+
+func TestBuildVerifyDatadirPrepContainer_FallsBackToContainerGroupWithoutFSGroup(t *testing.T) {
+	containerUID := int64(3000)
+	containerGID := int64(3001)
+	prep := buildVerifyDatadirPrepContainer(
+		[]corev1.Volume{{Name: "datadir", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+		&corev1.PodSecurityContext{},
+		&corev1.SecurityContext{RunAsUser: &containerUID, RunAsGroup: &containerGID},
+		"verify-image",
+		corev1.ResourceRequirements{},
+	)
+	if prep == nil {
+		t.Fatal("want prep container")
+	}
+	if len(prep.Args) == 0 || prep.Args[0] != "3000:3001" {
+		t.Fatalf("want container uid/gid in chown args, got %v", prep.Args)
+	}
+}
+
 func TestBuildVerificationJob_PVCBackedBackup_MountsBackupPVC(t *testing.T) {
 	fg := verifyFG()
 	// The fg has two profiles; the second is PVC-backed ("daily-local").

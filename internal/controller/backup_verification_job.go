@@ -478,12 +478,12 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	podSC, containerSC := mergeSecurityContexts(userPod, userCont)
 
 	// Prepend a tiny root init container that chowns every emptyDir to the
-	// pod's run-as user so the non-root verify containers can write them
+	// effective run-as user so the non-root verify containers can write them
 	// even where the kubelet does not apply fsGroup ownership (see the
 	// emptyDir note above). It runs before the PITR / decrypt init
 	// containers, which also write emptyDir staging dirs as the non-root
 	// user.
-	if prep := buildVerifyDatadirPrepContainer(volumes, podSC, image, defaultInitContainerResources()); prep != nil {
+	if prep := buildVerifyDatadirPrepContainer(volumes, podSC, containerSC, image, defaultInitContainerResources()); prep != nil {
 		initContainers = append([]corev1.Container{*prep}, initContainers...)
 	}
 
@@ -529,8 +529,9 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 }
 
 // buildVerifyDatadirPrepContainer returns an init container that chowns
-// every emptyDir-backed volume in the verification pod to the pod's
-// run-as user/group, or nil if the pod has no emptyDir volumes.
+// every emptyDir-backed volume in the verification pod to the verify
+// container's effective run-as user and writable group, or nil if the pod
+// has no emptyDir volumes.
 //
 // The verification pod runs mysqld and mysqlsh as a non-root user (uid 27
 // by default) and must write its ephemeral datadir, mysqlsh HOME, /tmp,
@@ -539,15 +540,15 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 // make them writable to the non-root user; that ownership is not applied
 // reliably across kubelet/runtime/host combinations (observed: kind on
 // GitHub-hosted runners leaves them root:root, so mysqld --initialize
-// fails with errno 13). Chowning the volumes to the run-as user is robust
-// regardless of whether fsGroup was applied, the default emptyDir mode, or
-// the node umask.
+// fails with errno 13). Chowning the volumes to the effective run-as user
+// and fsGroup is robust regardless of whether fsGroup was applied, the
+// default emptyDir mode, or the node umask.
 //
 // Each emptyDir is mounted at /prepvol/<name>; chowning through that mount
 // changes the underlying node directory, so the other containers see the
 // new ownership at their own mount paths. The container runs as root with
 // only CAP_CHOWN so the rest of the pod stays non-root and least-privilege.
-func buildVerifyDatadirPrepContainer(volumes []corev1.Volume, podSC *corev1.PodSecurityContext, image string, resources corev1.ResourceRequirements) *corev1.Container {
+func buildVerifyDatadirPrepContainer(volumes []corev1.Volume, podSC *corev1.PodSecurityContext, containerSC *corev1.SecurityContext, image string, resources corev1.ResourceRequirements) *corev1.Container {
 	var mounts []corev1.VolumeMount
 	var paths []string
 	for _, v := range volumes {
@@ -571,6 +572,17 @@ func buildVerifyDatadirPrepContainer(volumes []corev1.Volume, podSC *corev1.PodS
 		if podSC.RunAsGroup != nil {
 			gid = *podSC.RunAsGroup
 		}
+		if podSC.FSGroup != nil {
+			gid = *podSC.FSGroup
+		}
+	}
+	if containerSC != nil {
+		if containerSC.RunAsUser != nil {
+			uid = *containerSC.RunAsUser
+		}
+		if containerSC.RunAsGroup != nil && (podSC == nil || podSC.FSGroup == nil) {
+			gid = *containerSC.RunAsGroup
+		}
 	}
 
 	root := int64(0)
@@ -579,7 +591,8 @@ func buildVerifyDatadirPrepContainer(volumes []corev1.Volume, podSC *corev1.PodS
 	return &corev1.Container{
 		Name:    "prep-datadir",
 		Image:   image,
-		Command: []string{"sh", "-c", fmt.Sprintf("chown %d:%d %s", uid, gid, strings.Join(paths, " "))},
+		Command: []string{"chown"},
+		Args:    append([]string{fmt.Sprintf("%d:%d", uid, gid)}, paths...),
 		SecurityContext: &corev1.SecurityContext{
 			RunAsUser:                &root,
 			RunAsNonRoot:             &f,
