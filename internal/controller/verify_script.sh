@@ -85,6 +85,20 @@ log "starting ephemeral mysqld"
 # path the stock mysqld AppArmor profile permits, and writable here only
 # because we mount a fresh emptyDir there. mysqlx is disabled outright
 # since nothing in the verify path uses the X protocol.
+#
+# --gtid-mode=ON --enforce-gtid-consistency=ON make this ephemeral verify
+# mysqld mirror the production restore target (#101). The PITR replay
+# downloads EVERY site's archived binlogs and relies on server-side GTID
+# dedup to skip transactions already in the dump (loadDump restores the
+# dump's gtid_purged via updateGtidSet:"replace") AND to dedup the same
+# GTID re-logged across multiple sites. A gtid_mode=OFF server cannot do
+# this: it rejects the per-transaction SET @@SESSION.GTID_NEXT statements
+# mysqlbinlog emits, so raw `mysqlbinlog | mysql` replay fails outright;
+# and stripping those GTID statements (the only way to feed an OFF server)
+# discards the identity needed to dedup, double-applying in-dump and
+# cross-site duplicate transactions. MySQL 8.0 starts gtid_mode=ON with
+# binary logging disabled, so --skip-log-bin is retained alongside the
+# GTID flags.
 mysqld \
     --datadir="$DATA_DIR" \
     --bind-address=127.0.0.1 \
@@ -93,6 +107,8 @@ mysqld \
     --mysqlx=OFF \
     --log-error="$ERRLOG" \
     --skip-log-bin \
+    --gtid-mode=ON \
+    --enforce-gtid-consistency=ON \
     --skip-replica-start \
     --skip-name-resolve \
     --local-infile=1 &
