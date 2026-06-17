@@ -18,15 +18,18 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 		t.Fatalf("smoke profile selected %d scenarios, want 3", len(smoke))
 	}
 
-	// 09-network-partition-self-fence is no longer quarantined — the
-	// soft-partition detection gap (issue #93) is fixed by the bounded liveness
-	// read deadline — so it is back in the release profile (12 members).
+	// The release subset lists 12 members, but 31-pitr-verification-rustfs is
+	// quarantined (PITR replay duplicate-key on the gtid_mode=OFF verify
+	// mysqld; issue #101), so 11 are selected.
 	release := runner.SelectForProfile(all, runner.ProfileRelease)
-	if len(release) != 12 {
-		t.Fatalf("release profile selected %d scenarios, want 12", len(release))
+	if len(release) != 11 {
+		t.Fatalf("release profile selected %d scenarios, want 11", len(release))
 	}
 	if !containsScenarioID(release, "09-network-partition-self-fence") {
 		t.Error("release profile must include 09-network-partition-self-fence (no longer quarantined)")
+	}
+	if containsScenarioID(release, "31-pitr-verification-rustfs") {
+		t.Error("31-pitr-verification-rustfs is quarantined (#101) and must not be in the release profile")
 	}
 
 	// full = every registered scenario minus any that are quarantined. Computed
