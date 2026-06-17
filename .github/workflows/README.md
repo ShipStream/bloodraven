@@ -62,13 +62,13 @@ Release output locations:
 
 - Operator image: `ghcr.io/shipstream/bloodraven:{version}`
 - Sidecar image: `ghcr.io/shipstream/bloodraven-sidecar:{version}`
-- Helm repo: `https://shipstream.github.io/bloodraven`
+- Helm repo: `https://raw.githubusercontent.com/ShipStream/bloodraven/gh-pages`
 - Helm OCI repo: `oci://ghcr.io/shipstream/bloodraven/helm`
 
 Helm repo install example:
 
 ```bash
-helm repo add bloodraven https://shipstream.github.io/bloodraven
+helm repo add bloodraven https://raw.githubusercontent.com/ShipStream/bloodraven/gh-pages
 helm repo update
 helm install bloodraven bloodraven/bloodraven --version 1.2.3
 ```
@@ -86,11 +86,11 @@ git tag v1.2.3
 git push origin v1.2.3
 ```
 
-This publishes Docker images, creates a GitHub Release, updates the GitHub Pages Helm chart repository, and pushes the chart to GHCR as an OCI artifact automatically.
+This publishes Docker images, creates a GitHub Release, commits the packaged chart + `index.yaml` to the `gh-pages` branch, and pushes the chart to GHCR as an OCI artifact automatically.
 
 #### Required setup for Helm chart publishing
 
-The `gh-pages` branch must exist (can be empty). Create it once with:
+The `gh-pages` branch must exist (can be empty). The release workflow bootstraps it automatically, or create it once with:
 
 ```bash
 git checkout --orphan gh-pages
@@ -100,8 +100,8 @@ git push origin gh-pages
 git checkout main
 ```
 
-Then enable GitHub Pages for the repository pointing at the `gh-pages` branch. The Helm chart repository URL will be:
-`https://shipstream.github.io/bloodraven`
+The chart repo is served directly off the `gh-pages` branch via `raw.githubusercontent.com` — no GitHub Pages required. (GitHub Pages is unusable here: the org's Pages custom domain `docs.shipstream.io` is owned by the Mintlify dev center, so `https://shipstream.github.io/bloodraven` redirects there and 404s.) The Helm chart repository URL is:
+`https://raw.githubusercontent.com/ShipStream/bloodraven/gh-pages`
 
 ---
 
