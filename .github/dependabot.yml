@@ -4,7 +4,7 @@ updates:
   - package-ecosystem: gomod
     directory: /
     schedule:
-      interval: weekly
+      interval: quarterly
     groups:
       go-patch-minor:
         update-types:
@@ -14,9 +14,9 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: quarterly
 
   - package-ecosystem: docker
     directory: /
     schedule:
-      interval: weekly
+      interval: quarterly
