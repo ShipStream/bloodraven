@@ -18,9 +18,8 @@ env:
   # domain (docs.shipstream.io) is owned by the Mintlify dev center, so
   # https://shipstream.github.io/bloodraven redirects there and 404s. This
   # base matches what `helm repo index --url` stamps into index.yaml below
-  # (github.repository == ShipStream/bloodraven), so `helm repo add` and
-  # the chart download links agree.
-  HELM_REPOSITORY_URL: https://raw.githubusercontent.com/ShipStream/bloodraven/gh-pages
+  # (github.repository), so `helm repo add` and the chart download links agree.
+  HELM_REPOSITORY_URL: https://raw.githubusercontent.com/${{ github.repository }}/gh-pages
   HELM_OCI_REPOSITORY: oci://ghcr.io/shipstream/bloodraven/helm
 
 jobs:
