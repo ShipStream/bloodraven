@@ -92,7 +92,7 @@ make manifests           # Generate CRD and RBAC manifests
 - Go 1.26
 - controller-runtime v0.23.3
 - k8s.io/api v0.35.3
-- MySQL 9.6 with clone plugin
+- MySQL 9.7 LTS with clone plugin
 - Optional managed Dragonfly v1.38.0+
 
 ## Architecture snapshot

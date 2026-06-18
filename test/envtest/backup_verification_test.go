@@ -27,7 +27,7 @@ func newVerificationFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: namespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Image:      "mysql:9.6",
+			Image:      "mysql:9.7",
 			SecretName: "mysql-credentials",
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "dc1", Zone: "lion-dc1", LBIP: "203.0.113.1", TaintNodeSelector: map[string]string{"shipstream.io/failover-group.lion": "true", "shipstream.io/site.lion": "dc1"},
@@ -37,7 +37,7 @@ func newVerificationFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 			},
 			DNS: v1alpha1.DNSSpec{Hostname: "lion.az.example.com", TTL: 60},
 			Backup: &v1alpha1.BackupSpec{
-				Image: "container-registry.oracle.com/mysql/community-server:9.6",
+				Image: "container-registry.oracle.com/mysql/community-server:9.7",
 				Profiles: []v1alpha1.BackupProfile{
 					{
 						Name: "nightly-s3",

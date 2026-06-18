@@ -113,6 +113,7 @@ func TestPopulatePITRStatus_AggregatesAcrossSites(t *testing.T) {
 	pitr := fg.Status.PITR
 	if pitr == nil {
 		t.Fatal("expected status.pitr to be populated")
+		return
 	}
 	if !pitr.Enabled {
 		t.Error("expected Enabled=true")

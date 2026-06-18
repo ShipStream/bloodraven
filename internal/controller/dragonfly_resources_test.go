@@ -145,6 +145,7 @@ func TestReconcileDragonflyStatefulSet_AuthEnvWiredFromSecret(t *testing.T) {
 	}
 	if found == nil {
 		t.Fatalf("env var %s not wired", DragonflyAuthEnvVar)
+		return
 	}
 	if found.ValueFrom == nil || found.ValueFrom.SecretKeyRef == nil {
 		t.Fatalf("env var %s missing SecretKeyRef", DragonflyAuthEnvVar)
@@ -228,6 +229,7 @@ func TestDesiredDragonflyStatefulSet_ProbeDefaultsAreExplicit(t *testing.T) {
 	} {
 		if probe == nil {
 			t.Fatalf("%s probe is nil", name)
+			continue
 		}
 		if probe.TimeoutSeconds != 1 || probe.SuccessThreshold != 1 || probe.FailureThreshold != 3 {
 			t.Fatalf("%s probe defaults: timeout=%d success=%d failure=%d, want 1/1/3",

@@ -112,7 +112,7 @@ func minimalEnvtestStandby(name, ns string) *v1alpha1.MysqlStandbyCluster {
 			Template: v1alpha1.StandbyFailoverGroupTemplate{
 				Name: name + "-dr",
 				Spec: v1alpha1.MysqlFailoverGroupSpec{
-					Image:      "mysql:9.6",
+					Image:      "mysql:9.7",
 					SecretName: "mysql-creds",
 					DNS: v1alpha1.DNSSpec{
 						Hostname: name + "-dr.az.example.com",

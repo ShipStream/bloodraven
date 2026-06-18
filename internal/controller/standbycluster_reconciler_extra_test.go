@@ -212,6 +212,7 @@ func TestStandbyCluster_SecretNotFound(t *testing.T) {
 	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
 	if brc == nil {
 		t.Fatal("BucketReadable condition missing")
+		return
 	}
 	if brc.Status != metav1.ConditionFalse {
 		t.Errorf("BucketReadable: want False, got %s", brc.Status)
@@ -254,6 +255,7 @@ func TestStandbyCluster_SecretMissingKey(t *testing.T) {
 	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
 	if brc == nil {
 		t.Fatal("BucketReadable condition missing")
+		return
 	}
 	if brc.Status != metav1.ConditionFalse {
 		t.Errorf("BucketReadable: want False, got %s", brc.Status)
@@ -453,6 +455,7 @@ func TestStandbyCluster_BuildStoreCfg_Errors(t *testing.T) {
 			brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
 			if brc == nil {
 				t.Fatal("BucketReadable condition missing")
+				return
 			}
 			if brc.Status != metav1.ConditionFalse {
 				t.Errorf("BucketReadable: want False, got %s", brc.Status)
@@ -539,6 +542,7 @@ func TestStandbyCluster_DumpSelectionByEndTime(t *testing.T) {
 	d := updated.Status.Discovered
 	if d == nil {
 		t.Fatal("status.discovered is nil")
+		return
 	}
 	if d.DumpName != "a-dump-NEWER" {
 		t.Errorf("DumpName: want a-dump-NEWER (newer end time), got %q", d.DumpName)

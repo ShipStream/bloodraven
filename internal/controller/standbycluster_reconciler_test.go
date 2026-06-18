@@ -139,7 +139,7 @@ func minimalStandbyCR(name, ns string) *v1alpha1.MysqlStandbyCluster {
 			Template: v1alpha1.StandbyFailoverGroupTemplate{
 				Name: "orders-dr",
 				Spec: v1alpha1.MysqlFailoverGroupSpec{
-					Image:      "mysql:9.6",
+					Image:      "mysql:9.7",
 					SecretName: "mysql-creds",
 				},
 			},
@@ -260,6 +260,7 @@ func TestMysqlStandbyCluster_UnsupportedTransport(t *testing.T) {
 	brc := standbyFindCondition(updated, v1alpha1.StandbyConditionBucketReadable)
 	if brc == nil {
 		t.Fatal("BucketReadable condition missing")
+		return
 	}
 	if brc.Status != metav1.ConditionFalse {
 		t.Errorf("BucketReadable: want False, got %s", brc.Status)
@@ -271,6 +272,7 @@ func TestMysqlStandbyCluster_UnsupportedTransport(t *testing.T) {
 	skc := standbyFindCondition(updated, v1alpha1.StandbyConditionSourceConfigKnown)
 	if skc == nil {
 		t.Fatal("SourceConfigKnown condition missing")
+		return
 	}
 	if skc.Status != metav1.ConditionFalse {
 		t.Errorf("SourceConfigKnown: want False, got %s", skc.Status)
@@ -319,6 +321,7 @@ func TestMysqlStandbyCluster_SuccessfulDiscovery(t *testing.T) {
 	d := updated.Status.Discovered
 	if d == nil {
 		t.Fatal("status.discovered is nil")
+		return
 	}
 	if d.DumpName != "orders-nightly-20260520" {
 		t.Errorf("DumpName: want orders-nightly-20260520, got %q", d.DumpName)
@@ -561,6 +564,7 @@ func TestMysqlStandbyCluster_MultiSiteManifests(t *testing.T) {
 	d := updated.Status.Discovered
 	if d == nil {
 		t.Fatal("status.discovered is nil")
+		return
 	}
 	if d.ManifestCount != 2 {
 		t.Errorf("ManifestCount: want 2, got %d", d.ManifestCount)
@@ -609,6 +613,7 @@ func TestMysqlStandbyCluster_NewestDumpSelected(t *testing.T) {
 	d := updated.Status.Discovered
 	if d == nil {
 		t.Fatal("status.discovered is nil")
+		return
 	}
 	if d.DumpName != "orders-2026-05-20" {
 		t.Errorf("DumpName: want orders-2026-05-20, got %q", d.DumpName)
@@ -644,6 +649,7 @@ func TestMysqlStandbyCluster_NewestDumpSelectedBeyondLexicographicTail(t *testin
 	d := updated.Status.Discovered
 	if d == nil {
 		t.Fatal("status.discovered is nil")
+		return
 	}
 	if d.DumpName != "a-newest" {
 		t.Errorf("DumpName: want a-newest, got %q", d.DumpName)
@@ -669,6 +675,7 @@ func TestMysqlStandbyCluster_SlashBoundedPrefix(t *testing.T) {
 	d := updated.Status.Discovered
 	if d == nil {
 		t.Fatal("status.discovered is nil")
+		return
 	}
 	if d.DumpName != "current" {
 		t.Errorf("DumpName: want current, got %q", d.DumpName)
@@ -739,6 +746,7 @@ func TestMysqlStandbyCluster_Idempotent(t *testing.T) {
 	skc1 := standbyFindCondition(cr1, v1alpha1.StandbyConditionSourceConfigKnown)
 	if brc1 == nil || skc1 == nil {
 		t.Fatal("conditions missing after first reconcile")
+		return
 	}
 	ltt1 := brc1.LastTransitionTime
 	ltt1sk := skc1.LastTransitionTime
@@ -750,6 +758,7 @@ func TestMysqlStandbyCluster_Idempotent(t *testing.T) {
 	skc2 := standbyFindCondition(cr2, v1alpha1.StandbyConditionSourceConfigKnown)
 	if brc2 == nil || skc2 == nil {
 		t.Fatal("conditions missing after second reconcile")
+		return
 	}
 	// LastTransitionTime must not change when status is the same.
 	if !brc2.LastTransitionTime.Equal(&ltt1) {
@@ -972,6 +981,7 @@ func TestMysqlStandbyCluster_ColdStartManyDumpsCorrect(t *testing.T) {
 	d := updated.Status.Discovered
 	if d == nil {
 		t.Fatal("status.discovered is nil")
+		return
 	}
 	if d.DumpName != wantNewestDir {
 		t.Errorf("DumpName: want timestamp-newest %q, got %q", wantNewestDir, d.DumpName)
@@ -1361,6 +1371,7 @@ func TestMysqlStandbyCluster_DeterministicAcrossListOrder(t *testing.T) {
 		d := updated.Status.Discovered
 		if d == nil {
 			t.Fatalf("iter %d: status.discovered nil", i)
+			continue
 		}
 		if d.DumpName != "aaa-tie" {
 			t.Errorf("iter %d: tie-break: want lex-smallest aaa-tie, got %q", i, d.DumpName)

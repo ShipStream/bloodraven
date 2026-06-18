@@ -41,7 +41,7 @@ func newTestFG() *v1alpha1.MysqlFailoverGroup {
 			UID:       "test-uid-123",
 		},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Image: "mysql:9.6",
+			Image: "mysql:9.7",
 			Sites: []v1alpha1.SiteSpec{
 				{
 					Name:              "dc1",
@@ -199,8 +199,8 @@ func TestReconcile_CreatesDeployments(t *testing.T) {
 			t.Errorf("deployment %s: no containers", dc)
 			continue
 		}
-		if containers[0].Image != "mysql:9.6" {
-			t.Errorf("deployment %s: expected image mysql:9.6, got %s", dc, containers[0].Image)
+		if containers[0].Image != "mysql:9.7" {
+			t.Errorf("deployment %s: expected image mysql:9.7, got %s", dc, containers[0].Image)
 		}
 
 		// Check node selector
@@ -408,7 +408,7 @@ func TestReconcile_MysqlConfOverrides(t *testing.T) {
 
 func TestReconcile_DefaultImage(t *testing.T) {
 	fg := newTestFG()
-	fg.Spec.Image = "" // should default to mysql:9.6
+	fg.Spec.Image = "" // should default to mysql:9.7
 	r, c := newReconciler(fg)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -425,8 +425,8 @@ func TestReconcile_DefaultImage(t *testing.T) {
 		t.Fatalf("deployment not found: %v", err)
 	}
 
-	if deploy.Spec.Template.Spec.Containers[0].Image != "mysql:9.6" {
-		t.Errorf("expected default image mysql:9.6, got %s", deploy.Spec.Template.Spec.Containers[0].Image)
+	if deploy.Spec.Template.Spec.Containers[0].Image != "mysql:9.7" {
+		t.Errorf("expected default image mysql:9.7, got %s", deploy.Spec.Template.Spec.Containers[0].Image)
 	}
 }
 
@@ -624,6 +624,7 @@ func TestReconcile_TerminationGracePeriod(t *testing.T) {
 	tgps := deploy.Spec.Template.Spec.TerminationGracePeriodSeconds
 	if tgps == nil {
 		t.Fatal("expected TerminationGracePeriodSeconds to be set")
+		return
 	}
 	if *tgps != 60 {
 		t.Errorf("expected TerminationGracePeriodSeconds=60, got %d", *tgps)
@@ -1145,7 +1146,7 @@ func TestReconcile_DefersDeploymentUpdateWhenManagerRunning(t *testing.T) {
 	if err := c.Get(ctx, nn, &fresh); err != nil {
 		t.Fatalf("get CR for mutation: %v", err)
 	}
-	fresh.Spec.Image = "mysql:9.7"
+	fresh.Spec.Image = "mysql:9.7.1"
 	if err := c.Update(ctx, &fresh); err != nil {
 		t.Fatalf("update CR: %v", err)
 	}
@@ -1204,7 +1205,7 @@ func TestReconcile_AppliesDeploymentUpdateWhenNoManager(t *testing.T) {
 	if err := c.Get(ctx, nn, &fresh); err != nil {
 		t.Fatalf("get CR for mutation: %v", err)
 	}
-	fresh.Spec.Image = "mysql:9.7"
+	fresh.Spec.Image = "mysql:9.7.1"
 	if err := c.Update(ctx, &fresh); err != nil {
 		t.Fatalf("update CR: %v", err)
 	}
@@ -1218,8 +1219,8 @@ func TestReconcile_AppliesDeploymentUpdateWhenNoManager(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: "mysql-lion-dc1", Namespace: "shared-lion"}, &d); err != nil {
 		t.Fatalf("get deployment: %v", err)
 	}
-	if d.Spec.Template.Spec.Containers[0].Image != "mysql:9.7" {
-		t.Errorf("expected image mysql:9.7 after reconcile (no manager), got %s",
+	if d.Spec.Template.Spec.Containers[0].Image != "mysql:9.7.1" {
+		t.Errorf("expected image mysql:9.7.1 after reconcile (no manager), got %s",
 			d.Spec.Template.Spec.Containers[0].Image)
 	}
 }

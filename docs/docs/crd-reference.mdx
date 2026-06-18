@@ -47,7 +47,7 @@ Review runbooks before changing `spec.restoreInPlace`, restore-related `confirm`
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `image` | string | No | `mysql:9.6` | MySQL container image |
+| `image` | string | No | `mysql:9.7` | MySQL container image |
 | `sidecarImage` | string | No | `ghcr.io/shipstream/bloodraven-sidecar:0.1.6` | Bloodraven sidecar container image |
 | `sites` | []SiteSpec | Yes | -- | Site definitions. At least two sites with `role: primary-candidate`; additional `dr-only` sites may be appended. MinItems=2, MaxItems=16. |
 | `secretName` | string | No | -- | **(Legacy)** Name of the Secret containing MySQL credentials (key: `dsn`). Mutually exclusive with `credentials`. |
@@ -163,7 +163,7 @@ the field disables backups for this failover group.
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `image` | string | No | `container-registry.oracle.com/mysql/community-server:9.6` | Image containing `mysqlsh` used for dump / load. |
+| `image` | string | No | `container-registry.oracle.com/mysql/community-server:9.7` | Image containing `mysqlsh` used for dump / load. |
 | `imagePullSecrets` | []LocalObjectReference | No | -- | Pull secrets for the backup image. |
 | `profiles` | []BackupProfile | No | -- | Reusable named backup configurations referenced by schedules and `MysqlBackup` CRs. |
 | `schedules` | []BackupSchedule | No | -- | Cron-driven recurring backups; each references a profile by name. Each entry becomes a Kubernetes CronJob owned by this failover group. |
@@ -340,7 +340,7 @@ kind: MysqlFailoverGroup
 metadata:
   name: orders
 spec:
-  image: mysql:9.6
+  image: mysql:9.7
   sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:latest
   sites:
     - name: iad
@@ -440,7 +440,7 @@ kind: MysqlFailoverGroup
 metadata:
   name: orders
 spec:
-  image: mysql:9.6
+  image: mysql:9.7
   sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:latest
   sites:
     - name: iad

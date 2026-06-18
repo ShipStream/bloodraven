@@ -70,7 +70,7 @@ Restore time depends on dump size, compression, object-store or PVC throughput, 
 ## The backup image
 
 The default image is pinned to
-`container-registry.oracle.com/mysql/community-server:9.6`. This
+`container-registry.oracle.com/mysql/community-server:9.7`. This
 bundles the `mysqlsh` binary; the `community-shell` repository that
 appears in some docs **does not exist** in the Oracle registry — a
 common stumbling block. Production deployments should always pin this
@@ -154,11 +154,11 @@ metadata:
   name: orders
   namespace: orders
 spec:
-  image: mysql:9.6
+  image: mysql:9.7
   secretName: mysql-credentials
   # ... sites, dns, sidecar omitted ...
   backup:
-    image: container-registry.oracle.com/mysql/community-server:9.6
+    image: container-registry.oracle.com/mysql/community-server:9.7
     maxLagSecondsForSource: 120
     retry:
       maxAttempts: 3
@@ -333,7 +333,7 @@ metadata:
   name: orders
   namespace: orders
 spec:
-  image: mysql:9.6
+  image: mysql:9.7
   secretName: mysql-credentials
   # ... sites etc. ...
   backup:

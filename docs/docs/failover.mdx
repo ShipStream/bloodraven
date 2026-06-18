@@ -260,4 +260,4 @@ This sequence ensures:
 
 Without `OrderedUpdate`, both sites are updated simultaneously, which may cause brief downtime if both pods restart at the same time.
 
-For MySQL image changes specifically — including the upcoming 9.6 → 9.7 LTS transition — see the [Upgrade and version-skew policy](./upgrade-policy.mdx). The replica-first ordering above is the MySQL-required direction for a rolling version upgrade.
+For MySQL image changes specifically, including the 9.6 → 9.7 LTS transition, see the [Upgrade and version-skew policy](./upgrade-policy.mdx). The replica-first ordering above is the MySQL-required direction for a rolling version upgrade.
