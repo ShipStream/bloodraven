@@ -87,7 +87,7 @@ func succeededBackup(name string, ns string, fgName, profile string, completed m
 // --- DefaultBackupImage -----------------------------------------------------
 
 func TestDefaultBackupImage_IsPinnedCommunityServer(t *testing.T) {
-	want := "container-registry.oracle.com/mysql/community-server:9.6"
+	want := "container-registry.oracle.com/mysql/community-server:9.7"
 	if v1alpha1.DefaultBackupImage != want {
 		t.Errorf("DefaultBackupImage drifted: got %q, want %q", v1alpha1.DefaultBackupImage, want)
 	}

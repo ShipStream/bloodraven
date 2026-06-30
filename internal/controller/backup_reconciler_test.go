@@ -127,7 +127,7 @@ func fgWithBackup() *v1alpha1.MysqlFailoverGroup {
 	return &v1alpha1.MysqlFailoverGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "lion", Namespace: "ns"},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Image:      "mysql:9.6",
+			Image:      "mysql:9.7",
 			SecretName: "mysql-credentials",
 			Sites: []v1alpha1.SiteSpec{
 				{Name: "iad", Zone: "az-iad", LBIP: "10.0.0.1",
@@ -588,8 +588,8 @@ func TestMysqlBackupReconciler_CreatesJob_PicksReplica(t *testing.T) {
 	}
 	// Phase 2: capture the active-site MySQL image tag for
 	// version-pinned verification.
-	if got.Status.MysqlImage != "mysql:9.6" {
-		t.Errorf("want status.mysqlImage=mysql:9.6, got %q", got.Status.MysqlImage)
+	if got.Status.MysqlImage != "mysql:9.7" {
+		t.Errorf("want status.mysqlImage=mysql:9.7, got %q", got.Status.MysqlImage)
 	}
 
 	// Derived creds Secret should exist.

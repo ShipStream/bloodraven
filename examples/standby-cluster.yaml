@@ -54,7 +54,7 @@ spec:
   template:
     name: orders
     spec:
-      image: mysql:9.6
+      image: mysql:9.7
       sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:0.1.6
       credentials:
         operatorSecret: orders-mysql-operator

@@ -233,6 +233,7 @@ func TestBuildRestoreJob_MysqlBackupRef_PVCStorage_MountsBackupPVC(t *testing.T)
 	}
 	if restoreSrcMount == nil {
 		t.Fatal("expected restore-src volume mount for mysqlBackupRef PVC source")
+		return
 	}
 	if restoreSrcMount.MountPath != backupPVCMountPath {
 		t.Errorf("restore-src mount path = %q, want %q", restoreSrcMount.MountPath, backupPVCMountPath)

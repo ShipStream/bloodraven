@@ -14,7 +14,7 @@
 # full major.minor tag (as below). Using a floating tag like `:9` or
 # `:latest` is discouraged because mysqlsh dump/load compatibility across
 # versions is not guaranteed. The image below bundles mysqlsh with the
-# community-server 9.6 release.
+# community-server 9.7 release.
 apiVersion: shipstream.io/v1alpha1
 kind: MysqlFailoverGroup
 metadata:
@@ -22,7 +22,7 @@ metadata:
   namespace: bloodraven-playground
 spec:
   backup:
-    image: container-registry.oracle.com/mysql/community-server:9.6
+    image: container-registry.oracle.com/mysql/community-server:9.7
     maxLagSecondsForSource: 60
     activeDeadlineSeconds: 1800
     retry:

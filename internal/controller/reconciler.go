@@ -38,7 +38,7 @@ import (
 const (
 	finalizerName = "shipstream.io/graceful-shutdown"
 
-	defaultMySQLImage = "mysql:9.6"
+	defaultMySQLImage = "mysql:9.7"
 
 	labelAppName       = "app.kubernetes.io/name"
 	labelInstance      = "app.kubernetes.io/instance"

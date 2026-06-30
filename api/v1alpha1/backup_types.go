@@ -18,7 +18,7 @@ import (
 // Production deployments should always pin this explicitly via
 // spec.backup.image; never rely on ":9" or ":latest" because cross-version
 // mysqlsh dump/load compatibility is not guaranteed.
-const DefaultBackupImage = "container-registry.oracle.com/mysql/community-server:9.6"
+const DefaultBackupImage = "container-registry.oracle.com/mysql/community-server:9.7"
 
 // BackupSpec is the top-level backup configuration embedded in
 // MysqlFailoverGroupSpec as spec.backup. All fields are optional; omitting
@@ -29,7 +29,7 @@ type BackupSpec struct {
 	// (mysqlsh 8.0.32+). Defaults to DefaultBackupImage; production
 	// deployments should always pin a full major.minor tag here and
 	// avoid floating tags.
-	// +kubebuilder:default="container-registry.oracle.com/mysql/community-server:9.6"
+	// +kubebuilder:default="container-registry.oracle.com/mysql/community-server:9.7"
 	Image string `json:"image,omitempty"`
 
 	// ImagePullSecrets for the backup image.

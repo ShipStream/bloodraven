@@ -267,7 +267,7 @@ spec:
                         type: object
                     type: object
                   image:
-                    default: container-registry.oracle.com/mysql/community-server:9.6
+                    default: container-registry.oracle.com/mysql/community-server:9.7
                     description: |-
                       Image is the container image containing mysqlsh. It must include
                       util.dumpInstance() and util.loadDump() with native S3 support
@@ -5180,8 +5180,8 @@ spec:
                 minimum: 1
                 type: integer
               image:
-                default: mysql:9.6
-                description: 'Image is the MySQL container image. Default: mysql:9.6'
+                default: mysql:9.7
+                description: 'Image is the MySQL container image. Default: mysql:9.7'
                 type: string
               initFromBackup:
                 description: |-

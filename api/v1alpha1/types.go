@@ -36,8 +36,8 @@ type MysqlFailoverGroupList struct {
 // +kubebuilder:validation:XValidation:rule="self.sites.filter(s, s.role == 'primary-candidate').size() >= 2",message="spec.sites must contain at least two sites with role 'primary-candidate'"
 // +kubebuilder:validation:XValidation:rule="!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities) || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'primary-candidate'))",message="splitBrainPolicy.sitePriorities entries must match the names of sites with role 'primary-candidate'"
 type MysqlFailoverGroupSpec struct {
-	// Image is the MySQL container image. Default: mysql:9.6
-	// +kubebuilder:default="mysql:9.6"
+	// Image is the MySQL container image. Default: mysql:9.7
+	// +kubebuilder:default="mysql:9.7"
 	Image string `json:"image,omitempty"`
 
 	// SidecarImage is the image used for the sidecar/init container.

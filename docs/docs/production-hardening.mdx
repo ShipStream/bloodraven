@@ -212,7 +212,7 @@ When you are ready to put the MySQL and Dragonfly pods under the
 fill in the new opt-in fields on the `MysqlFailoverGroup` CR. The operator
 applies the value **verbatim** to the workload — it does not merge it
 with hardened defaults, because the right uid/gid depend on the image you
-run. The examples below target the upstream `mysql:9.6` and Dragonfly
+run. The examples below target the upstream `mysql:9.7` and Dragonfly
 images, both of which run as uid 999.
 
 ### MySQL — `spec.podSecurityContext` / `spec.containerSecurityContext`
@@ -300,7 +300,7 @@ persists its RDB snapshot. Set `readOnlyRootFilesystem: true`.
 
 If you already run Bloodraven in production and your MySQL data PVCs were
 created **before** these fields existed, the files on disk are owned by
-whatever uid the image originally ran as (uid 999 for upstream `mysql:9.6`,
+whatever uid the image originally ran as (uid 999 for upstream `mysql:9.7`,
 something else for a fork). Naively applying `fsGroup: 999` to a PVC
 created by a pod that ran as uid 0 will trigger a recursive chown on every
 pod start that can take many minutes on a large data volume — Kubernetes

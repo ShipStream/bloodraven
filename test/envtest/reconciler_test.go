@@ -25,7 +25,7 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 			Namespace: namespace,
 		},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
-			Image: "mysql:9.6",
+			Image: "mysql:9.7",
 			Sites: []v1alpha1.SiteSpec{
 				{
 					Name:              "dc1",
