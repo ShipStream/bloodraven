@@ -31,7 +31,7 @@ jobs:
     name: CI gate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [ci-gate, e2e-gate]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Generate release body
@@ -145,7 +145,7 @@ jobs:
           - target: sidecar
             image: ghcr.io/shipstream/bloodraven-sidecar
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -197,7 +197,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: docker
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
