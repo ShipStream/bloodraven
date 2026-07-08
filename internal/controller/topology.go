@@ -947,6 +947,10 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		tm.logger.Warn("ALERT", "message", action.Alert)
 	}
 
+	tm.mu.RLock()
+	lastFailoverTarget := tm.lastFailoverTarget
+	tm.mu.RUnlock()
+
 	// In-place restore is mutating the cluster right now; every
 	// cross-site decision (promotion, fencing a "returning" primary,
 	// auto-cloning an empty peer) would actively fight the restore.
@@ -998,7 +1002,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			// a fresh deploy. Without this guard the fresh-deploy bootstrap
 			// reverts the failover by re-cloning the promoted site back to
 			// the respawned old primary.
-			if tm.lastFailoverTarget == "" && tm.isFreshDeploy(ctx) {
+			if lastFailoverTarget == "" && tm.isFreshDeploy(ctx) {
 				tm.startBootstrap(ctx)
 				return
 			}
@@ -1010,9 +1014,9 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	// writable site except the current failover target so they stop
 	// accepting writes; recovery proceeds in checkRecovery for each
 	// fenced site once it transitions to read-only.
-	if action.SplitBrain && tm.lastFailoverTarget != "" && !tm.isBootstrapping() {
+	if action.SplitBrain && lastFailoverTarget != "" && !tm.isBootstrapping() {
 		for i := range tm.sites {
-			if tm.sites[i].name == tm.lastFailoverTarget {
+			if tm.sites[i].name == lastFailoverTarget {
 				continue
 			}
 			if tm.sites[i].state != state.StateWritable {
@@ -1039,7 +1043,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	// may carry unique writes, and the operator's designated
 	// authority is what matters.
 	promote := ""
-	if action.SplitBrain && tm.lastFailoverTarget == "" && !tm.isBootstrapping() && len(tm.cfg.SitePriorities) > 0 {
+	if action.SplitBrain && lastFailoverTarget == "" && !tm.isBootstrapping() && len(tm.cfg.SitePriorities) > 0 {
 		writable := tm.writableObservations()
 		winner, losers := state.ResolveSplitBrain(writable, tm.cfg.SitePriorities)
 		if winner != "" {
@@ -1065,10 +1069,17 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 	}
 
-	if promote != "" && tm.promotedSite == "" {
-		if !tm.lastFailover.IsZero() && tm.clock.Since(tm.lastFailover) < tm.failoverCooldown {
+	if promote != "" {
+		tm.mu.RLock()
+		promotedSite := tm.promotedSite
+		lastFailover := tm.lastFailover
+		tm.mu.RUnlock()
+		if promotedSite != "" {
+			return
+		}
+		if !lastFailover.IsZero() && tm.clock.Since(lastFailover) < tm.failoverCooldown {
 			tm.logger.Info("failover blocked by anti-flap cooldown",
-				"lastFailover", tm.lastFailover, "cooldown", tm.failoverCooldown)
+				"lastFailover", lastFailover, "cooldown", tm.failoverCooldown)
 			return
 		}
 
@@ -1112,11 +1123,14 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			return
 		}
 		metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
+		now := tm.clock.Now()
+		tm.mu.Lock()
 		tm.promotionGtidExecuted = promotionGtid
 		tm.promotedSite = candidate.name
-		tm.promotedAt = tm.clock.Now()
-		tm.lastFailover = tm.clock.Now()
+		tm.promotedAt = now
+		tm.lastFailover = now
 		tm.lastFailoverTarget = candidate.name
+		tm.mu.Unlock()
 
 		// Best-effort: ask the Dragonfly subsystem (when wired) to
 		// follow the MySQL promotion. The callback enforces its own
@@ -1132,11 +1146,11 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 // otherwise the first writable site other than newPrimary. Returns ""
 // if there is no plausible old primary to fence.
 func (tm *TopologyManager) previousPrimary(newPrimary string) string {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
 	if tm.lastFailoverTarget != "" && tm.lastFailoverTarget != newPrimary {
 		return tm.lastFailoverTarget
 	}
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
 	for i := range tm.sites {
 		if tm.sites[i].name == newPrimary {
 			continue

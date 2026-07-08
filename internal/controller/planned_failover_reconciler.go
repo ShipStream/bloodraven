@@ -760,8 +760,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverRollback(ctx context.Conte
 		if err := r.Runner.PlannedFailoverUnfence(unfenceCtx, nn, cur.SourcePrimary); err != nil {
 			log.FromContext(ctx).Error(err, "planned-failover: unfence after rollback",
 				"fg", nn, "site", cur.SourcePrimary)
-			cancel()
-			return 5 * time.Second, nil
+			msg = fmt.Sprintf("%s (warning: source primary unfence failed: %v)", msg, err)
 		}
 		cancel()
 	}
