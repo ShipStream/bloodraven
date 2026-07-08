@@ -66,21 +66,30 @@ If the operator is unreachable and you must promote a site by hand, the legacy t
 **Step 1: Fence the current primary**
 
 ```bash
-kubectl exec mysql-orders-iad-0 -c mysql -- \
+SOURCE_POD=$(kubectl get pod -n orders \
+  -l app.kubernetes.io/name=mysql,shipstream.io/failover-group=orders,shipstream.io/site=iad \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n orders "$SOURCE_POD" -c mysql -- \
   mysql -u root -p -e "SET GLOBAL super_read_only=ON;"
 ```
 
 **Step 2: Stop and reset replication on the target**
 
 ```bash
-kubectl exec mysql-orders-pdx-0 -c mysql -- \
+TARGET_POD=$(kubectl get pod -n orders \
+  -l app.kubernetes.io/name=mysql,shipstream.io/failover-group=orders,shipstream.io/site=pdx \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n orders "$TARGET_POD" -c mysql -- \
   mysql -u root -p -e "STOP REPLICA; RESET REPLICA ALL;"
 ```
 
 **Step 3: Promote the target**
 
 ```bash
-kubectl exec mysql-orders-pdx-0 -c mysql -- \
+TARGET_POD=$(kubectl get pod -n orders \
+  -l app.kubernetes.io/name=mysql,shipstream.io/failover-group=orders,shipstream.io/site=pdx \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n orders "$TARGET_POD" -c mysql -- \
   mysql -u root -p -e "SET GLOBAL read_only=0;"
 ```
 
@@ -97,31 +106,52 @@ If both sites report `writable` (split brain), the operator will **not** take au
 1. **Identify the authoritative site** -- determine which site has the most recent data by comparing GTID sets:
 
    ```bash
-   kubectl exec mysql-orders-iad-0 -c mysql -- \
+   IAD_POD=$(kubectl get pod -n orders \
+     -l app.kubernetes.io/name=mysql,shipstream.io/failover-group=orders,shipstream.io/site=iad \
+     -o jsonpath='{.items[0].metadata.name}')
+   PDX_POD=$(kubectl get pod -n orders \
+     -l app.kubernetes.io/name=mysql,shipstream.io/failover-group=orders,shipstream.io/site=pdx \
+     -o jsonpath='{.items[0].metadata.name}')
+
+   kubectl exec -n orders "$IAD_POD" -c mysql -- \
      mysql -u root -p -e "SELECT @@gtid_executed;"
 
-   kubectl exec mysql-orders-pdx-0 -c mysql -- \
+   kubectl exec -n orders "$PDX_POD" -c mysql -- \
      mysql -u root -p -e "SELECT @@gtid_executed;"
    ```
 
 2. **Fence the non-authoritative site**:
 
    ```bash
-   kubectl exec mysql-orders-pdx-0 -c mysql -- \
+   PDX_POD=$(kubectl get pod -n orders \
+     -l app.kubernetes.io/name=mysql,shipstream.io/failover-group=orders,shipstream.io/site=pdx \
+     -o jsonpath='{.items[0].metadata.name}')
+   kubectl exec -n orders "$PDX_POD" -c mysql -- \
      mysql -u root -p -e "SET GLOBAL super_read_only=ON;"
    ```
 
 3. **Re-establish replication** from the authoritative site to the fenced site:
 
    ```bash
-   kubectl exec mysql-orders-pdx-0 -c mysql -- \
+   PDX_POD=$(kubectl get pod -n orders \
+     -l app.kubernetes.io/name=mysql,shipstream.io/failover-group=orders,shipstream.io/site=pdx \
+     -o jsonpath='{.items[0].metadata.name}')
+   kubectl exec -n orders "$PDX_POD" -c mysql -- \
      mysql -u root -p -e "
+       STOP REPLICA;
+       RESET REPLICA ALL;
        CHANGE REPLICATION SOURCE TO
-         SOURCE_HOST='mysql-orders-iad.default.svc.cluster.local',
+         SOURCE_HOST='mysql-orders-iad.orders.svc.cluster.local',
+         SOURCE_USER='replicator',
+         SOURCE_PASSWORD='<replicator-password>',
          SOURCE_AUTO_POSITION=1;
        START REPLICA;
      "
    ```
+
+   Read the replicator password from the failover group's credentials Secret.
+   If the group enforces TLS for replication, include the corresponding
+   `SOURCE_SSL_*` options from your MySQL TLS setup as well.
 
 4. The operator will detect the corrected topology and resume normal operation.
 
@@ -209,8 +239,11 @@ If Kubernetes is still binding the pod to a corrupted claim, delete the
 site pod and PVC so the operator can recreate storage from the CR spec:
 
 ```bash
-kubectl delete pod mysql-orders-iad-0
-kubectl delete pvc data-mysql-orders-iad-0
+IAD_POD=$(kubectl get pod -n orders \
+  -l app.kubernetes.io/name=mysql,shipstream.io/failover-group=orders,shipstream.io/site=iad \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl delete pod -n orders "$IAD_POD"
+kubectl delete pvc -n orders mysql-orders-iad-data
 ```
 
 If your cluster uses local-path storage, clear any `db-readonly` taint

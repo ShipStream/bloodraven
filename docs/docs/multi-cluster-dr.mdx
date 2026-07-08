@@ -162,18 +162,20 @@ passphrase available.
 The operator does not distribute passphrases across clusters. Follow
 these steps before triggering a recovery:
 
-**Step 1.** Read the passphrase from the source cluster:
+**Step 1.** Copy the passphrase from the source cluster into a temporary file on a trusted workstation:
 
 ```bash
+PASSFILE=$(mktemp)
 kubectl -n orders get secret orders-backup-passphrase \
-  -o jsonpath='{.data.passphrase}' | base64 -d
+  -o jsonpath='{.data.passphrase}' | base64 -d > "$PASSFILE"
 ```
 
-**Step 2.** Create the same Secret in the DR cluster's namespace:
+**Step 2.** Point `kubectl` at the DR cluster and create the same Secret in the DR namespace from that file:
 
 ```bash
 kubectl -n orders create secret generic orders-backup-passphrase \
-  --from-literal=passphrase='<value from step 1>'
+  --from-file=passphrase="$PASSFILE"
+shred -u "$PASSFILE"
 ```
 
 **Step 3.** Reference it in the DR restore manifest via

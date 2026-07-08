@@ -5954,8 +5954,8 @@ spec:
                 properties:
                   bloodravenAddress:
                     description: |-
-                      BloodravenAddress is the address of the Bloodraven operator health endpoint.
-                      Default: bloodraven.<namespace>.svc.cluster.local:8082
+                      BloodravenAddress is the address of the Bloodraven operator auxiliary endpoint.
+                      When empty, the operator uses its configured default auxiliary Service address.
                     type: string
                   leaseTimeout:
                     default: 20s

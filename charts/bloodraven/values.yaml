@@ -142,10 +142,15 @@ auxiliary:
     # /ws/status. It currently has NO authentication or authorization
     # (see AUDIT H2); anything on the pod network can read failover-group
     # state for arbitrary namespaces and open unbounded WebSockets.
-    # Keep disabled unless the sidecar / dashboard / PITR retention
-    # sweeper actually need it, and pair with a NetworkPolicy that
-    # limits ingress to those specific ServiceAccounts.
-    enabled: false
+    # The sidecar self-fencing monitor and PITR retention sweeper need this
+    # endpoint unless every MysqlFailoverGroup sets spec.sidecar.bloodravenAddress
+    # to a reachable alternative. Pair with a NetworkPolicy that limits ingress
+    # to sidecars, dashboards, and observability namespaces that require it.
+    enabled: true
+    # -- Stable auxiliary Service name. The operator passes this Service FQDN
+    # to sidecars as BLOODRAVEN_ADDRESS by default; changing it requires a
+    # matching spec.sidecar.bloodravenAddress override for existing groups.
+    name: bloodraven
     # -- Auxiliary service port (status API + WebSocket)
     port: 8082
     # -- Service type
