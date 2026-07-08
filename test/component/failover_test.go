@@ -44,9 +44,9 @@ func TestFailover_DC1Down_PromoteDC2(t *testing.T) {
 		t.Error("dc2 should have been promoted (readOnly should be false)")
 	}
 
-	// DNS should have flipped immediately at failover trigger (before promotion).
+	// DNS should flip after successful promotion and writable confirmation.
 	if h.dns.getLastIP() != "2.2.2.2" {
-		t.Errorf("DNS should flip at failover trigger, got %s", h.dns.getLastIP())
+		t.Errorf("DNS should flip after promotion, got %s", h.dns.getLastIP())
 	}
 
 	// 5. Poll 2x more -- dc2 confirmed writable (recovery threshold = 2).
@@ -88,13 +88,13 @@ func TestFailover_DC2Down_PromoteDC1(t *testing.T) {
 		t.Error("dc1 should have been promoted")
 	}
 
-	// DNS should have flipped immediately at failover trigger.
+	// DNS should flip after successful promotion and writable confirmation.
 	if h.dns.getLastIP() != "1.1.1.1" {
-		t.Errorf("DNS should flip at failover trigger, got %s", h.dns.getLastIP())
+		t.Errorf("DNS should flip after promotion, got %s", h.dns.getLastIP())
 	}
 }
 
-func TestFailover_DNSFlipsAtTrigger(t *testing.T) {
+func TestFailover_DNSFlipsAfterPromotion(t *testing.T) {
 	h := newTestHarness(t) // DC1 writable, DC2 read-only
 
 	// Establish normal.
@@ -103,11 +103,11 @@ func TestFailover_DNSFlipsAtTrigger(t *testing.T) {
 	// DC1 goes down.
 	h.dc1MySQL.setError(errDown)
 
-	// Reach failure threshold: failover triggers — DNS flips immediately.
+	// Reach failure threshold: failover promotes the replica, confirms it writable, then flips DNS.
 	h.pollN(3)
 
 	if h.dns.getLastIP() != "2.2.2.2" {
-		t.Errorf("DNS should flip at failover trigger, got %s", h.dns.getLastIP())
+		t.Errorf("DNS should flip after promotion, got %s", h.dns.getLastIP())
 	}
 
 	// Additional polls should NOT cause another DNS flip.
@@ -133,7 +133,7 @@ func TestFailover_AntiFlap(t *testing.T) {
 		t.Fatal("first failover: dc2 should have been promoted")
 	}
 
-	// DNS should have flipped immediately at trigger time.
+	// DNS should flip after successful promotion and writable confirmation.
 	if h.dns.getLastIP() != "2.2.2.2" {
 		t.Fatalf("first failover: DNS should point to dc2, got %s", h.dns.getLastIP())
 	}

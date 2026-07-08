@@ -493,6 +493,19 @@ func (tm *TopologyManager) clearPendingPromotionLocked() {
 	tm.promotedAt = time.Time{}
 }
 
+func (tm *TopologyManager) confirmWritable(ctx context.Context, site *siteTracker) error {
+	confirmCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	readOnly, err := site.mysql.CheckReadOnly(confirmCtx)
+	if err != nil {
+		return fmt.Errorf("confirm writable on %q: %w", site.name, err)
+	}
+	if readOnly {
+		return fmt.Errorf("site %q still read_only after promotion", site.name)
+	}
+	return nil
+}
+
 // Ready returns true after the first successful poll cycle.
 func (tm *TopologyManager) Ready() bool {
 	tm.mu.RLock()
@@ -633,9 +646,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		}
 	}
 
-	// Check for pending promotion confirmation: DNS was already flipped at
-	// failover trigger time; this block confirms the promoted site is writable
-	// and clears the guard flag to allow future failovers.
+	// Check for pending promotion confirmation: DNS was flipped after successful
+	// promotion and writable confirmation; this block verifies the promoted site
+	// is still writable and clears the guard flag to allow future failovers.
 	tm.mu.Lock()
 	if tm.promotedSite != "" {
 		tm.reconcilePendingPromotionLocked()
@@ -1109,19 +1122,21 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 
 		tm.logger.Info("initiating failover", "candidate", candidate.name, "oldPrimary", oldPrimaryName)
 
-		// DNS flip FIRST: start propagation now so it overlaps with
-		// the relay-log drain and MySQL promotion steps.
-		if err := tm.dns.UpdateDNSRecord(ctx, candidate.lbIP); err != nil {
-			tm.logger.Error("DNS flip failed", "site", candidate.name, "error", err)
-		} else {
-			metrics.DNSFlipCount.WithLabelValues(candidate.name).Inc()
-		}
-
 		promotionGtid, err := tm.failover.Execute(ctx, candidate.mysql, oldPrimaryChecker, candidate.name)
 		if err != nil {
 			tm.logger.Error("failover failed", "error", err)
 			return
 		}
+		if err := tm.confirmWritable(ctx, candidate); err != nil {
+			tm.logger.Error("promotion succeeded but writable confirmation failed; DNS not flipped",
+				"site", candidate.name, "error", err)
+			return
+		}
+		if err := tm.dns.UpdateDNSRecord(ctx, candidate.lbIP); err != nil {
+			tm.logger.Error("DNS flip failed after successful promotion", "site", candidate.name, "error", err)
+			return
+		}
+		metrics.DNSFlipCount.WithLabelValues(candidate.name).Inc()
 		metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
 		now := tm.clock.Now()
 		tm.mu.Lock()
@@ -1403,7 +1418,8 @@ func (tm *TopologyManager) KillSiteAppConnections(ctx context.Context, name stri
 }
 
 // PlannedPromote runs FailoverController.Execute against the target,
-// flips DNS to the target's LB IP, and updates the in-memory
+// confirms the target is writable, flips DNS to the target's LB IP,
+// and updates the in-memory
 // lastFailover/lastFailoverTarget fields so the anti-flap cooldown
 // applies to any follow-on emergency or planned failover. Callers must
 // have already set plannedFailoverActive to true and completed the
@@ -1428,18 +1444,17 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 		}
 	}
 
-	// DNS flip first, mirroring applyCrossSiteAction: start propagation
-	// now so it overlaps with the MySQL steps.
-	if err := tm.dns.UpdateDNSRecord(ctx, targetSite.lbIP); err != nil {
-		tm.logger.Error("planned-failover DNS flip failed", "site", target, "error", err)
-	} else {
-		metrics.DNSFlipCount.WithLabelValues(target).Inc()
-	}
-
 	promotionGtid, err := tm.failover.Execute(ctx, targetSite.mysql, sourceChecker, target)
 	if err != nil {
 		return "", err
 	}
+	if err := tm.confirmWritable(ctx, targetSite); err != nil {
+		return "", fmt.Errorf("promotion succeeded but writable confirmation failed: %w", err)
+	}
+	if err := tm.dns.UpdateDNSRecord(ctx, targetSite.lbIP); err != nil {
+		return "", fmt.Errorf("DNS flip failed after successful promotion: %w", err)
+	}
+	metrics.DNSFlipCount.WithLabelValues(target).Inc()
 
 	tm.mu.Lock()
 	tm.promotionGtidExecuted = promotionGtid
@@ -1803,7 +1818,8 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 	tm.emitBootstrapStatus()
 
 	go func() {
-		err := tm.runBootstrap(ctx, donorSite.mysql, recipientSite.mysql, donorSite.host, recipient)
+		allowSkipClone := source != "reclone"
+		err := tm.runBootstrap(ctx, donorSite.mysql, recipientSite.mysql, donorSite.host, recipient, allowSkipClone)
 		tm.mu.Lock()
 		if err != nil {
 			tm.bootstrapPhase = BootstrapPhaseFailed
@@ -1820,12 +1836,12 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 
 // runBootstrap performs the clone, waits for the MySQL restart, and
 // sets up replication of recipient from donor.
-func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica mysql.Checker, primaryHost, replicaSite string) error {
+func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica mysql.Checker, primaryHost, replicaSite string, allowSkipClone bool) error {
 	// Check if the clone already completed (e.g. prior bootstrap succeeded at
 	// CLONE but failed at SetupReplication). If the primary's GTID set contains
 	// the replica's, the data is already in sync and we can skip directly to
 	// replication setup.
-	if tm.canSkipClone(ctx, primary, replica) {
+	if allowSkipClone && tm.canSkipClone(ctx, primary, replica) {
 		tm.logger.Info("replica already has primary data (prior clone detected), skipping clone phase")
 		tm.mu.Lock()
 		tm.bootstrapPhase = BootstrapPhaseSetupRepl
@@ -1886,8 +1902,10 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 	return nil
 }
 
-// canSkipClone returns true when the replica already contains the primary's
-// data (or a superset), indicating a prior CLONE INSTANCE succeeded.
+// canSkipClone returns true when the donor/primary GTID set contains the
+// recipient/replica GTID set, meaning the recipient is equal to or behind the
+// donor and cannot contain extra divergent transactions. Recipient supersets,
+// disjoint sets, empty sets, and malformed sets force a destructive clone.
 func (tm *TopologyManager) canSkipClone(ctx context.Context, primary, replica mysql.Checker) bool {
 	pRaw, err := primary.GetGtidExecuted(ctx)
 	if err != nil {
@@ -1905,7 +1923,7 @@ func (tm *TopologyManager) canSkipClone(ctx context.Context, primary, replica my
 	if err != nil || rGtid.IsEmpty() {
 		return false
 	}
-	return rGtid.Contains(pGtid) || pGtid.Contains(rGtid)
+	return pGtid.Contains(rGtid)
 }
 
 // setupReplicationForBootstrap runs only the replication setup phase of bootstrap.

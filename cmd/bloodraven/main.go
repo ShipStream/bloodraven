@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -219,11 +222,11 @@ func main() {
 
 	// Start a separate HTTP server for websocket and status on :8082
 	// (controller-runtime handles metrics on :8080 and probes on :8081)
-	mux := newAuxMux(runner, hub, mgr.GetClient())
+	mux := newAuxMuxWithLogger(runner, hub, mgr.GetClient(), logger)
 
 	auxSrv := &http.Server{
 		Addr:              ":8082",
-		Handler:           auxLoggingMiddleware(logger, mux),
+		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -272,22 +275,33 @@ func (f runnableFunc) Start(ctx context.Context) error {
 // against the aux server (method, path, status, duration, remote IP)
 // and increments Prometheus RED counters. A stuck handler or probing
 // attacker otherwise produces zero signal (AUDIT M4/M6).
-func auxLoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+func auxLoggingMiddleware(logger *slog.Logger, handler string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusRecorder{ResponseWriter: rw, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
 		dur := time.Since(start)
+		method := auxMetricMethod(r.Method)
 		logger.Info("aux http",
 			"method", r.Method,
 			"path", r.URL.Path,
+			"handler", handler,
 			"status", sw.status,
 			"duration_ms", dur.Milliseconds(),
 			"remote", r.RemoteAddr,
 		)
-		metrics.HTTPRequestsTotal.WithLabelValues("aux", r.URL.Path, r.Method, metrics.StatusClass(sw.status)).Inc()
-		metrics.HTTPRequestDurationSeconds.WithLabelValues("aux", r.URL.Path, r.Method).Observe(dur.Seconds())
+		metrics.HTTPRequestsTotal.WithLabelValues("aux", handler, method, metrics.StatusClass(sw.status)).Inc()
+		metrics.HTTPRequestDurationSeconds.WithLabelValues("aux", handler, method).Observe(dur.Seconds())
 	})
+}
+
+func auxMetricMethod(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions:
+		return method
+	default:
+		return "OTHER"
+	}
 }
 
 // statusRecorder captures the HTTP status so the logging middleware
@@ -300,6 +314,27 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying response writer does not support hijacking")
+	}
+	return h.Hijack()
+}
+
+func (r *statusRecorder) ReadFrom(src io.Reader) (int64, error) {
+	if rf, ok := r.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(src)
+	}
+	return io.Copy(r.ResponseWriter, src)
 }
 
 // pitrCutoffCache is a tiny TTL cache in front of the /pitr-cutoff
@@ -340,16 +375,20 @@ func (c *pitrCutoffCache) set(ns, group, profile string, value map[string]any) {
 }
 
 func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Client) *http.ServeMux {
+	return newAuxMuxWithLogger(runner, hub, k8sClient, slog.Default())
+}
+
+func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Client, logger *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, _ *http.Request) {
+	mux.Handle("/healthz", auxLoggingMiddleware(logger, "healthz", http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		rw.WriteHeader(http.StatusOK)
 		_, _ = rw.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/readyz", func(rw http.ResponseWriter, _ *http.Request) {
+	})))
+	mux.Handle("/readyz", auxLoggingMiddleware(logger, "readyz", http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		rw.WriteHeader(http.StatusOK)
 		_, _ = rw.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/status", func(rw http.ResponseWriter, _ *http.Request) {
+	})))
+	mux.Handle("/status", auxLoggingMiddleware(logger, "status", http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
 		statuses := runner.AllStatuses()
 		if len(statuses) == 0 {
@@ -357,8 +396,8 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sC
 			return
 		}
 		json.NewEncoder(rw).Encode(statuses)
-	})
-	mux.HandleFunc("/active-site", func(rw http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("/active-site", auxLoggingMiddleware(logger, "active-site", http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
 		ns := r.URL.Query().Get("namespace")
 		group := r.URL.Query().Get("group")
@@ -384,7 +423,7 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sC
 			"group":      group,
 			"activeSite": status.ActiveSite,
 		})
-	})
+	})))
 	// /pitr-cutoff is consumed by the sidecar's binlog archiver.
 	// Given a (namespace, group, profile) triple it returns the
 	// completion time of the OLDEST successful MysqlBackup retained
@@ -399,7 +438,7 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sC
 	// call, which also bounds the DoS surface on the unauthenticated
 	// endpoint (AUDIT H2).
 	pitrCache := newPITRCutoffCache(30 * time.Second)
-	mux.HandleFunc("/pitr-cutoff", func(rw http.ResponseWriter, r *http.Request) {
+	mux.Handle("/pitr-cutoff", auxLoggingMiddleware(logger, "pitr-cutoff", http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
 		ns := r.URL.Query().Get("namespace")
 		group := r.URL.Query().Get("group")
@@ -473,7 +512,8 @@ func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sC
 		}
 		pitrCache.set(ns, group, profile, resp)
 		json.NewEncoder(rw).Encode(resp)
-	})
-	mux.HandleFunc("/ws/status", hub.HandleWS)
+	})))
+	mux.Handle("/ws/status", auxLoggingMiddleware(logger, "ws-status", http.HandlerFunc(hub.HandleWS)))
+	mux.Handle("/", auxLoggingMiddleware(logger, "notfound", http.NotFoundHandler()))
 	return mux
 }

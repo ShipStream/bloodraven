@@ -152,3 +152,12 @@ func TestAuxMuxStatusWithoutFailoverGroups(t *testing.T) {
 		t.Fatalf("expected no active failover groups status, got %#v", status)
 	}
 }
+
+func TestAuxMetricMethodBoundsCardinality(t *testing.T) {
+	if got := auxMetricMethod(http.MethodGet); got != http.MethodGet {
+		t.Fatalf("GET should remain GET, got %q", got)
+	}
+	if got := auxMetricMethod("RANDOM-SCANNER-METHOD"); got != "OTHER" {
+		t.Fatalf("unknown method should become OTHER, got %q", got)
+	}
+}

@@ -475,10 +475,20 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		var dsn string
 		var err error
 		if fg.Spec.UsesCredentials() {
+			tlsConfigName := ""
+			if fg.Spec.TLS != nil {
+				tlsConfigName, err = mysqlTLSConfig(ctx, r.client, fg, siteServiceHost(fg.Name, site.Name, fg.Namespace))
+				if err != nil {
+					for j := 0; j < i; j++ {
+						siteMySQL[j].Close()
+					}
+					return fmt.Errorf("configure TLS for site %s: %w", site.Name, err)
+				}
+			}
 			dsn = buildSiteDSNFromCreds(
 				string(secret.Data["username"]),
 				string(secret.Data["password"]),
-				fg, site,
+				fg, site, tlsConfigName,
 			)
 		} else {
 			dsnBytes, ok := secret.Data["dsn"]
@@ -1323,13 +1333,17 @@ func buildSiteDSN(baseDSN string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1
 }
 
 // buildSiteDSNFromCreds constructs a DSN from username/password credentials
-// and the site service endpoint (used in credentials mode).
-func buildSiteDSNFromCreds(username, password string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) string {
+// and the site service endpoint (used in credentials mode). tlsConfigName, when
+// non-empty, names a MySQL driver TLS config registered for the site's service host.
+func buildSiteDSNFromCreds(username, password string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsConfigName string) string {
 	cfg := mysql.NewConfig()
 	cfg.User = username
 	cfg.Passwd = password
 	cfg.Net = "tcp"
-	cfg.Addr = fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d", fg.Name, site.Name, fg.Namespace, mysqlPort)
+	cfg.Addr = fmt.Sprintf("%s:%d", siteServiceHost(fg.Name, site.Name, fg.Namespace), mysqlPort)
 	cfg.Timeout = 5 * time.Second
+	if tlsConfigName != "" {
+		cfg.TLSConfig = tlsConfigName
+	}
 	return cfg.FormatDSN()
 }

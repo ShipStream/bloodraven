@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -45,11 +46,28 @@ type TopologySite struct {
 // Hub manages websocket connections and broadcasts state changes.
 type Hub struct {
 	mu             sync.RWMutex
-	clients        map[*websocket.Conn]struct{}
+	clients        map[*wsClient]struct{}
 	logger         *slog.Logger
 	upgrader       websocket.Upgrader
 	allowedOrigins map[string]struct{} // nil == allow all (legacy)
 	maxClients     int                 // 0 == unlimited
+}
+
+const (
+	wsSendBuffer = 8
+	wsWriteWait  = 5 * time.Second
+	wsPongWait   = 60 * time.Second
+	wsPingPeriod = 54 * time.Second
+)
+
+type wsClient struct {
+	hub       *Hub
+	conn      *websocket.Conn
+	send      chan []byte
+	done      chan struct{}
+	mu        sync.Mutex
+	closed    bool
+	closeOnce sync.Once
 }
 
 // NewHub builds a Hub and applies the AUDIT H2 hardening:
@@ -61,7 +79,7 @@ type Hub struct {
 //     extra upgrades are rejected with 429. Default 100.
 func NewHub(logger *slog.Logger) *Hub {
 	h := &Hub{
-		clients:    make(map[*websocket.Conn]struct{}),
+		clients:    make(map[*wsClient]struct{}),
 		logger:     logger,
 		maxClients: envInt("BLOODRAVEN_WS_MAX_CLIENTS", 100),
 	}
@@ -109,27 +127,15 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	client := &wsClient{hub: h, conn: conn, send: make(chan []byte, wsSendBuffer), done: make(chan struct{})}
 	h.mu.Lock()
-	h.clients[conn] = struct{}{}
+	h.clients[client] = struct{}{}
 	h.mu.Unlock()
 
 	h.logger.Info("websocket client connected", "remote", conn.RemoteAddr())
 
-	// Read loop to detect disconnects.
-	go func() {
-		defer func() {
-			h.mu.Lock()
-			delete(h.clients, conn)
-			h.mu.Unlock()
-			conn.Close()
-			h.logger.Info("websocket client disconnected", "remote", conn.RemoteAddr())
-		}()
-		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				return
-			}
-		}
-	}()
+	go client.readPump()
+	go client.writePump()
 }
 
 // Broadcast sends a topology message to all connected clients.
@@ -140,14 +146,96 @@ func (h *Hub) Broadcast(msg TopologyMessage) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.mu.RLock()
+	clients := make([]*wsClient, 0, len(h.clients))
+	for client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
 
-	for conn := range h.clients {
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-			h.logger.Warn("write to ws client failed", "remote", conn.RemoteAddr(), "error", err)
+	for _, client := range clients {
+		if !client.enqueue(data) {
+			h.logger.Warn("websocket client too slow; disconnecting", "remote", client.conn.RemoteAddr())
+			client.close()
 		}
 	}
+}
+
+func (c *wsClient) enqueue(data []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return true
+	}
+	select {
+	case c.send <- data:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *wsClient) readPump() {
+	defer c.close()
+	_ = c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	c.conn.SetPongHandler(func(string) error {
+		return c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	})
+	for {
+		if _, _, err := c.conn.ReadMessage(); err != nil {
+			return
+		}
+	}
+}
+
+func (c *wsClient) writePump() {
+	ticker := time.NewTicker(wsPingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.close()
+	}()
+	for {
+		select {
+		case msg, ok := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+			if !ok {
+				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				c.hub.logger.Warn("write to ws client failed", "remote", c.conn.RemoteAddr(), "error", err)
+				return
+			}
+		case <-ticker.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				c.hub.logger.Warn("ping ws client failed", "remote", c.conn.RemoteAddr(), "error", err)
+				return
+			}
+		case <-c.done:
+			return
+		}
+	}
+}
+
+func (c *wsClient) close() {
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		c.closed = true
+		close(c.done)
+		c.mu.Unlock()
+
+		c.hub.mu.Lock()
+		_, existed := c.hub.clients[c]
+		if existed {
+			delete(c.hub.clients, c)
+		}
+		c.hub.mu.Unlock()
+		_ = c.conn.Close()
+		if existed {
+			c.hub.logger.Info("websocket client disconnected", "remote", c.conn.RemoteAddr())
+		}
+	})
 }
 
 // ClientCount returns the number of connected websocket clients.

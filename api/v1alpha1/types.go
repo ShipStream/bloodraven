@@ -384,12 +384,17 @@ type DNSSpec struct {
 }
 
 // SidecarSpec configures the sidecar container behavior.
+// +kubebuilder:validation:XValidation:rule="!has(self.peerCheckInterval) || duration(self.peerCheckInterval) >= duration('1s')",message="spec.sidecar.peerCheckInterval must be at least 1s"
+// +kubebuilder:validation:XValidation:rule="!has(self.leaseTimeout) || duration(self.leaseTimeout) >= duration('3s')",message="spec.sidecar.leaseTimeout must be at least 3s"
+// +kubebuilder:validation:XValidation:rule="duration(has(self.leaseTimeout) ? self.leaseTimeout : '20s') >= duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval : '5s')",message="spec.sidecar.leaseTimeout must be at least 3x spec.sidecar.peerCheckInterval"
 type SidecarSpec struct {
-	// LeaseTimeout is how long before a sidecar lease expires. Default: 20s
+	// LeaseTimeout is how long before a sidecar lease expires. Default: 20s.
+	// Must be at least 3s and at least 3x PeerCheckInterval.
 	// +kubebuilder:default="20s"
 	LeaseTimeout *metav1.Duration `json:"leaseTimeout,omitempty"`
 
-	// PeerCheckInterval is how often the sidecar checks its peer. Default: 5s
+	// PeerCheckInterval is how often the sidecar checks its peer. Default: 5s.
+	// Must be at least 1s.
 	// +kubebuilder:default="5s"
 	PeerCheckInterval *metav1.Duration `json:"peerCheckInterval,omitempty"`
 

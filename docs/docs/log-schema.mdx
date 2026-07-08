@@ -75,7 +75,7 @@ The four events that trace one failover, in order:
 
 | Level | `msg` | Fields | Fired when |
 |---|---|---|---|
-| INFO | `initiating failover` | `candidate`, `oldPrimary`, `fg` | Operator has chosen a promotion target and is about to flip DNS and run the promotion sequence. |
+| INFO | `initiating failover` | `candidate`, `oldPrimary`, `fg` | Operator has chosen a promotion target and is about to run the promotion sequence. DNS flips only after promotion succeeds and the target is verified writable. |
 | INFO | `failover complete` | `promotedSite`, `promotionGtid`, `fg` | `Execute` finished: candidate is writable. `promotionGtid` is the candidate's `gtid_executed` snapshot taken just before clearing `super_read_only` — the upper bound on data that survived. |
 | INFO | `promotion confirmed: site is writable` | `site`, `fg` | Next poll observes the promoted site is `writable`. The internal post-failover guard clears here. |
 | ERROR | `failover failed` | `error`, `fg` | The promotion sequence returned an error. The operator does not retry automatically; the next eligible state-transition tick will re-evaluate. |

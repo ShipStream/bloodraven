@@ -1082,12 +1082,16 @@ func TestSecretToFailoverGroup_CredentialsMode(t *testing.T) {
 
 func TestBuildSiteDSNFromCreds(t *testing.T) {
 	fg := newTestFG()
-	dsn := buildSiteDSNFromCreds("myuser", "mypass", fg, fg.Spec.Sites[0])
+	dsn := buildSiteDSNFromCreds("myuser", "mypass", fg, fg.Spec.Sites[0], "")
 	if !strings.Contains(dsn, "myuser:mypass@") {
 		t.Errorf("DSN should contain credentials: %s", dsn)
 	}
 	if !strings.Contains(dsn, "mysql-lion-dc1.shared-lion.svc.cluster.local") {
 		t.Errorf("DSN should contain site host: %s", dsn)
+	}
+	dsn = buildSiteDSNFromCreds("myuser", "mypass", fg, fg.Spec.Sites[0], "bloodraven-test-tls")
+	if !strings.Contains(dsn, "tls=bloodraven-test-tls") {
+		t.Errorf("DSN should contain TLS config name: %s", dsn)
 	}
 }
 

@@ -379,15 +379,15 @@ func TestPromotionNotRepeated(t *testing.T) {
 		t.Fatal("site1 should have been promoted (readOnly should be false)")
 	}
 
-	// DNS should have flipped at trigger time
+	// DNS should flip after successful promotion and writable confirmation.
 	if dns.getLastIP() != "2.2.2.2" {
-		t.Errorf("DNS should flip at failover trigger, got %s", dns.getLastIP())
+		t.Errorf("DNS should flip after promotion, got %s", dns.getLastIP())
 	}
 
 	// Poll again while site0 still down, site1 recovering
 	pollN(tm, 5)
 
-	// DNS should only flip once (at trigger time)
+	// DNS should only flip once for the successful promotion.
 	dns.mu.Lock()
 	calls := dns.calls
 	dns.mu.Unlock()
@@ -396,7 +396,7 @@ func TestPromotionNotRepeated(t *testing.T) {
 	}
 }
 
-func TestPromotionFailure_DNSStillFlips(t *testing.T) {
+func TestPromotionFailure_DNSDoesNotFlip(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{readOnly: true}
 	tm, _, dns := newTestTopologyManager(site0, site1)
@@ -410,14 +410,42 @@ func TestPromotionFailure_DNSStillFlips(t *testing.T) {
 	site0.setError(errors.New("connection refused"))
 	pollN(tm, 3) // trigger failover attempt
 
-	// DNS flips before promotion — even if promotion fails, DNS was already updated.
-	if dns.getLastIP() != "2.2.2.2" {
-		t.Errorf("DNS should flip at trigger time even when promotion fails, got %q", dns.getLastIP())
+	// DNS must not flip when promotion fails.
+	if dns.getLastIP() != "" {
+		t.Errorf("DNS should not flip when promotion fails, got %q", dns.getLastIP())
 	}
 
 	// promotedSite should NOT be set since Execute returned an error.
 	if tm.promotedSite != "" {
 		t.Errorf("promotedSite should be empty after failed promotion, got %q", tm.promotedSite)
+	}
+}
+
+func TestCanSkipCloneGTIDPredicate(t *testing.T) {
+	tests := []struct {
+		name      string
+		donor     string
+		recipient string
+		want      bool
+	}{
+		{"equal", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10", true},
+		{"recipient behind donor", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-20", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10", true},
+		{"recipient ahead of donor", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-20", false},
+		{"disjoint", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10", "AAAAAAAA-71CA-11E1-9E33-C80AA9429562:1-10", false},
+		{"empty donor", "", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10", false},
+		{"empty recipient", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10", "", false},
+		{"malformed donor", "not-a-gtid", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10", false},
+		{"malformed recipient", "3E11FA47-71CA-11E1-9E33-C80AA9429562:1-10", "not-a-gtid", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			donor := &mockMySQL{gtidExecuted: tt.donor}
+			recipient := &mockMySQL{gtidExecuted: tt.recipient}
+			tm, _, _ := newTestTopologyManager(donor, recipient)
+			if got := tm.canSkipClone(context.Background(), donor, recipient); got != tt.want {
+				t.Fatalf("canSkipClone() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

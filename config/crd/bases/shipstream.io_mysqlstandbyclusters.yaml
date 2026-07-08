@@ -6247,15 +6247,31 @@ spec:
                             type: string
                           leaseTimeout:
                             default: 20s
-                            description: 'LeaseTimeout is how long before a sidecar
-                              lease expires. Default: 20s'
+                            description: |-
+                              LeaseTimeout is how long before a sidecar lease expires. Default: 20s.
+                              Must be at least 3s and at least 3x PeerCheckInterval.
                             type: string
                           peerCheckInterval:
                             default: 5s
-                            description: 'PeerCheckInterval is how often the sidecar
-                              checks its peer. Default: 5s'
+                            description: |-
+                              PeerCheckInterval is how often the sidecar checks its peer. Default: 5s.
+                              Must be at least 1s.
                             type: string
                         type: object
+                        x-kubernetes-validations:
+                        - message: spec.sidecar.peerCheckInterval must be at least
+                            1s
+                          rule: '!has(self.peerCheckInterval) || duration(self.peerCheckInterval)
+                            >= duration(''1s'')'
+                        - message: spec.sidecar.leaseTimeout must be at least 3s
+                          rule: '!has(self.leaseTimeout) || duration(self.leaseTimeout)
+                            >= duration(''3s'')'
+                        - message: spec.sidecar.leaseTimeout must be at least 3x spec.sidecar.peerCheckInterval
+                          rule: 'duration(has(self.leaseTimeout) ? self.leaseTimeout
+                            : ''20s'') >= duration(has(self.peerCheckInterval) ? self.peerCheckInterval
+                            : ''5s'') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval
+                            : ''5s'') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval
+                            : ''5s'')'
                       sidecarImage:
                         default: ghcr.io/shipstream/bloodraven-sidecar:0.1.6
                         description: SidecarImage is the image used for the sidecar/init
