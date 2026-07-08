@@ -196,12 +196,13 @@ func (c *wsClient) writePump() {
 	}()
 	for {
 		select {
-		case msg, ok := <-c.send:
+		case msg := <-c.send:
+			// c.send is never closed — shutdown is driven solely by
+			// c.done and the ticker error paths — so there is no
+			// channel-closed (!ok) case to handle here. enqueue() guards
+			// its non-blocking send with the c.closed flag under c.mu;
+			// keeping c.send open is what makes that guard sufficient.
 			_ = c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
-			if !ok {
-				_ = c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
 			if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				c.hub.logger.Warn("write to ws client failed", "remote", c.conn.RemoteAddr(), "error", err)
 				return

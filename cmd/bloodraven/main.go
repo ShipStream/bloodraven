@@ -291,7 +291,14 @@ func auxLoggingMiddleware(logger *slog.Logger, handler string, next http.Handler
 			"remote", r.RemoteAddr,
 		)
 		metrics.HTTPRequestsTotal.WithLabelValues("aux", handler, method, metrics.StatusClass(sw.status)).Inc()
-		metrics.HTTPRequestDurationSeconds.WithLabelValues("aux", handler, method).Observe(dur.Seconds())
+		// Skip the request-latency histogram for hijacked connections
+		// (e.g. the /ws/status WebSocket): their "duration" is the whole
+		// session lifetime, not request-handling latency, and would
+		// otherwise swamp the aux latency percentiles. The connection is
+		// still counted in HTTPRequestsTotal above.
+		if !sw.hijacked {
+			metrics.HTTPRequestDurationSeconds.WithLabelValues("aux", handler, method).Observe(dur.Seconds())
+		}
 	})
 }
 
@@ -305,10 +312,14 @@ func auxMetricMethod(method string) string {
 }
 
 // statusRecorder captures the HTTP status so the logging middleware
-// can record it. net/http doesn't offer this out of the box.
+// can record it. net/http doesn't offer this out of the box. It also
+// notes when the connection was hijacked (WebSocket upgrade) so the
+// middleware can skip the request-latency histogram for long-lived
+// connections whose "duration" is really the session lifetime.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status   int
+	hijacked bool
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
@@ -327,7 +338,11 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf("underlying response writer does not support hijacking")
 	}
-	return h.Hijack()
+	conn, rw, err := h.Hijack()
+	if err == nil {
+		r.hijacked = true
+	}
+	return conn, rw, err
 }
 
 func (r *statusRecorder) ReadFrom(src io.Reader) (int64, error) {

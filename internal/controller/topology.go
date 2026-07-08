@@ -1132,12 +1132,16 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				"site", candidate.name, "error", err)
 			return
 		}
-		if err := tm.dns.UpdateDNSRecord(ctx, candidate.lbIP); err != nil {
-			tm.logger.Error("DNS flip failed after successful promotion", "site", candidate.name, "error", err)
-			return
-		}
-		metrics.DNSFlipCount.WithLabelValues(candidate.name).Inc()
-		metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
+
+		// Promotion + writable confirmation both succeeded: the candidate
+		// is the authoritative primary now, regardless of whether DNS has
+		// caught up. Record the failover state (anti-flap cooldown,
+		// split-brain fencing target, status GTID) and count the failover
+		// BEFORE the DNS flip so a DNS-provider outage cannot erase the
+		// fact that a promotion happened. The DNS flip below is then
+		// best-effort for state tracking — its failure is logged and the
+		// success-only DNSFlipCount metric is left unincremented, but the
+		// operator no longer forgets the promotion.
 		now := tm.clock.Now()
 		tm.mu.Lock()
 		tm.promotionGtidExecuted = promotionGtid
@@ -1146,6 +1150,13 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		tm.lastFailover = now
 		tm.lastFailoverTarget = candidate.name
 		tm.mu.Unlock()
+		metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
+
+		if err := tm.dns.UpdateDNSRecord(ctx, candidate.lbIP); err != nil {
+			tm.logger.Error("DNS flip failed after successful promotion", "site", candidate.name, "error", err)
+			return
+		}
+		metrics.DNSFlipCount.WithLabelValues(candidate.name).Inc()
 
 		// Best-effort: ask the Dragonfly subsystem (when wired) to
 		// follow the MySQL promotion. The callback enforces its own
@@ -1451,18 +1462,27 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	if err := tm.confirmWritable(ctx, targetSite); err != nil {
 		return "", fmt.Errorf("promotion succeeded but writable confirmation failed: %w", err)
 	}
-	if err := tm.dns.UpdateDNSRecord(ctx, targetSite.lbIP); err != nil {
-		return "", fmt.Errorf("DNS flip failed after successful promotion: %w", err)
-	}
-	metrics.DNSFlipCount.WithLabelValues(target).Inc()
 
+	// Record the failover-tracking state before the DNS flip: the target
+	// is writable now, so a DNS-provider outage must not erase the
+	// cooldown / split-brain / status-GTID fields the reconciler relies
+	// on. The DNS flip below is best-effort for state tracking; on
+	// failure we still return the promotion GTID (not "") so the caller
+	// can surface what was promoted rather than mistaking a stale-DNS
+	// condition for a failed promotion.
+	now := tm.clock.Now()
 	tm.mu.Lock()
 	tm.promotionGtidExecuted = promotionGtid
 	tm.promotedSite = target
-	tm.promotedAt = tm.clock.Now()
-	tm.lastFailover = tm.clock.Now()
+	tm.promotedAt = now
+	tm.lastFailover = now
 	tm.lastFailoverTarget = target
 	tm.mu.Unlock()
+
+	if err := tm.dns.UpdateDNSRecord(ctx, targetSite.lbIP); err != nil {
+		return promotionGtid, fmt.Errorf("DNS flip failed after successful promotion: %w", err)
+	}
+	metrics.DNSFlipCount.WithLabelValues(target).Inc()
 
 	return promotionGtid, nil
 }

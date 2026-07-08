@@ -127,6 +127,19 @@ func (f *failingPromoteMySQL) SetReadOnly(_ context.Context, _ bool) error {
 	return errors.New("promote failed")
 }
 
+// stuckReadOnlyMySQL lets FailoverController.Execute complete (every step
+// returns nil) but keeps the site read_only, so the post-promotion
+// confirmWritable check fails — simulating a promotion that ran but never
+// actually accepted writes.
+type stuckReadOnlyMySQL struct {
+	*mockMySQL
+}
+
+// SetReadOnly is a no-op success: Execute's "SET read_only = 0" appears to
+// succeed, but the embedded mock's readOnly flag is left true, so
+// CheckReadOnly keeps reporting the site as read_only.
+func (s *stuckReadOnlyMySQL) SetReadOnly(_ context.Context, _ bool) error { return nil }
+
 func (m *mockMySQL) setReadOnly(ro bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -418,6 +431,82 @@ func TestPromotionFailure_DNSDoesNotFlip(t *testing.T) {
 	// promotedSite should NOT be set since Execute returned an error.
 	if tm.promotedSite != "" {
 		t.Errorf("promotedSite should be empty after failed promotion, got %q", tm.promotedSite)
+	}
+}
+
+// TestPromotionConfirmWritableFails_DNSDoesNotFlip covers the path where
+// FailoverController.Execute succeeds but the promoted site never leaves
+// read_only, so confirmWritable fails. DNS must not flip and no failover
+// state may be recorded — the promotion is treated as unconfirmed.
+func TestPromotionConfirmWritableFails_DNSDoesNotFlip(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, dns := newTestTopologyManager(site0, site1)
+
+	// Execute will "succeed" against site1, but it stays read_only.
+	tm.sites[1].mysql = &stuckReadOnlyMySQL{mockMySQL: site1}
+
+	pollN(tm, 2) // establish normal
+
+	site0.setError(errors.New("connection refused"))
+	pollN(tm, 3) // trigger failover: Execute succeeds, confirmWritable fails
+
+	// DNS must not flip when writable confirmation fails.
+	if dns.getLastIP() != "" {
+		t.Errorf("DNS should not flip when confirmWritable fails, got %q", dns.getLastIP())
+	}
+
+	// No failover state may be recorded for an unconfirmed promotion.
+	if tm.promotedSite != "" {
+		t.Errorf("promotedSite should be empty when confirmWritable fails, got %q", tm.promotedSite)
+	}
+	if tm.lastFailoverTarget != "" {
+		t.Errorf("lastFailoverTarget should be empty when confirmWritable fails, got %q", tm.lastFailoverTarget)
+	}
+}
+
+// TestPromotionDNSFlipFails_StatePreserved covers the path where promotion
+// and writable confirmation both succeed but the DNS provider is down.
+// The failover state (promotedSite / lastFailoverTarget / lastFailover)
+// must be recorded despite the DNS failure so split-brain fencing,
+// anti-flap cooldown, and metrics survive a DNS-provider outage.
+func TestPromotionDNSFlipFails_StatePreserved(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, dns := newTestTopologyManager(site0, site1)
+
+	// DNS provider is unavailable: every UpdateDNSRecord call errors.
+	dns.mu.Lock()
+	dns.err = errors.New("dns provider unavailable")
+	dns.mu.Unlock()
+
+	pollN(tm, 2) // establish normal
+
+	site0.setError(errors.New("connection refused"))
+	pollN(tm, 3) // trigger failover: Execute + confirmWritable succeed, DNS flip fails
+
+	// site1 was promoted at the MySQL level.
+	site1.mu.Lock()
+	site1RO := site1.readOnly
+	site1.mu.Unlock()
+	if site1RO {
+		t.Fatal("site1 should have been promoted (readOnly should be false)")
+	}
+
+	// DNS never recorded the new IP because the provider errored.
+	if dns.getLastIP() != "" {
+		t.Errorf("DNS lastIP should be empty when the provider errors, got %q", dns.getLastIP())
+	}
+
+	// Critically, the failover state must still be recorded.
+	if tm.promotedSite != "dc2" {
+		t.Errorf("promotedSite should be set despite DNS failure, got %q", tm.promotedSite)
+	}
+	if tm.lastFailoverTarget != "dc2" {
+		t.Errorf("lastFailoverTarget should be set despite DNS failure, got %q", tm.lastFailoverTarget)
+	}
+	if tm.lastFailover.IsZero() {
+		t.Error("lastFailover should be set despite DNS failure (anti-flap cooldown)")
 	}
 }
 

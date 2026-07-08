@@ -79,6 +79,8 @@ The four events that trace one failover, in order:
 | INFO | `failover complete` | `promotedSite`, `promotionGtid`, `fg` | `Execute` finished: candidate is writable. `promotionGtid` is the candidate's `gtid_executed` snapshot taken just before clearing `super_read_only` — the upper bound on data that survived. |
 | INFO | `promotion confirmed: site is writable` | `site`, `fg` | Next poll observes the promoted site is `writable`. The internal post-failover guard clears here. |
 | ERROR | `failover failed` | `error`, `fg` | The promotion sequence returned an error. The operator does not retry automatically; the next eligible state-transition tick will re-evaluate. |
+| ERROR | `promotion succeeded but writable confirmation failed; DNS not flipped` | `site`, `error`, `fg` | `Execute` returned successfully but the promoted site did not report writable within the confirmation window. DNS is **not** flipped and no failover state is recorded — the promotion is treated as unconfirmed and re-evaluated on the next tick. |
+| ERROR | `DNS flip failed after successful promotion` | `site`, `error`, `fg` | Promotion **and** writable confirmation both succeeded, so the failover state (cooldown, split-brain target, `promotionGtidExecuted`) and `bloodraven_failovers_total` are already recorded; only the DNS update failed. `bloodraven_dns_flips_total` is left unincremented. Operator intervention on the DNS provider may be required — MySQL has already promoted. |
 
 Supporting events emitted inside `Execute`:
 
