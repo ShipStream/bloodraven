@@ -77,6 +77,39 @@ func TestReconcilePlannedFailover_NoopTerminalStatusWithoutAnnotation(t *testing
 	}
 }
 
+func TestPlannedFailoverRollback_ContinuesOnUnfenceError(t *testing.T) {
+	fg := plannedFailoverFG("")
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase:         v1alpha1.PlannedFailoverPhaseWaitingForLag,
+		Target:        "pdx",
+		SourcePrimary: "iad",
+	}
+
+	r, _ := newReconciler(fg)
+	// Empty runner has no managers, so unfence fails. Rollback must still
+	// stamp terminal Failed status and release the planned-failover guard.
+	r.Runner = &TopologyManagerRunner{}
+
+	if d, err := r.plannedFailoverRollback(context.Background(), fg, fgNN(fg), "LagTimeout", "timeout message", "failed_timeout"); err != nil || d != 0 {
+		t.Fatalf("rollback returned d=%s err=%v, want terminal failure without requeue", d, err)
+	}
+
+	fetched := fetchFG(t, r, fgNN(fg))
+	pf := fetched.Status.PlannedFailover
+	if pf == nil || pf.Phase != v1alpha1.PlannedFailoverPhaseFailed {
+		t.Fatalf("expected terminal Failed, got %+v", pf)
+	}
+	if pf.Reason != "LagTimeout" {
+		t.Errorf("reason = %q, want LagTimeout", pf.Reason)
+	}
+	if !strings.Contains(pf.Message, "timeout message") {
+		t.Errorf("message = %q, want it to contain original message", pf.Message)
+	}
+	if !strings.Contains(pf.Message, "warning: source primary unfence failed") {
+		t.Errorf("message = %q, want unfence failure warning", pf.Message)
+	}
+}
+
 // --- accept/reject paths -----------------------------------------------
 
 func TestReconcilePlannedFailover_AcceptStampsPending(t *testing.T) {

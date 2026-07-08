@@ -180,10 +180,18 @@ func reconcileRole(ctx context.Context, db *sql.DB, role credentialRole) error {
 
 	for _, stmt := range stmts {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("exec %q: %w", truncateSQL(stmt), err)
+			return fmt.Errorf("exec %s: %w", credentialStatementErrorLabel(role.name, stmt), err)
 		}
 	}
 	return nil
+}
+
+func credentialStatementErrorLabel(roleName, stmt string) string {
+	upper := strings.ToUpper(stmt)
+	if strings.Contains(upper, "IDENTIFIED BY") {
+		return fmt.Sprintf("%s credential statement", roleName)
+	}
+	return fmt.Sprintf("%s statement %q", roleName, truncateSQL(stmt))
 }
 
 func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
