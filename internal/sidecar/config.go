@@ -2,9 +2,18 @@ package sidecar
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
+)
+
+const (
+	minPeerCheckInterval     = time.Second
+	minLeaseTimeout          = 3 * time.Second
+	leaseTimeoutPeerRatio    = 3
+	defaultLeaseTimeout      = 20 * time.Second
+	defaultPeerCheckInterval = 5 * time.Second
 )
 
 // Config holds sidecar configuration parsed from environment variables.
@@ -184,7 +193,7 @@ func ConfigFromEnv() (*Config, error) {
 	}
 	bloodravenAddress := os.Getenv("BLOODRAVEN_ADDRESS")
 
-	leaseTimeout := 20 * time.Second
+	leaseTimeout := defaultLeaseTimeout
 	if v := os.Getenv("LEASE_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
@@ -193,7 +202,7 @@ func ConfigFromEnv() (*Config, error) {
 		leaseTimeout = d
 	}
 
-	peerCheckInterval := 5 * time.Second
+	peerCheckInterval := defaultPeerCheckInterval
 	if v := os.Getenv("PEER_CHECK_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
@@ -201,6 +210,7 @@ func ConfigFromEnv() (*Config, error) {
 		}
 		peerCheckInterval = d
 	}
+	leaseTimeout, peerCheckInterval = normalizeFenceDurations(leaseTimeout, peerCheckInterval)
 
 	mySite := os.Getenv("MY_SITE")
 	podNamespace := os.Getenv("POD_NAMESPACE")
@@ -224,6 +234,27 @@ func ConfigFromEnv() (*Config, error) {
 		FailoverGroup:     failoverGroup,
 		PITR:              pitr,
 	}, nil
+}
+
+func normalizeFenceDurations(leaseTimeout, peerCheckInterval time.Duration) (time.Duration, time.Duration) {
+	if peerCheckInterval < minPeerCheckInterval {
+		slog.Warn("clamping unsafe sidecar peer check interval",
+			"configured", peerCheckInterval.String(),
+			"minimum", minPeerCheckInterval.String())
+		peerCheckInterval = minPeerCheckInterval
+	}
+	minLease := minLeaseTimeout
+	if ratioMin := time.Duration(leaseTimeoutPeerRatio) * peerCheckInterval; ratioMin > minLease {
+		minLease = ratioMin
+	}
+	if leaseTimeout < minLease {
+		slog.Warn("clamping unsafe sidecar lease timeout",
+			"configured", leaseTimeout.String(),
+			"minimum", minLease.String(),
+			"peerCheckInterval", peerCheckInterval.String())
+		leaseTimeout = minLease
+	}
+	return leaseTimeout, peerCheckInterval
 }
 
 // pitrConfigFromEnv returns the PITR archiver config, or nil when

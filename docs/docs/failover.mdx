@@ -169,7 +169,7 @@ Old primary recovery requires replication credentials (`MYSQL_REPLICATION_USER` 
 When the state machine observes both sites as `writable` simultaneously, the operator's response is tiered:
 
 1. **After a prior operator-initiated failover** -- The operator already knows which site it promoted (`status.lastFailoverTarget`). The other site being writable means the old primary returned. The operator fences it immediately (`SET GLOBAL super_read_only=ON`) and recovery proceeds on the next poll. This runs regardless of `spec.splitBrainPolicy`.
-2. **No prior failover history, `spec.splitBrainPolicy.preferSite` is set** -- The operator fences the non-preferred site and re-promotes the preferred one through the standard failover path (DNS flip, relay-log drain, `RESET REPLICA ALL`, promotion GTID record, `read_only=0`). The anti-flap cooldown still applies to this promotion.
+2. **No prior failover history, `spec.splitBrainPolicy.preferSite` is set** -- The operator fences the non-preferred site and re-promotes the preferred one through the standard failover path (relay-log drain, `RESET REPLICA ALL`, promotion GTID record, `read_only=0`, writable confirmation, DNS flip). The anti-flap cooldown still applies to this promotion.
 3. **No prior failover history, no `preferSite` configured** -- The operator alerts only (`SPLIT BRAIN: both sites are writable`) and takes no automated action. This is the default.
 
 ### When `preferSite` applies

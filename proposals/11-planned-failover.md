@@ -142,7 +142,7 @@ No new ClusterRole verbs — the reconciler already has `get;patch;update` on `m
    - Event `PlannedFailoverFailed{reason: LagTimeout}`.
    - Metric `bloodraven_planned_failovers_total{result="failed_timeout"}` increments.
 
-5. **Promoting** — call `FailoverController.Execute(ctx, target, oldPrimary, targetName)` at `internal/controller/failover.go:23`. This reuses the same 8-step sequence as emergency failover: fence (already fenced — idempotent), kill app connections on old primary, `WaitForRelayLogDrain`, `STOP REPLICA`, `RESET REPLICA ALL`, capture promotion GTID, clear super_read_only, `read_only=0`. Because the target was already caught up in WaitingForLag, `WaitForRelayLogDrain` returns nearly instantly. DNS is flipped via `tm.dns.UpdateDNSRecord` immediately before the MySQL steps, identical to the emergency path at `internal/controller/topology.go:957-961`.
+5. **Promoting** — call `FailoverController.Execute(ctx, target, oldPrimary, targetName)` at `internal/controller/failover.go:23`. This reuses the same promotion sequence as emergency failover: fence (already fenced — idempotent), kill app connections on old primary, `WaitForRelayLogDrain`, `STOP REPLICA`, `RESET REPLICA ALL`, capture promotion GTID, clear super_read_only, `read_only=0`. Because the target was already caught up in WaitingForLag, `WaitForRelayLogDrain` returns nearly instantly. DNS is flipped via `tm.dns.UpdateDNSRecord` only after the MySQL steps complete and the target is verified writable.
 
 6. **Resuming** — sync primary role label onto the new primary Pod (piggybacks on the next `syncPodLabels` tick), update `status.activeSite`, `status.lastFailoverTarget`, `status.lastFailover`, `status.promotionGtidExecuted` *identically* to the emergency path at `internal/controller/runner.go:593-597`. These fields are the same fields — the `lastFailover` stamp is what makes the cooldown apply to any follow-on emergency, which is exactly the behaviour the wishlist item asks for.
 
@@ -169,7 +169,7 @@ Phase advancement is one-phase-per-reconcile (same discipline as `reconcileInPla
 | Zero-lag wait times out | Clear `super_read_only=OFF`, re-apply primary label, stamp Failed. Old primary resumes writes. |
 | Old primary dies mid-drain | Hand off to emergency failover path. The topology manager observes `StateUnreachable` on the fenced primary; its usual automatic flow takes over. Stamp planned-failover as `Failed{reason: SourceCrashed}` but allow the emergency machinery to promote the (caught-up) target. |
 | `FailoverController.Execute` fails mid-promotion | Stamp Failed. Manual recovery required — this is the same failure mode as emergency failover failing mid-sequence, documented in the failure-mode matrix. |
-| DNS flip fails | Proceed with MySQL promotion (same behaviour as emergency path); emit warning event. Eventually-consistent DNS catches up; the Service label swap carries writes to the new primary in the meantime. |
+| DNS flip fails after promotion | Promotion has completed, but planned failover fails instead of stamping success. Operator/Event output must surface that DNS did not move so an operator can retry or repair the DNS provider. |
 
 Operator restart during any phase resumes from `status.plannedFailover.phase` on reconcile — the state machine is idempotent at phase boundaries by construction.
 

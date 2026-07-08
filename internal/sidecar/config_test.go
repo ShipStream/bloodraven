@@ -2,6 +2,7 @@ package sidecar
 
 import (
 	"testing"
+	"time"
 )
 
 func TestConfigFromEnv_MYSQL_DSN(t *testing.T) {
@@ -15,6 +16,30 @@ func TestConfigFromEnv_MYSQL_DSN(t *testing.T) {
 	}
 	if cfg.MysqlDSN != "root:pass@tcp(127.0.0.1:3306)/" {
 		t.Errorf("unexpected DSN: %s", cfg.MysqlDSN)
+	}
+}
+
+func TestNormalizeFenceDurations(t *testing.T) {
+	tests := []struct {
+		name      string
+		lease     time.Duration
+		peer      time.Duration
+		wantLease time.Duration
+		wantPeer  time.Duration
+	}{
+		{"defaults unchanged", 20 * time.Second, 5 * time.Second, 20 * time.Second, 5 * time.Second},
+		{"peer clamps to one second", 20 * time.Second, 0, 20 * time.Second, time.Second},
+		{"negative peer clamps", 20 * time.Second, -time.Second, 20 * time.Second, time.Second},
+		{"lease clamps to three seconds", 0, time.Second, 3 * time.Second, time.Second},
+		{"lease clamps to ratio", 5 * time.Second, 4 * time.Second, 12 * time.Second, 4 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotLease, gotPeer := normalizeFenceDurations(tt.lease, tt.peer)
+			if gotLease != tt.wantLease || gotPeer != tt.wantPeer {
+				t.Fatalf("normalizeFenceDurations() = (%s, %s), want (%s, %s)", gotLease, gotPeer, tt.wantLease, tt.wantPeer)
+			}
+		})
 	}
 }
 

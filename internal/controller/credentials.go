@@ -61,12 +61,19 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 	rootPass := string(operatorSecret.Data["MYSQL_ROOT_PASSWORD"])
 
 	primaryHost := fmt.Sprintf("mysql-%s-primary.%s.svc.cluster.local:%d", fg.Name, fg.Namespace, mysqlPort)
+	tlsConfigName := ""
+	if fg.Spec.TLS != nil {
+		tlsConfigName, err = mysqlTLSConfig(ctx, r.Client, fg, primaryServiceHost(fg.Name, fg.Namespace))
+		if err != nil {
+			return fmt.Errorf("configure TLS for credential reconciliation: %w", err)
+		}
+	}
 
 	// Try operator credentials first, fall back to root for initial setup.
-	db, err := openMySQL(operatorUser, operatorPass, primaryHost)
+	db, err := openMySQL(operatorUser, operatorPass, primaryHost, tlsConfigName)
 	if err != nil {
 		logger.Info("operator credentials failed, trying root for initial setup", "error", err)
-		db, err = openMySQL("root", rootPass, primaryHost)
+		db, err = openMySQL("root", rootPass, primaryHost, tlsConfigName)
 		if err != nil {
 			return fmt.Errorf("connect to primary as root: %w", err)
 		}
@@ -229,7 +236,7 @@ func (r *MysqlFailoverGroupReconciler) setCredentialHash(ctx context.Context, fg
 	})
 }
 
-func openMySQL(user, password, addr string) (*sql.DB, error) {
+func openMySQL(user, password, addr, tlsConfigName string) (*sql.DB, error) {
 	cfg := mysqldriver.NewConfig()
 	cfg.User = user
 	cfg.Passwd = password
@@ -238,6 +245,9 @@ func openMySQL(user, password, addr string) (*sql.DB, error) {
 	cfg.Timeout = 5 * time.Second
 	cfg.ReadTimeout = 5 * time.Second
 	cfg.WriteTimeout = 5 * time.Second
+	if tlsConfigName != "" {
+		cfg.TLSConfig = tlsConfigName
+	}
 	db, err := sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {
 		return nil, err

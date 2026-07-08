@@ -50,7 +50,7 @@ The annotation API closes all four.
 | `WaitingForLag` | Polling the target's `GTID_EXECUTED` until it contains the source's fenced GTID set. |
 | `WaitingForDragonflySync` | When Dragonfly is enabled, captures the source Dragonfly replication offset and polls the target until it catches up or `spec.dragonfly.plannedFailover.maxSyncWait` expires. |
 | `PromotingDragonfly` | When Dragonfly is enabled, strips the source Dragonfly traffic label, promotes the target with `REPLTAKEOVER`, updates role/traffic labels, and best-effort kills old-master clients so they reconnect through the active Service. |
-| `Promoting` | Running the same 8-step sequence as emergency failover: kill app connections, relay-log drain, `STOP REPLICA`, `RESET REPLICA ALL`, capture promotion GTID, clear `super_read_only`, `SET GLOBAL read_only=0`, DNS flip. |
+| `Promoting` | Running the same promotion sequence as emergency failover: kill app connections, relay-log drain, `STOP REPLICA`, `RESET REPLICA ALL`, capture promotion GTID, clear `super_read_only`, `SET GLOBAL read_only=0`, verify the target is writable, then flip DNS. |
 | `Resuming` | Persisting `status.activeSite`, `status.lastFailover`, `status.promotionGtidExecuted`; releasing the topology-manager guard. |
 | `Succeeded` | Terminal success. Status block retained until the next annotation replaces it. |
 | `Failed` | Terminal failure. See rollback behaviour below. |

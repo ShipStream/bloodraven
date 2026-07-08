@@ -18,7 +18,7 @@
 - [x] **H19:** Treat planned-failover rollback source unfence as best-effort so terminal failure handling and guard release still run. Fixed in PR #109.
 - [x] **H1/H18/H13/H12/H7/H11/H10:** Shipped production-install correctness slice: fixed NetworkPolicy examples, auxiliary Service defaults/addressing, TLS DNS names, backup verification snippets, runbook pod/PVC names, and DR passphrase handling.
 - [ ] **Next recommended slice:** version-skew and data-protection defaults: H9, H2, H21, and H14.
-- [ ] **Then:** remaining failover/runtime hardening: H3, H5, H8, H15, H16, and H20.
+- [x] **H3/H5/H8/H15/H16/H20:** Shipped remaining failover/runtime hardening: bounded sidecar fence timing, non-blocking WebSocket broadcasts, bounded aux HTTP metric labels, DNS-after-promotion failover ordering, safe reclone GTID predicate, and credentials-mode operator TLS.
 
 ## Cross-cutting themes (appear across many findings)
 

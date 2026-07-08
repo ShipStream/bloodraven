@@ -52,20 +52,20 @@ func TestSafetyInvariant_NeverDualPrimary(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Safety Invariant: DNS flips at failover trigger time (before promotion).
+// Safety Invariant: DNS flips only after successful writable promotion.
 // ---------------------------------------------------------------------------
 
-func TestSafetyInvariant_DNSFlipsAtFailoverTrigger(t *testing.T) {
+func TestSafetyInvariant_DNSFlipsAfterVerifiedPromotion(t *testing.T) {
 	h := newTestHarness(t)
 	h.pollN(2) // establish dc1=writable, dc2=read-only
 
 	// dc1 goes down
 	h.dc1MySQL.setError(errDown)
-	h.pollN(3) // failure threshold — triggers failover + immediate DNS flip
+	h.pollN(3) // failure threshold — triggers promotion, writable confirmation, then DNS flip
 
-	// DNS should have flipped immediately at failover trigger
+	// DNS should have flipped after successful promotion.
 	if h.dns.getLastIP() != "2.2.2.2" {
-		t.Errorf("DNS should flip at failover trigger, got %q", h.dns.getLastIP())
+		t.Errorf("DNS should flip after promotion, got %q", h.dns.getLastIP())
 	}
 
 	// DNS should flip exactly once
