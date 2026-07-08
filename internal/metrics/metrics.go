@@ -73,6 +73,17 @@ var (
 		Help: "Total number of split-brain incidents auto-resolved by spec.splitBrainPolicy.preferSite. The label is the preferred (winning) site.",
 	}, []string{"prefer_site"})
 
+	// PrimaryReassertTotal counts restorations of writability on the last
+	// failover target after it was found fenced with no writable site
+	// anywhere (typically the target's own sidecar re-fenced it with a
+	// stale lease right after a promotion). A steadily increasing counter
+	// means something keeps fencing the primary — check the sidecars'
+	// connectivity to the operator's auxiliary Service.
+	PrimaryReassertTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_primary_reassert_total",
+		Help: "Total number of times the operator restored writability on the promoted primary after finding it fenced with no writable site remaining.",
+	}, []string{"site"})
+
 	ReplicationLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_replication_lag_seconds",
 		Help: "Replication lag in seconds. Only set for the replica site; -1 if lag is NULL (not replicating).",
@@ -347,7 +358,7 @@ var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
 func Register(reg prometheus.Registerer) {
 	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount, FailoversTotal,
 		PlannedFailoversTotal, PlannedFailoverDurationSeconds, PlannedFailoverLagWaitSeconds,
-		SplitBrainAutoResolveTotal,
+		SplitBrainAutoResolveTotal, PrimaryReassertTotal,
 		ReplicationLag, ReplicationRunning, SiteState, DivergentTransactions, RecloneOperations,
 		BackupRunsTotal, BackupDurationSeconds,
 		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes,

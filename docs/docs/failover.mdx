@@ -52,10 +52,20 @@ After updating individual site states, the operator evaluates the pair together:
 | `unreachable` | `read-only` | **Failover** -- promote Site B |
 | `read-only` | `unreachable` | **Failover** -- promote Site A |
 | `writable` | `writable` | **Split brain** -- see [Split-brain resolution](#split-brain-resolution) |
-| `read-only` | `read-only` | **No primary** -- alert, no automatic action |
+| `read-only` | `read-only` | **No primary** -- alert, no automatic action (with one exception, below) |
 | `unreachable` | `unreachable` | **Total loss** -- alert, no automatic action |
 
 The operator only takes automatic action for the failover case (and, opt-in, for split brain). All other anomalous states require human investigation.
+
+**Exception — re-asserting a fenced promoted primary.** A freshly promoted primary can be fenced back to read-only by its own sidecar: the sidecar's fencing lease may still be stale when the promotion lands (for example, the operator restarted after a full-site outage and promoted before its auxiliary Service endpoint became Ready, so the sidecar's operator probes kept failing while the operator was already driving MySQL). That leaves every site reachable and read-only — a state the table above refuses to touch, because without history it is indistinguishable from a fresh-start condition that needs human input.
+
+The operator, however, does have history: `status.lastFailoverTarget` names the site it made authoritative. When **all** of the following hold, the operator restores writability on that site instead of alerting and waiting:
+
+- a prior failover is recorded and its target is reachable, read-only, and a `primary-candidate`;
+- every other site is also reachable and read-only (an unreachable site hands the decision back to the normal failover row above);
+- the target contains every other site's `GTID_EXECUTED` and the recorded `status.promotionGtidExecuted` — restoring it cannot lose transactions or create a second primary.
+
+The re-assert is rate-limited to once per `failoverCooldown`, logs `re-asserting fenced promoted primary` (see the [log schema](./log-schema.mdx)), and increments `bloodraven_primary_reassert_total`. GTID divergence between the sites still blocks it — that genuinely needs a human.
 
 ## Failover sequence
 

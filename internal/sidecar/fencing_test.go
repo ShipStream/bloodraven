@@ -229,8 +229,10 @@ func TestEvaluateRearmsAfterExternalRestore(t *testing.T) {
 	}
 
 	// Bloodraven is the only actor allowed to restore writability. Once
-	// that external restore is visible, the sidecar must re-arm so a
-	// later isolation event can self-fence again.
+	// that external restore is visible, the sidecar must re-arm with a
+	// fresh lease window: no instant re-fence on the pre-outage
+	// timestamps (that would fight the operator that just restored the
+	// site), but a later isolation event must self-fence again.
 	f.readOnly = false
 	f.superReadOnly = false
 	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
@@ -238,11 +240,27 @@ func TestEvaluateRearmsAfterExternalRestore(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
+	if fm.fenced {
+		t.Fatal("should rearm with a fresh lease window, not instantly re-fence on pre-restore timestamps")
+	}
+	if f.superReadOnly {
+		t.Error("should not set super_read_only in the same cycle as the rearm")
+	}
+	if !fm.lastBloodravenOK.Equal(clk.Now()) {
+		t.Errorf("rearm should reset lastBloodravenOK to now; got %v, want %v", fm.lastBloodravenOK, clk.Now())
+	}
+
+	// Renewed isolation: no probe succeeds for a full lease window after
+	// the rearm — the safety backstop must fire again.
+	clk.Advance(30 * time.Second)
+
+	fm.evaluate(context.Background())
+
 	if !fm.fenced {
-		t.Fatal("should have re-fenced after external restore and renewed isolation")
+		t.Fatal("should have re-fenced after external restore and renewed isolation past the lease timeout")
 	}
 	if !f.superReadOnly {
-		t.Error("should set super_read_only again after external restore")
+		t.Error("should set super_read_only again after external restore and renewed isolation")
 	}
 }
 

@@ -1376,6 +1376,184 @@ func TestCheckRecovery_RestoredInProgressRetriesImmediatelyWhenUnhealthy(t *test
 	}
 }
 
+// --- checkPrimaryReassert ---
+
+// setWedgedTopology puts the manager into the fenced-promoted-primary
+// wedge: every site reachable and read-only after a failover to target.
+func setWedgedTopology(tm *TopologyManager, target string) {
+	tm.mu.Lock()
+	tm.sites[0].state = state.StateReadOnly
+	tm.sites[1].state = state.StateReadOnly
+	tm.lastFailoverTarget = target
+	tm.mu.Unlock()
+}
+
+func TestPrimaryReassert_RestoresFencedPromotedTarget(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-8"}
+	tm, _, dns := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc1")
+	tm.mu.Lock()
+	tm.promotionGtidExecuted = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-9"
+	tm.mu.Unlock()
+
+	if !tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("expected re-assert to restore the fenced promoted target")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); ro {
+		t.Error("target should be writable after re-assert")
+	}
+	if ro, _ := site1.CheckReadOnly(context.Background()); !ro {
+		t.Error("peer must stay read-only")
+	}
+	if got := dns.getLastIP(); got != "1.1.1.1" {
+		t.Errorf("DNS should point at the re-asserted target LB, got %q", got)
+	}
+}
+
+func TestPrimaryReassert_NoFailoverHistoryNoOp(t *testing.T) {
+	// Without failover history the all-read-only state is the startup
+	// condition EvalCrossSite refuses to elect from; re-assert must
+	// preserve that invariant.
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "")
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must not fire without a lastFailoverTarget")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); !ro {
+		t.Error("no site may be made writable without failover history")
+	}
+}
+
+func TestPrimaryReassert_RefusesWhenPeerWritable(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: false, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc1")
+	tm.mu.Lock()
+	tm.sites[1].state = state.StateWritable
+	tm.mu.Unlock()
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must not fire while another site is writable")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); !ro {
+		t.Error("target must stay read-only while a peer is writable")
+	}
+}
+
+func TestPrimaryReassert_RefusesWhenPeerUnreachable(t *testing.T) {
+	// An unreachable peer hands the decision to the normal
+	// unreachable+read-only promotion path in EvalCrossSite.
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc1")
+	tm.mu.Lock()
+	tm.sites[1].state = state.StateUnreachable
+	tm.mu.Unlock()
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must not fire while a peer is unreachable")
+	}
+}
+
+func TestPrimaryReassert_RefusesOnDivergentPeer(t *testing.T) {
+	// The peer carries a transaction the target lacks: restoring the
+	// target would abandon it. Human review required.
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10,bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc1")
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must not fire when a peer has transactions the target lacks")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); !ro {
+		t.Error("target must stay read-only on divergence")
+	}
+}
+
+func TestPrimaryReassert_RefusesWhenTargetLostPromotionGtid(t *testing.T) {
+	// The recorded promotion GTID set is no longer contained in the
+	// target — it was wiped or restored since the promotion, so the
+	// failover history no longer describes this data lineage.
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "cccccccc-cccc-cccc-cccc-cccccccccccc:1-3"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "cccccccc-cccc-cccc-cccc-cccccccccccc:1-2"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc1")
+	tm.mu.Lock()
+	tm.promotionGtidExecuted = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-9"
+	tm.mu.Unlock()
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must not fire when the target lost the recorded promotion GTID set")
+	}
+}
+
+func TestPrimaryReassert_CooldownRateLimits(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-8"}
+	clk := clock.NewFakeClock(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC))
+	tm, _, _ := newTestTopologyManagerWithBootstrapClock(site0, site1, clk)
+	tm.failoverCooldown = 30 * time.Second
+	setWedgedTopology(tm, "dc1")
+
+	if !tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("expected first re-assert to fire")
+	}
+
+	// The sidecar fenced the target again for a persistent reason: the
+	// operator must not fight it at poll frequency.
+	site0.setReadOnly(true)
+	clk.Advance(5 * time.Second)
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must be rate-limited by the failover cooldown")
+	}
+
+	clk.Advance(30 * time.Second)
+	if !tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("expected re-assert to fire again after the cooldown")
+	}
+}
+
+func TestPrimaryReassert_DefersDuringPlannedFailover(t *testing.T) {
+	// A planned failover fences the source deliberately; while it is
+	// active the whole group can legitimately be read-only.
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc1")
+	tm.SetPlannedFailoverActive(true)
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must defer while a planned failover is active")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); !ro {
+		t.Error("target must stay read-only during a planned failover")
+	}
+}
+
+func TestPrimaryReassert_DefersDuringPendingPromotion(t *testing.T) {
+	// A pending promotion is still being confirmed; the promotion
+	// pipeline owns the topology until the guard clears or expires.
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc1")
+	tm.mu.Lock()
+	tm.promotedSite = "dc1"
+	tm.promotedAt = time.Now()
+	tm.mu.Unlock()
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must defer while a promotion is pending confirmation")
+	}
+}
+
 func TestReclone_BlockedDuringBootstrap(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{readOnly: true}
