@@ -1494,6 +1494,26 @@ func TestPrimaryReassert_RefusesWhenTargetLostPromotionGtid(t *testing.T) {
 	}
 }
 
+func TestPrimaryReassert_RefusesOnMalformedPromotionGtid(t *testing.T) {
+	// status.promotionGtidExecuted is written by the operator from MySQL
+	// itself; a parse failure means corruption or manual tampering, and
+	// the safety argument depends on that value — refuse, don't skip.
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-8"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc1")
+	tm.mu.Lock()
+	tm.promotionGtidExecuted = "not-a-gtid-set"
+	tm.mu.Unlock()
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must refuse when the recorded promotion GTID set is malformed")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); !ro {
+		t.Error("target must stay read-only when the recorded promotion GTID set is malformed")
+	}
+}
+
 func TestPrimaryReassert_CooldownRateLimits(t *testing.T) {
 	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
 	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-8"}

@@ -2104,7 +2104,9 @@ func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl []*mysql.
 // second primary. Any unreachable site instead leaves the decision to
 // the normal unreachable+read-only promotion path in EvalCrossSite.
 //
-// Called once per poll cycle. Returns true when a re-assert ran.
+// Called once per poll cycle. Returns true when a re-assert was
+// attempted (successful or not) so Poll surfaces the attempt through
+// the status callback; attempts are rate-limited by failoverCooldown.
 func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	if tm.isBootstrapping() || tm.isUpdating() || tm.isTopologyFrozen() || tm.isPlannedFailoverActive() {
 		return false
@@ -2162,7 +2164,16 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	}
 	if promotionGtidStr != "" {
 		promotionGtid, perr := mysql.ParseGTIDSet(promotionGtidStr)
-		if perr == nil && !targetGtid.Contains(promotionGtid) {
+		if perr != nil {
+			// The operator wrote this value from MySQL itself, so a parse
+			// failure means corruption or manual status tampering. The
+			// safety argument depends on the recorded invariant being
+			// trustworthy — refuse rather than silently skip the gate.
+			tm.logger.Warn("primary re-assert refused: recorded promotion GTID set failed to parse — status corrupted or manually edited?",
+				"site", target, "promotionGtid", promotionGtidStr, "error", perr)
+			return false
+		}
+		if !targetGtid.Contains(promotionGtid) {
 			tm.logger.Warn("primary re-assert refused: target no longer contains the recorded promotion GTID set (wiped or restored since promotion?)",
 				"site", target, "promotionGtid", promotionGtidStr, "targetGtid", targetGtidStr)
 			return false
@@ -2203,23 +2214,27 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 
 	if err := targetSite.mysql.SetSuperReadOnly(ctx, false); err != nil {
 		tm.logger.Error("primary re-assert: failed to clear super_read_only", "site", target, "error", err)
-		return false
+		return true
 	}
 	if err := targetSite.mysql.SetReadOnly(ctx, false); err != nil {
 		tm.logger.Error("primary re-assert: failed to clear read_only", "site", target, "error", err)
-		return false
+		return true
 	}
 	if err := tm.confirmWritable(ctx, targetSite); err != nil {
 		tm.logger.Error("primary re-assert: writable confirmation failed", "site", target, "error", err)
-		return false
+		return true
 	}
 	metrics.PrimaryReassertTotal.WithLabelValues(target).Inc()
 
 	// Best-effort DNS flip: idempotent when DNS already points at the
 	// target, and heals the case where the original promotion recorded
-	// its state but the flip itself failed.
+	// its state but the flip itself failed. As with the promotion path,
+	// there is no automatic retry once the group is healthy again —
+	// MySQL is already writable, so a persistent failure here needs
+	// operator intervention on the DNS provider.
 	if err := tm.dns.UpdateDNSRecord(ctx, targetSite.lbIP); err != nil {
-		tm.logger.Error("primary re-assert: DNS flip failed (next re-assert retries)", "site", target, "error", err)
+		tm.logger.Error("primary re-assert: DNS flip failed after restoring writability — no automatic retry, DNS provider may need intervention",
+			"site", target, "error", err)
 	}
 	return true
 }
