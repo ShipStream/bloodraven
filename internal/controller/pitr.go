@@ -306,6 +306,14 @@ type restorePITRFragments struct {
 // state, and mysqlbinlog's server-side GTID dedup then skips
 // already-applied transactions during replay — no per-MysqlBackup
 // metadata plumbing needed here.
+//
+// The verification path reuses this same builder (buildRestorePITRFragmentsFor)
+// against an EPHEMERAL verify mysqld, which is why that mysqld is started
+// gtid_mode=ON (verify_script.sh) and its load restores gtid_purged via
+// updateGtidSet:"replace" (marshalVerificationLoadOptions): the verify path
+// must mirror this restore-path server-side dedup so raw replay of
+// cross-site archived binlogs does not double-apply in-dump or duplicated
+// GTIDs (#101).
 func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFragments, error) {
 	if fg.Spec.InitFromBackup == nil {
 		return restorePITRFragments{}, nil

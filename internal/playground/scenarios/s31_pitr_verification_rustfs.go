@@ -30,13 +30,8 @@ func scenario31PITRVerificationRustFS() runner.Scenario {
 		Title: "PITR verification replays RustFS binlogs to timestamp",
 		Hypothesis: "With PITR enabled against RustFS, a pinned MysqlBackupVerification can restore a full dump, " +
 			"replay archived binlogs to a timestamp, include pre-target marker rows, and exclude post-target rows.",
-		Risk: "medium",
-		// Quarantined: the verify mysqld runs gtid_mode=OFF, so the binlog
-		// replay re-applies in-dump transactions and fails with a duplicate
-		// key. Tracked in #101. The in-place PITR restore path is unaffected
-		// (real mysqld runs gtid_mode=ON).
-		Quarantine: "PITR replay duplicate-key on the gtid_mode=OFF verify mysqld; see #101",
-		DocLink:    "playground/chaos-scenarios.md#31-pitr-verification-against-rustfs",
+		Risk:     "medium",
+		DocLink:  "playground/chaos-scenarios.md#31-pitr-verification-against-rustfs",
 		Timeout:  24 * time.Minute,
 		Precheck: assertReplicationRunningPrecheck,
 		Steps: []runner.Step{
