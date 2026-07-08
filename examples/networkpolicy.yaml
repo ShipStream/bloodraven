@@ -1,3 +1,6 @@
+# This example assumes the Bloodraven operator runs in the "bloodraven"
+# namespace and MySQL pods run in the "orders" namespace. Adjust namespaces
+# and labels to match your deployment.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,6 +20,21 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: bloodraven-dashboard
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: orders
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mysql
+              app.kubernetes.io/managed-by: bloodraven
+              shipstream.io/failover-group: orders
+      ports:
+        - protocol: TCP
+          port: 8082
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -27,6 +45,8 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: mysql
+      app.kubernetes.io/managed-by: bloodraven
+      shipstream.io/failover-group: orders
   policyTypes:
     - Ingress
   ingress:
@@ -37,6 +57,17 @@ spec:
       ports:
         - protocol: TCP
           port: 3306
+        - protocol: TCP
+          port: 8080
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mysql
+              app.kubernetes.io/managed-by: bloodraven
+              shipstream.io/failover-group: orders
+      ports:
+        - protocol: TCP
+          port: 8080
     - from:
         - podSelector: {}
       ports:

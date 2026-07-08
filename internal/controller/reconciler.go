@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -63,6 +64,16 @@ const (
 	mysqlPort   = 3306
 	sidecarPort = 8080
 )
+
+func defaultBloodravenAddress(fg *v1alpha1.MysqlFailoverGroup) string {
+	if fg.Spec.Sidecar.BloodravenAddress != "" {
+		return fg.Spec.Sidecar.BloodravenAddress
+	}
+	if addr := strings.TrimSpace(os.Getenv("BLOODRAVEN_DEFAULT_AUXILIARY_ADDRESS")); addr != "" {
+		return addr
+	}
+	return fmt.Sprintf("bloodraven.%s.svc.cluster.local:8082", fg.Namespace)
+}
 
 // MysqlFailoverGroupReconciler reconciles a MysqlFailoverGroup object.
 type MysqlFailoverGroupReconciler struct {
@@ -795,10 +806,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 		peerAddresses := strings.Join(peerAddrs, ",")
 
-		bloodravenAddress := fg.Spec.Sidecar.BloodravenAddress
-		if bloodravenAddress == "" {
-			bloodravenAddress = fmt.Sprintf("bloodraven.%s.svc.cluster.local:8082", fg.Namespace)
-		}
+		bloodravenAddress := defaultBloodravenAddress(fg)
 
 		leaseTimeout := "20s"
 		if fg.Spec.Sidecar.LeaseTimeout != nil {

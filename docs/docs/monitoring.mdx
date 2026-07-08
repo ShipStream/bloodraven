@@ -560,5 +560,8 @@ kubectl logs -n bloodraven deploy/bloodraven | jq 'select(.level == "ERROR")'
 Check the sidecar container for self-fencing events:
 
 ```bash
-kubectl logs mysql-orders-iad-0 -c sidecar | jq 'select(.msg | contains("self-fence"))'
+IAD_POD=$(kubectl get pod -n orders \
+  -l app.kubernetes.io/name=mysql,shipstream.io/failover-group=orders,shipstream.io/site=iad \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl logs -n orders "$IAD_POD" -c sidecar | jq 'select(.msg | contains("self-fence"))'
 ```

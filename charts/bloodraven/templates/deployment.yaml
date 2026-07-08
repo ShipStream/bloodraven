@@ -81,6 +81,10 @@ spec:
               value: {{ include "bloodraven.image" . | quote }}
             - name: BLOODRAVEN_OPERATOR_SA
               value: {{ include "bloodraven.serviceAccountName" . | quote }}
+            # Default operator auxiliary address injected into MySQL sidecars
+            # when spec.sidecar.bloodravenAddress is not set.
+            - name: BLOODRAVEN_DEFAULT_AUXILIARY_ADDRESS
+              value: {{ printf "%s.%s.svc.cluster.local:%v" (include "bloodraven.auxiliaryServiceName" .) .Release.Namespace (.Values.auxiliary.service.port | int) | quote }}
             # WebSocket hardening (AUDIT H2): Origin allowlist + client cap.
             - name: BLOODRAVEN_WS_ALLOWED_ORIGINS
               value: {{ .Values.auxiliary.service.wsAllowedOrigins | default "*" | quote }}

@@ -84,7 +84,8 @@ If Argo CD owns CRDs separately, commit the CRDs under `charts/bloodraven/crds/`
 
 The auxiliary HTTP and sidecar HTTP endpoints are intentionally internal
 and unauthenticated. Restrict them to the operator, dashboard, and
-Prometheus namespaces that need access.
+Prometheus namespaces that need access. The sidecar also needs to reach
+the operator auxiliary endpoint on `:8082` for `/active-site` checks.
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -109,9 +110,14 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: bloodraven-dashboard
-        - podSelector:
+        - namespaceSelector:
             matchLabels:
-              app.kubernetes.io/name: bloodraven
+              kubernetes.io/metadata.name: tenant-db
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mysql
+              app.kubernetes.io/managed-by: bloodraven
+              shipstream.io/failover-group: orders
       ports:
         - protocol: TCP
           port: 8082
@@ -119,12 +125,14 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: mysql-sidecar-ingress
+  name: orders-mysql-ingress
   namespace: tenant-db
 spec:
   podSelector:
     matchLabels:
-      shipstream.io/managed-by: bloodraven
+      app.kubernetes.io/name: mysql
+      app.kubernetes.io/managed-by: bloodraven
+      shipstream.io/failover-group: orders
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -133,19 +141,29 @@ spec:
               kubernetes.io/metadata.name: bloodraven
       ports:
         - protocol: TCP
+          port: 3306
+        - protocol: TCP
           port: 8080
     - from:
         - podSelector:
             matchLabels:
-              shipstream.io/managed-by: bloodraven
+              app.kubernetes.io/name: mysql
+              app.kubernetes.io/managed-by: bloodraven
+              shipstream.io/failover-group: orders
       ports:
         - protocol: TCP
           port: 8080
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 3306
 ```
 
 Adjust selectors to match your chart labels and namespace layout. If
 your CNI defaults to deny egress, also permit the operator to reach MySQL
-`:3306`, sidecar `:8080`, the Kubernetes API, and DNS.
+`:3306`, sidecar `:8080`, the Kubernetes API, and DNS, and permit sidecars
+to reach the operator auxiliary Service on `:8082`.
 
 ## PrometheusRule
 
@@ -334,10 +352,12 @@ spec:
             name: orders-backup-passphrase
             key: passphrase
         verification:
+          enabled: true
           schedule: "17 */6 * * *"
           sanityCheck:
             query: "SELECT COUNT(*) FROM information_schema.tables"
-            minRows: 1
+            expect:
+              minRows: 1
   sites:
     - name: iad
       zone: iad-1a

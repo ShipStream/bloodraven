@@ -393,8 +393,8 @@ type SidecarSpec struct {
 	// +kubebuilder:default="5s"
 	PeerCheckInterval *metav1.Duration `json:"peerCheckInterval,omitempty"`
 
-	// BloodravenAddress is the address of the Bloodraven operator health endpoint.
-	// Default: bloodraven.<namespace>.svc.cluster.local:8082
+	// BloodravenAddress is the address of the Bloodraven operator auxiliary endpoint.
+	// When empty, the operator uses its configured default auxiliary Service address.
 	BloodravenAddress string `json:"bloodravenAddress,omitempty"`
 }
 

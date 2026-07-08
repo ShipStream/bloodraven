@@ -61,6 +61,13 @@ Create the name of the service account to use.
 {{- end }}
 
 {{/*
+Auxiliary Service name used by sidecars for operator status checks.
+*/}}
+{{- define "bloodraven.auxiliaryServiceName" -}}
+{{- default "bloodraven" .Values.auxiliary.service.name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
 Operator image reference.
 */}}
 {{- define "bloodraven.image" -}}
