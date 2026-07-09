@@ -203,6 +203,12 @@ type TopologyManager struct {
 	recoveryDivergentGtid  string
 	recoveryDivergentCount int64
 
+	// lastReassert is when checkPrimaryReassert last restored (or attempted
+	// to restore) writability on a fenced promoted primary. Rate-limits the
+	// re-assert to once per failoverCooldown so a sidecar that keeps
+	// fencing for a persistent reason is not fought at poll frequency.
+	lastReassert time.Time
+
 	// Ordered update orchestration.
 	updater *UpdateController
 
@@ -730,6 +736,11 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// Check if old primary recovery is needed.
 	recoveryChanged := tm.checkRecovery(ctx, siteRepl, alertMsg, degradedReason)
 
+	// Restore writability on the promoted primary if its sidecar fenced
+	// it back to read-only and no writable site remains (poll-driven so
+	// the wedge heals even without further state transitions).
+	reasserted := tm.checkPrimaryReassert(ctx)
+
 	// Process pending reclone annotation.
 	recloneStarted := tm.checkReclone(ctx)
 
@@ -780,7 +791,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 
 	// Notify the status callback on any state change, recovery event, or update event.
-	if (anyTransition || replicationChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted) && tm.StatusCallback != nil {
+	if (anyTransition || replicationChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted) && tm.StatusCallback != nil {
 		tm.StatusCallback(tm.buildSnapshot(siteRepl, alertMsg, degradedReason))
 	}
 
@@ -2065,6 +2076,167 @@ func (tm *TopologyManager) checkRecovery(ctx context.Context, siteRepl []*mysql.
 		return tm.initiateRecovery(ctx, i, activeIdx, siteRepl, alert, degradedReason)
 	}
 	return false
+}
+
+// checkPrimaryReassert detects and heals the "promoted primary got
+// fenced back to read-only and nothing is writable" wedge.
+//
+// After a successful promotion the new primary's own sidecar can
+// re-fence it: the sidecar's fencing lease may still be stale when the
+// promotion lands — e.g. the operator restarted after a full-site
+// outage and promoted before its auxiliary Service endpoint became
+// Ready, so the sidecar's operator probes kept failing while the
+// operator was already driving MySQL. The group then settles with
+// every site reachable and read-only. EvalCrossSite deliberately
+// refuses to elect a primary from that state (all-read-only without
+// history is a startup condition that needs human input) and
+// checkRecovery requires a writable active site, so nothing restores
+// the target and the group stays wedged until a human runs SET GLOBAL
+// read_only=OFF.
+//
+// The topology manager, however, has the history the pure state matrix
+// refuses to assume: lastFailoverTarget names the site this operator
+// (or a predecessor, via status rehydration) made authoritative. When
+// that site is reachable, read-only, and promotable, every other site
+// is also reachable and read-only, and the target is GTID-complete (it
+// contains every peer's GTID_EXECUTED and the recorded promotion GTID
+// set), restoring its writability cannot lose transactions or create a
+// second primary. Any unreachable site instead leaves the decision to
+// the normal unreachable+read-only promotion path in EvalCrossSite.
+//
+// Called once per poll cycle. Returns true when a re-assert was
+// attempted (successful or not) so Poll surfaces the attempt through
+// the status callback; attempts are rate-limited by failoverCooldown.
+func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
+	if tm.isBootstrapping() || tm.isUpdating() || tm.isTopologyFrozen() || tm.isPlannedFailoverActive() {
+		return false
+	}
+
+	tm.mu.RLock()
+	target := tm.lastFailoverTarget
+	promotedSite := tm.promotedSite
+	lastReassert := tm.lastReassert
+	promotionGtidStr := tm.promotionGtidExecuted
+	tm.mu.RUnlock()
+
+	if target == "" {
+		return false
+	}
+	// A pending promotion is still being confirmed by
+	// reconcilePendingPromotionLocked; let that pipeline finish (or
+	// expire) before second-guessing the topology.
+	if promotedSite != "" {
+		return false
+	}
+	if !lastReassert.IsZero() && tm.clock.Since(lastReassert) < tm.failoverCooldown {
+		return false
+	}
+
+	var targetSite *siteTracker
+	for i := range tm.sites {
+		s := &tm.sites[i]
+		if s.name == target {
+			targetSite = s
+			continue
+		}
+		// A writable site means there is no wedge (split-brain repair
+		// belongs to applyCrossSiteAction); an unreachable or unknown
+		// site hands the decision to the normal promotion path.
+		if s.state != state.StateReadOnly {
+			return false
+		}
+	}
+	if targetSite == nil || targetSite.state != state.StateReadOnly || !targetSite.isPromotable() {
+		return false
+	}
+
+	gtidCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	targetGtidStr, err := targetSite.mysql.GetGtidExecuted(gtidCtx)
+	cancel()
+	if err != nil {
+		tm.logger.Warn("primary re-assert: failed to read target GTID_EXECUTED", "site", target, "error", err)
+		return false
+	}
+	targetGtid, err := mysql.ParseGTIDSet(targetGtidStr)
+	if err != nil {
+		tm.logger.Warn("primary re-assert: failed to parse target GTID_EXECUTED", "site", target, "error", err)
+		return false
+	}
+	if promotionGtidStr != "" {
+		promotionGtid, perr := mysql.ParseGTIDSet(promotionGtidStr)
+		if perr != nil {
+			// The operator wrote this value from MySQL itself, so a parse
+			// failure means corruption or manual status tampering. The
+			// safety argument depends on the recorded invariant being
+			// trustworthy — refuse rather than silently skip the gate.
+			tm.logger.Warn("primary re-assert refused: recorded promotion GTID set failed to parse — status corrupted or manually edited?",
+				"site", target, "promotionGtid", promotionGtidStr, "error", perr)
+			return false
+		}
+		if !targetGtid.Contains(promotionGtid) {
+			tm.logger.Warn("primary re-assert refused: target no longer contains the recorded promotion GTID set (wiped or restored since promotion?)",
+				"site", target, "promotionGtid", promotionGtidStr, "targetGtid", targetGtidStr)
+			return false
+		}
+	}
+	for i := range tm.sites {
+		s := &tm.sites[i]
+		if s.name == target {
+			continue
+		}
+		peerCtx, peerCancel := context.WithTimeout(ctx, 5*time.Second)
+		peerGtidStr, gerr := s.mysql.GetGtidExecuted(peerCtx)
+		peerCancel()
+		if gerr != nil {
+			tm.logger.Warn("primary re-assert: failed to read peer GTID_EXECUTED", "site", s.name, "error", gerr)
+			return false
+		}
+		peerGtid, gerr := mysql.ParseGTIDSet(peerGtidStr)
+		if gerr != nil {
+			tm.logger.Warn("primary re-assert: failed to parse peer GTID_EXECUTED", "site", s.name, "error", gerr)
+			return false
+		}
+		if !targetGtid.Contains(peerGtid) {
+			tm.logger.Warn("primary re-assert refused: peer has transactions the target lacks — divergence needs human review",
+				"site", s.name, "peerGtid", peerGtidStr, "targetGtid", targetGtidStr)
+			return false
+		}
+	}
+
+	// Stamp the attempt before mutating MySQL so failures are also
+	// rate-limited by the cooldown instead of retried at poll frequency.
+	tm.mu.Lock()
+	tm.lastReassert = tm.clock.Now()
+	tm.mu.Unlock()
+
+	tm.logger.Warn("re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability",
+		"site", target)
+
+	if err := targetSite.mysql.SetSuperReadOnly(ctx, false); err != nil {
+		tm.logger.Error("primary re-assert: failed to clear super_read_only", "site", target, "error", err)
+		return true
+	}
+	if err := targetSite.mysql.SetReadOnly(ctx, false); err != nil {
+		tm.logger.Error("primary re-assert: failed to clear read_only", "site", target, "error", err)
+		return true
+	}
+	if err := tm.confirmWritable(ctx, targetSite); err != nil {
+		tm.logger.Error("primary re-assert: writable confirmation failed", "site", target, "error", err)
+		return true
+	}
+	metrics.PrimaryReassertTotal.WithLabelValues(target).Inc()
+
+	// Best-effort DNS flip: idempotent when DNS already points at the
+	// target, and heals the case where the original promotion recorded
+	// its state but the flip itself failed. As with the promotion path,
+	// there is no automatic retry once the group is healthy again —
+	// MySQL is already writable, so a persistent failure here needs
+	// operator intervention on the DNS provider.
+	if err := tm.dns.UpdateDNSRecord(ctx, targetSite.lbIP); err != nil {
+		tm.logger.Error("primary re-assert: DNS flip failed after restoring writability — no automatic retry, DNS provider may need intervention",
+			"site", target, "error", err)
+	}
+	return true
 }
 
 func (tm *TopologyManager) clearHealthyRecoverySite(siteRepl []*mysql.ReplicaStatus) bool {

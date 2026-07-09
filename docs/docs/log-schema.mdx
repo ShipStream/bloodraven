@@ -145,6 +145,10 @@ Every per-site state change emits one record. Use this to replay the topology ti
 |---|---|---|---|
 | WARN | `ALERT` | `message`, `fg` | A cross-site `EvalCrossSite` action returned an alert string (split brain, no primary, total loss). The same conditions emit `SplitBrainDetected` / `NoPrimaryDetected` / `TotalLossDetected` Kubernetes Events. |
 | WARN | `split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities` | (context) | Opt-in `splitBrainPolicy` is fencing the lower-priority site. |
+| WARN | `re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability` | `site`, `fg` | The last failover target was found fenced (read-only) with every site reachable and nothing writable — typically its own sidecar re-fenced it with a stale lease right after a promotion. The operator restores writability on the target. Mirrored by `bloodraven_primary_reassert_total`. Rate-limited to once per `failoverCooldown`. |
+| WARN | `primary re-assert refused: peer has transactions the target lacks — divergence needs human review` | `site`, `peerGtid`, `targetGtid`, `fg` | The no-writable-site wedge was detected but restoring the last failover target would abandon peer transactions. The group stays read-only until an admin resolves the divergence. |
+| WARN | `primary re-assert refused: target no longer contains the recorded promotion GTID set (wiped or restored since promotion?)` | `site`, `promotionGtid`, `targetGtid`, `fg` | The failover history no longer describes the target's data lineage; the operator will not restore writability automatically. |
+| WARN | `primary re-assert refused: recorded promotion GTID set failed to parse — status corrupted or manually edited?` | `site`, `promotionGtid`, `error`, `fg` | `status.promotionGtidExecuted` is non-empty but malformed. The operator wrote this value from MySQL itself, so a parse failure means corruption or manual tampering — the re-assert safety argument depends on it, so the operator refuses. |
 | INFO | `failover blocked by anti-flap cooldown` | (context) | A failover decision was deferred because `failoverCooldown` has not elapsed since the last one. |
 | INFO | `cross-site action deferred: in-place restore in progress` | `fg` | Decisions are paused while `restoreInPlace` runs. |
 | INFO | `cross-site action deferred: planned failover in progress` | `fg` | Decisions are paused while a planned-failover annotation is being processed. |
@@ -160,6 +164,7 @@ The per-MySQL sidecar emits these in its operational stream. `SELF-FENCING:` is 
 | INFO | `SELF-FENCING: killed app connections` | `count`, `pod` | Connection kill after fencing succeeded. |
 | ERROR | `SELF-FENCING FAILED: could not set super_read_only` | `error`, `pod` | The fence write itself failed. The sidecar retries on the next tick. |
 | ERROR | `SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore` | `pod` | Final status; the sidecar will not unfence on its own. The next operator promotion clears it. |
+| INFO | `fencing: MySQL is writable after prior self-fence; rearming monitor` | `pod` | An actor with SUPER privileges (the operator, per the restore contract) made MySQL writable again after a self-fence. The monitor re-arms with a fresh lease window — it will not re-fence until a full `leaseTimeout` passes with the operator and every peer unreachable again. |
 | INFO | `fencing: adopted active-site view from peer` | `peer`, `activeSite`, `observedAt`, `pod` | Peer sidecar relayed a fresher view than what this sidecar had cached. Drives the topology-mismatch rule. |
 
 Safety-net events (sidecar startup):

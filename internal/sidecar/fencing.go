@@ -361,10 +361,26 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		if readOnly {
 			return
 		}
+		// Writability after a self-fence means an actor with SUPER
+		// privileges restored it — by contract ("only Bloodraven can
+		// restore") that is the operator promoting or re-asserting this
+		// site. Treat the restore as fresh evidence of controller
+		// intervention and grant a full lease window before rule #2 can
+		// fire again, exactly like process startup. Without this reset
+		// the monitor re-evaluates against pre-outage timestamps and
+		// instantly re-fences a freshly promoted primary whose operator
+		// is driving MySQL but not yet reachable through its auxiliary
+		// Service (endpoint readiness lags an operator restart), wedging
+		// the group in a no-writable-site state.
 		f.logger.Info("fencing: MySQL is writable after prior self-fence; rearming monitor")
 		f.fenced = false
+		now := f.clock.Now()
+		f.lastBloodravenOK = now
+		for addr := range f.lastPeerOK {
+			f.lastPeerOK[addr] = now
+		}
 		if f.topologyEnabled() {
-			f.topology.Set("", f.clock.Now())
+			f.topology.Set("", now)
 		}
 	}
 	if readOnly {
