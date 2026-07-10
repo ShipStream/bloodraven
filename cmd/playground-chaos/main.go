@@ -44,6 +44,7 @@ func main() {
 	continueOnFailure := rootFlags.Bool("continue-on-failure", false, "run-all only: keep going past the first failure")
 	junitOut := rootFlags.String("junit-out", "", "run-all only: write JUnit XML report to this path")
 	profile := rootFlags.String("profile", string(runner.DefaultProfile), "run-all only: scenario subset (smoke|release|full)")
+	baselineWait := rootFlags.Duration("baseline-wait", 5*time.Minute, "run-all only: wait up to this long for a healthy baseline before the first scenario (0 disables)")
 	verbose := rootFlags.Bool("verbose", false, "verbose logging")
 	kubeconfig := rootFlags.String("kubeconfig", "", "kubeconfig path (default: KUBECONFIG / ~/.kube/config)")
 	kctx := rootFlags.String("context", "", "kubectl context to use (default: current-context)")
@@ -103,7 +104,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "invalid profile %q; valid: smoke, release, full\n", p)
 			os.Exit(exitFlagParse)
 		}
-		os.Exit(runAll(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *noCleanup, *force, *autoReset, *continueOnFailure, *junitOut, p, logger))
+		os.Exit(runAll(*kubeconfig, *kctx, *namespace, *fg, *resultsDir, *timeout, *baselineWait, *noCleanup, *force, *autoReset, *continueOnFailure, *junitOut, p, logger))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", subcmd)
 		usage()
@@ -130,6 +131,7 @@ Flags:
   --continue-on-failure  run-all only: keep going past first failure
   --junit-out            run-all only: write JUnit XML to path
   --profile              run-all only: scenario subset (smoke|release|full)
+  --baseline-wait        run-all only: wait for healthy baseline before first scenario (default 5m, 0 disables)
   --verbose              verbose logging
   --kubeconfig           kubeconfig path
   --context              kubectl context
@@ -308,6 +310,32 @@ func runScenarioWithAutoReset(ctx context.Context, k *pgkube.Client, kubeconfig,
 	return executor.Run(ctx, scen)
 }
 
+// waitForBaseline polls check until it returns nil or timeout elapses.
+// The first check runs immediately, so a healthy cluster costs one poll.
+// progress is invoked after every failed check with the error and the
+// elapsed time. Returns nil once healthy; on timeout or context
+// cancellation it returns the last check error (or the context error if
+// no check ever ran).
+func waitForBaseline(ctx context.Context, timeout, interval time.Duration, check func(context.Context) error, progress func(err error, elapsed time.Duration)) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		lastErr = check(ctx)
+		if lastErr == nil {
+			return nil
+		}
+		progress(lastErr, timeout-time.Until(deadline))
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return lastErr
+		case <-time.After(interval):
+		}
+	}
+}
+
 // runReset shells out to this same binary's reset subcommand. Streams
 // output through to stderr so the user can watch reset progress.
 func runReset(ctx context.Context, kubeconfig, kctx, currentCtx, namespace, fg, resultsDir string) error {
@@ -330,7 +358,7 @@ func runReset(ctx context.Context, kubeconfig, kctx, currentCtx, namespace, fg, 
 	return nil
 }
 
-func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Duration, noCleanup, force, autoReset, continueOnFailure bool, junitOut string, profile runner.Profile, logger *slog.Logger) int {
+func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout, baselineWait time.Duration, noCleanup, force, autoReset, continueOnFailure bool, junitOut string, profile runner.Profile, logger *slog.Logger) int {
 	k, err := loadKube(kubeconfig, kctx, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -360,6 +388,40 @@ func runAll(kubeconfig, kctx, namespace, fg, resultsDir string, timeout time.Dur
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Suite-entry convergence wait. A freshly deployed playground
+	// legitimately takes tens of seconds to settle after setup.sh
+	// returns (operator first reconcile, replication catch-up), and CI
+	// starts run-all immediately after setup. Without this wait the
+	// first scenario's instant Precheck catches the still-converging
+	// cluster and --auto-reset reaches for a full MySQL wipe — a
+	// five-minute destructive remedy for a thirty-second problem (the
+	// v0.6.1 post-release E2E failed exactly this way: scenario 01
+	// FAILed in 38ms while every later scenario passed).
+	//
+	// A timeout here is deliberately NOT fatal: the per-scenario
+	// Precheck and --auto-reset remain the authoritative remedies, and
+	// they produce forensics that aborting the suite here would not.
+	if baselineWait > 0 {
+		start := time.Now()
+		err := waitForBaseline(ctx, baselineWait, 5*time.Second, func(ctx context.Context) error {
+			checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return scenarios.CheckBaseline(checkCtx, k, namespace, fg)
+		}, func(lastErr error, elapsed time.Duration) {
+			logger.Info("wait", "what", "run-all suite-entry healthy baseline",
+				"last", lastErr.Error(), "elapsed", elapsed.Round(time.Second))
+		})
+		switch {
+		case err != nil && ctx.Err() != nil:
+			return exitEnvironment
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "!! run-all: baseline still unhealthy after %s (%v) — proceeding; per-scenario precheck and --auto-reset take it from here\n",
+				baselineWait, err)
+		default:
+			logger.Info("run-all suite-entry baseline healthy", "elapsed", time.Since(start).Round(time.Second))
+		}
+	}
 
 	var results []runner.Result
 	exitCode := exitOK
