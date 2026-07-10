@@ -1,5 +1,8 @@
 # Bloodraven
 
+[![CI](https://github.com/ShipStream/bloodraven/actions/workflows/ci.yml/badge.svg)](https://github.com/ShipStream/bloodraven/actions/workflows/ci.yml)
+[![E2E (real-cluster chaos)](https://github.com/ShipStream/bloodraven/actions/workflows/e2e.yml/badge.svg)](https://github.com/ShipStream/bloodraven/actions/workflows/e2e.yml)
+
 With Bloodraven you can run MySQL async replication failover groups across Kubernetes sites. Bloodraven owns pod creation, MySQL configuration, health monitoring, promotion, DNS steering through external-dns, node taints, clone-based bootstrap, sidecar self-fencing, and optional Dragonfly cache/session sidekicks that follow the active MySQL site.
 
 Bloodraven is built for site-level failover where applications can accept non-zero recovery point objective (RPO) after sudden primary loss. It does not provide synchronous replication, zero RPO, or automatic conflict repair after divergent writes.
@@ -24,7 +27,7 @@ Bloodraven is built for site-level failover where applications can accept non-ze
 - **Graceful planned switchover**: An admin can move the primary site with one command; Bloodraven waits for the replica to catch up first, so planned moves can have zero data loss.
 - **Backup, restore, PITR, and verification**: Bloodraven can create backups, archive binlogs for point-in-time recovery, encrypt artifacts, restore from them, and test backups by loading them into a throwaway MySQL.
 - **Dragonfly cache/session failover**: Bloodraven can manage Dragonfly alongside MySQL, move the active cache/session endpoint during failover, and try to preserve sessions during planned moves.
-- **Chaos playground**: The local playground tests these failure modes in a real Kubernetes cluster before you trust them in production.
+- **Chaos-tested in CI**: 30+ automated chaos scenarios — primary kills, network partitions, split-brain, self-fencing, data wipes, backup/PITR verification — run against real Kubernetes clusters nightly, and a smoke subset gates every release before artifacts are published. The same [playground](https://bloodraven.readthedocs.io/en/latest/docs/playground) runs locally so you can test these failure modes yourself before you trust them in production.
 
 ## Quickstart
 

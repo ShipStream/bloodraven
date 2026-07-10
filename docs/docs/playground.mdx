@@ -192,6 +192,29 @@ For more advanced scenarios, use the chaos script:
 ./playground/chaos.sh recover                 # Undo all chaos
 ```
 
+### Automated chaos suite
+
+Beyond the interactive scripts, 30+ scripted chaos scenarios (primary
+kills, operator crashes mid-failover, network partitions, self-fencing,
+GTID divergence, data wipes, rolling updates, Dragonfly failover,
+backup and PITR verification) are automated by the `playground-chaos`
+runner. Each scenario states a hypothesis, injects real faults into the
+cluster, asserts on operator behavior, and captures full forensics on
+failure:
+
+```bash
+make chaos-list                                  # List every scenario with its hypothesis
+make chaos-run SCENARIO=06-self-fence-isolated-primary
+make chaos-run-all-profile PROFILE=smoke         # Core failover subset (~5 minutes)
+make chaos-run-all                               # The full suite
+```
+
+This same suite is Bloodraven's E2E test bed in CI: the full suite runs
+nightly against a real Kubernetes cluster, and the smoke profile gates
+every release — a tag cannot publish images or charts unless core
+failover works on a live cluster. The current status is on the
+[E2E workflow badge](https://github.com/ShipStream/bloodraven/actions/workflows/e2e.yml).
+
 ## Dragonfly co-management
 
 The playground `MysqlFailoverGroup` enables `spec.dragonfly`, so Bloodraven also creates one Dragonfly StatefulSet per site (`playground-dragonfly-iad`, `playground-dragonfly-pdx`), one Dragonfly PodDisruptionBudget per site, and a single app-facing `playground-dragonfly` Service whose endpoints follow the active site. The Service selector AND-gates `shipstream.io/dragonfly-role=master` AND `shipstream.io/dragonfly-traffic=enabled`: removing the traffic label sheds an endpoint atomically, which is how planned failover avoids a window where both the old and new master would match the selector during `REPLTAKEOVER`. Disable Dragonfly by removing the `spec.dragonfly` block.

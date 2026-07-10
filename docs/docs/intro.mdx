@@ -45,7 +45,7 @@ Bloodraven is a Kubernetes operator for MySQL async replication failover groups 
 - **Graceful planned switchover**: An admin can move the primary site with one command; Bloodraven waits for the replica to catch up first, so planned moves can have zero data loss.
 - **Backup, restore, PITR, and verification**: Bloodraven can create backups, archive binlogs for point-in-time recovery, encrypt artifacts, restore from them, and test backups by loading them into a throwaway MySQL.
 - **Dragonfly cache/session failover**: Bloodraven can manage Dragonfly alongside MySQL, move the active cache/session endpoint during failover, and try to preserve sessions during planned moves.
-- **Chaos playground**: The local playground tests these failure modes in a real Kubernetes cluster before you trust them in production.
+- **Chaos-tested in CI**: 30+ automated chaos scenarios — primary kills, network partitions, split-brain, self-fencing, data wipes, backup/PITR verification — run against real Kubernetes clusters nightly, and a smoke subset gates every release before artifacts are published. The same [playground](./playground.mdx) runs locally so you can test these failure modes yourself before you trust them in production.
 
 :::tip
 **Using an AI agent?** This documentation is available as `llms.txt` and `llms-full.txt` at the site root for consumption by LLM-based tools. Give your agent context with a prompt like:

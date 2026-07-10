@@ -90,6 +90,18 @@ const FeatureList = [
       </>
     ),
   },
+  {
+    icon: '💥',
+    title: 'Chaos-Tested in CI',
+    description: (
+      <>
+        30+ automated chaos scenarios — primary kills, network partitions,
+        split-brain, self-fencing, data wipes, backup and PITR verification —
+        run nightly against real Kubernetes clusters, and a smoke subset gates
+        every release before artifacts ship.
+      </>
+    ),
+  },
 ];
 
 function Feature({icon, title, description}) {
