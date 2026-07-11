@@ -56,14 +56,24 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `24-emergency-mysql-dragonfly-down` (§26; all Dragonfly StatefulSets scaled to 0, MySQL emergency failover still completes)
 - `25-operator-restart-mid-dragonfly-failover` (§27; operator restart while planned failover is in Dragonfly sync/promotion phase resumes safely)
 - `26-planned-dragonfly-sync-timeout-proceed` (§28; `onSyncTimeout=proceed` marks sessions not preserved and still completes MySQL failover)
-- `27-dragonfly-rolling-image-update` (§32; ordinary `spec.dragonfly.image` patch rolls one pod at a time and promotes the updated replica before rolling the old active pod)
+- `27-dragonfly-rolling-image-update` (§D6b; ordinary `spec.dragonfly.image` patch rolls one pod at a time and promotes the updated replica before rolling the old active pod)
 - `29-dragonfly-snapshot-upgrade` (§29; D6a snapshot-restore upgrade using the playground RustFS bucket)
 - `30-backup-verification-rustfs` (§30; configures a RustFS backup profile, creates a real `MysqlBackup`, pins `MysqlBackupVerification.spec.backupRef`, and asserts marker rows restore)
 - `31-pitr-verification-rustfs` (§31; enables RustFS PITR, archives sealed binlogs, verifies timestamp replay includes pre-target rows and excludes post-target rows)
+- `32-mfg-status-write-denial-emergency-promotion` (§32; denies the operator patch/update on `mysqlfailovergroups/status`, scales the active primary to 0, asserts MySQL promotes at the data layer while the CR status is frozen, then self-heals to the promoted site within 90s after RBAC restore)
+- `33-scoped-dns-outage` (§33; NetworkPolicy blocking only kube-dns egress from the active MySQL pod — proven with a DNS canary first — asserts the outage is DNS-scoped, not a pod partition and not the DNSEndpoint-API denial of §38)
+- `34-operator-kill-during-wait-replica` (§34; force-deletes the operator while an ordered update is held at `WaitReplica`; the replacement operator re-derives remaining drift from Deployment spec-hash mismatch and finishes with no double-roll and no `TOTAL LOSS`)
+- `35-planned-switchover-lag-timeout-rollback` (§35; `SOURCE_DELAY=60` on the target + `maxLagWait=5s` drives `WaitingForLag`→`Failed{LagTimeout}`; source stays active, `bloodraven_planned_failovers_total{result="failed_timeout"}` increments)
+- `36-rustfs-outage-during-restore-in-place` (§36; a per-schema in-place restore whose RustFS storage is scaled to 0 mid-run terminates `Failed` with the topology frozen; the untouched canary schema survives and the terminal `Failed` holds on the same confirm — a retry needs a new monotonic confirm — `ResetBeforeRunAll`)
+- `37-pitr-archive-handoff-across-failover` (§37; marker A archived on the old active, emergency failover, marker B archived on the new active; a timestamp verification replays baseline+A+B and excludes C across both per-site manifests — `ResetBeforeRunAll`)
+- `38-dnsendpoint-write-denial-during-failover` (§38; denies the operator write verbs on `dnsendpoints`, forces promotion; the DNSEndpoint target stays stale during denial then heals to the promoted LBIP within 90s after RBAC restore with no re-failover)
+- `39-dragonfly-master-partition` (§39; deny-all NetworkPolicy on only the Dragonfly master pod promotes the surviving replica; MySQL `status.activeSite` and failover counters are unchanged)
+
+Scenarios `32`–`39` are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. As of 2026-07-11, all eight have passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). All eight remain full-profile-only while this new, high-risk coverage matures. Scenarios `36` and `37` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
 
 `make chaos-list` is the authoritative inventory — when adding a scenario, also append it here so the doc and the registry stay in lock-step.
 
-Sections marked `§S` (planned-switchover) and `§SBR` (split-brain auto-resolve) are documented as appendix-style sections below — they exist as scenarios but don't fit the §1-§32 numbered failure-mode grid.
+Sections marked `§S` (planned-switchover) and `§SBR` (split-brain auto-resolve) are documented as appendix-style sections below — they exist as scenarios but don't fit the §1-§39 numbered failure-mode grid. The Dragonfly rolling image update, formerly numbered §32, is now the unnumbered §D6b appendix item so §32 could open the new emergency/denial band (§32-§39).
 
 The runner refuses to mutate any kubectl context that does not match the same allowlist as `playground/_guard.sh` (`k3d-*`, `kind-*`, `minikube*`, or names listed in `BLOODRAVEN_PLAYGROUND_CONTEXTS`). Markdown is the source of truth for hypotheses and prose; the runner's assertions are the operational ones documented under each scenario's "Verify" section.
 
@@ -830,7 +840,163 @@ The scenario uses the same RustFS bucket/profile/credential Secret as scenario 3
 
 ---
 
-### 32. Dragonfly Rolling Image Update (D6b)
+## Scenarios 32-39: Denial, restore, and Dragonfly-partition band
+
+These eight scenarios add RBAC-denial, scoped-DNS, ordered-update-kill, planned-lag-timeout, restore-in-place, PITR-handoff, and Dragonfly-partition coverage. All are **full-profile-only** (omitted from `smoke`/`release`); §36 and §37 also run `ResetBeforeRunAll`. Each scenario below now records its live-run history on the k3d playground (2026-07-11) under "Actual live result" — prior failure evidence is preserved for the scenarios that needed a fix before their final pass.
+
+Three of these (§32, §36, §38) exposed a real operator defect and shipped a minimal fix; see the **Observed defect and fix** notes under those sections. §33 exposed a real playground/tooling defect (a NetworkPolicy that this CNI evaluates post-DNAT), also documented under **Observed defect and fix**. §35 and §36's first live attempt each hit a scenario-only assertion-timing race (not an operator bug), fixed in the scenario's wait/verify logic — see the per-scenario notes below.
+
+### 32. MFG Status-Write Denial During Emergency Promotion
+**Category**: RBAC denial / status durability | **Risk**: High | **Profile**: full-only
+
+**Hypothesis**: Denying the operator `patch`/`update` on `shipstream.io/mysqlfailovergroups/status` and then scaling the active primary to 0 still completes MySQL promotion (the promotion is SQL, not a CR write). The CR status stays stale during the denial; after the ClusterRole is restored, status catches up to the promoted site within 90s with no second failover.
+
+**Injection**: Resolve the ClusterRole bound to ServiceAccount `bloodraven-playground/bloodraven`; remove `patch`/`update` from only `mysqlfailovergroups/status` (siblings like `mysqlbackups/status` keep their verbs via rule-splitting); scale the active MySQL Deployment to 0.
+
+**Verify**: The peer becomes writable at the MySQL layer (direct probe, not the frozen CR); `bloodraven_failovers_total{target_site=<peer>}` increments; the operator logs a forbidden `update fg status` error. After RBAC restore: `status.activeSite`, `lastFailoverTarget`, and `promotionGtidExecuted` heal to the promoted site within 90s and Ready returns True; the old primary rejoins without `RecoveryBlocked`.
+
+**Timing**: 8-minute timeout; 90s status-heal budget after RBAC restore.
+
+**Cleanup**: LIFO RBAC restore (idempotent closure), scale old primary back to 1, global recover, wait out anti-flap cooldown to a healthy baseline.
+
+**Observed defect and fix**: The operator wrote CR status only on transition events; a status write denied mid-failover was logged and dropped with nothing re-attempting it once the cluster stabilized. Fix (`internal/controller/runner.go`, `topology.go`): `updateCRStatus` now returns its error, the `StatusCallback` records it, and `Poll` re-fires the status callback every cycle while a prior write is known-failed (the writer already `DeepEqual`-skips no-ops, so a healthy cluster pays only a diff). Covered by `TestUpdateCRStatus_DeniedWriteReturnsErrorThenHeals` and `TestPoll_StatusRetryReFiresCallbackUntilCleared`.
+
+**Actual live result**: Passed on the k3d playground on the first live attempt (`20260711T004152Z`) with the status-write-retry fix above already in place: the ClusterRole edit denied `patch`/`update` on `mysqlfailovergroups/status` only, the active primary was scaled to 0, and MySQL promoted the peer at the data layer while the CR status stayed frozen during the denial. After RBAC restore, `status.activeSite`, `lastFailoverTarget`, and `promotionGtidExecuted` healed to the promoted site inside the 90s budget with no second failover and no `RecoveryBlocked` on rejoin.
+
+---
+
+### 33. Scoped Cluster-DNS Outage
+**Category**: Network / DNS isolation | **Risk**: Medium | **Profile**: full-only
+
+**Hypothesis**: A NetworkPolicy that blocks only kube-dns egress from the active MySQL pod (allowing all other egress) is a DNS-resolution outage, not a pod partition: the operator's DNSEndpoint API writes still succeed, no split-brain occurs, and MySQL either stays stable or the sidecar self-fences cleanly.
+
+**Injection**: Discover the `kube-system/kube-dns` ClusterIP *and* its backend pod IPs (from the `kube-system/kube-dns` Endpoints); run a busybox **canary** pod with a `nslookup` probe loop and apply the policy shape (egress `0.0.0.0/0` with `except: [<kube-dns ClusterIP>/32, <pod IP>/32, ...]`) to prove this CNI enforces the exception; only then apply the same policy to the active MySQL pod.
+
+**Verify**: Across >2× `leaseTimeout`, writable count never exceeds 1 and no site is `RecoveryBlocked`; the operator log shows **no** forbidden `apply DNSEndpoint` error (that is §38); the DNSEndpoint stays readable via the Kubernetes API. Sidecar DNS-resolution failures are captured as best-effort evidence. Both a stable-activeSite and a clean self-fence-then-failover are acceptable end states.
+
+**Timing**: 6-minute timeout (canary ~90s + 45s hold + recovery).
+
+**Cleanup**: Remove the DNS NetworkPolicy (canary pod and policy torn down in the same step); global recover verifies no chaos NetworkPolicy remains and waits for Ready with a replicating peer.
+
+**Observed defect and fix**: The first live run's canary proved this CNI (k3d's default) enforces NetworkPolicy *after* Service DNAT: the deny rule excepted only the kube-dns ClusterIP, but the packet's destination is already a CoreDNS pod IP by the time the CNI evaluates it, so the exception never matched and DNS kept resolving — the outage silently never happened. Fix (`internal/playground/kube/networkpolicy.go`): `BuildDNSEgressDenyPolicy`/`BuildDNSEgressDenyPolicyForSelector` now accept a list of deny IPs and except all of them; a new `DiscoverKubeDNSEndpointIPs` resolves the live CoreDNS backend pod IPs from the `kube-system/kube-dns` Endpoints, and the scenario excepts the ClusterIP plus every backend pod IP so the policy blocks DNS regardless of whether the CNI enforces pre- or post-DNAT. Covered by `TestBuildDNSEgressDenyPolicy`, `TestBuildDNSEgressDenyPolicyForSelector_DedupesAndSkipsEmpty`, `TestDiscoverKubeDNSEndpointIPs(_NoBackends)`, and `TestDenyDNSEgressAppliesAndReverts`.
+
+**Actual live result**: First live attempt (`20260711T004244Z`) failed precheck's own canary step after 50.294s — the canary kept resolving DNS (`dns=ok`) through the full 45s hold, confirming the post-DNAT root cause above rather than silently proceeding against a no-op policy (see `live-33-final.md`). After the pod-IP-except fix (`DiscoverKubeDNSEndpointIPs` plus the multi-IP `Except` list), the scenario passed live on `20260711T005348Z`: the canary reached `dns=fail`, the outage stayed DNS-scoped across the hold window (writable count never exceeded 1, no `RecoveryBlocked`), and the operator logged no forbidden `apply DNSEndpoint` error.
+
+---
+
+### 34. Operator Kill During Ordered-Update WaitReplica
+**Category**: Ordered update / operator resilience | **Risk**: High | **Profile**: full-only
+
+**Hypothesis**: Killing the operator while an ordered update is held at `WaitReplica` does not double-roll both MySQL pods or cause `TOTAL LOSS`. The replacement operator, whose in-memory update phase was lost, re-derives remaining drift from the Deployment spec-hash mismatch and completes the roll.
+
+**Injection**: Patch `spec.sites[*].resources.requests.memory`; wait for `status.updatePhase` to engage (preferably `WaitReplica`); apply an **ingress-only** deny NetworkPolicy to the standby MySQL pod so the operator's health check of the freshly-rolled standby fails (egress/replication stays open, satisfying the updater's replicating-standby precondition once lifted); force-delete the operator pod; after the replacement is Available, remove the hold.
+
+**Verify**: Never 0 writable (no double-roll / `TOTAL LOSS` window) and never >1 writable throughout; final `status.updatePhase == ""`; both Deployments run the patched memory request; one writable + one read-only; no `TOTAL LOSS` operator log. Then restore original memory and wait for the revert roll to settle.
+
+**Timing**: 12-minute timeout; 8-minute completion sub-budget.
+
+**Cleanup**: Remove the standby hold policy (also swept by global recover), restore memory, wait for a healthy baseline.
+
+**Actual live result**: Passed on the k3d playground on the first live attempt (`20260711T005458Z`) with no operator defect surfaced. The operator pod was force-deleted while `status.updatePhase` was held at `WaitReplica` behind the standby's ingress-only deny; the replacement operator re-derived the remaining drift from the Deployment spec-hash mismatch and completed the roll — writable count never dropped to 0 or rose above 1, `status.updatePhase` returned to empty, both Deployments landed on the patched memory request, and no `TOTAL LOSS` log fired. Re-run live on `20260711T033652Z` after the post-review scenario fix (threading the step context into `s34DeploymentsAt` instead of `context.Background()`): passed again with the same outcome.
+
+---
+
+### 35. Planned Switchover Lag-Timeout Rollback
+**Category**: Planned failover state machine | **Risk**: Medium | **Profile**: full-only
+
+**Hypothesis**: With `SOURCE_DELAY=60` on the target replica and a `maxLagWait=5s` annotation override, a planned switchover fences the source, waits for the target GTID to cover the fenced GTID, times out, and rolls back: `plannedFailover.phase=Failed` `reason=LagTimeout`, source stays active, and the failover history does not advance to the target.
+
+**Injection**: Set `SOURCE_DELAY=60` on the target (both threads still running, so the operator's replica-health check stays true); write a marker on the source **after** the delay is active (so the fenced GTID cannot be covered in time); annotate `bloodraven.shipstream.io/planned-failover=<target>:maxLagWait=5s`.
+
+**Verify**: `plannedFailover.phase` reaches terminal `Failed` with `reason=LagTimeout` (intermediate `Validating` is not asserted — it may not persist); `bloodraven_planned_failovers_total{result="failed_timeout"}` increments; `status.activeSite` stays the source; `lastFailoverTarget` does not advance to the target; the source becomes writable again (eventual — unfencing clears `super_read_only` first); the target stays read-only and replicating.
+
+**Timing**: 8-minute timeout.
+
+**Cleanup**: Clear `SOURCE_DELAY` on the read-only site, wait for the marker to replicate, drop `chaos_s35`, clear the annotation (already consumed by the terminal state machine).
+
+**Actual live result**: First live attempt (`20260711T005733Z`) reached the correct `plannedFailover.phase=Failed{LagTimeout}` outcome in 7.007s, then failed the very next verify check 21ms later on `status.activeSite=""` — a scenario-side assertion-timing race, not an operator bug: rollback unfences the source in two MySQL-level steps (`super_read_only` clears before `read_only`), and `activeSiteLocked()` reports no active site in the gap between them (see `live-35-final.md`). After replacing the one-shot check with the `s35RollbackConverged` poll (90s budget, hard-fails immediately if `activeSite`/`lastFailoverTarget` actually advance to the target), the scenario passed live on `20260711T011112Z`: the source settled back to sole-writable/active, failover history never advanced to the target, and the target stayed read-only and replicating. Re-run live on `20260711T033630Z` after the post-review cleanup fix (clearing `SOURCE_DELAY` on the stashed rollback target rather than the observed read-only site): passed again with the same outcome.
+
+---
+
+### 36. RustFS Outage During restoreInPlace
+**Category**: Restore-in-place / storage outage | **Risk**: High | **Profile**: full-only, `ResetBeforeRunAll`
+
+**Hypothesis**: A per-schema in-place restore whose RustFS storage is scaled to 0 mid-run terminates `Failed` with the topology frozen (no emergency failover, no reclone). The untouched safe schema survives on the active primary. A genuine execution failure records `confirmTokenUsed` (the executed confirm), so the terminal `Failed` **holds** on the same confirm — the operator does not auto-re-arm the destructive restore; a retry requires a new monotonic confirm. Only a validation rejection (an invalid confirm that never ran) leaves `confirmTokenUsed` empty.
+
+**Injection**: Configure an isolated RustFS profile under `e2e/36-…/<run-stamp>`; seed `chaos_s36_restore` and `chaos_s36_safe`; take a valid `MysqlBackup`; mutate only `chaos_s36_restore`; **confirm-token gate substep** — apply an invalid `confirm` and assert `Failed` with no Job and empty `confirmTokenUsed`; apply a fresh RFC3339 `confirm` with `source.mysqlBackupRef` and `loadOptions.includeSchemas=[chaos_s36_restore]`; wait until the restore Job is active (`phase=Restoring`, `jobName` set); scale the `rustfs` Deployment to 0.
+
+**Verify**: Terminal `phase=Failed`; `targetSite` equals the active site at preflight; `status.activeSite` unchanged; no `bloodraven.shipstream.io/reclone-site` annotation; exactly one writable; no `RecoveryBlocked`; `chaos_s36_safe.canary` still reads `must-survive`; `confirmTokenUsed` equals the executed confirm and the terminal `Failed` holds across a sampling window (no auto-re-arm on the same confirm). Restore Job pod logs are captured as evidence of the S3/RustFS read failure.
+
+**Timing**: 24-minute timeout.
+
+**Cleanup**: Reverter scales RustFS back to 1 and waits available; remove `spec.restoreInPlace`; delete the restore Job; sweep the fixed-name in-place restore Job on every site (capturing pod logs first) so nothing leaks into the next run; delete backup CRs; restore the original backup spec; drop the scenario schemas. The inject step also sweeps a retained restore Job before arming a fresh `confirm`. If cleanup cannot prove the safe canary survived, `playground-chaos reset` is the documented remediation; `ResetBeforeRunAll` isolates the next attempt.
+
+**Observed defect and fix**: The live runs exposed three real operator defects that compounded. (1) **Stale fixed-name Job inheritance** — the in-place restore Job name is fixed (`mysql-<fg>-<site>-inplace-restore`), so a terminal Job from a prior attempt survives across runs (and the playground reset). `inPlaceRestoring` read that leftover Job's phase and marked the *fresh* confirmed request `Failed` (with the prior backup path) without ever running it. (2) **Loader never enabled `local_infile`** — `util.loadDump()` loads via `LOAD DATA LOCAL INFILE`, which the server rejects unless `@@GLOBAL.local_infile=ON`; live primaries run the hardened MySQL-8 default `OFF`, so a per-schema restore DROPped the target schema in preflight and then failed inside the load — losing the schema. (3) **Auto-re-arm on failure** — once (1)/(2) let the Job genuinely fail, the terminal `Failed` left `confirmTokenUsed` empty (`stampTerminalFailure` never set it), so `confirmAdvances()` treated the unchanged `confirm` as fresh and re-armed the destructive restore (`Failed→Preflight→Fencing→Restoring`); the verify step then observed `Preflight`. This also violated the `RestoreInPlaceFailed`/`ConfirmTokenUsed` API contract, which says a failed restore holds until `confirm` advances. Fixes: `internal/controller/restore_inplace.go` stamps the `confirm` token on the Job (`bloodraven.shipstream.io/restore-confirm`) and binds each run to the confirm its Job was **accepted** under. A Job that is not this run's is removed only when it is *terminal* — an in-flight destructive Job is never deleted, whoever it belongs to, because killing a pod mid-`DROP`/mid-load would leave the schema half-gone and race a second loader over the wreckage; it is allowed to finish, and its terminal status is recorded against the confirm it actually ran with (so a `confirm` the user changed mid-run is not marked consumed by a run that never requested it — it re-arms its own run once the first is terminal). `stampTerminalFailure` records the executed `confirm` on a genuine execution failure (creds/build/Job) while leaving it empty for a pure validation rejection, so a failed-but-executed restore holds terminal and only a strictly-newer `confirm` retries (invalid-timestamp behavior preserved). `internal/controller/restore_script.py` treats `local_infile` as a **precondition of the load, not a best-effort nicety**: `_prepare_local_infile` enables and verifies it *before* the destructive preflight and aborts (exit 2, nothing dropped) if it cannot — the drop-then-fail hole that lost the schema is closed at the source — and the prior value is restored in a `finally` (a no-op on the verification path, whose throwaway mysqld already runs `--local-infile=1`), preserving the hardened posture outside the load window. Covered by `TestReconcileInPlaceRestore_StaleJobNotInherited`, `TestReconcileInPlaceRestore_MatchingFailedJobIsHonored`, `TestReconcileInPlaceRestore_RunningJobSurvivesConfirmChange`, `TestReconcileInPlaceRestore_TerminalTokenComesFromTheJob`, `TestReconcileInPlaceRestore_FailedJobRecordsTheJobsConfirm`, `TestInPlaceRestoreJobIsForConfirm`, `TestReconcileInPlaceRestore_FailedJobRecordsConfirmAndHolds`, `TestReconcileInPlaceRestore_TerminalFailedStaysIdleOnSameConfirm`, and `TestReconcileInPlaceRestore_TerminalFailedRearmsOnNewerConfirm`; the scenario samples the phase for 20s after `Failed` to prove no auto-re-arm.
+
+**Actual live result**: Four live attempts, three diagnosed-and-fixed iterations before the final pass:
+
+- `20260711T011139Z` failed in the inject step after 83ms with a stale `Failed` status from the *previous* substep's deliberately-invalid confirm — a scenario-side wait-helper race (`waitRestoreInPlaceActive` treated any observed terminal status as the fresh request's outcome, not just a fresh one), not an operator bug. Fixed by making the wait require positive evidence (`restoreInPlaceStatusChanged`) that the observed status post-dates the stale snapshot before honoring a terminal phase; see `live-36-final.md`.
+- `20260711T012539Z` failed the same inject step after 4.092s, this time on a genuine terminal `Failed: Job has reached the specified backoff limit` — two compounding operator defects: (1) the in-place restore Job's fixed name let a leftover terminal Job from an earlier attempt be inherited and misattributed to the fresh confirmed request without ever running it, and (2) the loader never enabled `local_infile`, so every restore Job — leftover or fresh — failed inside `util.load_dump()` after already dropping the target schema. Fixed by stamping a `restore-confirm` annotation on the Job and binding each run to the confirm its Job was accepted under, and by making `local_infile` a verified precondition of the load; see **Observed defect and fix** above for the shipped behavior (review replaced the first cut's delete-on-mismatch with terminal-only removal, so an in-flight destructive Job is never killed) and `live-36-job-final.md` for the live diagnosis.
+- `20260711T015238Z` reached the intended `Failed` outcome from the RustFS outage in 29.035s, then failed verify 12ms later: the terminal `Failed` had already auto-re-armed to `Preflight` because `stampTerminalFailure` never stamped `confirmTokenUsed` on a failure path, so `confirmAdvances(confirm, "")` treated the unchanged confirm as fresh. Fixed by recording the executed confirm on genuine execution failures (holding terminal on the same confirm) while leaving it empty on pure validation rejections; see `live-36-rearm-final.md`.
+- `20260711T021732Z` passed live with all three fixes in place: the restore terminated `Failed` because of the RustFS outage, `targetSite`/`activeSite` and writable count were unaffected, no reclone annotation appeared, the safe canary (`chaos_s36_safe.canary`) still read `must-survive`, and `confirmTokenUsed` matched the executed confirm and held `Failed` across the 20s post-terminal sampling window with no auto-re-arm.
+- `20260711T033531Z` re-ran live after review replaced the first cut's delete-on-mismatch Job handling with terminal-only removal: the restore Job log shows `BLOODRAVEN_LOCAL_INFILE_ENABLED prev=OFF` immediately before the drop (precondition verified ahead of any destructive step), then `BLOODRAVEN_LOAD_FAILED: While 'Opening dump': Failed to connect to rustfs...svc.cluster.local port 9000: Connection refused` from the RustFS outage, and `BLOODRAVEN_LOCAL_INFILE_RESTORED value=OFF` on the way out — the reviewed fix passed live with the same outcome as the prior final pass.
+
+---
+
+### 37. PITR Archive Handoff Across Failover
+**Category**: PITR continuity across failover | **Risk**: Medium | **Profile**: full-only, `ResetBeforeRunAll`
+
+**Hypothesis**: With PITR enabled, marker A archived on the old active and marker B archived on the new active — each in its own per-site manifest under the same prefix — are both restorable to a timestamp after B and before C. A pinned timestamp verification includes baseline+A+B and excludes C, proving archive continuity across an emergency failover.
+
+**Injection**: Configure PITR under `e2e/37-…/<run-stamp>`; wait for active archiver readiness; seed baseline and take a full `MysqlBackup`; insert marker A on the current active, `FLUSH BINARY LOGS`, wait archive coverage; scale the active to 0 to force failover; wait for the peer to become active and its sidecar archiver `primary=true` on the **same** prefix; insert marker B, flush, wait coverage; capture the PITR target after B; insert marker C after the target, flush, wait coverage.
+
+**Verify**: Both `manifest-<oldActive>.json` and `manifest-<newActive>.json` exist under `<prefix>/binlogs` with ≥1 file each (read straight from RustFS via `sidecar.ManifestKey`); the pinned `MysqlBackupVerification` (`mode=timestamp`) reports `ResultRow=1` for the sanity query (baseline+A+B present, C absent) and `ReplayedThroughBinlog` set.
+
+**Timing**: 30-minute timeout.
+
+**Cleanup**: Reverter scales the old active back to 1; delete backup + verification CRs; drop `chaos_s37_pitr` and wait for the drop to replicate; restore the original backup/PITR spec; wait for a healthy baseline, absorbing any anti-flap cooldown from the failover.
+
+**Actual live result**: Passed on the k3d playground on the first live attempt (`20260711T021839Z`) with no operator defect surfaced. Both `manifest-<oldActive>.json` and `manifest-<newActive>.json` existed under the shared `<prefix>/binlogs` with the expected files, the sidecar archiver flipped `primary=true` on the new active after the forced failover, and the pinned timestamp `MysqlBackupVerification` reported `ResultRow=1` for baseline+A+B with C excluded and `ReplayedThroughBinlog` set — confirming archive continuity across the emergency failover.
+
+---
+
+### 38. DNSEndpoint Write Denial During Failover
+**Category**: RBAC denial / DNS failover | **Risk**: High | **Profile**: full-only
+
+**Hypothesis**: Denying the operator `create`/`patch`/`update`/`delete` on `externaldns.k8s.io/dnsendpoints` (keeping `get`/`list`/`watch`) then forcing an emergency promotion still promotes the peer and writes CR status normally (status is not denied), but the DNSEndpoint target stays stale. After RBAC restore the DNSEndpoint flips to the promoted site's LBIP within 90s with no second failover.
+
+**Injection**: Capture the current DNSEndpoint target; remove the four write verbs from `dnsendpoints` only; scale the active MySQL Deployment to 0.
+
+**Verify**: `status.activeSite` and `lastFailoverTarget` flip to the peer; the DNSEndpoint target stays stale (never the peer LBIP) during denial; the operator logs `DNS flip failed after successful promotion` / forbidden `apply DNSEndpoint`. After RBAC restore: the DNSEndpoint target becomes the promoted LBIP within 90s and neither `activeSite` nor `lastFailover` advances (no re-failover). Finally the old primary rejoins and the DNS target matches the final active site.
+
+**Timing**: 10-minute timeout; 90s DNS-heal budget.
+
+**Cleanup**: LIFO RBAC restore, scale old primary back to 1, wait for recovery, verify DNSEndpoint equals the final active site, healthy baseline.
+
+**Observed defect and fix**: The operator applied the DNSEndpoint only at promotion/re-assert time; a promotion-time apply denied by RBAC was logged and dropped with no per-poll reconcile to retry it once the group stabilized. Fix (`internal/controller/topology.go`, `internal/platform/dns.go`): DNS is now reconciled level-triggered. `reconcileDNS` runs on every poll, derives the desired target from live topology (the single writable site, or a promotion this process just performed), compares it against the live DNSEndpoint (read back through the new optional `platform.DNSRecordReader`), and re-applies only on a real divergence — healing DNS without re-running promotion or touching MySQL. Deriving the target rather than memoizing it buys two properties a pending-target retry could not: the heal **survives an operator restart** (nothing needs to be remembered — the live record and the live topology are enough), and it can **never replay a superseded target** at a site that is now read-only. Every DNS write goes through one `applyDNS` helper, so `bloodraven_dns_flips_total{site}` counts exactly the target applied, and only when the record's value really changed. Covered by `TestReconcileDNS_HealsStaleRecordAfterOperatorRestart`, `TestReconcileDNS_NeverReplaysSupersededTarget`, `TestReconcileDNS_MatchingRecordIsNeverRewritten`, `TestReconcileDNS_DeniedPromotionFlipHealsWithoutRefailover`, `TestReconcileDNS_HealsWithoutRecordReadCapability`, and `TestDNSEndpointUpdater_CurrentDNSRecord`.
+
+**Actual live result**: Passed on the k3d playground on the first live attempt (`20260711T022237Z`), with a first-cut version of the heal in place (a promotion-time pending target re-applied every poll): the four write verbs were denied on `dnsendpoints`, the active primary was scaled to 0, and `status.activeSite`/`lastFailoverTarget` flipped to the peer while the DNSEndpoint target stayed stale and the operator logged the forbidden `apply DNSEndpoint` error. After RBAC restore the DNSEndpoint healed to the promoted LBIP inside the 90s budget with no second failover, and the old primary rejoined with the DNS target matching the final active site. That first cut was superseded in review by the level-triggered `reconcileDNS` described above — same observable behavior for this scenario, plus restart-safety and no stale-target replay. The replacement was re-run live on `20260711T033413Z` (RBAC deny/restore captured in `s38-clusterrole-original.json`/`s38-clusterrole-patched.json`): passed again with the same outcome — DNS stayed stale during the denial and healed to the promoted LBIP within the 90s budget after RBAC restore, with no second failover.
+
+---
+
+### 39. Live Dragonfly Master Partition
+**Category**: Dragonfly HA / partition | **Risk**: Medium | **Profile**: full-only
+
+**Hypothesis**: A deny-all NetworkPolicy on only the Dragonfly master pod makes Bloodraven see it `Unreachable` and promote the surviving replica: `status.dragonfly.activeSite` flips, the active Dragonfly Service endpoints move to the promoted pod, `bloodraven_dragonfly_promotions_total` increments, and MySQL `status.activeSite` and failover counters are unchanged.
+
+**Injection**: Seed a key on the current Dragonfly master and confirm it replicated to the peer; apply a deny-all (ingress+egress) NetworkPolicy selecting only the master site's Dragonfly pod labels. MySQL pods and Services are untouched.
+
+**Verify**: The old master goes `Unreachable`; `status.dragonfly.activeSite` flips to the peer; the seeded key reads back on the new master; the active Dragonfly Service endpoints converge to only the promoted pod; `dragonfly_promotions_total{result="success"}` increments; MySQL `status.activeSite` is unchanged and no MySQL failover metric increments.
+
+**Timing**: 8-minute timeout.
+
+**Cleanup**: Remove the partition; wait for the old master to rejoin as a healthy replica (`linkStatus=up`). If it returns a stale master and does not reconfigure within the settle budget, force-delete only the old Dragonfly pod (documented conservative recovery) so the StatefulSet recreates it cleanly.
+
+**Actual live result**: Passed on the k3d playground on the first live attempt (`20260711T022509Z`) with no operator defect surfaced. The deny-all NetworkPolicy on the master's Dragonfly pod drove it `Unreachable`, `status.dragonfly.activeSite` flipped to the peer, the seeded key read back on the new master, the active Dragonfly Service endpoints converged to only the promoted pod, and `bloodraven_dragonfly_promotions_total{result="success"}` incremented — while MySQL `status.activeSite` and failover counters stayed unchanged throughout.
+
+---
+
+### D6b. Dragonfly Rolling Image Update
 **Category**: Zero-downtime operations | **Risk**: Medium
 
 **Hypothesis**: A normal `spec.dragonfly.image` change rolls one Dragonfly pod at a time: the non-active site updates first, Bloodraven promotes that updated replica, and the old active site updates only after traffic has moved.

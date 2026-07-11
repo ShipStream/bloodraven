@@ -112,6 +112,75 @@ func inPlaceRestoreJobName(fgName, siteName string) string {
 	return truncateDNS1123(fmt.Sprintf("mysql-%s-%s-inplace-restore", fgName, siteName))
 }
 
+// restoreInPlaceConfirmAnnotation records the spec.restoreInPlace.confirm
+// token an in-place restore Job was created for. The Job name is fixed
+// (inPlaceRestoreJobName), so it survives across re-arms and even across a
+// playground reset; this annotation lets the reconciler tell a Job that
+// belongs to the current confirmed request apart from a leftover terminal
+// Job from a prior attempt that merely shares the name. Without it a fresh
+// confirmed request would read the stale Job's terminal phase (and its
+// stale backup path) and be marked Failed without ever running.
+const restoreInPlaceConfirmAnnotation = "bloodraven.shipstream.io/restore-confirm"
+
+// inPlaceRestoreJobConfirm returns the confirm token a Job was created for,
+// or "" when it carries none (a Job from before this annotation existed).
+func inPlaceRestoreJobConfirm(job *batchv1.Job) string {
+	if job == nil {
+		return ""
+	}
+	return job.GetAnnotations()[restoreInPlaceConfirmAnnotation]
+}
+
+// inPlaceRestoreJobIsForConfirm reports whether job was created for the
+// given confirm token. A Job with no recorded confirm (e.g. a leftover
+// from before this annotation existed, or from a prior restore request)
+// never matches a non-empty confirm, so it is always treated as stale and
+// cleared before a fresh request reuses the fixed Job name.
+func inPlaceRestoreJobIsForConfirm(job *batchv1.Job, confirm string) bool {
+	if job == nil || confirm == "" {
+		return false
+	}
+	return inPlaceRestoreJobConfirm(job) == confirm
+}
+
+// inPlaceRestoreJobAccepted reports whether the Job under the fixed in-place
+// restore name is the one THIS run owns, i.e. whether its outcome may be
+// attributed to the current status. Two ways to own it:
+//
+//   - The Job carries the current spec.confirm — the normal case: we created it
+//     for exactly this request. (Also covers a crash between Create and the
+//     status patch, where the status does not yet name the Job.)
+//   - The observed status names the Job while Restoring — this run created it,
+//     whatever token it carries. That is the case when the user changes
+//     spec.confirm while the Job is running (the run stays bound to the confirm
+//     it was accepted under), and when an operator upgraded mid-restore onto a
+//     Job that predates the confirm annotation.
+//
+// Everything else is a leftover from some other request that merely shares the
+// fixed Job name — its phase (and its stale backup path) must not become this
+// request's outcome.
+func inPlaceRestoreJobAccepted(job *batchv1.Job, cur *v1alpha1.RestoreInPlaceStatus, specConfirm string) bool {
+	if job == nil {
+		return false
+	}
+	if inPlaceRestoreJobIsForConfirm(job, specConfirm) {
+		return true
+	}
+	return cur != nil && cur.JobName == job.Name && cur.Phase == v1alpha1.RestoreInPlaceRestoring
+}
+
+// inPlaceRestoreAcceptedConfirm returns the confirm token the in-flight Job
+// actually executes under — the token stamped on the Job, falling back to the
+// current spec for a Job that predates the annotation. Terminal status is
+// recorded against THIS value, not against spec.confirm, so a confirm that the
+// user changed mid-run cannot be marked consumed by a Job that never ran with it.
+func inPlaceRestoreAcceptedConfirm(job *batchv1.Job, specConfirm string) string {
+	if c := inPlaceRestoreJobConfirm(job); c != "" {
+		return c
+	}
+	return specConfirm
+}
+
 // parseConfirmTimestamp parses spec.restoreInPlace.confirm. The confirm
 // field must be RFC 3339 so the monotonicity check is well-defined and
 // programmatic callers can just send time.Now().UTC().Format(time.RFC3339).
@@ -240,7 +309,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 	// phase-dispatch below trivially table-driven.
 	if cur == nil {
 		if err := validateInPlaceRestoreSpec(spec); err != nil {
-			r.stampTerminalFailure(ctx, fg, "", "", err.Error(), "RestoreInPlaceRejected")
+			// Pure validation rejection: nothing executed, so do not
+			// consume the confirm (empty confirmUsed preserves the
+			// invalid-timestamp behavior and lets the user fix the spec
+			// and retry with the same confirm).
+			r.stampTerminalFailure(ctx, fg, "", "", "", err.Error(), "RestoreInPlaceRejected")
 			return 0, nil
 		}
 		scope, _ := inPlaceRestoreScope(spec)
@@ -325,7 +398,9 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 	}
 
 	if err := validateInPlaceRestoreSpec(spec); err != nil {
-		r.stampTerminalFailure(ctx, fg, target, cur.Scope, err.Error(), "RestoreInPlaceRejected")
+		// Validation rejection (see stampTerminalFailure): leave
+		// confirmUsed empty so a fixed spec can retry on the same confirm.
+		r.stampTerminalFailure(ctx, fg, target, cur.Scope, "", err.Error(), "RestoreInPlaceRejected")
 		return 0, nil
 	}
 
@@ -384,23 +459,39 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	isFullInstance := schema == ""
 
 	credsName := restoreCredsSecretName(fg.Name)
-	if err := r.ensureRestoreCredsSecret(ctx, fg, credsName); err != nil {
-		r.stampTerminalFailure(ctx, fg, target, cur.Scope,
-			fmt.Sprintf("ensure restore creds: %v", err), "RestoreInPlaceBuildFailed")
-		return 0, nil
-	}
 
 	var job batchv1.Job
+	jobExists := true
 	jobName := inPlaceRestoreJobName(fg.Name, target)
 	jobKey := types.NamespacedName{Namespace: fg.Namespace, Name: jobName}
 	if err := r.Get(ctx, jobKey, &job); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return 0, fmt.Errorf("get in-place restore job: %w", err)
 		}
+		jobExists = false
+	}
 
+	// Keep the restore credentials Secret in place — the Job mounts it, and a
+	// restarting pod needs it to still be there. A failure is terminal only
+	// while no Job exists: once one does, nothing destructive may be aborted by
+	// a transient API error on a Secret its pod already holds. Failing the run
+	// there would also unfreeze the topology underneath a live DROP/load.
+	if err := r.ensureRestoreCredsSecret(ctx, fg, credsName); err != nil {
+		if !jobExists {
+			// Nothing has executed: a clean terminal for this confirm.
+			r.stampTerminalFailure(ctx, fg, target, cur.Scope, spec.Confirm,
+				fmt.Sprintf("ensure restore creds: %v", err), "RestoreInPlaceBuildFailed")
+			return 0, nil
+		}
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceCredsRefreshFailed",
+			"could not refresh restore credentials Secret %s while restore Job %s exists: %v",
+			credsName, job.Name, err)
+	}
+
+	if !jobExists {
 		built, err := r.buildInPlaceRestoreJob(ctx, fg, target, credsName, isFullInstance, schema)
 		if err != nil {
-			r.stampTerminalFailure(ctx, fg, target, cur.Scope, err.Error(), "RestoreInPlaceBuildFailed")
+			r.stampTerminalFailure(ctx, fg, target, cur.Scope, spec.Confirm, err.Error(), "RestoreInPlaceBuildFailed")
 			return 0, nil
 		}
 		if err := controllerutil.SetControllerReference(fg, built, r.Scheme); err != nil {
@@ -425,8 +516,68 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		return 15 * time.Second, nil
 	}
 
+	// A Job already exists under the fixed in-place restore name. Work out
+	// two things before touching it: whether it has finished, and whether it
+	// belongs to this request.
 	phase, message := jobPhase(&job, "in-place restore")
+	accepted := inPlaceRestoreJobAccepted(&job, cur, spec.Confirm)
+	acceptedConfirm := inPlaceRestoreAcceptedConfirm(&job, spec.Confirm)
+
+	if !accepted {
+		// A Job from some other request under the fixed name. If it is still
+		// running it is a destructive restore in flight — it may be mid-DROP
+		// or mid-load on the live primary right now. Deleting it would kill
+		// the pod part-way through and race a second loader over the wreckage,
+		// so we wait for it to terminate no matter whose it is.
+		if phase == "" {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceJobBusy",
+				"in-place restore Job %s from an earlier request is still running; waiting for it to finish before starting confirm=%s",
+				job.Name, spec.Confirm)
+			return 15 * time.Second, nil
+		}
+
+		// Terminal and not ours: a retained Job from a prior attempt that
+		// merely shares the fixed name. Its phase (and its stale backup path)
+		// must not become this request's outcome — that is how a fresh
+		// confirmed request ends up Failed without ever running. Delete it
+		// (background propagation drops its pods too) and requeue; once it is
+		// gone the create branch above builds a clean Job for this request.
+		if job.GetDeletionTimestamp() == nil {
+			bg := metav1.DeletePropagationBackground
+			if err := r.Delete(ctx, &job, &client.DeleteOptions{PropagationPolicy: &bg}); err != nil && !apierrors.IsNotFound(err) {
+				return 0, fmt.Errorf("delete stale in-place restore job %s: %w", job.Name, err)
+			}
+			r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceStaleJobRemoved",
+				"removed stale in-place restore Job %s from a prior request before starting confirm=%s",
+				job.Name, spec.Confirm)
+		}
+		return 3 * time.Second, nil
+	}
+
+	// This run's Job is still running. If the user changed spec.confirm while
+	// it runs, the run stays bound to the confirm it was accepted under: the
+	// destructive Job is never interrupted, and the newer confirm re-arms its
+	// own run once this one is terminal. Say so on the CR.
 	if phase == "" {
+		if acceptedConfirm != spec.Confirm {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceConfirmDeferred",
+				"spec.restoreInPlace.confirm=%s cannot start while the in-flight restore Job %s (confirm=%s) is running; it will start once the running restore finishes",
+				spec.Confirm, job.Name, acceptedConfirm)
+			waitMsg := fmt.Sprintf("in-flight restore Job %s is running under confirm=%s; confirm=%s starts a new run once it finishes",
+				job.Name, acceptedConfirm, spec.Confirm)
+			if cur.Message != waitMsg {
+				next := &v1alpha1.RestoreInPlaceStatus{
+					Phase:      v1alpha1.RestoreInPlaceRestoring,
+					JobName:    job.Name,
+					TargetSite: target,
+					Scope:      cur.Scope,
+					StartTime:  cur.StartTime,
+					Message:    waitMsg,
+				}
+				applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+			}
+		}
 		return 15 * time.Second, nil
 	}
 
@@ -454,8 +605,14 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 			JobName:    job.Name,
 			TargetSite: target,
 			Scope:      cur.Scope,
-			StartTime:  cur.StartTime,
-			Message:    "load complete; lifting fence",
+			// Carry the confirm the Job actually ran with into the terminal
+			// status (inPlaceResuming stamps it). If the user changed
+			// spec.confirm while this Job was running, the new confirm must
+			// not be marked consumed by a run it never requested — it re-arms
+			// its own run once this one is terminal.
+			ConfirmTokenUsed: acceptedConfirm,
+			StartTime:        cur.StartTime,
+			Message:          "load complete; lifting fence",
 		}
 		applyRestoreMetadataToInPlaceStatus(next, meta)
 		if r.setInPlaceRestoreStatus(ctx, fg, next) {
@@ -464,10 +621,14 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		return 2 * time.Second, nil
 	}
 
-	// Failure.
+	// Failure. This is an accepted confirm whose restore Job ran and
+	// failed — record the confirm the Job ran with (not whatever spec.confirm
+	// says right now) so the terminal Failed holds and the destructive restore
+	// is not silently re-armed on the same confirm; the user must bump confirm
+	// to a strictly newer timestamp to retry.
 	r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceFailed",
 		"in-place restore Job %s failed: %s", job.Name, message)
-	r.stampTerminalFailure(ctx, fg, target, cur.Scope, message, "RestoreInPlaceFailed")
+	r.stampTerminalFailure(ctx, fg, target, cur.Scope, acceptedConfirm, message, "RestoreInPlaceFailed")
 	// Even on failure we unfence so the cluster is not indefinitely
 	// stuck read-only. stampTerminalFailure triggers the runner to
 	// clear the topologyFrozen flag on next sync.
@@ -513,13 +674,22 @@ func (r *MysqlFailoverGroupReconciler) inPlaceResuming(ctx context.Context, fg *
 		}
 	}
 
+	// Stamp the confirm the restore actually ran with. inPlaceRestoring carries
+	// it over from the Job that performed the load; it differs from spec.confirm
+	// only when the user changed confirm mid-run, and in that case the new
+	// confirm must NOT be consumed here — it re-arms its own run.
+	confirmUsed := cur.ConfirmTokenUsed
+	if confirmUsed == "" {
+		confirmUsed = spec.Confirm
+	}
+
 	now := metav1.Now()
 	next := &v1alpha1.RestoreInPlaceStatus{
 		Phase:            v1alpha1.RestoreInPlaceSucceeded,
 		JobName:          cur.JobName,
 		TargetSite:       target,
 		Scope:            cur.Scope,
-		ConfirmTokenUsed: spec.Confirm,
+		ConfirmTokenUsed: confirmUsed,
 		StartTime:        cur.StartTime,
 		CompletionTime:   &now,
 		Message:          "in-place restore complete",
@@ -562,7 +732,21 @@ func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Conte
 
 // stampTerminalFailure writes a Failed status with the given message
 // and preserves prior metadata (scope, startTime, target).
-func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, scope, msg, eventReason string) {
+//
+// confirmUsed records the spec.restoreInPlace.confirm value that this
+// terminal failure belongs to. It MUST be set for a genuine execution
+// failure (an accepted confirm whose restore Job was built/created and
+// then failed): recording it makes the terminal Failed stable on the
+// same confirm, so the reconciler does not silently re-arm and re-run
+// the destructive restore — a user must bump confirm to a strictly
+// newer RFC 3339 timestamp to retry (matching the RestoreInPlaceFailed
+// and ConfirmTokenUsed contract). It MUST be empty ("") for a pure
+// validation rejection (a malformed confirm/spec that never executed):
+// leaving it empty preserves the invalid-timestamp behavior (the still-
+// invalid spec.Confirm keeps failing confirmAdvances, so the status
+// holds) while letting the user fix the spec and retry with the same
+// confirm once it parses.
+func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, scope, confirmUsed, msg, eventReason string) {
 	now := metav1.Now()
 	cur := fg.Status.RestoreInPlace
 	var start *metav1.Time
@@ -575,13 +759,14 @@ func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context,
 		start = &now
 	}
 	next := &v1alpha1.RestoreInPlaceStatus{
-		Phase:          v1alpha1.RestoreInPlaceFailed,
-		JobName:        jobName,
-		TargetSite:     target,
-		Scope:          scope,
-		StartTime:      start,
-		CompletionTime: &now,
-		Message:        msg,
+		Phase:            v1alpha1.RestoreInPlaceFailed,
+		JobName:          jobName,
+		TargetSite:       target,
+		Scope:            scope,
+		ConfirmTokenUsed: confirmUsed,
+		StartTime:        start,
+		CompletionTime:   &now,
+		Message:          msg,
 	}
 	applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
 	r.setInPlaceRestoreStatus(ctx, fg, next)
@@ -657,7 +842,7 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 		}
 	}
 
-	return r.buildRestoreJobSpec(ctx, fg, restoreJobInputs{
+	job, err := r.buildRestoreJobSpec(ctx, fg, restoreJobInputs{
 		JobName:     inPlaceRestoreJobName(fg.Name, targetSite),
 		TargetSite:  targetSite,
 		CredsName:   credsName,
@@ -668,6 +853,16 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 		FieldPath:   "restoreInPlace",
 		ExtraEnv:    extraEnv,
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Stamp the confirm token so inPlaceRestoring can distinguish this
+	// request's Job from a leftover Job that shares the fixed name.
+	if job.Annotations == nil {
+		job.Annotations = map[string]string{}
+	}
+	job.Annotations[restoreInPlaceConfirmAnnotation] = spec.Confirm
+	return job, nil
 }
 
 // primaryPodLabelFenced returns true when the pod(s) on the active site

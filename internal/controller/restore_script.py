@@ -379,6 +379,95 @@ def _run_pitr(host, port, user, password, stop_datetime, exclude_gtids, local_di
     return files[-1], len(files)
 
 
+# --------------------------------------------------------------------
+# local_infile: a hard precondition of the load
+# --------------------------------------------------------------------
+#
+# util.loadDump() loads table data with LOAD DATA LOCAL INFILE, which the
+# server rejects unless the global system variable local_infile is ON.
+# Production primaries run with the hardened MySQL 8 default local_infile
+# =OFF, so the load simply cannot succeed there until it is enabled.
+#
+# That makes it a PRECONDITION, not a best-effort nicety: it is enabled
+# and verified BEFORE the destructive preflight runs. Enabling it after
+# the drops (or letting a failed enable through) is what dropped a live
+# schema and then failed inside load_dump() with "local_infile disabled
+# in server" — the schema was gone with nothing to reload it from. If it
+# cannot be turned on we abort while the data is still intact.
+#
+# The prior value is put back once the load finishes, so the security
+# posture outside the load window is unchanged. The verification path
+# already starts its throwaway mysqld with --local-infile=1, so there the
+# value reads back ON and this is a no-op with nothing to restore.
+
+
+def _read_local_infile(session):
+    """Return @@GLOBAL.local_infile as 1/0, or None if it cannot be read."""
+    try:
+        row = session.run_sql("SELECT @@GLOBAL.local_infile").fetch_one()
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_LOCAL_INFILE_READ_FAILED: {}".format(e),
+              file=sys.stderr, flush=True)
+        return None
+    if not row or row[0] is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        # Some builds report ON/OFF rather than 1/0.
+        return 1 if str(row[0]).strip().upper() in ("ON", "1", "TRUE") else 0
+
+
+def _prepare_local_infile(session, state):
+    """Guarantee @@GLOBAL.local_infile=ON before anything destructive runs.
+
+    Returns the value to restore after the load (0), or None when the server
+    was already ON and there is nothing to put back. Exits(2) — with NOTHING
+    yet dropped — when the variable cannot be read, enabled, or verified,
+    because a load that is certain to fail must not be preceded by a DROP.
+    """
+    prev = _read_local_infile(session)
+    if prev is None:
+        print("BLOODRAVEN_LOCAL_INFILE_UNAVAILABLE: cannot read "
+              "@@GLOBAL.local_infile; refusing to run a destructive restore "
+              "whose load would then fail", file=sys.stderr, flush=True)
+        sys.exit(2)
+    state["previous"] = prev
+    if prev == 1:
+        # Already ON — nothing to change and nothing to restore.
+        return None
+
+    try:
+        session.run_sql("SET GLOBAL local_infile=ON")
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_LOCAL_INFILE_UNAVAILABLE: cannot enable "
+              "local_infile (the restore user needs SYSTEM_VARIABLES_ADMIN): "
+              "{}".format(e), file=sys.stderr, flush=True)
+        sys.exit(2)
+
+    # Read it back: a SET that did not stick would put us right back in the
+    # drop-then-fail hole this check exists to prevent.
+    if _read_local_infile(session) != 1:
+        print("BLOODRAVEN_LOCAL_INFILE_UNAVAILABLE: local_infile is still OFF "
+              "after SET GLOBAL local_infile=ON", file=sys.stderr, flush=True)
+        sys.exit(2)
+
+    print("BLOODRAVEN_LOCAL_INFILE_ENABLED prev=OFF", flush=True)
+    return prev
+
+
+def _restore_local_infile(session, prev):
+    """Restore @@GLOBAL.local_infile to the value _prepare_local_infile
+    captured. No-op when prev is None (unchanged / already ON)."""
+    if prev is None:
+        return
+    want = "ON" if prev == 1 else "OFF"
+    session.run_sql("SET GLOBAL local_infile={}".format(want))
+    if _read_local_infile(session) != prev:
+        raise RuntimeError("local_infile readback did not match restored value {}".format(want))
+    print("BLOODRAVEN_LOCAL_INFILE_RESTORED value={}".format(want), flush=True)
+
+
 def _target_coordinates(session):
     gtid = ""
     try:
@@ -464,24 +553,36 @@ def main():
 
     mysqlsh.globals.shell.connect(conn)
 
-    # Destructive preflight for in-place restore. The bootstrap restore
-    # path does not set any of the triggering env vars, so these are
-    # no-ops outside of spec.restoreInPlace.
     session = mysqlsh.globals.session
-    try:
-        _maybe_reset_replication(session)
-        _maybe_preflight_drops(session)
-    except Exception as e:  # noqa: BLE001
-        print("BLOODRAVEN_PREFLIGHT_FAILED: {}".format(e), file=sys.stderr,
-              flush=True)
-        sys.exit(2)
 
+    # util.loadDump() needs @@GLOBAL.local_infile=ON. Establish that FIRST:
+    # everything below this line is destructive, and a load that cannot
+    # possibly succeed must not be preceded by a DROP. Exits(2) here leave
+    # the target untouched. The prior value is put back in the finally,
+    # which also runs on the sys.exit(2) paths below, so a hardened primary
+    # ends up OFF again whatever happens.
+    local_infile_state = {"previous": None}
     try:
-        mysqlsh.globals.util.load_dump(input_url, opts)
-    except Exception as e:  # noqa: BLE001
-        print("BLOODRAVEN_LOAD_FAILED: {}".format(e), file=sys.stderr,
-              flush=True)
-        sys.exit(2)
+        _prepare_local_infile(session, local_infile_state)
+        # Destructive preflight for in-place restore. The bootstrap restore
+        # path does not set any of the triggering env vars, so these are
+        # no-ops outside of spec.restoreInPlace.
+        try:
+            _maybe_reset_replication(session)
+            _maybe_preflight_drops(session)
+        except Exception as e:  # noqa: BLE001
+            print("BLOODRAVEN_PREFLIGHT_FAILED: {}".format(e), file=sys.stderr,
+                  flush=True)
+            sys.exit(2)
+
+        try:
+            mysqlsh.globals.util.load_dump(input_url, opts)
+        except Exception as e:  # noqa: BLE001
+            print("BLOODRAVEN_LOAD_FAILED: {}".format(e), file=sys.stderr,
+                  flush=True)
+            sys.exit(2)
+    finally:
+        _restore_local_infile(session, local_infile_state["previous"])
 
     print("BLOODRAVEN_LOAD_COMPLETE input={}".format(input_url), flush=True)
 

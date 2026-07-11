@@ -514,6 +514,20 @@ This gives programmatic callers a simple "just send now()" pattern
 while also protecting against replay: an older manifest applied
 accidentally does not re-trigger a restore.
 
+Changing `confirm` while a restore Job is **already running** does not
+interrupt it. The running Job may be mid-`DROP` or mid-load against the
+live primary, so the operator lets it finish and records its outcome
+against the `confirm` it was accepted under (visible as
+`status.restoreInPlace.confirmTokenUsed`); the new `confirm` then starts
+its own run once the first reaches a terminal phase. Until then the CR
+says so:
+
+```text
+status.restoreInPlace.message: in-flight restore Job mysql-orders-pdx-inplace-restore
+  is running under confirm=2026-04-17T14:32:00Z; confirm=2026-04-17T15:05:00Z
+  starts a new run once it finishes
+```
+
 ### Observing the state machine
 
 ```bash
@@ -539,6 +553,25 @@ GRANT RELOAD, LOCK TABLES, PROCESS, REPLICATION CLIENT,
 ```
 
 Without `BACKUP_ADMIN`, set `dump.consistent: false` on the profile.
+
+### `local_infile` and the restore user
+
+Loading a dump uses `LOAD DATA LOCAL INFILE`, which the server rejects
+unless `@@GLOBAL.local_infile` is `ON`. MySQL 8 ships it `OFF`, so the
+restore Job turns it on for the duration of the load and puts the prior
+value back afterwards — the hardened posture outside the load window is
+unchanged. That requires `SYSTEM_VARIABLES_ADMIN` on the restore user:
+
+```sql
+GRANT SYSTEM_VARIABLES_ADMIN ON *.* TO 'restore'@'%';
+```
+
+This is checked **before** anything destructive runs. If `local_infile`
+is `OFF` and the operator cannot enable it, the Job exits with
+`BLOODRAVEN_LOCAL_INFILE_UNAVAILABLE` and **no schema is dropped** — the
+load could not have succeeded, so the restore fails with the data still
+intact rather than dropping the target and then failing to reload it.
+(A server already running `local_infile=ON` needs no extra grant.)
 
 ## Point-in-time recovery (PITR)
 
