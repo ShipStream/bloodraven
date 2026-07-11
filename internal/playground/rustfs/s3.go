@@ -29,24 +29,10 @@ func EnsureBucket(ctx context.Context, endpoint, bucket string, creds Credential
 	if bucket == "" {
 		return fmt.Errorf("bucket is required")
 	}
-	if creds.AccessKey == "" || creds.SecretKey == "" {
-		return fmt.Errorf("access key and secret key are required")
+	client, err := newS3Client(endpoint, creds)
+	if err != nil {
+		return err
 	}
-	if creds.Region == "" {
-		creds.Region = "us-east-1"
-	}
-	endpoint = strings.TrimRight(endpoint, "/")
-	if _, err := url.Parse(endpoint); err != nil {
-		return fmt.Errorf("parse endpoint: %w", err)
-	}
-
-	client := s3.NewFromConfig(aws.Config{
-		Region:      creds.Region,
-		Credentials: credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, ""),
-	}, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(endpoint)
-		o.UsePathStyle = true
-	})
 
 	if _, err := client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(bucket)}); err == nil {
 		return nil
@@ -80,24 +66,10 @@ func GetObject(ctx context.Context, endpoint, bucket, key string, creds Credenti
 	if bucket == "" || key == "" {
 		return nil, false, fmt.Errorf("bucket and key are required")
 	}
-	if creds.AccessKey == "" || creds.SecretKey == "" {
-		return nil, false, fmt.Errorf("access key and secret key are required")
+	client, err := newS3Client(endpoint, creds)
+	if err != nil {
+		return nil, false, err
 	}
-	if creds.Region == "" {
-		creds.Region = "us-east-1"
-	}
-	endpoint = strings.TrimRight(endpoint, "/")
-	if _, perr := url.Parse(endpoint); perr != nil {
-		return nil, false, fmt.Errorf("parse endpoint: %w", perr)
-	}
-
-	client := s3.NewFromConfig(aws.Config{
-		Region:      creds.Region,
-		Credentials: credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, ""),
-	}, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(endpoint)
-		o.UsePathStyle = true
-	})
 
 	out, gerr := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
 	if gerr != nil {
@@ -117,4 +89,24 @@ func GetObject(ctx context.Context, endpoint, bucket, key string, creds Credenti
 		return nil, true, fmt.Errorf("read object %q/%q body: %w", bucket, key, rerr)
 	}
 	return body, true, nil
+}
+
+func newS3Client(endpoint string, creds Credentials) (*s3.Client, error) {
+	if creds.AccessKey == "" || creds.SecretKey == "" {
+		return nil, fmt.Errorf("access key and secret key are required")
+	}
+	if creds.Region == "" {
+		creds.Region = "us-east-1"
+	}
+	endpoint = strings.TrimRight(endpoint, "/")
+	if _, err := url.Parse(endpoint); err != nil {
+		return nil, fmt.Errorf("parse endpoint: %w", err)
+	}
+	return s3.NewFromConfig(aws.Config{
+		Region:      creds.Region,
+		Credentials: credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, ""),
+	}, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+	}), nil
 }

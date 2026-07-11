@@ -2,10 +2,13 @@ package scenarios
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
@@ -326,6 +329,9 @@ func s36ObserveFailedSafely() runner.Step {
 				rip.Phase, rip.TargetSite, rip.ConfirmTokenUsed, rip.Message))
 			// Capture the restore Job pod logs as evidence of the S3/RustFS read failure.
 			captureJobPodLogs(ctx, env, ctxFetch(env, "restoreJobName"), "s36-restore-job")
+			if err := s36RequireStorageFailureEvidence(ctx, env, rip.Message, ctxFetch(env, "restoreJobName")); err != nil {
+				return err
+			}
 
 			// Regression guard for the live re-arm defect: a genuine
 			// execution failure records confirmTokenUsed, so the terminal
@@ -342,6 +348,35 @@ func s36ObserveFailedSafely() runner.Step {
 			return nil
 		},
 	}
+}
+
+func s36RequireStorageFailureEvidence(ctx context.Context, env *runner.Env, statusMessage, jobName string) error {
+	indicators := []string{"s3", "rustfs", "connection refused", "connection reset", "connection timed out", "no such host", "endpoint", "getobject", "object storage"}
+	containsIndicator := func(value string) bool {
+		value = strings.ToLower(value)
+		for _, indicator := range indicators {
+			if strings.Contains(value, indicator) {
+				return true
+			}
+		}
+		return false
+	}
+	if containsIndicator(statusMessage) {
+		return nil
+	}
+	pods, err := env.Kube.Kubernetes.CoreV1().Pods(env.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "job-name=" + jobName})
+	if err != nil {
+		return fmt.Errorf("list restore Job pods for storage-failure evidence: %w", err)
+	}
+	for _, pod := range pods.Items {
+		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+			body, err := env.Kube.PodLogTailLines(ctx, env.Namespace, pod.Name, container.Name, 400)
+			if err == nil && containsIndicator(string(body)) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("restore failed without RustFS/S3 read or connectivity evidence (status=%q job=%q)", statusMessage, jobName)
 }
 
 // s36RequireStableFailed samples status.restoreInPlace across window and fails
@@ -485,7 +520,9 @@ func s36Cleanup(ctx context.Context, env *runner.Env) error {
 	// on every site (capturing logs first) so nothing leaks into the next
 	// run's fresh confirmed request.
 	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
-	if err == nil {
+	if err != nil {
+		errs = append(errs, fmt.Errorf("get MFG for retained-job and schema cleanup: %w", err))
+	} else {
 		var sites []string
 		for i := range mfg.Spec.Sites {
 			sites = append(sites, mfg.Spec.Sites[i].Name)
@@ -512,7 +549,7 @@ func s36Cleanup(ctx context.Context, env *runner.Env) error {
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("s36 cleanup: %v", errs)
+		return fmt.Errorf("s36 cleanup: %w", errors.Join(errs...))
 	}
 	return nil
 }

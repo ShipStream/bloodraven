@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -145,6 +146,34 @@ func TestDNSEndpointUpdater_CurrentDNSRecord(t *testing.T) {
 	}
 	if found || target != "" {
 		t.Errorf("foreign hostname: got (%q, %v), want (\"\", false)", target, found)
+	}
+}
+
+func TestDNSEndpointUpdater_CurrentDNSRecordRejectsMalformedFields(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint map[string]interface{}
+		want     string
+	}{
+		{name: "dnsName", endpoint: map[string]interface{}{"dnsName": int64(1), "targets": []interface{}{"10.0.0.1"}}, want: "dnsName"},
+		{name: "targets", endpoint: map[string]interface{}{"dnsName": "lion.az.example.com", "targets": "10.0.0.1"}, want: "targets"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			gvk := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpoint"}
+			scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
+			obj := &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "externaldns.k8s.io/v1alpha1", "kind": "DNSEndpoint",
+				"metadata": map[string]interface{}{"name": "bloodraven-main", "namespace": "default"},
+				"spec":     map[string]interface{}{"endpoints": []interface{}{tc.endpoint}},
+			}}
+			obj.SetGroupVersionKind(gvk)
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(obj).Build()
+			dns := NewDNSEndpointUpdater(c, "main", "uid", "default", "main", "lion.az.example.com", 60).(DNSRecordReader)
+			if _, _, err := dns.CurrentDNSRecord(context.Background()); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CurrentDNSRecord error = %v, want malformed %s error", err, tc.want)
+			}
+		})
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -150,6 +151,24 @@ func TestPoll_StatusRetryReFiresCallbackUntilCleared(t *testing.T) {
 	pollN(tm, 1)
 	if calls != before {
 		t.Fatalf("after retry cleared, steady poll fired %d callbacks; want 0", calls-before)
+	}
+}
+
+func TestPoll_StatusRetryPreservesRejectedSnapshot(t *testing.T) {
+	tm, _, _ := newTestTopologyManager(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
+	for i := 0; i < 40; i++ {
+		pollN(tm, 1)
+	}
+	want := TopologySnapshot{ActiveSite: "dc1", Alert: "full rejected alert", DegradedReason: "Degraded"}
+	tm.mu.Lock()
+	tm.statusRetrySnapshot = &want
+	tm.statusWriteFailed = true
+	tm.mu.Unlock()
+	var got TopologySnapshot
+	tm.StatusCallback = func(snapshot TopologySnapshot) { got = snapshot }
+	pollN(tm, 1)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("retry snapshot = %#v, want exact rejected snapshot %#v", got, want)
 	}
 }
 
@@ -354,6 +373,8 @@ func TestReconcileDNS_DeniedPromotionFlipHealsWithoutRefailover(t *testing.T) {
 	site1 := &mockMySQL{readOnly: true}
 	dns := &fakeDNSEndpoint{record: "1.1.1.1"}
 	tm := newDNSHealTM(dns, site0, site1)
+	var callbackCalls int
+	tm.EmergencyFailoverCallback = func(context.Context, string, string) { callbackCalls++ }
 	pollN(tm, 2)
 
 	beforeFailovers := testutil.ToFloat64(metrics.FailoversTotal.WithLabelValues("dc2"))
@@ -366,6 +387,9 @@ func TestReconcileDNS_DeniedPromotionFlipHealsWithoutRefailover(t *testing.T) {
 	site1.mu.Unlock()
 	if promotedRO {
 		t.Fatal("dc2 must be promoted (writable) despite the denied DNS flip")
+	}
+	if callbackCalls != 1 {
+		t.Fatalf("EmergencyFailoverCallback calls=%d, want 1 despite DNS failure", callbackCalls)
 	}
 	if record, _ := dns.current(); record != "1.1.1.1" {
 		t.Fatalf("DNS must not have advanced while denied, record=%q", record)

@@ -418,7 +418,7 @@ def _read_local_infile(session):
         return 1 if str(row[0]).strip().upper() in ("ON", "1", "TRUE") else 0
 
 
-def _prepare_local_infile(session):
+def _prepare_local_infile(session, state):
     """Guarantee @@GLOBAL.local_infile=ON before anything destructive runs.
 
     Returns the value to restore after the load (0), or None when the server
@@ -432,6 +432,7 @@ def _prepare_local_infile(session):
               "@@GLOBAL.local_infile; refusing to run a destructive restore "
               "whose load would then fail", file=sys.stderr, flush=True)
         sys.exit(2)
+    state["previous"] = prev
     if prev == 1:
         # Already ON — nothing to change and nothing to restore.
         return None
@@ -461,13 +462,10 @@ def _restore_local_infile(session, prev):
     if prev is None:
         return
     want = "ON" if prev == 1 else "OFF"
-    try:
-        session.run_sql("SET GLOBAL local_infile={}".format(want))
-        print("BLOODRAVEN_LOCAL_INFILE_RESTORED value={}".format(want),
-              flush=True)
-    except Exception as e:  # noqa: BLE001
-        print("BLOODRAVEN_LOCAL_INFILE_RESTORE_IGNORED: {}".format(e),
-              flush=True)
+    session.run_sql("SET GLOBAL local_infile={}".format(want))
+    if _read_local_infile(session) != prev:
+        raise RuntimeError("local_infile readback did not match restored value {}".format(want))
+    print("BLOODRAVEN_LOCAL_INFILE_RESTORED value={}".format(want), flush=True)
 
 
 def _target_coordinates(session):
@@ -563,8 +561,9 @@ def main():
     # the target untouched. The prior value is put back in the finally,
     # which also runs on the sys.exit(2) paths below, so a hardened primary
     # ends up OFF again whatever happens.
-    prev_local_infile = _prepare_local_infile(session)
+    local_infile_state = {"previous": None}
     try:
+        _prepare_local_infile(session, local_infile_state)
         # Destructive preflight for in-place restore. The bootstrap restore
         # path does not set any of the triggering env vars, so these are
         # no-ops outside of spec.restoreInPlace.
@@ -583,7 +582,7 @@ def main():
                   flush=True)
             sys.exit(2)
     finally:
-        _restore_local_infile(session, prev_local_infile)
+        _restore_local_infile(session, local_infile_state["previous"])
 
     print("BLOODRAVEN_LOAD_COMPLETE input={}".format(input_url), flush=True)
 

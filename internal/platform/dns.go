@@ -129,10 +129,17 @@ func (d *dnsEndpointUpdater) CurrentDNSRecord(ctx context.Context) (string, bool
 		if !ok {
 			continue
 		}
-		if name, _, _ := unstructured.NestedString(ep, "dnsName"); name != d.hostname {
+		name, _, err := unstructured.NestedString(ep, "dnsName")
+		if err != nil {
+			return "", false, fmt.Errorf("read DNSEndpoint %s/%s endpoint dnsName: %w", d.namespace, d.name, err)
+		}
+		if name != d.hostname {
 			continue
 		}
-		targets, _, _ := unstructured.NestedStringSlice(ep, "targets")
+		targets, _, err := unstructured.NestedStringSlice(ep, "targets")
+		if err != nil {
+			return "", false, fmt.Errorf("read DNSEndpoint %s/%s endpoint targets: %w", d.namespace, d.name, err)
+		}
 		if len(targets) == 0 {
 			return "", false, nil
 		}

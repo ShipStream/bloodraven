@@ -3,7 +3,9 @@ package scenarios
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -382,7 +384,7 @@ func clearRetainedInPlaceRestoreJobs(ctx context.Context, env *runner.Env, captu
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("clear retained in-place restore jobs: %v", errs)
+		return fmt.Errorf("clear retained in-place restore jobs: %w", errors.Join(errs...))
 	}
 	return nil
 }
@@ -416,7 +418,11 @@ func readSiteBinlogManifest(ctx context.Context, env *runner.Env, bucket, binlog
 func pitrHandoffSanityQuery(db, runStem string) string {
 	return "SELECT IF(" +
 		"SUM(phase='baseline') = 1 AND SUM(phase='A') = 1 AND SUM(phase='B') = 1 AND SUM(phase='C') = 0" +
-		", 1, 0) FROM " + db + ".marker WHERE run_id=" + quoteSQLString(runStem)
+		", 1, 0) FROM " + quoteSQLIdentifier(db) + ".marker WHERE run_id=" + quoteSQLString(runStem)
+}
+
+func quoteSQLIdentifier(value string) string {
+	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
 
 // manifestNewestLastEvent returns the latest LastEventTime across a manifest's

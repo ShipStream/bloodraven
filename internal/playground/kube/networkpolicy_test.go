@@ -90,6 +90,31 @@ func TestDiscoverKubeDNSEndpointIPs_NoBackends(t *testing.T) {
 	}
 }
 
+func TestDiscoverKubeDNSClusterIP(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		clusterIP string
+		want      string
+		wantErr   bool
+	}{
+		{name: "normal", clusterIP: "10.43.0.10", want: "10.43.0.10"},
+		{name: "empty", wantErr: true},
+		{name: "None", clusterIP: corev1.ClusterIPNone, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "kube-dns", Namespace: "kube-system"}, Spec: corev1.ServiceSpec{ClusterIP: tc.clusterIP}}
+			c := &Client{Kubernetes: fake.NewSimpleClientset(svc)}
+			got, err := c.DiscoverKubeDNSClusterIP(context.Background())
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tc.wantErr && (err != nil || got != tc.want) {
+				t.Fatalf("got (%q, %v), want (%q, nil)", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildStandbyIngressHoldPolicy(t *testing.T) {
 	np := BuildStandbyIngressHoldPolicy("playground", "pdx")
 

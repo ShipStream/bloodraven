@@ -181,16 +181,8 @@ func s39VerifyEndpointsAndMySQLUnchanged() runner.Step {
 			expected := ctxFetch(env, "dfSeedValue")
 
 			// Seeded key readable on the promoted master (replication was healthy).
-			cli, err := env.Dragonfly(target)
-			if err != nil {
-				return fmt.Errorf("open dragonfly promoted master %s: %w", target, err)
-			}
-			got, ok, err := cli.Get(ctx, "scenario39:key")
-			if err != nil {
-				return fmt.Errorf("GET on promoted master %s: %w", target, err)
-			}
-			if !ok || got != expected {
-				return fmt.Errorf("scenario39:key on promoted master %s = %q ok=%v, want %q", target, got, ok, expected)
+			if err := s39WaitKeyOnSite(ctx, env, target, "scenario39:key", expected, 60*time.Second); err != nil {
+				return fmt.Errorf("replicated key unavailable on promoted master %s: %w", target, err)
 			}
 
 			// Active Dragonfly Service endpoints now include only the new

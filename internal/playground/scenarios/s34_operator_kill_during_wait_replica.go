@@ -182,6 +182,9 @@ func s34ObserveReplacementCompletes() runner.Step {
 					if len(writable) > 1 {
 						return false, "", fmt.Errorf("split-brain during update: writable=%v", writable)
 					}
+					if len(writable) == 0 {
+						return false, "", fmt.Errorf("no writable site during update: writable=%v read-only=%v other=%v", writable, readOnly, other)
+					}
 					sort.Strings(writable)
 					sort.Strings(readOnly)
 					depOK, depMsg := s34DeploymentsAt(doneCtx, env, mfg, expected)

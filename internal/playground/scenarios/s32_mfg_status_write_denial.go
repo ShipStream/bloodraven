@@ -55,6 +55,9 @@ func scenario32MFGStatusWriteDenial() runner.Scenario {
 					if err != nil {
 						return err
 					}
+					if mfg.Status.ActiveSite != activeSite {
+						return fmt.Errorf("CR status advanced during RBAC denial: activeSite=%q, want stale %q", mfg.Status.ActiveSite, activeSite)
+					}
 					activeSite = mfg.Status.ActiveSite
 					peerSite, err = PeerOf(mfg, activeSite)
 					if err != nil {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	rbacv1 "k8s.io/api/rbac/v1"
+
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 )
 
@@ -68,6 +70,7 @@ func (a *Actions) DenyOperatorClusterRoleVerbs(ctx context.Context, saNamespace,
 			"RBAC denial changed no rules on ClusterRole %s (denials=%+v); the operator role layout may have moved — refuse to run a hollow denial",
 			roleName, denials)
 	}
+	restoreRules := removedRBACGrants(original, denials)
 
 	cr.Rules = patched
 	if err := a.K.UpdateClusterRole(ctx, cr); err != nil {
@@ -75,8 +78,8 @@ func (a *Actions) DenyOperatorClusterRoleVerbs(ctx context.Context, saNamespace,
 	}
 
 	// Idempotent restore closure: re-read the role for the latest
-	// resourceVersion (another actor may have touched it) and set the exact
-	// original rules back. Only marks itself done on success, so a failed
+	// resourceVersion and add back only grants removed by this injection, so
+	// unrelated concurrent rule updates survive. Only marks itself done on success, so a failed
 	// explicit restore still gets retried by the cleanup reverter. Scenarios
 	// are sequential, so no locking is needed.
 	restored := false
@@ -88,7 +91,7 @@ func (a *Actions) DenyOperatorClusterRoleVerbs(ctx context.Context, saNamespace,
 		if err != nil {
 			return fmt.Errorf("re-read ClusterRole %s for restore: %w", roleName, err)
 		}
-		fresh.Rules = pgkube.CloneClusterRoleRules(original)
+		fresh.Rules = append(pgkube.CloneClusterRoleRules(fresh.Rules), pgkube.CloneClusterRoleRules(restoreRules)...)
 		if err := a.K.UpdateClusterRole(ctx, fresh); err != nil {
 			return fmt.Errorf("restore ClusterRole %s rules: %w", roleName, err)
 		}
@@ -103,4 +106,43 @@ func (a *Actions) DenyOperatorClusterRoleVerbs(ctx context.Context, saNamespace,
 		OriginalRules: string(originalJSON),
 		PatchedRules:  string(patchedJSON),
 	}, restore, nil
+}
+
+func removedRBACGrants(original []rbacv1.PolicyRule, denials []VerbDenial) []rbacv1.PolicyRule {
+	var grants []rbacv1.PolicyRule
+	for _, denial := range denials {
+		denied := make(map[string]bool, len(denial.Verbs))
+		for _, verb := range denial.Verbs {
+			denied[verb] = true
+		}
+		for _, rule := range original {
+			if !contains(rule.APIGroups, denial.APIGroup) || !contains(rule.Resources, denial.Resource) {
+				continue
+			}
+			verbs := make([]string, 0, len(rule.Verbs))
+			for _, verb := range rule.Verbs {
+				if denied[verb] {
+					verbs = append(verbs, verb)
+				}
+			}
+			if len(verbs) == 0 {
+				continue
+			}
+			grant := *rule.DeepCopy()
+			grant.APIGroups = []string{denial.APIGroup}
+			grant.Resources = []string{denial.Resource}
+			grant.Verbs = verbs
+			grants = append(grants, grant)
+		}
+	}
+	return grants
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

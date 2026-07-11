@@ -2,6 +2,7 @@ package scenarios
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -235,8 +236,8 @@ func s35VerifySourceStaysActive() runner.Step {
 			if err != nil {
 				return fmt.Errorf("target %s replica status: %w", target, err)
 			}
-			if !rs.Configured || !rs.IORunning {
-				return fmt.Errorf("target %s replication IO not running after rollback (configured=%v io=%v)", target, rs.Configured, rs.IORunning)
+			if !rs.Configured || !rs.IORunning || !rs.SQLRunning {
+				return fmt.Errorf("target %s replication not running after rollback (configured=%v io=%v sql=%v)", target, rs.Configured, rs.IORunning, rs.SQLRunning)
 			}
 			env.Capture.Note(fmt.Sprintf("source %s stayed active & writable; target %s read-only & replicating; failed_timeout metric incremented", source, target))
 			return nil
@@ -248,6 +249,7 @@ func s35VerifySourceStaysActive() runner.Step {
 // other read-only site, as a backstop), waits for the marker to replicate, and
 // drops the scenario schema.
 func s35Cleanup(ctx context.Context, env *runner.Env) error {
+	var errs []error
 	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
 		return fmt.Errorf("cleanup: get MFG: %w", err)
@@ -278,10 +280,12 @@ func s35Cleanup(ctx context.Context, env *runner.Env) error {
 		c, err := env.MySQL(name)
 		if err != nil {
 			env.Capture.Note(fmt.Sprintf("cleanup: skip SOURCE_DELAY clear on %s: %v", name, err))
+			errs = append(errs, fmt.Errorf("open %s to clear SOURCE_DELAY: %w", name, err))
 			continue
 		}
 		if err := clearSourceDelay(ctx, c); err != nil {
 			env.Capture.Note(fmt.Sprintf("cleanup: clear SOURCE_DELAY on %s: %v", name, err))
+			errs = append(errs, fmt.Errorf("clear SOURCE_DELAY on %s: %w", name, err))
 		}
 		// Only a replica can wait for the marker to arrive over replication.
 		if markerGtid != "" && readOnly[name] {
@@ -307,5 +311,5 @@ func s35Cleanup(ctx context.Context, env *runner.Env) error {
 		}
 		_ = c.Close()
 	}
-	return nil
+	return errors.Join(errs...)
 }

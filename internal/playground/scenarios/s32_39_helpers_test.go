@@ -1,6 +1,7 @@
 package scenarios
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -214,5 +215,13 @@ func TestInPlaceRestoreJobNameMirror(t *testing.T) {
 		if got := inPlaceRestoreJobName(c.fg, c.site); got != c.want {
 			t.Errorf("inPlaceRestoreJobName(%q,%q) = %q, want %q", c.fg, c.site, got, c.want)
 		}
+	}
+}
+
+func TestPITRHandoffSanityQueryQuotesDatabaseIdentifier(t *testing.T) {
+	got := pitrHandoffSanityQuery("archive`copy", "run-1")
+	wantFragment := "FROM `archive``copy`.marker WHERE run_id='run-1'"
+	if !strings.Contains(got, wantFragment) {
+		t.Fatalf("query = %q, want fragment %q", got, wantFragment)
 	}
 }

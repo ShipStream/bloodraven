@@ -47,3 +47,29 @@ func TestDenyDNSEgressAppliesAndReverts(t *testing.T) {
 		t.Errorf("NetworkPolicy %s still present after revert", name)
 	}
 }
+
+func TestPartitionDragonflyPodAppliesAndReverts(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	a := New(&pgkube.Client{Kubernetes: cs}, pgkube.PlaygroundNamespace, pgkube.FailoverGroupName)
+	ctx := context.Background()
+	if err := a.PartitionDragonflyPod(ctx, "iad"); err != nil {
+		t.Fatalf("PartitionDragonflyPod: %v", err)
+	}
+	name := pgkube.DragonflyPartitionPolicyName("iad")
+	np, err := cs.NetworkingV1().NetworkPolicies(pgkube.PlaygroundNamespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get applied NetworkPolicy: %v", err)
+	}
+	if len(np.Spec.PolicyTypes) != 2 || len(np.Spec.Ingress) != 0 || len(np.Spec.Egress) != 0 {
+		t.Fatalf("partition policy is not deny-all: %+v", np.Spec)
+	}
+	if len(a.PendingReverts()) != 1 {
+		t.Fatalf("pending reverts = %v, want one", a.PendingReverts())
+	}
+	if err := a.Revert(ctx); err != nil {
+		t.Fatalf("Revert: %v", err)
+	}
+	if _, err := cs.NetworkingV1().NetworkPolicies(pgkube.PlaygroundNamespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
+		t.Fatalf("NetworkPolicy %s remains after revert", name)
+	}
+}

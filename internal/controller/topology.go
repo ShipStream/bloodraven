@@ -223,7 +223,8 @@ type TopologyManager struct {
 	// once the write is permitted again. updateCRStatus already
 	// DeepEqual-skips no-op writes, so this retry only actually writes while
 	// the live CR diverges from the desired snapshot. Protected by mu.
-	statusWriteFailed bool
+	statusWriteFailed   bool
+	statusRetrySnapshot *TopologySnapshot
 
 	// Recovery state for old primary after failover.
 	recoveryPendingSite    string // site name with active or blocked recovery ("" = none)
@@ -834,8 +835,22 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	tm.mu.RLock()
 	statusRetry := tm.statusWriteFailed
 	tm.mu.RUnlock()
-	if (anyTransition || replicationChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted || statusRetry) && tm.StatusCallback != nil {
-		tm.StatusCallback(tm.buildSnapshot(siteRepl, alertMsg, degradedReason))
+	statusChanged := anyTransition || replicationChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted
+	if (statusChanged || statusRetry) && tm.StatusCallback != nil {
+		var snapshot TopologySnapshot
+		if statusRetry && !statusChanged {
+			tm.mu.RLock()
+			if tm.statusRetrySnapshot != nil {
+				snapshot = *tm.statusRetrySnapshot
+			}
+			tm.mu.RUnlock()
+		} else {
+			snapshot = tm.buildSnapshot(siteRepl, alertMsg, degradedReason)
+		}
+		tm.mu.Lock()
+		tm.statusRetrySnapshot = &snapshot
+		tm.mu.Unlock()
+		tm.StatusCallback(snapshot)
 	}
 
 	// Broadcast full topology to WebSocket clients on every poll cycle.
@@ -1379,7 +1394,6 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 			// desired target from live topology on every poll, so DNS heals to
 			// whichever site is primary once the write is permitted again.
 			// The MySQL promotion state above is already durable.
-			return
 		}
 
 		// Best-effort: ask the Dragonfly subsystem (when wired) to
