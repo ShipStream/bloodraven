@@ -219,6 +219,27 @@ func (a *Actions) AnnotatePlannedFailover(ctx context.Context, target string) er
 	return nil
 }
 
+// AnnotatePlannedFailoverRaw sets the planned-failover annotation to a raw
+// value, so scenarios can drive the annotation grammar's override syntax
+// (e.g. "<target>:maxLagWait=5s"). Reverter clears the annotation.
+//
+// Use AnnotatePlannedFailover for the bare-site form; use this when the
+// scenario needs a per-request knob such as a short maxLagWait to force the
+// WaitingForLag → Failed{LagTimeout} rollback.
+func (a *Actions) AnnotatePlannedFailoverRaw(ctx context.Context, rawValue string) error {
+	const key = "bloodraven.shipstream.io/planned-failover"
+	if rawValue == "" {
+		return fmt.Errorf("planned-failover raw annotation value must not be empty")
+	}
+	if err := a.K.AnnotateMFGNamed(ctx, a.Namespace, a.FG, key, rawValue); err != nil {
+		return fmt.Errorf("set planned-failover annotation %q: %w", rawValue, err)
+	}
+	a.push("clear planned-failover annotation", func(ctx context.Context) error {
+		return a.K.AnnotateMFGNamed(ctx, a.Namespace, a.FG, key, "")
+	})
+	return nil
+}
+
 // KillSidecarPID1 attaches an ephemeral container to the named site's
 // MySQL pod that targets the sidecar's PID namespace and runs `kill 1`.
 // SIGTERM is the default — the kernel ignores SIGKILL on PID 1 from
@@ -837,13 +858,18 @@ func (a *Actions) PatchDragonflySnapshot(ctx context.Context) error {
 
 // GlobalRecover is the safety-net cleanup the runner runs after every
 // scenario, regardless of outcome. Mirrors `chaos.sh recover`:
-// removes every chaos-partition NetworkPolicy and scales every MySQL
-// site back to 1 replica, plus every Dragonfly StatefulSet back to
-// 1 replica. Idempotent.
+// removes every chaos-partition NetworkPolicy, scales every MySQL
+// site back to 1 replica, scales every Dragonfly StatefulSet back to
+// 1 replica, and brings RustFS back up. Idempotent.
 func (a *Actions) GlobalRecover(ctx context.Context) error {
 	var errs []error
 	if err := a.K.RemoveAllChaosNetworkPolicies(ctx, a.Namespace); err != nil {
 		errs = append(errs, fmt.Errorf("remove chaos NetworkPolicies: %w", err))
+	}
+	// Object storage: a scenario that scaled RustFS to 0 and never ran its
+	// reverter would otherwise break every backup/restore scenario after it.
+	if err := a.RecoverRustFS(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("recover rustfs: %w", err))
 	}
 	mfg, err := a.K.GetMFGNamed(ctx, a.Namespace, a.FG)
 	if err == nil {

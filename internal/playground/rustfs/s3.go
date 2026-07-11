@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -68,4 +69,52 @@ func EnsureBucket(ctx context.Context, endpoint, bucket string, creds Credential
 		}
 		return fmt.Errorf("create bucket %q: %w", bucket, err)
 	}
+}
+
+// GetObject fetches an object from the RustFS bucket. Returns found=false
+// (with nil error) when the key does not exist so callers can distinguish a
+// missing manifest from a read error. Signed with AWS SigV4 like EnsureBucket
+// so no aws-cli sidecar image is needed. Used by the PITR archive-handoff
+// scenario to read per-site binlog manifests directly from storage.
+func GetObject(ctx context.Context, endpoint, bucket, key string, creds Credentials) (data []byte, found bool, err error) {
+	if bucket == "" || key == "" {
+		return nil, false, fmt.Errorf("bucket and key are required")
+	}
+	if creds.AccessKey == "" || creds.SecretKey == "" {
+		return nil, false, fmt.Errorf("access key and secret key are required")
+	}
+	if creds.Region == "" {
+		creds.Region = "us-east-1"
+	}
+	endpoint = strings.TrimRight(endpoint, "/")
+	if _, perr := url.Parse(endpoint); perr != nil {
+		return nil, false, fmt.Errorf("parse endpoint: %w", perr)
+	}
+
+	client := s3.NewFromConfig(aws.Config{
+		Region:      creds.Region,
+		Credentials: credentials.NewStaticCredentialsProvider(creds.AccessKey, creds.SecretKey, ""),
+	}, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+	})
+
+	out, gerr := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if gerr != nil {
+		var respErr *smithyhttp.ResponseError
+		if errors.As(gerr, &respErr) && respErr.HTTPStatusCode() == http.StatusNotFound {
+			return nil, false, nil
+		}
+		var apiErr smithy.APIError
+		if errors.As(gerr, &apiErr) && (apiErr.ErrorCode() == "NoSuchKey" || apiErr.ErrorCode() == "NotFound") {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("get object %q/%q: %w", bucket, key, gerr)
+	}
+	defer out.Body.Close()
+	body, rerr := io.ReadAll(out.Body)
+	if rerr != nil {
+		return nil, true, fmt.Errorf("read object %q/%q body: %w", bucket, key, rerr)
+	}
+	return body, true, nil
 }

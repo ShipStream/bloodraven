@@ -600,9 +600,13 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		break
 	}
 
-	// Set the status callback to update the CR status subresource on state changes.
+	// Set the status callback to update the CR status subresource on state
+	// changes. Feed the write result back to the manager so a rejected
+	// /status write (e.g. RBAC-denied mid-failover) arms a per-poll retry
+	// that self-heals once the write is permitted again.
 	tm.StatusCallback = func(snap TopologySnapshot) {
-		r.updateCRStatus(ctx, nn, snap)
+		err := r.updateCRStatus(ctx, nn, snap)
+		tm.markStatusWriteResult(err)
 	}
 	// BootstrapStatusCallback updates only the Bootstrapping condition so that
 	// unrelated conditions set by the most recent Poll cycle (Degraded,
@@ -751,17 +755,22 @@ func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {
 	delete(r.managers, nn)
 }
 
-// updateCRStatus writes topology state to the CR status subresource.
-func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.NamespacedName, snap TopologySnapshot) {
+// updateCRStatus writes topology state to the CR status subresource. It
+// returns nil when the desired status is persisted (or is a confirmed no-op,
+// or the CR is gone) and a non-nil error when the write could not be
+// confirmed — for example an RBAC-denied /status update. The caller uses the
+// error to arm/disarm a per-poll retry so a transiently-denied write heals
+// once permissions return.
+func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.NamespacedName, snap TopologySnapshot) error {
 	// Fetch the CR to get the latest resourceVersion and generation for the status update.
 	var freshFG v1alpha1.MysqlFailoverGroup
 	if err := r.client.Get(ctx, nn, &freshFG); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.logger.Warn("CR deleted, skipping status update", "fg", nn)
-			return
+			return nil
 		}
 		r.logger.Error("get fg for status update", "fg", nn, "error", err)
-		return
+		return err
 	}
 
 	// Save existing status before modification for comparison.
@@ -959,7 +968,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
 	if equality.Semantic.DeepEqual(existingStatus, &freshFG.Status) {
 		r.logger.Debug("status unchanged, skipping update", "fg", nn)
-		return
+		return nil
 	}
 
 	if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
@@ -974,16 +983,17 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.logger.Warn("CR deleted during status update, skipping", "fg", nn)
-			return
+			return nil
 		}
 		r.logger.Error("update fg status", "fg", nn, "error", err)
-		return
+		return err
 	}
 
 	// Emit Kubernetes Events only after the status update succeeds,
 	// so events are not emitted for transitions that failed to persist.
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
 	r.emitDegradedTransitionEvents(&freshFG, nn, snap)
+	return nil
 }
 
 // populatePITRStatus fills freshFG.Status.PITR from the cached

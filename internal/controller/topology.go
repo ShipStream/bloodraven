@@ -196,6 +196,35 @@ type TopologyManager struct {
 	promotedAt            time.Time
 	promotionGtidExecuted string // GTID set at last promotion
 
+	// DNS steering state. reconcileDNS drives the record to the CURRENT
+	// active site on every poll; these two fields only memoize what this
+	// process knows about the record so a converged cluster does not
+	// re-write it every tick. They are deliberately NOT a "pending target"
+	// to re-apply later: a memoized target can be superseded by a planned
+	// promote or a re-assert and would then replay a stale (read-only) site.
+	// The desired target is always re-derived from live topology instead —
+	// which is also what makes the heal survive an operator restart, since
+	// the live record is read back via platform.DNSRecordReader.
+	//
+	//   dnsAppliedTarget — last target this process is known to have applied
+	//                      ("" = unknown, e.g. right after a restart).
+	//   dnsWriteFailed   — a DNS write was attempted and rejected, and none
+	//                      has succeeded since; forces a re-apply attempt on
+	//                      every poll even when the record cannot be read.
+	//
+	// Protected by mu.
+	dnsAppliedTarget string
+	dnsWriteFailed   bool
+
+	// statusWriteFailed records that the most recent CR /status write was
+	// rejected (e.g. mysqlfailovergroups/status patch+update RBAC-denied
+	// during a failover). While set, Poll re-fires StatusCallback every
+	// cycle — even with no fresh state transition — so status catches up
+	// once the write is permitted again. updateCRStatus already
+	// DeepEqual-skips no-op writes, so this retry only actually writes while
+	// the live CR diverges from the desired snapshot. Protected by mu.
+	statusWriteFailed bool
+
 	// Recovery state for old primary after failover.
 	recoveryPendingSite    string // site name with active or blocked recovery ("" = none)
 	recoveryState          string // recoveryStateInProgress or recoveryStateBlocked
@@ -741,6 +770,13 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// the wedge heals even without further state transitions).
 	reasserted := tm.checkPrimaryReassert(ctx)
 
+	// Steer DNS at the current active site. Poll-driven and idempotent, so a
+	// promotion-time flip that was rejected (e.g. an RBAC-denied DNSEndpoint
+	// write) heals once the write is permitted again — without a fresh
+	// failover, and without replaying a target that a later promotion has
+	// already superseded.
+	tm.reconcileDNS(ctx)
+
 	// Process pending reclone annotation.
 	recloneStarted := tm.checkReclone(ctx)
 
@@ -790,13 +826,187 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		}
 	}
 
-	// Notify the status callback on any state change, recovery event, or update event.
-	if (anyTransition || replicationChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted) && tm.StatusCallback != nil {
+	// Notify the status callback on any state change, recovery event, or
+	// update event — and additionally whenever a prior /status write was
+	// rejected, so a transiently-denied status update self-heals once the
+	// write is permitted again (updateCRStatus no-op-skips when the CR
+	// already matches, so a healthy cluster pays only a DeepEqual per poll).
+	tm.mu.RLock()
+	statusRetry := tm.statusWriteFailed
+	tm.mu.RUnlock()
+	if (anyTransition || replicationChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted || statusRetry) && tm.StatusCallback != nil {
 		tm.StatusCallback(tm.buildSnapshot(siteRepl, alertMsg, degradedReason))
 	}
 
 	// Broadcast full topology to WebSocket clients on every poll cycle.
 	tm.broadcastTopology(siteRepl, alertMsg)
+}
+
+// desiredDNSSiteLocked returns the site DNS should point at, or "" when the
+// answer is not unambiguous and DNS must therefore be left alone. Must be
+// called with tm.mu held.
+//
+// A promotion this process just performed wins over the observed states: the
+// demoted source can still read as writable for a tick or two, and steering
+// DNS back at it would replay a stale target. Otherwise the answer is the
+// single writable site — zero writable (mid-failover, NoPrimary) or more than
+// one (split brain, or an old primary that has not been fenced yet) both
+// return "" so no guess is ever published.
+func (tm *TopologyManager) desiredDNSSiteLocked() string {
+	if tm.pendingPromotionFreshLocked() {
+		return tm.promotedSite
+	}
+	return tm.activeSiteLocked()
+}
+
+// applyDNS is the ONLY place the DNS record is written. Centralizing the
+// write keeps three properties that were previously spread across the
+// promotion paths and easy to get wrong:
+//
+//   - bloodraven_dns_flips_total is incremented for the site whose target was
+//     actually applied, and only when the record's value really changed.
+//   - a rejected write is remembered (dnsWriteFailed), so reconcileDNS keeps
+//     retrying it even without a fresh state transition.
+//   - a successful write is remembered (dnsAppliedTarget), so a converged
+//     cluster does not re-write the record on every poll.
+func (tm *TopologyManager) applyDNS(ctx context.Context, site, target string) error {
+	if tm.dns == nil || target == "" {
+		return nil
+	}
+	if err := tm.dns.UpdateDNSRecord(ctx, target); err != nil {
+		tm.mu.Lock()
+		tm.dnsWriteFailed = true
+		tm.mu.Unlock()
+		return err
+	}
+	tm.mu.Lock()
+	changed := tm.dnsAppliedTarget != target
+	tm.dnsAppliedTarget = target
+	tm.dnsWriteFailed = false
+	tm.mu.Unlock()
+	if changed {
+		metrics.DNSFlipCount.WithLabelValues(site).Inc()
+	}
+	return nil
+}
+
+// reconcileDNS steers the DNS record at the site that is the primary RIGHT
+// NOW. It runs on every poll, so a promotion-time flip that failed (an
+// RBAC-denied DNSEndpoint apply, a DNS provider outage) heals on its own once
+// the write is permitted again — no second failover, no MySQL mutation.
+//
+// The desired target is re-derived from live topology every time rather than
+// memoized at promotion, which gives two properties the previous
+// retry-the-pending-target approach could not:
+//
+//   - Restart-safe: an operator that restarts mid-denial re-reads the live
+//     record (platform.DNSRecordReader) and repairs it against the current
+//     active site. Nothing needs to survive in memory.
+//   - Cannot replay a stale target: if a planned promote or a primary
+//     re-assert has since moved the primary elsewhere, the reconcile applies
+//     THAT site — a superseded promotion target can never be published to a
+//     now-read-only site.
+//
+// When the updater cannot read the live record, the reconcile falls back to
+// this process's own knowledge: it re-applies only when a write is known to
+// have failed, or when the last target it applied is no longer the desired
+// one. It never writes speculatively.
+func (tm *TopologyManager) reconcileDNS(ctx context.Context) {
+	if tm.dns == nil {
+		return
+	}
+	// A planned failover owns the DNS record for the duration of its own
+	// promotion sequence; let it finish rather than racing it mid-flight.
+	// Any divergence it leaves behind is repaired by the next poll.
+	if tm.isPlannedFailoverActive() {
+		return
+	}
+
+	tm.mu.RLock()
+	site := tm.desiredDNSSiteLocked()
+	applied := tm.dnsAppliedTarget
+	writeFailed := tm.dnsWriteFailed
+	tm.mu.RUnlock()
+	if site == "" {
+		return
+	}
+	target := ""
+	if s := tm.getSite(site); s != nil {
+		target = s.lbIP
+	}
+	if target == "" {
+		return
+	}
+
+	// Prefer the live record when the updater can read it back: it is the
+	// only source of truth that survives an operator restart.
+	live, liveKnown := "", false
+	if reader, ok := tm.dns.(platform.DNSRecordReader); ok {
+		cur, found, err := reader.CurrentDNSRecord(ctx)
+		switch {
+		case err != nil:
+			// Unreadable (e.g. get is denied too) — fall through to the
+			// in-process state below rather than guessing.
+			tm.logger.Debug("DNS record read failed; falling back to in-process state",
+				"site", site, "error", err)
+		case !found:
+			// No record yet: an absent record diverges from every target.
+			live, liveKnown = "", true
+		default:
+			live, liveKnown = cur, true
+		}
+	}
+
+	switch {
+	case liveKnown && live == target:
+		// Converged. Record that so a later write is only counted as a flip
+		// if it genuinely changes the record.
+		tm.mu.Lock()
+		tm.dnsAppliedTarget = target
+		tm.dnsWriteFailed = false
+		tm.mu.Unlock()
+		return
+	case liveKnown:
+		// Live record diverges from the active site — repair it. Seed the
+		// applied target with what is really out there so applyDNS counts
+		// the flip against the true previous value.
+		tm.mu.Lock()
+		tm.dnsAppliedTarget = live
+		tm.mu.Unlock()
+	case writeFailed:
+		// Cannot read the record, but we know our last write did not land.
+	case applied != "" && applied != target:
+		// Cannot read the record; the last target we applied is no longer
+		// the primary (superseded promotion), so re-point it.
+	default:
+		// Nothing known to be stale — never write speculatively.
+		return
+	}
+
+	if err := tm.applyDNS(ctx, site, target); err != nil {
+		if writeFailed {
+			// Already known to be failing: the first failure was logged (here,
+			// or as "DNS flip failed after successful promotion"). Do not
+			// repeat it every poll — a persistent DNS-provider or RBAC problem
+			// would otherwise fill the log at poll frequency.
+			tm.logger.Debug("DNS reconcile still failing", "site", site, "target", target, "error", err)
+		} else {
+			tm.logger.Warn("DNS reconcile failed", "site", site, "target", target, "error", err)
+		}
+		return
+	}
+	tm.logger.Info("DNS reconciled to active site", "site", site, "target", target)
+}
+
+// markStatusWriteResult records whether the most recent CR /status write
+// succeeded. A failed write (err != nil) arms a per-poll retry so a
+// transiently-denied status update self-heals once the write is permitted
+// again; a success (or confirmed no-op) disarms it. Called by the runner's
+// StatusCallback with the result of updateCRStatus.
+func (tm *TopologyManager) markStatusWriteResult(err error) {
+	tm.mu.Lock()
+	tm.statusWriteFailed = err != nil
+	tm.mu.Unlock()
 }
 
 // observations returns a SiteObservation for every site. Caller must
@@ -1163,11 +1373,14 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		tm.mu.Unlock()
 		metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
 
-		if err := tm.dns.UpdateDNSRecord(ctx, candidate.lbIP); err != nil {
+		if err := tm.applyDNS(ctx, candidate.name, candidate.lbIP); err != nil {
 			tm.logger.Error("DNS flip failed after successful promotion", "site", candidate.name, "error", err)
+			// Not fatal, and nothing to remember: reconcileDNS re-derives the
+			// desired target from live topology on every poll, so DNS heals to
+			// whichever site is primary once the write is permitted again.
+			// The MySQL promotion state above is already durable.
 			return
 		}
-		metrics.DNSFlipCount.WithLabelValues(candidate.name).Inc()
 
 		// Best-effort: ask the Dragonfly subsystem (when wired) to
 		// follow the MySQL promotion. The callback enforces its own
@@ -1490,10 +1703,9 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	tm.lastFailoverTarget = target
 	tm.mu.Unlock()
 
-	if err := tm.dns.UpdateDNSRecord(ctx, targetSite.lbIP); err != nil {
+	if err := tm.applyDNS(ctx, target, targetSite.lbIP); err != nil {
 		return promotionGtid, fmt.Errorf("DNS flip failed after successful promotion: %w", err)
 	}
-	metrics.DNSFlipCount.WithLabelValues(target).Inc()
 
 	return promotionGtid, nil
 }
@@ -2228,12 +2440,12 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 
 	// Best-effort DNS flip: idempotent when DNS already points at the
 	// target, and heals the case where the original promotion recorded
-	// its state but the flip itself failed. As with the promotion path,
-	// there is no automatic retry once the group is healthy again —
-	// MySQL is already writable, so a persistent failure here needs
-	// operator intervention on the DNS provider.
-	if err := tm.dns.UpdateDNSRecord(ctx, targetSite.lbIP); err != nil {
-		tm.logger.Error("primary re-assert: DNS flip failed after restoring writability — no automatic retry, DNS provider may need intervention",
+	// its state but the flip itself failed. A failure here is not fatal —
+	// MySQL is writable again, and reconcileDNS re-derives the target from
+	// live topology on every poll, so DNS catches up on its own once the
+	// write is permitted.
+	if err := tm.applyDNS(ctx, target, targetSite.lbIP); err != nil {
+		tm.logger.Error("primary re-assert: DNS flip failed after restoring writability — the poll-driven DNS reconcile will keep retrying",
 			"site", target, "error", err)
 	}
 	return true
