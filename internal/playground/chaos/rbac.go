@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	rbacv1 "k8s.io/api/rbac/v1"
 
@@ -116,7 +117,7 @@ func removedRBACGrants(original []rbacv1.PolicyRule, denials []VerbDenial) []rba
 			denied[verb] = true
 		}
 		for _, rule := range original {
-			if !contains(rule.APIGroups, denial.APIGroup) || !contains(rule.Resources, denial.Resource) {
+			if !slices.Contains(rule.APIGroups, denial.APIGroup) || !slices.Contains(rule.Resources, denial.Resource) {
 				continue
 			}
 			verbs := make([]string, 0, len(rule.Verbs))
@@ -136,13 +137,4 @@ func removedRBACGrants(original []rbacv1.PolicyRule, denials []VerbDenial) []rba
 		}
 	}
 	return grants
-}
-
-func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
