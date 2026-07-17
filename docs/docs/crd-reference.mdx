@@ -62,7 +62,7 @@ Review runbooks before changing `spec.restoreInPlace`, restore-related `confirm`
 | `sidecar` | SidecarSpec | No | -- | Sidecar-container knobs (lease timeout, peer check interval, Bloodraven aux endpoint). |
 | `sidecarResources` | ResourceRequirements | No | -- | Compute resources (requests/limits) for the sidecar container |
 | `terminationGracePeriodSeconds` | int | No | `60` | Grace period for MySQL container shutdown. |
-| `mysqlConf` | map[string]string | No | -- | MySQL configuration overrides merged into the generated `my.cnf`. Changes trigger an ordered rolling restart when `updateStrategy: OrderedUpdate` is set. |
+| `mysqlConf` | map[string]string | No | -- | MySQL configuration overrides merged into the generated `my.cnf`. Bloodraven defaults `log-bin-trust-function-creators=1` so replicated function DDL is accepted consistently at every site. Changes trigger an ordered rolling restart when `updateStrategy: OrderedUpdate` is set. |
 | `replication` | ReplicationSpec | No | -- | Replication health settings |
 | `updateStrategy` | string | No | `OrderedUpdate` | Update strategy (`OrderedUpdate` or `Recreate`). |
 | `cloneTimeout` | int | No | `3600` | Timeout in seconds for initial data clone operations |

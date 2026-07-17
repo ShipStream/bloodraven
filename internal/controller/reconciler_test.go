@@ -140,7 +140,12 @@ func TestReconcile_CreatesConfigMap(t *testing.T) {
 	}
 
 	// Check for key config values
-	for _, expected := range []string{"gtid-mode=ON", "enforce-gtid-consistency=ON", "max-connections=500"} {
+	for _, expected := range []string{
+		"gtid-mode=ON",
+		"enforce-gtid-consistency=ON",
+		"log-bin-trust-function-creators=1",
+		"max-connections=500",
+	} {
 		if !strings.Contains(myCnf, expected) {
 			t.Errorf("my.cnf missing expected setting: %s", expected)
 		}
@@ -674,6 +679,19 @@ func TestGenerateMyCnf_NoCloneDDLTimeout(t *testing.T) {
 	cnf := generateMyCnf(fg)
 	if strings.Contains(cnf, "clone_ddl_timeout") {
 		t.Error("my.cnf should not contain clone_ddl_timeout (removed in MySQL 9.x)")
+	}
+}
+
+func TestGenerateMyCnf_LogBinTrustFunctionCreatorsCanBeOverridden(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.MysqlConf = map[string]string{"log-bin-trust-function-creators": "0"}
+
+	cnf := generateMyCnf(fg)
+	if !strings.Contains(cnf, "log-bin-trust-function-creators=0") {
+		t.Errorf("my.cnf should honor the mysqlConf override; got:\n%s", cnf)
+	}
+	if strings.Contains(cnf, "log-bin-trust-function-creators=1") {
+		t.Errorf("my.cnf should not retain the default when overridden; got:\n%s", cnf)
 	}
 }
 
