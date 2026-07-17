@@ -612,25 +612,26 @@ func (r *MysqlFailoverGroupReconciler) reconcileConfigMap(ctx context.Context, f
 func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
 	// Base config
 	settings := map[string]string{
-		"gtid-mode":                      "ON",
-		"enforce-gtid-consistency":       "ON",
-		"log-bin":                        "/var/lib/mysql/mysql-bin",
-		"log-replica-updates":            "ON",
-		"skip-replica-start":             "ON",
-		"sync-binlog":                    "1",
-		"binlog-expire-logs-seconds":     "1209600",
-		"plugin-load-add":                "mysql_clone.so",
-		"default-storage-engine":         "InnoDB",
-		"innodb-flush-method":            "O_DIRECT",
-		"innodb-flush-log-at-trx-commit": "2",
-		"innodb-file-per-table":          "1",
-		"max-allowed-packet":             "64M",
-		"max-connect-errors":             "1000000",
-		"skip-name-resolve":              "",
-		"max-connections":                "500",
-		"thread-cache-size":              "50",
-		"character-set-server":           "utf8mb4",
-		"collation-server":               "utf8mb4_unicode_ci",
+		"gtid-mode":                       "ON",
+		"enforce-gtid-consistency":        "ON",
+		"log-bin":                         "/var/lib/mysql/mysql-bin",
+		"log-bin-trust-function-creators": "1",
+		"log-replica-updates":             "ON",
+		"skip-replica-start":              "ON",
+		"sync-binlog":                     "1",
+		"binlog-expire-logs-seconds":      "1209600",
+		"plugin-load-add":                 "mysql_clone.so",
+		"default-storage-engine":          "InnoDB",
+		"innodb-flush-method":             "O_DIRECT",
+		"innodb-flush-log-at-trx-commit":  "2",
+		"innodb-file-per-table":           "1",
+		"max-allowed-packet":              "64M",
+		"max-connect-errors":              "1000000",
+		"skip-name-resolve":               "",
+		"max-connections":                 "500",
+		"thread-cache-size":               "50",
+		"character-set-server":            "utf8mb4",
+		"collation-server":                "utf8mb4_unicode_ci",
 	}
 
 	// clone_ddl_timeout was removed in MySQL 9.x; only set it for older versions.
@@ -659,7 +660,10 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
 
 	// Apply user overrides
 	for k, v := range fg.Spec.MysqlConf {
-		settings[k] = v
+		// MySQL treats dashes and underscores in option names as equivalent.
+		// Canonicalize them before merging so an underscore-style user key
+		// replaces a dash-style default instead of emitting both spellings.
+		settings[strings.ReplaceAll(k, "_", "-")] = v
 	}
 
 	// Build sorted output for deterministic ConfigMap content
