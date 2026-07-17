@@ -156,11 +156,16 @@ func TestReconcileDragonflyStatefulSet_AuthEnvWiredFromSecret(t *testing.T) {
 	if found.ValueFrom.SecretKeyRef.Key != "password" {
 		t.Errorf("env secretKey = %q, want password", found.ValueFrom.SecretKeyRef.Key)
 	}
-	// --requirepass is wired to expand the env var.
+	// --requirepass and --masterauth are wired to expand the env var.
+	// masterauth is required so REPLICAOF can AUTH against a password-
+	// protected active master (otherwise PING → NOAUTH → "replication cancelled").
 	args := sts.Spec.Template.Spec.Containers[0].Args
 	joined := joinArgs(args)
 	if !contains(joined, "--requirepass=$("+DragonflyAuthEnvVar+")") {
 		t.Errorf("args missing requirepass wiring (got %v)", args)
+	}
+	if !contains(joined, "--masterauth=$("+DragonflyAuthEnvVar+")") {
+		t.Errorf("args missing masterauth wiring (got %v)", args)
 	}
 }
 
@@ -613,6 +618,7 @@ func TestBuildDragonflyArgs_FiltersOperatorOwnedFlags(t *testing.T) {
 			"--port", "9999",
 			"--admin_port=8888",
 			"--requirepass=letmein",
+			"--masterauth=letmein",
 			// Innocent passthrough flag (must survive).
 			"--cluster_mode=emulated",
 		},
@@ -624,6 +630,7 @@ func TestBuildDragonflyArgs_FiltersOperatorOwnedFlags(t *testing.T) {
 		"--bind=192.168.1.1",
 		"--admin_port=8888",
 		"--requirepass=letmein",
+		"--masterauth=letmein",
 	} {
 		if contains(joined, banned) {
 			t.Errorf("operator-owned flag leaked through filter: %q in %q", banned, joined)
@@ -652,7 +659,7 @@ func TestBuildDragonflyArgs_FiltersOperatorOwnedFlags(t *testing.T) {
 // admission-webhook bypass), the env var must not be emitted with an
 // empty SecretKeyRef name — that produces a pod that fails to start
 // with a secret-not-found event rather than a clean reconcile error.
-// The corresponding --requirepass arg must also be omitted.
+// The corresponding --requirepass / --masterauth args must also be omitted.
 func TestBuildDragonflyEnv_EmptySecretNameOmitsEnv(t *testing.T) {
 	spec := &v1alpha1.DragonflySpec{
 		Auth: &v1alpha1.DragonflyAuthSpec{SecretName: ""},
@@ -661,8 +668,12 @@ func TestBuildDragonflyEnv_EmptySecretNameOmitsEnv(t *testing.T) {
 		t.Errorf("expected nil env when SecretName empty; got %+v", env)
 	}
 	args := buildDragonflyArgs(spec, 6379, 9999)
-	if contains(joinArgs(args), "--requirepass") {
-		t.Errorf("--requirepass emitted with empty SecretName; args = %q", joinArgs(args))
+	joined := joinArgs(args)
+	if contains(joined, "--requirepass") {
+		t.Errorf("--requirepass emitted with empty SecretName; args = %q", joined)
+	}
+	if contains(joined, "--masterauth") {
+		t.Errorf("--masterauth emitted with empty SecretName; args = %q", joined)
 	}
 }
 

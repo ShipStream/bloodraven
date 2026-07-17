@@ -57,7 +57,8 @@ const (
 
 	// DragonflyAuthEnvVar is the env var name into which the operator
 	// projects the Dragonfly auth password. Used to render --requirepass
-	// from a Secret without exposing the value in the pod spec.
+	// and --masterauth from a Secret without exposing the value in the
+	// pod spec.
 	DragonflyAuthEnvVar = "DRAGONFLY_PASSWORD"
 )
 
@@ -259,8 +260,8 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 
 // buildDragonflyArgs assembles the Dragonfly container command-line. The
 // operator owns --port, --admin_port, --maxmemory, --proactor_threads,
-// --break_replication_on_master_restart, and --requirepass (when auth
-// is configured); user-supplied args are appended last but with
+// --break_replication_on_master_restart, --requirepass, and --masterauth
+// (when auth is configured); user-supplied args are appended last but with
 // safety-critical flags filtered out (see dragonflyOperatorOwnedFlags).
 func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []string {
 	args := []string{
@@ -298,12 +299,21 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 			args = append(args, "--s3_sign_payload="+strconv.FormatBool(*spec.Snapshot.S3SignPayload))
 		}
 	}
-	// Auth flag emitted only when a usable Secret reference exists; an
+	// Auth flags emitted only when a usable Secret reference exists; an
 	// empty SecretName would cause the pod to fail to start with a
 	// secret-not-found event rather than a clean reconcile error.
+	//
+	// --masterauth must match --requirepass: REPLICAOF authenticates to
+	// the master with masterauth. Without it, password-protected masters
+	// reject the replica PING with NOAUTH and Dragonfly surfaces
+	// "ERR replication cancelled", leaving non-active sites as stale
+	// masters forever.
 	if spec.Auth != nil && spec.Auth.SecretName != "" {
 		// $(VAR) syntax is expanded by the kubelet from the env block.
-		args = append(args, "--requirepass=$("+DragonflyAuthEnvVar+")")
+		args = append(args,
+			"--requirepass=$("+DragonflyAuthEnvVar+")",
+			"--masterauth=$("+DragonflyAuthEnvVar+")",
+		)
 	}
 	args = append(args, filterDragonflyUserArgs(spec.Args)...)
 	return args
@@ -332,6 +342,7 @@ var dragonflyOperatorOwnedFlags = []string{
 	"--s3_use_https",
 	"--s3_sign_payload",
 	"--requirepass",
+	"--masterauth",
 }
 
 // filterDragonflyUserArgs drops args that target operator-owned flags.

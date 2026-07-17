@@ -56,14 +56,15 @@ type DragonflySpec struct {
 	// Args are additional command-line arguments appended to the
 	// Dragonfly container command. Operator-managed flags (for example
 	// --port, --admin_port, --maxmemory, --proactor_threads,
-	// --requirepass, and --replicaof) are reserved for the operator and
-	// cannot be overridden via spec.dragonfly.args.
+	// --requirepass, --masterauth, and --replicaof) are reserved for the
+	// operator and cannot be overridden via spec.dragonfly.args.
 	// +optional
 	Args []string `json:"args,omitempty"`
 
 	// Auth references a Secret containing the Dragonfly password. When
-	// set, the operator wires --requirepass and authenticates its own
-	// connections.
+	// set, the operator wires --requirepass and --masterauth (so replicas
+	// can authenticate to a password-protected master) and authenticates
+	// its own connections.
 	// +optional
 	Auth *DragonflyAuthSpec `json:"auth,omitempty"`
 
