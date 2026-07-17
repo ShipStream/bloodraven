@@ -683,15 +683,30 @@ func TestGenerateMyCnf_NoCloneDDLTimeout(t *testing.T) {
 }
 
 func TestGenerateMyCnf_LogBinTrustFunctionCreatorsCanBeOverridden(t *testing.T) {
-	fg := newTestFG()
-	fg.Spec.MysqlConf = map[string]string{"log-bin-trust-function-creators": "0"}
-
-	cnf := generateMyCnf(fg)
-	if !strings.Contains(cnf, "log-bin-trust-function-creators=0") {
-		t.Errorf("my.cnf should honor the mysqlConf override; got:\n%s", cnf)
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "hyphen spelling", key: "log-bin-trust-function-creators"},
+		{name: "underscore spelling", key: "log_bin_trust_function_creators"},
 	}
-	if strings.Contains(cnf, "log-bin-trust-function-creators=1") {
-		t.Errorf("my.cnf should not retain the default when overridden; got:\n%s", cnf)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fg := newTestFG()
+			fg.Spec.MysqlConf = map[string]string{tt.key: "0"}
+
+			cnf := generateMyCnf(fg)
+			if !strings.Contains(cnf, "log-bin-trust-function-creators=0") {
+				t.Errorf("my.cnf should honor the mysqlConf override; got:\n%s", cnf)
+			}
+			if strings.Contains(cnf, "log-bin-trust-function-creators=1") {
+				t.Errorf("my.cnf should not retain the default when overridden; got:\n%s", cnf)
+			}
+			if strings.Contains(cnf, "log_bin_trust_function_creators=") {
+				t.Errorf("my.cnf should normalize underscore-style option keys; got:\n%s", cnf)
+			}
+		})
 	}
 }
 

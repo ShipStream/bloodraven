@@ -660,7 +660,10 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
 
 	// Apply user overrides
 	for k, v := range fg.Spec.MysqlConf {
-		settings[k] = v
+		// MySQL treats dashes and underscores in option names as equivalent.
+		// Canonicalize them before merging so an underscore-style user key
+		// replaces a dash-style default instead of emitting both spellings.
+		settings[strings.ReplaceAll(k, "_", "-")] = v
 	}
 
 	// Build sorted output for deterministic ConfigMap content
