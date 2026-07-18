@@ -136,8 +136,17 @@ func s40SeedAndReplicateMarker(state *s40RunState) runner.Step {
 				return fmt.Errorf("open active MySQL %s: %w", state.active, err)
 			}
 			defer active.Close()
-			if _, err := active.Exec(ctx, "CREATE DATABASE IF NOT EXISTS bloodraven_reader_e2e; CREATE TABLE IF NOT EXISTS "+s40MarkerTable+" (marker VARCHAR(128) PRIMARY KEY); INSERT INTO "+s40MarkerTable+" (marker) VALUES (?)", state.marker); err != nil {
-				return fmt.Errorf("write marker %q: %w", state.marker, err)
+			for _, stmt := range []struct {
+				query string
+				args  []any
+			}{
+				{query: "CREATE DATABASE IF NOT EXISTS bloodraven_reader_e2e"},
+				{query: "CREATE TABLE IF NOT EXISTS " + s40MarkerTable + " (marker VARCHAR(128) PRIMARY KEY)"},
+				{query: "INSERT INTO " + s40MarkerTable + " (marker) VALUES (?)", args: []any{state.marker}},
+			} {
+				if _, err := active.Exec(ctx, stmt.query, stmt.args...); err != nil {
+					return fmt.Errorf("write marker %q: %w", state.marker, err)
+				}
 			}
 			return s40WaitForMarker(ctx, env, state.reader, state.marker, 60*time.Second)
 		},

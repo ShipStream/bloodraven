@@ -275,6 +275,16 @@ func (u *UpdateController) waitForReplicaReadyExpected(ctx context.Context, chec
 	deadline := time.Now().Add(timeout)
 	for {
 		readOnly, roleErr := checker.CheckReadOnly(ctx)
+		if roleErr == nil && !readOnly {
+			// MySQL does not persist SET GLOBAL read_only across a pod
+			// replacement. Re-fence the updated follower before restarting
+			// its retained replication configuration.
+			if err := checker.SetSuperReadOnly(ctx, true); err == nil {
+				if err := checker.SetReadOnly(ctx, true); err == nil {
+					readOnly = true
+				}
+			}
+		}
 		rs, err := checker.ShowReplicaStatus(ctx)
 		if roleErr == nil && readOnly && err == nil && rs != nil {
 			if canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected) && (!rs.IORunning || !rs.SQLRunning) {

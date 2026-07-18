@@ -114,6 +114,7 @@ func (r *resetter) run(ctx context.Context) error {
 		{"create replication users", r.createReplicationUsers},
 		{"start operator", r.startOperator},
 		{"wait healthy baseline", r.waitBaseline},
+		{"normalize fresh baseline", r.normalizeFreshBaseline},
 	}
 	for _, phase := range phases {
 		r.info("%s...", phase.name)
@@ -123,6 +124,23 @@ func (r *resetter) run(ctx context.Context) error {
 	}
 	r.info("reset complete")
 	return nil
+}
+
+// normalizeFreshBaseline removes the failover stamp produced while the
+// operator resolves the all-writable shape of newly initialized MySQL pods.
+// Restarting after the cluster has converged lets the manager discover the
+// existing primary without recording bootstrap as an operational failover.
+func (r *resetter) normalizeFreshBaseline(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+	if err := r.scaleOperatorDown(ctx, sites); err != nil {
+		return err
+	}
+	if err := r.clearMFGStatus(ctx, sites); err != nil {
+		return err
+	}
+	if err := r.startOperator(ctx, sites); err != nil {
+		return err
+	}
+	return r.waitBaseline(ctx, sites)
 }
 
 func (r *resetter) scaleOperatorDown(ctx context.Context, _ []v1alpha1.SiteSpec) error {

@@ -168,11 +168,20 @@ func TestUpdateController_ExecuteTargetsActiveLastRequiresDirectReplica(t *testi
 }
 
 func TestWaitForReplicaReadyExpectedRequiresReadOnlyDirectThreads(t *testing.T) {
+	writable := &testutil.FakeMySQL{ReadOnlyVal: false, ReplicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "new-primary"}}
+	uc := NewUpdateController(NewFailoverController(testutil.TestLogger()), testutil.TestLogger())
+	uc.tickInterval = time.Millisecond
+	if err := uc.waitForReplicaReadyExpected(context.Background(), writable, "new-primary", 10*time.Millisecond); err != nil {
+		t.Fatalf("updated writable follower was not recovered: %v", err)
+	}
+	if !writable.SuperReadOnlySet || !writable.ReadOnlyVal {
+		t.Fatal("updated writable follower was not re-fenced")
+	}
+
 	for _, tc := range []struct {
 		name    string
 		checker *testutil.FakeMySQL
 	}{
-		{name: "writable", checker: &testutil.FakeMySQL{ReadOnlyVal: false, ReplicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "new-primary"}}},
 		{name: "stopped threads", checker: &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{SourceHost: "new-primary"}}},
 		{name: "wrong source", checker: &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "old-primary"}}},
 	} {
