@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -88,11 +87,11 @@ func s40Precheck(state *s40RunState) func(context.Context, *runner.Env) error {
 		}
 		state.donorHost = playgroundInternalSiteHost(env.FG, state.active, env.Namespace)
 
-		readerStatus := s40StatusSite(mfg, state.reader)
+		readerStatus := statusSiteByName(mfg, state.reader)
 		if readerStatus == nil {
 			return fmt.Errorf("reader %q missing from status", state.reader)
 		}
-		if err := s40AssertReaderStatus(mfg, readerStatus, state.donorHost); err != nil {
+		if err := assertReaderServingStatus(mfg, readerStatus, state.donorHost); err != nil {
 			return fmt.Errorf("reader status precheck: %w", err)
 		}
 		pod, err := env.Kube.GetSiteMysqlPod(ctx, env.Namespace, env.FG, state.reader)
@@ -131,24 +130,10 @@ func s40SeedAndReplicateMarker(state *s40RunState) runner.Step {
 		Name:  "write a marker on the active primary and confirm it reaches the reader",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			state.marker = fmt.Sprintf("reader-loss-%d", time.Now().UnixNano())
-			active, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, state.active, env.Creds)
-			if err != nil {
-				return fmt.Errorf("open active MySQL %s: %w", state.active, err)
+			if err := seedMarkerRow(ctx, env, state.active, s40MarkerTable, state.marker); err != nil {
+				return err
 			}
-			defer active.Close()
-			for _, stmt := range []struct {
-				query string
-				args  []any
-			}{
-				{query: "CREATE DATABASE IF NOT EXISTS bloodraven_reader_e2e"},
-				{query: "CREATE TABLE IF NOT EXISTS " + s40MarkerTable + " (marker VARCHAR(128) PRIMARY KEY)"},
-				{query: "INSERT INTO " + s40MarkerTable + " (marker) VALUES (?)", args: []any{state.marker}},
-			} {
-				if _, err := active.Exec(ctx, stmt.query, stmt.args...); err != nil {
-					return fmt.Errorf("write marker %q: %w", state.marker, err)
-				}
-			}
-			return s40WaitForMarker(ctx, env, state.reader, state.marker, 60*time.Second)
+			return waitForMarkerOnSite(ctx, env, state.reader, s40MarkerTable, state.marker, 60*time.Second)
 		},
 	}
 }
@@ -222,11 +207,11 @@ func s40ReplaceReaderDataAndObserve(state *s40RunState) runner.Step {
 					if mfg.Status.ActiveSite != state.active {
 						return false, fmt.Sprintf("activeSite=%q", mfg.Status.ActiveSite), fmt.Errorf("active site changed during reader loss: %q -> %q", state.active, mfg.Status.ActiveSite)
 					}
-					status := s40StatusSite(mfg, state.reader)
+					status := statusSiteByName(mfg, state.reader)
 					if status == nil {
 						return false, "reader status missing", nil
 					}
-					err := s40AssertReaderStatus(mfg, status, state.donorHost)
+					err := assertReaderServingStatus(mfg, status, state.donorHost)
 					return err == nil, fmt.Sprintf("state=%s replicating=%v source=%q convergence=%s lag=%v", status.State, status.Replicating, status.SourceHost, status.SourceConvergenceState, status.SecondsBehindSource), nil
 				})
 			cancelWait()
@@ -293,8 +278,8 @@ func s40ObserveOnce(ctx context.Context, env *runner.Env, state *s40RunState, ob
 		if mfg.Status.ActiveSite != state.active {
 			observation.fail(fmt.Errorf("active site changed while reader was unavailable/recovering: %q -> %q", state.active, mfg.Status.ActiveSite))
 		}
-		if status := s40StatusSite(mfg, state.reader); status != nil {
-			readerServingHealthy = s40AssertReaderStatus(mfg, status, state.donorHost) == nil
+		if status := statusSiteByName(mfg, state.reader); status != nil {
+			readerServingHealthy = assertReaderServingStatus(mfg, status, state.donorHost) == nil
 		}
 	}
 
@@ -387,29 +372,6 @@ func (o *s40ContinuousObservation) result() error {
 	return nil
 }
 
-func s40AssertReaderStatus(mfg *v1alpha1.MysqlFailoverGroup, status *v1alpha1.SiteStatus, expectedHost string) error {
-	if status.State != "read-only" {
-		return fmt.Errorf("state=%q, want read-only", status.State)
-	}
-	if !status.Replicating {
-		return fmt.Errorf("replicating=false")
-	}
-	if status.SourceConvergenceState != v1alpha1.SourceConvergenceConverged {
-		return fmt.Errorf("sourceConvergenceState=%q, want Converged", status.SourceConvergenceState)
-	}
-	if canonicalMySQLHost(status.SourceHost) != canonicalMySQLHost(expectedHost) {
-		return fmt.Errorf("sourceHost=%q, want %q", status.SourceHost, expectedHost)
-	}
-	if status.SecondsBehindSource == nil {
-		return fmt.Errorf("secondsBehindSource is unknown")
-	}
-	maxLag := mfg.Spec.EffectiveReadOnlyMaxLagSeconds()
-	if *status.SecondsBehindSource > maxLag {
-		return fmt.Errorf("secondsBehindSource=%d exceeds reader threshold %d", *status.SecondsBehindSource, maxLag)
-	}
-	return nil
-}
-
 func s40WaitForLiveReader(ctx context.Context, env *runner.Env, state *s40RunState, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last string
@@ -433,30 +395,6 @@ func s40WaitForLiveReader(ctx context.Context, env *runner.Env, state *s40RunSta
 		}
 	}
 	return fmt.Errorf("reader live replication did not converge within %s (last: %s)", timeout, last)
-}
-
-func s40WaitForMarker(ctx context.Context, env *runner.Env, site, marker string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	var last error
-	for time.Now().Before(deadline) {
-		client, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site, env.Creds)
-		if err == nil {
-			count, queryErr := client.ScalarInt(ctx, "SELECT COUNT(*) FROM "+s40MarkerTable+" WHERE marker=?", marker)
-			_ = client.Close()
-			if queryErr == nil && count == 1 {
-				return nil
-			}
-			last = queryErr
-		} else {
-			last = err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-	}
-	return fmt.Errorf("marker %q did not replicate to %s within %s: %v", marker, site, timeout, last)
 }
 
 func s40AssertServiceTopology(ctx context.Context, env *runner.Env, reader, expectedPod string, requireClientEndpoint bool) error {
@@ -519,25 +457,6 @@ func s40WaitForServiceTopology(ctx context.Context, env *runner.Env, reader, exp
 		}
 	}
 	return fmt.Errorf("reader Service topology did not converge within %s: %w", timeout, last)
-}
-
-func s40StatusSite(mfg *v1alpha1.MysqlFailoverGroup, name string) *v1alpha1.SiteStatus {
-	for i := range mfg.Status.Sites {
-		if mfg.Status.Sites[i].Name == name {
-			return &mfg.Status.Sites[i]
-		}
-	}
-	return nil
-}
-
-func playgroundInternalSiteHost(group, site, namespace string) string {
-	return fmt.Sprintf("mysql-%s-%s-internal.%s.svc.cluster.local", group, site, namespace)
-}
-
-func canonicalMySQLHost(host string) string {
-	host = strings.ToLower(strings.TrimSpace(host))
-	host = strings.TrimSuffix(host, ":3306")
-	return strings.TrimSuffix(host, ".")
 }
 
 func s40PodReady(pod *corev1.Pod) bool {

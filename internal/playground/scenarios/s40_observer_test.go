@@ -140,7 +140,7 @@ func TestS40ObserveOnceIgnoresTerminatingServingEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s40StatusSite(mfg, "reader").Replicating = false
+	statusSiteByName(mfg, "reader").Replicating = false
 	if err := env.Kube.Controller.Update(context.Background(), mfg); err != nil {
 		t.Fatal(err)
 	}

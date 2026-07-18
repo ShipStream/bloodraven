@@ -1080,6 +1080,97 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
 
 ---
 
+### 41. Reader Availability During Unplanned Failover {#41-reader-availability-during-unplanned-failover}
+**Category**: Reader recovery and endpoint safety | **Risk**: Medium
+
+Issue #115 chaos proposal R3.
+
+**Hypothesis**: During the unplanned-failover window the reader keeps serving (stale) reads — staleness is allowed, availability is required. After promotion, source convergence repoints the reader directly at the new primary; at no point does the reader apply events relayed through the demoted primary.
+
+**Injection**: `make chaos-run SCENARIO=41-reader-availability-during-failover`. Seeds a marker on the active primary and confirms it reaches the reader, then scales the active primary's Deployment to 0 (sustained outage — pod-kill respawns in seconds and tests nothing).
+
+**Verify**:
+
+- A continuous observer answers a marker `SELECT` against the reader every 500ms throughout the window. One reconnect is allowed per tick (idle port-forward tunnels can drop); two consecutive failures fail the scenario. At least 20 successful reads are required so the observer provably covered the window.
+- `status.activeSite` flips to the promotable standby and nowhere else.
+- The reader's `SourceHost` history only ever moves old-primary → new-primary: any third host, or a return to the demoted primary after the repoint, fails the run.
+- The reader never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`.
+- Final reader status passes the serving contract against the new primary (`read-only`, replicating, `Converged`, lag ≤ `readOnlyMaxLagSeconds`), a marker written on the new primary replicates to the reader, and the client Service publishes exactly the reader pod again.
+
+**Cleanup**: The executor restores the old primary's scale; scenario cleanup reuses the scenario-08 auto-reclone path if the returning primary is divergent.
+
+---
+
+### 42. Reader Stall Does Not Degrade the Group {#42-reader-stall-does-not-degrade-the-group}
+**Category**: Reader recovery and endpoint safety | **Risk**: Low
+
+Issue #115 chaos proposal R4. Smoke-profile member: fast, no clone wait.
+
+**Hypothesis**: A wedged OLAP reader is invisible to the failover machinery — lag grows unbounded with zero group-level effect. The only reactions are endpoint shedding and alertable (not page-able) per-site status and metrics.
+
+**Injection**: `make chaos-run SCENARIO=42-reader-stall-no-group-degradation`. Applies `CHANGE REPLICATION SOURCE TO SOURCE_DELAY=600` on the reader in a single `STOP REPLICA; ...; START REPLICA` batch. SOURCE_DELAY — not `STOP REPLICA SQL_THREAD` — is the one lag injection the operator will not heal: both threads keep running on the correct source, so convergence sees a converged-but-lagging reader instead of a stopped one (same reasoning as scenario 14).
+
+**Verify** (soak of 3× `maxLagSeconds`, one primary write per second to grow applied lag):
+
+- Group `Ready` stays `True` every tick; `status.activeSite` and `status.lastFailover` never change (no failover, no anti-flap cooldown consumed).
+- The promotable standby keeps replicating.
+- The reader stays `read-only` and never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`.
+- Observed reader lag exceeds `readOnlyMaxLagSeconds` and the client Service sheds the reader endpoint.
+- `bloodraven_replication_lag_seconds{site=reader}` exceeds the reader threshold while `bloodraven_replication_source_state{site=reader,state="converged"}` stays 1 — the metrics report the stall honestly.
+
+**Rollback**: `SOURCE_DELAY=0`; the reader must catch up, pass the serving contract, and rejoin its client Service. Cleanup always clears the delay and drops the soak database through the primary.
+
+---
+
+### 43. Writable Reader Fence {#43-writable-reader-fence}
+**Category**: Reader recovery and endpoint safety | **Risk**: Medium
+
+Issue #115 chaos proposal R5 — the regression gate for role semantics under the worst input (spec gap #2).
+
+**Hypothesis**: A reader that somehow becomes writable is fenced like a `dr-only` loser without debounce, its errant GTID trips the convergence containment gate instead of a silent repoint, and it is never a promotion target — not even by explicit admin request.
+
+**Injection**: `make chaos-run SCENARIO=43-writable-reader-fence`. One multi-statement batch on the reader: `super_read_only=OFF`, `read_only=OFF`, then an errant `CREATE DATABASE`/`CREATE TABLE`/`INSERT` (reader-scoped split-brain). Later, `STOP REPLICA` on the reader forces the convergence invariant to act on the diverged follower.
+
+**Verify**:
+
+- Operator log contains `fenced writable non-promotable site` with `site=<reader>`; `super_read_only` is back `ON` within 30s; group `Ready` and `activeSite` untouched.
+- Annotating a planned failover targeting the reader lands `status.plannedFailover.phase=Failed` carrying the "only primary-candidate sites may be promoted" role error, and `bloodraven_planned_failovers_total{target_site=<reader>,result="rejected"}` increments.
+- After `STOP REPLICA`, the operator logs `replication source convergence blocked`, the reader reaches `SourceConvergenceState=Blocked` with reason `GTIDDiverged` (never a silent restart), `bloodraven_replication_source_state{site=reader,state="blocked"}` flips to 1, and the reader is shed from its client Service.
+
+**Cleanup**: The scenario reconciles the errant transactions by committing them as empty transactions on the active primary (refusing if the errant set carries any UUID other than the reader's — that demands `kubectl bloodraven reclone`), waits for the convergence invariant to restart the reader, then drops the scenario database through the primary so replication removes the errant row itself.
+
+---
+
+### 44. Reader Source Convergence Invariant {#44-reader-source-convergence-invariant}
+**Category**: Reader recovery and endpoint safety | **Risk**: Low
+
+Issue #115 chaos proposal R9.
+
+**Hypothesis**: Direct-source convergence is a periodic invariant of the poll loop, not a one-shot switchover event — *any* wrong-source state (operator drift, a partially-applied runbook, a pre-fix chained reader left over from an upgrade) heals with no failover. The divergent-wrong-source counterpart (must go `Blocked`, never silently repoint) is scenario 43's final phase.
+
+**Injection**: `make chaos-run SCENARIO=44-reader-source-convergence-invariant`. Repoints the reader's replication at the promotable standby (`CHANGE REPLICATION SOURCE TO SOURCE_HOST=<standby-internal>` in one batch; credentials and GTID auto-positioning carry over), producing a working chained topology.
+
+**Verify**:
+
+- Operator log contains `replication source convergence started` with `site=<reader>`, `currentSource=<standby-internal>`, `expectedSource=<active-internal>`, followed by `replication source convergence complete` back onto the active primary — the documented log-schema events.
+- Reader serving status and live `SHOW REPLICA STATUS` converge back onto the active primary; `bloodraven_replication_source_state{site=reader,state="converged"}` is 1.
+- Group `Ready` stays `True`; `status.activeSite` and `status.lastFailover` are untouched.
+- A marker written on the primary replicates to the reader over the repaired direct channel, and the client Service publishes exactly the reader pod.
+
+**Cleanup**: None needed for the wrong-source state itself — repairing it is exactly what the invariant does. Defensive cleanup restarts the reader's replication channel if the scenario failed with it stopped.
+
+---
+
+### Planned reader scenarios (not yet automated)
+
+Issue #115 proposals R6-R8 remain manual/full-profile follow-ups:
+
+- **45 (R6) — Bootstrap ordering with reader present**: fresh 3-site deploy must clone the promotable standby and reach failover-capable `Ready=True` *before* the reader clones; a mid-clone reader failure retries without blocking bootstrap. Run manually via `./playground/reset-mysql.sh` + `./playground/setup.sh` while watching `starting bootstrap` ordering in operator logs.
+- **46 (R7) — Primary dies mid-reader-clone**: trigger scenario 40's re-clone, hard-kill the donor primary while `CLONE INSTANCE` is in flight; failover must proceed un-wedged and the clone state machine must retry against the new primary. The playground's small dataset makes the in-flight window sub-second, so automation needs an artificial data volume first.
+- **47 (R8) — `externalTrafficPolicy: Local` endpoint semantics**: probe the reader NodePort (30306) from reader and non-reader nodes across pod-down/up; requires per-node canary pods and is infra-dependent (kube-proxy implementation).
+
+---
+
 ## Execution Plan
 
 1. **Setup**: `k3d cluster create` + `./playground/setup.sh`

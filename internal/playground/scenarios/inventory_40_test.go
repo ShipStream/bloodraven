@@ -39,7 +39,7 @@ func TestCanonicalMySQLHost(t *testing.T) {
 	}
 }
 
-func TestS40AssertReaderStatus(t *testing.T) {
+func TestAssertReaderServingStatus(t *testing.T) {
 	maxLag := int64(10)
 	lag := int64(10)
 	mfg := &v1alpha1.MysqlFailoverGroup{
@@ -55,16 +55,16 @@ func TestS40AssertReaderStatus(t *testing.T) {
 		SourceHost:             "mysql-playground-iad-internal.ns.svc.cluster.local:3306",
 		SourceConvergenceState: v1alpha1.SourceConvergenceConverged,
 	}
-	if err := s40AssertReaderStatus(mfg, &status, "mysql-playground-iad-internal.ns.svc.cluster.local"); err != nil {
+	if err := assertReaderServingStatus(mfg, &status, "mysql-playground-iad-internal.ns.svc.cluster.local"); err != nil {
 		t.Fatalf("exact-threshold reader rejected: %v", err)
 	}
 
 	lag = 11
-	if err := s40AssertReaderStatus(mfg, &status, "mysql-playground-iad-internal.ns.svc.cluster.local"); err == nil || !strings.Contains(err.Error(), "exceeds") {
+	if err := assertReaderServingStatus(mfg, &status, "mysql-playground-iad-internal.ns.svc.cluster.local"); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("over-threshold error = %v, want exceeds", err)
 	}
 	status.SecondsBehindSource = nil
-	if err := s40AssertReaderStatus(mfg, &status, "mysql-playground-iad-internal.ns.svc.cluster.local"); err == nil || !strings.Contains(err.Error(), "unknown") {
+	if err := assertReaderServingStatus(mfg, &status, "mysql-playground-iad-internal.ns.svc.cluster.local"); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("unknown-lag error = %v, want unknown", err)
 	}
 }
