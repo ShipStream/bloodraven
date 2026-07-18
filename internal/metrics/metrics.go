@@ -97,7 +97,7 @@ var (
 	ReplicationSourceState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_replication_source_state",
 		Help: "Direct-primary replication source convergence as a state-set.",
-	}, []string{"site", "state"})
+	}, []string{"namespace", "group", "site", "state"})
 
 	SiteState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_site_state",

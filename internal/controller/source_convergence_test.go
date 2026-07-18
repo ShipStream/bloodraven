@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -84,6 +85,28 @@ func TestSourceConvergence_DivergenceBeforeAndAfterStop(t *testing.T) {
 			t.Fatalf("calls stop=%d change=%d start=%d", follower.stopReplicaCalls, follower.changeSourceCalls, follower.startReplicaCalls)
 		}
 	})
+}
+
+func TestRepointReplica_RollbackUsesFreshBoundedContext(t *testing.T) {
+	primary := &mockMySQL{gtidExecuted: convergenceTestGTID, respectContext: true}
+	follower := &mockMySQL{
+		readOnly: true, gtidExecuted: convergenceTestGTID,
+		replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "wrong"},
+	}
+	tm := newConvergenceManager(t, []state.SiteRole{state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly}, primary, follower)
+	opCtx, cancel := context.WithCancel(context.Background())
+	follower.stopReplicaCancel = cancel
+
+	err := tm.repointReplica(opCtx, &tm.sites[0], &tm.sites[1], "wrong")
+	if err == nil || !strings.Contains(err.Error(), sourceReasonProbeFailed) {
+		t.Fatalf("repointReplica() error = %v, want post-stop probe failure", err)
+	}
+	if follower.startReplicaCalls != 1 {
+		t.Fatalf("rollback START REPLICA calls = %d, want 1", follower.startReplicaCalls)
+	}
+	if got := follower.startReplicaCtxErrs[0]; got != nil {
+		t.Fatalf("rollback START REPLICA reused canceled operation context: %v", got)
+	}
 }
 
 func TestSourceConvergence_MutationFailuresAndSuppression(t *testing.T) {

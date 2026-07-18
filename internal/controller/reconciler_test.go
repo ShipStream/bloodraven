@@ -683,6 +683,33 @@ func TestGenerateMyCnf_NoCloneDDLTimeout(t *testing.T) {
 	}
 }
 
+func TestGenerateMyCnf_StripsLogBinDisableAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "skip-log-bin hyphen", key: "skip-log-bin"},
+		{name: "skip_log_bin underscore", key: "skip_log_bin"},
+		{name: "disable-log-bin hyphen", key: "disable-log-bin"},
+		{name: "disable_log_bin underscore", key: "disable_log_bin"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fg := newTestFG()
+			fg.Spec.MysqlConf = map[string]string{tt.key: ""}
+
+			cnf := generateMyCnf(fg)
+			if strings.Contains(cnf, "skip-log-bin") || strings.Contains(cnf, "disable-log-bin") {
+				t.Errorf("my.cnf must not contain %s (normalized form); got:\n%s", tt.key, cnf)
+			}
+			if !strings.Contains(cnf, "log-bin=/var/lib/mysql/mysql-bin") {
+				t.Errorf("my.cnf should retain the enforced log-bin setting; got:\n%s", cnf)
+			}
+		})
+	}
+}
+
 func TestGenerateMyCnf_LogBinTrustFunctionCreatorsCanBeOverridden(t *testing.T) {
 	tests := []struct {
 		name string
@@ -905,6 +932,38 @@ func TestReaderServicesAndSiteOverrides(t *testing.T) {
 	}
 	if internal.Spec.Type != corev1.ServiceTypeClusterIP || !internal.Spec.PublishNotReadyAddresses || internal.Spec.Selector[labelHealthy] != "" || len(internal.Spec.Ports) != 2 {
 		t.Fatalf("internal service = %#v", internal.Spec)
+	}
+}
+
+func TestReaderLoadBalancerIPLifecycle(t *testing.T) {
+	fg := newTestFG()
+	reader := v1alpha1.SiteSpec{
+		Name: "reader", Role: v1alpha1.SiteRoleReadOnly, LBIP: "203.0.113.30",
+		ServiceTemplate: &v1alpha1.SiteServiceTemplate{Type: corev1.ServiceTypeLoadBalancer},
+	}
+	r, c := newReconciler(fg)
+	ctx := context.Background()
+	if err := r.reconcileSiteService(ctx, fg, reader); err != nil {
+		t.Fatal(err)
+	}
+	var svc corev1.Service
+	key := types.NamespacedName{Name: "mysql-lion-reader", Namespace: fg.Namespace}
+	if err := c.Get(ctx, key, &svc); err != nil {
+		t.Fatal(err)
+	}
+	if got := svc.Spec.LoadBalancerIP; got != reader.LBIP {
+		t.Fatalf("loadBalancerIP = %q, want %q", got, reader.LBIP)
+	}
+
+	reader.ServiceTemplate.Type = corev1.ServiceTypeClusterIP
+	if err := r.reconcileSiteService(ctx, fg, reader); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, key, &svc); err != nil {
+		t.Fatal(err)
+	}
+	if svc.Spec.LoadBalancerIP != "" {
+		t.Fatalf("loadBalancerIP was not cleared after ClusterIP transition: %q", svc.Spec.LoadBalancerIP)
 	}
 }
 

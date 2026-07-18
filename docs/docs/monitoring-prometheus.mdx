@@ -89,10 +89,12 @@ In Prometheus, check **Status > Targets** for the `bloodraven` job or ServiceMon
 
 ## Reader and source-convergence monitoring
 
-`bloodraven_replication_source_state{site,state}` is a state-set gauge for
-every follower. It emits the bounded `state` values `converged`, `pending`,
-and `blocked`; exactly one is `1` for a follower and the others are `0`.
-Active primaries have no active source state. Combine it with
+`bloodraven_replication_source_state{namespace,group,site,state}` is a state-set
+gauge for every follower. The `namespace` and `group` labels keep identically
+named sites in different failover groups in separate series. It emits the
+bounded `state` values `converged`, `pending`, and `blocked`; exactly one is `1`
+for a follower and the others are `0`. Active primaries have no active source
+state. Combine it with
 `bloodraven_replication_running{site,thread}` and
 `bloodraven_replication_lag_seconds{site}` when alerting on a reader.
 
@@ -103,7 +105,7 @@ Degraded. Alert on reader sites directly rather than inferring reader health
 from group conditions. For example:
 
 ```promql
-bloodraven_replication_source_state{site="reader",state!="converged"} == 1
+bloodraven_replication_source_state{namespace="warehouse",group="orders",site="reader",state!="converged"} == 1
 ```
 
 ```promql

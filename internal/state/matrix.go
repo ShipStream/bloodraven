@@ -69,7 +69,14 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 	var action CrossSiteAction
 
 	var writable, readOnly, unreachable []SiteObservation
+	coreCount := 0
 	for _, obs := range observations {
+		// Count configured core sites by role before state classification so an
+		// Unknown observation remains part of the topology instead of making an
+		// all-unknown startup look like an empty, healthy group.
+		if obs.Role != SiteRoleReadOnly {
+			coreCount++
+		}
 		if obs.State == StateWritable && obs.Role != SiteRolePrimaryCandidate {
 			action.FenceSites = append(action.FenceSites, obs.Name)
 			continue
@@ -87,7 +94,6 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 		}
 	}
 
-	coreCount := len(writable) + len(readOnly) + len(unreachable)
 	if coreCount == 0 {
 		if len(action.FenceSites) > 0 {
 			action.Alert = fmt.Sprintf("writable non-promotable site requires fencing (%s)", strings.Join(action.FenceSites, ", "))
@@ -95,6 +101,15 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 		} else {
 			action.Reason = "Healthy"
 		}
+		return action
+	}
+
+	// Fencing is best-effort and must be confirmed by a later poll before any
+	// promotion. Otherwise a failed fence and a successful promotion could
+	// leave two sites accepting writes.
+	if len(action.FenceSites) > 0 {
+		action.Alert = fmt.Sprintf("writable non-promotable site requires fencing (%s)", strings.Join(action.FenceSites, ", "))
+		action.Reason = "Degraded"
 		return action
 	}
 
@@ -144,11 +159,6 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 	if len(unreachable) > 0 {
 		action.Alert = fmt.Sprintf("%s unreachable while %s is primary",
 			strings.Join(siteNames(unreachable), ", "), writable[0].Name)
-		action.Reason = "Degraded"
-		return action
-	}
-	if len(action.FenceSites) > 0 {
-		action.Alert = fmt.Sprintf("writable non-promotable site requires fencing (%s)", strings.Join(action.FenceSites, ", "))
 		action.Reason = "Degraded"
 		return action
 	}

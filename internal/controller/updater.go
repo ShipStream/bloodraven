@@ -209,10 +209,19 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		return processed, nil
 	}
 
+	processedFollowers := make(map[string]struct{}, len(processed))
+	for _, name := range processed {
+		processedFollowers[name] = struct{}{}
+	}
 	var handoff *UpdateTarget
 	for i := range followers {
 		if !followers[i].Promotable {
 			continue
+		}
+		if followers[i].Drifted {
+			if _, updated := processedFollowers[followers[i].Name]; !updated {
+				continue
+			}
 		}
 		if err := u.requireDirectReplica(ctx, followers[i]); err == nil {
 			handoff = &followers[i]
@@ -231,12 +240,15 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	if err != nil {
 		return processed, fmt.Errorf("failover during update: %w", err)
 	}
+	// failover.Execute has already moved MySQL authority. Record that change
+	// before the confirmation probe so a transient probe failure cannot leave
+	// controller status pointing at the old primary.
+	if onPromoted != nil {
+		onPromoted(handoff.Name, promotionGTID)
+	}
 	readOnly, err := handoff.Checker.CheckReadOnly(ctx)
 	if err != nil || readOnly {
 		return processed, fmt.Errorf("updated standby %s was not confirmed writable after handoff", handoff.Name)
-	}
-	if onPromoted != nil {
-		onPromoted(handoff.Name, promotionGTID)
 	}
 	u.setPhase(UpdatePhaseUpdateOldPrimary)
 	if err := applyUpdate(ctx, active.Name); err != nil {

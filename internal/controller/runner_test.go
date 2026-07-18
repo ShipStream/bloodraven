@@ -456,6 +456,44 @@ func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
 	}
 }
 
+func TestUpdateCRStatus_ConvergencePendingWithNilReplicationIsDegraded(t *testing.T) {
+	fg := newTestFG()
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg).Build()
+	runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+
+	// A failed replica-status probe leaves Replication nil while convergence
+	// is marked Pending/ProbeFailed. The nil guard must not suppress the
+	// ReplicationSourceMismatch Degraded condition for the read-only
+	// follower, and the writable primary must not be flagged.
+	runner.updateCRStatus(context.Background(), nn, TopologySnapshot{
+		Sites: []SiteSnapshot{
+			{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
+			{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly,
+				Replication: nil, SourceConvergenceState: sourceConvergencePending, SourceConvergenceReason: sourceReasonProbeFailed},
+		},
+		ActiveSite:     "dc1",
+		DegradedReason: "Healthy",
+	})
+
+	var updated v1alpha1.MysqlFailoverGroup
+	if err := c.Get(context.Background(), nn, &updated); err != nil {
+		t.Fatal(err)
+	}
+	for _, condition := range updated.Status.Conditions {
+		if condition.Type == "Degraded" && condition.Reason == "ReplicationSourceMismatch" {
+			if condition.Status != metav1.ConditionTrue {
+				t.Fatalf("ReplicationSourceMismatch condition = %+v, want True", condition)
+			}
+			return
+		}
+	}
+	t.Fatal("ReplicationSourceMismatch Degraded condition not found for probe-failed follower")
+}
+
 func TestUpdateOnlyStatusCallbackPreservesNoPrimaryCondition(t *testing.T) {
 	fg := newTestFG()
 	scheme := testScheme()

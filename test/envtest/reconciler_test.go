@@ -4,11 +4,13 @@ package envtest
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -66,9 +68,8 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 func ensureNamespace(t *testing.T, name string) {
 	t.Helper()
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	if err := k8sClient.Create(ctx, ns); err != nil {
-		// Ignore already-exists errors.
-		return
+	if err := k8sClient.Create(ctx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create namespace %s: %v", name, err)
 	}
 }
 
@@ -168,8 +169,13 @@ func TestEnvtest_ReadOnlyRoleValidation(t *testing.T) {
 			if tt.wantOK && err != nil {
 				t.Fatalf("Create() rejected valid object: %v", err)
 			}
-			if !tt.wantOK && err == nil {
-				t.Fatal("Create() accepted invalid object")
+			if !tt.wantOK {
+				if err == nil {
+					t.Fatal("Create() accepted invalid object")
+				}
+				if !apierrors.IsInvalid(err) {
+					t.Fatalf("Create() error = %T %v, want Kubernetes Invalid schema error", err, err)
+				}
 			}
 		})
 	}
@@ -372,8 +378,8 @@ func TestEnvtest_ReconcilerCreatesResources(t *testing.T) {
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "mysql-lion-" + dc + "-config", Namespace: ns}, &cm); err != nil {
 			t.Fatalf("ConfigMap for %s not created: %v", dc, err)
 		}
-		if len(cm.OwnerReferences) == 0 || cm.OwnerReferences[0].Name != "lion" {
-			t.Errorf("ConfigMap %s owner refs = %v", dc, cm.OwnerReferences)
+		if !metav1.IsControlledBy(&cm, fg) {
+			t.Errorf("ConfigMap %s is not controlled by %s/%s: owner refs = %v", dc, fg.Namespace, fg.Name, cm.OwnerReferences)
 		}
 	}
 
@@ -409,6 +415,18 @@ func TestEnvtest_ReconcilerCreatesResources(t *testing.T) {
 		}
 		if len(svc.OwnerReferences) == 0 {
 			t.Errorf("Service %s should have owner reference", svcName)
+		}
+		if strings.HasSuffix(svcName, "-internal") {
+			if svc.Spec.Type != corev1.ServiceTypeClusterIP || svc.Spec.ExternalTrafficPolicy != "" ||
+				svc.Spec.LoadBalancerIP != "" || len(svc.Spec.LoadBalancerSourceRanges) != 0 ||
+				svc.Spec.LoadBalancerClass != nil || len(svc.Status.LoadBalancer.Ingress) != 0 {
+				t.Errorf("administrative Service %s is externally exposed: spec=%+v status=%+v", svcName, svc.Spec, svc.Status.LoadBalancer)
+			}
+			for _, port := range svc.Spec.Ports {
+				if port.NodePort != 0 {
+					t.Errorf("administrative Service %s port %s has nodePort %d", svcName, port.Name, port.NodePort)
+				}
+			}
 		}
 	}
 
@@ -482,11 +500,26 @@ func TestEnvtest_ReconcilerDefersExistingDeploymentSpecChange(t *testing.T) {
 		t.Fatalf("initial reconcile failed: %v", err)
 	}
 
-	var before appsv1.Deployment
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "mysql-lion-dc1", Namespace: ns}, &before); err != nil {
-		t.Fatalf("deployment not found after initial reconcile: %v", err)
+	mysqlImage := func(deploy *appsv1.Deployment) (string, bool) {
+		for _, container := range deploy.Spec.Template.Spec.Containers {
+			if container.Name == "mysql" {
+				return container.Image, true
+			}
+		}
+		return "", false
 	}
-	initialImage := before.Spec.Template.Spec.Containers[0].Image
+	initialImages := make(map[string]string, 2)
+	for _, site := range []string{"dc1", "dc2"} {
+		var before appsv1.Deployment
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "mysql-lion-" + site, Namespace: ns}, &before); err != nil {
+			t.Fatalf("deployment %s not found after initial reconcile: %v", site, err)
+		}
+		image, ok := mysqlImage(&before)
+		if !ok {
+			t.Fatalf("deployment %s has no named mysql container", site)
+		}
+		initialImages[site] = image
+	}
 
 	// Change the image.
 	var fetched v1alpha1.MysqlFailoverGroup
@@ -504,15 +537,21 @@ func TestEnvtest_ReconcilerDefersExistingDeploymentSpecChange(t *testing.T) {
 		t.Fatalf("re-reconcile after spec change failed: %v", err)
 	}
 
-	// Verify the existing Deployment was left untouched.
-	var deploy appsv1.Deployment
-	if err := k8sClient.Get(ctx, types.NamespacedName{
-		Name: "mysql-lion-dc1", Namespace: ns,
-	}, &deploy); err != nil {
-		t.Fatalf("deployment not found: %v", err)
-	}
-	if got := deploy.Spec.Template.Spec.Containers[0].Image; got != initialImage {
-		t.Errorf("existing deployment was patched outside ordered update: image %s -> %s", initialImage, got)
+	// Verify every existing Deployment's named MySQL container was left untouched.
+	for _, site := range []string{"dc1", "dc2"} {
+		var deploy appsv1.Deployment
+		if err := k8sClient.Get(ctx, types.NamespacedName{
+			Name: "mysql-lion-" + site, Namespace: ns,
+		}, &deploy); err != nil {
+			t.Fatalf("deployment %s not found: %v", site, err)
+		}
+		got, ok := mysqlImage(&deploy)
+		if !ok {
+			t.Fatalf("deployment %s has no named mysql container", site)
+		}
+		if got != initialImages[site] {
+			t.Errorf("existing deployment %s was patched outside ordered update: image %s -> %s", site, initialImages[site], got)
+		}
 	}
 }
 

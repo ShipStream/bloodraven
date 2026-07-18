@@ -277,7 +277,7 @@ kubectl -n $NS scale deployment mysql-playground-iad mysql-playground-pdx mysql-
 kubectl -n $NS scale deployment mysql-playground-iad mysql-playground-pdx mysql-playground-reader --replicas=1
 ```
 
-**Verify**: Operator logs "TOTAL LOSS: both sites are unreachable" during outage. After recovery, one site writable, one read-only, replication running. No operator crash or permanent degraded state.
+**Verify**: Operator logs a total-loss alert during the outage. After recovery, one site is writable and two followers are read-only with replication running. No operator crash or permanent degraded state.
 
 ---
 
@@ -1070,7 +1070,7 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
 
 - Exactly one spec site has effective role `read-only`; its pod is on a dedicated `zone-reader` worker.
 - A marker written to the active primary is visible on the reader before loss and after recovery.
-- A continuous observer fails immediately if the group `Ready` condition is ever not `True` during scale-down, empty-datadir detection, clone, or catch-up.
+- A continuous observer records any group `Ready` invariant violation during scale-down, empty-datadir detection, clone, or catch-up; `stopAndCheck` reports the first recorded error before the step completes.
 - Operator logs contain `starting bootstrap` with `source=auto-clone`, `donor=<captured-active>`, `recipient=reader`, and `donorHost=mysql-playground-<captured-active>-internal.bloodraven-playground.svc.cluster.local`.
 - The active site never changes. Final reader status is `State=read-only`, `SourceConvergenceState=Converged`, direct `SourceHost`, known lag at or below `readOnlyMaxLagSeconds`, and live MySQL IO/SQL threads running.
 - The reader client Service exposes only MySQL and has no serving EndpointSlice target while unhealthy. After convergence it has exactly the replacement reader pod.

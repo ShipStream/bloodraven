@@ -66,8 +66,18 @@ func Structured(msg string, fields map[string]string) Predicate {
 	}
 }
 
+// textFieldMatches reports whether line contains the complete
+// whitespace-delimited slog token key=value (or key="value"). Substring
+// matching is not sufficient: key boundaries (oldsource=...) and value
+// prefixes (source=auto-clone-old for source=auto-clone) would otherwise
+// falsely satisfy chaos log assertions.
 func textFieldMatches(line, key, value string) bool {
-	return strings.Contains(line, key+"="+value) || strings.Contains(line, key+"="+strconv.Quote(value))
+	pattern := `(^|[[:space:]])` +
+		regexp.QuoteMeta(key) + `=(` +
+		regexp.QuoteMeta(value) + `|` +
+		regexp.QuoteMeta(strconv.Quote(value)) +
+		`)($|[[:space:]])`
+	return regexp.MustCompile(pattern).MatchString(line)
 }
 
 // Wait blocks until a line matching the predicate is observed in the

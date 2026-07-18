@@ -138,6 +138,12 @@ func (tm *TopologyManager) repointReplica(ctx context.Context, active, follower 
 	tm.logger.Info("replication source convergence started",
 		"site", follower.name, "activeSite", active.name, "currentSource", currentSource,
 		"expectedSource", active.host, "fg", tm.cfg.Name)
+	// Rollback restarts must not reuse the operation context: if the probe or
+	// source change below consumed its deadline, StartReplica(ctx) would fail
+	// immediately and leave the unchanged channel stopped. Derive a fresh
+	// bounded rollback context before stopping replication.
+	rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), sourceConvergenceOperationTimeout)
+	defer rollbackCancel()
 	if err := follower.mysql.StopReplica(ctx); err != nil {
 		tm.logSourceFailure(follower, active, "stop", err)
 		return err
@@ -146,7 +152,7 @@ func (tm *TopologyManager) repointReplica(ctx context.Context, active, follower 
 		// The unchanged channel is safe to resume when the failure was a probe;
 		// divergence deliberately remains stopped for operator review.
 		if !strings.Contains(err.Error(), sourceReasonGTIDDiverged) {
-			_ = follower.mysql.StartReplica(ctx)
+			_ = follower.mysql.StartReplica(rollbackCtx)
 		}
 		return err
 	}
@@ -154,7 +160,7 @@ func (tm *TopologyManager) repointReplica(ctx context.Context, active, follower 
 		Host: active.host, User: tm.bootstrapCfg.ReplUser, Password: tm.bootstrapCfg.ReplPassword, UseSSL: tm.bootstrapCfg.UseSSL,
 	}); err != nil {
 		tm.logSourceFailure(follower, active, "change-source", err)
-		_ = follower.mysql.StartReplica(ctx)
+		_ = follower.mysql.StartReplica(rollbackCtx)
 		return err
 	}
 	if err := follower.mysql.StartReplica(ctx); err != nil {
@@ -256,7 +262,7 @@ func (tm *TopologyManager) emitSourceConvergenceMetrics() {
 		site := &tm.sites[i]
 		if site.name == active {
 			for _, value := range metrics.AllSourceStates {
-				metrics.ReplicationSourceState.DeleteLabelValues(site.name, value)
+				metrics.ReplicationSourceState.DeleteLabelValues(tm.cfg.Namespace, tm.cfg.Name, site.name, value)
 			}
 			continue
 		}
@@ -266,7 +272,7 @@ func (tm *TopologyManager) emitSourceConvergenceMetrics() {
 			if current == value {
 				v = 1
 			}
-			metrics.ReplicationSourceState.WithLabelValues(site.name, value).Set(v)
+			metrics.ReplicationSourceState.WithLabelValues(tm.cfg.Namespace, tm.cfg.Name, site.name, value).Set(v)
 		}
 	}
 }

@@ -875,6 +875,19 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		if s.Role == state.SiteRoleReadOnly {
 			continue
 		}
+		// Evaluate source convergence before the nil-replication guard: a
+		// failed probe leaves Replication nil while the convergence state is
+		// Pending/ProbeFailed, and skipping here would suppress the Degraded
+		// condition. Only read-only followers carry convergence state — the
+		// writable primary is excluded.
+		if reason == "Healthy" && s.State == state.StateReadOnly && s.SourceConvergenceState != sourceConvergenceConverged {
+			setCondition(&freshFG.Status.Conditions, metav1.Condition{
+				Type: "Degraded", Status: metav1.ConditionTrue,
+				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
+				Reason:  "ReplicationSourceMismatch",
+				Message: fmt.Sprintf("Replication source on %s is not the active primary", s.Name),
+			})
+		}
 		repl := s.Replication
 		if repl == nil {
 			continue
@@ -888,14 +901,6 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				LastTransitionTime: now,
 				Reason:             "ReplicationBroken",
 				Message:            fmt.Sprintf("Replication IO/SQL thread not running on %s", siteName),
-			})
-		}
-		if s.SourceConvergenceState != sourceConvergenceConverged {
-			setCondition(&freshFG.Status.Conditions, metav1.Condition{
-				Type: "Degraded", Status: metav1.ConditionTrue,
-				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
-				Reason:  "ReplicationSourceMismatch",
-				Message: fmt.Sprintf("Replication source on %s is not the active primary", siteName),
 			})
 		}
 		if repl.SecondsBehindSource != nil && *repl.SecondsBehindSource > maxLagSeconds {

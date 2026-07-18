@@ -20,29 +20,33 @@ import (
 // --- Mock MySQL ---
 
 type mockMySQL struct {
-	mu                  sync.Mutex
-	readOnly            bool
-	err                 error
-	promoted            bool
-	replicaStatusVal    *mysql.ReplicaStatus
-	replicaStatusErr    error
-	gtidExecuted        string
-	gtidExecutedErr     error
-	hasUserSchemas      *bool
-	userSchemasErr      error
-	stopReplicaCalls    int
-	resetReplicaCalls   int
-	changeSourceCalls   int
-	startReplicaCalls   int
-	stopReplicaErr      error
-	changeSourceErr     error
-	startReplicaErr     error
-	gtidSequence        []string
-	gtidCalls           int
-	changeDoesNotUpdate bool
-	superReadOnlyCalls  int
-	superReadOnlyErr    error
-	clonePrimaryHost    string
+	mu                       sync.Mutex
+	readOnly                 bool
+	err                      error
+	promoted                 bool
+	replicaStatusVal         *mysql.ReplicaStatus
+	replicaStatusErr         error
+	gtidExecuted             string
+	gtidExecutedErr          error
+	hasUserSchemas           *bool
+	userSchemasErr           error
+	stopReplicaCalls         int
+	resetReplicaCalls        int
+	changeSourceCalls        int
+	startReplicaCalls        int
+	stopReplicaErr           error
+	stopReplicaCancel        context.CancelFunc
+	changeSourceErr          error
+	startReplicaErr          error
+	startReplicaCtxErrs      []error
+	respectContext           bool
+	gtidSequence             []string
+	gtidCalls                int
+	changeDoesNotUpdate      bool
+	superReadOnlyCalls       int
+	superReadOnlyErr         error
+	superReadOnlyHadDeadline bool
+	clonePrimaryHost         string
 }
 
 func testBoolPtr(v bool) *bool {
@@ -65,10 +69,11 @@ func (m *mockMySQL) Promote(_ context.Context) error {
 
 func (m *mockMySQL) Close() error { return nil }
 
-func (m *mockMySQL) SetSuperReadOnly(_ context.Context, on bool) error {
+func (m *mockMySQL) SetSuperReadOnly(ctx context.Context, on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.superReadOnlyCalls++
+	_, m.superReadOnlyHadDeadline = ctx.Deadline()
 	if m.superReadOnlyErr != nil {
 		return m.superReadOnlyErr
 	}
@@ -93,6 +98,9 @@ func TestReadOnlyRoleSafety(t *testing.T) {
 	}
 	if !tm.fenceWritableNonPromotableSites(context.Background()) || reader.superReadOnlyCalls != 1 {
 		t.Fatalf("reader fence calls = %d", reader.superReadOnlyCalls)
+	}
+	if !reader.superReadOnlyHadDeadline {
+		t.Fatal("reader fencing call did not receive a bounded context")
 	}
 	taint := true
 	tm.applyPerSiteAction(context.Background(), &tm.sites[2], state.Action{Taint: &taint})
@@ -208,6 +216,9 @@ func (m *mockMySQL) StopReplica(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopReplicaCalls++
+	if m.stopReplicaCancel != nil {
+		m.stopReplicaCancel()
+	}
 	return m.stopReplicaErr
 }
 func (m *mockMySQL) ResetReplicaAll(_ context.Context) error {
@@ -243,10 +254,11 @@ func (m *mockMySQL) ChangeReplicationSource(_ context.Context, opts mysql.Replic
 	m.replicaStatusVal.SourceHost = opts.Host
 	return nil
 }
-func (m *mockMySQL) StartReplica(_ context.Context) error {
+func (m *mockMySQL) StartReplica(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.startReplicaCalls++
+	m.startReplicaCtxErrs = append(m.startReplicaCtxErrs, ctx.Err())
 	if m.startReplicaErr != nil {
 		return m.startReplicaErr
 	}
@@ -260,9 +272,12 @@ func (m *mockMySQL) StartReplicaSQLThread(_ context.Context) error { return nil 
 func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
-func (m *mockMySQL) GetGtidExecuted(_ context.Context) (string, error) {
+func (m *mockMySQL) GetGtidExecuted(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.respectContext && ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	if len(m.gtidSequence) > 0 {
 		idx := m.gtidCalls
 		if idx >= len(m.gtidSequence) {

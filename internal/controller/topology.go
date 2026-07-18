@@ -17,6 +17,14 @@ import (
 	"github.com/shipstream/bloodraven/internal/util"
 )
 
+const mysqlSafetyProbeTimeout = 5 * time.Second
+
+func withMySQLSafetyTimeout(ctx context.Context, probe func(context.Context) error) error {
+	probeCtx, cancel := context.WithTimeout(ctx, mysqlSafetyProbeTimeout)
+	defer cancel()
+	return probe(probeCtx)
+}
+
 // SiteTopologyConfig holds per-site configuration for the topology manager.
 type SiteTopologyConfig struct {
 	Name string
@@ -1293,7 +1301,10 @@ func (tm *TopologyManager) fenceWritableNonPromotableSites(ctx context.Context) 
 			continue
 		}
 		attempted = true
-		if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
+		err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+			return site.mysql.SetSuperReadOnly(probeCtx, true)
+		})
+		if err != nil {
 			tm.logger.Error("failed to fence writable non-promotable site", "site", site.name, "role", site.role, "error", err)
 		} else {
 			tm.logger.Warn("fenced writable non-promotable site", "site", site.name, "role", site.role)
@@ -1383,7 +1394,10 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				continue
 			}
 			tm.logger.Info("fencing returning old primary (split brain after failover)", "site", tm.sites[i].name)
-			if err := tm.sites[i].mysql.SetSuperReadOnly(ctx, true); err != nil {
+			err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+				return tm.sites[i].mysql.SetSuperReadOnly(probeCtx, true)
+			})
+			if err != nil {
 				tm.logger.Error("failed to fence returning old primary", "site", tm.sites[i].name, "error", err)
 			}
 		}
@@ -1411,7 +1425,10 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				if site := tm.getSite(loser); site != nil && site.state == state.StateWritable {
 					tm.logger.Warn("split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities",
 						"winner", winner, "fencedSite", loser)
-					if err := site.mysql.SetSuperReadOnly(ctx, true); err != nil {
+					err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+						return site.mysql.SetSuperReadOnly(probeCtx, true)
+					})
+					if err != nil {
 						tm.logger.Error("failed to fence non-preferred site", "site", loser, "error", err)
 					} else {
 						metrics.SplitBrainAutoResolveTotal.WithLabelValues(winner).Inc()
@@ -2065,33 +2082,34 @@ func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty st
 				(site.state != state.StateWritable && site.state != state.StateReadOnly) {
 				continue
 			}
-			rs, probeErr := site.mysql.ShowReplicaStatus(ctx)
+			var rs *mysql.ReplicaStatus
+			var gtid mysql.GTIDSet
+			var hasSchemas bool
+			probeErr := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+				var err error
+				rs, err = site.mysql.ShowReplicaStatus(probeCtx)
+				if err != nil {
+					return err
+				}
+				raw, err := site.mysql.GetGtidExecuted(probeCtx)
+				if err != nil {
+					return err
+				}
+				gtid, err = mysql.ParseGTIDSet(raw)
+				if err != nil {
+					return err
+				}
+				hasSchemas = !gtid.IsEmpty()
+				if checker, ok := site.mysql.(userSchemaChecker); ok {
+					hasSchemas, err = checker.HasUserSchemas(probeCtx)
+				}
+				return err
+			})
 			if probeErr != nil {
 				if site.role == state.SiteRoleReadOnly {
 					continue
 				}
 				return "", ""
-			}
-			raw, probeErr := site.mysql.GetGtidExecuted(ctx)
-			if probeErr != nil {
-				if site.role == state.SiteRoleReadOnly {
-					continue
-				}
-				return "", ""
-			}
-			gtid, probeErr := mysql.ParseGTIDSet(raw)
-			if probeErr != nil {
-				return "", ""
-			}
-			hasSchemas := !gtid.IsEmpty()
-			if checker, ok := site.mysql.(userSchemaChecker); ok {
-				hasSchemas, probeErr = checker.HasUserSchemas(ctx)
-				if probeErr != nil {
-					if site.role == state.SiteRoleReadOnly {
-						continue
-					}
-					return "", ""
-				}
 			}
 			freshInitialized := site.state == state.StateReadOnly && !hasSchemas
 			if rs == nil && (gtid.IsEmpty() || freshInitialized) {
@@ -2109,24 +2127,30 @@ func (tm *TopologyManager) detectAndFenceEmptyWritableSite(ctx context.Context) 
 		if site.state != state.StateWritable || site.role == state.SiteRoleReadOnly {
 			continue
 		}
-		rs, err := site.mysql.ShowReplicaStatus(ctx)
+		var rs *mysql.ReplicaStatus
+		var hasSchemas bool
+		err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+			var err error
+			rs, err = site.mysql.ShowReplicaStatus(probeCtx)
+			if err != nil || rs != nil {
+				return err
+			}
+			raw, err := site.mysql.GetGtidExecuted(probeCtx)
+			if err != nil {
+				return err
+			}
+			gtid, err := mysql.ParseGTIDSet(raw)
+			if err != nil {
+				return err
+			}
+			hasSchemas = !gtid.IsEmpty()
+			if checker, ok := site.mysql.(userSchemaChecker); ok {
+				hasSchemas, err = checker.HasUserSchemas(probeCtx)
+			}
+			return err
+		})
 		if err != nil || rs != nil {
 			return "", ""
-		}
-		raw, err := site.mysql.GetGtidExecuted(ctx)
-		if err != nil {
-			return "", ""
-		}
-		gtid, err := mysql.ParseGTIDSet(raw)
-		if err != nil {
-			return "", ""
-		}
-		hasSchemas := !gtid.IsEmpty()
-		if checker, ok := site.mysql.(userSchemaChecker); ok {
-			hasSchemas, err = checker.HasUserSchemas(ctx)
-			if err != nil {
-				return "", ""
-			}
 		}
 		if hasSchemas {
 			if donor != nil || !site.isPromotable() {
@@ -2143,10 +2167,15 @@ func (tm *TopologyManager) detectAndFenceEmptyWritableSite(ctx context.Context) 
 	if donor == nil || recipient == nil || donor.host == "" {
 		return "", ""
 	}
-	if err := recipient.mysql.SetSuperReadOnly(ctx, true); err != nil {
-		return "", ""
-	}
-	readOnly, err := recipient.mysql.CheckReadOnly(ctx)
+	var readOnly bool
+	err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+		if err := recipient.mysql.SetSuperReadOnly(probeCtx, true); err != nil {
+			return err
+		}
+		var err error
+		readOnly, err = recipient.mysql.CheckReadOnly(probeCtx)
+		return err
+	})
 	if err != nil || !readOnly || tm.confirmWritable(ctx, donor) != nil {
 		return "", ""
 	}
@@ -2193,12 +2222,20 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 		if tm.sites[i].name == seed {
 			continue
 		}
-		if err := tm.sites[i].mysql.SetSuperReadOnly(ctx, true); err != nil {
+		var readOnly bool
+		err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+			if err := tm.sites[i].mysql.SetSuperReadOnly(probeCtx, true); err != nil {
+				return err
+			}
+			var err error
+			readOnly, err = tm.sites[i].mysql.CheckReadOnly(probeCtx)
+			return err
+		})
+		if err != nil {
 			tm.logger.Error("fresh-deploy bootstrap: failed to fence non-seed site", "site", tm.sites[i].name, "error", err)
 			return
 		}
-		readOnly, err := tm.sites[i].mysql.CheckReadOnly(ctx)
-		if err != nil || !readOnly {
+		if !readOnly {
 			tm.logger.Error("fresh-deploy bootstrap: non-seed fence not confirmed", "site", tm.sites[i].name, "error", err)
 			return
 		}

@@ -721,6 +721,14 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) 
 		settings[k] = v
 	}
 
+	// skip-log-bin / disable-log-bin (underscore spellings are normalized to
+	// hyphens by normalizedMySQLSettings) would silently defeat the enforced
+	// log-bin invariant: the sorted render places them after log-bin and
+	// MySQL honors the last occurrence. Strip both aliases outright so group
+	// or site overrides cannot reintroduce them.
+	delete(settings, "skip-log-bin")
+	delete(settings, "disable-log-bin")
+
 	// Build sorted output for deterministic ConfigMap content
 	keys := make([]string, 0, len(settings))
 	for k := range settings {
@@ -1302,7 +1310,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 		if site.IsReadOnlyReader() {
 			selector[labelHealthy] = "yes"
 		}
-		mutateServiceSpec(svc, effectiveSiteServiceType(fg.Spec.ServiceTemplate, site.ServiceTemplate), effectiveSiteExternalTrafficPolicy(fg.Spec.ServiceTemplate, site.ServiceTemplate), selector, []corev1.ServicePort{
+		serviceType := effectiveSiteServiceType(fg.Spec.ServiceTemplate, site.ServiceTemplate)
+		mutateServiceSpec(svc, serviceType, effectiveSiteExternalTrafficPolicy(fg.Spec.ServiceTemplate, site.ServiceTemplate), selector, []corev1.ServicePort{
 			{
 				Name:       "mysql",
 				Port:       mysqlPort,
@@ -1311,6 +1320,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 				NodePort:   siteServiceNodePort(site.ServiceTemplate),
 			},
 		})
+		if serviceType == corev1.ServiceTypeLoadBalancer {
+			svc.Spec.LoadBalancerIP = site.LBIP
+		}
 		svc.Spec.PublishNotReadyAddresses = false
 		return nil
 	})

@@ -128,6 +128,57 @@ func TestUpdateController_ExecuteTargetsSkipsUnhealthyReader(t *testing.T) {
 	}
 }
 
+func TestUpdateController_ExecuteTargetsDoesNotHandoffSkippedDriftedFollower(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	standby := &flappingChecker{failFirst: true, sourceHost: "primary-internal"}
+	var applied []string
+	_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{
+		Name: "primary", Checker: &testutil.FakeMySQL{ReadOnlyVal: false}, Drifted: true,
+	}, []UpdateTarget{{
+		Name: "standby", Host: "standby-internal", Checker: standby, Promotable: true,
+		Drifted: true, ExpectedSource: "primary-internal",
+	}}, func(_ context.Context, name string) error {
+		applied = append(applied, name)
+		return nil
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "no healthy promotable standby") {
+		t.Fatalf("ExecuteTargets() error = %v, want no healthy standby", err)
+	}
+	if standby.tick != 1 {
+		t.Fatalf("skipped drifted standby was reprobed for handoff: probes=%d", standby.tick)
+	}
+	if len(applied) != 0 {
+		t.Fatalf("skipped drifted standby or active site was updated: %v", applied)
+	}
+}
+
+func TestUpdateController_ExecuteTargetsRecordsPromotionBeforeConfirmation(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	standby := &postPromotionProbeFailureChecker{FakeMySQL: &testutil.FakeMySQL{
+		ReadOnlyVal: true,
+		ReplicaStatusVal: &mysql.ReplicaStatus{
+			IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+		},
+	}}
+	promoted := ""
+	_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{
+		Name: "primary", Checker: &testutil.FakeMySQL{ReadOnlyVal: false}, Drifted: true,
+	}, []UpdateTarget{{
+		Name: "standby", Host: "standby-internal", Checker: standby, Promotable: true,
+		ExpectedSource: "primary-internal",
+	}}, func(context.Context, string) error { return nil }, func(site, _ string) {
+		promoted = site
+	})
+	if err == nil || !strings.Contains(err.Error(), "not confirmed writable") {
+		t.Fatalf("ExecuteTargets() error = %v, want confirmation failure", err)
+	}
+	if promoted != "standby" {
+		t.Fatalf("promotion callback site = %q, want standby", promoted)
+	}
+}
+
 func TestUpdateController_ExecuteTargetsActiveLastRequiresDirectReplica(t *testing.T) {
 	logger := testutil.TestLogger()
 	uc := NewUpdateController(NewFailoverController(logger), logger)
@@ -745,6 +796,8 @@ type flappingChecker struct {
 	mu         sync.Mutex
 	writable   bool
 	errorEvery int
+	failFirst  bool
+	sourceHost string
 	tick       int
 }
 
@@ -752,14 +805,14 @@ func (f *flappingChecker) CheckReadOnly(_ context.Context) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tick++
-	if f.errorEvery > 0 && f.tick%f.errorEvery == 0 {
+	if (f.failFirst && f.tick == 1) || (f.errorEvery > 0 && f.tick%f.errorEvery == 0) {
 		return false, errors.New("conn refused")
 	}
 	return !f.writable, nil
 }
 
 func (f *flappingChecker) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
-	return &mysql.ReplicaStatus{}, nil
+	return &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: f.sourceHost}, nil
 }
 
 func (f *flappingChecker) Promote(_ context.Context) error                  { return nil }
@@ -783,6 +836,17 @@ func (f *flappingChecker) CloneInstance(_ context.Context, _, _, _ string, _ boo
 	return nil
 }
 func (f *flappingChecker) Close() error { return nil }
+
+type postPromotionProbeFailureChecker struct {
+	*testutil.FakeMySQL
+}
+
+func (c *postPromotionProbeFailureChecker) CheckReadOnly(ctx context.Context) (bool, error) {
+	if !c.ReadOnlyVal {
+		return false, errors.New("post-promotion probe failed")
+	}
+	return c.FakeMySQL.CheckReadOnly(ctx)
+}
 
 type startableReplicaChecker struct {
 	starts int
