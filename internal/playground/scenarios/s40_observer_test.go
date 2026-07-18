@@ -117,6 +117,47 @@ func TestS40ObserveOnceAllowsExpectedEmptyListTransitions(t *testing.T) {
 	}
 }
 
+func TestS40ObserveOnceIgnoresTerminatingServingEndpoint(t *testing.T) {
+	ready := false
+	serving := true
+	terminating := true
+	portName := "mysql"
+	port := int32(3306)
+	clientset := k8sfake.NewSimpleClientset(&discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "reader-client",
+			Namespace: pgkube.PlaygroundNamespace,
+			Labels:    map[string]string{discoveryv1.LabelServiceName: pgkube.MysqlDeploymentName(pgkube.FailoverGroupName, "reader")},
+		},
+		Ports: []discoveryv1.EndpointPort{{Name: &portName, Port: &port}},
+		Endpoints: []discoveryv1.Endpoint{{
+			Conditions: discoveryv1.EndpointConditions{Ready: &ready, Serving: &serving, Terminating: &terminating},
+			TargetRef:  &corev1.ObjectReference{Kind: "Pod", Name: "reader-old", UID: types.UID("original-pod")},
+		}},
+	})
+	env, state := s40ObserverTestEnv(t, clientset)
+	mfg, err := env.Kube.GetMFGNamed(context.Background(), env.Namespace, env.FG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s40StatusSite(mfg, "reader").Replicating = false
+	if err := env.Kube.Controller.Update(context.Background(), mfg); err != nil {
+		t.Fatal(err)
+	}
+	observation := &s40ContinuousObservation{}
+
+	s40ObserveOnce(context.Background(), env, state, observation)
+
+	observation.mu.Lock()
+	defer observation.mu.Unlock()
+	if observation.err != nil {
+		t.Fatalf("terminating drain endpoint recorded as client-routable: %v", observation.err)
+	}
+	if !observation.sawClientEndpointEmpty {
+		t.Fatal("ready=false terminating endpoint did not record client endpoint absence")
+	}
+}
+
 func TestS40ObserveReadErrorIgnoresOnlyObserverCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

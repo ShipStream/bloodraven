@@ -301,14 +301,14 @@ func s40ObserveOnce(ctx context.Context, env *runner.Env, state *s40RunState, ob
 	clientState, clientErr := env.Kube.ServiceEndpointState(ctx, env.Namespace, pgkube.MysqlDeploymentName(env.FG, state.reader))
 	s40ObserveReadError(ctx, observation, "read reader client EndpointSlices", clientErr)
 	if clientErr == nil {
-		serving := clientState.ServingPodNames("mysql")
-		if len(serving) == 0 {
+		ready := clientState.ReadyPodNames("mysql")
+		if len(ready) == 0 {
 			// Empty EndpointSlice results are expected while scale-to-zero or
 			// endpoint turnover is in progress. The successful list, rather than
 			// an ignored NotFound/read error, is the explicit absence signal.
 			observation.markClientEmpty()
 		} else if mfgErr == nil && !readerServingHealthy {
-			observation.fail(fmt.Errorf("reader client Service published serving pods %v while reader status was unhealthy", serving))
+			observation.fail(fmt.Errorf("reader client Service published ready pods %v while reader status was unhealthy", ready))
 		}
 	}
 
@@ -323,8 +323,8 @@ func s40ObserveOnce(ctx context.Context, env *runner.Env, state *s40RunState, ob
 		if string(pod.UID) == state.originalPod || s40PodReady(pod) {
 			continue
 		}
-		if clientErr == nil && len(clientState.ServingPodNames("mysql")) != 0 {
-			observation.fail(fmt.Errorf("reader client Service published a serving endpoint while replacement pod %s was not ready", pod.Name))
+		if clientErr == nil && len(clientState.ReadyPodNames("mysql")) != 0 {
+			observation.fail(fmt.Errorf("reader client Service published a ready endpoint while replacement pod %s was not ready", pod.Name))
 		}
 		internal, internalErr := env.Kube.ServiceEndpointState(ctx, env.Namespace, pgkube.MysqlDeploymentName(env.FG, state.reader)+"-internal")
 		s40ObserveReadError(ctx, observation, "read reader internal EndpointSlices", internalErr)
