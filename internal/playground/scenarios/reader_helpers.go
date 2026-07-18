@@ -3,6 +3,7 @@ package scenarios
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -228,4 +229,13 @@ func waitForMarkerOnSite(ctx context.Context, env *runner.Env, site, qualifiedTa
 		}
 	}
 	return fmt.Errorf("marker %q did not replicate to %s within %s: %v", marker, site, timeout, last)
+}
+
+// formatLag renders a nullable Seconds_Behind_Source for progress
+// messages ("nil" when replication is not reporting lag).
+func formatLag(lag *int64) string {
+	if lag == nil {
+		return "nil"
+	}
+	return strconv.FormatInt(*lag, 10)
 }

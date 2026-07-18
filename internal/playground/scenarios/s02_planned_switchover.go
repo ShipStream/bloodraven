@@ -55,7 +55,10 @@ func verifyFollowersDirectlyFollowNewPrimary() runner.Step {
 				if err != nil {
 					last = err.Error()
 				} else if mfg.Status.ActiveSite == "" {
-					last = "activeSite is temporarily empty while topology reconverges"
+					// The status snapshot can publish an empty activeSite for a
+					// cycle while the promoted primary's writable confirmation
+					// lands. Only a different non-empty site is a real failure.
+					last = "activeSite momentarily empty after Succeeded"
 				} else if mfg.Status.ActiveSite != target {
 					return fmt.Errorf("planned failover target changed after success: activeSite=%q want %q", mfg.Status.ActiveSite, target)
 				} else {

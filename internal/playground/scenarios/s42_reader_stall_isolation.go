@@ -262,7 +262,7 @@ func s42ClearDelayAndRecover(state *s42RunState) runner.Step {
 					}
 					err := assertReaderServingStatus(mfg, status, state.topo.activeHost)
 					return err == nil, fmt.Sprintf("state=%s replicating=%v convergence=%s lag=%v",
-						status.State, status.Replicating, status.SourceConvergenceState, status.SecondsBehindSource), nil
+						status.State, status.Replicating, status.SourceConvergenceState, formatLag(status.SecondsBehindSource)), nil
 				})
 			if err != nil {
 				return err

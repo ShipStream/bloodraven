@@ -212,7 +212,7 @@ func s40ReplaceReaderDataAndObserve(state *s40RunState) runner.Step {
 						return false, "reader status missing", nil
 					}
 					err := assertReaderServingStatus(mfg, status, state.donorHost)
-					return err == nil, fmt.Sprintf("state=%s replicating=%v source=%q convergence=%s lag=%v", status.State, status.Replicating, status.SourceHost, status.SourceConvergenceState, status.SecondsBehindSource), nil
+					return err == nil, fmt.Sprintf("state=%s replicating=%v source=%q convergence=%s lag=%v", status.State, status.Replicating, status.SourceHost, status.SourceConvergenceState, formatLag(status.SecondsBehindSource)), nil
 				})
 			cancelWait()
 			if err != nil {
@@ -381,7 +381,7 @@ func s40WaitForLiveReader(ctx context.Context, env *runner.Env, state *s40RunSta
 			rs, statusErr := client.ShowReplicaStatus(ctx)
 			markerCount, markerErr := client.ScalarInt(ctx, "SELECT COUNT(*) FROM "+s40MarkerTable+" WHERE marker=?", state.marker)
 			_ = client.Close()
-			last = fmt.Sprintf("configured=%v io=%v sql=%v source=%q lag=%v marker=%d statusErr=%v markerErr=%v", rs.Configured, rs.IORunning, rs.SQLRunning, rs.SourceHost, rs.SecondsBehindSrc, markerCount, statusErr, markerErr)
+			last = fmt.Sprintf("configured=%v io=%v sql=%v source=%q lag=%v marker=%d statusErr=%v markerErr=%v", rs.Configured, rs.IORunning, rs.SQLRunning, rs.SourceHost, formatLag(rs.SecondsBehindSrc), markerCount, statusErr, markerErr)
 			if statusErr == nil && markerErr == nil && rs.Configured && rs.IORunning && rs.SQLRunning && canonicalMySQLHost(rs.SourceHost) == canonicalMySQLHost(state.donorHost) && rs.SecondsBehindSrc != nil && markerCount == 1 {
 				return nil
 			}

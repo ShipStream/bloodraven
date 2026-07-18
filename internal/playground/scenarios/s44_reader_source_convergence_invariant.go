@@ -149,7 +149,7 @@ func s44VerifyDirectSourceRestored(state *s44RunState) runner.Step {
 					}
 					err := assertReaderServingStatus(mfg, status, state.topo.activeHost)
 					return err == nil, fmt.Sprintf("convergence=%s/%s source=%q lag=%v",
-						status.SourceConvergenceState, status.SourceConvergenceReason, status.SourceHost, status.SecondsBehindSource), nil
+						status.SourceConvergenceState, status.SourceConvergenceReason, status.SourceHost, formatLag(status.SecondsBehindSource)), nil
 				})
 			cancel()
 			if err != nil {

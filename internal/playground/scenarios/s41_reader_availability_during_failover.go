@@ -148,7 +148,7 @@ func s41KillPrimaryAndObserveReader(state *s41RunState) runner.Step {
 					}
 					err := assertReaderServingStatus(mfg, status, state.newHost)
 					return err == nil, fmt.Sprintf("state=%s replicating=%v source=%q convergence=%s/%s lag=%v",
-						status.State, status.Replicating, status.SourceHost, status.SourceConvergenceState, status.SourceConvergenceReason, status.SecondsBehindSource), nil
+						status.State, status.Replicating, status.SourceHost, status.SourceConvergenceState, status.SourceConvergenceReason, formatLag(status.SecondsBehindSource)), nil
 				})
 			cancelRepoint()
 			if err != nil {

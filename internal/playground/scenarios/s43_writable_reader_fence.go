@@ -390,7 +390,7 @@ func s43RecoverErrantReader(ctx context.Context, env *runner.Env, state *s43RunS
 			}
 			err := assertReaderServingStatus(mfg, status, state.topo.activeHost)
 			return err == nil, fmt.Sprintf("convergence=%s/%s replicating=%v lag=%v",
-				status.SourceConvergenceState, status.SourceConvergenceReason, status.Replicating, status.SecondsBehindSource), nil
+				status.SourceConvergenceState, status.SourceConvergenceReason, status.Replicating, formatLag(status.SecondsBehindSource)), nil
 		})
 	cancel()
 	if err != nil {
