@@ -54,6 +54,8 @@ func verifyFollowersDirectlyFollowNewPrimary() runner.Step {
 				mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 				if err != nil {
 					last = err.Error()
+				} else if mfg.Status.ActiveSite == "" {
+					last = "activeSite is temporarily empty while topology reconverges"
 				} else if mfg.Status.ActiveSite != target {
 					return fmt.Errorf("planned failover target changed after success: activeSite=%q want %q", mfg.Status.ActiveSite, target)
 				} else {
