@@ -197,7 +197,7 @@ func s13ObserveClusterReconverged() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				"sites: writable=1 read-only=1 divergent=0 blocked=0",
+				"sites: writable=1 read-only=N-1 divergent=0 blocked=0",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other, blocked, divergent []string
 					for _, s := range mfg.Status.Sites {
@@ -220,7 +220,7 @@ func s13ObserveClusterReconverged() runner.Step {
 					sort.Strings(readOnly)
 					msg := fmt.Sprintf("writable=%v read-only=%v other=%v blocked=%v divergent=%v",
 						writable, readOnly, other, blocked, divergent)
-					done := len(writable) == 1 && len(readOnly) == 1 && len(blocked) == 0 && len(divergent) == 0
+					done := len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && len(blocked) == 0 && len(divergent) == 0
 					return done, msg, nil
 				},
 			)

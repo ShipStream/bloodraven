@@ -2,7 +2,10 @@ package logs
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -31,6 +34,40 @@ func And(preds ...Predicate) Predicate {
 		}
 		return true
 	}
+}
+
+// Structured matches a structured log message and exact field values in
+// either JSON or slog text output. Operator logging format differs between
+// local and CI deployments, while the public msg/field contract is stable.
+func Structured(msg string, fields map[string]string) Predicate {
+	return func(line string) bool {
+		var record map[string]any
+		if json.Unmarshal([]byte(line), &record) == nil {
+			if fmt.Sprint(record["msg"]) != msg {
+				return false
+			}
+			for key, value := range fields {
+				if fmt.Sprint(record[key]) != value {
+					return false
+				}
+			}
+			return true
+		}
+
+		if !textFieldMatches(line, "msg", msg) {
+			return false
+		}
+		for key, value := range fields {
+			if !textFieldMatches(line, key, value) {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+func textFieldMatches(line, key, value string) bool {
+	return strings.Contains(line, key+"="+value) || strings.Contains(line, key+"="+strconv.Quote(value))
 }
 
 // Wait blocks until a line matching the predicate is observed in the

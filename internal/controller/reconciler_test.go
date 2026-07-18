@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -129,7 +130,7 @@ func TestReconcile_CreatesConfigMap(t *testing.T) {
 
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Name: "mysql-lion-config", Namespace: "shared-lion",
+		Name: "mysql-lion-dc1-config", Namespace: "shared-lion",
 	}, &cm); err != nil {
 		t.Fatalf("configmap not created: %v", err)
 	}
@@ -363,7 +364,7 @@ func TestReconcile_TLSConfig(t *testing.T) {
 
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Name: "mysql-lion-config", Namespace: "shared-lion",
+		Name: "mysql-lion-dc1-config", Namespace: "shared-lion",
 	}, &cm); err != nil {
 		t.Fatalf("configmap not found: %v", err)
 	}
@@ -394,7 +395,7 @@ func TestReconcile_MysqlConfOverrides(t *testing.T) {
 
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Name: "mysql-lion-config", Namespace: "shared-lion",
+		Name: "mysql-lion-dc1-config", Namespace: "shared-lion",
 	}, &cm); err != nil {
 		t.Fatalf("configmap not found: %v", err)
 	}
@@ -791,11 +792,9 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 		t.Fatalf("update TLS secret: %v", err)
 	}
 
-	// Reconcile again — hash should change.
-	if _, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
-	}); err != nil {
-		t.Fatalf("reconcile after cert rotation failed: %v", err)
+	// Existing Deployments are updated only through the ordered site path.
+	if err := r.reconcileDeployment(context.Background(), fg, fg.Spec.Sites[0], 101, fg.Spec.Image); err != nil {
+		t.Fatalf("ordered site reconcile after cert rotation failed: %v", err)
 	}
 
 	if err := c.Get(context.Background(), types.NamespacedName{
@@ -822,6 +821,319 @@ func TestComputeSpecHash_StableWithoutTLS(t *testing.T) {
 	h3 := ComputeSpecHash(fg, site, map[string][]byte{"tls.crt": []byte("cert")}, nil)
 	if h3 == h1 {
 		t.Error("hash should differ when TLS data is provided")
+	}
+}
+
+func TestComputeSpecHash_IncludesAllPeerAddresses(t *testing.T) {
+	fg := newTestFG()
+	site := fg.Spec.Sites[0]
+	twoSiteHash := ComputeSpecHash(fg, site, nil, nil)
+
+	reader := v1alpha1.SiteSpec{Name: "reader", Role: v1alpha1.SiteRoleReadOnly}
+	fg.Spec.Sites = append(fg.Spec.Sites, reader)
+	threeSiteHash := ComputeSpecHash(fg, site, nil, nil)
+	if threeSiteHash == twoSiteHash {
+		t.Fatal("adding a reader did not change an existing site's pod hash")
+	}
+	if got, want := strings.Join(sitePeerAddresses(fg, "dc1"), ","),
+		"mysql-lion-dc2-internal.shared-lion.svc.cluster.local:8080,mysql-lion-reader-internal.shared-lion.svc.cluster.local:8080"; got != want {
+		t.Fatalf("peer addresses = %q, want %q", got, want)
+	}
+	r, c := newReconciler(fg)
+	if err := r.reconcileDeployment(context.Background(), fg, site, 101, fg.Spec.Image); err != nil {
+		t.Fatal(err)
+	}
+	var deployment appsv1.Deployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: resourceName(fg.Name, site.Name), Namespace: fg.Namespace}, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	var renderedPeers string
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		if container.Name != "sidecar" {
+			continue
+		}
+		for _, env := range container.Env {
+			if env.Name == "PEER_ADDRESSES" {
+				renderedPeers = env.Value
+			}
+		}
+	}
+	if renderedPeers != strings.Join(sitePeerAddresses(fg, site.Name), ",") {
+		t.Fatalf("rendered PEER_ADDRESSES = %q", renderedPeers)
+	}
+
+	fg.Spec.Sites = fg.Spec.Sites[:2]
+	if got := ComputeSpecHash(fg, site, nil, nil); got != twoSiteHash {
+		t.Fatalf("removing reader did not restore deterministic surviving-site hash: got %s want %s", got, twoSiteHash)
+	}
+}
+
+func TestReaderServicesAndSiteOverrides(t *testing.T) {
+	fg := newTestFG()
+	reader := v1alpha1.SiteSpec{
+		Name: "reader", Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
+		Storage: v1alpha1.StorageSpec{StorageClassName: "local", Size: resource.MustParse("10Gi")},
+		ServiceTemplate: &v1alpha1.SiteServiceTemplate{
+			Type: corev1.ServiceTypeNodePort, ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
+			NodePort: 31001, Annotations: map[string]string{"site": "reader"},
+		},
+	}
+	fg.Spec.ServiceTemplate = &v1alpha1.ServiceTemplate{Annotations: map[string]string{"group": "yes", "site": "group"}}
+	r, c := newReconciler(fg)
+	if err := r.reconcileSiteService(context.Background(), fg, reader); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reconcileInternalSiteService(context.Background(), fg, reader); err != nil {
+		t.Fatal(err)
+	}
+	var external corev1.Service
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "mysql-lion-reader", Namespace: fg.Namespace}, &external); err != nil {
+		t.Fatal(err)
+	}
+	if external.Spec.Selector[labelHealthy] != "yes" || len(external.Spec.Ports) != 1 || external.Spec.Ports[0].Name != "mysql" {
+		t.Fatalf("reader service = %#v", external.Spec)
+	}
+	if external.Spec.Ports[0].NodePort != 31001 || external.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal {
+		t.Fatalf("reader exposure not applied: %#v", external.Spec)
+	}
+	if external.Annotations["group"] != "yes" || external.Annotations["site"] != "reader" {
+		t.Fatalf("annotations = %v", external.Annotations)
+	}
+	var internal corev1.Service
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "mysql-lion-reader-internal", Namespace: fg.Namespace}, &internal); err != nil {
+		t.Fatal(err)
+	}
+	if internal.Spec.Type != corev1.ServiceTypeClusterIP || !internal.Spec.PublishNotReadyAddresses || internal.Spec.Selector[labelHealthy] != "" || len(internal.Spec.Ports) != 2 {
+		t.Fatalf("internal service = %#v", internal.Spec)
+	}
+}
+
+func TestMutateServiceSpecLifecycle(t *testing.T) {
+	svc := &corev1.Service{Spec: corev1.ServiceSpec{
+		ClusterIP: "10.0.0.10", ClusterIPs: []string{"10.0.0.10"}, Type: corev1.ServiceTypeNodePort,
+		Ports:               []corev1.ServicePort{{Name: "mysql", Port: mysqlPort, NodePort: 31000}},
+		HealthCheckNodePort: 32000, ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
+	}}
+	port := []corev1.ServicePort{{Name: "mysql", Port: mysqlPort}}
+	mutateServiceSpec(svc, corev1.ServiceTypeLoadBalancer, corev1.ServiceExternalTrafficPolicyLocal, nil, port)
+	if svc.Spec.Ports[0].NodePort != 31000 || svc.Spec.ClusterIP != "10.0.0.10" {
+		t.Fatalf("allocated fields not preserved: %#v", svc.Spec)
+	}
+	port[0].NodePort = 31001
+	mutateServiceSpec(svc, corev1.ServiceTypeNodePort, corev1.ServiceExternalTrafficPolicyCluster, nil, port)
+	if svc.Spec.Ports[0].NodePort != 31001 {
+		t.Fatalf("explicit nodePort not applied: %#v", svc.Spec.Ports)
+	}
+	mutateServiceSpec(svc, corev1.ServiceTypeClusterIP, "", nil, port)
+	if svc.Spec.Ports[0].NodePort != 0 || svc.Spec.ExternalTrafficPolicy != "" || svc.Spec.HealthCheckNodePort != 0 || svc.Spec.ClusterIP != "10.0.0.10" {
+		t.Fatalf("external to ClusterIP transition = %#v", svc.Spec)
+	}
+}
+
+func TestGenerateMyCnfSitePrecedenceAndProtectedSettings(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.MysqlConf = map[string]string{"max_connections": "600", "sync-binlog": "0", "gtid_mode": "OFF"}
+	site := fg.Spec.Sites[0]
+	site.MysqlConf = map[string]string{"max-connections": "700", "log_bin": "/unsafe"}
+	cnf := generateMyCnf(fg, site)
+	for _, want := range []string{"max-connections=700", "sync-binlog=0", "gtid-mode=ON", "log-bin=/var/lib/mysql/mysql-bin"} {
+		if !strings.Contains(cnf, want) {
+			t.Fatalf("my.cnf missing %q:\n%s", want, cnf)
+		}
+	}
+	fg2 := fg.DeepCopy()
+	fg2.Spec.MysqlConf = map[string]string{"max-connections": "600", "sync_binlog": "0", "gtid-mode": "OFF"}
+	if ComputeSpecHash(fg, site, nil, nil) != ComputeSpecHash(fg2, site, nil, nil) {
+		t.Fatal("normalized equivalent MySQL settings must hash identically")
+	}
+}
+
+func TestLegacyConfigMapCleanupIsReferenceDriven(t *testing.T) {
+	fg := newTestFG()
+	legacyName := "mysql-lion-config"
+	legacy := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: legacyName, Namespace: fg.Namespace}}
+	deployments := make([]client.Object, 0, len(fg.Spec.Sites))
+	for _, site := range fg.Spec.Sites {
+		deployments = append(deployments, &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: resourceName(fg.Name, site.Name), Namespace: fg.Namespace, Labels: commonLabels(fg.Name, site.Name)},
+			Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+				Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: legacyName}}},
+			}}}}},
+		})
+	}
+	objects := []client.Object{fg, legacy}
+	objects = append(objects, deployments...)
+	r, c := newReconciler(objects...)
+	if err := r.reconcileSiteConfigMaps(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.cleanupLegacyConfigMap(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	var retained corev1.ConfigMap
+	if err := c.Get(context.Background(), types.NamespacedName{Name: legacyName, Namespace: fg.Namespace}, &retained); err != nil {
+		t.Fatalf("referenced legacy map was deleted: %v", err)
+	}
+	for _, site := range fg.Spec.Sites {
+		var deployment appsv1.Deployment
+		nn := types.NamespacedName{Name: resourceName(fg.Name, site.Name), Namespace: fg.Namespace}
+		if err := c.Get(context.Background(), nn, &deployment); err != nil {
+			t.Fatal(err)
+		}
+		deployment.Spec.Template.Spec.Volumes[0].ConfigMap.Name = siteConfigMapName(fg.Name, site.Name)
+		if err := c.Update(context.Background(), &deployment); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.cleanupLegacyConfigMap(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: legacyName, Namespace: fg.Namespace}, &retained); err == nil {
+		t.Fatal("unreferenced legacy map was retained")
+	}
+	if err := r.cleanupLegacyConfigMap(context.Background(), fg); err != nil {
+		t.Fatalf("idempotent cleanup after deletion failed: %v", err)
+	}
+}
+
+func TestLegacyConfigMapCleanupRetentionMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind string
+	}{
+		{name: "missing desired configmap", kind: "missing-config"},
+		{name: "missing desired deployment", kind: "missing-deployment"},
+		{name: "desired deployment has unexpected reference", kind: "unexpected-reference"},
+		{name: "removed site deployment still references legacy", kind: "extra-legacy"},
+		{name: "uncached deployment list fails", kind: "list-error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := newTestFG()
+			legacyName := "mysql-lion-config"
+			objects := []client.Object{
+				fg,
+				&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: legacyName, Namespace: fg.Namespace}},
+			}
+			for i, site := range fg.Spec.Sites {
+				if tc.kind != "missing-config" || i != 0 {
+					objects = append(objects, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: siteConfigMapName(fg.Name, site.Name), Namespace: fg.Namespace}})
+				}
+				if tc.kind == "missing-deployment" && i == 0 {
+					continue
+				}
+				configName := siteConfigMapName(fg.Name, site.Name)
+				if tc.kind == "unexpected-reference" && i == 0 {
+					configName = "mysql-lion-wrong-config"
+				}
+				objects = append(objects, &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{Name: resourceName(fg.Name, site.Name), Namespace: fg.Namespace, Labels: commonLabels(fg.Name, site.Name)},
+					Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+						Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: configName}}},
+					}}}}},
+				})
+			}
+			if tc.kind == "extra-legacy" {
+				objects = append(objects, &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{Name: resourceName(fg.Name, "removed"), Namespace: fg.Namespace, Labels: commonLabels(fg.Name, "removed")},
+					Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+						Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: legacyName}}},
+					}}}}},
+				})
+			}
+			r, c := newReconciler(objects...)
+			r.APIReader = c
+			if tc.kind == "list-error" {
+				r.APIReader = failingListReader{Reader: c}
+			}
+			if err := r.cleanupLegacyConfigMap(context.Background(), fg); err != nil {
+				t.Fatal(err)
+			}
+			var legacy corev1.ConfigMap
+			if err := c.Get(context.Background(), types.NamespacedName{Name: legacyName, Namespace: fg.Namespace}, &legacy); err != nil {
+				t.Fatalf("legacy ConfigMap was deleted without complete reference proof: %v", err)
+			}
+		})
+	}
+}
+
+func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
+	lag0, lagHigh := int64(0), int64(301)
+	base := func() *v1alpha1.MysqlFailoverGroup {
+		fg := newTestFG()
+		fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "reader", Role: v1alpha1.SiteRoleReadOnly})
+		return fg
+	}
+	healthyStatuses := func() []v1alpha1.SiteStatus {
+		return []v1alpha1.SiteStatus{
+			{Name: "dc1", State: "writable"},
+			{Name: "dc2", State: "read-only", Replicating: true},
+			{Name: "reader", State: "read-only", Replicating: true, SourceHost: "mysql-lion-dc1-internal.shared-lion.svc.cluster.local", SourceConvergenceState: v1alpha1.SourceConvergenceConverged, SecondsBehindSource: &lag0},
+		}
+	}
+	for _, tc := range []struct {
+		name          string
+		configure     func(*v1alpha1.MysqlFailoverGroup)
+		wantPrimary   bool
+		wantReaderYes bool
+	}{
+		{name: "empty active", configure: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Status.Sites = healthyStatuses() }},
+		{name: "non-promotable active", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.ActiveSite = "reader"
+			fg.Status.Sites = healthyStatuses()
+			fg.Status.Sites[0].State = "read-only"
+			fg.Status.Sites[2].State = "writable"
+		}},
+		{name: "incomplete status", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.ActiveSite = "dc1"
+			fg.Status.Sites = healthyStatuses()[:2]
+		}},
+		{name: "source mismatch", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.ActiveSite = "dc1"
+			fg.Status.Sites = healthyStatuses()
+			fg.Status.Sites[2].SourceHost = "wrong"
+		}, wantPrimary: true},
+		{name: "thread failure", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.ActiveSite = "dc1"
+			fg.Status.Sites = healthyStatuses()
+			fg.Status.Sites[2].Replicating = false
+		}, wantPrimary: true},
+		{name: "lag failure", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.ActiveSite = "dc1"
+			fg.Status.Sites = healthyStatuses()
+			fg.Status.Sites[2].SecondsBehindSource = &lagHigh
+		}, wantPrimary: true},
+		{name: "healthy recovery", configure: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Status.ActiveSite = "dc1"
+			fg.Status.Sites = healthyStatuses()
+		}, wantPrimary: true, wantReaderYes: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := base()
+			tc.configure(fg)
+			primaryPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dc1-pod", Namespace: fg.Namespace, Labels: map[string]string{
+				labelAppName: "mysql", labelInstance: fg.Name, labelSite: "dc1", labelRole: "primary", labelHealthy: "yes",
+			}}}
+			readerPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "reader-pod", Namespace: fg.Namespace, Labels: map[string]string{
+				labelAppName: "mysql", labelInstance: fg.Name, labelSite: "reader", labelRole: "replica", labelHealthy: "yes",
+			}}}
+			r, c := newReconciler(fg, primaryPod, readerPod)
+			if err := r.syncPodLabels(context.Background(), fg); err != nil {
+				t.Fatal(err)
+			}
+			var gotPrimary, gotReader corev1.Pod
+			if err := c.Get(context.Background(), types.NamespacedName{Name: primaryPod.Name, Namespace: fg.Namespace}, &gotPrimary); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Get(context.Background(), types.NamespacedName{Name: readerPod.Name, Namespace: fg.Namespace}, &gotReader); err != nil {
+				t.Fatal(err)
+			}
+			if (gotPrimary.Labels[labelRole] == "primary") != tc.wantPrimary {
+				t.Fatalf("primary role label = %q, wantPrimary=%t", gotPrimary.Labels[labelRole], tc.wantPrimary)
+			}
+			if (gotReader.Labels[labelHealthy] == "yes") != tc.wantReaderYes {
+				t.Fatalf("reader healthy label = %q, wantHealthy=%t", gotReader.Labels[labelHealthy], tc.wantReaderYes)
+			}
+		})
 	}
 }
 
@@ -1119,7 +1431,7 @@ func TestBuildSiteDSNFromCreds(t *testing.T) {
 	if !strings.Contains(dsn, "myuser:mypass@") {
 		t.Errorf("DSN should contain credentials: %s", dsn)
 	}
-	if !strings.Contains(dsn, "mysql-lion-dc1.shared-lion.svc.cluster.local") {
+	if !strings.Contains(dsn, "mysql-lion-dc1-internal.shared-lion.svc.cluster.local") {
 		t.Errorf("DSN should contain site host: %s", dsn)
 	}
 	dsn = buildSiteDSNFromCreds("myuser", "mypass", fg, fg.Spec.Sites[0], "bloodraven-test-tls")
@@ -1224,11 +1536,9 @@ func TestReconcile_DefersDeploymentUpdateWhenManagerRunning(t *testing.T) {
 	}
 }
 
-// TestReconcile_AppliesDeploymentUpdateWhenNoManager verifies that when no
-// topology manager is running (initial deploy or pre-leader-election state),
-// the reconciler still applies Deployment updates directly. This is the
-// bootstrap path that must keep working even after the deferred-update change.
-func TestReconcile_AppliesDeploymentUpdateWhenNoManager(t *testing.T) {
+// TestReconcile_DefersExistingDeploymentWhenRunnerUnavailable verifies the
+// fail-safe behavior does not depend on manager wiring.
+func TestReconcile_DefersExistingDeploymentWhenRunnerUnavailable(t *testing.T) {
 	ctx := context.Background()
 	fg := newTestFG()
 	r, c := newReconciler(fg)
@@ -1247,7 +1557,7 @@ func TestReconcile_AppliesDeploymentUpdateWhenNoManager(t *testing.T) {
 		t.Fatalf("update CR: %v", err)
 	}
 
-	// No runner, no manager → reconciler must apply the update.
+	// No runner and no manager must still not permit a bulk existing update.
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
 		t.Fatalf("second reconcile failed: %v", err)
 	}
@@ -1256,10 +1566,108 @@ func TestReconcile_AppliesDeploymentUpdateWhenNoManager(t *testing.T) {
 	if err := c.Get(ctx, types.NamespacedName{Name: "mysql-lion-dc1", Namespace: "shared-lion"}, &d); err != nil {
 		t.Fatalf("get deployment: %v", err)
 	}
-	if d.Spec.Template.Spec.Containers[0].Image != "mysql:9.7.1" {
-		t.Errorf("expected image mysql:9.7.1 after reconcile (no manager), got %s",
-			d.Spec.Template.Spec.Containers[0].Image)
+	if d.Spec.Template.Spec.Containers[0].Image == "mysql:9.7.1" {
+		t.Errorf("existing deployment was updated outside the ordered path")
 	}
+}
+
+func TestReconcile_StartupDefersExistingDeploymentsBeforeManagerRegistration(t *testing.T) {
+	ctx := context.Background()
+	fg := newTestFG()
+	r, c := newReconciler(fg)
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The runner is wired as it is in production, but startup synchronization
+	// has not registered this group's manager yet.
+	r.Runner = &TopologyManagerRunner{managers: make(map[types.NamespacedName]*managedTopology)}
+	var fresh v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &fresh); err != nil {
+		t.Fatal(err)
+	}
+	fresh.Spec.Image = "mysql:startup-drift"
+	fresh.Spec.Sites = append(fresh.Spec.Sites, v1alpha1.SiteSpec{
+		Name: "reader", Role: v1alpha1.SiteRoleReadOnly,
+		Storage: v1alpha1.StorageSpec{StorageClassName: "local-reader", Size: resource.MustParse("10Gi")},
+	})
+	if err := c.Update(ctx, &fresh); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatal(err)
+	}
+	for _, site := range []string{"dc1", "dc2"} {
+		var deployment appsv1.Deployment
+		if err := c.Get(ctx, types.NamespacedName{Name: resourceName(fg.Name, site), Namespace: fg.Namespace}, &deployment); err != nil {
+			t.Fatal(err)
+		}
+		if got := deployment.Spec.Template.Spec.Containers[0].Image; got == "mysql:startup-drift" {
+			t.Fatalf("existing deployment %s was patched before ordered updater registration", site)
+		}
+	}
+	var reader appsv1.Deployment
+	if err := c.Get(ctx, types.NamespacedName{Name: resourceName(fg.Name, "reader"), Namespace: fg.Namespace}, &reader); err != nil {
+		t.Fatalf("genuinely missing reader deployment was not created: %v", err)
+	}
+}
+
+func TestReconcile_HashlessLegacyDeploymentsQueueOrderedDrift(t *testing.T) {
+	ctx := context.Background()
+	fg := newTestFG()
+	objects := []client.Object{fg}
+	for _, site := range fg.Spec.Sites {
+		objects = append(objects, &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: resourceName(fg.Name, site.Name), Namespace: fg.Namespace,
+				Labels: commonLabels(fg.Name, site.Name),
+			},
+			Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "mysql", Image: "mysql:legacy"}},
+			}}},
+		})
+	}
+	r, c := newReconciler(objects...)
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bulk reconciliation must leave both hashless legacy Deployments untouched.
+	for _, site := range fg.Spec.Sites {
+		var deployment appsv1.Deployment
+		if err := c.Get(ctx, types.NamespacedName{Name: resourceName(fg.Name, site.Name), Namespace: fg.Namespace}, &deployment); err != nil {
+			t.Fatal(err)
+		}
+		if got := deployment.Annotations[specHashAnnotation]; got != "" {
+			t.Fatalf("hashless deployment %s was bulk-patched with hash %q", site.Name, got)
+		}
+		if got := deployment.Spec.Template.Spec.Containers[0].Image; got != "mysql:legacy" {
+			t.Fatalf("legacy deployment %s was bulk-patched to %q", site.Name, got)
+		}
+	}
+
+	logger := testLogger()
+	runner := &TopologyManagerRunner{client: c, logger: logger, managers: make(map[types.NamespacedName]*managedTopology)}
+	tm := NewTopologyManager(testTopologyConfig(), []internalmysql.Checker{
+		&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true},
+	}, NewFailoverController(logger), nil, nil, BootstrapConfig{}, newMockTainter(), platform.NewHub(logger), &mockDNS{}, logger)
+	runner.checkSpecDrift(ctx, fg, tm)
+	tm.mu.RLock()
+	drift := append([]string(nil), tm.specDriftSites...)
+	tm.mu.RUnlock()
+	if strings.Join(drift, ",") != "dc1,dc2" {
+		t.Fatalf("hashless existing deployments queued drift %v, want [dc1 dc2]", drift)
+	}
+}
+
+type failingListReader struct {
+	client.Reader
+}
+
+func (r failingListReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errors.New("list failed")
 }
 
 // TestWaitForDeploymentRollout_ReadyReturnsImmediately verifies the wait

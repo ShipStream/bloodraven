@@ -104,13 +104,13 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 		// digging through operator logs for a real fault when the
 		// fix is just to wipe stale status.
 		if bothReadOnly(mfg) {
-			return fmt.Errorf("baseline unhealthy: operator sees both sites read-only and refuses to auto-promote (matrix.go startup-state guard) — run ./playground/reset-mysql.sh")
+			return fmt.Errorf("baseline unhealthy: operator sees all sites read-only and refuses to auto-promote (matrix.go startup-state guard) — run ./playground/reset-mysql.sh")
 		}
 		return fmt.Errorf("baseline unhealthy: Ready condition is %q (run ./playground/setup.sh)", pgkube.ReadyCondition(mfg))
 	}
 	if mfg.Status.ActiveSite == "" {
 		if bothReadOnly(mfg) {
-			return fmt.Errorf("baseline unhealthy: operator sees both sites read-only and refuses to auto-promote (matrix.go startup-state guard) — run ./playground/reset-mysql.sh")
+			return fmt.Errorf("baseline unhealthy: operator sees all sites read-only and refuses to auto-promote (matrix.go startup-state guard) — run ./playground/reset-mysql.sh")
 		}
 		return fmt.Errorf("baseline unhealthy: no active site (run ./playground/setup.sh)")
 	}

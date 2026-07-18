@@ -31,6 +31,13 @@ matches your expectations.
 - If you require synchronous commit semantics or quorum-based zero RPO
   on primary loss, Bloodraven is the wrong tool; see
   [Why not Group Replication?](./why-not-group-replication.mdx).
+- Read-only sites are full MySQL replicas. Filtered or partial replication,
+  replication proxying, and query routing through an operator-managed proxy
+  are not implemented.
+- Clone and reclone copy from the active primary at full speed. Bloodraven
+  does not throttle clone traffic, so adding or rebuilding a large reader can
+  consume primary network, storage, and CPU capacity. Schedule the operation
+  and monitor the donor accordingly.
 
 ## Operator availability
 
@@ -65,6 +72,8 @@ matches your expectations.
   into a separate Kubernetes cluster from the source backup archive.
   See [Multi-cluster DR](./multi-cluster-dr.mdx) for the end-to-end
   runbook using `spec.initFromBackup` with optional PITR replay.
+- `read-only` sites cannot be selected for scheduled, automatic, or
+  source-overridden backups. Healthy `dr-only` followers remain eligible.
 
 ## Dragonfly co-management
 
@@ -93,8 +102,9 @@ matches your expectations.
 
 - Grafana dashboards and metrics are shipped, but PrometheusRule alert
   examples are not yet packaged as first-class chart artifacts.
-- There is no `kubectl bloodraven` plugin yet. Use annotations,
-  `kubectl get`, and `kubectl describe` for operations.
+- The `kubectl bloodraven` plugin wraps supported day-2 operations, but it
+  remains a thin API client; the operator performs the authoritative safety
+  checks.
 
 ## External dependencies
 

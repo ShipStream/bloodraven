@@ -78,8 +78,23 @@ For a `MysqlFailoverGroup` named `orders` in namespace `default`, the operator c
 |---|---|---|
 | `mysql-orders-primary` | `mysql-orders-primary.default.svc.cluster.local:3306` | Writes. Always points to the active primary. |
 | `mysql-orders-replicas` | `mysql-orders-replicas.default.svc.cluster.local:3306` | Reads. Points to healthy read replicas. |
-| `mysql-orders-iad` | `mysql-orders-iad.default.svc.cluster.local:3306` | Direct access to the `iad` site instance. |
-| `mysql-orders-pdx` | `mysql-orders-pdx.default.svc.cluster.local:3306` | Direct access to the `pdx` site instance. |
+| `mysql-orders-iad` | `mysql-orders-iad.default.svc.cluster.local:3306` | Client-facing access to the `iad` site instance. |
+| `mysql-orders-pdx` | `mysql-orders-pdx.default.svc.cluster.local:3306` | Client-facing access to the `pdx` site instance. |
+| `mysql-orders-reader` | `mysql-orders-reader.default.svc.cluster.local:3306` | Health-gated site-specific read pool for a `read-only` site. |
+| `mysql-orders-<site>-internal` | `mysql-orders-<site>-internal.default.svc.cluster.local` | Operator-only administrative route for MySQL `3306` and the sidecar. Do not use from applications. |
+
+Client-facing site Services expose only the named MySQL port. The sidecar is
+not externally exposed and never receives a NodePort. Internal Services are
+always `ClusterIP`, set `publishNotReadyAddresses: true`, and do not select on
+the reader's `healthy` label. This preserves the operator's route for probes,
+replication repair, clone, backup, and sidecar peer traffic even while the
+reader pod is not ready or its application endpoint has been shed.
+
+When `spec.tls` is enabled, operator Go clients dial the internal Service but
+continue verifying the existing client-facing site hostname as TLS
+`ServerName`; existing certificates do not need to add the `-internal` name.
+Strict hostname verification configured inside MySQL-native replication or
+clone is separate and must trust the internal Service hostname.
 
 When `spec.dragonfly.enabled=true`, Bloodraven also owns the cache/session endpoints for the same failover group:
 
@@ -334,3 +349,30 @@ A replica is considered healthy when:
 - Its replication lag is within `spec.replication.maxLagSeconds`
 
 If no healthy replicas exist, the Service will have no endpoints. Applications reading from the replicas Service should handle this by falling back to the primary or surfacing an error.
+
+## Site-specific reader pools
+
+A site with `role: read-only` is a non-promotable follower intended for a
+local application read pool. Connect to its client-facing site Service, for
+example `mysql-orders-reader.default.svc.cluster.local:3306`. Never send
+writes to it: readers are held in `super_read_only`, are excluded from
+promotion and active DNS, and do not participate in application node taints.
+
+The reader Service publishes an endpoint only when the latest debounced
+topology snapshot confirms all of the following:
+
+- MySQL is read-only.
+- Both replication I/O and SQL threads are healthy.
+- `sourceConvergenceState` is `Converged` and the canonical `Source_Host`
+  directly names the uniquely confirmed active primary.
+- Replication lag is known and is less than or equal to
+  `spec.replication.readOnlyMaxLagSeconds`. When omitted, this inherits
+  `maxLagSeconds`; explicit zero means only zero lag is accepted.
+
+If any check fails, Kubernetes removes the reader from the client Service at
+the normal topology poll cadence. Existing connections are not an
+operator-managed proxy and are not forcibly killed; applications must handle
+connection errors and retry. Direct pod access and the internal Service remain
+available to the operator for diagnosis and recovery. Reader failures remain
+visible in site status and metrics but do not set the failover group's shared
+`Ready=False` or `Degraded=True` conditions.

@@ -18,7 +18,7 @@ The runner stamps an in-progress marker (`chaos.playground.bloodraven.io/in-prog
 - `--force` — delete any prior marker before preflight (banner printed).
 - `--auto-reset` — on Precheck failure, shell out to `./playground/reset-mysql.sh && ./playground/setup.sh`, then retry the scenario once. Wipes data; 3-second confirmation pause unless `CI=1`.
 
-`chaos-check` runs the same structural baseline scenarios use (stuck scale-to-0 deployments, bogus `lastFailoverTarget`, anti-flap cooldown still ticking, both-sites-read-only `NoPrimary` symptom, replication off on a non-active candidate) and prints `inProgress: yes/no + summary`. Each error includes the exact remediation command, so `chaos-check` is the fastest way to decide whether to re-run, `--force`, or reset.
+`chaos-check` runs the same structural baseline scenarios use (stuck scale-to-0 deployments, bogus `lastFailoverTarget`, anti-flap cooldown still ticking, all-sites-read-only `NoPrimary` symptom, replication off on a non-active candidate) and prints `inProgress: yes/no + summary`. Each error includes the exact remediation command, so `chaos-check` is the fastest way to decide whether to re-run, `--force`, or reset.
 
 After each scenario, standard cleanup waits for the MFG `Ready=True` condition, stable MySQL site states, and, when `spec.dragonfly.enabled=true`, `status.dragonfly.phase=Ready` with exactly one master and healthy replicas. This keeps `run-all` from starting the next scenario while Dragonfly is still recovering from an expected REPLTAKEOVER or pod restart.
 
@@ -30,14 +30,14 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `02-operator-kill-restart` (§2; negative-assertion — verifies activeSite stable and no SELF-FENCING during operator restart)
 - `02-planned-switchover` (§S; planned-failover state machine — annotates the MFG with `bloodraven.shipstream.io/planned-failover=<peer>`, asserts `Validating→Draining→WaitingForLag→Promoting→Resuming→Succeeded`, `transactionsLost==0`, and the `bloodraven_planned_failovers_total{result="success"}` increment)
 - `04-data-integrity-on-failover` (§4; seeds rows, blocks on `WAIT_FOR_EXECUTED_GTID_SET`, kills primary, asserts `GTID_SUBSET(pre, post)=1` and full row count on the new primary)
-- `05-operator-kill-during-failover` (§5; scales the active primary to 0, sleeps 1s, kills the operator pod, asserts the cluster reconverges to 1 writable + 1 read-only with `Ready=True` and neither sidecar emitted SELF-FENC during the operator-down gap)
+- `05-operator-kill-during-failover` (§5; scales the active primary to 0, sleeps 1s, kills the operator pod, asserts the cluster reconverges to 1 writable + all followers read-only with `Ready=True` and no sidecar emitted SELF-FENC during the operator-down gap)
 - `05-split-brain-auto-resolve` (§SBR; requires `spec.splitBrainPolicy.sitePriorities` set — clears `super_read_only` on the read-only site to force both writable, asserts the operator fences the non-preferred site, increments `bloodraven_split_brain_auto_resolve_total{prefer_site=...}`, and logs `split-brain auto-resolve`)
-- `06-self-fence-isolated-primary` (§6; scales operator AND peer to 0 — true isolation path, complements `09-`)
+- `06-self-fence-isolated-primary` (§6; scales operator AND every non-self peer, including the reader, to 0 — true isolation path, complements `09-`)
 - `08-gtid-divergence-detection` (§8; manufactures a rogue write on the old primary, asserts `recoveryState=RecoveryBlocked` + `divergentTransactionCount>0` + `divergence detected` log; auto-reclones in cleanup)
 - `09-anti-flap-cooldown` (§9; force-deletes the active primary, waits for failover + the original primary to come back as a reachable read-only candidate, then scales the new primary to 0 inside `failoverCooldown` and asserts `failovers_total` increments by exactly 1 across all sites — best-effort log scan for `failover blocked by anti-flap cooldown`)
 - `09-network-partition-self-fence` (§3 of this doc, NetworkPolicy partition path)
-- `10-full-bootstrap-after-data-wipe` (§10; scales replica to 0, scrubs the per-FG readonly taint from every node, deletes the replica's data PVC, and waits for the operator's `Bootstrapping` condition to cycle through `Cloning` → `WaitingForRestart` → `SetupReplication` → `Done` with replica IO+SQL threads ON at the end)
-- `11-total-loss-recovery` (§11; scales both sites to 0, asserts `TOTAL LOSS: all sites are unreachable` log + reconvergence)
+- `10-full-bootstrap-after-data-wipe` (§10; scales a candidate replica to 0, scrubs the per-FG readonly taint from every node, deletes that replica's data PVC, and waits for the operator's `Bootstrapping` condition to cycle through `Cloning` → `WaitingForRestart` → `SetupReplication` → `Done` with replica IO+SQL threads ON at the end)
+- `11-total-loss-recovery` (§11; scales every site to 0, asserts `TOTAL LOSS: all sites are unreachable` log + reconvergence)
 - `12-old-primary-recovery-no-divergence` (§7 of this doc; recovery without divergence)
 - `12-rolling-update-healthy-state` (§12; patches `spec.sites[*].resources.requests.memory` and asserts `status.updatePhase` engages then returns to empty, both deployments end at the new memory request, no `TOTAL LOSS` log fires during the roll)
 - `13-operator-kill-during-bootstrap` (§13; wipes the read-only site's PVC, scales it back up, then kills the operator pod once `Bootstrapping=True` and asserts the replacement operator drives the clone to `Status=False Reason=Done` with replica IO+SQL threads ON — runs `ResetBeforeRunAll` so `lastFailoverTarget` is empty when the precondition gate runs)
@@ -68,6 +68,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `37-pitr-archive-handoff-across-failover` (§37; marker A archived on the old active, emergency failover, marker B archived on the new active; a timestamp verification replays baseline+A+B and excludes C across both per-site manifests — `ResetBeforeRunAll`)
 - `38-dnsendpoint-write-denial-during-failover` (§38; denies the operator write verbs on `dnsendpoints`, forces promotion; the DNSEndpoint target stays stale during denial then heals to the promoted LBIP within 90s after RBAC restore with no re-failover)
 - `39-dragonfly-master-partition` (§39; deny-all NetworkPolicy on only the Dragonfly master pod promotes the surviving replica; MySQL `status.activeSite` and failover counters are unchanged)
+- `40-reader-data-loss-reclone` (§40; release-profile reader PVC replacement, continuous `Ready=True`, auto-clone donor/internal-host log assertion, direct-source/thread/lag/marker recovery, client EndpointSlice shedding, and internal endpoint publication)
 
 Scenarios `32`–`39` are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. As of 2026-07-11, all eight have passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). All eight remain full-profile-only while this new, high-risk coverage matures. Scenarios `36` and `37` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
 
@@ -79,9 +80,9 @@ The runner refuses to mutate any kubectl context that does not match the same al
 
 ## Prerequisites
 
-1. Create k3d cluster: `k3d cluster create bloodraven --agents 2 --k3s-arg '--tls-san=<hostname>@server:0'`
+1. Create k3d cluster: `k3d cluster create bloodraven --agents 3 --k3s-arg '--tls-san=<hostname>@server:0'`
 2. Run playground setup: `./playground/setup.sh`
-3. Verify healthy state: `kubectl -n bloodraven-playground get mysqlfailovergroups -o wide` shows one writable, one read-only
+3. Verify healthy state: `kubectl -n bloodraven-playground get mysqlfailovergroups -o wide` shows one writable and two read-only followers
 
 Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), `failoverCooldown=30s`, sidecar `leaseTimeout=20s`, `peerCheckInterval=5s`.
 
@@ -123,7 +124,7 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 
 **Injection**: `./playground/chaos.sh kill-operator`
 
-**Verify**: activeSite unchanged, both MySQL sites unchanged, zero "SELF-FENC" in sidecar logs, operator logs show clean startup.
+**Verify**: activeSite unchanged, every MySQL site unchanged, zero "SELF-FENC" in sidecar logs, operator logs show clean startup.
 
 ---
 
@@ -177,7 +178,7 @@ kubectl -n bloodraven-playground exec deploy/mysql-playground-<primary> -c mysql
 ### 6. Self-Fencing Validation
 **Category**: Split-brain prevention | **Risk**: Medium
 
-**Hypothesis**: Fully isolate primary (scale operator=0, scale replica=0). Sidecar self-fences at ~T+20s.
+**Hypothesis**: Fully isolate primary (scale operator=0, scale every non-self peer including the reader=0). Sidecar self-fences at ~T+20s.
 
 **Injection**:
 ```bash
@@ -266,14 +267,14 @@ The anti-flap code (topology.go) is unit-tested but requires a scenario where on
 ### 11. Simultaneous Both-Site Kill
 **Category**: Total loss / graceful degradation | **Risk**: High
 
-**Hypothesis**: Both MySQL deployments scaled to 0 -> TOTAL LOSS alert fires, no panic -> both come back -> operator re-establishes topology without manual intervention.
+**Hypothesis**: Every MySQL deployment scaled to 0 -> TOTAL LOSS alert fires, no panic -> all come back -> operator re-establishes topology without manual intervention.
 
 **Injection**:
 ```bash
 NS=bloodraven-playground
-kubectl -n $NS scale deployment mysql-playground-iad mysql-playground-pdx --replicas=0
+kubectl -n $NS scale deployment mysql-playground-iad mysql-playground-pdx mysql-playground-reader --replicas=0
 # Wait 15s for TOTAL LOSS alert
-kubectl -n $NS scale deployment mysql-playground-iad mysql-playground-pdx --replicas=1
+kubectl -n $NS scale deployment mysql-playground-iad mysql-playground-pdx mysql-playground-reader --replicas=1
 ```
 
 **Verify**: Operator logs "TOTAL LOSS: both sites are unreachable" during outage. After recovery, one site writable, one read-only, replication running. No operator crash or permanent degraded state.
@@ -706,7 +707,7 @@ Fail-back behavior is intentionally GTID-freshest/current-state-driven. When an 
 
 **Injection**: `make chaos-run SCENARIO=22-replication-status-after-recovery`. The runner scales the active primary to 0, waits for failover, scales it back up, waits for re-convergence, then reads the CR.
 
-**Verify**: Within 30s of `writable=1 read-only=1`, `mfg.Status.Sites[i].Replicating == true` for the read-only site. The scenario also probes the sidecar `/status` endpoint as a cross-check; if the sidecar reports replication running but the CR field is false, that is exactly the bug WISHLIST #36 describes.
+**Verify**: Within 30s of `writable=1 read-only=N-1`, `mfg.Status.Sites[i].Replicating == true` for the recovered candidate follower. The scenario also probes the sidecar `/status` endpoint as a cross-check; if the sidecar reports replication running but the CR field is false, that is exactly the bug WISHLIST #36 describes.
 
 **Cleanup**: Standard runner cleanup. No manual steps required.
 
@@ -887,7 +888,7 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 ### 34. Operator Kill During Ordered-Update WaitReplica
 **Category**: Ordered update / operator resilience | **Risk**: High | **Profile**: full-only
 
-**Hypothesis**: Killing the operator while an ordered update is held at `WaitReplica` does not double-roll both MySQL pods or cause `TOTAL LOSS`. The replacement operator, whose in-memory update phase was lost, re-derives remaining drift from the Deployment spec-hash mismatch and completes the roll.
+**Hypothesis**: Killing the operator while an ordered update is held at `WaitReplica` does not double-roll all MySQL pods or cause `TOTAL LOSS`. The replacement operator, whose in-memory update phase was lost, re-derives remaining drift from the Deployment spec-hash mismatch and completes the roll.
 
 **Injection**: Patch `spec.sites[*].resources.requests.memory`; wait for `status.updatePhase` to engage (preferably `WaitReplica`); apply an **ingress-only** deny NetworkPolicy to the standby MySQL pod so the operator's health check of the freshly-rolled standby fails (egress/replication stays open, satisfying the updater's replicating-standby precondition once lifted); force-delete the operator pod; after the replacement is Available, remove the hold.
 
@@ -1026,6 +1027,7 @@ These two scenarios cover state-machine paths that don't fit the §1-§30 emerge
 
 - `status.plannedFailover.phase` reaches `Succeeded` with `target=<peer>` (stale plannedFailover blocks left over from prior runs are ignored via the `StartTime` check, so this assertion is robust under rerun).
 - `status.plannedFailover.transactionsLost` is populated and equals 0.
+- Direct `SHOW REPLICA STATUS` on every non-active follower reports both threads running and `Source_Host=mysql-playground-<new-active>-internal.bloodraven-playground.svc.cluster.local`; this explicitly covers the demoted old primary and the reader.
 - `bloodraven_planned_failovers_total{target_site=<peer>,result="success"}` increments.
 
 **Note**: Single-scenario `run` will fail precheck if the cluster already has an in-flight `plannedFailover` in a non-terminal phase. The runner's standard cleanup waits for `Ready=True` before the next scenario starts, so `run-all` does not need to reset between this and the next entry.
@@ -1054,6 +1056,27 @@ kubectl -n bloodraven-playground patch mysqlfailovergroup playground --type json
 - The operator log contains `split-brain auto-resolve` (canonical msg from `internal/controller/topology.go`).
 
 **Cleanup**: None scenario-level — the runner's `GlobalRecover` and the operator's next reconcile re-assert `super_read_only` on the standby.
+
+---
+
+### 40. Reader Data Loss and Auto-Clone {#40-reader-data-loss-and-auto-clone}
+**Category**: Reader recovery and endpoint safety | **Risk**: High
+
+**Hypothesis**: Losing only the dedicated `read-only` reader's local data does not affect failover-group readiness or the writable primary. The operator removes the unhealthy reader from its client Service, recreates it from the confirmed active primary, converges it to a direct source, and republishes it only after threads and lag are healthy.
+
+**Injection**: `make chaos-run SCENARIO=40-reader-data-loss-reclone`. The scenario verifies that the reader is on the `zone-reader` worker, scales its Deployment to zero, deletes and observes replacement of its PVC UID, then scales it back to one. This deterministic local-PV replacement is the playground interpretation of reader node/storage loss; it avoids relying on literal node deletion and cloud volume behavior.
+
+**Verify**:
+
+- Exactly one spec site has effective role `read-only`; its pod is on a dedicated `zone-reader` worker.
+- A marker written to the active primary is visible on the reader before loss and after recovery.
+- A continuous observer fails immediately if the group `Ready` condition is ever not `True` during scale-down, empty-datadir detection, clone, or catch-up.
+- Operator logs contain `starting bootstrap` with `source=auto-clone`, `donor=<captured-active>`, `recipient=reader`, and `donorHost=mysql-playground-<captured-active>-internal.bloodraven-playground.svc.cluster.local`.
+- The active site never changes. Final reader status is `State=read-only`, `SourceConvergenceState=Converged`, direct `SourceHost`, known lag at or below `readOnlyMaxLagSeconds`, and live MySQL IO/SQL threads running.
+- The reader client Service exposes only MySQL and has no serving EndpointSlice target while unhealthy. After convergence it has exactly the replacement reader pod.
+- The reader internal Service remains `ClusterIP`, exposes MySQL and sidecar, has `publishNotReadyAddresses=true`, does not use the healthy selector, and publishes the replacement pod while it is unready.
+
+**Cleanup**: The PVC is intentionally replaced. The Deployment scale is restored immediately and the scenario does not finish until direct healthy replication and the client endpoint return. Standard runner forensics and cleanup remain active on every failure path.
 
 ---
 

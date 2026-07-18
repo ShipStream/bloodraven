@@ -21,6 +21,13 @@ import (
 
 // --- selectSourceSite ----------------------------------------------------
 
+func backupTestGroup(status *v1alpha1.MysqlFailoverGroupStatus) *v1alpha1.MysqlFailoverGroup {
+	return &v1alpha1.MysqlFailoverGroup{
+		Spec:   v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},
+		Status: *status,
+	}
+}
+
 func TestSelectSourceSite_ReplicaHealthy_PicksReplica(t *testing.T) {
 	lag := int64(30)
 	status := &v1alpha1.MysqlFailoverGroupStatus{
@@ -30,7 +37,7 @@ func TestSelectSourceSite_ReplicaHealthy_PicksReplica(t *testing.T) {
 			{Name: "pdx", State: "read-only", Replicating: true, SecondsBehindSource: &lag},
 		},
 	}
-	site, reason, err := selectSourceSite(status, "", 300)
+	site, reason, err := selectSourceSite(backupTestGroup(status), "", 300)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -51,7 +58,7 @@ func TestSelectSourceSite_ReplicaLagging_FallsBackToPrimary(t *testing.T) {
 			{Name: "pdx", State: "read-only", Replicating: true, SecondsBehindSource: &lag},
 		},
 	}
-	site, reason, err := selectSourceSite(status, "", 300)
+	site, reason, err := selectSourceSite(backupTestGroup(status), "", 300)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -71,7 +78,7 @@ func TestSelectSourceSite_ReplicaUnreachable_FallsBackToPrimary(t *testing.T) {
 			{Name: "pdx", State: "unreachable"},
 		},
 	}
-	site, _, err := selectSourceSite(status, "", 300)
+	site, _, err := selectSourceSite(backupTestGroup(status), "", 300)
 	if err != nil || site != "iad" {
 		t.Fatalf("want iad, got site=%s err=%v", site, err)
 	}
@@ -85,7 +92,7 @@ func TestSelectSourceSite_NoHealthySource_Error(t *testing.T) {
 			{Name: "pdx", State: "unreachable"},
 		},
 	}
-	if _, _, err := selectSourceSite(status, "", 300); err == nil {
+	if _, _, err := selectSourceSite(backupTestGroup(status), "", 300); err == nil {
 		t.Fatal("expected error when both sites unhealthy")
 	}
 }
@@ -98,7 +105,7 @@ func TestSelectSourceSite_OverrideWins(t *testing.T) {
 			{Name: "pdx", State: "unreachable"},
 		},
 	}
-	site, reason, err := selectSourceSite(status, "pdx", 300)
+	site, reason, err := selectSourceSite(backupTestGroup(status), "pdx", 300)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -115,8 +122,29 @@ func TestSelectSourceSite_OverrideUnknown_Error(t *testing.T) {
 			{Name: "pdx", State: "read-only"},
 		},
 	}
-	if _, _, err := selectSourceSite(status, "nope", 300); err == nil {
+	if _, _, err := selectSourceSite(backupTestGroup(status), "nope", 300); err == nil {
 		t.Fatal("expected error for unknown override site")
+	}
+}
+
+func TestSelectSourceSite_ExcludesReadOnlyRole(t *testing.T) {
+	lag := int64(0)
+	fg := &v1alpha1.MysqlFailoverGroup{
+		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{
+			{Name: "iad"}, {Name: "pdx", Role: v1alpha1.SiteRoleDROnly}, {Name: "reader", Role: v1alpha1.SiteRoleReadOnly},
+		}},
+		Status: v1alpha1.MysqlFailoverGroupStatus{ActiveSite: "iad", Sites: []v1alpha1.SiteStatus{
+			{Name: "iad", State: "writable"},
+			{Name: "reader", State: "read-only", Replicating: true, SecondsBehindSource: &lag},
+			{Name: "pdx", State: "read-only", Replicating: true, SecondsBehindSource: &lag},
+		}},
+	}
+	site, _, err := selectSourceSite(fg, "", 300)
+	if err != nil || site != "pdx" {
+		t.Fatalf("selected %q, err=%v", site, err)
+	}
+	if _, _, err := selectSourceSite(fg, "reader", 300); err == nil {
+		t.Fatal("explicit reader backup source must be rejected")
 	}
 }
 
@@ -212,7 +240,7 @@ func TestBuildBackupJob_S3_EnvAndConfig(t *testing.T) {
 	for _, e := range c.Env {
 		envMap[e.Name] = e.Value
 	}
-	if h := envMap["BLOODRAVEN_MYSQL_HOST"]; !strings.Contains(h, "mysql-lion-pdx.ns.svc.cluster.local:3306") {
+	if h := envMap["BLOODRAVEN_MYSQL_HOST"]; !strings.Contains(h, "mysql-lion-pdx-internal.ns.svc.cluster.local:3306") {
 		t.Errorf("bad host env: %q", h)
 	}
 	if envMap["BLOODRAVEN_S3_BUCKET"] != "bloodraven-backups" {

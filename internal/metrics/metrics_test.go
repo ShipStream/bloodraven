@@ -35,3 +35,20 @@ func TestRegisterIncludesRestoreMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestRegisterIncludesReplicationSourceState(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	Register(reg)
+	ReplicationSourceState.WithLabelValues("reader", "converged").Set(1)
+	defer ReplicationSourceState.DeleteLabelValues("reader", "converged")
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == "bloodraven_replication_source_state" {
+			return
+		}
+	}
+	t.Fatal("replication source state metric was not registered")
+}

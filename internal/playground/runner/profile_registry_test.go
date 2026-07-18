@@ -18,19 +18,22 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 		t.Fatalf("smoke profile selected %d scenarios, want 3", len(smoke))
 	}
 
-	// The release subset lists 12 members, all of which are now selected:
+	// The release subset lists 13 members, all of which are now selected:
 	// 31-pitr-verification-rustfs is no longer quarantined (#101 fixed — the
 	// verify mysqld runs gtid_mode=ON and server-side dedup handles the PITR
 	// replay).
 	release := runner.SelectForProfile(all, runner.ProfileRelease)
-	if len(release) != 12 {
-		t.Fatalf("release profile selected %d scenarios, want 12", len(release))
+	if len(release) != 13 {
+		t.Fatalf("release profile selected %d scenarios, want 13", len(release))
 	}
 	if !containsScenarioID(release, "09-network-partition-self-fence") {
 		t.Error("release profile must include 09-network-partition-self-fence (no longer quarantined)")
 	}
 	if !containsScenarioID(release, "31-pitr-verification-rustfs") {
 		t.Error("31-pitr-verification-rustfs is no longer quarantined (#101) and must be in the release profile")
+	}
+	if !containsScenarioID(release, "40-reader-data-loss-reclone") {
+		t.Error("40-reader-data-loss-reclone must be in the release profile")
 	}
 
 	// full = every registered scenario minus any that are quarantined. Computed

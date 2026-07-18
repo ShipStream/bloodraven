@@ -156,6 +156,70 @@ func TestEvalCrossSite_ThreeSite(t *testing.T) {
 	})
 }
 
+func TestEvalCrossSite_ReadOnlyReaderIsolation(t *testing.T) {
+	pc := SiteRolePrimaryCandidate
+	reader := SiteRoleReadOnly
+	dr := SiteRoleDROnly
+
+	tests := []struct {
+		name       string
+		obs        []SiteObservation
+		wantReason string
+		wantFence  []string
+	}{
+		{
+			name: "reader outage does not degrade healthy core",
+			obs: []SiteObservation{
+				obs("iad", pc, StateWritable), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateUnreachable),
+			},
+			wantReason: "Healthy",
+		},
+		{
+			name: "writable reader is fenced but not split brain",
+			obs: []SiteObservation{
+				obs("iad", pc, StateWritable), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateWritable),
+			},
+			wantReason: "Degraded",
+			wantFence:  []string{"reader"},
+		},
+		{
+			name: "writable dr-only degrades healthy candidate topology",
+			obs: []SiteObservation{
+				obs("iad", pc, StateWritable), obs("pdx", pc, StateReadOnly), obs("dr", dr, StateWritable),
+			},
+			wantReason: "Degraded",
+			wantFence:  []string{"dr"},
+		},
+		{
+			name: "sole writable reader is not a primary",
+			obs: []SiteObservation{
+				obs("iad", pc, StateReadOnly), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateWritable),
+			},
+			wantReason: "NoPrimary",
+			wantFence:  []string{"reader"},
+		},
+		{
+			name: "writable dr only is fenced and not primary",
+			obs: []SiteObservation{
+				obs("iad", pc, StateReadOnly), obs("pdx", pc, StateReadOnly), obs("dr", dr, StateWritable),
+			},
+			wantReason: "NoPrimary",
+			wantFence:  []string{"dr"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EvalCrossSite(tt.obs, nil)
+			if got.Reason != tt.wantReason || !equalStrings(got.FenceSites, tt.wantFence) {
+				t.Fatalf("EvalCrossSite() = %+v, want reason=%s fence=%v", got, tt.wantReason, tt.wantFence)
+			}
+			if got.SplitBrain {
+				t.Fatal("non-promotable writable site must not create split brain")
+			}
+		})
+	}
+}
+
 func TestRankPromotionCandidates(t *testing.T) {
 	pc := SiteRolePrimaryCandidate
 	dr := SiteRoleDROnly

@@ -9,7 +9,8 @@ package runner
 //     behaviours (emergency failover, planned switchover, operator restart,
 //     data integrity, operator kill during failover, self-fencing,
 //     network partition, PVC loss/re-bootstrap, old-primary recovery,
-//     failover state durability, backup verification, PITR verification).
+//     failover state durability, backup verification, PITR verification,
+//     reader PVC loss, and direct-source auto-clone).
 //   - full:   every registered scenario (existing run-all behaviour).
 type Profile string
 
@@ -54,6 +55,7 @@ var releaseScenarios = map[string]bool{
 	"23-failover-state-durability":          true, // state survives operator restart
 	"30-backup-verification-rustfs":         true, // RustFS backup restore verification
 	"31-pitr-verification-rustfs":           true, // RustFS PITR replay verification
+	"40-reader-data-loss-reclone":           true, // reader PVC loss, endpoint shedding, and direct-source auto-clone
 }
 
 // Profiles returns the list of valid profile names for CLI help and

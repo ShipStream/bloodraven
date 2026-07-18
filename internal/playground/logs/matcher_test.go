@@ -44,3 +44,21 @@ func TestTailerWaitTimeoutReturnsCtxErr(t *testing.T) {
 		t.Fatalf("expected timeout error, got nil")
 	}
 }
+
+func TestStructuredMatchesJSONAndText(t *testing.T) {
+	pred := Structured("starting bootstrap", map[string]string{
+		"source":    "auto-clone",
+		"recipient": "reader",
+	})
+	for _, line := range []string{
+		`{"msg":"starting bootstrap","source":"auto-clone","recipient":"reader"}`,
+		`time=now level=INFO msg="starting bootstrap" source=auto-clone recipient=reader`,
+	} {
+		if !pred(line) {
+			t.Errorf("Structured predicate did not match %q", line)
+		}
+	}
+	if pred(`{"msg":"starting bootstrap","source":"reclone","recipient":"reader"}`) {
+		t.Error("Structured predicate matched the wrong source")
+	}
+}

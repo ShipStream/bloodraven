@@ -156,7 +156,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if fg.Spec.Backup != nil && fg.Spec.Backup.MaxLagSecondsForSource > 0 {
 		maxLag = fg.Spec.Backup.MaxLagSecondsForSource
 	}
-	sourceSite, reason, err := selectSourceSite(&fg.Status, backup.Spec.SourceSiteOverride, maxLag)
+	sourceSite, reason, err := selectSourceSite(&fg, backup.Spec.SourceSiteOverride, maxLag)
 	if err != nil {
 		return r.failBackup(ctx, &backup, "NoHealthySource", err.Error())
 	}
@@ -1001,12 +1001,20 @@ func timeOrZero(t *metav1.Time) time.Time {
 // selectSourceSite picks the MySQL site to dump from. Replica first,
 // primary fallback. Returns the chosen site name and a short reason
 // string for events. `override` wins when set and the named site exists.
-func selectSourceSite(status *v1alpha1.MysqlFailoverGroupStatus, override string, maxLagSeconds int64) (string, string, error) {
-	if status == nil || len(status.Sites) == 0 {
+func selectSourceSite(fg *v1alpha1.MysqlFailoverGroup, override string, maxLagSeconds int64) (string, string, error) {
+	if fg == nil || len(fg.Status.Sites) == 0 {
 		return "", "", fmt.Errorf("failover group has no observed site status yet")
 	}
+	status := &fg.Status
 
 	if override != "" {
+		specSite := fg.Spec.SiteByName(override)
+		if specSite == nil {
+			return "", "", fmt.Errorf("sourceSiteOverride %q does not match any configured site", override)
+		}
+		if specSite.IsReadOnlyReader() {
+			return "", "", fmt.Errorf("sourceSiteOverride %q names a read-only site, which cannot be a backup source", override)
+		}
 		for i := range status.Sites {
 			if status.Sites[i].Name == override {
 				return override, "override", nil
@@ -1019,33 +1027,34 @@ func selectSourceSite(status *v1alpha1.MysqlFailoverGroupStatus, override string
 		return "", "", fmt.Errorf("failover group has no active site yet")
 	}
 
-	var primary, replica *v1alpha1.SiteStatus
+	var primary *v1alpha1.SiteStatus
+	var replicas []*v1alpha1.SiteStatus
 	for i := range status.Sites {
 		s := &status.Sites[i]
 		if s.Name == status.ActiveSite {
 			primary = s
 			continue
 		}
-		if replica == nil {
-			replica = s
+		specSite := fg.Spec.SiteByName(s.Name)
+		if specSite != nil && !specSite.IsReadOnlyReader() {
+			replicas = append(replicas, s)
 		}
 	}
 
-	if replica != nil && replica.State == "read-only" && replica.Replicating {
-		if replica.SecondsBehindSource == nil {
-			return replica.Name, "replica-preferred", nil
-		}
-		if *replica.SecondsBehindSource <= maxLagSeconds {
-			return replica.Name, "replica-preferred", nil
+	for _, replica := range replicas {
+		if replica.State == "read-only" && replica.Replicating {
+			if replica.SecondsBehindSource == nil || *replica.SecondsBehindSource <= maxLagSeconds {
+				return replica.Name, "replica-preferred", nil
+			}
 		}
 	}
 
-	if primary != nil && primary.State == "writable" {
+	primarySpec := fg.Spec.SiteByName(status.ActiveSite)
+	if primary != nil && primary.State == "writable" && primarySpec != nil && primarySpec.IsPromotable() {
 		return primary.Name, "primary-fallback", nil
 	}
 
-	return "", "", fmt.Errorf("no healthy source (primary=%s, replica=%s)",
-		siteStateString(primary), siteStateString(replica))
+	return "", "", fmt.Errorf("no healthy source (primary=%s)", siteStateString(primary))
 }
 
 func siteStateString(s *v1alpha1.SiteStatus) string {

@@ -164,7 +164,7 @@ func s08AutoRecloneCleanup(ctx context.Context, env *runner.Env) error {
 					div = append(div, s.Name)
 				}
 			}
-			done := len(writable) == 1 && len(readOnly) == 1 && len(blocked) == 0 && len(div) == 0
+			done := len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && len(blocked) == 0 && len(div) == 0
 			return done, fmt.Sprintf("writable=%v read-only=%v blocked=%v divergent=%v",
 				writable, readOnly, blocked, div), nil
 		},

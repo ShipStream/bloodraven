@@ -101,8 +101,8 @@ func s22ObserveFailoverFlip() runner.Step {
 }
 
 // s22ObserveRecovery scales the original primary back up and waits
-// for the cluster to reach a healthy two-site state — exactly one
-// writable, exactly one read-only, no RecoveryBlocked. We do not
+// for the cluster to reach a healthy N-site state — exactly one
+// writable, every follower read-only, no RecoveryBlocked. We do not
 // inspect the .replicating field here; that's the next step's job.
 // The point of this step is to land at the moment the operator
 // considers the recovery finished, so we can time the 30s window
@@ -115,11 +115,11 @@ func s22ObserveRecovery() runner.Step {
 			if err := env.Chaos.Revert(ctx); err != nil {
 				return fmt.Errorf("scale old primary back up: %w", err)
 			}
-			env.Capture.Note("old primary scaled back to 1; awaiting healthy two-site convergence")
+			env.Capture.Note("old primary scaled back to 1; awaiting healthy N-site convergence")
 			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				"sites: writable=1 read-only=1 blocked=0",
+				"sites: writable=1 read-only=N-1 blocked=0",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other, blocked []string
 					for _, s := range mfg.Status.Sites {
@@ -137,7 +137,7 @@ func s22ObserveRecovery() runner.Step {
 					}
 					msg := fmt.Sprintf("writable=%v read-only=%v other=%v blocked=%v",
 						writable, readOnly, other, blocked)
-					done := len(writable) == 1 && len(readOnly) == 1 && len(blocked) == 0
+					done := len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && len(blocked) == 0
 					return done, msg, nil
 				},
 			)

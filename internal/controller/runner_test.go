@@ -210,7 +210,6 @@ func TestUpdateCRStatus_IsNotFound_NoPanic(t *testing.T) {
 			{Name: "dc1", State: state.StateWritable},
 
 			{Name: "dc2", State: state.StateReadOnly},
-
 		},
 	}
 
@@ -239,7 +238,6 @@ func TestUpdateCRStatus_ExistingCR(t *testing.T) {
 			{Name: "dc1", State: state.StateWritable},
 
 			{Name: "dc2", State: state.StateReadOnly},
-
 		},
 		ActiveSite: "dc1",
 	}
@@ -290,7 +288,6 @@ func TestUpdateCRStatus_DeletedMidUpdate(t *testing.T) {
 			{Name: "dc1", State: state.StateWritable},
 
 			{Name: "dc2", State: state.StateReadOnly},
-
 		},
 	}
 
@@ -389,8 +386,7 @@ func TestUpdateCRStatus_SetsConditions(t *testing.T) {
 
 			{Name: "dc1", State: state.StateWritable},
 
-			{Name: "dc2", State: state.StateReadOnly},
-
+			{Name: "dc2", State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
 		},
 		ActiveSite: "dc1",
 	}
@@ -414,6 +410,80 @@ func TestUpdateCRStatus_SetsConditions(t *testing.T) {
 	if !foundReady {
 		t.Error("Ready condition not found in status")
 	}
+}
+
+func TestUpdateCRStatus_WritableNonPromotableIsDegraded(t *testing.T) {
+	for _, role := range []state.SiteRole{state.SiteRoleReadOnly, state.SiteRoleDROnly} {
+		t.Run(string(role), func(t *testing.T) {
+			fg := newTestFG()
+			fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{Name: "anomaly", Role: v1alpha1.SiteRole(role)})
+			scheme := testScheme()
+			c := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+				WithObjects(fg).Build()
+			runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
+			nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+			runner.updateCRStatus(context.Background(), nn, TopologySnapshot{
+				Sites: []SiteSnapshot{
+					{Name: "dc1", Role: state.SiteRolePrimaryCandidate, State: state.StateWritable},
+					{Name: "dc2", Role: state.SiteRolePrimaryCandidate, State: state.StateReadOnly, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
+					{Name: "anomaly", Role: role, State: state.StateWritable, ReplicationHealthy: true, SourceConvergenceState: sourceConvergenceConverged},
+				},
+				DegradedReason: "Degraded",
+				Alert:          "writable non-promotable site requires fencing (anomaly)",
+			})
+			var updated v1alpha1.MysqlFailoverGroup
+			if err := c.Get(context.Background(), nn, &updated); err != nil {
+				t.Fatal(err)
+			}
+			var ready, degraded *metav1.Condition
+			for i := range updated.Status.Conditions {
+				condition := &updated.Status.Conditions[i]
+				switch condition.Type {
+				case "Ready":
+					ready = condition
+				case "Degraded":
+					degraded = condition
+				}
+			}
+			if ready == nil || ready.Status != metav1.ConditionFalse {
+				t.Fatalf("Ready condition = %+v, want False", ready)
+			}
+			if degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason != "Degraded" {
+				t.Fatalf("Degraded condition = %+v, want True/Degraded", degraded)
+			}
+		})
+	}
+}
+
+func TestUpdateOnlyStatusCallbackPreservesNoPrimaryCondition(t *testing.T) {
+	fg := newTestFG()
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(fg).Build()
+	runner := &TopologyManagerRunner{client: c, logger: testLogger(), managers: make(map[types.NamespacedName]*managedTopology)}
+	tm, _, _ := newTestTopologyManager(&mockMySQL{readOnly: true}, &mockMySQL{readOnly: true})
+	tm.sites[0].state = state.StateReadOnly
+	tm.sites[1].state = state.StateReadOnly
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+	tm.StatusCallback = func(snapshot TopologySnapshot) { runner.updateCRStatus(context.Background(), nn, snapshot) }
+
+	tm.emitStatusSnapshot()
+	tm.emitStatusSnapshot() // update-completion-style callback without a transition
+	var updated v1alpha1.MysqlFailoverGroup
+	if err := c.Get(context.Background(), nn, &updated); err != nil {
+		t.Fatal(err)
+	}
+	for _, condition := range updated.Status.Conditions {
+		if condition.Type == "Degraded" {
+			if condition.Status != metav1.ConditionTrue || condition.Reason != "NoPrimary" {
+				t.Fatalf("persistent topology degradation was cleared: %+v", condition)
+			}
+			return
+		}
+	}
+	t.Fatal("Degraded condition not found")
 }
 
 func drainRunnerEvents(rec *record.FakeRecorder) []string {
@@ -576,13 +646,12 @@ func TestEmitDegradedTransitionEvents_SplitBrain(t *testing.T) {
 	runner, nn := newDegradedTestRunner(rec, fg, "Healthy")
 
 	snap := TopologySnapshot{
-		Alert:      "SPLIT BRAIN: both sites are writable",
+		Alert: "SPLIT BRAIN: both sites are writable",
 		Sites: []SiteSnapshot{
 
 			{Name: "dc1", State: state.StateWritable},
 
 			{Name: "dc2", State: state.StateWritable},
-
 		},
 	}
 
@@ -603,13 +672,12 @@ func TestEmitDegradedTransitionEvents_NoPrimary(t *testing.T) {
 	runner, nn := newDegradedTestRunner(rec, fg, "Healthy")
 
 	snap := TopologySnapshot{
-		Alert:      "NO PRIMARY: both sites are read-only",
+		Alert: "NO PRIMARY: both sites are read-only",
 		Sites: []SiteSnapshot{
 
 			{Name: "dc1", State: state.StateReadOnly},
 
 			{Name: "dc2", State: state.StateReadOnly},
-
 		},
 	}
 
@@ -630,13 +698,12 @@ func TestEmitDegradedTransitionEvents_TotalLoss(t *testing.T) {
 	runner, nn := newDegradedTestRunner(rec, fg, "Healthy")
 
 	snap := TopologySnapshot{
-		Alert:      "TOTAL LOSS: both sites are unreachable",
+		Alert: "TOTAL LOSS: both sites are unreachable",
 		Sites: []SiteSnapshot{
 
 			{Name: "dc1", State: state.StateUnreachable},
 
 			{Name: "dc2", State: state.StateUnreachable},
-
 		},
 	}
 
@@ -662,7 +729,6 @@ func TestEmitDegradedTransitionEvents_SiteRecovered(t *testing.T) {
 			{Name: "dc1", State: state.StateWritable},
 
 			{Name: "dc2", State: state.StateReadOnly},
-
 		},
 	}
 
@@ -683,13 +749,12 @@ func TestEmitDegradedTransitionEvents_NoEventOnSameReason(t *testing.T) {
 	runner, nn := newDegradedTestRunner(rec, fg, "SplitBrain")
 
 	snap := TopologySnapshot{
-		Alert:      "SPLIT BRAIN: both sites are writable",
+		Alert: "SPLIT BRAIN: both sites are writable",
 		Sites: []SiteSnapshot{
 
 			{Name: "dc1", State: state.StateWritable},
 
 			{Name: "dc2", State: state.StateWritable},
-
 		},
 	}
 
@@ -707,13 +772,12 @@ func TestEmitDegradedTransitionEvents_TransitionBetweenAlerts(t *testing.T) {
 	runner, nn := newDegradedTestRunner(rec, fg, "SplitBrain")
 
 	snap := TopologySnapshot{
-		Alert:      "TOTAL LOSS: both sites are unreachable",
+		Alert: "TOTAL LOSS: both sites are unreachable",
 		Sites: []SiteSnapshot{
 
 			{Name: "dc1", State: state.StateUnreachable},
 
 			{Name: "dc2", State: state.StateUnreachable},
-
 		},
 	}
 
@@ -739,7 +803,6 @@ func TestEmitDegradedTransitionEvents_NoRecoveryEventOnFreshManager(t *testing.T
 			{Name: "dc1", State: state.StateWritable},
 
 			{Name: "dc2", State: state.StateReadOnly},
-
 		},
 	}
 
@@ -763,7 +826,6 @@ func TestEmitDegradedTransitionEvents_ReplicationDoesNotCauseFalseRecovery(t *te
 			{Name: "dc1", State: state.StateWritable},
 
 			{Name: "dc2", State: state.StateReadOnly},
-
 		},
 	}
 	runner.emitDegradedTransitionEvents(fg, nn, snap)
@@ -817,7 +879,6 @@ func TestUpdateCRStatus_EmitsFailoverEvent(t *testing.T) {
 			{Name: "dc1", State: state.StateUnreachable},
 
 			{Name: "dc2", State: state.StateWritable},
-
 		},
 		ActiveSite:         "dc2",
 		LastFailover:       failoverTime,

@@ -14,7 +14,7 @@ func init() {
 	runner.Register(scenario06SelfFenceIsolatedPrimary())
 }
 
-// scenario06SelfFenceIsolatedPrimary scales the operator and the peer
+// scenario06SelfFenceIsolatedPrimary scales the operator and every peer
 // MySQL site to 0 replicas, leaving the active primary unable to talk
 // to either Bloodraven or any peer sidecar. After leaseTimeout (20s in
 // the playground) the primary's sidecar must self-fence — set
@@ -30,8 +30,8 @@ func init() {
 func scenario06SelfFenceIsolatedPrimary() runner.Scenario {
 	return runner.Scenario{
 		ID:    "06-self-fence-isolated-primary",
-		Title: "Isolated primary self-fences when operator and peer are gone",
-		Hypothesis: "With the operator scaled to 0 AND the peer site scaled to 0, the active primary's " +
+		Title: "Isolated primary self-fences when operator and all peers are gone",
+		Hypothesis: "With the operator scaled to 0 AND every peer site scaled to 0, the active primary's " +
 			"sidecar exceeds leaseTimeout with no reachable Bloodraven and no reachable peer, sets " +
 			"super_read_only=ON, and logs SELF-FENCED.",
 		Risk:     "medium",
@@ -50,22 +50,19 @@ func scenario06SelfFenceIsolatedPrimary() runner.Scenario {
 func injectIsolatePrimary() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "open tailers, scale operator and peer to 0",
+		Name:  "open tailers, scale operator and every non-self peer to 0",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
 				return err
 			}
 			active := mfg.Status.ActiveSite
-			peer, err := PeerOf(mfg, active)
-			if err != nil {
-				return err
+			peers := mfg.Spec.PeerSiteNames(active)
+			if len(peers) == 0 {
+				return fmt.Errorf("active site %s has no peers", active)
 			}
-			env.Capture.Note(fmt.Sprintf("active=%s peer=%s; isolating primary by killing operator+peer", active, peer))
+			env.Capture.Note(fmt.Sprintf("active=%s peers=%v; isolating primary by scaling operator+all peers to zero", active, peers))
 			if err := ctxStash(ctx, env, "primarySite", active); err != nil {
-				return err
-			}
-			if err := ctxStash(ctx, env, "peerSite", peer); err != nil {
 				return err
 			}
 			// Open tailer + sidecar probe BEFORE injection. The primary
@@ -78,13 +75,15 @@ func injectIsolatePrimary() runner.Step {
 			if _, err := env.Sidecar(active); err != nil {
 				return fmt.Errorf("open sidecar probe for %s: %w", active, err)
 			}
-			// Order matters: kill the peer first so the primary's
+			// Order matters: kill all peers first so the primary's
 			// peer-check timer starts ticking, then kill the operator.
 			// Reverters are LIFO, so cleanup brings the operator back
 			// before the peer — closer to a normal recovery shape than
 			// the reverse.
-			if err := env.Chaos.ScaleSiteToZero(ctx, peer); err != nil {
-				return err
+			for _, peer := range peers {
+				if err := env.Chaos.ScaleSiteToZero(ctx, peer); err != nil {
+					return fmt.Errorf("scale peer %s to zero: %w", peer, err)
+				}
 			}
 			if err := env.Chaos.ScaleOperatorToZero(ctx); err != nil {
 				return err

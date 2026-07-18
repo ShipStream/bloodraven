@@ -19,8 +19,8 @@ func init() {
 // playground's only TOTAL-LOSS path — and asserts the operator
 // recognises and surfaces it (`ALERT` log with `TOTAL LOSS: all sites
 // are unreachable`) without crashing or wedging the reconciler. It
-// then scales both back up and asserts the cluster reconverges to a
-// single writable + single read-only site.
+// then scales every site back up and asserts the cluster reconverges to a
+// single writable site with every follower read-only.
 //
 // The operator's resilience here is the property under test: a TOTAL
 // LOSS event must not put the controller into a state from which the
@@ -30,10 +30,10 @@ func init() {
 func scenario11TotalLossRecovery() runner.Scenario {
 	return runner.Scenario{
 		ID:    "11-total-loss-recovery",
-		Title: "Both sites scaled to 0 — TOTAL LOSS surfaced and recovered",
+		Title: "Every site scaled to 0 — TOTAL LOSS surfaced and recovered",
 		Hypothesis: "When every MySQL site is unreachable simultaneously, the operator emits an `ALERT` " +
-			"log line containing `TOTAL LOSS: all sites are unreachable` and does NOT crash. After both " +
-			"sites are restored, the cluster reconverges to one writable + one read-only with no " +
+			"log line containing `TOTAL LOSS: all sites are unreachable` and does NOT crash. After every " +
+			"site is restored, the cluster reconverges to one writable with all followers read-only and no " +
 			"RecoveryBlocked sites.",
 		Risk:     "high",
 		DocLink:  "playground/chaos-scenarios.md#11-simultaneous-both-site-kill",
@@ -126,7 +126,7 @@ func injectScaleAllSitesBackUp() runner.Step {
 func observeTotalLossReconvergence() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "cluster reconverges to one writable + one read-only after TOTAL LOSS",
+		Name:  "cluster reconverges to one writable + all followers read-only after TOTAL LOSS",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			// 4 minutes: bringing two MySQL pods back up, restarting the
 			// replication topology, and re-establishing replication can
@@ -136,7 +136,7 @@ func observeTotalLossReconvergence() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				"sites: writable=1 read-only=1 blocked=0 active!=\"\"",
+				"sites: writable=1 read-only=N-1 blocked=0 active!=\"\"",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other, blocked []string
 					for _, s := range mfg.Status.Sites {
@@ -156,7 +156,7 @@ func observeTotalLossReconvergence() runner.Step {
 					sort.Strings(readOnly)
 					msg := fmt.Sprintf("active=%q writable=%v read-only=%v other=%v blocked=%v",
 						mfg.Status.ActiveSite, writable, readOnly, other, blocked)
-					done := mfg.Status.ActiveSite != "" && len(writable) == 1 && len(readOnly) == 1 && len(blocked) == 0
+					done := mfg.Status.ActiveSite != "" && len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && len(blocked) == 0
 					return done, msg, nil
 				},
 			)

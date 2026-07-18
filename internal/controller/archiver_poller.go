@@ -161,8 +161,7 @@ func (p *archiverPoller) clearMetrics() {
 func buildSidecarClients(fg *v1alpha1.MysqlFailoverGroup) []*internalmysql.SidecarClient {
 	out := make([]*internalmysql.SidecarClient, len(fg.Spec.Sites))
 	for i, site := range fg.Spec.Sites {
-		url := fmt.Sprintf("http://mysql-%s-%s.%s.svc.cluster.local:%d",
-			fg.Name, site.Name, fg.Namespace, sidecarPort)
+		url := fmt.Sprintf("http://%s:%d", internalSiteServiceHost(fg.Name, site.Name, fg.Namespace), sidecarPort)
 		out[i] = internalmysql.NewSidecarClient(url)
 	}
 	return out

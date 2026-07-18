@@ -44,6 +44,19 @@ type UpdateController struct {
 	updating bool
 }
 
+// UpdateTarget describes one site in an N-site ordered rollout.
+type UpdateTarget struct {
+	Name           string
+	Host           string
+	Checker        mysql.Checker
+	Promotable     bool
+	Drifted        bool
+	ExpectedSource string
+	ReplUser       string
+	ReplPassword   string
+	UseSSL         bool
+}
+
 // NewUpdateController creates a new UpdateController.
 func NewUpdateController(failover *FailoverController, logger *slog.Logger) *UpdateController {
 	return &UpdateController{
@@ -150,6 +163,136 @@ func (u *UpdateController) Execute(ctx context.Context,
 	u.setPhase(UpdatePhaseComplete)
 	u.logger.Info("ordered update complete")
 	return nil
+}
+
+// ExecuteTargets updates every drifted follower sequentially, then updates the
+// active site only after handing authority to a healthy promotable standby.
+// The returned names completed successfully and may be removed from drift.
+func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarget, followers []UpdateTarget,
+	applyUpdate func(context.Context, string) error, onPromoted func(string, string)) (processed []string, err error) {
+	u.mu.Lock()
+	if u.updating {
+		u.mu.Unlock()
+		return nil, fmt.Errorf("update already in progress")
+	}
+	u.updating = true
+	u.mu.Unlock()
+	defer func() {
+		u.mu.Lock()
+		u.updating = false
+		u.phase = UpdatePhaseNone
+		u.mu.Unlock()
+	}()
+
+	for _, follower := range followers {
+		if !follower.Drifted {
+			continue
+		}
+		if err := u.requireDirectReplica(ctx, follower); err != nil {
+			u.logger.Warn("ordered update: retaining unsafe follower drift", "site", follower.Name, "error", err)
+			continue
+		}
+		u.setPhase(UpdatePhaseUpdateReplica)
+		u.logger.Info("ordered update: updating follower", "site", follower.Name)
+		if err := applyUpdate(ctx, follower.Name); err != nil {
+			return processed, fmt.Errorf("update follower %s: %w", follower.Name, err)
+		}
+		u.setPhase(UpdatePhaseWaitReplica)
+		if err := u.waitForReplicaReadyExpected(ctx, follower.Checker, follower.ExpectedSource, 5*time.Minute); err != nil {
+			return processed, fmt.Errorf("wait for follower %s: %w", follower.Name, err)
+		}
+		processed = append(processed, follower.Name)
+	}
+
+	if !active.Drifted {
+		u.setPhase(UpdatePhaseComplete)
+		return processed, nil
+	}
+
+	var handoff *UpdateTarget
+	for i := range followers {
+		if !followers[i].Promotable {
+			continue
+		}
+		if err := u.requireDirectReplica(ctx, followers[i]); err == nil {
+			handoff = &followers[i]
+			break
+		}
+	}
+	if handoff == nil {
+		return processed, fmt.Errorf("no healthy promotable standby available for active-site update")
+	}
+	if handoff.Host == "" {
+		return processed, fmt.Errorf("promotable standby %s has no replication host", handoff.Name)
+	}
+
+	u.setPhase(UpdatePhaseFailover)
+	promotionGTID, err := u.failover.Execute(ctx, handoff.Checker, active.Checker, handoff.Name)
+	if err != nil {
+		return processed, fmt.Errorf("failover during update: %w", err)
+	}
+	readOnly, err := handoff.Checker.CheckReadOnly(ctx)
+	if err != nil || readOnly {
+		return processed, fmt.Errorf("updated standby %s was not confirmed writable after handoff", handoff.Name)
+	}
+	if onPromoted != nil {
+		onPromoted(handoff.Name, promotionGTID)
+	}
+	u.setPhase(UpdatePhaseUpdateOldPrimary)
+	if err := applyUpdate(ctx, active.Name); err != nil {
+		return processed, fmt.Errorf("update old active %s: %w", active.Name, err)
+	}
+	if err := u.failover.RecoverOldPrimary(ctx, active.Checker, handoff.Host, active.ReplUser, active.ReplPassword, active.UseSSL); err != nil {
+		return processed, fmt.Errorf("configure old active %s as replica of %s: %w", active.Name, handoff.Name, err)
+	}
+	u.setPhase(UpdatePhaseWaitOldPrimary)
+	if err := u.waitForReplicaReadyExpected(ctx, active.Checker, handoff.Host, 5*time.Minute); err != nil {
+		return processed, fmt.Errorf("wait for old active %s to replicate from %s: %w", active.Name, handoff.Name, err)
+	}
+	processed = append(processed, active.Name)
+	u.setPhase(UpdatePhaseComplete)
+	return processed, nil
+}
+
+func (u *UpdateController) requireDirectReplica(ctx context.Context, target UpdateTarget) error {
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ro, err := target.Checker.CheckReadOnly(probeCtx)
+	if err != nil {
+		return fmt.Errorf("precondition: follower %s probe failed: %w", target.Name, err)
+	}
+	if !ro {
+		return fmt.Errorf("precondition: follower %s is writable", target.Name)
+	}
+	rs, err := target.Checker.ShowReplicaStatus(probeCtx)
+	if err != nil || rs == nil || !rs.IORunning || !rs.SQLRunning || canonicalSourceHost(rs.SourceHost) != canonicalSourceHost(target.ExpectedSource) {
+		return fmt.Errorf("precondition: follower %s is not directly replicating from the active primary", target.Name)
+	}
+	return nil
+}
+
+func (u *UpdateController) waitForReplicaReadyExpected(ctx context.Context, checker mysql.Checker, expected string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		readOnly, roleErr := checker.CheckReadOnly(ctx)
+		rs, err := checker.ShowReplicaStatus(ctx)
+		if roleErr == nil && readOnly && err == nil && rs != nil {
+			if canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected) && (!rs.IORunning || !rs.SQLRunning) {
+				_ = checker.StartReplica(ctx)
+			}
+			if rs.IORunning && rs.SQLRunning && canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected) {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timeout waiting for direct replication")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(u.tickInterval):
+		}
+	}
 }
 
 func (u *UpdateController) setPhase(p UpdatePhase) {

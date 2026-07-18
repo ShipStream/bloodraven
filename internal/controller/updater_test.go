@@ -58,6 +58,157 @@ func TestUpdateController_ExecuteOrder(t *testing.T) {
 	}
 }
 
+func TestUpdateController_ExecuteTargetsMultipleFollowersWithoutFailover(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	healthy := func() *testutil.FakeMySQL {
+		return &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+			IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+		}}
+	}
+	var order []string
+	processed, err := uc.ExecuteTargets(context.Background(), UpdateTarget{Name: "primary", Checker: active}, []UpdateTarget{
+		{Name: "candidate", Checker: healthy(), Promotable: true, Drifted: true, ExpectedSource: "primary-internal"},
+		{Name: "reader", Checker: healthy(), Drifted: true, ExpectedSource: "primary-internal"},
+	}, func(_ context.Context, name string) error { order = append(order, name); return nil }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(order, ",") != "candidate,reader" || strings.Join(processed, ",") != "candidate,reader" {
+		t.Fatalf("order=%v processed=%v", order, processed)
+	}
+	if active.Promoted {
+		t.Fatal("follower-only drift caused failover")
+	}
+}
+
+func TestUpdateController_ExecuteTargetsNeverHandsOffToReader(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	reader := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	var applied []string
+	_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{Name: "primary", Checker: active, Drifted: true}, []UpdateTarget{
+		{Name: "reader", Checker: reader, Drifted: true, ExpectedSource: "primary-internal"},
+	}, func(_ context.Context, name string) error { applied = append(applied, name); return nil }, nil)
+	if err == nil || strings.Contains(strings.Join(applied, ","), "primary") {
+		t.Fatalf("err=%v applied=%v", err, applied)
+	}
+}
+
+func TestUpdateController_ExecuteTargetsSkipsUnhealthyReader(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	candidate := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	reader := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: false, SQLRunning: false, SourceHost: "primary-internal",
+	}}
+	var applied []string
+	processed, err := uc.ExecuteTargets(context.Background(), UpdateTarget{Name: "primary", Checker: active}, []UpdateTarget{
+		{Name: "candidate", Checker: candidate, Promotable: true, Drifted: true, ExpectedSource: "primary-internal"},
+		{Name: "reader", Checker: reader, Drifted: true, ExpectedSource: "primary-internal"},
+	}, func(_ context.Context, name string) error {
+		applied = append(applied, name)
+		return nil
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(applied, ","); got != "candidate" {
+		t.Fatalf("applied = %q, want candidate", got)
+	}
+	if got := strings.Join(processed, ","); got != "candidate" {
+		t.Fatalf("processed = %q, want candidate; reader drift must remain", got)
+	}
+}
+
+func TestUpdateController_ExecuteTargetsActiveLastRequiresDirectReplica(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = time.Millisecond
+	oldPrimary := &testutil.FakeMySQL{ReadOnlyVal: false}
+	standby := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "old-primary-internal",
+	}}
+	reader := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: false, SQLRunning: false, SourceHost: "old-primary-internal",
+	}}
+	var order []string
+	processed, err := uc.ExecuteTargets(context.Background(), UpdateTarget{
+		Name: "old-primary", Host: "old-primary-internal", Checker: oldPrimary, Drifted: true,
+	}, []UpdateTarget{
+		{Name: "standby", Host: "new-primary-internal", Checker: standby, Promotable: true, Drifted: true, ExpectedSource: "old-primary-internal"},
+		{Name: "reader", Host: "reader-internal", Checker: reader, Drifted: true, ExpectedSource: "old-primary-internal"},
+	}, func(_ context.Context, name string) error {
+		order = append(order, name)
+		if name == "old-primary" {
+			oldPrimary.ReplicaStatusVal = &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "new-primary-internal"}
+		}
+		return nil
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(order, ","); got != "standby,old-primary" {
+		t.Fatalf("update order = %q", got)
+	}
+	if got := strings.Join(processed, ","); got != "standby,old-primary" {
+		t.Fatalf("processed = %q", got)
+	}
+	if !oldPrimary.ResetReplicaAllCalled || oldPrimary.ChangeReplicationOpts.Host != "new-primary-internal" || !oldPrimary.ReplicaStarted {
+		t.Fatalf("old primary was not configured from new authority: reset=%t opts=%+v started=%t",
+			oldPrimary.ResetReplicaAllCalled, oldPrimary.ChangeReplicationOpts, oldPrimary.ReplicaStarted)
+	}
+}
+
+func TestWaitForReplicaReadyExpectedRequiresReadOnlyDirectThreads(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		checker *testutil.FakeMySQL
+	}{
+		{name: "writable", checker: &testutil.FakeMySQL{ReadOnlyVal: false, ReplicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "new-primary"}}},
+		{name: "stopped threads", checker: &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{SourceHost: "new-primary"}}},
+		{name: "wrong source", checker: &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "old-primary"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uc := NewUpdateController(NewFailoverController(testutil.TestLogger()), testutil.TestLogger())
+			uc.tickInterval = time.Millisecond
+			if err := uc.waitForReplicaReadyExpected(context.Background(), tc.checker, "new-primary", 10*time.Millisecond); err == nil {
+				t.Fatal("unhealthy old primary was accepted")
+			}
+		})
+	}
+}
+
+func TestUpdateController_ExecuteTargetsRetainsOldPrimaryOnTimeout(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = time.Millisecond
+	oldPrimary := &testutil.FakeMySQL{ReadOnlyVal: false}
+	standby := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "old-primary",
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	processed, err := uc.ExecuteTargets(ctx,
+		UpdateTarget{Name: "old-primary", Checker: oldPrimary, Drifted: true},
+		[]UpdateTarget{{Name: "standby", Host: "new-primary", Checker: standby, Promotable: true, ExpectedSource: "old-primary"}},
+		func(context.Context, string) error { return nil }, nil,
+	)
+	if err == nil {
+		t.Fatal("expected old-primary readiness failure")
+	}
+	if strings.Contains(strings.Join(processed, ","), "old-primary") {
+		t.Fatalf("old primary drift was cleared: processed=%v", processed)
+	}
+}
+
 func TestUpdateController_IsUpdating(t *testing.T) {
 	logger := testutil.TestLogger()
 	failoverCtl := NewFailoverController(logger)

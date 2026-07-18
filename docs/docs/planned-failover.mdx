@@ -18,6 +18,11 @@ kubectl annotate mysqlfailovergroup orders \
 
 The operator fences the current primary, waits for `pdx` to catch up on the fenced source's GTID set, promotes it, flips DNS, and clears the fence. When `spec.dragonfly.enabled=true`, the same request also waits for the target Dragonfly replica to catch up and promotes it before MySQL promotion. Status lands on `.status.plannedFailover.phase: Succeeded` with `transactionsLost: 0`.
 
+Only `primary-candidate` sites are valid targets. `dr-only` and `read-only`
+followers are never promoted, used for active DNS, or involved in node-taint
+handoff. Readers remain direct followers and application read pools after the
+switchover.
+
 ## Why not `kubectl exec`?
 
 Manual promotion via three `kubectl exec ... SET GLOBAL ...` commands (see [Operations](./operations.mdx#manual-promotion-fallback-operator-unreachable)) works but has four real problems:
@@ -133,7 +138,7 @@ Every path out of `Draining`, `WaitingForLag`, or `Promoting` either completes a
 
 | Failure | Observable | Rollback? |
 | --- | --- | --- |
-| Target is unknown / dr-only / not replicating | `phase: Failed`, `reason: TargetUnhealthy` or `UnknownSite`, event `PlannedFailoverRejected` | no fence applied |
+| Target is unknown / dr-only / read-only / not replicating | `phase: Failed`, `reason: TargetUnhealthy` or `UnknownSite`, event `PlannedFailoverRejected` | no fence applied |
 | Anti-flap cooldown active + `onCooldown: reject` | `phase: Failed`, `reason: CooldownActive`, message includes `retry after ...` | no fence applied |
 | Anti-flap cooldown active + `onCooldown: defer` | `phase: Deferred`, `reason: CooldownActive`, `retryAfter` populated; annotation retained | no fence applied; reconciler retries automatically |
 | Admin removes the annotation while `Deferred` | `phase: Failed`, `reason: Cancelled` | no fence applied |
@@ -149,6 +154,28 @@ Every path out of `Draining`, `WaitingForLag`, or `Promoting` either completes a
 | DNS flip fails | `phase: Succeeded` with a warning event | N/A — the Service label swap carries writes to the new primary while external DNS catches up |
 
 The topology-manager's automatic cross-site evaluation is **paused** while a planned failover is in flight (via the `plannedFailoverActive` guard). When the planned path stamps `Succeeded` or `Failed`, the guard is released and the automatic path resumes.
+
+## Follower convergence after success
+
+Once the target is confirmed writable and planned-failover mutation is no
+longer in flight, Bloodraven converges every other candidate, `dr-only`, and
+`read-only` follower directly to the new primary. A chained or stale source is
+not considered healthy merely because its replication threads are running.
+
+Before `STOP REPLICA`, the new primary's `GTID_EXECUTED` must contain the
+follower's executed set. Bloodraven repeats this check after STOP to close the
+SQL-applier race, then changes the source and starts replication without
+resetting replication metadata. A failure is retried boundedly on subsequent
+polls. GTID non-containment is reported per site as
+`sourceConvergenceState: Blocked` and
+`sourceConvergenceReason: GTIDDiverged`; the operator does not discard the
+follower's extra transactions or silently repoint it.
+
+Reader client endpoints remain absent until MySQL is read-only, both threads
+are healthy, direct-source convergence is `Converged`, and known lag is within
+the effective reader threshold. A blocked or lagging reader does not change
+the successful planned-failover result or the group's shared Ready/Degraded
+conditions.
 
 ## Anti-flap cooldown
 

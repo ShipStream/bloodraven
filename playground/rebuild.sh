@@ -89,8 +89,15 @@ if want sidecar; then
   info "Building sidecar image..."
   $RUNTIME build --target sidecar -t bloodraven-sidecar:playground "$PROJECT_ROOT"
   IMAGES+=(bloodraven-sidecar:playground)
-  # Sidecar runs inside MySQL pods — need to restart those
-  DEPLOYMENTS+=(mysql-playground-iad mysql-playground-pdx)
+  # Sidecar runs inside every MySQL pod; derive the deployments from the CR.
+  mapfile -t mysql_sites < <(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground \
+    -o jsonpath='{range .spec.sites[*]}{.name}{"\n"}{end}')
+  if [[ ${#mysql_sites[@]} -eq 0 ]]; then
+    fail "MysqlFailoverGroup playground has no sites; run ./playground/setup.sh first"
+  fi
+  for site in "${mysql_sites[@]}"; do
+    DEPLOYMENTS+=("mysql-playground-$site")
+  done
 fi
 
 if want counter; then

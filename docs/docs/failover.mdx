@@ -57,6 +57,15 @@ After updating individual site states, the operator evaluates the pair together:
 
 The operator only takes automatic action for the failover case (and, opt-in, for split brain). All other anomalous states require human investigation.
 
+The table is the two-candidate core reduced to two columns. In an N-site
+group, only `primary-candidate` sites can be the active site, promotion target,
+or split-brain winner. `dr-only` and `read-only` sites are non-promotable. A
+writable non-promotable site is an anomaly and is fenced on every poll; a
+reader is fenced even when it is the sole writable site. Reader outages and
+replication failures remain visible per site but are excluded from group
+readiness and degradation calculations. Readers never trigger node taint
+changes or become active DNS targets.
+
 **Exception — re-asserting a fenced promoted primary.** A freshly promoted primary can be fenced back to read-only by its own sidecar: the sidecar's fencing lease may still be stale when the promotion lands (for example, the operator restarted after a full-site outage and promoted before its auxiliary Service endpoint became Ready, so the sidecar's operator probes kept failing while the operator was already driving MySQL). That leaves every site reachable and read-only — a state the table above refuses to touch, because without history it is indistinguishable from a fresh-start condition that needs human input.
 
 The operator, however, does have history: `status.lastFailoverTarget` names the site it made authoritative. When **all** of the following hold, the operator restores writability on that site instead of alerting and waiting:
@@ -97,6 +106,39 @@ When the operator decides to fail over to a candidate site, it executes these st
 9. **Update node taints**
    - Taint old active site nodes: `shipstream.io/db-readonly-<group>=true:NoExecute`
    - Untaint new active site nodes: remove the `shipstream.io/db-readonly-<group>` taint
+
+10. **Converge every follower's source**
+    - Candidate, `dr-only`, and `read-only` followers are verified against the
+      newly confirmed active primary
+    - Each follower must replicate directly from the primary; replication
+      chains are not accepted as converged
+
+## Direct-source convergence
+
+Source convergence runs after replica status collection and outside the
+promotion sequence. It is therefore able to repair a healthy wrong source
+after an operator restart even when no failover history exists. Mutation is
+allowed only when there is exactly one writable `primary-candidate`, no second
+writable site, and no bootstrap, update, restore, topology freeze, pending
+promotion, planned failover, or split brain in flight.
+
+For a wrong non-empty source, Bloodraven:
+
+1. Verifies that the active primary's `GTID_EXECUTED` contains the follower's
+   executed set.
+2. Runs `STOP REPLICA` and repeats both GTID reads and the containment check,
+   closing the race where the SQL applier advances after the first check.
+3. Runs `CHANGE REPLICATION SOURCE TO` with the configured credentials and TLS
+   settings, without `RESET REPLICA ALL`.
+4. Runs `START REPLICA` and boundedly verifies the direct canonical hostname
+   and both replication threads.
+
+If containment fails, status becomes `Blocked/GTIDDiverged` and no unsafe
+repoint occurs. A post-STOP containment failure leaves replication stopped.
+Other bounded failures remain `Pending/MutationFailed` for a later safe retry.
+This generic state is recorded in `sourceHost`, `sourceConvergenceState`, and
+`sourceConvergenceReason`; it does not replace old-primary
+`recoveryState`/`divergentGtid` reporting.
 
 ## Dragonfly during failover
 
@@ -165,7 +207,7 @@ To recover a divergent site:
    kubectl annotate mysqlfailovergroup <name> bloodraven.shipstream.io/reclone-site=<site>:<gtid-prefix>
    ```
 
-3. The operator validates that the prefix matches the observed `divergentGtid` — a mismatch is rejected with a `RecloneRejected` Warning Event, so a fat-fingered site name can't destroy the wrong replica. When a site has **no** `divergentGtid` (cold reclone: PVC loss, manual rebuild), the bare form `reclone-site=<site>` is still accepted.
+3. The operator validates that the prefix matches the observed `divergentGtid` — a mismatch is rejected with a `RecloneRejected` Warning Event, so a fat-fingered site name can't destroy the wrong replica. When a site has **no** `divergentGtid` (cold reclone: PVC loss, manual rebuild), use `kubectl bloodraven reclone <group> <site> --cold` to provide the required destructive confirmation.
 4. The operator runs `CLONE INSTANCE` on the target site, replacing all data with a fresh copy from the current primary. A `RecloneRequested` Event marks the start.
 
 See [Recovering a divergent old primary](./operations.mdx#recovering-a-divergent-old-primary) for the full procedure.
@@ -243,7 +285,7 @@ The cooldown timer resets after each failover. The last failover time is recorde
 
 ## Ordered updates
 
-When `spec.updateStrategy` is set to `OrderedUpdate`, spec changes (such as a new `image` or resource adjustments) are rolled out with zero downtime:
+When `spec.updateStrategy` is set to `OrderedUpdate`, spec changes (such as a new `image`, effective per-site MySQL config, or resource adjustments) are rolled out with zero downtime:
 
 ```mermaid
 sequenceDiagram
@@ -267,6 +309,14 @@ This sequence ensures:
 - The active primary is never restarted while serving traffic
 - Replication is healthy before each transition
 - At most one site is unavailable at any time
+
+For groups with more than two sites, every drifted non-active follower is
+updated sequentially and must be read-only with a direct healthy source before
+and after restart. If the active site has no drift, the rollout completes
+without failover; this is the normal reader-only configuration path. If the
+active site is drifted, only a healthy `primary-candidate` standby may receive
+the handoff. A reader or `dr-only` follower is never promoted to facilitate an
+update, and failed or unprocessed drift remains queued for a later reconcile.
 
 Without `OrderedUpdate`, both sites are updated simultaneously, which may cause brief downtime if both pods restart at the same time.
 

@@ -12,6 +12,11 @@ spec:
   dns:
     hostname: orders.az.example.com
     ttl: 60
+  replication:
+    maxLagSeconds: 300
+    readOnlyMaxLagSeconds: 30
+  serviceTemplate:
+    type: ClusterIP
   sites:
     - name: iad
       zone: us-east-1a
@@ -28,6 +33,19 @@ spec:
         shipstream.io/failover-group.orders: "true"
         shipstream.io/site.orders: pdx
       lbIP: 10.0.2.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
+    - name: reader
+      role: read-only
+      zone: us-east-1b
+      mysqlConf:
+        innodb_buffer_pool_size: 4G
+      serviceTemplate:
+        type: LoadBalancer
+        externalTrafficPolicy: Local
+        annotations:
+          service.beta.kubernetes.io/aws-load-balancer-internal: "true"
       storage:
         storageClassName: fast-ssd
         size: 100Gi

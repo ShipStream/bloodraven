@@ -94,6 +94,11 @@ var (
 		Help: "Whether a replication thread is running (1=yes, 0=no). Thread label is 'io' or 'sql'.",
 	}, []string{"site", "thread"})
 
+	ReplicationSourceState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_replication_source_state",
+		Help: "Direct-primary replication source convergence as a state-set.",
+	}, []string{"site", "state"})
+
 	SiteState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_site_state",
 		Help: "Current site state as a state-set (1 for current state, 0 for others). State label is 'writable', 'read-only', 'unreachable', or 'unknown'.",
@@ -354,12 +359,15 @@ var (
 // AllStates is the set of possible site states, used to emit the full state-set.
 var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
 
+// AllSourceStates is the bounded source-convergence state set.
+var AllSourceStates = []string{"converged", "pending", "blocked"}
+
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {
 	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount, FailoversTotal,
 		PlannedFailoversTotal, PlannedFailoverDurationSeconds, PlannedFailoverLagWaitSeconds,
 		SplitBrainAutoResolveTotal, PrimaryReassertTotal,
-		ReplicationLag, ReplicationRunning, SiteState, DivergentTransactions, RecloneOperations,
+		ReplicationLag, ReplicationRunning, ReplicationSourceState, SiteState, DivergentTransactions, RecloneOperations,
 		BackupRunsTotal, BackupDurationSeconds,
 		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes,
 		BackupVerifiedTimestamp, BackupVerificationLastAttemptTimestamp,

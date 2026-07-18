@@ -35,7 +35,7 @@ const (
 // runtime's retry behavior may dedupe them).
 //
 // The end-state invariants are the assertion:
-//   - exactly one site has state=writable, exactly one has state=read-only
+//   - exactly one site has state=writable, every follower has state=read-only
 //   - no sites are RecoveryBlocked
 //   - the final memory request matches the LAST patch we applied
 //     (s18PatchBaseMi + (s18PatchCount-1)*10)
@@ -47,7 +47,7 @@ func scenario18RapidCRSpecChanges() runner.Scenario {
 		ID:    "18-rapid-cr-spec-changes-during-failover",
 		Title: "Rapid CR spec changes during failover converge cleanly",
 		Hypothesis: "Triggering a failover and immediately applying five rapid memory-request patches " +
-			"yields a clean converged state: exactly one writable site, exactly one read-only site, no " +
+			"yields a clean converged state: exactly one writable site, every follower read-only, no " +
 			"RecoveryBlocked, and final memory request matches the last patch applied.",
 		Risk:     "high",
 		DocLink:  "playground/chaos-scenarios.md#18-rapid-cr-spec-changes-during-active-failover",
@@ -173,18 +173,18 @@ func s18ScaleOldPrimaryBackUp() runner.Step {
 }
 
 // s18ObserveConvergence waits for the cluster to settle: exactly one
-// writable site, exactly one read-only site, no RecoveryBlocked, and
+// writable site, every follower read-only, no RecoveryBlocked, and
 // status.updatePhase empty (the rolling-update controller may engage
 // during the patch storm to roll the new memory request).
 func s18ObserveConvergence() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "cluster converges to {1 writable, 1 read-only} with updatePhase empty",
+		Name:  "cluster converges to {1 writable, N-1 read-only} with updatePhase empty",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			waitCtx, cancel := context.WithTimeout(ctx, 8*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				"writable=1 read-only=1 blocked=0 updatePhase=\"\"",
+				"writable=1 read-only=N-1 blocked=0 updatePhase=\"\"",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other, blocked []string
 					for _, s := range mfg.Status.Sites {
@@ -204,7 +204,7 @@ func s18ObserveConvergence() runner.Step {
 					sort.Strings(readOnly)
 					msg := fmt.Sprintf("writable=%v read-only=%v other=%v blocked=%v updatePhase=%q",
 						writable, readOnly, other, blocked, mfg.Status.UpdatePhase)
-					done := len(writable) == 1 && len(readOnly) == 1 && len(blocked) == 0 && mfg.Status.UpdatePhase == ""
+					done := len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && len(blocked) == 0 && mfg.Status.UpdatePhase == ""
 					return done, msg, nil
 				},
 			)

@@ -26,8 +26,8 @@ const (
 // request and asserts the operator's UpdateController drives an ordered
 // roll: the standby rolls first (UpdateReplica → WaitReplica), the
 // operator fails over to it (Failover), then the old primary rolls
-// (UpdateOldPrimary → WaitOldPrimary → Complete). At the end both pods
-// run with the new memory request, both sites are in {writable,
+// (UpdateOldPrimary → WaitOldPrimary → Complete). At the end every pod
+// runs with the new memory request, every site is in {writable,
 // read-only}, and no TOTAL LOSS log line was emitted during the window.
 //
 // The assertion is the *invariant*, not the exact phase sequence:
@@ -47,7 +47,7 @@ func scenario12RollingUpdateHealthyState() runner.Scenario {
 		Title: "Rolling update during healthy state",
 		Hypothesis: "Patching spec.sites[*].resources.requests.memory triggers the UpdateController: " +
 			"status.updatePhase visits at least one non-empty phase, returns to empty after completion, " +
-			"both deployments end at the new memory request, and no TOTAL LOSS log fires during the roll.",
+			"every deployment ends at the new memory request, and no TOTAL LOSS log fires during the roll.",
 		Risk:     "medium",
 		DocLink:  "playground/chaos-scenarios.md#12-rolling-update-during-healthy-state",
 		Timeout:  10 * time.Minute,
@@ -107,19 +107,19 @@ func s12ObserveUpdateStarted() runner.Step {
 }
 
 // s12ObserveUpdateComplete waits for the cluster to settle: updatePhase
-// returns to empty AND the cluster is in {1 writable, 1 read-only}. The
+// returns to empty AND the cluster is in {1 writable, N-1 read-only}. The
 // updater clears the phase on its own when the roll lands successfully;
 // if it gets stuck in "Complete" or any non-empty value past 5 minutes
 // we want to know.
 func s12ObserveUpdateComplete() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "status.updatePhase returns to empty and sites are 1 writable + 1 read-only",
+		Name:  "status.updatePhase returns to empty and sites are 1 writable + all followers read-only",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			waitCtx, cancel := context.WithTimeout(ctx, 8*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				"updatePhase=\"\" writable=1 read-only=1",
+				"updatePhase=\"\" writable=1 read-only=N-1",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other []string
 					for _, s := range mfg.Status.Sites {
@@ -136,7 +136,7 @@ func s12ObserveUpdateComplete() runner.Step {
 					sort.Strings(readOnly)
 					msg := fmt.Sprintf("updatePhase=%q writable=%v read-only=%v other=%v",
 						mfg.Status.UpdatePhase, writable, readOnly, other)
-					done := mfg.Status.UpdatePhase == "" && len(writable) == 1 && len(readOnly) == 1
+					done := mfg.Status.UpdatePhase == "" && len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1
 					return done, msg, nil
 				},
 			)
@@ -145,7 +145,7 @@ func s12ObserveUpdateComplete() runner.Step {
 	}
 }
 
-// s12VerifyDeploymentsRolled confirms both site deployments now run
+// s12VerifyDeploymentsRolled confirms every site deployment now runs
 // with the patched memory request. We compare quantities (not raw
 // strings) so "300Mi" and "300M" differences would pass — the resource
 // API canonicalizes the value.

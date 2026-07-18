@@ -170,7 +170,7 @@ func s05ObserveSafeConvergence() runner.Step {
 			defer convergeCancel()
 			var healthySince time.Time
 			_, err := env.Wait.UntilCR(convergeCtx, env.Namespace,
-				"writable=1 read-only=1 ready=True blocked=0 (stable for 10s)",
+				"writable=1 read-only=N-1 ready=True blocked=0 (stable for 10s)",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other, blocked []string
 					for _, s := range mfg.Status.Sites {
@@ -196,7 +196,7 @@ func s05ObserveSafeConvergence() runner.Step {
 						}
 					}
 					healthy := mfg.Status.ActiveSite != "" &&
-						len(writable) == 1 && len(readOnly) == 1 &&
+						len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 &&
 						len(blocked) == 0 && ready == "True"
 					if healthy {
 						if healthySince.IsZero() {

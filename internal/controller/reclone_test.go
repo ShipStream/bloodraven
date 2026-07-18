@@ -90,6 +90,14 @@ func TestValidateRecloneRequest_ColdReclone_WithConfirm_OK(t *testing.T) {
 	}
 }
 
+func TestValidateRecloneRequest_ReadOnlyRecipient_OK(t *testing.T) {
+	fg := recloneFG([]string{"iad", "pdx", "reader"}, nil)
+	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleReadOnly
+	if err := validateRecloneRequest(fg, RecloneRequest{Site: "reader", GtidPrefix: "confirm=orders"}); err != nil {
+		t.Errorf("cold reader reclone with correct confirm token should succeed, got %v", err)
+	}
+}
+
 func TestValidateRecloneRequest_ColdReclone_WrongConfirm_Rejected(t *testing.T) {
 	fg := recloneFG([]string{"iad", "pdx"}, nil)
 	err := validateRecloneRequest(fg, RecloneRequest{Site: "iad", GtidPrefix: "confirm=wrongfg"})
