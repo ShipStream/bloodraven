@@ -596,8 +596,7 @@ func mergeSecurityContexts(userPod *corev1.PodSecurityContext, userContainer *co
 
 // backupMySQLHost returns the in-cluster hostname of a site's MySQL service.
 func backupMySQLHost(fg *v1alpha1.MysqlFailoverGroup, siteName string) string {
-	return fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d",
-		fg.Name, siteName, fg.Namespace, mysqlPort)
+	return fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, siteName, fg.Namespace), mysqlPort)
 }
 
 // resolveBackupStorage returns (outputURL, extraEnv, volumes, mounts) for

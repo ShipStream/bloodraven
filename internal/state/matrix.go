@@ -14,6 +14,9 @@ const (
 	SiteRolePrimaryCandidate SiteRole = "primary-candidate"
 	// SiteRoleDROnly is a site that only ever follows the active primary.
 	SiteRoleDROnly SiteRole = "dr-only"
+	// SiteRoleReadOnly is a non-promotable serving reader whose health does
+	// not contribute to failover-group readiness.
+	SiteRoleReadOnly SiteRole = "read-only"
 )
 
 // SiteObservation is a snapshot of one site at a single poll cycle.
@@ -26,6 +29,9 @@ type SiteObservation struct {
 // CrossSiteAction describes the cross-site action implied by a poll
 // cycle of observations.
 type CrossSiteAction struct {
+	// FenceSites lists writable non-promotable sites. These are anomalies,
+	// never active primaries or split-brain winners.
+	FenceSites []string
 	// PromotionCandidates is the ordered list of primary-candidate
 	// sites that are eligible to be promoted this cycle. The caller
 	// must rank by GTID freshness as the primary selector (most-
@@ -63,7 +69,21 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 	var action CrossSiteAction
 
 	var writable, readOnly, unreachable []SiteObservation
+	coreCount := 0
 	for _, obs := range observations {
+		// Count configured core sites by role before state classification so an
+		// Unknown observation remains part of the topology instead of making an
+		// all-unknown startup look like an empty, healthy group.
+		if obs.Role != SiteRoleReadOnly {
+			coreCount++
+		}
+		if obs.State == StateWritable && obs.Role != SiteRolePrimaryCandidate {
+			action.FenceSites = append(action.FenceSites, obs.Name)
+			continue
+		}
+		if obs.Role == SiteRoleReadOnly {
+			continue
+		}
 		switch obs.State {
 		case StateWritable:
 			writable = append(writable, obs)
@@ -74,13 +94,27 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 		}
 	}
 
-	if len(observations) == 0 {
-		action.Reason = "Healthy"
+	if coreCount == 0 {
+		if len(action.FenceSites) > 0 {
+			action.Alert = fmt.Sprintf("writable non-promotable site requires fencing (%s)", strings.Join(action.FenceSites, ", "))
+			action.Reason = "Degraded"
+		} else {
+			action.Reason = "Healthy"
+		}
+		return action
+	}
+
+	// Fencing is best-effort and must be confirmed by a later poll before any
+	// promotion. Otherwise a failed fence and a successful promotion could
+	// leave two sites accepting writes.
+	if len(action.FenceSites) > 0 {
+		action.Alert = fmt.Sprintf("writable non-promotable site requires fencing (%s)", strings.Join(action.FenceSites, ", "))
+		action.Reason = "Degraded"
 		return action
 	}
 
 	// Total loss: every site is unreachable.
-	if len(unreachable) == len(observations) {
+	if len(unreachable) == coreCount {
 		action.Alert = "TOTAL LOSS: all sites are unreachable"
 		action.Reason = "TotalLoss"
 		return action

@@ -61,7 +61,7 @@ Sidecar records additionally carry:
 
 - Keys are `camelCase`. Common keys: `site`, `fg`, `error`, `peer`, `count`, `source`, `donor`, `recipient`.
 - Site identifiers (`site`, `oldPrimary`, `newPrimary`, `promotedSite`, `donor`, `recipient`, `activeSite`, `authoritativeActiveSite`) all carry the bare site name as defined in `spec.sites[].name`.
-- GTID fields (`promotionGtid`, `divergentGtid`, `oldPrimaryGtid`, `newPrimaryGtid`) carry MySQL GTID-set strings exactly as MySQL returns them — never parsed or canonicalised.
+- GTID fields (`promotionGtid`, `divergentGtid`, `oldPrimaryGtid`, `newPrimaryGtid`, `followerGtid`, `activeGtid`) carry MySQL GTID-set strings exactly as MySQL returns them — never parsed or canonicalised.
 - Counts (`count`, `divergentTransactions`, `attempt`, `maxRetries`) are JSON numbers, not strings.
 - Durations (`leaseTimeout`, `pollInterval`, `delay`) are emitted by `slog`'s default `time.Duration` rendering — currently a string like `"30s"`. Treat as opaque if you need to parse, prefer the metric of the same name.
 
@@ -106,6 +106,25 @@ Fired after an emergency failover when the operator inspects the returning old p
 | WARN | `divergence detected` | `site`, `divergentTransactions`, `divergentGtid`, `oldPrimaryGtid`, `newPrimaryGtid`, `fg` | Old primary has committed transactions the new primary never saw. Operator does not auto-recover — admin must reclone. Mirrored by the `bloodraven_divergent_transactions` gauge and the `DataLossDetected` Kubernetes Event. |
 | INFO | `old primary recovery complete` | `site`, `source`, `fg` | Old primary is now replicating from the new primary. `source` is the new primary's host. |
 | ERROR | `old primary recovery failed` | `site`, `error`, `fg` | One step of the recovery sequence (fence / GTID query / `CHANGE REPLICATION SOURCE` / `START REPLICA`) returned an error. |
+
+### Replication source convergence
+
+After topology changes, Bloodraven verifies that every follower replicates
+directly from the uniquely confirmed active primary. These events cover
+candidate, `dr-only`, and `read-only` followers; they are separate from the
+old-primary recovery events above.
+
+| Level | `msg` | Fields | Notes |
+|---|---|---|---|
+| INFO | `replication source convergence started` | `site`, `activeSite`, `currentSource`, `expectedSource`, `fg` | A follower needs a source or thread-state correction and passed the initial mutation gates. |
+| INFO | `replication source convergence complete` | `site`, `source`, `fg` | The canonical source is the active primary and both replication threads are running. |
+| WARN | `replication source convergence blocked` | `site`, `activeSite`, `stage`, `followerGtid`, `activeGtid`, `fg` | GTID containment failed before or after stopping replication. No source change is issued. |
+| ERROR | `replication source convergence failed` | `site`, `activeSite`, `stage`, `error`, `fg` | A bounded source mutation or verification attempt failed. The next poll can retry safely. |
+
+Stable `stage` values include `pre-stop-gtid`, `post-stop-gtid`, `stop`,
+`change-source`, `start`, and `verify`. Use the status
+`sourceConvergenceState` and `sourceConvergenceReason` for current state; use
+these logs for the detailed failure and GTID evidence.
 
 ### Bootstrap and reclone
 

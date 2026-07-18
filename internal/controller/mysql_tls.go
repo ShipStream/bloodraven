@@ -77,6 +77,14 @@ func siteServiceHost(group, site, namespace string) string {
 	return fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", group, site, namespace)
 }
 
+func internalSiteServiceName(group, site string) string {
+	return fmt.Sprintf("mysql-%s-%s-internal", group, site)
+}
+
+func internalSiteServiceHost(group, site, namespace string) string {
+	return fmt.Sprintf("%s.%s.svc.cluster.local", internalSiteServiceName(group, site), namespace)
+}
+
 func primaryServiceHost(group, namespace string) string {
 	return fmt.Sprintf("mysql-%s-primary.%s.svc.cluster.local", group, namespace)
 }

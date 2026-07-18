@@ -3,8 +3,10 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,20 +20,33 @@ import (
 // --- Mock MySQL ---
 
 type mockMySQL struct {
-	mu                sync.Mutex
-	readOnly          bool
-	err               error
-	promoted          bool
-	replicaStatusVal  *mysql.ReplicaStatus
-	replicaStatusErr  error
-	gtidExecuted      string
-	gtidExecutedErr   error
-	hasUserSchemas    *bool
-	userSchemasErr    error
-	stopReplicaCalls  int
-	resetReplicaCalls int
-	changeSourceCalls int
-	startReplicaCalls int
+	mu                       sync.Mutex
+	readOnly                 bool
+	err                      error
+	promoted                 bool
+	replicaStatusVal         *mysql.ReplicaStatus
+	replicaStatusErr         error
+	gtidExecuted             string
+	gtidExecutedErr          error
+	hasUserSchemas           *bool
+	userSchemasErr           error
+	stopReplicaCalls         int
+	resetReplicaCalls        int
+	changeSourceCalls        int
+	startReplicaCalls        int
+	stopReplicaErr           error
+	stopReplicaCancel        context.CancelFunc
+	changeSourceErr          error
+	startReplicaErr          error
+	startReplicaCtxErrs      []error
+	respectContext           bool
+	gtidSequence             []string
+	gtidCalls                int
+	changeDoesNotUpdate      bool
+	superReadOnlyCalls       int
+	superReadOnlyErr         error
+	superReadOnlyHadDeadline bool
+	clonePrimaryHost         string
 }
 
 func testBoolPtr(v bool) *bool {
@@ -54,13 +69,157 @@ func (m *mockMySQL) Promote(_ context.Context) error {
 
 func (m *mockMySQL) Close() error { return nil }
 
-func (m *mockMySQL) SetSuperReadOnly(_ context.Context, _ bool) error  { return nil }
+func (m *mockMySQL) SetSuperReadOnly(ctx context.Context, on bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.superReadOnlyCalls++
+	_, m.superReadOnlyHadDeadline = ctx.Deadline()
+	if m.superReadOnlyErr != nil {
+		return m.superReadOnlyErr
+	}
+	if on {
+		m.readOnly = true
+	}
+	return nil
+}
+
+func TestReadOnlyRoleSafety(t *testing.T) {
+	primaryA := &mockMySQL{readOnly: true}
+	primaryB := &mockMySQL{readOnly: true}
+	reader := &mockMySQL{readOnly: false}
+	tm := newConvergenceManager(t,
+		[]state.SiteRole{state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly},
+		primaryA, primaryB, reader)
+	tm.sites[0].state = state.StateReadOnly
+	tm.sites[1].state = state.StateReadOnly
+	tm.sites[2].state = state.StateWritable
+	if got := tm.activeSiteLocked(); got != "" {
+		t.Fatalf("writable reader became active: %q", got)
+	}
+	if !tm.fenceWritableNonPromotableSites(context.Background()) || reader.superReadOnlyCalls != 1 {
+		t.Fatalf("reader fence calls = %d", reader.superReadOnlyCalls)
+	}
+	if !reader.superReadOnlyHadDeadline {
+		t.Fatal("reader fencing call did not receive a bounded context")
+	}
+	taint := true
+	tm.applyPerSiteAction(context.Background(), &tm.sites[2], state.Action{Taint: &taint})
+	if got := len(tm.tainter.(*mockTainter).taints); got != 0 {
+		t.Fatalf("reader caused %d taint operations", got)
+	}
+}
+
+func TestPoll_ReplicaStatusProbeFailureInterlocksRecovery(t *testing.T) {
+	primary := &mockMySQL{readOnly: false, gtidExecuted: convergenceTestGTID}
+	follower := &mockMySQL{
+		readOnly:         true,
+		gtidExecuted:     convergenceTestGTID,
+		replicaStatusErr: errors.New("temporary replica probe failure"),
+	}
+	tm := newConvergenceManager(t,
+		[]state.SiteRole{state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate},
+		primary, follower,
+	)
+	tm.lastFailoverTarget = "primary"
+
+	tm.Poll(context.Background())
+	if got := tm.sites[1].sourceConvergenceState; got != sourceConvergencePending {
+		t.Fatalf("source state = %q, want Pending", got)
+	}
+	if got := tm.sites[1].sourceConvergenceReason; got != sourceReasonProbeFailed {
+		t.Fatalf("source reason = %q, want ProbeFailed", got)
+	}
+	if follower.stopReplicaCalls != 0 || follower.resetReplicaCalls != 0 || follower.changeSourceCalls != 0 || follower.startReplicaCalls != 0 {
+		t.Fatalf("probe failure mutated replication: stop=%d reset=%d change=%d start=%d",
+			follower.stopReplicaCalls, follower.resetReplicaCalls, follower.changeSourceCalls, follower.startReplicaCalls)
+	}
+
+	follower.replicaStatusErr = nil
+	follower.replicaStatusVal = &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "old-primary"}
+	tm.Poll(context.Background())
+	if got := tm.sites[1].sourceConvergenceState; got != sourceConvergenceConverged {
+		t.Fatalf("source state after successful retry = %q, want Converged", got)
+	}
+	if follower.stopReplicaCalls != 1 || follower.changeSourceCalls != 1 || follower.startReplicaCalls != 1 || follower.resetReplicaCalls != 0 {
+		t.Fatalf("retry calls stop=%d reset=%d change=%d start=%d",
+			follower.stopReplicaCalls, follower.resetReplicaCalls, follower.changeSourceCalls, follower.startReplicaCalls)
+	}
+}
+
+func TestRecoveryRejectsWritableNonPromotableAuthority(t *testing.T) {
+	for _, role := range []state.SiteRole{state.SiteRoleReadOnly, state.SiteRoleDROnly} {
+		t.Run(string(role), func(t *testing.T) {
+			candidate := &mockMySQL{readOnly: true, gtidExecuted: convergenceTestGTID}
+			anomaly := &mockMySQL{readOnly: false, gtidExecuted: convergenceTestGTID}
+			tm := newConvergenceManager(t, []state.SiteRole{state.SiteRolePrimaryCandidate, role}, candidate, anomaly)
+			tm.sites[0].state = state.StateReadOnly
+			tm.sites[1].state = state.StateWritable
+			tm.lastFailoverTarget = "follower-a"
+
+			if tm.checkRecoveryWithConvergence(context.Background(), []*mysql.ReplicaStatus{nil, nil}, nil) {
+				t.Fatal("recovery changed state using non-promotable authority")
+			}
+			if candidate.gtidCalls != 0 || anomaly.gtidCalls != 0 || candidate.stopReplicaCalls != 0 || candidate.resetReplicaCalls != 0 || candidate.changeSourceCalls != 0 || candidate.startReplicaCalls != 0 {
+				t.Fatalf("recovery probed or mutated against %s authority", role)
+			}
+		})
+	}
+}
+
+func TestPoll_FirstWritableNonPromotableObservationFencesImmediately(t *testing.T) {
+	for _, role := range []state.SiteRole{state.SiteRoleReadOnly, state.SiteRoleDROnly} {
+		for _, fenceFails := range []bool{false, true} {
+			name := fmt.Sprintf("%s/fence-fails-%t", role, fenceFails)
+			t.Run(name, func(t *testing.T) {
+				primary := &mockMySQL{readOnly: false}
+				anomaly := &mockMySQL{readOnly: false}
+				if fenceFails {
+					anomaly.superReadOnlyErr = errors.New("fence failed")
+				}
+				tm := newConvergenceManager(t, []state.SiteRole{state.SiteRolePrimaryCandidate, role}, primary, anomaly)
+				tm.sites[1].state = state.StateReadOnly
+				tm.cfg.RecoveryThreshold = 3
+				var snapshot TopologySnapshot
+				tm.StatusCallback = func(s TopologySnapshot) { snapshot = s }
+
+				tm.Poll(context.Background())
+				if anomaly.superReadOnlyCalls != 1 {
+					t.Fatalf("first writable observation made %d fence calls, want 1", anomaly.superReadOnlyCalls)
+				}
+				if tm.sites[1].state != state.StateWritable || tm.activeSiteLocked() != "" {
+					t.Fatalf("anomaly did not immediately invalidate authority: state=%s active=%q", tm.sites[1].state, tm.activeSiteLocked())
+				}
+				if snapshot.DegradedReason != "Degraded" {
+					t.Fatalf("degraded reason = %q, want Degraded", snapshot.DegradedReason)
+				}
+			})
+		}
+	}
+}
+
+func TestEmitStatusSnapshotPreservesPersistentTopologyDegradation(t *testing.T) {
+	tm, _, _ := newTestTopologyManager(&mockMySQL{readOnly: true}, &mockMySQL{readOnly: true})
+	tm.sites[0].state = state.StateReadOnly
+	tm.sites[1].state = state.StateReadOnly
+	var snapshot TopologySnapshot
+	tm.StatusCallback = func(s TopologySnapshot) { snapshot = s }
+
+	// This is the callback path used by update completion; no state transition
+	// occurs while the current no-primary topology remains unchanged.
+	tm.emitStatusSnapshot()
+	if snapshot.DegradedReason != "NoPrimary" || snapshot.Alert == "" {
+		t.Fatalf("update-only snapshot cleared degradation: %+v", snapshot)
+	}
+}
 func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) { return 0, nil }
 func (m *mockMySQL) StopReplica(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopReplicaCalls++
-	return nil
+	if m.stopReplicaCancel != nil {
+		m.stopReplicaCancel()
+	}
+	return m.stopReplicaErr
 }
 func (m *mockMySQL) ResetReplicaAll(_ context.Context) error {
 	m.mu.Lock()
@@ -79,25 +238,54 @@ func (m *mockMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, 
 	defer m.mu.Unlock()
 	return m.replicaStatusVal, m.replicaStatusErr
 }
-func (m *mockMySQL) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
+func (m *mockMySQL) ChangeReplicationSource(_ context.Context, opts mysql.ReplicationSourceOpts) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.changeSourceCalls++
+	if m.changeSourceErr != nil {
+		return m.changeSourceErr
+	}
+	if m.changeDoesNotUpdate {
+		return nil
+	}
+	if m.replicaStatusVal == nil {
+		m.replicaStatusVal = &mysql.ReplicaStatus{}
+	}
+	m.replicaStatusVal.SourceHost = opts.Host
 	return nil
 }
-func (m *mockMySQL) StartReplica(_ context.Context) error {
+func (m *mockMySQL) StartReplica(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.startReplicaCalls++
+	m.startReplicaCtxErrs = append(m.startReplicaCtxErrs, ctx.Err())
+	if m.startReplicaErr != nil {
+		return m.startReplicaErr
+	}
+	if m.replicaStatusVal != nil {
+		m.replicaStatusVal.IORunning = true
+		m.replicaStatusVal.SQLRunning = true
+	}
 	return nil
 }
 func (m *mockMySQL) StartReplicaSQLThread(_ context.Context) error { return nil }
 func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
-func (m *mockMySQL) GetGtidExecuted(_ context.Context) (string, error) {
+func (m *mockMySQL) GetGtidExecuted(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.respectContext && ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if len(m.gtidSequence) > 0 {
+		idx := m.gtidCalls
+		if idx >= len(m.gtidSequence) {
+			idx = len(m.gtidSequence) - 1
+		}
+		m.gtidCalls++
+		return m.gtidSequence[idx], m.gtidExecutedErr
+	}
 	return m.gtidExecuted, m.gtidExecutedErr
 }
 func (m *mockMySQL) HasUserSchemas(_ context.Context) (bool, error) {
@@ -110,7 +298,11 @@ func (m *mockMySQL) HasUserSchemas(_ context.Context) (bool, error) {
 }
 func (m *mockMySQL) EnsureClonePlugin(_ context.Context) error           { return nil }
 func (m *mockMySQL) SetCloneDonorList(_ context.Context, _ string) error { return nil }
-func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
+
+func (m *mockMySQL) CloneInstance(_ context.Context, _, primaryHost, _ string, _ bool, _ int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clonePrimaryHost = primaryHost
 	return nil
 }
 
@@ -227,8 +419,8 @@ func testTopologyConfig() TopologyConfig {
 	return TopologyConfig{
 		Name: "lion",
 		Sites: []SiteTopologyConfig{
-			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("dc1")},
-			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("dc2")},
+			{Name: "dc1", Zone: "lion-dc1", LBIP: "1.1.1.1", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("dc1"), Host: "mysql-dc1"},
+			{Name: "dc2", Zone: "lion-dc2", LBIP: "2.2.2.2", Role: state.SiteRolePrimaryCandidate, TaintSelector: taintSelector("dc2"), Host: "mysql-dc2"},
 		},
 		PollInterval:      int64(50 * time.Millisecond),
 		FailureThreshold:  3,
@@ -329,6 +521,25 @@ func TestNormalSite0Primary(t *testing.T) {
 	}
 	if s.Sites[1].State != "read-only" {
 		t.Errorf("site1 state: got %s, want read-only", s.Sites[1].State)
+	}
+}
+
+func TestStatusIncludesSourceConvergence(t *testing.T) {
+	tm, _, _ := newTestTopologyManager(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
+	tm.SetSourceConvergence("dc2", "mysql-lion-dc1-internal.ns.svc.cluster.local", sourceConvergenceConverged, "")
+	tm.mu.Lock()
+	tm.sites[1].servingHealthy = true
+	tm.mu.Unlock()
+
+	site := tm.Status().Sites[1]
+	if got, want := site.SourceHost, "mysql-lion-dc1-internal.ns.svc.cluster.local"; got != want {
+		t.Fatalf("sourceHost = %q, want %q", got, want)
+	}
+	if got, want := site.SourceConvergenceState, string(sourceConvergenceConverged); got != want {
+		t.Fatalf("sourceConvergenceState = %q, want %q", got, want)
+	}
+	if !site.ServingHealthy {
+		t.Fatal("servingHealthy = false, want true")
 	}
 }
 
@@ -856,7 +1067,7 @@ func TestSnapshotActiveSiteDoesNotUsePendingPromotion(t *testing.T) {
 	tm.promotedAt = tm.clock.Now()
 	tm.mu.Unlock()
 
-	snap := tm.buildSnapshot(nil, "", "")
+	snap := tm.buildSnapshot(nil)
 	if snap.ActiveSite != "" {
 		t.Errorf("expected CR snapshot activeSite to reflect observed writable site only, got %q", snap.ActiveSite)
 	}
@@ -1191,6 +1402,35 @@ func TestReclone_HappyPath(t *testing.T) {
 	}
 }
 
+func TestReclone_ReadOnlyRecipientUsesActivePrimary(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	reader := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(primary, reader)
+	tm.autoBootstrapSuppressed = true
+	tm.sites[1].role = state.SiteRoleReadOnly
+	tm.cfg.Sites[1].Role = state.SiteRoleReadOnly
+	pollN(tm, 2)
+
+	tm.SetRecloneSite("dc2")
+	if !tm.checkReclone(context.Background()) {
+		t.Fatal("expected reader reclone to start")
+	}
+	tm.mu.RLock()
+	source := tm.bootstrapSource
+	tm.mu.RUnlock()
+	var primaryHost string
+	deadline := time.Now().Add(time.Second)
+	for primaryHost == "" && time.Now().Before(deadline) {
+		reader.mu.Lock()
+		primaryHost = reader.clonePrimaryHost
+		reader.mu.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	if source != "reclone" || primaryHost != "mysql-dc1" {
+		t.Fatalf("bootstrap = source %q primary host %q, want reclone/mysql-dc1", source, primaryHost)
+	}
+}
+
 func TestReclone_CannotReclonePrimary(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{readOnly: true}
@@ -1265,12 +1505,13 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutLastFailoverTarget(t *tes
 	tm.recoveryDivergentGtid = "aaaa:50-55"
 	tm.recoveryDivergentCount = 6
 	tm.lastFailoverTarget = ""
+	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
 	tm.mu.Unlock()
 
 	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{
 		nil,
 		{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"},
-	}, "", "")
+	})
 	if !changed {
 		t.Fatal("checkRecovery should report a status change after clearing healthy recovery state")
 	}
@@ -1297,12 +1538,13 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutReplicationCredentials(t 
 	tm.recoveryState = recoveryStateInProgress
 	tm.lastFailoverTarget = "dc1"
 	tm.bootstrapCfg = BootstrapConfig{}
+	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
 	tm.mu.Unlock()
 
 	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{
 		nil,
 		{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"},
-	}, "", "")
+	})
 	if !changed {
 		t.Fatal("checkRecovery should clear healthy recovery state even when retry credentials are unavailable")
 	}
@@ -1329,7 +1571,7 @@ func TestCheckRecovery_PersistsInProgressAndSuppressesImmediateRetry(t *testing.
 		snapshots = append(snapshots, s)
 	}
 
-	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}, "", "")
+	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
 	if !changed {
 		t.Fatal("expected recovery to start")
 	}
@@ -1340,7 +1582,7 @@ func TestCheckRecovery_PersistsInProgressAndSuppressesImmediateRetry(t *testing.
 		t.Fatalf("expected RecoveryInProgress snapshot before recovery, got %#v", snapshots)
 	}
 
-	changed = tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}, "", "")
+	changed = tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
 	if changed {
 		t.Fatal("recovery should not retry during stabilization window")
 	}
@@ -1349,7 +1591,7 @@ func TestCheckRecovery_PersistsInProgressAndSuppressesImmediateRetry(t *testing.
 	}
 
 	clk.Advance(recoveryRetryDelay + time.Second)
-	changed = tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}, "", "")
+	changed = tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
 	if !changed {
 		t.Fatal("expected recovery retry after stabilization window")
 	}
@@ -1367,7 +1609,7 @@ func TestCheckRecovery_RestoredInProgressRetriesImmediatelyWhenUnhealthy(t *test
 	setRecoveredTopology(tm)
 	tm.SetRecoveryInProgress("dc2")
 
-	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}, "", "")
+	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
 	if !changed {
 		t.Fatal("expected restored in-progress recovery to retry when unhealthy")
 	}
@@ -1714,7 +1956,7 @@ func TestPoll_ClearsReplicatingWhenReplicationStopped(t *testing.T) {
 	site1.replicaStatusVal = &mysql.ReplicaStatus{
 		IORunning:  false,
 		SQLRunning: false,
-		SourceHost: "dc1",
+		SourceHost: "mysql-dc1",
 	}
 	site1.mu.Unlock()
 
@@ -1762,12 +2004,12 @@ func TestPoll_StatusCallbackFiresWhenReplicationBecomesHealthy(t *testing.T) {
 	site1.mu.Unlock()
 
 	pollN(tm, 1)
-	if callbacks != 0 {
-		t.Fatalf("first healthy replication tick is debounce-only, got %d callbacks", callbacks)
+	if callbacks != 1 {
+		t.Fatalf("first healthy tick should persist source convergence, got %d callbacks", callbacks)
 	}
 	pollN(tm, 1)
-	if callbacks != 1 {
-		t.Fatalf("replication-only health change should trigger one callback, got %d", callbacks)
+	if callbacks != 2 {
+		t.Fatalf("debounced replication health should trigger a second callback, got %d", callbacks)
 	}
 	if captured.Sites[1].State != state.StateReadOnly {
 		t.Fatalf("site1 state = %s, want read-only", captured.Sites[1].State)
@@ -1827,10 +2069,9 @@ func TestPoll_StatusCallbackFiresWhenReplicaStatusErrorsAfterHealthy(t *testing.
 	}
 }
 
-// TestCheckUpdate_DefersWhenStandbyNotReplicating verifies the issue #46 gate:
-// even with spec drift and both sites in the right states, checkUpdate must NOT
-// start an ordered update against a stale standby.
-func TestCheckUpdate_DefersWhenStandbyNotReplicating(t *testing.T) {
+// TestCheckUpdate_RetainsUnhealthyStandbyDrift verifies an unsafe follower is
+// retained by the ordered plan without applying its Deployment update.
+func TestCheckUpdate_RetainsUnhealthyStandbyDrift(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{
 		readOnly:         true,
@@ -1840,23 +2081,79 @@ func TestCheckUpdate_DefersWhenStandbyNotReplicating(t *testing.T) {
 	// Attach an UpdateController and ApplyUpdate callback so checkUpdate doesn't
 	// early-return on nil dependencies.
 	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
-	tm.ApplyUpdate = func(_ context.Context, _ string) error {
-		t.Fatal("ApplyUpdate must not be called when standby is not replicating")
+	applied := make(chan string, 1)
+	tm.ApplyUpdate = func(_ context.Context, site string) error {
+		applied <- site
 		return nil
 	}
-
 	// Poll enough to settle states (site1 -> StateReadOnly with RecoveryThreshold=2).
 	pollN(tm, 3)
 
 	// Drift on standby — the classic trigger for an ordered update.
 	tm.SetSpecDriftSites([]string{"dc2"})
+	done := make(chan struct{})
+	tm.StatusCallback = func(TopologySnapshot) { close(done) }
 
 	started := tm.checkUpdate(context.Background())
-	if started {
-		t.Fatal("checkUpdate must defer when the standby is not a healthy replica")
+	if !started {
+		t.Fatal("checkUpdate must start so independently safe targets can be processed")
 	}
-	if tm.updater.IsUpdating() {
-		t.Error("UpdateController must not enter updating state on deferred start")
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ordered plan did not complete")
+	}
+	select {
+	case site := <-applied:
+		t.Fatalf("unsafe standby %s was updated", site)
+	default:
+	}
+	tm.mu.RLock()
+	drift := append([]string(nil), tm.specDriftSites...)
+	tm.mu.RUnlock()
+	if len(drift) != 1 || drift[0] != "dc2" {
+		t.Fatalf("unhealthy standby drift was not retained: %v", drift)
+	}
+}
+
+func TestCheckUpdate_ProcessesHealthyCandidateBeforeUnhealthyReader(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	candidate := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "mysql-primary-internal.ns.svc.cluster.local",
+	}}
+	reader := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: false, SQLRunning: false, SourceHost: "mysql-primary-internal.ns.svc.cluster.local",
+	}}
+	tm := newConvergenceManager(t, []state.SiteRole{
+		state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly,
+	}, primary, candidate, reader)
+	tm.sites[1].replicating = true
+	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	var applied []string
+	tm.ApplyUpdate = func(_ context.Context, site string) error {
+		applied = append(applied, site)
+		return nil
+	}
+	tm.SetSpecDriftSites([]string{"follower-a", "follower-b"})
+	done := make(chan struct{})
+	tm.StatusCallback = func(TopologySnapshot) { close(done) }
+
+	if !tm.checkUpdate(context.Background()) {
+		t.Fatal("ordered plan did not start")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ordered plan did not finish")
+	}
+	if got := strings.Join(applied, ","); got != "follower-a" {
+		t.Fatalf("applied = %q, want healthy candidate only", got)
+	}
+	tm.mu.RLock()
+	drift := append([]string(nil), tm.specDriftSites...)
+	tm.mu.RUnlock()
+	if len(drift) != 1 || drift[0] != "follower-b" {
+		t.Fatalf("remaining drift = %v, want unhealthy reader only", drift)
 	}
 }
 

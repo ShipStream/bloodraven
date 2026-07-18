@@ -35,6 +35,10 @@ type MysqlFailoverGroupList struct {
 // +kubebuilder:validation:XValidation:rule="self.sites.all(x, self.sites.filter(y, y.name == x.name).size() == 1)",message="spec.sites[].name must be unique"
 // +kubebuilder:validation:XValidation:rule="self.sites.filter(s, s.role == 'primary-candidate').size() >= 2",message="spec.sites must contain at least two sites with role 'primary-candidate'"
 // +kubebuilder:validation:XValidation:rule="!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities) || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s, s.name == p && s.role == 'primary-candidate'))",message="splitBrainPolicy.sitePriorities entries must match the names of sites with role 'primary-candidate'"
+// +kubebuilder:validation:XValidation:rule="!has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || (has(self.serviceTemplate.type) && self.serviceTemplate.type in ['NodePort', 'LoadBalancer'])",message="serviceTemplate.externalTrafficPolicy requires serviceTemplate.type NodePort or LoadBalancer"
+// +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(s.serviceTemplate) || !has(s.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="site serviceTemplate.externalTrafficPolicy requires an effective type of NodePort or LoadBalancer"
+// +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(s.serviceTemplate) || !has(s.serviceTemplate.nodePort) || ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="site serviceTemplate.nodePort requires an effective type of NodePort or LoadBalancer"
+// +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate) && has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="inherited externalTrafficPolicy requires each effective site service type to be NodePort or LoadBalancer"
 type MysqlFailoverGroupSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.7
 	// +kubebuilder:default="mysql:9.7"
@@ -249,6 +253,13 @@ type ReplicationSpec struct {
 	// +kubebuilder:default=300
 	// +kubebuilder:validation:Minimum=0
 	MaxLagSeconds int64 `json:"maxLagSeconds,omitempty"`
+
+	// ReadOnlyMaxLagSeconds is the maximum lag for a read-only site's
+	// client-facing endpoint. Nil inherits MaxLagSeconds; explicit zero
+	// requires the reader to be fully caught up.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ReadOnlyMaxLagSeconds *int64 `json:"readOnlyMaxLagSeconds,omitempty"`
 }
 
 // SiteRole describes the promotion eligibility of a site.
@@ -269,7 +280,7 @@ type ReplicationSpec struct {
 // *promotion* and *policy eligibility*; it does not exempt the site
 // from the same safety fencing that protects primary-candidate
 // losers.
-// +kubebuilder:validation:Enum=primary-candidate;dr-only
+// +kubebuilder:validation:Enum=primary-candidate;dr-only;read-only
 type SiteRole string
 
 const (
@@ -280,9 +291,14 @@ const (
 	// SiteRoleDROnly is a passive replica role: a site that follows
 	// the active primary but is never promoted automatically.
 	SiteRoleDROnly SiteRole = "dr-only"
+
+	// SiteRoleReadOnly is a serving replica that is never promoted and
+	// does not participate in core failover-group readiness.
+	SiteRoleReadOnly SiteRole = "read-only"
 )
 
 // SiteSpec defines the configuration for a single site in the failover group.
+// +kubebuilder:validation:XValidation:rule="self.role == 'read-only' || (has(self.taintNodeSelector) && has(self.lbIP))",message="taintNodeSelector and lbIP are required unless role is read-only"
 type SiteSpec struct {
 	// Name is the site identifier (e.g. "iad", "pdx", "lhr").
 	// Must be unique within spec.sites. MaxLength caps the CEL cost
@@ -306,17 +322,27 @@ type SiteSpec struct {
 	// group-scoped labels so one physical node can participate in multiple
 	// failover groups at the same site.
 	// +kubebuilder:validation:MinProperties=1
-	TaintNodeSelector map[string]string `json:"taintNodeSelector"`
+	// +optional
+	TaintNodeSelector map[string]string `json:"taintNodeSelector,omitempty"`
 
 	// LBIP is the load balancer IP for DNS failover.
 	// +kubebuilder:validation:MinLength=1
-	LBIP string `json:"lbIP"`
+	// +optional
+	LBIP string `json:"lbIP,omitempty"`
 
 	// Storage configures the persistent volume for this site.
 	Storage StorageSpec `json:"storage"`
 
 	// Resources defines the compute resources for the MySQL container.
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// MysqlConf overrides group-level MySQL settings for this site.
+	MysqlConf map[string]string `json:"mysqlConf,omitempty"`
+
+	// ServiceTemplate overrides the group Service template for this site's
+	// client-facing MySQL Service.
+	// +optional
+	ServiceTemplate *SiteServiceTemplate `json:"serviceTemplate,omitempty"`
 }
 
 // EffectiveRole returns the site's role, defaulting to
@@ -415,7 +441,35 @@ type ServiceTemplate struct {
 	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort
 	Type corev1.ServiceType `json:"type,omitempty"`
 
+	// ExternalTrafficPolicy controls external traffic routing for Services
+	// whose effective type is NodePort or LoadBalancer.
+	// +optional
+	// +kubebuilder:validation:Enum=Cluster;Local
+	ExternalTrafficPolicy corev1.ServiceExternalTrafficPolicyType `json:"externalTrafficPolicy,omitempty"`
+
 	// Annotations are additional annotations applied to every Service managed by this failover group.
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+// SiteServiceTemplate customizes one client-facing site Service.
+type SiteServiceTemplate struct {
+	// Type overrides the group Service type.
+	// +optional
+	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort
+	Type corev1.ServiceType `json:"type,omitempty"`
+
+	// ExternalTrafficPolicy overrides the group policy.
+	// +optional
+	// +kubebuilder:validation:Enum=Cluster;Local
+	ExternalTrafficPolicy corev1.ServiceExternalTrafficPolicyType `json:"externalTrafficPolicy,omitempty"`
+
+	// NodePort requests a specific port for this site's MySQL endpoint.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	NodePort int32 `json:"nodePort,omitempty"`
+
+	// Annotations are merged over group Service annotations for this site.
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
@@ -566,7 +620,30 @@ type SiteStatus struct {
 	// DivergentTransactionCount is the number of divergent transactions.
 	// +optional
 	DivergentTransactionCount *int64 `json:"divergentTransactionCount,omitempty"`
+
+	// SourceHost is the replication source reported by MySQL.
+	// +optional
+	SourceHost string `json:"sourceHost,omitempty"`
+
+	// SourceConvergenceState reports whether this follower directly follows
+	// the confirmed active primary.
+	// +optional
+	SourceConvergenceState SourceConvergenceState `json:"sourceConvergenceState,omitempty"`
+
+	// SourceConvergenceReason is a stable machine-readable explanation.
+	// +optional
+	SourceConvergenceReason string `json:"sourceConvergenceReason,omitempty"`
 }
+
+// SourceConvergenceState describes direct-primary source convergence.
+// +kubebuilder:validation:Enum="";Converged;Pending;Blocked
+type SourceConvergenceState string
+
+const (
+	SourceConvergenceConverged SourceConvergenceState = "Converged"
+	SourceConvergencePending   SourceConvergenceState = "Pending"
+	SourceConvergenceBlocked   SourceConvergenceState = "Blocked"
+)
 
 func init() {
 	SchemeBuilder.Register(&MysqlFailoverGroup{}, &MysqlFailoverGroupList{})

@@ -60,10 +60,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 	operatorPass := string(operatorSecret.Data["password"])
 	rootPass := string(operatorSecret.Data["MYSQL_ROOT_PASSWORD"])
 
-	primaryHost := fmt.Sprintf("mysql-%s-primary.%s.svc.cluster.local:%d", fg.Name, fg.Namespace, mysqlPort)
+	activeSite := fg.Spec.SiteByName(fg.Status.ActiveSite)
+	if activeSite == nil || !activeSite.IsPromotable() {
+		return fmt.Errorf("active site %q is not a primary-candidate", fg.Status.ActiveSite)
+	}
+	primaryHost := fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, activeSite.Name, fg.Namespace), mysqlPort)
 	tlsConfigName := ""
 	if fg.Spec.TLS != nil {
-		tlsConfigName, err = mysqlTLSConfig(ctx, r.Client, fg, primaryServiceHost(fg.Name, fg.Namespace))
+		tlsConfigName, err = mysqlTLSConfig(ctx, r.Client, fg, siteServiceHost(fg.Name, activeSite.Name, fg.Namespace))
 		if err != nil {
 			return fmt.Errorf("configure TLS for credential reconciliation: %w", err)
 		}

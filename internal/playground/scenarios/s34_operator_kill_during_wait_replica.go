@@ -34,17 +34,17 @@ const (
 // fails), force-deletes the operator pod, then removes the hold. The
 // replacement operator — whose in-memory update phase was lost — must
 // re-derive the remaining drift from the Deployment spec-hash mismatch and
-// finish the roll: both deployments end at the new memory request, no double
-// -roll or TOTAL LOSS occurs, and the cluster settles at one writable + one
-// read-only.
+// finish the roll: every deployment ends at the new memory request, no double
+// -roll or TOTAL LOSS occurs, and the cluster settles at one writable with
+// every follower read-only.
 func scenario34OperatorKillDuringWaitReplica() runner.Scenario {
 	return runner.Scenario{
 		ID:    s34ID,
 		Title: "Operator kill during ordered-update WaitReplica re-derives and completes",
-		Hypothesis: "Killing the operator while an ordered update is held at WaitReplica does not double-roll both " +
+		Hypothesis: "Killing the operator while an ordered update is held at WaitReplica does not double-roll all " +
 			"MySQL pods or cause TOTAL LOSS. The replacement operator re-derives remaining drift from Deployment " +
-			"spec-hash mismatch and completes: status.updatePhase returns to empty, both deployments run the new " +
-			"memory request, and the cluster is one writable + one read-only.",
+			"spec-hash mismatch and completes: status.updatePhase returns to empty, every deployment runs the new " +
+			"memory request, and the cluster is one writable with all followers read-only.",
 		Risk:              "high",
 		DocLink:           "playground/chaos-scenarios.md#34-operator-kill-during-ordered-update-waitreplica",
 		Timeout:           12 * time.Minute,
@@ -189,7 +189,7 @@ func s34ObserveReplacementCompletes() runner.Step {
 					sort.Strings(readOnly)
 					depOK, depMsg := s34DeploymentsAt(doneCtx, env, mfg, expected)
 					msg := fmt.Sprintf("updatePhase=%q writable=%v read-only=%v other=%v deployments=%s", mfg.Status.UpdatePhase, writable, readOnly, other, depMsg)
-					done := mfg.Status.UpdatePhase == "" && len(writable) == 1 && len(readOnly) == 1 && depOK
+					done := mfg.Status.UpdatePhase == "" && len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && depOK
 					return done, msg, nil
 				})
 			return err
@@ -197,7 +197,7 @@ func s34ObserveReplacementCompletes() runner.Step {
 	}
 }
 
-// s34DeploymentsAt reports whether both site deployments run at the wanted
+// s34DeploymentsAt reports whether every site deployment runs at the wanted
 // memory request. Returns a message for progress logging. Takes the caller's
 // context so the polling predicate stops issuing API calls when the step's
 // wait is cancelled or times out.

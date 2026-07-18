@@ -87,6 +87,36 @@ curl http://localhost:8080/metrics | grep '^bloodraven_'
 
 In Prometheus, check **Status > Targets** for the `bloodraven` job or ServiceMonitor-generated target.
 
+## Reader and source-convergence monitoring
+
+`bloodraven_replication_source_state{namespace,group,site,state}` is a state-set
+gauge for every follower. The `namespace` and `group` labels keep identically
+named sites in different failover groups in separate series. It emits the
+bounded `state` values `converged`, `pending`, and `blocked`; exactly one is `1`
+for a follower and the others are `0`. Active primaries have no active source
+state. Combine it with
+`bloodraven_replication_running{site,thread}` and
+`bloodraven_replication_lag_seconds{site}` when alerting on a reader.
+
+Reader failures are deliberately isolated from the failover group's shared
+`Ready` and `Degraded` conditions. A reader can be unreachable, lagging, or
+source-blocked while the core candidate/DR topology remains Ready and not
+Degraded. Alert on reader sites directly rather than inferring reader health
+from group conditions. For example:
+
+```promql
+bloodraven_replication_source_state{namespace="warehouse",group="orders",site="reader",state!="converged"} == 1
+```
+
+```promql
+bloodraven_replication_running{site="reader"} == 0
+or bloodraven_replication_lag_seconds{site="reader"} > 30
+```
+
+Use a sustained `for` interval appropriate to the normal poll and recovery
+cadence. A blocked source commonly needs GTID investigation and possibly a
+cold reclone; a pending source may clear on a later bounded retry.
+
 ## Alerts
 
 Keep alert rules with your platform monitoring stack. Alert names should link to [Alert To Runbook Map](./alert-runbook-map.mdx), and metric details live in [Monitoring Reference](./monitoring.mdx).

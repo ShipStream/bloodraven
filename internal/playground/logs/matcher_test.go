@@ -44,3 +44,45 @@ func TestTailerWaitTimeoutReturnsCtxErr(t *testing.T) {
 		t.Fatalf("expected timeout error, got nil")
 	}
 }
+
+func TestStructuredMatchesJSONAndText(t *testing.T) {
+	pred := Structured("starting bootstrap", map[string]string{
+		"source":    "auto-clone",
+		"recipient": "reader",
+	})
+	for _, line := range []string{
+		`{"msg":"starting bootstrap","source":"auto-clone","recipient":"reader"}`,
+		`time=now level=INFO msg="starting bootstrap" source=auto-clone recipient=reader`,
+	} {
+		if !pred(line) {
+			t.Errorf("Structured predicate did not match %q", line)
+		}
+	}
+	if pred(`{"msg":"starting bootstrap","source":"reclone","recipient":"reader"}`) {
+		t.Error("Structured predicate matched the wrong source")
+	}
+}
+
+func TestStructuredRejectsPartialTextTokens(t *testing.T) {
+	pred := Structured("starting bootstrap", map[string]string{
+		"source":    "auto-clone",
+		"recipient": "reader",
+	})
+	for _, line := range []string{
+		// Value prefix must not satisfy the exact value.
+		`msg="starting bootstrap" source=auto-clone-old recipient=reader`,
+		// Key prefix must not satisfy the exact key.
+		`msg="starting bootstrap" oldsource=auto-clone recipient=reader`,
+		// A matching value on a different key must not leak across fields.
+		`msg="starting bootstrap" source=auto-clone recipient=reader2`,
+	} {
+		if pred(line) {
+			t.Errorf("Structured predicate matched partial token in %q", line)
+		}
+	}
+	// Quoted values with spaces still match as a single token.
+	quoted := Structured("replication source convergence complete", map[string]string{"site": "reader"})
+	if !quoted(`time=now level=INFO msg="replication source convergence complete" site=reader`) {
+		t.Error("Structured predicate rejected quoted msg containing spaces")
+	}
+}

@@ -51,7 +51,7 @@ you'd hit with raw `kubectl get/annotate/create`.
 |---|---|---|
 | `status [group]` | One-shot health view for one group or every group in the namespace | `kubectl get mysqlfailovergroup -o wide` + `kubectl describe` |
 | `promote <group> <site>` | Apply the `planned-failover` annotation with optional `--max-lag-wait` override | `kubectl annotate mysqlfailovergroup <group> bloodraven.shipstream.io/planned-failover=<site>:maxLagWait=...` |
-| `reclone <group> <site>` | Re-clone a divergent site; auto-fills the GTID prefix from `status.sites[].divergentGtid` | `kubectl annotate mysqlfailovergroup <group> bloodraven.shipstream.io/reclone-site=<site>:<prefix>` |
+| `reclone <group> <site>` | Re-clone a divergent follower, or cold-reclone a candidate, DR site, or reader with `--cold`; auto-fills the GTID prefix when present | `kubectl annotate mysqlfailovergroup <group> bloodraven.shipstream.io/reclone-site=<site>:<prefix>` |
 | `backup <group> --profile <name>` | Create a `MysqlBackup` CR; optional `--source-site`, `--wait` | `kubectl create -f mysqlbackup.yaml` |
 | `verify-backup <group> --profile <name>` | Create a `MysqlBackupVerification` CR; optional `--backup`, `--wait` | `kubectl create -f mysqlbackupverification.yaml` |
 
@@ -133,6 +133,20 @@ kubectl bloodraven reclone orders iad -n orders --cold
 kubectl bloodraven reclone orders iad -n orders --gtid-prefix=a1b2c3d4
 ```
 
+Readers use the same destructive cold-reclone workflow. The exact generic
+form is:
+
+```bash
+kubectl bloodraven reclone <group> <reader-site> --cold
+```
+
+`--cold` is mandatory when no divergent GTID confirmation is available. It
+generates the group-name confirmation token, and the operator still rejects
+the active primary or an invalid target. A successful request wipes the
+reader datadir, clones from the uniquely confirmed active primary, and then
+waits for direct replication to converge. Clone traffic is unthrottled and
+runs against the primary, so plan capacity before rebuilding a large reader.
+
 ### backup
 
 ```bash
@@ -151,6 +165,8 @@ The plugin validates that the profile exists in
 `spec.backup.profiles` and that any `--source-site` is in
 `spec.sites` before posting the CR — so a typo fails immediately
 instead of being deferred to the operator's reconcile loop.
+The operator additionally rejects `read-only` sites as backup sources;
+readers are ineligible both for automatic selection and explicit overrides.
 
 ### verify-backup
 
@@ -201,3 +217,8 @@ summary at the end.
   progress on the server side; re-run `kubectl bloodraven status` to
   inspect the current phase. `--wait --timeout` is the polling budget,
   not the operator's budget.
+* A site with `sourceConvergenceState: Blocked` and
+  `sourceConvergenceReason: GTIDDiverged` cannot be safely repointed. Compare
+  the follower and active-primary GTID sets, preserve any data that needs
+  review, then use the divergent-prefix reclone flow or the explicit reader
+  cold-reclone command above.

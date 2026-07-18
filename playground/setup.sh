@@ -6,7 +6,7 @@
 # Usage: ./playground/setup.sh
 #
 # Prerequisites:
-#   - kubectl pointing at a cluster with at least 2 nodes
+#   - kubectl pointing at a cluster with at least 3 worker nodes
 #   - helm
 #   - docker or podman (docker preferred — k3d's podman support is
 #     experimental, and the image-load path is faster on docker).
@@ -16,10 +16,10 @@
 # Cluster setup (do once, before running this script):
 #
 #   k3d:
-#     k3d cluster create bloodraven --agents 2
+#     k3d cluster create bloodraven --agents 3
 #
 #   minikube:
-#     minikube start --nodes=2 --cpus=2 --memory=2048 --driver=docker
+#     minikube start --nodes=4 --cpus=2 --memory=2048 --driver=docker
 #
 #   kind:
 #     cat <<EOF | kind create cluster --config=-
@@ -27,6 +27,7 @@
 #     apiVersion: kind.x-k8s.io/v1alpha4
 #     nodes:
 #       - role: control-plane
+#       - role: worker
 #       - role: worker
 #       - role: worker
 #     EOF
@@ -45,6 +46,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NAMESPACE="bloodraven-playground"
+SITE_NAMES=(iad pdx reader)
+SITE_ZONES=(zone-iad zone-pdx zone-reader)
+EXPECTED_SITE_COUNT=${#SITE_NAMES[@]}
 
 info()  { echo -e "\033[1;34m==>\033[0m $*"; }
 ok()    { echo -e "\033[1;32m OK\033[0m $*"; }
@@ -94,36 +98,29 @@ fi
 
 kubectl cluster-info >/dev/null 2>&1 || fail "No Kubernetes cluster reachable. Set up a cluster first (see script header)."
 
-# ── 1. Verify at least 2 nodes ───────────────────────────────────────────
-NODES=($(kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name))
-if [[ ${#NODES[@]} -lt 2 ]]; then
-  fail "Need at least 2 nodes, got ${#NODES[@]}. See script header for cluster setup."
-fi
-ok "Cluster reachable with ${#NODES[@]} nodes"
-
-# ── 2. Label nodes to simulate sites ────────────────────────────────────
-info "Labeling nodes as site zones..."
-# Pick first two worker nodes (skip control-plane-only if possible)
+# ── 1. Verify at least 3 worker nodes ────────────────────────────────────
+mapfile -t NODES < <(kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name)
 WORKERS=()
 for n in "${NODES[@]}"; do
   labels=$(kubectl get node "$n" --show-labels --no-headers 2>/dev/null || true)
-  if [[ "$labels" != *"node-role.kubernetes.io/control-plane"* && "$labels" != *"node-role.kubernetes.io/master"* ]]; then
+  unschedulable=$(kubectl get node "$n" -o jsonpath='{.spec.unschedulable}' 2>/dev/null || true)
+  if [[ "$unschedulable" != "true" && "$labels" != *"node-role.kubernetes.io/control-plane"* && "$labels" != *"node-role.kubernetes.io/master"* ]]; then
     WORKERS+=("$n")
   fi
 done
-# Fall back to all nodes if no pure workers
-if [[ ${#WORKERS[@]} -lt 2 ]]; then
-  WORKERS=("${NODES[@]}")
+if [[ ${#WORKERS[@]} -lt "$EXPECTED_SITE_COUNT" ]]; then
+  fail "Need at least $EXPECTED_SITE_COUNT worker nodes, got ${#WORKERS[@]}. See script header for cluster setup."
 fi
+ok "Cluster reachable with ${#WORKERS[@]} worker nodes"
 
-kubectl label node "${WORKERS[0]}" topology.kubernetes.io/zone=zone-iad --overwrite
-kubectl label node "${WORKERS[0]}" shipstream.io/failover-group.playground=true --overwrite
-kubectl label node "${WORKERS[0]}" shipstream.io/site.playground=iad --overwrite
-
-kubectl label node "${WORKERS[1]}" topology.kubernetes.io/zone=zone-pdx --overwrite
-kubectl label node "${WORKERS[1]}" shipstream.io/failover-group.playground=true --overwrite
-kubectl label node "${WORKERS[1]}" shipstream.io/site.playground=pdx --overwrite
-ok "Nodes labeled: ${WORKERS[0]}=iad, ${WORKERS[1]}=pdx"
+# ── 2. Label nodes to simulate sites ────────────────────────────────────
+info "Labeling nodes as site zones..."
+for i in "${!SITE_NAMES[@]}"; do
+  kubectl label node "${WORKERS[$i]}" "topology.kubernetes.io/zone=${SITE_ZONES[$i]}" --overwrite
+  kubectl label node "${WORKERS[$i]}" shipstream.io/failover-group.playground=true --overwrite
+  kubectl label node "${WORKERS[$i]}" "shipstream.io/site.playground=${SITE_NAMES[$i]}" --overwrite
+done
+ok "Nodes labeled: ${WORKERS[0]}=iad, ${WORKERS[1]}=pdx, ${WORKERS[2]}=reader"
 
 # ── 3. Build images ──────────────────────────────────────────────────────
 if [[ -n "${SKIP_IMAGE_BUILD:-}" ]]; then
@@ -343,13 +340,13 @@ for i in $(seq 1 180); do
   PVCS_BOUND=$(kubectl -n "$NAMESPACE" get pvc -l app.kubernetes.io/name=mysql \
     -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null \
     | grep -c '^Bound$' || true)
-  if [[ "$PVCS_BOUND" -ge 2 ]]; then
-    ok "Both MySQL PVCs are bound"
+  if [[ "$PVCS_BOUND" -ge "$EXPECTED_SITE_COUNT" ]]; then
+    ok "All $EXPECTED_SITE_COUNT MySQL PVCs are bound"
     break
   fi
   sleep 1
 done
-if [[ "$PVCS_BOUND" -lt 2 ]]; then
+if [[ "$PVCS_BOUND" -lt "$EXPECTED_SITE_COUNT" ]]; then
   warn "Timed out waiting for MySQL PVCs to bind"
   kubectl -n "$NAMESPACE" get pvc -o wide 2>/dev/null || true
   kubectl -n "$NAMESPACE" describe pvc 2>/dev/null || true
@@ -367,24 +364,24 @@ for i in $(seq 1 36); do
   READY=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=mysql \
     -o jsonpath='{range .items[*]}{.status.containerStatuses[*].ready}{"\n"}{end}' 2>/dev/null \
     | grep -c "true true" || true)
-  if [[ "$READY" -ge 2 ]]; then
-    ok "Both MySQL pods are ready"
+  if [[ "$READY" -ge "$EXPECTED_SITE_COUNT" ]]; then
+    ok "All $EXPECTED_SITE_COUNT MySQL pods are ready"
     break
   fi
   sleep 5
 done
-if [[ "$READY" -lt 2 ]]; then
+if [[ "$READY" -lt "$EXPECTED_SITE_COUNT" ]]; then
   warn "Timed out waiting for MySQL pods"
   kubectl -n "$NAMESPACE" get pods,pvc -o wide 2>/dev/null || true
   kubectl -n "$NAMESPACE" describe pods -l app.kubernetes.io/name=mysql 2>/dev/null || true
   exit 1
 fi
 
-info "Creating replication user on both MySQL sites..."
+info "Creating replication user on every MySQL site..."
 REPL_USER=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_USER}' | base64 -d)
 REPL_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_REPLICATION_PASSWORD}' | base64 -d)
 ROOT_PASS=$(kubectl -n "$NAMESPACE" get secret mysql-credentials -o jsonpath='{.data.MYSQL_ROOT_PASSWORD}' | base64 -d)
-for site in iad pdx; do
+for site in "${SITE_NAMES[@]}"; do
   CREATED=false
   LAST_ERR=""
   for attempt in $(seq 1 12); do
@@ -443,7 +440,7 @@ DF_ENABLED=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup playground \
   -o jsonpath='{.spec.dragonfly.enabled}' 2>/dev/null || echo "")
 if [[ "$DF_ENABLED" == "true" ]]; then
   info "Waiting for Dragonfly StatefulSets (one per site)..."
-  for site in iad pdx; do
+  for site in "${SITE_NAMES[@]}"; do
     if ! kubectl -n "$NAMESPACE" rollout status statefulset/playground-dragonfly-$site --timeout=120s 2>/dev/null; then
       warn "Dragonfly StatefulSet for $site did not become ready in 120s — check 'kubectl describe statefulset playground-dragonfly-$site'"
     fi
@@ -496,6 +493,7 @@ fi
 echo "  Chaos monkey:"
 echo "    ./playground/chaos.sh kill-site iad"
 echo "    ./playground/chaos.sh kill-site pdx"
+echo "    ./playground/chaos.sh kill-site reader"
 echo "    ./playground/chaos.sh cordon iad"
 echo "    ./playground/chaos.sh network-partition iad"
 echo "    ./playground/chaos.sh kill-dragonfly iad"

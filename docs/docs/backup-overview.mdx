@@ -25,6 +25,16 @@ Bloodraven backs up MySQL with mysqlsh `util.dumpInstance()` and restores with `
 4. Verify the backup with `MysqlBackupVerification`.
 5. Document the restore path and test it on a non-production group.
 
+## Backup source eligibility
+
+Bloodraven prefers a healthy replica within the configured backup lag
+threshold and falls back to the confirmed active primary. A healthy
+`dr-only` follower remains eligible. A `read-only` site is never selected as
+an automatic backup source, and setting `sourceSiteOverride` or
+`kubectl bloodraven backup --source-site` to a reader is rejected. This keeps
+application read pools and backup load separate; reclassify the site only if
+you intend to change its operational role.
+
 ## Start here
 
 - [S3 Backups](./backup-s3.mdx) for object storage.

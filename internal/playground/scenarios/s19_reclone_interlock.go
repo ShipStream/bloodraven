@@ -381,7 +381,7 @@ func verifyRecloneAcceptedMatching() runner.Step {
 						}
 						bootDone = boot.Status == metav1.ConditionFalse && boot.Reason == "Done"
 					}
-					clean := len(writable) == 1 && len(readOnly) == 1 && len(blocked) == 0 && len(divergent) == 0 && bootDone
+					clean := len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && len(blocked) == 0 && len(divergent) == 0 && bootDone
 					now := time.Now()
 					if clean {
 						if cleanSince.IsZero() {

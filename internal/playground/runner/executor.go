@@ -219,7 +219,7 @@ func (e *Executor) cleanup(env *Env, s Scenario) error {
 	if err := env.Chaos.GlobalRecover(cleanCtx); err != nil {
 		errs = append(errs, fmt.Errorf("global recover: %w", err))
 	}
-	// Wait for the cluster to converge back to a healthy two-site
+	// Wait for the cluster to converge back to a healthy N-site
 	// state so the next scenario's Precheck does not race a still-
 	// recovering cluster (run-all surfaced this: scenario N's chaos
 	// scales a site to 0; scenario N+1 starts before that pod has
@@ -310,7 +310,7 @@ func processAlive(pid int) bool {
 	return p.Signal(nil) == nil
 }
 
-// waitForClusterReconverge polls the MFG until both sites are in
+// waitForClusterReconverge polls the MFG until every site is in
 // {writable, read-only} (i.e. the operator has finished any in-flight
 // promotion/recovery), the cluster reports Ready=True, and optional
 // Dragonfly topology has returned to Ready. This is the cleanup gate

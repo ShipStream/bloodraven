@@ -51,14 +51,36 @@ spec:
         limits:
           cpu: 500m
           memory: 1Gi
+    - name: reader
+      role: read-only
+      zone: zone-reader
+      mysqlConf:
+        max-connections: "150"
+      serviceTemplate:
+        type: NodePort
+        externalTrafficPolicy: Local
+        nodePort: 30306
+        annotations:
+          playground.bloodraven.io/purpose: site-local-reads
+      storage:
+        storageClassName: playground-fast
+        size: 1Gi
+      resources:
+        requests:
+          cpu: 100m
+          memory: 384Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
   sidecar:
     leaseTimeout: 20s
     peerCheckInterval: 5s
   replication:
     maxLagSeconds: 30
+    readOnlyMaxLagSeconds: 10
   # Playground-only Dragonfly co-management. Bloodraven creates one
-  # Dragonfly StatefulSet per site and configures the non-active site
-  # as a replica of the active site. Disable by removing this block or
+  # Dragonfly StatefulSet per site and configures non-active sites as
+  # replicas of the active site. Disable by removing this block or
   # setting enabled=false; the rest of the failover group is unaffected.
   dragonfly:
     enabled: true

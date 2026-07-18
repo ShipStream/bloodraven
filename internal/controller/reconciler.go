@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -50,12 +51,14 @@ const (
 	labelManagedBy     = "app.kubernetes.io/managed-by"
 	managerName        = "bloodraven"
 
-	specHashAnnotation = "shipstream.io/spec-hash"
+	specHashAnnotation        = "shipstream.io/spec-hash"
+	managedServiceAnnotations = "shipstream.io/managed-service-annotations"
+	configMapRenderVersion    = "site-config-v1"
 
 	// Bump when the rendered MySQL Deployment pod spec changes without a
 	// corresponding user-facing spec field change, so existing pods roll
 	// forward to the new safe defaults.
-	deploymentPodRenderVersion = "deployment-pod-render-v2-stable-relay-log"
+	deploymentPodRenderVersion = "deployment-pod-render-v3-site-config-internal-service"
 
 	// RecloneAnnotation is set by an admin to trigger a reclone of a
 	// specific site from the current primary via CLONE INSTANCE.
@@ -194,9 +197,10 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return result, err
 	}
 
-	// Reconcile ConfigMap
-	if err := r.reconcileConfigMap(ctx, &fg); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcile configmap: %w", err)
+	// Desired per-site ConfigMaps are created before any Deployment reference
+	// changes. This ordering makes migration from the legacy shared map safe.
+	if err := r.reconcileSiteConfigMaps(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile site configmaps: %w", err)
 	}
 
 	// Reconcile init-users ConfigMap for MySQL user creation on first boot.
@@ -215,14 +219,18 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// simultaneous restarts of both sites (which causes a TOTAL LOSS window).
 	orderedUpdateActive := fg.Status.UpdatePhase != ""
 
-	// When a topology manager is already running for this CR, defer Deployment
-	// updates to the ordered update path: the reconciler firing on a CR spec
+	// Defer every existing Deployment to the ordered update path: the reconciler firing on a CR spec
 	// change must not restart both sites simultaneously. The runner's
 	// checkSpecDrift compares the desired hash against the live Deployment
 	// annotation, so leaving the existing Deployment untouched is what causes
 	// drift to be observed and the ordered update to start. New Deployments
-	// (initial bootstrap) are always created here since there's no manager yet.
-	managerRunning := r.Runner != nil && r.Runner.HasManager(req.NamespacedName)
+	// (initial bootstrap) are always created here. This guard deliberately does
+	// not depend on runner wiring or manager registration: existing Deployments
+	// are never safe to patch from the bulk reconciliation loop.
+	deploymentReader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		deploymentReader = r.APIReader
+	}
 
 	// Reconcile per-site resources
 	for i, site := range fg.Spec.Sites {
@@ -233,17 +241,15 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		if !orderedUpdateActive {
 			deferDeployment := false
-			if managerRunning {
-				var existing appsv1.Deployment
-				deployNN := types.NamespacedName{
-					Namespace: fg.Namespace,
-					Name:      resourceName(fg.Name, site.Name),
-				}
-				if err := r.Get(ctx, deployNN, &existing); err == nil {
-					deferDeployment = true
-				} else if !errors.IsNotFound(err) {
-					return ctrl.Result{}, fmt.Errorf("get deployment %s: %w", site.Name, err)
-				}
+			var existing appsv1.Deployment
+			deployNN := types.NamespacedName{
+				Namespace: fg.Namespace,
+				Name:      resourceName(fg.Name, site.Name),
+			}
+			if err := deploymentReader.Get(ctx, deployNN, &existing); err == nil {
+				deferDeployment = true
+			} else if !errors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("get deployment %s: %w", site.Name, err)
 			}
 			if !deferDeployment {
 				if err := r.reconcileDeployment(ctx, &fg, site, serverID, image); err != nil {
@@ -254,6 +260,12 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err := r.reconcileSiteService(ctx, &fg, site); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile site service %s: %w", site.Name, err)
 		}
+		if err := r.reconcileInternalSiteService(ctx, &fg, site); err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcile internal site service %s: %w", site.Name, err)
+		}
+	}
+	if err := r.cleanupLegacyConfigMap(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("cleanup legacy configmap: %w", err)
 	}
 
 	// Reconcile shared services
@@ -469,7 +481,13 @@ func (r *MysqlFailoverGroupReconciler) handleDeletion(ctx context.Context, fg *v
 	// Remove taints for all configured site selectors.
 	if r.Tainter != nil {
 		for _, site := range fg.Spec.Sites {
+			if site.IsReadOnlyReader() {
+				continue
+			}
 			selector := taintNodeSelectorString(site.TaintNodeSelector)
+			if selector == "" {
+				continue
+			}
 			if err := r.Tainter.SetTaint(ctx, selector, fg.Name, false); err != nil {
 				logger.Error(err, "failed to remove taint during shutdown", "site", site.Name)
 				// Continue cleanup despite taint removal failure
@@ -583,10 +601,23 @@ func commonLabels(fgName, siteName string) map[string]string {
 	}
 }
 
-func (r *MysqlFailoverGroupReconciler) reconcileConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+func siteConfigMapName(group, site string) string {
+	return fmt.Sprintf("mysql-%s-%s-config", group, site)
+}
+
+func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	for _, site := range fg.Spec.Sites {
+		if err := r.reconcileSiteConfigMap(ctx, fg, site); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("mysql-%s-config", fg.Name),
+			Name:      siteConfigMapName(fg.Name, site.Name),
 			Namespace: fg.Namespace,
 		},
 	}
@@ -602,14 +633,27 @@ func (r *MysqlFailoverGroupReconciler) reconcileConfigMap(ctx context.Context, f
 			labelManagedBy:     managerName,
 		}
 		cm.Data = map[string]string{
-			"bloodraven.cnf": generateMyCnf(fg),
+			"bloodraven.cnf": generateMyCnf(fg, site),
 		}
 		return nil
 	})
 	return err
 }
 
-func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
+func normalizedMySQLSettings(raw map[string]string) map[string]string {
+	keys := make([]string, 0, len(raw))
+	for key := range raw {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make(map[string]string, len(raw))
+	for _, key := range keys {
+		out[strings.ReplaceAll(key, "_", "-")] = raw[key]
+	}
+	return out
+}
+
+func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) string {
 	// Base config
 	settings := map[string]string{
 		"gtid-mode":                       "ON",
@@ -658,13 +702,32 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup) string {
 		settings["max-binlog-size"] = maxSize
 	}
 
-	// Apply user overrides
-	for k, v := range fg.Spec.MysqlConf {
-		// MySQL treats dashes and underscores in option names as equivalent.
-		// Canonicalize them before merging so an underscore-style user key
-		// replaces a dash-style default instead of emitting both spellings.
-		settings[strings.ReplaceAll(k, "_", "-")] = v
+	for k, v := range normalizedMySQLSettings(fg.Spec.MysqlConf) {
+		settings[k] = v
 	}
+	if len(sites) > 0 {
+		for k, v := range normalizedMySQLSettings(sites[0].MysqlConf) {
+			settings[k] = v
+		}
+	}
+
+	// These settings are operator-owned safety invariants and cannot be
+	// weakened by group or site overrides.
+	for k, v := range map[string]string{
+		"gtid-mode": "ON", "enforce-gtid-consistency": "ON",
+		"log-bin": "/var/lib/mysql/mysql-bin", "log-replica-updates": "ON",
+		"skip-replica-start": "ON", "plugin-load-add": "mysql_clone.so",
+	} {
+		settings[k] = v
+	}
+
+	// skip-log-bin / disable-log-bin (underscore spellings are normalized to
+	// hyphens by normalizedMySQLSettings) would silently defeat the enforced
+	// log-bin invariant: the sorted render places them after log-bin and
+	// MySQL honors the last occurrence. Strip both aliases outright so group
+	// or site overrides cannot reintroduce them.
+	delete(settings, "skip-log-bin")
+	delete(settings, "disable-log-bin")
 
 	// Build sorted output for deterministic ConfigMap content
 	keys := make([]string, 0, len(settings))
@@ -797,18 +860,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 
 		sidecarImage := fg.Spec.SidecarImage
 
-		configMapName := fmt.Sprintf("mysql-%s-config", fg.Name)
+		configMapName := siteConfigMapName(fg.Name, site.Name)
 
 		// Build the list of peer sidecar addresses. The sidecar treats
 		// "all peers unreachable" as one half of the self-fencing
 		// quorum, so every non-self site needs to be listed here.
-		peerNames := fg.Spec.PeerSiteNames(site.Name)
-		peerAddrs := make([]string, len(peerNames))
-		for i, name := range peerNames {
-			peerAddrs[i] = fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d",
-				fg.Name, name, fg.Namespace, sidecarPort)
-		}
-		peerAddresses := strings.Join(peerAddrs, ",")
+		peerAddresses := strings.Join(sitePeerAddresses(fg, site.Name), ",")
 
 		bloodravenAddress := defaultBloodravenAddress(fg)
 
@@ -1244,29 +1301,49 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context,
 			return err
 		}
 		svc.Labels = commonLabels(fg.Name, site.Name)
-		applyServiceAnnotations(svc, fg.Spec.ServiceTemplate)
-		svc.Spec = corev1.ServiceSpec{
-			Type: serviceType(fg.Spec.ServiceTemplate),
-			Selector: map[string]string{
-				labelAppName:  "mysql",
-				labelInstance: fg.Name,
-				labelSite:     site.Name,
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "mysql",
-					Port:       mysqlPort,
-					TargetPort: intstr.FromInt32(mysqlPort),
-					Protocol:   corev1.ProtocolTCP,
-				},
-				{
-					Name:       "sidecar",
-					Port:       sidecarPort,
-					TargetPort: intstr.FromInt32(sidecarPort),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
+		applyManagedServiceAnnotations(svc, effectiveSiteServiceAnnotations(fg.Spec.ServiceTemplate, site.ServiceTemplate))
+		selector := map[string]string{
+			labelAppName:  "mysql",
+			labelInstance: fg.Name,
+			labelSite:     site.Name,
 		}
+		if site.IsReadOnlyReader() {
+			selector[labelHealthy] = "yes"
+		}
+		serviceType := effectiveSiteServiceType(fg.Spec.ServiceTemplate, site.ServiceTemplate)
+		mutateServiceSpec(svc, serviceType, effectiveSiteExternalTrafficPolicy(fg.Spec.ServiceTemplate, site.ServiceTemplate), selector, []corev1.ServicePort{
+			{
+				Name:       "mysql",
+				Port:       mysqlPort,
+				TargetPort: intstr.FromInt32(mysqlPort),
+				Protocol:   corev1.ProtocolTCP,
+				NodePort:   siteServiceNodePort(site.ServiceTemplate),
+			},
+		})
+		if serviceType == corev1.ServiceTypeLoadBalancer {
+			svc.Spec.LoadBalancerIP = site.LBIP
+		}
+		svc.Spec.PublishNotReadyAddresses = false
+		return nil
+	})
+	return err
+}
+
+func (r *MysqlFailoverGroupReconciler) reconcileInternalSiteService(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: internalSiteServiceName(fg.Name, site.Name), Namespace: fg.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		if err := controllerutil.SetControllerReference(fg, svc, r.Scheme); err != nil {
+			return err
+		}
+		svc.Labels = commonLabels(fg.Name, site.Name)
+		applyManagedServiceAnnotations(svc, nil)
+		mutateServiceSpec(svc, corev1.ServiceTypeClusterIP, "", map[string]string{
+			labelAppName: "mysql", labelInstance: fg.Name, labelSite: site.Name,
+		}, []corev1.ServicePort{
+			{Name: "mysql", Port: mysqlPort, TargetPort: intstr.FromInt32(mysqlPort), Protocol: corev1.ProtocolTCP},
+			{Name: "sidecar", Port: sidecarPort, TargetPort: intstr.FromInt32(sidecarPort), Protocol: corev1.ProtocolTCP},
+		})
+		svc.Spec.PublishNotReadyAddresses = true
 		return nil
 	})
 	return err
@@ -1290,22 +1367,19 @@ func (r *MysqlFailoverGroupReconciler) reconcilePrimaryService(ctx context.Conte
 			labelFailoverGroup: fg.Name,
 			labelManagedBy:     managerName,
 		}
-		applyServiceAnnotations(svc, fg.Spec.ServiceTemplate)
-		svc.Spec = corev1.ServiceSpec{
-			Type: serviceType(fg.Spec.ServiceTemplate),
-			Selector: map[string]string{
-				labelInstance: fg.Name,
-				labelRole:     "primary",
+		applyManagedServiceAnnotations(svc, serviceAnnotations(fg.Spec.ServiceTemplate))
+		mutateServiceSpec(svc, serviceType(fg.Spec.ServiceTemplate), serviceExternalTrafficPolicy(fg.Spec.ServiceTemplate), map[string]string{
+			labelInstance: fg.Name,
+			labelRole:     "primary",
+		}, []corev1.ServicePort{
+			{
+				Name:       "mysql",
+				Port:       mysqlPort,
+				TargetPort: intstr.FromInt32(mysqlPort),
+				Protocol:   corev1.ProtocolTCP,
 			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "mysql",
-					Port:       mysqlPort,
-					TargetPort: intstr.FromInt32(mysqlPort),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
-		}
+		})
+		svc.Spec.PublishNotReadyAddresses = false
 		return nil
 	})
 	return err
@@ -1329,23 +1403,20 @@ func (r *MysqlFailoverGroupReconciler) reconcileReplicasService(ctx context.Cont
 			labelFailoverGroup: fg.Name,
 			labelManagedBy:     managerName,
 		}
-		applyServiceAnnotations(svc, fg.Spec.ServiceTemplate)
-		svc.Spec = corev1.ServiceSpec{
-			Type: serviceType(fg.Spec.ServiceTemplate),
-			Selector: map[string]string{
-				labelInstance: fg.Name,
-				labelRole:     "replica",
-				labelHealthy:  "yes",
+		applyManagedServiceAnnotations(svc, serviceAnnotations(fg.Spec.ServiceTemplate))
+		mutateServiceSpec(svc, serviceType(fg.Spec.ServiceTemplate), serviceExternalTrafficPolicy(fg.Spec.ServiceTemplate), map[string]string{
+			labelInstance: fg.Name,
+			labelRole:     "replica",
+			labelHealthy:  "yes",
+		}, []corev1.ServicePort{
+			{
+				Name:       "mysql",
+				Port:       mysqlPort,
+				TargetPort: intstr.FromInt32(mysqlPort),
+				Protocol:   corev1.ProtocolTCP,
 			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "mysql",
-					Port:       mysqlPort,
-					TargetPort: intstr.FromInt32(mysqlPort),
-					Protocol:   corev1.ProtocolTCP,
-				},
-			},
-		}
+		})
+		svc.Spec.PublishNotReadyAddresses = false
 		return nil
 	})
 	return err
@@ -1393,15 +1464,122 @@ func serviceType(tmpl *v1alpha1.ServiceTemplate) corev1.ServiceType {
 }
 
 // applyServiceAnnotations merges user-supplied service annotations into the Service.
+func serviceExternalTrafficPolicy(tmpl *v1alpha1.ServiceTemplate) corev1.ServiceExternalTrafficPolicyType {
+	if tmpl != nil {
+		return tmpl.ExternalTrafficPolicy
+	}
+	return ""
+}
+
+func effectiveSiteServiceType(group *v1alpha1.ServiceTemplate, site *v1alpha1.SiteServiceTemplate) corev1.ServiceType {
+	if site != nil && site.Type != "" {
+		return site.Type
+	}
+	return serviceType(group)
+}
+
+func effectiveSiteExternalTrafficPolicy(group *v1alpha1.ServiceTemplate, site *v1alpha1.SiteServiceTemplate) corev1.ServiceExternalTrafficPolicyType {
+	if site != nil && site.ExternalTrafficPolicy != "" {
+		return site.ExternalTrafficPolicy
+	}
+	return serviceExternalTrafficPolicy(group)
+}
+
+func siteServiceNodePort(site *v1alpha1.SiteServiceTemplate) int32 {
+	if site != nil {
+		return site.NodePort
+	}
+	return 0
+}
+
+func serviceAnnotations(tmpl *v1alpha1.ServiceTemplate) map[string]string {
+	if tmpl == nil {
+		return nil
+	}
+	return tmpl.Annotations
+}
+
+// applyServiceAnnotations is retained for Dragonfly Services, whose resource
+// lifecycle is separate from the MySQL Service mutation contract.
 func applyServiceAnnotations(svc *corev1.Service, tmpl *v1alpha1.ServiceTemplate) {
-	if tmpl == nil || len(tmpl.Annotations) == 0 {
+	if tmpl == nil {
 		return
 	}
 	if svc.Annotations == nil {
-		svc.Annotations = make(map[string]string, len(tmpl.Annotations))
+		svc.Annotations = make(map[string]string)
 	}
 	for k, v := range tmpl.Annotations {
 		svc.Annotations[k] = v
+	}
+}
+
+func effectiveSiteServiceAnnotations(group *v1alpha1.ServiceTemplate, site *v1alpha1.SiteServiceTemplate) map[string]string {
+	out := make(map[string]string)
+	if group != nil {
+		for k, v := range group.Annotations {
+			out[k] = v
+		}
+	}
+	if site != nil {
+		for k, v := range site.Annotations {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func applyManagedServiceAnnotations(svc *corev1.Service, desired map[string]string) {
+	if svc.Annotations == nil {
+		svc.Annotations = make(map[string]string)
+	}
+	var previous []string
+	_ = json.Unmarshal([]byte(svc.Annotations[managedServiceAnnotations]), &previous)
+	for _, key := range previous {
+		delete(svc.Annotations, key)
+	}
+	keys := make([]string, 0, len(desired))
+	for k, v := range desired {
+		svc.Annotations[k] = v
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	encoded, _ := json.Marshal(keys)
+	svc.Annotations[managedServiceAnnotations] = string(encoded)
+}
+
+func mutateServiceSpec(svc *corev1.Service, serviceType corev1.ServiceType, etp corev1.ServiceExternalTrafficPolicyType, selector map[string]string, ports []corev1.ServicePort) {
+	oldPorts := make(map[string]corev1.ServicePort, len(svc.Spec.Ports))
+	for _, port := range svc.Spec.Ports {
+		oldPorts[port.Name] = port
+	}
+	external := serviceType == corev1.ServiceTypeNodePort || serviceType == corev1.ServiceTypeLoadBalancer
+	if external && etp == "" {
+		etp = corev1.ServiceExternalTrafficPolicyCluster
+	}
+	for i := range ports {
+		if external && ports[i].NodePort == 0 {
+			ports[i].NodePort = oldPorts[ports[i].Name].NodePort
+		}
+		if !external {
+			ports[i].NodePort = 0
+		}
+	}
+	svc.Spec.Type = serviceType
+	svc.Spec.Selector = selector
+	svc.Spec.Ports = ports
+	if external {
+		svc.Spec.ExternalTrafficPolicy = etp
+	} else {
+		svc.Spec.ExternalTrafficPolicy = ""
+	}
+	if serviceType != corev1.ServiceTypeLoadBalancer {
+		svc.Spec.LoadBalancerIP = ""
+		svc.Spec.LoadBalancerSourceRanges = nil
+		svc.Spec.LoadBalancerClass = nil
+		svc.Spec.AllocateLoadBalancerNodePorts = nil
+	}
+	if serviceType != corev1.ServiceTypeLoadBalancer || etp != corev1.ServiceExternalTrafficPolicyLocal {
+		svc.Spec.HealthCheckNodePort = 0
 	}
 }
 
@@ -1410,16 +1588,35 @@ func applyServiceAnnotations(svc *corev1.Service, tmpl *v1alpha1.ServiceTemplate
 func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	logger := log.FromContext(ctx)
 
-	if fg.Status.ActiveSite == "" {
-		return nil
+	statusByName := make(map[string]v1alpha1.SiteStatus, len(fg.Status.Sites))
+	for _, siteStatus := range fg.Status.Sites {
+		statusByName[siteStatus.Name] = siteStatus
+	}
+	statusComplete := len(statusByName) >= len(fg.Spec.Sites)
+	writableSites := 0
+	for _, site := range fg.Spec.Sites {
+		status, found := statusByName[site.Name]
+		if !found {
+			statusComplete = false
+			continue
+		}
+		if status.State == "writable" {
+			writableSites++
+		}
+	}
+	authorityValid := false
+	if statusComplete && fg.Status.ActiveSite != "" && writableSites == 1 {
+		for _, site := range fg.Spec.Sites {
+			if site.Name == fg.Status.ActiveSite && site.IsPromotable() && statusByName[site.Name].State == "writable" {
+				authorityValid = true
+				break
+			}
+		}
 	}
 
-	// Guard: status may not be populated yet
-	if len(fg.Status.Sites) < len(fg.Spec.Sites) {
-		return nil
-	}
-
-	// Determine which site is primary, which is replica
+	// Determine which site is primary, which is replica. Invalid or incomplete
+	// authority deliberately leaves every site non-primary and every reader
+	// non-serving, shedding stale Service endpoints rather than returning early.
 	type siteInfo struct {
 		spec   v1alpha1.SiteSpec
 		status v1alpha1.SiteStatus
@@ -1428,12 +1625,13 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 
 	sites := make([]siteInfo, len(fg.Spec.Sites))
 	for i := range fg.Spec.Sites {
+		siteStatus := statusByName[fg.Spec.Sites[i].Name]
 		sites[i] = siteInfo{
 			spec:   fg.Spec.Sites[i],
-			status: fg.Status.Sites[i],
+			status: siteStatus,
 			role:   "replica",
 		}
-		if fg.Status.ActiveSite == fg.Spec.Sites[i].Name {
+		if authorityValid && fg.Status.ActiveSite == fg.Spec.Sites[i].Name {
 			sites[i].role = "primary"
 		}
 	}
@@ -1491,7 +1689,14 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 		}
 
 		healthy := "no"
-		if si.status.State == "writable" || si.status.State == "read-only" {
+		if si.spec.IsReadOnlyReader() {
+			if authorityValid && si.status.State == "read-only" && si.status.SourceConvergenceState == v1alpha1.SourceConvergenceConverged &&
+				si.status.Replicating && si.status.SecondsBehindSource != nil &&
+				canonicalSourceHost(si.status.SourceHost) == canonicalSourceHost(internalSiteServiceHost(fg.Name, fg.Status.ActiveSite, fg.Namespace)) &&
+				*si.status.SecondsBehindSource <= fg.Spec.EffectiveReadOnlyMaxLagSeconds() {
+				healthy = "yes"
+			}
+		} else if si.status.State == "writable" || si.status.State == "read-only" {
 			healthy = "yes"
 		}
 
@@ -1558,15 +1763,10 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 	// already relies on for resources/sidecarResources.
 	fmt.Fprintf(h, "podSC=%v\n", fg.Spec.PodSecurityContext)
 	fmt.Fprintf(h, "containerSC=%v\n", fg.Spec.ContainerSecurityContext)
-	// Sort mysqlConf keys for deterministic hash
-	keys := make([]string, 0, len(fg.Spec.MysqlConf))
-	for k := range fg.Spec.MysqlConf {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		fmt.Fprintf(h, "mysql.%s=%s\n", k, fg.Spec.MysqlConf[k])
-	}
+	fmt.Fprintf(h, "configMapRenderVersion=%s\n", configMapRenderVersion)
+	fmt.Fprintf(h, "configMapName=%s\n", siteConfigMapName(fg.Name, site.Name))
+	fmt.Fprintf(h, "effectiveMyCnf=%s\n", generateMyCnf(fg, site))
+	fmt.Fprintf(h, "peerAddresses=%s\n", strings.Join(sitePeerAddresses(fg, site.Name), ","))
 	// PITR settings affect both my.cnf (max_binlog_size) and the
 	// sidecar env (archiver config). Either change must roll the pod.
 	// Hash the EFFECTIVE values (with defaults filled in) rather than
@@ -1641,6 +1841,15 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
+func sitePeerAddresses(fg *v1alpha1.MysqlFailoverGroup, siteName string) []string {
+	peerNames := fg.Spec.PeerSiteNames(siteName)
+	peerAddrs := make([]string, len(peerNames))
+	for i, name := range peerNames {
+		peerAddrs[i] = fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, name, fg.Namespace), sidecarPort)
+	}
+	return peerAddrs
+}
+
 func int32Ptr(i int32) *int32 { return &i }
 
 // CRConfigToTopologyConfig extracts topology manager configuration from a CR.
@@ -1679,21 +1888,82 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 			LBIP:          s.LBIP,
 			Role:          state.SiteRole(s.EffectiveRole()),
 			TaintSelector: taintNodeSelectorString(s.TaintNodeSelector),
-			Host:          fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local", fg.Name, s.Name, fg.Namespace),
+			Host:          internalSiteServiceHost(fg.Name, s.Name, fg.Namespace),
 		}
 	}
 
 	return TopologyConfig{
-		Namespace:         fg.Namespace,
-		Name:              fg.Name,
-		Sites:             sites,
-		PollInterval:      pollInterval,
-		FailureThreshold:  int(failureThreshold),
-		RecoveryThreshold: int(recoveryThreshold),
-		FailoverCooldown:  failoverCooldown,
-		SitePriorities:    sitePriorities,
-		DragonflyEnabled:  dragonflyEnabled(fg),
+		Namespace:             fg.Namespace,
+		Name:                  fg.Name,
+		Sites:                 sites,
+		PollInterval:          pollInterval,
+		FailureThreshold:      int(failureThreshold),
+		RecoveryThreshold:     int(recoveryThreshold),
+		FailoverCooldown:      failoverCooldown,
+		MaxLagSeconds:         fg.Spec.EffectiveMaxLagSeconds(),
+		ReadOnlyMaxLagSeconds: fg.Spec.EffectiveReadOnlyMaxLagSeconds(),
+		SitePriorities:        sitePriorities,
+		DragonflyEnabled:      dragonflyEnabled(fg),
 	}
+}
+
+func (r *MysqlFailoverGroupReconciler) cleanupLegacyConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	legacy := fmt.Sprintf("mysql-%s-config", fg.Name)
+	desiredConfigs := make(map[string]string, len(fg.Spec.Sites))
+	for _, site := range fg.Spec.Sites {
+		desiredConfig := siteConfigMapName(fg.Name, site.Name)
+		var cm corev1.ConfigMap
+		if err := reader.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: desiredConfig}, &cm); err != nil {
+			return nil
+		}
+		desiredConfigs[resourceName(fg.Name, site.Name)] = desiredConfig
+	}
+
+	var deployments appsv1.DeploymentList
+	if err := reader.List(ctx, &deployments,
+		client.InNamespace(fg.Namespace),
+		client.MatchingLabels{labelAppName: "mysql", labelInstance: fg.Name},
+	); err != nil {
+		return nil
+	}
+	seenDesired := make(map[string]bool, len(desiredConfigs))
+	for i := range deployments.Items {
+		deployment := &deployments.Items[i]
+		configName := deploymentConfigMapName(deployment)
+		if expected, desired := desiredConfigs[deployment.Name]; desired {
+			seenDesired[deployment.Name] = true
+			if configName != expected {
+				return nil
+			}
+			continue
+		}
+		if configName == legacy {
+			return nil
+		}
+	}
+	for deploymentName := range desiredConfigs {
+		if !seenDesired[deploymentName] {
+			return nil
+		}
+	}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: legacy, Namespace: fg.Namespace}}
+	if err := r.Delete(ctx, cm); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
+func deploymentConfigMapName(deployment *appsv1.Deployment) string {
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		if volume.Name == "config" && volume.ConfigMap != nil {
+			return volume.ConfigMap.Name
+		}
+	}
+	return ""
 }
 
 func taintNodeSelectorString(selector map[string]string) string {
@@ -1719,6 +1989,9 @@ func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Conte
 	for i, site := range fg.Spec.Sites {
 		if site.Name == siteName {
 			siteFound = true
+			if err := r.reconcileSiteConfigMap(ctx, &fg, site); err != nil {
+				return fmt.Errorf("reconcile site configmap: %w", err)
+			}
 			serverID := int32(101 + i)
 			if err := r.reconcileDeployment(ctx, &fg, site, serverID, image); err != nil {
 				return err

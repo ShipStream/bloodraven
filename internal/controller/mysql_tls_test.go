@@ -28,6 +28,9 @@ func TestMySQLServiceHosts(t *testing.T) {
 	if got, want := siteServiceHost("orders", "iad", "shop"), "mysql-orders-iad.shop.svc.cluster.local"; got != want {
 		t.Fatalf("siteServiceHost() = %q, want %q", got, want)
 	}
+	if got, want := internalSiteServiceHost("orders", "iad", "shop"), "mysql-orders-iad-internal.shop.svc.cluster.local"; got != want {
+		t.Fatalf("internalSiteServiceHost() = %q, want %q", got, want)
+	}
 	if got, want := primaryServiceHost("orders", "shop"), "mysql-orders-primary.shop.svc.cluster.local"; got != want {
 		t.Fatalf("primaryServiceHost() = %q, want %q", got, want)
 	}

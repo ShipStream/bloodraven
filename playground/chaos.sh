@@ -2,14 +2,14 @@
 # Bloodraven Playground — Chaos Monkey
 #
 # Usage:
-#   ./playground/chaos.sh kill-site <iad|pdx>       Kill MySQL+Dragonfly pods at a site
+#   ./playground/chaos.sh kill-site <site>           Kill MySQL+Dragonfly pods at a site
 #   ./playground/chaos.sh kill-operator              Kill the operator pod
 #   ./playground/chaos.sh kill-counter               Kill the counter app pod
-#   ./playground/chaos.sh kill-dragonfly <iad|pdx>   Kill the Dragonfly pod at a site (StatefulSet recreates)
+#   ./playground/chaos.sh kill-dragonfly <site>      Kill the Dragonfly pod at a site (StatefulSet recreates)
 #   ./playground/chaos.sh dragonfly-status           Show Dragonfly status, pod roles, active endpoints
-#   ./playground/chaos.sh cordon <iad|pdx>           Cordon the node for a site
+#   ./playground/chaos.sh cordon <site>              Cordon the node for a site
 #   ./playground/chaos.sh uncordon                   Uncordon all nodes
-#   ./playground/chaos.sh network-partition <iad|pdx> Simulate network partition (drop MySQL traffic)
+#   ./playground/chaos.sh network-partition <site>   Simulate network partition (drop MySQL traffic)
 #   ./playground/chaos.sh recover                    Undo all chaos (uncordon, restore network)
 #   ./playground/chaos.sh status                     Show current state
 #   ./playground/chaos.sh watch                      Continuous watch
@@ -31,36 +31,26 @@ usage() {
   echo "Usage: $0 <command> [args]"
   echo ""
   echo "Commands:"
-  echo "  kill-site <iad|pdx>          Delete MySQL+Dragonfly pods at the given site"
+  echo "  kill-site <site>             Delete MySQL+Dragonfly pods at the given site"
   echo "  kill-operator                Delete the Bloodraven operator pod"
   echo "  kill-counter                 Delete the counter app pod"
-  echo "  kill-dragonfly <iad|pdx>     Delete the Dragonfly pod at the given site"
+  echo "  kill-dragonfly <site>        Delete the Dragonfly pod at the given site"
   echo "  dragonfly-status             Show Dragonfly status, pod roles, and active endpoints"
-  echo "  cordon <iad|pdx>             Cordon the node hosting the given site"
+  echo "  cordon <site>                Cordon the node hosting the given site"
   echo "  uncordon                     Uncordon all playground nodes"
-  echo "  network-partition <iad|pdx>  Block MySQL traffic on a site's node via exec into a debug pod"
+  echo "  network-partition <site>     Block MySQL traffic to a site's pod with NetworkPolicy"
   echo "  recover                      Undo all chaos actions"
   echo "  status                       Show cluster and failover group status"
   echo "  watch                        Watch pods and failover group continuously"
   exit 1
 }
 
-site_zone() {
-  case "$1" in
-    iad) echo "zone-iad" ;;
-    pdx) echo "zone-pdx" ;;
-    *) echo "Unknown site: $1" >&2; exit 1 ;;
-  esac
-}
-
 site_node() {
-  local zone
-  zone=$(site_zone "$1")
-  kubectl get nodes -l "topology.kubernetes.io/zone=$zone" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+  kubectl get nodes -l "shipstream.io/site.playground=$1" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
 }
 
 cmd_kill_site() {
-  local site="${1:?Usage: kill-site <iad|pdx>}"
+  local site="${1:?Usage: kill-site <site>}"
   info "Killing MySQL pod at site '$site'..."
   kubectl -n "$NAMESPACE" delete pod -l "shipstream.io/site=$site" --grace-period=0 --force 2>/dev/null || \
     kubectl -n "$NAMESPACE" delete pod -l "shipstream.io/site=$site"
@@ -82,7 +72,7 @@ cmd_kill_counter() {
 }
 
 cmd_cordon() {
-  local site="${1:?Usage: cordon <iad|pdx>}"
+  local site="${1:?Usage: cordon <site>}"
   local node
   node=$(site_node "$site")
   if [[ -z "$node" ]]; then
@@ -103,7 +93,7 @@ cmd_uncordon() {
 }
 
 cmd_network_partition() {
-  local site="${1:?Usage: network-partition <iad|pdx>}"
+  local site="${1:?Usage: network-partition <site>}"
   info "Simulating network partition on site '$site' (NetworkPolicy deny-all)..."
 
   # Use a Kubernetes NetworkPolicy to block all ingress and egress traffic
@@ -134,7 +124,7 @@ EOF
 }
 
 cmd_kill_dragonfly() {
-  local site="${1:?Usage: kill-dragonfly <iad|pdx>}"
+  local site="${1:?Usage: kill-dragonfly <site>}"
   info "Killing Dragonfly pod at site '$site' (StatefulSet will recreate)..."
   # StatefulSet pods are named -<ordinal>; we have replicas=1 so it's always -0.
   local pod="playground-dragonfly-${site}-0"

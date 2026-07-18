@@ -15,11 +15,21 @@ failover:
 |------|----------------|-------------|
 | `primary-candidate` (default) | yes | active/standby pair inside a region |
 | `dr-only` | no | cross-region follower, kept for disaster recovery |
+| `read-only` | no | site-specific application read pool |
 
 The spec must contain at least **two** `primary-candidate` sites so the
 operator always has a promotion target for the current primary. Any
-number of `dr-only` sites may be appended for cross-region DR or
-read-only regional fan-out.
+number of `dr-only` or `read-only` sites may be appended. A reader does
+not count toward the two-candidate minimum.
+
+Bloodraven uses these terms consistently:
+
+| Term | Meaning |
+|---|---|
+| Reader | A site with effective role `read-only`. |
+| Follower | Any non-active site with replication metadata, including candidate, DR, and reader sites. |
+| Standby | A healthy, promotable `primary-candidate` follower. |
+| Active primary | The unique observed writable site, which must have role `primary-candidate`. |
 
 ## Replication topology
 
@@ -31,13 +41,22 @@ chains.
                primary (iad, primary-candidate)
                 /        |         \
                /         |          \
-           (pdx)       (fra)       (syd)
-   primary-candidate  primary-candidate  dr-only
+           (pdx)       (fra)       (reader)
+    primary-candidate     dr-only      read-only
 ```
 
-During failover, the newly promoted primary becomes the source for
-every remaining replica (including `dr-only` sites) via a single
-`CHANGE REPLICATION SOURCE` per replica.
+During planned or emergency failover, the newly promoted primary becomes the
+direct source for every remaining follower, including `dr-only` and
+`read-only` sites. Bloodraven also detects a healthy-looking follower that
+still points through another replica after restart or topology drift.
+
+Before repointing, the operator requires exactly one writable promotable
+primary and checks that its `GTID_EXECUTED` contains the follower's executed
+set. It repeats containment after `STOP REPLICA` to close the applier race,
+then uses `CHANGE REPLICATION SOURCE TO` and `START REPLICA` without resetting
+replication metadata. Divergence is reported as
+`sourceConvergenceState: Blocked` with reason `GTIDDiverged`; Bloodraven does
+not silently abandon follower transactions.
 
 ## Failover target selection
 
@@ -57,7 +76,12 @@ best candidate using this order:
 3. **Declared order.** Final tiebreaker for replicas that share GTID
    sets and are not named in the priority list.
 
-`dr-only` sites are never auto-promoted.
+`dr-only` and `read-only` sites are never auto-promoted, selected by planned
+failover, used as active DNS targets, or chosen as clone donors. A reader that
+becomes writable is fenced on every topology poll, even if it is the only
+writable site. Readers also never apply or remove node taints; supplied
+`lbIP` and `taintNodeSelector` fields are accepted for manifest compatibility
+but ignored.
 
 If *no* `primary-candidate` replica is reachable when the primary
 fails, the operator emits a `NoPrimary` alert and takes no action.
@@ -143,10 +167,9 @@ Failover behaviour:
 
 ## Sidecar peer awareness
 
-Each pod's sidecar is given the list of peer sidecar addresses (every
-non-self site) via the `PEER_ADDRESSES` env var — a comma-separated
-list that the operator populates from `spec.sites[]` at reconcile
-time. The sidecar tracks per-peer liveness and only self-fences when
+Each pod's sidecar is given the internal Service addresses for every
+non-self site, including `dr-only` sites and readers, via the
+`PEER_ADDRESSES` env var. The sidecar tracks per-peer liveness and only self-fences when
 the operator **and every peer** are unreachable beyond
 `spec.sidecar.leaseTimeout`. A single reachable peer is enough to
 keep the primary writable.
@@ -156,22 +179,66 @@ the primary can still reach at least one peer is preserved as a
 legitimate-writes window rather than collapsing to a self-fenced
 outage.
 
+Reader peers provide connectivity and relay fresh operator-authoritative
+active-site observations; they gain no promotion or primary authority. A
+reachable peer without fresh authoritative topology can still suppress the
+lease-only all-peers-unreachable fence. This is retained compatibility
+behavior, not a quorum guarantee.
+
+## Example: two candidates and a reader
+
+The reader omits candidate/DR-only placement fields, uses a lower endpoint
+lag threshold, and customizes only its own client Service and MySQL config:
+
+```yaml
+spec:
+  replication:
+    maxLagSeconds: 300
+    readOnlyMaxLagSeconds: 30
+  sites:
+    - name: iad
+      role: primary-candidate
+      zone: iad-1a
+      taintNodeSelector:
+        shipstream.io/site.orders: iad
+      lbIP: 10.0.0.10
+      storage: {storageClassName: gp3, size: 500Gi}
+    - name: pdx
+      role: primary-candidate
+      zone: pdx-1a
+      taintNodeSelector:
+        shipstream.io/site.orders: pdx
+      lbIP: 10.1.0.10
+      storage: {storageClassName: gp3, size: 500Gi}
+    - name: reader
+      role: read-only
+      zone: iad-1b
+      mysqlConf:
+        innodb_buffer_pool_size: 4G
+      serviceTemplate:
+        type: LoadBalancer
+        externalTrafficPolicy: Local
+        annotations:
+          service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+      storage: {storageClassName: gp3, size: 500Gi}
+  splitBrainPolicy:
+    sitePriorities: [iad, pdx]
+```
+
 ## Sizing and compatibility
 
-- Minimum: 2 sites, both `primary-candidate`.
-- Maximum: none imposed by the CRD. Practical limits derive from
+- Minimum: 2 sites, both `primary-candidate`; readers are additional sites.
+- Maximum: 16 sites. Practical limits derive from
   replication cost on the primary (each replica opens an I/O thread)
   and from DNS/LB churn at failover time.
-- Every site is managed identically at the Kubernetes level — same
-  Deployment/Service/PVC shape, same role/permission model. Adding a
-  site is a CRD edit plus a reconcile.
+- Every site receives a Deployment, PVC, client MySQL Service, internal
+  administrative Service, and per-site MySQL ConfigMap. Reader client
+  endpoints have stricter health gating than other site Services.
 
 ## Known limitations
 
 - `dr-only` sites cannot be auto-promoted. Region-level loss of every
   primary-candidate site requires manual intervention.
-- The ordered rolling-update path walks a single active/standby pair
-  per update cycle; additional sites observe spec drift and get
-  rolled on subsequent cycles.
-- Planned failover targets only `primary-candidate` sites. A `dr-only`
-  site must be deliberately reclassified before it can be promoted.
+- Planned failover targets only `primary-candidate` sites. A `dr-only` or
+  `read-only` site must be deliberately reclassified, with `lbIP` and
+  `taintNodeSelector` supplied, before it can be promoted.

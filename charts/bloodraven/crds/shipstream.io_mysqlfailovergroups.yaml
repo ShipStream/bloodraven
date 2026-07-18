@@ -5708,6 +5708,14 @@ spec:
                     format: int64
                     minimum: 0
                     type: integer
+                  readOnlyMaxLagSeconds:
+                    description: |-
+                      ReadOnlyMaxLagSeconds is the maximum lag for a read-only site's
+                      client-facing endpoint. Nil inherits MaxLagSeconds; explicit zero
+                      requires the reader to be fully caught up.
+                    format: int64
+                    minimum: 0
+                    type: integer
                 type: object
               restoreInPlace:
                 description: |-
@@ -5942,6 +5950,14 @@ spec:
                     description: Annotations are additional annotations applied to
                       every Service managed by this failover group.
                     type: object
+                  externalTrafficPolicy:
+                    description: |-
+                      ExternalTrafficPolicy controls external traffic routing for Services
+                      whose effective type is NodePort or LoadBalancer.
+                    enum:
+                    - Cluster
+                    - Local
+                    type: string
                   type:
                     description: 'Type is the Kubernetes Service type. Default: ClusterIP'
                     enum:
@@ -6068,6 +6084,12 @@ spec:
                       description: LBIP is the load balancer IP for DNS failover.
                       minLength: 1
                       type: string
+                    mysqlConf:
+                      additionalProperties:
+                        type: string
+                      description: MysqlConf overrides group-level MySQL settings
+                        for this site.
+                      type: object
                     name:
                       description: |-
                         Name is the site identifier (e.g. "iad", "pdx", "lhr").
@@ -6144,7 +6166,40 @@ spec:
                       enum:
                       - primary-candidate
                       - dr-only
+                      - read-only
                       type: string
+                    serviceTemplate:
+                      description: |-
+                        ServiceTemplate overrides the group Service template for this site's
+                        client-facing MySQL Service.
+                      properties:
+                        annotations:
+                          additionalProperties:
+                            type: string
+                          description: Annotations are merged over group Service annotations
+                            for this site.
+                          type: object
+                        externalTrafficPolicy:
+                          description: ExternalTrafficPolicy overrides the group policy.
+                          enum:
+                          - Cluster
+                          - Local
+                          type: string
+                        nodePort:
+                          description: NodePort requests a specific port for this
+                            site's MySQL endpoint.
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        type:
+                          description: Type overrides the group Service type.
+                          enum:
+                          - ClusterIP
+                          - LoadBalancer
+                          - NodePort
+                          type: string
+                      type: object
                     storage:
                       description: Storage configures the persistent volume for this
                         site.
@@ -6179,12 +6234,15 @@ spec:
                       minLength: 1
                       type: string
                   required:
-                  - lbIP
                   - name
                   - storage
-                  - taintNodeSelector
                   - zone
                   type: object
+                  x-kubernetes-validations:
+                  - message: taintNodeSelector and lbIP are required unless role is
+                      read-only
+                    rule: self.role == 'read-only' || (has(self.taintNodeSelector)
+                      && has(self.lbIP))
                 maxItems: 16
                 minItems: 2
                 type: array
@@ -6280,6 +6338,29 @@ spec:
               rule: '!has(self.splitBrainPolicy) || !has(self.splitBrainPolicy.sitePriorities)
                 || self.splitBrainPolicy.sitePriorities.all(p, self.sites.exists(s,
                 s.name == p && s.role == ''primary-candidate''))'
+            - message: serviceTemplate.externalTrafficPolicy requires serviceTemplate.type
+                NodePort or LoadBalancer
+              rule: '!has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy)
+                || (has(self.serviceTemplate.type) && self.serviceTemplate.type in
+                [''NodePort'', ''LoadBalancer''])'
+            - message: site serviceTemplate.externalTrafficPolicy requires an effective
+                type of NodePort or LoadBalancer
+              rule: 'self.sites.all(s, !has(s.serviceTemplate) || !has(s.serviceTemplate.externalTrafficPolicy)
+                || ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate)
+                && has(self.serviceTemplate.type) ? self.serviceTemplate.type : ''ClusterIP''))
+                in [''NodePort'', ''LoadBalancer'']))'
+            - message: site serviceTemplate.nodePort requires an effective type of
+                NodePort or LoadBalancer
+              rule: 'self.sites.all(s, !has(s.serviceTemplate) || !has(s.serviceTemplate.nodePort)
+                || ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate)
+                && has(self.serviceTemplate.type) ? self.serviceTemplate.type : ''ClusterIP''))
+                in [''NodePort'', ''LoadBalancer'']))'
+            - message: inherited externalTrafficPolicy requires each effective site
+                service type to be NodePort or LoadBalancer
+              rule: 'self.sites.all(s, !has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy)
+                || ((has(s.serviceTemplate) && has(s.serviceTemplate.type) ? s.serviceTemplate.type
+                : (has(self.serviceTemplate.type) ? self.serviceTemplate.type : ''ClusterIP''))
+                in [''NodePort'', ''LoadBalancer'']))'
           status:
             description: MysqlFailoverGroupStatus defines the observed state of MysqlFailoverGroup.
             properties:
@@ -7057,6 +7138,24 @@ spec:
                         (populated when replication status is enriched).
                       format: int64
                       type: integer
+                    sourceConvergenceReason:
+                      description: SourceConvergenceReason is a stable machine-readable
+                        explanation.
+                      type: string
+                    sourceConvergenceState:
+                      description: |-
+                        SourceConvergenceState reports whether this follower directly follows
+                        the confirmed active primary.
+                      enum:
+                      - ""
+                      - Converged
+                      - Pending
+                      - Blocked
+                      type: string
+                    sourceHost:
+                      description: SourceHost is the replication source reported by
+                        MySQL.
+                      type: string
                     state:
                       description: 'State is the current state: writable, read-only,
                         unreachable, or unknown.'

@@ -3,10 +3,12 @@ package scenarios
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
+	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -31,8 +33,79 @@ func scenario02PlannedSwitchover() runner.Scenario {
 		Steps: []runner.Step{
 			injectPlannedFailoverAnnotation(),
 			observePlannedFailoverSucceeded(),
+			verifyFollowersDirectlyFollowNewPrimary(),
 			verifyTransactionsLostZero(),
 			verifyPlannedFailoverMetric(),
+		},
+	}
+}
+
+func verifyFollowersDirectlyFollowNewPrimary() runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseVerify,
+		Name:  "every follower directly replicates from the new active primary",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			target := ctxFetch(env, "switchoverTarget")
+			original := ctxFetch(env, "originalPrimary")
+			expectedHost := playgroundInternalSiteHost(env.FG, target, env.Namespace)
+			deadline := time.Now().Add(2 * time.Minute)
+			var last string
+			for time.Now().Before(deadline) {
+				mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+				if err != nil {
+					last = err.Error()
+				} else if mfg.Status.ActiveSite == "" {
+					// The status snapshot can publish an empty activeSite for a
+					// cycle while the promoted primary's writable confirmation
+					// lands. Only a different non-empty site is a real failure.
+					last = "activeSite momentarily empty after Succeeded"
+				} else if mfg.Status.ActiveSite != target {
+					return fmt.Errorf("planned failover target changed after success: activeSite=%q want %q", mfg.Status.ActiveSite, target)
+				} else {
+					var bad []string
+					foundOriginal := false
+					foundReader := false
+					for _, site := range mfg.Spec.Sites {
+						if site.Name == target {
+							continue
+						}
+						foundOriginal = foundOriginal || site.Name == original
+						foundReader = foundReader || site.IsReadOnlyReader()
+						client, openErr := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site.Name, env.Creds)
+						if openErr != nil {
+							bad = append(bad, fmt.Sprintf("%s=open:%v", site.Name, openErr))
+							continue
+						}
+						rs, statusErr := client.ShowReplicaStatus(ctx)
+						_ = client.Close()
+						if statusErr != nil {
+							bad = append(bad, fmt.Sprintf("%s=status:%v", site.Name, statusErr))
+							continue
+						}
+						if !rs.Configured || !rs.IORunning || !rs.SQLRunning || canonicalMySQLHost(rs.SourceHost) != canonicalMySQLHost(expectedHost) {
+							bad = append(bad, fmt.Sprintf("%s=configured:%v/io:%v/sql:%v/source:%q", site.Name, rs.Configured, rs.IORunning, rs.SQLRunning, rs.SourceHost))
+						}
+					}
+					sort.Strings(bad)
+					if !foundOriginal {
+						return fmt.Errorf("demoted original primary %q is not a follower in spec", original)
+					}
+					if !foundReader {
+						return fmt.Errorf("planned switchover topology has no read-only reader follower")
+					}
+					last = fmt.Sprintf("expectedSource=%s bad=%v", expectedHost, bad)
+					if len(bad) == 0 {
+						env.Capture.Note("all followers directly replicate from " + expectedHost)
+						return nil
+					}
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(time.Second):
+				}
+			}
+			return fmt.Errorf("followers did not converge directly to %s within 2m (last: %s)", expectedHost, last)
 		},
 	}
 }

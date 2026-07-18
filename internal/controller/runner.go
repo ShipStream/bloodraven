@@ -447,10 +447,14 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 			Name:      resourceName(fg.Name, site.Name),
 		}
 		if err := r.client.Get(ctx, deployNN, &deploy); err != nil {
-			continue // Deployment doesn't exist yet — reconciler will create it
+			if apierrors.IsNotFound(err) {
+				continue // Deployment doesn't exist yet — reconciler will create it
+			}
+			r.logger.Warn("failed to inspect deployment spec drift; preserving current drift set", "site", site.Name, "error", err)
+			return
 		}
 		liveHash := deploy.Annotations[specHashAnnotation]
-		if liveHash != "" && liveHash != desiredHash {
+		if liveHash != desiredHash {
 			driftSites = append(driftSites, site.Name)
 		}
 	}
@@ -477,6 +481,8 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		if fg.Spec.UsesCredentials() {
 			tlsConfigName := ""
 			if fg.Spec.TLS != nil {
+				// Dial the always-published internal Service while retaining the
+				// client-facing hostname as TLS ServerName for existing certificates.
 				tlsConfigName, err = mysqlTLSConfig(ctx, r.client, fg, siteServiceHost(fg.Name, site.Name, fg.Namespace))
 				if err != nil {
 					for j := 0; j < i; j++ {
@@ -581,6 +587,9 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		r.logger.Info("restored lastFailover from CR status", "fg", nn, "lastFailover", fg.Status.LastFailover.Time)
 	}
 	for _, site := range fg.Status.Sites {
+		if site.SourceConvergenceState != "" || site.SourceHost != "" {
+			tm.SetSourceConvergence(site.Name, site.SourceHost, SourceConvergenceState(site.SourceConvergenceState), site.SourceConvergenceReason)
+		}
 		if site.RecoveryState != recoveryStateBlocked && site.RecoveryState != recoveryStateInProgress && site.DivergentGtid == "" {
 			continue
 		}
@@ -782,7 +791,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		freshFG.Status.Sites = make([]v1alpha1.SiteStatus, len(snap.Sites))
 	}
 	for i, s := range snap.Sites {
-		freshFG.Status.Sites[i] = siteStatusFromSnapshot(s.Name, s.State, s.LastSeen, s.Replication)
+		freshFG.Status.Sites[i] = siteStatusFromSnapshot(s)
 	}
 
 	if !snap.LastFailover.IsZero() {
@@ -809,15 +818,14 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	// Evaluate replication health.
-	hasWritable := false
+	hasWritable := validSnapshotActiveSite(snap) != ""
 	replicationHealthy := true
 	for _, s := range snap.Sites {
-		if s.State == state.StateWritable {
-			hasWritable = true
+		if s.Role == state.SiteRoleReadOnly || s.Name == snap.ActiveSite {
+			continue
 		}
-		if s.Replication != nil {
-			replicationHealthy = replicationHealthy && s.Replication.IORunning && s.Replication.SQLRunning
-		}
+		replicationHealthy = replicationHealthy && s.ReplicationHealthy &&
+			s.SourceConvergenceState == sourceConvergenceConverged
 	}
 
 	// Update conditions using freshFG.Generation so ObservedGeneration reflects
@@ -861,12 +869,25 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	// Add replication-specific degraded conditions.
-	maxLagSeconds := int64(300)
-	if freshFG.Spec.Replication != nil && freshFG.Spec.Replication.MaxLagSeconds > 0 {
-		maxLagSeconds = freshFG.Spec.Replication.MaxLagSeconds
-	}
+	maxLagSeconds := freshFG.Spec.EffectiveMaxLagSeconds()
 
 	for _, s := range snap.Sites {
+		if s.Role == state.SiteRoleReadOnly {
+			continue
+		}
+		// Evaluate source convergence before the nil-replication guard: a
+		// failed probe leaves Replication nil while the convergence state is
+		// Pending/ProbeFailed, and skipping here would suppress the Degraded
+		// condition. Only read-only followers carry convergence state — the
+		// writable primary is excluded.
+		if reason == "Healthy" && s.State == state.StateReadOnly && s.SourceConvergenceState != sourceConvergenceConverged {
+			setCondition(&freshFG.Status.Conditions, metav1.Condition{
+				Type: "Degraded", Status: metav1.ConditionTrue,
+				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
+				Reason:  "ReplicationSourceMismatch",
+				Message: fmt.Sprintf("Replication source on %s is not the active primary", s.Name),
+			})
+		}
 		repl := s.Replication
 		if repl == nil {
 			continue
@@ -994,6 +1015,28 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
 	r.emitDegradedTransitionEvents(&freshFG, nn, snap)
 	return nil
+}
+
+func validSnapshotActiveSite(snap TopologySnapshot) string {
+	if snap.ActiveSite != "" {
+		for _, site := range snap.Sites {
+			if site.Name == snap.ActiveSite && site.State == state.StateWritable && site.Role != state.SiteRoleDROnly && site.Role != state.SiteRoleReadOnly {
+				return snap.ActiveSite
+			}
+		}
+		return ""
+	}
+	active := ""
+	for _, site := range snap.Sites {
+		if site.State != state.StateWritable {
+			continue
+		}
+		if active != "" || site.Role == state.SiteRoleDROnly || site.Role == state.SiteRoleReadOnly {
+			return ""
+		}
+		active = site.Name
+	}
+	return active
 }
 
 // populatePITRStatus fills freshFG.Status.PITR from the cached
@@ -1185,8 +1228,12 @@ func degradedReason(snap TopologySnapshot) string {
 	if snap.Alert == "" {
 		return "Healthy"
 	}
-	var writable, readOnly, unreachable int
+	var writable, readOnly, unreachable, coreSites int
 	for _, s := range snap.Sites {
+		if s.Role == state.SiteRoleReadOnly {
+			continue
+		}
+		coreSites++
 		switch s.State {
 		case state.StateWritable:
 			writable++
@@ -1196,13 +1243,13 @@ func degradedReason(snap TopologySnapshot) string {
 			unreachable++
 		}
 	}
-	if len(snap.Sites) == 0 {
+	if coreSites == 0 {
 		return "Alert"
 	}
 	switch {
 	case writable > 1:
 		return "SplitBrain"
-	case unreachable == len(snap.Sites):
+	case unreachable == coreSites:
 		return "TotalLoss"
 	case writable == 0 && readOnly > 0:
 		return "NoPrimary"
@@ -1293,19 +1340,22 @@ func (r *TopologyManagerRunner) updateBootstrappingCondition(ctx context.Context
 	}
 }
 
-func siteStatusFromSnapshot(name string, s state.SiteState, lastSeen time.Time, repl *internalmysql.ReplicaStatus) v1alpha1.SiteStatus {
+func siteStatusFromSnapshot(s SiteSnapshot) v1alpha1.SiteStatus {
 	status := v1alpha1.SiteStatus{
-		Name:  name,
-		State: s.String(),
+		Name:                    s.Name,
+		State:                   s.State.String(),
+		SourceHost:              s.SourceHost,
+		SourceConvergenceState:  v1alpha1.SourceConvergenceState(s.SourceConvergenceState),
+		SourceConvergenceReason: s.SourceConvergenceReason,
 	}
-	if !lastSeen.IsZero() {
-		t := metav1.NewTime(lastSeen)
+	if !s.LastSeen.IsZero() {
+		t := metav1.NewTime(s.LastSeen)
 		status.LastSeen = &t
 	}
-	if repl != nil {
-		status.Replicating = repl.IORunning && repl.SQLRunning
-		status.SecondsBehindSource = repl.SecondsBehindSource
-		status.GtidExecuted = repl.ExecutedGtidSet
+	if s.Replication != nil {
+		status.Replicating = s.ReplicationHealthy
+		status.SecondsBehindSource = s.Replication.SecondsBehindSource
+		status.GtidExecuted = s.Replication.ExecutedGtidSet
 	}
 	return status
 }
@@ -1338,7 +1388,7 @@ func buildSiteDSN(baseDSN string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1
 	if err != nil {
 		return "", fmt.Errorf("parse DSN: %w", err)
 	}
-	parsed.Addr = fmt.Sprintf("mysql-%s-%s.%s.svc.cluster.local:%d", fg.Name, site.Name, fg.Namespace, mysqlPort)
+	parsed.Addr = fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, site.Name, fg.Namespace), mysqlPort)
 	return parsed.FormatDSN(), nil
 }
 
@@ -1350,7 +1400,7 @@ func buildSiteDSNFromCreds(username, password string, fg *v1alpha1.MysqlFailover
 	cfg.User = username
 	cfg.Passwd = password
 	cfg.Net = "tcp"
-	cfg.Addr = fmt.Sprintf("%s:%d", siteServiceHost(fg.Name, site.Name, fg.Namespace), mysqlPort)
+	cfg.Addr = fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, site.Name, fg.Namespace), mysqlPort)
 	cfg.Timeout = 5 * time.Second
 	if tlsConfigName != "" {
 		cfg.TLSConfig = tlsConfigName

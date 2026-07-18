@@ -125,7 +125,7 @@ func observeClusterReconvergence() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				"sites: writable=1 read-only=1 divergent=0",
+				"sites: writable=1 read-only=N-1 divergent=0",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					var writable, readOnly, other []string
 					var divergent int64
@@ -152,7 +152,7 @@ func observeClusterReconvergence() runner.Step {
 						"writable=%v read-only=%v other=%v divergent=%d blocked=%v",
 						writable, readOnly, other, divergent, blocked,
 					)
-					done := len(writable) == 1 && len(readOnly) == 1 && divergent == 0 && len(blocked) == 0
+					done := len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 && divergent == 0 && len(blocked) == 0
 					return done, msg, nil
 				},
 			)

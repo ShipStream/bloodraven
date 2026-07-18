@@ -68,3 +68,26 @@ func (s *MysqlFailoverGroupSpec) PeerSiteNames(name string) []string {
 	}
 	return out
 }
+
+// IsReadOnlyReader reports whether the site is a non-promotable serving reader.
+func (s SiteSpec) IsReadOnlyReader() bool {
+	return s.EffectiveRole() == SiteRoleReadOnly
+}
+
+// EffectiveMaxLagSeconds returns the group replication threshold, including
+// the API default for objects constructed outside admission.
+func (s *MysqlFailoverGroupSpec) EffectiveMaxLagSeconds() int64 {
+	if s.Replication == nil || s.Replication.MaxLagSeconds == 0 {
+		return 300
+	}
+	return s.Replication.MaxLagSeconds
+}
+
+// EffectiveReadOnlyMaxLagSeconds returns the reader endpoint threshold. An
+// explicit zero is meaningful; nil inherits the group threshold.
+func (s *MysqlFailoverGroupSpec) EffectiveReadOnlyMaxLagSeconds() int64 {
+	if s.Replication != nil && s.Replication.ReadOnlyMaxLagSeconds != nil {
+		return *s.Replication.ReadOnlyMaxLagSeconds
+	}
+	return s.EffectiveMaxLagSeconds()
+}

@@ -48,6 +48,11 @@ type resetter struct {
 	runtime    string
 }
 
+type resetPhase struct {
+	name string
+	fn   func(context.Context, []v1alpha1.SiteSpec) error
+}
+
 func resetPlayground(kubeconfig, kctx, namespace, fg, resultsDir string, logger *slog.Logger) int {
 	k, err := loadKube(kubeconfig, kctx, false)
 	if err != nil {
@@ -95,10 +100,15 @@ func (r *resetter) run(ctx context.Context) error {
 		return fmt.Errorf("MFG has no spec.sites")
 	}
 
-	phases := []struct {
-		name string
-		fn   func(context.Context, []v1alpha1.SiteSpec) error
-	}{
+	if err := r.runPhases(ctx, sites, r.resetPhases()); err != nil {
+		return err
+	}
+	r.info("reset complete")
+	return nil
+}
+
+func (r *resetter) resetPhases() []resetPhase {
+	return []resetPhase{
 		{"scale operator down", r.scaleOperatorDown},
 		{"scale MySQL down", r.scaleMysqlDown},
 		{"sync MySQL deployment specs", r.syncMySQLDeploymentSpecs},
@@ -114,15 +124,35 @@ func (r *resetter) run(ctx context.Context) error {
 		{"create replication users", r.createReplicationUsers},
 		{"start operator", r.startOperator},
 		{"wait healthy baseline", r.waitBaseline},
+		{"normalize fresh baseline", r.normalizeFreshBaseline},
 	}
+}
+
+func (r *resetter) runPhases(ctx context.Context, sites []v1alpha1.SiteSpec, phases []resetPhase) error {
 	for _, phase := range phases {
 		r.info("%s...", phase.name)
 		if err := phase.fn(ctx, sites); err != nil {
 			return fmt.Errorf("%s: %w", phase.name, err)
 		}
 	}
-	r.info("reset complete")
 	return nil
+}
+
+// normalizeFreshBaseline removes the failover stamp produced while the
+// operator resolves the all-writable shape of newly initialized MySQL pods.
+// Restarting after the cluster has converged lets the manager discover the
+// existing primary without recording bootstrap as an operational failover.
+func (r *resetter) normalizeFreshBaseline(ctx context.Context, sites []v1alpha1.SiteSpec) error {
+	return r.runPhases(ctx, sites, r.normalizationPhases())
+}
+
+func (r *resetter) normalizationPhases() []resetPhase {
+	return []resetPhase{
+		{"scale operator down", r.scaleOperatorDown},
+		{"clear MFG status", r.clearMFGStatus},
+		{"start operator", r.startOperator},
+		{"wait healthy baseline", r.waitBaseline},
+	}
 }
 
 func (r *resetter) scaleOperatorDown(ctx context.Context, _ []v1alpha1.SiteSpec) error {

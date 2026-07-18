@@ -105,6 +105,10 @@ func (m *mockMySQL) ChangeReplicationSource(_ context.Context, opts mysql.Replic
 	defer m.mu.Unlock()
 	m.replicationSourceSet = true
 	m.changeReplicationOpts = opts
+	if m.replicaStatus == nil {
+		m.replicaStatus = &mysql.ReplicaStatus{}
+	}
+	m.replicaStatus.SourceHost = opts.Host
 	return nil
 }
 
@@ -112,6 +116,10 @@ func (m *mockMySQL) StartReplica(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.replicaStarted = true
+	if m.replicaStatus != nil {
+		m.replicaStatus.IORunning = true
+		m.replicaStatus.SQLRunning = true
+	}
 	return nil
 }
 

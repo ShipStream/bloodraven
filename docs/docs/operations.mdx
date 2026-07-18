@@ -141,7 +141,7 @@ If both sites report `writable` (split brain), the operator will **not** take au
        STOP REPLICA;
        RESET REPLICA ALL;
        CHANGE REPLICATION SOURCE TO
-         SOURCE_HOST='mysql-orders-iad.orders.svc.cluster.local',
+          SOURCE_HOST='mysql-orders-iad-internal.orders.svc.cluster.local',
          SOURCE_USER='replicator',
          SOURCE_PASSWORD='<replicator-password>',
          SOURCE_AUTO_POSITION=1;
@@ -193,6 +193,52 @@ If the prefix doesn't match the observed `divergentGtid` (wrong site, stale copy
 
 A `RecloneRequested` Normal Event marks the start. The site will temporarily appear unreachable during the MySQL restart that follows the clone. Progress is reported in the `Bootstrapping` condition.
 
+### Recloning a read-only site
+
+A reader is a valid clone recipient but never a donor. If a reader has lost
+its PVC or source convergence is blocked and its data can be discarded, use
+the plugin's destructive cold-reclone confirmation:
+
+```bash
+kubectl bloodraven reclone <group> <reader-site> --cold
+```
+
+For example:
+
+```bash
+kubectl bloodraven reclone orders reader --cold
+```
+
+The operator validates a uniquely writable `primary-candidate` donor before
+starting `CLONE INSTANCE`. The reader client Service has no healthy endpoint
+while clone, catch-up, or direct-source convergence is incomplete. Clone
+reads from the active primary at full speed and is not throttled.
+
+### Troubleshooting blocked source convergence
+
+Inspect the generic source fields independently of old-primary recovery:
+
+```bash
+kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{range .status.sites[*]}{.name}: source={.sourceHost} state={.sourceConvergenceState} reason={.sourceConvergenceReason}{"\n"}{end}'
+```
+
+- `Pending/SourceMismatch` means the observed source is not the confirmed
+  primary and convergence has not completed.
+- `Pending/ProbeFailed` or `Pending/MutationFailed` means a probe or bounded
+  `STOP REPLICA` / `CHANGE REPLICATION SOURCE TO` / `START REPLICA` attempt
+  failed. Check the four stable convergence log events and their `stage`.
+- `Blocked/GTIDDiverged` means the active primary does not contain the
+  follower's executed GTID set. Bloodraven intentionally leaves the channel
+  unchanged, or stopped if the second containment check failed after STOP.
+  Do not reset replication metadata to force a rejoin. Review the GTIDs and
+  preserve any required data before recloning.
+
+Convergence is also deliberately paused during bootstrap, ordered updates,
+restore, topology freeze, pending promotion, planned failover, and split
+brain. Resolve or allow that operation to finish before treating `Pending`
+as a source fault.
+
 ## PVC loss recovery runbook
 
 Use this when one site's MySQL data PVC is irrecoverable: cloud volume
@@ -223,11 +269,10 @@ primary-candidate site.
 
 For normal old-primary divergence, use the GTID-prefix reclone flow
 above. For PVC loss, the target has no usable data to preserve, so the
-operator accepts the cold reclone form:
+operator accepts a cold reclone with an explicit destructive confirmation:
 
 ```bash
-kubectl annotate mysqlfailovergroup orders \
-  bloodraven.shipstream.io/reclone-site=iad
+kubectl bloodraven reclone orders iad --cold
 ```
 
 The operator emits `RecloneRequested` and drives the same clone path used

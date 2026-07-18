@@ -15,6 +15,7 @@ nodes:
   - role: control-plane
   - role: worker
   - role: worker
+  - role: worker
 networking:
   # Disable kindnet so Calico can manage CNI instead.
   disableDefaultCNI: true

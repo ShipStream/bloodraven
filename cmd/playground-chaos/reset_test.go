@@ -1,6 +1,10 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"reflect"
 	"testing"
 
@@ -10,6 +14,51 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
+
+func TestResetNormalizationPhaseOrdering(t *testing.T) {
+	r := &resetter{}
+	resetPhases := r.resetPhases()
+	if len(resetPhases) < 2 {
+		t.Fatalf("reset phase count = %d, want at least 2", len(resetPhases))
+	}
+	last := []string{resetPhases[len(resetPhases)-2].name, resetPhases[len(resetPhases)-1].name}
+	if !reflect.DeepEqual(last, []string{"wait healthy baseline", "normalize fresh baseline"}) {
+		t.Fatalf("final reset phases = %v, want initial baseline then normalization", last)
+	}
+
+	normalization := r.normalizationPhases()
+	var names []string
+	for _, phase := range normalization {
+		names = append(names, phase.name)
+	}
+	want := []string{"scale operator down", "clear MFG status", "start operator", "wait healthy baseline"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("normalization phases = %v, want %v", names, want)
+	}
+}
+
+func TestRunResetPhasesStopsOnFirstError(t *testing.T) {
+	r := &resetter{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	boom := errors.New("boom")
+	var calls []string
+	phase := func(name string, err error) resetPhase {
+		return resetPhase{name: name, fn: func(context.Context, []v1alpha1.SiteSpec) error {
+			calls = append(calls, name)
+			return err
+		}}
+	}
+	err := r.runPhases(context.Background(), nil, []resetPhase{
+		phase("scale operator down", nil),
+		phase("clear MFG status", boom),
+		phase("start operator", nil),
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("runPhases() error = %v, want %v", err, boom)
+	}
+	if !reflect.DeepEqual(calls, []string{"scale operator down", "clear MFG status"}) {
+		t.Fatalf("phase calls = %v, want stop at first error", calls)
+	}
+}
 
 func TestEscapeSQLString(t *testing.T) {
 	cases := []struct {

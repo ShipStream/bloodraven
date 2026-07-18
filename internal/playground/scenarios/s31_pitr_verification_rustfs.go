@@ -91,7 +91,7 @@ func s31WaitArchiverReady() runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			waitCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 			defer cancel()
-			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR spec rollout", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			_, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR spec rollout", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 				ready := false
 				for _, c := range mfg.Status.Conditions {
 					if c.Type == "Ready" {
@@ -104,17 +104,16 @@ func s31WaitArchiverReady() runner.Step {
 			if err != nil {
 				return err
 			}
-			active := mfg.Status.ActiveSite
 			if _, err := env.Logs("operator"); err != nil {
 				env.Capture.Note("open operator logs failed: " + err.Error())
 			}
-			if _, err := env.Logs("sidecar:" + active); err != nil {
-				env.Capture.Note("open sidecar logs failed: " + err.Error())
-			}
 			wantPrefix := path.Join(ctxFetch(env, "backupPrefix"), "binlogs")
-			st, err := waitForArchiverReady(waitCtx, env, active, wantPrefix)
+			active, st, err := waitForActiveArchiverReady(waitCtx, env, wantPrefix)
 			if err != nil {
 				return err
+			}
+			if _, err := env.Logs("sidecar:" + active); err != nil {
+				env.Capture.Note("open sidecar logs failed: " + err.Error())
 			}
 			env.Capture.Note("active archiver ready: " + archiverSummary(st))
 			if _, replica, err := activeAndReplica(ctx, env); err == nil {
@@ -126,6 +125,42 @@ func s31WaitArchiverReady() runner.Step {
 			}
 			return ctxStash(ctx, env, "activeSite", active)
 		},
+	}
+}
+
+func waitForActiveArchiverReady(ctx context.Context, env *runner.Env, wantPrefix string) (string, *pgsidecar.ArchiverStatusResponse, error) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	var last string
+	for {
+		mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+		if err != nil {
+			last = err.Error()
+		} else if mfg.Status.ActiveSite == "" {
+			last = "active site is empty"
+		} else {
+			active := mfg.Status.ActiveSite
+			probe, err := pgsidecar.Open(ctx, env.Kube, env.Namespace, env.FG, active)
+			if err != nil {
+				last = fmt.Sprintf("active=%s: %v", active, err)
+			} else {
+				st, statusErr := probe.ArchiverStatus(ctx)
+				probe.Close()
+				if statusErr != nil {
+					last = fmt.Sprintf("active=%s: %v", active, statusErr)
+				} else {
+					last = fmt.Sprintf("active=%s %s", active, archiverSummary(st))
+					if st.Enabled && st.Primary && st.StorageType == string(v1alpha1.BackupStorageS3) && strings.Trim(st.ManifestPrefix, "/") == strings.Trim(wantPrefix, "/") && st.LastError == "" && !st.LastScanAt.IsZero() {
+						return active, st, nil
+					}
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return "", nil, fmt.Errorf("wait for active archiver readiness: %w (last: %s)", ctx.Err(), last)
+		case <-tick.C:
+		}
 	}
 }
 

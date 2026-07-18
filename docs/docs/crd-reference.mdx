@@ -49,7 +49,7 @@ Review runbooks before changing `spec.restoreInPlace`, restore-related `confirm`
 |---|---|---|---|---|
 | `image` | string | No | `mysql:9.7` | MySQL container image |
 | `sidecarImage` | string | No | `ghcr.io/shipstream/bloodraven-sidecar:0.1.6` | Bloodraven sidecar container image |
-| `sites` | []SiteSpec | Yes | -- | Site definitions. At least two sites with `role: primary-candidate`; additional `dr-only` sites may be appended. MinItems=2, MaxItems=16. |
+| `sites` | []SiteSpec | Yes | -- | Site definitions. At least two sites with `role: primary-candidate`; additional `dr-only` and `read-only` followers may be appended. MinItems=2, MaxItems=16. |
 | `secretName` | string | No | -- | **(Legacy)** Name of the Secret containing MySQL credentials (key: `dsn`). Mutually exclusive with `credentials`. |
 | `credentials` | CredentialsSpec | No | -- | Per-role MySQL credential management. The operator creates MySQL users with role-appropriate privileges and rotates passwords when secrets change. Mutually exclusive with `secretName`. |
 | `dns` | DNSSpec | Yes | -- | DNS configuration for traffic steering via external-dns |
@@ -68,7 +68,7 @@ Review runbooks before changing `spec.restoreInPlace`, restore-related `confirm`
 | `cloneTimeout` | int | No | `3600` | Timeout in seconds for initial data clone operations |
 | `podLabels` | map[string]string | No | -- | Additional labels applied to every MySQL pod. Operator labels take precedence on conflict. |
 | `podAnnotations` | map[string]string | No | -- | Additional annotations applied to every MySQL pod. Operator annotations take precedence on conflict. |
-| `serviceTemplate` | ServiceTemplate | No | -- | Customizes the Services created by the operator |
+| `serviceTemplate` | ServiceTemplate | No | -- | Defaults the client-facing site, primary, and replicas Services. Internal per-site Services ignore this template and remain ClusterIP. |
 | `extraContainers` | []Container | No | -- | Additional containers injected into every MySQL pod (e.g. exporters) |
 | `extraInitContainers` | []Container | No | -- | Additional init containers injected after the operator's built-in init container |
 | `backup` | BackupSpec | No | -- | Backup configuration (profiles, schedules, retry, PITR, encryption, security contexts). See [BackupSpec](#backupspec). |
@@ -84,12 +84,33 @@ Each entry in `spec.sites` defines one site in the failover group.
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `name` | string | Yes | -- | Unique site identifier (e.g. `iad`, `pdx`). Used in Service names and labels. MaxLength=253. |
-| `role` | string | No | `primary-candidate` | Promotion eligibility: `primary-candidate` (can be auto-promoted on failover) or `dr-only` (passive replica; never auto-promoted). At least two `primary-candidate` sites are required. |
+| `role` | string | No | `primary-candidate` | `primary-candidate` can be promoted; `dr-only` and `read-only` are never promoted. A reader provides a health-gated site-specific read pool. At least two `primary-candidate` sites are required. |
 | `zone` | string | Yes | -- | Availability zone or region for pod scheduling |
-| `taintNodeSelector` | map[string]string | Yes | -- | Label selector used to find nodes that receive this group's `db-readonly` taint for this site. Use group-scoped labels such as `shipstream.io/failover-group.orders=true` and `shipstream.io/site.orders=iad` for shared nodes. |
-| `lbIP` | string | Yes | -- | Load balancer IP address. Used for DNS A-record steering on failover. |
+| `taintNodeSelector` | map[string]string | Conditional | -- | Required and non-empty for `primary-candidate` and `dr-only`; optional for `read-only`. Selects nodes that receive this group's `db-readonly` taint. Accepted but ignored on readers, which never cause taint operations. |
+| `lbIP` | string | Conditional | -- | Required and non-empty for `primary-candidate` and `dr-only`; optional for `read-only`. Used for active-primary DNS steering. Accepted but ignored on readers, which are never DNS targets. |
 | `storage` | StorageSpec | Yes | -- | Persistent storage configuration for this site |
 | `resources` | ResourceRequirements | No | -- | Compute resources (requests/limits) for the MySQL container at this site |
+| `mysqlConf` | map[string]string | No | -- | Site-specific MySQL options applied after normalized group overrides. Changing this map rolls only affected sites unless other drift is pending. |
+| `serviceTemplate` | SiteServiceTemplate | No | -- | Scalar and annotation overrides for this site's client-facing MySQL Service. Does not affect sibling, primary, replicas, or internal Services. |
+
+Reader manifests may retain legacy `lbIP` and `taintNodeSelector` values for
+compatibility, but Bloodraven ignores them. Changing a reader to
+`primary-candidate` or `dr-only` is rejected until both fields are present.
+A reader does not satisfy the two-candidate minimum and cannot appear in
+`splitBrainPolicy.sitePriorities`.
+
+### Admission combinations
+
+| Combination | Admitted? |
+|---|---|
+| Two `primary-candidate` sites, each with non-empty `lbIP` and `taintNodeSelector` | Yes |
+| Two candidates plus a reader with both placement fields omitted | Yes |
+| Reader with either or both legacy placement fields supplied | Yes; supplied values are ignored |
+| Omitted/default role, explicit candidate, or `dr-only` with either placement field omitted | No |
+| Fewer than two candidates, or a reader/DR site in `sitePriorities` | No |
+| `externalTrafficPolicy` on an effective `ClusterIP` Service | No |
+| Site `nodePort` on an effective `ClusterIP` Service | No |
+| ETP on `NodePort`/`LoadBalancer`, or site NodePort in 1-65535 on those types | Yes; Kubernetes then applies its cluster-specific NodePort range |
 
 ### StorageSpec
 
@@ -124,6 +145,7 @@ Each entry in `spec.sites` defines one site in the failover group.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `maxLagSeconds` | int | No | Maximum acceptable replication lag in seconds before the replica is considered unhealthy |
+| `readOnlyMaxLagSeconds` | int | No | Maximum lag for a reader's client endpoint. Omitted inherits `maxLagSeconds` (including its 300-second effective fallback); explicit `0` requires zero reported lag. |
 
 ### SplitBrainPolicySpec
 
@@ -142,7 +164,22 @@ full description of semantics and tradeoffs.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `type` | string | No | Kubernetes Service type: `ClusterIP` (default), `LoadBalancer`, or `NodePort` |
-| `annotations` | map[string]string | No | Additional annotations applied to every Service managed by the operator |
+| `externalTrafficPolicy` | string | No | `Cluster` or `Local`. Valid only when the effective Service type is `NodePort` or `LoadBalancer`. Applied to site, primary, and replicas Services when supported. |
+| `annotations` | map[string]string | No | Default annotations for client-facing site, primary, and replicas Services. Not applied to internal Services. |
+
+### SiteServiceTemplate (`spec.sites[].serviceTemplate`)
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | string | No | Site Service override: `ClusterIP`, `LoadBalancer`, or `NodePort`. Omitted inherits the group type. |
+| `externalTrafficPolicy` | string | No | Site override: `Cluster` or `Local`. Legal only when the effective site type is `NodePort` or `LoadBalancer`. |
+| `nodePort` | int | No | Requested NodePort for this site's named `mysql` port, range 1-65535. Legal only for effective type `NodePort` or `LoadBalancer`; cluster admission enforces its configured allocation range. |
+| `annotations` | map[string]string | No | Merged over group annotations for this site only; site keys win. |
+
+The operator preserves Kubernetes-assigned Service identity and compatible
+allocated NodePorts across reconciles and external-type transitions. Moving a
+site Service to `ClusterIP` clears external-only fields. The sidecar port is
+never exposed through a client Service or assigned a NodePort.
 
 ### CredentialsSpec
 
@@ -375,6 +412,20 @@ spec:
         limits:
           cpu: "4"
           memory: "16Gi"
+    - name: reader
+      role: read-only
+      zone: us-east-1b
+      mysqlConf:
+        innodb_buffer_pool_size: "4G"
+      serviceTemplate:
+        type: LoadBalancer
+        externalTrafficPolicy: Local
+        nodePort: 32006
+        annotations:
+          service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
   secretName: mysql-credentials
   sidecarResources:
     requests:
@@ -402,6 +453,7 @@ spec:
     sync_binlog: "1"
   replication:
     maxLagSeconds: 300
+    readOnlyMaxLagSeconds: 30
   updateStrategy: OrderedUpdate
   dragonfly:
     enabled: true
@@ -416,7 +468,8 @@ spec:
     prometheus.io/scrape: "true"
     prometheus.io/port: "9104"
   serviceTemplate:
-    type: ClusterIP
+    type: LoadBalancer
+    externalTrafficPolicy: Local
     annotations:
       service.beta.kubernetes.io/aws-load-balancer-internal: "true"
   extraContainers:
@@ -525,6 +578,9 @@ The operator writes the following status fields.
 | `replicating` | bool | Whether this site is replicating from another site |
 | `secondsBehindSource` | int | Replication lag in seconds (only set when replicating) |
 | `gtidExecuted` | string | GTID set executed on this site |
+| `sourceHost` | string | Source hostname reported by MySQL. Followers are expected to name the active primary's internal site Service. |
+| `sourceConvergenceState` | string | `Converged`, `Pending`, or `Blocked`. Generic direct-source state for every follower; independent of old-primary recovery state. |
+| `sourceConvergenceReason` | string | Stable reason: `DirectSource`, `SourceMismatch`, `ProbeFailed`, `MutationFailed`, or `GTIDDiverged`. Detailed errors remain in structured logs. |
 | `recoveryState` | string | Old-primary recovery state: empty (no recovery needed), `RecoveryInProgress` (the operator is reconfiguring or waiting for the site to stabilize as a replica), or `RecoveryBlocked` (divergent transactions detected — trigger a reclone to recover) |
 | `divergentGtid` | string | GTID set of transactions on this site that diverge from the current primary. Populated when `recoveryState` is `RecoveryBlocked`. |
 | `divergentTransactionCount` | int | Number of divergent transactions. Populated when `recoveryState` is `RecoveryBlocked`. |
@@ -533,8 +589,8 @@ The operator writes the following status fields.
 
 | Type | Meaning |
 |---|---|
-| `Ready` | `True` when the failover group has one writable primary and all replicas are healthy |
-| `Degraded` | `True` when replication is broken, lag exceeds `maxLagSeconds`, or a site is unreachable |
+| `Ready` | `True` when there is exactly one confirmed writable `primary-candidate` and every non-reader follower has healthy direct replication. Reader reachability, lag, threads, and source state do not change this group condition. |
+| `Degraded` | `True` when core candidate/DR replication is broken or source-mismatched, lag exceeds `maxLagSeconds`, or a non-reader site is unreachable. Reader failures are excluded and remain visible per site and in metrics. |
 | `RecoveryPending` | `True` while old-primary recovery is running (`RecoveryInProgress`) or when an old primary has divergent transactions (`DivergentTransactions`). Use the reclone annotation only for `DivergentTransactions`. |
 | `Bootstrapping` | `True` when a clone operation is in progress (fresh-deploy, auto-clone, or reclone). Reason indicates the phase. |
 
@@ -591,6 +647,18 @@ status:
       replicating: true
       secondsBehindSource: 0
       gtidExecuted: "uuid:1-100"
+      sourceHost: mysql-orders-iad-internal.orders.svc.cluster.local
+      sourceConvergenceState: Converged
+      sourceConvergenceReason: DirectSource
+    - name: reader
+      state: read-only
+      lastSeen: "2025-01-01T00:00:00Z"
+      replicating: true
+      secondsBehindSource: 0
+      gtidExecuted: "uuid:1-100"
+      sourceHost: mysql-orders-iad-internal.orders.svc.cluster.local
+      sourceConvergenceState: Converged
+      sourceConvergenceReason: DirectSource
   conditions:
     - type: Ready
       status: "True"

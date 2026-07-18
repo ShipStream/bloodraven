@@ -57,6 +57,12 @@ func TestEvalCrossSite_TwoSite(t *testing.T) {
 			wantAlert:    true,
 			wantReason:   "TotalLoss",
 		},
+		{
+			name:         "all unknown candidates are not healthy",
+			observations: []SiteObservation{obs("iad", pc, StateUnknown), obs("pdx", pc, StateUnknown)},
+			wantAlert:    true,
+			wantReason:   "NoPrimary",
+		},
 	}
 
 	for _, tt := range tests {
@@ -154,6 +160,81 @@ func TestEvalCrossSite_ThreeSite(t *testing.T) {
 			t.Fatalf("alert should list every unreachable site: %q", a.Alert)
 		}
 	})
+}
+
+func TestEvalCrossSite_ReadOnlyReaderIsolation(t *testing.T) {
+	pc := SiteRolePrimaryCandidate
+	reader := SiteRoleReadOnly
+	dr := SiteRoleDROnly
+
+	tests := []struct {
+		name       string
+		obs        []SiteObservation
+		wantReason string
+		wantFence  []string
+	}{
+		{
+			name: "reader outage does not degrade healthy core",
+			obs: []SiteObservation{
+				obs("iad", pc, StateWritable), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateUnreachable),
+			},
+			wantReason: "Healthy",
+		},
+		{
+			name: "writable reader is fenced but not split brain",
+			obs: []SiteObservation{
+				obs("iad", pc, StateWritable), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateWritable),
+			},
+			wantReason: "Degraded",
+			wantFence:  []string{"reader"},
+		},
+		{
+			name: "writable dr-only degrades healthy candidate topology",
+			obs: []SiteObservation{
+				obs("iad", pc, StateWritable), obs("pdx", pc, StateReadOnly), obs("dr", dr, StateWritable),
+			},
+			wantReason: "Degraded",
+			wantFence:  []string{"dr"},
+		},
+		{
+			name: "sole writable reader is fenced before no-primary handling",
+			obs: []SiteObservation{
+				obs("iad", pc, StateReadOnly), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateWritable),
+			},
+			wantReason: "Degraded",
+			wantFence:  []string{"reader"},
+		},
+		{
+			name: "writable dr only is fenced before no-primary handling",
+			obs: []SiteObservation{
+				obs("iad", pc, StateReadOnly), obs("pdx", pc, StateReadOnly), obs("dr", dr, StateWritable),
+			},
+			wantReason: "Degraded",
+			wantFence:  []string{"dr"},
+		},
+		{
+			name: "writable reader blocks promotion until fence is confirmed",
+			obs: []SiteObservation{
+				obs("iad", pc, StateUnreachable), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateWritable),
+			},
+			wantReason: "Degraded",
+			wantFence:  []string{"reader"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EvalCrossSite(tt.obs, nil)
+			if got.Reason != tt.wantReason || !equalStrings(got.FenceSites, tt.wantFence) {
+				t.Fatalf("EvalCrossSite() = %+v, want reason=%s fence=%v", got, tt.wantReason, tt.wantFence)
+			}
+			if got.SplitBrain {
+				t.Fatal("non-promotable writable site must not create split brain")
+			}
+			if len(got.FenceSites) > 0 && len(got.PromotionCandidates) > 0 {
+				t.Fatalf("fencing and promotion must not be emitted together: %+v", got)
+			}
+		})
+	}
 }
 
 func TestRankPromotionCandidates(t *testing.T) {

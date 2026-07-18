@@ -17,7 +17,7 @@ The playground is the recommended learning path before production. It lets you s
 
 ## What you get
 
-- **Two-site MySQL cluster** (IAD + PDX) managed by the Bloodraven operator
+- **Three-site MySQL cluster** with promotable IAD/PDX sites and a dedicated non-promotable reader
 - **Real-time dashboard** showing site health, replication state, DNS records, and an event log
 - **Counter app** that writes to MySQL through the primary service, proving state persists across failovers
 - **Simulated external-dns pipeline** — the operator creates `DNSEndpoint` CRs, external-dns watches them and pushes records to an in-memory webhook provider, and the dashboard displays the results
@@ -31,7 +31,7 @@ You need three tools installed:
 - **kubectl** — for talking to your cluster
 - **helm** — for deploying the operator
 
-And a local Kubernetes cluster with at least 2 worker nodes. We recommend [k3d](https://k3d.io) because it's fast and lightweight, but kind and minikube work too.
+And a local Kubernetes cluster with at least 3 worker nodes. The third worker is dedicated to the `read-only` reader so storage-loss testing is deterministic. We recommend [k3d](https://k3d.io) because it's fast and lightweight, but kind and minikube work too.
 
 ### Create a cluster with k3d (recommended)
 
@@ -39,11 +39,11 @@ And a local Kubernetes cluster with at least 2 worker nodes. We recommend [k3d](
 # Install k3d if you haven't already
 curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
 
-# Create a cluster with 2 worker nodes
-k3d cluster create bloodraven --agents 2
+# Create a cluster with 3 worker nodes
+k3d cluster create bloodraven --agents 3
 ```
 
-That's it. You now have a 3-node cluster (1 server + 2 agents) ready to go.
+That's it. You now have a 4-node cluster (1 server + 3 agents) ready to go.
 
 <details>
 <summary>Using kind or minikube instead</summary>
@@ -58,13 +58,14 @@ nodes:
   - role: control-plane
   - role: worker
   - role: worker
+  - role: worker
 EOF
 ```
 
 **minikube:**
 
 ```bash
-minikube start --nodes=2 --cpus=2 --memory=2048 --driver=docker
+minikube start --nodes=4 --cpus=2 --memory=2048 --driver=docker
 ```
 
 </details>
@@ -79,14 +80,16 @@ From the root of the repository:
 
 This single script handles everything:
 
-1. Verifies your cluster has at least 2 nodes
-2. Labels nodes to simulate two data center sites (IAD and PDX)
+1. Verifies your cluster has at least 3 worker nodes
+2. Labels dedicated workers for IAD, PDX, and the reader zone
 3. Builds all container images locally
 4. Loads images into your cluster (auto-detects k3d, kind, or minikube)
 5. Installs the CRDs, namespace, RBAC, and operator via Helm
-6. Creates a `MysqlFailoverGroup` with two MySQL sites
+6. Creates a `MysqlFailoverGroup` with two primary candidates and one `read-only` reader
 7. Seeds a DNS record so the external-dns pipeline works immediately
 8. Deploys the dashboard and counter app
+
+The default `reader` site intentionally omits `lbIP` and `taintNodeSelector`. It demonstrates reader-specific `mysqlConf`, a site-only NodePort Service override, and `replication.readOnlyMaxLagSeconds`; the priorities remain `[iad, pdx]`, so the reader cannot be promoted.
 
 Setup takes about 2 minutes depending on your machine.
 
@@ -205,9 +208,18 @@ failure:
 ```bash
 make chaos-list                                  # List every scenario with its hypothesis
 make chaos-run SCENARIO=06-self-fence-isolated-primary
+make chaos-run SCENARIO=40-reader-data-loss-reclone
 make chaos-run-all-profile PROFILE=smoke         # Core failover subset (~5 minutes)
 make chaos-run-all                               # The full suite
 ```
+
+Scenarios 40-44 cover the dedicated read-only reader site end to end:
+
+- **40** deterministically interprets reader node/storage loss as Deployment scale-down plus PVC replacement on the dedicated reader worker. It continuously proves reader loss does not unset group `Ready`, verifies the reader client endpoint is shed during clone/catch-up, and confirms direct-source replication and endpoint return after auto-clone.
+- **41** answers reader `SELECT`s continuously through an unplanned failover (staleness allowed, availability required) and asserts the reader repoints directly to the new primary with no chained or blocked intermediate state.
+- **42** (smoke profile) stalls only the reader with `SOURCE_DELAY` and proves unbounded reader lag has zero group-level effect: no failover, no cooldown consumed, just endpoint shedding plus alertable status and metrics.
+- **43** makes the reader anomalously writable with an errant row: the operator fences it without debounce, a planned failover targeting it is rejected with the role error, and the errant GTID blocks source convergence at the containment gate instead of silently repointing.
+- **44** manually repoints the reader at the standby and proves direct-source convergence is a poll-loop invariant — any wrong-source state heals, with the documented convergence log events and no failover.
 
 This same suite is Bloodraven's E2E test bed in CI: the full suite runs
 nightly against a real Kubernetes cluster, and the smoke profile gates
@@ -217,7 +229,7 @@ failover works on a live cluster. The current status is on the
 
 ## Dragonfly co-management
 
-The playground `MysqlFailoverGroup` enables `spec.dragonfly`, so Bloodraven also creates one Dragonfly StatefulSet per site (`playground-dragonfly-iad`, `playground-dragonfly-pdx`), one Dragonfly PodDisruptionBudget per site, and a single app-facing `playground-dragonfly` Service whose endpoints follow the active site. The Service selector AND-gates `shipstream.io/dragonfly-role=master` AND `shipstream.io/dragonfly-traffic=enabled`: removing the traffic label sheds an endpoint atomically, which is how planned failover avoids a window where both the old and new master would match the selector during `REPLTAKEOVER`. Disable Dragonfly by removing the `spec.dragonfly` block.
+The playground `MysqlFailoverGroup` enables `spec.dragonfly`, so Bloodraven also creates one Dragonfly StatefulSet per site (`playground-dragonfly-iad`, `playground-dragonfly-pdx`, and `playground-dragonfly-reader`), one Dragonfly PodDisruptionBudget per site, and a single app-facing `playground-dragonfly` Service whose endpoints follow the active site. The Service selector AND-gates `shipstream.io/dragonfly-role=master` AND `shipstream.io/dragonfly-traffic=enabled`: removing the traffic label sheds an endpoint atomically, which is how planned failover avoids a window where both the old and new master would match the selector during `REPLTAKEOVER`. Disable Dragonfly by removing the `spec.dragonfly` block.
 
 Bloodraven supports Dragonfly `v1.38.0+` for managed deployments. The playground pins `docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0`; avoid older tags because several replication, snapshot, and expiry bugs were fixed before this baseline.
 

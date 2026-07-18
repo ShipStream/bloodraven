@@ -180,7 +180,7 @@ func s16ObserveContainerRestarted() runner.Step {
 func s16VerifyNoSplitBrain() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "cluster converges to exactly one writable + one read-only after SHUTDOWN",
+		Name:  "cluster converges to exactly one writable + all followers read-only after SHUTDOWN",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			deadline := time.Now().Add(3 * time.Minute)
 			tick := time.NewTicker(2 * time.Second)
@@ -208,14 +208,14 @@ func s16VerifyNoSplitBrain() runner.Step {
 					if len(writable) > 1 {
 						return fmt.Errorf("split-brain observed after mysqld SHUTDOWN: writable=%v", writable)
 					}
-					if len(writable) == 1 && len(readOnly) == 1 {
+					if len(writable) == 1 && len(readOnly) == len(mfg.Status.Sites)-1 {
 						env.Capture.Note(fmt.Sprintf("converged: writable=%v read-only=%v", writable, readOnly))
 						return nil
 					}
 				}
 				if time.Now().After(deadline) {
 					last, lerr := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
-					return fmt.Errorf("cluster did not converge to 1 writable + 1 read-only within 3m (last fetch err=%v sites=%+v)",
+					return fmt.Errorf("cluster did not converge to 1 writable + N-1 read-only within 3m (last fetch err=%v sites=%+v)",
 						lerr, summarizeSites(last))
 				}
 				select {

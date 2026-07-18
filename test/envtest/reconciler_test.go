@@ -3,11 +3,14 @@
 package envtest
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -65,9 +68,8 @@ func newTestFG(namespace string) *v1alpha1.MysqlFailoverGroup {
 func ensureNamespace(t *testing.T, name string) {
 	t.Helper()
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	if err := k8sClient.Create(ctx, ns); err != nil {
-		// Ignore already-exists errors.
-		return
+	if err := k8sClient.Create(ctx, ns); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create namespace %s: %v", name, err)
 	}
 }
 
@@ -111,6 +113,103 @@ func TestEnvtest_CRCreationAndSchemaAcceptance(t *testing.T) {
 	}
 	if fetched.Spec.DNS.Hostname != "lion.az.example.com" {
 		t.Errorf("expected DNS hostname 'lion.az.example.com', got %q", fetched.Spec.DNS.Hostname)
+	}
+}
+
+func TestEnvtest_ReadOnlyRoleValidation(t *testing.T) {
+	readerSite := func() v1alpha1.SiteSpec {
+		return v1alpha1.SiteSpec{
+			Name: "reader", Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
+			Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*v1alpha1.MysqlFailoverGroup)
+		wantOK bool
+	}{
+		{name: "reader omits placement", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites = append(fg.Spec.Sites, readerSite()) }, wantOK: true},
+		{name: "reader accepts legacy placement", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+			r := readerSite()
+			r.LBIP = "203.0.113.3"
+			r.TaintNodeSelector = map[string]string{"site": "reader"}
+			fg.Spec.Sites = append(fg.Spec.Sites, r)
+		}, wantOK: true},
+		{name: "candidate requires lb ip", mutate: func(fg *v1alpha1.MysqlFailoverGroup) { fg.Spec.Sites[0].LBIP = "" }},
+		{name: "dr only requires selector", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.Sites[0].Role = v1alpha1.SiteRoleDROnly
+			fg.Spec.Sites[0].TaintNodeSelector = nil
+		}},
+		{name: "reader does not satisfy candidate minimum", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.Sites[1] = readerSite()
+		}},
+		{name: "reader rejected from priorities", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.Sites = append(fg.Spec.Sites, readerSite())
+			fg.Spec.SplitBrainPolicy = &v1alpha1.SplitBrainPolicySpec{SitePriorities: []string{"reader"}}
+		}},
+		{name: "valid inherited service exposure", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+			fg.Spec.ServiceTemplate = &v1alpha1.ServiceTemplate{Type: corev1.ServiceTypeNodePort, ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal}
+			r := readerSite()
+			r.ServiceTemplate = &v1alpha1.SiteServiceTemplate{NodePort: 31000}
+			fg.Spec.Sites = append(fg.Spec.Sites, r)
+		}, wantOK: true},
+		{name: "node port rejected for cluster ip", mutate: func(fg *v1alpha1.MysqlFailoverGroup) {
+			r := readerSite()
+			r.ServiceTemplate = &v1alpha1.SiteServiceTemplate{NodePort: 31000}
+			fg.Spec.Sites = append(fg.Spec.Sites, r)
+		}},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := fmt.Sprintf("reader-validation-%d", i)
+			ensureNamespace(t, ns)
+			fg := newTestFG(ns)
+			tt.mutate(fg)
+			err := k8sClient.Create(ctx, fg)
+			if tt.wantOK && err != nil {
+				t.Fatalf("Create() rejected valid object: %v", err)
+			}
+			if !tt.wantOK {
+				if err == nil {
+					t.Fatal("Create() accepted invalid object")
+				}
+				if !apierrors.IsInvalid(err) {
+					t.Fatalf("Create() error = %T %v, want Kubernetes Invalid schema error", err, err)
+				}
+			}
+		})
+	}
+}
+
+func TestEnvtest_ReadOnlyRoleTransitions(t *testing.T) {
+	ns := "reader-role-transitions"
+	ensureNamespace(t, ns)
+	fg := newTestFG(ns)
+	fg.Spec.Sites = append(fg.Spec.Sites, v1alpha1.SiteSpec{
+		Name: "reader", Role: v1alpha1.SiteRoleReadOnly, Zone: "reader-zone",
+		Storage: v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")},
+	})
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDROnly
+	if err := k8sClient.Update(ctx, fg); err == nil {
+		t.Fatal("reader to dr-only transition without placement was accepted")
+	}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: ns}, fg); err != nil {
+		t.Fatal(err)
+	}
+	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleDROnly
+	fg.Spec.Sites[2].LBIP = "203.0.113.3"
+	fg.Spec.Sites[2].TaintNodeSelector = map[string]string{"site": "reader"}
+	if err := k8sClient.Update(ctx, fg); err != nil {
+		t.Fatalf("reader to dr-only transition with placement rejected: %v", err)
+	}
+	fg.Spec.Sites[2].Role = v1alpha1.SiteRoleReadOnly
+	fg.Spec.Sites[2].LBIP = ""
+	fg.Spec.Sites[2].TaintNodeSelector = nil
+	if err := k8sClient.Update(ctx, fg); err != nil {
+		t.Fatalf("dr-only to reader transition rejected: %v", err)
 	}
 }
 
@@ -273,17 +372,15 @@ func TestEnvtest_ReconcilerCreatesResources(t *testing.T) {
 		t.Fatalf("reconcile failed: %v", err)
 	}
 
-	// Verify ConfigMap was created with owner reference
-	var cm corev1.ConfigMap
-	if err := k8sClient.Get(ctx, types.NamespacedName{
-		Name: "mysql-lion-config", Namespace: ns,
-	}, &cm); err != nil {
-		t.Fatalf("ConfigMap not created: %v", err)
-	}
-	if len(cm.OwnerReferences) == 0 {
-		t.Error("ConfigMap should have owner reference to MysqlFailoverGroup")
-	} else if cm.OwnerReferences[0].Name != "lion" {
-		t.Errorf("ConfigMap owner ref: got %q, want 'lion'", cm.OwnerReferences[0].Name)
+	// Verify per-site ConfigMaps were created with owner references.
+	for _, dc := range []string{"dc1", "dc2"} {
+		var cm corev1.ConfigMap
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "mysql-lion-" + dc + "-config", Namespace: ns}, &cm); err != nil {
+			t.Fatalf("ConfigMap for %s not created: %v", dc, err)
+		}
+		if !metav1.IsControlledBy(&cm, fg) {
+			t.Errorf("ConfigMap %s is not controlled by %s/%s: owner refs = %v", dc, fg.Namespace, fg.Name, cm.OwnerReferences)
+		}
 	}
 
 	// Verify Deployments
@@ -308,7 +405,7 @@ func TestEnvtest_ReconcilerCreatesResources(t *testing.T) {
 	}
 
 	// Verify Services
-	for _, svcName := range []string{"mysql-lion-dc1", "mysql-lion-dc2", "mysql-lion-primary", "mysql-lion-replicas"} {
+	for _, svcName := range []string{"mysql-lion-dc1", "mysql-lion-dc2", "mysql-lion-dc1-internal", "mysql-lion-dc2-internal", "mysql-lion-primary", "mysql-lion-replicas"} {
 		var svc corev1.Service
 		if err := k8sClient.Get(ctx, types.NamespacedName{
 			Name: svcName, Namespace: ns,
@@ -318,6 +415,18 @@ func TestEnvtest_ReconcilerCreatesResources(t *testing.T) {
 		}
 		if len(svc.OwnerReferences) == 0 {
 			t.Errorf("Service %s should have owner reference", svcName)
+		}
+		if strings.HasSuffix(svcName, "-internal") {
+			if svc.Spec.Type != corev1.ServiceTypeClusterIP || svc.Spec.ExternalTrafficPolicy != "" ||
+				svc.Spec.LoadBalancerIP != "" || len(svc.Spec.LoadBalancerSourceRanges) != 0 ||
+				svc.Spec.LoadBalancerClass != nil || len(svc.Status.LoadBalancer.Ingress) != 0 {
+				t.Errorf("administrative Service %s is externally exposed: spec=%+v status=%+v", svcName, svc.Spec, svc.Status.LoadBalancer)
+			}
+			for _, port := range svc.Spec.Ports {
+				if port.NodePort != 0 {
+					t.Errorf("administrative Service %s port %s has nodePort %d", svcName, port.Name, port.NodePort)
+				}
+			}
 		}
 	}
 
@@ -369,7 +478,7 @@ func TestEnvtest_ReconcilerIdempotent(t *testing.T) {
 	}
 }
 
-func TestEnvtest_ReconcilerHandlesSpecChange(t *testing.T) {
+func TestEnvtest_ReconcilerDefersExistingDeploymentSpecChange(t *testing.T) {
 	ns := "envtest-spec-change"
 	ensureNamespace(t, ns)
 	ensureSecret(t, ns)
@@ -391,7 +500,28 @@ func TestEnvtest_ReconcilerHandlesSpecChange(t *testing.T) {
 		t.Fatalf("initial reconcile failed: %v", err)
 	}
 
-	// Change the image
+	mysqlImage := func(deploy *appsv1.Deployment) (string, bool) {
+		for _, container := range deploy.Spec.Template.Spec.Containers {
+			if container.Name == "mysql" {
+				return container.Image, true
+			}
+		}
+		return "", false
+	}
+	initialImages := make(map[string]string, 2)
+	for _, site := range []string{"dc1", "dc2"} {
+		var before appsv1.Deployment
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "mysql-lion-" + site, Namespace: ns}, &before); err != nil {
+			t.Fatalf("deployment %s not found after initial reconcile: %v", site, err)
+		}
+		image, ok := mysqlImage(&before)
+		if !ok {
+			t.Fatalf("deployment %s has no named mysql container", site)
+		}
+		initialImages[site] = image
+	}
+
+	// Change the image.
 	var fetched v1alpha1.MysqlFailoverGroup
 	if err := k8sClient.Get(ctx, nn, &fetched); err != nil {
 		t.Fatalf("failed to get fg: %v", err)
@@ -401,20 +531,27 @@ func TestEnvtest_ReconcilerHandlesSpecChange(t *testing.T) {
 		t.Fatalf("failed to update fg: %v", err)
 	}
 
-	// Re-reconcile should update the deployment
+	// Bulk reconciliation must defer the existing Deployment to the ordered
+	// updater rather than patching every site concurrently.
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
 		t.Fatalf("re-reconcile after spec change failed: %v", err)
 	}
 
-	// Verify the deployment was updated
-	var deploy appsv1.Deployment
-	if err := k8sClient.Get(ctx, types.NamespacedName{
-		Name: "mysql-lion-dc1", Namespace: ns,
-	}, &deploy); err != nil {
-		t.Fatalf("deployment not found: %v", err)
-	}
-	if deploy.Spec.Template.Spec.Containers[0].Image != "mysql:8.4" {
-		t.Errorf("expected image mysql:8.4, got %s", deploy.Spec.Template.Spec.Containers[0].Image)
+	// Verify every existing Deployment's named MySQL container was left untouched.
+	for _, site := range []string{"dc1", "dc2"} {
+		var deploy appsv1.Deployment
+		if err := k8sClient.Get(ctx, types.NamespacedName{
+			Name: "mysql-lion-" + site, Namespace: ns,
+		}, &deploy); err != nil {
+			t.Fatalf("deployment %s not found: %v", site, err)
+		}
+		got, ok := mysqlImage(&deploy)
+		if !ok {
+			t.Fatalf("deployment %s has no named mysql container", site)
+		}
+		if got != initialImages[site] {
+			t.Errorf("existing deployment %s was patched outside ordered update: image %s -> %s", site, initialImages[site], got)
+		}
 	}
 }
 

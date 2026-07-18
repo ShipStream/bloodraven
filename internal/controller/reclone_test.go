@@ -84,9 +84,25 @@ func TestValidateRecloneRequest_ColdReclone_BareSite_RequiresConfirm(t *testing.
 }
 
 func TestValidateRecloneRequest_ColdReclone_WithConfirm_OK(t *testing.T) {
-	fg := recloneFG([]string{"iad", "pdx"}, nil)
-	if err := validateRecloneRequest(fg, RecloneRequest{Site: "iad", GtidPrefix: "confirm=orders"}); err != nil {
-		t.Errorf("cold reclone with correct confirm token should succeed, got %v", err)
+	tests := []struct {
+		name      string
+		sites     []string
+		recipient string
+		role      v1alpha1.SiteRole
+	}{
+		{name: "primary candidate", sites: []string{"iad", "pdx"}, recipient: "iad"},
+		{name: "read-only reader", sites: []string{"iad", "pdx", "reader"}, recipient: "reader", role: v1alpha1.SiteRoleReadOnly},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fg := recloneFG(tt.sites, nil)
+			if tt.role != "" {
+				fg.Spec.SiteByName(tt.recipient).Role = tt.role
+			}
+			if err := validateRecloneRequest(fg, RecloneRequest{Site: tt.recipient, GtidPrefix: "confirm=orders"}); err != nil {
+				t.Errorf("cold reclone with correct confirm token should succeed, got %v", err)
+			}
+		})
 	}
 }
 
