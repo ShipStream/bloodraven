@@ -1,0 +1,538 @@
+---
+sidebar_position: 9
+---
+
+# Data-at-rest encryption
+
+Bloodraven can run MySQL with InnoDB data-at-rest encryption turned on,
+keeping the encryption key off the MySQL data PVC and off worker-node
+disks. It uses the GPL `component_keyring_file` keyring component that
+ships in MySQL Community Edition, so it needs no Oracle Enterprise
+licence and no CSI-level encrypted storage.
+
+```yaml
+spec:
+  tls:                             # required
+    issuerRef: {name: ca, kind: Issuer}
+    secretName: mysql-tls
+  encryptionAtRest:
+    enabled: true
+```
+
+The operator installation must also enable the chart's dedicated escrow
+TLS listener. Everything below explains that prerequisite, what the
+feature protects, and how the keyring lifecycle works.
+
+## What this is not
+
+:::warning Not Oracle "MySQL Enterprise TDE"
+Oracle reserves the encrypted local keyring
+(`component_keyring_encrypted_file`) and the KMS integrations (AWS, OCI,
+KMIP) for Enterprise Edition, and calls the centrally-managed product
+"MySQL Enterprise Transparent Data Encryption". Oracle states explicitly
+that the file-based keyring components are **not intended as
+regulatory-compliance solutions**.
+
+Do not present this feature as compliance-grade TDE. If you have a
+PCI/FIPS-style requirement that names a key-management system, this
+design does not satisfy it on its own.
+:::
+
+## Threat model
+
+**In scope — what this protects against:**
+
+| Threat | How it is addressed |
+|---|---|
+| A stolen or decommissioned MySQL data PVC | Tablespaces, redo, undo, binary and relay logs are all encrypted. The key is not on the volume. |
+| A volume snapshot copied out of the cluster | Same. |
+| A worker-node disk read offline | The keyring only ever exists on tmpfs (a Secret volume or a memory-backed `emptyDir`), never on a persistent disk. |
+| An operator or application user rotating keys ad hoc | In the sealed steady state the keyring is read-only, so MySQL itself rejects `ALTER INSTANCE ROTATE INNODB MASTER KEY`. |
+
+**Out of scope — what this does not protect against:**
+
+- **A live root-level compromise of a node, or of the MySQL process.** A
+  running MySQL necessarily holds decrypted keys in memory. Anything that
+  can read that memory, or that can simply ask MySQL for the data, wins.
+- **A compromised Kubernetes control plane.** See
+  [etcd is now part of your key custody](#etcd-is-now-part-of-your-key-custody).
+- **Backup, restore, and verification staging.** See
+  [Boundaries](#boundaries).
+
+## etcd is now part of your key custody
+
+The live keyring is projected from a Kubernetes Secret. **Kubernetes
+stores Secrets unencrypted in etcd by default.** Without API-server
+encryption at rest, enabling this feature does not protect your keys — it
+just moves them from the MySQL data disk to the control-plane disk.
+
+Before enabling `encryptionAtRest`, you must:
+
+1. **Turn on API-server encryption at rest for Secrets**, ideally
+   KMS-backed (`kms` provider v2), not `aescbc` with a local key file.
+   See the [Kubernetes encryption-at-rest
+   guide](https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/).
+2. **Restrict RBAC on Secrets** in the failover group's namespace. Anyone
+   who can `get` secrets there can read the keyring and decrypt a stolen
+   PVC.
+3. **Disable or encrypt swap on worker nodes.** Kubernetes asks for
+   `tmpfs` with `noswap`, but kernel support for that mount option is
+   only official from Linux 6.3. On older kernels kubelet logs a warning
+   and memory-backed volume contents can reach swap. Verify with
+   `mount | grep tmpfs` on a node and check kubelet's startup logs.
+
+None of these are optional. Bloodraven cannot verify them for you.
+
+## Requirements
+
+- **`spec.tls` must be set.** MySQL requires a secure connection to clone
+  encrypted data, and Bloodraven bootstraps every replica with `CLONE
+  INSTANCE`. The CRD rejects `encryptionAtRest.enabled: true` without
+  TLS.
+- **The operator escrow TLS listener must be enabled.** Set
+  `auxiliary.escrowTLS.enabled=true` and
+  `auxiliary.escrowTLS.existingSecret=<secret>` on the Bloodraven chart.
+  The Secret must contain `tls.crt` and `tls.key`; the certificate SAN
+  must cover the auxiliary Service FQDN, and every encrypted group's
+  `spec.tls` `ca.crt` must trust its issuer. Keyring bytes and their
+  bearer token are never sent over the plaintext auxiliary listener.
+- **MySQL 9.x Community** (or any build shipping
+  `component_keyring_file`). Verified against `mysql:9.7`.
+- **Image-specific paths.** MySQL only reads its global component
+  manifest from the directory holding the `mysqld` binary, and its global
+  component config from `plugin_dir`. Defaults match the official
+  `mysql:9.x` images. If you run a different image, check them:
+
+  ```bash
+  docker run --rm --entrypoint sh <image> -c \
+    'command -v mysqld; mysqld --verbose --help 2>/dev/null | grep "^plugin_dir"'
+  ```
+
+  and set `spec.encryptionAtRest.keyring.mysqldDir` /
+  `.pluginDir` accordingly.
+
+## How the keyring lifecycle works
+
+Every site has its own independent keyring. That is not a simplification
+— MySQL's encrypted clone decrypts the donor's tablespace keys in transit
+and the recipient re-encrypts them under a **new master key of its own**,
+so sites cannot share one.
+
+A site is in one of two renderings at any moment.
+
+### Sealed — the steady state
+
+```text
+    Kubernetes Secret  mysql-<group>-<site>-keyring-v<N>   (immutable)
+              │
+              │  kubelet projects it onto node-local tmpfs
+              ▼
+    /run/mysql-keyring/keyring   (read-only, mode 0444)
+              │
+              │  component_keyring_file with "read_only": true
+              ▼
+    mysqld ──────────────► encrypted /var/lib/mysql
+```
+
+`"read_only": true` is doing real work here, not documentation. With it
+set, MySQL physically cannot add a key:
+
+```sql
+mysql> ALTER INSTANCE ROTATE INNODB MASTER KEY;
+ERROR 3185 (HY000): Can't find master key from keyring, ...
+```
+
+That is the guarantee that makes the design safe: in the steady state
+there is **no window** in which MySQL can create a key that is not
+already escrowed, because it cannot create keys at all.
+
+### Unsealed — bootstrap, clone, and rotation
+
+Three operations genuinely need to write the keyring:
+
+| Operation | Why |
+|---|---|
+| Initial bootstrap | MySQL creates the master key, redo key, and binlog master key while initializing a fresh data directory. |
+| `CLONE INSTANCE` into this site | The recipient re-wraps every tablespace key under a new master key of its own. |
+| Master-key rotation | By definition. |
+
+For those, the operator re-renders the site with the keyring on a
+memory-backed `emptyDir`, seeded from the current escrow version by an
+init container, and arms the sidecar's escrow agent:
+
+```text
+    keyring-init ──seed──► /run/mysql-keyring/keyring  (tmpfs, rw)
+                                      │
+                    mysqld writes ────┤
+                                      │
+                          sidecar reads, hashes
+                                      │
+                  HTTPS POST /keyring/escrow  (bearer token)
+                                      ▼
+                            operator writes a new
+                            immutable Secret version
+                                      │
+                    operator re-reads it and compares
+                    against the live digest
+                                      ▼
+                            re-render sealed, roll pod
+```
+
+The operator will not seal a site until **all** of the following hold:
+
+1. an escrow Secret exists for the site,
+2. its contents, re-hashed by the operator, match the live keyring digest
+   the sidecar reports,
+3. the Deployment is actually rendered with the Secret projection and the
+   pod is ready,
+4. MySQL reports `Read_only: Yes` in
+   `performance_schema.keyring_component_status`.
+
+## Key loss is bounded by construction
+
+The only window in which a keyring can be lost is while a site is
+deliberately unsealed. That window is made survivable rather than merely
+short:
+
+- **Bootstrap:** the site has no data worth keeping. Recovery is to wipe
+  and re-bootstrap.
+- **Clone:** the site is being overwritten from a donor anyway. Recovery
+  is to re-clone.
+- **Rotation:** **the operator refuses to rotate the active primary.** A
+  replica that loses its keyring mid-rotation is re-cloneable from the
+  primary; a primary that lost one would not be. See
+  [Rotating keys](#rotating-keys).
+
+So a lost keyring always costs you a re-clone of one site, never your
+data. The one thing that would be unrecoverable — losing the escrow
+Secret of a sealed site — is why the operator raises a `Failed` phase and
+a `KeyringEscrowMissing` event the moment it notices one is gone.
+
+## Status and monitoring
+
+```bash
+kubectl get mysqlfailovergroup orders -o jsonpath='{.status.encryptionAtRest}' | jq
+```
+
+```json
+{
+  "sealed": true,
+  "sites": [
+    {
+      "name": "iad",
+      "phase": "Sealed",
+      "keyringSecret": "mysql-orders-iad-keyring-v1",
+      "keyringVersion": 1,
+      "keyringDigest": "sha256:9f2c…",
+      "coverage": {
+        "keyringComponent": "component_keyring_file",
+        "keyringReadOnly": true,
+        "systemTablespaceEncrypted": true,
+        "unencryptedTablespaces": 0,
+        "redoLogEncrypted": true,
+        "undoLogEncrypted": true,
+        "binlogEncrypted": true
+      }
+    }
+  ]
+}
+```
+
+`status.conditions[type=EncryptionAtRestReady]` summarizes the group.
+
+### Metrics
+
+| Metric | Meaning |
+|---|---|
+| `bloodraven_keyring_phase{mysql_namespace,failover_group,site,phase}` | One-hot per site. **Alert on `phase="sealed"` being 0 for more than a few minutes.** |
+| `bloodraven_keyring_escrow_version{mysql_namespace,failover_group,site}` | Current escrow version per site. |
+| `bloodraven_keyring_escrow_pushes_total{outcome}` | Sidecar → operator escrow pushes. Sustained failures mean a site cannot be sealed. |
+| `bloodraven_keyring_rotations_total{outcome}` | Master-key rotations. |
+| `bloodraven_encryption_unencrypted_tablespaces{mysql_namespace,failover_group,site}` | User tablespaces still reporting `ENCRYPTION='N'`. **Non-zero means part of your data is in the clear.** |
+| `bloodraven_encryption_coverage{mysql_namespace,failover_group,site,aspect}` | Per-aspect coverage (`system_tablespace`, `redo_log`, `undo_log`, `binlog`, `keyring_read_only`). |
+
+Suggested alert:
+
+```yaml
+- alert: BloodravenKeyringNotSealed
+  expr: bloodraven_keyring_phase{phase="sealed"} == 0
+  for: 15m
+  annotations:
+    summary: "{{ $labels.site }} is running with a writable keyring"
+```
+
+## Coverage
+
+With the defaults, Bloodraven enforces these as operator-owned settings —
+a `spec.mysqlConf` entry naming the same key is ignored, so a stray
+override cannot silently downgrade a site:
+
+```ini
+default_table_encryption=ON
+table_encryption_privilege_check=ON
+innodb_redo_log_encrypt=ON
+innodb_undo_log_encrypt=ON
+binlog_encryption=ON          # covers relay logs on replicas too
+```
+
+Plus `ALTER TABLESPACE mysql ENCRYPTION='Y'`, run once by the sidecar on
+the writable site. This one matters more than it looks:
+`default_table_encryption` does **not** cover the `mysql` system
+tablespace, which holds the data dictionary. Leave it unencrypted and
+every schema, table, and column name is readable on a stolen PVC even
+though the row data is not.
+
+Each can be turned off individually — and each one you turn off narrows
+the claim:
+
+```yaml
+spec:
+  encryptionAtRest:
+    enabled: true
+    coverage:
+      binaryLog: false     # binlogs and relay logs land in plaintext
+```
+
+:::note `default_table_encryption` is forward-looking
+It encrypts schemas and tables created *after* it takes effect. It does
+not rewrite anything already on disk. That is what
+`status.…coverage.unencryptedTablespaces` counts.
+:::
+
+## Enabling encryption
+
+### On a new failover group
+
+Set `spec.encryptionAtRest.enabled: true` and `spec.tls` before the group
+first bootstraps. Every site comes up unsealed, creates its keys during
+initialization, escrows, and seals. Nothing else to do.
+
+### On an existing group
+
+The operator **refuses** by default:
+
+```text
+Warning  EncryptionAdoptionRefused  spec.encryptionAtRest.enabled was turned on for a
+  group that is already serving from site "iad". Existing tablespaces stay plaintext —
+  MySQL only encrypts data written after the fact.
+```
+
+This is not a mistake in the refusal — it is the honest answer. Flipping
+the flag on a live group gives you a cluster that *reports* encrypted
+while most of the bytes on the PVC are not.
+
+**Supported path — replica-first, no plaintext left behind:**
+
+1. Stand up the encrypted group (or add an encrypted site) and let it
+   bootstrap and seal.
+2. Load it from the existing cluster (`spec.initFromBackup`, or
+   replication from the old primary).
+3. Verify `status.encryptionAtRest.sealed == true` and
+   `unencryptedTablespaces == 0` on every site.
+4. Cut traffic over with a [planned failover](./planned-failover.mdx).
+5. Decommission the old cluster and **wipe its PVCs** — they still hold
+   plaintext.
+
+**Escape hatch — accept partial coverage:**
+
+If you understand that pre-existing tables stay in the clear until they
+are rebuilt:
+
+```bash
+kubectl annotate mysqlfailovergroup orders \
+  bloodraven.shipstream.io/encryption-adopt=confirm
+```
+
+New writes are then encrypted, redo/undo/binlog encryption engages, and
+`unencryptedTablespaces` tells you how much is still exposed. Rebuild the
+remainder at your own pace:
+
+```sql
+ALTER TABLE mydb.orders ENCRYPTION='Y';   -- rebuilds the table
+```
+
+Note that this rewrites each table in place, so plan it like any other
+large `ALTER`.
+
+## Rotating keys
+
+Rotation is the one operation where a lost keyring would cost you data
+rather than a re-clone, because `ALTER INSTANCE ROTATE INNODB MASTER KEY`
+re-wraps the tablespace keys under a new master key. **The operator
+therefore refuses to rotate the active primary.**
+
+The supported procedure rotates every site while it is a replica:
+
+```bash
+# 1. Rotate each replica, one at a time. Wait for Sealed between them.
+kubectl annotate mysqlfailovergroup orders \
+  bloodraven.shipstream.io/rotate-keyring=pdx --overwrite
+
+kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="pdx")].phase}'
+# Pending → Unsealed → Escrowed → Sealed
+
+# 2. Planned failover onto a rotated site.
+kubectl annotate mysqlfailovergroup orders \
+  bloodraven.shipstream.io/planned-failover=pdx
+
+# 3. Rotate the old primary, now a replica.
+kubectl annotate mysqlfailovergroup orders \
+  bloodraven.shipstream.io/rotate-keyring=iad --overwrite
+```
+
+The annotation is cleared automatically once the target site is Sealed
+again. Rotation is also refused while an ordered update or a planned
+failover is in flight.
+
+Each rotation mints a new immutable escrow Secret version.
+`keyring.retainVersions` (default 5) controls how many superseded
+versions are kept; the version a site is currently sealed against is
+never pruned, even if retention would otherwise reach it.
+
+## Disaster recovery
+
+**A site's pod is gone.** Nothing to do. The keyring lives in the escrow
+Secret; kubelet re-projects it when the pod is rescheduled.
+
+**A site's escrow Secret was deleted.** The site is `Failed` and a
+`KeyringEscrowMissing` event fires. If the pod is still running, its
+keyring is alive on tmpfs — **do not delete or restart that pod.** Recover
+by recreating the exact missing Secret directly from the running pod.
+This avoids a rollout while the only surviving key copy is in memory.
+
+```bash
+set -o pipefail
+POD=$(kubectl get pod \
+  -l shipstream.io/failover-group=orders,shipstream.io/site=iad \
+  -o jsonpath='{.items[0].metadata.name}')
+SECRET=$(kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="iad")].keyringSecret}')
+VERSION=$(kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="iad")].keyringVersion}')
+DIGEST=$(kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="iad")].keyringDigest}')
+KEYRING_DIR=$(kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.spec.encryptionAtRest.keyring.dataFileDir}')
+KEYRING_DIR=${KEYRING_DIR:-/run/mysql-keyring}
+FG_UID=$(kubectl get mysqlfailovergroup orders -o jsonpath='{.metadata.uid}')
+
+kubectl exec "$POD" -c mysql -- cat "$KEYRING_DIR/keyring" | \
+  kubectl create secret generic "$SECRET" --from-file=keyring=/dev/stdin
+ACTUAL_DIGEST=$(kubectl get secret "$SECRET" -o jsonpath='{.data.keyring}' | \
+  base64 -d | sha256sum | cut -d' ' -f1)
+if [[ "sha256:${ACTUAL_DIGEST}" != "$DIGEST" ]]; then
+  kubectl delete secret "$SECRET"
+  echo "restored keyring digest does not match status; refusing to continue" >&2
+  exit 1
+fi
+kubectl label secret "$SECRET" \
+  app.kubernetes.io/name=mysql-keyring \
+  app.kubernetes.io/managed-by=bloodraven \
+  shipstream.io/failover-group=orders shipstream.io/site=iad \
+  shipstream.io/keyring-version="$VERSION"
+kubectl annotate secret "$SECRET" shipstream.io/keyring-digest="$DIGEST"
+kubectl patch secret "$SECRET" --type=merge -p="{
+  \"metadata\":{\"ownerReferences\":[{
+    \"apiVersion\":\"shipstream.io/v1alpha1\",\"kind\":\"MysqlFailoverGroup\",
+    \"name\":\"orders\",\"uid\":\"${FG_UID}\",\"controller\":true,\"blockOwnerDeletion\":true
+  }]},\"immutable\":true
+}"
+
+SITE_INDEX=$(kubectl get mysqlfailovergroup orders -o json | \
+  jq -er '.status.encryptionAtRest.sites | map(.name) | index("iad")')
+kubectl patch mysqlfailovergroup orders --subresource=status --type=json -p="[
+  {\"op\":\"test\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/name\",\"value\":\"iad\"},
+  {\"op\":\"replace\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/phase\",\"value\":\"Sealed\"}
+]"
+```
+
+If the pod is already gone, that site's data is unrecoverable. Delete its
+unreadable PVC and use the confirmed reclone annotation; the operator
+starts the replacement with a fresh keyring and clones from the healthy
+primary.
+
+**The whole namespace was lost.** Restore from a backup
+([backup encryption](./backup-encryption.mdx) is a separate, independent
+key), then bootstrap a fresh encrypted group and load it. Backup
+artifacts are logical dumps, so they do not depend on any site's keyring.
+
+**Rolling a site back onto an older keyring version.** Patch the site's
+`keyringSecret`/`keyringVersion`/`keyringDigest` in status to an older
+retained version and let the pod roll. Only do this if you know the older
+version still decrypts the data on that PVC — a master-key rotation
+happened in between if the version changed, and the newer key is the one
+the tablespace headers reference.
+
+## Boundaries
+
+Live MySQL encryption does not cover Bloodraven's logical
+backup/restore/verification workflows:
+
+| Workflow | What still touches node storage in plaintext |
+|---|---|
+| Backup | `mysqlsh` stages the dump in a local `emptyDir` before Bloodraven encrypts and uploads it. |
+| Restore | The artifact is decrypted into an `emptyDir` before `mysqlsh` loads it. |
+| Backup verification | An ephemeral MySQL data directory is created on an `emptyDir`, not TDE-enabled. |
+
+Backup *artifacts* at rest in S3 or on a PVC are separately protected by
+[`spec.backup.profiles[].encryption`](./backup-encryption.mdx) — turn
+that on too. The gap above is the transient staging inside the pod's own
+`emptyDir`, which lands on the node's ephemeral storage.
+
+If your requirement is "no plaintext database content ever touches node
+storage", this feature alone does not satisfy it and you should also
+constrain where backup Jobs schedule, or use encrypted ephemeral storage
+on those nodes.
+
+## Interaction with other features
+
+| Feature | Behaviour |
+|---|---|
+| Failover / promotion | Unaffected. Both sites are independently encrypted and sealed. |
+| Reclone (`bloodraven.shipstream.io/reclone-site`) | The operator unseals the recipient first, then clones, then re-escrows and re-seals. The clone is deferred (not failed) for one poll cycle while the pod rolls. |
+| Ordered updates | Seal transitions participate in the pod spec hash, so they roll one site at a time through the normal ordered-update path. |
+| PITR / binlog archiver | Archived binlogs are encrypted by MySQL on disk *and* re-encrypted by the archiver if `spec.backup` encryption is on. |
+| Dragonfly | Unaffected — Dragonfly is a separate subsystem with no keyring. |
+
+## Reference
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Turn on data-at-rest encryption. Requires `spec.tls`. |
+| `coverage.tables` | `true` | `default_table_encryption` |
+| `coverage.privilegeCheck` | `true` | `table_encryption_privilege_check` |
+| `coverage.redoLog` | `true` | `innodb_redo_log_encrypt` |
+| `coverage.undoLog` | `true` | `innodb_undo_log_encrypt` |
+| `coverage.binaryLog` | `true` | `binlog_encryption` (binary + relay logs) |
+| `coverage.systemTablespace` | `true` | `ALTER TABLESPACE mysql ENCRYPTION='Y'` |
+| `keyring.dataFileDir` | `/run/mysql-keyring` | Keyring mount point. Must be outside the actual MySQL datadir. Admission rejects `/var/lib/mysql` and descendants; custom-image datadirs require manual verification. |
+| `keyring.mysqldDir` | `/usr/sbin` | Directory holding `mysqld`; the global manifest is mounted here. |
+| `keyring.pluginDir` | `/usr/lib64/mysql/plugin` | MySQL `plugin_dir`; the global component config is mounted here. |
+| `keyring.retainVersions` | `5` | Superseded escrow versions kept per site (2–50). |
+| `keyring.escrowTimeoutSeconds` | `600` | How long before a site that has not escrowed is reported `Failed`. It stays unsealed and keeps retrying either way. |
+
+### Resources the operator creates
+
+| Resource | Purpose |
+|---|---|
+| `mysql-<group>-<site>-keyring-v<N>` (Secret, immutable) | Escrowed keyring. Owned by the failover group. |
+| `mysql-<group>-<site>-keyring-token` (Secret) | Per-site escrow bearer token. Mounted into the sidecar only while unsealed. |
+| `mysql-<group>-<site>-config` (ConfigMap) | Gains `keyring-manifest.json` and `keyring-component.json`, subPath-mounted into the image's `mysqld` and plugin directories. |
+
+### Annotations
+
+| Annotation | Value | Effect |
+|---|---|---|
+| `bloodraven.shipstream.io/rotate-keyring` | site name | Rotate that site's master key. Refused on the active primary. Cleared on completion. |
+| `bloodraven.shipstream.io/encryption-adopt` | `confirm` | Accept partial coverage when enabling encryption on a live group. |
+
+## Further reading
+
+- [InnoDB data-at-rest encryption](https://dev.mysql.com/doc/refman/9.7/en/innodb-data-encryption.html)
+- [Keyring component installation](https://dev.mysql.com/doc/refman/9.7/en/keyring-component-installation.html)
+- [`component_keyring_file`](https://dev.mysql.com/doc/refman/9.7/en/keyring-file-component.html)
+- [Encrypting binary and relay logs](https://dev.mysql.com/doc/refman/9.7/en/replication-binlog-encryption.html)
+- [Cloning encrypted data](https://dev.mysql.com/doc/refman/9.7/en/clone-plugin-encrypted-data.html)
+- [Kubernetes: encrypting data at rest](https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/)
+- [Kubernetes: swap and memory-backed volumes](https://kubernetes.io/docs/concepts/cluster-administration/swap-memory-management/#memory-backed-volumes)

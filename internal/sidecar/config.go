@@ -58,6 +58,10 @@ type Config struct {
 	// disabled for the failover group — in that case the archiver
 	// goroutine is never started.
 	PITR *PITRConfig
+
+	// Keyring holds the encryption-at-rest escrow configuration. Nil
+	// when spec.encryptionAtRest is disabled for the failover group.
+	Keyring *KeyringConfig
 }
 
 // PITRConfig controls the binlog archiver goroutine that runs inside
@@ -221,6 +225,11 @@ func ConfigFromEnv() (*Config, error) {
 		return nil, err
 	}
 
+	keyring, err := keyringConfigFromEnv()
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		MysqlDSN:          dsn,
 		PodName:           podName,
@@ -233,6 +242,7 @@ func ConfigFromEnv() (*Config, error) {
 		PodNamespace:      podNamespace,
 		FailoverGroup:     failoverGroup,
 		PITR:              pitr,
+		Keyring:           keyring,
 	}, nil
 }
 

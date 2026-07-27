@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -255,6 +257,63 @@ func main() {
 	})); err != nil {
 		logger.Error("unable to add auxiliary server", "error", err)
 		os.Exit(1)
+	}
+
+	escrowCertFile := strings.TrimSpace(os.Getenv("BLOODRAVEN_ESCROW_TLS_CERT_FILE"))
+	escrowKeyFile := strings.TrimSpace(os.Getenv("BLOODRAVEN_ESCROW_TLS_KEY_FILE"))
+	if escrowCertFile != "" || escrowKeyFile != "" {
+		if escrowCertFile == "" || escrowKeyFile == "" {
+			logger.Error("escrow TLS requires both certificate and key files")
+			os.Exit(1)
+		}
+		_, err := tls.LoadX509KeyPair(escrowCertFile, escrowKeyFile)
+		if err != nil {
+			logger.Error("unable to load escrow TLS certificate", "error", err)
+			os.Exit(1)
+		}
+		escrowAddr := strings.TrimSpace(os.Getenv("BLOODRAVEN_ESCROW_TLS_ADDR"))
+		if escrowAddr == "" {
+			escrowAddr = ":8443"
+		}
+		escrowSrv := &http.Server{
+			Addr:              escrowAddr,
+			Handler:           newEscrowMux(mgr.GetClient(), logger),
+			ReadHeaderTimeout: 5 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    1 << 16,
+			TLSConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+					certificate, err := tls.LoadX509KeyPair(escrowCertFile, escrowKeyFile)
+					if err != nil {
+						return nil, fmt.Errorf("reload escrow TLS certificate: %w", err)
+					}
+					return &certificate, nil
+				},
+			},
+		}
+		if err := mgr.Add(runnableFunc(func(ctx context.Context) error {
+			errCh := make(chan error, 1)
+			go func() {
+				logger.Info("starting keyring escrow TLS server", "addr", escrowAddr)
+				if err := escrowSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+					errCh <- err
+				}
+				close(errCh)
+			}()
+			select {
+			case err := <-errCh:
+				return fmt.Errorf("keyring escrow TLS server failed: %w", err)
+			case <-ctx.Done():
+			}
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			return escrowSrv.Shutdown(shutdownCtx)
+		})); err != nil {
+			logger.Error("unable to add keyring escrow TLS server", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	logger.Info("starting bloodraven manager")
@@ -529,6 +588,14 @@ func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform
 		json.NewEncoder(rw).Encode(resp)
 	})))
 	mux.Handle("/ws/status", auxLoggingMiddleware(logger, "ws-status", http.HandlerFunc(hub.HandleWS)))
+	mux.Handle("/", auxLoggingMiddleware(logger, "notfound", http.NotFoundHandler()))
+	return mux
+}
+
+func newEscrowMux(k8sClient client.Client, logger *slog.Logger) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/keyring/escrow", auxLoggingMiddleware(logger, "keyring-escrow",
+		controller.NewKeyringEscrowHandler(k8sClient, logger)))
 	mux.Handle("/", auxLoggingMiddleware(logger, "notfound", http.NotFoundHandler()))
 	return mux
 }

@@ -102,7 +102,16 @@ func Open(ctx context.Context, k *pgkube.Client, namespace, fg, site string, cre
 	if err != nil {
 		return nil, fmt.Errorf("port-forward mysql for site %s: %w", site, err)
 	}
-	dsn := fmt.Sprintf("%s:%s@tcp(127.0.0.1:%d)/?multiStatements=true&parseTime=true",
+	// tls=preferred negotiates TLS when the server advertises it and
+	// falls back to plaintext when it does not, without verifying the
+	// certificate. That covers both playground shapes with no detection
+	// logic: the default (no spec.tls) and the encryption-at-rest
+	// playground, where the operator sets require_secure_transport=ON and
+	// a plaintext connection would simply be refused. Certificate
+	// verification is deliberately skipped — the playground CA is
+	// generated on the fly by enable-encryption.sh and the tunnel is a
+	// port-forward to localhost.
+	dsn := fmt.Sprintf("%s:%s@tcp(127.0.0.1:%d)/?multiStatements=true&parseTime=true&tls=preferred",
 		creds.RootUser, creds.RootPassword, pf.LocalPort)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {

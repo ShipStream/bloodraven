@@ -31,6 +31,52 @@ type ArchiverStatus struct {
 	NewestArchivedTime time.Time `json:"newestArchivedTime,omitempty"`
 }
 
+// KeyringComponentStatus mirrors the sidecar's view of
+// performance_schema.keyring_component_status.
+type KeyringComponentStatus struct {
+	Name     string `json:"name,omitempty"`
+	Status   string `json:"status,omitempty"`
+	DataFile string `json:"dataFile,omitempty"`
+	ReadOnly bool   `json:"readOnly"`
+}
+
+// KeyringCoverage mirrors the sidecar's observed encryption coverage.
+type KeyringCoverage struct {
+	SystemTablespaceEncrypted bool  `json:"systemTablespaceEncrypted"`
+	UnencryptedTablespaces    int64 `json:"unencryptedTablespaces"`
+	RedoLogEncrypted          bool  `json:"redoLogEncrypted"`
+	UndoLogEncrypted          bool  `json:"undoLogEncrypted"`
+	BinlogEncrypted           bool  `json:"binlogEncrypted"`
+}
+
+// KeyringStatus mirrors the sidecar's /keyring/status JSON response.
+// Must stay wire-compatible with internal/sidecar.KeyringStatus.
+//
+// The payload carries digests only — never key material. The operator
+// uses Digest vs EscrowedDigest to decide whether a site's live keyring
+// is fully captured in escrow, which is the gate on sealing a site.
+type KeyringStatus struct {
+	Enabled     bool   `json:"enabled"`
+	Path        string `json:"path,omitempty"`
+	Present     bool   `json:"present"`
+	Size        int64  `json:"size"`
+	Digest      string `json:"digest,omitempty"`
+	EscrowArmed bool   `json:"escrowArmed"`
+
+	EscrowedDigest  string     `json:"escrowedDigest,omitempty"`
+	EscrowedVersion int32      `json:"escrowedVersion,omitempty"`
+	EscrowedSecret  string     `json:"escrowedSecret,omitempty"`
+	LastEscrowAt    *time.Time `json:"lastEscrowAt,omitempty"`
+	LastError       string     `json:"lastError,omitempty"`
+
+	RotateRequested bool   `json:"rotateRequested"`
+	RotateDone      bool   `json:"rotateDone"`
+	RotateError     string `json:"rotateError,omitempty"`
+
+	Component *KeyringComponentStatus `json:"component,omitempty"`
+	Coverage  *KeyringCoverage        `json:"coverage,omitempty"`
+}
+
 // SidecarClient is an HTTP client for communicating with a sidecar.
 type SidecarClient struct {
 	httpClient *http.Client
@@ -95,6 +141,40 @@ func (c *SidecarClient) GetArchiverStatus(ctx context.Context) (*ArchiverStatus,
 	var status ArchiverStatus
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
 		return nil, fmt.Errorf("decode archiver status: %w", err)
+	}
+	return &status, nil
+}
+
+// GetKeyringStatus fetches the encryption-at-rest keyring snapshot from
+// the sidecar's /keyring/status endpoint. Returns a KeyringStatus with
+// Enabled=false when the sidecar responds 200 but encryption is not
+// configured for that site.
+func (c *SidecarClient) GetKeyringStatus(ctx context.Context) (*KeyringStatus, error) {
+	url := c.baseURL + "/keyring/status"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get keyring status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// A sidecar from a release that predates encryption-at-rest.
+		// Treat it as "encryption not running here" rather than an
+		// error so a partially-upgraded group still reconciles.
+		return &KeyringStatus{Enabled: false}, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("sidecar returned status %d", resp.StatusCode)
+	}
+
+	var status KeyringStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("decode keyring status: %w", err)
 	}
 	return &status, nil
 }

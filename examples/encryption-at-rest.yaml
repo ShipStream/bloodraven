@@ -1,0 +1,119 @@
+# Data-at-rest encryption using MySQL Community's component_keyring_file.
+#
+# PREREQUISITES — Bloodraven cannot verify these for you, and without
+# them this configuration does not protect your keys:
+#
+#   1. API-server encryption at rest for Secrets, ideally KMS-backed.
+#      The live keyring is a Kubernetes Secret, so etcd becomes part of
+#      your key custody. Without this you have moved the plaintext key
+#      from the MySQL disk to the control-plane disk.
+#      https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/
+#
+#   2. Tight RBAC on Secrets in this namespace. Anyone who can `get`
+#      secrets here can decrypt a stolen PVC.
+#
+#   3. Swap disabled or encrypted on worker nodes. `tmpfs noswap` is only
+#      official from Linux 6.3; on older kernels kubelet warns and
+#      memory-backed volume contents can reach swap.
+#
+# This is NOT Oracle "MySQL Enterprise TDE". Oracle states that file-based
+# keyrings are not intended as regulatory-compliance solutions.
+#
+# See docs/docs/encryption-at-rest.mdx for the full threat model.
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: orders-mysql-tls
+  namespace: orders
+spec:
+  secretName: orders-mysql-tls
+  issuerRef:
+    name: mysql-ca
+    kind: ClusterIssuer
+  commonName: orders.az.example.com
+  dnsNames:
+    - orders.az.example.com
+    - mysql-orders-primary.orders.svc.cluster.local
+    - mysql-orders-replicas.orders.svc.cluster.local
+---
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlFailoverGroup
+metadata:
+  name: orders
+  namespace: orders
+spec:
+  image: mysql:9.7
+  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:0.1.6
+
+  credentials:
+    operatorSecret: orders-mysql-operator
+    appSecret: orders-mysql-app
+    readOnlySecret: orders-mysql-readonly
+    monitorSecret: orders-mysql-monitor
+    backupSecret: orders-mysql-backup
+
+  # Required by spec.encryptionAtRest: MySQL mandates a secure connection
+  # to clone encrypted data, and Bloodraven bootstraps every replica with
+  # CLONE INSTANCE.
+  tls:
+    issuerRef:
+      name: mysql-ca
+      kind: ClusterIssuer
+    secretName: orders-mysql-tls
+
+  encryptionAtRest:
+    enabled: true
+
+    # Everything below is optional — these are the defaults, spelled out
+    # so it is clear what "enabled: true" actually turns on.
+    coverage:
+      tables: true             # default_table_encryption
+      privilegeCheck: true     # table_encryption_privilege_check
+      redoLog: true            # innodb_redo_log_encrypt
+      undoLog: true            # innodb_undo_log_encrypt
+      binaryLog: true          # binlog_encryption (binary + relay logs)
+      # ALTER TABLESPACE mysql ENCRYPTION='Y'. Not covered by
+      # default_table_encryption; without it the data dictionary (every
+      # schema, table, and column name) stays readable on a stolen PVC.
+      systemTablespace: true
+
+    keyring:
+      # Must NOT be inside /var/lib/mysql. MySQL documents this, and
+      # co-locating them would put the key on the same stolen volume as
+      # the ciphertext.
+      dataFileDir: /run/mysql-keyring
+
+      # Image-specific. These match the official mysql:9.x images.
+      # Verify for other images with:
+      #   docker run --rm --entrypoint sh <image> -c \
+      #     'command -v mysqld; mysqld --verbose --help | grep "^plugin_dir"'
+      mysqldDir: /usr/sbin
+      pluginDir: /usr/lib64/mysql/plugin
+
+      retainVersions: 5
+      escrowTimeoutSeconds: 600
+
+  dns:
+    hostname: orders.az.example.com
+    ttl: 60
+
+  sites:
+    - name: iad
+      zone: us-east-1a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: iad
+      lbIP: 10.0.1.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi
+    - name: pdx
+      zone: us-west-2a
+      taintNodeSelector:
+        shipstream.io/failover-group.orders: "true"
+        shipstream.io/site.orders: pdx
+      lbIP: 10.0.2.1
+      storage:
+        storageClassName: fast-ssd
+        size: 100Gi

@@ -354,7 +354,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	return nil
 }
 
-// handleRecloneAnnotation consumes the one-shot reclone annotation
+// handleRecloneAnnotation validates and queues the durable reclone annotation
 // under the safety interlock described in reclone.go. Invalid
 // annotations are rejected with a RecloneRejected Event and the
 // annotation is cleared so the admin can retry with a fixed value
@@ -376,18 +376,21 @@ func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg 
 		r.removeRecloneAnnotation(ctx, nn)
 		return
 	}
-	tm.SetRecloneSite(req.Site)
-	if r.recorder != nil {
+	if tm.SetRecloneSite(req.Site) && r.recorder != nil {
 		r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecloneRequested",
 			"admin requested CLONE INSTANCE of site %q", req.Site)
 	}
-	r.removeRecloneAnnotation(ctx, nn)
 }
 
-// removeRecloneAnnotation removes the one-shot reclone annotation from the CR
-// after it has been passed to the topology manager.
+// removeRecloneAnnotation removes a rejected one-shot reclone annotation.
 func (r *TopologyManagerRunner) removeRecloneAnnotation(ctx context.Context, nn types.NamespacedName) {
-	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+	if err := r.removeRecloneAnnotationForSite(ctx, nn, ""); err != nil {
+		r.logger.Error("failed to remove reclone annotation", "fg", nn, "error", err)
+	}
+}
+
+func (r *TopologyManagerRunner) removeRecloneAnnotationForSite(ctx context.Context, nn types.NamespacedName, expectedSite string) error {
+	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		var fresh v1alpha1.MysqlFailoverGroup
 		if err := r.client.Get(ctx, nn, &fresh); err != nil {
 			return err
@@ -399,13 +402,13 @@ func (r *TopologyManagerRunner) removeRecloneAnnotation(ctx context.Context, nn 
 		if _, ok := annotations[RecloneAnnotation]; !ok {
 			return nil
 		}
+		if expectedSite != "" && parseRecloneAnnotation(annotations[RecloneAnnotation]).Site != expectedSite {
+			return fmt.Errorf("reclone annotation changed before start")
+		}
 		delete(annotations, RecloneAnnotation)
 		fresh.SetAnnotations(annotations)
 		return r.client.Update(ctx, &fresh)
 	})
-	if err != nil {
-		r.logger.Error("failed to remove reclone annotation", "fg", nn, "error", err)
-	}
 }
 
 // checkSpecDrift compares the desired spec hash for each site against the live
@@ -566,6 +569,15 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	tm := NewTopologyManager(cfg, siteMySQL, failoverCtl, updateCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
 		r.logger.With("fg", nn.String()))
 
+	// Encryption-at-rest clone gate: a CLONE INSTANCE recipient needs a
+	// writable keyring to rewrap the donor's tablespace keys, so the
+	// topology manager must ask the reconciler to unseal the site first.
+	// deployReconciler is the reconciler; the type assertion keeps the
+	// runner from depending on the concrete type.
+	if gate, ok := r.deployReconciler.(KeyringGate); ok && fg.Spec.EncryptionEnabled() {
+		tm.SetKeyringGate(gate)
+	}
+
 	// Restore failover history from CR status so recovery logic works across
 	// operator restarts — without this, checkRecovery() returns early because
 	// lastFailoverTarget is empty after a fresh TopologyManager.
@@ -623,6 +635,9 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// populated snapshot from the async bootstrap goroutine.
 	tm.BootstrapStatusCallback = func(phase, errMsg, source string) {
 		r.updateBootstrappingCondition(ctx, nn, phase, errMsg, source)
+	}
+	tm.RecloneCompleteCallback = func(completeCtx context.Context, site string) error {
+		return r.removeRecloneAnnotationForSite(completeCtx, nn, site)
 	}
 
 	// Wire the ordered update callback so the UpdateController can reconcile

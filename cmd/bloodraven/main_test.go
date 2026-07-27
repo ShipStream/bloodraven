@@ -161,3 +161,21 @@ func TestAuxMetricMethodBoundsCardinality(t *testing.T) {
 		t.Fatalf("unknown method should become OTHER, got %q", got)
 	}
 }
+
+func TestKeyringEscrowOnlyExistsOnTLSMux(t *testing.T) {
+	hub := platform.NewHub(slog.Default())
+	runner := controller.NewTopologyManagerRunner(nil, nil, hub, nil, slog.Default())
+	req := httptest.NewRequest(http.MethodGet, "/keyring/escrow", nil)
+
+	plain := httptest.NewRecorder()
+	newAuxMux(runner, hub, nil).ServeHTTP(plain, req)
+	if plain.Code != http.StatusNotFound {
+		t.Fatalf("plain auxiliary status = %d, want 404", plain.Code)
+	}
+
+	tlsMux := httptest.NewRecorder()
+	newEscrowMux(nil, slog.Default()).ServeHTTP(tlsMux, req)
+	if tlsMux.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("escrow TLS mux status = %d, want 405", tlsMux.Code)
+	}
+}

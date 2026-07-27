@@ -83,3 +83,32 @@ func TestRegisterIncludesMetrics(t *testing.T) {
 		})
 	}
 }
+
+func TestDeleteKeyringSiteMetricsPreservesActiveSites(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(KeyringPhase, KeyringEscrowVersion, EncryptionCoverageGaps, EncryptionCoverageFlag)
+	for _, site := range []string{"active", "gone"} {
+		KeyringPhase.WithLabelValues("namespace", "group", site, "sealed").Set(1)
+		KeyringEscrowVersion.WithLabelValues("namespace", "group", site).Set(2)
+		EncryptionCoverageGaps.WithLabelValues("namespace", "group", site).Set(3)
+		EncryptionCoverageFlag.WithLabelValues("namespace", "group", site, "redo_log").Set(1)
+	}
+	defer DeleteKeyringSiteMetrics("namespace", "group", "active")
+	defer DeleteKeyringSiteMetrics("namespace", "group", "gone")
+
+	DeleteKeyringSiteMetrics("namespace", "group", "gone")
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, family := range families {
+		if len(family.Metric) != 1 {
+			t.Fatalf("metric %s has %d series after cleanup, want one active series", family.GetName(), len(family.Metric))
+		}
+		for _, label := range family.Metric[0].Label {
+			if label.GetName() == "site" && label.GetValue() != "active" {
+				t.Fatalf("metric %s retained site %q", family.GetName(), label.GetValue())
+			}
+		}
+	}
+}

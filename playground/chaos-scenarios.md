@@ -1171,6 +1171,80 @@ Issue #115 proposals R6-R8 remain manual/full-profile follow-ups:
 
 ---
 
+## 48. Keyring Seal And Rotation
+
+**Automated**: `make chaos-run SCENARIO=48-keyring-seal-and-rotation`
+
+**Quarantined from every batch profile.** It needs a playground brought up
+with TLS and `spec.encryptionAtRest` enabled, which is not the baseline
+the other scenarios assume:
+
+```bash
+./playground/setup.sh
+./playground/enable-encryption.sh --fresh   # wipe + encrypt from birth
+make chaos-run SCENARIO=48-keyring-seal-and-rotation
+```
+
+`--fresh` wipes MySQL first so every tablespace is encrypted from birth.
+Without it the script converts in place, which leaves pre-existing tables
+plaintext — fine for exercising the keyring lifecycle, not representative
+of a production adoption.
+
+**Hypothesis**: every site reports `phase=Sealed` with a read-only keyring
+component; `ALTER INSTANCE ROTATE INNODB MASTER KEY` is rejected on a
+sealed site; annotating the replica for rotation mints escrow version N+1
+and returns it to `Sealed` with data intact; annotating the active primary
+is refused with a `KeyringRotationRefused` event.
+
+**What it actually proves**, in order:
+
+1. **Sealed means sealed.** Checks `performance_schema.keyring_component_status`
+   on each site for `Read_only=Yes`, not just the operator's status field.
+   A rendering bug could otherwise leave a writable keyring behind a Secret
+   mount and the operator would call it sealed.
+2. **The key is not on the data volume.** MySQL's own `Data_file` must be
+   outside `/var/lib/mysql`, and the rendered pod must project the keyring
+   from a Secret rather than an emptyDir. This is the whole at-rest claim:
+   a stolen PVC must not carry the key that decrypts it.
+3. **The seal is enforced by the engine.** An ad-hoc
+   `ALTER INSTANCE ROTATE INNODB MASTER KEY` must fail. This is what makes
+   "no unescrowed key can exist in the steady state" true rather than
+   aspirational.
+4. **Rotation on the primary is refused.** Rotation is the one lifecycle
+   operation whose failure window would cost data rather than a re-clone,
+   and only on the primary.
+5. **Rotation on a replica is safe and complete.** A new immutable escrow
+   version is minted, the previous version survives for rollback, the
+   site returns to `Sealed`, and the data still decrypts.
+
+**Expected duration**: ~5-8 minutes (dominated by the pod roll for the
+unseal and the roll back to sealed).
+
+**Manual observation** while it runs:
+
+```bash
+watch -n2 "kubectl -n bloodraven-playground get mysqlfailovergroup playground \
+  -o jsonpath='{range .status.encryptionAtRest.sites[*]}{.name}{\"\t\"}{.phase}{\"\t\"}{.keyringSecret}{\"\n\"}{end}'"
+
+./playground/enable-encryption.sh --status
+```
+
+**Known follow-ups** not automated here:
+
+- **Clone into an encrypted recipient**: covered implicitly whenever a
+  reclone runs on an encrypted playground (the operator unseals the
+  recipient first), but there is no dedicated scenario asserting the
+  unseal → clone → re-escrow → seal ordering.
+- **Escrow Secret loss**: deleting a sealed site's escrow Secret should
+  raise `KeyringEscrowMissing` and phase `Failed`. Destructive and
+  easy to get wrong by hand; see
+  `docs/docs/runbooks.mdx#keyring-escrow-lost`.
+- **Node loss with an unsealed site**: verifies the bounded-loss claim
+  (a lost keyring costs a re-clone, never data). Needs real node
+  eviction, not a pod kill.
+
+---
+
 ## Execution Plan
 
 1. **Setup**: `k3d cluster create` + `./playground/setup.sh`

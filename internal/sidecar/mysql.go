@@ -3,6 +3,7 @@ package sidecar
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -183,6 +184,129 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 		killed++
 	}
 	return killed, rows.Err()
+}
+
+// KeyringComponentStatus reads performance_schema.keyring_component_status,
+// which is the authoritative view of whether a keyring component loaded
+// and whether it is read-only. The table is a key/value shape, so the
+// rows are folded into a struct here.
+//
+// An empty table means no keyring component is installed; that is
+// returned as a zero-valued status rather than an error so the operator
+// can distinguish "no keyring" from "cannot reach MySQL".
+func (m *LiveMysql) KeyringComponentStatus(ctx context.Context) (*KeyringComponentStatus, error) {
+	rows, err := m.db.QueryContext(ctx,
+		"SELECT STATUS_KEY, STATUS_VALUE FROM performance_schema.keyring_component_status")
+	if err != nil {
+		return nil, fmt.Errorf("query keyring_component_status: %w", err)
+	}
+	defer rows.Close()
+
+	out := &KeyringComponentStatus{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("scan keyring_component_status: %w", err)
+		}
+		switch k {
+		case "Component_name":
+			out.Name = v
+		case "Component_status":
+			out.Status = v
+		case "Data_file":
+			out.DataFile = v
+		case "Read_only":
+			out.ReadOnly = strings.EqualFold(v, "Yes")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate keyring_component_status: %w", err)
+	}
+	return out, nil
+}
+
+// EncryptionCoverage reports what is actually encrypted on this
+// instance. It deliberately reads the live dictionary rather than
+// trusting my.cnf: a site adopted from an unencrypted cluster can have
+// every variable set correctly and still hold plaintext tables that were
+// never rebuilt.
+//
+// The `mysql` system tablespace is called out separately because
+// default_table_encryption does not cover it — it needs an explicit
+// ALTER TABLESPACE, and leaving it plaintext exposes the data
+// dictionary (schema, table, and column names) on disk.
+func (m *LiveMysql) EncryptionCoverage(ctx context.Context) (*KeyringCoverage, error) {
+	out := &KeyringCoverage{}
+
+	var redo, undo, binlog sql.NullString
+	if err := m.db.QueryRowContext(ctx,
+		"SELECT @@innodb_redo_log_encrypt, @@innodb_undo_log_encrypt, @@binlog_encryption",
+	).Scan(&redo, &undo, &binlog); err != nil {
+		return nil, fmt.Errorf("query encryption variables: %w", err)
+	}
+	out.RedoLogEncrypted = mysqlBool(redo)
+	out.UndoLogEncrypted = mysqlBool(undo)
+	out.BinlogEncrypted = mysqlBool(binlog)
+
+	var sysEnc string
+	err := m.db.QueryRowContext(ctx,
+		"SELECT ENCRYPTION FROM information_schema.INNODB_TABLESPACES WHERE NAME = 'mysql'",
+	).Scan(&sysEnc)
+	switch {
+	case err == nil:
+		out.SystemTablespaceEncrypted = strings.EqualFold(sysEnc, "Y")
+	case errors.Is(err, sql.ErrNoRows):
+		// No row means the general tablespace isn't present in this
+		// deployment shape; leave it false rather than failing the whole
+		// coverage sample.
+	default:
+		return nil, fmt.Errorf("query system tablespace encryption: %w", err)
+	}
+
+	// Count user tablespaces still reporting ENCRYPTION='N'. InnoDB
+	// system/temporary tablespaces are excluded: they are not
+	// file-per-table and are governed by the redo/undo settings above.
+	if err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.INNODB_TABLESPACES
+		  WHERE ENCRYPTION = 'N'
+		    AND SPACE_TYPE = 'Single'
+		    AND NAME NOT LIKE 'mysql/%'
+		    AND NAME NOT LIKE 'sys/%'`,
+	).Scan(&out.UnencryptedTablespaces); err != nil {
+		return nil, fmt.Errorf("count unencrypted tablespaces: %w", err)
+	}
+
+	return out, nil
+}
+
+func mysqlBool(value sql.NullString) bool {
+	if !value.Valid {
+		return false
+	}
+	s := strings.TrimSpace(value.String)
+	return s == "1" || strings.EqualFold(s, "on") || strings.EqualFold(s, "true")
+}
+
+// RotateInnoDBMasterKey issues the master-key rotation. It only
+// succeeds against a writable keyring: with the sealed (read_only)
+// rendering MySQL rejects it with ER_CANNOT_FIND_KEY_IN_KEYRING, which
+// is precisely the guardrail that stops an ad-hoc rotation from
+// stranding data behind a key nobody escrowed.
+func (m *LiveMysql) RotateInnoDBMasterKey(ctx context.Context) error {
+	if _, err := m.db.ExecContext(ctx, "ALTER INSTANCE ROTATE INNODB MASTER KEY"); err != nil {
+		return fmt.Errorf("alter instance rotate innodb master key: %w", err)
+	}
+	return nil
+}
+
+// EncryptSystemTablespace encrypts the `mysql` tablespace. It reuses the
+// existing master key rather than creating one, so it is safe to run
+// against a sealed, read-only keyring.
+func (m *LiveMysql) EncryptSystemTablespace(ctx context.Context) error {
+	if _, err := m.db.ExecContext(ctx, "ALTER TABLESPACE mysql ENCRYPTION='Y'"); err != nil {
+		return fmt.Errorf("alter tablespace mysql encryption: %w", err)
+	}
+	return nil
 }
 
 // Close closes the underlying database connection.

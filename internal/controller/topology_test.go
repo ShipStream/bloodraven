@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // --- Mock MySQL ---
@@ -1375,6 +1377,16 @@ func TestPickFreshestCandidate_SkipsUnreachable(t *testing.T) {
 
 // --- checkReclone tests ---
 
+type testKeyringGate struct {
+	ready bool
+	calls int
+}
+
+func (g *testKeyringGate) RequestKeyringUnseal(context.Context, types.NamespacedName, string) (bool, error) {
+	g.calls++
+	return g.ready, nil
+}
+
 func TestReclone_HappyPath(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{readOnly: true}
@@ -1399,6 +1411,86 @@ func TestReclone_HappyPath(t *testing.T) {
 	tm.mu.RUnlock()
 	if src != "reclone" {
 		t.Errorf("expected bootstrapSource=reclone, got %q", src)
+	}
+}
+
+func TestReclone_PreservesPendingRequestUntilKeyringUnsealed(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	replica := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(primary, replica)
+	tm.autoBootstrapSuppressed = true
+	pollN(tm, 2)
+	gate := &testKeyringGate{}
+	tm.SetKeyringGate(gate)
+	var consumed atomic.Int32
+	tm.RecloneCompleteCallback = func(context.Context, string) error {
+		consumed.Add(1)
+		return nil
+	}
+	tm.SetRecloneSite("dc2")
+
+	if tm.checkReclone(context.Background()) {
+		t.Fatal("reclone started before the keyring was unsealed")
+	}
+	tm.mu.RLock()
+	pending := tm.reclonePendingSite
+	tm.mu.RUnlock()
+	if pending != "dc2" || consumed.Load() != 0 {
+		t.Fatalf("pending reclone was lost: %q", pending)
+	}
+
+	gate.ready = true
+	if !tm.checkReclone(context.Background()) {
+		t.Fatal("reclone did not start after the keyring became ready")
+	}
+	deadline := time.Now().Add(time.Second)
+	for consumed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	tm.mu.RLock()
+	pending = tm.reclonePendingSite
+	tm.mu.RUnlock()
+	if pending != "" || gate.calls != 2 || consumed.Load() != 1 {
+		t.Fatalf("pending=%q calls=%d consumed=%d", pending, gate.calls, consumed.Load())
+	}
+}
+
+func TestReclone_AnnotationCleanupFailureDoesNotRepeatSuccessfulClone(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	replica := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(primary, replica)
+	tm.autoBootstrapSuppressed = true
+	pollN(tm, 2)
+	var cleanupCalls atomic.Int32
+	tm.RecloneCompleteCallback = func(context.Context, string) error {
+		if cleanupCalls.Add(1) == 1 {
+			return errors.New("api unavailable")
+		}
+		return nil
+	}
+	tm.SetRecloneSite("dc2")
+	if !tm.checkReclone(context.Background()) {
+		t.Fatal("expected reclone to start")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		tm.mu.RLock()
+		completed := tm.recloneCompletedSite
+		tm.mu.RUnlock()
+		if completed == "dc2" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if tm.checkReclone(context.Background()) {
+		t.Fatal("annotation cleanup retry started a second clone")
+	}
+	tm.mu.RLock()
+	completed := tm.recloneCompletedSite
+	tm.mu.RUnlock()
+	if completed != "" || cleanupCalls.Load() != 2 {
+		t.Fatalf("completed=%q cleanupCalls=%d", completed, cleanupCalls.Load())
 	}
 }
 

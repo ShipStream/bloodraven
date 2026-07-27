@@ -362,6 +362,69 @@ var AllStates = []string{"writable", "read-only", "unreachable", "unknown"}
 // AllSourceStates is the bounded source-convergence state set.
 var AllSourceStates = []string{"converged", "pending", "blocked"}
 
+// --- encryption at rest ---------------------------------------------
+
+// KeyringPhase reports the per-site keyring lifecycle phase as a set of
+// one-hot gauges. Alert on bloodraven_keyring_phase{phase="sealed"} == 0
+// for a site that should be protected: any other phase means the site is
+// running with a writable keyring or failed to escrow one.
+var KeyringPhase = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "bloodraven_keyring_phase",
+	Help: "1 for the site's current keyring phase, 0 for the others.",
+}, []string{"mysql_namespace", "failover_group", "site", "phase"})
+
+// AllKeyringPhases is the bounded keyring phase set, used to zero out
+// stale series when a site transitions.
+var AllKeyringPhases = []string{"pending", "unsealed", "escrowed", "sealed", "failed"}
+
+// KeyringEscrowVersion is the escrow Secret version a site is currently
+// sealed against. Monotonic per site; a jump means a rotation or a
+// clone re-wrapped the keyring.
+var KeyringEscrowVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "bloodraven_keyring_escrow_version",
+	Help: "Current keyring escrow Secret version per site.",
+}, []string{"mysql_namespace", "failover_group", "site"})
+
+// KeyringEscrowPushesTotal counts sidecar escrow pushes by outcome.
+// Sustained failures mean a site cannot be sealed and is therefore
+// running unprotected.
+var KeyringEscrowPushesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "bloodraven_keyring_escrow_pushes_total",
+	Help: "Keyring escrow pushes from the sidecar to the operator, by outcome.",
+}, []string{"failover_group", "site", "outcome"})
+
+// KeyringRotationsTotal counts master-key rotations by outcome.
+var KeyringRotationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "bloodraven_keyring_rotations_total",
+	Help: "InnoDB master key rotations attempted by the sidecar, by outcome.",
+}, []string{"failover_group", "site", "outcome"})
+
+// EncryptionCoverageGaps counts observed coverage shortfalls per site:
+// user tablespaces still reporting ENCRYPTION='N'. Non-zero on a cluster
+// adopted from unencrypted data whose tables were never rebuilt.
+var EncryptionCoverageGaps = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "bloodraven_encryption_unencrypted_tablespaces",
+	Help: "User tablespaces still reporting ENCRYPTION='N' on a site.",
+}, []string{"mysql_namespace", "failover_group", "site"})
+
+// EncryptionCoverageFlag reports individual coverage booleans observed
+// on the live instance (1 = encrypted). The `aspect` label is one of
+// system_tablespace, redo_log, undo_log, binlog, keyring_read_only.
+var EncryptionCoverageFlag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "bloodraven_encryption_coverage",
+	Help: "Observed data-at-rest encryption coverage per aspect (1 = on).",
+}, []string{"mysql_namespace", "failover_group", "site", "aspect"})
+
+// DeleteKeyringSiteMetrics removes every gauge series for a site that is
+// no longer present in the failover-group spec.
+func DeleteKeyringSiteMetrics(namespace, group, site string) {
+	labels := prometheus.Labels{"mysql_namespace": namespace, "failover_group": group, "site": site}
+	KeyringPhase.DeletePartialMatch(labels)
+	KeyringEscrowVersion.DeletePartialMatch(labels)
+	EncryptionCoverageGaps.DeletePartialMatch(labels)
+	EncryptionCoverageFlag.DeletePartialMatch(labels)
+}
+
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {
 	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount, FailoversTotal,
@@ -378,7 +441,9 @@ func Register(reg prometheus.Registerer) {
 		HTTPRequestsTotal, HTTPRequestDurationSeconds,
 		BackupEncryptDurationSeconds, BackupDecryptDurationSeconds,
 		BackupEncryptBytesTotal, BackupEncryptFailuresTotal,
-		DragonflySiteUp, DragonflyPromotionsTotal, DragonflyManagerPanicsTotal)
+		DragonflySiteUp, DragonflyPromotionsTotal, DragonflyManagerPanicsTotal,
+		KeyringPhase, KeyringEscrowVersion, KeyringEscrowPushesTotal, KeyringRotationsTotal,
+		EncryptionCoverageGaps, EncryptionCoverageFlag)
 }
 
 // StatusClass returns "2xx", "3xx", "4xx", "5xx" for an HTTP status

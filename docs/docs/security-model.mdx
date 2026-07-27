@@ -131,17 +131,18 @@ as you would scope `kubectl delete pvc`.
 |---|---|---|---|
 | Operator metrics | `:8080` | No | Prometheus scrape (`/metrics`). |
 | Operator health probes | `:8081` | No | Kubernetes liveness/readiness. |
-| Operator auxiliary HTTP | `:8082` | No | `/status`, `/active-site`, `/pitr-cutoff`, `/ws/status` (WebSocket). Consumed by the dashboard and by sidecars that check which site is active. |
-| Sidecar HTTP | `:8080` | No | `/health`, `/status`, `/peer/ping`, `/archiver/status`. Consumed by the operator and the peer sidecar. |
+| Operator auxiliary HTTP | `:8082` | No | `/status`, `/active-site`, `/pitr-cutoff`, `/ws/status` (WebSocket). |
+| Operator keyring escrow HTTPS | `:8443` by default | Bearer token + TLS | `/keyring/escrow`; enabled with `auxiliary.escrowTLS`. |
+| Sidecar HTTP | `:8080` | No | `/health`, `/status`, `/peer/ping`, `/archiver/status`, `/keyring/status`. Consumed by the operator and the peer sidecar. |
 | MySQL | `:3306` | Yes (password; TLS if `spec.tls` set) | Data plane. |
 | Dragonfly client | `:6379` by default | Password when `spec.dragonfly.auth` is set | Optional Redis-compatible cache/session data plane. |
 | Dragonfly admin | `:9999` by default | Password when `spec.dragonfly.auth` is set | Optional operator control surface for replication, promotion, and snapshot commands. |
 
-**None of the HTTP surfaces above authenticate callers.** They expose
-read-only status and GTID coordinates; none accept state-changing
-requests. The design assumes the pod network is protected by
-NetworkPolicy and that the operator + sidecars run in a namespace that
-does not accept untrusted ingress. In particular:
+**With one exception, none of the HTTP surfaces above authenticate
+callers.** The unauthenticated ones expose read-only status and GTID
+coordinates and accept no state-changing requests. The design assumes the pod network is
+protected by NetworkPolicy and that the operator + sidecars run in a
+namespace that does not accept untrusted ingress. In particular:
 
 - Do not expose `:8082` outside the cluster. The `/active-site` and
   `/status` endpoints do not leak credentials but do leak topology,
@@ -151,6 +152,27 @@ does not accept untrusted ingress. In particular:
   Anyone that can reach port `8082` can read real-time failover events.
 - If you require scrape auth, front the metrics endpoint with a
   sidecar (e.g. `kube-rbac-proxy`). The chart does not ship one.
+- `/keyring/status` on the sidecar reports digests and encryption
+  coverage — never key material. It leaks the same class of
+  reconnaissance as `/status`.
+
+**The exception: `/keyring/escrow`.** It is the only operator HTTP endpoint
+that mutates cluster state, so it is isolated on a dedicated TLS listener
+and is the only one that authenticates.
+Callers present a per-site bearer token that the operator mints into a
+Secret mounted **only** into that site's pod, and **only** while that
+site is deliberately unsealed. A sealed site carries no token at all.
+Beyond the token: the body is size-capped, the claimed digest must match
+a fresh hash of the payload, escrow Secrets are immutable (so an accepted
+push can only add a version, never rewrite the one a running MySQL is
+sealed against), and the reconcile loop independently re-reads the stored
+Secret before it will seal anything. See
+[Data-at-rest encryption](./encryption-at-rest.mdx).
+
+The sidecar validates the listener certificate against the CA mounted
+from the failover group's `spec.tls` Secret. There is no plaintext
+fallback and redirects are rejected so neither the bearer token nor the
+keyring can be sent to another endpoint.
 
 ## TLS and data-in-flight
 
@@ -197,6 +219,15 @@ applications.
   When `spec.dragonfly.auth` is set, the operator projects the password
   Secret into Dragonfly pods as an environment variable and uses it for
   its own Redis-protocol connections.
+- **MySQL data at rest is plaintext unless you enable
+  `spec.encryptionAtRest`.** With it enabled, tablespaces, redo, undo,
+  binary and relay logs are encrypted and the keyring lives only on
+  tmpfs — but the key then lives in a Kubernetes Secret, which means
+  **etcd becomes part of your key custody**. Enabling the feature
+  without API-server encryption at rest for Secrets moves the plaintext
+  key from the MySQL disk to the control-plane disk rather than
+  protecting it. See
+  [Data-at-rest encryption](./encryption-at-rest.mdx#etcd-is-now-part-of-your-key-custody).
 
 ## Compromise scenarios
 
@@ -359,6 +390,13 @@ Explicit non-goals, so the list above is complete:
   trigger reconciles at whatever rate the API server allows. The
   operator is rate-limited by controller-runtime's workqueue, but a
   motivated abuser can still produce noise.
+- **Live compromise of a MySQL pod when `spec.encryptionAtRest` is on**
+  — a running `mysqld` holds decrypted keys in memory by necessity, and
+  the keyring file is readable inside its own pod. Data-at-rest
+  encryption defends stolen volumes, snapshots, and node disks; it does
+  not defend a live process. It is also **not** Oracle "MySQL
+  Enterprise TDE" and Oracle does not present file keyrings as a
+  regulatory-compliance solution.
 
 ## Hardening summary
 

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -299,6 +301,16 @@ type TopologyManager struct {
 	// poll cycle then cleared. Protected by mu.
 	reclonePendingSite string
 
+	// keyringGate, when set, is consulted before every clone into a
+	// site. Encryption-at-rest sites normally run with a read-only
+	// keyring, but a CLONE INSTANCE recipient re-encrypts the donor's
+	// tablespace keys under a new master key of its own — which a
+	// read-only keyring cannot accept. The gate asks the reconciler to
+	// unseal the recipient and reports whether it is ready yet; a clone
+	// that starts against a sealed recipient fails partway and leaves
+	// the data directory unusable. Nil when encryption is disabled.
+	keyringGate KeyringGate
+
 	// autoBootstrapSuppressed is set by the runner while a one-shot
 	// initFromBackup restore is in flight. It prevents the fresh-deploy
 	// auto-clone path from racing the restore Job to populate the
@@ -329,6 +341,11 @@ type TopologyManager struct {
 	// Protected by mu.
 	specDriftSites []string
 
+	// recloneCompletedSite prevents an annotation-cleanup outage from
+	// repeating an already-successful destructive clone. Poll retries
+	// only the durable annotation removal while this is set.
+	recloneCompletedSite string
+
 	// StatusCallback is invoked after each poll cycle that produces a state change.
 	// The runner sets this to push status updates to the CR.
 	StatusCallback func(TopologySnapshot)
@@ -339,6 +356,11 @@ type TopologyManager struct {
 	// ReplicationBroken, Updating, ...) are not inadvertently cleared by a
 	// partially-populated TopologySnapshot during an async bootstrap run.
 	BootstrapStatusCallback func(phase, errMsg, source string)
+
+	// RecloneCompleteCallback durably consumes the reclone annotation
+	// after the requested bootstrap attempt completes. Keeping it until
+	// then lets an operator restart retry an interrupted attempt.
+	RecloneCompleteCallback func(ctx context.Context, site string) error
 
 	// EmergencyFailoverCallback is invoked synchronously after a
 	// successful emergency failover Execute, on the same goroutine that
@@ -1858,13 +1880,43 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 // topology manager only forgets sites when it restarts).
 var errSiteNotFound = fmt.Errorf("planned-failover: site not found in topology manager")
 
+// KeyringGate is consulted before a clone into a site that may be
+// running encryption-at-rest. RequestKeyringUnseal returns true when the
+// site's keyring is already writable and the clone may proceed; false
+// means the operator has recorded the unseal request and the caller
+// should retry after the pod has rolled.
+//
+// Implemented by MysqlFailoverGroupReconciler. Nil in tests and in
+// deployments with encryption disabled.
+type KeyringGate interface {
+	RequestKeyringUnseal(ctx context.Context, nn types.NamespacedName, site string) (bool, error)
+}
+
+// SetKeyringGate wires the encryption-at-rest clone gate. Safe to call
+// with nil to disable gating.
+func (tm *TopologyManager) SetKeyringGate(g KeyringGate) {
+	tm.mu.Lock()
+	tm.keyringGate = g
+	tm.mu.Unlock()
+}
+
+func (tm *TopologyManager) getKeyringGate() KeyringGate {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.keyringGate
+}
+
 // SetRecloneSite requests that the given site be recloned from the current
 // primary. Called by the runner when it detects the reclone annotation.
 // The topology manager processes this during the next poll cycle.
-func (tm *TopologyManager) SetRecloneSite(site string) {
+func (tm *TopologyManager) SetRecloneSite(site string) bool {
 	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.reclonePendingSite == site || tm.recloneCompletedSite == site {
+		return false
+	}
 	tm.reclonePendingSite = site
-	tm.mu.Unlock()
+	return true
 }
 
 // isBootstrapping reports whether an auto-bootstrap is currently running.
@@ -2282,12 +2334,12 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 
 // startBootstrapByName kicks off the async bootstrap goroutine for the
 // named donor/recipient pair. Caller must hold no locks.
-func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, recipient, source string) {
+func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, recipient, source string) bool {
 	donorSite := tm.getSite(donor)
 	recipientSite := tm.getSite(recipient)
 	if donorSite == nil || recipientSite == nil {
 		tm.logger.Error("bootstrap aborted: unknown site", "donor", donor, "recipient", recipient)
-		return
+		return false
 	}
 	if donorSite.host == "" {
 		err := fmt.Errorf("bootstrap: donor host not configured for site %s", donor)
@@ -2296,16 +2348,34 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		tm.bootstrapErr = err
 		tm.mu.Unlock()
 		tm.emitBootstrapStatus()
-		return
+		return false
 	}
 	if source != "fresh-deploy" {
 		confirmed, err := tm.confirmedActivePrimary(ctx)
 		if err != nil || confirmed.name != donorSite.name {
 			tm.logger.Error("bootstrap aborted: donor is not the confirmed active primary", "donor", donor, "error", err)
-			return
+			return false
 		}
 	}
 
+	// Encryption-at-rest: a clone recipient must have a writable keyring
+	// before CLONE INSTANCE runs. Deferring here (rather than failing)
+	// is deliberate — the reconciler unseals the site and rolls its pod,
+	// and the next poll cycle picks the bootstrap back up.
+	if gate := tm.getKeyringGate(); gate != nil {
+		nn := types.NamespacedName{Namespace: tm.cfg.Namespace, Name: tm.cfg.Name}
+		ready, err := gate.RequestKeyringUnseal(ctx, nn, recipient)
+		if err != nil {
+			tm.logger.Error("bootstrap deferred: keyring unseal request failed",
+				"recipient", recipient, "error", err)
+			return false
+		}
+		if !ready {
+			tm.logger.Info("bootstrap deferred: waiting for the recipient keyring to be unsealed",
+				"recipient", recipient, "source", source)
+			return false
+		}
+	}
 	tm.mu.Lock()
 	tm.bootstrapPhase = BootstrapPhaseCloning
 	tm.bootstrapErr = nil
@@ -2334,7 +2404,21 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		if err == nil {
 			err = tm.runBootstrap(ctx, donorSite.mysql, recipientSite.mysql, donorSite.host, recipient, allowSkipClone)
 		}
+		var recloneCallbackErr error
+		if source == "reclone" && tm.RecloneCompleteCallback != nil {
+			if callbackErr := tm.RecloneCompleteCallback(ctx, recipient); callbackErr != nil {
+				tm.logger.Error("could not consume reclone annotation after bootstrap attempt",
+					"recipient", recipient, "error", callbackErr)
+				recloneCallbackErr = callbackErr
+			}
+		}
 		tm.mu.Lock()
+		if source == "reclone" && tm.reclonePendingSite == recipient {
+			tm.reclonePendingSite = ""
+		}
+		if source == "reclone" && err == nil && recloneCallbackErr != nil {
+			tm.recloneCompletedSite = recipient
+		}
 		if err != nil {
 			tm.bootstrapPhase = BootstrapPhaseFailed
 			tm.bootstrapErr = err
@@ -2350,6 +2434,7 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		tm.mu.Unlock()
 		tm.emitBootstrapStatus()
 	}()
+	return true
 }
 
 // runBootstrap performs the clone, waits for the MySQL restart, and
@@ -2873,7 +2958,24 @@ func (tm *TopologyManager) executeRecovery(ctx context.Context, oldPrimaryIdx, n
 func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 	tm.mu.RLock()
 	site := tm.reclonePendingSite
+	completedSite := tm.recloneCompletedSite
 	tm.mu.RUnlock()
+	if completedSite != "" {
+		if tm.RecloneCompleteCallback == nil {
+			return false
+		}
+		if err := tm.RecloneCompleteCallback(ctx, completedSite); err != nil {
+			tm.logger.Error("reclone complete; annotation cleanup will retry",
+				"site", completedSite, "error", err)
+			return false
+		}
+		tm.mu.Lock()
+		if tm.recloneCompletedSite == completedSite {
+			tm.recloneCompletedSite = ""
+		}
+		tm.mu.Unlock()
+		return false
+	}
 
 	if site == "" {
 		return false
@@ -2919,13 +3021,10 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 		return false
 	}
 
-	tm.mu.Lock()
-	tm.reclonePendingSite = ""
-	tm.mu.Unlock()
-
+	if !tm.startBootstrapByName(ctx, donor.name, recipient.name, "reclone") {
+		return false
+	}
 	metrics.RecloneOperations.WithLabelValues(site).Inc()
-
-	tm.startBootstrapByName(ctx, donor.name, recipient.name, "reclone")
 	return true
 }
 

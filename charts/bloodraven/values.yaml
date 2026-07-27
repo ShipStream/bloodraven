@@ -136,6 +136,16 @@ grafanaDashboards:
   extraAnnotations: {}
 
 auxiliary:
+  escrowTLS:
+    # -- Serve the keyring escrow endpoint on a dedicated TLS listener.
+    # Required before enabling spec.encryptionAtRest on any failover group.
+    enabled: false
+    # -- TLS service/listener port.
+    port: 8443
+    # -- Existing kubernetes.io/tls-style Secret containing tls.crt and tls.key.
+    # Its certificate SAN must cover the auxiliary Service FQDN and its issuer
+    # must be trusted by every encrypted group's spec.tls Secret ca.crt.
+    existingSecret: ""
   service:
     # -- Create a Service for the auxiliary HTTP/WebSocket endpoint.
     # This endpoint exposes /status, /active-site, /pitr-cutoff, and

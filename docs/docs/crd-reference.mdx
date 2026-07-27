@@ -76,6 +76,7 @@ Review runbooks before changing `spec.restoreInPlace`, restore-related `confirm`
 | `restoreInPlace` | RestoreInPlaceSpec | No | -- | Re-triggerable destructive restore against the active primary. Bumping `confirm` to a newer RFC 3339 timestamp re-arms. See [RestoreInPlaceSpec](#restoreinplacespec-specrestoreinplace). |
 | `plannedFailover` | PlannedFailoverSpec | No | -- | Cluster-wide defaults for the graceful planned-failover API (triggered via `bloodraven.shipstream.io/planned-failover=<site>`). |
 | `dragonfly` | DragonflySpec | No | -- | Optional per-site Dragonfly cache/session co-management. When enabled, the operator creates one Dragonfly StatefulSet per site, an active Redis-compatible Service, replication wiring, promotion status, and optional snapshot-restore upgrade support. See [DragonflySpec](#dragonflyspec-specdragonfly). |
+| `encryptionAtRest` | EncryptionAtRestSpec | No | -- | MySQL InnoDB data-at-rest encryption via the GPL `component_keyring_file` keyring component, with the live keyring projected from a per-site Secret so no key material lands on the data PVC or a node disk. Requires `spec.tls`. See [EncryptionAtRestSpec](#encryptionatrestspec-specencryptionatrest) and [Data-at-rest encryption](./encryption-at-rest.mdx). |
 
 ### SiteSpec
 
@@ -369,6 +370,50 @@ managed Dragonfly resources.
 | `s3UseHTTPS` | bool | No | Passed as `--s3_use_https` when set. |
 | `s3SignPayload` | bool | No | Passed as `--s3_sign_payload` when set. |
 
+### EncryptionAtRestSpec (`spec.encryptionAtRest`)
+
+Requires `spec.tls`: MySQL mandates a secure connection to clone
+encrypted data and Bloodraven bootstraps every replica with `CLONE
+INSTANCE`. The CRD rejects `enabled: true` without it.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `enabled` | bool | Yes | `false` | Turn on data-at-rest encryption for every site. Refused on a group that is already serving unless the `bloodraven.shipstream.io/encryption-adopt=confirm` annotation is set. |
+| `coverage` | EncryptionCoverageSpec | No | all `true` | Which encryption settings the operator enforces. See [EncryptionCoverageSpec](#encryptioncoveragespec). |
+| `keyring` | KeyringSpec | No | -- | Keyring component paths and escrow lifecycle. See [KeyringSpec](#keyringspec). |
+
+### EncryptionCoverageSpec
+
+Every field defaults to `true`. These are operator-owned once encryption
+is enabled: a `spec.mysqlConf` entry naming the same option is ignored,
+so a stray override cannot silently downgrade a site. Turning one off
+narrows the security claim.
+
+| Field | Type | Default | MySQL setting |
+|---|---|---|---|
+| `tables` | bool | `true` | `default_table_encryption`. Applies to schemas and tables created afterwards; does not rewrite existing data. |
+| `privilegeCheck` | bool | `true` | `table_encryption_privilege_check`. Stops application users opting individual tables out of encryption. |
+| `redoLog` | bool | `true` | `innodb_redo_log_encrypt` |
+| `undoLog` | bool | `true` | `innodb_undo_log_encrypt` |
+| `binaryLog` | bool | `true` | `binlog_encryption` (covers relay logs on replicas too) |
+| `systemTablespace` | bool | `true` | `ALTER TABLESPACE mysql ENCRYPTION='Y'`, run once by the sidecar on the writable site. Not covered by `default_table_encryption`; without it the data dictionary (schema, table, and column names) stays readable on a stolen PVC. |
+
+### KeyringSpec
+
+`mysqldDir` and `pluginDir` are image-specific. The defaults match the
+official `mysql:9.x` images — MySQL only reads its global component
+manifest from the directory holding `mysqld`, and its global component
+config from `plugin_dir`, so a wrong value shows up as InnoDB refusing to
+start.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `dataFileDir` | string | `/run/mysql-keyring` | Keyring mount point. It must be outside the actual MySQL datadir. Admission rejects `/var/lib/mysql` and descendants; custom-image datadirs require manual verification. |
+| `mysqldDir` | string | `/usr/sbin` | Directory containing the `mysqld` binary; `mysqld.my` is subPath-mounted here. |
+| `pluginDir` | string | `/usr/lib64/mysql/plugin` | MySQL `plugin_dir`; `component_keyring_file.cnf` is subPath-mounted here. |
+| `retainVersions` | int | `5` | Superseded escrow Secret versions kept per site (2--50). The version a site is currently sealed against is never pruned. |
+| `escrowTimeoutSeconds` | int | `600` | How long before a site that has not escrowed its keyring is reported `Failed`. Minimum 30. The site stays unsealed and the operator keeps retrying either way. |
+
 ## Full example
 
 ```yaml
@@ -567,6 +612,7 @@ The operator writes the following status fields.
 | `pitr` | PITRStatus | Summary of the continuous binlog archive, populated by the operator from periodic polls of each sidecar's `/archiver/status` endpoint. Present when `spec.backup.pitr.enabled=true`. |
 | `plannedFailover` | PlannedFailoverStatus | Most-recent planned (admin-triggered) failover attempt. Retained until a newer annotation replaces it; how `kubectl describe` tells the story of a switchover after the fact. |
 | `dragonfly` | DragonflyStatus | Observed Dragonfly subsystem state when `spec.dragonfly.enabled=true`: active site, phase, per-site roles, reachability, replication health, last promotion, and snapshot-upgrade status. |
+| `encryptionAtRest` | EncryptionAtRestStatus | Observed data-at-rest encryption state when `spec.encryptionAtRest.enabled=true`: whether every site is sealed, and per-site keyring phase, escrow Secret/version/digest, and observed coverage. See [EncryptionAtRestStatus](#encryptionatreststatus). |
 
 ### SiteStatus
 
@@ -593,6 +639,47 @@ The operator writes the following status fields.
 | `Degraded` | `True` when core candidate/DR replication is broken or source-mismatched, lag exceeds `maxLagSeconds`, or a non-reader site is unreachable. Reader failures are excluded and remain visible per site and in metrics. |
 | `RecoveryPending` | `True` while old-primary recovery is running (`RecoveryInProgress`) or when an old primary has divergent transactions (`DivergentTransactions`). Use the reclone annotation only for `DivergentTransactions`. |
 | `Bootstrapping` | `True` when a clone operation is in progress (fresh-deploy, auto-clone, or reclone). Reason indicates the phase. |
+| `EncryptionAtRestReady` | `True` when every site is sealed against a verified escrowed keyring. `False` with reason `KeyringNotSealed` while sites are bootstrapping, cloning, or rotating; `KeyringFailed` when a site could not escrow or its escrow Secret is missing or corrupt; `AdoptionRefused` when encryption was enabled on a group that is already serving. |
+
+### EncryptionAtRestStatus
+
+| Field | Type | Description |
+|---|---|---|
+| `sealed` | bool | `True` only when every site is in the `Sealed` phase. **This is the field to alert on** -- `false` means at least one site is running with a writable keyring or failed to escrow. |
+| `sites` | []SiteEncryptionStatus | Per-site keyring lifecycle. |
+| `observedGeneration` | int | CR generation the encryption subsystem last reconciled. |
+
+### SiteEncryptionStatus
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Site identifier |
+| `phase` | string | `Pending`, `Unsealed`, `Escrowed`, `Sealed`, or `Failed`. The normal sequence is `Pending -> Unsealed -> Escrowed -> Sealed`. `Escrowed` means the keyring is captured and verified and the pod is rolling onto the sealed rendering. |
+| `unsealReason` | string | Why the site is unsealed: `Bootstrap`, `Clone`, or `Rotation`. Empty when sealed. |
+| `keyringSecret` | string | Escrow Secret the site is sealed against (or seeded from while unsealed). |
+| `keyringVersion` | int | Escrow version. Monotonic per site; each version is an immutable Secret. |
+| `keyringDigest` | string | `sha256:<hex>` over the escrowed keyring bytes. The operator refuses to seal until the sidecar reports the same digest for the live keyring file. |
+| `lastEscrowTime` | timestamp | When the current version was accepted. |
+| `unsealedSince` | timestamp | When the site entered `Unsealed`. Drives `keyring.escrowTimeoutSeconds`. |
+| `message` | string | Human-readable explanation of the current phase. |
+| `coverage` | SiteEncryptionCoverage | What was actually observed on the live instance. |
+
+### SiteEncryptionCoverage
+
+Sampled from the live instance, not inferred from `my.cnf`. A site can be
+`Sealed` and still have incomplete coverage -- for example an adopted
+cluster whose pre-existing tables were never rebuilt.
+
+| Field | Type | Description |
+|---|---|---|
+| `keyringComponent` | string | `Component_name` from `performance_schema.keyring_component_status`. |
+| `keyringReadOnly` | bool | The component's `Read_only` status. Must be `true` in the `Sealed` phase. |
+| `systemTablespaceEncrypted` | bool | Whether the `mysql` tablespace is encrypted. |
+| `unencryptedTablespaces` | int | User tablespaces still reporting `ENCRYPTION='N'`. **Non-zero means part of your data is in the clear.** |
+| `redoLogEncrypted` | bool | `@@innodb_redo_log_encrypt` |
+| `undoLogEncrypted` | bool | `@@innodb_undo_log_encrypt` |
+| `binlogEncrypted` | bool | `@@binlog_encryption` |
+| `lastCheckTime` | timestamp | When coverage was last sampled. |
 
 ### DragonflyStatus
 
@@ -630,6 +717,8 @@ The operator writes the following status fields.
 | `bloodraven.shipstream.io/reclone-site` | Triggers a `CLONE INSTANCE` from the current primary to the named site. Value format depends on the target's state: `<site>:confirm=<group-name>` for a cold reclone (no divergent GTID recorded), or `<site>:<gtid-prefix>` when `status.sites[].divergentGtid` is non-empty — the prefix must be 8+ characters and match the observed divergent GTID. Both forms act as a fat-finger interlock (cold path added by AUDIT L3 / WISHLIST #5). Invalid annotations are rejected with a `RecloneRejected` Warning Event and cleared. Valid ones emit `RecloneRequested` and report progress via the `Bootstrapping` condition. |
 | `bloodraven.shipstream.io/planned-failover` | Starts a planned failover to the named site. When Dragonfly is enabled, the planned-failover status includes a `dragonfly` substatus with session-preservation details. |
 | `bloodraven.shipstream.io/dragonfly-snapshot-upgrade` | Starts the Dragonfly snapshot-restore upgrade workflow to the target image. Requires `spec.dragonfly.snapshot` to be configured. |
+| `bloodraven.shipstream.io/rotate-keyring` | Rotates the named site's InnoDB master key. **Refused on the active primary** -- rotation is the one operation whose failure window would cost data rather than a re-clone, so the supported procedure is to rotate replicas, run a planned failover, then rotate the ex-primary. Also refused while an ordered update or planned failover is in flight. Cleared automatically once the target site is `Sealed` again. |
+| `bloodraven.shipstream.io/encryption-adopt` | Set to `confirm` to enable encryption on a failover group that already holds data, acknowledging that pre-existing tablespaces stay plaintext until they are rebuilt. `status.encryptionAtRest.sites[].coverage.unencryptedTablespaces` reports how much is still exposed. |
 
 ### Example status
 

@@ -108,6 +108,12 @@ type MysqlFailoverGroupReconciler struct {
 	// is used.
 	dragonflyConnector DragonflyConnector
 
+	// keyringStatus overrides the production sidecar-backed fetcher used
+	// by the encryption-at-rest state machine. Tests inject a scripted
+	// fake; production wiring leaves this nil so
+	// defaultKeyringStatusFetcher is used.
+	keyringStatus keyringStatusFetcher
+
 	dragonflyRolloutMu      sync.Mutex
 	dragonflyRolloutBackoff map[dragonflyRolloutKey]dragonflyRolloutState
 }
@@ -132,7 +138,12 @@ type dragonflyRolloutState struct {
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// Secrets: read for credentials/TLS, and create/delete for the
+// encryption-at-rest keyring escrow (immutable per-site keyring
+// versions) and its per-site escrow tokens. Update is deliberately
+// absent — escrow Secrets are immutable by construction, so the
+// operator only ever mints a new version or prunes an old one.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=externaldns.k8s.io,resources=dnsendpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -195,6 +206,16 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Validate that the referenced credential secret(s) exist and contain expected keys.
 	if result, err := r.validateCredentialSecrets(ctx, &fg); err != nil || result.RequeueAfter > 0 {
 		return result, err
+	}
+
+	// Encryption-at-rest must settle before anything renders: both the
+	// per-site ConfigMap (which carries "read_only" for the keyring
+	// component) and the Deployment (which picks a Secret projection or
+	// a memory-backed emptyDir for the keyring volume) are driven by the
+	// per-site keyring phase this call maintains.
+	encryptionRequeueAfter, err := r.reconcileEncryptionAtRest(ctx, &fg)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile encryption at rest: %w", err)
 	}
 
 	// Desired per-site ConfigMaps are created before any Deployment reference
@@ -390,6 +411,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	deferredRequeue = minPositiveDuration(deferredRequeue, backupRequeue)
+	// A site mid-keyring-lifecycle is waiting on a pod roll or on the
+	// sidecar's escrow push, neither of which enqueues the CR.
+	deferredRequeue = minPositiveDuration(deferredRequeue, encryptionRequeueAfter)
 	if deferredRequeue > 0 {
 		return ctrl.Result{RequeueAfter: deferredRequeue}, nil
 	}
@@ -635,6 +659,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Contex
 		cm.Data = map[string]string{
 			"bloodraven.cnf": generateMyCnf(fg, site),
 		}
+		// Keyring manifest + component config. Both are projected into
+		// image-owned directories with subPath mounts, so they have to
+		// live in a ConfigMap rather than being written by the init
+		// container. Sealed vs unsealed only changes "read_only".
+		for k, v := range keyringConfigMapData(fg, fg.SiteKeyringSealed(site.Name)) {
+			cm.Data[k] = v
+		}
 		return nil
 	})
 	return err
@@ -718,6 +749,14 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) 
 		"log-bin": "/var/lib/mysql/mysql-bin", "log-replica-updates": "ON",
 		"skip-replica-start": "ON", "plugin-load-add": "mysql_clone.so",
 	} {
+		settings[k] = v
+	}
+
+	// Encryption coverage is likewise operator-owned: the security claim
+	// depends on these settings being exactly what spec.encryptionAtRest
+	// asked for, so a spec.mysqlConf override for the same keys must not
+	// be able to silently downgrade a site to plaintext redo logs.
+	for k, v := range encryptionMySQLSettings(fg) {
 		settings[k] = v
 	}
 
@@ -815,6 +854,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			}
 		}
 	}
+	// Encryption-at-rest rendering is driven by the site's observed
+	// keyring phase, not by the spec alone: a site is only rendered
+	// sealed once the operator has verified that its keyring is durably
+	// escrowed. buildEncryptionFragments returns empty fragments when
+	// spec.encryptionAtRest is absent or disabled.
+	encFrags := buildEncryptionFragments(
+		fg, site,
+		fg.SiteKeyringSealed(site.Name),
+		siteEscrowSecretName(fg, site.Name),
+		siteKeyringRotating(fg, site.Name),
+	)
+
 	specHash := ComputeSpecHash(fg, site, tlsSecretData, credSecretData)
 
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
@@ -891,6 +942,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			})
 		}
 
+		volumeMounts = append(volumeMounts, encFrags.MysqlVolumeMounts...)
+
 		sidecarVolumeMounts := []corev1.VolumeMount{}
 		if fg.Spec.TLS != nil {
 			sidecarVolumeMounts = append(sidecarVolumeMounts, corev1.VolumeMount{
@@ -899,6 +952,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				ReadOnly:  true,
 			})
 		}
+		sidecarVolumeMounts = append(sidecarVolumeMounts, encFrags.SidecarVolumeMounts...)
 
 		mysqlArgs := []string{
 			fmt.Sprintf("--server-id=%d", serverID),
@@ -1071,9 +1125,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			return fmt.Errorf("build pitr sidecar fragments: %w", err)
 		}
 		sidecarEnv = append(sidecarEnv, pitrFrags.SidecarEnv...)
+		sidecarEnv = append(sidecarEnv, encFrags.SidecarEnv...)
 		sidecarVolumeMounts = append(sidecarVolumeMounts, pitrFrags.SidecarVolumeMounts...)
 		sidecarSecurityContext := fg.Spec.ContainerSecurityContext.DeepCopy()
-		if fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled {
+		// The keyring file is mode 0600 owned by mysqld's uid so it is
+		// not world-readable inside the pod; the escrow agent has to run
+		// as that same uid to read it. Same defaulting rule as PITR:
+		// only fill in what the user left unset.
+		if (fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled) ||
+			fg.Spec.EncryptionEnabled() {
 			if sidecarSecurityContext == nil {
 				sidecarSecurityContext = &corev1.SecurityContext{}
 			}
@@ -1214,6 +1274,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		// PITR contributions (AWS creds secret or backup PVC volume).
 		volumes = append(volumes, pitrFrags.PodVolumes...)
 
+		// Encryption contributions (keyring volume, escrow token, seed).
+		volumes = append(volumes, encFrags.PodVolumes...)
+
 		podAnnotations := make(map[string]string)
 		for k, v := range fg.Spec.PodAnnotations {
 			podAnnotations[k] = v
@@ -1238,35 +1301,38 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 						Operator: corev1.TolerationOpExists,
 					},
 				},
-				InitContainers: append([]corev1.Container{
-					{
-						Name:  "init",
-						Image: image,
-						Command: []string{
-							"sh", "-c",
-							fmt.Sprintf("cp /etc/mysql/config-map/bloodraven.cnf /etc/mysql/conf.d/bloodraven.cnf && printf '[mysqld]\\nserver-id=%d\\n' > /etc/mysql/conf.d/server-id.cnf", serverID),
-						},
-						VolumeMounts: []corev1.VolumeMount{
-							{Name: "config", MountPath: "/etc/mysql/config-map"},
-							{Name: "conf", MountPath: "/etc/mysql/conf.d"},
-						},
-						// Mirror the main mysql container's user-supplied
-						// SecurityContext onto the operator-injected init
-						// container. Without this, Restricted PSS admission
-						// rejects the pod because the init container has no
-						// drop-ALL / runAsNonRoot / seccomp settings. nil
-						// stays nil (backward-compat). DeepCopy per F4 so
-						// the init container does not alias the mysql
-						// container's pointer.
-						SecurityContext: fg.Spec.ContainerSecurityContext.DeepCopy(),
-						// Default init-container resources so LimitRange
-						// admission accepts the pod. Users who need a
-						// different shape can override via the spec; this
-						// init container is operator-managed so we don't
-						// expose a separate field for it.
-						Resources: defaultInitContainerResources(),
+				// Order: keyring-init first — the keyring must exist
+				// before mysqld starts, and it is cheaper to fail the
+				// pod there than to have InnoDB abort startup with
+				// "Check keyring fail". encFrags.InitContainers is
+				// empty when encryption is off or the site is sealed.
+				InitContainers: append(append(append([]corev1.Container{}, encFrags.InitContainers...), corev1.Container{
+					Name:  "init",
+					Image: image,
+					Command: []string{
+						"sh", "-c",
+						fmt.Sprintf("cp /etc/mysql/config-map/bloodraven.cnf /etc/mysql/conf.d/bloodraven.cnf && printf '[mysqld]\\nserver-id=%d\\n' > /etc/mysql/conf.d/server-id.cnf", serverID),
 					},
-				}, fg.Spec.ExtraInitContainers...),
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "config", MountPath: "/etc/mysql/config-map"},
+						{Name: "conf", MountPath: "/etc/mysql/conf.d"},
+					},
+					// Mirror the main mysql container's user-supplied
+					// SecurityContext onto the operator-injected init
+					// container. Without this, Restricted PSS admission
+					// rejects the pod because the init container has no
+					// drop-ALL / runAsNonRoot / seccomp settings. nil
+					// stays nil (backward-compat). DeepCopy per F4 so
+					// the init container does not alias the mysql
+					// container's pointer.
+					SecurityContext: fg.Spec.ContainerSecurityContext.DeepCopy(),
+					// Default init-container resources so LimitRange
+					// admission accepts the pod. Users who need a
+					// different shape can override via the spec; this
+					// init container is operator-managed so we don't
+					// expose a separate field for it.
+					Resources: defaultInitContainerResources(),
+				}), fg.Spec.ExtraInitContainers...),
 				Containers: append(containers, fg.Spec.ExtraContainers...),
 				Volumes:    volumes,
 				// Pod-level security context is applied verbatim from
@@ -1808,6 +1874,30 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 			}
 		}
 	}
+	// Encryption-at-rest rendering depends on the site's observed
+	// keyring phase, not just on the spec, so the hash has to include
+	// it: flipping a site from unsealed to sealed changes the keyring
+	// volume from a memory emptyDir to a Secret projection and the
+	// component config from read_only:false to true, and that has to
+	// roll the pod through the ordered-update path. Hashing the
+	// escrow Secret NAME (not its contents) is deliberate — versions are
+	// immutable, so the name uniquely identifies the bytes, and the
+	// operator never needs to read key material to compute a hash.
+	if fg.Spec.EncryptionEnabled() {
+		kr := fg.Spec.EffectiveKeyring()
+		sealed := fg.SiteKeyringSealed(site.Name)
+		fmt.Fprintf(h, "encryption.renderVersion=%s\n", encryptionPodRenderVersion)
+		fmt.Fprintf(h, "encryption.sealed=%t\n", sealed)
+		fmt.Fprintf(h, "encryption.escrowSecret=%s\n", siteEscrowSecretName(fg, site.Name))
+		fmt.Fprintf(h, "encryption.rotate=%t\n", siteKeyringRotating(fg, site.Name))
+		fmt.Fprintf(h, "encryption.escrowURL=%s\n", defaultKeyringEscrowURL(fg))
+		fmt.Fprintf(h, "encryption.dataFileDir=%s\n", kr.DataFileDir)
+		fmt.Fprintf(h, "encryption.mysqldDir=%s\n", kr.MysqldDir)
+		fmt.Fprintf(h, "encryption.pluginDir=%s\n", kr.PluginDir)
+		fmt.Fprintf(h, "encryption.keyringConfig=%s\n",
+			keyringComponentConfigJSON(fg.Spec.KeyringDataFilePath(), sealed))
+	}
+
 	// Include TLS certificate data so cert rotation triggers a rolling update.
 	if len(tlsSecretData) > 0 {
 		tlsKeys := make([]string, 0, len(tlsSecretData))

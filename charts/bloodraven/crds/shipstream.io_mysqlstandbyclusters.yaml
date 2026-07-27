@@ -2369,6 +2369,138 @@ spec:
                             auth is set
                           rule: '!has(self.auth) || (has(self.auth.secretName) &&
                             self.auth.secretName.size() > 0)'
+                      encryptionAtRest:
+                        description: |-
+                          EncryptionAtRest configures MySQL InnoDB data-at-rest encryption
+                          using the GPL component_keyring_file keyring component, with the
+                          live keyring projected from a per-site Kubernetes Secret so no key
+                          material lands on the MySQL data PVC or a worker-node disk.
+
+                          Requires spec.tls: MySQL mandates a secure connection when cloning
+                          encrypted data, and Bloodraven bootstraps replicas with CLONE
+                          INSTANCE.
+                        properties:
+                          coverage:
+                            description: |-
+                              Coverage selects which MySQL encryption settings the operator
+                              enforces in the generated my.cnf. Every field defaults to true;
+                              setting one to false narrows the security claim and is reported
+                              on status.encryptionAtRest.
+                            properties:
+                              binaryLog:
+                                default: true
+                                description: |-
+                                  BinaryLog sets binlog_encryption, which covers both binary logs
+                                  on the primary and relay logs on replicas. Default true.
+                                type: boolean
+                              privilegeCheck:
+                                default: true
+                                description: |-
+                                  PrivilegeCheck sets table_encryption_privilege_check. When true
+                                  (default), creating a table whose encryption differs from the
+                                  schema default requires TABLE_ENCRYPTION_ADMIN, so application
+                                  users cannot opt individual tables out of encryption.
+                                type: boolean
+                              redoLog:
+                                default: true
+                                description: RedoLog sets innodb_redo_log_encrypt.
+                                  Default true.
+                                type: boolean
+                              systemTablespace:
+                                default: true
+                                description: |-
+                                  SystemTablespace controls whether the operator runs
+                                  `ALTER TABLESPACE mysql ENCRYPTION='Y'` once a site is sealed.
+                                  The `mysql` system tablespace is not covered by
+                                  default_table_encryption and holds the data dictionary, so leaving
+                                  this false leaves table and column names in plaintext on disk.
+                                  Default true. The statement reuses the existing master key, so it
+                                  is safe to run against a sealed (read-only) keyring.
+                                type: boolean
+                              tables:
+                                default: true
+                                description: |-
+                                  Tables sets default_table_encryption. When true (default), every
+                                  newly created schema and file-per-table tablespace is encrypted.
+                                  It does NOT retroactively encrypt tables that already exist.
+                                type: boolean
+                              undoLog:
+                                default: true
+                                description: UndoLog sets innodb_undo_log_encrypt.
+                                  Default true.
+                                type: boolean
+                            type: object
+                          enabled:
+                            default: false
+                            description: |-
+                              Enabled turns on data-at-rest encryption for every site in the
+                              group. Enabling requires spec.tls to be set, because MySQL
+                              requires a secure connection to clone encrypted data.
+
+                              Encryption can only be enabled on a group that has not yet
+                              bootstrapped, or adopted by an existing group via the replica-first
+                              reclone procedure documented in docs/docs/encryption-at-rest.mdx.
+                              The operator rejects flipping this flag on a group whose sites
+                              already hold unencrypted data.
+                            type: boolean
+                          keyring:
+                            description: |-
+                              Keyring configures the keyring component paths and the escrow
+                              Secret lifecycle.
+                            properties:
+                              dataFileDir:
+                                default: /run/mysql-keyring
+                                description: |-
+                                  DataFileDir is the in-container directory holding the keyring data
+                                  file. It is backed by a Secret volume when sealed and by a
+                                  memory-backed emptyDir when unsealed. MySQL requires that this
+                                  path is NOT inside the data directory. Admission rejects the
+                                  default /var/lib/mysql datadir and its descendants; custom-image
+                                  datadirs must be checked manually.
+                                pattern: ^/[^\0]*[^/]$
+                                type: string
+                              escrowTimeoutSeconds:
+                                default: 600
+                                description: |-
+                                  EscrowTimeoutSeconds is how long the operator waits for a freshly
+                                  unsealed site to escrow its keyring before reporting the site as
+                                  failed on status. The site is not sealed and not admitted to
+                                  service until escrow succeeds; the timeout only controls when the
+                                  condition flips to a loud failure.
+                                format: int32
+                                minimum: 30
+                                type: integer
+                              mysqldDir:
+                                default: /usr/sbin
+                                description: |-
+                                  MysqldDir is the directory containing the mysqld binary. MySQL
+                                  only reads its global component manifest from there, so the
+                                  operator mounts `mysqld.my` into this directory.
+                                pattern: ^/[^\0]*[^/]$
+                                type: string
+                              pluginDir:
+                                default: /usr/lib64/mysql/plugin
+                                description: |-
+                                  PluginDir is MySQL's plugin_dir. MySQL only reads the global
+                                  `component_keyring_file.cnf` from there, so the operator mounts
+                                  the generated config into this directory.
+                                pattern: ^/[^\0]*[^/]$
+                                type: string
+                              retainVersions:
+                                default: 5
+                                description: |-
+                                  RetainVersions is how many superseded escrow Secret versions the
+                                  operator keeps per site. Older versions are garbage-collected.
+                                  Keeping more than one lets an operator roll a site back onto a
+                                  previous keyring if a rotation went wrong.
+                                format: int32
+                                maximum: 50
+                                minimum: 2
+                                type: integer
+                            type: object
+                        required:
+                        - enabled
+                        type: object
                       extraContainers:
                         description: |-
                           ExtraContainers are additional containers injected into every MySQL pod.
@@ -6659,6 +6791,16 @@ spec:
                         ? s.serviceTemplate.type : (has(self.serviceTemplate.type)
                         ? self.serviceTemplate.type : ''ClusterIP'')) in [''NodePort'',
                         ''LoadBalancer'']))'
+                    - message: 'spec.encryptionAtRest.enabled requires spec.tls: MySQL
+                        requires a secure connection to clone encrypted data'
+                      rule: '!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled
+                        || has(self.tls)'
+                    - message: spec.encryptionAtRest.keyring.dataFileDir must not
+                        be inside the MySQL data directory
+                      rule: '!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled
+                        || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir)
+                        || (self.encryptionAtRest.keyring.dataFileDir != ''/var/lib/mysql''
+                        && !self.encryptionAtRest.keyring.dataFileDir.startsWith(''/var/lib/mysql/''))'
                 required:
                 - name
                 - spec
