@@ -566,6 +566,15 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	tm := NewTopologyManager(cfg, siteMySQL, failoverCtl, updateCtl, bootstrapCtl, bootstrapCfg, tainter, r.hub, dns,
 		r.logger.With("fg", nn.String()))
 
+	// Encryption-at-rest clone gate: a CLONE INSTANCE recipient needs a
+	// writable keyring to rewrap the donor's tablespace keys, so the
+	// topology manager must ask the reconciler to unseal the site first.
+	// deployReconciler is the reconciler; the type assertion keeps the
+	// runner from depending on the concrete type.
+	if gate, ok := r.deployReconciler.(KeyringGate); ok && fg.Spec.EncryptionEnabled() {
+		tm.SetKeyringGate(gate)
+	}
+
 	// Restore failover history from CR status so recovery logic works across
 	// operator restarts — without this, checkRecovery() returns early because
 	// lastFailoverTarget is empty after a fresh TopologyManager.

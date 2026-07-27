@@ -115,6 +115,37 @@ Setup takes about 2 minutes depending on your machine.
 | `./playground/chaos.sh cordon pdx` | Site capacity or scheduling failure |
 | `./playground/chaos.sh recover` | Infrastructure recovery after an incident |
 | `./playground/reset-mysql.sh` | Destructive lab reset, not a production recovery command |
+| `./playground/enable-encryption.sh` | Turning on [data-at-rest encryption](./encryption-at-rest.mdx) — generates playground TLS material and converts the group |
+
+## Data-at-rest encryption in the playground
+
+The playground comes up unencrypted. To exercise the keyring lifecycle:
+
+```bash
+./playground/enable-encryption.sh --fresh    # wipe MySQL, then encrypt from birth
+./playground/enable-encryption.sh --status   # per-site phase + escrow versions
+```
+
+The script generates a self-signed CA and server certificate (encryption
+requires `spec.tls`, because MySQL mandates a secure connection to clone
+encrypted data), patches the failover group, and waits for every site to
+reach `phase: Sealed`.
+
+`--fresh` wipes MySQL first so every tablespace is encrypted from birth.
+Without it the script converts in place and stamps the
+`encryption-adopt=confirm` annotation — pre-existing tables stay
+plaintext, which is fine for exercising the lifecycle but is **not** what
+a production adoption looks like.
+
+Once sealed, run the dedicated chaos scenario:
+
+```bash
+make chaos-run SCENARIO=48-keyring-seal-and-rotation
+```
+
+It is quarantined from the batch profiles precisely because it needs this
+non-default baseline. See
+[chaos-scenarios.md § 48](https://github.com/ShipStream/bloodraven/blob/main/playground/chaos-scenarios.md).
 
 ## Reset when things go wrong
 

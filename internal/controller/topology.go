@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/shipstream/bloodraven/internal/clock"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -298,6 +300,16 @@ type TopologyManager struct {
 	// requests a reclone of a specific site. Processed during the next
 	// poll cycle then cleared. Protected by mu.
 	reclonePendingSite string
+
+	// keyringGate, when set, is consulted before every clone into a
+	// site. Encryption-at-rest sites normally run with a read-only
+	// keyring, but a CLONE INSTANCE recipient re-encrypts the donor's
+	// tablespace keys under a new master key of its own — which a
+	// read-only keyring cannot accept. The gate asks the reconciler to
+	// unseal the recipient and reports whether it is ready yet; a clone
+	// that starts against a sealed recipient fails partway and leaves
+	// the data directory unusable. Nil when encryption is disabled.
+	keyringGate KeyringGate
 
 	// autoBootstrapSuppressed is set by the runner while a one-shot
 	// initFromBackup restore is in flight. It prevents the fresh-deploy
@@ -1858,6 +1870,32 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 // topology manager only forgets sites when it restarts).
 var errSiteNotFound = fmt.Errorf("planned-failover: site not found in topology manager")
 
+// KeyringGate is consulted before a clone into a site that may be
+// running encryption-at-rest. RequestKeyringUnseal returns true when the
+// site's keyring is already writable and the clone may proceed; false
+// means the operator has recorded the unseal request and the caller
+// should retry after the pod has rolled.
+//
+// Implemented by MysqlFailoverGroupReconciler. Nil in tests and in
+// deployments with encryption disabled.
+type KeyringGate interface {
+	RequestKeyringUnseal(ctx context.Context, nn types.NamespacedName, site string) (bool, error)
+}
+
+// SetKeyringGate wires the encryption-at-rest clone gate. Safe to call
+// with nil to disable gating.
+func (tm *TopologyManager) SetKeyringGate(g KeyringGate) {
+	tm.mu.Lock()
+	tm.keyringGate = g
+	tm.mu.Unlock()
+}
+
+func (tm *TopologyManager) getKeyringGate() KeyringGate {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.keyringGate
+}
+
 // SetRecloneSite requests that the given site be recloned from the current
 // primary. Called by the runner when it detects the reclone annotation.
 // The topology manager processes this during the next poll cycle.
@@ -2302,6 +2340,25 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		confirmed, err := tm.confirmedActivePrimary(ctx)
 		if err != nil || confirmed.name != donorSite.name {
 			tm.logger.Error("bootstrap aborted: donor is not the confirmed active primary", "donor", donor, "error", err)
+			return
+		}
+	}
+
+	// Encryption-at-rest: a clone recipient must have a writable keyring
+	// before CLONE INSTANCE runs. Deferring here (rather than failing)
+	// is deliberate — the reconciler unseals the site and rolls its pod,
+	// and the next poll cycle picks the bootstrap back up.
+	if gate := tm.getKeyringGate(); gate != nil {
+		nn := types.NamespacedName{Namespace: tm.cfg.Namespace, Name: tm.cfg.Name}
+		ready, err := gate.RequestKeyringUnseal(ctx, nn, recipient)
+		if err != nil {
+			tm.logger.Error("bootstrap deferred: keyring unseal request failed",
+				"recipient", recipient, "error", err)
+			return
+		}
+		if !ready {
+			tm.logger.Info("bootstrap deferred: waiting for the recipient keyring to be unsealed",
+				"recipient", recipient, "source", source)
 			return
 		}
 	}

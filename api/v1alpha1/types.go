@@ -39,6 +39,8 @@ type MysqlFailoverGroupList struct {
 // +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(s.serviceTemplate) || !has(s.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="site serviceTemplate.externalTrafficPolicy requires an effective type of NodePort or LoadBalancer"
 // +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(s.serviceTemplate) || !has(s.serviceTemplate.nodePort) || ((has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate) && has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="site serviceTemplate.nodePort requires an effective type of NodePort or LoadBalancer"
 // +kubebuilder:validation:XValidation:rule="self.sites.all(s, !has(self.serviceTemplate) || !has(self.serviceTemplate.externalTrafficPolicy) || ((has(s.serviceTemplate) && has(s.serviceTemplate.type) ? s.serviceTemplate.type : (has(self.serviceTemplate.type) ? self.serviceTemplate.type : 'ClusterIP')) in ['NodePort', 'LoadBalancer']))",message="inherited externalTrafficPolicy requires each effective site service type to be NodePort or LoadBalancer"
+// +kubebuilder:validation:XValidation:rule="!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || has(self.tls)",message="spec.encryptionAtRest.enabled requires spec.tls: MySQL requires a secure connection to clone encrypted data"
+// +kubebuilder:validation:XValidation:rule="!has(self.encryptionAtRest) || !self.encryptionAtRest.enabled || !has(self.encryptionAtRest.keyring) || !has(self.encryptionAtRest.keyring.dataFileDir) || (self.encryptionAtRest.keyring.dataFileDir != '/var/lib/mysql' && !self.encryptionAtRest.keyring.dataFileDir.startsWith('/var/lib/mysql/'))",message="spec.encryptionAtRest.keyring.dataFileDir must not be inside the MySQL data directory"
 type MysqlFailoverGroupSpec struct {
 	// Image is the MySQL container image. Default: mysql:9.7
 	// +kubebuilder:default="mysql:9.7"
@@ -210,6 +212,17 @@ type MysqlFailoverGroupSpec struct {
 	// Same backward-compatibility semantics as PodSecurityContext.
 	// +optional
 	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
+
+	// EncryptionAtRest configures MySQL InnoDB data-at-rest encryption
+	// using the GPL component_keyring_file keyring component, with the
+	// live keyring projected from a per-site Kubernetes Secret so no key
+	// material lands on the MySQL data PVC or a worker-node disk.
+	//
+	// Requires spec.tls: MySQL mandates a secure connection when cloning
+	// encrypted data, and Bloodraven bootstraps replicas with CLONE
+	// INSTANCE.
+	// +optional
+	EncryptionAtRest *EncryptionAtRestSpec `json:"encryptionAtRest,omitempty"`
 }
 
 // SplitBrainPolicySpec configures automated split-brain resolution.
@@ -579,6 +592,11 @@ type MysqlFailoverGroupStatus struct {
 	// spec.dragonfly is configured.
 	// +optional
 	Dragonfly *DragonflyStatus `json:"dragonfly,omitempty"`
+
+	// EncryptionAtRest is the observed state of the data-at-rest
+	// encryption subsystem when spec.encryptionAtRest.enabled is true.
+	// +optional
+	EncryptionAtRest *EncryptionAtRestStatus `json:"encryptionAtRest,omitempty"`
 }
 
 // SiteStatus describes the observed state of a single site.

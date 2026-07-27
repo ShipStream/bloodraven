@@ -46,7 +46,11 @@ spec:
           env:
             - name: MYSQL_DSN
               # Uses the operator's primary service which tracks the active writable MySQL.
-              value: "root:playground-root-pw@tcp(mysql-playground-primary.bloodraven-playground.svc.cluster.local:3306)/?parseTime=true&timeout=5s"
+              # tls=preferred keeps this working in both playground shapes: plaintext by
+              # default, and TLS once ./playground/enable-encryption.sh turns on spec.tls
+              # (which makes the operator set require_secure_transport=ON, refusing
+              # plaintext). Verification is skipped — the playground CA is generated locally.
+              value: "root:playground-root-pw@tcp(mysql-playground-primary.bloodraven-playground.svc.cluster.local:3306)/?parseTime=true&timeout=5s&tls=preferred"
             - name: LISTEN_ADDR
               value: ":8090"
             # Dragonfly active Service — Bloodraven re-routes this Service's

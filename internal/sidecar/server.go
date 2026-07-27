@@ -18,6 +18,7 @@ type Server struct {
 	httpServer *http.Server
 	archiver   *BinlogArchiver
 	topology   *TopologyCache
+	keyring    *KeyringAgent
 }
 
 // NewServer creates a new sidecar HTTP server.
@@ -33,6 +34,7 @@ func NewServer(mysql mysqlQuerier, listenAddr string, logger *slog.Logger) *Serv
 	mux.HandleFunc("GET /peer/ping", s.instrument("/peer/ping", s.handlePeerPing))
 	mux.HandleFunc("GET /peer/active-site", s.instrument("/peer/active-site", s.handlePeerActiveSite))
 	mux.HandleFunc("GET /archiver/status", s.instrument("/archiver/status", s.handleArchiverStatus))
+	mux.HandleFunc("GET /keyring/status", s.instrument("/keyring/status", s.handleKeyringStatus))
 
 	s.httpServer = &http.Server{
 		Addr:              listenAddr,
@@ -169,6 +171,30 @@ func (s *Server) handleArchiverStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	json.NewEncoder(w).Encode(s.archiver.Snapshot(ctx))
+}
+
+// SetKeyring wires the encryption-at-rest escrow agent into the server
+// so the operator can read the live keyring digest and coverage through
+// /keyring/status. Optional: when unset, the endpoint reports
+// enabled:false, which the operator reads as "this site is not running
+// encryption-at-rest".
+func (s *Server) SetKeyring(a *KeyringAgent) { s.keyring = a }
+
+// handleKeyringStatus reports the live keyring digest, the last escrow
+// the operator confirmed, and the instance's observed encryption
+// coverage.
+//
+// The payload deliberately contains no key material — only digests. The
+// operator uses it to decide whether a site is safe to seal, and the
+// answer must never depend on shipping the keyring over this
+// unauthenticated endpoint.
+func (s *Server) handleKeyringStatus(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.keyring == nil {
+		_ = json.NewEncoder(w).Encode(KeyringStatus{Enabled: false})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(s.keyring.Snapshot())
 }
 
 // activeSiteResponse is the JSON response from the operator's /active-site endpoint.

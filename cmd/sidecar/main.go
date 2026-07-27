@@ -99,11 +99,26 @@ func main() {
 	// by the HTTP server for peers' /peer/active-site requests.
 	topology := &sidecar.TopologyCache{}
 
+	// Optional encryption-at-rest keyring agent. Built before the HTTP
+	// server so /keyring/status can serve its Snapshot().
+	var keyringAgent *sidecar.KeyringAgent
+	if cfg.Keyring != nil {
+		keyringAgent = sidecar.NewKeyringAgent(cfg.Keyring, cfg, mysql, logger)
+		logger.Info("keyring agent enabled",
+			"path", cfg.Keyring.Path,
+			"escrowArmed", cfg.Keyring.EscrowArmed,
+			"rotate", cfg.Keyring.Rotate,
+		)
+	}
+
 	// Create the HTTP server
 	srv := sidecar.NewServer(mysql, cfg.ListenAddr, logger)
 	srv.SetTopology(topology)
 	if archiver != nil {
 		srv.SetArchiver(archiver)
+	}
+	if keyringAgent != nil {
+		srv.SetKeyring(keyringAgent)
 	}
 
 	// Run startup safety net (also seeds the topology cache).
@@ -144,6 +159,14 @@ func main() {
 		go func() {
 			defer wg.Done()
 			archiver.Run(ctx)
+		}()
+	}
+
+	if keyringAgent != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			keyringAgent.Run(ctx)
 		}()
 	}
 

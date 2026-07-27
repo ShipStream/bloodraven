@@ -106,6 +106,33 @@ matches your expectations.
   remains a thin API client; the operator performs the authoritative safety
   checks.
 
+## Data-at-rest encryption
+
+- `spec.encryptionAtRest` uses MySQL Community's `component_keyring_file`.
+  It is **not** Oracle "MySQL Enterprise TDE", and Oracle states that
+  file-based keyrings are not intended as regulatory-compliance
+  solutions. Do not present it as compliance-grade TDE.
+- The live keyring is a Kubernetes Secret, so **etcd becomes part of your
+  key custody**. API-server encryption at rest for Secrets (ideally
+  KMS-backed) and tight Secret RBAC are prerequisites, not
+  recommendations. Bloodraven cannot verify either.
+- Memory-backed volumes can reach swap on kernels older than 6.3, where
+  `tmpfs noswap` is unsupported. Disable or encrypt swap on worker nodes.
+- Enabling encryption on a group that already holds data is refused by
+  default: MySQL only encrypts what is written afterwards, so existing
+  tablespaces stay plaintext. The supported adoption path is
+  replica-first (bootstrap encrypted, load, planned-failover, wipe the
+  old PVCs); an annotation exists to accept partial coverage knowingly.
+- Master-key rotation is refused on the active primary. Rotate replicas,
+  planned-failover, then rotate the ex-primary.
+- Backup, restore, and backup-verification still stage plaintext in pod
+  `emptyDir` volumes. Backup *artifacts* are separately protected by
+  `spec.backup.profiles[].encryption`; the transient staging inside the
+  Job's own pod is not covered by live MySQL encryption.
+- The `mysqldDir` and `pluginDir` defaults match the official
+  `mysql:9.x` images. Other images need those fields set explicitly, and
+  a wrong value shows up as InnoDB refusing to start.
+
 ## External dependencies
 
 - DNS steering depends on external-dns consuming `DNSEndpoint` objects.

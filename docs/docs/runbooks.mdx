@@ -127,6 +127,84 @@ Use when all nodes/storage/network for a site are gone.
 
 Expected impact is bounded by failover detection, relay-log drain, DNS TTL, and application reconnect behavior.
 
+## Keyring not sealed
+
+Use when `bloodraven_keyring_phase{phase="sealed"}` is 0 for a site, or
+`status.conditions[type=EncryptionAtRestReady]` is `False`.
+
+A site that is not sealed is running with a **writable keyring**. Its
+data is still encrypted, but the operator cannot yet prove the key is
+durably escrowed.
+
+1. Find out what it is waiting for — `message` carries the reason:
+
+   ```bash
+   kubectl get mysqlfailovergroup orders -n orders \
+     -o jsonpath='{range .status.encryptionAtRest.sites[*]}{.name}{"\t"}{.phase}{"\t"}{.message}{"\n"}{end}'
+   ```
+
+2. `Unsealed` with `unsealReason: Clone` or `Bootstrap` is normal and
+   transient. Wait for the clone to finish.
+3. `Unsealed` with "waiting for the sidecar to escrow" — check the
+   sidecar can reach the operator:
+
+   ```bash
+   kubectl exec -n orders deploy/mysql-orders-iad -c sidecar -- \
+     wget -qO- localhost:8080/keyring/status
+   ```
+
+   `lastError` on that payload names the failure. Common causes: the
+   operator's auxiliary Service is unreachable, or the escrow token
+   Secret was deleted (the operator re-mints it on the next reconcile,
+   but the pod needs to roll to pick it up).
+4. `Escrowed` that never becomes `Sealed` — the pod has not rolled onto
+   the sealed rendering. Check for a stuck ordered update
+   (`status.updatePhase`).
+5. `Failed` — read the message and follow
+   [Keyring escrow lost](#keyring-escrow-lost) if it names a missing or
+   corrupt Secret.
+
+Full background: [Data-at-rest encryption](./encryption-at-rest.mdx).
+
+## Keyring escrow lost
+
+Use on a `KeyringEscrowMissing` or `KeyringEscrowCorrupt` Event.
+
+:::danger Do not restart the affected pod
+A sealed site's escrow Secret is its **only** durable copy of the keys.
+If the Secret is gone but the pod is still running, the keyring is alive
+on the pod's tmpfs. Deleting, evicting, or draining that pod destroys it
+and makes that site's data unrecoverable.
+:::
+
+1. Confirm the pod is still running:
+
+   ```bash
+   kubectl get pod -n orders -l shipstream.io/site=iad
+   ```
+
+2. If it is running, re-escrow by re-rendering the site unsealed. The
+   sidecar pushes whatever MySQL is holding, and the operator mints a new
+   version:
+
+   ```bash
+   kubectl patch mysqlfailovergroup orders -n orders --subresource=status --type=merge -p \
+     '{"status":{"encryptionAtRest":{"sites":[{"name":"iad","phase":"Unsealed","unsealReason":"Rotation"}]}}}'
+   ```
+
+   Watch it return to `Sealed` with a new `keyringVersion`.
+3. If the pod is already gone, that site's data is unrecoverable.
+   Re-clone it from a healthy peer:
+
+   ```bash
+   kubectl annotate mysqlfailovergroup orders -n orders \
+     bloodraven.shipstream.io/reclone-site='iad:confirm=orders'
+   ```
+
+4. If **every** site lost its escrow, restore from backup. Backup
+   artifacts are logical dumps protected by a separate key, so they do
+   not depend on any site's keyring.
+
 ## Network partition diagnosis
 
 Use [Network Partitions](./network-partitions.mdx). Prioritize preventing two writable sites.

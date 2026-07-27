@@ -23,3 +23,50 @@ spec:
           annotations:
             summary: Bloodraven backup verification is stale
             runbook_url: https://bloodraven.readthedocs.io/en/latest/docs/backup-verification/
+        # --- data-at-rest encryption -------------------------------------
+        # Only meaningful when spec.encryptionAtRest.enabled=true; the
+        # series do not exist otherwise, so these are inert on unencrypted
+        # groups.
+        - alert: BloodravenKeyringNotSealed
+          # A site outside the Sealed phase is running with a writable
+          # keyring. Its data is still encrypted, but the operator cannot
+          # yet prove the key is durably escrowed. Transient during
+          # bootstrap, a clone, or a rotation — hence the 15m window.
+          expr: bloodraven_keyring_phase{phase="sealed"} == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Bloodraven site {{ $labels.site }} is running with a writable keyring
+            description: >-
+              Site {{ $labels.site }} in failover group {{ $labels.failover_group }} is not
+              sealed against an escrowed keyring. Check
+              status.encryptionAtRest.sites[].message for what it is waiting on.
+            runbook_url: https://bloodraven.readthedocs.io/en/latest/docs/runbooks/#keyring-not-sealed
+        - alert: BloodravenKeyringEscrowFailing
+          # Sustained escrow failures mean the site can never be sealed.
+          expr: rate(bloodraven_keyring_escrow_pushes_total{outcome="failure"}[15m]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Bloodraven keyring escrow is failing for site {{ $labels.site }}
+            description: >-
+              The sidecar cannot get its keyring into escrow, so the operator will not
+              seal the site. Check the sidecar's /keyring/status lastError field.
+            runbook_url: https://bloodraven.readthedocs.io/en/latest/docs/runbooks/#keyring-not-sealed
+        - alert: BloodravenUnencryptedTablespaces
+          # Non-zero means part of the data on the PVC is in the clear.
+          # Expected on a group adopted with encryption-adopt=confirm until
+          # the pre-existing tables are rebuilt.
+          expr: bloodraven_encryption_unencrypted_tablespaces > 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: Bloodraven site {{ $labels.site }} still has unencrypted tablespaces
+            description: >-
+              {{ $value }} user tablespaces on site {{ $labels.site }} report ENCRYPTION='N'.
+              MySQL only encrypts data written after default_table_encryption takes effect;
+              pre-existing tables need ALTER TABLE ... ENCRYPTION='Y'.
+            runbook_url: https://bloodraven.readthedocs.io/en/latest/docs/encryption-at-rest/#coverage

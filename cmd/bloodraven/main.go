@@ -528,6 +528,13 @@ func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform
 		pitrCache.set(ns, group, profile, resp)
 		json.NewEncoder(rw).Encode(resp)
 	})))
+	// /keyring/escrow is the encryption-at-rest escrow sink. Unlike the
+	// rest of this mux it mutates cluster state, so it authenticates
+	// every request against the per-site bearer token the operator
+	// minted — see controller.NewKeyringEscrowHandler for the full
+	// threat model.
+	mux.Handle("/keyring/escrow", auxLoggingMiddleware(logger, "keyring-escrow",
+		controller.NewKeyringEscrowHandler(k8sClient, logger)))
 	mux.Handle("/ws/status", auxLoggingMiddleware(logger, "ws-status", http.HandlerFunc(hub.HandleWS)))
 	mux.Handle("/", auxLoggingMiddleware(logger, "notfound", http.NotFoundHandler()))
 	return mux

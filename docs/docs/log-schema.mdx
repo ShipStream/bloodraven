@@ -213,6 +213,47 @@ Emitted by the sidecar's `BinlogArchiver`.
 
 Per-upload success/failure is also reflected in the `bloodraven_archiver_upload_failures` and `bloodraven_archiver_last_upload_timestamp_seconds` metrics — prefer those for alerting.
 
+### Data-at-rest encryption
+
+Emitted when `spec.encryptionAtRest.enabled=true`. See
+[Data-at-rest encryption](./encryption-at-rest.mdx) for the lifecycle
+these events trace.
+
+Operator events:
+
+| Level | `msg` | Fields | Notes |
+|---|---|---|---|
+| INFO | `keyring phase transition` | `site`, `from`, `to`, `reason`, `version`, `fg` | The per-site keyring lifecycle advanced. The normal sequence is `Pending → Unsealed → Escrowed → Sealed`. Any transition **to** `Unsealed` from `Sealed` means the site is deliberately running with a writable keyring (clone or rotation). |
+| INFO | `keyring escrowed` | `namespace`, `group`, `site`, `version`, `secret`, `digest` | The operator accepted a sidecar escrow push and stored a new immutable Secret version. Also emitted by the sidecar with `site`, `version`, `secret`, `digest`, `pod`. |
+| INFO | `refusing to enable encryption at rest on a live failover group` | `activeSite`, `fg` | `spec.encryptionAtRest.enabled` was turned on for a group that is already serving. Rendering is unchanged; existing tablespaces would have stayed plaintext. |
+| WARN | `keyring escrow rejected` | `namespace`, `group`, `site`, `reason` | A push to `/keyring/escrow` failed authentication. The response to the caller is deliberately vague; the reason is only here. |
+| WARN | `keyring escrow digest mismatch` | `namespace`, `group`, `site`, `claimed`, `computed` | An escrow push carried a digest that did not match its payload. Nothing was stored. |
+| ERROR | `keyring escrow: store failed` | `namespace`, `group`, `site`, `error` | The operator could not write the escrow Secret. The site stays unsealed and the sidecar keeps retrying. |
+
+Sidecar events:
+
+| Level | `msg` | Fields | Notes |
+|---|---|---|---|
+| INFO | `keyring agent enabled` | `path`, `escrowArmed`, `rotate`, `pod` | Sidecar startup. `escrowArmed=false` means this pod renders a sealed keyring and only reports its digest. |
+| INFO | `rotated innodb master key` | `site`, `pod` | `ALTER INSTANCE ROTATE INNODB MASTER KEY` succeeded. |
+| INFO | `encrypted the mysql system tablespace` | `site`, `pod` | `ALTER TABLESPACE mysql ENCRYPTION='Y'` succeeded on the writable site. |
+| WARN | `keyring escrow push failed, will retry` | `error`, `site`, `digest`, `pod` | The push was rejected or the operator echoed a digest that did not match. Escrow is retried until it succeeds; the site is not sealed in the meantime. |
+| WARN | `could not encrypt the mysql system tablespace` | `error`, `site`, `pod` | Retried on the next tick. |
+| ERROR | `keyring rotation failed` | `error`, `site`, `pod` | The rotation statement failed. The agent still escrows whatever is on disk, because a failed rotation may already have written a key. |
+
+Kubernetes Event reasons emitted on the `MysqlFailoverGroup`:
+
+| Reason | Type | When |
+|---|---|---|
+| `KeyringPhase` | Normal / Warning | Any keyring phase transition. Warning when the new phase is `Failed`. |
+| `KeyringUnsealed` | Normal | A site was unsealed so a `CLONE INSTANCE` can rewrap tablespace keys. |
+| `KeyringRotationRefused` | Warning | A rotation was requested for the active primary, or while an ordered update or planned failover was in flight. |
+| `KeyringEscrowMissing` | Warning | A sealed site's escrow Secret no longer exists. **That site cannot restart.** See the DR runbook. |
+| `KeyringEscrowCorrupt` | Warning | A sealed site's escrow Secret no longer hashes to the recorded digest. |
+| `KeyringDigestMismatch` | Warning | A pod rendered sealed is running a keyring that does not match its escrow; the operator refuses to call it sealed. |
+| `KeyringNotReadOnly` | Warning | MySQL reports a writable keyring on a site the operator considers sealed. |
+| `EncryptionAdoptionRefused` | Warning | Encryption was enabled on a group that is already serving. |
+
 ### Dragonfly
 
 Bloodraven optionally co-manages per-site Dragonfly instances and emits the following events when `spec.dragonfly.enabled=true`. Mirrored by the `bloodraven_dragonfly_site_up` gauge and the `bloodraven_dragonfly_promotions_total{result}` counter, plus the matching `Dragonfly*` Kubernetes Events on the `MysqlFailoverGroup`.
