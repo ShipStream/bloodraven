@@ -113,9 +113,11 @@ func TestReconcile_UnencryptedDeployHasNoKeyringArtifacts(t *testing.T) {
 		}
 	}
 	var cm corev1.ConfigMap
-	_ = c.Get(context.Background(), types.NamespacedName{
+	if err := c.Get(context.Background(), types.NamespacedName{
 		Namespace: "shared-lion", Name: siteConfigMapName("lion", "dc1"),
-	}, &cm)
+	}, &cm); err != nil {
+		t.Fatalf("get configmap: %v", err)
+	}
 	if _, ok := cm.Data[keyringManifestKey]; ok {
 		t.Error("unencrypted ConfigMap must not carry keyring files")
 	}
@@ -172,9 +174,11 @@ func TestReconcile_SealedSiteRendersSecretProjection(t *testing.T) {
 		}
 	}
 	var cm corev1.ConfigMap
-	_ = c.Get(context.Background(), types.NamespacedName{
+	if err := c.Get(context.Background(), types.NamespacedName{
 		Namespace: "shared-lion", Name: siteConfigMapName("lion", "dc1"),
-	}, &cm)
+	}, &cm); err != nil {
+		t.Fatalf("get configmap: %v", err)
+	}
 	if !strings.Contains(cm.Data[keyringComponentKey], `"read_only": true`) {
 		t.Errorf("sealed component config must be read-only:\n%s", cm.Data[keyringComponentKey])
 	}

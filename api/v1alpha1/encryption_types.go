@@ -67,6 +67,7 @@ type EncryptionCoverageSpec struct {
 	// Tables sets default_table_encryption. When true (default), every
 	// newly created schema and file-per-table tablespace is encrypted.
 	// It does NOT retroactively encrypt tables that already exist.
+	// +kubebuilder:default=true
 	// +optional
 	Tables *bool `json:"tables,omitempty"`
 
@@ -74,19 +75,23 @@ type EncryptionCoverageSpec struct {
 	// (default), creating a table whose encryption differs from the
 	// schema default requires TABLE_ENCRYPTION_ADMIN, so application
 	// users cannot opt individual tables out of encryption.
+	// +kubebuilder:default=true
 	// +optional
 	PrivilegeCheck *bool `json:"privilegeCheck,omitempty"`
 
 	// RedoLog sets innodb_redo_log_encrypt. Default true.
+	// +kubebuilder:default=true
 	// +optional
 	RedoLog *bool `json:"redoLog,omitempty"`
 
 	// UndoLog sets innodb_undo_log_encrypt. Default true.
+	// +kubebuilder:default=true
 	// +optional
 	UndoLog *bool `json:"undoLog,omitempty"`
 
 	// BinaryLog sets binlog_encryption, which covers both binary logs
 	// on the primary and relay logs on replicas. Default true.
+	// +kubebuilder:default=true
 	// +optional
 	BinaryLog *bool `json:"binaryLog,omitempty"`
 
@@ -97,6 +102,7 @@ type EncryptionCoverageSpec struct {
 	// this false leaves table and column names in plaintext on disk.
 	// Default true. The statement reuses the existing master key, so it
 	// is safe to run against a sealed (read-only) keyring.
+	// +kubebuilder:default=true
 	// +optional
 	SystemTablespace *bool `json:"systemTablespace,omitempty"`
 }
@@ -113,7 +119,9 @@ type KeyringSpec struct {
 	// DataFileDir is the in-container directory holding the keyring data
 	// file. It is backed by a Secret volume when sealed and by a
 	// memory-backed emptyDir when unsealed. MySQL requires that this
-	// path is NOT inside the data directory.
+	// path is NOT inside the data directory. Admission rejects the
+	// default /var/lib/mysql datadir and its descendants; custom-image
+	// datadirs must be checked manually.
 	// +kubebuilder:default="/run/mysql-keyring"
 	// +kubebuilder:validation:Pattern=`^/[^\0]*[^/]$`
 	// +optional

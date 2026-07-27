@@ -371,7 +371,7 @@ var AllSourceStates = []string{"converged", "pending", "blocked"}
 var KeyringPhase = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_keyring_phase",
 	Help: "1 for the site's current keyring phase, 0 for the others.",
-}, []string{"failover_group", "site", "phase"})
+}, []string{"mysql_namespace", "failover_group", "site", "phase"})
 
 // AllKeyringPhases is the bounded keyring phase set, used to zero out
 // stale series when a site transitions.
@@ -383,7 +383,7 @@ var AllKeyringPhases = []string{"pending", "unsealed", "escrowed", "sealed", "fa
 var KeyringEscrowVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_keyring_escrow_version",
 	Help: "Current keyring escrow Secret version per site.",
-}, []string{"failover_group", "site"})
+}, []string{"mysql_namespace", "failover_group", "site"})
 
 // KeyringEscrowPushesTotal counts sidecar escrow pushes by outcome.
 // Sustained failures mean a site cannot be sealed and is therefore
@@ -405,7 +405,7 @@ var KeyringRotationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 var EncryptionCoverageGaps = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_encryption_unencrypted_tablespaces",
 	Help: "User tablespaces still reporting ENCRYPTION='N' on a site.",
-}, []string{"failover_group", "site"})
+}, []string{"mysql_namespace", "failover_group", "site"})
 
 // EncryptionCoverageFlag reports individual coverage booleans observed
 // on the live instance (1 = encrypted). The `aspect` label is one of
@@ -413,7 +413,17 @@ var EncryptionCoverageGaps = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 var EncryptionCoverageFlag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_encryption_coverage",
 	Help: "Observed data-at-rest encryption coverage per aspect (1 = on).",
-}, []string{"failover_group", "site", "aspect"})
+}, []string{"mysql_namespace", "failover_group", "site", "aspect"})
+
+// DeleteKeyringSiteMetrics removes every gauge series for a site that is
+// no longer present in the failover-group spec.
+func DeleteKeyringSiteMetrics(namespace, group, site string) {
+	labels := prometheus.Labels{"mysql_namespace": namespace, "failover_group": group, "site": site}
+	KeyringPhase.DeletePartialMatch(labels)
+	KeyringEscrowVersion.DeletePartialMatch(labels)
+	EncryptionCoverageGaps.DeletePartialMatch(labels)
+	EncryptionCoverageFlag.DeletePartialMatch(labels)
+}
 
 // Register registers all metrics with the given registerer.
 func Register(reg prometheus.Registerer) {

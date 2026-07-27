@@ -186,7 +186,7 @@ func TestReconcileEncryption_AdvancesToEscrowedOnDigestMatch(t *testing.T) {
 	r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
 		"dc1": liveKeyring(keyringDigest(raw), false),
 		"dc2": liveKeyring(keyringDigest(raw), false),
-	}), fg)
+	}), fg, unsealedDeployment(fg, "dc1"), unsealedDeployment(fg, "dc2"))
 
 	store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
 	for _, site := range []string{"dc1", "dc2"} {
@@ -235,7 +235,7 @@ func sealedDeployment(fg *v1alpha1.MysqlFailoverGroup, site, secret string) *app
 				},
 			},
 		},
-		Status: appsv1.DeploymentStatus{ObservedGeneration: 3, ReadyReplicas: 1},
+		Status: appsv1.DeploymentStatus{ObservedGeneration: 3, UpdatedReplicas: 1, ReadyReplicas: 1},
 	}
 }
 
@@ -495,6 +495,31 @@ func TestReconcileEncryption_RotatesReplica(t *testing.T) {
 	if siteStatus(fg, "dc1").Phase != v1alpha1.KeyringPhaseSealed {
 		t.Error("rotation must be scoped to the annotated site")
 	}
+
+	if err := c.Create(context.Background(), unsealedDeployment(fg, "dc2")); err != nil {
+		t.Fatalf("create unsealed deployment: %v", err)
+	}
+	r.keyringStatus = scriptedKeyring(map[string]*internalmysql.KeyringStatus{
+		"dc2": liveKeyring(keyringDigest([]byte("k")), false),
+	})
+	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
+		t.Fatalf("follow-up reconcile: %v", err)
+	}
+	s = siteStatus(fg, "dc2")
+	if s.Phase != v1alpha1.KeyringPhaseUnsealed || s.UnsealReason != v1alpha1.UnsealReasonRotation {
+		t.Fatalf("rotation accepted the old digest: %+v", s)
+	}
+	changed := liveKeyring(keyringDigest([]byte("changed")), false)
+	r.keyringStatus = scriptedKeyring(map[string]*internalmysql.KeyringStatus{"dc2": changed})
+	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
+		t.Fatalf("failed-rotation reconcile: %v", err)
+	}
+	if s = siteStatus(fg, "dc2"); s.Phase != v1alpha1.KeyringPhaseUnsealed {
+		t.Fatalf("rotation advanced without RotateDone: %+v", s)
+	}
+	if siteStatus(fg, "dc1").Phase != v1alpha1.KeyringPhaseSealed {
+		t.Error("follow-up rotation reconcile changed dc1")
+	}
 }
 
 func TestReconcileEncryption_RefusesRotationDuringOrderedUpdate(t *testing.T) {
@@ -550,15 +575,36 @@ func TestRequestKeyringUnseal(t *testing.T) {
 		if s.Phase != v1alpha1.KeyringPhaseUnsealed || s.UnsealReason != v1alpha1.UnsealReasonClone {
 			t.Errorf("status = %+v", s)
 		}
+		if s.KeyringSecret != "" || s.KeyringDigest != "" {
+			t.Errorf("missing clone seed was retained: %+v", s)
+		}
 	})
 
 	t.Run("already unsealed allows the clone", func(t *testing.T) {
 		fg := sealedGroupWithActive("dc1")
 		fg.Status.EncryptionAtRest.Sites[1].Phase = v1alpha1.KeyringPhaseUnsealed
-		r, _ := encReconciler(t, scriptedKeyring(nil), fg)
+		r, _ := encReconciler(t, scriptedKeyring(nil), fg, unsealedDeployment(fg, "dc2"))
 		ok, err := r.RequestKeyringUnseal(ctx, nn, "dc2")
 		if err != nil || !ok {
 			t.Fatalf("ok=%v err=%v", ok, err)
+		}
+	})
+
+	t.Run("existing escrow is retained as clone seed", func(t *testing.T) {
+		fg := sealedGroupWithActive("dc1")
+		seedName := fg.Status.EncryptionAtRest.Sites[1].KeyringSecret
+		seed := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: seedName, Namespace: fg.Namespace}}
+		r, c := encReconciler(t, scriptedKeyring(nil), fg, seed)
+		ok, err := r.RequestKeyringUnseal(ctx, nn, "dc2")
+		if err != nil || ok {
+			t.Fatalf("ok=%v err=%v", ok, err)
+		}
+		var latest v1alpha1.MysqlFailoverGroup
+		if err := c.Get(ctx, nn, &latest); err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got := latest.Status.EncryptionAtRest.Sites[1].KeyringSecret; got != seedName {
+			t.Fatalf("clone seed = %q, want %q", got, seedName)
 		}
 	})
 }

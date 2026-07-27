@@ -45,8 +45,8 @@ spec:
             runbook_url: https://bloodraven.readthedocs.io/en/latest/docs/runbooks/#keyring-not-sealed
         - alert: BloodravenKeyringEscrowFailing
           # Sustained escrow failures mean the site can never be sealed.
-          expr: rate(bloodraven_keyring_escrow_pushes_total{outcome="failure"}[15m]) > 0
-          for: 15m
+          expr: rate(bloodraven_keyring_escrow_pushes_total{outcome="failure"}[5m]) > 0
+          for: 5m
           labels:
             severity: warning
           annotations:

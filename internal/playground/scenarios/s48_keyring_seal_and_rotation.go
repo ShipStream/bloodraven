@@ -245,7 +245,7 @@ func s48VerifyKeyringOffDataVolume(state *s48RunState) runner.Step {
 // ever exist in the steady state" true rather than aspirational.
 func s48VerifySealRejectsRotation(state *s48RunState) runner.Step {
 	return runner.Step{
-		Phase: runner.PhaseVerify,
+		Phase: runner.PhaseInject,
 		Name:  "ALTER INSTANCE ROTATE INNODB MASTER KEY is rejected on a sealed site",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			db, err := env.MySQL(state.activeSite)
@@ -313,11 +313,8 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 }
 
 func s48ClearRotateAnnotation(ctx context.Context, env *runner.Env, state *s48RunState) error {
-	err := env.Kube.PatchMFGNamed(ctx, env.Namespace, env.FG, []pgkube.JSONPatchOp{{
-		Op:   "remove",
-		Path: "/metadata/annotations/bloodraven.shipstream.io~1rotate-keyring",
-	}})
-	if err != nil && !strings.Contains(err.Error(), "not found") {
+	if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
+		"bloodraven.shipstream.io/rotate-keyring", ""); err != nil {
 		return fmt.Errorf("clear rotate annotation: %w", err)
 	}
 	state.rotated = false

@@ -103,7 +103,11 @@ func main() {
 	// server so /keyring/status can serve its Snapshot().
 	var keyringAgent *sidecar.KeyringAgent
 	if cfg.Keyring != nil {
-		keyringAgent = sidecar.NewKeyringAgent(cfg.Keyring, cfg, mysql, logger)
+		keyringAgent, err = sidecar.NewKeyringAgent(cfg.Keyring, cfg, mysql, logger)
+		if err != nil {
+			logger.Error("unable to configure keyring agent", "error", err)
+			os.Exit(1)
+		}
 		logger.Info("keyring agent enabled",
 			"path", cfg.Keyring.Path,
 			"escrowArmed", cfg.Keyring.EscrowArmed,

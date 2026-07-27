@@ -159,6 +159,14 @@ func TestEscrowHandler_RejectsDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestEscrowHandler_RejectsMissingDigest(t *testing.T) {
+	h := newEscrowHarness(t)
+	rec := h.post(t, h.token, h.req([]byte("actual"), ""))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
 func TestEscrowHandler_RejectsEmptyKeyring(t *testing.T) {
 	h := newEscrowHarness(t)
 	req := h.req(nil, "")
@@ -200,7 +208,8 @@ func TestEscrowHandler_RejectsMalformedJSON(t *testing.T) {
 
 func TestEscrowHandler_RejectsMissingFields(t *testing.T) {
 	h := newEscrowHarness(t)
-	req := h.req([]byte("k"), "")
+	raw := []byte("k")
+	req := h.req(raw, keyringDigest(raw))
 	req.Site = ""
 	rec := h.post(t, h.token, req)
 	if rec.Code != http.StatusBadRequest {
@@ -218,11 +227,14 @@ func TestEscrowHandler_RejectsUnknownSite(t *testing.T) {
 		t.Fatalf("mint: %v", err)
 	}
 	var sec corev1.Secret
-	_ = h.client.Get(ctx, types.NamespacedName{
+	if err := h.client.Get(ctx, types.NamespacedName{
 		Namespace: h.fg.Namespace, Name: v1alpha1.KeyringTokenSecretName(h.fg.Name, "ghost"),
-	}, &sec)
+	}, &sec); err != nil {
+		t.Fatalf("get ghost token: %v", err)
+	}
 
-	req := h.req([]byte("k"), "")
+	raw := []byte("k")
+	req := h.req(raw, keyringDigest(raw))
 	req.Site = "ghost"
 	rec := h.post(t, string(sec.Data[v1alpha1.KeyringTokenKey]), req)
 	if rec.Code != http.StatusNotFound {
@@ -238,9 +250,11 @@ func TestEscrowHandler_RejectsWhenEncryptionDisabled(t *testing.T) {
 		t.Fatalf("mint: %v", err)
 	}
 	var sec corev1.Secret
-	_ = c.Get(ctx, types.NamespacedName{
+	if err := c.Get(ctx, types.NamespacedName{
 		Namespace: fg.Namespace, Name: v1alpha1.KeyringTokenSecretName(fg.Name, "dc1"),
-	}, &sec)
+	}, &sec); err != nil {
+		t.Fatalf("get token: %v", err)
+	}
 
 	h := &escrowHarness{
 		handler: NewKeyringEscrowHandler(c, slog.New(slog.NewTextHandler(io.Discard, nil))),
@@ -248,7 +262,8 @@ func TestEscrowHandler_RejectsWhenEncryptionDisabled(t *testing.T) {
 		token:   string(sec.Data[v1alpha1.KeyringTokenKey]),
 		fg:      fg,
 	}
-	rec := h.post(t, h.token, h.req([]byte("k"), ""))
+	raw := []byte("k")
+	rec := h.post(t, h.token, h.req(raw, keyringDigest(raw)))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409", rec.Code)
 	}

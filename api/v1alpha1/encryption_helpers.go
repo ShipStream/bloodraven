@@ -170,11 +170,16 @@ func (fg *MysqlFailoverGroup) EffectiveSitePhase(site string) SiteKeyringPhase {
 // the rendering is what starts the roll; observing that roll complete is
 // what advances the phase from Escrowed to Sealed. Failed is excluded so
 // a site that could not escrow is never sealed against a Secret the
-// operator does not trust.
+// operator does not trust. A Failed site that was already sealed keeps
+// the sealed rendering: failures such as a deleted escrow Secret must
+// never roll away the only surviving in-memory keyring copy.
 func (fg *MysqlFailoverGroup) SiteKeyringSealed(site string) bool {
+	s := fg.Status.EncryptionAtRest.SiteEncryptionStatusByName(site)
 	switch fg.EffectiveSitePhase(site) {
 	case KeyringPhaseEscrowed, KeyringPhaseSealed:
 		return true
+	case KeyringPhaseFailed:
+		return s != nil && s.KeyringSecret != "" && s.UnsealReason == ""
 	default:
 		return false
 	}

@@ -183,20 +183,66 @@ and makes that site's data unrecoverable.
    kubectl get pod -n orders -l shipstream.io/site=iad
    ```
 
-2. If it is running, re-escrow by re-rendering the site unsealed. The
-   sidecar pushes whatever MySQL is holding, and the operator mints a new
-   version:
+2. If it is running, recreate the exact missing Secret from the keyring
+   still mounted in the running pod. Do not force an unseal or rollout:
+   that would destroy the only surviving in-memory copy before it was
+   durable again.
 
    ```bash
-   kubectl patch mysqlfailovergroup orders -n orders --subresource=status --type=merge -p \
-     '{"status":{"encryptionAtRest":{"sites":[{"name":"iad","phase":"Unsealed","unsealReason":"Rotation"}]}}}'
+   set -o pipefail
+   POD=$(kubectl get pod -n orders \
+     -l shipstream.io/failover-group=orders,shipstream.io/site=iad \
+     -o jsonpath='{.items[0].metadata.name}')
+   SECRET=$(kubectl get mysqlfailovergroup orders -n orders \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="iad")].keyringSecret}')
+   VERSION=$(kubectl get mysqlfailovergroup orders -n orders \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="iad")].keyringVersion}')
+   DIGEST=$(kubectl get mysqlfailovergroup orders -n orders \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="iad")].keyringDigest}')
+   KEYRING_DIR=$(kubectl get mysqlfailovergroup orders -n orders \
+     -o jsonpath='{.spec.encryptionAtRest.keyring.dataFileDir}')
+   KEYRING_DIR=${KEYRING_DIR:-/run/mysql-keyring}
+   FG_UID=$(kubectl get mysqlfailovergroup orders -n orders -o jsonpath='{.metadata.uid}')
+
+   kubectl exec -n orders "$POD" -c mysql -- cat "$KEYRING_DIR/keyring" | \
+     kubectl create secret generic "$SECRET" -n orders --from-file=keyring=/dev/stdin
+   ACTUAL_DIGEST=$(kubectl get secret "$SECRET" -n orders -o jsonpath='{.data.keyring}' | \
+     base64 -d | sha256sum | cut -d' ' -f1)
+   if [[ "sha256:${ACTUAL_DIGEST}" != "$DIGEST" ]]; then
+     kubectl delete secret "$SECRET" -n orders
+     echo "restored keyring digest does not match status; refusing to continue" >&2
+     exit 1
+   fi
+   kubectl label secret "$SECRET" -n orders \
+     app.kubernetes.io/name=mysql-keyring \
+     app.kubernetes.io/managed-by=bloodraven \
+     shipstream.io/failover-group=orders shipstream.io/site=iad \
+     shipstream.io/keyring-version="$VERSION"
+   kubectl annotate secret "$SECRET" -n orders shipstream.io/keyring-digest="$DIGEST"
+   kubectl patch secret "$SECRET" -n orders --type=merge -p="{
+     \"metadata\":{\"ownerReferences\":[{
+       \"apiVersion\":\"shipstream.io/v1alpha1\",\"kind\":\"MysqlFailoverGroup\",
+       \"name\":\"orders\",\"uid\":\"${FG_UID}\",\"controller\":true,\"blockOwnerDeletion\":true
+     }]},\"immutable\":true
+   }"
+
+   SITE_INDEX=$(kubectl get mysqlfailovergroup orders -n orders -o json | \
+     jq -er '.status.encryptionAtRest.sites | map(.name) | index("iad")')
+   kubectl patch mysqlfailovergroup orders -n orders --subresource=status \
+     --type=json -p="[
+       {\"op\":\"test\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/name\",\"value\":\"iad\"},
+       {\"op\":\"replace\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/phase\",\"value\":\"Sealed\"}
+     ]"
    ```
 
-   Watch it return to `Sealed` with a new `keyringVersion`.
+   Verify that the site returns to `Sealed` without restarting the pod.
 3. If the pod is already gone, that site's data is unrecoverable.
-   Re-clone it from a healthy peer:
+   Delete the unreadable PVC, then re-clone it from a healthy peer. The
+   confirmation token is mandatory because this permanently discards the
+   target site's local data:
 
    ```bash
+   kubectl delete pvc mysql-orders-iad-data -n orders
    kubectl annotate mysqlfailovergroup orders -n orders \
      bloodraven.shipstream.io/reclone-site='iad:confirm=orders'
    ```

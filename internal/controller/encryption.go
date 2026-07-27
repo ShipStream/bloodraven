@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -16,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v1"
+	encryptionPodRenderVersion = "encryption-pod-render-v2"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -254,6 +256,8 @@ func buildEncryptionFragments(
 	})
 	out.SidecarEnv = append(out.SidecarEnv,
 		corev1.EnvVar{Name: "BLOODRAVEN_KEYRING_ESCROW", Value: "1"},
+		corev1.EnvVar{Name: "BLOODRAVEN_KEYRING_ESCROW_URL", Value: defaultKeyringEscrowURL(fg)},
+		corev1.EnvVar{Name: "BLOODRAVEN_KEYRING_ESCROW_CA_FILE", Value: "/etc/mysql/tls/ca.crt"},
 		corev1.EnvVar{
 			Name:  "BLOODRAVEN_KEYRING_TOKEN_FILE",
 			Value: path.Join(keyringTokenMountPath, v1alpha1.KeyringTokenKey),
@@ -292,10 +296,15 @@ func buildEncryptionFragments(
 	}
 
 	out.InitContainers = append(out.InitContainers, corev1.Container{
-		Name:  "keyring-init",
-		Image: effectiveMySQLImage(fg),
-		Command: []string{
-			"sh", "-c", keyringInitScript(dataFilePath, escrowSecret != ""),
+		Name:    "keyring-init",
+		Image:   effectiveMySQLImage(fg),
+		Command: []string{"sh", "-c"},
+		Args: []string{
+			keyringInitScript(escrowSecret != ""),
+			"keyring-init",
+			dataFilePath,
+			path.Dir(dataFilePath),
+			path.Join(keyringSeedMountPath, v1alpha1.KeyringDataFileName),
 		},
 		VolumeMounts:    initMounts,
 		SecurityContext: fg.Spec.ContainerSecurityContext.DeepCopy(),
@@ -328,12 +337,10 @@ func buildEncryptionFragments(
 // security context pins both containers to the same non-root uid they
 // are already owned correctly and the chown is skipped rather than
 // failed.
-func keyringInitScript(dataFilePath string, seeded bool) string {
-	dir := path.Dir(dataFilePath)
-	seed := fmt.Sprintf(": > %q", dataFilePath)
+func keyringInitScript(seeded bool) string {
+	seed := `: > "$data_file"`
 	if seeded {
-		seed = fmt.Sprintf("cp %q %q",
-			path.Join(keyringSeedMountPath, v1alpha1.KeyringDataFileName), dataFilePath)
+		seed = `cp "$seed_file" "$data_file"`
 	}
 	// The directory operations are root-only on purpose. A memory-backed
 	// emptyDir is created root-owned mode 0777 (or fsGroup-writable when
@@ -342,16 +349,26 @@ func keyringInitScript(dataFilePath string, seeded bool) string {
 	// by mysqld's uid. Attempting it unconditionally would trip `set -e`
 	// and wedge the pod on any hardened, non-root deployment.
 	return fmt.Sprintf(`set -e
-if [ ! -s %[1]q ]; then
-  %[2]s
+data_file=$1
+data_dir=$2
+seed_file=$3
+if [ ! -s "$data_file" ]; then
+  %s
 fi
-chmod 600 %[1]q
+chmod 600 "$data_file"
 if [ "$(id -u)" = "0" ]; then
-  chown %[3]s %[1]q
-  chown %[3]s %[4]q
-  chmod 700 %[4]q
+  chown %s "$data_file"
+  chown %s "$data_dir"
+  chmod 700 "$data_dir"
 fi
-`, dataFilePath, seed, keyringFileOwner, dir)
+`, seed, keyringFileOwner, keyringFileOwner)
+}
+
+func defaultKeyringEscrowURL(fg *v1alpha1.MysqlFailoverGroup) string {
+	if configured := strings.TrimSpace(os.Getenv("BLOODRAVEN_DEFAULT_ESCROW_URL")); configured != "" {
+		return configured
+	}
+	return fmt.Sprintf("https://bloodraven.%s.svc.cluster.local:8443/keyring/escrow", fg.Namespace)
 }
 
 // keyringConfigMapData returns the two ConfigMap entries carrying the

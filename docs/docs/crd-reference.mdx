@@ -408,7 +408,7 @@ start.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `dataFileDir` | string | `/run/mysql-keyring` | Keyring mount point. Rejected if inside `/var/lib/mysql`; MySQL documents that the keyring data file must not be in the data directory, and co-locating them would put the key on the same stolen volume as the ciphertext. |
+| `dataFileDir` | string | `/run/mysql-keyring` | Keyring mount point. It must be outside the actual MySQL datadir. Admission rejects `/var/lib/mysql` and descendants; custom-image datadirs require manual verification. |
 | `mysqldDir` | string | `/usr/sbin` | Directory containing the `mysqld` binary; `mysqld.my` is subPath-mounted here. |
 | `pluginDir` | string | `/usr/lib64/mysql/plugin` | MySQL `plugin_dir`; `component_keyring_file.cnf` is subPath-mounted here. |
 | `retainVersions` | int | `5` | Superseded escrow Secret versions kept per site (2--50). The version a site is currently sealed against is never pruned. |

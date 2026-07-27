@@ -1890,6 +1890,7 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 		fmt.Fprintf(h, "encryption.sealed=%t\n", sealed)
 		fmt.Fprintf(h, "encryption.escrowSecret=%s\n", siteEscrowSecretName(fg, site.Name))
 		fmt.Fprintf(h, "encryption.rotate=%t\n", siteKeyringRotating(fg, site.Name))
+		fmt.Fprintf(h, "encryption.escrowURL=%s\n", defaultKeyringEscrowURL(fg))
 		fmt.Fprintf(h, "encryption.dataFileDir=%s\n", kr.DataFileDir)
 		fmt.Fprintf(h, "encryption.mysqldDir=%s\n", kr.MysqldDir)
 		fmt.Fprintf(h, "encryption.pluginDir=%s\n", kr.PluginDir)

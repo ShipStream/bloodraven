@@ -128,7 +128,7 @@ func NewKeyringEscrowHandler(c client.Client, logger *slog.Logger) http.Handler 
 		}
 
 		computed := keyringDigest(raw)
-		if req.Digest != "" && req.Digest != computed {
+		if req.Digest == "" || req.Digest != computed {
 			logger.Warn("keyring escrow digest mismatch",
 				"namespace", req.Namespace, "group", req.Group, "site", req.Site,
 				"claimed", req.Digest, "computed", computed)

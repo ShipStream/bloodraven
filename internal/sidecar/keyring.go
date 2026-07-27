@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -12,7 +14,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,8 +50,7 @@ type KeyringAgent struct {
 	group     string
 	site      string
 
-	bloodravenAddress string
-	httpClient        *http.Client
+	httpClient *http.Client
 
 	mu     sync.Mutex
 	status KeyringStatus
@@ -75,6 +78,13 @@ type KeyringConfig struct {
 	// TokenFile holds the per-site bearer token the operator issued for
 	// escrow pushes. Only mounted on unsealed pods.
 	TokenFile string
+
+	// EscrowURL is the operator's TLS-only keyring escrow endpoint.
+	EscrowURL string
+
+	// EscrowCAFile contains the CA that issued the operator escrow
+	// listener's certificate.
+	EscrowCAFile string
 
 	// Rotate asks the agent to issue ALTER INSTANCE ROTATE INNODB MASTER
 	// KEY once MySQL is reachable. Only ever set together with
@@ -125,11 +135,11 @@ type KeyringStatus struct {
 	Digest      string `json:"digest,omitempty"`
 	EscrowArmed bool   `json:"escrowArmed"`
 
-	EscrowedDigest  string    `json:"escrowedDigest,omitempty"`
-	EscrowedVersion int32     `json:"escrowedVersion,omitempty"`
-	EscrowedSecret  string    `json:"escrowedSecret,omitempty"`
-	LastEscrowAt    time.Time `json:"lastEscrowAt,omitempty"`
-	LastError       string    `json:"lastError,omitempty"`
+	EscrowedDigest  string     `json:"escrowedDigest,omitempty"`
+	EscrowedVersion int32      `json:"escrowedVersion,omitempty"`
+	EscrowedSecret  string     `json:"escrowedSecret,omitempty"`
+	LastEscrowAt    *time.Time `json:"lastEscrowAt,omitempty"`
+	LastError       string     `json:"lastError,omitempty"`
 
 	RotateRequested bool   `json:"rotateRequested"`
 	RotateDone      bool   `json:"rotateDone"`
@@ -168,23 +178,55 @@ type escrowResponse struct {
 }
 
 // NewKeyringAgent builds an agent. cfg must be non-nil.
-func NewKeyringAgent(cfg *KeyringConfig, sidecarCfg *Config, mysql keyringQuerier, logger *slog.Logger) *KeyringAgent {
+func NewKeyringAgent(cfg *KeyringConfig, sidecarCfg *Config, mysql keyringQuerier, logger *slog.Logger) (*KeyringAgent, error) {
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	if cfg.EscrowArmed {
+		var err error
+		httpClient, err = newEscrowHTTPClient(cfg.EscrowURL, cfg.EscrowCAFile)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &KeyringAgent{
-		cfg:               cfg,
-		mysql:             mysql,
-		logger:            logger,
-		namespace:         sidecarCfg.PodNamespace,
-		group:             sidecarCfg.FailoverGroup,
-		site:              sidecarCfg.MySite,
-		bloodravenAddress: sidecarCfg.BloodravenAddress,
-		httpClient:        &http.Client{Timeout: 10 * time.Second},
+		cfg:        cfg,
+		mysql:      mysql,
+		logger:     logger,
+		namespace:  sidecarCfg.PodNamespace,
+		group:      sidecarCfg.FailoverGroup,
+		site:       sidecarCfg.MySite,
+		httpClient: httpClient,
 		status: KeyringStatus{
 			Enabled:         true,
 			Path:            cfg.Path,
 			EscrowArmed:     cfg.EscrowArmed,
 			RotateRequested: cfg.Rotate,
 		},
+	}, nil
+}
+
+func newEscrowHTTPClient(rawURL, caFile string) (*http.Client, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, fmt.Errorf("BLOODRAVEN_KEYRING_ESCROW_URL must be an https URL")
 	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read escrow CA: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("BLOODRAVEN_KEYRING_ESCROW_CA_FILE contains no valid certificates")
+	}
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    roots,
+		}},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return fmt.Errorf("escrow redirects are not allowed")
+		},
+	}, nil
 }
 
 // Snapshot returns the current status for /keyring/status.
@@ -251,6 +293,8 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 		a.status.Digest = ""
 		if !errors.Is(err, os.ErrNotExist) {
 			a.status.LastError = fmt.Sprintf("read keyring: %v", err)
+		} else {
+			a.status.LastError = ""
 		}
 		a.mu.Unlock()
 		return
@@ -269,15 +313,17 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 	alreadyEscrowed := a.status.EscrowedDigest == digest && digest != ""
 	a.mu.Unlock()
 
-	a.refreshMySQLView(ctx)
+	viewErr := a.refreshMySQLView(ctx)
 
 	if !a.cfg.EscrowArmed || digest == "" || alreadyEscrowed {
+		a.setOperationalError(viewErr)
 		return
 	}
-	if err := a.push(ctx, raw, digest); err != nil {
-		a.setError(err.Error())
+	pushErr := a.push(ctx, raw, digest)
+	a.setOperationalError(errors.Join(viewErr, pushErr))
+	if pushErr != nil {
 		a.logger.Warn("keyring escrow push failed, will retry",
-			"error", err, "site", a.site, "digest", digest)
+			"error", pushErr, "site", a.site, "digest", digest)
 		metrics.KeyringEscrowPushesTotal.WithLabelValues(a.group, a.site, "failure").Inc()
 		return
 	}
@@ -287,28 +333,28 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 // refreshMySQLView samples the keyring component status and the
 // encryption coverage. Failures are recorded but never fatal: MySQL may
 // simply not be up yet, and the escrow path must not depend on it.
-func (a *KeyringAgent) refreshMySQLView(ctx context.Context) {
+func (a *KeyringAgent) refreshMySQLView(ctx context.Context) error {
 	if a.mysql == nil {
-		return
+		return nil
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	comp, err := a.mysql.KeyringComponentStatus(qCtx)
 	if err != nil {
-		return
+		err = fmt.Errorf("keyring component status: %w", err)
 	}
-	cov, err := a.mysql.EncryptionCoverage(qCtx)
-	if err != nil {
+	cov, coverageErr := a.mysql.EncryptionCoverage(qCtx)
+	if coverageErr != nil {
+		coverageErr = fmt.Errorf("encryption coverage: %w", coverageErr)
 		cov = nil
 	}
 
 	a.mu.Lock()
 	a.status.Component = comp
-	if cov != nil {
-		a.status.Coverage = cov
-	}
+	a.status.Coverage = cov
 	a.mu.Unlock()
+	viewErr := errors.Join(err, coverageErr)
 
 	// Close the one coverage gap that default_table_encryption cannot:
 	// the `mysql` system tablespace holding the data dictionary. Only
@@ -317,25 +363,25 @@ func (a *KeyringAgent) refreshMySQLView(ctx context.Context) {
 	// it on a read-only replica would just fail.
 	if a.cfg.EncryptSystemTablespace && cov != nil && !cov.SystemTablespaceEncrypted {
 		readOnly, err := a.mysql.IsReadOnly(qCtx)
-		if err != nil || readOnly {
-			return
+		if err != nil {
+			return errors.Join(viewErr, fmt.Errorf("query read_only before encrypting system tablespace: %w", err))
+		}
+		if readOnly {
+			return viewErr
 		}
 		if err := a.mysql.EncryptSystemTablespace(qCtx); err != nil {
-			a.setError(fmt.Sprintf("encrypt system tablespace: %v", err))
 			a.logger.Warn("could not encrypt the mysql system tablespace", "error", err, "site", a.site)
-			return
+			return errors.Join(viewErr, fmt.Errorf("encrypt system tablespace: %w", err))
 		}
 		a.logger.Info("encrypted the mysql system tablespace", "site", a.site)
 	}
+	return viewErr
 }
 
 // push sends the keyring to the operator and records the confirmed
 // version. The operator is the only writer of escrow Secrets; the agent
 // holds no Kubernetes credentials at all.
 func (a *KeyringAgent) push(ctx context.Context, raw []byte, digest string) error {
-	if a.bloodravenAddress == "" {
-		return fmt.Errorf("no bloodraven address configured")
-	}
 	token, err := readTrimFile(a.cfg.TokenFile)
 	if err != nil {
 		return fmt.Errorf("read escrow token: %w", err)
@@ -357,8 +403,7 @@ func (a *KeyringAgent) push(ctx context.Context, raw []byte, digest string) erro
 
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	url := fmt.Sprintf("http://%s/keyring/escrow", a.bloodravenAddress)
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, a.cfg.EscrowURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create escrow request: %w", err)
 	}
@@ -391,8 +436,8 @@ func (a *KeyringAgent) push(ctx context.Context, raw []byte, digest string) erro
 	a.status.EscrowedDigest = out.Digest
 	a.status.EscrowedVersion = out.Version
 	a.status.EscrowedSecret = out.Secret
-	a.status.LastEscrowAt = time.Now().UTC()
-	a.status.LastError = ""
+	now := time.Now().UTC()
+	a.status.LastEscrowAt = &now
 	a.mu.Unlock()
 
 	a.logger.Info("keyring escrowed",
@@ -406,11 +451,35 @@ func (a *KeyringAgent) setError(msg string) {
 	a.mu.Unlock()
 }
 
+func (a *KeyringAgent) setOperationalError(err error) {
+	if err == nil {
+		a.setError("")
+		return
+	}
+	a.setError(err.Error())
+}
+
+func envBool(name string) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("parse %s: %w", name, err)
+	}
+	return value, nil
+}
+
 // keyringConfigFromEnv builds the keyring wiring from the operator's env
 // vars. Returns nil when encryption-at-rest is not enabled for this
 // failover group.
 func keyringConfigFromEnv() (*KeyringConfig, error) {
-	if v := os.Getenv("BLOODRAVEN_KEYRING_ENABLED"); v == "" || v == "0" || v == "false" {
+	enabled, err := envBool("BLOODRAVEN_KEYRING_ENABLED")
+	if err != nil {
+		return nil, err
+	}
+	if !enabled {
 		return nil, nil
 	}
 	path := os.Getenv("BLOODRAVEN_KEYRING_FILE")
@@ -422,14 +491,30 @@ func keyringConfigFromEnv() (*KeyringConfig, error) {
 		Path:         path,
 		PollInterval: 5 * time.Second,
 	}
-	if v := os.Getenv("BLOODRAVEN_KEYRING_ESCROW"); v == "1" || v == "true" {
+	escrow, err := envBool("BLOODRAVEN_KEYRING_ESCROW")
+	if err != nil {
+		return nil, err
+	}
+	if escrow {
 		cfg.EscrowArmed = true
 		cfg.TokenFile = os.Getenv("BLOODRAVEN_KEYRING_TOKEN_FILE")
 		if cfg.TokenFile == "" {
 			return nil, fmt.Errorf("BLOODRAVEN_KEYRING_ESCROW=1 but BLOODRAVEN_KEYRING_TOKEN_FILE is empty")
 		}
+		cfg.EscrowURL = strings.TrimSpace(os.Getenv("BLOODRAVEN_KEYRING_ESCROW_URL"))
+		if cfg.EscrowURL == "" {
+			return nil, fmt.Errorf("BLOODRAVEN_KEYRING_ESCROW=1 but BLOODRAVEN_KEYRING_ESCROW_URL is empty")
+		}
+		cfg.EscrowCAFile = strings.TrimSpace(os.Getenv("BLOODRAVEN_KEYRING_ESCROW_CA_FILE"))
+		if cfg.EscrowCAFile == "" {
+			return nil, fmt.Errorf("BLOODRAVEN_KEYRING_ESCROW=1 but BLOODRAVEN_KEYRING_ESCROW_CA_FILE is empty")
+		}
 	}
-	if v := os.Getenv("BLOODRAVEN_KEYRING_ROTATE"); v == "1" || v == "true" {
+	rotate, err := envBool("BLOODRAVEN_KEYRING_ROTATE")
+	if err != nil {
+		return nil, err
+	}
+	if rotate {
 		if !cfg.EscrowArmed {
 			// A rotation on a sealed pod would be rejected by MySQL
 			// anyway, and quietly accepting the flag would hide an
@@ -438,7 +523,11 @@ func keyringConfigFromEnv() (*KeyringConfig, error) {
 		}
 		cfg.Rotate = true
 	}
-	if v := os.Getenv("BLOODRAVEN_KEYRING_ENCRYPT_SYSTEM_TABLESPACE"); v == "1" || v == "true" {
+	encryptSystemTablespace, err := envBool("BLOODRAVEN_KEYRING_ENCRYPT_SYSTEM_TABLESPACE")
+	if err != nil {
+		return nil, err
+	}
+	if encryptSystemTablespace {
 		cfg.EncryptSystemTablespace = true
 	}
 	if v := os.Getenv("BLOODRAVEN_KEYRING_POLL_INTERVAL"); v != "" {

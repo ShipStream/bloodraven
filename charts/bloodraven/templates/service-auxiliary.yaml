@@ -17,6 +17,12 @@ spec:
       port: {{ .Values.auxiliary.service.port }}
       targetPort: auxiliary
       protocol: TCP
+    {{- if .Values.auxiliary.escrowTLS.enabled }}
+    - name: escrow-tls
+      port: {{ .Values.auxiliary.escrowTLS.port }}
+      targetPort: escrow-tls
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "bloodraven.selectorLabels" . | nindent 4 }}
 {{- end }}

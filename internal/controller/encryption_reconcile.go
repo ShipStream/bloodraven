@@ -58,6 +58,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 		// only a status cleanup. The escrow Secrets stay: deleting them
 		// would strand any data still encrypted on disk.
 		if fg.Status.EncryptionAtRest != nil {
+			for i := range fg.Status.EncryptionAtRest.Sites {
+				metrics.DeleteKeyringSiteMetrics(fg.Namespace, fg.Name, fg.Status.EncryptionAtRest.Sites[i].Name)
+			}
 			fg.Status.EncryptionAtRest = nil
 			if err := r.patchEncryptionStatus(ctx, fg); err != nil {
 				return 0, err
@@ -98,6 +101,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 
 	// Reconcile the site list so a site added to spec.sites gets an
 	// entry (and a removed one stops being reported).
+	activeSites := make(map[string]struct{}, len(fg.Spec.Sites))
+	for _, name := range fg.Spec.SiteNames() {
+		activeSites[name] = struct{}{}
+	}
+	for i := range st.Sites {
+		if _, ok := activeSites[st.Sites[i].Name]; !ok {
+			metrics.DeleteKeyringSiteMetrics(fg.Namespace, fg.Name, st.Sites[i].Name)
+		}
+	}
 	st.Sites = alignSiteEncryptionStatus(st.Sites, fg.Spec.SiteNames())
 
 	rotateTarget := strings.TrimSpace(fg.Annotations[RotateKeyringAnnotation])
@@ -131,7 +143,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 			r.Recorder.Eventf(fg, eventTypeForKeyringPhase(site.Phase), "KeyringPhase",
 				"site %s keyring %s -> %s (%s)", site.Name, before.Phase, site.Phase, site.Message)
 		}
-		publishKeyringMetrics(fg.Name, site)
+		publishKeyringMetrics(fg.Namespace, fg.Name, site)
 	}
 
 	st.Sealed = allSealed
@@ -225,6 +237,14 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 			site.UnsealedSince = &now
 		}
 	}
+	ready, err := r.deploymentReadyWithUnsealedKeyring(ctx, fg, site.Name)
+	if err != nil {
+		return false, err
+	}
+	if !ready {
+		site.Message = "waiting for the Deployment to roll onto the writable keyring rendering"
+		return true, nil
+	}
 
 	live, err := fetch(ctx, fg, site.Name)
 	if err != nil {
@@ -237,6 +257,17 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 	}
 	if live.Digest == "" {
 		site.Message = "waiting for MySQL to create the keyring"
+		return checkEscrowDeadline(fg, site), nil
+	}
+	if site.UnsealReason == v1alpha1.UnsealReasonRotation && !live.RotateDone {
+		site.Message = "waiting for MySQL to complete the requested keyring rotation"
+		if live.RotateError != "" {
+			site.Message = fmt.Sprintf("keyring rotation failed; waiting for retry: %s", live.RotateError)
+		}
+		return checkEscrowDeadline(fg, site), nil
+	}
+	if site.UnsealReason == v1alpha1.UnsealReasonRotation && live.Digest == site.KeyringDigest {
+		site.Message = "waiting for MySQL to rotate away from the previously escrowed keyring"
 		return checkEscrowDeadline(fg, site), nil
 	}
 
@@ -456,10 +487,27 @@ func (r *MysqlFailoverGroupReconciler) RequestKeyringUnseal(
 	}
 	switch s.Phase {
 	case v1alpha1.KeyringPhaseUnsealed, v1alpha1.KeyringPhasePending:
-		return true, nil
+		return r.deploymentReadyWithUnsealedKeyring(ctx, &fg, site)
 	}
 
 	now := metav1.Now()
+	if s.KeyringSecret != "" {
+		var seed corev1.Secret
+		err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: s.KeyringSecret}, &seed)
+		switch {
+		case apierrors.IsNotFound(err):
+			// An explicitly confirmed reclone is the recovery path after the
+			// old keyring is irretrievably lost. Do not render the missing
+			// Secret as a seed; the replacement PVC starts with a fresh
+			// keyring and CLONE INSTANCE rewraps the donor's tablespace keys.
+			s.KeyringSecret = ""
+			s.KeyringVersion = 0
+			s.KeyringDigest = ""
+			s.LastEscrowTime = nil
+		case err != nil:
+			return false, fmt.Errorf("check keyring seed before clone unseal: %w", err)
+		}
+	}
 	s.Phase = v1alpha1.KeyringPhaseUnsealed
 	s.UnsealReason = v1alpha1.UnsealReasonClone
 	s.UnsealedSince = &now
@@ -472,6 +520,28 @@ func (r *MysqlFailoverGroupReconciler) RequestKeyringUnseal(
 	r.Recorder.Eventf(&fg, corev1.EventTypeNormal, "KeyringUnsealed",
 		"site %s unsealed for clone", site)
 	return false, nil
+}
+
+func (r *MysqlFailoverGroupReconciler) deploymentReadyWithUnsealedKeyring(
+	ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string,
+) (bool, error) {
+	var deploy appsv1.Deployment
+	key := types.NamespacedName{Namespace: fg.Namespace, Name: resourceName(fg.Name, site)}
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	if err := reader.Get(ctx, key, &deploy); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get deployment for keyring unseal %s: %w", site, err)
+	}
+	if !deploymentRendersUnsealedKeyring(&deploy) {
+		return false, nil
+	}
+	return deploy.Status.ObservedGeneration >= deploy.Generation &&
+		deploy.Status.UpdatedReplicas >= 1 && deploy.Status.ReadyReplicas >= 1, nil
 }
 
 // -------------------------------------------------------------------
@@ -497,11 +567,14 @@ func alignSiteEncryptionStatus(existing []v1alpha1.SiteEncryptionStatus, names [
 }
 
 func applyCoverage(site *v1alpha1.SiteEncryptionStatus, live *mysql.KeyringStatus) {
-	if live == nil {
+	if live == nil || (live.Component == nil && live.Coverage == nil) {
 		return
 	}
 	now := metav1.Now()
-	cov := &v1alpha1.SiteEncryptionCoverage{LastCheckTime: &now}
+	cov := site.Coverage
+	if cov == nil {
+		cov = &v1alpha1.SiteEncryptionCoverage{}
+	}
 	if live.Component != nil {
 		cov.KeyringComponent = live.Component.Name
 		cov.KeyringReadOnly = live.Component.ReadOnly
@@ -512,6 +585,7 @@ func applyCoverage(site *v1alpha1.SiteEncryptionStatus, live *mysql.KeyringStatu
 		cov.RedoLogEncrypted = live.Coverage.RedoLogEncrypted
 		cov.UndoLogEncrypted = live.Coverage.UndoLogEncrypted
 		cov.BinlogEncrypted = live.Coverage.BinlogEncrypted
+		cov.LastCheckTime = &now
 	}
 	site.Coverage = cov
 }
@@ -523,18 +597,18 @@ func eventTypeForKeyringPhase(p v1alpha1.SiteKeyringPhase) string {
 	return corev1.EventTypeNormal
 }
 
-func publishKeyringMetrics(group string, site *v1alpha1.SiteEncryptionStatus) {
+func publishKeyringMetrics(namespace, group string, site *v1alpha1.SiteEncryptionStatus) {
 	phase := strings.ToLower(string(site.Phase))
 	for _, p := range metrics.AllKeyringPhases {
 		v := 0.0
 		if p == phase {
 			v = 1
 		}
-		metrics.KeyringPhase.WithLabelValues(group, site.Name, p).Set(v)
+		metrics.KeyringPhase.WithLabelValues(namespace, group, site.Name, p).Set(v)
 	}
-	metrics.KeyringEscrowVersion.WithLabelValues(group, site.Name).Set(float64(site.KeyringVersion))
+	metrics.KeyringEscrowVersion.WithLabelValues(namespace, group, site.Name).Set(float64(site.KeyringVersion))
 	if c := site.Coverage; c != nil {
-		metrics.EncryptionCoverageGaps.WithLabelValues(group, site.Name).Set(float64(c.UnencryptedTablespaces))
+		metrics.EncryptionCoverageGaps.WithLabelValues(namespace, group, site.Name).Set(float64(c.UnencryptedTablespaces))
 		for aspect, on := range map[string]bool{
 			"system_tablespace": c.SystemTablespaceEncrypted,
 			"redo_log":          c.RedoLogEncrypted,
@@ -546,7 +620,7 @@ func publishKeyringMetrics(group string, site *v1alpha1.SiteEncryptionStatus) {
 			if on {
 				v = 1
 			}
-			metrics.EncryptionCoverageFlag.WithLabelValues(group, site.Name, aspect).Set(v)
+			metrics.EncryptionCoverageFlag.WithLabelValues(namespace, group, site.Name, aspect).Set(v)
 		}
 	}
 }

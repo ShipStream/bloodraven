@@ -52,6 +52,11 @@ spec:
             - name: auxiliary
               containerPort: 8082
               protocol: TCP
+            {{- if .Values.auxiliary.escrowTLS.enabled }}
+            - name: escrow-tls
+              containerPort: {{ .Values.auxiliary.escrowTLS.port }}
+              protocol: TCP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -85,6 +90,16 @@ spec:
             # when spec.sidecar.bloodravenAddress is not set.
             - name: BLOODRAVEN_DEFAULT_AUXILIARY_ADDRESS
               value: {{ printf "%s.%s.svc.cluster.local:%v" (include "bloodraven.auxiliaryServiceName" .) .Release.Namespace (.Values.auxiliary.service.port | int) | quote }}
+            {{- if .Values.auxiliary.escrowTLS.enabled }}
+            - name: BLOODRAVEN_DEFAULT_ESCROW_URL
+              value: {{ printf "https://%s.%s.svc.cluster.local:%v/keyring/escrow" (include "bloodraven.auxiliaryServiceName" .) .Release.Namespace (.Values.auxiliary.escrowTLS.port | int) | quote }}
+            - name: BLOODRAVEN_ESCROW_TLS_ADDR
+              value: {{ printf ":%v" (.Values.auxiliary.escrowTLS.port | int) | quote }}
+            - name: BLOODRAVEN_ESCROW_TLS_CERT_FILE
+              value: /etc/bloodraven/escrow-tls/tls.crt
+            - name: BLOODRAVEN_ESCROW_TLS_KEY_FILE
+              value: /etc/bloodraven/escrow-tls/tls.key
+            {{- end }}
             # WebSocket hardening (AUDIT H2): Origin allowlist + client cap.
             - name: BLOODRAVEN_WS_ALLOWED_ORIGINS
               value: {{ .Values.auxiliary.service.wsAllowedOrigins | default "*" | quote }}
@@ -93,13 +108,27 @@ spec:
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          {{- with .Values.extraVolumeMounts }}
+          {{- if or .Values.auxiliary.escrowTLS.enabled .Values.extraVolumeMounts }}
           volumeMounts:
+            {{- if .Values.auxiliary.escrowTLS.enabled }}
+            - name: escrow-tls
+              mountPath: /etc/bloodraven/escrow-tls
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- end }}
-      {{- with .Values.extraVolumes }}
+      {{- if or .Values.auxiliary.escrowTLS.enabled .Values.extraVolumes }}
       volumes:
+        {{- if .Values.auxiliary.escrowTLS.enabled }}
+        - name: escrow-tls
+          secret:
+            secretName: {{ required "auxiliary.escrowTLS.existingSecret is required when escrow TLS is enabled" .Values.auxiliary.escrowTLS.existingSecret }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

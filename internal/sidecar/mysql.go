@@ -238,15 +238,15 @@ func (m *LiveMysql) KeyringComponentStatus(ctx context.Context) (*KeyringCompone
 func (m *LiveMysql) EncryptionCoverage(ctx context.Context) (*KeyringCoverage, error) {
 	out := &KeyringCoverage{}
 
-	var redo, undo, binlog int
+	var redo, undo, binlog sql.NullString
 	if err := m.db.QueryRowContext(ctx,
 		"SELECT @@innodb_redo_log_encrypt, @@innodb_undo_log_encrypt, @@binlog_encryption",
 	).Scan(&redo, &undo, &binlog); err != nil {
 		return nil, fmt.Errorf("query encryption variables: %w", err)
 	}
-	out.RedoLogEncrypted = redo == 1
-	out.UndoLogEncrypted = undo == 1
-	out.BinlogEncrypted = binlog == 1
+	out.RedoLogEncrypted = mysqlBool(redo)
+	out.UndoLogEncrypted = mysqlBool(undo)
+	out.BinlogEncrypted = mysqlBool(binlog)
 
 	var sysEnc string
 	err := m.db.QueryRowContext(ctx,
@@ -277,6 +277,14 @@ func (m *LiveMysql) EncryptionCoverage(ctx context.Context) (*KeyringCoverage, e
 	}
 
 	return out, nil
+}
+
+func mysqlBool(value sql.NullString) bool {
+	if !value.Valid {
+		return false
+	}
+	s := strings.TrimSpace(value.String)
+	return s == "1" || strings.EqualFold(s, "on") || strings.EqualFold(s, "true")
 }
 
 // RotateInnoDBMasterKey issues the master-key rotation. It only

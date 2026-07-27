@@ -182,6 +182,20 @@ func TestEffectiveSitePhaseAndSealed(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("failed sealed site preserves rendering", func(t *testing.T) {
+		fg := encFG(&EncryptionAtRestSpec{Enabled: true})
+		fg.Status.EncryptionAtRest = &EncryptionAtRestStatus{Sites: []SiteEncryptionStatus{{
+			Name: "iad", Phase: KeyringPhaseFailed, KeyringSecret: "mysql-orders-iad-keyring-v1",
+		}}}
+		if !fg.SiteKeyringSealed("iad") {
+			t.Fatal("a steady-state escrow failure must not roll away the surviving keyring")
+		}
+		fg.Status.EncryptionAtRest.Sites[0].UnsealReason = UnsealReasonRotation
+		if fg.SiteKeyringSealed("iad") {
+			t.Fatal("an unsealed rotation failure must remain writable for retries")
+		}
+	})
 }
 
 func TestSiteEncryptionStatusByName(t *testing.T) {

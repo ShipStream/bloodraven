@@ -2388,11 +2388,13 @@ spec:
                               on status.encryptionAtRest.
                             properties:
                               binaryLog:
+                                default: true
                                 description: |-
                                   BinaryLog sets binlog_encryption, which covers both binary logs
                                   on the primary and relay logs on replicas. Default true.
                                 type: boolean
                               privilegeCheck:
+                                default: true
                                 description: |-
                                   PrivilegeCheck sets table_encryption_privilege_check. When true
                                   (default), creating a table whose encryption differs from the
@@ -2400,10 +2402,12 @@ spec:
                                   users cannot opt individual tables out of encryption.
                                 type: boolean
                               redoLog:
+                                default: true
                                 description: RedoLog sets innodb_redo_log_encrypt.
                                   Default true.
                                 type: boolean
                               systemTablespace:
+                                default: true
                                 description: |-
                                   SystemTablespace controls whether the operator runs
                                   `ALTER TABLESPACE mysql ENCRYPTION='Y'` once a site is sealed.
@@ -2414,12 +2418,14 @@ spec:
                                   is safe to run against a sealed (read-only) keyring.
                                 type: boolean
                               tables:
+                                default: true
                                 description: |-
                                   Tables sets default_table_encryption. When true (default), every
                                   newly created schema and file-per-table tablespace is encrypted.
                                   It does NOT retroactively encrypt tables that already exist.
                                 type: boolean
                               undoLog:
+                                default: true
                                 description: UndoLog sets innodb_undo_log_encrypt.
                                   Default true.
                                 type: boolean
@@ -2448,7 +2454,9 @@ spec:
                                   DataFileDir is the in-container directory holding the keyring data
                                   file. It is backed by a Secret volume when sealed and by a
                                   memory-backed emptyDir when unsealed. MySQL requires that this
-                                  path is NOT inside the data directory.
+                                  path is NOT inside the data directory. Admission rejects the
+                                  default /var/lib/mysql datadir and its descendants; custom-image
+                                  datadirs must be checked manually.
                                 pattern: ^/[^\0]*[^/]$
                                 type: string
                               escrowTimeoutSeconds:

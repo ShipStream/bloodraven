@@ -31,10 +31,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NAMESPACE="bloodraven-playground"
 FG="playground"
 TLS_SECRET="mysql-playground-tls"
+ESCROW_TLS_SECRET="bloodraven-escrow-tls"
 
 info() { echo -e "\033[1;34m==>\033[0m $*"; }
 ok()   { echo -e "\033[1;32m OK\033[0m $*"; }
@@ -80,18 +80,23 @@ kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" >/dev/null 2>&1 \
 # ---------------------------------------------------------------------
 # 1. TLS material
 # ---------------------------------------------------------------------
-if kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" >/dev/null 2>&1; then
-	ok "TLS secret $TLS_SECRET already exists"
+if kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" >/dev/null 2>&1 && \
+	kubectl -n "$NAMESPACE" get secret "$ESCROW_TLS_SECRET" >/dev/null 2>&1; then
+	ok "TLS secrets $TLS_SECRET and $ESCROW_TLS_SECRET already exist"
 else
+	if kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" >/dev/null 2>&1 || \
+		kubectl -n "$NAMESPACE" get secret "$ESCROW_TLS_SECRET" >/dev/null 2>&1; then
+		die "only one playground TLS Secret exists; delete both $TLS_SECRET and $ESCROW_TLS_SECRET, then retry"
+	fi
 	command -v openssl >/dev/null 2>&1 || die "openssl is required to generate playground TLS material"
-	info "generating a self-signed CA and server certificate"
+	info "generating a self-signed CA and separate MySQL/escrow server certificates"
 
 	TMP="$(mktemp -d)"
 	trap 'rm -rf "$TMP"' EXIT
 
 	openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
 		-keyout "$TMP/ca.key" -out "$TMP/ca.crt" \
-		-subj "/CN=bloodraven-playground-ca" >/dev/null 2>&1
+		-subj "/CN=bloodraven-playground-ca" >/dev/null
 
 	# SANs cover every name MySQL is dialled by: the per-site internal
 	# Services (used for replication and by the operator), the
@@ -121,18 +126,45 @@ EOF
 
 	openssl req -newkey rsa:2048 -nodes \
 		-keyout "$TMP/tls.key" -out "$TMP/tls.csr" \
-		-subj "/CN=mysql-${FG}" >/dev/null 2>&1
+		-subj "/CN=mysql-${FG}" >/dev/null
 	openssl x509 -req -in "$TMP/tls.csr" -days 3650 \
 		-CA "$TMP/ca.crt" -CAkey "$TMP/ca.key" -CAcreateserial \
 		-extfile "$TMP/san.cnf" -extensions v3 \
-		-out "$TMP/tls.crt" >/dev/null 2>&1
+		-out "$TMP/tls.crt" >/dev/null
+
+	cat > "$TMP/escrow-san.cnf" <<EOF
+[req]
+distinguished_name = dn
+[dn]
+[v3]
+subjectAltName = DNS:bloodraven.${NAMESPACE}.svc.cluster.local
+extendedKeyUsage = serverAuth
+EOF
+	openssl req -newkey rsa:2048 -nodes \
+		-keyout "$TMP/escrow-tls.key" -out "$TMP/escrow-tls.csr" \
+		-subj "/CN=bloodraven.${NAMESPACE}.svc.cluster.local" >/dev/null
+	openssl x509 -req -in "$TMP/escrow-tls.csr" -days 3650 \
+		-CA "$TMP/ca.crt" -CAkey "$TMP/ca.key" -CAcreateserial \
+		-extfile "$TMP/escrow-san.cnf" -extensions v3 \
+		-out "$TMP/escrow-tls.crt" >/dev/null
 
 	kubectl -n "$NAMESPACE" create secret generic "$TLS_SECRET" \
 		--from-file=ca.crt="$TMP/ca.crt" \
 		--from-file=tls.crt="$TMP/tls.crt" \
 		--from-file=tls.key="$TMP/tls.key"
 	ok "created TLS secret $TLS_SECRET"
+	kubectl -n "$NAMESPACE" create secret tls "$ESCROW_TLS_SECRET" \
+		--cert="$TMP/escrow-tls.crt" --key="$TMP/escrow-tls.key"
+	ok "created escrow TLS secret $ESCROW_TLS_SECRET"
 fi
+
+info "enabling the operator keyring escrow TLS listener"
+helm upgrade bloodraven "$SCRIPT_DIR/../charts/bloodraven" \
+	--namespace "$NAMESPACE" --reuse-values \
+	--set auxiliary.escrowTLS.enabled=true \
+	--set auxiliary.escrowTLS.existingSecret="$ESCROW_TLS_SECRET" \
+	--timeout=180s
+kubectl -n "$NAMESPACE" rollout status deployment/bloodraven --timeout=180s
 
 # ---------------------------------------------------------------------
 # 2. Optional wipe, so every tablespace is encrypted from birth

@@ -2,7 +2,6 @@ package controller
 
 import (
 	"encoding/json"
-	"path"
 	"strings"
 	"testing"
 
@@ -155,16 +154,16 @@ func TestKeyringConfigMapData(t *testing.T) {
 func TestKeyringInitScript(t *testing.T) {
 	// Fresh bootstrap: MySQL needs the file to exist (it aborts startup
 	// on a missing keyring data file) but an empty one is fine.
-	fresh := keyringInitScript("/run/mysql-keyring/keyring", false)
-	if !strings.Contains(fresh, `: > "/run/mysql-keyring/keyring"`) {
+	fresh := keyringInitScript(false)
+	if !strings.Contains(fresh, `: > "$data_file"`) {
 		t.Errorf("fresh bootstrap must create an empty keyring:\n%s", fresh)
 	}
 	if strings.Contains(fresh, keyringSeedMountPath) {
 		t.Errorf("fresh bootstrap must not reference a seed:\n%s", fresh)
 	}
 
-	seeded := keyringInitScript("/run/mysql-keyring/keyring", true)
-	if !strings.Contains(seeded, path.Join(keyringSeedMountPath, "keyring")) {
+	seeded := keyringInitScript(true)
+	if !strings.Contains(seeded, `cp "$seed_file" "$data_file"`) {
 		t.Errorf("seeded unseal must copy from the escrow Secret:\n%s", seeded)
 	}
 	for _, want := range []string{"chmod 600", `id -u`, "chown 999:999"} {
@@ -179,10 +178,10 @@ func TestKeyringInitScript(t *testing.T) {
 	// the file leaves a root-owned directory and MySQL fails
 	// --initialize with an opaque "InnoDB Database creation was aborted
 	// with error Generic error" (verified against mysql:9.7).
-	if !strings.Contains(fresh, `chmod 700 "/run/mysql-keyring"`) {
+	if !strings.Contains(fresh, `chmod 700 "$data_dir"`) {
 		t.Errorf("init script must prepare the keyring directory, not just the file:\n%s", fresh)
 	}
-	if !strings.Contains(fresh, `chown 999:999 "/run/mysql-keyring"`) {
+	if !strings.Contains(fresh, `chown 999:999 "$data_dir"`) {
 		t.Errorf("init script must chown the keyring directory:\n%s", fresh)
 	}
 
@@ -191,12 +190,15 @@ func TestKeyringInitScript(t *testing.T) {
 	// need to. Doing it unconditionally trips `set -e` and wedges the pod.
 	rootOnly := fresh[strings.Index(fresh, `if [ "$(id -u)" = "0" ]`):]
 	for _, mustBeGuarded := range []string{
-		`chown 999:999 "/run/mysql-keyring"`,
-		`chmod 700 "/run/mysql-keyring"`,
+		`chown 999:999 "$data_dir"`,
+		`chmod 700 "$data_dir"`,
 	} {
 		if !strings.Contains(rootOnly, mustBeGuarded) {
 			t.Errorf("%q must be inside the root-only branch:\n%s", mustBeGuarded, fresh)
 		}
+	}
+	if strings.Contains(fresh, "/run/mysql-keyring") {
+		t.Errorf("paths must be passed as positional arguments, not interpolated into the shell script:\n%s", fresh)
 	}
 }
 
@@ -268,6 +270,7 @@ func TestBuildEncryptionFragments_Sealed(t *testing.T) {
 }
 
 func TestBuildEncryptionFragments_UnsealedFresh(t *testing.T) {
+	t.Setenv("BLOODRAVEN_DEFAULT_ESCROW_URL", "")
 	fg := encTestFG()
 	frags := buildEncryptionFragments(fg, fg.Spec.Sites[0], false, "", false)
 
@@ -303,8 +306,27 @@ func TestBuildEncryptionFragments_UnsealedFresh(t *testing.T) {
 	if env["BLOODRAVEN_KEYRING_FILE"] != "/run/mysql-keyring/keyring" {
 		t.Errorf("keyring file env = %q", env["BLOODRAVEN_KEYRING_FILE"])
 	}
+	if env["BLOODRAVEN_KEYRING_ESCROW_URL"] != "https://bloodraven.shared-lion.svc.cluster.local:8443/keyring/escrow" {
+		t.Errorf("escrow URL = %q", env["BLOODRAVEN_KEYRING_ESCROW_URL"])
+	}
+	if env["BLOODRAVEN_KEYRING_ESCROW_CA_FILE"] != "/etc/mysql/tls/ca.crt" {
+		t.Errorf("escrow CA file = %q", env["BLOODRAVEN_KEYRING_ESCROW_CA_FILE"])
+	}
 	if _, ok := env["BLOODRAVEN_KEYRING_ROTATE"]; ok {
 		t.Error("rotation must not be requested unless asked for")
+	}
+}
+
+func TestBuildEncryptionFragments_DoesNotInterpolateKeyringPathIntoShell(t *testing.T) {
+	fg := encTestFG()
+	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{DataFileDir: `/run/$(touch injected)`}
+	frags := buildEncryptionFragments(fg, fg.Spec.Sites[0], false, "", false)
+	init := frags.InitContainers[0]
+	if strings.Contains(init.Args[0], "touch injected") {
+		t.Fatalf("untrusted path was interpolated into shell script:\n%s", init.Args[0])
+	}
+	if init.Args[2] != `/run/$(touch injected)/keyring` {
+		t.Fatalf("data path argument = %q", init.Args[2])
 	}
 }
 
@@ -415,5 +437,15 @@ func TestComputeSpecHash_UnchangedWhenEncryptionDisabled(t *testing.T) {
 	}
 	if strings.Contains(a, "encryption") {
 		t.Fatal("sanity: hash is a hex digest")
+	}
+}
+
+func TestComputeSpecHash_EscrowURLChangeRollsEncryptedPods(t *testing.T) {
+	fg := encTestFG()
+	t.Setenv("BLOODRAVEN_DEFAULT_ESCROW_URL", "https://old.example/keyring/escrow")
+	oldHash := ComputeSpecHash(fg, fg.Spec.Sites[0], nil, nil)
+	t.Setenv("BLOODRAVEN_DEFAULT_ESCROW_URL", "https://new.example/keyring/escrow")
+	if newHash := ComputeSpecHash(fg, fg.Spec.Sites[0], nil, nil); newHash == oldHash {
+		t.Fatal("changing the escrow endpoint must roll encrypted sidecars")
 	}
 }

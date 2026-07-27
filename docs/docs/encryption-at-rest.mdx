@@ -19,9 +19,9 @@ spec:
     enabled: true
 ```
 
-That is the whole minimal configuration. Everything below is about what
-it actually protects, what it does not, and how the keyring lifecycle
-works — all of which you should read before turning it on in production.
+The operator installation must also enable the chart's dedicated escrow
+TLS listener. Everything below explains that prerequisite, what the
+feature protects, and how the keyring lifecycle works.
 
 ## What this is not
 
@@ -89,6 +89,13 @@ None of these are optional. Bloodraven cannot verify them for you.
   encrypted data, and Bloodraven bootstraps every replica with `CLONE
   INSTANCE`. The CRD rejects `encryptionAtRest.enabled: true` without
   TLS.
+- **The operator escrow TLS listener must be enabled.** Set
+  `auxiliary.escrowTLS.enabled=true` and
+  `auxiliary.escrowTLS.existingSecret=<secret>` on the Bloodraven chart.
+  The Secret must contain `tls.crt` and `tls.key`; the certificate SAN
+  must cover the auxiliary Service FQDN, and every encrypted group's
+  `spec.tls` `ca.crt` must trust its issuer. Keyring bytes and their
+  bearer token are never sent over the plaintext auxiliary listener.
 - **MySQL 9.x Community** (or any build shipping
   `component_keyring_file`). Verified against `mysql:9.7`.
 - **Image-specific paths.** MySQL only reads its global component
@@ -160,7 +167,7 @@ init container, and arms the sidecar's escrow agent:
                                       │
                           sidecar reads, hashes
                                       │
-                     POST /keyring/escrow  (bearer token)
+                  HTTPS POST /keyring/escrow  (bearer token)
                                       ▼
                             operator writes a new
                             immutable Secret version
@@ -237,12 +244,12 @@ kubectl get mysqlfailovergroup orders -o jsonpath='{.status.encryptionAtRest}' |
 
 | Metric | Meaning |
 |---|---|
-| `bloodraven_keyring_phase{phase}` | One-hot per site. **Alert on `phase="sealed"` being 0 for more than a few minutes.** |
-| `bloodraven_keyring_escrow_version` | Current escrow version per site. |
+| `bloodraven_keyring_phase{mysql_namespace,failover_group,site,phase}` | One-hot per site. **Alert on `phase="sealed"` being 0 for more than a few minutes.** |
+| `bloodraven_keyring_escrow_version{mysql_namespace,failover_group,site}` | Current escrow version per site. |
 | `bloodraven_keyring_escrow_pushes_total{outcome}` | Sidecar → operator escrow pushes. Sustained failures mean a site cannot be sealed. |
 | `bloodraven_keyring_rotations_total{outcome}` | Master-key rotations. |
-| `bloodraven_encryption_unencrypted_tablespaces` | User tablespaces still reporting `ENCRYPTION='N'`. **Non-zero means part of your data is in the clear.** |
-| `bloodraven_encryption_coverage{aspect}` | Per-aspect coverage (`system_tablespace`, `redo_log`, `undo_log`, `binlog`, `keyring_read_only`). |
+| `bloodraven_encryption_unencrypted_tablespaces{mysql_namespace,failover_group,site}` | User tablespaces still reporting `ENCRYPTION='N'`. **Non-zero means part of your data is in the clear.** |
+| `bloodraven_encryption_coverage{mysql_namespace,failover_group,site,aspect}` | Per-aspect coverage (`system_tablespace`, `redo_log`, `undo_log`, `binlog`, `keyring_read_only`). |
 
 Suggested alert:
 
@@ -391,16 +398,59 @@ Secret; kubelet re-projects it when the pod is rescheduled.
 **A site's escrow Secret was deleted.** The site is `Failed` and a
 `KeyringEscrowMissing` event fires. If the pod is still running, its
 keyring is alive on tmpfs — **do not delete or restart that pod.** Recover
-by rolling a fresh escrow: re-render the site unsealed so the sidecar
-re-escrows what MySQL is holding.
+by recreating the exact missing Secret directly from the running pod.
+This avoids a rollout while the only surviving key copy is in memory.
 
 ```bash
-kubectl patch mysqlfailovergroup orders --subresource=status --type=merge -p \
-  '{"status":{"encryptionAtRest":{"sites":[{"name":"iad","phase":"Unsealed","unsealReason":"Rotation"}]}}}'
+set -o pipefail
+POD=$(kubectl get pod \
+  -l shipstream.io/failover-group=orders,shipstream.io/site=iad \
+  -o jsonpath='{.items[0].metadata.name}')
+SECRET=$(kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="iad")].keyringSecret}')
+VERSION=$(kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="iad")].keyringVersion}')
+DIGEST=$(kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="iad")].keyringDigest}')
+KEYRING_DIR=$(kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{.spec.encryptionAtRest.keyring.dataFileDir}')
+KEYRING_DIR=${KEYRING_DIR:-/run/mysql-keyring}
+FG_UID=$(kubectl get mysqlfailovergroup orders -o jsonpath='{.metadata.uid}')
+
+kubectl exec "$POD" -c mysql -- cat "$KEYRING_DIR/keyring" | \
+  kubectl create secret generic "$SECRET" --from-file=keyring=/dev/stdin
+ACTUAL_DIGEST=$(kubectl get secret "$SECRET" -o jsonpath='{.data.keyring}' | \
+  base64 -d | sha256sum | cut -d' ' -f1)
+if [[ "sha256:${ACTUAL_DIGEST}" != "$DIGEST" ]]; then
+  kubectl delete secret "$SECRET"
+  echo "restored keyring digest does not match status; refusing to continue" >&2
+  exit 1
+fi
+kubectl label secret "$SECRET" \
+  app.kubernetes.io/name=mysql-keyring \
+  app.kubernetes.io/managed-by=bloodraven \
+  shipstream.io/failover-group=orders shipstream.io/site=iad \
+  shipstream.io/keyring-version="$VERSION"
+kubectl annotate secret "$SECRET" shipstream.io/keyring-digest="$DIGEST"
+kubectl patch secret "$SECRET" --type=merge -p="{
+  \"metadata\":{\"ownerReferences\":[{
+    \"apiVersion\":\"shipstream.io/v1alpha1\",\"kind\":\"MysqlFailoverGroup\",
+    \"name\":\"orders\",\"uid\":\"${FG_UID}\",\"controller\":true,\"blockOwnerDeletion\":true
+  }]},\"immutable\":true
+}"
+
+SITE_INDEX=$(kubectl get mysqlfailovergroup orders -o json | \
+  jq -er '.status.encryptionAtRest.sites | map(.name) | index("iad")')
+kubectl patch mysqlfailovergroup orders --subresource=status --type=json -p="[
+  {\"op\":\"test\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/name\",\"value\":\"iad\"},
+  {\"op\":\"replace\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/phase\",\"value\":\"Sealed\"}
+]"
 ```
 
-If the pod is already gone, that site's data is unrecoverable — re-clone
-it from a healthy peer.
+If the pod is already gone, that site's data is unrecoverable. Delete its
+unreadable PVC and use the confirmed reclone annotation; the operator
+starts the replacement with a fresh keyring and clones from the healthy
+primary.
 
 **The whole namespace was lost.** Restore from a backup
 ([backup encryption](./backup-encryption.mdx) is a separate, independent
@@ -456,7 +506,7 @@ on those nodes.
 | `coverage.undoLog` | `true` | `innodb_undo_log_encrypt` |
 | `coverage.binaryLog` | `true` | `binlog_encryption` (binary + relay logs) |
 | `coverage.systemTablespace` | `true` | `ALTER TABLESPACE mysql ENCRYPTION='Y'` |
-| `keyring.dataFileDir` | `/run/mysql-keyring` | Keyring mount point. Must not be inside `/var/lib/mysql`. |
+| `keyring.dataFileDir` | `/run/mysql-keyring` | Keyring mount point. Must be outside the actual MySQL datadir. Admission rejects `/var/lib/mysql` and descendants; custom-image datadirs require manual verification. |
 | `keyring.mysqldDir` | `/usr/sbin` | Directory holding `mysqld`; the global manifest is mounted here. |
 | `keyring.pluginDir` | `/usr/lib64/mysql/plugin` | MySQL `plugin_dir`; the global component config is mounted here. |
 | `keyring.retainVersions` | `5` | Superseded escrow versions kept per site (2–50). |

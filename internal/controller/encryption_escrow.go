@@ -352,3 +352,12 @@ func deploymentRendersSealedKeyring(deploy *appsv1.Deployment) bool {
 	}
 	return false
 }
+
+func deploymentRendersUnsealedKeyring(deploy *appsv1.Deployment) bool {
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if v.Name == keyringVolumeName {
+			return v.EmptyDir != nil
+		}
+	}
+	return false
+}

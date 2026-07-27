@@ -63,11 +63,11 @@ type KeyringStatus struct {
 	Digest      string `json:"digest,omitempty"`
 	EscrowArmed bool   `json:"escrowArmed"`
 
-	EscrowedDigest  string    `json:"escrowedDigest,omitempty"`
-	EscrowedVersion int32     `json:"escrowedVersion,omitempty"`
-	EscrowedSecret  string    `json:"escrowedSecret,omitempty"`
-	LastEscrowAt    time.Time `json:"lastEscrowAt,omitempty"`
-	LastError       string    `json:"lastError,omitempty"`
+	EscrowedDigest  string     `json:"escrowedDigest,omitempty"`
+	EscrowedVersion int32      `json:"escrowedVersion,omitempty"`
+	EscrowedSecret  string     `json:"escrowedSecret,omitempty"`
+	LastEscrowAt    *time.Time `json:"lastEscrowAt,omitempty"`
+	LastError       string     `json:"lastError,omitempty"`
 
 	RotateRequested bool   `json:"rotateRequested"`
 	RotateDone      bool   `json:"rotateDone"`
