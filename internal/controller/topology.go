@@ -296,6 +296,11 @@ type TopologyManager struct {
 	// BootstrapStatusCallback into condition messages. Protected by mu.
 	bootstrapSource string
 
+	// bootstrapRecipient records the site currently being cloned into.
+	// Consulted only while bootstrapPhase is in-flight, so a stale value
+	// left behind by a finished bootstrap is inert. Protected by mu.
+	bootstrapRecipient string
+
 	// reclonePendingSite is set by the runner when an admin annotation
 	// requests a reclone of a specific site. Processed during the next
 	// poll cycle then cleared. Protected by mu.
@@ -1363,10 +1368,12 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		return
 	}
 
-	// Suppress any cross-site actions while a bootstrap or ordered update is in
-	// progress: during an update the standby is restarting and will appear
-	// unreachable, and we do not want to initiate a spurious failover.
-	if tm.isBootstrapping() || tm.isUpdating() {
+	// Suppress any cross-site actions while a topology-relevant bootstrap or
+	// an ordered update is in progress: during an update the standby is
+	// restarting and will appear unreachable, and we do not want to initiate
+	// a spurious failover. A clone into a non-promotable reader is excluded —
+	// see bootstrapBlocksCrossSite.
+	if tm.bootstrapBlocksCrossSite() || tm.isUpdating() {
 		tm.mu.RLock()
 		phase := tm.bootstrapPhase
 		tm.mu.RUnlock()
@@ -1407,7 +1414,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	// writable site except the current failover target so they stop
 	// accepting writes; recovery proceeds in checkRecovery for each
 	// fenced site once it transitions to read-only.
-	if action.SplitBrain && lastFailoverTarget != "" && !tm.isBootstrapping() {
+	if action.SplitBrain && lastFailoverTarget != "" && !tm.bootstrapBlocksCrossSite() {
 		for i := range tm.sites {
 			if tm.sites[i].name == lastFailoverTarget {
 				continue
@@ -1439,7 +1446,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	// may carry unique writes, and the operator's designated
 	// authority is what matters.
 	promote := ""
-	if action.SplitBrain && lastFailoverTarget == "" && !tm.isBootstrapping() && len(tm.cfg.SitePriorities) > 0 {
+	if action.SplitBrain && lastFailoverTarget == "" && !tm.bootstrapBlocksCrossSite() && len(tm.cfg.SitePriorities) > 0 {
 		writable := tm.writableObservations()
 		winner, losers := state.ResolveSplitBrain(writable, tm.cfg.SitePriorities)
 		if winner != "" {
@@ -1930,6 +1937,75 @@ func (tm *TopologyManager) isBootstrapping() bool {
 	return false
 }
 
+// bootstrapBlocksCrossSite reports whether the in-flight bootstrap (if
+// any) is one that must suppress cross-site actions.
+//
+// A clone into a promotable or dr-only site does suppress: that site is
+// part of the replication topology the failover decision reasons about,
+// it goes unreachable across the CLONE INSTANCE restart, and promoting
+// or fencing around it mid-clone risks diverging data.
+//
+// A clone into a non-promotable reader does NOT suppress. A reader can
+// never be a failover target, so a reader clone carries no information
+// about where the primary should live. Suppressing on it means losing a
+// reader's disk can block promoting a new primary — the group stays in
+// NoPrimary with no writable site for as long as the reader takes to
+// clone, which for a large dataset is unbounded. Readers are already
+// treated as non-blocking elsewhere for the same reason: detectEmptySite
+// deliberately skips readers in its reachability guard so "a missing
+// reader must not block recovery of a promotable site".
+func (tm *TopologyManager) bootstrapBlocksCrossSite() bool {
+	if !tm.isBootstrapping() {
+		return false
+	}
+	tm.mu.RLock()
+	recipient := tm.bootstrapRecipient
+	tm.mu.RUnlock()
+	if recipient == "" {
+		// Recipient unknown (older state or a bootstrap started before
+		// this field was tracked): fall back to the conservative
+		// behaviour of suppressing.
+		return true
+	}
+	site := tm.getSite(recipient)
+	if site == nil {
+		return true
+	}
+	// Only an explicit read-only reader is exempt. Any other role — including
+	// one this build does not recognise — keeps the conservative behaviour,
+	// so a misconfigured or newly-introduced role cannot silently open the
+	// cross-site path during a topology-relevant clone.
+	return site.role != state.SiteRoleReadOnly
+}
+
+// cloningReaderSite returns the name of the non-promotable reader whose
+// in-flight clone the current poll cycle is deliberately tolerating, or ""
+// when no such clone is running.
+//
+// Callers that already passed bootstrapBlocksCrossSite use this to exclude
+// that one site from peer checks which would otherwise re-block the very
+// path the carve-out exists to keep open — a reader is unreachable across
+// its CLONE INSTANCE restart and its GTID set is unreadable while the clone
+// overwrites it. The exclusion is deliberately scoped to the single site
+// being cloned, and only while that clone is in flight: every other site,
+// and that same reader at any other time, is checked exactly as before.
+func (tm *TopologyManager) cloningReaderSite() string {
+	if !tm.isBootstrapping() {
+		return ""
+	}
+	tm.mu.RLock()
+	recipient := tm.bootstrapRecipient
+	tm.mu.RUnlock()
+	if recipient == "" {
+		return ""
+	}
+	site := tm.getSite(recipient)
+	if site == nil || site.role != state.SiteRoleReadOnly {
+		return ""
+	}
+	return recipient
+}
+
 // isUpdating reports whether an ordered update is currently running.
 func (tm *TopologyManager) isUpdating() bool {
 	return tm.updater != nil && tm.updater.IsUpdating()
@@ -2380,6 +2456,7 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 	tm.bootstrapPhase = BootstrapPhaseCloning
 	tm.bootstrapErr = nil
 	tm.bootstrapSource = source
+	tm.bootstrapRecipient = recipient
 	tm.mu.Unlock()
 
 	tm.logger.Info("starting bootstrap",
@@ -2691,7 +2768,12 @@ func (tm *TopologyManager) checkRecoveryWithConvergence(ctx context.Context, sit
 // attempted (successful or not) so Poll surfaces the attempt through
 // the status callback; attempts are rate-limited by failoverCooldown.
 func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
-	if tm.isBootstrapping() || tm.isUpdating() || tm.isTopologyFrozen() || tm.isPlannedFailoverActive() {
+	// A clone into a non-promotable reader must not hold this wedge-healing
+	// path shut: re-asserting the promoted primary's writability is exactly
+	// what rescues a group stuck with no writable site, and a reader clone
+	// says nothing about where the primary belongs. See
+	// bootstrapBlocksCrossSite.
+	if tm.bootstrapBlocksCrossSite() || tm.isUpdating() || tm.isTopologyFrozen() || tm.isPlannedFailoverActive() {
 		return false
 	}
 
@@ -2715,11 +2797,21 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		return false
 	}
 
+	// The one reader whose clone this cycle tolerates is excluded from the
+	// peer checks below: it is unreachable across its CLONE INSTANCE restart
+	// and its GTID set is unreadable mid-clone, so consulting it would
+	// re-block the wedge-healing path the carve-out exists to keep open. Any
+	// errant transactions it held are being overwritten by the clone anyway.
+	skipCloningReader := tm.cloningReaderSite()
+
 	var targetSite *siteTracker
 	for i := range tm.sites {
 		s := &tm.sites[i]
 		if s.name == target {
 			targetSite = s
+			continue
+		}
+		if s.name == skipCloningReader {
 			continue
 		}
 		// A writable site means there is no wedge (split-brain repair
@@ -2764,7 +2856,7 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	}
 	for i := range tm.sites {
 		s := &tm.sites[i]
-		if s.name == target {
+		if s.name == target || s.name == skipCloningReader {
 			continue
 		}
 		peerCtx, peerCancel := context.WithTimeout(ctx, 5*time.Second)
