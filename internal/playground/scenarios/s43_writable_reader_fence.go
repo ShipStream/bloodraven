@@ -311,13 +311,32 @@ func s43VerifySidecarFenceSparesReplication(state *s43RunState) runner.Step {
 			if waitErr := env.Chaos.WaitForOperatorAvailable(restoreCtx); waitErr != nil {
 				return errors.Join(err, fmt.Errorf("wait for operator: %w", waitErr))
 			}
-			// The scale cycle replaced the operator pod, so the cached
-			// tailer is bound to a pod that no longer exists. Rebind it or
-			// the convergence-log assertion two steps down would wait out
+			// The scale cycle replaced the operator pod, so everything bound
+			// to the old one is now stale.
+			//
+			// The log tailer follows a pod that no longer exists — rebind
+			// it, or the convergence-log assertion two steps down waits out
 			// its full timeout against a dead stream.
 			if _, reopenErr := env.ReopenLogs("operator"); reopenErr != nil {
 				return errors.Join(err, fmt.Errorf("reopen operator tailer: %w", reopenErr))
 			}
+			// The metrics scraper is port-forwarded to that same dead pod.
+			if refreshErr := env.RefreshMetrics(restoreCtx); refreshErr != nil {
+				return errors.Join(err, fmt.Errorf("refresh metrics scraper: %w", refreshErr))
+			}
+			// And the replacement is a fresh process, so its Prometheus
+			// counters all restarted at zero. The baseline captured during
+			// inject describes a process that no longer exists; the
+			// planned-failover step would then wait for an increment past a
+			// value the new operator can never reach. Re-baseline.
+			before, metricErr := metricCounter(restoreCtx, env, "bloodraven_planned_failovers_total", map[string]string{
+				"target_site": state.topo.reader,
+				"result":      "rejected",
+			})
+			if metricErr != nil {
+				return errors.Join(err, fmt.Errorf("re-baseline rejected counter: %w", metricErr))
+			}
+			state.rejectedBefore = before
 			return err
 		},
 	}
