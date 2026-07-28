@@ -445,6 +445,13 @@ func (f *FencingMonitor) doFence(ctx context.Context) {
 		f.logger.Error("SELF-FENCING FAILED: could not set super_read_only", "error", err)
 		return
 	}
+	// The fence *is* super_read_only=ON, so record it the moment that
+	// write lands rather than after the eviction below. Eviction is
+	// cleanup on a fence that already holds, and it has no bound — a site
+	// draining a slow KILL would otherwise report self_fenced=false while
+	// demonstrably fenced, and anything synchronising on that state would
+	// act as though no fence were in flight.
+	f.fenced.Store(true)
 
 	// KillConnections reports a partial eviction as (killed>0, err): the
 	// sessions it could identify are gone, but it could not enumerate or
@@ -476,7 +483,6 @@ func (f *FencingMonitor) doFence(ctx context.Context) {
 		f.logger.Info("SELF-FENCING: killed app connections", "count", killed)
 	}
 
-	f.fenced.Store(true)
 	f.logger.Error("SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore")
 }
 

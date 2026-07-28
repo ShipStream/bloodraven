@@ -728,3 +728,61 @@ func TestEvaluateRequiresAllPeersDown(t *testing.T) {
 		t.Fatal("should not self-fence when at least one peer is still reachable")
 	}
 }
+
+// blockingFencer holds KillConnections open until released, so a test
+// can observe the monitor's state while a fence is mid-eviction.
+type blockingFencer struct {
+	*mockFencer
+	entered  chan struct{}
+	release  chan struct{}
+	released bool
+}
+
+func (b *blockingFencer) KillConnections(ctx context.Context) (int, error) {
+	close(b.entered)
+	<-b.release
+	return 0, nil
+}
+
+// The fence is super_read_only=ON, so IsFenced must be true from the
+// moment that write lands — not after the eviction, which has no bound.
+// Anything synchronising on this state (the sidecar's /status
+// self_fenced field, and scenario 43 through it) would otherwise see
+// "not fenced" for a site that demonstrably is, and act as though no
+// fence were in flight.
+func TestFencingReportsFencedBeforeEvictionCompletes(t *testing.T) {
+	clk := clock.NewFakeClock(time.Now())
+	m := newMockFencer(false)
+	b := &blockingFencer{mockFencer: m, entered: make(chan struct{}), release: make(chan struct{})}
+	fm := newTestFencingMonitor(b, clk)
+	fm.WithTopology("iad", "ns", "fg", &TopologyCache{})
+	fm.topology.Set("pdx", clk.Now())
+	setPeerLastOK(fm, clk.Now())
+	fm.lastBloodravenOK = clk.Now()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fm.evaluate(context.Background())
+	}()
+
+	select {
+	case <-b.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("eviction never started")
+	}
+
+	if !fm.IsFenced() {
+		t.Error("IsFenced() is false while the fence is mid-eviction; super_read_only is already ON")
+	}
+
+	close(b.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("evaluate did not return after the eviction was released")
+	}
+	if !fm.IsFenced() {
+		t.Error("IsFenced() is false after a completed fence")
+	}
+}
