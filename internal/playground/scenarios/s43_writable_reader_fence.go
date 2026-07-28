@@ -28,6 +28,7 @@ type s43RunState struct {
 	rejectedBefore float64
 	errantSet      string
 	fencedBy       string
+	sidecarFenced  bool
 	recovered      bool
 }
 
@@ -184,13 +185,33 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 				pglogs.Watch{
 					Label:  "sidecar:" + state.topo.reader,
 					Tailer: sidecarTail,
-					Pred:   pglogs.Substring("SELF-FENCING: topology mismatch"),
+					// The terminal line, not "SELF-FENCING: topology
+					// mismatch" — that one is logged before the fence write
+					// and the connection kill, so it proves a decision, not
+					// a completed fence.
+					Pred: pglogs.Substring("SELF-FENCED"),
 				})
 			cancelLog()
 			if err != nil {
 				return err
 			}
-			env.Capture.Note(fmt.Sprintf("writable reader %s was fenced by %s", state.topo.reader, state.fencedBy))
+
+			// Which label WaitAny returned says who was seen first by a
+			// goroutine, not who acted first, and both actors may have
+			// fenced. Establish the sidecar's participation independently:
+			// super_read_only is back ON by now, so its monitor returns on
+			// its next read-only check and can no longer fence — any
+			// SELF-FENCED it was going to emit has been emitted, and this
+			// window only covers tailer lag.
+			state.sidecarFenced = strings.HasPrefix(state.fencedBy, "sidecar:")
+			if !state.sidecarFenced {
+				probeCtx, cancelProbe := context.WithTimeout(ctx, 15*time.Second)
+				_, probeErr := sidecarTail.Wait(probeCtx, env.StartTime, pglogs.Substring("SELF-FENCED"))
+				cancelProbe()
+				state.sidecarFenced = probeErr == nil
+			}
+			env.Capture.Note(fmt.Sprintf("writable reader %s was fenced by %s (sidecar also fenced: %v)",
+				state.topo.reader, state.fencedBy, state.sidecarFenced))
 
 			// Fencing must not cost the reader its replication channel.
 			// The sidecar's post-fence connection kill used to select the
@@ -245,8 +266,9 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 // the active-site view it already holds — nothing clears it while the
 // monitor has not fenced.
 //
-// Skipped entirely when the sidecar won the first fence, which both
-// covers the path already and avoids a rearm deadlock (see below).
+// Skipped entirely when the sidecar already fenced during the observe
+// step, which both covers the path already and avoids a rearm deadlock
+// (see below).
 func s43VerifySidecarFenceSparesReplication(state *s43RunState) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
@@ -259,12 +281,23 @@ func s43VerifySidecarFenceSparesReplication(state *s43RunState) runner.Step {
 			// peer views stop advancing, so the cleared cache can never be
 			// repopulated, rule #1 never fires, and reachable peers keep
 			// rule #2 quiet.
-			if strings.HasPrefix(state.fencedBy, "sidecar:") {
+			if state.sidecarFenced {
 				env.Capture.Note("skipping forced sidecar fence: the sidecar already fenced the reader in the observe step")
 				return nil
 			}
 			if err := env.Chaos.ScaleOperatorToZero(ctx); err != nil {
 				return err
+			}
+			// replicas=0 is only a spec write. Until the pod finishes
+			// terminating the operator still reconciles, and it would win
+			// the fence this step exists to give the sidecar.
+			goneCtx, cancelGone := context.WithTimeout(ctx, 2*time.Minute)
+			goneErr := env.Chaos.WaitForOperatorGone(goneCtx)
+			cancelGone()
+			if goneErr != nil {
+				restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+				defer cancel()
+				return errors.Join(goneErr, env.Chaos.ScaleOperatorToOne(restoreCtx))
 			}
 			err := s43ForceSidecarFence(ctx, env, state)
 			// Restore the operator before later steps, on the failure path
