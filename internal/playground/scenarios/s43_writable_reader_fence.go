@@ -198,36 +198,27 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 
 			// Which label WaitAny returned says who was seen first by a
 			// goroutine, not who acted first, and both actors may have
-			// fenced. Establish the sidecar's participation independently.
+			// fenced. Ask the sidecar directly instead of inferring from
+			// logs: no log-based check can separate "has not fenced" from
+			// "has not logged yet", because the terminal line is written
+			// only after an unbounded connection eviction.
 			//
-			// Probe for the *decision* line, not the terminal one. doFence
-			// logs SELF-FENCED only after its connection eviction, which has
-			// no bound, so a fence still in flight may not have logged it
-			// yet — inferring "the sidecar did nothing" from that absence
-			// would be wrong, and would send the next step into the rearm
-			// deadlock. The mismatch line is emitted before that work
-			// begins, and once super_read_only is back ON (confirmed above)
-			// the monitor returns on its next read-only check and cannot
-			// start a new fence. So if the decision line is not there by
-			// now, there is no fence in flight and none coming.
-			state.sidecarFenced = strings.HasPrefix(state.fencedBy, "sidecar:")
-			if !state.sidecarFenced {
-				decisionCtx, cancelDecision := context.WithTimeout(ctx, 15*time.Second)
-				_, decisionErr := sidecarTail.Wait(decisionCtx, env.StartTime,
-					pglogs.Substring("SELF-FENCING: topology mismatch"))
-				cancelDecision()
-				if decisionErr == nil {
-					// Committed to fencing. Wait out the eviction so the
-					// skip decision rests on a completed fence.
-					termCtx, cancelTerm := context.WithTimeout(ctx, 60*time.Second)
-					_, termErr := sidecarTail.Wait(termCtx, env.StartTime, pglogs.Substring("SELF-FENCED"))
-					cancelTerm()
-					if termErr != nil {
-						return fmt.Errorf("reader sidecar logged a topology mismatch but never completed the fence: %w", termErr)
-					}
-					state.sidecarFenced = true
-				}
+			// IsFenced is also the exactly right predicate for the next
+			// step's skip decision, whenever it was set. That step makes
+			// the reader writable with the operator down; if this monitor
+			// is fenced, that sends it down its rearm path, which clears
+			// the topology cache to Set("", now) — and Adopt only takes a
+			// strictly newer observedAt, so with the operator down no peer
+			// view can repopulate it and no fence would ever come.
+			probe, err := env.Sidecar(state.topo.reader)
+			if err != nil {
+				return fmt.Errorf("open reader sidecar probe: %w", err)
 			}
+			sidecarStatus, err := probe.Status(ctx)
+			if err != nil {
+				return fmt.Errorf("read reader sidecar status: %w", err)
+			}
+			state.sidecarFenced = sidecarStatus.SelfFenced
 			env.Capture.Note(fmt.Sprintf("writable reader %s was fenced by %s (sidecar also fenced: %v)",
 				state.topo.reader, state.fencedBy, state.sidecarFenced))
 

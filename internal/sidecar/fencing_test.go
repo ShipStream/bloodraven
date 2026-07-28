@@ -88,7 +88,7 @@ func TestEvaluateDoesNothingWhenBothReachable(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when both are reachable")
 	}
 	if f.superReadOnly {
@@ -107,7 +107,7 @@ func TestEvaluateDoesNothingWhenOnlyBloodravenDown(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when only Bloodraven is down (hold steady)")
 	}
 	if f.superReadOnly {
@@ -126,7 +126,7 @@ func TestEvaluateDoesNothingWhenOnlyPeerDown(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when only peer is down (Bloodraven handles it)")
 	}
 	if f.superReadOnly {
@@ -145,7 +145,7 @@ func TestEvaluateFencesWhenBothUnreachablePastTimeout(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Error("should fence when both are unreachable past timeout")
 	}
 	if !f.superReadOnly {
@@ -164,7 +164,7 @@ func TestEvaluateDoesNotFenceWhenBothDownButWithinTimeout(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when both are unreachable but within timeout")
 	}
 	if f.superReadOnly {
@@ -183,7 +183,7 @@ func TestEvaluateDoesNotFenceWhenAlreadyReadOnly(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence a replica (already read-only)")
 	}
 	if f.superReadOnly {
@@ -201,7 +201,7 @@ func TestEvaluateDoesNotReFenceWhenAlreadyFenced(t *testing.T) {
 	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
 
 	fm.evaluate(context.Background())
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("should have fenced")
 	}
 
@@ -224,7 +224,7 @@ func TestEvaluateRearmsAfterExternalRestore(t *testing.T) {
 	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
 
 	fm.evaluate(context.Background())
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("should have fenced")
 	}
 
@@ -240,7 +240,7 @@ func TestEvaluateRearmsAfterExternalRestore(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Fatal("should rearm with a fresh lease window, not instantly re-fence on pre-restore timestamps")
 	}
 	if f.superReadOnly {
@@ -256,7 +256,7 @@ func TestEvaluateRearmsAfterExternalRestore(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("should have re-fenced after external restore and renewed isolation past the lease timeout")
 	}
 	if !f.superReadOnly {
@@ -271,13 +271,13 @@ func TestEvaluateRearmClearsStaleTopologyCache(t *testing.T) {
 	cache := &TopologyCache{}
 	cache.Set("pdx", clk.Now().Add(-10*time.Second))
 	fm := newTopologyFencingMonitor(f, clk, cache, nil)
-	fm.fenced = true
+	fm.fenced.Store(true)
 	fm.lastBloodravenOK = clk.Now()
 	setPeerLastOK(fm, clk.Now())
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Fatal("should rearm without immediately fencing on stale topology")
 	}
 	if snap := cache.Snapshot(); snap.ActiveSite != "" {
@@ -316,7 +316,7 @@ func TestEvaluateHandlesReadOnlyError(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when read_only check fails")
 	}
 	if f.superReadOnly {
@@ -336,14 +336,14 @@ func TestCheckStepFunction(t *testing.T) {
 	setPeerLastOK(fm, clk.Now())
 
 	fm.Check(context.Background())
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when both reachable")
 	}
 
 	clk.Advance(30 * time.Second)
 	fm.Check(context.Background())
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Error("should fence after clock advances past lease timeout with both unreachable")
 	}
 }
@@ -433,7 +433,7 @@ func TestEvaluate_TopologyMismatchFencesImmediately(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("should fence when topology says active site != mySite")
 	}
 	if !f.superReadOnly {
@@ -458,7 +458,7 @@ func TestEvaluate_TopologyMatchDoesNotFence(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when topology confirms this is the active site")
 	}
 }
@@ -480,7 +480,7 @@ func TestEvaluate_EmptyCacheDoesNotFence(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("empty topology cache should not trigger fencing")
 	}
 }
@@ -695,7 +695,7 @@ func TestEvaluate_StalePrimaryLearnsViaPeer(t *testing.T) {
 
 	fm.Check(context.Background())
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("stale primary should fence after adopting peer's fresher active-site view")
 	}
 	snap := cache.Snapshot()
@@ -724,7 +724,7 @@ func TestEvaluateRequiresAllPeersDown(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Fatal("should not self-fence when at least one peer is still reachable")
 	}
 }

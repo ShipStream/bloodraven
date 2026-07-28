@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	"github.com/shipstream/bloodraven/internal/clock"
@@ -51,10 +52,13 @@ type FencingMonitor struct {
 	leaseTimeout     time.Duration
 	lastBloodravenOK time.Time
 	lastPeerOK       map[string]time.Time
-	fenced           bool
-	logger           *slog.Logger
-	httpClient       *http.Client
-	clock            clock.Clock
+	// fenced is written by the monitor goroutine and read by the sidecar
+	// HTTP handler that reports self-fenced state, so it is atomic rather
+	// than a plain bool.
+	fenced     atomic.Bool
+	logger     *slog.Logger
+	httpClient *http.Client
+	clock      clock.Clock
 
 	// Topology-aware fields. Populated by WithTopology; zero values
 	// disable rule #1 above. mySite/namespace/group are the identity
@@ -357,7 +361,7 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		f.logger.Warn("fencing: could not check read_only status", "error", err)
 		return
 	}
-	if f.fenced {
+	if f.fenced.Load() {
 		if readOnly {
 			return
 		}
@@ -373,7 +377,7 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		// Service (endpoint readiness lags an operator restart), wedging
 		// the group in a no-writable-site state.
 		f.logger.Info("fencing: MySQL is writable after prior self-fence; rearming monitor")
-		f.fenced = false
+		f.fenced.Store(false)
 		now := f.clock.Now()
 		f.lastBloodravenOK = now
 		for addr := range f.lastPeerOK {
@@ -472,11 +476,12 @@ func (f *FencingMonitor) doFence(ctx context.Context) {
 		f.logger.Info("SELF-FENCING: killed app connections", "count", killed)
 	}
 
-	f.fenced = true
+	f.fenced.Store(true)
 	f.logger.Error("SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore")
 }
 
-// IsFenced returns whether the monitor has self-fenced.
+// IsFenced reports whether this monitor has self-fenced and not yet
+// rearmed. Safe to call from any goroutine.
 func (f *FencingMonitor) IsFenced() bool {
-	return f.fenced
+	return f.fenced.Load()
 }

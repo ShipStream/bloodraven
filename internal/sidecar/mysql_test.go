@@ -126,18 +126,21 @@ func TestEvictionError(t *testing.T) {
 	// KillConnections caps the per-session causes it collects at
 	// maxReportedKillErrors, but the failure count is never truncated:
 	// more failures than retained details must still report exactly.
-	details := make([]error, 0, maxReportedKillErrors)
-	for i := 0; i < maxReportedKillErrors; i++ {
+	details := make([]error, 0, maxReportedKillErrors+5)
+	for i := 0; i < maxReportedKillErrors+5; i++ {
 		details = append(details, fmt.Errorf("kill %d: access denied", i))
 	}
-	truncated := evictionError(nil, 0, 10, 20, details).Error()
-	if !strings.Contains(truncated, "failed to kill 10 of 20 sessions") {
-		t.Errorf("truncated error lost the exact count: %q", truncated)
+	truncated := evictionError(nil, 0, len(details), 20, details).Error()
+	if want := fmt.Sprintf("failed to kill %d of 20 sessions", len(details)); !strings.Contains(truncated, want) {
+		t.Errorf("truncated error lost the exact count (want %q): %q", want, truncated)
 	}
 	for i := 0; i < maxReportedKillErrors; i++ {
 		if !strings.Contains(truncated, fmt.Sprintf("kill %d: access denied", i)) {
 			t.Errorf("truncated error dropped retained detail %d: %q", i, truncated)
 		}
+	}
+	if strings.Contains(truncated, fmt.Sprintf("kill %d: access denied", maxReportedKillErrors)) {
+		t.Errorf("truncated error kept a detail past the cap: %q", truncated)
 	}
 	if strings.Count(truncated, "access denied") != maxReportedKillErrors {
 		t.Errorf("expected exactly %d retained details, got %q", maxReportedKillErrors, truncated)

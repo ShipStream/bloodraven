@@ -22,6 +22,7 @@ type StatusInfo struct {
 	SecondsBehindSource *int64 `json:"seconds_behind_source"`
 	ServerID            int    `json:"server_id"`
 	Uptime              int64  `json:"uptime"`
+	SelfFenced          bool   `json:"self_fenced"`
 }
 
 // mysqlQuerier abstracts MySQL queries for testing.
@@ -248,11 +249,10 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 			// Keep the causes, not just the tally: a permission denial,
 			// a lost connection and a cancelled context are three very
 			// different operational stories and the warning has to be
-			// able to tell them apart. Bounded so a site that refuses
-			// every KILL cannot turn one log line into hundreds.
-			if len(killErrs) < maxReportedKillErrors {
-				killErrs = append(killErrs, fmt.Errorf("kill %d: %w", id, err))
-			}
+			// able to tell them apart. evictionError truncates the list;
+			// collecting it whole keeps that policy in one testable place
+			// and is bounded by len(targets) either way.
+			killErrs = append(killErrs, fmt.Errorf("kill %d: %w", id, err))
 			continue
 		}
 		killed++
@@ -262,8 +262,9 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 }
 
 // maxReportedKillErrors caps how many individual KILL failures are
-// carried in the eviction error. The count is always exact; only the
-// per-session causes are truncated.
+// carried in the eviction error, so a site that refuses every KILL
+// cannot turn one log line into hundreds. The count is always exact;
+// only the per-session causes are truncated.
 const maxReportedKillErrors = 3
 
 // evictionError aggregates every reason an eviction pass was incomplete,
@@ -285,6 +286,9 @@ func evictionError(iterErr error, unreadable, failed, targets int, killErrs []er
 	}
 	if failed > 0 {
 		problems = append(problems, fmt.Errorf("failed to kill %d of %d sessions", failed, targets))
+		if len(killErrs) > maxReportedKillErrors {
+			killErrs = killErrs[:maxReportedKillErrors]
+		}
 		problems = append(problems, killErrs...)
 	}
 	return errors.Join(problems...)
