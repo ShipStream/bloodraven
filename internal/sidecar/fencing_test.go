@@ -23,20 +23,6 @@ type mockFencer struct {
 	readOnlyErr   error
 	superReadOnly bool
 	setReadOnlyCh chan struct{} // closed on SetSuperReadOnly call
-
-	// killErr, when set, is returned by KillConnections. killCalls counts
-	// every call so eviction-retry tests can assert the monitor stopped.
-	killErr   error
-	killCalls int
-
-	// superReadOnlyErr, when set, is returned by CheckSuperReadOnly.
-	superReadOnlyErr error
-
-	// killSurvivors is the survivor list KillConnections reports
-	// alongside killErr; killTargets records the IDs each KillSessions
-	// retry aimed at.
-	killSurvivors []int64
-	killTargets   [][]int64
 }
 
 func newMockFencer(readOnly bool) *mockFencer {
@@ -53,10 +39,6 @@ func (m *mockFencer) IsReadOnly(_ context.Context) (bool, error) {
 	return m.readOnly, nil
 }
 
-func (m *mockFencer) CheckSuperReadOnly(_ context.Context) (bool, error) {
-	return m.superReadOnly, m.superReadOnlyErr
-}
-
 func (m *mockFencer) SetSuperReadOnly(_ context.Context) error {
 	m.superReadOnly = true
 	m.readOnly = true
@@ -67,21 +49,8 @@ func (m *mockFencer) SetSuperReadOnly(_ context.Context) error {
 	return nil
 }
 
-func (m *mockFencer) KillConnections(_ context.Context) (EvictionResult, error) {
-	m.killCalls++
-	if m.killErr != nil {
-		return EvictionResult{Survivors: m.killSurvivors}, m.killErr
-	}
-	return EvictionResult{}, nil
-}
-
-func (m *mockFencer) KillSessions(_ context.Context, ids []int64) (EvictionResult, error) {
-	m.killCalls++
-	m.killTargets = append(m.killTargets, ids)
-	if m.killErr != nil {
-		return EvictionResult{Survivors: ids}, m.killErr
-	}
-	return EvictionResult{Killed: len(ids)}, nil
+func (m *mockFencer) KillConnections(_ context.Context) (int, error) {
+	return 0, nil
 }
 
 func testLogger() *slog.Logger {
@@ -757,233 +726,5 @@ func TestEvaluateRequiresAllPeersDown(t *testing.T) {
 
 	if fm.fenced {
 		t.Fatal("should not self-fence when at least one peer is still reachable")
-	}
-}
-
-// fenceWithFailedEviction drives the monitor through a topology-mismatch
-// self-fence whose connection eviction fails, leaving a retry armed.
-func fenceWithFailedEviction(t *testing.T, m *mockFencer) *FencingMonitor {
-	t.Helper()
-	clk := clock.NewFakeClock(time.Now())
-	fm := newTestFencingMonitor(m, clk)
-	fm.WithTopology("iad", "ns", "fg", &TopologyCache{})
-	fm.topology.Set("pdx", clk.Now())
-	setPeerLastOK(fm, clk.Now())
-	fm.lastBloodravenOK = clk.Now()
-
-	fm.evaluate(context.Background())
-	if !fm.fenced {
-		t.Fatal("expected topology mismatch to self-fence")
-	}
-	if !fm.evictionPending {
-		t.Fatal("failed eviction did not arm a retry")
-	}
-	return fm
-}
-
-// An eviction that could not finish must be retried on a later tick.
-// Once fenced, evaluate() returns on its first read-only check, so
-// without the retry the surviving sessions are never revisited.
-func TestFencingRetriesIncompleteEviction(t *testing.T) {
-	m := newMockFencer(false)
-	m.killErr = fmt.Errorf("failed to kill 1 of 3 sessions")
-	m.killSurvivors = []int64{41}
-	fm := fenceWithFailedEviction(t, m)
-	callsAfterFence := m.killCalls
-
-	// The site is still read-only, so this tick would otherwise be a
-	// no-op. It must re-attempt the eviction instead.
-	m.killErr = nil
-	fm.evaluate(context.Background())
-
-	if m.killCalls != callsAfterFence+1 {
-		t.Errorf("KillConnections called %d times, want %d (one retry)", m.killCalls, callsAfterFence+1)
-	}
-	if fm.evictionPending {
-		t.Error("a successful retry must clear the pending eviction")
-	}
-
-	// Nothing left to retry: later ticks stay quiet.
-	fm.evaluate(context.Background())
-	if m.killCalls != callsAfterFence+1 {
-		t.Errorf("KillConnections called again after the eviction completed (%d calls)", m.killCalls)
-	}
-}
-
-// Retries are bounded. A KILL refused on every tick is being refused for
-// a structural reason, and retrying forever would warn every tick without
-// changing anything.
-func TestFencingBoundsEvictionRetries(t *testing.T) {
-	m := newMockFencer(false)
-	m.killErr = fmt.Errorf("failed to kill 1 of 3 sessions")
-	m.killSurvivors = []int64{41}
-	fm := fenceWithFailedEviction(t, m)
-	callsAfterFence := m.killCalls
-
-	for i := 0; i < 10; i++ {
-		fm.evaluate(context.Background())
-	}
-
-	wantRetries := maxEvictionRetries
-	if got := m.killCalls - callsAfterFence; got != wantRetries {
-		t.Errorf("eviction retried %d times, want %d", got, wantRetries)
-	}
-	if fm.evictionPending {
-		t.Error("monitor must stop retrying after giving up")
-	}
-	// Giving up must not unfence: super_read_only=ON is the safety
-	// property and it still holds.
-	if !fm.fenced {
-		t.Error("giving up on eviction must not clear the fence")
-	}
-}
-
-// A site that becomes writable again is a fresh start: the previous
-// fence's unevicted sessions are no longer its problem.
-func TestFencingRearmClearsPendingEviction(t *testing.T) {
-	m := newMockFencer(false)
-	m.killErr = fmt.Errorf("failed to kill 1 of 3 sessions")
-	m.killSurvivors = []int64{41}
-	fm := fenceWithFailedEviction(t, m)
-
-	// An actor with SUPER restored writability, per the restore contract.
-	m.readOnly = false
-	m.superReadOnly = false
-	fm.topology.Set("", fm.clock.Now())
-	fm.evaluate(context.Background())
-
-	if fm.fenced {
-		t.Fatal("writable MySQL must rearm the monitor")
-	}
-	if fm.evictionPending || fm.evictionAttempts != 0 {
-		t.Errorf("rearm left stale eviction state (pending=%v attempts=%d)", fm.evictionPending, fm.evictionAttempts)
-	}
-}
-
-// Promotion clears super_read_only (failover.go step 7) before read_only
-// (step 8). A retry tick landing between them still sees @@read_only=1
-// while the fence is already gone — evicting there would kill the
-// operator's own promotion session.
-func TestFencingSkipsEvictionRetryDuringPromotion(t *testing.T) {
-	m := newMockFencer(false)
-	m.killErr = fmt.Errorf("failed to kill 1 of 3 sessions")
-	m.killSurvivors = []int64{41}
-	fm := fenceWithFailedEviction(t, m)
-	callsAfterFence := m.killCalls
-
-	// Operator step 7 has run; step 8 has not, so IsReadOnly still says
-	// read-only. Only super_read_only reveals the fence is lifted.
-	m.superReadOnly = false
-
-	fm.evaluate(context.Background())
-
-	if m.killCalls != callsAfterFence {
-		t.Errorf("evicted inside the promotion window (%d calls, want %d)", m.killCalls, callsAfterFence)
-	}
-	if fm.evictionPending || fm.evictionAttempts != 0 {
-		t.Errorf("a lifted fence must cancel the retry (pending=%v attempts=%d)", fm.evictionPending, fm.evictionAttempts)
-	}
-}
-
-// If the fence state cannot be read, the retry is skipped but stays armed:
-// evicting on an unknown state risks the promotion window, and disarming
-// would drop the surviving sessions for good.
-func TestFencingKeepsEvictionArmedWhenFenceStateUnreadable(t *testing.T) {
-	m := newMockFencer(false)
-	m.killErr = fmt.Errorf("failed to kill 1 of 3 sessions")
-	m.killSurvivors = []int64{41}
-	fm := fenceWithFailedEviction(t, m)
-	callsAfterFence := m.killCalls
-
-	m.superReadOnlyErr = fmt.Errorf("connection refused")
-	fm.evaluate(context.Background())
-
-	if m.killCalls != callsAfterFence {
-		t.Errorf("evicted without confirming the fence still holds (%d calls)", m.killCalls)
-	}
-	if !fm.evictionPending {
-		t.Error("an unreadable fence state must leave the retry armed")
-	}
-}
-
-// The super_read_only check cannot by itself make the retry safe against
-// a promotion — promotion can clear the flag between the check and the
-// KILL. Safety comes from the retry only ever targeting the sessions the
-// original fence identified and failed to kill. A connection opened
-// after the fence, such as the operator's promotion session, is not in
-// that list at any interleaving.
-func TestFencingRetryTargetsOnlyOriginalSurvivors(t *testing.T) {
-	m := newMockFencer(false)
-	m.killErr = fmt.Errorf("failed to kill 2 of 5 sessions")
-	m.killSurvivors = []int64{41, 42}
-	fm := fenceWithFailedEviction(t, m)
-
-	fm.evaluate(context.Background())
-
-	if len(m.killTargets) != 1 {
-		t.Fatalf("expected exactly one retry, got %d", len(m.killTargets))
-	}
-	got := m.killTargets[0]
-	if len(got) != 2 || got[0] != 41 || got[1] != 42 {
-		t.Errorf("retry targeted %v, want exactly the original survivors [41 42]", got)
-	}
-	// Whatever the operator opens after the fence — id 99 stands in for
-	// its promotion session — is unreachable by construction: the retry
-	// never enumerates, so it cannot discover new sessions.
-	for _, id := range got {
-		if id == 99 {
-			t.Error("retry targeted a session opened after the fence")
-		}
-	}
-}
-
-// Each attempt aims at strictly fewer sessions: whoever died drops out of
-// the target list.
-func TestFencingRetryNarrowsTargetsAsSessionsDie(t *testing.T) {
-	m := newMockFencer(false)
-	m.killErr = fmt.Errorf("failed to kill 2 of 5 sessions")
-	m.killSurvivors = []int64{41, 42}
-	fm := fenceWithFailedEviction(t, m)
-
-	fm.evaluate(context.Background())
-	// One of the two finally died; only the other is still holding on.
-	m.killSurvivors = []int64{42}
-	fm.evictionSurvivors = []int64{42}
-	fm.evaluate(context.Background())
-
-	if len(m.killTargets) != 2 {
-		t.Fatalf("expected two retries, got %d", len(m.killTargets))
-	}
-	if got := m.killTargets[1]; len(got) != 1 || got[0] != 42 {
-		t.Errorf("second retry targeted %v, want only the remaining survivor [42]", got)
-	}
-}
-
-// An eviction that failed only because enumeration broke has no session
-// IDs to aim at. Reporting it is right; arming a retry that cannot do
-// anything is not.
-func TestFencingDoesNotArmRetryWithoutSurvivors(t *testing.T) {
-	clk := clock.NewFakeClock(time.Now())
-	m := newMockFencer(false)
-	m.killErr = fmt.Errorf("list connections: driver went away")
-	m.killSurvivors = nil
-	fm := newTestFencingMonitor(m, clk)
-	fm.WithTopology("iad", "ns", "fg", &TopologyCache{})
-	fm.topology.Set("pdx", clk.Now())
-	setPeerLastOK(fm, clk.Now())
-	fm.lastBloodravenOK = clk.Now()
-
-	fm.evaluate(context.Background())
-	if !fm.fenced {
-		t.Fatal("expected topology mismatch to self-fence")
-	}
-	if fm.evictionPending {
-		t.Error("armed a retry with no session to target")
-	}
-
-	callsAfterFence := m.killCalls
-	fm.evaluate(context.Background())
-	if m.killCalls != callsAfterFence {
-		t.Errorf("retried anyway (%d calls, want %d)", m.killCalls, callsAfterFence)
 	}
 }

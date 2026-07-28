@@ -16,14 +16,8 @@ import (
 // Fencer abstracts MySQL operations needed by the fencing monitor.
 type Fencer interface {
 	IsReadOnly(ctx context.Context) (bool, error)
-	// CheckSuperReadOnly reports @@super_read_only specifically. It is not
-	// redundant with IsReadOnly, which reads @@read_only: promotion clears
-	// super_read_only before read_only, so the two disagree for the width
-	// of that window and only this one answers "is our fence still on".
-	CheckSuperReadOnly(ctx context.Context) (bool, error)
 	SetSuperReadOnly(ctx context.Context) error
-	KillConnections(ctx context.Context) (EvictionResult, error)
-	KillSessions(ctx context.Context, ids []int64) (EvictionResult, error)
+	KillConnections(ctx context.Context) (int, error)
 }
 
 // FencingMonitor polls Bloodraven and every peer sidecar, and self-
@@ -58,20 +52,9 @@ type FencingMonitor struct {
 	lastBloodravenOK time.Time
 	lastPeerOK       map[string]time.Time
 	fenced           bool
-
-	// evictionPending records that a fence landed but could not evict
-	// every session. Once fenced, evaluate() returns on the first
-	// read-only check, so without this the surviving sessions would
-	// never be retried and could stay connected to the fenced site
-	// indefinitely. Retries are bounded by evictionAttempts: a session
-	// that refuses to die three ticks running is not going to, and
-	// re-killing forever would just be noise.
-	evictionPending   bool
-	evictionAttempts  int
-	evictionSurvivors []int64
-	logger            *slog.Logger
-	httpClient        *http.Client
-	clock             clock.Clock
+	logger           *slog.Logger
+	httpClient       *http.Client
+	clock            clock.Clock
 
 	// Topology-aware fields. Populated by WithTopology; zero values
 	// disable rule #1 above. mySite/namespace/group are the identity
@@ -376,7 +359,6 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 	}
 	if f.fenced {
 		if readOnly {
-			f.retryEviction(ctx)
 			return
 		}
 		// Writability after a self-fence means an actor with SUPER
@@ -392,12 +374,6 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		// the group in a no-writable-site state.
 		f.logger.Info("fencing: MySQL is writable after prior self-fence; rearming monitor")
 		f.fenced = false
-		// The site is writable again, so the sessions the previous fence
-		// failed to evict are no longer the previous fence's problem. A
-		// future fence starts its own eviction from scratch.
-		f.evictionPending = false
-		f.evictionAttempts = 0
-		f.evictionSurvivors = nil
 		now := f.clock.Now()
 		f.lastBloodravenOK = now
 		for addr := range f.lastPeerOK {
@@ -469,96 +445,28 @@ func (f *FencingMonitor) doFence(ctx context.Context) {
 	// KillConnections reports a partial eviction as (killed>0, err): the
 	// sessions it could identify are gone, but it could not enumerate or
 	// kill them all. Carry the count so the warning says how far the fence
-	// got, and arm a retry — see retryEviction.
-	res, err := f.mysql.KillConnections(ctx)
-	if err != nil {
-		f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err, "count", res.Killed)
-		// Only sessions we identified can be retried by ID. An eviction
-		// that failed purely because enumeration broke leaves nothing to
-		// aim at, so it is reported and dropped rather than armed as a
-		// retry that could not do anything.
-		f.evictionSurvivors = res.Survivors
-		f.evictionPending = len(res.Survivors) > 0
-		f.evictionAttempts = 0
+	// got.
+	//
+	// Deliberately not retried on later ticks. A surviving session cannot
+	// write — super_read_only=ON is set above and holds — so what is left
+	// is a stale-read window, and closing it from here means issuing KILLs
+	// against a site the operator may be promoting. There is no
+	// interleaving that makes that safe from inside the sidecar: the
+	// operator holds a persistent pooled connection to every site
+	// (internal/mysql/checker.go), so its future promotion session can
+	// already be in the process list at fence time, and killing it aborts
+	// the promotion mid-sequence. Draining stragglers with retries is the
+	// operator's job, where it can be sequenced against its own promotion
+	// — see the planned-failover Draining phase and spec.plannedFailover
+	// .drainTimeout, which kills every second until the count reaches zero.
+	if killed, err := f.mysql.KillConnections(ctx); err != nil {
+		f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err, "count", killed)
 	} else {
-		f.logger.Info("SELF-FENCING: killed app connections", "count", res.Killed)
-		f.evictionPending = false
-		f.evictionSurvivors = nil
+		f.logger.Info("SELF-FENCING: killed app connections", "count", killed)
 	}
 
 	f.fenced = true
 	f.logger.Error("SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore")
-}
-
-// maxEvictionRetries bounds how many later ticks will re-attempt an
-// eviction that the fence itself could not finish.
-const maxEvictionRetries = 3
-
-// retryEviction re-attempts an incomplete eviction on a later tick.
-//
-// The fence's safety property — super_read_only=ON — is already held by
-// the time this runs, so a surviving session cannot write. What it can
-// do is keep reading from a site the operator has demoted, which is the
-// stale-read the eviction exists to prevent. Once f.fenced is set,
-// evaluate() returns on its first read-only check, so nothing else would
-// ever revisit those sessions.
-//
-// Bounded on purpose. A KILL that is refused three ticks running is
-// being refused for a structural reason (a privilege the sidecar does
-// not hold, a session the server will not let it touch), and retrying
-// forever would emit a warning every tick without changing anything.
-func (f *FencingMonitor) retryEviction(ctx context.Context) {
-	if !f.evictionPending {
-		return
-	}
-	// Our fence is super_read_only=ON, and only that flag says whether it
-	// still holds. Promotion clears super_read_only (failover.go step 7)
-	// before read_only (step 8), so a tick landing between them still sees
-	// @@read_only=1 while the fence is already lifted. The fence we were
-	// finishing is gone, so there is nothing left to evict.
-	//
-	// This check is not what makes the retry safe against a promotion —
-	// it cannot be, since promotion could clear the flag in the moment
-	// between reading it and issuing the KILLs. Safety comes from the
-	// retry only ever targeting evictionSurvivors, sessions the original
-	// fence identified and failed to kill. The operator's promotion
-	// connection, and every client it admits, are opened after the fence
-	// and are therefore not in that list at any interleaving. The check
-	// below just stops pointless work once the fence is lifted.
-	superReadOnly, err := f.mysql.CheckSuperReadOnly(ctx)
-	if err != nil {
-		f.logger.Warn("fencing: could not check super_read_only before eviction retry", "error", err)
-		return
-	}
-	if !superReadOnly {
-		f.clearPendingEviction()
-		f.logger.Info("SELF-FENCING: abandoning eviction retry, fence already lifted")
-		return
-	}
-	f.evictionAttempts++
-	res, err := f.mysql.KillSessions(ctx, f.evictionSurvivors)
-	if err == nil {
-		f.clearPendingEviction()
-		f.logger.Info("SELF-FENCING: killed app connections", "count", res.Killed)
-		return
-	}
-	// Narrow the target list to whoever is still holding on, so each
-	// attempt aims at strictly fewer sessions than the last.
-	f.evictionSurvivors = res.Survivors
-	if f.evictionAttempts >= maxEvictionRetries || len(res.Survivors) == 0 {
-		attempts := f.evictionAttempts
-		f.clearPendingEviction()
-		f.logger.Warn("SELF-FENCING: giving up on evicting connections after fencing",
-			"error", err, "count", res.Killed, "attempts", attempts)
-		return
-	}
-	f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err, "count", res.Killed)
-}
-
-func (f *FencingMonitor) clearPendingEviction() {
-	f.evictionPending = false
-	f.evictionAttempts = 0
-	f.evictionSurvivors = nil
 }
 
 // IsFenced returns whether the monitor has self-fenced.

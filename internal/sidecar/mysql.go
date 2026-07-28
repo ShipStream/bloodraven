@@ -144,15 +144,6 @@ func (m *LiveMysql) IsReadOnly(ctx context.Context) (bool, error) {
 	return readOnly == 1, nil
 }
 
-func (m *LiveMysql) CheckSuperReadOnly(ctx context.Context) (bool, error) {
-	var superReadOnly int
-	err := m.db.QueryRowContext(ctx, "SELECT @@super_read_only").Scan(&superReadOnly)
-	if err != nil {
-		return false, fmt.Errorf("query super_read_only: %w", err)
-	}
-	return superReadOnly == 1, nil
-}
-
 func (m *LiveMysql) SetSuperReadOnly(ctx context.Context) error {
 	_, err := m.db.ExecContext(ctx, "SET GLOBAL super_read_only = ON")
 	if err != nil {
@@ -208,24 +199,13 @@ func killableConnection(user, command string) bool {
 	return true
 }
 
-// EvictionResult reports what one eviction pass achieved.
-type EvictionResult struct {
-	Killed int
-	// Survivors are sessions that were identified as application traffic
-	// and then refused to die. A retry targets exactly these and never
-	// re-enumerates: the operator's promotion connection, and any client
-	// it admits, are opened after the fence and so can never appear in
-	// this list. That is what keeps a retry from racing a promotion.
-	Survivors []int64
-}
-
-func (m *LiveMysql) KillConnections(ctx context.Context) (EvictionResult, error) {
+func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 	rows, err := m.db.QueryContext(ctx,
 		`SELECT id, COALESCE(user, ''), COALESCE(command, '')
 		 FROM information_schema.processlist
 		 WHERE id != CONNECTION_ID()`)
 	if err != nil {
-		return EvictionResult{}, fmt.Errorf("list connections: %w", err)
+		return 0, fmt.Errorf("list connections: %w", err)
 	}
 	defer rows.Close()
 
@@ -251,22 +231,8 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (EvictionResult, error)
 	// result set is a candidate. Close is idempotent with the defer above.
 	rows.Close()
 
-	res := m.killSessions(ctx, targets)
-	return res, evictionError(iterErr, unreadable, len(res.Survivors), len(targets))
-}
-
-// KillSessions kills exactly the supplied session IDs, skipping
-// enumeration entirely. Used to finish an eviction that a previous pass
-// left incomplete — see EvictionResult.Survivors for why the retry must
-// not look for fresh targets.
-func (m *LiveMysql) KillSessions(ctx context.Context, ids []int64) (EvictionResult, error) {
-	res := m.killSessions(ctx, ids)
-	return res, evictionError(nil, 0, len(res.Survivors), len(ids))
-}
-
-func (m *LiveMysql) killSessions(ctx context.Context, ids []int64) EvictionResult {
-	var res EvictionResult
-	for _, id := range ids {
+	var killed, failed int
+	for _, id := range targets {
 		if _, err := m.db.ExecContext(ctx, fmt.Sprintf("KILL %d", id)); err != nil {
 			// A session that ended on its own between the SELECT and the
 			// KILL is the outcome the fence wanted, not a failure to
@@ -277,12 +243,13 @@ func (m *LiveMysql) killSessions(ctx context.Context, ids []int64) EvictionResul
 			if isUnknownThread(err) {
 				continue
 			}
-			res.Survivors = append(res.Survivors, id)
+			failed++
 			continue
 		}
-		res.Killed++
+		killed++
 	}
-	return res
+
+	return killed, evictionError(iterErr, unreadable, failed, len(targets))
 }
 
 // evictionError aggregates every reason an eviction pass was incomplete,
