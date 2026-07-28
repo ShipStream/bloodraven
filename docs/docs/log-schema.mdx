@@ -182,7 +182,7 @@ The per-MySQL sidecar emits these in its operational stream. `SELF-FENCING:` is 
 |---|---|---|---|
 | ERROR | `SELF-FENCING: topology mismatch — operator-authoritative active site disagrees with our site, setting super_read_only=ON` | `site`, `authoritativeActiveSite`, `observedAt`, `pod` | The operator (or a peer relaying the operator's view) reports a different active site than this sidecar is on. Fired even when the operator is reachable. |
 | ERROR | `SELF-FENCING: Bloodraven and every peer unreachable beyond lease timeout, setting super_read_only=ON` | `bloodravenLastOk`, `latestPeerOk`, `peers`, `leaseTimeout`, `pod` | Backstop rule: nothing is reachable, so we can't be sure we're still primary. |
-| INFO | `SELF-FENCING: killed app connections` | `count`, `pod` | Connection kill after fencing succeeded. |
+| INFO | `SELF-FENCING: killed app connections` | `count`, `pod` | Application sessions evicted after fencing succeeded. Server-internal threads are spared, so a fenced replica keeps applying from the authoritative primary. |
 | ERROR | `SELF-FENCING FAILED: could not set super_read_only` | `error`, `pod` | The fence write itself failed. The sidecar retries on the next tick. |
 | ERROR | `SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore` | `pod` | Final status; the sidecar will not unfence on its own. The next operator promotion clears it. |
 | INFO | `fencing: MySQL is writable after prior self-fence; rearming monitor` | `pod` | An actor with SUPER privileges (the operator, per the restore contract) made MySQL writable again after a self-fence. The monitor re-arms with a fresh lease window — it will not re-fence until a full `leaseTimeout` passes with the operator and every peer unreachable again. |

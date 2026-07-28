@@ -11,6 +11,7 @@ import (
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
+	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -25,6 +26,7 @@ type s43RunState struct {
 	readerUUID     string
 	rejectedBefore float64
 	errantSet      string
+	fencedBy       string
 	recovered      bool
 }
 
@@ -38,8 +40,9 @@ func scenario43WritableReaderFence() runner.Scenario {
 	return runner.Scenario{
 		ID:    "43-writable-reader-fence",
 		Title: "Anomalously writable reader is fenced, blocked on divergence, and never promoted",
-		Hypothesis: "Turning off super_read_only on the reader and writing an errant row triggers the un-debounced " +
-			"fence back to super_read_only=ON; a planned failover targeting the reader is rejected with the role " +
+		Hypothesis: "Turning off super_read_only on the reader and writing an errant row triggers an un-debounced " +
+			"fence back to super_read_only=ON — from the operator's poll loop or the reader's own sidecar fencing " +
+			"monitor, whichever ticks first; a planned failover targeting the reader is rejected with the role " +
 			"error; and the errant GTID trips the convergence GTID gate into Blocked/GTIDDiverged instead of a " +
 			"silent repoint.",
 		Risk:     "medium",
@@ -74,10 +77,13 @@ func s43InjectWritableReaderWithErrantRow(state *s43RunState) runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "turn off super_read_only on the reader and write one errant row",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			// Open the operator tailer before injecting so the fence line
-			// cannot scroll past the SinceTime window.
+			// Open both fencing actors' tailers before injecting so the
+			// fence line cannot scroll past the SinceTime window.
 			if _, err := env.Logs("operator"); err != nil {
 				return fmt.Errorf("open operator tailer: %w", err)
+			}
+			if _, err := env.Logs("sidecar:" + state.topo.reader); err != nil {
+				return fmt.Errorf("open reader sidecar tailer: %w", err)
 			}
 			before, err := metricCounter(ctx, env, "bloodraven_planned_failovers_total", map[string]string{
 				"target_site": state.topo.reader,
@@ -112,41 +118,96 @@ func s43InjectWritableReaderWithErrantRow(state *s43RunState) runner.Step {
 	}
 }
 
+// s43ObserveFence asserts the safety property — the reader's writable
+// window closes — without encoding which control plane closes it. Two
+// independent actors race here and both are correct:
+//
+//   - the operator's poll loop (2s), which fences any writable
+//     non-promotable site without debounce, and
+//   - the reader's own sidecar fencing monitor (5s), whose
+//     topology-mismatch rule self-fences any site that is writable
+//     while the operator-authoritative active site is someone else.
+//
+// The sidecar wins roughly one run in five, and when it does the
+// operator never observes a writable reader at all — no state
+// transition, no fence, no log line. Asserting only on the operator's
+// line made this step flaky (issue #119). So: wait on the invariant
+// (super_read_only back ON), then require that *an* actor logged a
+// deliberate fence, so the step still fails if the window closed for
+// some other reason (a mysqld restart, a lost injection).
 func s43ObserveFence(state *s43RunState) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "operator fences the reader back to super_read_only without group impact",
+		Name:  "reader is fenced back to super_read_only without group impact",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			tail, err := env.Logs("operator")
-			if err != nil {
-				return err
-			}
-			logCtx, cancelLog := context.WithTimeout(ctx, 60*time.Second)
-			_, err = env.Wait.UntilLog(logCtx, tail, env.StartTime,
-				"writable non-promotable reader is fenced",
-				pglogs.Structured("fenced writable non-promotable site", map[string]string{"site": state.topo.reader}))
-			cancelLog()
-			if err != nil {
-				return err
-			}
-
 			reader, err := env.MySQL(state.topo.reader)
 			if err != nil {
 				return fmt.Errorf("open reader mysql: %w", err)
 			}
-			deadline := time.Now().Add(30 * time.Second)
+			deadline := time.Now().Add(60 * time.Second)
 			for {
 				on, err := reader.SuperReadOnly(ctx)
 				if err == nil && on {
 					break
 				}
 				if time.Now().After(deadline) {
-					return fmt.Errorf("reader super_read_only not restored within 30s (on=%v err=%v)", on, err)
+					return fmt.Errorf("reader super_read_only not restored within 60s (on=%v err=%v)", on, err)
 				}
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
 				case <-time.After(time.Second):
+				}
+			}
+
+			operatorTail, err := env.Logs("operator")
+			if err != nil {
+				return err
+			}
+			sidecarTail, err := env.Logs("sidecar:" + state.topo.reader)
+			if err != nil {
+				return err
+			}
+			// The fence write precedes its log line in both actors, so
+			// the winning line is already in a ring buffer by now; the
+			// window only covers tailer stream lag.
+			logCtx, cancelLog := context.WithTimeout(ctx, 30*time.Second)
+			_, state.fencedBy, err = env.Wait.UntilAnyLog(logCtx, env.StartTime,
+				"writable non-promotable reader is fenced by the operator or its sidecar",
+				pglogs.Watch{
+					Label:  "operator",
+					Tailer: operatorTail,
+					Pred:   pglogs.Structured("fenced writable non-promotable site", map[string]string{"site": state.topo.reader}),
+				},
+				pglogs.Watch{
+					Label:  "sidecar:" + state.topo.reader,
+					Tailer: sidecarTail,
+					Pred:   pglogs.Substring("SELF-FENCING: topology mismatch"),
+				})
+			cancelLog()
+			if err != nil {
+				return err
+			}
+			env.Capture.Note(fmt.Sprintf("writable reader %s was fenced by %s", state.topo.reader, state.fencedBy))
+
+			// Fencing must not cost the reader its replication channel.
+			// The sidecar's post-fence connection kill used to select the
+			// replica's own `system user` threads, which stopped
+			// replication on the site being fenced and — because the
+			// reader is diverged — left convergence permanently Blocked
+			// with no operator action to explain it (issue #119). Sampled
+			// twice so a kill landing just after the fence is still
+			// caught.
+			for _, delay := range []time.Duration{0, 5 * time.Second} {
+				if delay > 0 {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(delay):
+					}
+				}
+				if err := s43AssertReaderReplicating(ctx, reader); err != nil {
+					return err
 				}
 			}
 
@@ -163,6 +224,34 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 			return nil
 		},
 	}
+}
+
+// s43AssertReaderReplicating fails unless the reader's I/O and applier
+// threads are both running. Query errors are retried rather than
+// reported: the fence's connection kill legitimately takes out this very
+// session, and the pool reconnects on the next attempt.
+func s43AssertReaderReplicating(ctx context.Context, reader *pgmysql.SiteClient) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
+		}
+		repl, err := reader.ShowReplicaStatus(ctx)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if !repl.IORunning || !repl.SQLRunning {
+			return fmt.Errorf("reader replication stopped by the fence (io=%v sql=%v lastIO=%q lastSQL=%q); fencing must not kill replication threads",
+				repl.IORunning, repl.SQLRunning, repl.LastIOError, repl.LastSQLError)
+		}
+		return nil
+	}
+	return fmt.Errorf("reader replica status after fence: %w", lastErr)
 }
 
 func s43VerifyPlannedFailoverRejected(state *s43RunState) runner.Step {

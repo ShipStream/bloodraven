@@ -162,28 +162,79 @@ func (m *LiveMysql) ClearSuperReadOnly(ctx context.Context) error {
 	return nil
 }
 
+// killableConnection reports whether a processlist row is an
+// application session that a fence must boot.
+//
+// Server-internal threads are recognized by user, not by command. On a
+// replica the replication I/O and applier threads run as `system user`
+// with command `Connect`/`Query`, so a command-only filter selects them
+// and the KILL stops replication on the very site being fenced. That is
+// collateral damage with no safety value: super_read_only does not stop
+// the applier, and replicating from the authoritative primary is exactly
+// what a fenced site should keep doing. Losing the channel instead
+// stalls the site until the operator's convergence invariant restarts it
+// — and on a diverged site convergence is Blocked, so it never comes
+// back on its own (issue #119).
+//
+// `Binlog Dump`/`Binlog Dump GTID` keep their own command-based
+// exemption, unchanged from before: those are a fenced primary's
+// outbound feeds to its replicas, they authenticate as the ordinary
+// replication user rather than `system user`, and cutting them would
+// strand peers short of the transactions this site committed before the
+// fence — the opposite of what fencing is for.
+//
+// The operator's mysql.Checker.KillAppConnections deliberately does NOT
+// share this filter. Its call sites want the applier gone: the bootstrap
+// path kills connections so CLONE's DROP DATA phase is not blocked on
+// open table handles. Do not "unify" the two.
+func killableConnection(user, command string) bool {
+	switch user {
+	case "", "system user", "event_scheduler":
+		return false
+	}
+	switch command {
+	case "Binlog Dump", "Binlog Dump GTID", "Daemon":
+		return false
+	}
+	return true
+}
+
 func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id FROM information_schema.processlist
-		 WHERE id != CONNECTION_ID()
-		 AND command NOT IN ('Binlog Dump', 'Binlog Dump GTID')`)
+		`SELECT id, COALESCE(user, ''), COALESCE(command, '')
+		 FROM information_schema.processlist
+		 WHERE id != CONNECTION_ID()`)
 	if err != nil {
 		return 0, fmt.Errorf("list connections: %w", err)
 	}
 	defer rows.Close()
 
-	var killed int
+	var targets []int64
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var user, command string
+		if err := rows.Scan(&id, &user, &command); err != nil {
 			continue
 		}
+		if killableConnection(user, command) {
+			targets = append(targets, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	// KILL after the cursor is drained: the connection pool is capped at
+	// three, and killing while rows are still streaming can take out the
+	// session feeding this very result set.
+	var killed int
+	for _, id := range targets {
 		if _, err := m.db.ExecContext(ctx, fmt.Sprintf("KILL %d", id)); err != nil {
 			continue
 		}
 		killed++
 	}
-	return killed, rows.Err()
+	return killed, nil
 }
 
 // KeyringComponentStatus reads performance_schema.keyring_component_status,

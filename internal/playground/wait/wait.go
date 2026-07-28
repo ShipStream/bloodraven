@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -142,6 +143,36 @@ func (h *Helper) UntilLog(ctx context.Context, t *pglogs.Tailer, since time.Time
 	}
 	h.Logger.Info("matched log", "what", what, "line", m.Line, "elapsed", time.Since(start).Round(time.Millisecond))
 	return m, nil
+}
+
+// LogWatch names one candidate source for UntilAnyLog.
+type LogWatch = pglogs.Watch
+
+// UntilAnyLog blocks until any of the supplied watches observes a
+// matching line, and returns the winning watch's label alongside the
+// match. Use it when an invariant is legitimately enforced by more than
+// one component, so the scenario asserts that *someone* acted rather
+// than racing a specific actor's log line. Timeout reporting matches
+// UntilLog: only ctx expiry becomes a TimeoutError.
+func (h *Helper) UntilAnyLog(ctx context.Context, since time.Time, what string, watches ...LogWatch) (pglogs.Match, string, error) {
+	start := time.Now()
+	m, label, err := pglogs.WaitAny(ctx, since, watches...)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			labels := make([]string, 0, len(watches))
+			for _, w := range watches {
+				labels = append(labels, w.Label)
+			}
+			return pglogs.Match{}, "", &TimeoutError{
+				What:        what,
+				LastMessage: "no matching log line observed on " + strings.Join(labels, ", "),
+				Elapsed:     time.Since(start),
+			}
+		}
+		return pglogs.Match{}, "", fmt.Errorf("wait %s: %w", what, err)
+	}
+	h.Logger.Info("matched log", "what", what, "source", label, "line", m.Line, "elapsed", time.Since(start).Round(time.Millisecond))
+	return m, label, nil
 }
 
 // MetricCondition is the predicate body for UntilMetric.
