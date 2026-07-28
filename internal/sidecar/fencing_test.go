@@ -23,6 +23,11 @@ type mockFencer struct {
 	readOnlyErr   error
 	superReadOnly bool
 	setReadOnlyCh chan struct{} // closed on SetSuperReadOnly call
+
+	// killErr, when set, is returned by KillConnections. killCalls counts
+	// every call so eviction-retry tests can assert the monitor stopped.
+	killErr   error
+	killCalls int
 }
 
 func newMockFencer(readOnly bool) *mockFencer {
@@ -50,7 +55,8 @@ func (m *mockFencer) SetSuperReadOnly(_ context.Context) error {
 }
 
 func (m *mockFencer) KillConnections(_ context.Context) (int, error) {
-	return 0, nil
+	m.killCalls++
+	return 0, m.killErr
 }
 
 func testLogger() *slog.Logger {
@@ -726,5 +732,102 @@ func TestEvaluateRequiresAllPeersDown(t *testing.T) {
 
 	if fm.fenced {
 		t.Fatal("should not self-fence when at least one peer is still reachable")
+	}
+}
+
+// fenceWithFailedEviction drives the monitor through a topology-mismatch
+// self-fence whose connection eviction fails, leaving a retry armed.
+func fenceWithFailedEviction(t *testing.T, m *mockFencer) *FencingMonitor {
+	t.Helper()
+	clk := clock.NewFakeClock(time.Now())
+	fm := newTestFencingMonitor(m, clk)
+	fm.WithTopology("iad", "ns", "fg", &TopologyCache{})
+	fm.topology.Set("pdx", clk.Now())
+	setPeerLastOK(fm, clk.Now())
+	fm.lastBloodravenOK = clk.Now()
+
+	fm.evaluate(context.Background())
+	if !fm.fenced {
+		t.Fatal("expected topology mismatch to self-fence")
+	}
+	if !fm.evictionPending {
+		t.Fatal("failed eviction did not arm a retry")
+	}
+	return fm
+}
+
+// An eviction that could not finish must be retried on a later tick.
+// Once fenced, evaluate() returns on its first read-only check, so
+// without the retry the surviving sessions are never revisited.
+func TestFencingRetriesIncompleteEviction(t *testing.T) {
+	m := newMockFencer(false)
+	m.killErr = fmt.Errorf("failed to kill 1 of 3 sessions")
+	fm := fenceWithFailedEviction(t, m)
+	callsAfterFence := m.killCalls
+
+	// The site is still read-only, so this tick would otherwise be a
+	// no-op. It must re-attempt the eviction instead.
+	m.killErr = nil
+	fm.evaluate(context.Background())
+
+	if m.killCalls != callsAfterFence+1 {
+		t.Errorf("KillConnections called %d times, want %d (one retry)", m.killCalls, callsAfterFence+1)
+	}
+	if fm.evictionPending {
+		t.Error("a successful retry must clear the pending eviction")
+	}
+
+	// Nothing left to retry: later ticks stay quiet.
+	fm.evaluate(context.Background())
+	if m.killCalls != callsAfterFence+1 {
+		t.Errorf("KillConnections called again after the eviction completed (%d calls)", m.killCalls)
+	}
+}
+
+// Retries are bounded. A KILL refused on every tick is being refused for
+// a structural reason, and retrying forever would warn every tick without
+// changing anything.
+func TestFencingBoundsEvictionRetries(t *testing.T) {
+	m := newMockFencer(false)
+	m.killErr = fmt.Errorf("failed to kill 1 of 3 sessions")
+	fm := fenceWithFailedEviction(t, m)
+	callsAfterFence := m.killCalls
+
+	for i := 0; i < 10; i++ {
+		fm.evaluate(context.Background())
+	}
+
+	wantRetries := maxEvictionRetries
+	if got := m.killCalls - callsAfterFence; got != wantRetries {
+		t.Errorf("eviction retried %d times, want %d", got, wantRetries)
+	}
+	if fm.evictionPending {
+		t.Error("monitor must stop retrying after giving up")
+	}
+	// Giving up must not unfence: super_read_only=ON is the safety
+	// property and it still holds.
+	if !fm.fenced {
+		t.Error("giving up on eviction must not clear the fence")
+	}
+}
+
+// A site that becomes writable again is a fresh start: the previous
+// fence's unevicted sessions are no longer its problem.
+func TestFencingRearmClearsPendingEviction(t *testing.T) {
+	m := newMockFencer(false)
+	m.killErr = fmt.Errorf("failed to kill 1 of 3 sessions")
+	fm := fenceWithFailedEviction(t, m)
+
+	// An actor with SUPER restored writability, per the restore contract.
+	m.readOnly = false
+	m.superReadOnly = false
+	fm.topology.Set("", fm.clock.Now())
+	fm.evaluate(context.Background())
+
+	if fm.fenced {
+		t.Fatal("writable MySQL must rearm the monitor")
+	}
+	if fm.evictionPending || fm.evictionAttempts != 0 {
+		t.Errorf("rearm left stale eviction state (pending=%v attempts=%d)", fm.evictionPending, fm.evictionAttempts)
 	}
 }

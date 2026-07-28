@@ -250,17 +250,22 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 	}
 
 	// Enumeration and eviction problems do not cancel the fence: evict every
-	// session we did identify, then report the gap so the caller's warning
-	// names it.
-	switch {
-	case iterErr != nil:
-		return killed, fmt.Errorf("iterate connections: %w", iterErr)
-	case unreadable > 0:
-		return killed, fmt.Errorf("skipped %d unreadable processlist rows", unreadable)
-	case failed > 0:
-		return killed, fmt.Errorf("failed to kill %d of %d sessions", failed, len(targets))
+	// session we did identify, then report every gap so the caller's warning
+	// names all of them. These causes are independent — an iteration that
+	// ended early can coincide with rows that would not scan and KILLs that
+	// were refused — so they are joined rather than ranked, and reporting
+	// only the first would hide the rest.
+	var problems []error
+	if iterErr != nil {
+		problems = append(problems, fmt.Errorf("iterate connections: %w", iterErr))
 	}
-	return killed, nil
+	if unreadable > 0 {
+		problems = append(problems, fmt.Errorf("skipped %d unreadable processlist rows", unreadable))
+	}
+	if failed > 0 {
+		problems = append(problems, fmt.Errorf("failed to kill %d of %d sessions", failed, len(targets)))
+	}
+	return killed, errors.Join(problems...)
 }
 
 // isUnknownThread reports whether err is MySQL's ER_NO_SUCH_THREAD, i.e.

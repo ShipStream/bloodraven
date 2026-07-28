@@ -52,6 +52,16 @@ type FencingMonitor struct {
 	lastBloodravenOK time.Time
 	lastPeerOK       map[string]time.Time
 	fenced           bool
+
+	// evictionPending records that a fence landed but could not evict
+	// every session. Once fenced, evaluate() returns on the first
+	// read-only check, so without this the surviving sessions would
+	// never be retried and could stay connected to the fenced site
+	// indefinitely. Retries are bounded by evictionAttempts: a session
+	// that refuses to die three ticks running is not going to, and
+	// re-killing forever would just be noise.
+	evictionPending  bool
+	evictionAttempts int
 	logger           *slog.Logger
 	httpClient       *http.Client
 	clock            clock.Clock
@@ -359,6 +369,7 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 	}
 	if f.fenced {
 		if readOnly {
+			f.retryEviction(ctx)
 			return
 		}
 		// Writability after a self-fence means an actor with SUPER
@@ -374,6 +385,11 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		// the group in a no-writable-site state.
 		f.logger.Info("fencing: MySQL is writable after prior self-fence; rearming monitor")
 		f.fenced = false
+		// The site is writable again, so the sessions the previous fence
+		// failed to evict are no longer the previous fence's problem. A
+		// future fence starts its own eviction from scratch.
+		f.evictionPending = false
+		f.evictionAttempts = 0
 		now := f.clock.Now()
 		f.lastBloodravenOK = now
 		for addr := range f.lastPeerOK {
@@ -443,16 +459,57 @@ func (f *FencingMonitor) doFence(ctx context.Context) {
 	}
 
 	// KillConnections reports a partial eviction as (killed>0, err): the
-	// sessions it could identify are gone, but it could not enumerate them
-	// all. Carry the count so the warning says how far the fence got.
+	// sessions it could identify are gone, but it could not enumerate or
+	// kill them all. Carry the count so the warning says how far the fence
+	// got, and arm a retry — see retryEviction.
 	if killed, err := f.mysql.KillConnections(ctx); err != nil {
 		f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err, "count", killed)
+		f.evictionPending = true
+		f.evictionAttempts = 0
 	} else {
 		f.logger.Info("SELF-FENCING: killed app connections", "count", killed)
+		f.evictionPending = false
 	}
 
 	f.fenced = true
 	f.logger.Error("SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore")
+}
+
+// maxEvictionRetries bounds how many later ticks will re-attempt an
+// eviction that the fence itself could not finish.
+const maxEvictionRetries = 3
+
+// retryEviction re-attempts an incomplete eviction on a later tick.
+//
+// The fence's safety property — super_read_only=ON — is already held by
+// the time this runs, so a surviving session cannot write. What it can
+// do is keep reading from a site the operator has demoted, which is the
+// stale-read the eviction exists to prevent. Once f.fenced is set,
+// evaluate() returns on its first read-only check, so nothing else would
+// ever revisit those sessions.
+//
+// Bounded on purpose. A KILL that is refused three ticks running is
+// being refused for a structural reason (a privilege the sidecar does
+// not hold, a session the server will not let it touch), and retrying
+// forever would emit a warning every tick without changing anything.
+func (f *FencingMonitor) retryEviction(ctx context.Context) {
+	if !f.evictionPending {
+		return
+	}
+	f.evictionAttempts++
+	killed, err := f.mysql.KillConnections(ctx)
+	if err == nil {
+		f.evictionPending = false
+		f.logger.Info("SELF-FENCING: killed app connections", "count", killed)
+		return
+	}
+	if f.evictionAttempts >= maxEvictionRetries {
+		f.evictionPending = false
+		f.logger.Warn("SELF-FENCING: giving up on evicting connections after fencing",
+			"error", err, "count", killed, "attempts", f.evictionAttempts)
+		return
+	}
+	f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err, "count", killed)
 }
 
 // IsFenced returns whether the monitor has self-fenced.
