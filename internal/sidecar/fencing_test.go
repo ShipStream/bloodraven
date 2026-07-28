@@ -786,3 +786,30 @@ func TestFencingReportsFencedBeforeEvictionCompletes(t *testing.T) {
 		t.Error("IsFenced() is false after a completed fence")
 	}
 }
+
+// self_fenced is process-scoped by design. A restarted sidecar meeting an
+// instance that is still read-only from an earlier fence reports not
+// fenced: evaluate() returns on the read-only check without
+// reconstructing why, and nothing persists the earlier decision.
+// super_read_only answers "is it fenced"; this answers "did this monitor
+// fence it".
+func TestFencingIsFencedIsScopedToTheProcess(t *testing.T) {
+	clk := clock.NewFakeClock(time.Now())
+	// Fresh monitor, instance still read-only from a fence a previous
+	// container performed.
+	m := newMockFencer(true)
+	fm := newTestFencingMonitor(m, clk)
+	fm.WithTopology("iad", "ns", "fg", &TopologyCache{})
+	fm.topology.Set("pdx", clk.Now())
+	setPeerLastOK(fm, clk.Now())
+	fm.lastBloodravenOK = clk.Now()
+
+	fm.evaluate(context.Background())
+
+	if fm.IsFenced() {
+		t.Error("a fresh monitor must not claim a fence it did not perform")
+	}
+	if m.superReadOnly {
+		t.Error("a read-only instance must not be re-fenced")
+	}
+}

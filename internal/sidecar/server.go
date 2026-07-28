@@ -191,6 +191,13 @@ func (s *Server) SetKeyring(a *KeyringAgent) { s.keyring = a }
 // lines — cannot distinguish "has not fenced" from "has not logged yet",
 // because the terminal line is written only after connection eviction,
 // which is unbounded.
+//
+// The reported state is scoped to this process. A restarted sidecar
+// facing a still-fenced instance reports self_fenced=false: evaluate()
+// returns on the read-only check without reconstructing why the instance
+// is read-only, and nothing persists the earlier decision. That is the
+// intended contract — super_read_only answers "is it fenced",
+// self_fenced answers "did this monitor fence it".
 func (s *Server) SetFencing(f *FencingMonitor) { s.fencing = f }
 
 // handleKeyringStatus reports the live keyring digest, the last escrow

@@ -22,7 +22,13 @@ type StatusInfo struct {
 	SecondsBehindSource *int64 `json:"seconds_behind_source"`
 	ServerID            int    `json:"server_id"`
 	Uptime              int64  `json:"uptime"`
-	SelfFenced          bool   `json:"self_fenced"`
+	// SelfFenced reports whether *this sidecar process* self-fenced and
+	// has not rearmed. It is deliberately process-scoped: a container
+	// restart clears it, and RunSafetyNet's startup fence is not counted
+	// either, so a site can be fenced with self_fenced=false. Read
+	// super_read_only for whether the instance is fenced; read this for
+	// whether this monitor is the one that fenced it.
+	SelfFenced bool `json:"self_fenced"`
 }
 
 // mysqlQuerier abstracts MySQL queries for testing.
