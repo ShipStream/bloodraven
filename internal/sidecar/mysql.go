@@ -144,6 +144,15 @@ func (m *LiveMysql) IsReadOnly(ctx context.Context) (bool, error) {
 	return readOnly == 1, nil
 }
 
+func (m *LiveMysql) CheckSuperReadOnly(ctx context.Context) (bool, error) {
+	var superReadOnly int
+	err := m.db.QueryRowContext(ctx, "SELECT @@super_read_only").Scan(&superReadOnly)
+	if err != nil {
+		return false, fmt.Errorf("query super_read_only: %w", err)
+	}
+	return superReadOnly == 1, nil
+}
+
 func (m *LiveMysql) SetSuperReadOnly(ctx context.Context) error {
 	_, err := m.db.ExecContext(ctx, "SET GLOBAL super_read_only = ON")
 	if err != nil {
@@ -249,12 +258,19 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 		killed++
 	}
 
-	// Enumeration and eviction problems do not cancel the fence: evict every
-	// session we did identify, then report every gap so the caller's warning
-	// names all of them. These causes are independent — an iteration that
-	// ended early can coincide with rows that would not scan and KILLs that
-	// were refused — so they are joined rather than ranked, and reporting
-	// only the first would hide the rest.
+	return killed, evictionError(iterErr, unreadable, failed, len(targets))
+}
+
+// evictionError aggregates every reason an eviction pass was incomplete,
+// and returns nil when it covered every session.
+//
+// Enumeration and eviction problems do not cancel the fence: the sessions
+// that could be identified are evicted first, and this only reports the
+// gap. The causes are independent — an iteration that ended early can
+// coincide with rows that would not scan and KILLs that were refused — so
+// they are joined rather than ranked. Reporting only the first would hide
+// the rest.
+func evictionError(iterErr error, unreadable, failed, targets int) error {
 	var problems []error
 	if iterErr != nil {
 		problems = append(problems, fmt.Errorf("iterate connections: %w", iterErr))
@@ -263,9 +279,9 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 		problems = append(problems, fmt.Errorf("skipped %d unreadable processlist rows", unreadable))
 	}
 	if failed > 0 {
-		problems = append(problems, fmt.Errorf("failed to kill %d of %d sessions", failed, len(targets)))
+		problems = append(problems, fmt.Errorf("failed to kill %d of %d sessions", failed, targets))
 	}
-	return killed, errors.Join(problems...)
+	return errors.Join(problems...)
 }
 
 // isUnknownThread reports whether err is MySQL's ER_NO_SUCH_THREAD, i.e.

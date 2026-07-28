@@ -16,6 +16,11 @@ import (
 // Fencer abstracts MySQL operations needed by the fencing monitor.
 type Fencer interface {
 	IsReadOnly(ctx context.Context) (bool, error)
+	// CheckSuperReadOnly reports @@super_read_only specifically. It is not
+	// redundant with IsReadOnly, which reads @@read_only: promotion clears
+	// super_read_only before read_only, so the two disagree for the width
+	// of that window and only this one answers "is our fence still on".
+	CheckSuperReadOnly(ctx context.Context) (bool, error)
 	SetSuperReadOnly(ctx context.Context) error
 	KillConnections(ctx context.Context) (int, error)
 }
@@ -494,6 +499,24 @@ const maxEvictionRetries = 3
 // forever would emit a warning every tick without changing anything.
 func (f *FencingMonitor) retryEviction(ctx context.Context) {
 	if !f.evictionPending {
+		return
+	}
+	// Our fence is super_read_only=ON, and only that flag says whether it
+	// still holds. Promotion clears super_read_only (failover.go step 7)
+	// before read_only (step 8), so a tick landing between them still sees
+	// @@read_only=1 while the fence is already lifted. Evicting there would
+	// kill the operator's own promotion session and any client it has just
+	// begun admitting. The fence we were finishing is gone, so there is
+	// nothing left to evict.
+	superReadOnly, err := f.mysql.CheckSuperReadOnly(ctx)
+	if err != nil {
+		f.logger.Warn("fencing: could not check super_read_only before eviction retry", "error", err)
+		return
+	}
+	if !superReadOnly {
+		f.evictionPending = false
+		f.evictionAttempts = 0
+		f.logger.Info("SELF-FENCING: abandoning eviction retry, fence already lifted")
 		return
 	}
 	f.evictionAttempts++

@@ -28,6 +28,9 @@ type mockFencer struct {
 	// every call so eviction-retry tests can assert the monitor stopped.
 	killErr   error
 	killCalls int
+
+	// superReadOnlyErr, when set, is returned by CheckSuperReadOnly.
+	superReadOnlyErr error
 }
 
 func newMockFencer(readOnly bool) *mockFencer {
@@ -42,6 +45,10 @@ func (m *mockFencer) IsReadOnly(_ context.Context) (bool, error) {
 		return false, m.readOnlyErr
 	}
 	return m.readOnly, nil
+}
+
+func (m *mockFencer) CheckSuperReadOnly(_ context.Context) (bool, error) {
+	return m.superReadOnly, m.superReadOnlyErr
 }
 
 func (m *mockFencer) SetSuperReadOnly(_ context.Context) error {
@@ -829,5 +836,49 @@ func TestFencingRearmClearsPendingEviction(t *testing.T) {
 	}
 	if fm.evictionPending || fm.evictionAttempts != 0 {
 		t.Errorf("rearm left stale eviction state (pending=%v attempts=%d)", fm.evictionPending, fm.evictionAttempts)
+	}
+}
+
+// Promotion clears super_read_only (failover.go step 7) before read_only
+// (step 8). A retry tick landing between them still sees @@read_only=1
+// while the fence is already gone — evicting there would kill the
+// operator's own promotion session.
+func TestFencingSkipsEvictionRetryDuringPromotion(t *testing.T) {
+	m := newMockFencer(false)
+	m.killErr = fmt.Errorf("failed to kill 1 of 3 sessions")
+	fm := fenceWithFailedEviction(t, m)
+	callsAfterFence := m.killCalls
+
+	// Operator step 7 has run; step 8 has not, so IsReadOnly still says
+	// read-only. Only super_read_only reveals the fence is lifted.
+	m.superReadOnly = false
+
+	fm.evaluate(context.Background())
+
+	if m.killCalls != callsAfterFence {
+		t.Errorf("evicted inside the promotion window (%d calls, want %d)", m.killCalls, callsAfterFence)
+	}
+	if fm.evictionPending || fm.evictionAttempts != 0 {
+		t.Errorf("a lifted fence must cancel the retry (pending=%v attempts=%d)", fm.evictionPending, fm.evictionAttempts)
+	}
+}
+
+// If the fence state cannot be read, the retry is skipped but stays armed:
+// evicting on an unknown state risks the promotion window, and disarming
+// would drop the surviving sessions for good.
+func TestFencingKeepsEvictionArmedWhenFenceStateUnreadable(t *testing.T) {
+	m := newMockFencer(false)
+	m.killErr = fmt.Errorf("failed to kill 1 of 3 sessions")
+	fm := fenceWithFailedEviction(t, m)
+	callsAfterFence := m.killCalls
+
+	m.superReadOnlyErr = fmt.Errorf("connection refused")
+	fm.evaluate(context.Background())
+
+	if m.killCalls != callsAfterFence {
+		t.Errorf("evicted without confirming the fence still holds (%d calls)", m.killCalls)
+	}
+	if !fm.evictionPending {
+		t.Error("an unreadable fence state must leave the retry armed")
 	}
 }

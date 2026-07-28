@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -85,5 +86,41 @@ func TestIsUnknownThread(t *testing.T) {
 	}
 	if isUnknownThread(nil) {
 		t.Error("nil must not be treated as a vanished session")
+	}
+}
+
+// An incomplete eviction has independent causes that can coincide. The
+// warning must name all of them, not just the first.
+func TestEvictionError(t *testing.T) {
+	if err := evictionError(nil, 0, 0, 5); err != nil {
+		t.Errorf("a complete pass must report no error, got %v", err)
+	}
+
+	iterFail := errors.New("driver went away")
+	got := evictionError(iterFail, 2, 1, 4)
+	if got == nil {
+		t.Fatal("combined failures reported no error")
+	}
+	msg := got.Error()
+	for _, want := range []string{
+		"iterate connections: driver went away",
+		"skipped 2 unreadable processlist rows",
+		"failed to kill 1 of 4 sessions",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("combined error %q is missing %q", msg, want)
+		}
+	}
+	// The underlying iteration error stays inspectable through the join.
+	if !errors.Is(got, iterFail) {
+		t.Error("joined error does not unwrap to the iteration error")
+	}
+
+	// Each cause alone is reported alone.
+	if msg := evictionError(nil, 3, 0, 9).Error(); !strings.Contains(msg, "skipped 3") || strings.Contains(msg, "failed to kill") {
+		t.Errorf("unreadable-only error reported extra causes: %q", msg)
+	}
+	if msg := evictionError(nil, 0, 2, 9).Error(); !strings.Contains(msg, "failed to kill 2 of 9") || strings.Contains(msg, "skipped") {
+		t.Errorf("kill-failure-only error reported extra causes: %q", msg)
 	}
 }

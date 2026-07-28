@@ -417,6 +417,12 @@ func (m *mockSidecarMySQL) IsReadOnly(_ context.Context) (bool, error) {
 	return m.readOnly, nil
 }
 
+func (m *mockSidecarMySQL) CheckSuperReadOnly(_ context.Context) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.superReadOnly, nil
+}
+
 func (m *mockSidecarMySQL) SetSuperReadOnly(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

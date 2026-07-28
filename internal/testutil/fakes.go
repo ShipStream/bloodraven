@@ -343,6 +343,12 @@ func (m *FakeFencer) IsReadOnly(_ context.Context) (bool, error) {
 	return m.ReadOnlyVal, m.ReadOnlyErr
 }
 
+func (m *FakeFencer) CheckSuperReadOnly(_ context.Context) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.SuperReadOnly, nil
+}
+
 func (m *FakeFencer) SetSuperReadOnly(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
