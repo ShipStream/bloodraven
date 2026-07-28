@@ -450,6 +450,12 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 // monitor stops mattering.
 const fenceTimeout = 20 * time.Second
 
+// fenceProbeTimeout bounds the read that resolves an ambiguous fence
+// write. Short: it runs after the fence sequence already spent its own
+// budget, and a server too slow to answer one `SELECT @@read_only` is
+// better left to the next tick than allowed to extend the stall.
+const fenceProbeTimeout = 5 * time.Second
+
 // doFence performs the actual SET GLOBAL super_read_only=ON +
 // KILL-app-connections step and flips the fenced flag. Separated so
 // both fencing rules share the same write sequence.
@@ -458,7 +464,32 @@ func (f *FencingMonitor) doFence(ctx context.Context) {
 	defer cancelFence()
 
 	if err := f.mysql.SetSuperReadOnly(fenceCtx); err != nil {
-		f.logger.Error("SELF-FENCING FAILED: could not set super_read_only", "error", err)
+		// A write that reports an error may still have landed. Cancelling
+		// the context tears down the client connection; it does not roll
+		// back a SET GLOBAL the server already applied, and the same is
+		// true of a connection lost while waiting for the reply. So an
+		// error here means "unknown", not "did not fence".
+		//
+		// Assuming failure on an ambiguous result is not the safe default,
+		// because the flag is what arms the rearm branch in evaluate().
+		// Left false against an instance that is genuinely read-only, the
+		// monitor skips that branch when the operator later restores
+		// writability, never refreshes its lease timestamps, and re-fences
+		// the site it just promoted — the no-writable-site wedge the rearm
+		// path exists to prevent. Resolve it with a fresh read instead.
+		if !f.fenceLanded(ctx) {
+			f.logger.Error("SELF-FENCING FAILED: could not set super_read_only", "error", err)
+			return
+		}
+		// The fence holds, so record it and emit the terminal event. The
+		// eviction is skipped deliberately: fenceCtx is spent, every KILL
+		// on it would fail immediately, and eviction is cleanup on a fence
+		// that already holds — the same surviving-session cost documented
+		// below for a partial eviction, with the same bound (reads only).
+		f.fenced.Store(true)
+		f.logger.Warn("SELF-FENCING: super_read_only write failed but the fence is in place; skipping connection eviction",
+			"error", err)
+		f.logger.Error("SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore")
 		return
 	}
 	// The fence *is* super_read_only=ON, so record it the moment that
@@ -499,6 +530,33 @@ func (f *FencingMonitor) doFence(ctx context.Context) {
 	}
 
 	f.logger.Error("SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore")
+}
+
+// fenceLanded reports whether super_read_only is in place after a fence
+// write that returned an error, so an ambiguous result is resolved by
+// asking the server rather than by assuming.
+//
+// read_only is the right signal even though the write targets
+// super_read_only: setting super_read_only implies read_only, and it is
+// the same variable evaluate() and the rearm branch already treat as
+// "this instance is fenced". A false positive is possible in principle —
+// another actor could have set read_only in the same instant — but it
+// costs only a fresh lease window on the next restore, whereas the false
+// negative costs the wedge described at the call site.
+//
+// The probe gets its own context: the one that produced the error is
+// spent. It stays a child of ctx so a shutting-down sidecar fails fast
+// instead of spending the probe budget on its way out.
+func (f *FencingMonitor) fenceLanded(ctx context.Context) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, fenceProbeTimeout)
+	defer cancel()
+
+	readOnly, err := f.mysql.IsReadOnly(probeCtx)
+	if err != nil {
+		f.logger.Warn("fencing: could not confirm whether the super_read_only write landed", "error", err)
+		return false
+	}
+	return readOnly
 }
 
 // IsFenced reports whether this monitor has self-fenced and not yet
