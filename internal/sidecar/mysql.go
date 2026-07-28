@@ -210,29 +210,42 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 	defer rows.Close()
 
 	var targets []int64
+	var unreadable int
 	for rows.Next() {
 		var id int64
 		var user, command string
 		if err := rows.Scan(&id, &user, &command); err != nil {
+			// A row we cannot read is a session we cannot kill. Count it
+			// so a partial fence is reported rather than silently passing
+			// for a complete one.
+			unreadable++
 			continue
 		}
 		if killableConnection(user, command) {
 			targets = append(targets, id)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
+	iterErr := rows.Err()
+	// Release the pooled connection before issuing the KILLs, and never
+	// KILL while rows are still streaming — the session feeding this very
+	// result set is a candidate. Close is idempotent with the defer above.
+	rows.Close()
 
-	// KILL after the cursor is drained: the connection pool is capped at
-	// three, and killing while rows are still streaming can take out the
-	// session feeding this very result set.
 	var killed int
 	for _, id := range targets {
 		if _, err := m.db.ExecContext(ctx, fmt.Sprintf("KILL %d", id)); err != nil {
 			continue
 		}
 		killed++
+	}
+
+	// Enumeration problems do not cancel the fence: evict every session we
+	// did identify, then report the gap so the caller's warning names it.
+	switch {
+	case iterErr != nil:
+		return killed, fmt.Errorf("iterate connections: %w", iterErr)
+	case unreadable > 0:
+		return killed, fmt.Errorf("skipped %d unreadable processlist rows", unreadable)
 	}
 	return killed, nil
 }

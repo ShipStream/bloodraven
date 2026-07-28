@@ -442,8 +442,11 @@ func (f *FencingMonitor) doFence(ctx context.Context) {
 		return
 	}
 
+	// KillConnections reports a partial eviction as (killed>0, err): the
+	// sessions it could identify are gone, but it could not enumerate them
+	// all. Carry the count so the warning says how far the fence got.
 	if killed, err := f.mysql.KillConnections(ctx); err != nil {
-		f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err)
+		f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err, "count", killed)
 	} else {
 		f.logger.Info("SELF-FENCING: killed app connections", "count", killed)
 	}
