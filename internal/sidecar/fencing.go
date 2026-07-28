@@ -437,25 +437,35 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 	f.doFence(ctx)
 }
 
-// evictionTimeout bounds the post-fence connection eviction. Chosen well
-// above any healthy KILL sweep (a handful of statements against local
-// MySQL) and well below the point where a wedged monitor would matter.
-const evictionTimeout = 15 * time.Second
+// fenceTimeout bounds the whole fence sequence — the super_read_only
+// write and the connection eviction that follows it — because both run
+// on the monitor's own goroutine. Either one blocking on an unresponsive
+// server would stop every subsequent fencing check for this site,
+// indefinitely, and losing the tick loop is worse than losing this
+// attempt: a fence that times out is retried on the next tick, whereas a
+// wedged loop never fences again.
+//
+// Chosen well above a healthy sequence (one SET GLOBAL plus a handful of
+// KILLs against local MySQL) and well below the point where a stalled
+// monitor stops mattering.
+const fenceTimeout = 20 * time.Second
 
 // doFence performs the actual SET GLOBAL super_read_only=ON +
 // KILL-app-connections step and flips the fenced flag. Separated so
 // both fencing rules share the same write sequence.
 func (f *FencingMonitor) doFence(ctx context.Context) {
-	if err := f.mysql.SetSuperReadOnly(ctx); err != nil {
+	fenceCtx, cancelFence := context.WithTimeout(ctx, fenceTimeout)
+	defer cancelFence()
+
+	if err := f.mysql.SetSuperReadOnly(fenceCtx); err != nil {
 		f.logger.Error("SELF-FENCING FAILED: could not set super_read_only", "error", err)
 		return
 	}
 	// The fence *is* super_read_only=ON, so record it the moment that
 	// write lands rather than after the eviction below. Eviction is
-	// cleanup on a fence that already holds, and it has no bound — a site
-	// draining a slow KILL would otherwise report self_fenced=false while
-	// demonstrably fenced, and anything synchronising on that state would
-	// act as though no fence were in flight.
+	// cleanup on a fence that already holds, and it runs under the shared
+	// fenceTimeout below — a site draining a slow KILL would otherwise
+	// report self_fenced=false while demonstrably fenced.
 	f.fenced.Store(true)
 
 	// KillConnections reports a partial eviction as (killed>0, err): the
@@ -482,14 +492,7 @@ func (f *FencingMonitor) doFence(ctx context.Context) {
 	// That is the accepted cost: it is bounded to reads, and the warning
 	// below carries the causes so an operator can act on it. Do not "fix"
 	// it with a retry here — see the promotion race above.
-	// Bound the eviction. The fence is already established above, so this
-	// is cleanup — and it runs on the monitor's own goroutine, so a KILL
-	// that blocks on an unresponsive server would stop every subsequent
-	// fencing check for this site, indefinitely. Losing stragglers is a
-	// stale-read window; losing the tick loop is losing the fence.
-	evictCtx, cancelEvict := context.WithTimeout(ctx, evictionTimeout)
-	defer cancelEvict()
-	if killed, err := f.mysql.KillConnections(evictCtx); err != nil {
+	if killed, err := f.mysql.KillConnections(fenceCtx); err != nil {
 		f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err, "count", killed)
 	} else {
 		f.logger.Info("SELF-FENCING: killed app connections", "count", killed)

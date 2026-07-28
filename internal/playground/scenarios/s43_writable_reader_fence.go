@@ -175,10 +175,10 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 			//
 			// So match each actor on whichever line it emits promptly. For
 			// the sidecar that is the topology-mismatch decision, not the
-			// terminal SELF-FENCED: the terminal line trails an unbounded
-			// connection eviction, and waiting on it would fail this step
-			// after 30s for a fence that demonstrably succeeded — the exact
-			// class of flake this scenario was fixed for.
+			// terminal SELF-FENCED: the terminal line trails the connection
+			// eviction, so waiting on it could fail this step for a fence
+			// that demonstrably succeeded — the exact class of flake this
+			// scenario was fixed for.
 			logCtx, cancelLog := context.WithTimeout(ctx, 30*time.Second)
 			_, state.fencedBy, err = env.Wait.UntilAnyLog(logCtx, env.StartTime,
 				"writable non-promotable reader is fenced by the operator or its sidecar",
@@ -206,11 +206,11 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 			// reader is diverged — left convergence permanently Blocked
 			// with no operator action to explain it (issue #119).
 			//
-			// The second sample is past the sidecar's eviction deadline
-			// (evictionTimeout, 15s), so a kill cannot land after the last
+			// The second sample is past the sidecar's whole-fence deadline
+			// (fenceTimeout, 20s), so a kill cannot land after the last
 			// look: whichever actor fenced, every KILL it was going to
 			// issue has either happened or been abandoned by then.
-			for _, delay := range []time.Duration{0, 20 * time.Second} {
+			for _, delay := range []time.Duration{0, 25 * time.Second} {
 				if delay > 0 {
 					select {
 					case <-ctx.Done():

@@ -812,12 +812,12 @@ func TestFencingIsFencedIsScopedToTheProcess(t *testing.T) {
 	}
 }
 
-// The eviction runs on the monitor's own goroutine, so it must be
-// bounded: a KILL blocking on an unresponsive server would otherwise
-// stop every subsequent fencing check for this site forever. The fence
-// itself is already established by then, so giving up on stragglers is
-// the cheap side of that trade.
-func TestFencingBoundsTheEviction(t *testing.T) {
+// The fence sequence runs on the monitor's own goroutine, so both the
+// super_read_only write and the eviction must be bounded: either one
+// blocking on an unresponsive server would otherwise stop every
+// subsequent fencing check for this site forever. A fence that times out
+// is retried next tick; a wedged loop never fences again.
+func TestFencingBoundsTheFenceSequence(t *testing.T) {
 	clk := clock.NewFakeClock(time.Now())
 	m := newMockFencer(false)
 	d := &deadlineRecordingFencer{mockFencer: m}
@@ -835,12 +835,21 @@ func TestFencingBoundsTheEviction(t *testing.T) {
 	if !d.hadDeadline {
 		t.Error("KillConnections got an unbounded context; a hung KILL would wedge the monitor loop")
 	}
+	if !d.setHadDeadline {
+		t.Error("SetSuperReadOnly got an unbounded context; a hung write would wedge the monitor loop")
+	}
 }
 
 type deadlineRecordingFencer struct {
 	*mockFencer
-	called      bool
-	hadDeadline bool
+	called         bool
+	hadDeadline    bool
+	setHadDeadline bool
+}
+
+func (d *deadlineRecordingFencer) SetSuperReadOnly(ctx context.Context) error {
+	_, d.setHadDeadline = ctx.Deadline()
+	return d.mockFencer.SetSuperReadOnly(ctx)
 }
 
 func (d *deadlineRecordingFencer) KillConnections(ctx context.Context) (int, error) {
