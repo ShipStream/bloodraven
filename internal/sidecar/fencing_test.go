@@ -746,10 +746,8 @@ func (b *blockingFencer) KillConnections(ctx context.Context) (int, error) {
 
 // The fence is super_read_only=ON, so IsFenced must be true from the
 // moment that write lands — not after the eviction, which has no bound.
-// Anything synchronising on this state (the sidecar's /status
-// self_fenced field, and scenario 43 through it) would otherwise see
-// "not fenced" for a site that demonstrably is, and act as though no
-// fence were in flight.
+// Otherwise /status reports self_fenced=false for a site that is
+// demonstrably fenced, for as long as a slow KILL takes to drain.
 func TestFencingReportsFencedBeforeEvictionCompletes(t *testing.T) {
 	clk := clock.NewFakeClock(time.Now())
 	m := newMockFencer(false)
