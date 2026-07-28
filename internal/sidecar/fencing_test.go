@@ -88,7 +88,7 @@ func TestEvaluateDoesNothingWhenBothReachable(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when both are reachable")
 	}
 	if f.superReadOnly {
@@ -107,7 +107,7 @@ func TestEvaluateDoesNothingWhenOnlyBloodravenDown(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when only Bloodraven is down (hold steady)")
 	}
 	if f.superReadOnly {
@@ -126,7 +126,7 @@ func TestEvaluateDoesNothingWhenOnlyPeerDown(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when only peer is down (Bloodraven handles it)")
 	}
 	if f.superReadOnly {
@@ -145,7 +145,7 @@ func TestEvaluateFencesWhenBothUnreachablePastTimeout(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Error("should fence when both are unreachable past timeout")
 	}
 	if !f.superReadOnly {
@@ -164,7 +164,7 @@ func TestEvaluateDoesNotFenceWhenBothDownButWithinTimeout(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when both are unreachable but within timeout")
 	}
 	if f.superReadOnly {
@@ -183,7 +183,7 @@ func TestEvaluateDoesNotFenceWhenAlreadyReadOnly(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence a replica (already read-only)")
 	}
 	if f.superReadOnly {
@@ -201,7 +201,7 @@ func TestEvaluateDoesNotReFenceWhenAlreadyFenced(t *testing.T) {
 	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
 
 	fm.evaluate(context.Background())
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("should have fenced")
 	}
 
@@ -224,7 +224,7 @@ func TestEvaluateRearmsAfterExternalRestore(t *testing.T) {
 	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
 
 	fm.evaluate(context.Background())
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("should have fenced")
 	}
 
@@ -240,7 +240,7 @@ func TestEvaluateRearmsAfterExternalRestore(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Fatal("should rearm with a fresh lease window, not instantly re-fence on pre-restore timestamps")
 	}
 	if f.superReadOnly {
@@ -256,7 +256,7 @@ func TestEvaluateRearmsAfterExternalRestore(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("should have re-fenced after external restore and renewed isolation past the lease timeout")
 	}
 	if !f.superReadOnly {
@@ -271,13 +271,13 @@ func TestEvaluateRearmClearsStaleTopologyCache(t *testing.T) {
 	cache := &TopologyCache{}
 	cache.Set("pdx", clk.Now().Add(-10*time.Second))
 	fm := newTopologyFencingMonitor(f, clk, cache, nil)
-	fm.fenced = true
+	fm.fenced.Store(true)
 	fm.lastBloodravenOK = clk.Now()
 	setPeerLastOK(fm, clk.Now())
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Fatal("should rearm without immediately fencing on stale topology")
 	}
 	if snap := cache.Snapshot(); snap.ActiveSite != "" {
@@ -316,7 +316,7 @@ func TestEvaluateHandlesReadOnlyError(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when read_only check fails")
 	}
 	if f.superReadOnly {
@@ -336,14 +336,14 @@ func TestCheckStepFunction(t *testing.T) {
 	setPeerLastOK(fm, clk.Now())
 
 	fm.Check(context.Background())
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when both reachable")
 	}
 
 	clk.Advance(30 * time.Second)
 	fm.Check(context.Background())
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Error("should fence after clock advances past lease timeout with both unreachable")
 	}
 }
@@ -433,7 +433,7 @@ func TestEvaluate_TopologyMismatchFencesImmediately(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("should fence when topology says active site != mySite")
 	}
 	if !f.superReadOnly {
@@ -458,7 +458,7 @@ func TestEvaluate_TopologyMatchDoesNotFence(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("should not fence when topology confirms this is the active site")
 	}
 }
@@ -480,7 +480,7 @@ func TestEvaluate_EmptyCacheDoesNotFence(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("empty topology cache should not trigger fencing")
 	}
 }
@@ -695,7 +695,7 @@ func TestEvaluate_StalePrimaryLearnsViaPeer(t *testing.T) {
 
 	fm.Check(context.Background())
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("stale primary should fence after adopting peer's fresher active-site view")
 	}
 	snap := cache.Snapshot()
@@ -724,7 +724,136 @@ func TestEvaluateRequiresAllPeersDown(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Fatal("should not self-fence when at least one peer is still reachable")
 	}
+}
+
+// blockingFencer holds KillConnections open until released, so a test
+// can observe the monitor's state while a fence is mid-eviction.
+type blockingFencer struct {
+	*mockFencer
+	entered  chan struct{}
+	release  chan struct{}
+	released bool
+}
+
+func (b *blockingFencer) KillConnections(ctx context.Context) (int, error) {
+	close(b.entered)
+	<-b.release
+	return 0, nil
+}
+
+// The fence is super_read_only=ON, so IsFenced must be true from the
+// moment that write lands — not after the eviction, which has no bound.
+// Otherwise /status reports self_fenced=false for a site that is
+// demonstrably fenced, for as long as a slow KILL takes to drain.
+func TestFencingReportsFencedBeforeEvictionCompletes(t *testing.T) {
+	clk := clock.NewFakeClock(time.Now())
+	m := newMockFencer(false)
+	b := &blockingFencer{mockFencer: m, entered: make(chan struct{}), release: make(chan struct{})}
+	fm := newTestFencingMonitor(b, clk)
+	fm.WithTopology("iad", "ns", "fg", &TopologyCache{})
+	fm.topology.Set("pdx", clk.Now())
+	setPeerLastOK(fm, clk.Now())
+	fm.lastBloodravenOK = clk.Now()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fm.evaluate(context.Background())
+	}()
+
+	select {
+	case <-b.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("eviction never started")
+	}
+
+	if !fm.IsFenced() {
+		t.Error("IsFenced() is false while the fence is mid-eviction; super_read_only is already ON")
+	}
+
+	close(b.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("evaluate did not return after the eviction was released")
+	}
+	if !fm.IsFenced() {
+		t.Error("IsFenced() is false after a completed fence")
+	}
+}
+
+// self_fenced is process-scoped by design. A restarted sidecar meeting an
+// instance that is still read-only from an earlier fence reports not
+// fenced: evaluate() returns on the read-only check without
+// reconstructing why, and nothing persists the earlier decision.
+// super_read_only answers "is it fenced"; this answers "did this monitor
+// fence it".
+func TestFencingIsFencedIsScopedToTheProcess(t *testing.T) {
+	clk := clock.NewFakeClock(time.Now())
+	// Fresh monitor, instance still read-only from a fence a previous
+	// container performed.
+	m := newMockFencer(true)
+	fm := newTestFencingMonitor(m, clk)
+	fm.WithTopology("iad", "ns", "fg", &TopologyCache{})
+	fm.topology.Set("pdx", clk.Now())
+	setPeerLastOK(fm, clk.Now())
+	fm.lastBloodravenOK = clk.Now()
+
+	fm.evaluate(context.Background())
+
+	if fm.IsFenced() {
+		t.Error("a fresh monitor must not claim a fence it did not perform")
+	}
+	if m.superReadOnly {
+		t.Error("a read-only instance must not be re-fenced")
+	}
+}
+
+// The fence sequence runs on the monitor's own goroutine, so both the
+// super_read_only write and the eviction must be bounded: either one
+// blocking on an unresponsive server would otherwise stop every
+// subsequent fencing check for this site forever. A fence that times out
+// is retried next tick; a wedged loop never fences again.
+func TestFencingBoundsTheFenceSequence(t *testing.T) {
+	clk := clock.NewFakeClock(time.Now())
+	m := newMockFencer(false)
+	d := &deadlineRecordingFencer{mockFencer: m}
+	fm := newTestFencingMonitor(d, clk)
+	fm.WithTopology("iad", "ns", "fg", &TopologyCache{})
+	fm.topology.Set("pdx", clk.Now())
+	setPeerLastOK(fm, clk.Now())
+	fm.lastBloodravenOK = clk.Now()
+
+	fm.evaluate(context.Background())
+
+	if !d.called {
+		t.Fatal("eviction never ran")
+	}
+	if !d.hadDeadline {
+		t.Error("KillConnections got an unbounded context; a hung KILL would wedge the monitor loop")
+	}
+	if !d.setHadDeadline {
+		t.Error("SetSuperReadOnly got an unbounded context; a hung write would wedge the monitor loop")
+	}
+}
+
+type deadlineRecordingFencer struct {
+	*mockFencer
+	called         bool
+	hadDeadline    bool
+	setHadDeadline bool
+}
+
+func (d *deadlineRecordingFencer) SetSuperReadOnly(ctx context.Context) error {
+	_, d.setHadDeadline = ctx.Deadline()
+	return d.mockFencer.SetSuperReadOnly(ctx)
+}
+
+func (d *deadlineRecordingFencer) KillConnections(ctx context.Context) (int, error) {
+	d.called = true
+	_, d.hadDeadline = ctx.Deadline()
+	return 0, nil
 }

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	"github.com/shipstream/bloodraven/internal/clock"
@@ -51,10 +52,13 @@ type FencingMonitor struct {
 	leaseTimeout     time.Duration
 	lastBloodravenOK time.Time
 	lastPeerOK       map[string]time.Time
-	fenced           bool
-	logger           *slog.Logger
-	httpClient       *http.Client
-	clock            clock.Clock
+	// fenced is written by the monitor goroutine and read by the sidecar
+	// HTTP handler that reports self-fenced state, so it is atomic rather
+	// than a plain bool.
+	fenced     atomic.Bool
+	logger     *slog.Logger
+	httpClient *http.Client
+	clock      clock.Clock
 
 	// Topology-aware fields. Populated by WithTopology; zero values
 	// disable rule #1 above. mySite/namespace/group are the identity
@@ -357,7 +361,7 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		f.logger.Warn("fencing: could not check read_only status", "error", err)
 		return
 	}
-	if f.fenced {
+	if f.fenced.Load() {
 		if readOnly {
 			return
 		}
@@ -373,7 +377,7 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		// Service (endpoint readiness lags an operator restart), wedging
 		// the group in a no-writable-site state.
 		f.logger.Info("fencing: MySQL is writable after prior self-fence; rearming monitor")
-		f.fenced = false
+		f.fenced.Store(false)
 		now := f.clock.Now()
 		f.lastBloodravenOK = now
 		for addr := range f.lastPeerOK {
@@ -433,26 +437,72 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 	f.doFence(ctx)
 }
 
+// fenceTimeout bounds the whole fence sequence — the super_read_only
+// write and the connection eviction that follows it — because both run
+// on the monitor's own goroutine. Either one blocking on an unresponsive
+// server would stop every subsequent fencing check for this site,
+// indefinitely, and losing the tick loop is worse than losing this
+// attempt: a fence that times out is retried on the next tick, whereas a
+// wedged loop never fences again.
+//
+// Chosen well above a healthy sequence (one SET GLOBAL plus a handful of
+// KILLs against local MySQL) and well below the point where a stalled
+// monitor stops mattering.
+const fenceTimeout = 20 * time.Second
+
 // doFence performs the actual SET GLOBAL super_read_only=ON +
 // KILL-app-connections step and flips the fenced flag. Separated so
 // both fencing rules share the same write sequence.
 func (f *FencingMonitor) doFence(ctx context.Context) {
-	if err := f.mysql.SetSuperReadOnly(ctx); err != nil {
+	fenceCtx, cancelFence := context.WithTimeout(ctx, fenceTimeout)
+	defer cancelFence()
+
+	if err := f.mysql.SetSuperReadOnly(fenceCtx); err != nil {
 		f.logger.Error("SELF-FENCING FAILED: could not set super_read_only", "error", err)
 		return
 	}
+	// The fence *is* super_read_only=ON, so record it the moment that
+	// write lands rather than after the eviction below. Eviction is
+	// cleanup on a fence that already holds, and it runs under the shared
+	// fenceTimeout below — a site draining a slow KILL would otherwise
+	// report self_fenced=false while demonstrably fenced.
+	f.fenced.Store(true)
 
-	if killed, err := f.mysql.KillConnections(ctx); err != nil {
-		f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err)
+	// KillConnections reports a partial eviction as (killed>0, err): the
+	// sessions it could identify are gone, but it could not enumerate or
+	// kill them all. Carry the count so the warning says how far the fence
+	// got.
+	//
+	// Deliberately not retried on later ticks. A surviving session cannot
+	// write — super_read_only=ON is set above and holds — so what is left
+	// is a stale-read window, and closing it from here means issuing KILLs
+	// against a site the operator may be promoting. There is no
+	// interleaving that makes that safe from inside the sidecar: the
+	// operator holds a persistent pooled connection to every site
+	// (internal/mysql/checker.go), so its future promotion session can
+	// already be in the process list at fence time, and killing it aborts
+	// the promotion mid-sequence. Draining stragglers with retries is the
+	// operator's job, where it can be sequenced against its own promotion
+	// — see the planned-failover Draining phase and spec.plannedFailover
+	// .drainTimeout, which kills every second until the count reaches zero.
+	//
+	// That covers planned failover only. An autonomous self-fence (rule #1
+	// or #2) has no operator-side follow-up, so a session that survives it
+	// keeps reading stale data until the site is next promoted or demoted.
+	// That is the accepted cost: it is bounded to reads, and the warning
+	// below carries the causes so an operator can act on it. Do not "fix"
+	// it with a retry here — see the promotion race above.
+	if killed, err := f.mysql.KillConnections(fenceCtx); err != nil {
+		f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err, "count", killed)
 	} else {
 		f.logger.Info("SELF-FENCING: killed app connections", "count", killed)
 	}
 
-	f.fenced = true
 	f.logger.Error("SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore")
 }
 
-// IsFenced returns whether the monitor has self-fenced.
+// IsFenced reports whether this monitor has self-fenced and not yet
+// rearmed. Safe to call from any goroutine.
 func (f *FencingMonitor) IsFenced() bool {
-	return f.fenced
+	return f.fenced.Load()
 }

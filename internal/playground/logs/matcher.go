@@ -3,6 +3,7 @@ package logs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -134,4 +135,72 @@ func (t *Tailer) Wait(ctx context.Context, since time.Time, pred Predicate) (Mat
 		}
 		t.cond.Wait()
 	}
+}
+
+// Watch pairs one tailer with the predicate to run against its lines
+// and a label naming the component it observes. Used by WaitAny.
+type Watch struct {
+	// Label names the actor this watch observes ("operator",
+	// "sidecar:reader"). Returned by WaitAny so the caller can report
+	// which component satisfied the invariant.
+	Label  string
+	Tailer *Tailer
+	Pred   Predicate
+}
+
+// WaitAny blocks until any watch observes a line satisfying its own
+// predicate, and returns that match plus the winning watch's label.
+// Use it when a single invariant may legitimately be satisfied by more
+// than one component and the caller must not encode which one wins the
+// race — for example a writable non-promotable site, which is fenced by
+// whichever of the operator's poll loop and the site's own sidecar
+// fencing monitor ticks first (issue #119).
+//
+// Watches whose tailer stream fails are not fatal on their own: the
+// remaining watches keep waiting, and a stream error is only returned
+// once no watch can still match. A stream error outranks a context
+// expiry in the returned error so triage can tell a broken tailer from
+// a genuine "nobody fenced" timeout.
+func WaitAny(ctx context.Context, since time.Time, watches ...Watch) (Match, string, error) {
+	if len(watches) == 0 {
+		return Match{}, "", fmt.Errorf("WaitAny: no watches supplied")
+	}
+	type result struct {
+		match Match
+		label string
+		err   error
+	}
+	// Cancel the losers as soon as one watch matches so their Wait
+	// goroutines do not outlive this call.
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan result, len(watches))
+	for _, w := range watches {
+		go func(w Watch) {
+			m, err := w.Tailer.Wait(waitCtx, since, w.Pred)
+			results <- result{match: m, label: w.Label, err: err}
+		}(w)
+	}
+
+	var streamErr, ctxErr error
+	for range watches {
+		r := <-results
+		switch {
+		case r.err == nil:
+			return r.match, r.label, nil
+		case errors.Is(r.err, context.DeadlineExceeded), errors.Is(r.err, context.Canceled):
+			if ctxErr == nil {
+				ctxErr = r.err
+			}
+		default:
+			if streamErr == nil {
+				streamErr = fmt.Errorf("%s: %w", r.label, r.err)
+			}
+		}
+	}
+	if streamErr != nil {
+		return Match{}, "", streamErr
+	}
+	return Match{}, "", ctxErr
 }

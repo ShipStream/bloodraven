@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 // StatusInfo holds the MySQL status information returned by the sidecar.
@@ -22,6 +22,13 @@ type StatusInfo struct {
 	SecondsBehindSource *int64 `json:"seconds_behind_source"`
 	ServerID            int    `json:"server_id"`
 	Uptime              int64  `json:"uptime"`
+	// SelfFenced reports whether *this sidecar process* self-fenced and
+	// has not rearmed. It is deliberately process-scoped: a container
+	// restart clears it, and RunSafetyNet's startup fence is not counted
+	// either, so a site can be fenced with self_fenced=false. Read
+	// super_read_only for whether the instance is fenced; read this for
+	// whether this monitor is the one that fenced it.
+	SelfFenced bool `json:"self_fenced"`
 }
 
 // mysqlQuerier abstracts MySQL queries for testing.
@@ -162,28 +169,143 @@ func (m *LiveMysql) ClearSuperReadOnly(ctx context.Context) error {
 	return nil
 }
 
+// killableConnection reports whether a processlist row is an
+// application session that a fence must boot.
+//
+// Server-internal threads are recognized by user, not by command. On a
+// replica the replication I/O and applier threads run as `system user`
+// with command `Connect`/`Query`, so a command-only filter selects them
+// and the KILL stops replication on the very site being fenced. That is
+// collateral damage with no safety value: super_read_only does not stop
+// the applier, and replicating from the authoritative primary is exactly
+// what a fenced site should keep doing. Losing the channel instead
+// stalls the site until the operator's convergence invariant restarts it
+// — and on a diverged site convergence is Blocked, so it never comes
+// back on its own (issue #119).
+//
+// `Binlog Dump`/`Binlog Dump GTID` keep their own command-based
+// exemption, unchanged from before: those are a fenced primary's
+// outbound feeds to its replicas, they authenticate as the ordinary
+// replication user rather than `system user`, and cutting them would
+// strand peers short of the transactions this site committed before the
+// fence — the opposite of what fencing is for.
+//
+// The operator's mysql.Checker.KillAppConnections deliberately does NOT
+// share this filter. Its call sites want the applier gone: the bootstrap
+// path kills connections so CLONE's DROP DATA phase is not blocked on
+// open table handles. Do not "unify" the two.
+func killableConnection(user, command string) bool {
+	switch user {
+	case "", "system user", "event_scheduler":
+		return false
+	}
+	switch command {
+	case "Binlog Dump", "Binlog Dump GTID", "Daemon":
+		return false
+	}
+	return true
+}
+
 func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id FROM information_schema.processlist
-		 WHERE id != CONNECTION_ID()
-		 AND command NOT IN ('Binlog Dump', 'Binlog Dump GTID')`)
+		`SELECT id, COALESCE(user, ''), COALESCE(command, '')
+		 FROM information_schema.processlist
+		 WHERE id != CONNECTION_ID()`)
 	if err != nil {
 		return 0, fmt.Errorf("list connections: %w", err)
 	}
 	defer rows.Close()
 
-	var killed int
+	var targets []int64
+	var unreadable int
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var user, command string
+		if err := rows.Scan(&id, &user, &command); err != nil {
+			// A row we cannot read is a session we cannot kill. Count it
+			// so a partial fence is reported rather than silently passing
+			// for a complete one.
+			unreadable++
 			continue
 		}
+		if killableConnection(user, command) {
+			targets = append(targets, id)
+		}
+	}
+	iterErr := rows.Err()
+	// Release the pooled connection before issuing the KILLs, and never
+	// KILL while rows are still streaming — the session feeding this very
+	// result set is a candidate. Close is idempotent with the defer above.
+	rows.Close()
+
+	var killed, failed int
+	var killErrs []error
+	for _, id := range targets {
 		if _, err := m.db.ExecContext(ctx, fmt.Sprintf("KILL %d", id)); err != nil {
+			// A session that ended on its own between the SELECT and the
+			// KILL is the outcome the fence wanted, not a failure to
+			// report. Sessions churn constantly, so counting these would
+			// fire the partial-fence warning on nearly every fence and
+			// bury the cases that matter (a privilege error, a connection
+			// lost mid-batch).
+			if isUnknownThread(err) {
+				continue
+			}
+			failed++
+			// Keep the causes, not just the tally: a permission denial,
+			// a lost connection and a cancelled context are three very
+			// different operational stories and the warning has to be
+			// able to tell them apart. evictionError truncates the list;
+			// collecting it whole keeps that policy in one testable place
+			// and is bounded by len(targets) either way.
+			killErrs = append(killErrs, fmt.Errorf("kill %d: %w", id, err))
 			continue
 		}
 		killed++
 	}
-	return killed, rows.Err()
+
+	return killed, evictionError(iterErr, unreadable, failed, len(targets), killErrs)
+}
+
+// maxReportedKillErrors caps how many individual KILL failures are
+// carried in the eviction error, so a site that refuses every KILL
+// cannot turn one log line into hundreds. The count is always exact;
+// only the per-session causes are truncated.
+const maxReportedKillErrors = 3
+
+// evictionError aggregates every reason an eviction pass was incomplete,
+// and returns nil when it covered every session.
+//
+// Enumeration and eviction problems do not cancel the fence: the sessions
+// that could be identified are evicted first, and this only reports the
+// gap. The causes are independent — an iteration that ended early can
+// coincide with rows that would not scan and KILLs that were refused — so
+// they are joined rather than ranked. Reporting only the first would hide
+// the rest.
+func evictionError(iterErr error, unreadable, failed, targets int, killErrs []error) error {
+	var problems []error
+	if iterErr != nil {
+		problems = append(problems, fmt.Errorf("iterate connections: %w", iterErr))
+	}
+	if unreadable > 0 {
+		problems = append(problems, fmt.Errorf("skipped %d unreadable processlist rows", unreadable))
+	}
+	if failed > 0 {
+		problems = append(problems, fmt.Errorf("failed to kill %d of %d sessions", failed, targets))
+		if len(killErrs) > maxReportedKillErrors {
+			killErrs = killErrs[:maxReportedKillErrors]
+		}
+		problems = append(problems, killErrs...)
+	}
+	return errors.Join(problems...)
+}
+
+// isUnknownThread reports whether err is MySQL's ER_NO_SUCH_THREAD, i.e.
+// the session named by a KILL no longer exists.
+func isUnknownThread(err error) bool {
+	const erNoSuchThread = 1094
+	var mysqlErr *mysqldriver.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == erNoSuchThread
 }
 
 // KeyringComponentStatus reads performance_schema.keyring_component_status,

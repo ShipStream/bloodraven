@@ -19,6 +19,7 @@ type Server struct {
 	archiver   *BinlogArchiver
 	topology   *TopologyCache
 	keyring    *KeyringAgent
+	fencing    *FencingMonitor
 }
 
 // NewServer creates a new sidecar HTTP server.
@@ -128,6 +129,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	status.SelfFenced = s.fencing != nil && s.fencing.IsFenced()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
 }
@@ -179,6 +182,23 @@ func (s *Server) handleArchiverStatus(w http.ResponseWriter, r *http.Request) {
 // enabled:false, which the operator reads as "this site is not running
 // encryption-at-rest".
 func (s *Server) SetKeyring(a *KeyringAgent) { s.keyring = a }
+
+// SetFencing attaches the fencing monitor so /status can report whether
+// this sidecar has self-fenced. Without it the field is always false,
+// which matches a deployment that runs no monitor. Call once before Run.
+//
+// The alternative — inferring a self-fence from the SELF-FENCING log
+// lines — cannot distinguish "has not fenced" from "has not logged yet",
+// because the terminal line is written only after connection eviction,
+// which trails the fence by up to fenceTimeout.
+//
+// The reported state is scoped to this process. A restarted sidecar
+// facing a still-fenced instance reports self_fenced=false: evaluate()
+// returns on the read-only check without reconstructing why the instance
+// is read-only, and nothing persists the earlier decision. That is the
+// intended contract — super_read_only answers "is it fenced",
+// self_fenced answers "did this monitor fence it".
+func (s *Server) SetFencing(f *FencingMonitor) { s.fencing = f }
 
 // handleKeyringStatus reports the live keyring digest, the last escrow
 // the operator confirmed, and the instance's observed encryption

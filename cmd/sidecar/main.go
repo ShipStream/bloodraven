@@ -137,6 +137,7 @@ func main() {
 		cfg.LeaseTimeout,
 		logger,
 	).WithTopology(cfg.MySite, cfg.PodNamespace, cfg.FailoverGroup, topology)
+	srv.SetFencing(fm)
 
 	// Run the HTTP server, fencing monitor, and (optionally) the
 	// archiver concurrently. Any of them failing cancels the shared

@@ -116,6 +116,7 @@ type StatusResponse struct {
 	SecondsBehindSource *int64 `json:"seconds_behind_source"`
 	ServerID            int    `json:"server_id"`
 	Uptime              int64  `json:"uptime"`
+	SelfFenced          bool   `json:"self_fenced"`
 }
 
 // Status calls GET /status and decodes the JSON response.

@@ -60,7 +60,7 @@ func TestFencingInvariant_NeverSelfFenceReplica(t *testing.T) {
 	// Run full Check cycle (checkBloodraven + checkPeer + evaluate)
 	fm.Check(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("SAFETY VIOLATION: FencingMonitor self-fenced a replica")
 	}
 	if f.superReadOnly {
@@ -83,7 +83,7 @@ func TestFencingInvariant_NeverAutoUnfence(t *testing.T) {
 
 	// First check: should fence
 	fm.Check(context.Background())
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("should have self-fenced")
 	}
 
@@ -97,7 +97,7 @@ func TestFencingInvariant_NeverAutoUnfence(t *testing.T) {
 	}
 
 	// Must still be fenced — only Bloodraven can restore
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Error("SAFETY VIOLATION: FencingMonitor auto-unfenced after self-fencing")
 	}
 }
@@ -126,7 +126,7 @@ func TestFencingInvariant_RequiresBothDown(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("SAFETY VIOLATION: fenced when only peer is down (bloodraven still reachable)")
 	}
 
@@ -136,7 +136,7 @@ func TestFencingInvariant_RequiresBothDown(t *testing.T) {
 
 	fm.evaluate(context.Background())
 
-	if fm.fenced {
+	if fm.fenced.Load() {
 		t.Error("SAFETY VIOLATION: fenced when only bloodraven is down (peer still reachable)")
 	}
 }
@@ -159,7 +159,7 @@ func TestFencingInvariant_FencesExactlyOnce(t *testing.T) {
 		clk.Advance(5 * time.Second)
 	}
 
-	if !fm.fenced {
+	if !fm.fenced.Load() {
 		t.Fatal("should have self-fenced")
 	}
 
