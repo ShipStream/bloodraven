@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 // StatusInfo holds the MySQL status information returned by the sidecar.
@@ -231,23 +231,44 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 	// result set is a candidate. Close is idempotent with the defer above.
 	rows.Close()
 
-	var killed int
+	var killed, failed int
 	for _, id := range targets {
 		if _, err := m.db.ExecContext(ctx, fmt.Sprintf("KILL %d", id)); err != nil {
+			// A session that ended on its own between the SELECT and the
+			// KILL is the outcome the fence wanted, not a failure to
+			// report. Sessions churn constantly, so counting these would
+			// fire the partial-fence warning on nearly every fence and
+			// bury the cases that matter (a privilege error, a connection
+			// lost mid-batch).
+			if isUnknownThread(err) {
+				continue
+			}
+			failed++
 			continue
 		}
 		killed++
 	}
 
-	// Enumeration problems do not cancel the fence: evict every session we
-	// did identify, then report the gap so the caller's warning names it.
+	// Enumeration and eviction problems do not cancel the fence: evict every
+	// session we did identify, then report the gap so the caller's warning
+	// names it.
 	switch {
 	case iterErr != nil:
 		return killed, fmt.Errorf("iterate connections: %w", iterErr)
 	case unreadable > 0:
 		return killed, fmt.Errorf("skipped %d unreadable processlist rows", unreadable)
+	case failed > 0:
+		return killed, fmt.Errorf("failed to kill %d of %d sessions", failed, len(targets))
 	}
 	return killed, nil
+}
+
+// isUnknownThread reports whether err is MySQL's ER_NO_SUCH_THREAD, i.e.
+// the session named by a KILL no longer exists.
+func isUnknownThread(err error) bool {
+	const erNoSuchThread = 1094
+	var mysqlErr *mysqldriver.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == erNoSuchThread
 }
 
 // KeyringComponentStatus reads performance_schema.keyring_component_status,

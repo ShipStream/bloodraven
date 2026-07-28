@@ -2,7 +2,11 @@ package sidecar
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"testing"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 func TestMySQLBool(t *testing.T) {
@@ -58,5 +62,28 @@ func TestKillableConnectionSparesReplicationThreads(t *testing.T) {
 		if !killableConnection(c.user, c.command) {
 			t.Errorf("killableConnection(%q, %q) = false, want true", c.user, c.command)
 		}
+	}
+}
+
+// A KILL against a session that already exited is the outcome the fence
+// wanted. Counting it as a failure would fire the partial-fence warning
+// on nearly every fence, since sessions churn between the SELECT and the
+// KILL.
+func TestIsUnknownThread(t *testing.T) {
+	if !isUnknownThread(&mysqldriver.MySQLError{Number: 1094, Message: "Unknown thread id: 42"}) {
+		t.Error("ER_NO_SUCH_THREAD not recognized")
+	}
+	if !isUnknownThread(fmt.Errorf("kill 42: %w", &mysqldriver.MySQLError{Number: 1094})) {
+		t.Error("wrapped ER_NO_SUCH_THREAD not recognized")
+	}
+	// A privilege error is a real failure and must be reported.
+	if isUnknownThread(&mysqldriver.MySQLError{Number: 1095, Message: "You are not owner of thread 42"}) {
+		t.Error("ER_KILL_DENIED_ERROR must not be treated as a vanished session")
+	}
+	if isUnknownThread(errors.New("connection reset")) {
+		t.Error("non-MySQL error must not be treated as a vanished session")
+	}
+	if isUnknownThread(nil) {
+		t.Error("nil must not be treated as a vanished session")
 	}
 }
