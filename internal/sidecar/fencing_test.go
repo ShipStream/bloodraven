@@ -857,3 +857,110 @@ func (d *deadlineRecordingFencer) KillConnections(ctx context.Context) (int, err
 	_, d.hadDeadline = ctx.Deadline()
 	return 0, nil
 }
+
+// ambiguousFencer applies the fence write and then reports an error, the
+// shape of a SET GLOBAL that the server executed before the client's
+// context deadline tore the connection down.
+type ambiguousFencer struct {
+	*mockFencer
+	applyWrite bool
+	killed     bool
+}
+
+func (a *ambiguousFencer) SetSuperReadOnly(_ context.Context) error {
+	if a.applyWrite {
+		a.superReadOnly = true
+		a.readOnly = true
+	}
+	return context.DeadlineExceeded
+}
+
+func (a *ambiguousFencer) KillConnections(_ context.Context) (int, error) {
+	a.killed = true
+	return 0, nil
+}
+
+// A fence write that returns an error may still have landed — cancelling
+// the context drops the client connection, it does not roll back a SET
+// GLOBAL the server already applied. Treating that as "not fenced" leaves
+// the flag false against a read-only instance, so evaluate() skips the
+// rearm branch when the operator restores writability, never refreshes
+// its lease timestamps, and re-fences the site it just promoted.
+func TestFencingResolvesAnAmbiguousFenceWrite(t *testing.T) {
+	newMonitor := func(a *ambiguousFencer) (*FencingMonitor, *clock.FakeClock) {
+		clk := clock.NewFakeClock(time.Now())
+		fm := newTestFencingMonitor(a, clk)
+		fm.WithTopology("iad", "ns", "fg", &TopologyCache{})
+		fm.topology.Set("pdx", clk.Now())
+		setPeerLastOK(fm, clk.Now())
+		fm.lastBloodravenOK = clk.Now()
+		return fm, clk
+	}
+
+	t.Run("write landed", func(t *testing.T) {
+		a := &ambiguousFencer{mockFencer: newMockFencer(false), applyWrite: true}
+		fm, _ := newMonitor(a)
+
+		fm.evaluate(context.Background())
+
+		if !fm.IsFenced() {
+			t.Error("IsFenced() is false after a fence write that errored but landed; the instance is read-only")
+		}
+		if a.killed {
+			t.Error("eviction ran on a spent fence context; every KILL would fail immediately")
+		}
+	})
+
+	// The rearm branch is the whole reason the flag has to be right: a
+	// monitor that missed its own fence never refreshes the lease window
+	// the operator's restore is supposed to grant.
+	t.Run("rearms after the operator restores writability", func(t *testing.T) {
+		a := &ambiguousFencer{mockFencer: newMockFencer(false), applyWrite: true}
+		fm, clk := newMonitor(a)
+		fm.evaluate(context.Background())
+
+		// The operator promotes this site: writable again, and the stale
+		// active-site view that tripped rule #1 is cleared with it.
+		a.readOnly = false
+		a.superReadOnly = false
+		stale := fm.lastBloodravenOK
+		clk.Advance(time.Minute)
+		fm.topology.Set("", clk.Now())
+
+		fm.evaluate(context.Background())
+
+		if fm.IsFenced() {
+			t.Error("monitor did not rearm after the restore")
+		}
+		if !fm.lastBloodravenOK.After(stale) {
+			t.Error("rearm did not refresh the lease window; rule #2 would re-fence against pre-outage timestamps")
+		}
+	})
+
+	// The other half of the contract: a write that genuinely failed must
+	// not be promoted to a fence just because it errored.
+	t.Run("write did not land", func(t *testing.T) {
+		a := &ambiguousFencer{mockFencer: newMockFencer(false), applyWrite: false}
+		fm, _ := newMonitor(a)
+
+		fm.evaluate(context.Background())
+
+		if fm.IsFenced() {
+			t.Error("IsFenced() is true after a fence write that failed and left the instance writable")
+		}
+	})
+
+	// An unreadable instance is unknown, not fenced. Claiming the fence
+	// here would suppress the retry that is the actual remedy.
+	t.Run("probe unavailable", func(t *testing.T) {
+		a := &ambiguousFencer{mockFencer: newMockFencer(false), applyWrite: true}
+		fm, _ := newMonitor(a)
+		a.readOnlyErr = fmt.Errorf("connection refused")
+
+		fm.doFence(context.Background())
+
+		if fm.IsFenced() {
+			t.Error("IsFenced() is true although the confirming read failed; the outcome is unknown")
+		}
+	})
+}
