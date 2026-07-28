@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
 // ---------------------------------------------------------------------------
@@ -360,8 +361,12 @@ func (m *FakeFencer) SetSuperReadOnly(_ context.Context) error {
 	return nil
 }
 
-func (m *FakeFencer) KillConnections(_ context.Context) (int, error) {
-	return 0, nil
+func (m *FakeFencer) KillConnections(_ context.Context) (sidecar.EvictionResult, error) {
+	return sidecar.EvictionResult{}, nil
+}
+
+func (m *FakeFencer) KillSessions(_ context.Context, ids []int64) (sidecar.EvictionResult, error) {
+	return sidecar.EvictionResult{Killed: len(ids)}, nil
 }
 
 func (m *FakeFencer) IsSuperReadOnly() bool {

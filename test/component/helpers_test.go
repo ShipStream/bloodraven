@@ -15,6 +15,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
+	"github.com/shipstream/bloodraven/internal/sidecar"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -431,7 +432,13 @@ func (m *mockSidecarMySQL) SetSuperReadOnly(_ context.Context) error {
 	return nil
 }
 
-func (m *mockSidecarMySQL) KillConnections(_ context.Context) (int, error) { return 0, nil }
+func (m *mockSidecarMySQL) KillConnections(_ context.Context) (sidecar.EvictionResult, error) {
+	return sidecar.EvictionResult{}, nil
+}
+
+func (m *mockSidecarMySQL) KillSessions(_ context.Context, ids []int64) (sidecar.EvictionResult, error) {
+	return sidecar.EvictionResult{Killed: len(ids)}, nil
+}
 
 func (m *mockSidecarMySQL) isSuperReadOnly() bool {
 	m.mu.Lock()
