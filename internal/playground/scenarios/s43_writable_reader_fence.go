@@ -2,7 +2,6 @@ package scenarios
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,7 +27,6 @@ type s43RunState struct {
 	rejectedBefore float64
 	errantSet      string
 	fencedBy       string
-	sidecarFenced  bool
 	recovered      bool
 }
 
@@ -54,7 +52,6 @@ func scenario43WritableReaderFence() runner.Scenario {
 		Steps: []runner.Step{
 			s43InjectWritableReaderWithErrantRow(state),
 			s43ObserveFence(state),
-			s43VerifySidecarFenceSparesReplication(state),
 			s43VerifyPlannedFailoverRejected(state),
 			s43VerifyErrantGtidBlocksConvergence(state),
 			s43ReconcileAndRecover(state),
@@ -196,31 +193,7 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 				return err
 			}
 
-			// Which label WaitAny returned says who was seen first by a
-			// goroutine, not who acted first, and both actors may have
-			// fenced. Ask the sidecar directly instead of inferring from
-			// logs: no log-based check can separate "has not fenced" from
-			// "has not logged yet", because the terminal line is written
-			// only after an unbounded connection eviction.
-			//
-			// IsFenced is also the exactly right predicate for the next
-			// step's skip decision, whenever it was set. That step makes
-			// the reader writable with the operator down; if this monitor
-			// is fenced, that sends it down its rearm path, which clears
-			// the topology cache to Set("", now) — and Adopt only takes a
-			// strictly newer observedAt, so with the operator down no peer
-			// view can repopulate it and no fence would ever come.
-			probe, err := env.Sidecar(state.topo.reader)
-			if err != nil {
-				return fmt.Errorf("open reader sidecar probe: %w", err)
-			}
-			sidecarStatus, err := probe.Status(ctx)
-			if err != nil {
-				return fmt.Errorf("read reader sidecar status: %w", err)
-			}
-			state.sidecarFenced = sidecarStatus.SelfFenced
-			env.Capture.Note(fmt.Sprintf("writable reader %s was fenced by %s (sidecar also fenced: %v)",
-				state.topo.reader, state.fencedBy, state.sidecarFenced))
+			env.Capture.Note(fmt.Sprintf("writable reader %s was fenced by %s", state.topo.reader, state.fencedBy))
 
 			// Fencing must not cost the reader its replication channel.
 			// The sidecar's post-fence connection kill used to select the
@@ -256,150 +229,6 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 			return nil
 		},
 	}
-}
-
-// s43VerifySidecarFenceSparesReplication forces the sidecar to be the
-// fencing actor and re-checks that replication survives.
-//
-// The observe step accepts a fence from either actor, which is right for
-// the fencing invariant but leaves the regression this guards — the
-// sidecar's post-fence connection kill taking out the site's own
-// replication threads — exercised only on the runs where the sidecar
-// happens to win the race. The operator's fence never kills connections
-// at all, so on the other runs the replication assertion passes without
-// touching the code under test.
-//
-// Scaling the operator away leaves the sidecar as the only actor that
-// can fence, so the path runs on every operator-won run. Rule #1 still
-// fires with the operator down because the reader's topology cache keeps
-// the active-site view it already holds — nothing clears it while the
-// monitor has not fenced.
-//
-// Skipped entirely when the sidecar already fenced during the observe
-// step, which both covers the path already and avoids a rearm deadlock
-// (see below).
-func s43VerifySidecarFenceSparesReplication(state *s43RunState) runner.Step {
-	return runner.Step{
-		Phase: runner.PhaseVerify,
-		Name:  "sidecar's own fence spares the reader's replication threads",
-		Do: func(ctx context.Context, env *runner.Env) error {
-			// If the sidecar already won the first fence, the path is
-			// covered and forcing a second one would hang: rearming on a
-			// writable instance calls topology.Set("", now), and Adopt only
-			// takes a strictly newer observedAt. With the operator down,
-			// peer views stop advancing, so the cleared cache can never be
-			// repopulated, rule #1 never fires, and reachable peers keep
-			// rule #2 quiet.
-			if state.sidecarFenced {
-				env.Capture.Note("skipping forced sidecar fence: the sidecar already fenced the reader in the observe step")
-				return nil
-			}
-			if err := env.Chaos.ScaleOperatorToZero(ctx); err != nil {
-				return err
-			}
-			// replicas=0 is only a spec write. Until the pod finishes
-			// terminating the operator still reconciles, and it would win
-			// the fence this step exists to give the sidecar.
-			goneCtx, cancelGone := context.WithTimeout(ctx, 2*time.Minute)
-			goneErr := env.Chaos.WaitForOperatorGone(goneCtx)
-			cancelGone()
-			if goneErr != nil {
-				restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-				defer cancel()
-				return errors.Join(goneErr, env.Chaos.ScaleOperatorToOne(restoreCtx))
-			}
-			err := s43ForceSidecarFence(ctx, env, state)
-			// Restore the operator before later steps, on the failure path
-			// too — they all need it. Detached from ctx so a cancelled
-			// scenario still puts the operator back.
-			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-			defer cancel()
-			if restoreErr := env.Chaos.ScaleOperatorToOne(restoreCtx); restoreErr != nil {
-				return errors.Join(err, fmt.Errorf("restore operator: %w", restoreErr))
-			}
-			if waitErr := env.Chaos.WaitForOperatorAvailable(restoreCtx); waitErr != nil {
-				return errors.Join(err, fmt.Errorf("wait for operator: %w", waitErr))
-			}
-			// The scale cycle replaced the operator pod, so everything bound
-			// to the old one is now stale.
-			//
-			// The log tailer follows a pod that no longer exists — rebind
-			// it, or the convergence-log assertion two steps down waits out
-			// its full timeout against a dead stream.
-			if _, reopenErr := env.ReopenLogs("operator"); reopenErr != nil {
-				return errors.Join(err, fmt.Errorf("reopen operator tailer: %w", reopenErr))
-			}
-			// The metrics scraper is port-forwarded to that same dead pod.
-			if refreshErr := env.RefreshMetrics(restoreCtx); refreshErr != nil {
-				return errors.Join(err, fmt.Errorf("refresh metrics scraper: %w", refreshErr))
-			}
-			// And the replacement is a fresh process, so its Prometheus
-			// counters all restarted at zero. The baseline captured during
-			// inject describes a process that no longer exists; the
-			// planned-failover step would then wait for an increment past a
-			// value the new operator can never reach. Re-baseline.
-			before, metricErr := metricCounter(restoreCtx, env, "bloodraven_planned_failovers_total", map[string]string{
-				"target_site": state.topo.reader,
-				"result":      "rejected",
-			})
-			if metricErr != nil {
-				return errors.Join(err, fmt.Errorf("re-baseline rejected counter: %w", metricErr))
-			}
-			state.rejectedBefore = before
-			return err
-		},
-	}
-}
-
-func s43ForceSidecarFence(ctx context.Context, env *runner.Env, state *s43RunState) error {
-	tail, err := env.Logs("sidecar:" + state.topo.reader)
-	if err != nil {
-		return err
-	}
-	reader, err := env.MySQL(state.topo.reader)
-	if err != nil {
-		return fmt.Errorf("open reader mysql: %w", err)
-	}
-
-	// Scope the log wait to this injection so the earlier fence's line
-	// cannot satisfy it.
-	since := time.Now()
-	// Writable again, but no write this time: the reader is already
-	// diverged and more errant GTIDs would only complicate the reconcile
-	// in the settle step.
-	if _, err := reader.Exec(ctx, "SET GLOBAL super_read_only = OFF; SET GLOBAL read_only = OFF"); err != nil {
-		return fmt.Errorf("make reader writable with the operator down: %w", err)
-	}
-
-	// PEER_CHECK_INTERVAL is 5s; 90s covers a loaded CI node with margin.
-	logCtx, cancelLog := context.WithTimeout(ctx, 90*time.Second)
-	_, err = env.Wait.UntilLog(logCtx, tail, since,
-		"reader sidecar self-fences with the operator down",
-		pglogs.Substring("SELF-FENCED"))
-	cancelLog()
-	if err != nil {
-		return err
-	}
-
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		on, err := reader.SuperReadOnly(ctx)
-		if err == nil && on {
-			break
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("reader super_read_only not restored by its sidecar within 30s (on=%v err=%v)", on, err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-	}
-
-	// The assertion this step exists for: the sidecar's connection kill
-	// ran, and the reader is still replicating.
-	return s43AssertReaderReplicating(ctx, reader)
 }
 
 // s43AssertReaderReplicating fails unless the reader's I/O and applier

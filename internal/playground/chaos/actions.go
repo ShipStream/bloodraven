@@ -132,51 +132,6 @@ func (a *Actions) ScaleOperatorToZero(ctx context.Context) error {
 	return nil
 }
 
-// WaitForOperatorGone polls until no operator pod exists at all.
-//
-// ScaleOperatorToZero only writes replicas=0 to the Deployment spec. The
-// running pod then works through its graceful-termination window, and
-// until it exits it keeps reconciling — so a scenario that needs the
-// operator genuinely absent (rather than merely scheduled for removal)
-// must wait for this, or the operator it thinks it removed can still act.
-func (a *Actions) WaitForOperatorGone(ctx context.Context) error {
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
-	var lastErr error
-	remaining := -1
-	for {
-		pods, err := a.K.Kubernetes.CoreV1().Pods(a.Namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: pgmetrics.OperatorPodSelector,
-		})
-		if err != nil {
-			lastErr = err
-		} else {
-			remaining = len(pods.Items)
-			if remaining == 0 {
-				return nil
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("operator pods still present in %s: %w (remaining=%d lastErr=%v)",
-				a.Namespace, ctx.Err(), remaining, lastErr)
-		case <-tick.C:
-		}
-	}
-}
-
-// ScaleOperatorToOne brings the operator back without draining the
-// scenario cleanup stack. Use this when a step needs the operator
-// offline only for its own duration and must restore it before later
-// steps run. Pair with WaitForOperatorAvailable.
-func (a *Actions) ScaleOperatorToOne(ctx context.Context) error {
-	const dep = "bloodraven"
-	if err := a.K.ScaleDeployment(ctx, a.Namespace, dep, 1); err != nil {
-		return fmt.Errorf("scale %s to 1: %w", dep, err)
-	}
-	return nil
-}
-
 // WaitForOperatorAvailable polls the operator Deployment until its
 // available-replicas count matches the desired count, signalling that
 // the replacement pod has rolled out and passed its readiness probe.
