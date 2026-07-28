@@ -198,17 +198,35 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 
 			// Which label WaitAny returned says who was seen first by a
 			// goroutine, not who acted first, and both actors may have
-			// fenced. Establish the sidecar's participation independently:
-			// super_read_only is back ON by now, so its monitor returns on
-			// its next read-only check and can no longer fence — any
-			// SELF-FENCED it was going to emit has been emitted, and this
-			// window only covers tailer lag.
+			// fenced. Establish the sidecar's participation independently.
+			//
+			// Probe for the *decision* line, not the terminal one. doFence
+			// logs SELF-FENCED only after its connection eviction, which has
+			// no bound, so a fence still in flight may not have logged it
+			// yet — inferring "the sidecar did nothing" from that absence
+			// would be wrong, and would send the next step into the rearm
+			// deadlock. The mismatch line is emitted before that work
+			// begins, and once super_read_only is back ON (confirmed above)
+			// the monitor returns on its next read-only check and cannot
+			// start a new fence. So if the decision line is not there by
+			// now, there is no fence in flight and none coming.
 			state.sidecarFenced = strings.HasPrefix(state.fencedBy, "sidecar:")
 			if !state.sidecarFenced {
-				probeCtx, cancelProbe := context.WithTimeout(ctx, 15*time.Second)
-				_, probeErr := sidecarTail.Wait(probeCtx, env.StartTime, pglogs.Substring("SELF-FENCED"))
-				cancelProbe()
-				state.sidecarFenced = probeErr == nil
+				decisionCtx, cancelDecision := context.WithTimeout(ctx, 15*time.Second)
+				_, decisionErr := sidecarTail.Wait(decisionCtx, env.StartTime,
+					pglogs.Substring("SELF-FENCING: topology mismatch"))
+				cancelDecision()
+				if decisionErr == nil {
+					// Committed to fencing. Wait out the eviction so the
+					// skip decision rests on a completed fence.
+					termCtx, cancelTerm := context.WithTimeout(ctx, 60*time.Second)
+					_, termErr := sidecarTail.Wait(termCtx, env.StartTime, pglogs.Substring("SELF-FENCED"))
+					cancelTerm()
+					if termErr != nil {
+						return fmt.Errorf("reader sidecar logged a topology mismatch but never completed the fence: %w", termErr)
+					}
+					state.sidecarFenced = true
+				}
 			}
 			env.Capture.Note(fmt.Sprintf("writable reader %s was fenced by %s (sidecar also fenced: %v)",
 				state.topo.reader, state.fencedBy, state.sidecarFenced))

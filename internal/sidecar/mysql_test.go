@@ -97,7 +97,8 @@ func TestEvictionError(t *testing.T) {
 	}
 
 	iterFail := errors.New("driver went away")
-	got := evictionError(iterFail, 2, 1, 4, []error{errors.New("kill 7: access denied")})
+	killFail := errors.New("kill 7: access denied")
+	got := evictionError(iterFail, 2, 1, 4, []error{killFail})
 	if got == nil {
 		t.Fatal("combined failures reported no error")
 	}
@@ -106,14 +107,40 @@ func TestEvictionError(t *testing.T) {
 		"iterate connections: driver went away",
 		"skipped 2 unreadable processlist rows",
 		"failed to kill 1 of 4 sessions",
+		// The per-session cause, not just the tally: a permission denial
+		// and a dropped connection are different operational stories.
+		"kill 7: access denied",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("combined error %q is missing %q", msg, want)
 		}
 	}
-	// The underlying iteration error stays inspectable through the join.
+	// Both underlying errors stay inspectable through the join.
 	if !errors.Is(got, iterFail) {
 		t.Error("joined error does not unwrap to the iteration error")
+	}
+	if !errors.Is(got, killFail) {
+		t.Error("joined error does not unwrap to the individual KILL error")
+	}
+
+	// KillConnections caps the per-session causes it collects at
+	// maxReportedKillErrors, but the failure count is never truncated:
+	// more failures than retained details must still report exactly.
+	details := make([]error, 0, maxReportedKillErrors)
+	for i := 0; i < maxReportedKillErrors; i++ {
+		details = append(details, fmt.Errorf("kill %d: access denied", i))
+	}
+	truncated := evictionError(nil, 0, 10, 20, details).Error()
+	if !strings.Contains(truncated, "failed to kill 10 of 20 sessions") {
+		t.Errorf("truncated error lost the exact count: %q", truncated)
+	}
+	for i := 0; i < maxReportedKillErrors; i++ {
+		if !strings.Contains(truncated, fmt.Sprintf("kill %d: access denied", i)) {
+			t.Errorf("truncated error dropped retained detail %d: %q", i, truncated)
+		}
+	}
+	if strings.Count(truncated, "access denied") != maxReportedKillErrors {
+		t.Errorf("expected exactly %d retained details, got %q", maxReportedKillErrors, truncated)
 	}
 
 	// Each cause alone is reported alone.
