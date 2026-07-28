@@ -190,7 +190,7 @@ func (s *Server) SetKeyring(a *KeyringAgent) { s.keyring = a }
 // The alternative — inferring a self-fence from the SELF-FENCING log
 // lines — cannot distinguish "has not fenced" from "has not logged yet",
 // because the terminal line is written only after connection eviction,
-// which is unbounded.
+// which trails the fence by up to fenceTimeout.
 //
 // The reported state is scoped to this process. A restarted sidecar
 // facing a still-fenced instance reports self_fenced=false: evaluate()

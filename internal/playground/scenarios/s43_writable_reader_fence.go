@@ -206,10 +206,22 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 			// reader is diverged — left convergence permanently Blocked
 			// with no operator action to explain it (issue #119).
 			//
-			// The second sample is past the sidecar's whole-fence deadline
-			// (fenceTimeout, 20s), so a kill cannot land after the last
-			// look: whichever actor fenced, every KILL it was going to
-			// issue has either happened or been abandoned by then.
+			// The second sample sits past the sidecar's whole-fence
+			// deadline (fenceTimeout, 20s) measured from the observed
+			// fence, which covers every realistic ordering of the two
+			// actors.
+			//
+			// It is a backstop, not a proof. The sidecar is an independent
+			// process, so no sampling window can be provably race-free
+			// against it — a sufficiently starved goroutine could always
+			// begin its eviction after the last look. Two earlier attempts
+			// to close that gap (forcing the actor, then synchronising on
+			// sidecar state) each cost more than they bought and were
+			// reverted; see the scenario doc. The deterministic coverage
+			// for this regression is the killableConnection unit test,
+			// which pins the filter that decides what gets killed. This
+			// catches the wiring end-to-end on the runs where the sidecar
+			// is the actor.
 			for _, delay := range []time.Duration{0, 25 * time.Second} {
 				if delay > 0 {
 					select {
