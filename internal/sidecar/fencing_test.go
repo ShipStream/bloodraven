@@ -811,3 +811,40 @@ func TestFencingIsFencedIsScopedToTheProcess(t *testing.T) {
 		t.Error("a read-only instance must not be re-fenced")
 	}
 }
+
+// The eviction runs on the monitor's own goroutine, so it must be
+// bounded: a KILL blocking on an unresponsive server would otherwise
+// stop every subsequent fencing check for this site forever. The fence
+// itself is already established by then, so giving up on stragglers is
+// the cheap side of that trade.
+func TestFencingBoundsTheEviction(t *testing.T) {
+	clk := clock.NewFakeClock(time.Now())
+	m := newMockFencer(false)
+	d := &deadlineRecordingFencer{mockFencer: m}
+	fm := newTestFencingMonitor(d, clk)
+	fm.WithTopology("iad", "ns", "fg", &TopologyCache{})
+	fm.topology.Set("pdx", clk.Now())
+	setPeerLastOK(fm, clk.Now())
+	fm.lastBloodravenOK = clk.Now()
+
+	fm.evaluate(context.Background())
+
+	if !d.called {
+		t.Fatal("eviction never ran")
+	}
+	if !d.hadDeadline {
+		t.Error("KillConnections got an unbounded context; a hung KILL would wedge the monitor loop")
+	}
+}
+
+type deadlineRecordingFencer struct {
+	*mockFencer
+	called      bool
+	hadDeadline bool
+}
+
+func (d *deadlineRecordingFencer) KillConnections(ctx context.Context) (int, error) {
+	d.called = true
+	_, d.hadDeadline = ctx.Deadline()
+	return 0, nil
+}

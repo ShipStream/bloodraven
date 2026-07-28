@@ -27,12 +27,7 @@ type s43RunState struct {
 	rejectedBefore float64
 	errantSet      string
 	fencedBy       string
-	// sidecarFencedBefore is the reader sidecar's self_fenced flag as of
-	// injection. The flag is process-scoped and persists until rearm, so
-	// only a false->true transition means "this monitor fenced during
-	// this run".
-	sidecarFencedBefore bool
-	recovered           bool
+	recovered      bool
 }
 
 // scenario43WritableReaderFence is chaos proposal R5 from issue #115:
@@ -98,16 +93,6 @@ func s43InjectWritableReaderWithErrantRow(state *s43RunState) runner.Step {
 				return err
 			}
 			state.rejectedBefore = before
-
-			probe, err := env.Sidecar(state.topo.reader)
-			if err != nil {
-				return fmt.Errorf("open reader sidecar probe: %w", err)
-			}
-			sidecarStatus, err := probe.Status(ctx)
-			if err != nil {
-				return fmt.Errorf("read reader sidecar status: %w", err)
-			}
-			state.sidecarFencedBefore = sidecarStatus.SelfFenced
 
 			reader, err := env.MySQL(state.topo.reader)
 			if err != nil {
@@ -214,34 +199,18 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 
 			env.Capture.Note(fmt.Sprintf("writable reader %s was fenced by %s", state.topo.reader, state.fencedBy))
 
-			// If the sidecar fenced during this run, its connection
-			// eviction may still be running: self_fenced flips when the
-			// super_read_only write lands, before KillConnections, and that
-			// call has no bound. Sampling replication now could miss a kill
-			// that arrives later — the very regression below is the one
-			// this step exists to catch. Wait for the terminal SELF-FENCED,
-			// which is emitted only once eviction has returned.
-			//
-			// Scoped to a false->true transition because the flag survives
-			// until rearm: a sidecar already fenced at injection cannot
-			// fence again this run (it rearms on the writable instance and
-			// clears its topology cache), so there is no eviction in
-			// flight to wait for.
-			if !state.sidecarFencedBefore {
-				if err := s43WaitSidecarEvictionSettled(ctx, env, state); err != nil {
-					return err
-				}
-			}
-
 			// Fencing must not cost the reader its replication channel.
 			// The sidecar's post-fence connection kill used to select the
 			// replica's own `system user` threads, which stopped
 			// replication on the site being fenced and — because the
 			// reader is diverged — left convergence permanently Blocked
-			// with no operator action to explain it (issue #119). Sampled
-			// twice so a kill landing just after the fence is still
-			// caught.
-			for _, delay := range []time.Duration{0, 5 * time.Second} {
+			// with no operator action to explain it (issue #119).
+			//
+			// The second sample is past the sidecar's eviction deadline
+			// (evictionTimeout, 15s), so a kill cannot land after the last
+			// look: whichever actor fenced, every KILL it was going to
+			// issue has either happened or been abandoned by then.
+			for _, delay := range []time.Duration{0, 20 * time.Second} {
 				if delay > 0 {
 					select {
 					case <-ctx.Done():
@@ -267,52 +236,6 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 			return nil
 		},
 	}
-}
-
-// s43WaitSidecarEvictionSettled blocks until the reader's sidecar has
-// finished any eviction it started this run, so a later replication
-// sample cannot race a slow KILL.
-//
-// self_fenced is read rather than inferred from logs: it is set the
-// moment the fence lands, so a short poll after super_read_only is
-// already confirmed ON is enough to tell whether this monitor fenced.
-// If it did not, there is nothing in flight and the caller proceeds.
-func s43WaitSidecarEvictionSettled(ctx context.Context, env *runner.Env, state *s43RunState) error {
-	probe, err := env.Sidecar(state.topo.reader)
-	if err != nil {
-		return fmt.Errorf("open reader sidecar probe: %w", err)
-	}
-	// super_read_only is confirmed ON by now, so a sidecar fence has
-	// already stored the flag; this only covers the gap between that
-	// write returning and the store.
-	fenced := false
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		status, err := probe.Status(ctx)
-		if err == nil && status.SelfFenced {
-			fenced = true
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Second):
-		}
-	}
-	if !fenced {
-		return nil
-	}
-
-	tail, err := env.Logs("sidecar:" + state.topo.reader)
-	if err != nil {
-		return err
-	}
-	logCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
-	_, err = env.Wait.UntilLog(logCtx, tail, env.StartTime,
-		"reader sidecar finishes the eviction it started",
-		pglogs.Substring("SELF-FENCED"))
-	return err
 }
 
 // s43AssertReaderReplicating fails unless the reader's I/O and applier
