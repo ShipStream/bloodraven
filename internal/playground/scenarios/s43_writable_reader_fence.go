@@ -2,6 +2,7 @@ package scenarios
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -52,6 +53,7 @@ func scenario43WritableReaderFence() runner.Scenario {
 		Steps: []runner.Step{
 			s43InjectWritableReaderWithErrantRow(state),
 			s43ObserveFence(state),
+			s43VerifySidecarFenceSparesReplication(state),
 			s43VerifyPlannedFailoverRejected(state),
 			s43VerifyErrantGtidBlocksConvergence(state),
 			s43ReconcileAndRecover(state),
@@ -224,6 +226,97 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 			return nil
 		},
 	}
+}
+
+// s43VerifySidecarFenceSparesReplication forces the sidecar to be the
+// fencing actor and re-checks that replication survives.
+//
+// The observe step accepts a fence from either actor, which is right for
+// the fencing invariant but leaves the regression this guards — the
+// sidecar's post-fence connection kill taking out the site's own
+// replication threads — exercised only on the runs where the sidecar
+// happens to win the race. The operator's fence never kills connections
+// at all, so on the other runs the replication assertion passes without
+// touching the code under test.
+//
+// Scaling the operator away leaves the sidecar as the only actor that
+// can fence, so the path runs every time. Rule #1 still fires with the
+// operator down: the reader's topology cache keeps its active-site view,
+// refreshed from peer sidecars rather than the operator.
+func s43VerifySidecarFenceSparesReplication(state *s43RunState) runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseVerify,
+		Name:  "sidecar's own fence spares the reader's replication threads",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			if err := env.Chaos.ScaleOperatorToZero(ctx); err != nil {
+				return err
+			}
+			err := s43ForceSidecarFence(ctx, env, state)
+			// Restore the operator before later steps, on the failure path
+			// too — they all need it. Detached from ctx so a cancelled
+			// scenario still puts the operator back.
+			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			defer cancel()
+			if restoreErr := env.Chaos.ScaleOperatorToOne(restoreCtx); restoreErr != nil {
+				return errors.Join(err, fmt.Errorf("restore operator: %w", restoreErr))
+			}
+			if waitErr := env.Chaos.WaitForOperatorAvailable(restoreCtx); waitErr != nil {
+				return errors.Join(err, fmt.Errorf("wait for operator: %w", waitErr))
+			}
+			return err
+		},
+	}
+}
+
+func s43ForceSidecarFence(ctx context.Context, env *runner.Env, state *s43RunState) error {
+	tail, err := env.Logs("sidecar:" + state.topo.reader)
+	if err != nil {
+		return err
+	}
+	reader, err := env.MySQL(state.topo.reader)
+	if err != nil {
+		return fmt.Errorf("open reader mysql: %w", err)
+	}
+
+	// Scope the log wait to this injection so the earlier fence's line
+	// cannot satisfy it.
+	since := time.Now()
+	// Writable again, but no write this time: the reader is already
+	// diverged and more errant GTIDs would only complicate the reconcile
+	// in the settle step.
+	if _, err := reader.Exec(ctx, "SET GLOBAL super_read_only = OFF; SET GLOBAL read_only = OFF"); err != nil {
+		return fmt.Errorf("make reader writable with the operator down: %w", err)
+	}
+
+	// PEER_CHECK_INTERVAL is 5s; 90s covers a loaded CI node with margin.
+	logCtx, cancelLog := context.WithTimeout(ctx, 90*time.Second)
+	_, err = env.Wait.UntilLog(logCtx, tail, since,
+		"reader sidecar self-fences with the operator down",
+		pglogs.Substring("SELF-FENCED"))
+	cancelLog()
+	if err != nil {
+		return err
+	}
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		on, err := reader.SuperReadOnly(ctx)
+		if err == nil && on {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("reader super_read_only not restored by its sidecar within 30s (on=%v err=%v)", on, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+
+	// The assertion this step exists for: the sidecar's connection kill
+	// ran, and the reader is still replicating.
+	return s43AssertReaderReplicating(ctx, reader)
 }
 
 // s43AssertReaderReplicating fails unless the reader's I/O and applier

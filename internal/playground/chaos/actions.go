@@ -132,6 +132,18 @@ func (a *Actions) ScaleOperatorToZero(ctx context.Context) error {
 	return nil
 }
 
+// ScaleOperatorToOne brings the operator back without draining the
+// scenario cleanup stack. Use this when a step needs the operator
+// offline only for its own duration and must restore it before later
+// steps run. Pair with WaitForOperatorAvailable.
+func (a *Actions) ScaleOperatorToOne(ctx context.Context) error {
+	const dep = "bloodraven"
+	if err := a.K.ScaleDeployment(ctx, a.Namespace, dep, 1); err != nil {
+		return fmt.Errorf("scale %s to 1: %w", dep, err)
+	}
+	return nil
+}
+
 // WaitForOperatorAvailable polls the operator Deployment until its
 // available-replicas count matches the desired count, signalling that
 // the replacement pod has rolled out and passed its readiness probe.

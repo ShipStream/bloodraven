@@ -92,12 +92,12 @@ func TestIsUnknownThread(t *testing.T) {
 // An incomplete eviction has independent causes that can coincide. The
 // warning must name all of them, not just the first.
 func TestEvictionError(t *testing.T) {
-	if err := evictionError(nil, 0, 0, 5); err != nil {
+	if err := evictionError(nil, 0, 0, 5, nil); err != nil {
 		t.Errorf("a complete pass must report no error, got %v", err)
 	}
 
 	iterFail := errors.New("driver went away")
-	got := evictionError(iterFail, 2, 1, 4)
+	got := evictionError(iterFail, 2, 1, 4, []error{errors.New("kill 7: access denied")})
 	if got == nil {
 		t.Fatal("combined failures reported no error")
 	}
@@ -117,10 +117,10 @@ func TestEvictionError(t *testing.T) {
 	}
 
 	// Each cause alone is reported alone.
-	if msg := evictionError(nil, 3, 0, 9).Error(); !strings.Contains(msg, "skipped 3") || strings.Contains(msg, "failed to kill") {
+	if msg := evictionError(nil, 3, 0, 9, nil).Error(); !strings.Contains(msg, "skipped 3") || strings.Contains(msg, "failed to kill") {
 		t.Errorf("unreadable-only error reported extra causes: %q", msg)
 	}
-	if msg := evictionError(nil, 0, 2, 9).Error(); !strings.Contains(msg, "failed to kill 2 of 9") || strings.Contains(msg, "skipped") {
+	if msg := evictionError(nil, 0, 2, 9, nil).Error(); !strings.Contains(msg, "failed to kill 2 of 9") || strings.Contains(msg, "skipped") {
 		t.Errorf("kill-failure-only error reported extra causes: %q", msg)
 	}
 }

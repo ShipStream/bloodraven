@@ -459,6 +459,13 @@ func (f *FencingMonitor) doFence(ctx context.Context) {
 	// operator's job, where it can be sequenced against its own promotion
 	// — see the planned-failover Draining phase and spec.plannedFailover
 	// .drainTimeout, which kills every second until the count reaches zero.
+	//
+	// That covers planned failover only. An autonomous self-fence (rule #1
+	// or #2) has no operator-side follow-up, so a session that survives it
+	// keeps reading stale data until the site is next promoted or demoted.
+	// That is the accepted cost: it is bounded to reads, and the warning
+	// below carries the causes so an operator can act on it. Do not "fix"
+	// it with a retry here — see the promotion race above.
 	if killed, err := f.mysql.KillConnections(ctx); err != nil {
 		f.logger.Warn("SELF-FENCING: failed to kill connections after fencing", "error", err, "count", killed)
 	} else {

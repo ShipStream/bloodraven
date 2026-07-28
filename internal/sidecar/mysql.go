@@ -232,6 +232,7 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 	rows.Close()
 
 	var killed, failed int
+	var killErrs []error
 	for _, id := range targets {
 		if _, err := m.db.ExecContext(ctx, fmt.Sprintf("KILL %d", id)); err != nil {
 			// A session that ended on its own between the SELECT and the
@@ -244,13 +245,26 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 				continue
 			}
 			failed++
+			// Keep the causes, not just the tally: a permission denial,
+			// a lost connection and a cancelled context are three very
+			// different operational stories and the warning has to be
+			// able to tell them apart. Bounded so a site that refuses
+			// every KILL cannot turn one log line into hundreds.
+			if len(killErrs) < maxReportedKillErrors {
+				killErrs = append(killErrs, fmt.Errorf("kill %d: %w", id, err))
+			}
 			continue
 		}
 		killed++
 	}
 
-	return killed, evictionError(iterErr, unreadable, failed, len(targets))
+	return killed, evictionError(iterErr, unreadable, failed, len(targets), killErrs)
 }
+
+// maxReportedKillErrors caps how many individual KILL failures are
+// carried in the eviction error. The count is always exact; only the
+// per-session causes are truncated.
+const maxReportedKillErrors = 3
 
 // evictionError aggregates every reason an eviction pass was incomplete,
 // and returns nil when it covered every session.
@@ -261,7 +275,7 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 // coincide with rows that would not scan and KILLs that were refused — so
 // they are joined rather than ranked. Reporting only the first would hide
 // the rest.
-func evictionError(iterErr error, unreadable, failed, targets int) error {
+func evictionError(iterErr error, unreadable, failed, targets int, killErrs []error) error {
 	var problems []error
 	if iterErr != nil {
 		problems = append(problems, fmt.Errorf("iterate connections: %w", iterErr))
@@ -271,6 +285,7 @@ func evictionError(iterErr error, unreadable, failed, targets int) error {
 	}
 	if failed > 0 {
 		problems = append(problems, fmt.Errorf("failed to kill %d of %d sessions", failed, targets))
+		problems = append(problems, killErrs...)
 	}
 	return errors.Join(problems...)
 }
