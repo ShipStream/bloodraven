@@ -1971,7 +1971,39 @@ func (tm *TopologyManager) bootstrapBlocksCrossSite() bool {
 	if site == nil {
 		return true
 	}
-	return site.isPromotable() || site.role == state.SiteRoleDROnly
+	// Only an explicit read-only reader is exempt. Any other role — including
+	// one this build does not recognise — keeps the conservative behaviour,
+	// so a misconfigured or newly-introduced role cannot silently open the
+	// cross-site path during a topology-relevant clone.
+	return site.role != state.SiteRoleReadOnly
+}
+
+// cloningReaderSite returns the name of the non-promotable reader whose
+// in-flight clone the current poll cycle is deliberately tolerating, or ""
+// when no such clone is running.
+//
+// Callers that already passed bootstrapBlocksCrossSite use this to exclude
+// that one site from peer checks which would otherwise re-block the very
+// path the carve-out exists to keep open — a reader is unreachable across
+// its CLONE INSTANCE restart and its GTID set is unreadable while the clone
+// overwrites it. The exclusion is deliberately scoped to the single site
+// being cloned, and only while that clone is in flight: every other site,
+// and that same reader at any other time, is checked exactly as before.
+func (tm *TopologyManager) cloningReaderSite() string {
+	if !tm.isBootstrapping() {
+		return ""
+	}
+	tm.mu.RLock()
+	recipient := tm.bootstrapRecipient
+	tm.mu.RUnlock()
+	if recipient == "" {
+		return ""
+	}
+	site := tm.getSite(recipient)
+	if site == nil || site.role != state.SiteRoleReadOnly {
+		return ""
+	}
+	return recipient
 }
 
 // isUpdating reports whether an ordered update is currently running.
@@ -2765,11 +2797,21 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		return false
 	}
 
+	// The one reader whose clone this cycle tolerates is excluded from the
+	// peer checks below: it is unreachable across its CLONE INSTANCE restart
+	// and its GTID set is unreadable mid-clone, so consulting it would
+	// re-block the wedge-healing path the carve-out exists to keep open. Any
+	// errant transactions it held are being overwritten by the clone anyway.
+	skipCloningReader := tm.cloningReaderSite()
+
 	var targetSite *siteTracker
 	for i := range tm.sites {
 		s := &tm.sites[i]
 		if s.name == target {
 			targetSite = s
+			continue
+		}
+		if s.name == skipCloningReader {
 			continue
 		}
 		// A writable site means there is no wedge (split-brain repair
@@ -2814,7 +2856,7 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	}
 	for i := range tm.sites {
 		s := &tm.sites[i]
-		if s.name == target {
+		if s.name == target || s.name == skipCloningReader {
 			continue
 		}
 		peerCtx, peerCancel := context.WithTimeout(ctx, 5*time.Second)
