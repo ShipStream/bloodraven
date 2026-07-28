@@ -168,9 +168,17 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 			if err != nil {
 				return err
 			}
-			// The fence write precedes its log line in both actors, so
-			// the winning line is already in a ring buffer by now; the
-			// window only covers tailer stream lag.
+			// The fence itself is already established — super_read_only is
+			// back ON, verified above. What is left is attribution: that a
+			// control plane did this deliberately, rather than a mysqld
+			// restart or a lost injection.
+			//
+			// So match each actor on whichever line it emits promptly. For
+			// the sidecar that is the topology-mismatch decision, not the
+			// terminal SELF-FENCED: the terminal line trails an unbounded
+			// connection eviction, and waiting on it would fail this step
+			// after 30s for a fence that demonstrably succeeded — the exact
+			// class of flake this scenario was fixed for.
 			logCtx, cancelLog := context.WithTimeout(ctx, 30*time.Second)
 			_, state.fencedBy, err = env.Wait.UntilAnyLog(logCtx, env.StartTime,
 				"writable non-promotable reader is fenced by the operator or its sidecar",
@@ -182,11 +190,7 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 				pglogs.Watch{
 					Label:  "sidecar:" + state.topo.reader,
 					Tailer: sidecarTail,
-					// The terminal line, not "SELF-FENCING: topology
-					// mismatch" — that one is logged before the fence write
-					// and the connection kill, so it proves a decision, not
-					// a completed fence.
-					Pred: pglogs.Substring("SELF-FENCED"),
+					Pred:   pglogs.Substring("SELF-FENCING: topology mismatch"),
 				})
 			cancelLog()
 			if err != nil {
