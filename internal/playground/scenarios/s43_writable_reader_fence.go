@@ -240,14 +240,29 @@ func s43ObserveFence(state *s43RunState) runner.Step {
 // touching the code under test.
 //
 // Scaling the operator away leaves the sidecar as the only actor that
-// can fence, so the path runs every time. Rule #1 still fires with the
-// operator down: the reader's topology cache keeps its active-site view,
-// refreshed from peer sidecars rather than the operator.
+// can fence, so the path runs on every operator-won run. Rule #1 still
+// fires with the operator down because the reader's topology cache keeps
+// the active-site view it already holds — nothing clears it while the
+// monitor has not fenced.
+//
+// Skipped entirely when the sidecar won the first fence, which both
+// covers the path already and avoids a rearm deadlock (see below).
 func s43VerifySidecarFenceSparesReplication(state *s43RunState) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
 		Name:  "sidecar's own fence spares the reader's replication threads",
 		Do: func(ctx context.Context, env *runner.Env) error {
+			// If the sidecar already won the first fence, the path is
+			// covered and forcing a second one would hang: rearming on a
+			// writable instance calls topology.Set("", now), and Adopt only
+			// takes a strictly newer observedAt. With the operator down,
+			// peer views stop advancing, so the cleared cache can never be
+			// repopulated, rule #1 never fires, and reachable peers keep
+			// rule #2 quiet.
+			if strings.HasPrefix(state.fencedBy, "sidecar:") {
+				env.Capture.Note("skipping forced sidecar fence: the sidecar already fenced the reader in the observe step")
+				return nil
+			}
 			if err := env.Chaos.ScaleOperatorToZero(ctx); err != nil {
 				return err
 			}
@@ -262,6 +277,13 @@ func s43VerifySidecarFenceSparesReplication(state *s43RunState) runner.Step {
 			}
 			if waitErr := env.Chaos.WaitForOperatorAvailable(restoreCtx); waitErr != nil {
 				return errors.Join(err, fmt.Errorf("wait for operator: %w", waitErr))
+			}
+			// The scale cycle replaced the operator pod, so the cached
+			// tailer is bound to a pod that no longer exists. Rebind it or
+			// the convergence-log assertion two steps down would wait out
+			// its full timeout against a dead stream.
+			if _, reopenErr := env.ReopenLogs("operator"); reopenErr != nil {
+				return errors.Join(err, fmt.Errorf("reopen operator tailer: %w", reopenErr))
 			}
 			return err
 		},

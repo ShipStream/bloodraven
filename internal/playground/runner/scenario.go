@@ -82,6 +82,13 @@ type Env struct {
 	// operator pod; "sidecar:<site>" tails a site's sidecar; "mysql:<site>"
 	// tails the mysql container.
 	Logs func(component string) (*pglogs.Tailer, error)
+
+	// ReopenLogs rebinds a component's tailer to the pod backing it now,
+	// discarding the cached one. Call it after anything that replaces a
+	// pod (a Deployment scaled to 0 and back, a rollout): a Tailer follows
+	// one pod name for its whole life, so the cached one would stream from
+	// a pod that no longer exists and silently never match again.
+	ReopenLogs func(component string) (*pglogs.Tailer, error)
 }
 
 // Step is the unit of work the executor labels and times.

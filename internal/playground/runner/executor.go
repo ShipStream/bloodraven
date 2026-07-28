@@ -448,11 +448,12 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 	}
 
 	var (
-		mu          sync.Mutex
-		mysqlMap    = map[string]*pgmysql.SiteClient{}
-		sidecarMap  = map[string]*pgsidecar.Probe{}
-		tailerMap   = map[string]*pglogs.Tailer{}
-		dragonflies []*pgdragonfly.SiteClient // tracked for executor-driven Close
+		mu            sync.Mutex
+		mysqlMap      = map[string]*pgmysql.SiteClient{}
+		sidecarMap    = map[string]*pgsidecar.Probe{}
+		tailerMap     = map[string]*pglogs.Tailer{}
+		tailerCancels = map[string]context.CancelFunc{}
+		dragonflies   []*pgdragonfly.SiteClient // tracked for executor-driven Close
 	)
 	tailerCtx, cancelTailers := context.WithCancel(context.Background())
 
@@ -529,11 +530,31 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 			Container: container,
 			SinceTime: startTime,
 		}, 4096)
-		t.Start(tailerCtx, e.K)
+		tctx, tcancel := context.WithCancel(tailerCtx)
+		t.Start(tctx, e.K)
 		mu.Lock()
 		tailerMap[component] = t
+		tailerCancels[component] = tcancel
 		mu.Unlock()
 		return t, nil
+	}
+
+	// reopenLogs drops any cached tailer for component and binds a fresh
+	// one to whichever pod backs it now. A Tailer streams one pod name for
+	// its whole life, so after a Deployment replaces the pod — a scale to 0
+	// and back, an eviction, a rollout — the cached tailer follows a pod
+	// that no longer exists and silently never matches again. Its
+	// SinceTime is still the scenario start, so the replacement's log
+	// history is picked up from the beginning.
+	reopenLogs := func(component string) (*pglogs.Tailer, error) {
+		mu.Lock()
+		if cancel, ok := tailerCancels[component]; ok {
+			cancel()
+			delete(tailerCancels, component)
+		}
+		delete(tailerMap, component)
+		mu.Unlock()
+		return openLogs(component)
 	}
 
 	openDragonfly := func(site string) (*pgdragonfly.SiteClient, error) {
@@ -584,6 +605,7 @@ func (e *Executor) buildEnv(ctx context.Context, logger *slog.Logger, cap *Captu
 		MySQL:          openMySQL,
 		Sidecar:        openSidecar,
 		Logs:           openLogs,
+		ReopenLogs:     reopenLogs,
 		Dragonfly:      openDragonfly,
 	}
 	e.tailers = tailerMap
