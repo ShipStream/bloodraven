@@ -651,40 +651,56 @@ func TestEmitFailoverEvents_NoDataLossEventWhenAlreadyBlocked(t *testing.T) {
 // Event stream must follow it — otherwise an admin who extracted only the
 // first-reported set silently loses the rest.
 func TestEmitFailoverEvents_DataLossEventWhenDivergenceGrows(t *testing.T) {
-	prevCount := int64(5)
-	rec := record.NewFakeRecorder(10)
-	fg := newTestFG()
-	runner := &TopologyManagerRunner{recorder: rec}
+	tests := []struct {
+		name string
+		// prevCount is the count already persisted in status; nil means a
+		// status that never recorded one.
+		prevCount *int64
+		newCount  int64
+		want      []string // substrings the single expected event must contain
+	}{
+		{name: "unchanged count is not re-reported", prevCount: ptr64(5), newCount: 5},
+		{name: "grown count is re-reported", prevCount: ptr64(5), newCount: 9, want: []string{"DataLossDetected", "9 divergent"}},
+		{name: "shrunk count is re-reported", prevCount: ptr64(9), newCount: 5, want: []string{"DataLossDetected", "5 divergent"}},
+		{name: "absent prior count is treated as unchanged", prevCount: nil, newCount: 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := record.NewFakeRecorder(10)
+			runner := &TopologyManagerRunner{recorder: rec}
+			existing := &v1alpha1.MysqlFailoverGroupStatus{
+				Sites: []v1alpha1.SiteStatus{
+					{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTransactionCount: tt.prevCount},
+				},
+			}
+			// The summary fields carry deliberately stale values: event
+			// emission reads Sites[] only, so a regression back to the
+			// summary would fail this test rather than pass it by accident.
+			snap := TopologySnapshot{
+				Sites:             []SiteSnapshot{{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTxnCount: tt.newCount}},
+				RecoveryState:     "",
+				RecoverySite:      "stale-site",
+				DivergentTxnCount: 999,
+			}
 
-	existing := &v1alpha1.MysqlFailoverGroupStatus{
-		Sites: []v1alpha1.SiteStatus{
-			{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTransactionCount: &prevCount},
-		},
-	}
+			runner.emitFailoverEvents(newTestFG(), existing, snap)
+			events := drainRunnerEvents(rec)
 
-	// Unchanged count: no repeat event.
-	unchanged := TopologySnapshot{
-		Sites:             []SiteSnapshot{{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTxnCount: 5}},
-		RecoveryState:     "RecoveryBlocked",
-		RecoverySite:      "dc1",
-		DivergentTxnCount: 5,
-	}
-	runner.emitFailoverEvents(fg, existing, unchanged)
-	if events := drainRunnerEvents(rec); len(events) != 0 {
-		t.Errorf("unchanged count: want no events, got %v", events)
-	}
-
-	// Grown count: re-report.
-	grown := TopologySnapshot{
-		Sites:             []SiteSnapshot{{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTxnCount: 9}},
-		RecoveryState:     "RecoveryBlocked",
-		RecoverySite:      "dc1",
-		DivergentTxnCount: 9,
-	}
-	runner.emitFailoverEvents(fg, existing, grown)
-	events := drainRunnerEvents(rec)
-	if len(events) != 1 || !strings.Contains(events[0], "DataLossDetected") || !strings.Contains(events[0], "9 divergent") {
-		t.Errorf("grown count: want one DataLossDetected reporting 9, got %v", events)
+			if len(tt.want) == 0 {
+				if len(events) != 0 {
+					t.Errorf("want no events, got %v", events)
+				}
+				return
+			}
+			if len(events) != 1 {
+				t.Fatalf("want exactly one event, got %v", events)
+			}
+			for _, sub := range tt.want {
+				if !strings.Contains(events[0], sub) {
+					t.Errorf("event %q missing %q", events[0], sub)
+				}
+			}
+		})
 	}
 }
 
