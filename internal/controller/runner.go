@@ -608,7 +608,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		if site.RecoveryState == recoveryStateInProgress {
 			tm.SetRecoveryInProgress(site.Name)
 			r.logger.Info("restored recovery in-progress state from CR status", "fg", nn, "site", site.Name)
-			break
+			continue
 		}
 		var count int64
 		if site.DivergentTransactionCount != nil {
@@ -617,8 +617,6 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		tm.SetRecoveryBlocked(site.Name, site.DivergentGtid, count)
 		r.logger.Info("restored recovery blocked state from CR status",
 			"fg", nn, "site", site.Name, "divergentGtid", site.DivergentGtid, "divergentTransactionCount", count)
-		// TopologyManager tracks a single pending recovery site.
-		break
 	}
 
 	// Set the status callback to update the CR status subresource on state
@@ -627,7 +625,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// that self-heals once the write is permitted again.
 	tm.StatusCallback = func(snap TopologySnapshot) {
 		err := r.updateCRStatus(ctx, nn, snap)
-		tm.markStatusWriteResult(err)
+		tm.MarkStatusWriteResult(err)
 	}
 	// BootstrapStatusCallback updates only the Bootstrapping condition so that
 	// unrelated conditions set by the most recent Poll cycle (Degraded,
@@ -816,18 +814,16 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	freshFG.Status.LastFailoverTarget = snap.LastFailoverTarget
 	freshFG.Status.PromotionGtidExecuted = snap.PromotionGtidExecuted
 
-	// Write per-site recovery fields.
+	// Write per-site recovery fields. Every site carries its own recovery
+	// state and divergence report — multiple sites can be in recovery at
+	// once (e.g. two former primaries after consecutive failovers).
 	for i, s := range snap.Sites {
-		if snap.RecoverySite == s.Name && snap.RecoveryState != "" {
-			freshFG.Status.Sites[i].RecoveryState = snap.RecoveryState
-			freshFG.Status.Sites[i].DivergentGtid = snap.DivergentGtid
-			if snap.DivergentTxnCount > 0 {
-				c := snap.DivergentTxnCount
-				freshFG.Status.Sites[i].DivergentTransactionCount = &c
-			}
+		freshFG.Status.Sites[i].RecoveryState = s.RecoveryState
+		freshFG.Status.Sites[i].DivergentGtid = s.DivergentGtid
+		if s.RecoveryState != "" && s.DivergentTxnCount > 0 {
+			c := s.DivergentTxnCount
+			freshFG.Status.Sites[i].DivergentTransactionCount = &c
 		} else {
-			freshFG.Status.Sites[i].RecoveryState = ""
-			freshFG.Status.Sites[i].DivergentGtid = ""
 			freshFG.Status.Sites[i].DivergentTransactionCount = nil
 		}
 	}
@@ -1158,33 +1154,47 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 			"Failover completed: %s promoted as new primary", snap.LastFailoverTarget)
 	}
 
-	// Data loss detected: RecoveryBlocked appeared where it wasn't before.
-	oldRecoveryActive := false
-	oldRecoverySite := ""
-	oldBlocked := false
+	// Per-site recovery transitions: compare the previously persisted state
+	// against the new snapshot for each site independently, since multiple
+	// sites can be in recovery at once.
+	oldState := make(map[string]string, len(existingStatus.Sites))
+	oldDivergentCount := make(map[string]int64, len(existingStatus.Sites))
 	for _, s := range existingStatus.Sites {
-		if s.RecoveryState == recoveryStateInProgress || s.RecoveryState == recoveryStateBlocked {
-			oldRecoveryActive = true
-			oldRecoverySite = s.Name
-		}
-		if s.RecoveryState == recoveryStateBlocked {
-			oldBlocked = true
-			break
+		oldState[s.Name] = s.RecoveryState
+		if s.DivergentTransactionCount != nil {
+			oldDivergentCount[s.Name] = *s.DivergentTransactionCount
 		}
 	}
-	newBlocked := snap.RecoveryState == recoveryStateBlocked
-	newRecoveryActive := snap.RecoveryState == recoveryStateInProgress || snap.RecoveryState == recoveryStateBlocked
-
-	if newBlocked && !oldBlocked {
-		r.recorder.Eventf(fg, corev1.EventTypeWarning, "DataLossDetected",
-			"%d divergent transactions on %s did not replicate before failover",
-			snap.DivergentTxnCount, snap.RecoverySite)
+	recoveryActive := func(st string) bool {
+		return st == recoveryStateInProgress || st == recoveryStateBlocked
 	}
-
-	// Recovery complete: RecoveryInProgress/RecoveryBlocked cleared.
-	if oldRecoveryActive && !newRecoveryActive {
-		r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecoveryComplete",
-			"Old primary %s recovered and is now replicating", oldRecoverySite)
+	for _, s := range snap.Sites {
+		// Data loss detected: RecoveryBlocked appeared where it wasn't before,
+		// or the periodic re-verification found the divergent set has CHANGED
+		// while the site stayed blocked (it respawned writable, took writes,
+		// and was re-fenced). Re-emitting on a changed count keeps the Event
+		// stream in step with status.divergentTransactionCount — an admin who
+		// extracts only the first-reported set would lose the rest. An
+		// unchanged count is not re-emitted, and a status that never recorded
+		// a count is treated as unchanged rather than as a new report.
+		countChanged := false
+		if prev, ok := oldDivergentCount[s.Name]; ok && prev != s.DivergentTxnCount {
+			countChanged = true
+		}
+		if s.RecoveryState == recoveryStateBlocked &&
+			(oldState[s.Name] != recoveryStateBlocked || countChanged) {
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, "DataLossDetected",
+				"%d divergent transactions on %s did not replicate before failover",
+				s.DivergentTxnCount, s.Name)
+		}
+		// Recovery complete: RecoveryInProgress/RecoveryBlocked cleared. A
+		// marker cleared because the site became WRITABLE (promotion or
+		// re-assert) is not a recovery completion — the site did not rejoin
+		// as a replica — so no Normal event is emitted for it.
+		if recoveryActive(oldState[s.Name]) && !recoveryActive(s.RecoveryState) && s.State != state.StateWritable {
+			r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecoveryComplete",
+				"Old primary %s recovered and is now replicating", s.Name)
+		}
 	}
 }
 

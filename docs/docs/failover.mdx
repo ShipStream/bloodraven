@@ -161,13 +161,13 @@ After an emergency failover, the old primary may come back online. The operator 
 
 ### Detection
 
-On each poll cycle, if a site is read-only with no replication configured (the signature of a former primary after `RESET REPLICA ALL`), and a prior failover has occurred, the operator initiates recovery:
+On each poll cycle, if a site is read-only with no active replication (the signature of a former primary) while another site is the directly confirmed writable primary, the operator initiates recovery. Recovery is deliberately **not** gated on a recorded failover: a primary can change hands without one (a replica respawns writable and is adopted while the old primary respawns fenced, or the failover record was lost to a status-write outage plus an operator restart), and the orphaned ex-primary still needs to rejoin. Empty sites — no user schemas, or an empty GTID set when the schema check is unavailable — are skipped and left to bootstrap/auto-clone. The sequence:
 
 1. **Fence** the returning site with `SET GLOBAL super_read_only=ON` (defensive — the sidecar may have already fenced it)
 2. **Query `@@global.gtid_executed`** on both the old and new primary
 3. **Compare GTID sets** to determine if the old primary has any transactions not on the new primary
 
-If the old primary returns **writable** (e.g., power was cut before the sidecar could self-fence), the operator first detects this as a split-brain condition and fences it immediately. Recovery proceeds on the next poll cycle once the site transitions to read-only.
+If the old primary returns **writable** (e.g., power was cut before the sidecar could self-fence), the operator first detects this as a split-brain condition and fences it immediately. The fence is retried on **every** poll cycle while the split-brain persists — a transient error on the first attempt (a network blip during the site's recovery turbulence) does not leave the returning site writable. Recovery proceeds once the site transitions to read-only.
 
 ### No divergence (automatic rejoin)
 
@@ -191,8 +191,10 @@ If the old primary has committed transactions that never replicated to the new p
 - Sets the `RecoveryPending` condition to `True` with reason `DivergentTransactions`
 - Emits the `bloodraven_divergent_transactions` Prometheus metric
 
+While a site is `RecoveryBlocked`, the operator re-verifies the divergence roughly every 30 seconds rather than freezing the first report. If the site diverges *further* before you resolve it (for example its pod respawned writable, accepted a few writes, and was re-fenced), `divergentGtid` and the count refresh to the full current set. If the divergence is resolved externally — you replay the missing transactions onto the new primary so its GTID set comes to contain the old primary's — the re-check notices containment and automatically rejoins the site as a replica.
+
 :::danger
-Divergent transactions mean the old primary accepted writes that the new primary never received. These transactions are effectively lost from the replication stream. The site must be **re-cloned** from the current primary to recover. Do not attempt to manually reconfigure replication — conflicting GTID sets will cause replication errors.
+Divergent transactions mean the old primary accepted writes that the new primary never received. These transactions are effectively lost from the replication stream. There are exactly two sanctioned ways out: **re-clone** the site from the current primary (discarding the divergent transactions after you have extracted what you need), or **replay the divergent transactions onto the new primary** so its GTID set comes to contain the old primary's — the periodic re-verification then rejoins the site automatically. Do not manually reconfigure replication on the divergent site — conflicting GTID sets will cause replication errors.
 :::
 
 To recover a divergent site:

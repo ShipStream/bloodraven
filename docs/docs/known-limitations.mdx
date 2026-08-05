@@ -48,6 +48,18 @@ matches your expectations.
   failover decisions wait for an operator to run.
 - If the primary fails while the operator is down, writes remain
   unavailable until the operator returns and completes failover.
+- Anti-flap state (`status.lastFailover`, `status.lastFailoverTarget`)
+  is durable only in CR status. If status writes are being rejected
+  (e.g. an RBAC regression on `mysqlfailovergroups/status`) **and** the
+  operator restarts before the write self-heals, the restarted process
+  rehydrates stale values: the failover cooldown resets, and a
+  subsequent site failure inside the intended cooldown window can
+  promote earlier than configured (deterministic-simulation finding,
+  `CooldownViolated` class). GTID gates still bound the damage — any
+  divergence this causes is fenced and reported — but the flap timing
+  guarantee is only as durable as status writes. Alert on
+  `mysqlfailovergroups/status` write failures (the operator logs and
+  retries them every poll) to close the window.
 
 ## Placement and shared nodes
 

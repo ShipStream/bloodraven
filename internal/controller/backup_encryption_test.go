@@ -395,4 +395,3 @@ func TestBuildRestoreJob_EncryptedSource_NoPassphraseSecretErrors(t *testing.T) 
 		t.Errorf("error should mention passphrase, got %v", err)
 	}
 }
-

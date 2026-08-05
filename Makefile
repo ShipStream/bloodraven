@@ -1,6 +1,6 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile
+.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration dst dst-repro fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile
 
 ##@ General
 
@@ -102,6 +102,13 @@ test-e2e-smoke: build-playground-chaos ## Run real-cluster E2E smoke (smoke prof
 
 test-integration: ## Run integration tests (network listener tests)
 	go test -tags integration -race ./internal/platform/ ./test/component/
+
+DST_ARGS ?=
+dst: ## Run the DST saturation campaign (deterministic simulation of the failover loop)
+	DST_FULL=1 DST_REPORT=$${DST_REPORT:-$(CURDIR)/playground/chaos-results/dst-report.txt} go test ./internal/dst/ -run TestDST_Campaign -v -count=1 -timeout 45m $(DST_ARGS)
+
+dst-repro: ## Replay one DST seed with events + operator logs (DST_SEED=<n> [DST_SKIP=i,j] make dst-repro)
+	go test ./internal/dst/ -run TestDST_Repro -v -count=1
 
 ##@ Code Quality
 

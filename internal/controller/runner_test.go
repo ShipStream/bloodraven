@@ -594,6 +594,10 @@ func TestEmitFailoverEvents_DataLossDetected(t *testing.T) {
 		},
 	}
 	snap := TopologySnapshot{
+		Sites: []SiteSnapshot{
+			{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTxnCount: 5},
+			{Name: "dc2"},
+		},
 		RecoveryState:     "RecoveryBlocked",
 		RecoverySite:      "dc1",
 		DivergentTxnCount: 5,
@@ -625,6 +629,10 @@ func TestEmitFailoverEvents_NoDataLossEventWhenAlreadyBlocked(t *testing.T) {
 		},
 	}
 	snap := TopologySnapshot{
+		Sites: []SiteSnapshot{
+			{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTxnCount: 5},
+			{Name: "dc2"},
+		},
 		RecoveryState:     "RecoveryBlocked",
 		RecoverySite:      "dc1",
 		DivergentTxnCount: 5,
@@ -635,6 +643,64 @@ func TestEmitFailoverEvents_NoDataLossEventWhenAlreadyBlocked(t *testing.T) {
 
 	if len(events) != 0 {
 		t.Errorf("want no events when already blocked, got %v", events)
+	}
+}
+
+// A blocked site can diverge FURTHER (it respawns writable, takes writes, and
+// is re-fenced). The periodic re-verification rewrites the count, and the
+// Event stream must follow it — otherwise an admin who extracted only the
+// first-reported set silently loses the rest.
+func TestEmitFailoverEvents_DataLossEventWhenDivergenceGrows(t *testing.T) {
+	tests := []struct {
+		name string
+		// prevCount is the count already persisted in status; nil means a
+		// status that never recorded one.
+		prevCount *int64
+		newCount  int64
+		want      []string // substrings the single expected event must contain
+	}{
+		{name: "unchanged count is not re-reported", prevCount: ptr64(5), newCount: 5},
+		{name: "grown count is re-reported", prevCount: ptr64(5), newCount: 9, want: []string{"DataLossDetected", "9 divergent"}},
+		{name: "shrunk count is re-reported", prevCount: ptr64(9), newCount: 5, want: []string{"DataLossDetected", "5 divergent"}},
+		{name: "absent prior count is treated as unchanged", prevCount: nil, newCount: 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := record.NewFakeRecorder(10)
+			runner := &TopologyManagerRunner{recorder: rec}
+			existing := &v1alpha1.MysqlFailoverGroupStatus{
+				Sites: []v1alpha1.SiteStatus{
+					{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTransactionCount: tt.prevCount},
+				},
+			}
+			// The summary fields carry deliberately stale values: event
+			// emission reads Sites[] only, so a regression back to the
+			// summary would fail this test rather than pass it by accident.
+			snap := TopologySnapshot{
+				Sites:             []SiteSnapshot{{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTxnCount: tt.newCount}},
+				RecoveryState:     "",
+				RecoverySite:      "stale-site",
+				DivergentTxnCount: 999,
+			}
+
+			runner.emitFailoverEvents(newTestFG(), existing, snap)
+			events := drainRunnerEvents(rec)
+
+			if len(tt.want) == 0 {
+				if len(events) != 0 {
+					t.Errorf("want no events, got %v", events)
+				}
+				return
+			}
+			if len(events) != 1 {
+				t.Fatalf("want exactly one event, got %v", events)
+			}
+			for _, sub := range tt.want {
+				if !strings.Contains(events[0], sub) {
+					t.Errorf("event %q missing %q", events[0], sub)
+				}
+			}
+		})
 	}
 }
 
@@ -650,7 +716,10 @@ func TestEmitFailoverEvents_RecoveryComplete(t *testing.T) {
 		},
 	}
 	snap := TopologySnapshot{
-		RecoveryState: "",
+		Sites: []SiteSnapshot{
+			{Name: "dc1"},
+			{Name: "dc2"},
+		},
 	}
 
 	runner.emitFailoverEvents(fg, existing, snap)

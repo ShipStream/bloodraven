@@ -110,6 +110,13 @@ Non-zero means "this many transactions are permanently lost from the
 replication stream unless you recover them out-of-band from the old
 primary's binlog."
 
+The report stays current: while recovery is blocked the operator
+re-verifies the divergence on the recovery retry cadence (~30s), so a
+site that diverges further before you act (e.g. it respawned writable
+for a moment and was re-fenced) has its `divergentGtid` refreshed
+rather than under-reported, and divergence you resolve out-of-band
+(replaying the set onto the new primary) unblocks the automatic rejoin.
+
 Bloodraven also records `status.promotionGtidExecuted` — the GTID
 set on the new primary **at the moment of promotion**, before it began
 accepting writes. Together with `divergentGtid` this gives you
