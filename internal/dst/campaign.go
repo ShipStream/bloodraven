@@ -2,12 +2,17 @@ package dst
 
 import (
 	"fmt"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
+
+// restartMarker matches a CooldownViolated detail that explicitly records at
+// least one operator restart between the offending promotions.
+var restartMarker = regexp.MustCompile(`operator restarts between: [1-9]`)
 
 // CampaignConfig controls a batch campaign.
 type CampaignConfig struct {
@@ -61,7 +66,10 @@ func fingerprint(violations []Violation) string {
 	set := map[string]struct{}{}
 	for _, v := range violations {
 		key := v.Invariant
-		if v.Invariant == "CooldownViolated" && !strings.Contains(v.Detail, "restarts between: 0") {
+		// Fail safe: only an EXPLICIT nonzero restart marker lands in the
+		// documented/expected class; anything unrecognized stays in the
+		// regression class rather than being silently excused.
+		if v.Invariant == "CooldownViolated" && restartMarker.MatchString(v.Detail) {
 			key = "CooldownViolated(restart)"
 		}
 		set[key] = struct{}{}

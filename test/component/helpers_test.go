@@ -50,6 +50,23 @@ type mockMySQL struct {
 	// replicaStatus is returned from ShowReplicaStatus. nil (default) means
 	// "never had replication configured", which is the fresh-deploy signature.
 	replicaStatus *mysql.ReplicaStatus
+
+	// hasUserSchemas overrides HasUserSchemas when non-nil; the default
+	// derives from gtidExecuted so existing fixtures keep their meaning
+	// (data implies schemas, empty implies none).
+	hasUserSchemas *bool
+}
+
+// HasUserSchemas satisfies the operator's userSchemaChecker assertion so the
+// production schema-based emptiness paths are exercised, not just the GTID
+// fallback.
+func (m *mockMySQL) HasUserSchemas(_ context.Context) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hasUserSchemas != nil {
+		return *m.hasUserSchemas, nil
+	}
+	return m.gtidExecuted != "", nil
 }
 
 func (m *mockMySQL) CheckReadOnly(_ context.Context) (bool, error) {

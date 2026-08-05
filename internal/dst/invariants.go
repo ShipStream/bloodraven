@@ -3,6 +3,7 @@ package dst
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/mysql"
@@ -53,16 +54,51 @@ func (r *trialRunner) lastKnownTarget() string {
 }
 
 // splitBrainResolvable reports whether the operator has an automatic path out
-// of a dual-writable state: either failover history (fence the returning old
-// primary) or a configured split-brain priority policy. Without both, manual
-// resolution is the documented design.
-func (r *trialRunner) splitBrainResolvable() bool {
-	return r.lastKnownTarget() != "" || len(r.trial.Priorities) > 0
+// of the CURRENT dual-writable state, mirroring its real capability rather
+// than mere configuration presence:
+//
+//   - history path: the failover target must itself be a live writable
+//     authority (the operator refuses to fence everything else around a
+//     non-writable target);
+//   - priorities path: state.ResolveSplitBrain resolves only when a priority
+//     entry names a currently-writable primary-candidate — priorities that
+//     name only fenced/crashed sites are, by documented design, alert-only.
+//
+// Anything else is the documented manual-resolution state, not a violation.
+func (r *trialRunner) splitBrainResolvable(truth []SiteTruth) bool {
+	writableByName := map[string]bool{}
+	var writableObs []state.SiteObservation
+	for i, t := range truth {
+		if !t.Writable() {
+			continue
+		}
+		writableByName[t.Name] = true
+		writableObs = append(writableObs, state.SiteObservation{
+			Name: t.Name, Role: r.trial.Roles[i], State: state.StateWritable,
+		})
+	}
+	if target := r.lastKnownTarget(); target != "" && writableByName[target] {
+		return true
+	}
+	if len(r.trial.Priorities) > 0 {
+		if winner, _ := state.ResolveSplitBrain(writableObs, r.trial.Priorities); winner != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // checkPoll runs the per-poll invariants.
 func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Event) {
 	for _, e := range events {
+		// Fault-injection events are INPUT shape, not observed behavior:
+		// folding them into the signature multiplies the signature space by
+		// the schedule space and the saturation rule can never go dry (they
+		// re-entered the poll window when event stamping was fixed to open
+		// the window before fault application).
+		if strings.HasPrefix(string(e.Kind), "fault.") {
+			continue
+		}
 		key := string(e.Kind)
 		if e.Outcome != "" {
 			key += ":" + e.Outcome
@@ -137,7 +173,7 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 			}
 		}
 	}
-	if writable >= 2 && allReachable && r.splitBrainResolvable() {
+	if writable >= 2 && allReachable && r.splitBrainResolvable(truth) {
 		r.dualStreak++
 		if r.dualStreak > dualWritableGrace && !r.dualFlagged {
 			r.dualFlagged = true
@@ -199,7 +235,7 @@ func (r *trialRunner) checkEnd() []Violation {
 
 	switch {
 	case len(writable) >= 2:
-		if r.splitBrainResolvable() {
+		if r.splitBrainResolvable(truth) {
 			names := []string{}
 			for _, t := range writable {
 				names = append(names, t.Name)

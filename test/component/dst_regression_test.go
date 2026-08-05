@@ -315,6 +315,53 @@ func TestRecovery_BlockedReport_PreservedWhileRogueWritable(t *testing.T) {
 	}
 }
 
+// Ultra-review finding (high, via the post-fix DST campaign): isFreshDeploy
+// must require emptiness. Restart amnesia — failover during a status-write
+// outage, operator restart, old primary respawning writable — reproduces the
+// all-writable, no-replication-metadata signature on a POPULATED cluster; the
+// fresh-deploy path would then seed by sitePriorities and clone the newer
+// side from the stale one, destroying post-failover writes.
+func TestFreshDeploy_NotTriggeredByRestartAmnesia(t *testing.T) {
+	// Both writable, no replication metadata, but both hold data — the
+	// amnesia signature. dc2 has post-failover writes dc1 lacks.
+	dc1 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-100"}
+	dc2 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-100,uuid2:1-50"}
+
+	logger := newQuietLogger()
+	tainter := newMockTainter()
+	hub := platform.NewHub(logger)
+	dns := &mockDNS{}
+	fc := controller.NewFailoverController(logger)
+	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	cfg := controller.TopologyConfig{
+		Name: "lion", Sites: defaultTwoSiteConfig(), PollInterval: int64(50 * time.Millisecond),
+		FailureThreshold: 3, RecoveryThreshold: 2, FailoverCooldown: 0,
+		SitePriorities: []string{"dc1"},
+	}
+	bootstrap := controller.NewBootstrapController(logger)
+	bootstrapCfg := controller.BootstrapConfig{ReplUser: "repl", ReplPassword: "replpass"}
+	tm := controller.NewTopologyManagerWithClock(cfg, []mysql.Checker{dc1, dc2}, fc, nil, bootstrap, bootstrapCfg, tainter, hub, dns, logger, clk)
+
+	for i := 0; i < 4; i++ {
+		tm.Poll(t.Context())
+	}
+
+	if phase := tm.BootstrapPhase(); phase != controller.BootstrapPhaseNone {
+		t.Fatalf("fresh-deploy bootstrap fired on a populated amnesia cluster (phase %q) — this is the clone-the-stale-side data-loss path", phase)
+	}
+	// The split-brain must instead resolve by policy: dc1 wins, dc2 fenced,
+	// its divergent writes preserved for the recovery report.
+	if !dc2.isSuperReadOnly() {
+		t.Error("policy loser dc2 was not fenced")
+	}
+	dc2.mu.Lock()
+	cloned := dc2.cloneInstanceCalled
+	dc2.mu.Unlock()
+	if cloned {
+		t.Error("dc2 was cloned — post-failover writes destroyed")
+	}
+}
+
 // Ultra-review finding (high): a rogue-writable READER must not gate
 // split-brain fencing of the primary-candidates — EvalCrossSite's FenceSites
 // early return reports SplitBrain=false in that state, so the retry must
