@@ -13,17 +13,35 @@ import (
 // TestDeterminism is the property everything else rests on: the same seed
 // must produce byte-identical behavior, twice, including under shrink masks.
 func TestDeterminism(t *testing.T) {
+	// maskEveryOther is the deterministic stand-in for a shrink mask: the
+	// shrinker masks arbitrary subsets, so replay must be stable with Skip
+	// set, not only with the full schedule.
+	maskEveryOther := func(trial Trial) Trial {
+		trial.Skip = make([]bool, len(trial.Ops))
+		for i := range trial.Skip {
+			trial.Skip[i] = i%2 == 0
+		}
+		return trial
+	}
 	for seed := uint64(1); seed <= 40; seed++ {
-		a := RunTrial(GenerateTrial(seed), false, nil)
-		b := RunTrial(GenerateTrial(seed), false, nil)
-		if a.Signature != b.Signature {
-			t.Fatalf("seed %d: signatures differ:\n  a=%s\n  b=%s", seed, a.Signature, b.Signature)
-		}
-		if fmt.Sprint(a.Violations) != fmt.Sprint(b.Violations) {
-			t.Fatalf("seed %d: violations differ:\n  a=%v\n  b=%v", seed, a.Violations, b.Violations)
-		}
-		if fmt.Sprint(a.PromotionPolls) != fmt.Sprint(b.PromotionPolls) {
-			t.Fatalf("seed %d: promotion polls differ: %v vs %v", seed, a.PromotionPolls, b.PromotionPolls)
+		for _, tc := range []struct {
+			name string
+			gen  func(uint64) Trial
+		}{
+			{"unmasked", GenerateTrial},
+			{"masked", func(s uint64) Trial { return maskEveryOther(GenerateTrial(s)) }},
+		} {
+			a := RunTrial(tc.gen(seed), false, nil)
+			b := RunTrial(tc.gen(seed), false, nil)
+			if a.Signature != b.Signature {
+				t.Fatalf("seed %d (%s): signatures differ:\n  a=%s\n  b=%s", seed, tc.name, a.Signature, b.Signature)
+			}
+			if fmt.Sprint(a.Violations) != fmt.Sprint(b.Violations) {
+				t.Fatalf("seed %d (%s): violations differ:\n  a=%v\n  b=%v", seed, tc.name, a.Violations, b.Violations)
+			}
+			if fmt.Sprint(a.PromotionPolls) != fmt.Sprint(b.PromotionPolls) {
+				t.Fatalf("seed %d (%s): promotion polls differ: %v vs %v", seed, tc.name, a.PromotionPolls, b.PromotionPolls)
+			}
 		}
 	}
 }

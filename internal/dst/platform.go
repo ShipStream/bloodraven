@@ -4,6 +4,18 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/shipstream/bloodraven/internal/platform"
+)
+
+// The production code reaches these optional interfaces through runtime type
+// assertions, which fail silently — the sim would just stop exercising the
+// read-back / schema paths. Assert them at compile time so a signature change
+// on the production side breaks the build instead.
+var (
+	_ platform.DNSUpdater      = (*simDNS)(nil)
+	_ platform.DNSRecordReader = (*simDNS)(nil)
+	_ platform.NodeTainter     = (*simTainter)(nil)
 )
 
 // simDNS implements platform.DNSUpdater and platform.DNSRecordReader against

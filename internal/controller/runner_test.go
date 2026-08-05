@@ -646,6 +646,48 @@ func TestEmitFailoverEvents_NoDataLossEventWhenAlreadyBlocked(t *testing.T) {
 	}
 }
 
+// A blocked site can diverge FURTHER (it respawns writable, takes writes, and
+// is re-fenced). The periodic re-verification rewrites the count, and the
+// Event stream must follow it — otherwise an admin who extracted only the
+// first-reported set silently loses the rest.
+func TestEmitFailoverEvents_DataLossEventWhenDivergenceGrows(t *testing.T) {
+	prevCount := int64(5)
+	rec := record.NewFakeRecorder(10)
+	fg := newTestFG()
+	runner := &TopologyManagerRunner{recorder: rec}
+
+	existing := &v1alpha1.MysqlFailoverGroupStatus{
+		Sites: []v1alpha1.SiteStatus{
+			{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTransactionCount: &prevCount},
+		},
+	}
+
+	// Unchanged count: no repeat event.
+	unchanged := TopologySnapshot{
+		Sites:             []SiteSnapshot{{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTxnCount: 5}},
+		RecoveryState:     "RecoveryBlocked",
+		RecoverySite:      "dc1",
+		DivergentTxnCount: 5,
+	}
+	runner.emitFailoverEvents(fg, existing, unchanged)
+	if events := drainRunnerEvents(rec); len(events) != 0 {
+		t.Errorf("unchanged count: want no events, got %v", events)
+	}
+
+	// Grown count: re-report.
+	grown := TopologySnapshot{
+		Sites:             []SiteSnapshot{{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTxnCount: 9}},
+		RecoveryState:     "RecoveryBlocked",
+		RecoverySite:      "dc1",
+		DivergentTxnCount: 9,
+	}
+	runner.emitFailoverEvents(fg, existing, grown)
+	events := drainRunnerEvents(rec)
+	if len(events) != 1 || !strings.Contains(events[0], "DataLossDetected") || !strings.Contains(events[0], "9 divergent") {
+		t.Errorf("grown count: want one DataLossDetected reporting 9, got %v", events)
+	}
+}
+
 func TestEmitFailoverEvents_RecoveryComplete(t *testing.T) {
 	rec := record.NewFakeRecorder(10)
 	fg := newTestFG()

@@ -1158,15 +1158,31 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	// against the new snapshot for each site independently, since multiple
 	// sites can be in recovery at once.
 	oldState := make(map[string]string, len(existingStatus.Sites))
+	oldDivergentCount := make(map[string]int64, len(existingStatus.Sites))
 	for _, s := range existingStatus.Sites {
 		oldState[s.Name] = s.RecoveryState
+		if s.DivergentTransactionCount != nil {
+			oldDivergentCount[s.Name] = *s.DivergentTransactionCount
+		}
 	}
 	recoveryActive := func(st string) bool {
 		return st == recoveryStateInProgress || st == recoveryStateBlocked
 	}
 	for _, s := range snap.Sites {
-		// Data loss detected: RecoveryBlocked appeared where it wasn't before.
-		if s.RecoveryState == recoveryStateBlocked && oldState[s.Name] != recoveryStateBlocked {
+		// Data loss detected: RecoveryBlocked appeared where it wasn't before,
+		// or the periodic re-verification found the divergent set has CHANGED
+		// while the site stayed blocked (it respawned writable, took writes,
+		// and was re-fenced). Re-emitting on a changed count keeps the Event
+		// stream in step with status.divergentTransactionCount — an admin who
+		// extracts only the first-reported set would lose the rest. An
+		// unchanged count is not re-emitted, and a status that never recorded
+		// a count is treated as unchanged rather than as a new report.
+		countChanged := false
+		if prev, ok := oldDivergentCount[s.Name]; ok && prev != s.DivergentTxnCount {
+			countChanged = true
+		}
+		if s.RecoveryState == recoveryStateBlocked &&
+			(oldState[s.Name] != recoveryStateBlocked || countChanged) {
 			r.recorder.Eventf(fg, corev1.EventTypeWarning, "DataLossDetected",
 				"%d divergent transactions on %s did not replicate before failover",
 				s.DivergentTxnCount, s.Name)

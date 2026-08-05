@@ -288,6 +288,19 @@ func (m *simChecker) GetGtidExecuted(_ context.Context) (string, error) {
 	return m.s.executed.String(), nil
 }
 
+// userSchemaChecker mirrors the operator's unexported interface of the same
+// name. It cannot be referenced directly across the package boundary, so this
+// copy is the compile-time guard that simChecker keeps matching the shape the
+// controller type-asserts for; the shapes must be changed together.
+type userSchemaChecker interface {
+	HasUserSchemas(context.Context) (bool, error)
+}
+
+var (
+	_ mysql.Checker     = (*simChecker)(nil)
+	_ userSchemaChecker = (*simChecker)(nil)
+)
+
 // HasUserSchemas satisfies the operator's userSchemaChecker type assertion.
 func (m *simChecker) HasUserSchemas(_ context.Context) (bool, error) {
 	m.c.mu.Lock()
