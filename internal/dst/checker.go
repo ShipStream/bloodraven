@@ -32,7 +32,14 @@ var errNotApplied = errors.New("read tcp: i/o timeout (sim: statement not applie
 var errAmbiguous = errors.New("read tcp: i/o timeout (sim: statement applied, response lost)")
 
 // reachableLocked returns nil when the operator can talk to this site.
+//
+// A process killed mid-Execute fails here first: the remainder of the dying
+// Poll must not be able to read or write anything, or the model would credit
+// a dead operator with work it never did.
 func (m *simChecker) reachableLocked() error {
+	if m.c.operatorDead {
+		return errOperatorDead
+	}
 	if m.s.crashed {
 		return fmt.Errorf("dial tcp %s:3306: connect: connection refused", m.s.host)
 	}
@@ -43,14 +50,37 @@ func (m *simChecker) reachableLocked() error {
 }
 
 // mutate runs a state-changing statement under the fault rules: reachability,
-// then fail-without-apply, then apply (which may itself return a semantic
-// MySQL error), then ambiguous apply-but-error.
+// then the armed mid-Execute crash, then fail-without-apply, then apply
+// (which may itself return a semantic MySQL error), then ambiguous
+// apply-but-error.
 func (m *simChecker) mutate(kind EventKind, detail string, fn func() error) error {
 	m.c.mu.Lock()
 	defer m.c.mu.Unlock()
 	if err := m.reachableLocked(); err != nil {
 		m.c.event(m.s.name, kind, detail, "unreachable")
 		return err
+	}
+	// The crash countdown is consumed by every mutation the operator gets
+	// as far as sending, whether or not the statement then succeeds — that
+	// is what makes the death land at an arbitrary point in a sequence
+	// rather than only at points that happen to be healthy.
+	if m.c.crashNowLocked() {
+		if m.c.crashPreApply {
+			m.c.killOperatorLocked(m.s.name, kind, false)
+			m.c.event(m.s.name, kind, detail, "operatorDied")
+			return errOperatorDead
+		}
+		// The statement reaches the server and applies; the reply never
+		// gets back to a process that no longer exists. Semantic rejections
+		// still reject — a dying operator does not get to violate MySQL.
+		if err := fn(); err != nil {
+			m.c.killOperatorLocked(m.s.name, kind, false)
+			m.c.event(m.s.name, kind, detail, "rejected:"+err.Error())
+			return err
+		}
+		m.c.killOperatorLocked(m.s.name, kind, true)
+		m.c.event(m.s.name, kind, detail, "appliedThenOperatorDied")
+		return errOperatorDead
 	}
 	if m.c.failMuts[m.s.name] > 0 {
 		m.c.failMuts[m.s.name]--
@@ -114,6 +144,14 @@ func (m *simChecker) KillAppConnections(_ context.Context) (int, error) {
 	defer m.c.mu.Unlock()
 	if err := m.reachableLocked(); err != nil {
 		return 0, err
+	}
+	// Consumes the crash countdown like any other statement, so the process
+	// can die between fencing the old primary and draining the candidate.
+	// The kill leaves no model state, so pre/post-apply are the same here.
+	if m.c.crashNowLocked() {
+		m.c.killOperatorLocked(m.s.name, EvKillConns, !m.c.crashPreApply)
+		m.c.event(m.s.name, EvKillConns, "", "operatorDied")
+		return 0, errOperatorDead
 	}
 	m.c.event(m.s.name, EvKillConns, "", "")
 	return 0, nil

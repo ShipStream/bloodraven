@@ -156,14 +156,25 @@ func (f *FencingMonitor) topologyEnabled() bool {
 	return f.topology != nil && f.mySite != "" && f.namespace != "" && f.group != ""
 }
 
-// Run starts the fencing monitor loop. Blocks until ctx is cancelled.
-func (f *FencingMonitor) Run(ctx context.Context) {
-	// Initialize last-seen times to now (grace period on startup)
-	now := f.clock.Now()
+// SeedStartupGrace stamps every reachability signal as seen right now, so
+// rule #2 cannot fire until a full lease has elapsed since this call.
+//
+// Run does this before its first tick, which is the only thing that keeps a
+// freshly started sidecar from fencing its own primary on tick one: an
+// unseeded monitor reads a zero lastBloodravenOK, computes an unbounded
+// silence, and self-fences immediately. Callers that drive Check directly
+// instead of Run — deterministic harnesses — must call this first or they
+// are testing a monitor no production process ever is.
+func (f *FencingMonitor) SeedStartupGrace(now time.Time) {
 	f.lastBloodravenOK = now
 	for _, addr := range f.peerAddrs {
 		f.lastPeerOK[addr] = now
 	}
+}
+
+// Run starts the fencing monitor loop. Blocks until ctx is cancelled.
+func (f *FencingMonitor) Run(ctx context.Context) {
+	f.SeedStartupGrace(f.clock.Now())
 
 	ticker := f.clock.NewTicker(f.checkInterval)
 	defer ticker.Stop()

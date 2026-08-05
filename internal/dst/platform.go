@@ -33,6 +33,10 @@ func newSimDNS(c *Cluster) *simDNS { return &simDNS{c: c} }
 
 func (d *simDNS) UpdateDNSRecord(_ context.Context, ip string) error {
 	d.c.mu.Lock()
+	if d.c.operatorDead {
+		d.c.mu.Unlock()
+		return errOperatorDead
+	}
 	denied := d.c.dnsDenied
 	site := d.c.byLBIP[ip]
 	if !denied {
@@ -53,8 +57,12 @@ func (d *simDNS) UpdateDNSRecord(_ context.Context, ip string) error {
 
 func (d *simDNS) CurrentDNSRecord(_ context.Context) (string, bool, error) {
 	d.c.mu.Lock()
+	dead := d.c.operatorDead
 	denied := d.c.dnsDenied
 	d.c.mu.Unlock()
+	if dead {
+		return "", false, errOperatorDead
+	}
 	if denied {
 		return "", false, errors.New("dnsendpoints.externaldns.k8s.io get forbidden (sim: outage)")
 	}

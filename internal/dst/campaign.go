@@ -14,6 +14,12 @@ import (
 // least one operator restart between the offending promotions.
 var restartMarker = regexp.MustCompile(`operator restarts between: [1-9]`)
 
+// lostStateMarker matches a CooldownViolated detail in which at least one of
+// those restarts came up without the durable anti-flap record — which only
+// happens when the out-of-band store was also rejecting writes, since the
+// operator writes the record at promotion time and retries every poll.
+var lostStateMarker = regexp.MustCompile(`lost the durable anti-flap record: [1-9]`)
+
 // CampaignConfig controls a batch campaign.
 type CampaignConfig struct {
 	StartSeed uint64
@@ -58,19 +64,31 @@ type CampaignResult struct {
 }
 
 // fingerprint dedups failures by the set of violated invariants.
-// CooldownViolated carries its restart context in the fingerprint: the
-// documented, expected class involves an operator restart between the two
-// promotions, and a cooldown violation WITHOUT one is a regression that must
-// not dedup into the expected class and vanish from reports.
+//
+// CooldownViolated splits three ways, because only one of the three is
+// inherent and the other two must not dedup into it and vanish:
+//
+//   - CooldownViolated — no restart between the two promotions. Always a
+//     regression: one process ignored its own cooldown.
+//   - CooldownViolated(restart) — a restart, but the durable anti-flap
+//     record survived it. Also a regression: the restarted process had the
+//     record and promoted anyway. Before the out-of-band store existed this
+//     was the documented/expected class; it is a regression now.
+//   - CooldownViolated(restart+stateLost) — a restart that came up without
+//     the record, which requires BOTH durable paths to have been rejecting
+//     writes. Inherent: nothing could have carried the cooldown across.
 func fingerprint(violations []Violation) string {
 	set := map[string]struct{}{}
 	for _, v := range violations {
 		key := v.Invariant
-		// Fail safe: only an EXPLICIT nonzero restart marker lands in the
-		// documented/expected class; anything unrecognized stays in the
-		// regression class rather than being silently excused.
+		// Fail safe: only EXPLICIT nonzero markers narrow the class;
+		// anything unrecognized stays in the broadest regression class
+		// rather than being silently excused.
 		if v.Invariant == "CooldownViolated" && restartMarker.MatchString(v.Detail) {
 			key = "CooldownViolated(restart)"
+			if lostStateMarker.MatchString(v.Detail) {
+				key = "CooldownViolated(restart+stateLost)"
+			}
 		}
 		set[key] = struct{}{}
 	}

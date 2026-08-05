@@ -6,6 +6,8 @@ package component
 // evolves.
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -436,4 +438,75 @@ func TestSplitBrainFence_PrioritiesPath_RetriedAfterFailure(t *testing.T) {
 	if !dc2.isSuperReadOnly() {
 		t.Error("split-brain loser not re-fenced after transient failures on the priorities path")
 	}
+}
+
+// DST finding 9 (the CooldownViolated(restart) class): anti-flap state lived
+// only in CR status. A status-write outage that spanned an operator restart
+// left the replacement process with no cooldown at all, and it would promote
+// again immediately. The record is now written out of band as well, and a
+// restart rehydrates from whichever durable copy is newer.
+//
+// This pins the operator-level contract the fix rests on: a promotion writes
+// the record through the out-of-band recorder even when it is the ONLY path
+// available, and a fresh manager rehydrated from that record refuses to
+// promote inside the cooldown.
+func TestAntiFlapRecordSurvivesStatusOutage(t *testing.T) {
+	// recorder stands in for the annotation store: independent of the
+	// status subresource, exactly as in production.
+	var recorded []controller.FailoverRecord
+	rec := recorderFunc(func(_ context.Context, r controller.FailoverRecord) error {
+		recorded = append(recorded, r)
+		return nil
+	})
+
+	dc1 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-10"}
+	dc2 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-10"}
+	h := newTestHarnessWithMySQL(t, dc1, dc2)
+	h.tm.SetFailoverStateRecorder(rec)
+	// Every CR /status write is rejected for the whole test, so the status
+	// copy of the record never lands.
+	h.tm.StatusCallback = func(controller.TopologySnapshot) {
+		h.tm.MarkStatusWriteResult(errors.New("mysqlfailovergroups/status is forbidden"))
+	}
+
+	h.pollN(2) // dc1 is primary
+	dc1.setError(errDown)
+	h.pollN(5) // dc2 promoted
+
+	if dc2.isReadOnly() {
+		t.Fatal("setup: dc2 should have been promoted")
+	}
+	if len(recorded) == 0 {
+		t.Fatal("promotion did not write the anti-flap record out of band; a restart would lose the cooldown")
+	}
+	last := recorded[len(recorded)-1]
+	if last.LastFailoverTarget != "dc2" {
+		t.Errorf("out-of-band record names %q, want dc2", last.LastFailoverTarget)
+	}
+	if last.LastFailover.IsZero() {
+		t.Error("out-of-band record carries no timestamp, so it cannot bound a cooldown")
+	}
+
+	// The replacement process: a fresh manager with a real cooldown,
+	// rehydrated from the out-of-band record alone (status wrote nothing).
+	fresh := newTestHarnessWithMySQL(t, dc1, dc2)
+	fresh.tm.SetLastFailover(last.LastFailover)
+	fresh.tm.SetLastFailoverTarget(last.LastFailoverTarget)
+
+	// dc2 now dies too, giving the fresh process a reason to promote dc1 —
+	// which the cooldown must forbid.
+	dc1.respawn(true) // clears the error and brings dc1 back fenced
+	dc2.setError(errDown)
+	fresh.pollN(10)
+
+	if !dc1.isReadOnly() {
+		t.Error("fresh operator promoted inside the anti-flap cooldown; the rehydrated out-of-band record did not bound it")
+	}
+}
+
+// recorderFunc adapts a function to controller.FailoverStateRecorder.
+type recorderFunc func(context.Context, controller.FailoverRecord) error
+
+func (f recorderFunc) RecordFailoverState(ctx context.Context, r controller.FailoverRecord) error {
+	return f(ctx, r)
 }

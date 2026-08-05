@@ -103,6 +103,15 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		if e.Outcome != "" {
 			key += ":" + e.Outcome
 		}
+		// Which statement the operator died on is repro detail, not a
+		// distinct behavior class. Left per-statement, the two death
+		// outcomes would add one signature dimension per mutation kind and
+		// multiply the space by 2^(2*kinds) — enough that the saturation
+		// rule stops firing within any sane wall-clock budget. The event
+		// log keeps the full detail; only the signature collapses.
+		if e.Outcome == "operatorDied" || e.Outcome == "appliedThenOperatorDied" {
+			key = "operatorDiedMidStatement:" + e.Outcome
+		}
 		r.kindsSeen[key] = struct{}{}
 	}
 
@@ -119,6 +128,10 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 	if target, grantSeq := promotionTarget(events); target != "" {
 		r.promotionPolls = append(r.promotionPolls, p)
 		r.currentTarget = target
+		// The clock has not advanced for this poll yet, so Now() is the
+		// instant the operator itself stamped on the promotion. A restart
+		// that rehydrates anything older lost the record.
+		r.lastPromotionAt = r.clk.Now()
 
 		// I: the operator must never promote while it observes another
 		// writable site, unless it fenced that site in the same cycle.
@@ -214,21 +227,34 @@ func (r *trialRunner) checkEnd() []Violation {
 	}
 
 	// Cooldown spacing between observed promotions.
+	//
+	// The detail carries both the restart count and how many of those
+	// restarts lost the anti-flap record, because the two combinations mean
+	// very different things and the campaign fingerprints them apart:
+	// losing the record while every durable path was up is a regression,
+	// while losing it during an out-of-band store outage is the inherent
+	// residue (both durable copies were unwritable, so nothing could have
+	// carried the cooldown across the restart).
 	cooldownPolls := r.trial.CooldownSec // 1s per poll
 	for i := 1; i < len(r.promotionPolls); i++ {
 		gap := r.promotionPolls[i] - r.promotionPolls[i-1]
 		if gap < cooldownPolls {
-			restarts := 0
+			restarts, lost := 0, 0
 			for _, rp := range r.restartPolls {
 				if rp > r.promotionPolls[i-1] && rp <= r.promotionPolls[i] {
 					restarts++
 				}
 			}
+			for _, lp := range r.lostStatePolls {
+				if lp > r.promotionPolls[i-1] && lp <= r.promotionPolls[i] {
+					lost++
+				}
+			}
 			out = append(out, Violation{
 				Invariant: "CooldownViolated",
 				Poll:      r.promotionPolls[i],
-				Detail: fmt.Sprintf("promotions %d polls apart (cooldown %d polls, operator restarts between: %d)",
-					gap, cooldownPolls, restarts),
+				Detail: fmt.Sprintf("promotions %d polls apart (cooldown %d polls, operator restarts between: %d, of which lost the durable anti-flap record: %d)",
+					gap, cooldownPolls, restarts, lost),
 			})
 		}
 	}

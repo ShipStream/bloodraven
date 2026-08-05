@@ -309,6 +309,10 @@ Kubernetes Event reasons emitted on the `MysqlFailoverGroup` (visible via `kubec
 | INFO | `stopping topology manager` | `fg` |
 | INFO | `config changed, restarting topology manager` | `fg` |
 | INFO | `restored lastFailoverTarget from CR status` | `fg`, `target` |
+| INFO | `restored lastFailover from CR status` | `fg`, `lastFailover` |
+| WARN | `restored lastFailoverTarget from out-of-band annotations` | `fg`, `target`, `statusTarget` |
+| WARN | `restored lastFailover from out-of-band annotations` | `fg`, `lastFailover`, `statusLastFailover` |
+| ERROR | `out-of-band anti-flap state write failed; retrying every poll` | `target`, `lastFailover`, `error` |
 | INFO | `starting graceful shutdown` | `fg` |
 | INFO | `CR deleted — DNSEndpoint will be garbage-collected` | (none) |
 | INFO | `sidecar starting` | `listenAddr`, `peerAddresses`, `bloodravenAddress`, `leaseTimeout`, `peerCheckInterval`, `site`, `namespace`, `fg`, `pod` |

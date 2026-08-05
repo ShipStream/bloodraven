@@ -48,18 +48,26 @@ matches your expectations.
   failover decisions wait for an operator to run.
 - If the primary fails while the operator is down, writes remain
   unavailable until the operator returns and completes failover.
-- Anti-flap state (`status.lastFailover`, `status.lastFailoverTarget`)
-  is durable only in CR status. If status writes are being rejected
-  (e.g. an RBAC regression on `mysqlfailovergroups/status`) **and** the
-  operator restarts before the write self-heals, the restarted process
-  rehydrates stale values: the failover cooldown resets, and a
-  subsequent site failure inside the intended cooldown window can
-  promote earlier than configured (deterministic-simulation finding,
-  `CooldownViolated` class). GTID gates still bound the damage — any
-  divergence this causes is fenced and reported — but the flap timing
-  guarantee is only as durable as status writes. Alert on
-  `mysqlfailovergroups/status` write failures (the operator logs and
-  retries them every poll) to close the window.
+- Anti-flap state (`lastFailover`, `lastFailoverTarget`) is persisted
+  twice on every promotion: in `status.lastFailover` /
+  `status.lastFailoverTarget`, and out of band in the failover group's
+  own annotations (`bloodraven.shipstream.io/last-failover`,
+  `bloodraven.shipstream.io/last-failover-target`). The two travel
+  different API paths — the status subresource has its own RBAC rule
+  and admission chain — so an outage on one does not take the other
+  with it. A restarting operator rehydrates from whichever copy is
+  newer, and both writes retry every poll until accepted. Losing the
+  cooldown across a restart therefore requires **both** paths to be
+  rejecting writes at once; while that holds, a subsequent site failure
+  inside the intended cooldown window can promote earlier than
+  configured (deterministic-simulation finding,
+  `CooldownViolated(restart+stateLost)` class). GTID gates still bound
+  the damage — any divergence this causes is fenced and reported. Alert
+  on `mysqlfailovergroups` and `mysqlfailovergroups/status` write
+  failures (the operator logs and retries both every poll) to close the
+  window. A restart that had to fall back to the annotations logs
+  `restored lastFailover from out-of-band annotations` at WARN, which is
+  a direct signal that this group's status writes were failing.
 
 ## Placement and shared nodes
 

@@ -27,10 +27,19 @@ type TrialResult struct {
 
 	PromotionPolls []int
 	RestartPolls   []int
+	// LostStatePolls are restarts that came up without the durable
+	// anti-flap record.
+	LostStatePolls []int
 	FinalStatus    controller.StatusResponse
 	FinalSnapshot  *controller.TopologySnapshot
-	FinalTruth     []SiteTruth
-	Events         []Event // populated only in capture mode
+	// FinalFailoverRecord is the out-of-band anti-flap store's last
+	// accepted write.
+	FinalFailoverRecord *controller.FailoverRecord
+	FinalTruth          []SiteTruth
+	// SelfFenced are the sites whose sidecar monitors ended the trial
+	// believing they had self-fenced.
+	SelfFenced []string
+	Events     []Event // populated only in capture mode
 }
 
 // Failed reports whether any invariant was violated.
@@ -52,6 +61,20 @@ type trialRunner struct {
 	// way runner.go rehydrates from CR status.
 	persisted *controller.TopologySnapshot
 
+	// persistedFailover simulates the out-of-band anti-flap store (the
+	// failover group's object annotations in production): the last record
+	// whose write was not denied. Its outage knob is separate from the
+	// status one, so a trial can deny either path independently.
+	persistedFailover *controller.FailoverRecord
+	// stateDeniedSincePromotion tracks whether the out-of-band store has an
+	// unhealed rejection. Cleared by any accepted write, so it means
+	// exactly "the durable record may be behind the last promotion".
+	stateDeniedSincePromotion bool
+
+	// sidecars are the per-site fencing actors (sidecar.go). Each wraps a
+	// real sidecar.FencingMonitor.
+	sidecars []*simSidecar
+
 	promotionPolls []int
 	restartPolls   []int
 	violations     []Violation
@@ -59,11 +82,53 @@ type trialRunner struct {
 	reasonsSeen    map[string]struct{}
 
 	// currentTarget is the failover target the running operator process
-	// knows in memory; it reverts to the persisted CR value on restart.
+	// knows in memory; it reverts to the persisted value on restart.
 	currentTarget string
+	// lastPromotionAt is the fake-clock instant of the most recent promotion
+	// the harness observed, and lostStatePolls the polls at which a restart
+	// rehydrated an anti-flap record older than it. Together they separate
+	// an inherent cooldown reset (every durable path was down) from a
+	// regression (a durable path was up and the operator did not use it).
+	lastPromotionAt time.Time
+	lostStatePolls  []int
+
+	// rehydrated is the anti-flap record the current operator process
+	// started from — what buildManager merged out of the two durable paths.
+	rehydrated controller.FailoverRecord
+
+	// operatorDeadUntil is the first poll at which a process killed
+	// mid-Execute is replaced; -1 when the operator is alive.
+	// pendingCrashDown carries the armed crash's down window until the
+	// death actually lands.
+	operatorDeadUntil int
+	pendingCrashDown  int
 
 	dualStreak  int
 	dualFlagged bool
+}
+
+// simFailoverStore is the out-of-band anti-flap store: a
+// controller.FailoverStateRecorder whose availability is modeled
+// independently of simulated CR /status writes.
+//
+// Called only from the operator's poll goroutine (the promotion paths and
+// the per-poll retry), which is the harness goroutine itself, so the
+// unsynchronized runner fields it touches are safe. The one production
+// caller that is NOT on that goroutine — the ordered-update handoff — cannot
+// run here: the trial wires a nil UpdateController.
+type simFailoverStore struct{ r *trialRunner }
+
+func (s *simFailoverStore) RecordFailoverState(_ context.Context, rec controller.FailoverRecord) error {
+	if s.r.cluster.StateDenied() {
+		s.r.cluster.NoteFailoverStateWrite(rec.LastFailoverTarget, true)
+		s.r.stateDeniedSincePromotion = true
+		return errors.New("mysqlfailovergroups patch forbidden (sim: outage)")
+	}
+	cp := rec
+	s.r.persistedFailover = &cp
+	s.r.stateDeniedSincePromotion = false
+	s.r.cluster.NoteFailoverStateWrite(rec.LastFailoverTarget, false)
+	return nil
 }
 
 // RunTrial executes one trial. When capture is true the full event log is
@@ -73,10 +138,11 @@ func RunTrial(trial Trial, capture bool, handler slog.Handler) (result TrialResu
 		handler = slog.DiscardHandler
 	}
 	r := &trialRunner{
-		trial:       trial,
-		logger:      slog.New(handler),
-		kindsSeen:   make(map[string]struct{}),
-		reasonsSeen: make(map[string]struct{}),
+		trial:             trial,
+		logger:            slog.New(handler),
+		kindsSeen:         make(map[string]struct{}),
+		reasonsSeen:       make(map[string]struct{}),
+		operatorDeadUntil: -1,
 	}
 
 	defer func() {
@@ -135,14 +201,21 @@ func (r *trialRunner) setup(capture bool) {
 	}
 
 	if t.SeedHistory {
-		// A prior process failed over to the first site long ago; the CR
-		// carries the durable record.
+		// A prior process failed over to the first site long ago. Both
+		// durable paths carry it, which is the steady state after a
+		// promotion that neither path rejected.
+		stamp := r.clk.Now().Add(-2 * time.Hour)
 		r.persisted = &controller.TopologySnapshot{
-			LastFailover:       r.clk.Now().Add(-2 * time.Hour),
+			LastFailover:       stamp,
+			LastFailoverTarget: t.SiteNames[0],
+		}
+		r.persistedFailover = &controller.FailoverRecord{
+			LastFailover:       stamp,
 			LastFailoverTarget: t.SiteNames[0],
 		}
 	}
 
+	r.buildSidecars()
 	r.buildManager()
 }
 
@@ -170,16 +243,33 @@ func (r *trialRunner) buildManager() {
 	)
 	tm.SetSleepForTest(func(time.Duration) {})
 
-	// Rehydration from CR status (runner.go): lastFailoverTarget,
-	// lastFailover, and per-site source convergence and recovery state
+	tm.SetFailoverStateRecorder(&simFailoverStore{r: r})
+
+	// Rehydration (runner.go): the anti-flap record comes from whichever
+	// durable path is newer — the CR status copy or the out-of-band store —
+	// and per-site source convergence and recovery state come from CR status
 	// (every site can carry its own recovery marker).
+	statusRecord := controller.FailoverRecord{}
 	if p := r.persisted; p != nil {
-		if p.LastFailoverTarget != "" {
-			tm.SetLastFailoverTarget(p.LastFailoverTarget)
+		statusRecord = controller.FailoverRecord{
+			LastFailover:       p.LastFailover,
+			LastFailoverTarget: p.LastFailoverTarget,
 		}
-		if !p.LastFailover.IsZero() {
-			tm.SetLastFailover(p.LastFailover)
-		}
+	}
+	oobRecord := controller.FailoverRecord{}
+	if f := r.persistedFailover; f != nil {
+		oobRecord = *f
+	}
+	rehydrated := controller.NewerFailoverRecord(statusRecord, oobRecord)
+	if rehydrated.LastFailoverTarget != "" {
+		tm.SetLastFailoverTarget(rehydrated.LastFailoverTarget)
+	}
+	if !rehydrated.LastFailover.IsZero() {
+		tm.SetLastFailover(rehydrated.LastFailover)
+	}
+	r.rehydrated = rehydrated
+
+	if p := r.persisted; p != nil {
 		for _, site := range p.Sites {
 			if site.SourceConvergenceState != "" || site.SourceHost != "" {
 				tm.SetSourceConvergence(site.Name, site.SourceHost, site.SourceConvergenceState, site.SourceConvergenceReason)
@@ -194,6 +284,12 @@ func (r *trialRunner) buildManager() {
 	}
 
 	tm.StatusCallback = func(snap controller.TopologySnapshot) {
+		if r.cluster.OperatorDead() {
+			// A process that no longer exists does not land status writes,
+			// however far the dying Poll gets through its own bookkeeping.
+			tm.MarkStatusWriteResult(errOperatorDead)
+			return
+		}
 		if r.cluster.StatusDenied() {
 			tm.MarkStatusWriteResult(errors.New("mysqlfailovergroups/status write forbidden (sim: outage)"))
 			return
@@ -230,8 +326,32 @@ func (r *trialRunner) run() {
 			r.healAll()
 		}
 
+		// A process killed mid-Execute is replaced at the start of the poll
+		// its down window expires in — before that poll's sidecar ticks, so
+		// the sidecars see the operator return exactly when it returns.
+		if r.operatorDeadUntil >= 0 && p >= r.operatorDeadUntil {
+			r.restartOperator(p)
+		}
+
 		r.cluster.Tick()
-		r.tm.Poll(ctx)
+
+		if !r.trial.SidecarAfterPoll {
+			r.tickSidecars(ctx)
+		}
+		if !r.cluster.OperatorDead() {
+			r.tm.Poll(ctx)
+		}
+		if r.cluster.OperatorDead() && r.operatorDeadUntil < 0 {
+			// Died during this poll. The replacement starts Down polls
+			// later; until then no Poll runs at all, so the sidecars are
+			// the only actors — which is the interaction this fault exists
+			// to reach.
+			r.operatorDeadUntil = p + 1 + r.pendingCrashDown
+			r.pendingCrashDown = 0
+		}
+		if r.trial.SidecarAfterPoll {
+			r.tickSidecars(ctx)
+		}
 
 		st := r.tm.Status()
 		events := r.cluster.PollEvents()
@@ -242,6 +362,54 @@ func (r *trialRunner) run() {
 			r.checkBaseline(p, st)
 		}
 	}
+
+	// A trial that ends with the operator still dead would judge its end
+	// state against a cluster nobody is driving. The heal window is
+	// generated well before the last poll and Down is bounded, so this is a
+	// belt-and-braces guard rather than a live path.
+	if r.cluster.OperatorDead() {
+		r.violations = append(r.violations, Violation{
+			Invariant: "HarnessOperatorNeverReturned",
+			Poll:      r.trial.Polls - 1,
+			Detail:    "trial ended with the operator process still dead",
+		})
+	}
+}
+
+// restartOperator brings up a replacement process after any kind of death —
+// a scheduled restart or a mid-Execute kill — and checks what the
+// replacement managed to rehydrate.
+func (r *trialRunner) restartOperator(poll int) {
+	r.operatorDeadUntil = -1
+	r.cluster.ReviveOperator()
+	r.cluster.NoteOperatorRestart()
+	r.restartPolls = append(r.restartPolls, poll)
+	r.buildManager()
+	r.checkRehydratedAntiFlap(poll)
+}
+
+// checkRehydratedAntiFlap compares what the new process rehydrated against
+// the promotion the harness actually observed.
+//
+// Losing the record is inherent ONLY while the out-of-band store has an
+// unhealed rejection: the operator writes it at promotion time and retries
+// every poll, so a healthy store means a current record. Anything else is
+// the operator failing to write it, or failing to read it back — which is
+// precisely the CooldownViolated(restart) class this store closes.
+func (r *trialRunner) checkRehydratedAntiFlap(poll int) {
+	if r.lastPromotionAt.IsZero() || !r.rehydrated.LastFailover.Before(r.lastPromotionAt) {
+		return
+	}
+	r.lostStatePolls = append(r.lostStatePolls, poll)
+	if r.stateDeniedSincePromotion {
+		return
+	}
+	r.violations = append(r.violations, Violation{
+		Invariant: "AntiFlapStateLost",
+		Poll:      poll,
+		Detail: fmt.Sprintf("restart rehydrated lastFailover=%v (target %q) but a promotion landed at %v and the out-of-band store was accepting writes",
+			r.rehydrated.LastFailover, r.rehydrated.LastFailoverTarget, r.lastPromotionAt),
+	})
 }
 
 // applyOp applies one schedule op to the model (or restarts the operator).
@@ -260,9 +428,15 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 	case OpHealPair:
 		r.cluster.SetPairLink(op.Site, op.Peer, false)
 	case OpRestartOperator:
-		r.cluster.NoteOperatorRestart()
-		r.restartPolls = append(r.restartPolls, poll)
-		r.buildManager()
+		r.restartOperator(poll)
+	case OpCrashOperatorMid:
+		// Arming only schedules the death; it lands inside this poll's
+		// mutation sequence, wherever the countdown runs out. If the
+		// operator issues fewer mutations than the countdown, the arm
+		// carries into later polls — which is the point: the crash lands
+		// where the operator happens to be, not where the schedule is.
+		r.cluster.ArmOperatorCrash(op.N, op.PreApply)
+		r.pendingCrashDown = op.Down
 	case OpAmbiguousMuts:
 		r.cluster.AddAmbiguousMutations(op.Site, op.N)
 	case OpFailMuts:
@@ -287,6 +461,10 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 		r.cluster.SetStatusDenied(true)
 	case OpStatusHeal:
 		r.cluster.SetStatusDenied(false)
+	case OpStateOutage:
+		r.cluster.SetStateDenied(true)
+	case OpStateHeal:
+		r.cluster.SetStateDenied(false)
 	case OpDNSOutage:
 		r.cluster.SetDNSDenied(true)
 	case OpDNSHeal:
@@ -318,7 +496,13 @@ func (r *trialRunner) healAll() {
 	}
 	r.cluster.SetDNSDenied(false)
 	r.cluster.SetStatusDenied(false)
+	r.cluster.SetStateDenied(false)
 	r.cluster.ClearInjectedCallFaults()
+	// Disarm a crash that has not fired yet. An armed countdown surviving
+	// into the settle window would kill the operator during the very polls
+	// the end-state invariants assume a quiesced, actively-managed cluster.
+	r.cluster.DisarmOperatorCrash()
+	r.pendingCrashDown = 0
 }
 
 // checkBaseline asserts the warmup converged: the first site is the observed
@@ -353,12 +537,17 @@ func (r *trialRunner) finish() TrialResult {
 	violations = append(violations, r.checkEnd()...)
 
 	res := TrialResult{
-		Trial:          r.trial,
-		Violations:     violations,
-		BaselineOK:     true,
-		PromotionPolls: r.promotionPolls,
-		RestartPolls:   r.restartPolls,
-		FinalSnapshot:  r.persisted,
+		Trial:               r.trial,
+		Violations:          violations,
+		BaselineOK:          true,
+		PromotionPolls:      r.promotionPolls,
+		RestartPolls:        r.restartPolls,
+		LostStatePolls:      r.lostStatePolls,
+		FinalSnapshot:       r.persisted,
+		FinalFailoverRecord: r.persistedFailover,
+	}
+	if r.sidecars != nil {
+		res.SelfFenced = r.selfFencedSites()
 	}
 	if r.tm != nil {
 		res.FinalStatus = r.tm.Status()
