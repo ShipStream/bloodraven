@@ -30,6 +30,8 @@ Structured-log `msg` strings and field names listed in `docs/docs/log-schema.mdx
 ## Testing Guidelines
 Add table-driven unit tests beside the code they cover, using the existing `*_test.go` layout under `internal/`. Put cross-component behavior tests in `test/component`, API-server/controller-runtime tests in `test/envtest`, and real-cluster playground scenarios in `internal/playground/scenarios` through `cmd/playground-chaos`. Some tests create local HTTP listeners with `httptest`, so restricted sandboxes may fail even when local developer runs pass.
 
+Deterministic simulation tests (DST) of the failover control loop live in `internal/dst`: seeded random fault schedules run against the real `TopologyManager` with a fake clock and an in-memory MySQL model. `make test` includes the quick sweep; `make dst` runs the saturation campaign (stops at coverage-diminishing returns); `DST_SEED=<n> make dst-repro` replays any trial exactly, with `DST_SKIP=<i,j>` to mask schedule ops. When a DST finding is fixed, pin it as a component test in `test/component` (see `dst_regression_test.go`) — DST seeds shift when the schedule generator changes, component tests don't. See `internal/dst/README.md`.
+
 ### Pre-PR gate (required, do not skip)
 Before pushing a branch that opens or updates a PR, run all of the following from the repo root and fix anything they report. Do **not** push expecting CI to find problems you could have caught locally — CI failures on lint or generate drift are round-trip latency and reviewer noise.
 

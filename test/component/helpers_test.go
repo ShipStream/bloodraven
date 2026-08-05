@@ -28,6 +28,13 @@ type mockMySQL struct {
 	err      error
 	promoted bool
 
+	// superROFailN makes the next N SetSuperReadOnly calls fail without
+	// applying, to exercise fence-retry behavior.
+	superROFailN int
+	// stopReplicaFailN makes the next N StopReplica calls fail, to abort a
+	// promotion sequence partway.
+	stopReplicaFailN int
+
 	// Tracking fields for verification.
 	superReadOnly         bool
 	stoppedReplica        bool
@@ -64,6 +71,10 @@ func (m *mockMySQL) Close() error { return nil }
 func (m *mockMySQL) SetSuperReadOnly(_ context.Context, on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.superROFailN > 0 {
+		m.superROFailN--
+		return errors.New("transient: connection reset by peer")
+	}
 	m.superReadOnly = on
 	if on {
 		m.readOnly = true
@@ -76,6 +87,10 @@ func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) { return 
 func (m *mockMySQL) StopReplica(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopReplicaFailN > 0 {
+		m.stopReplicaFailN--
+		return errors.New("transient: i/o timeout")
+	}
 	m.stoppedReplica = true
 	return nil
 }
@@ -182,6 +197,44 @@ func (m *mockMySQL) isReadOnly() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.readOnly
+}
+
+// isSuperReadOnly returns the current superReadOnly state.
+func (m *mockMySQL) isSuperReadOnly() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.superReadOnly
+}
+
+// failNextSuperRO makes the next n SetSuperReadOnly calls fail transiently.
+func (m *mockMySQL) failNextSuperRO(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.superROFailN = n
+}
+
+// failNextStopReplica makes the next n StopReplica calls fail transiently.
+func (m *mockMySQL) failNextStopReplica(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopReplicaFailN = n
+}
+
+// respawn simulates a MySQL restart: reachable again, read_only per the
+// server config, super_read_only cleared (it is never persisted).
+func (m *mockMySQL) respawn(readOnly bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.err = nil
+	m.readOnly = readOnly
+	m.superReadOnly = false
+}
+
+// setGtidExecuted replaces the reported GTID_EXECUTED set.
+func (m *mockMySQL) setGtidExecuted(gtid string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gtidExecuted = gtid
 }
 
 // ---------------------------------------------------------------------------

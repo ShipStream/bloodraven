@@ -213,7 +213,7 @@ func (tm *TopologyManager) verifyDirectReplica(ctx context.Context, follower *si
 			lastErr = fmt.Errorf("replica source or threads not converged")
 		}
 		if attempt < 2 {
-			time.Sleep(100 * time.Millisecond)
+			tm.sleep(100 * time.Millisecond)
 		}
 	}
 	return nil, lastErr

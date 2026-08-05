@@ -137,7 +137,7 @@ func TestPoll_StatusRetryReFiresCallbackUntilCleared(t *testing.T) {
 	}
 
 	// Arm the status-write retry (a prior /status write was denied).
-	tm.markStatusWriteResult(errors.New("mysqlfailovergroups/status is forbidden"))
+	tm.MarkStatusWriteResult(errors.New("mysqlfailovergroups/status is forbidden"))
 	before = calls
 	pollN(tm, 1)
 	if calls == before {
@@ -145,7 +145,7 @@ func TestPoll_StatusRetryReFiresCallbackUntilCleared(t *testing.T) {
 	}
 
 	// Disarm (write succeeded): steady polls fire nothing again.
-	tm.markStatusWriteResult(nil)
+	tm.MarkStatusWriteResult(nil)
 	drainSteady()
 	before = calls
 	pollN(tm, 1)

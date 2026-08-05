@@ -1557,29 +1557,24 @@ func TestReclone_PreservesRecoveryStateUntilReplicationHealthy(t *testing.T) {
 
 	// Simulate RecoveryBlocked state on dc2.
 	tm.mu.Lock()
-	tm.recoveryPendingSite = "dc2"
-	tm.recoveryState = recoveryStateBlocked
-	tm.recoveryDivergentGtid = "aaaa:50-55"
-	tm.recoveryDivergentCount = 6
+	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateBlocked, divergentGtid: "aaaa:50-55", divergentCount: 6}
 	tm.mu.Unlock()
 
 	tm.SetRecloneSite("dc2")
 	tm.checkReclone(context.Background())
 
 	tm.mu.RLock()
-	recoverySite := tm.recoveryPendingSite
-	divergentGtid := tm.recoveryDivergentGtid
-	divergentCount := tm.recoveryDivergentCount
+	rec := tm.recovery["dc2"]
 	tm.mu.RUnlock()
 
-	if recoverySite != "dc2" {
-		t.Errorf("recoveryPendingSite should remain blocked until replication is healthy, got %q", recoverySite)
+	if rec == nil || rec.state != recoveryStateBlocked {
+		t.Fatalf("dc2 recovery should remain blocked until replication is healthy, got %+v", rec)
 	}
-	if divergentGtid != "aaaa:50-55" {
-		t.Errorf("recoveryDivergentGtid should remain until replication is healthy, got %q", divergentGtid)
+	if rec.divergentGtid != "aaaa:50-55" {
+		t.Errorf("divergentGtid should remain until replication is healthy, got %q", rec.divergentGtid)
 	}
-	if divergentCount != 6 {
-		t.Errorf("recoveryDivergentCount should remain until replication is healthy, got %d", divergentCount)
+	if rec.divergentCount != 6 {
+		t.Errorf("divergentCount should remain until replication is healthy, got %d", rec.divergentCount)
 	}
 }
 
@@ -1592,10 +1587,7 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutLastFailoverTarget(t *tes
 	pollN(tm, 2)
 
 	tm.mu.Lock()
-	tm.recoveryPendingSite = "dc2"
-	tm.recoveryState = recoveryStateBlocked
-	tm.recoveryDivergentGtid = "aaaa:50-55"
-	tm.recoveryDivergentCount = 6
+	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateBlocked, divergentGtid: "aaaa:50-55", divergentCount: 6}
 	tm.lastFailoverTarget = ""
 	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
 	tm.mu.Unlock()
@@ -1609,12 +1601,10 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutLastFailoverTarget(t *tes
 	}
 
 	tm.mu.RLock()
-	recoverySite := tm.recoveryPendingSite
-	divergentGtid := tm.recoveryDivergentGtid
-	divergentCount := tm.recoveryDivergentCount
+	rec := tm.recovery["dc2"]
 	tm.mu.RUnlock()
-	if recoverySite != "" || divergentGtid != "" || divergentCount != 0 {
-		t.Fatalf("recovery state not cleared: site=%q divergentGtid=%q count=%d", recoverySite, divergentGtid, divergentCount)
+	if rec != nil {
+		t.Fatalf("recovery state not cleared: %+v", rec)
 	}
 }
 
@@ -1626,8 +1616,7 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutReplicationCredentials(t 
 	tm.mu.Lock()
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateReadOnly
-	tm.recoveryPendingSite = "dc2"
-	tm.recoveryState = recoveryStateInProgress
+	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateInProgress}
 	tm.lastFailoverTarget = "dc1"
 	tm.bootstrapCfg = BootstrapConfig{}
 	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
@@ -1642,11 +1631,10 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutReplicationCredentials(t 
 	}
 
 	tm.mu.RLock()
-	recoverySite := tm.recoveryPendingSite
-	recoveryState := tm.recoveryState
+	rec := tm.recovery["dc2"]
 	tm.mu.RUnlock()
-	if recoverySite != "" || recoveryState != "" {
-		t.Fatalf("recovery state not cleared: site=%q state=%q", recoverySite, recoveryState)
+	if rec != nil {
+		t.Fatalf("recovery state not cleared: %+v", rec)
 	}
 }
 

@@ -1,0 +1,78 @@
+package dst
+
+import (
+	"context"
+	"errors"
+	"sync"
+)
+
+// simDNS implements platform.DNSUpdater and platform.DNSRecordReader against
+// the cluster. The record read-back path matters: reconcileDNS prefers the
+// live record, and its restart-heal behavior depends on it.
+type simDNS struct {
+	c  *Cluster
+	mu sync.Mutex
+
+	record string
+	found  bool
+}
+
+func newSimDNS(c *Cluster) *simDNS { return &simDNS{c: c} }
+
+func (d *simDNS) UpdateDNSRecord(_ context.Context, ip string) error {
+	d.c.mu.Lock()
+	denied := d.c.dnsDenied
+	site := d.c.byLBIP[ip]
+	if !denied {
+		d.c.event(site, EvDNSSet, "ip="+ip, "")
+	} else {
+		d.c.event(site, EvDNSSet, "ip="+ip, "denied")
+	}
+	d.c.mu.Unlock()
+	if denied {
+		return errors.New("dnsendpoints.externaldns.k8s.io is forbidden (sim: outage)")
+	}
+	d.mu.Lock()
+	d.record = ip
+	d.found = true
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *simDNS) CurrentDNSRecord(_ context.Context) (string, bool, error) {
+	d.c.mu.Lock()
+	denied := d.c.dnsDenied
+	d.c.mu.Unlock()
+	if denied {
+		return "", false, errors.New("dnsendpoints.externaldns.k8s.io get forbidden (sim: outage)")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.record, d.found, nil
+}
+
+// Record returns the current DNS target ip and the site it maps to.
+func (d *simDNS) Record() (ip, site string, found bool) {
+	d.mu.Lock()
+	ip, found = d.record, d.found
+	d.mu.Unlock()
+	d.c.mu.Lock()
+	site = d.c.byLBIP[ip]
+	d.c.mu.Unlock()
+	return ip, site, found
+}
+
+// simTainter implements platform.NodeTainter, recording taint state.
+type simTainter struct {
+	mu     sync.Mutex
+	taints map[string]bool
+}
+
+func newSimTainter() *simTainter { return &simTainter{taints: make(map[string]bool)} }
+
+func (t *simTainter) SetTaint(_ context.Context, selector, _ string, taint bool) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.taints[selector] = taint
+	return nil
+}

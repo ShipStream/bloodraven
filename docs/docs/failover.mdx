@@ -167,7 +167,7 @@ On each poll cycle, if a site is read-only with no replication configured (the s
 2. **Query `@@global.gtid_executed`** on both the old and new primary
 3. **Compare GTID sets** to determine if the old primary has any transactions not on the new primary
 
-If the old primary returns **writable** (e.g., power was cut before the sidecar could self-fence), the operator first detects this as a split-brain condition and fences it immediately. Recovery proceeds on the next poll cycle once the site transitions to read-only.
+If the old primary returns **writable** (e.g., power was cut before the sidecar could self-fence), the operator first detects this as a split-brain condition and fences it immediately. The fence is retried on **every** poll cycle while the split-brain persists — a transient error on the first attempt (a network blip during the site's recovery turbulence) does not leave the returning site writable. Recovery proceeds once the site transitions to read-only.
 
 ### No divergence (automatic rejoin)
 
@@ -190,6 +190,8 @@ If the old primary has committed transactions that never replicated to the new p
 - Sets `status.sites[].recoveryState` to `RecoveryBlocked`
 - Sets the `RecoveryPending` condition to `True` with reason `DivergentTransactions`
 - Emits the `bloodraven_divergent_transactions` Prometheus metric
+
+While a site is `RecoveryBlocked`, the operator re-verifies the divergence roughly every 30 seconds rather than freezing the first report. If the site diverges *further* before you resolve it (for example its pod respawned writable, accepted a few writes, and was re-fenced), `divergentGtid` and the count refresh to the full current set. If the divergence is resolved externally — you replay the missing transactions onto the new primary so its GTID set comes to contain the old primary's — the re-check notices containment and automatically rejoins the site as a replica.
 
 :::danger
 Divergent transactions mean the old primary accepted writes that the new primary never received. These transactions are effectively lost from the replication stream. The site must be **re-cloned** from the current primary to recover. Do not attempt to manually reconfigure replication — conflicting GTID sets will cause replication errors.

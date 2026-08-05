@@ -594,6 +594,10 @@ func TestEmitFailoverEvents_DataLossDetected(t *testing.T) {
 		},
 	}
 	snap := TopologySnapshot{
+		Sites: []SiteSnapshot{
+			{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTxnCount: 5},
+			{Name: "dc2"},
+		},
 		RecoveryState:     "RecoveryBlocked",
 		RecoverySite:      "dc1",
 		DivergentTxnCount: 5,
@@ -625,6 +629,10 @@ func TestEmitFailoverEvents_NoDataLossEventWhenAlreadyBlocked(t *testing.T) {
 		},
 	}
 	snap := TopologySnapshot{
+		Sites: []SiteSnapshot{
+			{Name: "dc1", RecoveryState: "RecoveryBlocked", DivergentTxnCount: 5},
+			{Name: "dc2"},
+		},
 		RecoveryState:     "RecoveryBlocked",
 		RecoverySite:      "dc1",
 		DivergentTxnCount: 5,
@@ -650,7 +658,10 @@ func TestEmitFailoverEvents_RecoveryComplete(t *testing.T) {
 		},
 	}
 	snap := TopologySnapshot{
-		RecoveryState: "",
+		Sites: []SiteSnapshot{
+			{Name: "dc1"},
+			{Name: "dc2"},
+		},
 	}
 
 	runner.emitFailoverEvents(fg, existing, snap)

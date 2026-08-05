@@ -185,6 +185,7 @@ func TestRecovery_AlreadyReplicating_Skipped(t *testing.T) {
 		replicaStatus: &mysql.ReplicaStatus{
 			IORunning:  true,
 			SQLRunning: true,
+			SourceHost: "mysql-lion-dc1.default.svc.cluster.local",
 		},
 	}
 	h := newRecoveryHarness(t, dc1, dc2)
