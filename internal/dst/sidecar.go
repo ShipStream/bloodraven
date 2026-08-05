@@ -220,7 +220,7 @@ func (w *simResponse) writeString(s string)        { w.body.WriteString(s) }
 func (w *simResponse) result() *http.Response {
 	return &http.Response{
 		StatusCode:    w.code,
-		Status:        http.StatusText(w.code),
+		Status:        fmt.Sprintf("%d %s", w.code, http.StatusText(w.code)),
 		Header:        w.header,
 		Body:          io.NopCloser(bytes.NewReader(w.body.Bytes())),
 		ContentLength: int64(w.body.Len()),

@@ -42,8 +42,14 @@ const (
 
 // failoverStateWriteTimeout bounds one out-of-band write. It runs inline on
 // the poll goroutine immediately after a promotion, so it must not be able
-// to stall the loop; a write that misses this budget is retried on the next
-// poll by the pending-record path in Poll.
+// to stall the loop indefinitely; a write that misses this budget is retried
+// on the next poll by the pending-record path in Poll.
+//
+// The promotion path waits for an in-flight write before starting its own,
+// so its worst case is TWO of these budgets back to back (~20s): one
+// draining the write it queued behind, one for its own API call. That only
+// happens when two promotions race, and a bounded post-promotion delay is
+// preferred over a promotion whose record silently loses the race.
 const failoverStateWriteTimeout = 10 * time.Second
 
 // FailoverRecord is the anti-flap state that must survive an operator

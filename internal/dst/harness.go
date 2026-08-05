@@ -70,6 +70,18 @@ type trialRunner struct {
 	// unhealed rejection. Cleared by any accepted write, so it means
 	// exactly "the durable record may be behind the last promotion".
 	stateDeniedSincePromotion bool
+	// statusDroppedPromotion is the status-path analog: it latches when the
+	// process that performed the last promotion lands a successful CR
+	// status write whose record still predates that promotion — the status
+	// path was available, and the operator dropped the record from it. A
+	// stale rehydrate is inherent only when NEITHER durable path could have
+	// preserved the record; this latch is what catches "status could have".
+	statusDroppedPromotion bool
+	// promotionRestarts is len(restartPolls) at the last promotion. A
+	// stale-looking status write from a LATER process generation is
+	// legitimate (the replacement never knew the record), so the latch
+	// above only arms while the promoting process is still the one running.
+	promotionRestarts int
 
 	// sidecars are the per-site fencing actors (sidecar.go). Each wraps a
 	// real sidecar.FencingMonitor.
@@ -299,6 +311,13 @@ func (r *trialRunner) buildManager() {
 		if snap.DegradedReason != "" {
 			r.reasonsSeen[snap.DegradedReason] = struct{}{}
 		}
+		// A successful status write by the promoting process that still
+		// predates its own promotion means the operator dropped the record
+		// from a durable path that was accepting writes.
+		if !r.lastPromotionAt.IsZero() && cp.LastFailover.Before(r.lastPromotionAt) &&
+			len(r.restartPolls) == r.promotionRestarts {
+			r.statusDroppedPromotion = true
+		}
 		tm.MarkStatusWriteResult(nil)
 	}
 
@@ -391,24 +410,37 @@ func (r *trialRunner) restartOperator(poll int) {
 // checkRehydratedAntiFlap compares what the new process rehydrated against
 // the promotion the harness actually observed.
 //
-// Losing the record is inherent ONLY while the out-of-band store has an
-// unhealed rejection: the operator writes it at promotion time and retries
-// every poll, so a healthy store means a current record. Anything else is
-// the operator failing to write it, or failing to read it back — which is
-// precisely the CooldownViolated(restart) class this store closes.
+// Losing the record is inherent ONLY while neither durable path could have
+// preserved it: the out-of-band store has an unhealed rejection AND the
+// status path never landed a post-promotion copy either. The operator
+// writes the out-of-band record at promotion time and retries it every
+// poll, so a healthy store means a current record; and a status write that
+// the promoting process landed successfully WITHOUT the record is the
+// operator dropping it, not the path failing. Either way the loss is the
+// CooldownViolated(restart) class this store closes.
+//
+// Note the status side needs no "denied" flag of its own: if a successful
+// post-promotion status write had carried the record, the rehydrate (the
+// newer of the two paths) would not be stale in the first place. The only
+// status-path regression a stale rehydrate can hide is the drop latched by
+// statusDroppedPromotion.
 func (r *trialRunner) checkRehydratedAntiFlap(poll int) {
 	if r.lastPromotionAt.IsZero() || !r.rehydrated.LastFailover.Before(r.lastPromotionAt) {
 		return
 	}
 	r.lostStatePolls = append(r.lostStatePolls, poll)
-	if r.stateDeniedSincePromotion {
+	if r.stateDeniedSincePromotion && !r.statusDroppedPromotion {
 		return
+	}
+	why := "the out-of-band store was accepting writes"
+	if r.stateDeniedSincePromotion {
+		why = "the promoting process landed a CR status write that dropped the record"
 	}
 	r.violations = append(r.violations, Violation{
 		Invariant: "AntiFlapStateLost",
 		Poll:      poll,
-		Detail: fmt.Sprintf("restart rehydrated lastFailover=%v (target %q) but a promotion landed at %v and the out-of-band store was accepting writes",
-			r.rehydrated.LastFailover, r.rehydrated.LastFailoverTarget, r.lastPromotionAt),
+		Detail: fmt.Sprintf("restart rehydrated lastFailover=%v (target %q) but a promotion landed at %v and %s",
+			r.rehydrated.LastFailover, r.rehydrated.LastFailoverTarget, r.lastPromotionAt, why),
 	})
 }
 

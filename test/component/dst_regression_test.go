@@ -502,6 +502,17 @@ func TestAntiFlapRecordSurvivesStatusOutage(t *testing.T) {
 	if !dc1.isReadOnly() {
 		t.Error("fresh operator promoted inside the anti-flap cooldown; the rehydrated out-of-band record did not bound it")
 	}
+
+	// Negative control: the same cluster state driven by a process that
+	// rehydrated nothing must promote dc1. Without this, the assertion
+	// above could pass because no promotion was reachable at all — a
+	// debounce or candidate-selection change — rather than because the
+	// rehydrated record forbade it.
+	control := newTestHarnessWithMySQL(t, dc1, dc2)
+	control.pollN(10)
+	if dc1.isReadOnly() {
+		t.Error("control operator with no rehydrated record did not promote dc1, so the cooldown assertion proves nothing")
+	}
 }
 
 // recorderFunc adapts a function to controller.FailoverStateRecorder.

@@ -165,6 +165,12 @@ func (f *FencingMonitor) topologyEnabled() bool {
 // silence, and self-fences immediately. Callers that drive Check directly
 // instead of Run — deterministic harnesses — must call this first or they
 // are testing a monitor no production process ever is.
+//
+// The reachability timestamps this writes are owned by a single goroutine:
+// Run (or, in harnesses, whichever goroutine drives Check). They are
+// deliberately unsynchronized — the only cross-goroutine field on the
+// monitor is the atomic fenced flag — so SeedStartupGrace must not be
+// called concurrently with Run or Check.
 func (f *FencingMonitor) SeedStartupGrace(now time.Time) {
 	f.lastBloodravenOK = now
 	for _, addr := range f.peerAddrs {

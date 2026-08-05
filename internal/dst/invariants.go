@@ -132,6 +132,8 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		// instant the operator itself stamped on the promotion. A restart
 		// that rehydrates anything older lost the record.
 		r.lastPromotionAt = r.clk.Now()
+		r.statusDroppedPromotion = false
+		r.promotionRestarts = len(r.restartPolls)
 
 		// I: the operator must never promote while it observes another
 		// writable site, unless it fenced that site in the same cycle.

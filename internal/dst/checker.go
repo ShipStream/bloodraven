@@ -147,10 +147,17 @@ func (m *simChecker) KillAppConnections(_ context.Context) (int, error) {
 	}
 	// Consumes the crash countdown like any other statement, so the process
 	// can die between fencing the old primary and draining the candidate.
-	// The kill leaves no model state, so pre/post-apply are the same here.
+	// The kill mutates no model state either way, but the outcome string
+	// must still track the applied flag: the checker's death classification
+	// splits the tallies on it.
 	if m.c.crashNowLocked() {
-		m.c.killOperatorLocked(m.s.name, EvKillConns, !m.c.crashPreApply)
-		m.c.event(m.s.name, EvKillConns, "", "operatorDied")
+		applied := !m.c.crashPreApply
+		m.c.killOperatorLocked(m.s.name, EvKillConns, applied)
+		outcome := "operatorDied"
+		if applied {
+			outcome = "appliedThenOperatorDied"
+		}
+		m.c.event(m.s.name, EvKillConns, "", outcome)
 		return 0, errOperatorDead
 	}
 	m.c.event(m.s.name, EvKillConns, "", "")

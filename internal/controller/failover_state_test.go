@@ -351,7 +351,9 @@ func TestPersistFailoverState_NewerPromotionDuringWrite(t *testing.T) {
 
 // TestRecordFailover_IgnoresOlderPromotion: an out-of-order record (a slow
 // ordered-update goroutine reporting a promotion older than one already
-// seen) must not roll the desired record backwards.
+// seen) must not roll the desired record backwards — nor the in-memory
+// anti-flap pair, which feeds the cooldown check and split-brain fencing
+// directly.
 func TestRecordFailover_IgnoresOlderPromotion(t *testing.T) {
 	stub := &stubFailoverRecorder{}
 	tm := failoverStateTestManager(stub)
@@ -369,6 +371,46 @@ func TestRecordFailover_IgnoresOlderPromotion(t *testing.T) {
 	last, _ := stub.lastWrite()
 	if last.LastFailoverTarget != "gamma" {
 		t.Errorf("store last saw %+v, want the newer record", last)
+	}
+	if !tm.lastFailover.Equal(newer) {
+		t.Errorf("in-memory cooldown anchor rolled back to %v; want %v", tm.lastFailover, newer)
+	}
+	if tm.lastFailoverTarget != "gamma" {
+		t.Errorf("in-memory fencing target renamed to %q; want gamma", tm.lastFailoverTarget)
+	}
+}
+
+// TestPersistFailoverState_EqualTimestampSupersede: under a coarse clock two
+// promotions can share an instant. A supersede that changes only the target
+// must keep the store dirty when it lands mid-write, or the newer target is
+// dropped with nothing scheduled to retry.
+func TestPersistFailoverState_EqualTimestampSupersede(t *testing.T) {
+	stub := &stubFailoverRecorder{}
+	tm := failoverStateTestManager(stub)
+	ctx := context.Background()
+
+	now := tm.clock.Now()
+	// While (now, beta) is being written, a same-instant promotion of gamma
+	// replaces the desired record.
+	stub.before = func() {
+		tm.mu.Lock()
+		cp := FailoverRecord{LastFailover: now, LastFailoverTarget: "gamma"}
+		tm.desiredFailoverState = &cp
+		tm.failoverStateDirty = true
+		tm.mu.Unlock()
+	}
+	tm.recordFailover(ctx, now, "beta", "")
+
+	if !tm.failoverStateDirty {
+		t.Fatal("equal-timestamp supersede was marked clean; the gamma record would never be written")
+	}
+	tm.flushFailoverState(ctx, false)
+	last, ok := stub.lastWrite()
+	if !ok || last.LastFailoverTarget != "gamma" {
+		t.Errorf("follow-up write = %+v, want gamma @ %v", last, now)
+	}
+	if tm.failoverStateDirty {
+		t.Error("still dirty after the newest record landed")
 	}
 }
 

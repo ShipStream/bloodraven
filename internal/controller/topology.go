@@ -569,11 +569,21 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 	tm.promotionGtidExecuted = promotionGtid
 	tm.promotedSite = target
 	tm.promotedAt = now
-	tm.lastFailover = now
-	tm.lastFailoverTarget = target
-	// Only ever advance the desired record. A promotion recorded from the
+	// Only ever advance the anti-flap pair. A promotion recorded from the
 	// ordered-update goroutine and one recorded from the poll goroutine can
-	// interleave here; taking the newer keeps the durable record monotone.
+	// interleave here with `now` sampled before the lock, so the older
+	// sample can be applied second; rolling lastFailover backwards would
+	// end the cooldown early, and renaming lastFailoverTarget would point
+	// split-brain fencing at the older promotion's site. The bookkeeping
+	// fields above stay last-writer-wins on purpose: they describe what
+	// this process just did, and gating them on a timestamp would let a
+	// future-dated rehydrated record silently drop a real promotion's
+	// recovery state.
+	if !tm.lastFailover.After(now) {
+		tm.lastFailover = now
+		tm.lastFailoverTarget = target
+	}
+	// Same monotone rule for the durable record.
 	if tm.desiredFailoverState == nil || !tm.desiredFailoverState.LastFailover.After(now) {
 		cp := rec
 		tm.desiredFailoverState = &cp
@@ -636,10 +646,14 @@ func (tm *TopologyManager) flushFailoverState(ctx context.Context, wait bool) {
 		return
 	}
 
-	// Clear the flag only if nothing newer arrived while the write was in
-	// flight; otherwise the next poll writes the newer record.
+	// Clear the flag only if the desired record is still exactly what was
+	// written. Comparing the whole record rather than just the timestamp
+	// matters under a coarse clock: a promotion that supersedes this one
+	// inside the same tick carries an equal LastFailover but a different
+	// target, and clearing the flag for it would drop that target with
+	// nothing scheduled to retry.
 	tm.mu.Lock()
-	if tm.desiredFailoverState != nil && tm.desiredFailoverState.LastFailover.After(write.LastFailover) {
+	if tm.desiredFailoverState == nil || *tm.desiredFailoverState != write {
 		tm.mu.Unlock()
 		return
 	}

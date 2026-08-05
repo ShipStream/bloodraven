@@ -104,10 +104,12 @@ At end of trial (post-heal, post-settle):
 At every operator restart:
 - **AntiFlapStateLost** — a restarted process must rehydrate an anti-flap
   record at least as new as the last promotion the harness observed, unless
-  the out-of-band store had an unhealed rejection. The operator writes that
-  record at promotion time and retries it every poll, so a healthy store
-  means a current record; anything else is a failure to write it or to read
-  it back.
+  both durable paths were unavailable to preserve it: the out-of-band store
+  had an unhealed rejection, and the status path never landed a
+  post-promotion copy either. The operator writes the out-of-band record at
+  promotion time and retries it every poll, so a healthy store means a
+  current record; and a status write the promoting process landed without
+  the record is the operator dropping it, not the path failing.
 
 ## Model fidelity notes
 

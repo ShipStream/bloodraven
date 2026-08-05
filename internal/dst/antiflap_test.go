@@ -123,13 +123,18 @@ func TestAntiFlapLostWhenEveryDurablePathIsDenied(t *testing.T) {
 	if got := violationsNamed(r.Violations, "AntiFlapStateLost"); len(got) > 0 {
 		t.Errorf("losing the record with every durable path denied is inherent, not a violation: %v", got)
 	}
-	// If this schedule does produce a cooldown violation it must land in the
-	// inherent fingerprint, never in a regression class.
-	if cv := violationsNamed(r.Violations, "CooldownViolated"); len(cv) > 0 {
-		fp := fingerprint(cv)
-		if fp != "CooldownViolated(restart+stateLost)" {
-			t.Errorf("cooldown violation fingerprinted as %q, want the inherent class; detail: %v", fp, cv)
-		}
+	// With no durable record surviving the restart, the second promotion is
+	// inherent to the schedule — requiring it keeps this test from passing
+	// vacuously when the trial stops promoting at all.
+	if len(r.PromotionPolls) < 2 {
+		t.Fatalf("expected a second promotion after the restart, got %v", r.PromotionPolls)
+	}
+	cv := violationsNamed(r.Violations, "CooldownViolated")
+	if len(cv) == 0 {
+		t.Fatal("expected the inherent cooldown violation; the trial is no longer exercising the lost-state class")
+	}
+	if fp := fingerprint(cv); fp != "CooldownViolated(restart+stateLost)" {
+		t.Errorf("cooldown violation fingerprinted as %q, want the inherent class; detail: %v", fp, cv)
 	}
 }
 
@@ -168,6 +173,22 @@ func TestAntiFlapStateLostInvariantIsArmed(t *testing.T) {
 	}
 	if got := violationsNamed(r2.violations, "AntiFlapStateLost"); len(got) > 0 {
 		t.Errorf("store was denied, so the loss is inherent: %v", got)
+	}
+
+	// Store denied, but the promoting process landed a status write that
+	// dropped the record: the status path could have preserved it, so the
+	// loss is a regression again.
+	r3 := &trialRunner{
+		trial: trial, lastPromotionAt: mustFakeNow(),
+		stateDeniedSincePromotion: true, statusDroppedPromotion: true,
+	}
+	r3.checkRehydratedAntiFlap(42)
+	got = violationsNamed(r3.violations, "AntiFlapStateLost")
+	if len(got) != 1 {
+		t.Fatalf("status path dropped the record while the store was denied — want a violation, got %v", r3.violations)
+	}
+	if !strings.Contains(got[0].Detail, "dropped the record") {
+		t.Errorf("detail should name the status-path drop, got %q", got[0].Detail)
 	}
 }
 
