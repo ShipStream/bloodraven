@@ -1171,8 +1171,11 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 				"%d divergent transactions on %s did not replicate before failover",
 				s.DivergentTxnCount, s.Name)
 		}
-		// Recovery complete: RecoveryInProgress/RecoveryBlocked cleared.
-		if recoveryActive(oldState[s.Name]) && !recoveryActive(s.RecoveryState) {
+		// Recovery complete: RecoveryInProgress/RecoveryBlocked cleared. A
+		// marker cleared because the site became WRITABLE (promotion or
+		// re-assert) is not a recovery completion — the site did not rejoin
+		// as a replica — so no Normal event is emitted for it.
+		if recoveryActive(oldState[s.Name]) && !recoveryActive(s.RecoveryState) && s.State != state.StateWritable {
 			r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecoveryComplete",
 				"Old primary %s recovered and is now replicating", s.Name)
 		}

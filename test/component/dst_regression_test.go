@@ -230,6 +230,137 @@ func TestRecovery_EmptySite_LeftToBootstrap(t *testing.T) {
 	}
 }
 
+// Ultra-review finding (high): a persistently-skipped site (empty datadir)
+// earlier in scan order must not consume the recovery cycle and starve a
+// divergent site behind it out of ever being reported.
+func TestRecovery_EmptySiteDoesNotStarveDivergentSite(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, gtidExecuted: ""}                      // empty, scan-first, skipped forever
+	dc2 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-10,uuid_b:1-5"} // divergent ex-primary
+	dc3 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-10"}           // active primary
+
+	logger := newQuietLogger()
+	tainter := newMockTainter()
+	hub := platform.NewHub(logger)
+	dns := &mockDNS{}
+	fc := controller.NewFailoverController(logger)
+	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	sites := defaultTwoSiteConfig()
+	sites = append(sites, controller.SiteTopologyConfig{
+		Name: "dc3", Zone: "lion-dc3", LBIP: "3.3.3.3", Role: state.SiteRolePrimaryCandidate,
+		TaintSelector: taintSelector("dc3"), Host: "mysql-lion-dc3.default.svc.cluster.local",
+	})
+	cfg := controller.TopologyConfig{
+		Name: "lion", Sites: sites, PollInterval: int64(50 * time.Millisecond),
+		FailureThreshold: 3, RecoveryThreshold: 2, FailoverCooldown: 0,
+	}
+	bootstrapCfg := controller.BootstrapConfig{ReplUser: "repl", ReplPassword: "replpass"}
+	tm := controller.NewTopologyManagerWithClock(cfg, []mysql.Checker{dc1, dc2, dc3}, fc, nil, nil, bootstrapCfg, tainter, hub, dns, logger, clk)
+	tm.SetLastFailoverTarget("dc3")
+
+	for i := 0; i < 4; i++ {
+		tm.Poll(t.Context())
+	}
+
+	blocked := ""
+	for _, s := range tm.Status().Sites {
+		if s.Name == "dc2" {
+			blocked = s.RecoveryState
+		}
+	}
+	if blocked != "RecoveryBlocked" {
+		t.Errorf("divergent dc2 not reported (state %q) — starved by the skipped empty site ahead of it in scan order", blocked)
+	}
+}
+
+// Ultra-review finding (high): a RecoveryBlocked divergence report is live
+// evidence and must survive the site going rogue-writable; only the report of
+// a site that became the failover target again may be dropped.
+func TestRecovery_BlockedReport_PreservedWhileRogueWritable(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-10"}
+	dc2 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-10"}
+	h := newRecoveryHarness(t, dc1, dc2)
+
+	h.pollN(2)
+	dc1.setError(errDown)
+	h.pollN(5) // failover to dc2
+
+	dc1.respawn(true)
+	dc1.setGtidExecuted("uuid1:1-14")
+	h.pollN(3) // divergence detected and blocked
+
+	divergent := func() string {
+		for _, s := range h.tm.Status().Sites {
+			if s.Name == "dc1" {
+				return s.DivergentGtid
+			}
+		}
+		return ""
+	}
+	if divergent() == "" {
+		t.Fatal("setup: expected dc1 blocked with a divergence report")
+	}
+
+	// dc1 goes rogue-writable. The report must persist on every poll while
+	// the split-brain fence brings it back — never a window where the human
+	// loses the divergence data.
+	dc1.respawn(false)
+	for i := 0; i < 6; i++ {
+		h.pollN(1)
+		if divergent() == "" {
+			t.Fatalf("divergence report vanished at poll %d while dc1 was rogue-writable", i)
+		}
+	}
+	if !dc1.isSuperReadOnly() {
+		t.Error("dc1 was not re-fenced after going rogue-writable")
+	}
+}
+
+// Ultra-review finding (high): a rogue-writable READER must not gate
+// split-brain fencing of the primary-candidates — EvalCrossSite's FenceSites
+// early return reports SplitBrain=false in that state, so the retry must
+// count writable candidates directly.
+func TestSplitBrainFence_ReaderWritableDoesNotBlockCandidateFencing(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-10"} // failover target, writable
+	dc2 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-10"}  // candidate replica
+	dc3 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-10"}  // reader role
+
+	logger := newQuietLogger()
+	tainter := newMockTainter()
+	hub := platform.NewHub(logger)
+	dns := &mockDNS{}
+	fc := controller.NewFailoverController(logger)
+	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	sites := defaultTwoSiteConfig()
+	sites = append(sites, controller.SiteTopologyConfig{
+		Name: "dc3", Zone: "lion-dc3", LBIP: "3.3.3.3", Role: state.SiteRoleReadOnly,
+		TaintSelector: taintSelector("dc3"), Host: "mysql-lion-dc3.default.svc.cluster.local",
+	})
+	cfg := controller.TopologyConfig{
+		Name: "lion", Sites: sites, PollInterval: int64(50 * time.Millisecond),
+		FailureThreshold: 3, RecoveryThreshold: 2, FailoverCooldown: 0,
+	}
+	tm := controller.NewTopologyManagerWithClock(cfg, []mysql.Checker{dc1, dc2, dc3}, fc, nil, nil, controller.BootstrapConfig{}, tainter, hub, dns, logger, clk)
+	tm.SetLastFailoverTarget("dc1")
+
+	poll := func(n int) {
+		for i := 0; i < n; i++ {
+			tm.Poll(t.Context())
+		}
+	}
+	poll(2) // establish
+
+	// Reader and candidate both go rogue-writable; the reader's fence fails
+	// persistently. Candidate fencing must proceed anyway.
+	dc3.respawn(false)
+	dc3.failNextSuperRO(50)
+	dc2.respawn(false)
+	poll(4)
+
+	if !dc2.isSuperReadOnly() {
+		t.Error("candidate dc2 not fenced while the rogue-writable reader's fence kept failing (FenceSites early-return gating)")
+	}
+}
+
 // DST finding 5 (seed 2669): the no-history, priorities-based split-brain
 // resolution was transition-gated. If the loser fence failed transiently AND
 // the winner promotion aborted partway (so no failover target was recorded),

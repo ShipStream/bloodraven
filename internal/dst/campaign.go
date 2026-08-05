@@ -53,10 +53,18 @@ type CampaignResult struct {
 }
 
 // fingerprint dedups failures by the set of violated invariants.
+// CooldownViolated carries its restart context in the fingerprint: the
+// documented, expected class involves an operator restart between the two
+// promotions, and a cooldown violation WITHOUT one is a regression that must
+// not dedup into the expected class and vanish from reports.
 func fingerprint(violations []Violation) string {
 	set := map[string]struct{}{}
 	for _, v := range violations {
-		set[v.Invariant] = struct{}{}
+		key := v.Invariant
+		if v.Invariant == "CooldownViolated" && !strings.Contains(v.Detail, "restarts between: 0") {
+			key = "CooldownViolated(restart)"
+		}
+		set[key] = struct{}{}
 	}
 	keys := make([]string, 0, len(set))
 	for k := range set {
@@ -100,9 +108,13 @@ func RunCampaign(cfg CampaignConfig, progress func(string)) CampaignResult {
 			break
 		}
 
-		batch := runBatch(seed, cfg.BatchSize, cfg.Workers)
-		seed += uint64(cfg.BatchSize)
-		res.Trials += cfg.BatchSize
+		batchSize := cfg.BatchSize
+		if cfg.MaxTrials > 0 && res.Trials+batchSize > cfg.MaxTrials {
+			batchSize = cfg.MaxTrials - res.Trials // honor the cap exactly
+		}
+		batch := runBatch(seed, batchSize, cfg.Workers)
+		seed += uint64(batchSize)
+		res.Trials += batchSize
 		res.Batches++
 
 		newSigs, newFails := 0, 0

@@ -86,6 +86,12 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 
 		// I: the operator must never promote while it observes another
 		// writable site, unless it fenced that site in the same cycle.
+		// "Fenced" deliberately counts an ATTEMPT with any outcome: fencing
+		// is best-effort by design (the old primary may be unreachable, and
+		// the priorities path promotes its winner even when a loser fence
+		// errors), so requiring an effective fence would flag by-design
+		// behavior. A failed fence that leaves two writable sites is still
+		// caught — by DualWritableUnresolved when it persists.
 		for _, s := range st.Sites {
 			if s.Name == target || s.State != "writable" {
 				continue

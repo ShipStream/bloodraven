@@ -155,19 +155,24 @@ func (r *trialRunner) buildManager() {
 		checkers[i] = r.cluster.NewChecker(name)
 	}
 	fc := controller.NewFailoverController(r.logger)
-	// The bootstrap controller stays nil (CLONE is not modeled); replication
-	// credentials are still configured so recovery and source convergence —
-	// which reuse them — run exactly as in production.
+	// The bootstrap controller is real and non-nil, exactly as the runner
+	// wires it whenever replication credentials exist — a nil controller
+	// with credentials set is a production-impossible combination that
+	// would skip the bootstrap-precedence guards in the split-brain paths.
+	// CLONE itself stays unreachable in trials: the model never produces an
+	// empty site, so no clone goroutine can start and determinism holds.
+	// simChecker's clone methods error loudly if that assumption breaks.
+	bootstrap := controller.NewBootstrapController(r.logger)
 	tm := controller.NewTopologyManagerWithClock(
-		r.cfg, checkers, fc, nil, nil,
+		r.cfg, checkers, fc, nil, bootstrap,
 		controller.BootstrapConfig{ReplUser: "repl", ReplPassword: "sim-pw"},
 		r.tainter, r.hub, r.dns, r.logger, r.clk,
 	)
 	tm.SetSleepForTest(func(time.Duration) {})
 
 	// Rehydration from CR status (runner.go): lastFailoverTarget,
-	// lastFailover, per-site source convergence, and the single pending
-	// recovery marker.
+	// lastFailover, and per-site source convergence and recovery state
+	// (every site can carry its own recovery marker).
 	if p := r.persisted; p != nil {
 		if p.LastFailoverTarget != "" {
 			tm.SetLastFailoverTarget(p.LastFailoverTarget)
@@ -210,6 +215,11 @@ func (r *trialRunner) run() {
 	next := 0
 
 	for p := 0; p < r.trial.Polls; p++ {
+		// Open the poll's event window BEFORE applying fault ops so injected
+		// faults are stamped with the poll they take effect in — the repro
+		// log then matches the schedule's @pNNN annotations exactly.
+		r.cluster.BeginPoll(p)
+
 		// Apply scheduled fault ops due at this poll (never during warmup by
 		// construction; the shrinker only removes ops).
 		for next < len(ops) && ops[next].At <= p {
@@ -220,7 +230,6 @@ func (r *trialRunner) run() {
 			r.healAll()
 		}
 
-		r.cluster.BeginPoll(p)
 		r.cluster.Tick()
 		r.tm.Poll(ctx)
 

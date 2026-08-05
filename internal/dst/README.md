@@ -20,10 +20,13 @@ DST_SEED=61 DST_SKIP=1,3 make dst-repro # replay with schedule ops 1 and 3 maske
 Campaign knobs (env): `DST_BATCH` (default 1000), `DST_DRY_BATCHES` (default
 3), `DST_MAX_TRIALS` (500000), `DST_WALL_SECONDS` (1800), `DST_REPORT`.
 
-The campaign stops at **coverage saturation**: after `DST_DRY_BATCHES`
-consecutive batches produce no new behavior signature and no new failure
-fingerprint, more trials are diminishing returns. Failures are deduplicated by
-the set of violated invariants and shrunk to a minimal fault schedule.
+The campaign stops at **coverage saturation**: a batch is "dry" when it
+produces no new failure fingerprint and fewer than 1% of its trials yield a
+new behavior signature; after `DST_DRY_BATCHES` consecutive dry batches, more
+trials are diminishing returns. Failures are deduplicated by the set of
+violated invariants (with `CooldownViolated` split into restart and
+no-restart variants so the expected class cannot mask a regression) and
+shrunk to a minimal fault schedule.
 
 ## How a trial works
 
@@ -100,10 +103,23 @@ playground E2E suite as the fidelity check for this model.
 
 ## Known finding classes (expected in campaign output)
 
-- **`CooldownViolated` with `operator restarts between: ≥1`** — the anti-flap
-  cooldown and failover target are durable only in CR status; a status-write
-  outage plus an operator restart legitimately resets them (see
+- **`CooldownViolated(restart)`** (a restart between the two promotions) —
+  the anti-flap cooldown and failover target are durable only in CR status; a
+  status-write outage plus an operator restart legitimately resets them (see
   `docs/docs/known-limitations.mdx` → Operator availability). A durable
-  out-of-band store is the eventual fix; until then this class is expected,
-  and any `CooldownViolated` *without* a restart between the promotions is a
-  regression.
+  out-of-band store is the eventual fix; until then this fingerprint is
+  expected. A plain `CooldownViolated` fingerprint (no restart) is a
+  regression — the fingerprints are kept distinct precisely so the expected
+  class cannot absorb it.
+
+## Model coverage gaps (documented, not yet closed)
+
+- The cluster is always seeded with baseline data, so **empty/fresh sites
+  never occur in trials** — the operator's empty-site guards and clone paths
+  are covered by component tests only (CLONE is unmodeled).
+- Fault injection applies to mutations; **reads never fail independently**,
+  so "mutation applied, subsequent read fails" interleavings inside a single
+  operator action are unexplored.
+- The bootstrap controller is real (production-shaped config) but clone can
+  never start; the sidecar FencingMonitor is represented only by rogue-fence
+  faults.

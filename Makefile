@@ -105,10 +105,10 @@ test-integration: ## Run integration tests (network listener tests)
 
 DST_ARGS ?=
 dst: ## Run the DST saturation campaign (deterministic simulation of the failover loop)
-	DST_FULL=1 DST_REPORT=$${DST_REPORT:-$(CURDIR)/playground/chaos-results/dst-report.txt} go test ./internal/dst/ -run TestDST_Campaign -v -timeout 45m $(DST_ARGS)
+	DST_FULL=1 DST_REPORT=$${DST_REPORT:-$(CURDIR)/playground/chaos-results/dst-report.txt} go test ./internal/dst/ -run TestDST_Campaign -v -count=1 -timeout 45m $(DST_ARGS)
 
 dst-repro: ## Replay one DST seed with events + operator logs (DST_SEED=<n> [DST_SKIP=i,j] make dst-repro)
-	go test ./internal/dst/ -run TestDST_Repro -v
+	go test ./internal/dst/ -run TestDST_Repro -v -count=1
 
 ##@ Code Quality
 

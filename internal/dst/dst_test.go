@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -46,9 +47,13 @@ func TestFaultFreeBaseline(t *testing.T) {
 	}
 }
 
-// TestDST_Quick is the CI-speed sweep. It fails only on harness-integrity
-// violations (panics, model holes, broken baselines); operator findings are
-// logged for the full campaign to characterize.
+// TestDST_Quick is the CI-speed regression sweep: ANY invariant violation
+// across the fixed seed range fails the build. The range is deterministic, so
+// this is a stable gate, not a flake source — a new failure here means a real
+// behavior change. If a documented known-limitation class (see
+// README "Known finding classes") ever enters the range after an intentional
+// change, regenerate the expectations knowingly rather than widening this
+// filter silently.
 func TestDST_Quick(t *testing.T) {
 	trials := 400
 	if s := os.Getenv("DST_QUICK_TRIALS"); s != "" {
@@ -61,10 +66,7 @@ func TestDST_Quick(t *testing.T) {
 	for seed := uint64(1); seed <= uint64(trials); seed++ {
 		r := RunTrial(GenerateTrial(seed), false, nil)
 		for _, v := range r.Violations {
-			switch v.Invariant {
-			case "Panic", "ModelHole", "BaselineBroken":
-				t.Errorf("seed %d: harness-integrity violation: %s", seed, v)
-			}
+			t.Errorf("seed %d: %s", seed, v)
 		}
 		if r.Failed() {
 			fp := fingerprint(r.Violations)
@@ -97,7 +99,9 @@ func TestDST_Campaign(t *testing.T) {
 	res := RunCampaign(cfg, func(msg string) { t.Log(msg) })
 	t.Log("\n" + res.Report())
 	if path := os.Getenv("DST_REPORT"); path != "" {
-		if err := os.WriteFile(path, []byte(res.Report()), 0o644); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Errorf("create report dir: %v", err)
+		} else if err := os.WriteFile(path, []byte(res.Report()), 0o644); err != nil {
 			t.Errorf("write report: %v", err)
 		}
 	}

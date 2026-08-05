@@ -202,6 +202,10 @@ func (m *simChecker) ChangeReplicationSource(_ context.Context, opts mysql.Repli
 		m.s.sourceHost = opts.Host
 		m.s.ioErr = ""
 		m.s.sqlErr = ""
+		// Real MySQL purges the relay logs when CHANGE REPLICATION SOURCE
+		// changes the connection metadata; without this, stale relay entries
+		// fetched from the OLD source could be applied after a repoint.
+		m.s.retrieved = make(gtidVec)
 		return nil
 	})
 }
@@ -240,7 +244,11 @@ func (m *simChecker) WaitForRelayLogDrain(_ context.Context, timeout time.Durati
 		m.c.event(m.s.name, EvDrain, "", "unreachable")
 		return err
 	}
-	if m.c.drainStalled[m.s.name] {
+	// A stalled SQL apply means the backlog cannot drain within the timeout,
+	// exactly like an explicit drain stall — the real WaitForRelayLogDrain
+	// would poll until the deadline and report a timeout, and the promotion
+	// proceeds with the backlog unapplied.
+	if m.c.drainStalled[m.s.name] || m.c.applyStalled[m.s.name] {
 		m.c.event(m.s.name, EvDrain, "", "timeout")
 		return fmt.Errorf("relay log drain timed out after %s", timeout)
 	}
