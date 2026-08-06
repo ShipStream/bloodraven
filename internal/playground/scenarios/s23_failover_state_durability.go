@@ -210,6 +210,11 @@ func s23VerifyStateSurvivedRestart() runner.Step {
 			if oob.LastFailover.IsZero() {
 				return fmt.Errorf("annotation last-failover cleared across operator restart: pre=%q post=<nil>", expectedStamp)
 			}
+			if !oob.LastFailover.Equal(mfg.Status.LastFailover.Time) {
+				return fmt.Errorf("status and annotation last-failover differ after restart: status=%s annotation=%s",
+					mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano),
+					oob.LastFailover.Format(time.RFC3339Nano))
+			}
 			postStamp := mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano)
 			postStampUnix := mfg.Status.LastFailover.Time.UTC().UnixNano()
 			delta := time.Duration(postStampUnix - expectedStampUnix)

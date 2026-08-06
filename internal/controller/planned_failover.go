@@ -247,7 +247,11 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 	// the automatic path after restart, so a status-write outage cannot make
 	// planned and emergency failover disagree about the cooldown.
 	cooldown := failoverCooldownFromSpec(fg)
-	failoverRecord, _, _ := EffectiveFailoverRecord(fg, now)
+	failoverRecord, _, err := EffectiveFailoverRecord(fg, now)
+	if err != nil && failoverRecord.IsZero() {
+		return PlannedFailoverReject, "InvalidFailoverState", fmt.Errorf(
+			"planned-failover: durable anti-flap state is invalid: %w", err)
+	}
 	if !failoverRecord.LastFailover.IsZero() {
 		elapsed := now.Sub(failoverRecord.LastFailover)
 		if elapsed < cooldown {

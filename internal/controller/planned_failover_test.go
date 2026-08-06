@@ -161,56 +161,120 @@ func TestValidatePlannedFailover_TargetNotReplicating(t *testing.T) {
 	}
 }
 
-func TestValidatePlannedFailover_CooldownActive(t *testing.T) {
-	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
+func TestValidatePlannedFailover_Cooldown(t *testing.T) {
 	cooldown := 5 * time.Minute
-	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: cooldown}
-	now := time.Now()
-	last := metav1.NewTime(now.Add(-2 * time.Minute))
-	fg.Status.LastFailover = &last
-
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now, false)
-	if result != PlannedFailoverReject || reason != "CooldownActive" {
-		t.Fatalf("expected CooldownActive reject, got result=%v reason=%q err=%v", result, reason, err)
-	}
-	if err == nil || !strings.Contains(err.Error(), "cooldown") {
-		t.Errorf("err = %v, want 'cooldown'", err)
-	}
-}
-
-func TestValidatePlannedFailover_CooldownExpired(t *testing.T) {
-	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
-	cooldown := 5 * time.Minute
-	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: cooldown}
-	now := time.Now()
-	last := metav1.NewTime(now.Add(-10 * time.Minute))
-	fg.Status.LastFailover = &last
-
-	result, _, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now, false)
-	if result != PlannedFailoverAccept {
-		t.Fatalf("expected accept once cooldown expired, got %v (err=%v)", result, err)
-	}
-}
-
-func TestValidatePlannedFailover_CooldownUsesNewerAnnotationRecord(t *testing.T) {
-	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
-	cooldown := 5 * time.Minute
-	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: cooldown}
 	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
-	staleStatus := metav1.NewTime(now.Add(-10 * time.Minute))
-	fg.Status.LastFailover = &staleStatus
-	fg.Status.LastFailoverTarget = "iad"
-	fg.Annotations = map[string]string{
-		LastFailoverAnnotation:       now.Add(-30 * time.Second).Format(time.RFC3339),
-		LastFailoverTargetAnnotation: "pdx",
+	cases := []struct {
+		name        string
+		statusAgo   time.Duration
+		annotation  *FailoverRecord
+		wantResult  PlannedFailoverValidationResult
+		wantReason  string
+		wantErr     string
+		wantRetryAt time.Time
+	}{
+		{
+			name:        "status-only active",
+			statusAgo:   2 * time.Minute,
+			wantResult:  PlannedFailoverReject,
+			wantReason:  "CooldownActive",
+			wantErr:     "cooldown",
+			wantRetryAt: now.Add(3 * time.Minute),
+		},
+		{
+			name:        "status-only expired",
+			statusAgo:   10 * time.Minute,
+			wantResult:  PlannedFailoverAccept,
+			wantRetryAt: now.Add(-5 * time.Minute),
+		},
+		{
+			name:      "annotation newer",
+			statusAgo: 10 * time.Minute,
+			annotation: &FailoverRecord{
+				LastFailover:       now.Add(-30 * time.Second),
+				LastFailoverTarget: "pdx",
+			},
+			wantResult:  PlannedFailoverReject,
+			wantReason:  "CooldownActive",
+			wantErr:     "cooldown",
+			wantRetryAt: now.Add(4*time.Minute + 30*time.Second),
+		},
 	}
 
-	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now, false)
-	if result != PlannedFailoverReject || reason != "CooldownActive" {
-		t.Fatalf("expected annotation-aware cooldown rejection, got result=%v reason=%q err=%v", result, reason, err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
+			fg.Spec.FailoverCooldown = &metav1.Duration{Duration: cooldown}
+			last := metav1.NewTime(now.Add(-tc.statusAgo))
+			fg.Status.LastFailover = &last
+			fg.Status.LastFailoverTarget = "iad"
+			if tc.annotation != nil {
+				fg.Annotations = map[string]string{
+					LastFailoverAnnotation:       tc.annotation.LastFailover.Format(time.RFC3339),
+					LastFailoverTargetAnnotation: tc.annotation.LastFailoverTarget,
+				}
+			}
+
+			result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now, false)
+			if result != tc.wantResult || reason != tc.wantReason {
+				t.Fatalf("validation = (%v, %q, %v), want result=%v reason=%q", result, reason, err, tc.wantResult, tc.wantReason)
+			}
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Errorf("err = %v, want substring %q", err, tc.wantErr)
+			}
+			if got := cooldownRetryAfter(fg, now); !got.Equal(tc.wantRetryAt) {
+				t.Errorf("cooldown retry = %v, want %v", got, tc.wantRetryAt)
+			}
+		})
 	}
-	if want := now.Add(-30 * time.Second).Add(cooldown); !cooldownRetryAfter(fg, now).Equal(want) {
-		t.Errorf("cooldown retry = %v, want %v", cooldownRetryAfter(fg, now), want)
+}
+
+func TestValidatePlannedFailover_DurableStateErrors(t *testing.T) {
+	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		withStatus bool
+		wantReason string
+		wantErr    string
+	}{
+		{
+			name:       "no valid copy",
+			wantReason: "InvalidFailoverState",
+			wantErr:    "durable anti-flap state is invalid",
+		},
+		{
+			name:       "valid status fallback",
+			withStatus: true,
+			wantReason: "CooldownActive",
+			wantErr:    "cooldown",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
+			fg.Annotations = map[string]string{
+				LastFailoverAnnotation:       "not-a-timestamp",
+				LastFailoverTargetAnnotation: "iad",
+			}
+			if tc.withStatus {
+				last := metav1.NewTime(now.Add(-time.Minute))
+				fg.Status.LastFailover = &last
+				fg.Status.LastFailoverTarget = "iad"
+			}
+
+			result, reason, err := validatePlannedFailoverRequest(
+				fg, PlannedFailoverRequest{Site: "pdx"}, now, false)
+			if result != PlannedFailoverReject || reason != tc.wantReason {
+				t.Fatalf("expected %s reject, got result=%v reason=%q err=%v", tc.wantReason, result, reason, err)
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err = %v, want substring %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
