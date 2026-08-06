@@ -11,6 +11,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
@@ -56,6 +57,10 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 	// Structural symptom checks first — these surface specific known
 	// failure modes that would otherwise hide behind a generic
 	// "ready=false" or "no active site" error.
+	failoverRecord, _, failoverErr := brcontroller.EffectiveFailoverRecord(mfg, time.Now())
+	if failoverErr != nil {
+		return fmt.Errorf("baseline unhealthy: durable anti-flap state is invalid (%v) — run ./playground/reset-mysql.sh", failoverErr)
+	}
 
 	// Stuck scale-to-0 from a prior chaos run that did not clean up.
 	// We check Deployment.spec.replicas rather than running pods because
@@ -76,9 +81,9 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 	}
 
 	// lastFailoverTarget sanity: if set, must name a known site.
-	if t := mfg.Status.LastFailoverTarget; t != "" {
+	if t := failoverRecord.LastFailoverTarget; t != "" {
 		if !siteInSpec(mfg, t) {
-			return fmt.Errorf("baseline unhealthy: status.lastFailoverTarget=%q is not in spec.sites — run ./playground/reset-mysql.sh", t)
+			return fmt.Errorf("baseline unhealthy: effective lastFailoverTarget=%q is not in spec.sites — run ./playground/reset-mysql.sh", t)
 		}
 	}
 
@@ -87,8 +92,8 @@ func CheckBaseline(ctx context.Context, k *pgkube.Client, namespace, fg string) 
 	// failoverCooldown`. If we start an emergency-failover scenario
 	// while inside that window, it hangs until the timeout. Surface it
 	// up front.
-	if cd := failoverCooldown(mfg); cd > 0 && mfg.Status.LastFailover != nil {
-		elapsed := time.Since(mfg.Status.LastFailover.Time)
+	if cd := failoverCooldown(mfg); cd > 0 && !failoverRecord.LastFailover.IsZero() {
+		elapsed := time.Since(failoverRecord.LastFailover)
 		if elapsed < cd {
 			remaining := (cd - elapsed).Round(time.Second)
 			return fmt.Errorf("baseline unhealthy: anti-flap cooldown active for another %s — wait or run ./playground/reset-mysql.sh", remaining)
@@ -241,12 +246,12 @@ func isPromotableSite(mfg *v1alpha1.MysqlFailoverGroup, name string) bool {
 	return false
 }
 
-// failoverCooldown returns the configured cooldown, or 0 if none.
+// failoverCooldown returns the configured cooldown or the operator default.
 func failoverCooldown(mfg *v1alpha1.MysqlFailoverGroup) time.Duration {
-	if mfg.Spec.FailoverCooldown != nil {
+	if mfg.Spec.FailoverCooldown != nil && mfg.Spec.FailoverCooldown.Duration > 0 {
 		return mfg.Spec.FailoverCooldown.Duration
 	}
-	return 0
+	return 5 * time.Minute
 }
 
 func plannedTerminal(p v1alpha1.PlannedFailoverPhase) bool {

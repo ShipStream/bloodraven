@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	pgmetrics "github.com/shipstream/bloodraven/internal/playground/metrics"
@@ -124,6 +127,9 @@ func clearFailoverHistoryStatus(ctx context.Context, env *runner.Env) error {
 	mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 	if err != nil {
 		return err
+	}
+	if err := brcontroller.ClearFailoverState(ctx, env.Kube.Controller, types.NamespacedName{Namespace: env.Namespace, Name: env.FG}); err != nil {
+		return fmt.Errorf("clear out-of-band failover history: %w", err)
 	}
 	status, err := json.Marshal(mfg.Status)
 	if err != nil {

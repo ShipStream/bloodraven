@@ -33,6 +33,10 @@ func newSimDNS(c *Cluster) *simDNS { return &simDNS{c: c} }
 
 func (d *simDNS) UpdateDNSRecord(_ context.Context, ip string) error {
 	d.c.mu.Lock()
+	if d.c.operatorDead {
+		d.c.mu.Unlock()
+		return errOperatorDead
+	}
 	denied := d.c.dnsDenied
 	site := d.c.byLBIP[ip]
 	if !denied {
@@ -53,8 +57,12 @@ func (d *simDNS) UpdateDNSRecord(_ context.Context, ip string) error {
 
 func (d *simDNS) CurrentDNSRecord(_ context.Context) (string, bool, error) {
 	d.c.mu.Lock()
+	dead := d.c.operatorDead
 	denied := d.c.dnsDenied
 	d.c.mu.Unlock()
+	if dead {
+		return "", false, errOperatorDead
+	}
 	if denied {
 		return "", false, errors.New("dnsendpoints.externaldns.k8s.io get forbidden (sim: outage)")
 	}
@@ -76,13 +84,19 @@ func (d *simDNS) Record() (ip, site string, found bool) {
 
 // simTainter implements platform.NodeTainter, recording taint state.
 type simTainter struct {
+	c      *Cluster
 	mu     sync.Mutex
 	taints map[string]bool
 }
 
-func newSimTainter() *simTainter { return &simTainter{taints: make(map[string]bool)} }
+func newSimTainter(c *Cluster) *simTainter {
+	return &simTainter{c: c, taints: make(map[string]bool)}
+}
 
 func (t *simTainter) SetTaint(_ context.Context, selector, _ string, taint bool) error {
+	if t.c.OperatorDead() {
+		return errOperatorDead
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.taints[selector] = taint

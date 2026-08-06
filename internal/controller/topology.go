@@ -242,7 +242,38 @@ type TopologyManager struct {
 	failover           *FailoverController
 	lastFailover       time.Time
 	lastFailoverTarget string
-	failoverCooldown   time.Duration
+	// lastFailoverLocal distinguishes a promotion observed by this process
+	// from a restored durable timestamp. A real local promotion is
+	// authoritative even after a backward clock step or a skewed restored
+	// record; after that, timestamp ordering protects concurrent local
+	// promotions from applying out of order. Protected by mu once running.
+	lastFailoverLocal bool
+	failoverCooldown  time.Duration
+
+	// failoverState persists lastFailover/lastFailoverTarget out of band
+	// from the CR status subresource, so a status-write outage that spans
+	// an operator restart cannot reset the anti-flap cooldown. Nil in tests
+	// and wherever no store is wired; every call site is nil-safe.
+	//
+	// desiredFailoverState is the newest record any promotion has produced,
+	// and failoverStateDirty says it may not be in the store yet. While
+	// dirty, Poll retries every cycle, mirroring the statusWriteFailed
+	// retry — the two durable paths fail for different reasons and each has
+	// to heal on its own. Both protected by mu.
+	//
+	// Promotions are not all issued from the poll goroutine: the
+	// ordered-update handoff records one from its own goroutine while Poll
+	// keeps running. Carrying a single newest-record slot rather than a
+	// queue of pending writes is what makes that safe — a flush always
+	// writes the newest record it can see, so a slow write can never land
+	// an older record over a newer one.
+	failoverState        FailoverStateRecorder
+	desiredFailoverState *FailoverRecord
+	failoverStateDirty   bool
+
+	// failoverStateWriteMu serializes out-of-band writes so two concurrent
+	// flushes cannot reach the API server out of order. Never held with mu.
+	failoverStateWriteMu sync.Mutex
 
 	// Promotion state: tracks which site was promoted and is pending DNS flip.
 	promotedSite          string // empty = no pending promotion
@@ -508,19 +539,144 @@ func (tm *TopologyManager) SetSleepForTest(fn func(time.Duration)) {
 	tm.sleep = fn
 }
 
-// SetLastFailoverTarget restores the failover target from persisted CR status.
+// SetLastFailoverTarget restores the failover target from persisted state.
 // Called once at startup so recovery logic works across operator restarts.
 func (tm *TopologyManager) SetLastFailoverTarget(target string) {
 	tm.lastFailoverTarget = target
 }
 
-// SetLastFailover restores the failover timestamp from persisted CR status.
+// SetLastFailover restores the failover timestamp from persisted state.
 // Called once at startup so the anti-flap cooldown window survives operator
 // restart instead of silently resetting to zero (which would let a fresh
 // operator process ping-pong promote inside the cooldown that the prior
 // process intended to enforce).
 func (tm *TopologyManager) SetLastFailover(t time.Time) {
 	tm.lastFailover = t
+	tm.lastFailoverLocal = false
+}
+
+// SetFailoverStateRecorder wires the out-of-band anti-flap store. Call once
+// at startup, before Run/Poll: the field is read from the poll path without
+// synchronization.
+func (tm *TopologyManager) SetFailoverStateRecorder(rec FailoverStateRecorder) {
+	tm.failoverState = rec
+}
+
+// recordFailover stamps the in-memory promotion state for a promotion that
+// has already been confirmed writable, then persists the anti-flap half of
+// it out of band.
+//
+// Every path that promotes — emergency failover, planned switchover, and the
+// ordered-update handoff — goes through here, so the durable record can
+// never be written by one and skipped by another.
+func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, target, promotionGtid string) {
+	rec := FailoverRecord{LastFailover: now, LastFailoverTarget: target}
+
+	tm.mu.Lock()
+	tm.promotionGtidExecuted = promotionGtid
+	tm.promotedSite = target
+	tm.promotedAt = now
+	// A promotion observed by this process supersedes restored state even if
+	// the wall clock moved backward. Thereafter, only advance the anti-flap
+	// pair: the ordered-update and poll goroutines sample `now` before this
+	// lock, so an older local sample can arrive second. The bookkeeping
+	// fields above stay last-writer-wins because they describe what this
+	// process just did and feed old-primary recovery.
+	ignoredOlderLocal := false
+	currentFailover, currentTarget := tm.lastFailover, tm.lastFailoverTarget
+	if !tm.lastFailoverLocal || !tm.lastFailover.After(now) {
+		tm.lastFailover = now
+		tm.lastFailoverTarget = target
+		tm.lastFailoverLocal = true
+	} else {
+		ignoredOlderLocal = true
+	}
+	// Same monotone rule for the durable record.
+	if tm.desiredFailoverState == nil || !tm.desiredFailoverState.LastFailover.After(now) {
+		cp := rec
+		tm.desiredFailoverState = &cp
+		tm.failoverStateDirty = true
+	}
+	tm.mu.Unlock()
+	if ignoredOlderLocal {
+		tm.logger.Warn("ignored out-of-order local failover record",
+			"target", target, "lastFailover", now,
+			"currentTarget", currentTarget, "currentLastFailover", currentFailover)
+	}
+
+	tm.flushFailoverState(ctx, true)
+}
+
+// flushFailoverState writes the newest anti-flap record through the
+// out-of-band store, leaving the dirty flag set when the write is rejected
+// so the next poll retries.
+//
+// Deliberately best-effort and never fatal to the promotion: the site is
+// already writable by the time this runs, and refusing to acknowledge a
+// completed promotion because a bookkeeping write failed would trade a
+// timing guarantee for an availability outage. The retry closes the window
+// instead.
+//
+// wait chooses how to handle a flush already in progress. A promotion waits,
+// because its record is the one that matters; the per-poll retry does not,
+// because blocking the poll loop behind another goroutine's API call buys
+// nothing — the record stays dirty and the next poll picks it up.
+func (tm *TopologyManager) flushFailoverState(ctx context.Context, wait bool) {
+	if tm.failoverState == nil {
+		return
+	}
+	tm.mu.RLock()
+	dirty := tm.failoverStateDirty
+	tm.mu.RUnlock()
+	if !dirty {
+		return
+	}
+
+	if wait {
+		tm.failoverStateWriteMu.Lock()
+	} else if !tm.failoverStateWriteMu.TryLock() {
+		return
+	}
+	defer tm.failoverStateWriteMu.Unlock()
+
+	// Read the record only after winning the write lock: a flush that
+	// queued behind another must write whatever is newest NOW, not what was
+	// newest when it was called.
+	tm.mu.RLock()
+	rec, dirty := tm.desiredFailoverState, tm.failoverStateDirty
+	tm.mu.RUnlock()
+	if !dirty || rec == nil {
+		return
+	}
+	write := *rec
+
+	// A manager config restart cancels the poll context, but the status write
+	// uses the longer-lived runner context. Detach this already-started
+	// bookkeeping write as well so the two durable paths do not diverge only
+	// because one manager generation was replaced. The timeout still bounds
+	// shutdown work.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failoverStateWriteTimeout)
+	defer cancel()
+	err := tm.failoverState.RecordFailoverState(writeCtx, write)
+	if err != nil {
+		tm.logger.Error("out-of-band anti-flap state write failed; retrying every poll",
+			"target", write.LastFailoverTarget, "lastFailover", write.LastFailover, "error", err)
+		return
+	}
+
+	// Clear the flag only if the desired record is still exactly what was
+	// written. Comparing the whole record rather than just the timestamp
+	// matters under a coarse clock: a promotion that supersedes this one
+	// inside the same tick carries an equal LastFailover but a different
+	// target, and clearing the flag for it would drop that target with
+	// nothing scheduled to retry.
+	tm.mu.Lock()
+	if tm.desiredFailoverState == nil || *tm.desiredFailoverState != write {
+		tm.mu.Unlock()
+		return
+	}
+	tm.failoverStateDirty = false
+	tm.mu.Unlock()
 }
 
 // SetRecoveryBlocked restores a persisted divergent-recovery marker from CR
@@ -1008,6 +1164,12 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		}
 	}
 	tm.emitSourceConvergenceMetrics()
+
+	// Re-attempt a rejected out-of-band anti-flap write. Independent of the
+	// status retry below: the two durable paths have separate RBAC rules and
+	// separate admission chains, so one can be denied while the other is
+	// healthy, and each has to heal on its own cadence.
+	tm.flushFailoverState(ctx, false)
 
 	// Notify the status callback on any state change, recovery event, or
 	// update event — and additionally whenever a prior /status write was
@@ -1611,14 +1773,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		// best-effort for state tracking — its failure is logged and the
 		// success-only DNSFlipCount metric is left unincremented, but the
 		// operator no longer forgets the promotion.
-		now := tm.clock.Now()
-		tm.mu.Lock()
-		tm.promotionGtidExecuted = promotionGtid
-		tm.promotedSite = candidate.name
-		tm.promotedAt = now
-		tm.lastFailover = now
-		tm.lastFailoverTarget = candidate.name
-		tm.mu.Unlock()
+		tm.recordFailover(ctx, tm.clock.Now(), candidate.name, promotionGtid)
 		metrics.FailoversTotal.WithLabelValues(candidate.name).Inc()
 
 		if err := tm.applyDNS(ctx, candidate.name, candidate.lbIP); err != nil {
@@ -2104,14 +2259,7 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	// failure we still return the promotion GTID (not "") so the caller
 	// can surface what was promoted rather than mistaking a stale-DNS
 	// condition for a failed promotion.
-	now := tm.clock.Now()
-	tm.mu.Lock()
-	tm.promotionGtidExecuted = promotionGtid
-	tm.promotedSite = target
-	tm.promotedAt = now
-	tm.lastFailover = now
-	tm.lastFailoverTarget = target
-	tm.mu.Unlock()
+	tm.recordFailover(ctx, tm.clock.Now(), target, promotionGtid)
 
 	if err := tm.applyDNS(ctx, target, targetSite.lbIP); err != nil {
 		return promotionGtid, fmt.Errorf("DNS flip failed after successful promotion: %w", err)
@@ -2317,14 +2465,7 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 	go func() {
 		processed, err := tm.updater.ExecuteTargets(ctx, active, followers, applyUpdate, func(target, promotionGTID string) {
 			targetSite := tm.getSite(target)
-			now := tm.clock.Now()
-			tm.mu.Lock()
-			tm.promotionGtidExecuted = promotionGTID
-			tm.promotedSite = target
-			tm.promotedAt = now
-			tm.lastFailover = now
-			tm.lastFailoverTarget = target
-			tm.mu.Unlock()
+			tm.recordFailover(ctx, tm.clock.Now(), target, promotionGTID)
 			metrics.FailoversTotal.WithLabelValues(target).Inc()
 			if targetSite != nil {
 				if dnsErr := tm.applyDNS(ctx, target, targetSite.lbIP); dnsErr != nil {

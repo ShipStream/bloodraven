@@ -331,9 +331,18 @@ func TestUpdateController_ConcurrentReject(t *testing.T) {
 
 	uc := NewUpdateController(failoverCtl, logger)
 
-	// Block the first Execute in the applyUpdate callback
+	// Block the first Execute in the applyUpdate callback.
+	//
+	// firstStarted is buffered on purpose. The non-blocking send below has
+	// to land whether or not the test goroutine has reached its receive
+	// yet: unbuffered, a callback that gets there first drops the signal
+	// through the default arm, then parks on blockCh — and the test parks
+	// on firstStarted forever, since only the test can close blockCh. That
+	// is a genuine deadlock, not a slow test, and it hangs the whole
+	// package until the 10m timeout when a loaded runner schedules the
+	// callback ahead of the test.
 	blockCh := make(chan struct{})
-	firstStarted := make(chan struct{})
+	firstStarted := make(chan struct{}, 1)
 
 	applyFirst := func(_ context.Context, _ string) error {
 		select {
@@ -349,8 +358,13 @@ func TestUpdateController_ConcurrentReject(t *testing.T) {
 		errCh <- uc.Execute(context.Background(), "dc1", "dc2", replicaMySQL, primaryMySQL, applyFirst)
 	}()
 
-	// Wait for first Execute to start
-	<-firstStarted
+	// Wait for first Execute to start, but fail locally rather than hanging
+	// the entire package if a future refactor stops reaching applyUpdate.
+	select {
+	case <-firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first Execute to reach applyUpdate")
+	}
 
 	// Try second Execute - should be rejected
 	err := uc.Execute(context.Background(), "dc1", "dc2", replicaMySQL, primaryMySQL,
@@ -361,8 +375,13 @@ func TestUpdateController_ConcurrentReject(t *testing.T) {
 
 	// Unblock first Execute
 	close(blockCh)
-	if err := <-errCh; err != nil {
-		t.Fatalf("first Execute returned error: %v", err)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("first Execute returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first Execute to finish")
 	}
 }
 

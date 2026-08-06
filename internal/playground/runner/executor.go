@@ -12,6 +12,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgchaos "github.com/shipstream/bloodraven/internal/playground/chaos"
 	pgdragonfly "github.com/shipstream/bloodraven/internal/playground/dragonfly"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
@@ -326,8 +327,16 @@ func waitForClusterReconvergeStable(ctx context.Context, env *Env, stableFor tim
 		func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 			ready := pgkube.ReadyCondition(mfg) == "True"
 			var bad []string
-			if mfg.Spec.FailoverCooldown != nil && mfg.Status.LastFailover != nil {
-				remaining := mfg.Spec.FailoverCooldown.Duration - time.Since(mfg.Status.LastFailover.Time)
+			failoverRecord, _, failoverErr := brcontroller.EffectiveFailoverRecord(mfg, time.Now())
+			if failoverErr != nil {
+				bad = append(bad, fmt.Sprintf("antiFlapState=%v", failoverErr))
+			}
+			cooldown := 5 * time.Minute
+			if mfg.Spec.FailoverCooldown != nil && mfg.Spec.FailoverCooldown.Duration > 0 {
+				cooldown = mfg.Spec.FailoverCooldown.Duration
+			}
+			if !failoverRecord.LastFailover.IsZero() {
+				remaining := cooldown - time.Since(failoverRecord.LastFailover)
 				if remaining > 0 {
 					bad = append(bad, fmt.Sprintf("cooldown=%s", remaining.Round(time.Second)))
 				}

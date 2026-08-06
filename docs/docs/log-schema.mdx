@@ -175,6 +175,8 @@ Every per-site state change emits one record. Use this to replay the topology ti
 | WARN | `primary re-assert refused: target no longer contains the recorded promotion GTID set (wiped or restored since promotion?)` | `site`, `promotionGtid`, `targetGtid`, `fg` | The failover history no longer describes the target's data lineage; the operator will not restore writability automatically. |
 | WARN | `primary re-assert refused: recorded promotion GTID set failed to parse — status corrupted or manually edited?` | `site`, `promotionGtid`, `error`, `fg` | `status.promotionGtidExecuted` is non-empty but malformed. The operator wrote this value from MySQL itself, so a parse failure means corruption or manual tampering — the re-assert safety argument depends on it, so the operator refuses. |
 | INFO | `failover blocked by anti-flap cooldown` | (context) | A failover decision was deferred because `failoverCooldown` has not elapsed since the last one. |
+| WARN | `ignored out-of-order local failover record` | `target`, `lastFailover`, `currentTarget`, `currentLastFailover`, `fg` | Two local promotion paths reported out of timestamp order; the newer in-process anti-flap pair remains authoritative. |
+| ERROR | `out-of-band anti-flap state write failed; retrying every poll` | `fg`, `target`, `lastFailover`, `error` | The annotation write was rejected. The newest record stays pending and is retried on each poll. |
 | INFO | `cross-site action deferred: in-place restore in progress` | `fg` | Decisions are paused while `restoreInPlace` runs. |
 | INFO | `cross-site action deferred: planned failover in progress` | `fg` | Decisions are paused while a planned-failover annotation is being processed. |
 
@@ -309,6 +311,11 @@ Kubernetes Event reasons emitted on the `MysqlFailoverGroup` (visible via `kubec
 | INFO | `stopping topology manager` | `fg` |
 | INFO | `config changed, restarting topology manager` | `fg` |
 | INFO | `restored lastFailoverTarget from CR status` | `fg`, `target` |
+| INFO | `restored lastFailover from CR status` | `fg`, `lastFailover` |
+| WARN | `restored lastFailoverTarget from out-of-band annotations` | `fg`, `target`, `statusTarget` |
+| WARN | `restored lastFailover from out-of-band annotations` | `fg`, `lastFailover`, `statusLastFailover` |
+| ERROR | `out-of-band anti-flap annotation unreadable; falling back to CR status` | `fg`, `error` |
+| ERROR | `CR status anti-flap state unreadable; ignoring unsafe copy` | `fg`, `error` |
 | INFO | `starting graceful shutdown` | `fg` |
 | INFO | `CR deleted — DNSEndpoint will be garbage-collected` | (none) |
 | INFO | `sidecar starting` | `listenAddr`, `peerAddresses`, `bloodravenAddress`, `leaseTimeout`, `peerCheckInterval`, `site`, `namespace`, `fg`, `pod` |

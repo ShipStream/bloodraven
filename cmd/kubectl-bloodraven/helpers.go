@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
 func encodeJSON(out io.Writer, v any) error {
@@ -96,10 +97,11 @@ func lagString(secs *int64) string {
 }
 
 func lastFailoverAge(fg *v1alpha1.MysqlFailoverGroup) string {
-	if fg.Status.LastFailover == nil {
+	rec, _, _ := brcontroller.EffectiveFailoverRecord(fg, time.Now())
+	if rec.LastFailover.IsZero() {
 		return "-"
 	}
-	return age(fg.Status.LastFailover.Time)
+	return age(rec.LastFailover)
 }
 
 func plannedFailoverSummary(fg *v1alpha1.MysqlFailoverGroup) string {

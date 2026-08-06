@@ -23,6 +23,7 @@
 package dst
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -109,6 +110,13 @@ const (
 	EvDrain        EventKind = "waitRelayDrain"
 	EvKillConns    EventKind = "killAppConns"
 	EvDNSSet       EventKind = "dnsSet"
+	EvStateWrite   EventKind = "failoverStateWrite"
+
+	// Sidecar FencingMonitor actions. Distinct from the operator's own
+	// EvSetSuperRO so invariants that ask "did the OPERATOR fence this
+	// site" cannot be satisfied by a sidecar that happened to fence it.
+	EvSidecarFence EventKind = "sidecarSelfFence"
+	EvSidecarKill  EventKind = "sidecarKillConns"
 
 	// Harness-injected fault events.
 	EvCrash           EventKind = "fault.crash"
@@ -118,6 +126,8 @@ const (
 	EvPartPair        EventKind = "fault.partitionPair"
 	EvHealPair        EventKind = "fault.healPair"
 	EvOperatorRestart EventKind = "fault.operatorRestart"
+	EvOperatorArm     EventKind = "fault.armOperatorCrash"
+	EvOperatorDie     EventKind = "fault.operatorDied"
 	EvAmbiguous       EventKind = "fault.ambiguousMutations"
 	EvFailMutations   EventKind = "fault.failMutations"
 	EvStallApply      EventKind = "fault.stallApply"
@@ -130,6 +140,8 @@ const (
 	EvRogueWritable   EventKind = "fault.rogueWritable"
 	EvStatusOutage    EventKind = "fault.statusWriteOutage"
 	EvStatusHeal      EventKind = "fault.statusWriteHeal"
+	EvStateOutage     EventKind = "fault.failoverStateOutage"
+	EvStateHeal       EventKind = "fault.failoverStateHeal"
 	EvDNSOutage       EventKind = "fault.dnsOutage"
 	EvDNSHeal         EventKind = "fault.dnsHeal"
 )
@@ -220,6 +232,12 @@ type Cluster struct {
 	drainStalled  map[string]bool
 	dnsDenied     bool
 	statusDenied  bool
+	// stateDenied rejects writes to the out-of-band anti-flap store. It is
+	// a SEPARATE knob from statusDenied on purpose: the two durable paths
+	// have different RBAC rules and different admission chains in
+	// production, so a trial in which only one is denied is the realistic
+	// case, and the one the durable store exists to survive.
+	stateDenied bool
 
 	// acked accumulates every transaction acknowledged to the simulated
 	// application, across all primaries the trial ever had.
@@ -232,6 +250,13 @@ type Cluster struct {
 	pollEvents []Event
 	seq        int
 	poll       int
+
+	// Mid-Execute operator death. crashCountdown counts operator mutations
+	// down to the fatal one; -1 means unarmed. operatorDead gates every
+	// operator-side interaction with the model afterwards.
+	crashCountdown int
+	crashPreApply  bool
+	operatorDead   bool
 
 	// Model-detected violations (checked at mutation time).
 	violations []Violation
@@ -261,6 +286,8 @@ func NewCluster(specs []SiteSpec, baselineTxns int64) *Cluster {
 		applyStalled:  make(map[string]bool),
 		drainStalled:  make(map[string]bool),
 		acked:         make(gtidVec),
+
+		crashCountdown: -1,
 	}
 	primaryUUID := specs[0].UUID
 	base := gtidVec{primaryUUID: baselineTxns}
@@ -418,6 +445,13 @@ func (c *Cluster) Truth() []SiteTruth {
 		})
 	}
 	return out
+}
+
+// SiteCrashed reports whether the named site's process is down.
+func (c *Cluster) SiteCrashed(name string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.byName[name].crashed
 }
 
 // Acked returns the ledger of all application-acknowledged transactions.
@@ -641,6 +675,40 @@ func (c *Cluster) StatusDenied() bool {
 	return c.statusDenied
 }
 
+// SetStateDenied toggles the out-of-band anti-flap store outage.
+func (c *Cluster) SetStateDenied(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stateDenied == on {
+		return
+	}
+	c.stateDenied = on
+	if on {
+		c.event("", EvStateOutage, "", "")
+	} else {
+		c.event("", EvStateHeal, "", "")
+	}
+}
+
+// StateDenied reports whether out-of-band anti-flap writes are being
+// rejected.
+func (c *Cluster) StateDenied() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stateDenied
+}
+
+// NoteFailoverStateWrite records an out-of-band anti-flap write attempt.
+func (c *Cluster) NoteFailoverStateWrite(target string, denied bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	outcome := ""
+	if denied {
+		outcome = "denied"
+	}
+	c.event("", EvStateWrite, "target="+target, outcome)
+}
+
 // ClearInjectedCallFaults drops un-consumed ambiguous/failing mutation
 // counters. Used by heal-all so the settle window is fault-free.
 func (c *Cluster) ClearInjectedCallFaults() {
@@ -655,6 +723,90 @@ func (c *Cluster) NoteOperatorRestart() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.event("", EvOperatorRestart, "", "")
+}
+
+// ---------------------------------------------------------------------------
+// Mid-Execute operator death
+// ---------------------------------------------------------------------------
+//
+// A plain operator restart lands between polls, so every promotion sequence
+// it interrupts is interrupted at a boundary the operator chose. Real
+// processes die in the middle: after RESET REPLICA ALL and before the
+// read_only grant, after fencing one peer and before fencing the next,
+// after the promotion and before the durable write.
+//
+// Death is modeled as "the process stops interacting" rather than as a
+// panic: the fatal statement lands (or does not, per PreApply), the flag
+// goes up, and from then until the harness builds a replacement, every
+// operator-side call — reads, mutations, DNS, status, the anti-flap store —
+// fails or is dropped. Unwinding the real stack with a panic would be no
+// more faithful (the manager is discarded either way) and would risk
+// unwinding through one of Poll's per-site goroutines, where a recover on
+// the harness goroutine cannot catch it.
+
+// errOperatorDead is what a dead process's in-flight calls see. It never
+// reaches production code paths that inspect error text; it exists so the
+// remainder of the dying Poll cannot change the model.
+var errOperatorDead = errors.New("dst: operator process died mid-execute")
+
+// ArmOperatorCrash schedules the operator's death on the nth subsequent
+// mutation (n == 0 kills on the very next one). preApply kills before the
+// statement reaches the server rather than after it applied.
+func (c *Cluster) ArmOperatorCrash(n int, preApply bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.operatorDead || c.crashCountdown >= 0 {
+		return false
+	}
+	c.crashCountdown = n
+	c.crashPreApply = preApply
+	c.event("", EvOperatorArm, fmt.Sprintf("afterMutations=%d preApply=%v", n, preApply), "")
+	return true
+}
+
+// ReviveOperator clears the death flag; the harness calls it when it builds
+// the replacement process.
+func (c *Cluster) ReviveOperator() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.operatorDead = false
+	c.crashCountdown = -1
+}
+
+// DisarmOperatorCrash cancels a countdown that has not fired yet, without
+// reviving an operator that already died. Used by heal-all so the settle
+// window is fault-free.
+func (c *Cluster) DisarmOperatorCrash() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.crashCountdown = -1
+}
+
+// OperatorDead reports whether the operator process is currently dead.
+func (c *Cluster) OperatorDead() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.operatorDead
+}
+
+// crashNowLocked reports whether this mutation is the fatal one, consuming
+// the countdown. Must be called with c.mu held.
+func (c *Cluster) crashNowLocked() bool {
+	if c.crashCountdown < 0 {
+		return false
+	}
+	if c.crashCountdown > 0 {
+		c.crashCountdown--
+		return false
+	}
+	c.crashCountdown = -1
+	return true
+}
+
+// killOperatorLocked marks the process dead. Must be called with c.mu held.
+func (c *Cluster) killOperatorLocked(site string, kind EventKind, applied bool) {
+	c.operatorDead = true
+	c.event(site, EvOperatorDie, fmt.Sprintf("during=%s applied=%v", kind, applied), "")
 }
 
 // ---------------------------------------------------------------------------

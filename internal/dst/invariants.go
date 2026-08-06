@@ -21,20 +21,28 @@ const dualWritableGrace = 13
 // error).
 func effectiveOutcome(o string) bool { return o == "" || o == "ambiguous" }
 
+// observedOutcome includes a statement that reached MySQL before the
+// operator died. It is suitable for physical writable/fencing invariants,
+// but not for anti-flap bookkeeping: the dead Execute path could not reach
+// recordFailover after receiving this outcome.
+func observedOutcome(o string) bool {
+	return effectiveOutcome(o) || o == "appliedThenOperatorDied"
+}
+
 // promotionTarget returns the site a failover-style promotion landed on this
 // poll, if any. The signature is RESET REPLICA ALL plus SET read_only=OFF
 // taking effect on the same site in the same poll — that is
 // FailoverController.Execute's fingerprint, and distinguishes a promotion
 // from a primary re-assert (which never resets replication metadata).
-func promotionTarget(events []Event) (string, int) {
+func promotionTarget(events []Event, outcome func(string) bool) (string, int) {
 	reset := map[string]bool{}
 	for _, e := range events {
-		if e.Kind == EvResetReplica && effectiveOutcome(e.Outcome) {
+		if e.Kind == EvResetReplica && outcome(e.Outcome) {
 			reset[e.Site] = true
 		}
 	}
 	for _, e := range events {
-		if e.Kind == EvSetRO && e.Detail == "on=false" && effectiveOutcome(e.Outcome) && reset[e.Site] {
+		if e.Kind == EvSetRO && e.Detail == "on=false" && outcome(e.Outcome) && reset[e.Site] {
 			return e.Site, e.Seq
 		}
 	}
@@ -42,15 +50,24 @@ func promotionTarget(events []Event) (string, int) {
 }
 
 // lastKnownTarget is the operator's current in-memory failover target: set by
-// an observed promotion, reset to the persisted CR value across a restart.
+// an observed promotion, then rehydrated from the newer durable copy across a
+// restart just like the production runner.
 func (r *trialRunner) lastKnownTarget() string {
 	if r.currentTarget != "" {
 		return r.currentTarget
 	}
+	statusRecord := controller.FailoverRecord{}
 	if r.persisted != nil {
-		return r.persisted.LastFailoverTarget
+		statusRecord = controller.FailoverRecord{
+			LastFailover:       r.persisted.LastFailover,
+			LastFailoverTarget: r.persisted.LastFailoverTarget,
+		}
 	}
-	return ""
+	oobRecord := controller.FailoverRecord{}
+	if r.persistedFailover != nil {
+		oobRecord = *r.persistedFailover
+	}
+	return controller.NewerFailoverRecord(statusRecord, oobRecord).LastFailoverTarget
 }
 
 // splitBrainResolvable reports whether the operator has an automatic path out
@@ -103,6 +120,15 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		if e.Outcome != "" {
 			key += ":" + e.Outcome
 		}
+		// Which statement the operator died on is repro detail, not a
+		// distinct behavior class. Left per-statement, the two death
+		// outcomes would add one signature dimension per mutation kind and
+		// multiply the space by 2^(2*kinds) — enough that the saturation
+		// rule stops firing within any sane wall-clock budget. The event
+		// log keeps the full detail; only the signature collapses.
+		if e.Outcome == "operatorDied" || e.Outcome == "appliedThenOperatorDied" {
+			key = "operatorDiedMidStatement:" + e.Outcome
+		}
 		r.kindsSeen[key] = struct{}{}
 	}
 
@@ -115,11 +141,24 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		}
 	}
 
-	// Promotion detection + associated invariants.
-	if target, grantSeq := promotionTarget(events); target != "" {
+	// A promotion for anti-flap bookkeeping must have returned far enough for
+	// Execute to reach recordFailover. A writable grant that applied just
+	// before process death is still visible to the physical ordering
+	// invariants below, but deliberately does not arm durable-state checks.
+	if target, _ := promotionTarget(events, effectiveOutcome); target != "" {
 		r.promotionPolls = append(r.promotionPolls, p)
 		r.currentTarget = target
+		// The clock has not advanced for this poll yet, so Now() is the
+		// instant the operator itself stamped on the promotion. A restart
+		// that rehydrates anything older lost the record.
+		r.lastPromotionAt = r.clk.Now()
+		r.statusDroppedPromotion = false
+		r.promotionRestarts = len(r.restartPolls)
+	}
 
+	// Promotion detection for physical writable/fencing invariants includes
+	// a grant that applied immediately before the operator died.
+	if target, grantSeq := promotionTarget(events, observedOutcome); target != "" {
 		// I: the operator must never promote while it observes another
 		// writable site, unless it fenced that site in the same cycle.
 		// "Fenced" deliberately counts an ATTEMPT with any outcome: fencing
@@ -173,7 +212,7 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 			}
 		}
 	}
-	if writable >= 2 && allReachable && r.splitBrainResolvable(truth) {
+	if !r.cluster.OperatorDead() && writable >= 2 && allReachable && r.splitBrainResolvable(truth) {
 		r.dualStreak++
 		if r.dualStreak > dualWritableGrace && !r.dualFlagged {
 			r.dualFlagged = true
@@ -214,21 +253,34 @@ func (r *trialRunner) checkEnd() []Violation {
 	}
 
 	// Cooldown spacing between observed promotions.
+	//
+	// The detail carries both the restart count and how many of those
+	// restarts lost the anti-flap record, because the two combinations mean
+	// very different things and the campaign fingerprints them apart:
+	// losing the record while every durable path was up is a regression,
+	// while losing it during an out-of-band store outage is the inherent
+	// residue (both durable copies were unwritable, so nothing could have
+	// carried the cooldown across the restart).
 	cooldownPolls := r.trial.CooldownSec // 1s per poll
 	for i := 1; i < len(r.promotionPolls); i++ {
 		gap := r.promotionPolls[i] - r.promotionPolls[i-1]
 		if gap < cooldownPolls {
-			restarts := 0
+			restarts, lost := 0, 0
 			for _, rp := range r.restartPolls {
 				if rp > r.promotionPolls[i-1] && rp <= r.promotionPolls[i] {
 					restarts++
 				}
 			}
+			for _, lp := range r.lostStatePolls {
+				if lp > r.promotionPolls[i-1] && lp <= r.promotionPolls[i] {
+					lost++
+				}
+			}
 			out = append(out, Violation{
 				Invariant: "CooldownViolated",
 				Poll:      r.promotionPolls[i],
-				Detail: fmt.Sprintf("promotions %d polls apart (cooldown %d polls, operator restarts between: %d)",
-					gap, cooldownPolls, restarts),
+				Detail: fmt.Sprintf("promotions %d polls apart (cooldown %d polls, operator restarts between: %d, of which lost the durable anti-flap record: %d)",
+					gap, cooldownPolls, restarts, lost),
 			})
 		}
 	}

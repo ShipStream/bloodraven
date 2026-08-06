@@ -7,6 +7,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -27,8 +28,8 @@ func init() {
 
 // scenario23FailoverStateDurability is the regression test the
 // project wishlist asks for in WISHLIST.md item #38. The contract: the
-// post-failover state stored in the CR (status.lastFailoverTarget and
-// status.lastFailover) MUST survive an operator pod restart so the
+// post-failover state stored in both CR status and the out-of-band
+// annotations MUST survive an operator pod restart so the
 // new operator process can rehydrate its in-memory anti-flap timer and
 // fence-returning-old-primary state from CR ground truth instead of
 // from a fresh-start (no failover ever happened) view.
@@ -55,10 +56,10 @@ func init() {
 func scenario23FailoverStateDurability() runner.Scenario {
 	return runner.Scenario{
 		ID:    "23-failover-state-durability",
-		Title: "status.lastFailoverTarget survives operator restart",
+		Title: "both durable failover-state copies survive operator restart",
 		Hypothesis: "After a clean failover, killing and restarting the operator pod must NOT clear " +
-			"status.lastFailoverTarget or status.lastFailover. The post-restart operator must rehydrate " +
-			"both fields from the CR; activeSite must remain at the post-failover primary.",
+			"the status or annotation anti-flap records. The post-restart operator must rehydrate " +
+			"the effective record; activeSite must remain at the post-failover primary.",
 		Risk:     "low",
 		DocLink:  "playground/chaos-scenarios.md#23-failover-state-durability",
 		Timeout:  4 * time.Minute,
@@ -94,20 +95,26 @@ func s23InjectKillPrimary() runner.Step {
 func s23ObserveFailoverComplete() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "wait for activeSite flip and lastFailoverTarget stamp",
+		Name:  "wait for activeSite flip and both durable failover records",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			original := ctxFetch(env, "originalPrimary")
 			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				"activeSite flipped AND lastFailoverTarget stamped",
+				"activeSite flipped AND status/annotation failover records stamped",
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					hasTarget := mfg.Status.LastFailoverTarget != ""
 					hasStamp := mfg.Status.LastFailover != nil && !mfg.Status.LastFailover.IsZero()
+					oob, oobErr := brcontroller.FailoverRecordFromAnnotations(mfg.GetAnnotations())
+					if oobErr != nil {
+						return false, "annotation record invalid", oobErr
+					}
+					oobMatches := hasStamp && oob.LastFailoverTarget == mfg.Status.LastFailoverTarget &&
+						oob.LastFailover.Equal(mfg.Status.LastFailover.Time)
 					flipped := mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original
-					msg := fmt.Sprintf("activeSite=%q target=%q stamp=%v",
-						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, hasStamp)
-					return flipped && hasTarget && hasStamp, msg, nil
+					msg := fmt.Sprintf("activeSite=%q target=%q stamp=%v annotationsMatch=%v",
+						mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, hasStamp, oobMatches)
+					return flipped && hasTarget && hasStamp && oobMatches, msg, nil
 				},
 			)
 			if err != nil {
@@ -168,7 +175,7 @@ func s23InjectKillOperator() runner.Step {
 func s23VerifyStateSurvivedRestart() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "lastFailoverTarget, lastFailover, and activeSite preserved across restart",
+		Name:  "status, annotations, and activeSite preserved across restart",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			expectedTarget := ctxFetch(env, "preRestartTarget")
 			expectedActive := ctxFetch(env, "preRestartActive")
@@ -193,6 +200,21 @@ func s23VerifyStateSurvivedRestart() runner.Step {
 			if mfg.Status.LastFailover == nil || mfg.Status.LastFailover.IsZero() {
 				return fmt.Errorf("lastFailover cleared across operator restart: pre=%q post=<nil>", expectedStamp)
 			}
+			oob, err := brcontroller.FailoverRecordFromAnnotations(mfg.GetAnnotations())
+			if err != nil {
+				return fmt.Errorf("annotation failover record invalid after restart: %w", err)
+			}
+			if oob.LastFailoverTarget != expectedTarget {
+				return fmt.Errorf("annotation last-failover-target changed across restart: pre=%q post=%q", expectedTarget, oob.LastFailoverTarget)
+			}
+			if oob.LastFailover.IsZero() {
+				return fmt.Errorf("annotation last-failover cleared across operator restart: pre=%q post=<nil>", expectedStamp)
+			}
+			if !oob.LastFailover.Equal(mfg.Status.LastFailover.Time) {
+				return fmt.Errorf("status and annotation last-failover differ after restart: status=%s annotation=%s",
+					mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano),
+					oob.LastFailover.Format(time.RFC3339Nano))
+			}
 			postStamp := mfg.Status.LastFailover.Time.UTC().Format(time.RFC3339Nano)
 			postStampUnix := mfg.Status.LastFailover.Time.UTC().UnixNano()
 			delta := time.Duration(postStampUnix - expectedStampUnix)
@@ -203,6 +225,10 @@ func s23VerifyStateSurvivedRestart() runner.Step {
 			if delta > s23PostRestartStampDrift {
 				return fmt.Errorf("lastFailover stamp advanced by %s across operator restart (tolerance %s) — looks like a fresh failover, not a status-enrichment rewrite: pre=%s post=%s",
 					delta, s23PostRestartStampDrift, expectedStamp, postStamp)
+			}
+			if annotationDelta := oob.LastFailover.Sub(time.Unix(0, expectedStampUnix)); annotationDelta < 0 || annotationDelta > s23PostRestartStampDrift {
+				return fmt.Errorf("annotation last-failover changed outside tolerance across restart: pre=%s post=%s delta=%s",
+					expectedStamp, oob.LastFailover.Format(time.RFC3339Nano), annotationDelta)
 			}
 			env.Capture.Note(fmt.Sprintf("post-restart CR matches: active=%s target=%s stamp=%s (drift=%s within %s)",
 				mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget, postStamp, delta, s23PostRestartStampDrift))

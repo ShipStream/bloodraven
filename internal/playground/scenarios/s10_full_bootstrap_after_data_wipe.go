@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	pgsidecar "github.com/shipstream/bloodraven/internal/playground/sidecar"
 )
@@ -254,7 +255,8 @@ func s10VerifyReplicaThreadsRunning() runner.Step {
 
 // s10AssertPristine extends the standard replication-running precheck
 // with a hard requirement that no previous failover has happened in
-// this cluster's lifetime: status.lastFailoverTarget must be empty.
+// this cluster's lifetime: the effective durable failover target must be
+// empty in both status and annotations.
 //
 // Why: the operator's `isFreshDeploy(ctx)` bootstrap branch is gated
 // on `tm.lastFailoverTarget == ""`. After any prior failover the
@@ -277,12 +279,16 @@ func s10AssertPristine(ctx context.Context, env *runner.Env) error {
 	if err != nil {
 		return fmt.Errorf("precheck: get MFG: %w", err)
 	}
-	if mfg.Status.LastFailoverTarget != "" {
+	failoverRecord, _, failoverErr := brcontroller.EffectiveFailoverRecord(mfg, time.Now())
+	if failoverErr != nil {
+		return fmt.Errorf("precheck: durable anti-flap state is invalid: %w", failoverErr)
+	}
+	if failoverRecord.LastFailoverTarget != "" {
 		return fmt.Errorf(
-			"precheck: status.lastFailoverTarget=%q (cluster has had a failover); "+
+			"precheck: effective lastFailoverTarget=%q (cluster has had a failover); "+
 				"fresh-deploy bootstrap detection requires a pristine cluster — "+
-				"run `./playground/setup.sh` (or recreate the cluster) and run scenario 10 first",
-			mfg.Status.LastFailoverTarget)
+				"run `./playground/reset-mysql.sh` and run scenario 10 first",
+			failoverRecord.LastFailoverTarget)
 	}
 	return nil
 }

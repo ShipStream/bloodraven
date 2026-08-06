@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -42,6 +43,15 @@ func TestDeterminism(t *testing.T) {
 			if fmt.Sprint(a.PromotionPolls) != fmt.Sprint(b.PromotionPolls) {
 				t.Fatalf("seed %d (%s): promotion polls differ: %v vs %v", seed, tc.name, a.PromotionPolls, b.PromotionPolls)
 			}
+			if !reflect.DeepEqual(a.SelfFenced, b.SelfFenced) {
+				t.Fatalf("seed %d (%s): self-fenced sites differ: %v vs %v", seed, tc.name, a.SelfFenced, b.SelfFenced)
+			}
+			if !reflect.DeepEqual(a.LostStatePolls, b.LostStatePolls) {
+				t.Fatalf("seed %d (%s): lost-state polls differ: %v vs %v", seed, tc.name, a.LostStatePolls, b.LostStatePolls)
+			}
+			if !reflect.DeepEqual(a.FinalFailoverRecord, b.FinalFailoverRecord) {
+				t.Fatalf("seed %d (%s): final failover records differ: %+v vs %+v", seed, tc.name, a.FinalFailoverRecord, b.FinalFailoverRecord)
+			}
 		}
 	}
 }
@@ -72,6 +82,12 @@ func TestFaultFreeBaseline(t *testing.T) {
 // README "Known finding classes") ever enters the range after an intentional
 // change, regenerate the expectations knowingly rather than widening this
 // filter silently.
+//
+// Note that seeds shift whenever the schedule generator changes — adding a
+// fault kind or rebalancing faultWeights redraws every trial. That is why
+// fixed findings are pinned as component tests (test/component/
+// dst_regression_test.go) and as the hand-built trials in antiflap_test.go,
+// rather than as seeds.
 func TestDST_Quick(t *testing.T) {
 	trials := 400
 	if s := os.Getenv("DST_QUICK_TRIALS"); s != "" {
@@ -153,7 +169,10 @@ func TestDST_Repro(t *testing.T) {
 	for _, e := range r.Events {
 		t.Log(e)
 	}
-	t.Logf("promotions at polls %v; restarts at %v", r.PromotionPolls, r.RestartPolls)
+	t.Logf("promotions at polls %v; restarts at %v; restarts that lost the anti-flap record at %v",
+		r.PromotionPolls, r.RestartPolls, r.LostStatePolls)
+	t.Logf("sidecars believing they self-fenced at end: %v", r.SelfFenced)
+	t.Logf("out-of-band anti-flap record: %+v", r.FinalFailoverRecord)
 	t.Logf("final status: %+v", r.FinalStatus)
 	for _, tr := range r.FinalTruth {
 		t.Logf("truth %s: crashed=%v ro=%v sro=%v repl=%v src=%q io=%v sql=%v exec=%s",

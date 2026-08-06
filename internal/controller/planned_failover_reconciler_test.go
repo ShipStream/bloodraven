@@ -499,14 +499,14 @@ func TestEffectiveOnCooldown(t *testing.T) {
 
 func TestCooldownRetryAfter(t *testing.T) {
 	fg := &v1alpha1.MysqlFailoverGroup{}
-	if !cooldownRetryAfter(fg).IsZero() {
+	if !cooldownRetryAfter(fg, time.Now()).IsZero() {
 		t.Error("no lastFailover: want zero time")
 	}
 	last := metav1.NewTime(time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC))
 	fg.Status.LastFailover = &last
 	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: 10 * time.Minute}
 	want := last.Time.Add(10 * time.Minute)
-	if got := cooldownRetryAfter(fg); !got.Equal(want) {
+	if got := cooldownRetryAfter(fg, last.Time); !got.Equal(want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }

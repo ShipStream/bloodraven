@@ -32,8 +32,16 @@ const (
 	OpRogueWritable   OpKind = "rogueWritable"
 	OpStatusOutage    OpKind = "statusWriteOutage"
 	OpStatusHeal      OpKind = "statusWriteHeal"
+	OpStateOutage     OpKind = "failoverStateOutage"
+	OpStateHeal       OpKind = "failoverStateHeal"
 	OpDNSOutage       OpKind = "dnsOutage"
 	OpDNSHeal         OpKind = "dnsHeal"
+	// OpCrashOperatorMid kills the operator process partway through a
+	// sequence of MySQL mutations rather than between polls. N is the
+	// countdown in operator mutations; PreApply chooses whether the fatal
+	// statement reaches the server; Down is how many polls pass before the
+	// replacement process starts.
+	OpCrashOperatorMid OpKind = "crashOperatorMid"
 )
 
 // Op is one scheduled fault operation, applied at the start of poll At.
@@ -42,8 +50,15 @@ type Op struct {
 	Kind   OpKind
 	Site   string
 	Peer   string // partner for pair partitions
-	N      int    // count for ambiguous/failing mutations
+	N      int    // count for ambiguous/failing mutations, or crash countdown
 	Fenced bool   // crash boot mode: true = sidecar re-fences on boot
+
+	// PreApply (OpCrashOperatorMid) kills the operator BEFORE the fatal
+	// statement reaches the server rather than after it applied.
+	PreApply bool
+	// Down (OpCrashOperatorMid) is how many polls the operator stays dead
+	// before its replacement starts.
+	Down int
 }
 
 func (o Op) String() string {
@@ -54,11 +69,14 @@ func (o Op) String() string {
 	if o.Peer != "" {
 		s += " peer=" + o.Peer
 	}
-	if o.N != 0 {
+	if o.N != 0 || o.Kind == OpCrashOperatorMid {
 		s += fmt.Sprintf(" n=%d", o.N)
 	}
 	if o.Kind == OpCrash {
 		s += fmt.Sprintf(" bootFenced=%v", o.Fenced)
+	}
+	if o.Kind == OpCrashOperatorMid {
+		s += fmt.Sprintf(" preApply=%v down=%d", o.PreApply, o.Down)
 	}
 	return s
 }
@@ -75,7 +93,25 @@ type Trial struct {
 	WarmupPolls int
 	HealAt      int // poll at which every outstanding fault is healed
 	Polls       int
-	Ops         []Op
+
+	// Sidecar actor configuration. Every site runs a real
+	// sidecar.FencingMonitor (see sidecar.go); these are the deployment
+	// knobs a real chart exposes.
+	//
+	//   SidecarLeasePolls — --fencing-lease-timeout, in polls (1 poll = 1s).
+	//   SidecarTopology   — topology-aware fencing (rule #1) wired or not;
+	//                       the monitor documents lease-only as a supported
+	//                       degraded mode, so both are worth covering.
+	//   SidecarAfterPoll  — whether the monitor's tick lands after the
+	//                       operator's poll or before it. The sidecar ticks
+	//                       on its own schedule in production, so both
+	//                       interleavings are real; fixing one per trial
+	//                       keeps replay exact.
+	SidecarLeasePolls int
+	SidecarTopology   bool
+	SidecarAfterPoll  bool
+
+	Ops []Op
 	// Skip masks Ops for shrinking; nil means all ops are active.
 	Skip []bool
 }
@@ -96,8 +132,14 @@ func (t Trial) ActiveOps() []Op {
 
 func (t Trial) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "seed=%d sites=%d roles=%v priorities=%v cooldown=%ds history=%v warmup=%d healAt=%d polls=%d\n",
-		t.Seed, len(t.SiteNames), t.Roles, t.Priorities, t.CooldownSec, t.SeedHistory, t.WarmupPolls, t.HealAt, t.Polls)
+	seed := fmt.Sprintf("%d", t.Seed)
+	if t.Seed == 0 {
+		seed = "hand-built"
+	}
+	fmt.Fprintf(&b, "seed=%s sites=%d roles=%v priorities=%v cooldown=%ds history=%v warmup=%d healAt=%d polls=%d\n",
+		seed, len(t.SiteNames), t.Roles, t.Priorities, t.CooldownSec, t.SeedHistory, t.WarmupPolls, t.HealAt, t.Polls)
+	fmt.Fprintf(&b, "  sidecar: leasePolls=%d topologyAware=%v tickAfterPoll=%v\n",
+		t.SidecarLeasePolls, t.SidecarTopology, t.SidecarAfterPoll)
 	for i, op := range t.Ops {
 		masked := ""
 		if t.Skip != nil && t.Skip[i] {
@@ -109,6 +151,59 @@ func (t Trial) String() string {
 }
 
 var trialSiteNames = []string{"alpha", "beta", "gamma"}
+
+// faultWeight is one entry in the fault-kind distribution. Weights are
+// percentages of a single rng.IntN(100) draw and must sum to exactly 100 —
+// faultWeightSum enforces that at init so a mis-edited table fails loudly
+// instead of silently starving the last kind.
+//
+// A table rather than a case list: adding a fault kind then costs one line
+// and a rebalance you can audit at a glance, and every kind still consumes
+// exactly one draw, so replay stays exact.
+type faultWeight struct {
+	kind   OpKind
+	weight int
+}
+
+var faultWeights = []faultWeight{
+	{OpCrash, 16},
+	{OpPartOpSite, 13},
+	{OpPartPair, 9},
+	{OpRestartOperator, 8},
+	{OpCrashOperatorMid, 6},
+	{OpAmbiguousMuts, 9},
+	{OpFailMuts, 7},
+	{OpStallApply, 5},
+	{OpStallFetch, 4},
+	{OpDrainStall, 3},
+	{OpRogueFence, 6},
+	{OpRogueWritable, 3},
+	{OpStatusOutage, 4},
+	{OpStateOutage, 4},
+	{OpDNSOutage, 3},
+}
+
+func init() {
+	sum := 0
+	for _, w := range faultWeights {
+		sum += w.weight
+	}
+	if sum != 100 {
+		panic(fmt.Sprintf("dst: faultWeights sum to %d, want 100", sum))
+	}
+}
+
+// pickFaultKind maps one uniform draw in [0,100) onto the weight table.
+func pickFaultKind(roll int) OpKind {
+	acc := 0
+	for _, w := range faultWeights {
+		acc += w.weight
+		if roll < acc {
+			return w.kind
+		}
+	}
+	return faultWeights[len(faultWeights)-1].kind
+}
 
 // GenerateTrial derives a complete trial from a seed.
 func GenerateTrial(seed uint64) Trial {
@@ -143,6 +238,15 @@ func GenerateTrial(seed uint64) Trial {
 	cooldown := []int{10, 30, 60}[rng.IntN(3)]
 	seedHistory := rng.IntN(2) == 0
 
+	// Sidecar deployment shape. The lease values bracket the operator's own
+	// debounce (FailureThreshold 3 + RecoveryThreshold 2): a lease shorter
+	// than the operator's reaction time means the sidecar fences first, a
+	// longer one means the operator usually gets there first, and both
+	// orderings happen in production depending on how the chart is tuned.
+	sidecarLease := []int{8, 15, 30}[rng.IntN(3)]
+	sidecarTopology := rng.IntN(100) < 80
+	sidecarAfterPoll := rng.IntN(2) == 0
+
 	const warmup = 8
 	faultWindow := 25 + rng.IntN(30)
 	healAt := warmup + faultWindow
@@ -166,8 +270,9 @@ func GenerateTrial(seed uint64) Trial {
 	}
 
 	for i := 0; i < numOps; i++ {
-		switch rng.IntN(100) {
-		case 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17: // 18%: crash
+		kind := pickFaultKind(rng.IntN(100))
+		switch kind {
+		case OpCrash:
 			site := pickSite()
 			start := at()
 			op := Op{At: start, Kind: OpCrash, Site: site, Fenced: rng.IntN(100) < 45}
@@ -178,12 +283,12 @@ func GenerateTrial(seed uint64) Trial {
 					ops = append(ops, Op{At: h, Kind: OpRecover, Site: site, Fenced: op.Fenced})
 				}
 			}
-		case 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31: // 14%: operator<->site partition
+		case OpPartOpSite:
 			site := pickSite()
 			start := at()
 			ops = append(ops, Op{At: start, Kind: OpPartOpSite, Site: site})
 			pairedHeal(start, OpHealOpSite, site, "")
-		case 32, 33, 34, 35, 36, 37, 38, 39, 40, 41: // 10%: site<->site partition
+		case OpPartPair:
 			a := pickSite()
 			b := pickSite()
 			for b == a {
@@ -192,54 +297,79 @@ func GenerateTrial(seed uint64) Trial {
 			start := at()
 			ops = append(ops, Op{At: start, Kind: OpPartPair, Site: a, Peer: b})
 			pairedHeal(start, OpHealPair, a, b)
-		case 42, 43, 44, 45, 46, 47, 48, 49, 50, 51: // 10%: operator restart
+		case OpRestartOperator:
 			ops = append(ops, Op{At: at(), Kind: OpRestartOperator})
-		case 52, 53, 54, 55, 56, 57, 58, 59, 60, 61: // 10%: ambiguous mutations
+		case OpCrashOperatorMid:
+			// The countdown is in operator mutations, not polls, so the
+			// process dies at an arbitrary point inside a fence/promote
+			// sequence rather than cleanly between polls. A zero countdown
+			// kills on the very next mutation.
+			ops = append(ops, Op{
+				At:       at(),
+				Kind:     OpCrashOperatorMid,
+				N:        rng.IntN(6),
+				PreApply: rng.IntN(2) == 0,
+				Down:     rng.IntN(4),
+			})
+		case OpAmbiguousMuts:
 			ops = append(ops, Op{At: at(), Kind: OpAmbiguousMuts, Site: pickSite(), N: 1 + rng.IntN(4)})
-		case 62, 63, 64, 65, 66, 67, 68, 69: // 8%: failing mutations
+		case OpFailMuts:
 			ops = append(ops, Op{At: at(), Kind: OpFailMuts, Site: pickSite(), N: 1 + rng.IntN(4)})
-		case 70, 71, 72, 73, 74, 75: // 6%: replication apply stall (relay backlog builds)
+		case OpStallApply: // replication apply stall (relay backlog builds)
 			site := pickSite()
 			start := at()
 			ops = append(ops, Op{At: start, Kind: OpStallApply, Site: site})
 			pairedHeal(start, OpHealApply, site, "")
-		case 76, 77, 78, 79: // 4%: replication fetch stall
+		case OpStallFetch:
 			site := pickSite()
 			start := at()
 			ops = append(ops, Op{At: start, Kind: OpStallFetch, Site: site})
 			pairedHeal(start, OpHealFetch, site, "")
-		case 80, 81, 82: // 3%: relay drain stall
+		case OpDrainStall:
 			site := pickSite()
 			start := at()
 			ops = append(ops, Op{At: start, Kind: OpDrainStall, Site: site})
 			pairedHeal(start, OpHealDrain, site, "")
-		case 83, 84, 85, 86, 87, 88: // 6%: rogue fence (stale sidecar lease)
+		case OpRogueFence:
+			// A human or an out-of-band actor setting super_read_only=ON.
+			// The sidecar's own fencing is no longer represented here — it
+			// runs as a real actor (sidecar.go) — but "someone with SUPER
+			// fenced this site" is still its own fault mode.
 			ops = append(ops, Op{At: at(), Kind: OpRogueFence, Site: pickSite()})
-		case 89, 90, 91: // 3%: rogue writable (human error on a replica)
+		case OpRogueWritable: // human error on a replica
 			ops = append(ops, Op{At: at(), Kind: OpRogueWritable, Site: pickSite()})
-		case 92, 93, 94, 95: // 4%: CR status write outage
+		case OpStatusOutage: // CR /status subresource write outage
 			start := at()
 			ops = append(ops, Op{At: start, Kind: OpStatusOutage})
 			pairedHeal(start, OpStatusHeal, "", "")
-		default: // 4%: DNS outage
+		case OpStateOutage: // out-of-band anti-flap store outage
+			start := at()
+			ops = append(ops, Op{At: start, Kind: OpStateOutage})
+			pairedHeal(start, OpStateHeal, "", "")
+		case OpDNSOutage:
 			start := at()
 			ops = append(ops, Op{At: start, Kind: OpDNSOutage})
 			pairedHeal(start, OpDNSHeal, "", "")
+		default:
+			panic(fmt.Sprintf("dst: faultWeights kind %q has no case in GenerateTrial", kind))
 		}
 	}
 
 	sort.SliceStable(ops, func(i, j int) bool { return ops[i].At < ops[j].At })
 
 	return Trial{
-		Seed:        seed,
-		SiteNames:   append([]string{}, names...),
-		Roles:       roles,
-		Priorities:  priorities,
-		CooldownSec: cooldown,
-		SeedHistory: seedHistory,
-		WarmupPolls: warmup,
-		HealAt:      healAt,
-		Polls:       polls,
-		Ops:         ops,
+		Seed:              seed,
+		SiteNames:         append([]string{}, names...),
+		Roles:             roles,
+		Priorities:        priorities,
+		CooldownSec:       cooldown,
+		SeedHistory:       seedHistory,
+		WarmupPolls:       warmup,
+		HealAt:            healAt,
+		Polls:             polls,
+		SidecarLeasePolls: sidecarLease,
+		SidecarTopology:   sidecarTopology,
+		SidecarAfterPoll:  sidecarAfterPoll,
+		Ops:               ops,
 	}
 }

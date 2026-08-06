@@ -231,7 +231,7 @@ When the state machine observes both sites as `writable` simultaneously, the ope
 `preferSite` is a tiebreaker for states the operator cannot resolve from its own history. The two common triggers:
 
 - **Fresh deploy with existing data.** Both sites come up writable and `lastFailoverTarget` is empty because this operator instance has never failed anything over. Without `preferSite`, the operator alerts and waits for an admin.
-- **Operator restart amnesia.** In-memory `lastFailoverTarget` is repopulated from `status.lastFailoverTarget` at startup, but if a split brain occurred during the restart window (for example, an old primary came back *while* the operator was restarting), the operator may never have had an opportunity to record the most recent failover. `preferSite` provides a deterministic answer in this case.
+- **Operator restart amnesia.** In-memory `lastFailoverTarget` is repopulated at startup from the newer of `status.lastFailoverTarget` and the out-of-band annotation (see [Where the cooldown is stored](#where-the-cooldown-is-stored)), so a failure on either durable path no longer costs the operator its history. But if a split brain occurred during the restart window — for example, an old primary came back *while* the operator was restarting — the operator may never have had an opportunity to record the most recent failover at all. `preferSite` provides a deterministic answer in this case.
 
 When history *is* available (case 1 above), the operator trusts it and does **not** consult `preferSite`. This preserves the invariant that the site most recently promoted keeps its writes.
 
@@ -283,7 +283,22 @@ During the cooldown:
 - Automatic failovers are suppressed
 - Manual intervention can still be performed (see [Operations](./operations.mdx))
 
-The cooldown timer resets after each failover. The last failover time is recorded in `status.lastFailover`.
+The cooldown timer resets after each failover.
+
+### Where the cooldown is stored
+
+The last failover time and target are written to two places on every promotion, so an operator restart cannot silently reset the cooldown:
+
+| Location | Written by |
+|---|---|
+| `status.lastFailover`, `status.lastFailoverTarget` | the per-poll CR status update |
+| `bloodraven.shipstream.io/last-failover`, `bloodraven.shipstream.io/last-failover-target` annotations | a merge patch issued inline with the promotion |
+
+The two travel different API paths — the status subresource has its own RBAC rule and admission chain — so an outage on one does not take the other with it. Both writes retry every poll until accepted, and a restarting operator rehydrates from whichever copy carries the later timestamp.
+
+A restart that had to fall back to the annotations logs `restored lastFailover from out-of-band annotations` at WARN. That means this group's status writes were failing when it last promoted, and is worth alerting on. Losing the cooldown across a restart requires **both** paths to be rejecting writes at once; see [Known limitations](./known-limitations.mdx) → Operator availability.
+
+The annotations are operator-owned bookkeeping. Editing or removing them by hand changes what a restart believes about the cooldown; the running process keeps its in-memory value either way and rewrites both copies on its next promotion.
 
 ## Ordered updates
 

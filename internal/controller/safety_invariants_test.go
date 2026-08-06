@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
@@ -173,13 +176,10 @@ func TestInvariant_NeverPromoteDuringCooldown(t *testing.T) {
 // INVARIANT 4b: Anti-flap cooldown survives operator restart.
 //
 // After a process restart, a fresh TopologyManager starts with
-// tm.lastFailover == time.Time{} (zero), which makes the cooldown
-// branch in topology.go a no-op. The runner.startManager hydration
-// path MUST call SetLastFailover from fg.Status.LastFailover so the
-// cooldown still applies in the restarted operator process. Without
-// this, a fast restart inside the cooldown window lets the new
-// operator ping-pong promote — exactly the failure mode WISHLIST #38
-// describes.
+// tm.lastFailover == time.Time{} (zero), which makes the cooldown branch in
+// topology.go a no-op. The runner hydration path MUST install the newer of
+// CR status and the out-of-band annotations so the cooldown still applies
+// when either API path missed the promotion write.
 //
 // This test simulates the restart by constructing a fresh
 // TopologyManager (the invariant under test is "SetLastFailover is
@@ -204,12 +204,27 @@ func TestInvariant_CooldownSurvivesOperatorRestart(t *testing.T) {
 	clk := clock.NewFakeClock(start)
 	tm := NewTopologyManagerWithClock(cfg, []internalmysql.Checker{site0, site1}, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger(), clk)
 
-	// Rehydrate as runner.startManager does: lastFailoverTarget +
-	// lastFailover from the CR. The "previous" failover happened 30
-	// minutes ago and the cooldown is 1 hour, so the cooldown is still
-	// active.
-	tm.SetLastFailoverTarget("dc2")
-	tm.SetLastFailover(start.Add(-30 * time.Minute))
+	// Status is stale, while the annotation copy carries the promotion from
+	// 30 minutes ago. Rehydrate the effective record exactly as the runner
+	// does and verify that the out-of-band winner enforces the cooldown.
+	statusStamp := metav1.NewTime(start.Add(-2 * time.Hour))
+	fg := &v1alpha1.MysqlFailoverGroup{
+		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "dc1"}, {Name: "dc2"}}},
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			LastFailoverAnnotation:       start.Add(-30 * time.Minute).Format(time.RFC3339),
+			LastFailoverTargetAnnotation: "dc2",
+		}},
+		Status: v1alpha1.MysqlFailoverGroupStatus{LastFailover: &statusStamp, LastFailoverTarget: "dc1"},
+	}
+	record, fromAnnotations, err := EffectiveFailoverRecord(fg, start)
+	if err != nil {
+		t.Fatalf("effective failover record: %v", err)
+	}
+	if !fromAnnotations {
+		t.Fatal("expected annotation copy to win over stale status")
+	}
+	tm.SetLastFailoverTarget(record.LastFailoverTarget)
+	tm.SetLastFailover(record.LastFailover)
 
 	// Drive the topology manager. With site0=read-only and
 	// site1=unreachable + writable=0, EvalCrossSite returns

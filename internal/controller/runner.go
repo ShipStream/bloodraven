@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -578,26 +579,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		tm.SetKeyringGate(gate)
 	}
 
-	// Restore failover history from CR status so recovery logic works across
-	// operator restarts — without this, checkRecovery() returns early because
-	// lastFailoverTarget is empty after a fresh TopologyManager.
-	if fg.Status.LastFailoverTarget != "" {
-		tm.SetLastFailoverTarget(fg.Status.LastFailoverTarget)
-		r.logger.Info("restored lastFailoverTarget from CR status", "fg", nn, "target", fg.Status.LastFailoverTarget)
-	}
-	// Restore the lastFailover timestamp too so the anti-flap cooldown
-	// window survives operator restart. Without this, an operator pod
-	// restart inside the cooldown silently resets the in-memory timer to
-	// zero and the topology.go cooldown branch becomes a no-op until the
-	// next failover stamps a fresh value — meaning a fast restart-then-
-	// peer-failure could ping-pong promotions that the original process
-	// would have blocked. The CR's status.lastFailover IS already
-	// persisted (see updateCRStatus → status.LastFailover); we just
-	// weren't reading it back. Tracked in WISHLIST #38.
-	if fg.Status.LastFailover != nil && !fg.Status.LastFailover.IsZero() {
-		tm.SetLastFailover(fg.Status.LastFailover.Time)
-		r.logger.Info("restored lastFailover from CR status", "fg", nn, "lastFailover", fg.Status.LastFailover.Time)
-	}
+	r.restoreFailoverState(tm, fg, nn)
 	for _, site := range fg.Status.Sites {
 		if site.SourceConvergenceState != "" || site.SourceHost != "" {
 			tm.SetSourceConvergence(site.Name, site.SourceHost, SourceConvergenceState(site.SourceConvergenceState), site.SourceConvergenceReason)
@@ -708,6 +690,73 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	}
 
 	return nil
+}
+
+// restoreFailoverState wires the out-of-band anti-flap store and restores
+// failover history into a fresh TopologyManager, so recovery logic and the
+// anti-flap cooldown work across operator restarts — without this,
+// the topology.go cooldown branch becomes a no-op until the next failover
+// stamps a fresh value, so a fast restart-then-peer-failure could ping-pong
+// promotions that the original process would have blocked.
+//
+// Two durable copies exist and either can be the fresher one: status is
+// ahead when the annotation write was rejected, the annotations are ahead
+// when the status write was. Rehydrating from whichever is newer is what
+// makes the cooldown survive an outage on one path — restoring only from
+// status is exactly the CooldownViolated(restart) window the simulator
+// reproduces.
+func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) {
+	// Wire the store before anything can promote. The annotations it writes
+	// are the second durable copy of the record below, on an API path that
+	// fails independently of the status subresource.
+	tm.SetFailoverStateRecorder(NewAnnotationFailoverStateRecorder(r.client, nn))
+
+	statusRecord := FailoverRecordFromStatus(fg)
+	failoverRecord, fromAnnotations, err := EffectiveFailoverRecord(fg, time.Now())
+	if err != nil {
+		var readErr *FailoverRecordReadError
+		if errors.As(err, &readErr) {
+			if readErr.Annotations != nil {
+				// Corrupt or unsafe annotation: fall back to the other valid
+				// copy rather than silently resetting or poisoning the cooldown.
+				r.logger.Error("out-of-band anti-flap annotation unreadable; falling back to CR status",
+					"fg", nn.String(), "error", readErr.Annotations)
+			}
+			if readErr.Status != nil {
+				r.logger.Error("CR status anti-flap state unreadable; ignoring unsafe copy",
+					"fg", nn.String(), "error", readErr.Status)
+			}
+		} else {
+			r.logger.Error("durable anti-flap state unreadable; ignoring unsafe copy",
+				"fg", nn.String(), "error", err)
+		}
+	}
+
+	// The two restores below are logged under distinct msg strings rather
+	// than one msg with a source field: `restored lastFailoverTarget from CR
+	// status` is a documented stable event (docs/docs/log-schema.mdx), and
+	// the out-of-band case is worth alerting on in its own right — it means
+	// this group's status writes were failing when it last promoted.
+	if failoverRecord.LastFailoverTarget != "" {
+		tm.SetLastFailoverTarget(failoverRecord.LastFailoverTarget)
+		if fromAnnotations {
+			r.logger.Warn("restored lastFailoverTarget from out-of-band annotations",
+				"fg", nn.String(), "target", failoverRecord.LastFailoverTarget,
+				"statusTarget", statusRecord.LastFailoverTarget)
+		} else {
+			r.logger.Info("restored lastFailoverTarget from CR status", "fg", nn.String(), "target", failoverRecord.LastFailoverTarget)
+		}
+	}
+	if !failoverRecord.LastFailover.IsZero() {
+		tm.SetLastFailover(failoverRecord.LastFailover)
+		if fromAnnotations {
+			r.logger.Warn("restored lastFailover from out-of-band annotations",
+				"fg", nn.String(), "lastFailover", failoverRecord.LastFailover,
+				"statusLastFailover", statusRecord.LastFailover)
+		} else {
+			r.logger.Info("restored lastFailover from CR status", "fg", nn.String(), "lastFailover", failoverRecord.LastFailover)
+		}
+	}
 }
 
 // stopAll cancels all running topology managers.

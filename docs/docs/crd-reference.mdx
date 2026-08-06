@@ -714,6 +714,8 @@ cluster whose pre-existing tables were never rebuilt.
 
 | Annotation | Description |
 |---|---|
+| `bloodraven.shipstream.io/last-failover` | Operator-owned out-of-band copy of `status.lastFailover`, formatted as an RFC3339 UTC timestamp at second precision. Do not edit manually. Reset tooling clears it together with status history. |
+| `bloodraven.shipstream.io/last-failover-target` | Operator-owned out-of-band copy of `status.lastFailoverTarget`. It is always written and cleared as a pair with `last-failover`. Do not edit manually. |
 | `bloodraven.shipstream.io/reclone-site` | Triggers a `CLONE INSTANCE` from the current primary to the named site. Value format depends on the target's state: `<site>:confirm=<group-name>` for a cold reclone (no divergent GTID recorded), or `<site>:<gtid-prefix>` when `status.sites[].divergentGtid` is non-empty — the prefix must be 8+ characters and match the observed divergent GTID. Both forms act as a fat-finger interlock (cold path added by AUDIT L3 / WISHLIST #5). Invalid annotations are rejected with a `RecloneRejected` Warning Event and cleared. Valid ones emit `RecloneRequested` and report progress via the `Bootstrapping` condition. |
 | `bloodraven.shipstream.io/planned-failover` | Starts a planned failover to the named site. When Dragonfly is enabled, the planned-failover status includes a `dragonfly` substatus with session-preservation details. |
 | `bloodraven.shipstream.io/dragonfly-snapshot-upgrade` | Starts the Dragonfly snapshot-restore upgrade workflow to the target image. Requires `spec.dragonfly.snapshot` to be configured. |
