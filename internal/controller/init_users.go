@@ -48,6 +48,44 @@ func generateInitUsersScript(fg *v1alpha1.MysqlFailoverGroup) string {
 	return generateSecretNameModeInitScript()
 }
 
+// initScriptSocketPreamble resolves the Unix socket the *temporary* server
+// started by the image entrypoint is actually listening on, and defines
+// run_mysql() to talk to it explicitly.
+//
+// Init scripts run before the entrypoint restarts MySQL with networking, so
+// TCP is not an option — the temporary server runs with --skip-networking.
+// A bare `mysql -u root` therefore falls back to the client's default socket
+// path, which the official images take from the `[client]` section of
+// /etc/my.cnf (/var/run/mysqld/mysqld.sock). That is not always where the
+// server bound: when mysqld's effective `socket` resolves to the compiled-in
+// default (/var/lib/mysql/mysql.sock) the entrypoint's mysql_socket_fix()
+// creates no compatibility symlink, the client gets ERROR 2002, and — because
+// the script runs under `set -e` — the entrypoint aborts mid-init and the
+// container exits. The pod then either recovers on restart (datadir is already
+// initialized) or wedges in CrashLoopBackOff, because the killed temporary
+// server left a stale mysql.sock.lock in the datadir whose recorded PID can
+// collide with a live PID in the restarted container ("Another process with
+// pid N is using unix socket file"). Resolving the live socket removes the
+// whole chain.
+const initScriptSocketPreamble = `
+MYSQL_SOCKET=""
+for candidate in "${SOCKET:-}" /var/run/mysqld/mysqld.sock /var/lib/mysql/mysql.sock /tmp/mysql.sock; do
+    if [ -n "$candidate" ] && [ -S "$candidate" ]; then
+        MYSQL_SOCKET="$candidate"
+        break
+    fi
+done
+if [ -z "$MYSQL_SOCKET" ]; then
+    echo "bloodraven-init: could not locate a MySQL server socket; tried ${SOCKET:-} /var/run/mysqld/mysqld.sock /var/lib/mysql/mysql.sock /tmp/mysql.sock" >&2
+    exit 1
+fi
+echo "bloodraven-init: using MySQL socket ${MYSQL_SOCKET}"
+
+run_mysql() {
+    MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-}" mysql --protocol=SOCKET --socket="$MYSQL_SOCKET" -u root "$@"
+}
+`
+
 // generateSecretNameModeInitScript creates the replication user from env vars
 // injected by the legacy secretName secret (MYSQL_REPLICATION_USER/PASSWORD).
 func generateSecretNameModeInitScript() string {
@@ -65,13 +103,13 @@ if [ -z "${MYSQL_REPLICATION_USER:-}" ] || [ -z "${MYSQL_REPLICATION_PASSWORD:-}
     echo "bloodraven-init: MYSQL_REPLICATION_USER/PASSWORD not set, skipping replication user"
     exit 0
 fi
-
+` + initScriptSocketPreamble + `
 install_clone_plugin() {
     local installed
-    installed=$(MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root -Nse "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone'" 2>/dev/null || echo 0)
+    installed=$(run_mysql -Nse "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone'" 2>/dev/null || echo 0)
     if [ "$installed" = "0" ]; then
         echo "bloodraven-init: installing MySQL clone plugin"
-        MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';"
+        run_mysql -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';"
     fi
 }
 
@@ -81,7 +119,7 @@ REPL_USER=$(escape_sql "$MYSQL_REPLICATION_USER")
 REPL_PASS=$(escape_sql "$MYSQL_REPLICATION_PASSWORD")
 
 echo "bloodraven-init: creating replication user '${REPL_USER}'"
-MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<EOSQL
+run_mysql <<EOSQL
 CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';
 ALTER USER '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%';
@@ -103,13 +141,13 @@ escape_sql() {
     val="${val//\'/\'\'}"
     printf '%s' "$val"
 }
-
+` + initScriptSocketPreamble + `
 install_clone_plugin() {
     local installed
-    installed=$(MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root -Nse "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone'" 2>/dev/null || echo 0)
+    installed=$(run_mysql -Nse "SELECT COUNT(*) FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME='clone'" 2>/dev/null || echo 0)
     if [ "$installed" = "0" ]; then
         echo "bloodraven-init: installing MySQL clone plugin"
-        MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';"
+        run_mysql -e "INSTALL PLUGIN clone SONAME 'mysql_clone.so';"
     fi
 }
 
@@ -123,7 +161,7 @@ create_user_with_grants() {
     fi
     grants="${2//__USER__/$user}"
     echo "bloodraven-init: creating $1 user '${user}'"
-    MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<EOSQL
+    run_mysql <<EOSQL
 CREATE USER IF NOT EXISTS '${user}'@'%' IDENTIFIED BY '${pass}';
 ALTER USER '${user}'@'%' IDENTIFIED BY '${pass}';
 ${grants}
