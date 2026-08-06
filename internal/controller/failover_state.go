@@ -155,6 +155,18 @@ func FailoverRecordFromAnnotations(annotations map[string]string) (FailoverRecor
 // rejected, the annotation is ahead when the status write was. Ties go to
 // the first argument, which callers pass as the CR status copy — when both
 // carry the same instant they describe the same promotion.
+//
+// That tie rule rests on a precondition: no two promotions share a truncated
+// second. Both paths store second precision (see the annotation doc above),
+// so two promotions inside one second would be indistinguishable here, and a
+// tie between them would be broken arbitrarily rather than correctly — the
+// rehydrated LastFailoverTarget could name the earlier one. The precondition
+// holds because a promotion is several MySQL round-trips (fence, GTID wait,
+// writable grant) and the paths that can promote back to back — planned
+// switchover and the ordered-update handoff — each complete one before
+// starting the next. The exposure if it were ever violated is bounded to a
+// stale fencing target for one cooldown window: the timestamps are equal, so
+// the cooldown deadline itself is correct either way.
 func NewerFailoverRecord(a, b FailoverRecord) FailoverRecord {
 	if b.LastFailover.After(a.LastFailover) {
 		return b

@@ -384,34 +384,91 @@ func TestRecordFailover_IgnoresOlderPromotion(t *testing.T) {
 // promotions can share an instant. A supersede that changes only the target
 // must keep the store dirty when it lands mid-write, or the newer target is
 // dropped with nothing scheduled to retry.
+//
+// The superseding promotion goes through recordFailover rather than being
+// stamped onto the manager by hand, so both halves of the equal-timestamp
+// rule are under test: recordFailover must ADVANCE on an equal instant with
+// a different target (a strict Before comparison there would drop gamma
+// silently), and the flush must then refuse to mark the store clean on
+// beta's behalf.
 func TestPersistFailoverState_EqualTimestampSupersede(t *testing.T) {
 	stub := &stubFailoverRecorder{}
 	tm := failoverStateTestManager(stub)
 	ctx := context.Background()
 
 	now := tm.clock.Now()
+	gammaDone := make(chan struct{})
+	releaseGamma := make(chan struct{})
+
 	// While (now, beta) is being written, a same-instant promotion of gamma
-	// replaces the desired record.
+	// arrives from another goroutine — the ordered-update handoff racing
+	// Poll, which is the only way two promotions can share an instant.
 	stub.before = func() {
-		tm.mu.Lock()
-		cp := FailoverRecord{LastFailover: now, LastFailoverTarget: "gamma"}
-		tm.desiredFailoverState = &cp
-		tm.failoverStateDirty = true
-		tm.mu.Unlock()
+		// gamma's own flush must be pinned inside the stub once it wins the
+		// write mutex, so the assertions below observe the state beta's
+		// write left behind rather than racing gamma's write to clear it.
+		// Set before beta's flush releases the mutex, so gamma cannot miss it.
+		stub.before = func() { <-releaseGamma }
+
+		go func() {
+			defer close(gammaDone)
+			tm.recordFailover(ctx, now, "gamma", "")
+		}()
+		// Wait only for the record gamma publishes, never for its call to
+		// return: its flush blocks on the write mutex this one holds.
+		waitForDesiredTarget(t, tm, "gamma")
 	}
 	tm.recordFailover(ctx, now, "beta", "")
 
-	if !tm.failoverStateDirty {
+	if !failoverStateIsDirty(tm) {
 		t.Fatal("equal-timestamp supersede was marked clean; the gamma record would never be written")
 	}
-	tm.flushFailoverState(ctx, false)
+
+	// Let gamma's retry through. It is the real per-promotion flush, so this
+	// also proves the pending record survives to a successful write.
+	close(releaseGamma)
+	<-gammaDone
+
 	last, ok := stub.lastWrite()
-	if !ok || last.LastFailoverTarget != "gamma" {
+	if !ok || last.LastFailoverTarget != "gamma" || !last.LastFailover.Equal(now) {
 		t.Errorf("follow-up write = %+v, want gamma @ %v", last, now)
 	}
-	if tm.failoverStateDirty {
+	if failoverStateIsDirty(tm) {
 		t.Error("still dirty after the newest record landed")
 	}
+	// The in-memory anti-flap pair feeds the cooldown check and split-brain
+	// fencing, and it is subject to the same equal-instant rule.
+	tm.mu.RLock()
+	target := tm.lastFailoverTarget
+	tm.mu.RUnlock()
+	if target != "gamma" {
+		t.Errorf("in-memory fencing target = %q, want the same-instant supersede gamma", target)
+	}
+}
+
+// waitForDesiredTarget blocks until the pending out-of-band record names
+// target. It is how a test observes a promotion recorded from another
+// goroutine without waiting for that goroutine's flush, which may be queued
+// behind the caller's own write.
+func waitForDesiredTarget(t *testing.T, tm *TopologyManager, target string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		tm.mu.RLock()
+		rec, dirty := tm.desiredFailoverState, tm.failoverStateDirty
+		tm.mu.RUnlock()
+		if dirty && rec != nil && rec.LastFailoverTarget == target {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for the pending record to name %q; recordFailover dropped the equal-instant supersede", target)
+}
+
+func failoverStateIsDirty(tm *TopologyManager) bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.failoverStateDirty
 }
 
 // TestPersistFailoverState_NoRecorder: the store is optional, and its absence

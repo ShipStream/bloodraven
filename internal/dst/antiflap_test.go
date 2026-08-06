@@ -144,51 +144,67 @@ func TestAntiFlapLostWhenEveryDurablePathIsDenied(t *testing.T) {
 // anti-flap assertion here would keep passing. Feeding it a stale record
 // directly proves it still bites.
 func TestAntiFlapStateLostInvariantIsArmed(t *testing.T) {
-	trial := antiFlapTrial()
-	r := &trialRunner{trial: trial}
-	// A promotion the harness saw, and a process that came up knowing
-	// nothing about it, with the out-of-band store reported healthy.
-	r.lastPromotionAt = mustFakeNow()
-	r.stateDeniedSincePromotion = false
+	// Every case feeds the same stale rehydrate — a promotion the harness
+	// saw and a process that came up knowing nothing about it — and varies
+	// only which durable path could have preserved the record.
+	cases := []struct {
+		name string
+		// stateDenied is an unhealed rejection on the out-of-band store;
+		// statusDropped is the promoting process landing a status write
+		// that still predates its own promotion.
+		stateDenied    bool
+		statusDropped  bool
+		wantViolations int
+		wantDetail     string
+	}{
+		{
+			name:           "store healthy is a regression",
+			wantViolations: 1,
+			wantDetail:     "accepting writes",
+		},
+		{
+			// Losing the record with the store denied is inherent, so the
+			// poll is still recorded as lost but nothing is flagged.
+			name:           "store denied is inherent",
+			stateDenied:    true,
+			wantViolations: 0,
+		},
+		{
+			// The status path could have preserved it, so the loss is a
+			// regression again even with the store denied.
+			name:           "store denied but status dropped the record",
+			stateDenied:    true,
+			statusDropped:  true,
+			wantViolations: 1,
+			wantDetail:     "dropped the record",
+		},
+	}
 
-	r.checkRehydratedAntiFlap(42)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &trialRunner{
+				trial:                     antiFlapTrial(),
+				lastPromotionAt:           mustFakeNow(),
+				stateDeniedSincePromotion: tc.stateDenied,
+				statusDroppedPromotion:    tc.statusDropped,
+			}
 
-	if len(r.lostStatePolls) != 1 || r.lostStatePolls[0] != 42 {
-		t.Errorf("stale rehydrate not recorded: %v", r.lostStatePolls)
-	}
-	got := violationsNamed(r.violations, "AntiFlapStateLost")
-	if len(got) != 1 {
-		t.Fatalf("want exactly one AntiFlapStateLost, got %v", r.violations)
-	}
-	if !strings.Contains(got[0].Detail, "accepting writes") {
-		t.Errorf("detail should explain why this is a regression, got %q", got[0].Detail)
-	}
+			r.checkRehydratedAntiFlap(42)
 
-	// Same stale rehydrate, but the store had an unhealed rejection: no
-	// violation, still recorded as lost.
-	r2 := &trialRunner{trial: trial, lastPromotionAt: mustFakeNow(), stateDeniedSincePromotion: true}
-	r2.checkRehydratedAntiFlap(42)
-	if len(r2.lostStatePolls) != 1 {
-		t.Errorf("lost record must still be recorded when the store was denied: %v", r2.lostStatePolls)
-	}
-	if got := violationsNamed(r2.violations, "AntiFlapStateLost"); len(got) > 0 {
-		t.Errorf("store was denied, so the loss is inherent: %v", got)
-	}
-
-	// Store denied, but the promoting process landed a status write that
-	// dropped the record: the status path could have preserved it, so the
-	// loss is a regression again.
-	r3 := &trialRunner{
-		trial: trial, lastPromotionAt: mustFakeNow(),
-		stateDeniedSincePromotion: true, statusDroppedPromotion: true,
-	}
-	r3.checkRehydratedAntiFlap(42)
-	got = violationsNamed(r3.violations, "AntiFlapStateLost")
-	if len(got) != 1 {
-		t.Fatalf("status path dropped the record while the store was denied — want a violation, got %v", r3.violations)
-	}
-	if !strings.Contains(got[0].Detail, "dropped the record") {
-		t.Errorf("detail should name the status-path drop, got %q", got[0].Detail)
+			// Recorded as lost in every case: that bookkeeping is what
+			// separates an inherent reset from a regression, so it must
+			// not depend on which path was down.
+			if len(r.lostStatePolls) != 1 || r.lostStatePolls[0] != 42 {
+				t.Errorf("stale rehydrate not recorded: %v", r.lostStatePolls)
+			}
+			got := violationsNamed(r.violations, "AntiFlapStateLost")
+			if len(got) != tc.wantViolations {
+				t.Fatalf("want %d AntiFlapStateLost, got %v", tc.wantViolations, r.violations)
+			}
+			if tc.wantDetail != "" && !strings.Contains(got[0].Detail, tc.wantDetail) {
+				t.Errorf("detail should explain why this is a regression (%q), got %q", tc.wantDetail, got[0].Detail)
+			}
+		})
 	}
 }
 
