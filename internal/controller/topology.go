@@ -242,7 +242,13 @@ type TopologyManager struct {
 	failover           *FailoverController
 	lastFailover       time.Time
 	lastFailoverTarget string
-	failoverCooldown   time.Duration
+	// lastFailoverLocal distinguishes a promotion observed by this process
+	// from a restored durable timestamp. A real local promotion is
+	// authoritative even after a backward clock step or a skewed restored
+	// record; after that, timestamp ordering protects concurrent local
+	// promotions from applying out of order. Protected by mu once running.
+	lastFailoverLocal bool
+	failoverCooldown  time.Duration
 
 	// failoverState persists lastFailover/lastFailoverTarget out of band
 	// from the CR status subresource, so a status-write outage that spans
@@ -546,6 +552,7 @@ func (tm *TopologyManager) SetLastFailoverTarget(target string) {
 // process intended to enforce).
 func (tm *TopologyManager) SetLastFailover(t time.Time) {
 	tm.lastFailover = t
+	tm.lastFailoverLocal = false
 }
 
 // SetFailoverStateRecorder wires the out-of-band anti-flap store. Call once
@@ -569,19 +576,20 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 	tm.promotionGtidExecuted = promotionGtid
 	tm.promotedSite = target
 	tm.promotedAt = now
-	// Only ever advance the anti-flap pair. A promotion recorded from the
-	// ordered-update goroutine and one recorded from the poll goroutine can
-	// interleave here with `now` sampled before the lock, so the older
-	// sample can be applied second; rolling lastFailover backwards would
-	// end the cooldown early, and renaming lastFailoverTarget would point
-	// split-brain fencing at the older promotion's site. The bookkeeping
-	// fields above stay last-writer-wins on purpose: they describe what
-	// this process just did, and gating them on a timestamp would let a
-	// future-dated rehydrated record silently drop a real promotion's
-	// recovery state.
-	if !tm.lastFailover.After(now) {
+	// A promotion observed by this process supersedes restored state even if
+	// the wall clock moved backward. Thereafter, only advance the anti-flap
+	// pair: the ordered-update and poll goroutines sample `now` before this
+	// lock, so an older local sample can arrive second. The bookkeeping
+	// fields above stay last-writer-wins because they describe what this
+	// process just did and feed old-primary recovery.
+	ignoredOlderLocal := false
+	currentFailover, currentTarget := tm.lastFailover, tm.lastFailoverTarget
+	if !tm.lastFailoverLocal || !tm.lastFailover.After(now) {
 		tm.lastFailover = now
 		tm.lastFailoverTarget = target
+		tm.lastFailoverLocal = true
+	} else {
+		ignoredOlderLocal = true
 	}
 	// Same monotone rule for the durable record.
 	if tm.desiredFailoverState == nil || !tm.desiredFailoverState.LastFailover.After(now) {
@@ -590,6 +598,11 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 		tm.failoverStateDirty = true
 	}
 	tm.mu.Unlock()
+	if ignoredOlderLocal {
+		tm.logger.Warn("ignored out-of-order local failover record",
+			"target", target, "lastFailover", now,
+			"currentTarget", currentTarget, "currentLastFailover", currentFailover)
+	}
 
 	tm.flushFailoverState(ctx, true)
 }
@@ -637,7 +650,12 @@ func (tm *TopologyManager) flushFailoverState(ctx context.Context, wait bool) {
 	}
 	write := *rec
 
-	writeCtx, cancel := context.WithTimeout(ctx, failoverStateWriteTimeout)
+	// A manager config restart cancels the poll context, but the status write
+	// uses the longer-lived runner context. Detach this already-started
+	// bookkeeping write as well so the two durable paths do not diverge only
+	// because one manager generation was replaced. The timeout still bounds
+	// shutdown work.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), failoverStateWriteTimeout)
 	defer cancel()
 	err := tm.failoverState.RecordFailoverState(writeCtx, write)
 	if err != nil {

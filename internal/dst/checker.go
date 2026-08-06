@@ -66,20 +66,20 @@ func (m *simChecker) mutate(kind EventKind, detail string, fn func() error) erro
 	// rather than only at points that happen to be healthy.
 	if m.c.crashNowLocked() {
 		if m.c.crashPreApply {
-			m.c.killOperatorLocked(m.s.name, kind, false)
 			m.c.event(m.s.name, kind, detail, "operatorDied")
+			m.c.killOperatorLocked(m.s.name, kind, false)
 			return errOperatorDead
 		}
 		// The statement reaches the server and applies; the reply never
 		// gets back to a process that no longer exists. Semantic rejections
 		// still reject — a dying operator does not get to violate MySQL.
 		if err := fn(); err != nil {
-			m.c.killOperatorLocked(m.s.name, kind, false)
 			m.c.event(m.s.name, kind, detail, "rejected:"+err.Error())
+			m.c.killOperatorLocked(m.s.name, kind, false)
 			return err
 		}
-		m.c.killOperatorLocked(m.s.name, kind, true)
 		m.c.event(m.s.name, kind, detail, "appliedThenOperatorDied")
+		m.c.killOperatorLocked(m.s.name, kind, true)
 		return errOperatorDead
 	}
 	if m.c.failMuts[m.s.name] > 0 {
@@ -152,12 +152,12 @@ func (m *simChecker) KillAppConnections(_ context.Context) (int, error) {
 	// splits the tallies on it.
 	if m.c.crashNowLocked() {
 		applied := !m.c.crashPreApply
-		m.c.killOperatorLocked(m.s.name, EvKillConns, applied)
 		outcome := "operatorDied"
 		if applied {
 			outcome = "appliedThenOperatorDied"
 		}
 		m.c.event(m.s.name, EvKillConns, "", outcome)
+		m.c.killOperatorLocked(m.s.name, EvKillConns, applied)
 		return 0, errOperatorDead
 	}
 	m.c.event(m.s.name, EvKillConns, "", "")

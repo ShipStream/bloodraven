@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -691,15 +692,12 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	return nil
 }
 
-// stopAll cancels all running topology managers.
 // restoreFailoverState wires the out-of-band anti-flap store and restores
 // failover history into a fresh TopologyManager, so recovery logic and the
 // anti-flap cooldown work across operator restarts — without this,
-// checkRecovery() returns early because lastFailoverTarget is empty after a
-// fresh TopologyManager, and the topology.go cooldown branch becomes a
-// no-op until the next failover stamps a fresh value, so a fast
-// restart-then-peer-failure could ping-pong promotions that the original
-// process would have blocked.
+// the topology.go cooldown branch becomes a no-op until the next failover
+// stamps a fresh value, so a fast restart-then-peer-failure could ping-pong
+// promotions that the original process would have blocked.
 //
 // Two durable copies exist and either can be the fresher one: status is
 // ahead when the annotation write was rejected, the annotations are ahead
@@ -713,19 +711,25 @@ func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1
 	// fails independently of the status subresource.
 	tm.SetFailoverStateRecorder(NewAnnotationFailoverStateRecorder(r.client, nn))
 
-	statusRecord := FailoverRecord{LastFailoverTarget: fg.Status.LastFailoverTarget}
-	if fg.Status.LastFailover != nil && !fg.Status.LastFailover.IsZero() {
-		statusRecord.LastFailover = fg.Status.LastFailover.Time
-	}
-	failoverRecord, fromAnnotations := statusRecord, false
-	if oob, err := FailoverRecordFromAnnotations(fg.GetAnnotations()); err != nil {
-		// Corrupt annotation: fall back to status rather than treating it as
-		// "no history", and say so loudly — a silently dropped record is the
-		// failure mode this whole path exists to prevent.
-		r.logger.Error("out-of-band anti-flap annotation unreadable; falling back to CR status",
-			"fg", nn, "error", err)
-	} else if newer := NewerFailoverRecord(statusRecord, oob); newer != statusRecord {
-		failoverRecord, fromAnnotations = newer, true
+	statusRecord := FailoverRecordFromStatus(fg)
+	failoverRecord, fromAnnotations, err := EffectiveFailoverRecord(fg, time.Now())
+	if err != nil {
+		var readErr *FailoverRecordReadError
+		if errors.As(err, &readErr) {
+			if readErr.Annotations != nil {
+				// Corrupt or unsafe annotation: fall back to the other valid
+				// copy rather than silently resetting or poisoning the cooldown.
+				r.logger.Error("out-of-band anti-flap annotation unreadable; falling back to CR status",
+					"fg", nn.String(), "error", readErr.Annotations)
+			}
+			if readErr.Status != nil {
+				r.logger.Error("CR status anti-flap state unreadable; ignoring unsafe copy",
+					"fg", nn.String(), "error", readErr.Status)
+			}
+		} else {
+			r.logger.Error("durable anti-flap state unreadable; ignoring unsafe copy",
+				"fg", nn.String(), "error", err)
+		}
 	}
 
 	// The two restores below are logged under distinct msg strings rather
@@ -737,24 +741,25 @@ func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1
 		tm.SetLastFailoverTarget(failoverRecord.LastFailoverTarget)
 		if fromAnnotations {
 			r.logger.Warn("restored lastFailoverTarget from out-of-band annotations",
-				"fg", nn, "target", failoverRecord.LastFailoverTarget,
+				"fg", nn.String(), "target", failoverRecord.LastFailoverTarget,
 				"statusTarget", statusRecord.LastFailoverTarget)
 		} else {
-			r.logger.Info("restored lastFailoverTarget from CR status", "fg", nn, "target", failoverRecord.LastFailoverTarget)
+			r.logger.Info("restored lastFailoverTarget from CR status", "fg", nn.String(), "target", failoverRecord.LastFailoverTarget)
 		}
 	}
 	if !failoverRecord.LastFailover.IsZero() {
 		tm.SetLastFailover(failoverRecord.LastFailover)
 		if fromAnnotations {
 			r.logger.Warn("restored lastFailover from out-of-band annotations",
-				"fg", nn, "lastFailover", failoverRecord.LastFailover,
+				"fg", nn.String(), "lastFailover", failoverRecord.LastFailover,
 				"statusLastFailover", statusRecord.LastFailover)
 		} else {
-			r.logger.Info("restored lastFailover from CR status", "fg", nn, "lastFailover", failoverRecord.LastFailover)
+			r.logger.Info("restored lastFailover from CR status", "fg", nn.String(), "lastFailover", failoverRecord.LastFailover)
 		}
 	}
 }
 
+// stopAll cancels all running topology managers.
 func (r *TopologyManagerRunner) stopAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()

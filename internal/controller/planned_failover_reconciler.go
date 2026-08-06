@@ -253,7 +253,7 @@ func (r *MysqlFailoverGroupReconciler) stampDeferred(ctx context.Context, fg *v1
 	lagWrap := metav1.Duration{Duration: maxLagWait}
 	drainWrap := metav1.Duration{Duration: drainTimeout}
 
-	retry := cooldownRetryAfter(fg)
+	retry := cooldownRetryAfter(fg, now)
 	var retryMeta *metav1.Time
 	if !retry.IsZero() {
 		m := metav1.NewTime(retry)

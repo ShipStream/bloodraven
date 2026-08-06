@@ -243,17 +243,18 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 		}
 	}
 
-	// Anti-flap cooldown. This is the rule the wishlist item explicitly
-	// calls out: the planned path mirrors the check in
-	// applyCrossSiteAction and does not bypass it.
+	// Anti-flap cooldown. This is the same effective durable record used by
+	// the automatic path after restart, so a status-write outage cannot make
+	// planned and emergency failover disagree about the cooldown.
 	cooldown := failoverCooldownFromSpec(fg)
-	if fg.Status.LastFailover != nil && !fg.Status.LastFailover.IsZero() {
-		elapsed := now.Sub(fg.Status.LastFailover.Time)
+	failoverRecord, _, _ := EffectiveFailoverRecord(fg, now)
+	if !failoverRecord.LastFailover.IsZero() {
+		elapsed := now.Sub(failoverRecord.LastFailover)
 		if elapsed < cooldown {
-			retryAfter := fg.Status.LastFailover.Time.Add(cooldown)
+			retryAfter := failoverRecord.LastFailover.Add(cooldown)
 			return PlannedFailoverReject, "CooldownActive", fmt.Errorf(
 				"planned-failover: anti-flap cooldown active (last failover at %s, cooldown %s, retry after %s)",
-				fg.Status.LastFailover.Time.UTC().Format(time.RFC3339),
+				failoverRecord.LastFailover.UTC().Format(time.RFC3339),
 				cooldown, retryAfter.UTC().Format(time.RFC3339))
 		}
 	}
@@ -311,11 +312,12 @@ func effectiveOnCooldown(fg *v1alpha1.MysqlFailoverGroup) string {
 // cooldownRetryAfter returns the earliest time after which the cooldown
 // check will accept a new planned failover. Returns the zero time when
 // no prior failover has been recorded.
-func cooldownRetryAfter(fg *v1alpha1.MysqlFailoverGroup) time.Time {
-	if fg.Status.LastFailover == nil || fg.Status.LastFailover.IsZero() {
+func cooldownRetryAfter(fg *v1alpha1.MysqlFailoverGroup, now time.Time) time.Time {
+	rec, _, _ := EffectiveFailoverRecord(fg, now)
+	if rec.LastFailover.IsZero() {
 		return time.Time{}
 	}
-	return fg.Status.LastFailover.Time.Add(failoverCooldownFromSpec(fg))
+	return rec.LastFailover.Add(failoverCooldownFromSpec(fg))
 }
 
 // plannedFailoverFencesSourcePrimary reports whether syncPodLabels

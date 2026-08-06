@@ -68,6 +68,10 @@ matches your expectations.
   window. A restart that had to fall back to the annotations logs
   `restored lastFailover from out-of-band annotations` at WARN, which is
   a direct signal that this group's status writes were failing.
+  This guarantee starts with operator builds that understand those
+  annotations. Rolling back to an older build makes the annotation copy
+  invisible again; do not rely on cooldown continuity across such a rollback
+  while status writes are failing.
 
 ## Placement and shared nodes
 

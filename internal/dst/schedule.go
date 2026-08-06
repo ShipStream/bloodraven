@@ -69,7 +69,7 @@ func (o Op) String() string {
 	if o.Peer != "" {
 		s += " peer=" + o.Peer
 	}
-	if o.N != 0 {
+	if o.N != 0 || o.Kind == OpCrashOperatorMid {
 		s += fmt.Sprintf(" n=%d", o.N)
 	}
 	if o.Kind == OpCrash {
@@ -132,8 +132,12 @@ func (t Trial) ActiveOps() []Op {
 
 func (t Trial) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "seed=%d sites=%d roles=%v priorities=%v cooldown=%ds history=%v warmup=%d healAt=%d polls=%d\n",
-		t.Seed, len(t.SiteNames), t.Roles, t.Priorities, t.CooldownSec, t.SeedHistory, t.WarmupPolls, t.HealAt, t.Polls)
+	seed := fmt.Sprintf("%d", t.Seed)
+	if t.Seed == 0 {
+		seed = "hand-built"
+	}
+	fmt.Fprintf(&b, "seed=%s sites=%d roles=%v priorities=%v cooldown=%ds history=%v warmup=%d healAt=%d polls=%d\n",
+		seed, len(t.SiteNames), t.Roles, t.Priorities, t.CooldownSec, t.SeedHistory, t.WarmupPolls, t.HealAt, t.Polls)
 	fmt.Fprintf(&b, "  sidecar: leasePolls=%d topologyAware=%v tickAfterPoll=%v\n",
 		t.SidecarLeasePolls, t.SidecarTopology, t.SidecarAfterPoll)
 	for i, op := range t.Ops {
@@ -266,7 +270,8 @@ func GenerateTrial(seed uint64) Trial {
 	}
 
 	for i := 0; i < numOps; i++ {
-		switch pickFaultKind(rng.IntN(100)) {
+		kind := pickFaultKind(rng.IntN(100))
+		switch kind {
 		case OpCrash:
 			site := pickSite()
 			start := at()
@@ -341,10 +346,12 @@ func GenerateTrial(seed uint64) Trial {
 			start := at()
 			ops = append(ops, Op{At: start, Kind: OpStateOutage})
 			pairedHeal(start, OpStateHeal, "", "")
-		default: // DNS outage
+		case OpDNSOutage:
 			start := at()
 			ops = append(ops, Op{At: start, Kind: OpDNSOutage})
 			pairedHeal(start, OpDNSHeal, "", "")
+		default:
+			panic(fmt.Sprintf("dst: faultWeights kind %q has no case in GenerateTrial", kind))
 		}
 	}
 

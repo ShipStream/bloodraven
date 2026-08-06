@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/scenarios"
@@ -364,6 +365,9 @@ func (r *resetter) clearMFGStatus(ctx context.Context, _ []v1alpha1.SiteSpec) er
 	}
 	if err != nil {
 		return err
+	}
+	if err := brcontroller.ClearFailoverState(ctx, r.k.Controller, types.NamespacedName{Namespace: r.namespace, Name: r.fg}); err != nil {
+		return fmt.Errorf("clear out-of-band failover history: %w", err)
 	}
 	status, err := json.Marshal(mfg.Status)
 	if err != nil {

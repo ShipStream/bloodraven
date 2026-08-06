@@ -358,8 +358,13 @@ func TestUpdateController_ConcurrentReject(t *testing.T) {
 		errCh <- uc.Execute(context.Background(), "dc1", "dc2", replicaMySQL, primaryMySQL, applyFirst)
 	}()
 
-	// Wait for first Execute to start
-	<-firstStarted
+	// Wait for first Execute to start, but fail locally rather than hanging
+	// the entire package if a future refactor stops reaching applyUpdate.
+	select {
+	case <-firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first Execute to reach applyUpdate")
+	}
 
 	// Try second Execute - should be rejected
 	err := uc.Execute(context.Background(), "dc1", "dc2", replicaMySQL, primaryMySQL,
@@ -370,8 +375,13 @@ func TestUpdateController_ConcurrentReject(t *testing.T) {
 
 	// Unblock first Execute
 	close(blockCh)
-	if err := <-errCh; err != nil {
-		t.Fatalf("first Execute returned error: %v", err)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("first Execute returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for first Execute to finish")
 	}
 }
 

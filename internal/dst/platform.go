@@ -84,13 +84,19 @@ func (d *simDNS) Record() (ip, site string, found bool) {
 
 // simTainter implements platform.NodeTainter, recording taint state.
 type simTainter struct {
+	c      *Cluster
 	mu     sync.Mutex
 	taints map[string]bool
 }
 
-func newSimTainter() *simTainter { return &simTainter{taints: make(map[string]bool)} }
+func newSimTainter(c *Cluster) *simTainter {
+	return &simTainter{c: c, taints: make(map[string]bool)}
+}
 
 func (t *simTainter) SetTaint(_ context.Context, selector, _ string, taint bool) error {
+	if t.c.OperatorDead() {
+		return errOperatorDead
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.taints[selector] = taint

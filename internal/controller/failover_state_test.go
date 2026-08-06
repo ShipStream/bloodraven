@@ -134,7 +134,12 @@ func TestFailoverRecordFromAnnotations(t *testing.T) {
 		{
 			name:        "target only",
 			annotations: map[string]string{LastFailoverTargetAnnotation: "beta"},
-			want:        FailoverRecord{LastFailoverTarget: "beta"},
+			wantErr:     true,
+		},
+		{
+			name:        "timestamp only",
+			annotations: map[string]string{LastFailoverAnnotation: stamp.Format(time.RFC3339Nano)},
+			wantErr:     true,
 		},
 		{
 			name: "full record",
@@ -147,9 +152,18 @@ func TestFailoverRecordFromAnnotations(t *testing.T) {
 		{
 			name: "non-UTC timestamp normalizes to UTC",
 			annotations: map[string]string{
-				LastFailoverAnnotation: stamp.In(time.FixedZone("x", 3600)).Format(time.RFC3339Nano),
+				LastFailoverAnnotation:       stamp.In(time.FixedZone("x", 3600)).Format(time.RFC3339Nano),
+				LastFailoverTargetAnnotation: "gamma",
 			},
-			want: FailoverRecord{LastFailover: stamp},
+			want: FailoverRecord{LastFailover: stamp, LastFailoverTarget: "gamma"},
+		},
+		{
+			name: "sub-second timestamp normalizes to status precision",
+			annotations: map[string]string{
+				LastFailoverAnnotation:       stamp.Add(500 * time.Millisecond).Format(time.RFC3339Nano),
+				LastFailoverTargetAnnotation: "gamma",
+			},
+			want: FailoverRecord{LastFailover: stamp, LastFailoverTarget: "gamma"},
 		},
 		{
 			name:        "corrupt timestamp is an error",
@@ -197,6 +211,59 @@ func TestNewerFailoverRecord(t *testing.T) {
 	}
 	if got := NewerFailoverRecord(FailoverRecord{}, late); got != late {
 		t.Errorf("empty status: got %+v, want %+v", got, late)
+	}
+}
+
+func TestEffectiveFailoverRecord(t *testing.T) {
+	now := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	statusStamp := metav1.NewTime(now.Add(-10 * time.Minute))
+	fg := &v1alpha1.MysqlFailoverGroup{
+		Spec: v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "alpha"}, {Name: "beta"}}},
+		Status: v1alpha1.MysqlFailoverGroupStatus{
+			LastFailover:       &statusStamp,
+			LastFailoverTarget: "alpha",
+		},
+		ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+			LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
+			LastFailoverTargetAnnotation: "beta",
+		}},
+	}
+
+	rec, fromAnnotations, err := EffectiveFailoverRecord(fg, now)
+	if err != nil || !fromAnnotations || rec.LastFailoverTarget != "beta" {
+		t.Fatalf("newer annotation: rec=%+v fromAnnotations=%v err=%v", rec, fromAnnotations, err)
+	}
+
+	fg.Annotations = map[string]string{LastFailoverAnnotation: now.Format(time.RFC3339)}
+	rec, fromAnnotations, err = EffectiveFailoverRecord(fg, now)
+	if err == nil || fromAnnotations || rec.LastFailoverTarget != "alpha" {
+		t.Fatalf("unpaired annotation fallback: rec=%+v fromAnnotations=%v err=%v", rec, fromAnnotations, err)
+	}
+
+	fg.Annotations = map[string]string{
+		LastFailoverAnnotation:       now.Add(24 * time.Hour).Format(time.RFC3339),
+		LastFailoverTargetAnnotation: "beta",
+	}
+	rec, fromAnnotations, err = EffectiveFailoverRecord(fg, now)
+	if err == nil || fromAnnotations || rec.LastFailoverTarget != "alpha" {
+		t.Fatalf("future annotation fallback: rec=%+v fromAnnotations=%v err=%v", rec, fromAnnotations, err)
+	}
+
+	fg.Annotations = map[string]string{
+		LastFailoverAnnotation:       now.Add(-time.Minute).Format(time.RFC3339),
+		LastFailoverTargetAnnotation: "not-in-spec",
+	}
+	rec, fromAnnotations, err = EffectiveFailoverRecord(fg, now)
+	if err == nil || fromAnnotations || rec.LastFailoverTarget != "alpha" {
+		t.Fatalf("unknown annotation target fallback: rec=%+v fromAnnotations=%v err=%v", rec, fromAnnotations, err)
+	}
+
+	futureStatus := metav1.NewTime(now.Add(48 * time.Hour))
+	fg.Status.LastFailover = &futureStatus
+	fg.Status.LastFailoverTarget = "alpha"
+	rec, _, err = EffectiveFailoverRecord(fg, now)
+	if err == nil || !rec.IsZero() {
+		t.Fatalf("two future copies: rec=%+v err=%v", rec, err)
 	}
 }
 
@@ -380,6 +447,25 @@ func TestRecordFailover_IgnoresOlderPromotion(t *testing.T) {
 	}
 }
 
+func TestRecordFailover_LocalPromotionSupersedesRestoredFutureRecord(t *testing.T) {
+	stub := &stubFailoverRecorder{}
+	tm := failoverStateTestManager(stub)
+	now := tm.clock.Now()
+	tm.SetLastFailover(now.Add(time.Hour))
+	tm.SetLastFailoverTarget("alpha")
+
+	tm.recordFailover(context.Background(), now, "beta", "")
+
+	if !tm.lastFailover.Equal(now) || tm.lastFailoverTarget != "beta" || !tm.lastFailoverLocal {
+		t.Fatalf("local promotion did not supersede restored record: last=%v target=%q local=%v",
+			tm.lastFailover, tm.lastFailoverTarget, tm.lastFailoverLocal)
+	}
+	last, ok := stub.lastWrite()
+	if !ok || !last.LastFailover.Equal(now) || last.LastFailoverTarget != "beta" {
+		t.Fatalf("durable record = %+v, want beta @ %v", last, now)
+	}
+}
+
 // TestPersistFailoverState_EqualTimestampSupersede: under a coarse clock two
 // promotions can share an instant. A supersede that changes only the target
 // must keep the store dirty when it lands mid-write, or the newer target is
@@ -508,8 +594,34 @@ func TestAnnotationFailoverStateRecorder_MissingObject(t *testing.T) {
 	scheme := failoverStateScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	rec := NewAnnotationFailoverStateRecorder(c, types.NamespacedName{Namespace: "bloodraven", Name: "gone"})
-	err := rec.RecordFailoverState(context.Background(), FailoverRecord{LastFailoverTarget: "beta"})
+	err := rec.RecordFailoverState(context.Background(), FailoverRecord{LastFailover: time.Now(), LastFailoverTarget: "beta"})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("want NotFound, got %v", err)
+	}
+}
+
+func TestClearFailoverStateDeletesOnlyOwnedAnnotations(t *testing.T) {
+	scheme := failoverStateScheme(t)
+	fg := failoverStateFG()
+	fg.Annotations[LastFailoverAnnotation] = "2030-01-01T00:00:00Z"
+	fg.Annotations[LastFailoverTargetAnnotation] = "beta"
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(fg).Build()
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+
+	if err := ClearFailoverState(context.Background(), c, nn); err != nil {
+		t.Fatalf("ClearFailoverState: %v", err)
+	}
+	var got v1alpha1.MysqlFailoverGroup
+	if err := c.Get(context.Background(), nn, &got); err != nil {
+		t.Fatalf("get fg: %v", err)
+	}
+	if _, ok := got.Annotations[LastFailoverAnnotation]; ok {
+		t.Errorf("%s survived clear", LastFailoverAnnotation)
+	}
+	if _, ok := got.Annotations[LastFailoverTargetAnnotation]; ok {
+		t.Errorf("%s survived clear", LastFailoverTargetAnnotation)
+	}
+	if got.Annotations["unrelated.example.com/keep-me"] != "yes" {
+		t.Errorf("clear clobbered unrelated annotations: %v", got.Annotations)
 	}
 }

@@ -117,6 +117,12 @@ operator acts on are:
 - `bloodraven.shipstream.io/dragonfly-snapshot-upgrade=<image>` — Runs
   the Dragonfly snapshot-restore upgrade workflow when
   `spec.dragonfly.snapshot` is configured.
+- `bloodraven.shipstream.io/last-failover` and
+  `bloodraven.shipstream.io/last-failover-target` — Operator-owned durable
+  anti-flap history. A writer can extend or clear the effective cooldown and
+  change the remembered fencing target. The operator rejects malformed,
+  unpaired, unknown-site, and implausibly future-dated values, but these keys
+  must still be protected from manual or third-party mutation.
 
 An attacker with `patch mysqlfailovergroups` in the target namespace
 can therefore cause a data wipe of one site (bounded by the GTID

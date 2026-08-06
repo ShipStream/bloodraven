@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -41,6 +42,15 @@ func TestDeterminism(t *testing.T) {
 			}
 			if fmt.Sprint(a.PromotionPolls) != fmt.Sprint(b.PromotionPolls) {
 				t.Fatalf("seed %d (%s): promotion polls differ: %v vs %v", seed, tc.name, a.PromotionPolls, b.PromotionPolls)
+			}
+			if !reflect.DeepEqual(a.SelfFenced, b.SelfFenced) {
+				t.Fatalf("seed %d (%s): self-fenced sites differ: %v vs %v", seed, tc.name, a.SelfFenced, b.SelfFenced)
+			}
+			if !reflect.DeepEqual(a.LostStatePolls, b.LostStatePolls) {
+				t.Fatalf("seed %d (%s): lost-state polls differ: %v vs %v", seed, tc.name, a.LostStatePolls, b.LostStatePolls)
+			}
+			if !reflect.DeepEqual(a.FinalFailoverRecord, b.FinalFailoverRecord) {
+				t.Fatalf("seed %d (%s): final failover records differ: %+v vs %+v", seed, tc.name, a.FinalFailoverRecord, b.FinalFailoverRecord)
 			}
 		}
 	}

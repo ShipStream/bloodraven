@@ -21,20 +21,28 @@ const dualWritableGrace = 13
 // error).
 func effectiveOutcome(o string) bool { return o == "" || o == "ambiguous" }
 
+// observedOutcome includes a statement that reached MySQL before the
+// operator died. It is suitable for physical writable/fencing invariants,
+// but not for anti-flap bookkeeping: the dead Execute path could not reach
+// recordFailover after receiving this outcome.
+func observedOutcome(o string) bool {
+	return effectiveOutcome(o) || o == "appliedThenOperatorDied"
+}
+
 // promotionTarget returns the site a failover-style promotion landed on this
 // poll, if any. The signature is RESET REPLICA ALL plus SET read_only=OFF
 // taking effect on the same site in the same poll — that is
 // FailoverController.Execute's fingerprint, and distinguishes a promotion
 // from a primary re-assert (which never resets replication metadata).
-func promotionTarget(events []Event) (string, int) {
+func promotionTarget(events []Event, outcome func(string) bool) (string, int) {
 	reset := map[string]bool{}
 	for _, e := range events {
-		if e.Kind == EvResetReplica && effectiveOutcome(e.Outcome) {
+		if e.Kind == EvResetReplica && outcome(e.Outcome) {
 			reset[e.Site] = true
 		}
 	}
 	for _, e := range events {
-		if e.Kind == EvSetRO && e.Detail == "on=false" && effectiveOutcome(e.Outcome) && reset[e.Site] {
+		if e.Kind == EvSetRO && e.Detail == "on=false" && outcome(e.Outcome) && reset[e.Site] {
 			return e.Site, e.Seq
 		}
 	}
@@ -42,15 +50,24 @@ func promotionTarget(events []Event) (string, int) {
 }
 
 // lastKnownTarget is the operator's current in-memory failover target: set by
-// an observed promotion, reset to the persisted CR value across a restart.
+// an observed promotion, then rehydrated from the newer durable copy across a
+// restart just like the production runner.
 func (r *trialRunner) lastKnownTarget() string {
 	if r.currentTarget != "" {
 		return r.currentTarget
 	}
+	statusRecord := controller.FailoverRecord{}
 	if r.persisted != nil {
-		return r.persisted.LastFailoverTarget
+		statusRecord = controller.FailoverRecord{
+			LastFailover:       r.persisted.LastFailover,
+			LastFailoverTarget: r.persisted.LastFailoverTarget,
+		}
 	}
-	return ""
+	oobRecord := controller.FailoverRecord{}
+	if r.persistedFailover != nil {
+		oobRecord = *r.persistedFailover
+	}
+	return controller.NewerFailoverRecord(statusRecord, oobRecord).LastFailoverTarget
 }
 
 // splitBrainResolvable reports whether the operator has an automatic path out
@@ -124,8 +141,11 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		}
 	}
 
-	// Promotion detection + associated invariants.
-	if target, grantSeq := promotionTarget(events); target != "" {
+	// A promotion for anti-flap bookkeeping must have returned far enough for
+	// Execute to reach recordFailover. A writable grant that applied just
+	// before process death is still visible to the physical ordering
+	// invariants below, but deliberately does not arm durable-state checks.
+	if target, _ := promotionTarget(events, effectiveOutcome); target != "" {
 		r.promotionPolls = append(r.promotionPolls, p)
 		r.currentTarget = target
 		// The clock has not advanced for this poll yet, so Now() is the
@@ -134,7 +154,11 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 		r.lastPromotionAt = r.clk.Now()
 		r.statusDroppedPromotion = false
 		r.promotionRestarts = len(r.restartPolls)
+	}
 
+	// Promotion detection for physical writable/fencing invariants includes
+	// a grant that applied immediately before the operator died.
+	if target, grantSeq := promotionTarget(events, observedOutcome); target != "" {
 		// I: the operator must never promote while it observes another
 		// writable site, unless it fenced that site in the same cycle.
 		// "Fenced" deliberately counts an ATTEMPT with any outcome: fencing
@@ -188,7 +212,7 @@ func (r *trialRunner) checkPoll(p int, st controller.StatusResponse, events []Ev
 			}
 		}
 	}
-	if writable >= 2 && allReachable && r.splitBrainResolvable(truth) {
+	if !r.cluster.OperatorDead() && writable >= 2 && allReachable && r.splitBrainResolvable(truth) {
 		r.dualStreak++
 		if r.dualStreak > dualWritableGrace && !r.dualFlagged {
 			r.dualFlagged = true

@@ -4,8 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,6 +67,20 @@ func TestAssertHealthyBaselineRejectsOrderedUpdateInProgress(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ordered update still in phase") {
 		t.Fatalf("error %q does not mention ordered update phase", err)
+	}
+}
+
+func TestAssertHealthyBaselineUsesAnnotationFailoverRecord(t *testing.T) {
+	mfg := testBaselineMFG(false)
+	mfg.Annotations = map[string]string{
+		brcontroller.LastFailoverAnnotation:       time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		brcontroller.LastFailoverTargetAnnotation: "pdx",
+	}
+	env := testScenarioEnv(t, mfg)
+
+	err := AssertHealthyBaseline(context.Background(), env)
+	if err == nil || !strings.Contains(err.Error(), "anti-flap cooldown active") {
+		t.Fatalf("annotation-only cooldown error = %v", err)
 	}
 }
 

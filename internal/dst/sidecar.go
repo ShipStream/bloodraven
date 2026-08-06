@@ -40,7 +40,6 @@ import (
 // simSidecar is one site's fencing actor.
 type simSidecar struct {
 	site    string
-	cluster *Cluster
 	monitor *sidecar.FencingMonitor
 	cache   *sidecar.TopologyCache
 }
@@ -58,9 +57,8 @@ func (r *trialRunner) buildSidecars() {
 
 func (r *trialRunner) newSidecar(site string) *simSidecar {
 	s := &simSidecar{
-		site:    site,
-		cluster: r.cluster,
-		cache:   &sidecar.TopologyCache{},
+		site:  site,
+		cache: &sidecar.TopologyCache{},
 	}
 
 	peers := make([]string, 0, len(r.trial.SiteNames)-1)
@@ -90,12 +88,21 @@ func (r *trialRunner) newSidecar(site string) *simSidecar {
 	return s
 }
 
-// tickSidecars runs one fencing check per live site, in declared site order
-// so the sequence is deterministic. A crashed site runs nothing; the first
-// tick after it comes back runs against a freshly constructed monitor,
-// matching a restarted sidecar container.
+// tickSidecars runs one fencing check per live site. The first site rotates
+// deterministically each tick, covering both sides of peer-relay ordering
+// without introducing scheduler nondeterminism. A crashed site runs nothing;
+// the first tick after it comes back uses a fresh monitor, matching a
+// restarted sidecar container.
 func (r *trialRunner) tickSidecars(ctx context.Context) {
-	for i, name := range r.trial.SiteNames {
+	n := len(r.trial.SiteNames)
+	if n == 0 {
+		return
+	}
+	start := (int(r.trial.Seed%uint64(n)) + r.sidecarTick) % n
+	r.sidecarTick++
+	for offset := 0; offset < n; offset++ {
+		i := (start + offset) % n
+		name := r.trial.SiteNames[i]
 		if r.cluster.SiteCrashed(name) {
 			// Mark it for reconstruction on return.
 			r.sidecars[i] = nil
@@ -238,25 +245,37 @@ func (t *simTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return nil, errSimUnreachable
 		}
 		if err := t.serveOperator(rec, req.URL); err != nil {
-			return nil, err
+			return nil, t.modelError(err)
 		}
 	default:
 		peer := siteFromSidecarAddr(req.URL.Host)
 		// byName is built once in NewCluster and never mutated, so this
 		// membership check needs no lock.
 		if _, ok := t.r.cluster.byName[peer]; !ok {
-			return nil, fmt.Errorf("dst: sidecar request to unknown host %q", req.URL.Host)
+			return nil, t.modelError(fmt.Errorf("dst: sidecar request to unknown host %q", req.URL.Host))
 		}
 		if !t.peerReachable(peer) {
 			return nil, errSimUnreachable
 		}
 		if err := t.servePeer(rec, req.URL, peer); err != nil {
-			return nil, err
+			return nil, t.modelError(err)
 		}
 	}
 	resp := rec.result()
 	resp.Request = req
 	return resp, nil
+}
+
+// modelError promotes a transport/schema gap to a harness violation before
+// returning it to FencingMonitor. The monitor correctly treats HTTP errors as
+// reachability failures, but an unmodeled endpoint must fail the trial loudly
+// instead of masquerading as an ordinary partition.
+func (t *simTransport) modelError(err error) error {
+	t.r.cluster.mu.Lock()
+	poll := t.r.cluster.poll
+	t.r.cluster.mu.Unlock()
+	t.r.violations = append(t.r.violations, Violation{Invariant: "ModelHole", Poll: poll, Detail: err.Error()})
+	return err
 }
 
 // operatorReachable: the sidecar talks to the operator over the same network
@@ -319,8 +338,8 @@ func (t *simTransport) servePeer(w *simResponse, u *url.URL, peer string) error 
 	case "/peer/active-site":
 		sc := t.r.sidecarFor(peer)
 		if sc == nil {
-			// The peer's container is down; nothing to relay. Its /peer/ping
-			// would not have answered either, so this is belt and braces.
+			// The peer disappeared between the reachability check and topology
+			// lookup; return no relay rather than dereferencing a stale actor.
 			w.WriteHeader(http.StatusNoContent)
 			return nil
 		}

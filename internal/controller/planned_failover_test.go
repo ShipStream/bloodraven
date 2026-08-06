@@ -192,6 +192,28 @@ func TestValidatePlannedFailover_CooldownExpired(t *testing.T) {
 	}
 }
 
+func TestValidatePlannedFailover_CooldownUsesNewerAnnotationRecord(t *testing.T) {
+	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
+	cooldown := 5 * time.Minute
+	fg.Spec.FailoverCooldown = &metav1.Duration{Duration: cooldown}
+	now := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	staleStatus := metav1.NewTime(now.Add(-10 * time.Minute))
+	fg.Status.LastFailover = &staleStatus
+	fg.Status.LastFailoverTarget = "iad"
+	fg.Annotations = map[string]string{
+		LastFailoverAnnotation:       now.Add(-30 * time.Second).Format(time.RFC3339),
+		LastFailoverTargetAnnotation: "pdx",
+	}
+
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, now, false)
+	if result != PlannedFailoverReject || reason != "CooldownActive" {
+		t.Fatalf("expected annotation-aware cooldown rejection, got result=%v reason=%q err=%v", result, reason, err)
+	}
+	if want := now.Add(-30 * time.Second).Add(cooldown); !cooldownRetryAfter(fg, now).Equal(want) {
+		t.Errorf("cooldown retry = %v, want %v", cooldownRetryAfter(fg, now), want)
+	}
+}
+
 func TestValidatePlannedFailover_ConcurrentRestoreRejected(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{

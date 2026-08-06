@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	brcontroller "github.com/shipstream/bloodraven/internal/controller"
 )
 
 const statusUsage = `Show health of one or every MysqlFailoverGroup in a namespace.
@@ -155,12 +156,12 @@ func printGroupStatus(out io.Writer, fg *v1alpha1.MysqlFailoverGroup, format str
 	if fg.Spec.DNS.Hostname != "" {
 		fmt.Fprintf(out, "  DNS: %s (TTL %ds)\n", fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL)
 	}
-	if fg.Status.LastFailover != nil {
-		target := fg.Status.LastFailoverTarget
+	if failoverRecord, _, _ := brcontroller.EffectiveFailoverRecord(fg, time.Now()); !failoverRecord.LastFailover.IsZero() {
+		target := failoverRecord.LastFailoverTarget
 		if target == "" {
 			target = "?"
 		}
-		fmt.Fprintf(out, "  Last failover: %s ago, target %s\n", age(fg.Status.LastFailover.Time), target)
+		fmt.Fprintf(out, "  Last failover: %s ago, target %s\n", age(failoverRecord.LastFailover), target)
 	}
 	if fg.Status.UpdatePhase != "" {
 		fmt.Fprintf(out, "  Update phase: %s\n", fg.Status.UpdatePhase)

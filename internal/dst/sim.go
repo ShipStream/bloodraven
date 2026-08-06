@@ -752,12 +752,16 @@ var errOperatorDead = errors.New("dst: operator process died mid-execute")
 // ArmOperatorCrash schedules the operator's death on the nth subsequent
 // mutation (n == 0 kills on the very next one). preApply kills before the
 // statement reaches the server rather than after it applied.
-func (c *Cluster) ArmOperatorCrash(n int, preApply bool) {
+func (c *Cluster) ArmOperatorCrash(n int, preApply bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.operatorDead || c.crashCountdown >= 0 {
+		return false
+	}
 	c.crashCountdown = n
 	c.crashPreApply = preApply
 	c.event("", EvOperatorArm, fmt.Sprintf("afterMutations=%d preApply=%v", n, preApply), "")
+	return true
 }
 
 // ReviveOperator clears the death flag; the harness calls it when it builds

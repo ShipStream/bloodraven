@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -38,6 +39,11 @@ const (
 	// failing. Matching precision makes the common case an exact tie.
 	LastFailoverAnnotation       = "bloodraven.shipstream.io/last-failover"
 	LastFailoverTargetAnnotation = "bloodraven.shipstream.io/last-failover-target"
+
+	// FailoverClockSkewGrace bounds how far either durable timestamp may be
+	// ahead of the reader's clock. A larger jump is unsafe to install because
+	// the cooldown gate treats negative elapsed time as still active.
+	FailoverClockSkewGrace = 5 * time.Minute
 )
 
 // failoverStateWriteTimeout bounds one out-of-band write. It runs inline on
@@ -95,13 +101,24 @@ func NewAnnotationFailoverStateRecorder(c client.Client, nn types.NamespacedName
 // planned-failover, and keyring-rotation flows all write annotations on this
 // same object.
 func (s *annotationFailoverStateRecorder) RecordFailoverState(ctx context.Context, rec FailoverRecord) error {
-	annotations := map[string]string{
-		LastFailoverTargetAnnotation: rec.LastFailoverTarget,
-	}
+	annotations := map[string]any{}
 	if rec.LastFailover.IsZero() {
-		annotations[LastFailoverAnnotation] = ""
+		if rec.LastFailoverTarget != "" {
+			return fmt.Errorf("failover-state record has target %q without a timestamp", rec.LastFailoverTarget)
+		}
+		// JSON merge patch deletes map keys only when their values are null.
+		// Empty strings leave the annotations present and can let a later
+		// status-only clear be resurrected by the out-of-band copy.
+		annotations[LastFailoverAnnotation] = nil
+		annotations[LastFailoverTargetAnnotation] = nil
 	} else {
-		annotations[LastFailoverAnnotation] = failoverStampFormat(rec.LastFailover)
+		encoded, err := FailoverRecordAnnotations(rec)
+		if err != nil {
+			return err
+		}
+		for key, value := range encoded {
+			annotations[key] = value
+		}
 	}
 
 	patch, err := json.Marshal(map[string]any{
@@ -117,10 +134,34 @@ func (s *annotationFailoverStateRecorder) RecordFailoverState(ctx context.Contex
 	return s.client.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patch))
 }
 
+// FailoverRecordAnnotations encodes a non-zero record exactly as the
+// production annotation writer does. The simulator uses the same helper so
+// its durable-store seam exercises the real precision and parsing contract.
+func FailoverRecordAnnotations(rec FailoverRecord) (map[string]string, error) {
+	if rec.LastFailover.IsZero() {
+		return nil, fmt.Errorf("cannot encode a zero failover record; use ClearFailoverState to delete it")
+	}
+	if rec.LastFailoverTarget == "" {
+		return nil, fmt.Errorf("failover-state record has timestamp %s without a target", rec.LastFailover.UTC().Format(time.RFC3339Nano))
+	}
+	return map[string]string{
+		LastFailoverAnnotation:       failoverStampFormat(rec.LastFailover),
+		LastFailoverTargetAnnotation: rec.LastFailoverTarget,
+	}, nil
+}
+
+// ClearFailoverState deletes both out-of-band anti-flap annotations. Callers
+// that intentionally clear status.lastFailover and status.lastFailoverTarget
+// must call this while the operator is stopped, otherwise the running manager
+// can immediately repopulate either durable copy.
+func ClearFailoverState(ctx context.Context, c client.Client, nn types.NamespacedName) error {
+	return NewAnnotationFailoverStateRecorder(c, nn).RecordFailoverState(ctx, FailoverRecord{})
+}
+
 // failoverStampFormat renders a promotion instant for the annotation, at the
 // same UTC second precision metav1.Time gives status.lastFailover.
 func failoverStampFormat(t time.Time) string {
-	return t.UTC().Truncate(time.Second).Format(time.RFC3339)
+	return t.UTC().Format(time.RFC3339)
 }
 
 // FailoverRecordFromAnnotations reads the out-of-band anti-flap record off a
@@ -128,8 +169,8 @@ func failoverStampFormat(t time.Time) string {
 // (no history); an unparseable one is an error, because silently treating
 // corrupt state as "no history" is what resets the cooldown.
 //
-// Parsing accepts RFC3339Nano so a record written by an older build (which
-// stamped nanoseconds) still reads back correctly on upgrade.
+// Parsing accepts RFC3339Nano defensively, but normalizes it to the same
+// second precision as the write path and metav1.Time status copy.
 func FailoverRecordFromAnnotations(annotations map[string]string) (FailoverRecord, error) {
 	var rec FailoverRecord
 	if len(annotations) == 0 {
@@ -138,14 +179,91 @@ func FailoverRecordFromAnnotations(annotations map[string]string) (FailoverRecor
 	rec.LastFailoverTarget = annotations[LastFailoverTargetAnnotation]
 	raw := annotations[LastFailoverAnnotation]
 	if raw == "" {
+		if rec.LastFailoverTarget != "" {
+			return FailoverRecord{}, fmt.Errorf("%s annotation is set without %s", LastFailoverTargetAnnotation, LastFailoverAnnotation)
+		}
 		return rec, nil
+	}
+	if rec.LastFailoverTarget == "" {
+		return FailoverRecord{}, fmt.Errorf("%s annotation is set without %s", LastFailoverAnnotation, LastFailoverTargetAnnotation)
 	}
 	t, err := time.Parse(time.RFC3339Nano, raw)
 	if err != nil {
 		return FailoverRecord{}, fmt.Errorf("parse %s annotation %q: %w", LastFailoverAnnotation, raw, err)
 	}
-	rec.LastFailover = t.UTC()
+	rec.LastFailover = t.UTC().Truncate(time.Second)
 	return rec, nil
+}
+
+// FailoverRecordFromStatus reads the status-subresource copy of the durable
+// anti-flap record.
+func FailoverRecordFromStatus(fg *v1alpha1.MysqlFailoverGroup) FailoverRecord {
+	rec := FailoverRecord{LastFailoverTarget: fg.Status.LastFailoverTarget}
+	if fg.Status.LastFailover != nil && !fg.Status.LastFailover.IsZero() {
+		rec.LastFailover = fg.Status.LastFailover.Time.UTC().Truncate(time.Second)
+	}
+	return rec
+}
+
+// FailoverRecordReadError reports invalid durable copies while allowing the
+// caller to continue with any valid copy that remains.
+type FailoverRecordReadError struct {
+	Status      error
+	Annotations error
+}
+
+func (e *FailoverRecordReadError) Error() string {
+	if joined := errors.Join(e.Status, e.Annotations); joined != nil {
+		return joined.Error()
+	}
+	return ""
+}
+
+// EffectiveFailoverRecord returns the newest safe durable copy. Malformed,
+// unpaired, or implausibly future-dated copies are ignored independently so
+// one bad path cannot poison the cooldown or discard the other good path.
+func EffectiveFailoverRecord(fg *v1alpha1.MysqlFailoverGroup, now time.Time) (FailoverRecord, bool, error) {
+	statusRecord := FailoverRecordFromStatus(fg)
+	oobRecord, oobErr := FailoverRecordFromAnnotations(fg.GetAnnotations())
+	readErr := &FailoverRecordReadError{Annotations: oobErr}
+
+	limit := now.Add(FailoverClockSkewGrace)
+	if !statusRecord.LastFailover.IsZero() && statusRecord.LastFailover.After(limit) {
+		readErr.Status = fmt.Errorf("status.lastFailover %s is more than %s ahead of local time %s",
+			statusRecord.LastFailover.Format(time.RFC3339), FailoverClockSkewGrace, now.UTC().Format(time.RFC3339))
+		statusRecord = FailoverRecord{}
+	}
+	if oobErr == nil && !oobRecord.LastFailover.IsZero() && oobRecord.LastFailover.After(limit) {
+		readErr.Annotations = fmt.Errorf("%s annotation %s is more than %s ahead of local time %s",
+			LastFailoverAnnotation, oobRecord.LastFailover.Format(time.RFC3339), FailoverClockSkewGrace, now.UTC().Format(time.RFC3339))
+		oobRecord = FailoverRecord{}
+	}
+	if statusRecord.LastFailoverTarget != "" && !failoverTargetInSpec(fg, statusRecord.LastFailoverTarget) {
+		readErr.Status = errors.Join(readErr.Status,
+			fmt.Errorf("status.lastFailoverTarget %q is not present in spec.sites", statusRecord.LastFailoverTarget))
+		statusRecord = FailoverRecord{}
+	}
+	if oobErr == nil && oobRecord.LastFailoverTarget != "" && !failoverTargetInSpec(fg, oobRecord.LastFailoverTarget) {
+		readErr.Annotations = errors.Join(readErr.Annotations,
+			fmt.Errorf("%s annotation target %q is not present in spec.sites", LastFailoverTargetAnnotation, oobRecord.LastFailoverTarget))
+		oobRecord = FailoverRecord{}
+	}
+
+	winner := NewerFailoverRecord(statusRecord, oobRecord)
+	fromAnnotations := winner != statusRecord
+	if readErr.Status == nil && readErr.Annotations == nil {
+		return winner, fromAnnotations, nil
+	}
+	return winner, fromAnnotations, readErr
+}
+
+func failoverTargetInSpec(fg *v1alpha1.MysqlFailoverGroup, target string) bool {
+	for i := range fg.Spec.Sites {
+		if fg.Spec.Sites[i].Name == target {
+			return true
+		}
+	}
+	return false
 }
 
 // NewerFailoverRecord returns whichever record was stamped later.

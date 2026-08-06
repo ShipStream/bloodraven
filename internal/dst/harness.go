@@ -86,6 +86,10 @@ type trialRunner struct {
 	// sidecars are the per-site fencing actors (sidecar.go). Each wraps a
 	// real sidecar.FencingMonitor.
 	sidecars []*simSidecar
+	// sidecarTick rotates deterministic sidecar execution order so peer-relay
+	// races are sampled from every site first, rather than permanently
+	// privileging declaration order.
+	sidecarTick int
 
 	promotionPolls []int
 	restartPolls   []int
@@ -131,12 +135,22 @@ type trialRunner struct {
 type simFailoverStore struct{ r *trialRunner }
 
 func (s *simFailoverStore) RecordFailoverState(_ context.Context, rec controller.FailoverRecord) error {
+	if s.r.cluster.OperatorDead() {
+		return errOperatorDead
+	}
 	if s.r.cluster.StateDenied() {
 		s.r.cluster.NoteFailoverStateWrite(rec.LastFailoverTarget, true)
 		s.r.stateDeniedSincePromotion = true
 		return errors.New("mysqlfailovergroups patch forbidden (sim: outage)")
 	}
-	cp := rec
+	annotations, err := controller.FailoverRecordAnnotations(rec)
+	if err != nil {
+		return err
+	}
+	cp, err := controller.FailoverRecordFromAnnotations(annotations)
+	if err != nil {
+		return err
+	}
 	s.r.persistedFailover = &cp
 	s.r.stateDeniedSincePromotion = false
 	s.r.cluster.NoteFailoverStateWrite(rec.LastFailoverTarget, false)
@@ -197,7 +211,7 @@ func (r *trialRunner) setup(capture bool) {
 	r.cluster = NewCluster(specs, 100)
 	r.cluster.SetCapture(capture)
 	r.dns = newSimDNS(r.cluster)
-	r.tainter = newSimTainter()
+	r.tainter = newSimTainter(r.cluster)
 	r.clk = clock.NewFakeClock(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
 	r.hub = platform.NewHub(r.logger)
 
@@ -467,8 +481,9 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 		// operator issues fewer mutations than the countdown, the arm
 		// carries into later polls — which is the point: the crash lands
 		// where the operator happens to be, not where the schedule is.
-		r.cluster.ArmOperatorCrash(op.N, op.PreApply)
-		r.pendingCrashDown = op.Down
+		if r.cluster.ArmOperatorCrash(op.N, op.PreApply) {
+			r.pendingCrashDown = op.Down
+		}
 	case OpAmbiguousMuts:
 		r.cluster.AddAmbiguousMutations(op.Site, op.N)
 	case OpFailMuts:

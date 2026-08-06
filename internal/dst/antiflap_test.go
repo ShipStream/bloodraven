@@ -101,6 +101,30 @@ func TestAntiFlapSurvivesStatusOutageAcrossRestart(t *testing.T) {
 	}
 }
 
+// TestAntiFlapSurvivesStateOutageAcrossRestart pins the complementary
+// durability quadrant: when the annotation path is denied, CR status alone
+// must carry the cooldown into the replacement process.
+func TestAntiFlapSurvivesStateOutageAcrossRestart(t *testing.T) {
+	trial := antiFlapTrial(Op{At: 9, Kind: OpStateOutage})
+	r := RunTrial(trial, true, nil)
+
+	if len(r.PromotionPolls) == 0 {
+		t.Fatalf("trial never promoted; trial:\n%s", trial)
+	}
+	if got := violationsNamed(r.Violations, "AntiFlapStateLost"); len(got) > 0 {
+		t.Errorf("restart lost the status-backed anti-flap record: %v", got)
+	}
+	if got := violationsNamed(r.Violations, "CooldownViolated"); len(got) > 0 {
+		t.Errorf("status copy did not enforce cooldown across restart: %v", got)
+	}
+	if len(r.LostStatePolls) > 0 {
+		t.Errorf("restart at polls %v came up without the status record", r.LostStatePolls)
+	}
+	if r.FinalSnapshot == nil || r.FinalSnapshot.LastFailoverTarget == "" {
+		t.Fatal("status path holds no failover record after promotion")
+	}
+}
+
 // TestAntiFlapLostWhenEveryDurablePathIsDenied pins the residue: with BOTH
 // durable paths rejecting writes, nothing can carry the cooldown across a
 // restart, and the harness must classify that as inherent rather than as a
