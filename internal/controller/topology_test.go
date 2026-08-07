@@ -1315,6 +1315,45 @@ func TestDetectEmptySite_UserSchemaBlocksFreshInitializedReplica(t *testing.T) {
 	}
 }
 
+// TestDetectEmptySite_SharedHistorySchemalessNotEmpty guards the residual
+// #130 path: a returning member that shares the cluster's GTID UUIDs but has
+// no user schemas must not be auto-cloned. Without the sharesHistory gate,
+// detectEmptySite would hand it to clone on the same poll that
+// initiateRecovery correctly RecoveryBlocked it — wiping the only copy of
+// divergent transactions.
+func TestDetectEmptySite_SharedHistorySchemalessNotEmpty(t *testing.T) {
+	clusterGTID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-12"
+	noSchemas := false
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: clusterGTID}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: clusterGTID + ":13-15", hasUserSchemas: &noSchemas}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateReadOnly
+
+	donor, empty := tm.detectEmptySite(context.Background())
+	if donor != "" || empty != "" {
+		t.Errorf("shared-history schemaless site must not be empty, got donor=%q empty=%q", donor, empty)
+	}
+}
+
+// TestDetectEmptySite_SkipsSitesUnderRecovery ensures auto-clone cannot
+// race a RecoveryBlocked / RecoveryInProgress report on the same poll.
+func TestDetectEmptySite_SkipsSitesUnderRecovery(t *testing.T) {
+	// Foreign UUID + no schemas would otherwise look fresh.
+	noSchemas := false
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-100"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "bbbb:1-9", hasUserSchemas: &noSchemas}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateReadOnly
+	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateBlocked, divergentGtid: "bbbb:1-9", divergentCount: 9}
+
+	donor, empty := tm.detectEmptySite(context.Background())
+	if donor != "" || empty != "" {
+		t.Errorf("RecoveryBlocked site must not be auto-cloned, got donor=%q empty=%q", donor, empty)
+	}
+}
+
 func TestBootstrapIdlePhaseIncludesDone(t *testing.T) {
 	for _, phase := range []BootstrapPhase{BootstrapPhaseNone, BootstrapPhaseDone, BootstrapPhaseFailed} {
 		if !bootstrapIdlePhase(phase) {

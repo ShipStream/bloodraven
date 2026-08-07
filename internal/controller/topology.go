@@ -2624,13 +2624,17 @@ type userSchemaChecker interface {
 }
 
 // detectEmptySite looks for exactly one donor/recipient pair where a
-// single site is reachable but has no replication metadata and no user
-// schemas. A freshly initialized MySQL datadir may have local GTIDs
+// single site is reachable but has no replication metadata and a genuinely
+// fresh datadir. A freshly initialized MySQL datadir may have local GTIDs
 // from setup statements, so GTID emptiness alone is not a reliable
-// emptiness signal. Works for any number of sites; the donor is the
-// writable site, and the recipient is any reachable empty site. When
-// multiple sites are empty the operator clones one per poll cycle.
-// Returns ("", "") when no eligible pair exists.
+// emptiness signal — and neither is "no user schemas" alone: a cluster that
+// has never created one (or dropped its last) still has returning members
+// that share the cluster's GTID UUIDs and must not be cloned over. Schema
+// absence is consulted only when the site's GTIDs share no UUID with the
+// donor. Works for any number of sites; the donor is the writable site, and
+// the recipient is any reachable empty site. When multiple sites are empty
+// the operator clones one per poll cycle. Returns ("", "") when no eligible
+// pair exists.
 func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty string) {
 	active, err := tm.confirmedActivePrimary(ctx)
 	if err != nil {
@@ -2657,6 +2661,17 @@ func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty st
 			site := &tm.sites[i]
 			if site.name == active.name || site.role != role ||
 				(site.state != state.StateWritable && site.state != state.StateReadOnly) {
+				continue
+			}
+			// A site already under recovery must never be auto-cloned: the
+			// divergence comparison (or in-progress rejoin) owns it. Without
+			// this guard a RecoveryBlocked schemaless member would be wiped
+			// on the same poll that correctly reported the block.
+			tm.mu.RLock()
+			rec := tm.recovery[site.name]
+			inRecovery := rec != nil && (rec.state == recoveryStateBlocked || rec.state == recoveryStateInProgress)
+			tm.mu.RUnlock()
+			if inRecovery {
 				continue
 			}
 			var rs *mysql.ReplicaStatus
@@ -2688,8 +2703,18 @@ func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty st
 				}
 				return "", ""
 			}
-			freshInitialized := site.state == state.StateReadOnly && !hasSchemas
-			if rs == nil && (gtid.IsEmpty() || freshInitialized) {
+			// Mirror initiateRecovery's empty-datadir discriminator: schema
+			// absence only counts for a read-only site whose GTID UUIDs are
+			// foreign to the donor. sharesHistory fails safe toward "not
+			// empty" on donor probe failure so an unreachable primary cannot
+			// open a clone-over window. The ReadOnly gate matches the prior
+			// freshInitialized check so a writable anomaly is not silently
+			// adopted as a clone recipient.
+			emptyDatadir := gtid.IsEmpty()
+			if !emptyDatadir && site.state == state.StateReadOnly && !tm.sharesHistory(ctx, gtid, active) {
+				emptyDatadir = !hasSchemas
+			}
+			if rs == nil && emptyDatadir {
 				return active.name, site.name
 			}
 		}
@@ -3501,11 +3526,11 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	// An empty site is a bootstrap/auto-clone concern, not a returning old
 	// primary: replicating it from scratch would depend on the donor
 	// retaining every binlog since server init, which CLONE exists to avoid.
-	// "Empty" uses the same definition as detectEmptySite — no user schemas
-	// when the checker can answer that, GTID emptiness otherwise — because a
-	// freshly initialized datadir carries setup GTIDs while holding no data.
-	// Checked before the defensive fence so pre-bootstrap empty sites are
-	// not mutated at poll frequency.
+	// "Empty" matches detectEmptySite: GTID emptiness, or no user schemas
+	// only when the site's GTID UUIDs share nothing with the new primary
+	// (server-init noise under a brand-new server_uuid). Checked before the
+	// defensive fence so pre-bootstrap empty sites are not mutated at poll
+	// frequency.
 	preGtidStr, preErr := oldPrimary.mysql.GetGtidExecuted(ctx)
 	if preErr != nil {
 		tm.logger.Error("recovery: failed to get old primary GTID", "site", oldPrimary.name, "error", preErr)
