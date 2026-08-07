@@ -2293,19 +2293,30 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 	noSchemas := false
 
 	tests := []struct {
-		name         string
-		oldGTID      string
-		wantRecovery bool
+		name             string
+		oldGTID          string
+		wantRecovery     bool
+		wantState        string
+		wantStartReplica bool
 	}{
 		{
-			name:         "shares cluster history: recover despite no user schemas",
-			oldGTID:      clusterGTID,
-			wantRecovery: true,
+			// Contained by the new primary's set: safe to rejoin as a replica.
+			name:             "shares cluster history: recover despite no user schemas",
+			oldGTID:          clusterGTID,
+			wantRecovery:     true,
+			wantState:        recoveryStateInProgress,
+			wantStartReplica: true,
 		},
 		{
-			name:         "diverged but shares history: still reaches the comparison",
-			oldGTID:      clusterGTID + ",aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:13-15",
-			wantRecovery: true,
+			// The whole point of the fix: a returning member carrying
+			// transactions the new primary never saw must be BLOCKED, not
+			// silently cloned over. Asserting only "recovery engaged" would
+			// let an unsafe auto-recovery pass.
+			name:             "diverged but shares history: blocked, never auto-started",
+			oldGTID:          clusterGTID + ",aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:13-15",
+			wantRecovery:     true,
+			wantState:        recoveryStateBlocked,
+			wantStartReplica: false,
 		},
 		{
 			name:         "fresh datadir GTIDs under its own uuid: left to auto-clone",
@@ -2324,16 +2335,29 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 
 			tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
 
-			got := site1.startReplicaCallCount() > 0
+			started := site1.startReplicaCallCount() > 0
 			tm.mu.RLock()
 			rec := tm.recovery["dc2"]
 			tm.mu.RUnlock()
-			if rec != nil {
-				got = true
-			}
+
+			got := started || rec != nil
 			if got != tt.wantRecovery {
 				t.Fatalf("recovery engaged = %v, want %v (startReplica calls=%d, state=%+v)",
 					got, tt.wantRecovery, site1.startReplicaCallCount(), rec)
+			}
+			if !tt.wantRecovery {
+				return
+			}
+			gotState := ""
+			if rec != nil {
+				gotState = rec.state
+			}
+			if gotState != tt.wantState {
+				t.Errorf("recovery state = %q, want %q (rec=%+v)", gotState, tt.wantState, rec)
+			}
+			if started != tt.wantStartReplica {
+				t.Errorf("StartReplica called = %v, want %v (calls=%d)",
+					started, tt.wantStartReplica, site1.startReplicaCallCount())
 			}
 		})
 	}
@@ -2381,22 +2405,51 @@ func TestActiveSiteLocked_WritableReaderDoesNotClearActiveSite(t *testing.T) {
 		},
 	}
 
+	// Every non-idle phase, not just Cloning: the writable window opens when
+	// the cloned datadir starts (Restarting) and does not close until
+	// SetupReplication's first statement — SetSuperReadOnly — lands, which is
+	// after the phase has already flipped to SetupRepl. The canSkipClone path
+	// enters SetupRepl without passing through Cloning at all.
+	activePhases := []BootstrapPhase{BootstrapPhaseCloning, BootstrapPhaseRestarting, BootstrapPhaseSetupRepl}
+
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		for _, phase := range activePhases {
+			t.Run(tt.name+"/"+string(phase), func(t *testing.T) {
+				tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{})
+				tm.mu.Lock()
+				tm.sites[0].role = state.SiteRolePrimaryCandidate
+				tm.sites[0].state = state.StateWritable
+				tm.sites[1].role = tt.readerRole
+				tm.sites[1].state = tt.dc2State
+				if tt.cloningInto {
+					tm.bootstrapRecipient = tm.sites[1].name
+					tm.bootstrapPhase = phase
+				}
+				got := tm.activeSiteLocked()
+				tm.mu.Unlock()
+				if got != tt.want {
+					t.Errorf("activeSiteLocked() = %q, want %q", got, tt.want)
+				}
+			})
+		}
+	}
+
+	// Idle phases must never grant the bypass: a reader that is writable with
+	// no bootstrap in flight is a real authority anomaly.
+	for _, phase := range []BootstrapPhase{BootstrapPhaseNone, BootstrapPhaseDone, BootstrapPhaseFailed} {
+		t.Run("idle phase still invalidates/"+string(phase), func(t *testing.T) {
 			tm, _, _ := newTestTopologyManager(&mockMySQL{}, &mockMySQL{})
 			tm.mu.Lock()
 			tm.sites[0].role = state.SiteRolePrimaryCandidate
 			tm.sites[0].state = state.StateWritable
-			tm.sites[1].role = tt.readerRole
-			tm.sites[1].state = tt.dc2State
-			if tt.cloningInto {
-				tm.bootstrapRecipient = tm.sites[1].name
-				tm.bootstrapPhase = BootstrapPhaseCloning
-			}
+			tm.sites[1].role = state.SiteRoleReadOnly
+			tm.sites[1].state = state.StateWritable
+			tm.bootstrapRecipient = tm.sites[1].name
+			tm.bootstrapPhase = phase
 			got := tm.activeSiteLocked()
 			tm.mu.Unlock()
-			if got != tt.want {
-				t.Errorf("activeSiteLocked() = %q, want %q", got, tt.want)
+			if got != "" {
+				t.Errorf("activeSiteLocked() = %q, want %q for idle phase %q", got, "", phase)
 			}
 		})
 	}

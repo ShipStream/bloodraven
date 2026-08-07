@@ -3471,7 +3471,11 @@ func (tm *TopologyManager) stampRecoveryBackoff(name string) {
 func (tm *TopologyManager) sharesHistory(ctx context.Context, gtid mysql.GTIDSet, newPrimary *siteTracker) bool {
 	raw, err := newPrimary.mysql.GetGtidExecuted(ctx)
 	if err != nil {
-		tm.logger.Warn("recovery: could not read new primary GTID for the fresh-datadir check",
+		// Debug, not Warn: the conservative "shares" verdict lets the caller
+		// proceed, and the caller's own read of the same GTID fails moments
+		// later at ERROR with a probe backoff. One unreachable new primary
+		// should produce one log line per cycle, not two.
+		tm.logger.Debug("recovery: could not read new primary GTID for the fresh-datadir check",
 			"site", newPrimary.name, "error", err)
 		return true
 	}
