@@ -1323,9 +1323,12 @@ func TestDetectEmptySite_UserSchemaBlocksFreshInitializedReplica(t *testing.T) {
 // divergent transactions.
 func TestDetectEmptySite_SharedHistorySchemalessNotEmpty(t *testing.T) {
 	clusterGTID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-12"
+	// Diverged but same UUID family as the primary — sharesHistory must
+	// keep this off the auto-clone path even with no user schemas.
+	oldGTID := clusterGTID + ",aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:13-15"
 	noSchemas := false
 	site0 := &mockMySQL{readOnly: false, gtidExecuted: clusterGTID}
-	site1 := &mockMySQL{readOnly: true, gtidExecuted: clusterGTID + ":13-15", hasUserSchemas: &noSchemas}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: oldGTID, hasUserSchemas: &noSchemas}
 	tm, _, _ := newTestTopologyManager(site0, site1)
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateReadOnly
