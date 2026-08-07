@@ -379,6 +379,36 @@ func TestGTIDSet_IsEmpty(t *testing.T) {
 	}
 }
 
+func TestGTIDSet_HasCommonUUIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{name: "shared uuid", a: "uuid1:1-5", b: "uuid1:1-10", want: true},
+		{name: "disjoint uuids", a: "uuid1:1-5", b: "uuid2:1-5", want: false},
+		{name: "one shared among many", a: "uuid1:1-2,uuid2:1-3", b: "uuid2:5-9,uuid3:1-1", want: true},
+		{name: "empty a", a: "", b: "uuid1:1-5", want: false},
+		{name: "empty b", a: "uuid1:1-5", b: "", want: false},
+		{name: "both empty", a: "", b: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a, err := ParseGTIDSet(tt.a)
+			if err != nil {
+				t.Fatalf("parse a: %v", err)
+			}
+			b, err := ParseGTIDSet(tt.b)
+			if err != nil {
+				t.Fatalf("parse b: %v", err)
+			}
+			if got := a.HasCommonUUIDs(b); got != tt.want {
+				t.Errorf("HasCommonUUIDs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseGTIDSet_MalformedIntervalNotTreatedAsTag(t *testing.T) {
 	// These inputs must return errors, not be silently misparsed as tagged GTID entries.
 	tests := []string{

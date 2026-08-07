@@ -2363,6 +2363,39 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 	}
 }
 
+// TestCheckRecovery_UnreachablePrimaryFailsSafeTowardComparison ensures a
+// slow or unreachable new primary can never demote a returning old primary to
+// a fresh-datadir verdict. sharesHistory answers "shares" on probe failure so
+// the schema check is not consulted and recovery proceeds to its own bounded
+// comparison (which then backs off), rather than silently skipping into
+// auto-clone. Without this, a schemaless site whose only UUIDs look foreign
+// while the primary is briefly unreachable would be wiped.
+func TestCheckRecovery_UnreachablePrimaryFailsSafeTowardComparison(t *testing.T) {
+	noSchemas := false
+	// Foreign-looking GTIDs: if the primary probe failed open toward
+	// "fresh", the schema check would mark this empty and skip recovery.
+	oldGTID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-3"
+	site0 := &mockMySQL{readOnly: false, gtidExecutedErr: errors.New("primary probe timeout")}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: oldGTID, hasUserSchemas: &noSchemas}
+	clk := clock.NewFakeClock(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC))
+	tm, _, _ := newTestTopologyManagerWithBootstrapClock(site0, site1, clk)
+	setRecoveredTopology(tm)
+
+	tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
+
+	site1.mu.Lock()
+	fenced := site1.superReadOnlyCalls
+	site1.mu.Unlock()
+	if fenced == 0 {
+		t.Fatal("expected recovery to fence the returning site when the new primary is unreachable; " +
+			"got a fresh-datadir skip instead (would hand the site to auto-clone)")
+	}
+	if site1.startReplicaCallCount() != 0 {
+		t.Fatalf("StartReplica must not run without a successful GTID comparison, got %d calls",
+			site1.startReplicaCallCount())
+	}
+}
+
 // TestActiveSiteLocked_WritableReaderDoesNotClearActiveSite guards the
 // scenario-40 regression: a reader returns writable for a few seconds after
 // its CLONE-induced restart (the fresh datadir starts before super_read_only
