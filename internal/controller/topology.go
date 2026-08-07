@@ -722,6 +722,23 @@ func (tm *TopologyManager) SetSourceConvergence(site, host string, convergence S
 func (tm *TopologyManager) activeSiteLocked() string {
 	var active *siteTracker
 	for i := range tm.sites {
+		// A reader that is writable *because the operator is cloning into it*
+		// is an expected phase of that clone, not evidence of lost authority:
+		// CLONE INSTANCE restarts mysqld and the fresh datadir comes up before
+		// super_read_only is reapplied. Counting that window dropped
+		// status.activeSite to "" on every reader reclone — a spurious
+		// NoPrimary published to DNS steering and every status consumer —
+		// while the promotable primary stayed healthy and unambiguous.
+		//
+		// A reader that turns writable on its own still invalidates authority
+		// immediately (see TestPoll_FirstWritableNonPromotableObservation-
+		// FencesImmediately); that signal is deliberate and unchanged. Either
+		// way the reader is alerted and fenced by the non-promotable path.
+		if tm.sites[i].role == state.SiteRoleReadOnly &&
+			tm.sites[i].name == tm.bootstrapRecipient &&
+			!bootstrapIdlePhase(tm.bootstrapPhase) {
+			continue
+		}
 		if tm.sites[i].state == state.StateWritable {
 			if active != nil {
 				return ""
@@ -3446,6 +3463,29 @@ func (tm *TopologyManager) stampRecoveryBackoff(name string) {
 	tm.recovery[name] = &siteRecovery{retryAfter: tm.clock.Now().Add(recoveryRetryDelay)}
 }
 
+// sharesHistory reports whether gtid carries any GTID UUID the new primary
+// also has — i.e. whether the site ever participated in this cluster's
+// transaction history. A probe failure answers "shares" so an unreachable or
+// slow new primary can never demote a returning old primary to a fresh-datadir
+// verdict; recovery's own bounded comparison is the safe place to decide.
+func (tm *TopologyManager) sharesHistory(ctx context.Context, gtid mysql.GTIDSet, newPrimary *siteTracker) bool {
+	raw, err := newPrimary.mysql.GetGtidExecuted(ctx)
+	if err != nil {
+		// Debug, not Warn: the conservative "shares" verdict lets the caller
+		// proceed, and the caller's own read of the same GTID fails moments
+		// later at ERROR with a probe backoff. One unreachable new primary
+		// should produce one log line per cycle, not two.
+		tm.logger.Debug("recovery: could not read new primary GTID for the fresh-datadir check",
+			"site", newPrimary.name, "error", err)
+		return true
+	}
+	newGtid, err := mysql.ParseGTIDSet(raw)
+	if err != nil {
+		return true
+	}
+	return gtid.HasCommonUUIDs(newGtid)
+}
+
 // initiateRecovery fences the old primary, compares GTID sets, and either
 // auto-recovers (no divergence) or blocks with metadata (divergence).
 //
@@ -3478,10 +3518,24 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	empty := false
 	if preGtid, parseErr := mysql.ParseGTIDSet(preGtidStr); parseErr == nil {
 		empty = preGtid.IsEmpty()
-	}
-	if checker, ok := oldPrimary.mysql.(userSchemaChecker); ok {
-		if hasSchemas, err := checker.HasUserSchemas(ctx); err == nil {
-			empty = !hasSchemas
+		// A non-empty GTID set is only fresh-datadir noise when none of its
+		// UUIDs appear in the new primary's history: server initialization
+		// commits local transactions under a brand-new server_uuid, which is
+		// why GTID emptiness alone cannot spot a wiped site. "No user schemas"
+		// cannot stand in for it either — a cluster that has not created one
+		// yet, or dropped its last, still has real old primaries. Taking the
+		// schema answer unconditionally sent a returning old primary that
+		// shared every cluster GTID down the auto-clone path, skipping the
+		// divergence comparison that is the whole point of recovery: a
+		// diverged site would have been cloned over instead of reported as
+		// RecoveryBlocked. A returning member always shares the cluster's
+		// UUIDs; a fresh datadir never does.
+		if !empty && !tm.sharesHistory(ctx, preGtid, newPrimary) {
+			if checker, ok := oldPrimary.mysql.(userSchemaChecker); ok {
+				if hasSchemas, err := checker.HasUserSchemas(ctx); err == nil {
+					empty = !hasSchemas
+				}
+			}
 		}
 	}
 	if empty {
