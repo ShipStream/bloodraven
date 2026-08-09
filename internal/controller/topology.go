@@ -3494,7 +3494,12 @@ func (tm *TopologyManager) stampRecoveryBackoff(name string) {
 // slow new primary can never demote a returning old primary to a fresh-datadir
 // verdict; recovery's own bounded comparison is the safe place to decide.
 func (tm *TopologyManager) sharesHistory(ctx context.Context, gtid mysql.GTIDSet, newPrimary *siteTracker) bool {
-	raw, err := newPrimary.mysql.GetGtidExecuted(ctx)
+	var raw string
+	err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+		var probeErr error
+		raw, probeErr = newPrimary.mysql.GetGtidExecuted(probeCtx)
+		return probeErr
+	})
 	if err != nil {
 		// Debug, not Warn: the conservative "shares" verdict lets the caller
 		// proceed, and the caller's own read of the same GTID fails moments
