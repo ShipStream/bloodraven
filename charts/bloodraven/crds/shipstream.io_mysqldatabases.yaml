@@ -93,7 +93,19 @@ spec:
           metadata:
             type: object
           spec:
-            description: MysqlDatabaseSpec is the desired state of one tenant database.
+            description: |-
+              MysqlDatabaseSpec is the desired state of one tenant database.
+
+              Membership in the privilege allowlist is enforced by the MysqlPrivilege
+              enum rather than by CEL: it is structural, cheaper, and the API server
+              checks it before these rules run. Uniqueness of spec.grants[].username is
+              enforced by the list-map key on the field. What is left for CEL is the one
+              thing neither can express — that "ALL PRIVILEGES" is not combinable with
+              other entries, since GRANT ALL PRIVILEGES, SELECT is not valid SQL.
+
+              Every rule here is re-checked in Go (see MysqlDatabaseSpec.Validate)
+              because the owner username arrives from a Secret, which the API server
+              never sees.
             properties:
               characterSet:
                 default: utf8mb4
@@ -138,6 +150,9 @@ spec:
                   not, the CR fails with reason GrantUserMissing and no user is
                   created. This is how a shared CDC reader is granted onto a tenant
                   schema without giving anyone the right to invent MySQL users.
+
+                  Keyed by username: the API server rejects duplicate entries without
+                  needing a quadratic CEL rule to notice them.
                 items:
                   description: MysqlDatabaseGrant grants an already-existing MySQL
                     user on this database.
@@ -154,6 +169,12 @@ spec:
                           The set is deliberately schema/DML-scoped. Notably absent: GRANT OPTION
                           (see the MysqlDatabase doc comment), and every *_ADMIN dynamic privilege,
                           which are instance-scoped and cannot be granted ON a single schema anyway.
+
+                          The Enum marker below is the allowlist enforcement at the API server: it
+                          is checked structurally, costs nothing against the CRD validation budget,
+                          and produces a better error message than an equivalent CEL rule. The CEL
+                          rules on MysqlDatabaseSpec cover only what an enum cannot — composition
+                          constraints between entries.
                         enum:
                         - ALL PRIVILEGES
                         - SELECT
@@ -170,7 +191,9 @@ spec:
                         - TRIGGER
                         - EVENT
                         - EXECUTE
+                        maxLength: 32
                         type: string
+                      maxItems: 15
                       minItems: 1
                       type: array
                       x-kubernetes-list-type: atomic
@@ -188,8 +211,11 @@ spec:
                   - privileges
                   - username
                   type: object
+                maxItems: 64
                 type: array
-                x-kubernetes-list-type: atomic
+                x-kubernetes-list-map-keys:
+                - username
+                x-kubernetes-list-type: map
               groupRef:
                 description: |-
                   GroupRef identifies the MysqlFailoverGroup in the same namespace
@@ -226,6 +252,12 @@ spec:
                         The set is deliberately schema/DML-scoped. Notably absent: GRANT OPTION
                         (see the MysqlDatabase doc comment), and every *_ADMIN dynamic privilege,
                         which are instance-scoped and cannot be granted ON a single schema anyway.
+
+                        The Enum marker below is the allowlist enforcement at the API server: it
+                        is checked structurally, costs nothing against the CRD validation budget,
+                        and produces a better error message than an equivalent CEL rule. The CEL
+                        rules on MysqlDatabaseSpec cover only what an enum cannot — composition
+                        constraints between entries.
                       enum:
                       - ALL PRIVILEGES
                       - SELECT
@@ -242,7 +274,9 @@ spec:
                       - TRIGGER
                       - EVENT
                       - EXECUTE
+                      maxLength: 32
                       type: string
+                    maxItems: 15
                     type: array
                     x-kubernetes-list-type: atomic
                   secretName:
@@ -268,27 +302,14 @@ spec:
             - owner
             type: object
             x-kubernetes-validations:
-            - message: spec.owner.privileges entries must come from the MysqlDatabase
-                privilege allowlist
-              rule: '!has(self.owner.privileges) || self.owner.privileges.all(p, p
-                in [''ALL PRIVILEGES'',''SELECT'',''INSERT'',''UPDATE'',''DELETE'',''CREATE'',''DROP'',''ALTER'',''INDEX'',''REFERENCES'',''LOCK
-                TABLES'',''SHOW VIEW'',''TRIGGER'',''EVENT'',''EXECUTE''])'
             - message: spec.owner.privileges must not combine 'ALL PRIVILEGES' with
                 other privileges
               rule: '!has(self.owner.privileges) || self.owner.privileges.size() <
                 2 || !(''ALL PRIVILEGES'' in self.owner.privileges)'
-            - message: spec.grants[].privileges entries must come from the MysqlDatabase
-                privilege allowlist
-              rule: '!has(self.grants) || self.grants.all(g, g.privileges.all(p, p
-                in [''ALL PRIVILEGES'',''SELECT'',''INSERT'',''UPDATE'',''DELETE'',''CREATE'',''DROP'',''ALTER'',''INDEX'',''REFERENCES'',''LOCK
-                TABLES'',''SHOW VIEW'',''TRIGGER'',''EVENT'',''EXECUTE'']))'
             - message: spec.grants[].privileges must not combine 'ALL PRIVILEGES'
                 with other privileges
               rule: '!has(self.grants) || self.grants.all(g, g.privileges.size() <
                 2 || !(''ALL PRIVILEGES'' in g.privileges))'
-            - message: spec.grants[].username must be unique
-              rule: '!has(self.grants) || self.grants.all(g, self.grants.filter(o,
-                o.username == g.username).size() == 1)'
           status:
             description: |-
               MysqlDatabaseStatus is the observed state of a MysqlDatabase.

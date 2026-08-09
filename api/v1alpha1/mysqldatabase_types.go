@@ -67,7 +67,14 @@ type MysqlDatabaseList struct {
 // The set is deliberately schema/DML-scoped. Notably absent: GRANT OPTION
 // (see the MysqlDatabase doc comment), and every *_ADMIN dynamic privilege,
 // which are instance-scoped and cannot be granted ON a single schema anyway.
+//
+// The Enum marker below is the allowlist enforcement at the API server: it
+// is checked structurally, costs nothing against the CRD validation budget,
+// and produces a better error message than an equivalent CEL rule. The CEL
+// rules on MysqlDatabaseSpec cover only what an enum cannot — composition
+// constraints between entries.
 // +kubebuilder:validation:Enum="ALL PRIVILEGES";SELECT;INSERT;UPDATE;DELETE;CREATE;DROP;ALTER;INDEX;REFERENCES;"LOCK TABLES";"SHOW VIEW";TRIGGER;EVENT;EXECUTE
+// +kubebuilder:validation:MaxLength=32
 type MysqlPrivilege string
 
 const (
@@ -124,11 +131,19 @@ const (
 
 // MysqlDatabaseSpec is the desired state of one tenant database.
 //
-// +kubebuilder:validation:XValidation:rule="!has(self.owner.privileges) || self.owner.privileges.all(p, p in ['ALL PRIVILEGES','SELECT','INSERT','UPDATE','DELETE','CREATE','DROP','ALTER','INDEX','REFERENCES','LOCK TABLES','SHOW VIEW','TRIGGER','EVENT','EXECUTE'])",message="spec.owner.privileges entries must come from the MysqlDatabase privilege allowlist"
+// Membership in the privilege allowlist is enforced by the MysqlPrivilege
+// enum rather than by CEL: it is structural, cheaper, and the API server
+// checks it before these rules run. Uniqueness of spec.grants[].username is
+// enforced by the list-map key on the field. What is left for CEL is the one
+// thing neither can express — that "ALL PRIVILEGES" is not combinable with
+// other entries, since GRANT ALL PRIVILEGES, SELECT is not valid SQL.
+//
+// Every rule here is re-checked in Go (see MysqlDatabaseSpec.Validate)
+// because the owner username arrives from a Secret, which the API server
+// never sees.
+//
 // +kubebuilder:validation:XValidation:rule="!has(self.owner.privileges) || self.owner.privileges.size() < 2 || !('ALL PRIVILEGES' in self.owner.privileges)",message="spec.owner.privileges must not combine 'ALL PRIVILEGES' with other privileges"
-// +kubebuilder:validation:XValidation:rule="!has(self.grants) || self.grants.all(g, g.privileges.all(p, p in ['ALL PRIVILEGES','SELECT','INSERT','UPDATE','DELETE','CREATE','DROP','ALTER','INDEX','REFERENCES','LOCK TABLES','SHOW VIEW','TRIGGER','EVENT','EXECUTE']))",message="spec.grants[].privileges entries must come from the MysqlDatabase privilege allowlist"
 // +kubebuilder:validation:XValidation:rule="!has(self.grants) || self.grants.all(g, g.privileges.size() < 2 || !('ALL PRIVILEGES' in g.privileges))",message="spec.grants[].privileges must not combine 'ALL PRIVILEGES' with other privileges"
-// +kubebuilder:validation:XValidation:rule="!has(self.grants) || self.grants.all(g, self.grants.filter(o, o.username == g.username).size() == 1)",message="spec.grants[].username must be unique"
 type MysqlDatabaseSpec struct {
 	// GroupRef identifies the MysqlFailoverGroup in the same namespace
 	// that owns the MySQL instance this database lives on. Cross-namespace
@@ -171,8 +186,13 @@ type MysqlDatabaseSpec struct {
 	// not, the CR fails with reason GrantUserMissing and no user is
 	// created. This is how a shared CDC reader is granted onto a tenant
 	// schema without giving anyone the right to invent MySQL users.
+	//
+	// Keyed by username: the API server rejects duplicate entries without
+	// needing a quadratic CEL rule to notice them.
 	// +optional
-	// +listType=atomic
+	// +listType=map
+	// +listMapKey=username
+	// +kubebuilder:validation:MaxItems=64
 	Grants []MysqlDatabaseGrant `json:"grants,omitempty"`
 
 	// DeletionPolicy controls what happens in MySQL when this CR is
@@ -203,6 +223,7 @@ type MysqlDatabaseOwner struct {
 	// +kubebuilder:default={"ALL PRIVILEGES"}
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=15
 	Privileges []MysqlPrivilege `json:"privileges,omitempty"`
 }
 
@@ -219,6 +240,7 @@ type MysqlDatabaseGrant struct {
 
 	// Privileges granted to this user ON <databaseName>.*.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=15
 	// +listType=atomic
 	Privileges []MysqlPrivilege `json:"privileges"`
 }
