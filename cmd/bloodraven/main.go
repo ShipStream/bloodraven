@@ -196,6 +196,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register the MysqlDatabase reconciler. This is the tenant-database
+	// API: a caller with namespaced RBAC on mysqldatabases provisions a
+	// database, its owning user and grant-only entries without holding a
+	// MySQL credential or Secret access. It shares the admin connection
+	// path with the credential reconciler by design — see
+	// openAdminConnection in internal/controller/credentials.go.
+	databaseReconciler := &controller.MysqlDatabaseReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("bloodraven-database"),
+	}
+	if err := databaseReconciler.SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create database controller", "error", err)
+		os.Exit(1)
+	}
+
 	// Tell the schedule reconciler which operator image and ServiceAccount
 	// to embed into the CronJob pods it creates. These can be overridden
 	// via env vars to support kind/k3d playground runs where the operator

@@ -1,0 +1,59 @@
+# Example RBAC for a tenant provisioner that uses the MysqlDatabase CRD.
+#
+# This file is an example. It is NOT installed by the Helm chart and is NOT
+# part of the operator's own ClusterRole — binding it is a deliberate act by
+# the cluster administrator, scoped to one namespace and one ServiceAccount.
+#
+# The point of the whole MysqlDatabase API is what is ABSENT below:
+#
+#   - no rule for `secrets` in any verb, so the caller cannot read the owner
+#     password it writes, nor the group's operator credential;
+#   - no rule for `mysqlfailovergroups`, so the caller cannot read the DSN,
+#     the credential secret names, or the topology;
+#   - no MySQL credential of any kind, because Bloodraven holds the only one.
+#
+# A caller bound to this Role can provision a tenant database, its owning
+# user, and a grant for an existing shared principal, while holding no MySQL
+# credential and no Secret access. If a future change to this file (or to the
+# reconciler) makes a `secrets` rule necessary here, that change has
+# reintroduced the standing root-equivalent credential this API exists to
+# remove, and is the wrong change.
+#
+# Writing the owner Secret is a separate concern and deliberately a separate
+# principal. In ShipStream's deployment, External Secrets Operator renders it
+# from OpenBao; the provisioner never touches it. If your provisioner must
+# write the Secret itself, grant `create` on `secrets` in a namespace that
+# holds no other credentials — never `get`/`list`, which would let it read
+# the operator credential sitting next to it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bloodraven-mysqldatabase-caller
+  namespace: bloodraven
+rules:
+  - apiGroups: [shipstream.io]
+    resources: [mysqldatabases]
+    verbs: [create, get, list, watch, update, patch, delete]
+  # status is read-only for the caller: phase, observedGeneration and the
+  # Ready condition are how it reports provisioning state back to its own
+  # callers without a MySQL connection. It must not be able to write status,
+  # or "Ready" would stop meaning "Bloodraven applied this".
+  - apiGroups: [shipstream.io]
+    resources: [mysqldatabases/status]
+    verbs: [get]
+---
+# Bind it to the provisioner's ServiceAccount. Namespaced on purpose: a
+# caller authorized for one tenant namespace gains nothing in any other.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bloodraven-mysqldatabase-caller
+  namespace: bloodraven
+subjects:
+  - kind: ServiceAccount
+    name: tenant-provisioner
+    namespace: bloodraven
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bloodraven-mysqldatabase-caller

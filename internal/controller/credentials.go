@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	k8sretry "k8s.io/client-go/util/retry"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -50,37 +51,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 		return nil
 	}
 
-	// Read operator credentials for connecting to MySQL.
-	operatorSecretName := fg.Spec.Credentials.OperatorSecret
-	var operatorSecret corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}, &operatorSecret); err != nil {
-		return fmt.Errorf("get operator secret: %w", err)
-	}
-	operatorUser := string(operatorSecret.Data["username"])
-	operatorPass := string(operatorSecret.Data["password"])
-	rootPass := string(operatorSecret.Data["MYSQL_ROOT_PASSWORD"])
-
-	activeSite := fg.Spec.SiteByName(fg.Status.ActiveSite)
-	if activeSite == nil || !activeSite.IsPromotable() {
-		return fmt.Errorf("active site %q is not a primary-candidate", fg.Status.ActiveSite)
-	}
-	primaryHost := fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, activeSite.Name, fg.Namespace), mysqlPort)
-	tlsConfigName := ""
-	if fg.Spec.TLS != nil {
-		tlsConfigName, err = mysqlTLSConfig(ctx, r.Client, fg, siteServiceHost(fg.Name, activeSite.Name, fg.Namespace))
-		if err != nil {
-			return fmt.Errorf("configure TLS for credential reconciliation: %w", err)
-		}
-	}
-
-	// Try operator credentials first, fall back to root for initial setup.
-	db, err := openMySQL(operatorUser, operatorPass, primaryHost, tlsConfigName)
+	db, err := openAdminConnection(ctx, r.Client, fg, openMySQL)
 	if err != nil {
-		logger.Info("operator credentials failed, trying root for initial setup", "error", err)
-		db, err = openMySQL("root", rootPass, primaryHost, tlsConfigName)
-		if err != nil {
-			return fmt.Errorf("connect to primary as root: %w", err)
-		}
+		return err
 	}
 	defer db.Close()
 
@@ -238,6 +211,69 @@ func (r *MysqlFailoverGroupReconciler) setCredentialHash(ctx context.Context, fg
 		fresh.Annotations[credentialHashAnnotation] = hash
 		return r.Update(ctx, &fresh)
 	})
+}
+
+// openMySQLFunc is the signature of openMySQL. It exists so component tests
+// can substitute an in-memory MySQL model without forking the production
+// connection path.
+type openMySQLFunc func(user, password, addr, tlsConfigName string) (*sql.DB, error)
+
+// openAdminConnection resolves the operator credential for fg and opens an
+// admin connection to the group's current active primary, falling back to
+// root for initial setup exactly as the credential reconciler always has.
+//
+// THIS IS THE ONE PLACE IN BLOODRAVEN THAT HOLDS MYSQL ADMIN. It has exactly
+// two callers — reconcileCredentials (group-level roles) and the
+// MysqlDatabase reconciler (per-tenant databases). They manage disjoint
+// principals, but they share this function on purpose: a second connection
+// path would be a second place where root-equivalent credentials are
+// assembled, which is precisely the property the MysqlDatabase CRD exists to
+// avoid handing out. If you are adding a third caller, that is a design
+// decision, not a refactor.
+//
+// The caller owns the returned *sql.DB and must Close it.
+func openAdminConnection(
+	ctx context.Context,
+	c ctrlclient.Client,
+	fg *v1alpha1.MysqlFailoverGroup,
+	open openMySQLFunc,
+) (*sql.DB, error) {
+	logger := log.FromContext(ctx)
+
+	var operatorSecret corev1.Secret
+	operatorSecretName := fg.Spec.Credentials.OperatorSecret
+	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}, &operatorSecret); err != nil {
+		return nil, fmt.Errorf("get operator secret: %w", err)
+	}
+	operatorUser := string(operatorSecret.Data["username"])
+	operatorPass := string(operatorSecret.Data["password"])
+	rootPass := string(operatorSecret.Data["MYSQL_ROOT_PASSWORD"])
+
+	activeSite := fg.Spec.SiteByName(fg.Status.ActiveSite)
+	if activeSite == nil || !activeSite.IsPromotable() {
+		return nil, fmt.Errorf("active site %q is not a primary-candidate", fg.Status.ActiveSite)
+	}
+	primaryHost := fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, activeSite.Name, fg.Namespace), mysqlPort)
+
+	tlsConfigName := ""
+	if fg.Spec.TLS != nil {
+		var err error
+		tlsConfigName, err = mysqlTLSConfig(ctx, c, fg, siteServiceHost(fg.Name, activeSite.Name, fg.Namespace))
+		if err != nil {
+			return nil, fmt.Errorf("configure TLS for admin connection: %w", err)
+		}
+	}
+
+	// Try operator credentials first, fall back to root for initial setup.
+	db, err := open(operatorUser, operatorPass, primaryHost, tlsConfigName)
+	if err != nil {
+		logger.Info("operator credentials failed, trying root for initial setup", "error", err)
+		db, err = open("root", rootPass, primaryHost, tlsConfigName)
+		if err != nil {
+			return nil, fmt.Errorf("connect to primary as root: %w", err)
+		}
+	}
+	return db, nil
 }
 
 func openMySQL(user, password, addr, tlsConfigName string) (*sql.DB, error) {
