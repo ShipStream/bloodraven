@@ -601,3 +601,75 @@ func TestMysqlDatabaseReconcilesAgainstDSNModeGroup(t *testing.T) {
 		t.Fatalf("dialed as %q, want the DSN user root", dialedUser)
 	}
 }
+
+// TestMysqlDatabaseRefusesReservedOwnerUsers is a privilege-escalation guard.
+//
+// Bloodraven applies ALTER USER ... IDENTIFIED BY from the owner Secret's
+// bytes. Pointed at a Secret naming root or a group-level credential, that
+// same statement resets a privileged account's password to a value the
+// Secret's author chose. The CRD's own documentation says the two MySQL-admin
+// call sites manage disjoint principals; this is the check that makes it so.
+func TestMysqlDatabaseRefusesReservedOwnerUsers(t *testing.T) {
+	appSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "mysql-app", Namespace: mdbTestNamespace},
+		Data:       map[string][]byte{"username": []byte("app"), "password": []byte("app-pw")},
+	}
+
+	for _, username := range []string{"root", "operator", "app", "replicator"} {
+		t.Run(username, func(t *testing.T) {
+			fg := mdbTestGroup()
+			fg.Spec.Credentials.AppSecret = "mysql-app"
+
+			operator := mdbTestOperatorSecret()
+			operator.Data["MYSQL_REPLICATION_USER"] = []byte("replicator")
+
+			owner := mdbTestOwnerSecret()
+			owner.Data["username"] = []byte(username)
+			owner.Data["password"] = []byte("attacker-chosen")
+
+			r, c, rec := newMdbReconciler(t, mdbTestCR(), fg, operator, appSecret, owner)
+
+			if _, err := r.Reconcile(context.Background(), mdbRequest()); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+
+			mdb := getMdb(t, c)
+			if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+				t.Fatalf("phase = %q, want Failed for reserved owner %q", mdb.Status.Phase, username)
+			}
+			if cond := readyCondition(mdb); cond == nil || cond.Reason != "OwnerUserReserved" {
+				t.Fatalf("Ready condition = %+v, want reason OwnerUserReserved", cond)
+			}
+			assertEventContains(t, rec, "OwnerUserReserved")
+			// newMdbReconciler's dialer fails the test if called, so no
+			// ALTER USER was ever built, let alone executed.
+		})
+	}
+}
+
+func TestReservedGroupUsernames(t *testing.T) {
+	fg := mdbTestGroup()
+	fg.Spec.Credentials.AppSecret = "mysql-app"
+	fg.Spec.Credentials.MonitorSecret = "mysql-monitor" // deliberately absent
+
+	operator := mdbTestOperatorSecret()
+	operator.Data["MYSQL_REPLICATION_USER"] = []byte("replicator")
+	appSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "mysql-app", Namespace: mdbTestNamespace},
+		Data:       map[string][]byte{"username": []byte("app")},
+	}
+
+	_, c, _ := newMdbReconciler(t, fg, operator, appSecret)
+
+	got := reservedGroupUsernames(context.Background(), c, fg)
+	for _, want := range []string{"root", "operator", "app", "replicator"} {
+		if !got[want] {
+			t.Fatalf("reservedGroupUsernames() missing %q: %v", want, got)
+		}
+	}
+	// A tenant owner is not reserved, and an unreadable Secret is skipped
+	// rather than failing the caller.
+	if got["acme_app"] {
+		t.Fatalf("reservedGroupUsernames() wrongly reserved a tenant owner: %v", got)
+	}
+}

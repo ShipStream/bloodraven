@@ -253,6 +253,67 @@ func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.Mys
 	return parsed.User, parsed.Passwd, rootPassword, nil
 }
 
+// reservedGroupUsernames returns the MySQL account names that belong to the
+// MysqlFailoverGroup itself: root, the replication user, and every principal
+// named by spec.credentials (or by the legacy DSN).
+//
+// The MysqlDatabase reconciler uses this to refuse to adopt a group-level
+// principal as a tenant database owner. The reason is specific and worth
+// stating, because nothing else enforces it:
+//
+// Bloodraven applies ALTER USER … IDENTIFIED BY from the owner Secret's
+// bytes. That is desired-state semantics, and it is correct for a user this
+// CRD owns. Pointed at a Secret whose `username` is `root` or the operator
+// account, the same statement becomes a password reset on a group-level
+// credential — which turns "provision a tenant database" into privilege
+// escalation for anyone who can write that Secret, and into an outage for
+// anyone who mistypes secretName.
+//
+// The two MySQL-admin call sites are documented as managing disjoint
+// principals. This is what makes that true rather than merely intended.
+//
+// Secrets that cannot be read are skipped rather than failing the caller: a
+// missing app/monitor Secret is a group-level problem and must not wedge an
+// unrelated tenant. The operator Secret is the exception — it is required to
+// connect at all, so its absence surfaces there instead.
+func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.MysqlFailoverGroup) map[string]bool {
+	reserved := map[string]bool{"root": true}
+
+	add := func(name string) {
+		if name != "" {
+			reserved[name] = true
+		}
+	}
+
+	names := []string{fg.Spec.EffectiveOperatorSecretName()}
+	if fg.Spec.Credentials != nil {
+		names = append(names,
+			fg.Spec.Credentials.AppSecret,
+			fg.Spec.Credentials.ReadOnlySecret,
+			fg.Spec.Credentials.MonitorSecret,
+			fg.Spec.Credentials.BackupSecret,
+		)
+	}
+
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		var secret corev1.Secret
+		if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &secret); err != nil {
+			continue
+		}
+		add(string(secret.Data["username"]))
+		add(string(secret.Data["MYSQL_REPLICATION_USER"]))
+		if dsn, ok := secret.Data["dsn"]; ok {
+			if parsed, err := mysqldriver.ParseDSN(string(dsn)); err == nil {
+				add(parsed.User)
+			}
+		}
+	}
+	return reserved
+}
+
 // openMySQLFunc is the signature of openMySQL. It exists so component tests
 // can substitute an in-memory MySQL model without forking the production
 // connection path.

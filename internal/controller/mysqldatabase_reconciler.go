@@ -181,6 +181,19 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	// Refuse to adopt a group-level principal as a tenant owner. Checked
+	// after the hash short-circuit so a settled cluster does not pay for the
+	// extra Secret reads, and before anything is rendered so the offending
+	// ALTER USER is never built. See reservedGroupUsernames.
+	if reservedGroupUsernames(ctx, r.Client, &fg)[ownerUser] {
+		r.Recorder.Eventf(&mdb, corev1.EventTypeWarning, "OwnerUserReserved",
+			"Secret %q names %q, which belongs to MysqlFailoverGroup %q", secretKey.Name, ownerUser, fg.Name)
+		return r.fail(ctx, &mdb, "OwnerUserReserved", fmt.Sprintf(
+			"Secret %q names owner user %q, which is a credential of MysqlFailoverGroup %q; "+
+				"a MysqlDatabase owns only its own tenant user and must not set the password of a group-level principal",
+			secretKey.Name, ownerUser, fg.Name))
+	}
+
 	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseCreating {
 		if err := r.stampStatus(ctx, &mdb, func(st *v1alpha1.MysqlDatabaseStatus) {
 			st.Phase = v1alpha1.MysqlDatabasePhaseCreating

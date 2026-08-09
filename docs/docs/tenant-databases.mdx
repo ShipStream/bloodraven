@@ -112,6 +112,18 @@ Without that split, "create a database" would imply "create arbitrary MySQL user
 
 If you hit `GrantUserMissing`, the fix is to create the principal as a group-level concern — it is shared across tenants, so it does not belong to any one `MysqlDatabase`. The CR re-checks on its own and goes `Ready` once the user exists; no CR edit is needed.
 
+## The owner cannot be a group-level principal
+
+Bloodraven applies `ALTER USER … IDENTIFIED BY` from the owner Secret's bytes. That is correct desired-state behaviour for a user this CRD owns — it is what makes rotation a Secret write. Pointed at a Secret whose `username` is `root`, the operator user, or any other account named by `spec.credentials`, the same statement would instead reset a privileged account's password to whatever the Secret's author chose.
+
+So the reconciler refuses. If `spec.owner.secretName` resolves to a username belonging to the group — `root`, the replication user, or any `spec.credentials` principal — the CR fails with `reason: OwnerUserReserved` and no statement is built, let alone executed.
+
+This matters most if you deviate from the recommended split. In the intended deployment the caller has no `secrets` verbs at all (the Secret is rendered by an external controller), so it cannot name anything. If your provisioner does write its own owner Secrets, this check is what stops "provision a tenant database" from becoming "reset the operator's password".
+
+:::caution Residual risk
+The check covers group-level principals. It does not stop a caller who can write Secrets in the namespace from naming *another tenant's* owner username and resetting that tenant's password. If your callers write their own owner Secrets and you host mutually-untrusting tenants in one namespace, give each tenant its own namespace — the CRD is namespaced and the caller Role is namespaced precisely so that this is available.
+:::
+
 ## Rotation
 
 Rotating the owner password is a Secret write and nothing else:
