@@ -506,3 +506,118 @@ func TestMysqlDatabasePendingDuringPlannedFailover(t *testing.T) {
 		t.Fatalf("issued %d statements against a fenced primary", n)
 	}
 }
+
+// TestMysqlDatabaseDeleteAfterPartialApplyCleansUp is the regression test for
+// two related delete-path bugs found in review:
+//
+//  1. The REVOKE for a spec.grants[] user that never existed used to error
+//     (MySQL 1141 — IF EXISTS does not cover a missing account), wedging the
+//     finalizer forever. IGNORE UNKNOWN USER fixes it; the fake server
+//     models the 1141 behavior, so this test fails without the clause.
+//  2. status.ownerUser used to be stamped only on a successful apply, so a
+//     partial apply (owner created, then GrantUserMissing) orphaned a live,
+//     fully-privileged owner account on delete. It is now stamped before any
+//     SQL runs.
+func TestMysqlDatabaseDeleteAfterPartialApplyCleansUp(t *testing.T) {
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
+			{Username: "ghost", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+		}
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+
+	h.reconcile()
+
+	// Partial apply: database and owner exist, CR is Failed on the ghost.
+	mdb := h.get()
+	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+		t.Fatalf("phase = %q, want Failed", mdb.Status.Phase)
+	}
+	if !h.server.hasUser(mdbOwnerUser) {
+		t.Fatal("test premise broken: owner user was not created before the grants[] check")
+	}
+	if mdb.Status.OwnerUser != mdbOwnerUser {
+		t.Fatalf("status.ownerUser = %q after partial apply, want %q (the write-ahead record)",
+			mdb.Status.OwnerUser, mdbOwnerUser)
+	}
+
+	h.delete()
+	h.reconcile()
+
+	// The finalizer released despite the ghost user never existing…
+	var out v1alpha1.MysqlDatabase
+	err := h.client.Get(context.Background(), types.NamespacedName{Namespace: mdbNamespace, Name: mdbName}, &out)
+	if err == nil {
+		t.Fatalf("MysqlDatabase still present (finalizers %v); deletion wedged", out.Finalizers)
+	}
+	// …and the partially-applied owner did not survive as an orphaned
+	// privileged account.
+	if h.server.hasUser(mdbOwnerUser) {
+		t.Fatal("partial-apply owner user survived deletionPolicy=Delete; orphaned privileged account")
+	}
+	if _, ok := h.server.database(mdbDatabase); ok {
+		t.Fatal("database survived deletionPolicy=Delete")
+	}
+}
+
+// TestMysqlDatabaseOwnerUsernameRotationDropsOldUser: rotating the Secret's
+// username must revoke the old credential, not leave a shadow account with
+// the old password and full privileges — the stated contract is "rotation is
+// a Secret write and nothing else", which has to include revocation.
+func TestMysqlDatabaseOwnerUsernameRotationDropsOldUser(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+
+	h.reconcile()
+	h.requireReady()
+
+	var s corev1.Secret
+	key := types.NamespacedName{Namespace: mdbNamespace, Name: "acme-mysql-owner"}
+	if err := h.client.Get(context.Background(), key, &s); err != nil {
+		t.Fatalf("get owner secret: %v", err)
+	}
+	s.Data["username"] = []byte("acme_app_v2")
+	s.Data["password"] = []byte("owner-pw-2")
+	if err := h.client.Update(context.Background(), &s); err != nil {
+		t.Fatalf("update owner secret: %v", err)
+	}
+
+	h.reconcile()
+	mdb := h.requireReady()
+
+	if mdb.Status.OwnerUser != "acme_app_v2" {
+		t.Fatalf("status.ownerUser = %q, want acme_app_v2", mdb.Status.OwnerUser)
+	}
+	if h.server.hasUser(mdbOwnerUser) {
+		t.Fatalf("old owner user %q still exists after username rotation; the leaked credential was not revoked", mdbOwnerUser)
+	}
+	if pw, ok := h.server.password("acme_app_v2"); !ok || pw != "owner-pw-2" {
+		t.Fatalf("new owner password = %q (present=%v), want the rotated Secret value", pw, ok)
+	}
+	if privs, ok := h.server.grantsFor(mdbDatabase, "acme_app_v2"); !ok || len(privs) == 0 {
+		t.Fatal("new owner user has no grants on the database")
+	}
+}
+
+// TestMysqlDatabaseOwnerPrivilegeNarrowingRevokes: shrinking
+// spec.owner.privileges must actually shrink MySQL's grant, not GRANT the
+// narrower set on top of the wider one and report the narrow set as applied.
+func TestMysqlDatabaseOwnerPrivilegeNarrowingRevokes(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+
+	h.reconcile()
+	h.requireReady()
+	if privs, _ := h.server.grantsFor(mdbDatabase, mdbOwnerUser); strings.Join(privs, ",") != "ALL PRIVILEGES" {
+		t.Fatalf("owner grants = %v, want default ALL PRIVILEGES", privs)
+	}
+
+	h.update(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Owner.Privileges = []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}
+	})
+	h.reconcile()
+	h.requireReady()
+
+	if privs, _ := h.server.grantsFor(mdbDatabase, mdbOwnerUser); strings.Join(privs, ",") != "SELECT" {
+		t.Fatalf("owner grants = %v after narrowing to SELECT; the old wider grant survived", privs)
+	}
+}

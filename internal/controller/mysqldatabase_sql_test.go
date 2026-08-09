@@ -182,7 +182,7 @@ func TestRenderDestructiveStatements(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderRevokeAll() error = %v", err)
 	}
-	if want := "REVOKE IF EXISTS ALL PRIVILEGES ON `acme_wms`.* FROM 'maester'@'%'"; revoke != want {
+	if want := "REVOKE IF EXISTS ALL PRIVILEGES ON `acme_wms`.* FROM 'maester'@'%' IGNORE UNKNOWN USER"; revoke != want {
 		t.Fatalf("renderRevokeAll() = %q, want %q", revoke, want)
 	}
 
@@ -288,6 +288,7 @@ func TestGroupFenced(t *testing.T) {
 		{
 			"restore restoring",
 			group(func(fg *v1alpha1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
 				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceRestoring}
 			}),
 			true, "RestoreInProgress",
@@ -295,13 +296,22 @@ func TestGroupFenced(t *testing.T) {
 		{
 			"restore fencing",
 			group(func(fg *v1alpha1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
 				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFencing}
+			}),
+			true, "RestoreInProgress",
+		},
+		{
+			"restore requested but not yet observed",
+			group(func(fg *v1alpha1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
 			}),
 			true, "RestoreInProgress",
 		},
 		{
 			"restore succeeded is not fenced",
 			group(func(fg *v1alpha1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
 				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceSucceeded}
 			}),
 			false, "",
@@ -309,6 +319,7 @@ func TestGroupFenced(t *testing.T) {
 		{
 			"restore failed is not fenced",
 			group(func(fg *v1alpha1.MysqlFailoverGroup) {
+				fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{}
 				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed}
 			}),
 			false, "",

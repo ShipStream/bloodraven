@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -195,6 +196,37 @@ func TestMysqlDatabase_EnvtestSchemaRejections(t *testing.T) {
 				t.Fatal("API server accepted the CR; it must be rejected by the schema")
 			}
 		})
+	}
+}
+
+// TestMysqlDatabase_EnvtestDatabaseNameIsImmutable pins the XValidation
+// transition rule: MySQL has no schema rename, so an edited databaseName
+// would CREATE a second database and orphan the first — the API server must
+// refuse the edit outright.
+func TestMysqlDatabase_EnvtestDatabaseNameIsImmutable(t *testing.T) {
+	ns := createNamespace(t, "mydb-immutable")
+
+	cr := newMysqlDatabaseCR(ns, "tenant-immutable")
+	if err := k8sClient.Create(ctx, cr); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, cr) })
+
+	cr.Spec.DatabaseName = "renamed_wms"
+	if err := k8sClient.Update(ctx, cr); err == nil {
+		t.Fatal("API server accepted a databaseName change; the field must be immutable")
+	}
+
+	// Any other spec edit still goes through.
+	var fresh v1alpha1.MysqlDatabase
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), &fresh); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	fresh.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
+		{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+	}
+	if err := k8sClient.Update(ctx, &fresh); err != nil {
+		t.Fatalf("an unrelated spec edit was rejected: %v", err)
 	}
 }
 

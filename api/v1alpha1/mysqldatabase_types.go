@@ -156,8 +156,14 @@ type MysqlDatabaseSpec struct {
 	// interpolated into DDL, so anything outside [A-Za-z0-9_] is rejected
 	// by the API server and re-rejected in Go before rendering. Escaping
 	// alone is not the contract.
+	//
+	// The field is immutable because MySQL has no schema rename: editing it
+	// would CREATE a second database and orphan the first, and a later
+	// deletionPolicy: Delete would drop only the new name. Renaming a
+	// tenant database is a migration, not a spec edit.
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_]{1,64}$`
 	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.databaseName is immutable; renaming would orphan the existing database"
 	DatabaseName string `json:"databaseName"`
 
 	// CharacterSet is the database default character set. Defaults to
@@ -285,13 +291,20 @@ type MysqlDatabaseStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// DatabaseCreated records that CREATE DATABASE has been applied at
-	// least once for this CR.
+	// DatabaseCreated is the write-ahead record for cleanup: it is stamped
+	// the moment the reconciler commits to executing DDL for this CR, before
+	// the first statement runs. deletionPolicy: Delete drops MySQL objects
+	// only when it is set — a CR that failed before any SQL (invalid spec,
+	// reserved owner, ownership conflict) must not drop a database something
+	// else created under the same name.
 	// +optional
 	DatabaseCreated bool `json:"databaseCreated,omitempty"`
 
-	// OwnerUser is the username echoed from the referenced Secret. The
-	// password is never echoed anywhere.
+	// OwnerUser is the username echoed from the referenced Secret, recorded
+	// before the first statement runs so cleanup covers partial applies.
+	// During a username rotation it keeps the previous name until the old
+	// account has actually been dropped. The password is never echoed
+	// anywhere.
 	// +optional
 	OwnerUser string `json:"ownerUser,omitempty"`
 

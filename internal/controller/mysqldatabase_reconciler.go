@@ -4,13 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"reflect"
 	"sort"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -60,6 +65,28 @@ type errGrantUserMissing struct {
 
 func (e *errGrantUserMissing) Error() string {
 	return fmt.Sprintf("MySQL user %q does not exist; spec.grants[] never creates users", e.username)
+}
+
+// transientSQLError distinguishes connectivity weather from a MySQL verdict.
+// It exists because an unplanned failover can land between the dial and the
+// exec: the group watch re-enqueues every tenant the moment ActiveSite moves,
+// which can be up to 30s before the promoted site is actually writable
+// (pendingPromotionActiveSiteTTL). DDL against that primary fails with 1290;
+// a connection killed mid-promotion surfaces as a driver/net error. Neither
+// is a fact about the CR, so neither may latch Phase=Failed — a healthy
+// tenant must not go red for every ordinary failover.
+func transientSQLError(err error) bool {
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		// 1290: ER_OPTION_PREVENTS_STATEMENT (super_read_only primary,
+		// i.e. promotion not finished). 1836: ER_READ_ONLY_MODE.
+		return myErr.Number == 1290 || myErr.Number == 1836
+	}
+	var netErr net.Error
+	return errors.Is(err, driver.ErrBadConn) ||
+		errors.Is(err, mysqldriver.ErrInvalidConn) ||
+		errors.Is(err, io.EOF) ||
+		errors.As(err, &netErr)
 }
 
 // MysqlDatabaseReconciler reconciles MysqlDatabase resources: one tenant
@@ -184,20 +211,55 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Refuse to adopt a group-level principal as a tenant owner. Checked
 	// after the hash short-circuit so a settled cluster does not pay for the
 	// extra Secret reads, and before anything is rendered so the offending
-	// ALTER USER is never built. See reservedGroupUsernames.
-	if reservedGroupUsernames(ctx, r.Client, &fg)[ownerUser] {
-		r.Recorder.Eventf(&mdb, corev1.EventTypeWarning, "OwnerUserReserved",
-			"Secret %q names %q, which belongs to MysqlFailoverGroup %q", secretKey.Name, ownerUser, fg.Name)
+	// ALTER USER is never built. The check fails closed: a group Secret that
+	// is mid-rotation (NotFound) parks the tenant in Pending, and any other
+	// read error fails the reconcile — never proceed on a partial reserved
+	// set. See reservedGroupUsernames.
+	reserved, err := reservedGroupUsernames(ctx, r.Client, &fg)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.pending(ctx, &mdb, "GroupSecretMissing",
+				fmt.Sprintf("cannot resolve group %q's reserved usernames: %v", fg.Name, err))
+		}
+		return ctrl.Result{}, fmt.Errorf("resolve reserved group usernames: %w", err)
+	}
+	if reserved[ownerUser] {
 		return r.fail(ctx, &mdb, "OwnerUserReserved", fmt.Sprintf(
 			"Secret %q names owner user %q, which is a credential of MysqlFailoverGroup %q; "+
 				"a MysqlDatabase owns only its own tenant user and must not set the password of a group-level principal",
 			secretKey.Name, ownerUser, fg.Name))
 	}
 
-	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseCreating {
+	// Refuse to fight another CR over the same database or the same owner
+	// principal. Without this, deleting a duplicate CR that carries
+	// deletionPolicy: Delete would DROP the survivor's live database, and two
+	// CRs sharing an owner Secret would take turns resetting each other's
+	// password. Oldest CR wins; the newer one fails loudly.
+	conflictReason, conflictMsg, err := r.ownershipConflict(ctx, &mdb, ownerUser)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if conflictReason != "" {
+		return r.fail(ctx, &mdb, conflictReason, conflictMsg)
+	}
+
+	// The Creating stamp doubles as the write-ahead record for deletion:
+	// DatabaseCreated and OwnerUser are committed *before* any SQL executes,
+	// so a partially-applied CR (say, one that failed on GrantUserMissing
+	// after the owner user was created) still knows what it may have touched
+	// when deletionPolicy: Delete needs to clean up. OwnerUser is only
+	// written here when it is empty: during a username rotation the previous
+	// name must survive in status until the old account is actually dropped,
+	// or a failed rotation would leak a live privileged user with no record
+	// of it anywhere.
+	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseCreating || mdb.Status.OwnerUser == "" {
 		if err := r.stampStatus(ctx, &mdb, func(st *v1alpha1.MysqlDatabaseStatus) {
 			st.Phase = v1alpha1.MysqlDatabasePhaseCreating
 			st.ObservedGeneration = mdb.Generation
+			st.DatabaseCreated = true
+			if st.OwnerUser == "" {
+				st.OwnerUser = ownerUser
+			}
 			st.Message = fmt.Sprintf("applying database %s on site %s", mdb.Spec.DatabaseName, fg.Status.ActiveSite)
 			setCondition(&st.Conditions, metav1.Condition{
 				Type:               ConditionDatabaseReady,
@@ -222,13 +284,41 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	defer db.Close()
 
+	// A rotated owner username means the previously-recorded account is now
+	// obsolete desired state: drop it before applying the new one, so a
+	// credential rotation actually revokes the old credential. status keeps
+	// the old name until this succeeds (see the Creating stamp above), so a
+	// transient failure here retries rather than leaking the account.
+	if prev := mdb.Status.OwnerUser; prev != "" && prev != ownerUser && !reserved[prev] {
+		dropStmt, derr := renderDropUser(prev)
+		if derr != nil {
+			// A status value that no longer renders is unreachable via any
+			// input we accept; log and move on rather than wedging the CR.
+			logger.Error(derr, "cannot render drop for previous owner user; skipping", "previousOwner", prev)
+		} else {
+			if _, xerr := db.ExecContext(ctx, dropStmt); xerr != nil {
+				if transientSQLError(xerr) {
+					return r.pending(ctx, &mdb, "PrimaryUnavailable",
+						fmt.Sprintf("transient MySQL error dropping rotated owner user on group %q: %v", fg.Name, xerr))
+				}
+				return r.fail(ctx, &mdb, "MySQLError",
+					fmt.Sprintf("drop previous owner user %q: %v", prev, xerr))
+			}
+			r.Recorder.Eventf(&mdb, corev1.EventTypeNormal, "OwnerUserRotated",
+				"dropped previous owner user %q after username rotation to %q", prev, ownerUser)
+		}
+	}
+
 	appliedGrants, err := applyDatabase(ctx, db, &mdb, ownerUser, ownerPass)
 	if err != nil {
 		var missing *errGrantUserMissing
 		if errors.As(err, &missing) {
-			r.Recorder.Eventf(&mdb, corev1.EventTypeWarning, "GrantUserMissing",
-				"MySQL user %q does not exist; no user was created", missing.username)
 			return r.fail(ctx, &mdb, "GrantUserMissing", err.Error())
+		}
+		if transientSQLError(err) {
+			logger.V(1).Info("transient MySQL error, staying pending", "error", err)
+			return r.pending(ctx, &mdb, "PrimaryUnavailable",
+				fmt.Sprintf("transient MySQL error on group %q: %v", fg.Name, err))
 		}
 		return r.fail(ctx, &mdb, "MySQLError", err.Error())
 	}
@@ -277,7 +367,35 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 		return ctrl.Result{}, r.removeFinalizer(ctx, mdb)
 	}
 
+	// DatabaseCreated is the write-ahead record from the apply path: it is
+	// stamped before the first statement ever executes. A CR without it
+	// (invalid spec, reserved owner, ownership conflict — all fail before
+	// SQL) has nothing of its own in MySQL, and must not drop a database
+	// that some other CR or system created under the same name.
+	if !mdb.Status.DatabaseCreated {
+		r.Recorder.Eventf(mdb, corev1.EventTypeNormal, "DatabaseDropSkipped",
+			"deletionPolicy=Delete: this CR never applied any DDL for database %q; nothing to drop", mdb.Spec.DatabaseName)
+		return ctrl.Result{}, r.removeFinalizer(ctx, mdb)
+	}
+
 	logger := log.FromContext(ctx)
+
+	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseDeleting {
+		if err := r.stampStatus(ctx, mdb, func(st *v1alpha1.MysqlDatabaseStatus) {
+			st.Phase = v1alpha1.MysqlDatabasePhaseDeleting
+			st.Message = fmt.Sprintf("dropping database %s", mdb.Spec.DatabaseName)
+			setCondition(&st.Conditions, metav1.Condition{
+				Type:               ConditionDatabaseReady,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: mdb.Generation,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "Deleting",
+				Message:            st.Message,
+			})
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	var fg v1alpha1.MysqlFailoverGroup
 	fgKey := types.NamespacedName{Namespace: mdb.Namespace, Name: mdb.Spec.GroupRef.Name}
@@ -301,13 +419,38 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 		return ctrl.Result{RequeueAfter: mysqlDatabasePendingRequeue}, nil
 	}
 
+	// The apply path backs off while the primary is fenced; injecting a
+	// DROP DATABASE into an in-place restore or a planned failover's drain
+	// window would be strictly worse than injecting a CREATE.
+	if _, msg, fenced := groupFenced(&fg); fenced {
+		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, "DatabaseDropDeferred",
+			"%s; deferring DROP of database %q", msg, mdb.Spec.DatabaseName)
+		return ctrl.Result{RequeueAfter: mysqlDatabasePendingRequeue}, nil
+	}
+
+	// Scope the drop to what is exclusively ours. Another live CR declaring
+	// the same database (a conflict that predates its own failure, or a
+	// mid-migration duplicate) means the schema is not ours to drop; another
+	// live CR claiming the same owner principal means the user is not.
+	dropDB, dropOwner, err := r.deleteScope(ctx, mdb)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !dropDB {
+		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, "DatabaseDropSkipped",
+			"another MysqlDatabase still declares database %q; not dropping it", mdb.Spec.DatabaseName)
+	}
+	if !dropDB && !dropOwner {
+		return ctrl.Result{}, r.removeFinalizer(ctx, mdb)
+	}
+
 	db, err := openAdminConnection(ctx, r.Client, &fg, r.dialer())
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("connect to primary for deletion: %w", err)
 	}
 	defer db.Close()
 
-	if err := dropDatabase(ctx, db, mdb); err != nil {
+	if err := dropDatabase(ctx, db, mdb, dropDB, dropOwner); err != nil {
 		return ctrl.Result{}, fmt.Errorf("drop tenant database: %w", err)
 	}
 
@@ -317,6 +460,78 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 	logger.Info("dropped tenant database", "database", mdb.Spec.DatabaseName, "group", fg.Name)
 
 	return ctrl.Result{}, r.removeFinalizer(ctx, mdb)
+}
+
+// deleteScope decides which MySQL objects the deleting CR may remove: the
+// database (unless another live CR on the same group still declares it) and
+// the owner user (unless another live CR shares the Secret or the username).
+// CRs that are themselves being deleted don't count as claims — of two CRs
+// deleted together, the first to reconcile drops, and the second's statements
+// are IF EXISTS no-ops.
+func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1.MysqlDatabase) (dropDB, dropOwner bool, err error) {
+	dropDB = true
+	dropOwner = mdb.Status.OwnerUser != ""
+
+	var list v1alpha1.MysqlDatabaseList
+	if err := r.List(ctx, &list, client.InNamespace(mdb.Namespace)); err != nil {
+		return false, false, fmt.Errorf("list mysqldatabases for delete guard: %w", err)
+	}
+	for i := range list.Items {
+		other := &list.Items[i]
+		if other.Name == mdb.Name || !other.DeletionTimestamp.IsZero() ||
+			other.Spec.GroupRef.Name != mdb.Spec.GroupRef.Name {
+			continue
+		}
+		if other.Spec.DatabaseName == mdb.Spec.DatabaseName {
+			dropDB = false
+		}
+		if dropOwner && (other.Spec.Owner.SecretName == mdb.Spec.Owner.SecretName ||
+			other.Status.OwnerUser == mdb.Status.OwnerUser) {
+			dropOwner = false
+		}
+	}
+	return dropDB, dropOwner, nil
+}
+
+// mdbOutranks reports whether a wins an ownership conflict against b: the
+// older CR wins, name as the deterministic tie-break. Both sides compute the
+// same answer, so exactly one CR of a conflicting pair goes Failed.
+func mdbOutranks(a, b *v1alpha1.MysqlDatabase) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	}
+	return a.Name < b.Name
+}
+
+// ownershipConflict reports whether a higher-ranked live MysqlDatabase on the
+// same group already claims this CR's database name or owner principal.
+func (r *MysqlDatabaseReconciler) ownershipConflict(ctx context.Context, mdb *v1alpha1.MysqlDatabase, ownerUser string) (reason, message string, err error) {
+	var list v1alpha1.MysqlDatabaseList
+	if err := r.List(ctx, &list, client.InNamespace(mdb.Namespace)); err != nil {
+		return "", "", fmt.Errorf("list mysqldatabases for conflict check: %w", err)
+	}
+	for i := range list.Items {
+		other := &list.Items[i]
+		if other.Name == mdb.Name || !other.DeletionTimestamp.IsZero() ||
+			other.Spec.GroupRef.Name != mdb.Spec.GroupRef.Name {
+			continue
+		}
+		if !mdbOutranks(other, mdb) {
+			continue // we outrank; the other CR reports the conflict
+		}
+		if other.Spec.DatabaseName == mdb.Spec.DatabaseName {
+			return "DatabaseNameConflict", fmt.Sprintf(
+				"MysqlDatabase %q already declares database %q on group %q; two CRs must not manage one database (deletionPolicy: Delete on either would drop the other's data)",
+				other.Name, mdb.Spec.DatabaseName, mdb.Spec.GroupRef.Name), nil
+		}
+		if other.Spec.Owner.SecretName == mdb.Spec.Owner.SecretName ||
+			(other.Status.OwnerUser != "" && other.Status.OwnerUser == ownerUser) {
+			return "OwnerConflict", fmt.Sprintf(
+				"MysqlDatabase %q already owns MySQL user %q on group %q; each MysqlDatabase must own a distinct user (deleting one CR would drop the other's credential)",
+				other.Name, ownerUser, mdb.Spec.GroupRef.Name), nil
+		}
+	}
+	return "", "", nil
 }
 
 // applyDatabase runs the idempotent apply sequence on an open admin
@@ -335,6 +550,15 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 		return nil, err
 	}
 	ownerStmts, err := renderOwnerUserStatements(ownerUser, ownerPass)
+	if err != nil {
+		return nil, err
+	}
+	// Revoke-then-grant makes spec.owner.privileges true desired state: a
+	// narrowed privilege list actually narrows, instead of GRANT silently
+	// leaving the wider old set in place while status reports the new one.
+	// The owner is this CR's own user, so the revoke cannot take anything
+	// away from a principal some other system manages.
+	ownerRevoke, err := renderRevokeAll("spec.owner secret username", spec.DatabaseName, ownerUser)
 	if err != nil {
 		return nil, err
 	}
@@ -366,6 +590,9 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 			return nil, err
 		}
 	}
+	if err := exec(ownerRevoke); err != nil {
+		return nil, err
+	}
 	if err := exec(ownerGrant); err != nil {
 		return nil, err
 	}
@@ -394,28 +621,32 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 // dropDatabase is the deletionPolicy: Delete path. It revokes before it
 // drops, because MySQL leaves schema-level grant rows behind when a schema
 // disappears, and it never drops a spec.grants[] user: those principals are
-// shared and this CRD did not create them.
-func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase) error {
+// shared and this CRD did not create them. dropDB and dropOwner come from
+// deleteScope — either may be false when another live CR still claims the
+// database or the owner principal.
+func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, dropDB, dropOwner bool) error {
 	spec := &mdb.Spec
 
 	stmts := make([]string, 0, len(spec.Grants)+3)
-	for i, g := range spec.Grants {
-		stmt, err := renderRevokeAll(fmt.Sprintf("spec.grants[%d].username", i), spec.DatabaseName, g.Username)
+	if dropDB {
+		for i, g := range spec.Grants {
+			stmt, err := renderRevokeAll(fmt.Sprintf("spec.grants[%d].username", i), spec.DatabaseName, g.Username)
+			if err != nil {
+				return err
+			}
+			stmts = append(stmts, stmt)
+		}
+		dropDBStmt, err := renderDropDatabase(spec.DatabaseName)
 		if err != nil {
 			return err
 		}
-		stmts = append(stmts, stmt)
+		stmts = append(stmts, dropDBStmt)
 	}
-	dropDB, err := renderDropDatabase(spec.DatabaseName)
-	if err != nil {
-		return err
-	}
-	stmts = append(stmts, dropDB)
 
-	// The owner user is only dropped when we know which user it was. An
-	// empty status.ownerUser means the CR never reached a successful apply,
-	// so there is no owner of ours to remove.
-	if mdb.Status.OwnerUser != "" {
+	// The owner user is only dropped when we know which user it was: the
+	// apply path records status.ownerUser before the first statement runs,
+	// so even a partially-applied owner is covered.
+	if dropOwner && mdb.Status.OwnerUser != "" {
 		dropUser, err := renderDropUser(mdb.Status.OwnerUser)
 		if err != nil {
 			return err
@@ -435,54 +666,41 @@ func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase) 
 // mysqlUserExists answers the spec.grants[] precondition with a
 // parameterized query — the username is compared, never rendered.
 func mysqlUserExists(ctx context.Context, db *sql.DB, username string) (bool, error) {
-	rows, err := db.QueryContext(ctx, grantUserExistsQuery, username, tenantUserHost)
+	var one int
+	err := db.QueryRowContext(ctx, grantUserExistsQuery, username, tenantUserHost).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
-	found := rows.Next()
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-	return found, nil
+	return true, nil
 }
 
 // groupFenced reports whether the group's primary is currently fenced by an
 // in-place restore or a planned failover, in which case a MysqlDatabase backs
 // off to Pending instead of erroring.
+//
+// It delegates to inPlaceRestoreInFlight and plannedFailoverInFlight — the
+// same classifiers the topology manager freezes on — rather than keeping a
+// private copy of which phases count as active. A private copy would drift
+// the first time a phase is added, and its disagreement with the canonical
+// helpers would be exactly the window where a tenant runs DDL against a
+// primary the operator considers fenced.
 func groupFenced(fg *v1alpha1.MysqlFailoverGroup) (reason, message string, fenced bool) {
-	if rip := fg.Status.RestoreInPlace; rip != nil && restoreInPlaceActive(rip.Phase) {
+	if inPlaceRestoreInFlight(fg) {
+		phase := "requested" // spec set, status not yet observed
+		if fg.Status.RestoreInPlace != nil {
+			phase = string(fg.Status.RestoreInPlace.Phase)
+		}
 		return "RestoreInProgress",
-			fmt.Sprintf("group %q is mid in-place restore (phase %s)", fg.Name, rip.Phase), true
+			fmt.Sprintf("group %q is mid in-place restore (phase %s)", fg.Name, phase), true
 	}
-	if pf := fg.Status.PlannedFailover; pf != nil && plannedFailoverActive(pf.Phase) {
+	if plannedFailoverInFlight(fg.Status.PlannedFailover) {
 		return "PlannedFailoverInProgress",
-			fmt.Sprintf("group %q is mid planned failover (phase %s)", fg.Name, pf.Phase), true
+			fmt.Sprintf("group %q is mid planned failover (phase %s)", fg.Name, fg.Status.PlannedFailover.Phase), true
 	}
 	return "", "", false
-}
-
-func restoreInPlaceActive(phase v1alpha1.RestoreInPlacePhase) bool {
-	switch phase {
-	case v1alpha1.RestoreInPlaceNone,
-		v1alpha1.RestoreInPlaceSucceeded,
-		v1alpha1.RestoreInPlaceFailed:
-		return false
-	default:
-		return true
-	}
-}
-
-func plannedFailoverActive(phase v1alpha1.PlannedFailoverPhase) bool {
-	switch phase {
-	case v1alpha1.PlannedFailoverPhaseNone,
-		v1alpha1.PlannedFailoverPhaseDeferred,
-		v1alpha1.PlannedFailoverPhaseSucceeded,
-		v1alpha1.PlannedFailoverPhaseFailed:
-		return false
-	default:
-		return true
-	}
 }
 
 // computeDatabaseHash fingerprints everything an apply depends on: the spec,
@@ -548,7 +766,10 @@ func (r *MysqlDatabaseReconciler) pending(ctx context.Context, mdb *v1alpha1.Mys
 // error so the CR does not hot-loop through exponential backoff while a human
 // reads the message; the slow requeue still lets it self-heal if the fix
 // happened outside Kubernetes (a missing grant user being created, say).
+// Every failure reason emits a Warning event, so `kubectl describe` tells
+// the same story for all of them rather than only the hand-picked few.
 func (r *MysqlDatabaseReconciler) fail(ctx context.Context, mdb *v1alpha1.MysqlDatabase, reason, message string) (ctrl.Result, error) {
+	r.Recorder.Event(mdb, corev1.EventTypeWarning, reason, message)
 	if err := r.stampStatus(ctx, mdb, func(st *v1alpha1.MysqlDatabaseStatus) {
 		st.Phase = v1alpha1.MysqlDatabasePhaseFailed
 		st.ObservedGeneration = mdb.Generation
@@ -596,13 +817,47 @@ func (r *MysqlDatabaseReconciler) removeFinalizer(ctx context.Context, mdb *v1al
 //     else" true. Without it, a rotated password would sit unapplied until
 //     something else poked the CR.
 func (r *MysqlDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Index CRs by owner Secret name so the Secret watch maps with an O(1)
+	// cache lookup. Secrets are the churniest resource in most clusters
+	// (Helm releases, cert renewals, token rotation); the map func runs for
+	// every one of those events and must not List-and-scan each time.
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.MysqlDatabase{},
+		mdbOwnerSecretIndex, func(o client.Object) []string {
+			return []string{o.(*v1alpha1.MysqlDatabase).Spec.Owner.SecretName}
+		}); err != nil {
+		return fmt.Errorf("index mysqldatabase owner secret: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.MysqlDatabase{}).
 		Watches(&v1alpha1.MysqlFailoverGroup{},
 			handler.EnqueueRequestsFromMapFunc(r.mapGroupToDatabases),
 			builder.WithPredicates(groupActiveSiteChangedPredicate())).
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapSecretToDatabases)).
+		Watches(&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.mapSecretToDatabases),
+			builder.WithPredicates(secretDataChangedPredicate())).
 		Complete(r)
+}
+
+// mdbOwnerSecretIndex is the cache index key for spec.owner.secretName.
+const mdbOwnerSecretIndex = ".spec.owner.secretName"
+
+// secretDataChangedPredicate drops Secret update events whose Data did not
+// change. ESO and friends re-apply Secrets on their refresh interval whether
+// or not the value rotated; without this, every no-op re-apply of an owner
+// Secret would enqueue a full reconcile for its tenant. Creates and deletes
+// pass through (the zero predicate.Funcs returns true), because a Secret
+// appearing is exactly what un-parks an OwnerSecretMissing tenant.
+func secretDataChangedPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldSecret, okOld := e.ObjectOld.(*corev1.Secret)
+			newSecret, okNew := e.ObjectNew.(*corev1.Secret)
+			if !okOld || !okNew {
+				return false
+			}
+			return !reflect.DeepEqual(oldSecret.Data, newSecret.Data)
+		},
+	}
 }
 
 // groupActiveSiteChangedPredicate narrows the group watch to the transitions
@@ -634,9 +889,19 @@ func (r *MysqlDatabaseReconciler) mapGroupToDatabases(ctx context.Context, obj c
 }
 
 func (r *MysqlDatabaseReconciler) mapSecretToDatabases(ctx context.Context, obj client.Object) []reconcile.Request {
-	return r.databasesMatching(ctx, obj.GetNamespace(), func(mdb *v1alpha1.MysqlDatabase) bool {
-		return mdb.Spec.Owner.SecretName == obj.GetName()
-	})
+	var list v1alpha1.MysqlDatabaseList
+	if err := r.List(ctx, &list, client.InNamespace(obj.GetNamespace()),
+		client.MatchingFields{mdbOwnerSecretIndex: obj.GetName()}); err != nil {
+		log.FromContext(ctx).Error(err, "list mysqldatabases for secret watch mapping", "namespace", obj.GetNamespace())
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range list.Items {
+		reqs = append(reqs, reconcile.Request{
+			NamespacedName: types.NamespacedName{Namespace: list.Items[i].Namespace, Name: list.Items[i].Name},
+		})
+	}
+	return reqs
 }
 
 func (r *MysqlDatabaseReconciler) databasesMatching(ctx context.Context, namespace string, match func(*v1alpha1.MysqlDatabase) bool) []reconcile.Request {

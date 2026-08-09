@@ -62,7 +62,7 @@ func scenario49TenantDatabaseFailover() runner.Scenario {
 			s49ObserveReappliedOnNewPrimary(),
 			s49VerifyOnPrimary("after switchover"),
 		},
-		Cleanup: s49Cleanup,
+		Cleanup: s49DeleteLeftovers,
 	}
 }
 
@@ -272,10 +272,6 @@ func s49WaitForReady(ctx context.Context, env *runner.Env, timeout time.Duration
 	return nil, fmt.Errorf("timed out waiting for MysqlDatabase %s to be Ready: %s", s49CRName, last)
 }
 
-func s49Cleanup(ctx context.Context, env *runner.Env) error {
-	return s49DeleteLeftovers(ctx, env)
-}
-
 // s49DeleteLeftovers removes the CR (deletionPolicy Delete drops the database
 // and the owner user, but never the shared grants[] principal) and the owner
 // Secret. Also used as a precheck so a previous aborted run cannot leave a
@@ -287,13 +283,20 @@ func s49DeleteLeftovers(ctx context.Context, env *runner.Env) error {
 		return fmt.Errorf("delete mysqldatabase: %w", err)
 	}
 
-	// Wait for the finalizer to release so the next run starts clean.
+	// Wait for the finalizer to release so the next run starts clean. A
+	// deadline expiry is a hard failure, not a shrug: returning nil here
+	// would report clean cleanup over a wedged deletion, and the next run's
+	// Create would no-op against the terminating CR and fail somewhere far
+	// from the real cause — the exact class of chronic flake PR #112 was
+	// about.
 	deadline := time.Now().Add(2 * time.Minute)
+	released := false
 	for time.Now().Before(deadline) {
 		var live v1alpha1.MysqlDatabase
 		key := client.ObjectKey{Namespace: env.Namespace, Name: s49CRName}
 		err := env.Kube.Controller.Get(ctx, key, &live)
 		if apierrors.IsNotFound(err) {
+			released = true
 			break
 		}
 		if err != nil {
@@ -304,6 +307,15 @@ func s49DeleteLeftovers(ctx context.Context, env *runner.Env) error {
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
+	}
+	if !released {
+		var live v1alpha1.MysqlDatabase
+		key := client.ObjectKey{Namespace: env.Namespace, Name: s49CRName}
+		state := "unknown"
+		if err := env.Kube.Controller.Get(ctx, key, &live); err == nil {
+			state = fmt.Sprintf("phase=%s finalizers=%v message=%q", live.Status.Phase, live.Finalizers, live.Status.Message)
+		}
+		return fmt.Errorf("MysqlDatabase %s still terminating after 2m (%s); finalizer never released", s49CRName, state)
 	}
 
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: s49SecretName, Namespace: env.Namespace}}

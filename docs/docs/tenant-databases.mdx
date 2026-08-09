@@ -79,11 +79,11 @@ status:
 
 | Phase | Meaning |
 |---|---|
-| `Pending` | A dependency is not ready: the group is absent or has no active site, the owner Secret has not been written, or the primary is fenced by an in-place restore or a planned failover. Not an error. |
+| `Pending` | A dependency is not ready: the group is absent or has no active site, the owner Secret has not been written, a group credential Secret is mid-rotation, the primary is fenced by an in-place restore or a planned failover, or a transient MySQL/connection error hit mid-apply (an unplanned failover, say). Not an error. |
 | `Creating` | Applying DDL. |
 | `Ready` | Database, owner and grants applied on the current active primary. |
-| `Failed` | Invalid identifier, privilege outside the allowlist, a `grants[]` user that does not exist, or a MySQL error. |
-| `Deleting` | Finalizer running. |
+| `Failed` | Invalid identifier, a `grants[]` user that does not exist, an ownership conflict with another CR, a reserved owner username, or a MySQL verdict about the CR's own statements. |
+| `Deleting` | Finalizer running under `deletionPolicy: Delete`. |
 
 A `MysqlDatabase` applied before its `MysqlFailoverGroup` goes `Pending`, not `Failed` — that ordering is normal, not a fault.
 
@@ -116,13 +116,19 @@ If you hit `GrantUserMissing`, the fix is to create the principal as a group-lev
 
 Bloodraven applies `ALTER USER … IDENTIFIED BY` from the owner Secret's bytes. That is correct desired-state behaviour for a user this CRD owns — it is what makes rotation a Secret write. Pointed at a Secret whose `username` is `root`, the operator user, or any other account named by `spec.credentials`, the same statement would instead reset a privileged account's password to whatever the Secret's author chose.
 
-So the reconciler refuses. If `spec.owner.secretName` resolves to a username belonging to the group — `root`, the replication user, or any `spec.credentials` principal — the CR fails with `reason: OwnerUserReserved` and no statement is built, let alone executed.
+So the reconciler refuses. If `spec.owner.secretName` resolves to a username belonging to the group — `root`, `replicator`, MySQL's built-in system accounts (`mysql.sys`, `mysql.session`, `mysql.infoschema`), or any `spec.credentials` principal — the CR fails with `reason: OwnerUserReserved` and no statement is built, let alone executed. The check fails closed: if a group credential Secret cannot be read for any reason other than not existing, the reconcile errors and retries rather than proceeding with a partial reserved set.
 
 This matters most if you deviate from the recommended split. In the intended deployment the caller has no `secrets` verbs at all (the Secret is rendered by an external controller), so it cannot name anything. If your provisioner does write its own owner Secrets, this check is what stops "provision a tenant database" from becoming "reset the operator's password".
 
 :::caution Residual risk
-The check covers group-level principals. It does not stop a caller who can write Secrets in the namespace from naming *another tenant's* owner username and resetting that tenant's password. If your callers write their own owner Secrets and you host mutually-untrusting tenants in one namespace, give each tenant its own namespace — the CRD is namespaced and the caller Role is namespaced precisely so that this is available.
+The check covers group-level principals, and a separate conflict check (below) covers principals that belong to another `MysqlDatabase`. What remains: a caller who can write Secrets in the namespace can still collide with MySQL users created entirely outside Bloodraven. If your callers write their own owner Secrets and you host mutually-untrusting tenants in one namespace, give each tenant its own namespace — the CRD is namespaced and the caller Role is namespaced precisely so that this is available.
 :::
+
+## One database, one CR
+
+Two `MysqlDatabase` CRs on the same group must not claim the same `databaseName` or the same owner principal: desired-state `ALTER USER` means shared owners take turns resetting each other's password, and `deletionPolicy: Delete` on one duplicate would drop the other's live data. The reconciler refuses: the older CR wins, the newer fails with `reason: DatabaseNameConflict` or `OwnerConflict` before any SQL is rendered.
+
+`spec.databaseName` is also **immutable**, enforced by the API server. MySQL has no schema rename; an edited name would CREATE a second database and orphan the first. Renaming a tenant database is a migration, not a spec edit.
 
 ## Rotation
 
@@ -135,6 +141,10 @@ kubectl -n bloodraven patch secret acme-mysql-owner \
 
 The reconciler watches the referenced Secret, so it applies `ALTER USER` on the next reconcile. Re-applying an unchanged CR issues **zero** MySQL statements — the reconciler compares a hash of the spec, the Secret's contents and the active site against `status.lastAppliedHash` — which is what keeps a tenant-dense cluster from hammering the primary.
 
+Rotating the **username** in the Secret is also just a Secret write, and it revokes what it replaces: the reconciler creates the new owner, grants it, and drops the previous owner account (`OwnerUserRotated` event). A rotation performed because a credential leaked actually revokes the leaked credential — `status.ownerUser` keeps the old name until the old account is really gone, so a failure mid-rotation retries rather than leaving a shadow account.
+
+`spec.owner.privileges` is desired state in both directions: the reconciler revokes the owner's existing grant on the database before granting the declared set, so narrowing `[ALL PRIVILEGES]` to `[SELECT]` actually narrows it. (This applies to the CR-owned owner only — `grants[]` principals are shared, see Known gaps.)
+
 ## Deletion
 
 `deletionPolicy` defaults to `Retain`, and the default is the point.
@@ -146,7 +156,13 @@ The reconciler watches the referenced Secret, so it applies `ALTER USER` on the 
 
 Dropping a tenant database because a CR was garbage-collected by a GitOps prune, a namespace delete or a bad label selector is an unrecoverable data-loss incident. Offboarding should be an audited human action, so it takes an explicit `deletionPolicy: Delete` to express it. The zero value resolves to `Retain` too — a CR stored before the field existed, or one round-tripped by a client that dropped it, is never read as permission to drop data.
 
-Under `Delete`, if the group has no active site the drop is **deferred**, not skipped: the CR emits `DatabaseDropDeferred` and waits. If the group is gone entirely there is nothing to connect to, so the finalizer is released with a `DatabaseCleanupSkipped` warning rather than wedging the CR forever.
+`Delete` only removes what the CR actually applied and exclusively owns:
+
+- `status.databaseCreated` is a write-ahead record, stamped before the first statement ever executes. A CR that failed before any SQL ran (invalid spec, reserved owner, ownership conflict) releases with `DatabaseDropSkipped` and touches nothing — it must not drop a database something else created under the same name. A CR that failed *mid*-apply is covered in the other direction: its owner user is recorded and gets dropped rather than surviving as an orphaned privileged account.
+- If another live CR on the group still declares the same `databaseName` or shares the owner principal, the drop is scoped down to what is exclusively this CR's, with a `DatabaseDropSkipped` warning for the rest.
+- The `grants[]` revoke uses `REVOKE ... IGNORE UNKNOWN USER`, so a CR that failed on `GrantUserMissing` still deletes cleanly instead of wedging on the revoke of a user that never existed.
+
+Under `Delete`, if the group has no active site — or its primary is fenced by an in-place restore or planned failover — the drop is **deferred**, not skipped: the CR emits `DatabaseDropDeferred` and waits. If the group is gone entirely there is nothing to connect to, so the finalizer is released with a `DatabaseCleanupSkipped` warning rather than wedging the CR forever. While the finalizer runs, `status.phase` is `Deleting`.
 
 ## Failover
 
@@ -154,7 +170,9 @@ Reconciliation runs against the primary only. Grants replicate, so after a failo
 
 The active site is part of the hash, so a failover invalidates the "nothing changed" short-circuit and forces a re-apply. The controller watches `MysqlFailoverGroup` and re-enqueues every `MysqlDatabase` in the namespace whose `groupRef` matches when `status.activeSite` changes, or when the group enters or leaves a fenced state. `status.activeSite` on the CR follows the group.
 
-During an in-place restore or a planned failover the primary is fenced, and reconciliation backs off to `Pending` rather than erroring — a maintenance window working as designed should not turn every tenant CR red.
+During an in-place restore or a planned failover the primary is fenced, and reconciliation backs off to `Pending` rather than erroring — a maintenance window working as designed should not turn every tenant CR red. The fence uses the same classifiers the topology manager freezes on, so "fenced" here always means what it means to the operator.
+
+The same logic applies to *unplanned* failovers, where there is no fence to observe: the group watch re-enqueues tenants the moment `status.activeSite` moves, which can be before the promoted site has actually left `super_read_only`. Read-only and connection errors during an apply are classified as transient — the CR stays `Pending` with `reason: PrimaryUnavailable` and retries — rather than latching `Failed` on every ordinary failover. `Failed` is reserved for MySQL's verdicts about the CR itself.
 
 ## RBAC
 
@@ -209,5 +227,7 @@ Both paths connect to the same primary through the same function — `openAdminC
 
 ## Known gaps
 
-- **Removing a `grants[]` entry does not revoke it.** The grant stays in place until the CR is deleted under `deletionPolicy: Delete`. Diffing against `status.appliedGrants` and revoking is probably the right behaviour, but it makes a CR edit destructive, so it is deliberately not implemented yet.
+- **Removing a `grants[]` entry does not revoke it.** The grant stays in place until the CR is deleted under `deletionPolicy: Delete`. Diffing against `status.appliedGrants` and revoking is probably the right behaviour, but it makes a CR edit destructive, so it is deliberately not implemented yet. (The owner's own privileges do not have this gap — they are revoked-and-regranted on every apply.)
 - **Host scoping is `'%'`,** consistent with every account in `credentials.go`. Scoping tenant owners to a pod CIDR is worth doing, but as one change across both paths rather than here alone.
+- **Out-of-band drift is not self-healed.** A database or grant dropped directly in MySQL is not detected: the hash short-circuit means an unchanged Ready CR issues no statements, which is the deliberate trade for not hammering the primary. Force a re-apply by rotating the owner Secret or editing the spec.
+- **`sql_mode=NO_BACKSLASH_ESCAPES` is unsupported** on the target group: password escaping assumes MySQL's default backslash semantics, so a password containing `\` would be stored literally under that mode.

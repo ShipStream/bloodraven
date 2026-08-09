@@ -251,7 +251,7 @@ var (
 	reCreateUser     = regexp.MustCompile(`^CREATE USER IF NOT EXISTS '(.*)'@'%' IDENTIFIED BY '(.*)'$`)
 	reAlterUser      = regexp.MustCompile(`^ALTER USER '(.*)'@'%' IDENTIFIED BY '(.*)'$`)
 	reGrant          = regexp.MustCompile("^GRANT (.+) ON `([^`]+)`\\.\\* TO '(.*)'@'%'$")
-	reRevoke         = regexp.MustCompile("^REVOKE IF EXISTS ALL PRIVILEGES ON `([^`]+)`\\.\\* FROM '(.*)'@'%'$")
+	reRevoke         = regexp.MustCompile("^REVOKE IF EXISTS ALL PRIVILEGES ON `([^`]+)`\\.\\* FROM '(.*)'@'%'( IGNORE UNKNOWN USER)?$")
 	reDropDatabase   = regexp.MustCompile("^DROP DATABASE IF EXISTS `([^`]+)`$")
 	reDropUser       = regexp.MustCompile(`^DROP USER IF EXISTS '(.*)'@'%'$`)
 )
@@ -304,8 +304,17 @@ func (s *fakeSQLServer) apply(stmt string) error {
 
 	case reRevoke.MatchString(stmt):
 		m := reRevoke.FindStringSubmatch(stmt)
-		if byUser, ok := s.grants[m[1]]; ok {
-			delete(byUser, m[2])
+		database, username, ignoreUnknown := m[1], m[2], m[3] != ""
+		if _, exists := s.users[username]; !exists && !ignoreUnknown {
+			// Mirrors real MySQL (ERROR 1141, verified on 9.7): IF EXISTS
+			// only tolerates a missing grant; a missing *account* errors
+			// unless IGNORE UNKNOWN USER is present. This is the exact
+			// wedge the delete path had, so the model must not be more
+			// forgiving than the server.
+			return fmt.Errorf("fake mysql: REVOKE from nonexistent user %q without IGNORE UNKNOWN USER", username)
+		}
+		if byUser, ok := s.grants[database]; ok {
+			delete(byUser, username)
 		}
 		return nil
 

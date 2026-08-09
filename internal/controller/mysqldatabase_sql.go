@@ -98,7 +98,14 @@ func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, us
 }
 
 // renderRevokeAll builds REVOKE ALL PRIVILEGES ... ON `db`.* FROM 'user'@'%'.
-// IF EXISTS keeps it idempotent when the grant was already removed by hand.
+// IF EXISTS keeps it idempotent when the grant was already removed by hand;
+// IGNORE UNKNOWN USER keeps it from erroring when the account itself does
+// not exist. The second clause is load-bearing on the delete path: a CR that
+// failed with GrantUserMissing still lists that user in spec.grants[], and
+// without IGNORE UNKNOWN USER the revoke would error (MySQL 1141), the
+// finalizer would never release, and the CR would wedge in Deleting forever.
+// Verified against MySQL 9.7: IF EXISTS alone does not cover a missing
+// account, only a missing grant.
 func renderRevokeAll(kind, database, username string) (string, error) {
 	dbIdent, err := quoteIdentifier("spec.databaseName", database)
 	if err != nil {
@@ -108,7 +115,7 @@ func renderRevokeAll(kind, database, username string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("REVOKE IF EXISTS ALL PRIVILEGES ON %s.* FROM %s", dbIdent, account), nil
+	return fmt.Sprintf("REVOKE IF EXISTS ALL PRIVILEGES ON %s.* FROM %s IGNORE UNKNOWN USER", dbIdent, account), nil
 }
 
 // renderDropDatabase builds the DROP DATABASE statement. Only ever reached

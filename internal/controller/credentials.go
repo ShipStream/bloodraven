@@ -272,12 +272,26 @@ func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.Mys
 // The two MySQL-admin call sites are documented as managing disjoint
 // principals. This is what makes that true rather than merely intended.
 //
-// Secrets that cannot be read are skipped rather than failing the caller: a
-// missing app/monitor Secret is a group-level problem and must not wedge an
-// unrelated tenant. The operator Secret is the exception — it is required to
-// connect at all, so its absence surfaces there instead.
-func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.MysqlFailoverGroup) map[string]bool {
-	reserved := map[string]bool{"root": true}
+// Any Secret named by the group that cannot be read — including one that
+// does not exist — fails the check closed, because this is a security gate:
+// a Secret deleted mid-rotation (delete + recreate) or a transient API error
+// would otherwise silently shrink the reserved set for exactly the window in
+// which a tenant Secret naming that group principal would slip through. The
+// caller maps NotFound to Pending (a group Secret mid-rotation is an
+// ordering problem) and everything else to a reconcile error.
+//
+// The well-known principals that never come from a Secret are hardcoded:
+// root, the conventional replication user, and MySQL's built-in system
+// accounts (which pass ValidateMysqlUsername, since account names may
+// contain dots).
+func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.MysqlFailoverGroup) (map[string]bool, error) {
+	reserved := map[string]bool{
+		"root":             true,
+		"replicator":       true,
+		"mysql.sys":        true,
+		"mysql.session":    true,
+		"mysql.infoschema": true,
+	}
 
 	add := func(name string) {
 		if name != "" {
@@ -301,7 +315,7 @@ func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alph
 		}
 		var secret corev1.Secret
 		if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &secret); err != nil {
-			continue
+			return nil, fmt.Errorf("read group credential secret %s/%s: %w", fg.Namespace, name, err)
 		}
 		add(string(secret.Data["username"]))
 		add(string(secret.Data["MYSQL_REPLICATION_USER"]))
@@ -311,7 +325,7 @@ func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alph
 			}
 		}
 	}
-	return reserved
+	return reserved, nil
 }
 
 // openMySQLFunc is the signature of openMySQL. It exists so component tests
@@ -361,8 +375,15 @@ func openAdminConnection(
 	}
 
 	// Try operator credentials first, fall back to root for initial setup.
+	// The fallback only exists where MYSQL_ROOT_PASSWORD is part of the
+	// Secret contract (credentials mode); a DSN-mode Secret without the key
+	// must not turn every operator-connect failure into an empty-password
+	// root login attempt.
 	db, err := open(operatorUser, operatorPass, primaryHost, tlsConfigName)
 	if err != nil {
+		if rootPass == "" {
+			return nil, fmt.Errorf("connect to primary as %s: %w", operatorUser, err)
+		}
 		logger.Info("operator credentials failed, trying root for initial setup", "error", err)
 		db, err = open("root", rootPass, primaryHost, tlsConfigName)
 		if err != nil {
