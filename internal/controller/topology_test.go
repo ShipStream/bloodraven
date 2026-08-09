@@ -30,6 +30,7 @@ type mockMySQL struct {
 	replicaStatusErr         error
 	gtidExecuted             string
 	gtidExecutedErr          error
+	gtidExecutedHadDeadline  bool
 	hasUserSchemas           *bool
 	userSchemasErr           error
 	stopReplicaCalls         int
@@ -277,6 +278,7 @@ func (m *mockMySQL) WaitForRelayLogDrain(_ context.Context, _ time.Duration) err
 func (m *mockMySQL) GetGtidExecuted(ctx context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	_, m.gtidExecutedHadDeadline = ctx.Deadline()
 	if m.respectContext && ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -1315,6 +1317,52 @@ func TestDetectEmptySite_UserSchemaBlocksFreshInitializedReplica(t *testing.T) {
 	}
 }
 
+// TestDetectEmptySite_SharedHistorySchemalessNotEmpty guards the residual
+// #130 path: a returning member that shares the cluster's GTID UUIDs but has
+// no user schemas must not be auto-cloned. Without the sharesHistory gate,
+// detectEmptySite would hand it to clone on the same poll that
+// initiateRecovery correctly RecoveryBlocked it — wiping the only copy of
+// divergent transactions.
+func TestDetectEmptySite_SharedHistorySchemalessNotEmpty(t *testing.T) {
+	clusterGTID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-12"
+	// Diverged but same UUID family as the primary — sharesHistory must
+	// keep this off the auto-clone path even with no user schemas.
+	oldGTID := clusterGTID + ",aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:13-15"
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: clusterGTID}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: oldGTID, hasUserSchemas: testBoolPtr(false)}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateReadOnly
+
+	donor, empty := tm.detectEmptySite(context.Background())
+	if donor != "" || empty != "" {
+		t.Errorf("shared-history schemaless site must not be empty, got donor=%q empty=%q", donor, empty)
+	}
+	site0.mu.Lock()
+	historyProbeHadDeadline := site0.gtidExecutedHadDeadline
+	site0.mu.Unlock()
+	if !historyProbeHadDeadline {
+		t.Fatal("shared-history probe did not receive a bounded context")
+	}
+}
+
+// TestDetectEmptySite_SkipsSitesUnderRecovery ensures auto-clone cannot
+// race a RecoveryBlocked / RecoveryInProgress report on the same poll.
+func TestDetectEmptySite_SkipsSitesUnderRecovery(t *testing.T) {
+	// Foreign UUID + no schemas would otherwise look fresh.
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "aaaa:1-100"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "bbbb:1-9", hasUserSchemas: testBoolPtr(false)}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateReadOnly
+	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateBlocked, divergentGtid: "bbbb:1-9", divergentCount: 9}
+
+	donor, empty := tm.detectEmptySite(context.Background())
+	if donor != "" || empty != "" {
+		t.Errorf("RecoveryBlocked site must not be auto-cloned, got donor=%q empty=%q", donor, empty)
+	}
+}
+
 func TestBootstrapIdlePhaseIncludesDone(t *testing.T) {
 	for _, phase := range []BootstrapPhase{BootstrapPhaseNone, BootstrapPhaseDone, BootstrapPhaseFailed} {
 		if !bootstrapIdlePhase(phase) {
@@ -2290,7 +2338,6 @@ func TestPoll_ZerosReplicatingOnStateLeave(t *testing.T) {
 // write, or after the last database is dropped.
 func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 	clusterGTID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-12"
-	noSchemas := false
 
 	tests := []struct {
 		name             string
@@ -2328,7 +2375,7 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			site0 := &mockMySQL{readOnly: false, gtidExecuted: clusterGTID}
-			site1 := &mockMySQL{readOnly: true, gtidExecuted: tt.oldGTID, hasUserSchemas: &noSchemas}
+			site1 := &mockMySQL{readOnly: true, gtidExecuted: tt.oldGTID, hasUserSchemas: testBoolPtr(false)}
 			clk := clock.NewFakeClock(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC))
 			tm, _, _ := newTestTopologyManagerWithBootstrapClock(site0, site1, clk)
 			setRecoveredTopology(tm)
@@ -2360,6 +2407,38 @@ func TestCheckRecovery_SchemalessOldPrimaryStillRecovers(t *testing.T) {
 					started, tt.wantStartReplica, site1.startReplicaCallCount())
 			}
 		})
+	}
+}
+
+// TestCheckRecovery_UnreachablePrimaryFailsSafeTowardComparison ensures a
+// slow or unreachable new primary can never demote a returning old primary to
+// a fresh-datadir verdict. sharesHistory answers "shares" on probe failure so
+// the schema check is not consulted and recovery proceeds to its own bounded
+// comparison (which then backs off), rather than silently skipping into
+// auto-clone. Without this, a schemaless site whose only UUIDs look foreign
+// while the primary is briefly unreachable would be wiped.
+func TestCheckRecovery_UnreachablePrimaryFailsSafeTowardComparison(t *testing.T) {
+	// Foreign-looking GTIDs: if the primary probe failed open toward
+	// "fresh", the schema check would mark this empty and skip recovery.
+	oldGTID := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb:1-3"
+	site0 := &mockMySQL{readOnly: false, gtidExecutedErr: errors.New("primary probe timeout")}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: oldGTID, hasUserSchemas: testBoolPtr(false)}
+	clk := clock.NewFakeClock(time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC))
+	tm, _, _ := newTestTopologyManagerWithBootstrapClock(site0, site1, clk)
+	setRecoveredTopology(tm)
+
+	tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
+
+	site1.mu.Lock()
+	fenced := site1.superReadOnlyCalls
+	site1.mu.Unlock()
+	if fenced == 0 {
+		t.Fatal("expected recovery to fence the returning site when the new primary is unreachable; " +
+			"got a fresh-datadir skip instead (would hand the site to auto-clone)")
+	}
+	if site1.startReplicaCallCount() != 0 {
+		t.Fatalf("StartReplica must not run without a successful GTID comparison, got %d calls",
+			site1.startReplicaCallCount())
 	}
 }
 
