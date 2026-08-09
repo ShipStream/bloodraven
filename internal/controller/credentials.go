@@ -213,6 +213,46 @@ func (r *MysqlFailoverGroupReconciler) setCredentialHash(ctx context.Context, fg
 	})
 }
 
+// adminCredentials resolves the username/password Bloodraven uses to connect
+// to a group's primary as an administrator, plus the root password used for
+// the initial-setup fallback.
+//
+// Both credential modes are handled here because openAdminConnection is the
+// single admin path and must therefore work wherever a MysqlFailoverGroup
+// works. In credentials mode the operator Secret carries username/password
+// keys; in legacy DSN mode (spec.secretName) the same information lives
+// inside the `dsn` key, which is what the backup and restore reconcilers
+// already parse.
+func adminCredentials(ctx context.Context, c ctrlclient.Client, fg *v1alpha1.MysqlFailoverGroup) (user, password, rootPassword string, err error) {
+	secretName := fg.Spec.EffectiveOperatorSecretName()
+	if secretName == "" {
+		return "", "", "", fmt.Errorf("group %q references no operator credential secret", fg.Name)
+	}
+
+	var secret corev1.Secret
+	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: secretName}, &secret); err != nil {
+		return "", "", "", fmt.Errorf("get operator secret: %w", err)
+	}
+	rootPassword = string(secret.Data["MYSQL_ROOT_PASSWORD"])
+
+	if fg.Spec.UsesCredentials() {
+		return string(secret.Data["username"]), string(secret.Data["password"]), rootPassword, nil
+	}
+
+	dsnBytes, ok := secret.Data["dsn"]
+	if !ok {
+		return "", "", "", fmt.Errorf("secret %s missing 'dsn' key", secretName)
+	}
+	parsed, err := mysqldriver.ParseDSN(string(dsnBytes))
+	if err != nil {
+		return "", "", "", fmt.Errorf("parse dsn from secret %s: %w", secretName, err)
+	}
+	if parsed.User == "" {
+		return "", "", "", fmt.Errorf("dsn in secret %s has an empty user", secretName)
+	}
+	return parsed.User, parsed.Passwd, rootPassword, nil
+}
+
 // openMySQLFunc is the signature of openMySQL. It exists so component tests
 // can substitute an in-memory MySQL model without forking the production
 // connection path.
@@ -240,14 +280,10 @@ func openAdminConnection(
 ) (*sql.DB, error) {
 	logger := log.FromContext(ctx)
 
-	var operatorSecret corev1.Secret
-	operatorSecretName := fg.Spec.Credentials.OperatorSecret
-	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}, &operatorSecret); err != nil {
-		return nil, fmt.Errorf("get operator secret: %w", err)
+	operatorUser, operatorPass, rootPass, err := adminCredentials(ctx, c, fg)
+	if err != nil {
+		return nil, err
 	}
-	operatorUser := string(operatorSecret.Data["username"])
-	operatorPass := string(operatorSecret.Data["password"])
-	rootPass := string(operatorSecret.Data["MYSQL_ROOT_PASSWORD"])
 
 	activeSite := fg.Spec.SiteByName(fg.Status.ActiveSite)
 	if activeSite == nil || !activeSite.IsPromotable() {
@@ -257,7 +293,6 @@ func openAdminConnection(
 
 	tlsConfigName := ""
 	if fg.Spec.TLS != nil {
-		var err error
 		tlsConfigName, err = mysqlTLSConfig(ctx, c, fg, siteServiceHost(fg.Name, activeSite.Name, fg.Namespace))
 		if err != nil {
 			return nil, fmt.Errorf("configure TLS for admin connection: %w", err)

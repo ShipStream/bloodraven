@@ -505,3 +505,99 @@ func assertEventContains(t *testing.T, rec *record.FakeRecorder, want string) {
 		}
 	}
 }
+
+// TestAdminCredentialsBothModes covers the two ways a MysqlFailoverGroup
+// carries its operator credential. The legacy DSN mode matters here because
+// the playground and every pre-credentials group uses it: reconcileCredentials
+// is guarded by UsesCredentials(), so before MysqlDatabase existed nothing
+// ever reached this code with spec.credentials nil.
+func TestAdminCredentialsBothModes(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("credentials mode", func(t *testing.T) {
+		fg := mdbTestGroup()
+		_, c, _ := newMdbReconciler(t, fg, mdbTestOperatorSecret())
+
+		user, pass, root, err := adminCredentials(ctx, c, fg)
+		if err != nil {
+			t.Fatalf("adminCredentials() error = %v", err)
+		}
+		if user != "operator" || pass != "op-pw" || root != "root-pw" {
+			t.Fatalf("adminCredentials() = (%q, %q, %q)", user, pass, root)
+		}
+	})
+
+	t.Run("legacy dsn mode", func(t *testing.T) {
+		fg := mdbTestGroup()
+		fg.Spec.Credentials = nil
+		fg.Spec.SecretName = "mysql-credentials"
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "mysql-credentials", Namespace: mdbTestNamespace},
+			Data: map[string][]byte{
+				"dsn":                 []byte("root:playground-root-pw@tcp(127.0.0.1:3306)/mysql"),
+				"MYSQL_ROOT_PASSWORD": []byte("playground-root-pw"),
+			},
+		}
+		_, c, _ := newMdbReconciler(t, fg, secret)
+
+		user, pass, root, err := adminCredentials(ctx, c, fg)
+		if err != nil {
+			t.Fatalf("adminCredentials() error = %v", err)
+		}
+		if user != "root" || pass != "playground-root-pw" || root != "playground-root-pw" {
+			t.Fatalf("adminCredentials() = (%q, %q, %q)", user, pass, root)
+		}
+	})
+
+	t.Run("dsn mode with no dsn key", func(t *testing.T) {
+		fg := mdbTestGroup()
+		fg.Spec.Credentials = nil
+		fg.Spec.SecretName = "mysql-credentials"
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "mysql-credentials", Namespace: mdbTestNamespace},
+			Data:       map[string][]byte{"MYSQL_ROOT_PASSWORD": []byte("x")},
+		}
+		_, c, _ := newMdbReconciler(t, fg, secret)
+
+		if _, _, _, err := adminCredentials(ctx, c, fg); err == nil {
+			t.Fatal("adminCredentials() = nil error, want a missing-dsn failure")
+		}
+	})
+}
+
+// TestMysqlDatabaseReconcilesAgainstDSNModeGroup is the end-to-end version of
+// the same point: a DSN-mode group must not panic the reconciler.
+func TestMysqlDatabaseReconcilesAgainstDSNModeGroup(t *testing.T) {
+	fg := mdbTestGroup()
+	fg.Spec.Credentials = nil
+	fg.Spec.SecretName = "mysql-credentials"
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "mysql-credentials", Namespace: mdbTestNamespace},
+		Data:       map[string][]byte{"dsn": []byte("root:pw@tcp(127.0.0.1:3306)/mysql")},
+	}
+
+	scheme := testScheme()
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlDatabase{}, &v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(mdbTestCR(), fg, secret, mdbTestOwnerSecret()).
+		Build()
+
+	var dialedUser string
+	r := &MysqlDatabaseReconciler{
+		Client:   c,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(20),
+		OpenDB: func(user, password, addr, tlsConfigName string) (*sql.DB, error) {
+			dialedUser = user
+			return nil, errTestDialRefused
+		},
+	}
+
+	if _, err := r.Reconcile(context.Background(), mdbRequest()); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if dialedUser != "root" {
+		t.Fatalf("dialed as %q, want the DSN user root", dialedUser)
+	}
+}

@@ -1,0 +1,201 @@
+---
+sidebar_position: 11
+---
+
+# Tenant Databases
+
+`MysqlDatabase` is a namespaced CRD that declares one database on a `MysqlFailoverGroup`, the user that owns it, and grants for principals that already exist.
+
+It exists to answer one question: **how does a caller provision a tenant database without being handed MySQL admin?**
+
+## Why this exists
+
+Before this CRD, the only way to create a per-tenant database on a Bloodraven-managed group was to connect to MySQL as an administrator. That meant the provisioner held the group's operator credential — `GRANT ALL PRIVILEGES ON *.* WITH GRANT OPTION`, plus `MYSQL_ROOT_PASSWORD`. Standing, long-lived, and effectively root on every tenant database in every group it provisioned into.
+
+The obvious alternative — leasing a short-lived credential from a secrets engine such as OpenBao's `database` engine — does not work here, for reasons that are structural rather than incidental:
+
+1. **The secrets engine dials the database.** It opens the connection itself and fails closed when it cannot reach the host. A MySQL instance reachable only on a private network cannot be configured as a target at all.
+2. **Bloodraven is already the credential authority.** `reconcileRole` issues `CREATE USER IF NOT EXISTS … IDENTIFIED BY` and `ALTER USER … IDENTIFIED BY` from a referenced Secret's bytes. The Secret is *desired state for the MySQL user*, not a credential to a user that already exists. An external engine rotating the same principals would be a second writer with no arbitration.
+3. **The operator credential cannot be leased even in principle.** It carries `MYSQL_ROOT_PASSWORD` — the value MySQL is initialized with — and the operator falls back to `root` with it when the operator user does not yet exist. A credential that must be known before the database exists cannot be minted by something that connects to the database.
+
+So the component that holds MySQL admin is Bloodraven, because it already must. `MysqlDatabase` is the way to ask Bloodraven to create a tenant database without being given the keys to do it yourself. The caller's MySQL credential is replaced by Kubernetes RBAC on a namespaced CRD.
+
+**The security property:** a caller can provision a tenant database while holding **no MySQL credential and no Secret access**.
+
+## Example
+
+```yaml
+apiVersion: shipstream.io/v1alpha1
+kind: MysqlDatabase
+metadata:
+  name: tenant-acme
+  namespace: bloodraven
+spec:
+  groupRef:
+    name: main                    # MysqlFailoverGroup in the same namespace
+  databaseName: acme_wms          # ^[A-Za-z0-9_]{1,64}$
+  characterSet: utf8mb4           # default
+  collation: utf8mb4_unicode_ci   # default
+
+  owner:
+    # Secret with keys `username` and `password`, same contract as
+    # spec.credentials.*Secret on MysqlFailoverGroup.
+    secretName: acme-mysql-owner
+    privileges: [ALL PRIVILEGES]  # ON acme_wms.* only, never WITH GRANT OPTION
+
+  # Principals that must ALREADY exist. Grant-only: never CREATE USER.
+  grants:
+    - username: maester
+      privileges: [SELECT, DELETE]
+
+  deletionPolicy: Retain          # default
+```
+
+The owner's password arrives the way every other Bloodraven credential does: you write a Secret, Bloodraven applies it. Bloodraven never generates, returns, or stores a password — if it generated one it would need somewhere to put it, which reintroduces the custody problem this CRD exists to remove.
+
+## Status
+
+```yaml
+status:
+  phase: Ready                    # Pending | Creating | Ready | Failed | Deleting
+  observedGeneration: 3
+  databaseCreated: true
+  ownerUser: acme_app             # echoed from the Secret; NOT the password
+  appliedGrants: [acme_app, maester]
+  activeSite: dc1
+  lastAppliedHash: a1b2c3d4e5f6
+  message: database acme_wms ready on site dc1
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: DatabaseReconciled
+```
+
+`observedGeneration` and the `Ready` condition are the contract. They are how a provisioner reports provisioning state back to its own callers without opening a MySQL connection — treat them as API surface, not diagnostics.
+
+**`status` never carries credential material.** `ownerUser` is a username. `lastAppliedHash` is a digest of the Secret's bytes, not the bytes.
+
+### Phases
+
+| Phase | Meaning |
+|---|---|
+| `Pending` | A dependency is not ready: the group is absent or has no active site, the owner Secret has not been written, or the primary is fenced by an in-place restore or a planned failover. Not an error. |
+| `Creating` | Applying DDL. |
+| `Ready` | Database, owner and grants applied on the current active primary. |
+| `Failed` | Invalid identifier, privilege outside the allowlist, a `grants[]` user that does not exist, or a MySQL error. |
+| `Deleting` | Finalizer running. |
+
+A `MysqlDatabase` applied before its `MysqlFailoverGroup` goes `Pending`, not `Failed` — that ordering is normal, not a fault.
+
+## Privileges
+
+`privileges` is an allowlist, not a passthrough string:
+
+```
+ALL PRIVILEGES, SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER,
+INDEX, REFERENCES, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, EXECUTE
+```
+
+Anything outside the list is rejected by the API server (the field is an enum) and rejected again in Go before any SQL is rendered. `ALL PRIVILEGES` cannot be combined with other entries.
+
+`GRANT OPTION` is not on the list and never will be. Bloodraven never emits `WITH GRANT OPTION` from this CRD — an owner that can grant is an owner that can escape its own database. `ALL PRIVILEGES` here means `GRANT ALL PRIVILEGES ON \`acme_wms\`.*`, which confers nothing outside that schema.
+
+Identifiers are validated before they reach SQL rendering, not merely escaped: `databaseName`, `characterSet` and `collation` must match `^[A-Za-z0-9_]{1,64}$`, and usernames `^[A-Za-z0-9_][A-Za-z0-9_.$-]{0,31}$`. Rejection is the contract; escaping is the belt on top of the braces.
+
+## `grants[]` is grant-only
+
+A `MysqlDatabase` can bring exactly one MySQL principal into existence: its own `owner`, and only because you placed that user's password in a Secret first.
+
+Every `grants[]` entry names a user that must already exist. The reconciler verifies it (`SELECT 1 FROM mysql.user WHERE user = ? AND host = '%'`) and **fails the CR** with `reason: GrantUserMissing` if it does not. It never creates the user.
+
+Without that split, "create a database" would imply "create arbitrary MySQL users", and this CRD would be a privilege-escalation primitive rather than a narrowing of one.
+
+If you hit `GrantUserMissing`, the fix is to create the principal as a group-level concern — it is shared across tenants, so it does not belong to any one `MysqlDatabase`. The CR re-checks on its own and goes `Ready` once the user exists; no CR edit is needed.
+
+## Rotation
+
+Rotating the owner password is a Secret write and nothing else:
+
+```bash
+kubectl -n bloodraven patch secret acme-mysql-owner \
+  --type merge -p '{"stringData":{"password":"new-password"}}'
+```
+
+The reconciler watches the referenced Secret, so it applies `ALTER USER` on the next reconcile. Re-applying an unchanged CR issues **zero** MySQL statements — the reconciler compares a hash of the spec, the Secret's contents and the active site against `status.lastAppliedHash` — which is what keeps a tenant-dense cluster from hammering the primary.
+
+## Deletion
+
+`deletionPolicy` defaults to `Retain`, and the default is the point.
+
+| Policy | Behaviour on CR delete |
+|---|---|
+| `Retain` (default) | Remove the finalizer, leave MySQL untouched, emit `DatabaseRetained`. No connection is opened. |
+| `Delete` | Revoke the `grants[]` entries on this database, `DROP DATABASE`, `DROP USER` the owner, then remove the finalizer. Never drops a `grants[]` user — those principals are shared. |
+
+Dropping a tenant database because a CR was garbage-collected by a GitOps prune, a namespace delete or a bad label selector is an unrecoverable data-loss incident. Offboarding should be an audited human action, so it takes an explicit `deletionPolicy: Delete` to express it. The zero value resolves to `Retain` too — a CR stored before the field existed, or one round-tripped by a client that dropped it, is never read as permission to drop data.
+
+Under `Delete`, if the group has no active site the drop is **deferred**, not skipped: the CR emits `DatabaseDropDeferred` and waits. If the group is gone entirely there is nothing to connect to, so the finalizer is released with a `DatabaseCleanupSkipped` warning rather than wedging the CR forever.
+
+## Failover
+
+Reconciliation runs against the primary only. Grants replicate, so after a failover the rows are already on the new primary — but a CR must not report `Ready` against a primary the operator has not spoken to since the flip, because that is reporting something it does not know.
+
+The active site is part of the hash, so a failover invalidates the "nothing changed" short-circuit and forces a re-apply. The controller watches `MysqlFailoverGroup` and re-enqueues every `MysqlDatabase` in the namespace whose `groupRef` matches when `status.activeSite` changes, or when the group enters or leaves a fenced state. `status.activeSite` on the CR follows the group.
+
+During an in-place restore or a planned failover the primary is fenced, and reconciliation backs off to `Pending` rather than erroring — a maintenance window working as designed should not turn every tenant CR red.
+
+## RBAC
+
+Two separate pieces, and the distinction is the security story.
+
+**The operator** gets `get;list;watch;update;patch` on `mysqldatabases` and `get;update;patch` on `mysqldatabases/status`. Deliberately no `create` and no `delete`: it reconciles tenant databases that a caller declared, it never invents them. `update` is what lets it add and remove the finalizer.
+
+**The caller** binds a namespaced Role, shipped as an example at `config/rbac/mysqldatabase_caller_role.yaml` and not installed by default:
+
+```yaml
+rules:
+  - apiGroups: [shipstream.io]
+    resources: [mysqldatabases]
+    verbs: [create, get, list, watch, update, patch, delete]
+  - apiGroups: [shipstream.io]
+    resources: [mysqldatabases/status]
+    verbs: [get]
+```
+
+What is absent is the point:
+
+- no `secrets` rule, so the caller cannot read the owner password it provisions against, nor the group's operator credential;
+- no `mysqlfailovergroups` rule, so it cannot read the DSN, the credential Secret names, or the topology;
+- no MySQL credential of any kind.
+
+`status` is a subresource, so `update` on `mysqldatabases` does not let a caller forge `Ready`. Only Bloodraven writes status, which is what makes `Ready` mean "Bloodraven applied this".
+
+If a future change makes a `secrets` rule necessary in that Role, it has reintroduced the standing root-equivalent credential this API exists to remove.
+
+Writing the owner Secret is a separate concern and deliberately a separate principal — in ShipStream's deployment, External Secrets Operator renders it from OpenBao and the provisioner never touches it.
+
+## Quotas
+
+Nothing in Bloodraven bounds how many databases a namespace may create. Use a Kubernetes `ResourceQuota` on the CRD count:
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-databases
+  namespace: bloodraven
+spec:
+  hard:
+    count/mysqldatabases.shipstream.io: "200"
+```
+
+## Relationship to `spec.credentials`
+
+`MysqlDatabase` does not replace `spec.credentials` on `MysqlFailoverGroup`. The five group-level roles (operator, app, readonly, monitor, backup) stay exactly as they are; this is per-tenant databases, a different granularity.
+
+Both paths connect to the same primary through the same function — `openAdminConnection` in `internal/controller/credentials.go` — and manage disjoint principals. That function is the only place in Bloodraven that assembles MySQL admin credentials, and it has exactly these two callers. A third would be a design decision, not a refactor.
+
+## Known gaps
+
+- **Removing a `grants[]` entry does not revoke it.** The grant stays in place until the CR is deleted under `deletionPolicy: Delete`. Diffing against `status.appliedGrants` and revoking is probably the right behaviour, but it makes a CR edit destructive, so it is deliberately not implemented yet.
+- **Host scoping is `'%'`,** consistent with every account in `credentials.go`. Scoping tenant owners to a pod CIDR is worth doing, but as one change across both paths rather than here alone.
