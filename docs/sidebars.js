@@ -25,6 +25,7 @@ const sidebars = {
         'placement-contract',
         'app-integration',
         'credentials-and-tls',
+        'tenant-databases',
         'encryption-at-rest',
         'security-model',
         'production-hardening',

@@ -85,6 +85,23 @@ rules:
   - apiGroups: [shipstream.io]
     resources: [mysqlstandbyclusters/status]
     verbs: [get, patch, update]
+  # MysqlDatabase CRD (tenant databases).
+  #
+  # Deliberately no `create` and no `delete`: the operator reconciles tenant
+  # databases that a caller declared, it never invents or removes the CRs
+  # themselves. `update` is required to add and remove the
+  # shipstream.io/mysqldatabase finalizer. Callers get create/delete through
+  # a separate namespaced Role that grants no Secret access and no MySQL
+  # credential — see config/rbac/mysqldatabase_caller_role.yaml.
+  - apiGroups: [shipstream.io]
+    resources: [mysqldatabases]
+    verbs: [get, list, patch, update, watch]
+  - apiGroups: [shipstream.io]
+    resources: [mysqldatabases/finalizers]
+    verbs: [update]
+  - apiGroups: [shipstream.io]
+    resources: [mysqldatabases/status]
+    verbs: [get, patch, update]
   # External DNS (DNSEndpoint updates for DNS failover)
   - apiGroups: [externaldns.k8s.io]
     resources: [dnsendpoints]
