@@ -66,6 +66,14 @@ func (s *fakeSQLServer) addUser(username, password string) {
 	s.users[username] = password
 }
 
+// addDatabase pre-seeds a schema the model did not create through the
+// reconciler — the setup for the adoption-refusal tests.
+func (s *fakeSQLServer) addDatabase(name, charset, collation string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.databases[name] = charset + "/" + collation
+}
+
 func (s *fakeSQLServer) hasUser(username string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -195,8 +203,10 @@ type fakeSQLConn struct {
 func (c *fakeSQLConn) Prepare(string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fake mysql: Prepare is not supported; use ExecContext/QueryContext")
 }
-func (c *fakeSQLConn) Close() error              { return nil }
-func (c *fakeSQLConn) Begin() (driver.Tx, error) { return nil, fmt.Errorf("fake mysql: no transactions") }
+func (c *fakeSQLConn) Close() error { return nil }
+func (c *fakeSQLConn) Begin() (driver.Tx, error) {
+	return nil, fmt.Errorf("fake mysql: no transactions")
+}
 
 func (c *fakeSQLConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	if len(args) != 0 {
@@ -209,23 +219,34 @@ func (c *fakeSQLConn) ExecContext(_ context.Context, query string, args []driver
 }
 
 func (c *fakeSQLConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	if query != "SELECT 1 FROM mysql.user WHERE user = ? AND host = ?" {
-		return nil, fmt.Errorf("fake mysql: unmodelled query %q", query)
-	}
-	if len(args) != 2 {
-		return nil, fmt.Errorf("fake mysql: user-existence query wants 2 args, got %d", len(args))
-	}
-	username, _ := args[0].Value.(string)
-	host, _ := args[1].Value.(string)
-	if host != "%" {
-		return nil, fmt.Errorf("fake mysql: unexpected host %q", host)
-	}
+	switch query {
+	case "SELECT 1 FROM mysql.user WHERE user = ? AND host = ?":
+		if len(args) != 2 {
+			return nil, fmt.Errorf("fake mysql: user-existence query wants 2 args, got %d", len(args))
+		}
+		username, _ := args[0].Value.(string)
+		host, _ := args[1].Value.(string)
+		if host != "%" {
+			return nil, fmt.Errorf("fake mysql: unexpected host %q", host)
+		}
+		rows := &fakeSQLRows{}
+		if c.server.hasUser(username) {
+			rows.remaining = 1
+		}
+		return rows, nil
 
-	rows := &fakeSQLRows{}
-	if c.server.hasUser(username) {
-		rows.remaining = 1
+	case "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?":
+		if len(args) != 1 {
+			return nil, fmt.Errorf("fake mysql: schema-existence query wants 1 arg, got %d", len(args))
+		}
+		name, _ := args[0].Value.(string)
+		rows := &fakeSQLRows{}
+		if _, exists := c.server.database(name); exists {
+			rows.remaining = 1
+		}
+		return rows, nil
 	}
-	return rows, nil
+	return nil, fmt.Errorf("fake mysql: unmodelled query %q", query)
 }
 
 type fakeSQLRows struct {
@@ -249,13 +270,24 @@ func (r *fakeSQLRows) Next(dest []driver.Value) error {
 
 var (
 	reCreateDatabase = regexp.MustCompile("^CREATE DATABASE IF NOT EXISTS `([^`]+)` CHARACTER SET (\\S+) COLLATE (\\S+)$")
+	reAlterDatabase  = regexp.MustCompile("^ALTER DATABASE `([^`]+)` CHARACTER SET (\\S+) COLLATE (\\S+)$")
 	reCreateUser     = regexp.MustCompile(`^CREATE USER IF NOT EXISTS '(.*)'@'%' IDENTIFIED BY '(.*)'$`)
 	reAlterUser      = regexp.MustCompile(`^ALTER USER '(.*)'@'%' IDENTIFIED BY '(.*)'$`)
 	reGrant          = regexp.MustCompile("^GRANT (.+) ON `([^`]+)`\\.\\* TO '(.*)'@'%'$")
 	reRevoke         = regexp.MustCompile("^REVOKE IF EXISTS ALL PRIVILEGES ON `([^`]+)`\\.\\* FROM '(.*)'@'%'( IGNORE UNKNOWN USER)?$")
+	reRevokePartial  = regexp.MustCompile("^REVOKE IF EXISTS (.+) ON `([^`]+)`\\.\\* FROM '(.*)'@'%'( IGNORE UNKNOWN USER)?$")
 	reDropDatabase   = regexp.MustCompile("^DROP DATABASE IF EXISTS `([^`]+)`$")
 	reDropUser       = regexp.MustCompile(`^DROP USER IF EXISTS '(.*)'@'%'$`)
 )
+
+// fakeSQLAllPrivileges is what ALL PRIVILEGES expands to on a schema: the
+// concrete privilege list the reconciler's allowlist permits. Revoking a
+// named privilege from an account that holds ALL must leave the rest,
+// exactly as the real server does.
+var fakeSQLAllPrivileges = []string{
+	"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
+	"INDEX", "REFERENCES", "LOCK TABLES", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE",
+}
 
 func (s *fakeSQLServer) apply(stmt string) error {
 	s.mu.Lock()
@@ -271,6 +303,14 @@ func (s *fakeSQLServer) apply(stmt string) error {
 		if _, exists := s.databases[m[1]]; !exists {
 			s.databases[m[1]] = m[2] + "/" + m[3]
 		}
+		return nil
+
+	case reAlterDatabase.MatchString(stmt):
+		m := reAlterDatabase.FindStringSubmatch(stmt)
+		if _, exists := s.databases[m[1]]; !exists {
+			return fmt.Errorf("fake mysql: ALTER DATABASE on nonexistent database %q", m[1])
+		}
+		s.databases[m[1]] = m[2] + "/" + m[3]
 		return nil
 
 	case reCreateUser.MatchString(stmt):
@@ -330,6 +370,33 @@ func (s *fakeSQLServer) apply(stmt string) error {
 		}
 		if byUser, ok := s.grants[database]; ok {
 			delete(byUser, username)
+		}
+		return nil
+
+	case reRevokePartial.MatchString(stmt):
+		m := reRevokePartial.FindStringSubmatch(stmt)
+		privs, database, username, ignoreUnknown := m[1], m[2], m[3], m[4] != ""
+		if _, exists := s.users[username]; !exists && !ignoreUnknown {
+			return fmt.Errorf("fake mysql: REVOKE from nonexistent user %q without IGNORE UNKNOWN USER", username)
+		}
+		byUser, ok := s.grants[database]
+		if !ok {
+			return nil
+		}
+		current, ok := byUser[username]
+		if !ok {
+			return nil
+		}
+		if len(current) == 1 && current[0] == "ALL PRIVILEGES" {
+			current = append([]string(nil), fakeSQLAllPrivileges...)
+		}
+		for _, p := range strings.Split(privs, ", ") {
+			current = slices.DeleteFunc(current, func(x string) bool { return x == p })
+		}
+		if len(current) == 0 {
+			delete(byUser, username)
+		} else {
+			byUser[username] = current
 		}
 		return nil
 

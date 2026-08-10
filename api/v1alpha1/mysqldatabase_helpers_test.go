@@ -259,6 +259,27 @@ func TestSpecValidate(t *testing.T) {
 			ownerUser: "acme_app",
 			wantField: "spec.grants[1].username",
 		},
+		{
+			name:      "system schema mysql",
+			mutate:    func(s *MysqlDatabaseSpec) { s.DatabaseName = "mysql" },
+			ownerUser: "acme_app",
+			wantField: "system schema",
+		},
+		{
+			name:      "system schema in mixed case",
+			mutate:    func(s *MysqlDatabaseSpec) { s.DatabaseName = "Performance_Schema" },
+			ownerUser: "acme_app",
+			wantField: "system schema",
+		},
+		{
+			// A grants[] entry naming the owner would silently override
+			// spec.owner.privileges: the grants pass runs after the owner
+			// grant.
+			name:      "grant username is the owner username",
+			mutate:    func(s *MysqlDatabaseSpec) { s.Grants[0].Username = "acme_app" },
+			ownerUser: "acme_app",
+			wantField: "spec.grants[0].username",
+		},
 	}
 
 	for _, tc := range cases {
@@ -273,5 +294,18 @@ func TestSpecValidate(t *testing.T) {
 				t.Fatalf("Validate() = %q, want a message naming %s", err, tc.wantField)
 			}
 		})
+	}
+}
+
+func TestIsSystemSchema(t *testing.T) {
+	for _, name := range []string{"mysql", "MySQL", "MYSQL", "sys", "Sys", "information_schema", "INFORMATION_SCHEMA", "performance_schema"} {
+		if !IsSystemSchema(name) {
+			t.Fatalf("IsSystemSchema(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"acme_wms", "mysql_backup", "syslog", "performance", "", "my_sql"} {
+		if IsSystemSchema(name) {
+			t.Fatalf("IsSystemSchema(%q) = true, want false", name)
+		}
 	}
 }

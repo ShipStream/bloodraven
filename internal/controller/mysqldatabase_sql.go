@@ -42,6 +42,9 @@ func quoteAccount(kind, username string) (string, error) {
 }
 
 // renderCreateDatabase builds the idempotent CREATE DATABASE statement.
+// The reconciler separately refuses to run it against a schema it did not
+// create (schemaExistsQuery); IF NOT EXISTS stays so the create itself is
+// idempotent across retries.
 func renderCreateDatabase(database, characterSet, collation string) (string, error) {
 	dbIdent, err := quoteIdentifier("spec.databaseName", database)
 	if err != nil {
@@ -54,6 +57,28 @@ func renderCreateDatabase(database, characterSet, collation string) (string, err
 		return "", err
 	}
 	return fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s CHARACTER SET %s COLLATE %s",
+		dbIdent, characterSet, collation), nil
+}
+
+// renderAlterDatabase builds ALTER DATABASE ... CHARACTER SET ... COLLATE ...
+//
+// It exists because characterSet/collation are mutable spec fields, and
+// CREATE DATABASE IF NOT EXISTS is a no-op against an existing schema: an
+// edit would report Ready while MySQL kept the old defaults. ALTER DATABASE
+// only changes the schema defaults — never existing tables — so running it
+// on every apply makes the fields true desired state without a migration.
+func renderAlterDatabase(database, characterSet, collation string) (string, error) {
+	dbIdent, err := quoteIdentifier("spec.databaseName", database)
+	if err != nil {
+		return "", err
+	}
+	if err := v1alpha1.ValidateMysqlIdentifier("spec.characterSet", characterSet); err != nil {
+		return "", err
+	}
+	if err := v1alpha1.ValidateMysqlIdentifier("spec.collation", collation); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("ALTER DATABASE %s CHARACTER SET %s COLLATE %s",
 		dbIdent, characterSet, collation), nil
 }
 
@@ -95,6 +120,57 @@ func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, us
 		return "", err
 	}
 	return fmt.Sprintf("GRANT %s ON %s.* TO %s", strings.Join(privSQL, ", "), dbIdent, account), nil
+}
+
+// renderRevokeSurplus builds the REVOKE that removes every allowlist
+// privilege a principal holds on this database but the spec no longer
+// declares — or "" when there is no surplus to revoke.
+//
+// It is the second half of grant-then-revoke: the desired set is GRANTed
+// first, so a failure between the two statements leaves the principal with
+// the union of old and new privileges (over-granted for one requeue
+// interval) rather than with zero privileges on its own live database.
+// IF EXISTS tolerates a surplus entry the account does not actually hold;
+// IGNORE UNKNOWN USER tolerates a missing account, exactly as the
+// revoke-all path does.
+func renderRevokeSurplus(kind string, desired []v1alpha1.MysqlPrivilege, database, username string) (string, error) {
+	desiredSet := make(map[v1alpha1.MysqlPrivilege]bool, len(desired))
+	for _, p := range desired {
+		desiredSet[p] = true
+	}
+	// ALL PRIVILEGES is the whole allowlist: nothing can be surplus once
+	// it is granted. (Validation rejects combining it with other entries.)
+	if desiredSet[v1alpha1.PrivilegeAllPrivileges] {
+		return "", nil
+	}
+
+	var surplus []string
+	for _, name := range v1alpha1.AllowedPrivilegeNames() {
+		// ALL PRIVILEGES is a synonym for the whole set, not a listable
+		// member: MySQL rejects it combined with other entries in a
+		// REVOKE, and revoking every concrete privilege already empties an
+		// ALL PRIVILEGES grant.
+		if name == string(v1alpha1.PrivilegeAllPrivileges) {
+			continue
+		}
+		if !desiredSet[v1alpha1.MysqlPrivilege(name)] {
+			surplus = append(surplus, name)
+		}
+	}
+	if len(surplus) == 0 {
+		return "", nil
+	}
+
+	dbIdent, err := quoteIdentifier("spec.databaseName", database)
+	if err != nil {
+		return "", err
+	}
+	account, err := quoteAccount(kind, username)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("REVOKE IF EXISTS %s ON %s.* FROM %s IGNORE UNKNOWN USER",
+		strings.Join(surplus, ", "), dbIdent, account), nil
 }
 
 // renderRevokeAll builds REVOKE ALL PRIVILEGES ... ON `db`.* FROM 'user'@'%'.
@@ -144,3 +220,9 @@ func renderDropUser(username string) (string, error) {
 // username is compared rather than rendered, so there is no reason for it to
 // go anywhere near a format string.
 const grantUserExistsQuery = "SELECT 1 FROM mysql.user WHERE user = ? AND host = ?"
+
+// schemaExistsQuery is the parameterized existence check for
+// spec.databaseName. It gates adoption: a schema that already exists is
+// only this CR's to manage when status.databaseCreated says this CR
+// created it. Parameterized for the same reason grantUserExistsQuery is.
+const schemaExistsQuery = "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?"

@@ -672,3 +672,219 @@ func TestMysqlDatabaseGrantNarrowingRevokes(t *testing.T) {
 		t.Fatalf("maester grants = %v after narrowing to SELECT; INSERT survived", privs)
 	}
 }
+
+// requireFailed asserts a Failed phase with the given Ready reason.
+func requireFailed(t *testing.T, mdb *v1alpha1.MysqlDatabase, reason string) {
+	t.Helper()
+	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhaseFailed {
+		t.Fatalf("phase = %q (message %q), want Failed/%s", mdb.Status.Phase, mdb.Status.Message, reason)
+	}
+	for i := range mdb.Status.Conditions {
+		if mdb.Status.Conditions[i].Type == "Ready" {
+			if mdb.Status.Conditions[i].Reason != reason {
+				t.Fatalf("Ready reason = %q, want %s", mdb.Status.Conditions[i].Reason, reason)
+			}
+			return
+		}
+	}
+	t.Fatalf("no Ready condition; want reason %s", reason)
+}
+
+// TestMysqlDatabaseRemovingGrantRevokesIt makes grants[] desired state on
+// the way out, not just on the way in: removing an entry revokes it on the
+// next apply, via the diff against status.appliedGrants.
+func TestMysqlDatabaseRemovingGrantRevokesIt(t *testing.T) {
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{
+				v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeDelete,
+			}},
+		}
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.server.addUser("maester", "maester-pw")
+
+	h.reconcile()
+	h.requireReady()
+	if _, ok := h.server.grantsFor(mdbDatabase, "maester"); !ok {
+		t.Fatal("test premise broken: maester not granted after first apply")
+	}
+
+	h.update(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Grants = nil
+	})
+	h.reconcile()
+	h.requireReady()
+
+	if privs, ok := h.server.grantsFor(mdbDatabase, "maester"); ok {
+		t.Fatalf("maester still holds %v after its grants[] entry was removed; removal must revoke", privs)
+	}
+	// The shared principal itself is never dropped by a grants[] edit.
+	if !h.server.hasUser("maester") {
+		t.Fatal("removing a grants[] entry dropped the shared user")
+	}
+}
+
+// TestMysqlDatabaseDeleteRevokesRemovedGrants: a grant removed from the
+// spec immediately before deletion — no re-apply in between — must still be
+// revoked by the delete path through the status.appliedGrants union; the
+// mysql.db row otherwise survives DROP DATABASE and reactivates if the
+// schema name is ever recreated.
+func TestMysqlDatabaseDeleteRevokesRemovedGrants(t *testing.T) {
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+		}
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.server.addUser("maester", "maester-pw")
+
+	h.reconcile()
+	h.requireReady()
+
+	// Remove the entry and delete WITHOUT re-applying: only the delete
+	// path's union of spec.grants and status.appliedGrants can still reach
+	// maester's grant.
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Grants = nil })
+	before := h.server.statementCount()
+	h.delete()
+	h.reconcile()
+
+	if _, ok := h.server.database(mdbDatabase); ok {
+		t.Fatal("database survived deletionPolicy=Delete")
+	}
+	for _, stmt := range h.server.statementsSince(before) {
+		if strings.HasPrefix(stmt, "REVOKE") && strings.Contains(stmt, "'maester'") {
+			return // the union revoke ran during deletion
+		}
+	}
+	t.Fatal("delete path issued no REVOKE for maester (removed before deletion); the grant row would survive DROP DATABASE")
+}
+
+// TestMysqlDatabaseRefusesPreExistingSchema is the adoption gate: a schema
+// this CR did not create is not granted onto, not owned, and never dropped.
+func TestMysqlDatabaseRefusesPreExistingSchema(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	// Someone else's schema, same name.
+	h.server.addDatabase(mdbDatabase, "latin1", "latin1_swedish_ci")
+
+	h.reconcile()
+
+	mdb := h.get()
+	requireFailed(t, mdb, "DatabasePreExists")
+	// The gate ran no SQL: no owner user, no grants, and the foreign
+	// schema's defaults are untouched.
+	if h.server.hasUser(mdbOwnerUser) {
+		t.Fatal("owner user created despite refusing the schema")
+	}
+	if spec, _ := h.server.database(mdbDatabase); spec != "latin1/latin1_swedish_ci" {
+		t.Fatalf("foreign schema modified: %q", spec)
+	}
+	if mdb.Status.DatabaseCreated {
+		t.Fatal("status.databaseCreated set for a schema this CR never created; it would authorize a DROP")
+	}
+
+	// Deletion under Delete must release without touching the foreign
+	// schema.
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	h.delete()
+	h.reconcile()
+	if _, ok := h.server.database(mdbDatabase); !ok {
+		t.Fatal("deletion dropped a schema the CR refused to adopt")
+	}
+}
+
+// TestMysqlDatabaseRefusesPreExistingOwnerUser: CREATE USER IF NOT EXISTS +
+// ALTER USER must never reset the password of an account this CR did not
+// create, and deletion must never drop it.
+func TestMysqlDatabaseRefusesPreExistingOwnerUser(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	// Someone else's account, same name as the owner the Secret declares.
+	h.server.addUser(mdbOwnerUser, "foreign-password")
+
+	h.reconcile()
+
+	mdb := h.get()
+	requireFailed(t, mdb, "PreExistingOwnerUser")
+	if pw, _ := h.server.password(mdbOwnerUser); pw != "foreign-password" {
+		t.Fatalf("foreign account password was reset to %q", pw)
+	}
+	if mdb.Status.OwnerUser != "" {
+		t.Fatalf("status.ownerUser = %q, want empty — the account is not this CR's", mdb.Status.OwnerUser)
+	}
+
+	// Deletion under Delete drops the database this CR did create, but
+	// never the foreign account.
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	h.delete()
+	h.reconcile()
+	if !h.server.hasUser(mdbOwnerUser) {
+		t.Fatal("deletion dropped a pre-existing account the CR refused to adopt")
+	}
+	if _, ok := h.server.database(mdbDatabase); ok {
+		t.Fatal("database this CR created survived deletionPolicy=Delete")
+	}
+}
+
+// TestMysqlDatabaseCharacterSetEditAppliesAlterDatabase: characterSet and
+// collation are mutable desired state. CREATE DATABASE IF NOT EXISTS is a
+// no-op on an existing schema, so the edit must land through ALTER DATABASE
+// or the CR would report Ready while MySQL keeps the old defaults.
+func TestMysqlDatabaseCharacterSetEditAppliesAlterDatabase(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+
+	h.reconcile()
+	h.requireReady()
+
+	h.update(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.CharacterSet = "utf8mb3"
+		m.Spec.Collation = "utf8mb3_general_ci"
+	})
+	h.reconcile()
+	h.requireReady()
+
+	if spec, _ := h.server.database(mdbDatabase); spec != "utf8mb3/utf8mb3_general_ci" {
+		t.Fatalf("schema defaults = %q after edit, want utf8mb3/utf8mb3_general_ci", spec)
+	}
+}
+
+// TestMysqlDatabaseUsernameRotationCreatesBeforeDrop: rotation must be
+// create-grant-then-drop, never drop-then-create — a failure mid-handover
+// has to leave both accounts alive, not a tenant with no owner.
+func TestMysqlDatabaseUsernameRotationCreatesBeforeDrop(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+
+	h.reconcile()
+	h.requireReady()
+
+	var s corev1.Secret
+	key := types.NamespacedName{Namespace: mdbNamespace, Name: mdbOwnerSecretName}
+	if err := h.client.Get(context.Background(), key, &s); err != nil {
+		t.Fatalf("get owner secret: %v", err)
+	}
+	s.Data["username"] = []byte("acme_app_v2")
+	if err := h.client.Update(context.Background(), &s); err != nil {
+		t.Fatalf("update owner secret: %v", err)
+	}
+
+	before := h.server.statementCount()
+	h.reconcile()
+	h.requireReady()
+
+	createAt, dropAt := -1, -1
+	for i, stmt := range h.server.statementsSince(before) {
+		switch {
+		case strings.Contains(stmt, "CREATE USER IF NOT EXISTS 'acme_app_v2'"):
+			createAt = i
+		case stmt == "DROP USER IF EXISTS 'acme_app'@'%'":
+			dropAt = i
+		}
+	}
+	if createAt == -1 || dropAt == -1 {
+		t.Fatalf("rotation statements missing: create=%d drop=%d", createAt, dropAt)
+	}
+	if createAt > dropAt {
+		t.Fatalf("rotation dropped the old owner (statement %d) before creating the new one (%d); a mid-rotation failure would leave the tenant ownerless", dropAt, createAt)
+	}
+}

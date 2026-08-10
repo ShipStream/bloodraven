@@ -148,6 +148,13 @@ type MysqlDatabaseSpec struct {
 	// GroupRef identifies the MysqlFailoverGroup in the same namespace
 	// that owns the MySQL instance this database lives on. Cross-namespace
 	// and cross-group references are deliberately not expressible.
+	//
+	// The field is immutable for the same reason databaseName is: the
+	// reconciler has no way to move a schema between groups, so retargeting
+	// would apply the database and owner to the new group, orphan them on
+	// the old one, and aim any later deletionPolicy: Delete cleanup at the
+	// wrong MySQL. Changing groups is a migration, not a spec edit.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.groupRef is immutable; moving a database between groups is a migration, not a spec edit"
 	GroupRef LocalGroupRef `json:"groupRef"`
 
 	// DatabaseName is the MySQL schema name to create.
@@ -157,6 +164,11 @@ type MysqlDatabaseSpec struct {
 	// by the API server and re-rejected in Go before rendering. Escaping
 	// alone is not the contract.
 	//
+	// MySQL's own schemas are rejected as well (case-insensitively): a
+	// tenant CR naming `mysql` would grant its owner ALL PRIVILEGES on the
+	// grant tables, and `sys` is even droppable. Tenant databases get
+	// their own schema; the system schemas belong to the server.
+	//
 	// The field is immutable because MySQL has no schema rename: editing it
 	// would CREATE a second database and orphan the first, and a later
 	// deletionPolicy: Delete would drop only the new name. Renaming a
@@ -164,6 +176,7 @@ type MysqlDatabaseSpec struct {
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_]{1,64}$`
 	// +kubebuilder:validation:MaxLength=64
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.databaseName is immutable; renaming would orphan the existing database"
+	// +kubebuilder:validation:XValidation:rule="!(self.lowerAscii() in ['mysql', 'sys', 'information_schema', 'performance_schema'])",message="spec.databaseName must not name a MySQL system schema"
 	DatabaseName string `json:"databaseName"`
 
 	// CharacterSet is the database default character set. Defaults to
@@ -226,17 +239,25 @@ type MysqlDatabaseOwner struct {
 	// Privileges granted to the owner ON <databaseName>.*. Defaults to
 	// ["ALL PRIVILEGES"], which is schema-scoped and carries no GRANT
 	// OPTION.
+	//
+	// An explicit empty list is rejected (MinItems=1): it would otherwise
+	// resolve to the ALL PRIVILEGES default, turning an expressed
+	// revoke-all intent into a full-privilege owner. Absent is the only
+	// way to ask for the default.
 	// +kubebuilder:default={"ALL PRIVILEGES"}
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=15
 	Privileges []MysqlPrivilege `json:"privileges,omitempty"`
 }
 
 // MysqlDatabaseGrant grants an already-existing MySQL user on this database.
 type MysqlDatabaseGrant struct {
-	// Username of an existing MySQL user. The reconciler verifies the user
-	// exists and fails the CR if it does not; it never creates the user.
+	// Username of an existing MySQL user, matched at host '%' only —
+	// the same host every account in credentials.go and this CRD is
+	// created at. A principal that exists only at another host does not
+	// satisfy the existence check and fails the CR with GrantUserMissing.
 	//
 	// As with databaseName, the pattern is a pre-SQL-rendering rejection
 	// contract, not a formatting preference.
@@ -292,24 +313,28 @@ type MysqlDatabaseStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// DatabaseCreated is the write-ahead record for cleanup: it is stamped
-	// the moment the reconciler commits to executing DDL for this CR, before
-	// the first statement runs. deletionPolicy: Delete drops MySQL objects
-	// only when it is set — a CR that failed before any SQL (invalid spec,
-	// reserved owner, ownership conflict) must not drop a database something
-	// else created under the same name.
+	// once the admin connection is open and the reconciler commits to
+	// executing DDL for this CR, before the first statement runs.
+	// deletionPolicy: Delete drops MySQL objects only when it is set — a
+	// CR that failed before any SQL (invalid spec, reserved owner,
+	// ownership conflict, unreachable primary) must not drop a database
+	// something else created under the same name.
 	// +optional
 	DatabaseCreated bool `json:"databaseCreated,omitempty"`
 
-	// OwnerUser is the username echoed from the referenced Secret, recorded
-	// before the first statement runs so cleanup covers partial applies.
-	// During a username rotation it keeps the previous name until the old
-	// account has actually been dropped. The password is never echoed
-	// anywhere.
+	// OwnerUser is the username echoed from the referenced Secret,
+	// recorded once the admin connection is open so cleanup covers partial
+	// applies. During a username rotation it keeps the previous name until
+	// the old account has actually been dropped. The password is never
+	// echoed anywhere.
 	// +optional
 	OwnerUser string `json:"ownerUser,omitempty"`
 
-	// AppliedGrants lists the usernames that were granted on this database
-	// during the most recent successful apply, owner first.
+	// AppliedGrants lists the usernames granted on this database during
+	// the most recent successful apply, owner first. It is the input to
+	// revocation: an entry removed from spec.grants is revoked on the
+	// next apply, and deletion revokes the union of the current list and
+	// this record.
 	// +optional
 	// +listType=atomic
 	AppliedGrants []string `json:"appliedGrants,omitempty"`
@@ -322,13 +347,14 @@ type MysqlDatabaseStatus struct {
 	ActiveSite string `json:"activeSite,omitempty"`
 
 	// LastAppliedHash fingerprints the inputs of the most recent
-	// successful apply — spec, the owner Secret's contents, and the active
-	// site. Same construction as the credential hash on
-	// MysqlFailoverGroup. When it matches, reconciliation issues zero
-	// MySQL statements; this is what keeps a tenant-dense cluster from
-	// hammering the primary.
+	// successful apply — spec, the owner Secret's revision, the active
+	// site, and the group's identity. When it matches, reconciliation
+	// issues zero MySQL statements; this is what keeps a tenant-dense
+	// cluster from hammering the primary.
 	//
-	// It is a hash of the Secret's bytes, not the bytes.
+	// The Secret contributes its UID and resourceVersion, never a digest
+	// of its bytes: status is caller-readable, and a content digest would
+	// let a status reader offline-check password guesses against it.
 	// +optional
 	LastAppliedHash string `json:"lastAppliedHash,omitempty"`
 

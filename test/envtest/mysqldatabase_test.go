@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -200,6 +201,23 @@ func TestMysqlDatabase_EnvtestSchemaRejections(t *testing.T) {
 			name:   "empty group ref",
 			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.GroupRef.Name = "" },
 		},
+		{
+			name:   "system schema mysql",
+			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "mysql" },
+		},
+		{
+			// Case-insensitive: the denylist must not be bypassable by casing.
+			name:   "system schema SYS in uppercase",
+			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "SYS" },
+		},
+		{
+			name:   "system schema information_schema",
+			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "information_schema" },
+		},
+		{
+			name:   "system schema performance_schema",
+			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DatabaseName = "performance_schema" },
+		},
 	}
 
 	for i, tc := range cases {
@@ -242,6 +260,54 @@ func TestMysqlDatabase_EnvtestDatabaseNameIsImmutable(t *testing.T) {
 	}
 	if err := k8sClient.Update(ctx, &fresh); err != nil {
 		t.Fatalf("an unrelated spec edit was rejected: %v", err)
+	}
+}
+
+// TestMysqlDatabase_EnvtestExplicitEmptyOwnerPrivilegesRejected covers the
+// case the typed client cannot express: an explicit empty privileges list.
+// The Go struct serializes it away via omitempty, so the raw object is
+// created unstructured — exactly what kubectl apply with `privileges: []`
+// would send. Absent is the only way to ask for the ALL PRIVILEGES
+// default; an explicit [] must be rejected like grants[].privileges.
+func TestMysqlDatabase_EnvtestExplicitEmptyOwnerPrivilegesRejected(t *testing.T) {
+	ns := createNamespace(t, "mydb-empty-privs")
+
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "shipstream.io/v1alpha1",
+		"kind":       "MysqlDatabase",
+		"metadata":   map[string]any{"name": "tenant-empty", "namespace": ns},
+		"spec": map[string]any{
+			"groupRef":     map[string]any{"name": "main"},
+			"databaseName": "acme_wms",
+			"owner": map[string]any{
+				"secretName": "acme-mysql-owner",
+				"privileges": []any{},
+			},
+		},
+	}}
+
+	if err := k8sClient.Create(ctx, u); err == nil {
+		_ = k8sClient.Delete(ctx, u)
+		t.Fatal("API server accepted an explicit empty owner.privileges; MinItems=1 must reject it")
+	}
+}
+
+// TestMysqlDatabase_EnvtestGroupRefIsImmutable pins the groupRef transition
+// rule: the reconciler cannot move a schema between groups, so retargeting
+// would orphan the database on the old group and aim any later cleanup at
+// the wrong MySQL. The API server must refuse the edit outright.
+func TestMysqlDatabase_EnvtestGroupRefIsImmutable(t *testing.T) {
+	ns := createNamespace(t, "mydb-group-immutable")
+
+	cr := newMysqlDatabaseCR(ns, "tenant-group")
+	if err := k8sClient.Create(ctx, cr); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, cr) })
+
+	cr.Spec.GroupRef.Name = "other-group"
+	if err := k8sClient.Update(ctx, cr); err == nil {
+		t.Fatal("API server accepted a groupRef change; the field must be immutable")
 	}
 }
 
@@ -506,7 +572,7 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 	r := newMysqlDatabaseReconciler(t)
 	nn := types.NamespacedName{Namespace: ns, Name: "tenant-acme"}
 	t.Cleanup(func() { deleteAndDrainFinalizer(t, r, nn) })
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
@@ -516,9 +582,17 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 	if err := k8sClient.Get(ctx, nn, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	// Proof the owner Secret really was read on this path.
-	if got.Status.OwnerUser != "acme_app" {
-		t.Fatalf("status.ownerUser = %q, want acme_app — the test never exercised the Secret read", got.Status.OwnerUser)
+	if got.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+		t.Fatalf("phase = %q, want Pending for an unreachable primary", got.Status.Phase)
+	}
+	// The write-ahead record is stamped only once a connection is open: a
+	// CR that never connected records no owner and creates no authority to
+	// drop same-named objects later.
+	if got.Status.OwnerUser != "" {
+		t.Fatalf("status.ownerUser = %q without a connection, want empty", got.Status.OwnerUser)
+	}
+	if got.Status.DatabaseCreated {
+		t.Fatal("status.databaseCreated stamped without a connection")
 	}
 	rendered := fmt.Sprintf("%+v", got.Status)
 	if strings.Contains(rendered, password) {
@@ -526,5 +600,29 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 	}
 	if strings.Contains(rendered, "op-pw") || strings.Contains(rendered, "root-pw") {
 		t.Fatalf("status leaked a group credential: %s", rendered)
+	}
+
+	// Proof the owner Secret really is read on this path: removing its
+	// password key changes the verdict to OwnerSecretIncomplete.
+	var s corev1.Secret
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "acme-mysql-owner"}, &s); err != nil {
+		t.Fatalf("get owner secret: %v", err)
+	}
+	delete(s.Data, "password")
+	if err := k8sClient.Update(ctx, &s); err != nil {
+		t.Fatalf("update owner secret: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("reconcile after secret change: %v", err)
+	}
+	if err := k8sClient.Get(ctx, nn, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if cond := mysqlDatabaseReadyCondition(&got); cond == nil || cond.Reason != "OwnerSecretIncomplete" {
+		t.Fatalf("Ready condition = %+v, want OwnerSecretIncomplete — the Secret read is what must produce it", cond)
+	}
+	rendered = fmt.Sprintf("%+v", got.Status)
+	if strings.Contains(rendered, password) {
+		t.Fatalf("status leaked the owner password: %s", rendered)
 	}
 }

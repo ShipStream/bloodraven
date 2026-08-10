@@ -222,11 +222,15 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "acme-mysql-owner", Namespace: "bloodraven"},
+		ObjectMeta: metav1.ObjectMeta{Name: "acme-mysql-owner", Namespace: "bloodraven", UID: "uid-secret", ResourceVersion: "1"},
 		Data:       map[string][]byte{"username": []byte("acme_app"), "password": []byte("pw1")},
 	}
+	fg := &v1alpha1.MysqlFailoverGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: "bloodraven", UID: "uid-group"},
+	}
+	fg.Status.ActiveSite = "dc1"
 
-	base, err := computeDatabaseHash(mdb, secret, "dc1")
+	base, err := computeDatabaseHash(mdb, secret, fg)
 	if err != nil {
 		t.Fatalf("computeDatabaseHash() error = %v", err)
 	}
@@ -234,7 +238,7 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 		t.Fatalf("computeDatabaseHash() = %q, want a 16-character digest", base)
 	}
 
-	again, err := computeDatabaseHash(mdb, secret, "dc1")
+	again, err := computeDatabaseHash(mdb, secret, fg)
 	if err != nil {
 		t.Fatalf("computeDatabaseHash() error = %v", err)
 	}
@@ -242,18 +246,43 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 		t.Fatalf("computeDatabaseHash() is not stable: %q then %q", base, again)
 	}
 
-	// A rotated password must change the hash, or rotation would be
-	// silently skipped by the "nothing changed" short-circuit.
+	// A rotated Secret — new resourceVersion — must change the hash, or
+	// rotation would be silently skipped by the "nothing changed"
+	// short-circuit. The hash reads the Secret's revision, never its bytes.
 	rotated := secret.DeepCopy()
 	rotated.Data["password"] = []byte("pw2")
-	if h, err := computeDatabaseHash(mdb, rotated, "dc1"); err != nil || h == base {
+	rotated.ResourceVersion = "2"
+	if h, err := computeDatabaseHash(mdb, rotated, fg); err != nil || h == base {
 		t.Fatalf("computeDatabaseHash() after rotation = %q (err %v), want a different digest", h, err)
 	}
 
 	// A failover must change the hash, or the group watch would re-enqueue
 	// every CR only for the skip check to swallow the re-apply.
-	if h, err := computeDatabaseHash(mdb, secret, "dc2"); err != nil || h == base {
+	failedOver := fg.DeepCopy()
+	failedOver.Status.ActiveSite = "dc2"
+	if h, err := computeDatabaseHash(mdb, secret, failedOver); err != nil || h == base {
 		t.Fatalf("computeDatabaseHash() after failover = %q (err %v), want a different digest", h, err)
+	}
+
+	// A recreated group (new UID) must invalidate every Ready hash, or a
+	// restored-from-scratch group would inherit Ready CRs that never spoke
+	// to its MySQL.
+	recreated := fg.DeepCopy()
+	recreated.UID = "uid-group-2"
+	if h, err := computeDatabaseHash(mdb, secret, recreated); err != nil || h == base {
+		t.Fatalf("computeDatabaseHash() after group re-creation = %q (err %v), want a different digest", h, err)
+	}
+
+	// A completed in-place restore must invalidate the hash even when the
+	// active site never moved: the fence transitions may have been missed
+	// while the operator was down.
+	restored := fg.DeepCopy()
+	restored.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
+		Phase:            v1alpha1.RestoreInPlaceSucceeded,
+		ConfirmTokenUsed: "2026-08-10T00:00:00Z",
+	}
+	if h, err := computeDatabaseHash(mdb, secret, restored); err != nil || h == base {
+		t.Fatalf("computeDatabaseHash() after in-place restore = %q (err %v), want a different digest", h, err)
 	}
 
 	// A spec change must change the hash.
@@ -261,7 +290,7 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 	edited.Spec.Grants = append(edited.Spec.Grants, v1alpha1.MysqlDatabaseGrant{
 		Username: "reporting", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
 	})
-	if h, err := computeDatabaseHash(edited, secret, "dc1"); err != nil || h == base {
+	if h, err := computeDatabaseHash(edited, secret, fg); err != nil || h == base {
 		t.Fatalf("computeDatabaseHash() after a spec edit = %q (err %v), want a different digest", h, err)
 	}
 }
@@ -276,12 +305,76 @@ func TestComputeDatabaseHashNeverContainsSecretBytes(t *testing.T) {
 		Data:       map[string][]byte{"username": []byte("acme_app"), "password": []byte("hunter2")},
 	}
 
-	hash, err := computeDatabaseHash(mdb, secret, "dc1")
+	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "main"}}
+	fg.Status.ActiveSite = "dc1"
+	hash, err := computeDatabaseHash(mdb, secret, fg)
 	if err != nil {
 		t.Fatalf("computeDatabaseHash() error = %v", err)
 	}
 	if strings.Contains(hash, "hunter2") || strings.Contains(hash, "acme_app") {
 		t.Fatalf("hash %q leaked secret material", hash)
+	}
+}
+
+func TestRenderAlterDatabase(t *testing.T) {
+	got, err := renderAlterDatabase("acme_wms", "utf8mb3", "utf8mb3_general_ci")
+	if err != nil {
+		t.Fatalf("renderAlterDatabase() error = %v", err)
+	}
+	want := "ALTER DATABASE `acme_wms` CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci"
+	if got != want {
+		t.Fatalf("renderAlterDatabase() = %q, want %q", got, want)
+	}
+	if _, err := renderAlterDatabase("acme`; DROP DATABASE other", "utf8mb4", "utf8mb4_unicode_ci"); err == nil {
+		t.Fatal("renderAlterDatabase() accepted an invalid identifier")
+	}
+	if _, err := renderAlterDatabase("acme_wms", "utf8mb4 COLLATE evil", "utf8mb4_unicode_ci"); err == nil {
+		t.Fatal("renderAlterDatabase() accepted an injected character set")
+	}
+}
+
+func TestRenderRevokeSurplus(t *testing.T) {
+	// ALL PRIVILEGES is the whole allowlist: nothing can be surplus.
+	got, err := renderRevokeSurplus("spec.owner secret username",
+		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAllPrivileges}, "acme_wms", "acme_app")
+	if err != nil {
+		t.Fatalf("renderRevokeSurplus() error = %v", err)
+	}
+	if got != "" {
+		t.Fatalf("renderRevokeSurplus(ALL PRIVILEGES) = %q, want no statement", got)
+	}
+
+	// A narrow desired set revokes every other allowlist privilege, in
+	// canonical order, with the idempotence clauses.
+	got, err = renderRevokeSurplus("spec.owner secret username",
+		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme_wms", "acme_app")
+	if err != nil {
+		t.Fatalf("renderRevokeSurplus() error = %v", err)
+	}
+	want := "REVOKE IF EXISTS INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, " +
+		"LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, EXECUTE ON `acme_wms`.* FROM 'acme_app'@'%' IGNORE UNKNOWN USER"
+	if got != want {
+		t.Fatalf("renderRevokeSurplus() = %q, want %q", got, want)
+	}
+
+	// Every concrete privilege desired: nothing left to revoke.
+	full := make([]v1alpha1.MysqlPrivilege, 0)
+	for _, name := range v1alpha1.AllowedPrivilegeNames() {
+		if name != string(v1alpha1.PrivilegeAllPrivileges) {
+			full = append(full, v1alpha1.MysqlPrivilege(name))
+		}
+	}
+	got, err = renderRevokeSurplus("spec.owner secret username", full, "acme_wms", "acme_app")
+	if err != nil {
+		t.Fatalf("renderRevokeSurplus() error = %v", err)
+	}
+	if got != "" {
+		t.Fatalf("renderRevokeSurplus(full set) = %q, want no statement", got)
+	}
+
+	if _, err := renderRevokeSurplus("spec.owner secret username",
+		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme`; DROP DATABASE other", "acme_app"); err == nil {
+		t.Fatal("renderRevokeSurplus() accepted an invalid identifier")
 	}
 }
 

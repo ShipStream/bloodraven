@@ -25,6 +25,27 @@ const (
 // accepts.
 var mysqlIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,64}$`)
 
+// mysqlSystemSchemas are the schemas MySQL itself manages. They are
+// rejected as tenant database names, case-insensitively: on a typical
+// deployment `databaseName: mysql` would grant the tenant owner ALL
+// PRIVILEGES on the grant tables, and `sys` is even droppable. The CEL
+// rule on spec.databaseName enforces the same list at admission; this map
+// is the second check, and the one that also runs for objects the API
+// server never validated (tests, pre-rule storage).
+var mysqlSystemSchemas = map[string]bool{
+	"mysql":              true,
+	"sys":                true,
+	"information_schema": true,
+	"performance_schema": true,
+}
+
+// IsSystemSchema reports whether name is a MySQL system schema,
+// case-insensitively. Exported for the CEL-sync test: the admission rule
+// and this map must not drift.
+func IsSystemSchema(name string) bool {
+	return mysqlSystemSchemas[strings.ToLower(name)]
+}
+
 // mysqlUsernamePattern constrains MySQL account names. MySQL caps usernames
 // at 32 characters; the leading character is restricted further so a name
 // cannot start with a separator.
@@ -182,6 +203,9 @@ func (s *MysqlDatabaseSpec) Validate(ownerUsername string) error {
 	if err := ValidateMysqlIdentifier("spec.databaseName", s.DatabaseName); err != nil {
 		return err
 	}
+	if IsSystemSchema(s.DatabaseName) {
+		return fmt.Errorf("spec.databaseName %q is a MySQL system schema; tenant databases must use their own schema name", s.DatabaseName)
+	}
 	if err := ValidateMysqlIdentifier("spec.characterSet", s.EffectiveCharacterSet()); err != nil {
 		return err
 	}
@@ -200,6 +224,9 @@ func (s *MysqlDatabaseSpec) Validate(ownerUsername string) error {
 		field := fmt.Sprintf("spec.grants[%d].username", i)
 		if err := ValidateMysqlUsername(field, g.Username); err != nil {
 			return err
+		}
+		if g.Username == ownerUsername {
+			return fmt.Errorf("%s %q is the owner username; declare owner privileges via spec.owner.privileges", field, g.Username)
 		}
 		if seen[g.Username] {
 			return fmt.Errorf("%s %q is listed more than once", field, g.Username)

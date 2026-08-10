@@ -51,14 +51,35 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 		return nil
 	}
 
+	// Build the list of roles to reconcile, then fail closed on any
+	// collision with a tenant-owned principal BEFORE any SQL: reconcileRole
+	// runs ALTER USER ... IDENTIFIED BY plus global grants, which pointed at
+	// a tenant owner would reset its password and hand it instance-wide
+	// privileges. The MysqlDatabase path refuses group principals
+	// (reservedGroupUsernames); this is the reciprocal direction, and the
+	// two checks are what makes "disjoint principals" true rather than
+	// intended.
+	roles := r.buildRoles(ctx, fg)
+	claimed, err := r.tenantClaimedUsernames(ctx, fg)
+	if err != nil {
+		return fmt.Errorf("list tenant database claims: %w", err)
+	}
+	for _, role := range roles {
+		username, _, ok := strings.Cut(role.secretName, "\x00")
+		if !ok {
+			continue
+		}
+		if claimer, taken := claimed[username]; taken {
+			return fmt.Errorf("role %q resolves to username %q, which MysqlDatabase %q owns; group credentials must not manage tenant principals",
+				role.name, username, claimer)
+		}
+	}
+
 	db, err := openAdminConnection(ctx, r.Client, fg, openMySQL)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-
-	// Build the list of roles to reconcile.
-	roles := r.buildRoles(ctx, fg)
 
 	for _, role := range roles {
 		if err := reconcileRole(ctx, db, role); err != nil {
@@ -69,6 +90,28 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 
 	// Update the credential hash annotation.
 	return r.setCredentialHash(ctx, fg, currentHash)
+}
+
+// tenantClaimedUsernames returns the MySQL usernames owned by live
+// MysqlDatabases on fg, mapped to the claiming CR's name. status.ownerUser
+// is echoed before the tenant path's first statement runs, so any account
+// the tenant path has touched — or will retry — is claimed. CRs being
+// deleted keep their claim: only the finalizer decides whether the account
+// survives, and failing closed here costs one defer, not a password reset.
+func (r *MysqlFailoverGroupReconciler) tenantClaimedUsernames(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (map[string]string, error) {
+	var list v1alpha1.MysqlDatabaseList
+	if err := r.List(ctx, &list, ctrlclient.InNamespace(fg.Namespace)); err != nil {
+		return nil, err
+	}
+	claimed := make(map[string]string)
+	for i := range list.Items {
+		mdb := &list.Items[i]
+		if mdb.Spec.GroupRef.Name != fg.Name || mdb.Status.OwnerUser == "" {
+			continue
+		}
+		claimed[mdb.Status.OwnerUser] = mdb.Name
+	}
+	return claimed, nil
 }
 
 func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) []credentialRole {
@@ -340,7 +383,10 @@ type openMySQLFunc func(user, password, addr, tlsConfigName string) (*sql.DB, er
 
 // openAdminConnection resolves the operator credential for fg and opens an
 // admin connection to the group's current active primary, falling back to
-// root for initial setup exactly as the credential reconciler always has.
+// root for initial setup as the credential reconciler always has — with one
+// deliberate exception: an empty or absent MYSQL_ROOT_PASSWORD no longer
+// triggers an empty-password root attempt (see the rationale where the
+// fallback is applied below).
 //
 // THIS IS THE ONE PLACE IN BLOODRAVEN THAT HOLDS MYSQL ADMIN. It has exactly
 // two callers — reconcileCredentials (group-level roles) and the
