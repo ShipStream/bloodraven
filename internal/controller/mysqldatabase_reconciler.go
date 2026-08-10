@@ -306,9 +306,10 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// applyDatabase needs the pre-stamp values to decide what this CR may
 	// adopt and what it must revoke.
 	prior := priorApplyState{
-		databaseCreated: mdb.Status.DatabaseCreated,
-		recordedOwner:   mdb.Status.OwnerUser,
-		appliedGrants:   mdb.Status.AppliedGrants,
+		databaseCreated:  mdb.Status.DatabaseCreated,
+		recordedOwner:    mdb.Status.OwnerUser,
+		pendingOwnerUser: mdb.Status.PendingOwnerUser,
+		appliedGrants:    mdb.Status.AppliedGrants,
 	}
 
 	// Budget every MySQL interaction: one slow primary must not be able to
@@ -344,6 +345,13 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			st.DatabaseCreated = true
 			if st.OwnerUser == "" {
 				st.OwnerUser = ownerUser
+			} else if st.OwnerUser != ownerUser {
+				// Username rotation: record the new name BEFORE any
+				// rotation SQL. A failure between creating the new
+				// account and the Ready stamp must not leave the next
+				// reconcile unable to attribute it (see
+				// Status.PendingOwnerUser).
+				st.PendingOwnerUser = ownerUser
 			}
 			st.Message = fmt.Sprintf("applying database %s on site %s", mdb.Spec.DatabaseName, fg.Status.ActiveSite)
 			setCondition(&st.Conditions, metav1.Condition{
@@ -357,6 +365,22 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	// Rotation write-ahead for the retries the Creating stamp skips (phase
+	// already Creating with a recorded owner): the pending record must
+	// always name the user this run is about to create or re-apply, or the
+	// adoption gate cannot attribute it after a stamp failure. Also covers
+	// the Secret changing again mid-rotation.
+	if mdb.Status.OwnerUser != "" && mdb.Status.OwnerUser != ownerUser &&
+		mdb.Status.PendingOwnerUser != ownerUser {
+		if err := r.stampStatus(ctx, &mdb, func(st *v1alpha1.MysqlDatabaseStatus) {
+			st.PendingOwnerUser = ownerUser
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		mdb.Status.PendingOwnerUser = ownerUser
+		prior.pendingOwnerUser = ownerUser
 	}
 
 	appliedGrants, err := applyDatabase(sqlCtx, db, &mdb, ownerUser, ownerPass, prior)
@@ -455,6 +479,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		st.ObservedGeneration = mdb.Generation
 		st.DatabaseCreated = true
 		st.OwnerUser = ownerUser
+		st.PendingOwnerUser = ""
 		st.AppliedGrants = appliedGrants
 		st.ActiveSite = fg.Status.ActiveSite
 		st.LastAppliedHash = currentHash
@@ -688,6 +713,11 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 			candidates = append(candidates, secretUser)
 		}
 	}
+	// The rotation write-ahead record names an account that may exist in
+	// MySQL even though status.ownerUser never advanced to it.
+	if mdb.Status.PendingOwnerUser != "" && mdb.Status.PendingOwnerUser != mdb.Status.OwnerUser {
+		candidates = append(candidates, mdb.Status.PendingOwnerUser)
+	}
 
 	var list v1alpha1.MysqlDatabaseList
 	if err := r.List(ctx, &list, client.InNamespace(mdb.Namespace)); err != nil {
@@ -873,9 +903,10 @@ func (r *MysqlDatabaseReconciler) ownershipConflict(ctx context.Context, mdb *v1
 // was recorded before this run committed to executing DDL, and revocation
 // of removed grants[] entries needs the previous apply's username list.
 type priorApplyState struct {
-	databaseCreated bool
-	recordedOwner   string
-	appliedGrants   []string
+	databaseCreated  bool
+	recordedOwner    string
+	pendingOwnerUser string
+	appliedGrants    []string
 }
 
 // applyDatabase runs the idempotent apply sequence on an open admin
@@ -981,15 +1012,19 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 		return nil, err
 	}
 
-	// Owner adoption gate: an account that already exists is only this
-	// CR's to manage when this CR's record says so. Otherwise CREATE USER
-	// IF NOT EXISTS + ALTER USER would reset the password of an account
-	// some other system created and inherit its cross-schema privileges.
+	// Owner adoption gate: a FIRST apply must never adopt an account some
+	// other system created — CREATE USER IF NOT EXISTS + ALTER USER would
+	// reset its password and inherit its cross-schema privileges. An
+	// account matching the recorded owner is ours; so is one matching the
+	// rotation write-ahead record (status.pendingOwnerUser), which is how a
+	// rotation whose Ready stamp failed proves to the next reconcile that
+	// the already-created new account belongs to this CR instead of
+	// wedging on PreExistingOwnerUser.
 	ownerExists, err := mysqlUserExists(ctx, db, ownerUser)
 	if err != nil {
 		return nil, fmt.Errorf("check owner user existence: %w", err)
 	}
-	if ownerExists && prior.recordedOwner != ownerUser {
+	if ownerExists && prior.recordedOwner != ownerUser && prior.pendingOwnerUser != ownerUser {
 		return nil, &errPreExistingOwnerUser{username: ownerUser}
 	}
 	for _, stmt := range ownerStmts {

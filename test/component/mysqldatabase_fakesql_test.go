@@ -74,6 +74,14 @@ func (s *fakeSQLServer) addDatabase(name, charset, collation string) {
 	s.databases[name] = charset + "/" + collation
 }
 
+// removeUser deletes an account — used to simulate mid-rotation states
+// where the old owner has already been dropped.
+func (s *fakeSQLServer) removeUser(username string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.users, username)
+}
+
 func (s *fakeSQLServer) hasUser(username string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

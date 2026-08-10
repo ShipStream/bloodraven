@@ -472,6 +472,17 @@ spec:
                   the old account has actually been dropped. The password is never
                   echoed anywhere.
                 type: string
+              pendingOwnerUser:
+                description: |-
+                  PendingOwnerUser is the write-ahead record of an in-flight username
+                  rotation: the new owner's name, committed before any rotation SQL
+                  runs and cleared by the successful Ready stamp. It exists because a
+                  rotation can create the new account, drop the old one, and then fail
+                  to persist status: without the record, the next reconcile's adoption
+                  gate would see an account it cannot attribute and wedge the CR on
+                  PreExistingOwnerUser for a user it created itself. Deletion treats
+                  it as an owner candidate for the same reason.
+                type: string
               phase:
                 description: Phase is the lifecycle phase of this database.
                 enum:

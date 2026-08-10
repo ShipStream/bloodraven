@@ -888,3 +888,55 @@ func TestMysqlDatabaseUsernameRotationCreatesBeforeDrop(t *testing.T) {
 		t.Fatalf("rotation dropped the old owner (statement %d) before creating the new one (%d); a mid-rotation failure would leave the tenant ownerless", dropAt, createAt)
 	}
 }
+
+// TestMysqlDatabaseRotationSurvivesFailedReadyStamp is the wedge regression:
+// a rotation that created the new account and dropped the old one, but then
+// failed to persist the Ready stamp, must converge on retry. The
+// pendingOwnerUser write-ahead record is what lets the adoption gate
+// attribute the already-created account to this CR instead of failing
+// terminally on PreExistingOwnerUser for a user it created itself.
+func TestMysqlDatabaseRotationSurvivesFailedReadyStamp(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+
+	h.reconcile()
+	h.requireReady()
+
+	// Rotate the username in the Secret.
+	var s corev1.Secret
+	key := types.NamespacedName{Namespace: mdbNamespace, Name: mdbOwnerSecretName}
+	if err := h.client.Get(context.Background(), key, &s); err != nil {
+		t.Fatalf("get owner secret: %v", err)
+	}
+	s.Data["username"] = []byte("acme_app_v2")
+	s.Data["password"] = []byte("owner-pw-2")
+	if err := h.client.Update(context.Background(), &s); err != nil {
+		t.Fatalf("update owner secret: %v", err)
+	}
+
+	// Simulate the state after that rotation ran its MySQL work but crashed
+	// before the Ready stamp persisted: the new account exists, the old one
+	// is gone, and status still shows Creating with the old owner plus the
+	// write-ahead pending record from the Creating stamp.
+	h.server.removeUser(mdbOwnerUser)
+	h.server.addUser("acme_app_v2", "owner-pw-2")
+	mdb := h.get()
+	mdb.Status.Phase = v1alpha1.MysqlDatabasePhaseCreating
+	mdb.Status.PendingOwnerUser = "acme_app_v2"
+	mdb.Status.LastAppliedHash = ""
+	if err := h.client.Status().Update(context.Background(), mdb); err != nil {
+		t.Fatalf("simulate crashed-rotation status: %v", err)
+	}
+
+	h.reconcile()
+
+	mdb = h.requireReady() // must converge, not Failed/PreExistingOwnerUser
+	if mdb.Status.OwnerUser != "acme_app_v2" {
+		t.Fatalf("status.ownerUser = %q, want acme_app_v2", mdb.Status.OwnerUser)
+	}
+	if mdb.Status.PendingOwnerUser != "" {
+		t.Fatalf("status.pendingOwnerUser = %q after a completed rotation, want cleared", mdb.Status.PendingOwnerUser)
+	}
+	if pw, ok := h.server.password("acme_app_v2"); !ok || pw != "owner-pw-2" {
+		t.Fatalf("new owner password = %q (present=%v), want the rotated Secret value", pw, ok)
+	}
+}

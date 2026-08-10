@@ -330,6 +330,17 @@ type MysqlDatabaseStatus struct {
 	// +optional
 	OwnerUser string `json:"ownerUser,omitempty"`
 
+	// PendingOwnerUser is the write-ahead record of an in-flight username
+	// rotation: the new owner's name, committed before any rotation SQL
+	// runs and cleared by the successful Ready stamp. It exists because a
+	// rotation can create the new account, drop the old one, and then fail
+	// to persist status: without the record, the next reconcile's adoption
+	// gate would see an account it cannot attribute and wedge the CR on
+	// PreExistingOwnerUser for a user it created itself. Deletion treats
+	// it as an owner candidate for the same reason.
+	// +optional
+	PendingOwnerUser string `json:"pendingOwnerUser,omitempty"`
+
 	// AppliedGrants lists the usernames granted on this database during
 	// the most recent successful apply, owner first. It is the input to
 	// revocation: an entry removed from spec.grants is revoked on the

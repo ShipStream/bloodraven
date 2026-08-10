@@ -330,19 +330,11 @@ func TestMysqlDatabaseSkipsWhenNothingChanged(t *testing.T) {
 // decorative: when the active site moves, the skip check must not swallow
 // the re-apply. Detected here by the tripwire dialer firing.
 func TestMysqlDatabaseFailoverInvalidatesTheSkip(t *testing.T) {
-	secret := mdbTestOwnerSecret()
 	mdb := mdbTestCR()
-
-	staleFG := mdbTestGroup() // ActiveSite dc1
-	staleHash, err := computeDatabaseHash(mdb, secret, staleFG)
-	if err != nil {
-		t.Fatalf("computeDatabaseHash() error = %v", err)
-	}
 	mdb.Status = v1alpha1.MysqlDatabaseStatus{
 		Phase:              v1alpha1.MysqlDatabasePhaseReady,
 		ObservedGeneration: mdb.Generation,
 		ActiveSite:         "dc1",
-		LastAppliedHash:    staleHash,
 	}
 
 	fg := mdbTestGroup()
@@ -352,8 +344,34 @@ func TestMysqlDatabaseFailoverInvalidatesTheSkip(t *testing.T) {
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha1.MysqlDatabase{}, &v1alpha1.MysqlFailoverGroup{}).
-		WithObjects(mdb, fg, secret, mdbTestOperatorSecret()).
+		WithObjects(mdb, fg, mdbTestOwnerSecret(), mdbTestOperatorSecret()).
 		Build()
+
+	// The stale hash must be computed from the STORED objects — the fake
+	// client assigns the Secret's resourceVersion on create, and the
+	// Secret's revision is part of the hash. Hashing in-memory fixtures
+	// with empty revisions would produce a hash that differs for the wrong
+	// reason, letting the test pass even if the active site fell out of
+	// the hash inputs — the exact regression this test guards.
+	var storedSecret corev1.Secret
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: mdbTestNamespace, Name: mdbTestOwnerSecret().Name}, &storedSecret); err != nil {
+		t.Fatalf("get stored owner secret: %v", err)
+	}
+	var storedFG v1alpha1.MysqlFailoverGroup
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: mdbTestNamespace, Name: "main"}, &storedFG); err != nil {
+		t.Fatalf("get stored failover group: %v", err)
+	}
+	staleFG := storedFG.DeepCopy()
+	staleFG.Status.ActiveSite = "dc1" // the site the CR last applied on
+	staleHash, err := computeDatabaseHash(getMdb(t, c), &storedSecret, staleFG)
+	if err != nil {
+		t.Fatalf("computeDatabaseHash() error = %v", err)
+	}
+	latest := getMdb(t, c)
+	latest.Status.LastAppliedHash = staleHash
+	if err := c.Status().Update(context.Background(), latest); err != nil {
+		t.Fatalf("set lastAppliedHash: %v", err)
+	}
 
 	dialed := false
 	r := &MysqlDatabaseReconciler{
@@ -1199,6 +1217,30 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 			t.Fatalf("deleteScope() error = %v", err)
 		}
 		want := []string{"old_app", "acme_app"}
+		if len(dropOwners) != len(want) {
+			t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
+		}
+		for i := range want {
+			if dropOwners[i] != want[i] {
+				t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
+			}
+		}
+	})
+
+	t.Run("pending rotation record is cleaned up even without a secret", func(t *testing.T) {
+		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
+			m.Status.OwnerUser = "old_app"
+			m.Status.PendingOwnerUser = "new_app" // rotation crashed after creating it
+		})
+		// No owner Secret in the fixtures: the pending record alone must
+		// still put the new account on the drop list.
+		r, _, _ := newMdbReconciler(t, mdb, mdbTestGroup())
+
+		_, dropOwners, err := r.deleteScope(context.Background(), mdb, map[string]bool{})
+		if err != nil {
+			t.Fatalf("deleteScope() error = %v", err)
+		}
+		want := []string{"old_app", "new_app"}
 		if len(dropOwners) != len(want) {
 			t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
 		}
