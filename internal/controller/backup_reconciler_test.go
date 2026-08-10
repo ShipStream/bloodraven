@@ -691,16 +691,15 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected FakeRecorder, got %T", r.Recorder)
 	}
-	foundNoHealthy := false
+	noHealthyCount := 0
 	for len(rec.Events) > 0 {
 		ev := <-rec.Events
 		if strings.Contains(ev, "NoHealthySource") {
-			foundNoHealthy = true
-			break
+			noHealthyCount++
 		}
 	}
-	if !foundNoHealthy {
-		t.Fatal("expected NoHealthySource warning event on transition into Pending")
+	if noHealthyCount != 1 {
+		t.Fatalf("NoHealthySource warning events=%d, want exactly 1 on transition into Pending", noHealthyCount)
 	}
 	var job batchv1.Job
 	if err := c.Get(context.Background(), types.NamespacedName{
@@ -747,6 +746,19 @@ func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
 	}
 	mb := backupCR("pending-too-long", "lion", "nightly-s3")
 	mb.CreationTimestamp = metav1.NewTime(time.Now().Add(-(maxBackupPendingDuration + time.Minute)))
+	// Stale Job attribution must be cleared even on the terminal deadline path.
+	mb.Status = v1alpha1.MysqlBackupStatus{
+		Phase:             v1alpha1.BackupPhaseRunning,
+		JobName:           backupJobName(mb.Name),
+		SourceSite:        "pdx",
+		ActiveSiteAtStart: "iad",
+		StartTime:         &metav1.Time{Time: time.Now().Add(-time.Hour)},
+		Conditions: []metav1.Condition{{
+			Type:   ConditionBackupJobCreated,
+			Status: metav1.ConditionTrue,
+			Reason: "Created",
+		}},
+	}
 	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
 	reconcileUntilStable(t, r, "pending-too-long")
 
@@ -762,6 +774,13 @@ func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
 	}
 	if cond := meta.FindStatusCondition(got.Status.Conditions, ConditionBackupReady); cond == nil || cond.Reason != "NoHealthySource" {
 		t.Fatalf("Ready condition=%v, want Reason=NoHealthySource", cond)
+	}
+	if got.Status.JobName != "" || got.Status.SourceSite != "" || got.Status.ActiveSiteAtStart != "" || got.Status.StartTime != nil {
+		t.Fatalf("failed pre-launch status still has Job fields: job=%q source=%q activeAtStart=%q startTime=%v",
+			got.Status.JobName, got.Status.SourceSite, got.Status.ActiveSiteAtStart, got.Status.StartTime)
+	}
+	if cond := meta.FindStatusCondition(got.Status.Conditions, ConditionBackupJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("JobCreated condition=%v, want False after pre-launch deadline fail", cond)
 	}
 }
 

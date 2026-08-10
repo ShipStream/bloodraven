@@ -502,12 +502,22 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 
 // failBackup transitions a MysqlBackup to Failed with the given reason.
 func (r *MysqlBackupReconciler) failBackup(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string) (ctrl.Result, error) {
+	return r.failBackupOpts(ctx, backup, reason, message, false /*clearPreLaunchJob*/)
+}
+
+// failBackupOpts is failBackup with an option to drop stale Job attribution.
+// clearPreLaunchJob is set on the no-Job path (pending deadline exceeded) so a
+// terminal Failed status never advertises a Job that does not exist.
+func (r *MysqlBackupReconciler) failBackupOpts(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string, clearPreLaunchJob bool) (ctrl.Result, error) {
 	now := metav1.Now()
 	patch := client.MergeFrom(backup.DeepCopy())
 	backup.Status.Phase = v1alpha1.BackupPhaseFailed
 	backup.Status.CompletionTime = &now
 	backup.Status.Message = message
 	backup.Status.ObservedGeneration = backup.Generation
+	if clearPreLaunchJob {
+		clearPreLaunchJobStatus(backup, now)
+	}
 	setCondition(&backup.Status.Conditions, metav1.Condition{
 		Type:               ConditionBackupReady,
 		Status:             metav1.ConditionFalse,
@@ -523,6 +533,24 @@ func (r *MysqlBackupReconciler) failBackup(ctx context.Context, backup *v1alpha1
 	return ctrl.Result{}, nil
 }
 
+// clearPreLaunchJobStatus drops Job attribution that is only valid while a
+// backup Job exists. Used on the no-Job path (Pending retry or terminal fail
+// before launch) so status never advertises a deleted/GC'd Job.
+func clearPreLaunchJobStatus(backup *v1alpha1.MysqlBackup, now metav1.Time) {
+	backup.Status.StartTime = nil
+	backup.Status.JobName = ""
+	backup.Status.SourceSite = ""
+	backup.Status.ActiveSiteAtStart = ""
+	setCondition(&backup.Status.Conditions, metav1.Condition{
+		Type:               ConditionBackupJobCreated,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: backup.Generation,
+		LastTransitionTime: now,
+		Reason:             "NotCreated",
+		Message:            "backup Job has not been created yet",
+	})
+}
+
 // pendBackup records a retryable pre-launch dependency failure. A missing
 // healthy source is expected during failover and ordered updates; it must not
 // consume the one-shot MysqlBackup CR before a Job has even been created.
@@ -530,15 +558,16 @@ func (r *MysqlBackupReconciler) failBackup(ctx context.Context, backup *v1alpha1
 // If the wait exceeds maxBackupPendingDuration the CR is failed terminally so
 // stalled backups do not accumulate while the schedule keeps creating new ones.
 // Callers only reach this path when no Job exists yet; clear any stale
-// Job-related status so Pending never advertises a Job that is gone.
+// Job-related status so Pending/Failed never advertises a Job that is gone.
 func (r *MysqlBackupReconciler) pendBackup(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string) (ctrl.Result, error) {
 	now := metav1.Now()
 	// A missing source is normally transient. If it persists, fail the CR so
 	// it stops occupying the schedule and becomes eligible for pruning.
 	if !backup.CreationTimestamp.IsZero() {
 		if age := now.Sub(backup.CreationTimestamp.Time); age > maxBackupPendingDuration {
-			return r.failBackup(ctx, backup, reason,
-				fmt.Sprintf("%s (pending for %s)", message, age.Truncate(time.Second)))
+			return r.failBackupOpts(ctx, backup, reason,
+				fmt.Sprintf("%s (pending for %s)", message, age.Truncate(time.Second)),
+				true /*clearPreLaunchJob*/)
 		}
 	}
 
@@ -548,10 +577,7 @@ func (r *MysqlBackupReconciler) pendBackup(ctx context.Context, backup *v1alpha1
 	backup.Status.CompletionTime = nil
 	// Pre-launch: no Job exists. Drop any leftover Job attribution left by a
 	// deleted/GC'd Job so status matches the live cluster.
-	backup.Status.StartTime = nil
-	backup.Status.JobName = ""
-	backup.Status.SourceSite = ""
-	backup.Status.ActiveSiteAtStart = ""
+	clearPreLaunchJobStatus(backup, now)
 	backup.Status.Message = message
 	backup.Status.ObservedGeneration = backup.Generation
 	setCondition(&backup.Status.Conditions, metav1.Condition{
@@ -561,14 +587,6 @@ func (r *MysqlBackupReconciler) pendBackup(ctx context.Context, backup *v1alpha1
 		LastTransitionTime: now,
 		Reason:             reason,
 		Message:            message,
-	})
-	setCondition(&backup.Status.Conditions, metav1.Condition{
-		Type:               ConditionBackupJobCreated,
-		Status:             metav1.ConditionFalse,
-		ObservedGeneration: backup.Generation,
-		LastTransitionTime: now,
-		Reason:             "NotCreated",
-		Message:            "backup Job has not been created yet",
 	})
 	if err := r.Status().Patch(ctx, backup, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch pending status: %w", err)
