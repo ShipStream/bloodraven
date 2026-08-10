@@ -21,7 +21,7 @@ metadata:
   namespace: orders
 spec:
   image: mysql:9.7
-  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:0.1.6
+  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:0.9.0
   credentials:
     operatorSecret: orders-mysql-operator
     appSecret: orders-mysql-app
