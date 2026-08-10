@@ -9,6 +9,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -526,7 +527,11 @@ func newBackupReconciler(t *testing.T, objs ...client.Object) (*MysqlBackupRecon
 
 func backupCR(name, fgName, profile string) *v1alpha1.MysqlBackup {
 	return &v1alpha1.MysqlBackup{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         "ns",
+			CreationTimestamp: metav1.Now(),
+		},
 		Spec: v1alpha1.MysqlBackupSpec{
 			FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fgName},
 			ProfileName:      profile,
@@ -648,6 +653,19 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 		},
 	}
 	mb := backupCR("wait-for-source", "lion", "nightly-s3")
+	// Stale Job attribution from a deleted/GC'd Job must be cleared on Pending.
+	mb.Status = v1alpha1.MysqlBackupStatus{
+		Phase:             v1alpha1.BackupPhaseRunning,
+		JobName:           backupJobName(mb.Name),
+		SourceSite:        "pdx",
+		ActiveSiteAtStart: "iad",
+		StartTime:         &metav1.Time{Time: time.Now().Add(-time.Minute)},
+		Conditions: []metav1.Condition{{
+			Type:   ConditionBackupJobCreated,
+			Status: metav1.ConditionTrue,
+			Reason: "Created",
+		}},
+	}
 	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
 	reconcileUntilStable(t, r, "wait-for-source")
 
@@ -661,6 +679,28 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 	}
 	if got.Status.CompletionTime != nil {
 		t.Fatalf("pending backup has completionTime=%v", got.Status.CompletionTime)
+	}
+	if got.Status.JobName != "" || got.Status.SourceSite != "" || got.Status.ActiveSiteAtStart != "" || got.Status.StartTime != nil {
+		t.Fatalf("pending status still has Job fields: job=%q source=%q activeAtStart=%q startTime=%v",
+			got.Status.JobName, got.Status.SourceSite, got.Status.ActiveSiteAtStart, got.Status.StartTime)
+	}
+	if cond := meta.FindStatusCondition(got.Status.Conditions, ConditionBackupJobCreated); cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("JobCreated condition=%v, want False", cond)
+	}
+	rec, ok := r.Recorder.(*record.FakeRecorder)
+	if !ok {
+		t.Fatalf("expected FakeRecorder, got %T", r.Recorder)
+	}
+	foundNoHealthy := false
+	for len(rec.Events) > 0 {
+		ev := <-rec.Events
+		if strings.Contains(ev, "NoHealthySource") {
+			foundNoHealthy = true
+			break
+		}
+	}
+	if !foundNoHealthy {
+		t.Fatal("expected NoHealthySource warning event on transition into Pending")
 	}
 	var job batchv1.Job
 	if err := c.Get(context.Background(), types.NamespacedName{
@@ -694,6 +734,34 @@ func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
 		Name: backupJobName(got.Name), Namespace: got.Namespace,
 	}, &job); err != nil {
 		t.Fatalf("Job not created after source recovery: %v", err)
+	}
+}
+
+func TestMysqlBackupReconciler_NoSourcePendingDeadlineFails(t *testing.T) {
+	fg := fgWithBackup()
+	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+		Sites: []v1alpha1.SiteStatus{
+			{Name: "iad", State: "read-only"},
+			{Name: "pdx", State: "read-only", Replicating: true},
+		},
+	}
+	mb := backupCR("pending-too-long", "lion", "nightly-s3")
+	mb.CreationTimestamp = metav1.NewTime(time.Now().Add(-(maxBackupPendingDuration + time.Minute)))
+	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	reconcileUntilStable(t, r, "pending-too-long")
+
+	var got v1alpha1.MysqlBackup
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "pending-too-long", Namespace: "ns"}, &got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Status.Phase != v1alpha1.BackupPhaseFailed {
+		t.Fatalf("phase=%q, want Failed after pending deadline (message=%q)", got.Status.Phase, got.Status.Message)
+	}
+	if !strings.Contains(got.Status.Message, "pending for") {
+		t.Fatalf("message=%q, want pending-duration suffix", got.Status.Message)
+	}
+	if cond := meta.FindStatusCondition(got.Status.Conditions, ConditionBackupReady); cond == nil || cond.Reason != "NoHealthySource" {
+		t.Fatalf("Ready condition=%v, want Reason=NoHealthySource", cond)
 	}
 }
 

@@ -75,10 +75,21 @@ func TestConditionTrueForGeneration(t *testing.T) {
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: 4,
 	}}
-	if conditionTrueForGeneration(conds, "Ready", 5) {
-		t.Fatal("stale Ready=True condition must not satisfy generation 5")
+	tests := []struct {
+		name       string
+		condType   string
+		generation int64
+		want       bool
+	}{
+		{name: "stale", condType: "Ready", generation: 5, want: false},
+		{name: "matching", condType: "Ready", generation: 4, want: true},
+		{name: "missing type", condType: "Missing", generation: 4, want: false},
 	}
-	if !conditionTrueForGeneration(conds, "Ready", 4) {
-		t.Fatal("Ready=True condition should satisfy its observed generation")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := conditionTrueForGeneration(conds, tt.condType, tt.generation); got != tt.want {
+				t.Fatalf("conditionTrueForGeneration(%q, %d)=%v, want %v", tt.condType, tt.generation, got, tt.want)
+			}
+		})
 	}
 }

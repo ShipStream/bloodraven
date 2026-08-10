@@ -40,6 +40,12 @@ const (
 // fail against a misconfigured profile.
 const maxFailedRetention = 10
 
+// maxBackupPendingDuration caps how long a MysqlBackup waits for a healthy
+// source before it is failed terminally. A missing source is normally
+// transient (failover / ordered update); if it persists, the CR must stop
+// occupying the schedule and become eligible for failed-backup pruning.
+const maxBackupPendingDuration = 30 * time.Minute
+
 // MysqlBackupReconciler reconciles MysqlBackup resources.
 type MysqlBackupReconciler struct {
 	client.Client
@@ -520,11 +526,32 @@ func (r *MysqlBackupReconciler) failBackup(ctx context.Context, backup *v1alpha1
 // pendBackup records a retryable pre-launch dependency failure. A missing
 // healthy source is expected during failover and ordered updates; it must not
 // consume the one-shot MysqlBackup CR before a Job has even been created.
+//
+// If the wait exceeds maxBackupPendingDuration the CR is failed terminally so
+// stalled backups do not accumulate while the schedule keeps creating new ones.
+// Callers only reach this path when no Job exists yet; clear any stale
+// Job-related status so Pending never advertises a Job that is gone.
 func (r *MysqlBackupReconciler) pendBackup(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string) (ctrl.Result, error) {
 	now := metav1.Now()
+	// A missing source is normally transient. If it persists, fail the CR so
+	// it stops occupying the schedule and becomes eligible for pruning.
+	if !backup.CreationTimestamp.IsZero() {
+		if age := now.Sub(backup.CreationTimestamp.Time); age > maxBackupPendingDuration {
+			return r.failBackup(ctx, backup, reason,
+				fmt.Sprintf("%s (pending for %s)", message, age.Truncate(time.Second)))
+		}
+	}
+
+	wasPending := backup.Status.Phase == v1alpha1.BackupPhasePending
 	patch := client.MergeFrom(backup.DeepCopy())
 	backup.Status.Phase = v1alpha1.BackupPhasePending
 	backup.Status.CompletionTime = nil
+	// Pre-launch: no Job exists. Drop any leftover Job attribution left by a
+	// deleted/GC'd Job so status matches the live cluster.
+	backup.Status.StartTime = nil
+	backup.Status.JobName = ""
+	backup.Status.SourceSite = ""
+	backup.Status.ActiveSiteAtStart = ""
 	backup.Status.Message = message
 	backup.Status.ObservedGeneration = backup.Generation
 	setCondition(&backup.Status.Conditions, metav1.Condition{
@@ -535,8 +562,21 @@ func (r *MysqlBackupReconciler) pendBackup(ctx context.Context, backup *v1alpha1
 		Reason:             reason,
 		Message:            message,
 	})
+	setCondition(&backup.Status.Conditions, metav1.Condition{
+		Type:               ConditionBackupJobCreated,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: backup.Generation,
+		LastTransitionTime: now,
+		Reason:             "NotCreated",
+		Message:            "backup Job has not been created yet",
+	})
 	if err := r.Status().Patch(ctx, backup, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch pending status: %w", err)
+	}
+	// Preserve the NoHealthySource signal operators used to get from failBackup,
+	// but only on the transition into Pending — not on every 15s retry.
+	if !wasPending {
+		r.Recorder.Eventf(backup, corev1.EventTypeWarning, reason, "%s", message)
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
