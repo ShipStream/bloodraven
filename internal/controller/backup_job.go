@@ -133,6 +133,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		labelAppName:       "mysql-backup",
 		labelInstance:      fg.Name,
 		labelFailoverGroup: fg.Name,
+		labelSite:          in.SourceSite,
 		labelMysqlBackup:   backup.Name,
 		labelBackupProfile: in.Profile.Name,
 		labelManagedBy:     managerName,

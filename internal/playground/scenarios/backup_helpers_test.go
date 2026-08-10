@@ -68,3 +68,17 @@ func TestConditionTrue(t *testing.T) {
 		t.Fatalf("Missing condition should not be true")
 	}
 }
+
+func TestConditionTrueForGeneration(t *testing.T) {
+	conds := []metav1.Condition{{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: 4,
+	}}
+	if conditionTrueForGeneration(conds, "Ready", 5) {
+		t.Fatal("stale Ready=True condition must not satisfy generation 5")
+	}
+	if !conditionTrueForGeneration(conds, "Ready", 4) {
+		t.Fatal("Ready=True condition should satisfy its observed generation")
+	}
+}

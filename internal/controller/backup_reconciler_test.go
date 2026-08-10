@@ -8,6 +8,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -614,6 +615,9 @@ func TestMysqlBackupReconciler_CreatesJob_PicksReplica(t *testing.T) {
 	if got.Status.SourceSite != "pdx" {
 		t.Errorf("want source pdx, got %s", got.Status.SourceSite)
 	}
+	if job.Labels[labelSite] != "pdx" {
+		t.Errorf("want Job source-site label pdx, got %q", job.Labels[labelSite])
+	}
 	// Phase 2: capture the active-site MySQL image tag for
 	// version-pinned verification.
 	if got.Status.MysqlImage != "mysql:9.7" {
@@ -632,6 +636,140 @@ func TestMysqlBackupReconciler_CreatesJob_PicksReplica(t *testing.T) {
 	}
 	if string(creds.Data["MYSQL_PASSWORD"]) != "s3cret" {
 		t.Errorf("parsed password wrong: %q", creds.Data["MYSQL_PASSWORD"])
+	}
+}
+
+func TestMysqlBackupReconciler_NoSourceStaysPendingAndRetries(t *testing.T) {
+	fg := fgWithBackup()
+	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+		Sites: []v1alpha1.SiteStatus{
+			{Name: "iad", State: "read-only"},
+			{Name: "pdx", State: "read-only", Replicating: true},
+		},
+	}
+	mb := backupCR("wait-for-source", "lion", "nightly-s3")
+	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	reconcileUntilStable(t, r, "wait-for-source")
+
+	var got v1alpha1.MysqlBackup
+	key := types.NamespacedName{Name: "wait-for-source", Namespace: "ns"}
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get pending backup: %v", err)
+	}
+	if got.Status.Phase != v1alpha1.BackupPhasePending {
+		t.Fatalf("phase=%q, want Pending (message=%q)", got.Status.Phase, got.Status.Message)
+	}
+	if got.Status.CompletionTime != nil {
+		t.Fatalf("pending backup has completionTime=%v", got.Status.CompletionTime)
+	}
+	var job batchv1.Job
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: backupJobName(got.Name), Namespace: got.Namespace,
+	}, &job); !apierrors.IsNotFound(err) {
+		t.Fatalf("Job should not exist without a source, get err=%v", err)
+	}
+
+	var liveFG v1alpha1.MysqlFailoverGroup
+	fgKey := types.NamespacedName{Name: "lion", Namespace: "ns"}
+	if err := c.Get(context.Background(), fgKey, &liveFG); err != nil {
+		t.Fatalf("get failover group: %v", err)
+	}
+	liveFG.Status.ActiveSite = "iad"
+	liveFG.Status.Sites = []v1alpha1.SiteStatus{
+		{Name: "iad", State: "writable"},
+		{Name: "pdx", State: "read-only", Replicating: true},
+	}
+	if err := c.Status().Update(context.Background(), &liveFG); err != nil {
+		t.Fatalf("make source healthy: %v", err)
+	}
+	reconcileUntilStable(t, r, "wait-for-source")
+
+	if err := c.Get(context.Background(), key, &got); err != nil {
+		t.Fatalf("get running backup: %v", err)
+	}
+	if got.Status.Phase != v1alpha1.BackupPhaseRunning {
+		t.Fatalf("phase=%q, want Running after source recovery (message=%q)", got.Status.Phase, got.Status.Message)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: backupJobName(got.Name), Namespace: got.Namespace,
+	}, &job); err != nil {
+		t.Fatalf("Job not created after source recovery: %v", err)
+	}
+}
+
+func TestMysqlBackupReconciler_RunningJobSurvivesTransientNoActiveSite(t *testing.T) {
+	fg := fgWithBackup()
+	fg.Status = v1alpha1.MysqlFailoverGroupStatus{
+		ActiveSite: "iad",
+		Sites: []v1alpha1.SiteStatus{
+			{Name: "iad", State: "writable"},
+			{Name: "pdx", State: "read-only", Replicating: true},
+		},
+	}
+	mb := backupCR("in-flight-failover", "lion", "nightly-s3")
+	r, c := newBackupReconciler(t, fg, mb, dsnSecret())
+	reconcileUntilStable(t, r, "in-flight-failover")
+
+	backupKey := types.NamespacedName{Name: mb.Name, Namespace: mb.Namespace}
+	var running v1alpha1.MysqlBackup
+	if err := c.Get(context.Background(), backupKey, &running); err != nil {
+		t.Fatalf("get running backup: %v", err)
+	}
+	if running.Status.Phase != v1alpha1.BackupPhaseRunning || running.Status.SourceSite != "pdx" {
+		t.Fatalf("initial status phase=%q source=%q, want Running/pdx", running.Status.Phase, running.Status.SourceSite)
+	}
+
+	// Reproduce the nightly race: the backup Job already targets pdx, while
+	// an ordered update briefly publishes no active site on the group.
+	var liveFG v1alpha1.MysqlFailoverGroup
+	fgKey := types.NamespacedName{Name: "lion", Namespace: "ns"}
+	if err := c.Get(context.Background(), fgKey, &liveFG); err != nil {
+		t.Fatalf("get failover group: %v", err)
+	}
+	liveFG.Status.ActiveSite = ""
+	for i := range liveFG.Status.Sites {
+		liveFG.Status.Sites[i].State = "read-only"
+	}
+	if err := c.Status().Update(context.Background(), &liveFG); err != nil {
+		t.Fatalf("publish transient no-primary state: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: backupKey}); err != nil {
+		t.Fatalf("reconcile during no-primary window: %v", err)
+	}
+	if err := c.Get(context.Background(), backupKey, &running); err != nil {
+		t.Fatalf("get backup after no-primary reconcile: %v", err)
+	}
+	if running.Status.Phase != v1alpha1.BackupPhaseRunning {
+		t.Fatalf("in-flight backup became %q during no-primary window (message=%q)", running.Status.Phase, running.Status.Message)
+	}
+
+	// The pinned Job remains authoritative and can complete while the live
+	// topology is still between active sites.
+	var job batchv1.Job
+	jobKey := types.NamespacedName{Name: backupJobName(mb.Name), Namespace: mb.Namespace}
+	if err := c.Get(context.Background(), jobKey, &job); err != nil {
+		t.Fatalf("get backup Job: %v", err)
+	}
+	now := metav1.NewTime(time.Now())
+	job.Status.Succeeded = 1
+	job.Status.Conditions = []batchv1.JobCondition{{
+		Type: batchv1.JobComplete, Status: corev1.ConditionTrue,
+		LastProbeTime: now, LastTransitionTime: now,
+	}}
+	if err := c.Status().Update(context.Background(), &job); err != nil {
+		t.Fatalf("complete backup Job: %v", err)
+	}
+	reconcileUntilStable(t, r, mb.Name)
+
+	var done v1alpha1.MysqlBackup
+	if err := c.Get(context.Background(), backupKey, &done); err != nil {
+		t.Fatalf("get completed backup: %v", err)
+	}
+	if done.Status.Phase != v1alpha1.BackupPhaseSucceeded {
+		t.Fatalf("phase=%q, want Succeeded (message=%q)", done.Status.Phase, done.Status.Message)
+	}
+	if done.Status.SourceSite != "pdx" {
+		t.Fatalf("source=%q, want pinned source pdx", done.Status.SourceSite)
 	}
 }
 

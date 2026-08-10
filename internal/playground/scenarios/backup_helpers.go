@@ -169,7 +169,12 @@ func waitForBackupProfile(ctx context.Context, env *runner.Env, prefix string, p
 		s3 := found.Storage.S3
 		matches := found.Storage.Type == v1alpha1.BackupStorageS3 && s3.Bucket == backupE2EBucket && s3.Prefix == prefix && s3.EndpointURL == backupE2EEndpoint
 		pitrOK := !pitr || (mfg.Spec.Backup.PITR != nil && mfg.Spec.Backup.PITR.Enabled && mfg.Spec.Backup.PITR.ProfileName == backupE2EProfile)
-		ready := conditionTrue(mfg.Status.Conditions, "Ready")
+		// The spec patch increments metadata.generation before the topology
+		// manager has started (let alone completed) the resulting rollout.
+		// Reject a stale Ready=True condition from the previous generation;
+		// accepting it is what let scenario 31 create a backup in the middle
+		// of an ordered primary handoff.
+		ready := conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation)
 		activeOK := mfg.Status.ActiveSite != "" && mfg.Status.UpdatePhase == ""
 		return matches && pitrOK && ready && activeOK, fmt.Sprintf("profile storage=%s bucket=%q prefix=%q endpoint=%q pitrOK=%v ready=%v active=%q updatePhase=%q", found.Storage.Type, s3.Bucket, s3.Prefix, s3.EndpointURL, pitrOK, ready, mfg.Status.ActiveSite, mfg.Status.UpdatePhase), nil
 	})
@@ -608,6 +613,15 @@ func conditionsSummary(conds []metav1.Condition) string {
 func conditionTrue(conds []metav1.Condition, typ string) bool {
 	for _, c := range conds {
 		if c.Type == typ && c.Status == metav1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
+func conditionTrueForGeneration(conds []metav1.Condition, typ string, generation int64) bool {
+	for _, c := range conds {
+		if c.Type == typ && c.Status == metav1.ConditionTrue && c.ObservedGeneration == generation {
 			return true
 		}
 	}

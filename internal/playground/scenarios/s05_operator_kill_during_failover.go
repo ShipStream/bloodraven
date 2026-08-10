@@ -30,20 +30,24 @@ func init() {
 //   - cluster eventually reports exactly one writable site
 //   - the Ready condition becomes True
 //   - no RecoveryBlocked entries
-//   - neither sidecar self-fenced during the gap
+//   - neither sidecar self-fenced because every authority was unreachable
+//     beyond the lease timeout
 //
 // Either of two end states is acceptable: (a) the failover completed
 // and the peer is the new primary, or (b) the original primary
 // respawned and the new operator never triggered a failover. Both are
 // "safe convergence" — the failure mode this scenario protects
-// against is split-brain or wedged unreachable state.
+// against is split-brain or wedged unreachable state. An immediate
+// topology-mismatch self-fence is explicitly allowed: when the operator is
+// killed between promotion and publishing the new active-site view, that
+// fence is the safety mechanism closing the ambiguous writable window.
 func scenario05OperatorKillDuringFailover() runner.Scenario {
 	return runner.Scenario{
 		ID:    "05-operator-kill-during-failover",
 		Title: "Operator kill during active failover converges safely",
 		Hypothesis: "Killing the operator within ~1s of scaling the primary to 0 must NOT produce a " +
 			"split-brain or wedge the cluster. After the operator restarts, exactly one site is writable, " +
-			"Ready=True, and neither sidecar self-fenced.",
+			"Ready=True, and neither sidecar self-fenced because the operator gap exceeded leaseTimeout.",
 		Risk:     "medium",
 		DocLink:  "playground/chaos-scenarios.md#5-operator-kill-during-active-failover",
 		Timeout:  5 * time.Minute,
@@ -51,7 +55,7 @@ func scenario05OperatorKillDuringFailover() runner.Scenario {
 		Steps: []runner.Step{
 			s05InjectKillPrimaryThenOperator(),
 			s05ObserveSafeConvergence(),
-			s05VerifyNoSelfFence(),
+			s05VerifyNoLeaseExpirySelfFence(),
 		},
 	}
 }
@@ -222,16 +226,16 @@ func s05ObserveSafeConvergence() runner.Step {
 	}
 }
 
-// s05VerifyNoSelfFence confirms neither sidecar emitted SELF-FENCE
-// during the operator-down window. The window between operator kill
-// and operator-back-up is bounded by the Deployment respawn (~5–10s in
-// the playground), well below the sidecar leaseTimeout (20s), so a
-// SELF-FENCING/SELF-FENCED line would indicate the lease tracking
-// crossed leaseTimeout — likely a regression in restart tolerance.
-func s05VerifyNoSelfFence() runner.Step {
+// s05VerifyNoLeaseExpirySelfFence confirms neither sidecar exhausted its
+// operator-and-peer lease during the short restart gap. Do not reject the
+// other self-fence rule, topology mismatch: an operator killed after changing
+// MySQL writability but before publishing the new authoritative active site
+// can legitimately trigger that immediate safety fence. Safe convergence in
+// the preceding step verifies that the fence did not wedge the cluster.
+func s05VerifyNoLeaseExpirySelfFence() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "no SELF-FENC log on either sidecar across the operator gap",
+		Name:  "no lease-expiry SELF-FENCING on either sidecar across the operator gap",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			for _, key := range []string{"originalPrimary", "peerSite"} {
 				site := ctxFetch(env, key)
@@ -239,8 +243,9 @@ func s05VerifyNoSelfFence() runner.Step {
 				if err != nil {
 					return fmt.Errorf("get sidecar tailer for %s: %w", site, err)
 				}
-				if hit, line := firstMatchSince(tail, env.StartTime, pglogs.Substring("SELF-FENC")); hit {
-					return fmt.Errorf("sidecar %s self-fenced during operator-kill failover window: %s", site, line)
+				if hit, line := firstMatchSince(tail, env.StartTime,
+					pglogs.Substring("SELF-FENCING: Bloodraven and every peer unreachable beyond lease timeout")); hit {
+					return fmt.Errorf("sidecar %s exhausted its authority lease during operator-kill failover window: %s", site, line)
 				}
 			}
 			return nil

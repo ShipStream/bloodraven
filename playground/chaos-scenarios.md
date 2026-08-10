@@ -30,7 +30,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `02-operator-kill-restart` (§2; negative-assertion — verifies activeSite stable and no SELF-FENCING during operator restart)
 - `02-planned-switchover` (§S; planned-failover state machine — annotates the MFG with `bloodraven.shipstream.io/planned-failover=<peer>`, asserts `Validating→Draining→WaitingForLag→Promoting→Resuming→Succeeded`, `transactionsLost==0`, and the `bloodraven_planned_failovers_total{result="success"}` increment)
 - `04-data-integrity-on-failover` (§4; seeds rows, blocks on `WAIT_FOR_EXECUTED_GTID_SET`, kills primary, asserts `GTID_SUBSET(pre, post)=1` and full row count on the new primary)
-- `05-operator-kill-during-failover` (§5; scales the active primary to 0, sleeps 1s, kills the operator pod, asserts the cluster reconverges to 1 writable + all followers read-only with `Ready=True` and no sidecar emitted SELF-FENC during the operator-down gap)
+- `05-operator-kill-during-failover` (§5; scales the active primary to 0, sleeps 1s, kills the operator pod, asserts the cluster reconverges to 1 writable + all followers read-only with `Ready=True` and no sidecar exhausts its operator-and-peer lease during the short gap; an immediate topology-mismatch self-fence is allowed because it safely closes a promotion/publication race)
 - `05-split-brain-auto-resolve` (§SBR; requires `spec.splitBrainPolicy.sitePriorities` set — clears `super_read_only` on the read-only site to force both writable, asserts the operator fences the non-preferred site, increments `bloodraven_split_brain_auto_resolve_total{prefer_site=...}`, and logs `split-brain auto-resolve`)
 - `06-self-fence-isolated-primary` (§6; scales operator AND every non-self peer, including the reader, to 0 — true isolation path, complements `09-`)
 - `08-gtid-divergence-detection` (§8; manufactures a rogue write on the old primary, asserts `recoveryState=RecoveryBlocked` + `divergentTransactionCount>0` + `divergence detected` log; auto-reclones in cleanup)
@@ -169,7 +169,7 @@ kubectl -n bloodraven-playground exec deploy/mysql-playground-<primary> -c mysql
 
 **Injection**: `./playground/chaos.sh kill-site iad && sleep 1 && ./playground/chaos.sh kill-operator`
 
-**Verify**: After ~45s convergence, exactly one site has read_only=0. No split-brain.
+**Verify**: After ~45s convergence, exactly one site has read_only=0 and the group is `Ready=True`. No sidecar may emit the "Bloodraven and every peer unreachable beyond lease timeout" self-fence during the short operator restart. A topology-mismatch self-fence is valid in this scenario: if the operator dies after changing MySQL writability but before publishing the matching active-site view, immediate fencing is the intended safety response. No split-brain.
 
 **Observation**: In practice, the primary pod often respawns before the new operator finishes starting. The new operator discovers the original topology already restored (iad=writable, pdx=read-only) and resumes normal monitoring without triggering a failover. Replication may be in CONNECTING state briefly while the IO thread reconnects to the restarted primary's new pod IP via the Service DNS.
 
@@ -833,7 +833,7 @@ The scenario creates/ensures bucket `bloodraven-backup-e2e`, patches only `Mysql
 
 **Injection**: `make chaos-run SCENARIO=31-pitr-verification-rustfs`
 
-The scenario uses the same RustFS bucket/profile/credential Secret as scenario 30 but isolates objects under `e2e/31-pitr-verification-rustfs/<run-stamp>/` and enables `spec.backup.pitr` (`profileName=rustfs-e2e`, `maxBinlogSize=1M`, `archivePollInterval=2s`). It waits for the active sidecar `/archiver/status` endpoint to report `enabled=true`, `primary=true`, `storageType=S3`, and manifest prefix `<prefix>/binlogs` before taking the baseline backup.
+The scenario uses the same RustFS bucket/profile/credential Secret as scenario 30 but isolates objects under `e2e/31-pitr-verification-rustfs/<run-stamp>/` and enables `spec.backup.pitr` (`profileName=rustfs-e2e`, `maxBinlogSize=1M`, `archivePollInterval=2s`). It waits for `Ready=True` from the patched MFG generation with no ordered update in progress, then requires the active sidecar `/archiver/status` endpoint to report `enabled=true`, `primary=true`, `storageType=S3`, and manifest prefix `<prefix>/binlogs` before taking the baseline backup. The generation gate prevents stale pre-patch readiness from starting a backup during the PITR sidecar rollout.
 
 **Verify**: After the full backup succeeds, the scenario inserts a before-target marker row, captures a MySQL UTC timestamp, sleeps 2 seconds, inserts an after-target marker, executes `FLUSH BINARY LOGS`, and waits for sidecar archiver coverage with zero backlog. The pinned PITR verification uses `spec.pointInTime.mode=timestamp` and a sanity scalar that returns `1` only when baseline and before-target rows are present and the after-target row is absent. Success also requires `status.replayedThroughBinlog` and `Verified=True`.
 

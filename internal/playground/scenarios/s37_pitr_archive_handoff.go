@@ -89,7 +89,7 @@ func s37WaitArchiverReady() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 			defer cancel()
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace, "PITR spec rollout", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-				ready := conditionTrue(mfg.Status.Conditions, "Ready")
+				ready := conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation)
 				pitrSpec := mfg.Spec.Backup != nil && mfg.Spec.Backup.PITR != nil && mfg.Spec.Backup.PITR.Enabled && mfg.Spec.Backup.PITR.ProfileName == backupE2EProfile
 				return pitrSpec && ready && mfg.Status.UpdatePhase == "" && mfg.Status.ActiveSite != "",
 					fmt.Sprintf("pitrSpec=%v ready=%v active=%q", pitrSpec, ready, mfg.Status.ActiveSite), nil
