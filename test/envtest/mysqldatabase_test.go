@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -48,6 +49,20 @@ func newMysqlDatabaseReconciler(t *testing.T) *controller.MysqlDatabaseReconcile
 			return nil, nil
 		},
 	}
+}
+
+// deleteAndDrainFinalizer deletes the CR and runs one reconcile so the
+// deletion path releases the finalizer. Without the drain, any test whose
+// reconciler added the finalizer would leave the object stuck with a
+// deletionTimestamp and its namespace forever terminating.
+func deleteAndDrainFinalizer(t *testing.T, r *controller.MysqlDatabaseReconciler, nn types.NamespacedName) {
+	t.Helper()
+	var cr v1alpha1.MysqlDatabase
+	if err := k8sClient.Get(ctx, nn, &cr); err != nil {
+		return
+	}
+	_ = k8sClient.Delete(ctx, &cr)
+	_, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: nn})
 }
 
 func mysqlDatabaseReadyCondition(mdb *v1alpha1.MysqlDatabase) *metav1.Condition {
@@ -263,10 +278,10 @@ func TestMysqlDatabase_EnvtestPendingWithoutGroup(t *testing.T) {
 	if err := k8sClient.Create(ctx, cr); err != nil {
 		t.Fatalf("create MysqlDatabase: %v", err)
 	}
-	t.Cleanup(func() { _ = k8sClient.Delete(ctx, cr) })
 
 	r := newMysqlDatabaseReconciler(t)
 	nn := types.NamespacedName{Namespace: ns, Name: "tenant-acme"}
+	t.Cleanup(func() { deleteAndDrainFinalizer(t, r, nn) })
 
 	// First reconcile adds the finalizer and requeues.
 	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
@@ -276,7 +291,7 @@ func TestMysqlDatabase_EnvtestPendingWithoutGroup(t *testing.T) {
 	if err := k8sClient.Get(ctx, nn, &afterFinalizer); err != nil {
 		t.Fatalf("get after finalizer reconcile: %v", err)
 	}
-	if !controllerutil.ContainsFinalizer(&afterFinalizer, "shipstream.io/mysqldatabase") {
+	if !controllerutil.ContainsFinalizer(&afterFinalizer, controller.MysqlDatabaseFinalizer) {
 		t.Fatal("finalizer was not added")
 	}
 
@@ -429,7 +444,13 @@ func TestMysqlDatabase_EnvtestDeletePolicyIsOptIn(t *testing.T) {
 }
 
 // TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed keeps the no-credential
-// -in-status rule honest at the API boundary.
+// -in-status rule honest at the API boundary. The group exists and names an
+// active site that does not resolve to a promotable site, so the reconciler
+// reads the owner Secret, validates it, stamps Creating and then fails the
+// admin connection *before* dialing — every status-writing path that could
+// echo Secret bytes executes, while the no-dial invariant still holds.
+// Without the group, reconciliation would stop at Pending(GroupNotFound)
+// before ever reading the Secret, and the test would prove nothing.
 func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 	ns := createNamespace(t, "mydb-nosecret")
 
@@ -441,15 +462,50 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 	if err := k8sClient.Create(ctx, secret); err != nil {
 		t.Fatalf("create owner secret: %v", err)
 	}
+	operator := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "mysql-operator", Namespace: ns},
+		Data: map[string][]byte{
+			"username":            []byte("operator"),
+			"password":            []byte("op-pw"),
+			"MYSQL_ROOT_PASSWORD": []byte("root-pw"),
+		},
+	}
+	if err := k8sClient.Create(ctx, operator); err != nil {
+		t.Fatalf("create operator secret: %v", err)
+	}
+
+	fg := &v1alpha1.MysqlFailoverGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: ns},
+		Spec: v1alpha1.MysqlFailoverGroupSpec{
+			Image:       "mysql:9.7",
+			Credentials: &v1alpha1.CredentialsSpec{OperatorSecret: "mysql-operator"},
+			Sites: []v1alpha1.SiteSpec{
+				{Name: "dc1", Zone: "main-dc1", LBIP: "203.0.113.1",
+					TaintNodeSelector: map[string]string{"shipstream.io/site.main": "dc1"},
+					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
+				{Name: "dc2", Zone: "main-dc2", LBIP: "203.0.113.2",
+					TaintNodeSelector: map[string]string{"shipstream.io/site.main": "dc2"},
+					Storage:           v1alpha1.StorageSpec{StorageClassName: "standard", Size: resource.MustParse("10Gi")}},
+			},
+			DNS: v1alpha1.DNSSpec{Hostname: "main.az.example.com", TTL: 60},
+		},
+	}
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	fg.Status.ActiveSite = "nowhere" // resolves to no promotable site: no dial
+	if err := k8sClient.Status().Update(ctx, fg); err != nil {
+		t.Fatalf("update group status: %v", err)
+	}
 
 	cr := newMysqlDatabaseCR(ns, "tenant-acme")
 	if err := k8sClient.Create(ctx, cr); err != nil {
 		t.Fatalf("create MysqlDatabase: %v", err)
 	}
-	t.Cleanup(func() { _ = k8sClient.Delete(ctx, cr) })
 
 	r := newMysqlDatabaseReconciler(t)
 	nn := types.NamespacedName{Namespace: ns, Name: "tenant-acme"}
+	t.Cleanup(func() { deleteAndDrainFinalizer(t, r, nn) })
 	for i := 0; i < 2; i++ {
 		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
 			t.Fatalf("reconcile: %v", err)
@@ -460,8 +516,15 @@ func TestMysqlDatabase_EnvtestOwnerSecretIsNeverEchoed(t *testing.T) {
 	if err := k8sClient.Get(ctx, nn, &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
+	// Proof the owner Secret really was read on this path.
+	if got.Status.OwnerUser != "acme_app" {
+		t.Fatalf("status.ownerUser = %q, want acme_app — the test never exercised the Secret read", got.Status.OwnerUser)
+	}
 	rendered := fmt.Sprintf("%+v", got.Status)
 	if strings.Contains(rendered, password) {
 		t.Fatalf("status leaked the owner password: %s", rendered)
+	}
+	if strings.Contains(rendered, "op-pw") || strings.Contains(rendered, "root-pw") {
+		t.Fatalf("status leaked a group credential: %s", rendered)
 	}
 }

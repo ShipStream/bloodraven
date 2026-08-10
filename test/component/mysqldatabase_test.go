@@ -2,6 +2,7 @@ package component
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"testing"
 
@@ -25,12 +26,13 @@ import (
 // production code.
 
 const (
-	mdbNamespace = "bloodraven"
-	mdbName      = "tenant-acme"
-	mdbGroupName = "main"
-	mdbDatabase  = "acme_wms"
-	mdbOwnerUser = "acme_app"
-	mdbOwnerPass = "owner-pw-1"
+	mdbNamespace       = "bloodraven"
+	mdbName            = "tenant-acme"
+	mdbGroupName       = "main"
+	mdbDatabase        = "acme_wms"
+	mdbOwnerUser       = "acme_app"
+	mdbOwnerPass       = "owner-pw-1"
+	mdbOwnerSecretName = "acme-mysql-owner"
 )
 
 type mdbHarness struct {
@@ -123,7 +125,7 @@ func (h *mdbHarness) delete() {
 func (h *mdbHarness) setOwnerPassword(password string) {
 	h.t.Helper()
 	var s corev1.Secret
-	key := types.NamespacedName{Namespace: mdbNamespace, Name: "acme-mysql-owner"}
+	key := types.NamespacedName{Namespace: mdbNamespace, Name: mdbOwnerSecretName}
 	if err := h.client.Get(context.Background(), key, &s); err != nil {
 		h.t.Fatalf("get owner secret: %v", err)
 	}
@@ -170,7 +172,7 @@ func mdbOperatorSecret() *corev1.Secret {
 
 func mdbOwnerSecret() *corev1.Secret {
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "acme-mysql-owner", Namespace: mdbNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: mdbOwnerSecretName, Namespace: mdbNamespace},
 		Data: map[string][]byte{
 			"username": []byte(mdbOwnerUser),
 			"password": []byte(mdbOwnerPass),
@@ -184,14 +186,14 @@ func mdbCR(mutate ...func(*v1alpha1.MysqlDatabase)) *v1alpha1.MysqlDatabase {
 			Name:       mdbName,
 			Namespace:  mdbNamespace,
 			Generation: 1,
-			Finalizers: []string{"shipstream.io/mysqldatabase"},
+			Finalizers: []string{controller.MysqlDatabaseFinalizer},
 		},
 		Spec: v1alpha1.MysqlDatabaseSpec{
 			GroupRef:     v1alpha1.LocalGroupRef{Name: mdbGroupName},
 			DatabaseName: mdbDatabase,
 			CharacterSet: "utf8mb4",
 			Collation:    "utf8mb4_unicode_ci",
-			Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: "acme-mysql-owner"},
+			Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: mdbOwnerSecretName},
 		},
 	}
 	for _, m := range mutate {
@@ -444,6 +446,19 @@ func TestMysqlDatabaseDeletePolicyDropsDatabaseButNotSharedUsers(t *testing.T) {
 	if _, ok := h.server.grantsFor(mdbDatabase, "maester"); ok {
 		t.Fatal("deletionPolicy=Delete left maester's grant on the dropped database")
 	}
+	// The grants map also empties when the database is dropped, so the
+	// absence above cannot prove the REVOKE ran. The statement log can:
+	// MySQL keeps schema-level grant rows across DROP DATABASE, so the
+	// reconciler must have emitted an explicit revoke for maester.
+	revoked := false
+	for _, stmt := range h.server.statementsSince(0) {
+		if strings.HasPrefix(stmt, "REVOKE") && strings.Contains(stmt, "'maester'") {
+			revoked = true
+		}
+	}
+	if !revoked {
+		t.Fatal("no REVOKE for maester in the statement log; DROP DATABASE alone leaves the mysql.db grant row behind")
+	}
 }
 
 // TestMysqlDatabaseReappliesAfterFailover is the reason the group watch
@@ -572,7 +587,7 @@ func TestMysqlDatabaseOwnerUsernameRotationDropsOldUser(t *testing.T) {
 	h.requireReady()
 
 	var s corev1.Secret
-	key := types.NamespacedName{Namespace: mdbNamespace, Name: "acme-mysql-owner"}
+	key := types.NamespacedName{Namespace: mdbNamespace, Name: mdbOwnerSecretName}
 	if err := h.client.Get(context.Background(), key, &s); err != nil {
 		t.Fatalf("get owner secret: %v", err)
 	}
@@ -619,5 +634,41 @@ func TestMysqlDatabaseOwnerPrivilegeNarrowingRevokes(t *testing.T) {
 
 	if privs, _ := h.server.grantsFor(mdbDatabase, mdbOwnerUser); strings.Join(privs, ",") != "SELECT" {
 		t.Fatalf("owner grants = %v after narrowing to SELECT; the old wider grant survived", privs)
+	}
+}
+
+// TestMysqlDatabaseGrantNarrowingRevokes: while a grants[] entry is listed,
+// the CR is the authority on that user's privileges for this database, so
+// narrowing the entry must actually narrow MySQL. The fake models GRANT as
+// additive (like the real server), so this test cannot pass unless the
+// reconciler revokes before it grants.
+func TestMysqlDatabaseGrantNarrowingRevokes(t *testing.T) {
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{
+				v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeInsert,
+			}},
+		}
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.server.addUser("maester", "maester-pw")
+
+	h.reconcile()
+	h.requireReady()
+	privs, _ := h.server.grantsFor(mdbDatabase, "maester")
+	sorted := append([]string(nil), privs...)
+	sort.Strings(sorted)
+	if strings.Join(sorted, ",") != "INSERT,SELECT" {
+		t.Fatalf("maester grants = %v, want INSERT and SELECT", privs)
+	}
+
+	h.update(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Grants[0].Privileges = []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}
+	})
+	h.reconcile()
+	h.requireReady()
+
+	if privs, _ := h.server.grantsFor(mdbDatabase, "maester"); strings.Join(privs, ",") != "SELECT" {
+		t.Fatalf("maester grants = %v after narrowing to SELECT; INSERT survived", privs)
 	}
 }

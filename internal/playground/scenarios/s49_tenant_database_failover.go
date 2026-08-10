@@ -220,6 +220,21 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 		}
 	}
 
+	// The grant row existing is not enough: assert the requested privileges
+	// actually landed. The grants[] entry asks for SELECT and DELETE, so
+	// both columns must be Y — a row with either at N would mean the
+	// reconciler silently under-granted.
+	for _, col := range []string{"Select_priv", "Delete_priv"} {
+		v, err := client.ScalarString(ctx,
+			"SELECT "+col+" FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", s49DatabaseName, s49GrantUser)
+		if err != nil {
+			return fmt.Errorf("query %s on %s: %w", col, site, err)
+		}
+		if v != "Y" {
+			return fmt.Errorf("user %q has %s=%q on %q at %s, want Y", s49GrantUser, col, v, s49DatabaseName, site)
+		}
+	}
+
 	// The privilege this CRD must never confer. Grant_priv on a schema-level
 	// row is how WITH GRANT OPTION would show up.
 	for _, user := range []string{s49OwnerUser, s49GrantUser} {

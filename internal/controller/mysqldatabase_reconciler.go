@@ -35,10 +35,10 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// mysqlDatabaseFinalizer guards the MySQL-side cleanup decision. Named to
+// MysqlDatabaseFinalizer guards the MySQL-side cleanup decision. Named to
 // match the existing finalizers in this repo (shipstream.io/mysqlbackup,
 // shipstream.io/mysqlbackup-verification).
-const mysqlDatabaseFinalizer = "shipstream.io/mysqldatabase"
+const MysqlDatabaseFinalizer = "shipstream.io/mysqldatabase"
 
 // ConditionDatabaseReady is the Ready condition type on
 // MysqlDatabase.status.conditions. Together with status.observedGeneration
@@ -134,8 +134,8 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.reconcileDelete(ctx, &mdb)
 	}
 
-	if !controllerutil.ContainsFinalizer(&mdb, mysqlDatabaseFinalizer) {
-		controllerutil.AddFinalizer(&mdb, mysqlDatabaseFinalizer)
+	if !controllerutil.ContainsFinalizer(&mdb, MysqlDatabaseFinalizer) {
+		controllerutil.AddFinalizer(&mdb, MysqlDatabaseFinalizer)
 		if err := r.Update(ctx, &mdb); err != nil {
 			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
 		}
@@ -353,7 +353,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // reconcileDelete releases the finalizer, dropping MySQL state only under an
 // explicit deletionPolicy: Delete.
 func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1alpha1.MysqlDatabase) (ctrl.Result, error) {
-	if !controllerutil.ContainsFinalizer(mdb, mysqlDatabaseFinalizer) {
+	if !controllerutil.ContainsFinalizer(mdb, MysqlDatabaseFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
@@ -566,13 +566,26 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	if err != nil {
 		return nil, err
 	}
+	// grants[] entries still listed in the spec get the same revoke-then-
+	// grant treatment as the owner: while an entry exists, this CR is the
+	// authority on that user's privileges for this database (the revoke is
+	// scoped ON <db>.*, and ownershipConflict guarantees no other live CR
+	// declares this database), so narrowing an entry actually narrows it.
+	// Entries *removed* from the list are the documented gap — their
+	// usernames are no longer known here.
 	grantStmts := make([]string, len(spec.Grants))
+	grantRevokes := make([]string, len(spec.Grants))
 	for i, g := range spec.Grants {
 		stmt, err := renderGrant(fmt.Sprintf("spec.grants[%d].privileges", i), g.Privileges, spec.DatabaseName, g.Username)
 		if err != nil {
 			return nil, err
 		}
 		grantStmts[i] = stmt
+		revoke, err := renderRevokeAll(fmt.Sprintf("spec.grants[%d].username", i), spec.DatabaseName, g.Username)
+		if err != nil {
+			return nil, err
+		}
+		grantRevokes[i] = revoke
 	}
 
 	exec := func(stmt string) error {
@@ -605,6 +618,9 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 		}
 		if !exists {
 			return nil, &errGrantUserMissing{username: g.Username}
+		}
+		if err := exec(grantRevokes[i]); err != nil {
+			return nil, err
 		}
 		if err := exec(grantStmts[i]); err != nil {
 			return nil, err
@@ -798,7 +814,7 @@ func (r *MysqlDatabaseReconciler) stampStatus(ctx context.Context, mdb *v1alpha1
 }
 
 func (r *MysqlDatabaseReconciler) removeFinalizer(ctx context.Context, mdb *v1alpha1.MysqlDatabase) error {
-	controllerutil.RemoveFinalizer(mdb, mysqlDatabaseFinalizer)
+	controllerutil.RemoveFinalizer(mdb, MysqlDatabaseFinalizer)
 	if err := r.Update(ctx, mdb); err != nil {
 		return fmt.Errorf("remove finalizer: %w", err)
 	}

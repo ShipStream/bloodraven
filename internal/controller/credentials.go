@@ -320,9 +320,14 @@ func reservedGroupUsernames(ctx context.Context, c ctrlclient.Client, fg *v1alph
 		add(string(secret.Data["username"]))
 		add(string(secret.Data["MYSQL_REPLICATION_USER"]))
 		if dsn, ok := secret.Data["dsn"]; ok {
-			if parsed, err := mysqldriver.ParseDSN(string(dsn)); err == nil {
-				add(parsed.User)
+			// A dsn that does not parse hides the account it names, so it
+			// fails the gate like an unreadable Secret does — a corrupt
+			// group Secret must not un-reserve the group's own principal.
+			parsed, err := mysqldriver.ParseDSN(string(dsn))
+			if err != nil {
+				return nil, fmt.Errorf("parse dsn in group credential secret %s/%s: %w", fg.Namespace, name, err)
 			}
+			add(parsed.User)
 		}
 	}
 	return reserved, nil

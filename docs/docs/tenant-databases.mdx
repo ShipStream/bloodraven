@@ -143,7 +143,7 @@ The reconciler watches the referenced Secret, so it applies `ALTER USER` on the 
 
 Rotating the **username** in the Secret is also just a Secret write, and it revokes what it replaces: the reconciler creates the new owner, grants it, and drops the previous owner account (`OwnerUserRotated` event). A rotation performed because a credential leaked actually revokes the leaked credential — `status.ownerUser` keeps the old name until the old account is really gone, so a failure mid-rotation retries rather than leaving a shadow account.
 
-`spec.owner.privileges` is desired state in both directions: the reconciler revokes the owner's existing grant on the database before granting the declared set, so narrowing `[ALL PRIVILEGES]` to `[SELECT]` actually narrows it. (This applies to the CR-owned owner only — `grants[]` principals are shared, see Known gaps.)
+Privileges are desired state in both directions, for the owner and for every `grants[]` entry still listed in the spec: the reconciler revokes the user's existing grant on this database before granting the declared set, so narrowing `[ALL PRIVILEGES]` to `[SELECT]` actually narrows it. The revoke is scoped to this database, and the one-database-one-CR rule (above) is what makes it safe — no other CR can be managing the same grant. Entries *removed* from `grants[]` are the remaining gap, see Known gaps.
 
 ## Deletion
 
@@ -227,7 +227,7 @@ Both paths connect to the same primary through the same function — `openAdminC
 
 ## Known gaps
 
-- **Removing a `grants[]` entry does not revoke it.** The grant stays in place until the CR is deleted under `deletionPolicy: Delete`. Diffing against `status.appliedGrants` and revoking is probably the right behaviour, but it makes a CR edit destructive, so it is deliberately not implemented yet. (The owner's own privileges do not have this gap — they are revoked-and-regranted on every apply.)
+- **Removing a `grants[]` entry does not revoke it.** The grant stays in place until the CR is deleted under `deletionPolicy: Delete`. Diffing against `status.appliedGrants` and revoking is probably the right behaviour, but it makes a CR edit destructive, so it is deliberately not implemented yet. (Entries still *listed* do not have this gap — the owner and every listed grant are revoked-and-regranted on each apply, so edits converge.)
 - **Host scoping is `'%'`,** consistent with every account in `credentials.go`. Scoping tenant owners to a pod CIDR is worth doing, but as one change across both paths rather than here alone.
 - **Out-of-band drift is not self-healed.** A database or grant dropped directly in MySQL is not detected: the hash short-circuit means an unchanged Ready CR issues no statements, which is the deliberate trade for not hammering the primary. Force a re-apply by rotating the owner Secret or editing the spec.
 - **`sql_mode=NO_BACKSLASH_ESCAPES` is unsupported** on the target group: password escaping assumes MySQL's default backslash semantics, so a password containing `\` would be stored literally under that mode.

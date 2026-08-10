@@ -86,6 +86,21 @@ func TestRenderOwnerUserStatementsEscapesPassword(t *testing.T) {
 			t.Fatalf("statement %q did not escape the quote in the password", stmt)
 		}
 	}
+
+	// A trailing backslash is the other literal-breakout vector: under
+	// MySQL's default sql_mode, 'p\' would swallow the closing quote.
+	// escapeSingleQuotes doubles backslashes before quotes, so the rendered
+	// literal must end \\' — pinned here so the escaping order never quietly
+	// regresses to quotes-only.
+	got, err = renderOwnerUserStatements("acme_app", `p\`)
+	if err != nil {
+		t.Fatalf("renderOwnerUserStatements() error = %v", err)
+	}
+	for _, stmt := range got {
+		if !strings.HasSuffix(stmt, `IDENTIFIED BY 'p\\'`) {
+			t.Fatalf("statement %q did not escape the trailing backslash; the literal can be broken out of", stmt)
+		}
+	}
 }
 
 func TestRenderOwnerUserStatementsRejectsBadUsername(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -299,7 +300,21 @@ func (s *fakeSQLServer) apply(stmt string) error {
 		if s.grants[database] == nil {
 			s.grants[database] = map[string][]string{}
 		}
-		s.grants[database][username] = strings.Split(privs, ", ")
+		// Real MySQL GRANT is additive: it unions the new privileges with
+		// whatever the account already holds, so narrowing requires an
+		// explicit REVOKE. Modelling GRANT as replacement would let a
+		// narrowing test pass without the reconciler ever revoking — the
+		// model must not be more forgiving than the server.
+		existing := s.grants[database][username]
+		for _, p := range strings.Split(privs, ", ") {
+			if !slices.Contains(existing, p) {
+				existing = append(existing, p)
+			}
+		}
+		if slices.Contains(existing, "ALL PRIVILEGES") {
+			existing = []string{"ALL PRIVILEGES"}
+		}
+		s.grants[database][username] = existing
 		return nil
 
 	case reRevoke.MatchString(stmt):
