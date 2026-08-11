@@ -49,4 +49,4 @@ jobs:
     with:
       scenario: 48-keyring-seal-and-rotation
       enable-encryption: true
-      timeout-minutes: 60
+      timeout-minutes: 90

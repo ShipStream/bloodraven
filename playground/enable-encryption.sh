@@ -7,15 +7,16 @@
 # lifecycle without a second cluster.
 #
 # What it does:
-#   1. Generates a self-signed CA + server certificate and creates the
+#   1. Waits for the unencrypted playground to hold a healthy baseline.
+#   2. Generates a self-signed CA + server certificate and creates the
 #      TLS Secret the operator mounts. Encryption requires spec.tls
 #      because MySQL mandates a secure connection to clone encrypted
 #      data, and Bloodraven bootstraps every replica with CLONE INSTANCE.
-#   2. Patches the MFG with spec.tls + spec.encryptionAtRest.
-#   3. Stamps the encryption-adopt annotation, because the playground is
+#   3. Patches the MFG with spec.tls + spec.encryptionAtRest.
+#   4. Stamps the encryption-adopt annotation, because the playground is
 #      already serving and the operator otherwise refuses (existing
 #      tablespaces stay plaintext — see the warning below).
-#   4. Waits for every site to reach phase=Sealed.
+#   5. Waits for every site to reach phase=Sealed.
 #
 # Usage:
 #   ./playground/enable-encryption.sh              # convert in place
@@ -40,6 +41,37 @@ info() { echo -e "\033[1;34m==>\033[0m $*"; }
 ok()   { echo -e "\033[1;32m OK\033[0m $*"; }
 warn() { echo -e "\033[1;33m !!\033[0m $*"; }
 die()  { echo -e "\033[1;31mERR\033[0m $*" >&2; exit 1; }
+
+wait_for_stable_baseline() {
+	local reason="$1"
+	local runner="$SCRIPT_DIR/../bin/playground-chaos"
+	local deadline healthy_since now output
+
+	if [[ ! -x "$runner" ]]; then
+		info "building playground-chaos baseline checker"
+		make -C "$SCRIPT_DIR/.." build-playground-chaos
+	fi
+
+	info "waiting for a healthy baseline $reason (up to 7 minutes)"
+	deadline=$(( $(date +%s) + 420 ))
+	healthy_since=0
+	while [[ $(date +%s) -lt $deadline ]]; do
+		now=$(date +%s)
+		if output=$("$runner" check 2>&1); then
+			if [[ "$healthy_since" == "0" ]]; then
+				healthy_since=$now
+			elif (( now - healthy_since >= 20 )); then
+				ok "playground baseline remained healthy for 20 seconds"
+				return 0
+			fi
+		else
+			healthy_since=0
+			warn "$output"
+		fi
+		sleep 5
+	done
+	die "playground did not reach a stable healthy baseline $reason"
+}
 
 # shellcheck source=playground/_guard.sh
 source "$SCRIPT_DIR/_guard.sh"
@@ -77,8 +109,10 @@ fi
 kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" >/dev/null 2>&1 \
 	|| die "no MysqlFailoverGroup $FG in $NAMESPACE — run ./playground/setup.sh first"
 
+wait_for_stable_baseline "before restarting the operator for escrow TLS"
+
 # ---------------------------------------------------------------------
-# 1. TLS material
+# 2. TLS material
 # ---------------------------------------------------------------------
 if kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" >/dev/null 2>&1 && \
 	kubectl -n "$NAMESPACE" get secret "$ESCROW_TLS_SECRET" >/dev/null 2>&1; then
@@ -167,15 +201,17 @@ helm upgrade bloodraven "$SCRIPT_DIR/../charts/bloodraven" \
 kubectl -n "$NAMESPACE" rollout status deployment/bloodraven --timeout=180s
 
 # ---------------------------------------------------------------------
-# 2. Optional wipe, so every tablespace is encrypted from birth
+# 3. Optional wipe, so every tablespace is encrypted from birth
 # ---------------------------------------------------------------------
 if [[ "$FRESH" == "1" ]]; then
 	warn "--fresh: wiping MySQL data so every tablespace is encrypted from birth"
 	"$SCRIPT_DIR/reset-mysql.sh"
 fi
 
+wait_for_stable_baseline "before enabling encryption"
+
 # ---------------------------------------------------------------------
-# 3. Patch the failover group
+# 4. Patch the failover group
 # ---------------------------------------------------------------------
 # JSON Patch, not merge patch: merge and strategic-merge patches drop
 # required fields on this CRD (the documented mfg patch trap).
@@ -201,7 +237,7 @@ if [[ "$FRESH" != "1" ]]; then
 fi
 
 # ---------------------------------------------------------------------
-# 4. Wait for every site to seal
+# 5. Wait for every site to seal
 # ---------------------------------------------------------------------
 info "waiting for every site to reach phase=Sealed (up to 10 minutes)"
 deadline=$(( $(date +%s) + 600 ))

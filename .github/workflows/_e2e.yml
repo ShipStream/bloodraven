@@ -95,7 +95,7 @@ jobs:
         run: |
           set -o pipefail
           ./playground/enable-encryption.sh 2>&1 | tee playground/enable-encryption.log
-        timeout-minutes: 15
+        timeout-minutes: 30
 
       - name: Run E2E (${{ inputs.profile }} profile)
         if: inputs.scenario == ''
