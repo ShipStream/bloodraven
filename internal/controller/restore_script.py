@@ -97,7 +97,7 @@ def _tls_options():
     except (OSError, ssl.SSLError) as exc:
         raise RuntimeError(
             "BLOODRAVEN_TLS_CA_FILE is not a usable CA file: {}".format(exc)
-        )
+        ) from exc
     return "VERIFY_CA", ca
 
 def _host_port(addr, default_port=3306):

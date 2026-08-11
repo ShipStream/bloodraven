@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -416,10 +417,12 @@ func (a *KeyringAgent) push(ctx context.Context, raw []byte, digest string) erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// Never propagate the response body into LastError. The sidecar
-		// status is copied into the MysqlFailoverGroup status, and an
-		// upstream error page may contain credentials, tokens, or key
-		// material. The HTTP status is sufficient and safe diagnostics.
+		// Drain so HTTP/1.x can reuse the connection on retry, but never
+		// propagate the body into LastError. The sidecar status is copied
+		// into the MysqlFailoverGroup status, and an upstream error page
+		// may contain credentials, tokens, or key material. The HTTP
+		// status is sufficient and safe diagnostics.
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return fmt.Errorf("escrow rejected with HTTP status %d", resp.StatusCode)
 	}
 
