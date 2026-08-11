@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -326,19 +327,42 @@ func TestKeyringAgent_RetriesWhenOperatorEchoesWrongDigest(t *testing.T) {
 }
 
 func TestKeyringAgent_RetriesOnServerError(t *testing.T) {
-	f := newAgentFixture(t, nil)
-	f.escrow.status = http.StatusForbidden
-	if err := os.WriteFile(f.keyring, []byte("k"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
+	// push treats every non-200 the same: surface only the HTTP status on
+	// LastError, never the response body (which may carry credentials).
+	tests := []struct {
+		name   string
+		status int
+	}{
+		{name: "forbidden", status: http.StatusForbidden},
+		{name: "unauthorized", status: http.StatusUnauthorized},
+		{name: "bad_request", status: http.StatusBadRequest},
+		{name: "internal_server_error", status: http.StatusInternalServerError},
+		{name: "service_unavailable", status: http.StatusServiceUnavailable},
 	}
-	f.agent.tick(context.Background())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newAgentFixture(t, nil)
+			f.escrow.status = tt.status
+			if err := os.WriteFile(f.keyring, []byte("k"), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			f.agent.tick(context.Background())
 
-	got := f.agent.Snapshot()
-	if got.EscrowedDigest != "" {
-		t.Error("a rejected push must not be recorded as escrowed")
-	}
-	if got.LastError == "" {
-		t.Error("the rejection should surface on status so the operator can report it")
+			got := f.agent.Snapshot()
+			if got.EscrowedDigest != "" {
+				t.Error("a rejected push must not be recorded as escrowed")
+			}
+			if got.LastError == "" {
+				t.Error("the rejection should surface on status so the operator can report it")
+			}
+			wantStatus := fmt.Sprintf("HTTP status %d", tt.status)
+			if !strings.Contains(got.LastError, wantStatus) {
+				t.Errorf("LastError = %q, want only the safe %q", got.LastError, wantStatus)
+			}
+			if strings.Contains(got.LastError, "nope") {
+				t.Errorf("LastError exposed the escrow response body: %q", got.LastError)
+			}
+		})
 	}
 }
 

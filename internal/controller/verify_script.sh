@@ -151,7 +151,10 @@ chmod 0400 "$VERIFY_CREDS_DIR"/MYSQL_*
 
 export BLOODRAVEN_MYSQL_HOST="127.0.0.1:3306"
 export BLOODRAVEN_MYSQL_CREDS_DIR="$VERIFY_CREDS_DIR"
+# The ephemeral mysqld this restores into is plaintext on loopback and
+# has no certificate, so drop the group's TLS wiring for this run.
 unset BLOODRAVEN_TLS
+unset BLOODRAVEN_TLS_CA_FILE
 
 log "running restore.py against ephemeral mysqld"
 set +e

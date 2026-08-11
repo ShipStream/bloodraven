@@ -61,6 +61,35 @@ func mysqlTLSConfig(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFail
 	return name, nil
 }
 
+// mysqlTLSMountPath is where the operator projects spec.tls.secretName
+// into the mysql and sidecar containers.
+const mysqlTLSMountPath = "/etc/mysql/tls"
+
+// mysqlTLSSidecarEnv is the sidecar's half of the MySQL TLS contract:
+// where its client finds the CA and (optional) client keypair, and which
+// name to verify the server certificate against.
+//
+// The sidecar connects over loopback, and 127.0.0.1 is in no server
+// certificate, so it cannot verify against the address it dials. It
+// verifies against the per-site Service instead — the SAN
+// docs/docs/credentials-and-tls.mdx tells users to include, and the same
+// name the operator's own credentials-mode client verifies (see the
+// mysqlTLSConfig call sites, which likewise dial the -internal Service).
+//
+// Returns nil when spec.tls is unset, so groups without TLS render
+// exactly as before.
+func mysqlTLSSidecarEnv(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) []corev1.EnvVar {
+	if fg.Spec.TLS == nil || fg.Spec.TLS.SecretName == "" {
+		return nil
+	}
+	return []corev1.EnvVar{
+		{Name: "BLOODRAVEN_MYSQL_TLS_CA_FILE", Value: mysqlTLSMountPath + "/ca.crt"},
+		{Name: "BLOODRAVEN_MYSQL_TLS_CERT_FILE", Value: mysqlTLSMountPath + "/tls.crt"},
+		{Name: "BLOODRAVEN_MYSQL_TLS_KEY_FILE", Value: mysqlTLSMountPath + "/tls.key"},
+		{Name: "BLOODRAVEN_MYSQL_TLS_SERVER_NAME", Value: siteServiceHost(fg.Name, site.Name, fg.Namespace)},
+	}
+}
+
 func mysqlTLSConfigName(namespace, group, serverName string, data map[string][]byte) string {
 	h := sha256.New()
 	h.Write([]byte(serverName))

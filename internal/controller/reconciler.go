@@ -208,6 +208,8 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return result, err
 	}
 
+	r.warnOnSidecarVersionSkew(ctx, &fg)
+
 	// Encryption-at-rest must settle before anything renders: both the
 	// per-site ConfigMap (which carries "read_only" for the keyring
 	// component) and the Deployment (which picks a Secret projection or
@@ -1126,6 +1128,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 		sidecarEnv = append(sidecarEnv, pitrFrags.SidecarEnv...)
 		sidecarEnv = append(sidecarEnv, encFrags.SidecarEnv...)
+
+		// spec.tls makes generateMyCnf set require_secure_transport=ON,
+		// which rejects every plaintext TCP connection — including the
+		// sidecar's loopback one. Unlike libmysqlclient (and so mysqlsh
+		// and the backup/restore jobs), which negotiates TLS on its own
+		// under the default ssl-mode=PREFERRED, go-sql-driver/mysql sends
+		// plaintext unless the DSN names a registered TLS config. Without
+		// this wiring every sidecar query fails with Error 3159, /health
+		// returns 503, and the liveness probe crash-loops the container —
+		// taking the self-fencing monitor and the super_read_only safety
+		// net down with it while the group still reports only Degraded.
+		sidecarEnv = append(sidecarEnv, mysqlTLSSidecarEnv(fg, site)...)
 		sidecarVolumeMounts = append(sidecarVolumeMounts, pitrFrags.SidecarVolumeMounts...)
 		sidecarSecurityContext := fg.Spec.ContainerSecurityContext.DeepCopy()
 		// The keyring file is mode 0600 owned by mysqld's uid so it is

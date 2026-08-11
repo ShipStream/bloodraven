@@ -27,6 +27,7 @@
 # sees the same surface whether the Job is encrypted or not.
 import json
 import os
+import ssl
 import sys
 
 import mysqlsh  # type: ignore
@@ -43,6 +44,33 @@ def _bool(name, default=False):
         return default
     return v.strip().lower() in ("1", "true", "yes", "on")
 
+
+def _tls_options():
+    """MySQL TLS options for this job, as (ssl_mode, ssl_ca).
+
+    BLOODRAVEN_TLS is set by the operator whenever the failover group has
+    spec.tls, which also means mysqld runs with
+    require_secure_transport=ON. TLS-enabled jobs require the mounted CA
+    to be present and usable so they cannot silently downgrade to an
+    encrypted-but-unverified connection. PREFERRED (the client default)
+    is kept for non-TLS groups so their behaviour is unchanged.
+    """
+    if not _bool("BLOODRAVEN_TLS"):
+        return "PREFERRED", ""
+    ca = (os.environ.get("BLOODRAVEN_TLS_CA_FILE") or "").strip()
+    if not ca:
+        raise RuntimeError(
+            "BLOODRAVEN_TLS=1 requires BLOODRAVEN_TLS_CA_FILE"
+        )
+    try:
+        # Load the trust store now, before mysqlsh opens a connection. This
+        # rejects missing, unreadable, empty, and malformed CA files.
+        ssl.create_default_context(cafile=ca)
+    except (OSError, ssl.SSLError) as exc:
+        raise RuntimeError(
+            "BLOODRAVEN_TLS_CA_FILE is not a usable CA file: {}".format(exc)
+        ) from exc
+    return "VERIFY_CA", ca
 
 def _host_port(addr, default_port=3306):
     """Split host[:port], tolerating IPv6 literals like '[::1]:3306'."""
@@ -246,13 +274,16 @@ def main():
     _configure_aws_creds_dir()
 
     host_only, port = _host_port(host)
+    _ssl_mode, _ssl_ca = _tls_options()
     conn = {
         "host": host_only,
         "port": port,
         "user": user,
         "password": password,
-        "ssl-mode": "REQUIRED" if _bool("BLOODRAVEN_TLS") else "PREFERRED",
+        "ssl-mode": _ssl_mode,
     }
+    if _ssl_ca:
+        conn["ssl-ca"] = _ssl_ca
 
     print("BLOODRAVEN_DUMP_START host={} output={}".format(host, output),
           flush=True)

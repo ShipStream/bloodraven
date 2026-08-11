@@ -89,6 +89,15 @@ None of these are optional. Bloodraven cannot verify them for you.
   encrypted data, and Bloodraven bootstraps every replica with `CLONE
   INSTANCE`. The CRD rejects `encryptionAtRest.enabled: true` without
   TLS.
+- **The `spec.tls` certificate must cover the per-site Services.**
+  `spec.tls` makes the operator set `require_secure_transport=ON`, so the
+  sidecar's own MySQL connection is TLS too. It dials loopback — a name
+  no certificate carries — and therefore verifies against
+  `mysql-<group>-<site>.<namespace>.svc.cluster.local`. That SAN is
+  already required for the operator's failover probes (see
+  [Credentials and TLS](./credentials-and-tls.mdx)); if it is missing,
+  the sidecar cannot connect, `/health` fails, and the liveness probe
+  restarts the container.
 - **The operator escrow TLS listener must be enabled.** Set
   `auxiliary.escrowTLS.enabled=true` and
   `auxiliary.escrowTLS.existingSecret=<secret>` on the Bloodraven chart.
@@ -240,6 +249,23 @@ kubectl get mysqlfailovergroup orders -o jsonpath='{.status.encryptionAtRest}' |
 
 `status.conditions[type=EncryptionAtRestReady]` summarizes the group.
 
+### When a site will not seal
+
+A site that stays at `phase: Unsealed` carries the reason in
+`sites[].message`, including the sidecar's own last error where it has
+one. The three common causes:
+
+| `message` contains | Cause |
+|---|---|
+| `waiting for the Deployment to roll onto the writable keyring rendering` | The pod is not Ready. Check the sidecar container — if it is restarting, look at its logs before anything else. |
+| `sidecar reports: ... connection refused` | The operator's escrow listener is not running. Set `auxiliary.escrowTLS.enabled=true` on the chart. |
+| `sidecar reports: ... x509: certificate signed by unknown authority` | The escrow listener's certificate is not trusted by this group's `spec.tls` `ca.crt`. |
+
+```bash
+kubectl get mysqlfailovergroup orders \
+  -o jsonpath='{range .status.encryptionAtRest.sites[*]}{.name}{"\t"}{.phase}{"\t"}{.message}{"\n"}{end}'
+```
+
 ### Metrics
 
 | Metric | Meaning |
@@ -306,6 +332,21 @@ not rewrite anything already on disk. That is what
 Set `spec.encryptionAtRest.enabled: true` and `spec.tls` before the group
 first bootstraps. Every site comes up unsealed, creates its keys during
 initialization, escrows, and seals. Nothing else to do.
+
+:::caution Operator and sidecar images must both be current
+Because `spec.tls` sets `require_secure_transport=ON`, the sidecar's own
+MySQL connection needs TLS, which the operator configures through
+environment variables on the sidecar container. An operator new enough to
+render them paired with a sidecar too old to read them — or the reverse —
+leaves the sidecar unable to reach MySQL: it fails its health check, the
+liveness probe restarts it, and no site ever seals. Keep
+`spec.sidecarImage` at the same release as the operator.
+
+The operator emits a `SidecarVersionSkew` Warning event when the two
+image tags differ. It is advisory only — a re-tagged or locally built
+image looks the same as a real mismatch, so blocking on it would turn a
+cosmetic difference into an outage.
+:::
 
 ### On an existing group
 
