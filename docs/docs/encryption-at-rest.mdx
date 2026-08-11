@@ -384,6 +384,14 @@ kubectl annotate mysqlfailovergroup orders \
   bloodraven.shipstream.io/encryption-adopt=confirm
 ```
 
+Adoption rolls one site at a time. Encrypted configuration is written to a
+new immutable, content-addressed ConfigMap; an unrolled Deployment continues
+referencing its original unencrypted ConfigMap. The ordered updater switches
+the ConfigMap reference and keyring volume/init wiring together in one pod
+template revision. A restart of a site that has not taken its update therefore
+still uses a coherent unencrypted configuration rather than requesting a
+keyring the pod does not provide.
+
 New writes are then encrypted, redo/undo/binlog encryption engages, and
 `unencryptedTablespaces` tells you how much is still exposed. Rebuild the
 remainder at your own pace:
@@ -532,7 +540,7 @@ on those nodes.
 |---|---|
 | Failover / promotion | Unaffected. Both sites are independently encrypted and sealed. |
 | Reclone (`bloodraven.shipstream.io/reclone-site`) | The operator unseals the recipient first, then clones, then re-escrows and re-seals. The clone is deferred (not failed) for one poll cycle while the pod rolls. |
-| Ordered updates | Seal transitions participate in the pod spec hash, so they roll one site at a time through the normal ordered-update path. |
+| Ordered updates | Encryption ConfigMaps are immutable and content-addressed. Each site switches its ConfigMap reference and keyring wiring in the same ordered pod-template update; unrolled sites retain their prior restartable revision. Superseded ConfigMaps are removed only after the rollout reports no old pod remaining. |
 | PITR / binlog archiver | Archived binlogs are encrypted by MySQL on disk *and* re-encrypted by the archiver if `spec.backup` encryption is on. |
 | Dragonfly | Unaffected — Dragonfly is a separate subsystem with no keyring. |
 
@@ -559,7 +567,7 @@ on those nodes.
 |---|---|
 | `mysql-<group>-<site>-keyring-v<N>` (Secret, immutable) | Escrowed keyring. Owned by the failover group. |
 | `mysql-<group>-<site>-keyring-token` (Secret) | Per-site escrow bearer token. Mounted into the sidecar only while unsealed. |
-| `mysql-<group>-<site>-config` (ConfigMap) | Gains `keyring-manifest.json` and `keyring-component.json`, subPath-mounted into the image's `mysqld` and plugin directories. |
+| `mysql-<group>-<site>-config-<hash>` (immutable ConfigMap) | Content-addressed encrypted MySQL and keyring-component configuration. The Deployment references the exact revision matching its keyring wiring; superseded revisions remain until rollout completion. Unencrypted groups retain the canonical `mysql-<group>-<site>-config` name. |
 
 ### Annotations
 

@@ -1240,6 +1240,11 @@ func (in *MysqlFailoverGroupSpec) DeepCopyInto(out *MysqlFailoverGroupSpec) {
 		*out = new(metav1.Duration)
 		**out = **in
 	}
+	if in.ConnectionDrainTimeout != nil {
+		in, out := &in.ConnectionDrainTimeout, &out.ConnectionDrainTimeout
+		*out = new(metav1.Duration)
+		**out = **in
+	}
 	in.Sidecar.DeepCopyInto(&out.Sidecar)
 	if in.MysqlConf != nil {
 		in, out := &in.MysqlConf, &out.MysqlConf

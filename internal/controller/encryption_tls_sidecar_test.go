@@ -22,10 +22,11 @@ import (
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
-// These tests cover the spec.tls + spec.encryptionAtRest combination,
-// which no non-quarantined E2E scenario exercises (playground scenario 48
-// needs ./playground/enable-encryption.sh and is excluded from every
-// profile). Both bugs they pin were found in a 0.9.0 lab drill:
+// These tests cover the spec.tls + spec.encryptionAtRest combination.
+// Playground scenario 48 exercises it in a dedicated encryption CI job rather
+// than a shared batch profile because it requires
+// ./playground/enable-encryption.sh. Both bugs they pin were found in a 0.9.0
+// lab drill:
 //
 //  1. The escrow token was projected mode 0400 into a pod with no
 //     fsGroup, so the non-root sidecar could never read it and no site
@@ -421,8 +422,12 @@ func redactDSN(dsn string) string {
 
 func siteConfigMap(t *testing.T, r *MysqlFailoverGroupReconciler, site string) *corev1.ConfigMap {
 	t.Helper()
+	deployment := getDeployment(t, r, site)
 	var cm corev1.ConfigMap
-	key := types.NamespacedName{Namespace: "shared-lion", Name: siteConfigMapName("lion", site)}
+	key := types.NamespacedName{
+		Namespace: "shared-lion",
+		Name:      deploymentConfigMapName(deployment),
+	}
 	if err := r.Get(t.Context(), key, &cm); err != nil {
 		t.Fatalf("get configmap for %s: %v", site, err)
 	}

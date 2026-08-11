@@ -146,6 +146,16 @@ func (f *simFencer) IsReadOnly(_ context.Context) (bool, error) {
 	return s.readOnly, nil
 }
 
+func (f *simFencer) IsSuperReadOnly(_ context.Context) (bool, error) {
+	f.c.mu.Lock()
+	defer f.c.mu.Unlock()
+	s := f.c.byName[f.site]
+	if s.crashed {
+		return false, errSidecarSiteDown
+	}
+	return s.superReadOnly, nil
+}
+
 func (f *simFencer) SetSuperReadOnly(_ context.Context) error {
 	f.c.mu.Lock()
 	defer f.c.mu.Unlock()

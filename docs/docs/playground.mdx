@@ -143,8 +143,9 @@ Once sealed, run the dedicated chaos scenario:
 make chaos-run SCENARIO=48-keyring-seal-and-rotation
 ```
 
-It is quarantined from the batch profiles precisely because it needs this
-non-default baseline. See
+It stays quarantined from the shared batch profiles because it needs this
+non-default baseline. CI runs it explicitly in a dedicated encryption job
+after executing `enable-encryption.sh`. See
 [chaos-scenarios.md § 48](https://github.com/ShipStream/bloodraven/blob/main/playground/chaos-scenarios.md).
 
 ## Reset when things go wrong

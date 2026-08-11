@@ -50,6 +50,9 @@ type mockMySQL struct {
 	superReadOnlyErr         error
 	superReadOnlyHadDeadline bool
 	clonePrimaryHost         string
+	killConnectionResults    []int
+	killConnectionErrs       []error
+	killConnectionCalls      int
 }
 
 func testBoolPtr(v bool) *bool {
@@ -214,7 +217,21 @@ func TestEmitStatusSnapshotPreservesPersistentTopologyDegradation(t *testing.T) 
 		t.Fatalf("update-only snapshot cleared degradation: %+v", snapshot)
 	}
 }
-func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) { return 0, nil }
+func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	i := m.killConnectionCalls
+	m.killConnectionCalls++
+	var killed int
+	if i < len(m.killConnectionResults) {
+		killed = m.killConnectionResults[i]
+	}
+	var err error
+	if i < len(m.killConnectionErrs) {
+		err = m.killConnectionErrs[i]
+	}
+	return killed, err
+}
 func (m *mockMySQL) StopReplica(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1683,6 +1700,64 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutReplicationCredentials(t 
 	tm.mu.RUnlock()
 	if rec != nil {
 		t.Fatalf("recovery state not cleared: %+v", rec)
+	}
+}
+
+func TestCheckRecovery_DrainsSurvivingConnectionsBeforeCompletion(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{
+		readOnly:              true,
+		killConnectionResults: []int{2, 1, 0},
+	}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.SetSleepForTest(func(time.Duration) {})
+
+	tm.mu.Lock()
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateReadOnly
+	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateInProgress}
+	tm.lastFailoverTarget = "dc1"
+	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
+	tm.mu.Unlock()
+
+	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{
+		nil,
+		{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"},
+	})
+	if !changed {
+		t.Fatal("healthy recovery state was not completed")
+	}
+	if site1.killConnectionCalls != 3 {
+		t.Fatalf("connection drain calls = %d, want 3 passes ending at zero", site1.killConnectionCalls)
+	}
+	tm.mu.RLock()
+	rec := tm.recovery["dc2"]
+	tm.mu.RUnlock()
+	if rec != nil {
+		t.Fatalf("recovery state cleared before drain completion: %+v", rec)
+	}
+}
+
+func TestCheckRecovery_DrainsBeforeOldPrimaryMutation(t *testing.T) {
+	gtid := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: gtid}
+	site1 := &mockMySQL{
+		readOnly:              true,
+		gtidExecuted:          gtid,
+		killConnectionResults: []int{1, 0},
+	}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+	tm.SetSleepForTest(func(time.Duration) {})
+	setRecoveredTopology(tm)
+
+	if changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}); !changed {
+		t.Fatal("expected recovery to start")
+	}
+	if site1.killConnectionCalls != 2 {
+		t.Fatalf("connection drain calls = %d, want 2", site1.killConnectionCalls)
+	}
+	if got := site1.startReplicaCallCount(); got != 1 {
+		t.Fatalf("recovery did not proceed after clean drain: %d sequences", got)
 	}
 }
 

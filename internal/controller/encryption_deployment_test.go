@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
@@ -76,7 +77,7 @@ func TestReconcile_EncryptedConfigMapCarriesComponentFiles(t *testing.T) {
 
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Namespace: "shared-lion", Name: siteConfigMapName("lion", "dc1"),
+		Namespace: "shared-lion", Name: desiredSiteConfigMapName(fg, fg.Spec.Sites[0]),
 	}, &cm); err != nil {
 		t.Fatalf("get configmap: %v", err)
 	}
@@ -175,12 +176,126 @@ func TestReconcile_SealedSiteRendersSecretProjection(t *testing.T) {
 	}
 	var cm corev1.ConfigMap
 	if err := c.Get(context.Background(), types.NamespacedName{
-		Namespace: "shared-lion", Name: siteConfigMapName("lion", "dc1"),
+		Namespace: "shared-lion", Name: desiredSiteConfigMapName(fg, fg.Spec.Sites[0]),
 	}, &cm); err != nil {
 		t.Fatalf("get configmap: %v", err)
 	}
 	if !strings.Contains(cm.Data[keyringComponentKey], `"read_only": true`) {
 		t.Errorf("sealed component config must be read-only:\n%s", cm.Data[keyringComponentKey])
+	}
+}
+
+func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) {
+	fg := newTestFG()
+	r, c := encReconciler(t, scriptedKeyring(nil), fg)
+	reconcileOnce(t, r)
+
+	// Establish the live unencrypted revision first. Its Deployment and
+	// ConfigMap must remain a coherent, restartable pair while encryption
+	// adoption prepares a different content-addressed revision.
+	before := getDeployment(t, r, "dc1")
+	canonical := deploymentConfigMapName(before)
+	if canonical != siteConfigMapName("lion", "dc1") {
+		t.Fatalf("initial config reference = %q", canonical)
+	}
+
+	var live v1alpha1.MysqlFailoverGroup
+	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
+	if err := c.Get(context.Background(), nn, &live); err != nil {
+		t.Fatalf("get group: %v", err)
+	}
+	live.Spec.TLS = &v1alpha1.TLSSpec{
+		SecretName: "mysql-tls",
+		IssuerRef:  v1alpha1.IssuerRef{Name: "ca", Kind: "Issuer"},
+	}
+	live.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+	if live.Annotations == nil {
+		live.Annotations = map[string]string{}
+	}
+	live.Annotations[AdoptEncryptionAnnotation] = "confirm"
+	if err := c.Update(context.Background(), &live); err != nil {
+		t.Fatalf("enable encryption: %v", err)
+	}
+
+	reconcileOnce(t, r)
+
+	unrolled := getDeployment(t, r, "dc1")
+	if got := deploymentConfigMapName(unrolled); got != canonical {
+		t.Fatalf("bulk reconcile switched unrolled Deployment config from %q to %q", canonical, got)
+	}
+	if findVolume(unrolled.Spec.Template.Spec.Volumes, keyringVolumeName) != nil {
+		t.Fatal("bulk reconcile added keyring wiring to an unrolled Deployment")
+	}
+
+	var oldConfig corev1.ConfigMap
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: live.Namespace, Name: canonical,
+	}, &oldConfig); err != nil {
+		t.Fatalf("old config disappeared before rollout: %v", err)
+	}
+	if strings.Contains(oldConfig.Data["bloodraven.cnf"], "binlog-encryption=ON") {
+		t.Fatalf("unrolled site received encryption settings without keyring wiring:\n%s", oldConfig.Data["bloodraven.cnf"])
+	}
+
+	var refreshed v1alpha1.MysqlFailoverGroup
+	if err := c.Get(context.Background(), nn, &refreshed); err != nil {
+		t.Fatalf("refresh group: %v", err)
+	}
+	desiredName := desiredSiteConfigMapName(&refreshed, refreshed.Spec.Sites[0])
+	if desiredName == canonical {
+		t.Fatal("encrypted adoption reused the mutable unencrypted ConfigMap")
+	}
+	var desired corev1.ConfigMap
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: refreshed.Namespace, Name: desiredName,
+	}, &desired); err != nil {
+		t.Fatalf("desired encrypted config missing: %v", err)
+	}
+	if desired.Immutable == nil || !*desired.Immutable {
+		t.Fatal("encrypted ConfigMap revision must be immutable")
+	}
+	if !strings.Contains(desired.Data["bloodraven.cnf"], "binlog-encryption=ON") {
+		t.Fatalf("desired revision missing encryption settings:\n%s", desired.Data["bloodraven.cnf"])
+	}
+
+	// The ordered updater changes both halves in one PodTemplate update.
+	if err := r.reconcileDeployment(context.Background(), &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage); err != nil {
+		t.Fatalf("apply ordered site update: %v", err)
+	}
+	rolled := getDeployment(t, r, "dc1")
+	if got := deploymentConfigMapName(rolled); got != desiredName {
+		t.Fatalf("ordered update config reference = %q, want %q", got, desiredName)
+	}
+	if findVolume(rolled.Spec.Template.Spec.Volumes, keyringVolumeName) == nil {
+		t.Fatal("ordered update switched encrypted config without keyring wiring")
+	}
+
+	// Garbage collection is gated on rollout completion: until then the old
+	// canonical revision remains available for any surviving old pod.
+	if err := r.cleanupObsoleteSiteConfigMaps(context.Background(), &refreshed); err != nil {
+		t.Fatalf("cleanup during rollout: %v", err)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: refreshed.Namespace, Name: canonical,
+	}, &oldConfig); err != nil {
+		t.Fatalf("old config removed before rollout completion: %v", err)
+	}
+
+	rolled.Status.ObservedGeneration = rolled.Generation
+	rolled.Status.Replicas = 1
+	rolled.Status.UpdatedReplicas = 1
+	rolled.Status.AvailableReplicas = 1
+	if err := c.Status().Update(context.Background(), rolled); err != nil {
+		t.Fatalf("mark rollout complete: %v", err)
+	}
+	if err := r.cleanupObsoleteSiteConfigMaps(context.Background(), &refreshed); err != nil {
+		t.Fatalf("cleanup after rollout: %v", err)
+	}
+	err := c.Get(context.Background(), types.NamespacedName{
+		Namespace: refreshed.Namespace, Name: canonical,
+	}, &oldConfig)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("superseded config was not removed after rollout completion: %v", err)
 	}
 }
 

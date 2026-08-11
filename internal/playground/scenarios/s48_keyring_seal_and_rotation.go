@@ -50,10 +50,10 @@ type s48RunState struct {
 //     case where losing the keyring mid-rotation would cost data rather
 //     than a re-clone.
 //
-// Quarantined from the batch profiles: it requires a playground brought
-// up with TLS and encryption enabled (`./playground/enable-encryption.sh`),
-// which is not the default baseline the other scenarios assume. Run it
-// explicitly with `make chaos-run SCENARIO=48-keyring-seal-and-rotation`.
+// Kept out of shared batch profiles because it requires a playground brought
+// up with TLS and encryption enabled (`./playground/enable-encryption.sh`).
+// CI runs it explicitly in a dedicated encryption job; local runs use
+// `make chaos-run SCENARIO=48-keyring-seal-and-rotation`.
 func scenario48KeyringSealAndRotation() runner.Scenario {
 	state := &s48RunState{}
 	return runner.Scenario{
@@ -66,8 +66,8 @@ func scenario48KeyringSealAndRotation() runner.Scenario {
 		Risk:    "medium",
 		DocLink: "playground/chaos-scenarios.md#48-keyring-seal-and-rotation",
 		Timeout: 20 * time.Minute,
-		Quarantine: "requires a playground with TLS + spec.encryptionAtRest enabled; " +
-			"run ./playground/enable-encryption.sh first, then run this scenario explicitly",
+		Quarantine: "requires the dedicated TLS + spec.encryptionAtRest baseline; " +
+			"CI and local encryption jobs run this scenario explicitly",
 		Precheck: s48Precheck(state),
 		Steps: []runner.Step{
 			s48VerifySealedState(state),

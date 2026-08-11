@@ -100,6 +100,15 @@ type MysqlFailoverGroupSpec struct {
 	// +kubebuilder:default="5m"
 	FailoverCooldown *metav1.Duration `json:"failoverCooldown,omitempty"`
 
+	// ConnectionDrainTimeout bounds the operator-side retry window for
+	// evicting application sessions from a fenced former primary after an
+	// emergency failover or autonomous self-fence. This drain runs only
+	// after promotion has completed, so it cannot kill the operator's
+	// promotion session. Default: 30s.
+	// +kubebuilder:default="30s"
+	// +optional
+	ConnectionDrainTimeout *metav1.Duration `json:"connectionDrainTimeout,omitempty"`
+
 	// Sidecar configures sidecar behavior.
 	Sidecar SidecarSpec `json:"sidecar,omitempty"`
 

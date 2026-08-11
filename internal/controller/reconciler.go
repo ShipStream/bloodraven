@@ -53,7 +53,7 @@ const (
 
 	specHashAnnotation        = "shipstream.io/spec-hash"
 	managedServiceAnnotations = "shipstream.io/managed-service-annotations"
-	configMapRenderVersion    = "site-config-v1"
+	configMapRenderVersion    = "site-config-v2-content-addressed-encryption"
 
 	// Bump when the rendered MySQL Deployment pod spec changes without a
 	// corresponding user-facing spec field change, so existing pods roll
@@ -286,6 +286,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err := r.reconcileInternalSiteService(ctx, &fg, site); err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile internal site service %s: %w", site.Name, err)
 		}
+	}
+	if err := r.cleanupObsoleteSiteConfigMaps(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("cleanup obsolete site configmaps: %w", err)
 	}
 	if err := r.cleanupLegacyConfigMap(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("cleanup legacy configmap: %w", err)
@@ -631,6 +634,42 @@ func siteConfigMapName(group, site string) string {
 	return fmt.Sprintf("mysql-%s-%s-config", group, site)
 }
 
+// desiredSiteConfigData renders the complete ConfigMap payload for one site.
+// Keeping naming and reconciliation on this shared value prevents a
+// content-addressed name from ever disagreeing with the bytes mounted by the
+// pod revision.
+func desiredSiteConfigData(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) map[string]string {
+	data := map[string]string{
+		"bloodraven.cnf": generateMyCnf(fg, site),
+	}
+	for k, v := range keyringConfigMapData(fg, fg.SiteKeyringSealed(site.Name)) {
+		data[k] = v
+	}
+	return data
+}
+
+// desiredSiteConfigMapName content-addresses encrypted configurations. During
+// live adoption, existing pods keep referencing the old unencrypted canonical
+// ConfigMap while the ordered updater atomically switches one Deployment's
+// ConfigMap reference and keyring wiring in the same PodTemplate patch.
+func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) string {
+	base := siteConfigMapName(fg.Name, site.Name)
+	if !fg.Spec.EncryptionEnabled() {
+		return base
+	}
+	data := desiredSiteConfigData(fg, site)
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	for _, key := range keys {
+		fmt.Fprintf(h, "%s=%s\n", key, data[key])
+	}
+	return fmt.Sprintf("%s-%s", base, hex.EncodeToString(h.Sum(nil))[:12])
+}
+
 func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	for _, site := range fg.Spec.Sites {
 		if err := r.reconcileSiteConfigMap(ctx, fg, site); err != nil {
@@ -641,9 +680,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Conte
 }
 
 func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
+	versioned := fg.Spec.EncryptionEnabled()
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      siteConfigMapName(fg.Name, site.Name),
+			Name:      desiredSiteConfigMapName(fg, site),
 			Namespace: fg.Namespace,
 		},
 	}
@@ -656,17 +696,13 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Contex
 			labelAppName:       "mysql",
 			labelInstance:      fg.Name,
 			labelFailoverGroup: fg.Name,
+			labelSite:          site.Name,
 			labelManagedBy:     managerName,
 		}
-		cm.Data = map[string]string{
-			"bloodraven.cnf": generateMyCnf(fg, site),
-		}
-		// Keyring manifest + component config. Both are projected into
-		// image-owned directories with subPath mounts, so they have to
-		// live in a ConfigMap rather than being written by the init
-		// container. Sealed vs unsealed only changes "read_only".
-		for k, v := range keyringConfigMapData(fg, fg.SiteKeyringSealed(site.Name)) {
-			cm.Data[k] = v
+		cm.Data = desiredSiteConfigData(fg, site)
+		if versioned {
+			immutable := true
+			cm.Immutable = &immutable
 		}
 		return nil
 	})
@@ -913,7 +949,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 
 		sidecarImage := fg.Spec.SidecarImage
 
-		configMapName := siteConfigMapName(fg.Name, site.Name)
+		configMapName := desiredSiteConfigMapName(fg, site)
 
 		// Build the list of peer sidecar addresses. The sidecar treats
 		// "all peers unreachable" as one half of the self-fencing
@@ -1844,7 +1880,7 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 	fmt.Fprintf(h, "podSC=%v\n", fg.Spec.PodSecurityContext)
 	fmt.Fprintf(h, "containerSC=%v\n", fg.Spec.ContainerSecurityContext)
 	fmt.Fprintf(h, "configMapRenderVersion=%s\n", configMapRenderVersion)
-	fmt.Fprintf(h, "configMapName=%s\n", siteConfigMapName(fg.Name, site.Name))
+	fmt.Fprintf(h, "configMapName=%s\n", desiredSiteConfigMapName(fg, site))
 	fmt.Fprintf(h, "effectiveMyCnf=%s\n", generateMyCnf(fg, site))
 	fmt.Fprintf(h, "peerAddresses=%s\n", strings.Join(sitePeerAddresses(fg, site.Name), ","))
 	// PITR settings affect both my.cnf (max_binlog_size) and the
@@ -1978,6 +2014,10 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 	if fg.Spec.FailoverCooldown != nil {
 		failoverCooldown = int64(fg.Spec.FailoverCooldown.Duration)
 	}
+	var connectionDrainTimeout int64
+	if fg.Spec.ConnectionDrainTimeout != nil {
+		connectionDrainTimeout = int64(fg.Spec.ConnectionDrainTimeout.Duration)
+	}
 
 	var sitePriorities []string
 	if fg.Spec.SplitBrainPolicy != nil && len(fg.Spec.SplitBrainPolicy.SitePriorities) > 0 {
@@ -1997,17 +2037,18 @@ func CRConfigToTopologyConfig(fg *v1alpha1.MysqlFailoverGroup) TopologyConfig {
 	}
 
 	return TopologyConfig{
-		Namespace:             fg.Namespace,
-		Name:                  fg.Name,
-		Sites:                 sites,
-		PollInterval:          pollInterval,
-		FailureThreshold:      int(failureThreshold),
-		RecoveryThreshold:     int(recoveryThreshold),
-		FailoverCooldown:      failoverCooldown,
-		MaxLagSeconds:         fg.Spec.EffectiveMaxLagSeconds(),
-		ReadOnlyMaxLagSeconds: fg.Spec.EffectiveReadOnlyMaxLagSeconds(),
-		SitePriorities:        sitePriorities,
-		DragonflyEnabled:      dragonflyEnabled(fg),
+		Namespace:              fg.Namespace,
+		Name:                   fg.Name,
+		Sites:                  sites,
+		PollInterval:           pollInterval,
+		FailureThreshold:       int(failureThreshold),
+		RecoveryThreshold:      int(recoveryThreshold),
+		FailoverCooldown:       failoverCooldown,
+		ConnectionDrainTimeout: connectionDrainTimeout,
+		MaxLagSeconds:          fg.Spec.EffectiveMaxLagSeconds(),
+		ReadOnlyMaxLagSeconds:  fg.Spec.EffectiveReadOnlyMaxLagSeconds(),
+		SitePriorities:         sitePriorities,
+		DragonflyEnabled:       dragonflyEnabled(fg),
 	}
 }
 
@@ -2019,7 +2060,7 @@ func (r *MysqlFailoverGroupReconciler) cleanupLegacyConfigMap(ctx context.Contex
 	legacy := fmt.Sprintf("mysql-%s-config", fg.Name)
 	desiredConfigs := make(map[string]string, len(fg.Spec.Sites))
 	for _, site := range fg.Spec.Sites {
-		desiredConfig := siteConfigMapName(fg.Name, site.Name)
+		desiredConfig := desiredSiteConfigMapName(fg, site)
 		var cm corev1.ConfigMap
 		if err := reader.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: desiredConfig}, &cm); err != nil {
 			return nil
@@ -2068,6 +2109,80 @@ func deploymentConfigMapName(deployment *appsv1.Deployment) string {
 		}
 	}
 	return ""
+}
+
+func deploymentRolloutComplete(dep *appsv1.Deployment) bool {
+	desired := int32(1)
+	if dep.Spec.Replicas != nil {
+		desired = *dep.Spec.Replicas
+	}
+	return dep.Status.ObservedGeneration >= dep.Generation &&
+		dep.Status.UpdatedReplicas == desired &&
+		dep.Status.AvailableReplicas == desired &&
+		dep.Status.Replicas == dep.Status.UpdatedReplicas
+}
+
+// cleanupObsoleteSiteConfigMaps removes superseded encrypted ConfigMap
+// revisions only after the Deployment has completed the switch to the desired
+// revision and no old pod remains. An interrupted rollout therefore preserves
+// the old pod's exact configuration and remains restartable.
+func (r *MysqlFailoverGroupReconciler) cleanupObsoleteSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	if !fg.Spec.EncryptionEnabled() {
+		return nil
+	}
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	for _, site := range fg.Spec.Sites {
+		var dep appsv1.Deployment
+		nn := types.NamespacedName{
+			Namespace: fg.Namespace,
+			Name:      resourceName(fg.Name, site.Name),
+		}
+		if err := reader.Get(ctx, nn, &dep); err != nil {
+			if errors.IsNotFound(err) {
+				continue
+			}
+			return err
+		}
+		desired := desiredSiteConfigMapName(fg, site)
+		if deploymentConfigMapName(&dep) != desired || !deploymentRolloutComplete(&dep) {
+			continue
+		}
+
+		var configs corev1.ConfigMapList
+		if err := r.List(ctx, &configs,
+			client.InNamespace(fg.Namespace),
+			client.MatchingLabels{
+				labelFailoverGroup: fg.Name,
+				labelSite:          site.Name,
+				labelManagedBy:     managerName,
+			}); err != nil {
+			return err
+		}
+		for i := range configs.Items {
+			if configs.Items[i].Name == desired {
+				continue
+			}
+			if err := r.Delete(ctx, &configs.Items[i]); err != nil && !errors.IsNotFound(err) {
+				return err
+			}
+		}
+
+		// Pre-v1 encrypted groups used the mutable canonical name and did
+		// not label it with the site, so remove it explicitly after the
+		// content-addressed rollout is complete.
+		canonical := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name: siteConfigMapName(fg.Name, site.Name), Namespace: fg.Namespace,
+		}}
+		if canonical.Name != desired {
+			if err := r.Delete(ctx, canonical); err != nil && !errors.IsNotFound(err) {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func taintNodeSelectorString(selector map[string]string) string {
@@ -2140,17 +2255,8 @@ func (r *MysqlFailoverGroupReconciler) waitForDeploymentRollout(ctx context.Cont
 	for {
 		var dep appsv1.Deployment
 		err := reader.Get(ctx, nn, &dep)
-		if err == nil {
-			desired := int32(1)
-			if dep.Spec.Replicas != nil {
-				desired = *dep.Spec.Replicas
-			}
-			if dep.Status.ObservedGeneration >= dep.Generation &&
-				dep.Status.UpdatedReplicas == desired &&
-				dep.Status.AvailableReplicas == desired &&
-				dep.Status.Replicas == dep.Status.UpdatedReplicas {
-				return nil
-			}
+		if err == nil && deploymentRolloutComplete(&dep) {
+			return nil
 		}
 		// Transient API errors fall through to the next tick; NotFound is
 		// possible during the brief window after a Deployment delete and is

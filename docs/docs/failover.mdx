@@ -166,8 +166,9 @@ On each poll cycle, if a site is read-only with no active replication (the signa
 Only a **genuinely fresh datadir** is skipped and left to bootstrap/auto-clone. Freshness is decided from GTID history, not from the absence of user schemas: a site whose `GTID_EXECUTED` UUIDs share nothing with the new primary (server-init transactions under a brand-new `server_uuid`) may still be treated as empty when it also has no user schemas. A returning cluster member always carries the cluster's shared UUIDs, so a schemaless but previously participating site still runs the divergence comparison — never a silent clone-over. If the new primary cannot be probed for this check, the operator fails safe toward recovery rather than toward the fresh-datadir path. The sequence:
 
 1. **Fence** the returning site with `SET GLOBAL super_read_only=ON` (defensive — the sidecar may have already fenced it)
-2. **Query `@@global.gtid_executed`** on both the old and new primary
-3. **Compare GTID sets** to determine if the old primary has any transactions not on the new primary
+2. **Drain application sessions** until a pass finds none or `spec.connectionDrainTimeout` elapses (default `30s`). This runs after promotion, so it cannot kill the operator's promotion session. A timeout does not block recovery because the fence prevents writes; any survivor is limited to stale reads.
+3. **Query `@@global.gtid_executed`** on both the old and new primary
+4. **Compare GTID sets** to determine if the old primary has any transactions not on the new primary
 
 If the old primary returns **writable** (e.g., power was cut before the sidecar could self-fence), the operator first detects this as a split-brain condition and fences it immediately. The fence is retried on **every** poll cycle while the split-brain persists — a transient error on the first attempt (a network blip during the site's recovery turbulence) does not leave the returning site writable. Recovery proceeds once the site transitions to read-only.
 
@@ -181,7 +182,7 @@ If the new primary's GTID set contains all transactions from the old primary, th
 4. `CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1`
 5. `START REPLICA`
 
-While the sequence runs, `status.sites[].recoveryState` is `RecoveryInProgress` and the `RecoveryPending` condition is `True` with reason `RecoveryInProgress`. The operator keeps that state until MySQL reports healthy replication, then writes `replicating=true` and `gtidExecuted` for the read-only site and clears recovery state.
+While the sequence runs, `status.sites[].recoveryState` is `RecoveryInProgress` and the `RecoveryPending` condition is `True` with reason `RecoveryInProgress`. The operator keeps that state until MySQL reports healthy replication and the bounded application-connection drain has completed, then writes `replicating=true` and `gtidExecuted` for the read-only site and clears recovery state.
 
 ### Divergence detected (manual intervention required)
 

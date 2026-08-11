@@ -108,11 +108,11 @@ The chart repo is served directly off the `gh-pages` branch via `raw.githubuserc
 ### `e2e.yml` / `_e2e.yml` — Real-Cluster E2E
 
 **Triggers:**
-- Nightly schedule (release profile)
-- Manual dispatch with profile selection (smoke / release / full)
-- Pull requests with the `e2e` label (smoke profile)
+- Nightly schedule (release profile plus dedicated encryption scenario)
+- Manual dispatch with profile selection (smoke / release / full) plus encryption
+- Pull requests with the `e2e` label (smoke profile plus encryption)
 
-The reusable workflow (`_e2e.yml`) creates a kind cluster with Calico CNI, deploys the playground, and runs `playground-chaos run-all` with the selected profile. It uploads JUnit results, chaos forensics, setup logs, and kind logs as artifacts.
+The reusable workflow (`_e2e.yml`) creates a kind cluster with Calico CNI and deploys the playground. Normal jobs run `playground-chaos run-all` with the selected profile. The dedicated encryption job converts the default live group with `playground/enable-encryption.sh` and runs `48-keyring-seal-and-rotation` explicitly, covering adoption, sealing, key placement, and replica rotation against real MySQL. Jobs upload JUnit results where available, chaos forensics, setup logs, and kind logs as artifacts.
 
 Profiles:
 | Profile | Scenarios | Use case |
@@ -121,7 +121,7 @@ Profiles:
 | `release` | 10 (~20-30 min) | Release and nightly gate |
 | `full` | All registered | Full regression (manual only) |
 
-The release workflow (`.github/workflows/release.yml`) blocks Docker image builds and Helm chart publishing on the E2E release-profile gate. This ensures every tagged release is validated against real MySQL failover scenarios (WISHLIST #32).
+The release workflow (`.github/workflows/release.yml`) blocks publishing on both the smoke failover gate and the dedicated encryption adoption/rotation gate. The broader release profile still runs after publishing for extended validation.
 
 **Permissions:** `contents: read` (default)
 

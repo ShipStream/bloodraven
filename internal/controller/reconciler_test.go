@@ -438,6 +438,7 @@ func TestReconcile_DefaultImage(t *testing.T) {
 
 func TestCRConfigToTopologyConfig(t *testing.T) {
 	fg := newTestFG()
+	fg.Spec.ConnectionDrainTimeout = &metav1.Duration{Duration: 17 * time.Second}
 	tc := CRConfigToTopologyConfig(fg)
 
 	if tc.Sites[0].Name != "dc1" {
@@ -454,6 +455,9 @@ func TestCRConfigToTopologyConfig(t *testing.T) {
 	}
 	if time.Duration(tc.PollInterval) != 2*time.Second {
 		t.Errorf("expected poll interval 2s, got %v", time.Duration(tc.PollInterval))
+	}
+	if time.Duration(tc.ConnectionDrainTimeout) != 17*time.Second {
+		t.Errorf("expected connection drain timeout 17s, got %v", time.Duration(tc.ConnectionDrainTimeout))
 	}
 	if tc.Sites[0].TaintSelector != "shipstream.io/failover-group.lion=true,shipstream.io/site.lion=dc1" {
 		t.Errorf("expected dc1 taint selector, got %q", tc.Sites[0].TaintSelector)

@@ -53,12 +53,13 @@ type TopologyConfig struct {
 	// spec.sites.
 	Sites []SiteTopologyConfig
 
-	PollInterval          int64 // nanoseconds
-	FailureThreshold      int
-	RecoveryThreshold     int
-	FailoverCooldown      int64 // nanoseconds, default 5m
-	MaxLagSeconds         int64
-	ReadOnlyMaxLagSeconds int64
+	PollInterval           int64 // nanoseconds
+	FailureThreshold       int
+	RecoveryThreshold      int
+	FailoverCooldown       int64 // nanoseconds, default 5m
+	ConnectionDrainTimeout int64 // nanoseconds, default 30s
+	MaxLagSeconds          int64
+	ReadOnlyMaxLagSeconds  int64
 
 	// SitePriorities is the ordered list of primary-candidate site
 	// names that win split-brain ties. An empty slice means manual
@@ -464,8 +465,10 @@ type StatusResponse struct {
 }
 
 const (
-	recoveryStateInProgress = "RecoveryInProgress"
-	recoveryStateBlocked    = "RecoveryBlocked"
+	recoveryStateInProgress       = "RecoveryInProgress"
+	recoveryStateBlocked          = "RecoveryBlocked"
+	defaultConnectionDrainTimeout = 30 * time.Second
+	connectionDrainRetryInterval  = time.Second
 	// recoveryRetryDelay is the stabilization window after RecoverOldPrimary.
 	// During this window the operator waits for replication to report healthy
 	// instead of immediately resetting replica metadata again on the next poll.
@@ -3136,7 +3139,7 @@ func (tm *TopologyManager) checkRecoveryWithConvergence(ctx context.Context, sit
 	if tm.isTopologyFrozen() {
 		return false
 	}
-	if tm.clearHealthyRecoverySites(siteRepl) {
+	if tm.clearHealthyRecoverySites(ctx, siteRepl) {
 		return true
 	}
 	if tm.bootstrapCfg.ReplUser == "" {
@@ -3400,42 +3403,23 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	return true
 }
 
-// clearHealthyRecoverySites drops the recovery marker for every site that is
-// now a healthy, source-converged replica. A WRITABLE site clears only its
-// RecoveryInProgress marker (it was promoted or re-asserted — it is not
-// "recovering as a replica" any more): a RecoveryBlocked report is live
-// evidence of divergent transactions a human must recover and is therefore
-// PRESERVED while the site is merely rogue-writable — split-brain fencing
-// re-fences it and the periodic re-verification then refreshes the report.
-// The one case a blocked report is dropped on a writable site is when that
-// site is the operator's own failover target again (promotion or re-assert
-// made it the primary the report was computed against — the report is
-// definitionally stale). Returns true when any marker was cleared.
-func (tm *TopologyManager) clearHealthyRecoverySites(siteRepl []*mysql.ReplicaStatus) bool {
+// clearHealthyRecoverySites clears recovery markers whose site is now
+// writable or is a healthy, source-converged replica. Before a recovered
+// replica is marked done, the operator performs the post-fence drain that
+// closes stale sessions surviving the sidecar's best-effort eviction. This
+// also covers RecoveryInProgress restored after an operator restart.
+func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRepl []*mysql.ReplicaStatus) bool {
 	cleared := false
 	for i := range tm.sites {
 		name := tm.sites[i].name
-		// Copy the fields under the lock rather than letting the
-		// *siteRecovery escape it — stampRecoveryBackoff mutates the struct
-		// in place, so the pointer alone is not mu-protected.
 		tm.mu.RLock()
-		rec, recPresent := tm.recovery[name]
+		rec := tm.recovery[name]
 		var recState string
-		if recPresent && rec != nil {
+		if rec != nil {
 			recState = rec.state
-		} else {
-			recPresent = false
 		}
-		// The target designation alone is not proof of live authority: a
-		// stale lastFailoverTarget can string-match a rogue-writable site.
-		// Only the unique writable primary (the site the operator would
-		// answer for activeSite) has definitionally outdated its own
-		// divergence report.
-		isAuthoritativeTarget := tm.lastFailoverTarget == name && tm.activeSiteLocked() == name
+		isAuthoritativeTarget := name == tm.lastFailoverTarget
 		tm.mu.RUnlock()
-		if !recPresent {
-			continue
-		}
 		if recState == "" {
 			continue // probe-backoff marker, not a recovery state
 		}
@@ -3460,6 +3444,7 @@ func (tm *TopologyManager) clearHealthyRecoverySites(siteRepl []*mysql.ReplicaSt
 		if tm.sites[i].sourceConvergenceState != sourceConvergenceConverged {
 			continue
 		}
+		tm.drainSiteAppConnections(ctx, &tm.sites[i])
 		tm.mu.Lock()
 		delete(tm.recovery, name)
 		tm.mu.Unlock()
@@ -3468,6 +3453,44 @@ func (tm *TopologyManager) clearHealthyRecoverySites(siteRepl []*mysql.ReplicaSt
 		cleared = true
 	}
 	return cleared
+}
+
+// drainSiteAppConnections repeatedly evicts application sessions from a
+// fenced site until a pass finds none or the dedicated drain budget expires.
+// It is called only after promotion has completed and from the serialized
+// topology poll path, so it cannot race a promotion session against the site.
+// Timeout is best-effort: the site remains fenced, so survivors can read stale
+// data but cannot write, and recovery must not remain blocked forever.
+func (tm *TopologyManager) drainSiteAppConnections(ctx context.Context, site *siteTracker) {
+	timeout := time.Duration(tm.cfg.ConnectionDrainTimeout)
+	if timeout <= 0 {
+		timeout = defaultConnectionDrainTimeout
+	}
+	drainCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	for {
+		killCtx, cancelKill := context.WithTimeout(drainCtx, 5*time.Second)
+		killed, err := site.mysql.KillAppConnections(killCtx)
+		cancelKill()
+		if err == nil && killed == 0 {
+			tm.logger.Info("post-fence application connection drain complete", "site", site.name)
+			return
+		}
+		if err != nil {
+			tm.logger.Warn("post-fence application connection drain retry failed",
+				"site", site.name, "error", err)
+		} else {
+			tm.logger.Info("post-fence application connections evicted",
+				"site", site.name, "count", killed)
+		}
+		if drainCtx.Err() != nil {
+			tm.logger.Warn("post-fence application connection drain timed out",
+				"site", site.name, "timeout", timeout)
+			return
+		}
+		tm.sleep(connectionDrainRetryInterval)
+	}
 }
 
 func replicaStatusHealthy(repl *mysql.ReplicaStatus) bool {
@@ -3582,6 +3605,12 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		tm.stampRecoveryBackoff(oldPrimary.name)
 		return false, true
 	}
+
+	// Promotion is complete before recovery is considered, and the defensive
+	// fence above guarantees survivors cannot write. Drain here—not in the
+	// sidecar—so eviction cannot kill a promotion session that was already
+	// pooled when the autonomous fence fired.
+	tm.drainSiteAppConnections(ctx, oldPrimary)
 
 	// Re-read after the fence: this is the authoritative set the divergence
 	// comparison runs against (the fence guarantees it can no longer grow).
