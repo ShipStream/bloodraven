@@ -114,6 +114,17 @@ func TestBackupProfileRolloutReady(t *testing.T) {
 		t.Fatal("PITR profile should reject Ready=True from an older generation")
 	}
 
+	mfg.Status.UpdatePhase = "UpdateReplica"
+	if backupProfileRolloutReady(mfg, false) {
+		t.Fatal("plain backup profile should wait for an in-progress topology update")
+	}
+	mfg.Status.UpdatePhase = ""
+	mfg.Status.ActiveSite = ""
+	if backupProfileRolloutReady(mfg, false) {
+		t.Fatal("plain backup profile should wait until an active site is available")
+	}
+
+	mfg.Status.ActiveSite = "iad"
 	mfg.Status.Conditions[0].ObservedGeneration = mfg.Generation
 	if !backupProfileRolloutReady(mfg, true) {
 		t.Fatal("PITR profile should accept a completed current-generation rollout")

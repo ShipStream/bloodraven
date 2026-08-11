@@ -169,11 +169,12 @@ func waitForBackupProfile(ctx context.Context, env *runner.Env, prefix string, p
 		s3 := found.Storage.S3
 		matches := found.Storage.Type == v1alpha1.BackupStorageS3 && s3.Bucket == backupE2EBucket && s3.Prefix == prefix && s3.EndpointURL == backupE2EEndpoint
 		pitrOK := !pitr || (mfg.Spec.Backup.PITR != nil && mfg.Spec.Backup.PITR.Enabled && mfg.Spec.Backup.PITR.ProfileName == backupE2EProfile)
-		// A plain backup profile only configures backup Jobs; it does not
-		// change MySQL pods. PITR does change the sidecar pod spec, so only
-		// that path must wait for the current generation's rollout to finish.
-		// Requiring an observed-generation Ready condition for a plain profile
-		// can wait forever when the topology is unchanged and status is not
+		// Both paths still require a stable topology: starting a backup while
+		// a failover or rollout is in progress can select the wrong source.
+		// A plain backup profile does not change MySQL pods, though, so only
+		// PITR must also wait for Ready=True at the patched generation.
+		// Requiring that generation acknowledgement for a plain profile can
+		// wait forever when the topology is unchanged and status is not
 		// rewritten for the otherwise inert spec update.
 		rolloutReady := backupProfileRolloutReady(mfg, pitr)
 		return matches && pitrOK && rolloutReady, fmt.Sprintf("profile storage=%s bucket=%q prefix=%q endpoint=%q pitrOK=%v rolloutReady=%v generation=%d active=%q updatePhase=%q", found.Storage.Type, s3.Bucket, s3.Prefix, s3.EndpointURL, pitrOK, rolloutReady, mfg.Generation, mfg.Status.ActiveSite, mfg.Status.UpdatePhase), nil
@@ -182,12 +183,10 @@ func waitForBackupProfile(ctx context.Context, env *runner.Env, prefix string, p
 }
 
 func backupProfileRolloutReady(mfg *v1alpha1.MysqlFailoverGroup, pitr bool) bool {
-	if !pitr {
-		return true
+	if mfg.Status.ActiveSite == "" || mfg.Status.UpdatePhase != "" {
+		return false
 	}
-	return conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation) &&
-		mfg.Status.ActiveSite != "" &&
-		mfg.Status.UpdatePhase == ""
+	return !pitr || conditionTrueForGeneration(mfg.Status.Conditions, "Ready", mfg.Generation)
 }
 
 func createMysqlBackup(ctx context.Context, env *runner.Env, name, scenarioID string) error {
