@@ -8,7 +8,7 @@ spec:
   source:
     repoURL: https://raw.githubusercontent.com/shipstream/bloodraven/gh-pages
     chart: bloodraven
-    targetRevision: 0.9.0
+    targetRevision: 0.9.1
     helm:
       values: |
         metrics:

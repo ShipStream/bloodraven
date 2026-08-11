@@ -2,8 +2,8 @@ apiVersion: v2
 name: bloodraven
 description: Bloodraven MySQL operator - automated cross-DC MySQL replication and failover
 type: application
-version: 0.9.0
-appVersion: "0.9.0"
+version: 0.9.1
+appVersion: "0.9.1"
 
 keywords:
   - mysql

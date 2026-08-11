@@ -90,6 +90,30 @@ make generate            # Regenerate deep-copy code
 make manifests           # Generate CRD and RBAC manifests
 ```
 
+### How a new release is published
+
+Bloodraven releases are built from a semantic-version tag. Before creating the tag, update the release-coupled version pins in source, generated CRDs, documentation, and examples. The tag-driven [release workflow](./.github/workflows/README.md#releaseyml--release-automation) then builds and signs both images, packages the Helm chart, and publishes the GitHub release.
+
+For a future release, replace `<VERSION>` with a bare version such as `0.9.2`, then copy and paste this prompt:
+
+```text
+Prepare and publish Bloodraven <VERSION> from main. Update the SidecarImage
+kubebuilder default in api/v1alpha1/types.go, the version and appVersion in
+charts/bloodraven/Chart.yaml, and current-release pins in user-facing docs,
+examples, and fixtures. Do not blindly replace historical references or
+version-parsing test data.
+
+Run make generate && make manifests, copy config/crd/bases/*.yaml into
+charts/bloodraven/crds/, and confirm no previous-release operational pins
+remain. Run the full pre-PR gate from AGENTS.md, including the docs build and
+envtest because the CRD default changed. Commit the prepared release changes
+and get them merged to main. Tag the exact merged commit as v<VERSION>, push
+the tag, and monitor the complete Release workflow. Stop and fix any
+pre-publish failure; report any post-release E2E failure clearly. When it
+finishes, report the GitHub release, image tags and digests, Helm chart
+locations, and verification results.
+```
+
 ### Dependencies
 
 - Go 1.26
