@@ -178,6 +178,23 @@ func TestEncryption_SidecarMySQLDSNUsesTLS(t *testing.T) {
 					cm.Data["bloodraven.cnf"])
 			}
 
+			mysqlContainer := containerByName(getDeployment(t, r, "dc1").Spec.Template.Spec.Containers, "mysql")
+			if mysqlContainer == nil {
+				t.Fatal("deployment has no mysql container")
+			}
+			mysqlArgs := strings.Join(mysqlContainer.Args, "\n")
+			for _, want := range []string{
+				"--ssl-ca=/etc/mysql/tls/ca.crt",
+				"--ssl-cert=/etc/mysql/tls/tls.crt",
+				"--ssl-key=/etc/mysql/tls/tls.key",
+				"--require-secure-transport=ON",
+			} {
+				if !strings.Contains(mysqlArgs, want) {
+					t.Fatalf("mysql args missing %q; server could fall back to its auto-generated certificate:\n%s",
+						want, mysqlArgs)
+				}
+			}
+
 			sc := sidecarContainer(t, r, "dc1")
 			if findMount(sc.VolumeMounts, "/etc/mysql/tls") == nil {
 				t.Fatal("sidecar has no TLS material mounted")

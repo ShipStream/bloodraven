@@ -1003,6 +1003,19 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			"--skip-replica-start=ON",
 			"--plugin-load-add=mysql_clone.so",
 		}
+		if fg.Spec.TLS != nil {
+			// Keep the server-side TLS contract on the mysqld command line as
+			// well as in bloodraven.cnf. The sidecar verifies the per-site
+			// Service SAN from its first connection; allowing mysqld to fall
+			// back to its auto-generated server-cert.pem makes that first
+			// health check fail and the sidecar liveness probe crash-loop.
+			mysqlArgs = append(mysqlArgs,
+				"--ssl-ca=/etc/mysql/tls/ca.crt",
+				"--ssl-cert=/etc/mysql/tls/tls.crt",
+				"--ssl-key=/etc/mysql/tls/tls.key",
+				"--require-secure-transport=ON",
+			)
+		}
 
 		mysqlContainer := corev1.Container{
 			Name:  "mysql",
