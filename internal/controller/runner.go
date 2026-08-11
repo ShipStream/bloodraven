@@ -505,7 +505,17 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 			if !ok {
 				return fmt.Errorf("secret %s missing 'dsn' key", secretNN)
 			}
-			dsn, err = buildSiteDSN(string(dsnBytes), fg, site)
+			tlsConfigName := ""
+			if fg.Spec.TLS != nil {
+				tlsConfigName, err = mysqlTLSConfig(ctx, r.client, fg, siteServiceHost(fg.Name, site.Name, fg.Namespace))
+				if err != nil {
+					for j := 0; j < i; j++ {
+						siteMySQL[j].Close()
+					}
+					return fmt.Errorf("configure TLS for site %s: %w", site.Name, err)
+				}
+			}
+			dsn, err = buildSiteDSN(string(dsnBytes), fg, site, tlsConfigName)
 			if err != nil {
 				for j := 0; j < i; j++ {
 					siteMySQL[j].Close()
@@ -1456,13 +1466,25 @@ func setCondition(conditions *[]metav1.Condition, c metav1.Condition) {
 	*conditions = append(*conditions, c)
 }
 
-// buildSiteDSN takes a base DSN and replaces the host with the site service endpoint.
-func buildSiteDSN(baseDSN string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) (string, error) {
+// buildSiteDSN takes a base DSN and replaces the host with the site
+// service endpoint. tlsConfigName, when non-empty, names a MySQL driver
+// TLS config registered for the site's service host.
+//
+// The TLS config is only stamped on when the supplied DSN does not
+// already choose one: this is the legacy spec.secretName mode where the
+// DSN is user-authored, so an explicit `tls=` parameter is a deliberate
+// choice and wins. Without this, a group that turns on spec.tls — which
+// sets require_secure_transport=ON — would have every site probe fail
+// with Error 3159, and no failover could ever run.
+func buildSiteDSN(baseDSN string, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsConfigName string) (string, error) {
 	parsed, err := mysql.ParseDSN(baseDSN)
 	if err != nil {
 		return "", fmt.Errorf("parse DSN: %w", err)
 	}
 	parsed.Addr = fmt.Sprintf("%s:%d", internalSiteServiceHost(fg.Name, site.Name, fg.Namespace), mysqlPort)
+	if tlsConfigName != "" && parsed.TLSConfig == "" {
+		parsed.TLSConfig = tlsConfigName
+	}
 	return parsed.FormatDSN(), nil
 }
 

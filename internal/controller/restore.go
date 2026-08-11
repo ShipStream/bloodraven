@@ -968,7 +968,12 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		{Name: "HOME", Value: mysqlshHomeMountPath},
 	}
 	if fg.Spec.TLS != nil {
-		env = append(env, corev1.EnvVar{Name: "BLOODRAVEN_TLS", Value: "1"})
+		env = append(env,
+			corev1.EnvVar{Name: "BLOODRAVEN_TLS", Value: "1"},
+			// Verifies both the mysqlsh session and the mysqlbinlog|mysql
+			// PITR replay against the operator-mounted CA.
+			corev1.EnvVar{Name: "BLOODRAVEN_TLS_CA_FILE", Value: mysqlTLSMountPath + "/ca.crt"},
+		)
 	}
 	env = append(env, extraEnv...)
 	env = append(env, in.ExtraEnv...)

@@ -171,6 +171,22 @@ func ConfigFromEnv() (*Config, error) {
 		}
 	}
 
+	// When the group has spec.tls, mysqld runs with
+	// require_secure_transport=ON and rejects the plaintext loopback
+	// connection the DSN above describes. Nothing happens here when the
+	// operator did not configure TLS, so non-TLS groups keep the exact
+	// DSN previous releases produced.
+	tlsName, err := registerMySQLTLS()
+	if err != nil {
+		return nil, err
+	}
+	if tlsName != "" {
+		dsn, err = withMySQLTLSConfig(dsn, tlsName)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	podName := os.Getenv("MY_POD_NAME")
 	if podName == "" {
 		podName = "unknown"

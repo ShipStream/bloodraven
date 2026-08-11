@@ -18,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v2"
+	encryptionPodRenderVersion = "encryption-pod-render-v3"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -55,6 +55,24 @@ const (
 	// inside the MySQL pod is already out of scope, and the point of the
 	// feature is that the key never reaches a persistent disk.
 	keyringSecretMode int32 = 0o444
+
+	// keyringTokenMode variants for the escrow bearer token. Unlike the
+	// keyring itself the token is read only by the sidecar container,
+	// which runs the escrow agent directly as uid 999 — no image
+	// entrypoint drops privileges in between — so when the pod declares
+	// an fsGroup, kubelet's chgrp of the projection plus the fsGroup
+	// supplementary group are enough and the token can stay off the
+	// world-readable path.
+	//
+	// Without an fsGroup the projection is root:root and 0400 is
+	// unreadable by uid 999: open() returns EACCES on every retry, the
+	// keyring never escrows, and the group sits at
+	// phase=Unsealed/reason=Bootstrap indefinitely. That was the 0.9.0
+	// behavior. 0444 matches what keyringSecretMode already accepts for
+	// the far more sensitive keyring file, so it adds no exposure a
+	// reader of this pod does not already have.
+	keyringTokenModeShared  int32 = 0o444
+	keyringTokenModeFSGroup int32 = 0o440
 
 	// Uid/gid the official MySQL images run mysqld as. Reused from the
 	// PITR wiring (mysqlDataUID/mysqlDataGID in pitr.go) for the sidecar
@@ -242,7 +260,7 @@ func buildEncryptionFragments(
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  v1alpha1.KeyringTokenSecretName(fg.Name, site.Name),
-				DefaultMode: int32Ptr(0o400),
+				DefaultMode: int32Ptr(keyringTokenMode(fg)),
 				Items: []corev1.KeyToPath{
 					{Key: v1alpha1.KeyringTokenKey, Path: v1alpha1.KeyringTokenKey},
 				},
@@ -312,6 +330,22 @@ func buildEncryptionFragments(
 	})
 
 	return out
+}
+
+// keyringTokenMode picks the projection mode for the escrow bearer
+// token. See the keyringTokenMode* constants for why the mode depends on
+// whether the pod declares an fsGroup.
+//
+// This deliberately does not apply to the keyring volume: that one is
+// read by mysqld, which the official image entrypoint starts through
+// gosu. gosu resets the process's supplementary groups from the image's
+// group database, dropping the fsGroup kubelet injected, so group
+// permissions cannot be relied on there.
+func keyringTokenMode(fg *v1alpha1.MysqlFailoverGroup) int32 {
+	if fg.Spec.PodSecurityContext != nil && fg.Spec.PodSecurityContext.FSGroup != nil {
+		return keyringTokenModeFSGroup
+	}
+	return keyringTokenModeShared
 }
 
 // keyringInitScript prepares the memory-backed keyring before mysqld

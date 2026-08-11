@@ -73,6 +73,26 @@ def _bool(name, default=False):
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _tls_options():
+    """MySQL TLS options for this job, as (ssl_mode, ssl_ca).
+
+    BLOODRAVEN_TLS is set by the operator whenever the failover group has
+    spec.tls, which also means mysqld runs with
+    require_secure_transport=ON. The CA the operator mounts is used when
+    it is present so the connection is verified rather than merely
+    encrypted; REQUIRED is the fallback when no CA reached the pod.
+    PREFERRED (the client default) is kept for non-TLS groups so their
+    behaviour is unchanged.
+    """
+    if not _bool("BLOODRAVEN_TLS"):
+        return "PREFERRED", ""
+    ca = (os.environ.get("BLOODRAVEN_TLS_CA_FILE") or "").strip()
+    if ca and os.path.exists(ca):
+        return "VERIFY_CA", ca
+    return "REQUIRED", ""
+
+
+
 def _host_port(addr, default_port=3306):
     if not addr:
         return addr, default_port
@@ -353,6 +373,14 @@ def _run_pitr(host, port, user, password, stop_datetime, exclude_gtids, local_di
         "-h", host, "-P", str(port),
         "-u", user,
     ]
+    # The C client defaults to --ssl-mode=PREFERRED, so this pipeline
+    # happened to survive require_secure_transport=ON — but unverified.
+    # Match the mysqlsh session above instead of relying on the default.
+    replay_ssl_mode, replay_ssl_ca = _tls_options()
+    if replay_ssl_mode != "PREFERRED":
+        mysql_cmd.append("--ssl-mode=" + replay_ssl_mode)
+        if replay_ssl_ca:
+            mysql_cmd.append("--ssl-ca=" + replay_ssl_ca)
 
     print("BLOODRAVEN_PITR_START stop_datetime={} files={}".format(
           stop_datetime, len(files)), flush=True)
@@ -540,13 +568,16 @@ def main():
     _configure_aws_creds_dir()
 
     host_only, port = _host_port(host)
+    _ssl_mode, _ssl_ca = _tls_options()
     conn = {
         "host": host_only,
         "port": port,
         "user": user,
         "password": password,
-        "ssl-mode": "REQUIRED" if _bool("BLOODRAVEN_TLS") else "PREFERRED",
+        "ssl-mode": _ssl_mode,
     }
+    if _ssl_ca:
+        conn["ssl-ca"] = _ssl_ca
 
     print("BLOODRAVEN_LOAD_START host={} input={}".format(host, input_url),
           flush=True)

@@ -318,9 +318,16 @@ Kubernetes Event reasons emitted on the `MysqlFailoverGroup` (visible via `kubec
 | ERROR | `CR status anti-flap state unreadable; ignoring unsafe copy` | `fg`, `error` |
 | INFO | `starting graceful shutdown` | `fg` |
 | INFO | `CR deleted — DNSEndpoint will be garbage-collected` | (none) |
+| INFO | `sidecar image version differs from the operator` | `operatorImage`, `sidecarImage`, `operatorTag`, `sidecarTag` |
 | INFO | `sidecar starting` | `listenAddr`, `peerAddresses`, `bloodravenAddress`, `leaseTimeout`, `peerCheckInterval`, `site`, `namespace`, `fg`, `pod` |
 | INFO | `sidecar stopped` | `pod` |
 | INFO | `received signal, shutting down` | `signal`, `pod` |
+
+Kubernetes Event reasons emitted on the `MysqlFailoverGroup`:
+
+| Reason | Type | When |
+|---|---|---|
+| `SidecarVersionSkew` | Warning | `spec.sidecarImage` is tagged with a different release than the running operator. The two halves share a rendering contract, so a mismatch can break the sidecar silently — on a `spec.tls` group an older sidecar cannot reach MySQL at all. Advisory only: the operator reports skew but never blocks on it, because a re-tagged or locally built image is indistinguishable from a real mismatch. |
 
 ## Stability commitments
 

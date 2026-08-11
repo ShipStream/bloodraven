@@ -158,7 +158,13 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		{Name: "BLOODRAVEN_STORAGE_TYPE", Value: string(in.Profile.Storage.Type)},
 	}
 	if fg.Spec.TLS != nil {
-		baseEnv = append(baseEnv, corev1.EnvVar{Name: "BLOODRAVEN_TLS", Value: "1"})
+		baseEnv = append(baseEnv,
+			corev1.EnvVar{Name: "BLOODRAVEN_TLS", Value: "1"},
+			// The TLS Secret is already mounted at mysqlTLSMountPath; naming
+			// the CA lets the session verify the server instead of merely
+			// encrypting to it.
+			corev1.EnvVar{Name: "BLOODRAVEN_TLS_CA_FILE", Value: mysqlTLSMountPath + "/ca.crt"},
+		)
 	}
 
 	// resolveBackupStorage returns the user-facing destination — S3

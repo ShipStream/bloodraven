@@ -256,7 +256,7 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 		return true, nil
 	}
 	if live.Digest == "" {
-		site.Message = "waiting for MySQL to create the keyring"
+		site.Message = withSidecarError("waiting for MySQL to create the keyring", live.LastError)
 		return checkEscrowDeadline(fg, site), nil
 	}
 	if site.UnsealReason == v1alpha1.UnsealReasonRotation && !live.RotateDone {
@@ -280,13 +280,13 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 		return false, err
 	}
 	if !ok {
-		site.Message = "waiting for the sidecar to escrow the keyring"
+		site.Message = withSidecarError("waiting for the sidecar to escrow the keyring", live.LastError)
 		return checkEscrowDeadline(fg, site), nil
 	}
 	if current.Digest != live.Digest {
-		site.Message = fmt.Sprintf(
+		site.Message = withSidecarError(fmt.Sprintf(
 			"escrowed keyring (v%d) does not match the live keyring; waiting for a fresh escrow",
-			current.Version)
+			current.Version), live.LastError)
 		return checkEscrowDeadline(fg, site), nil
 	}
 
@@ -302,6 +302,31 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 		log.FromContext(ctx).Error(err, "keyring retention prune failed", "site", site.Name)
 	}
 	return true, nil
+}
+
+// maxSidecarErrorInStatus caps how much of the sidecar's error text is
+// copied into status.  Long enough for the actionable part of an x509 or
+// dial error, short enough to keep the status field readable.
+const maxSidecarErrorInStatus = 200
+
+// withSidecarError appends the sidecar's own last error to a waiting
+// message.
+//
+// A stalled escrow is otherwise indistinguishable from a slow one: the
+// operator polls /keyring/status, which already carries the reason the
+// push is failing (escrow listener not enabled, CA that does not trust
+// its issuer, unreadable token), but the state machine used to drop it.
+// The result was a group sitting at "waiting for the sidecar to escrow
+// the keyring" with the actual cause only in sidecar logs.
+func withSidecarError(msg, lastError string) string {
+	lastError = strings.TrimSpace(lastError)
+	if lastError == "" {
+		return msg
+	}
+	if len(lastError) > maxSidecarErrorInStatus {
+		lastError = lastError[:maxSidecarErrorInStatus] + "…"
+	}
+	return msg + "; sidecar reports: " + lastError
 }
 
 // advanceEscrowedSite waits for the Deployment to actually be running
