@@ -1703,6 +1703,43 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutReplicationCredentials(t 
 	}
 }
 
+func TestCheckRecovery_PreservesBlockedRecordedTargetDuringSplitBrain(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: false}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	tm.mu.Lock()
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateWritable
+	tm.recovery["dc2"] = &siteRecovery{
+		state:          recoveryStateBlocked,
+		divergentGtid:  "aaaa:50-55",
+		divergentCount: 6,
+		drainComplete:  true,
+	}
+	tm.lastFailoverTarget = "dc2"
+	tm.mu.Unlock()
+
+	if tm.clearHealthyRecoverySites(context.Background(), nil) {
+		t.Fatal("split-brain must not clear blocked divergence from the recorded target")
+	}
+	tm.mu.RLock()
+	rec := tm.recovery["dc2"]
+	tm.mu.RUnlock()
+	if rec == nil || rec.divergentGtid != "aaaa:50-55" {
+		t.Fatalf("divergence evidence was lost without unique authority: %+v", rec)
+	}
+	if rec.drainComplete {
+		t.Fatal("writable rogue site retained stale drain completion")
+	}
+
+	site0.readOnly = true
+	tm.sites[0].state = state.StateReadOnly
+	if !tm.clearHealthyRecoverySites(context.Background(), nil) {
+		t.Fatal("unique, directly confirmed recorded target should clear stale divergence")
+	}
+}
+
 func TestCheckRecovery_DrainsSurvivingConnectionsBeforeCompletion(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{
@@ -1710,8 +1747,6 @@ func TestCheckRecovery_DrainsSurvivingConnectionsBeforeCompletion(t *testing.T) 
 		killConnectionResults: []int{2, 1, 0},
 	}
 	tm, _, _ := newTestTopologyManager(site0, site1)
-	tm.SetSleepForTest(func(time.Duration) {})
-
 	tm.mu.Lock()
 	tm.sites[0].state = state.StateWritable
 	tm.sites[1].state = state.StateReadOnly
@@ -1720,12 +1755,18 @@ func TestCheckRecovery_DrainsSurvivingConnectionsBeforeCompletion(t *testing.T) 
 	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
 	tm.mu.Unlock()
 
-	changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{
+	repl := []*mysql.ReplicaStatus{
 		nil,
 		{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"},
-	})
-	if !changed {
-		t.Fatal("healthy recovery state was not completed")
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		changed := tm.checkRecovery(context.Background(), repl)
+		if attempt < 3 && changed {
+			t.Fatalf("recovery completed after drain pass %d, before the empty pass", attempt)
+		}
+		if attempt == 3 && !changed {
+			t.Fatal("healthy recovery state was not completed after the empty pass")
+		}
 	}
 	if site1.killConnectionCalls != 3 {
 		t.Fatalf("connection drain calls = %d, want 3 passes ending at zero", site1.killConnectionCalls)
@@ -1747,17 +1788,51 @@ func TestCheckRecovery_DrainsBeforeOldPrimaryMutation(t *testing.T) {
 		killConnectionResults: []int{1, 0},
 	}
 	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
-	tm.SetSleepForTest(func(time.Duration) {})
 	setRecoveredTopology(tm)
 
+	if changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}); changed {
+		t.Fatal("recovery mutation started before the drain reached an empty pass")
+	}
+	if got := site1.startReplicaCallCount(); got != 0 {
+		t.Fatalf("recovery mutated old primary during drain: %d sequences", got)
+	}
 	if changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}); !changed {
-		t.Fatal("expected recovery to start")
+		t.Fatal("expected recovery to start after the empty drain pass")
 	}
 	if site1.killConnectionCalls != 2 {
 		t.Fatalf("connection drain calls = %d, want 2", site1.killConnectionCalls)
 	}
 	if got := site1.startReplicaCallCount(); got != 1 {
 		t.Fatalf("recovery did not proceed after clean drain: %d sequences", got)
+	}
+}
+
+func TestCheckRecovery_DrainRetriesAfterKillError(t *testing.T) {
+	gtid := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: gtid}
+	site1 := &mockMySQL{
+		readOnly:              true,
+		gtidExecuted:          gtid,
+		killConnectionResults: []int{0, 1, 0},
+		killConnectionErrs:    []error{errors.New("process list unavailable"), nil, nil},
+	}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+	setRecoveredTopology(tm)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
+		if attempt < 3 && changed {
+			t.Fatalf("recovery completed after drain attempt %d", attempt)
+		}
+		if attempt == 3 && !changed {
+			t.Fatal("recovery did not resume after retry reached an empty pass")
+		}
+	}
+	if site1.killConnectionCalls != 3 {
+		t.Fatalf("connection drain calls = %d, want error, eviction, then empty pass", site1.killConnectionCalls)
+	}
+	if got := site1.startReplicaCallCount(); got != 1 {
+		t.Fatalf("recovery sequence count = %d, want 1", got)
 	}
 }
 

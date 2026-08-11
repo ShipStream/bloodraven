@@ -468,7 +468,6 @@ const (
 	recoveryStateInProgress       = "RecoveryInProgress"
 	recoveryStateBlocked          = "RecoveryBlocked"
 	defaultConnectionDrainTimeout = 30 * time.Second
-	connectionDrainRetryInterval  = time.Second
 	// recoveryRetryDelay is the stabilization window after RecoverOldPrimary.
 	// During this window the operator waits for replication to report healthy
 	// instead of immediately resetting replica metadata again on the next poll.
@@ -481,6 +480,8 @@ type siteRecovery struct {
 	retryAfter     time.Time
 	divergentGtid  string
 	divergentCount int64
+	drainStartedAt time.Time
+	drainComplete  bool
 }
 
 // NewTopologyManager creates a TopologyManager for the given configuration.
@@ -3418,14 +3419,24 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 		if rec != nil {
 			recState = rec.state
 		}
-		isAuthoritativeTarget := name == tm.lastFailoverTarget
+		isRecordedTarget := name == tm.lastFailoverTarget
 		tm.mu.RUnlock()
 		if recState == "" {
 			continue // probe-backoff marker, not a recovery state
 		}
 		if tm.sites[i].state == state.StateWritable {
-			if recState == recoveryStateBlocked && !isAuthoritativeTarget {
-				continue // live divergence report on a rogue-writable site: keep
+			if recState == recoveryStateBlocked {
+				// A remembered target is not authority by itself. Preserve the
+				// divergence report through split-brain and only clear it when
+				// this site is the unique, directly confirmed writable target.
+				active, err := tm.confirmedActivePrimary(ctx)
+				if !isRecordedTarget || err != nil || active.name != name {
+					tm.mu.Lock()
+					rec.drainStartedAt = time.Time{}
+					rec.drainComplete = false
+					tm.mu.Unlock()
+					continue
+				}
 			}
 			tm.mu.Lock()
 			delete(tm.recovery, name)
@@ -3444,7 +3455,9 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 		if tm.sites[i].sourceConvergenceState != sourceConvergenceConverged {
 			continue
 		}
-		tm.drainSiteAppConnections(ctx, &tm.sites[i])
+		if !tm.advanceSiteAppConnectionDrain(ctx, &tm.sites[i]) {
+			continue
+		}
 		tm.mu.Lock()
 		delete(tm.recovery, name)
 		tm.mu.Unlock()
@@ -3455,41 +3468,72 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 	return cleared
 }
 
-// drainSiteAppConnections repeatedly evicts application sessions from a
-// fenced site until a pass finds none or the dedicated drain budget expires.
-// It is called only after promotion has completed and from the serialized
-// topology poll path, so it cannot race a promotion session against the site.
-// Timeout is best-effort: the site remains fenced, so survivors can read stale
-// data but cannot write, and recovery must not remain blocked forever.
-func (tm *TopologyManager) drainSiteAppConnections(ctx context.Context, site *siteTracker) {
+// advanceSiteAppConnectionDrain performs at most one eviction pass for a
+// fenced site. State is retained in siteRecovery so the serialized poll loop
+// remains free to observe failures and process failover thresholds between
+// passes. It returns true after an empty pass or when the best-effort budget
+// expires.
+func (tm *TopologyManager) advanceSiteAppConnectionDrain(ctx context.Context, site *siteTracker) bool {
 	timeout := time.Duration(tm.cfg.ConnectionDrainTimeout)
 	if timeout <= 0 {
 		timeout = defaultConnectionDrainTimeout
 	}
-	drainCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
-	for {
-		killCtx, cancelKill := context.WithTimeout(drainCtx, 5*time.Second)
-		killed, err := site.mysql.KillAppConnections(killCtx)
-		cancelKill()
-		if err == nil && killed == 0 {
-			tm.logger.Info("post-fence application connection drain complete", "site", site.name)
-			return
-		}
-		if err != nil {
-			tm.logger.Warn("post-fence application connection drain retry failed",
-				"site", site.name, "error", err)
-		} else {
-			tm.logger.Info("post-fence application connections evicted",
-				"site", site.name, "count", killed)
-		}
-		if drainCtx.Err() != nil {
-			tm.logger.Warn("post-fence application connection drain timed out",
-				"site", site.name, "timeout", timeout)
-			return
-		}
-		tm.sleep(connectionDrainRetryInterval)
+	now := tm.clock.Now()
+	tm.mu.Lock()
+	rec := tm.recovery[site.name]
+	if rec == nil {
+		rec = &siteRecovery{}
+		tm.recovery[site.name] = rec
+	}
+	if rec.drainComplete {
+		tm.mu.Unlock()
+		return true
+	}
+	if rec.drainStartedAt.IsZero() {
+		rec.drainStartedAt = now
+	}
+	deadline := rec.drainStartedAt.Add(timeout)
+	tm.mu.Unlock()
+
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		tm.completeSiteAppConnectionDrain(site.name)
+		tm.logger.Warn("post-fence application connection drain timed out",
+			"site", site.name, "timeout", timeout, "fg", tm.cfg.Name)
+		return true
+	}
+	attemptTimeout := min(5*time.Second, remaining)
+	killCtx, cancelKill := context.WithTimeout(ctx, attemptTimeout)
+	killed, err := site.mysql.KillAppConnections(killCtx)
+	cancelKill()
+	if err == nil && killed == 0 {
+		tm.completeSiteAppConnectionDrain(site.name)
+		tm.logger.Info("post-fence application connection drain complete",
+			"site", site.name, "fg", tm.cfg.Name)
+		return true
+	}
+	if err != nil {
+		tm.logger.Warn("post-fence application connection drain retry failed",
+			"site", site.name, "error", err, "fg", tm.cfg.Name)
+	} else {
+		tm.logger.Info("post-fence application connections evicted",
+			"site", site.name, "count", killed, "fg", tm.cfg.Name)
+	}
+	if !tm.clock.Now().Before(deadline) {
+		tm.completeSiteAppConnectionDrain(site.name)
+		tm.logger.Warn("post-fence application connection drain timed out",
+			"site", site.name, "timeout", timeout, "fg", tm.cfg.Name)
+		return true
+	}
+	return false
+}
+
+func (tm *TopologyManager) completeSiteAppConnectionDrain(site string) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if rec := tm.recovery[site]; rec != nil {
+		rec.drainComplete = true
 	}
 }
 
@@ -3595,23 +3639,30 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		return false, false
 	}
 
-	tm.logger.Info("initiating old primary recovery", "oldPrimary", oldPrimary.name, "newPrimary", newPrimary.name)
+	tm.mu.RLock()
+	rec := tm.recovery[oldPrimary.name]
+	drainStarted := rec != nil && (!rec.drainStartedAt.IsZero() || rec.drainComplete)
+	tm.mu.RUnlock()
+	if !drainStarted {
+		tm.logger.Info("initiating old primary recovery", "oldPrimary", oldPrimary.name, "newPrimary", newPrimary.name)
 
-	// Defensive fence. From here on the cycle's recovery budget is spent, and
-	// every failure exit stamps a probe backoff so one persistently-failing
-	// site cannot monopolize the budget at poll frequency.
-	if err := oldPrimary.mysql.SetSuperReadOnly(ctx, true); err != nil {
-		tm.logger.Error("recovery: failed to fence old primary", "site", oldPrimary.name, "error", err)
-		tm.stampRecoveryBackoff(oldPrimary.name)
-		return false, true
+		// Defensive fence. From here on the cycle's recovery budget is spent,
+		// and every failure exit stamps a probe backoff so one persistently-
+		// failing site cannot monopolize the budget at poll frequency.
+		if err := oldPrimary.mysql.SetSuperReadOnly(ctx, true); err != nil {
+			tm.logger.Error("recovery: failed to fence old primary", "site", oldPrimary.name, "error", err)
+			tm.stampRecoveryBackoff(oldPrimary.name)
+			return false, true
+		}
 	}
 
 	// Promotion is complete before recovery is considered, and the defensive
-	// fence above guarantees survivors cannot write. Drain here—not in the
-	// sidecar—so eviction cannot kill a promotion session that was already
-	// pooled when the autonomous fence fired.
-	tm.drainSiteAppConnections(ctx, oldPrimary)
-
+	// fence above guarantees survivors cannot write. Each poll performs one
+	// drain pass; GTID comparison and recovery mutation resume only after the
+	// drain completes or its best-effort timeout expires.
+	if !tm.advanceSiteAppConnectionDrain(ctx, oldPrimary) {
+		return false, true
+	}
 	// Re-read after the fence: this is the authoritative set the divergence
 	// comparison runs against (the fence guarantees it can no longer grow).
 	oldGtidStr, err := oldPrimary.mysql.GetGtidExecuted(ctx)
@@ -3651,10 +3702,15 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	if newGtid.Contains(oldGtid) {
 		tm.logger.Info("no GTID divergence, auto-recovering old primary as replica", "site", oldPrimary.name)
 		tm.mu.Lock()
-		tm.recovery[oldPrimary.name] = &siteRecovery{
-			state:      recoveryStateInProgress,
-			retryAfter: tm.clock.Now().Add(recoveryRetryDelay),
+		rec := tm.recovery[oldPrimary.name]
+		if rec == nil {
+			rec = &siteRecovery{}
+			tm.recovery[oldPrimary.name] = rec
 		}
+		rec.state = recoveryStateInProgress
+		rec.retryAfter = tm.clock.Now().Add(recoveryRetryDelay)
+		rec.divergentGtid = ""
+		rec.divergentCount = 0
 		tm.mu.Unlock()
 		metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
 		// Persist RecoveryInProgress before RecoverOldPrimary starts. The
@@ -3695,12 +3751,15 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	// Blocked reports are periodically re-verified (see
 	// checkRecoveryWithConvergence) so further divergence refreshes the
 	// report; rate-limit the re-check to the recovery retry cadence.
-	tm.recovery[oldPrimary.name] = &siteRecovery{
-		state:          recoveryStateBlocked,
-		retryAfter:     tm.clock.Now().Add(recoveryRetryDelay),
-		divergentGtid:  divergent.String(),
-		divergentCount: count,
+	rec = tm.recovery[oldPrimary.name]
+	if rec == nil {
+		rec = &siteRecovery{}
+		tm.recovery[oldPrimary.name] = rec
 	}
+	rec.state = recoveryStateBlocked
+	rec.retryAfter = tm.clock.Now().Add(recoveryRetryDelay)
+	rec.divergentGtid = divergent.String()
+	rec.divergentCount = count
 	tm.mu.Unlock()
 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(float64(count))

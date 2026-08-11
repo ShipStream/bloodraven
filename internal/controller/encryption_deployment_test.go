@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -10,9 +11,23 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
+
+type failDeploymentUpdateClient struct {
+	client.Client
+	remaining int
+}
+
+func (c *failDeploymentUpdateClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if _, ok := obj.(*appsv1.Deployment); ok && c.remaining > 0 {
+		c.remaining--
+		return errors.New("injected deployment update failure")
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
 
 // These tests drive the real Reconcile loop end to end so the wiring
 // between the keyring state machine, the per-site ConfigMap and the
@@ -257,10 +272,24 @@ func TestReconcile_EncryptionAdoptionKeepsUnrolledSiteRestartable(t *testing.T) 
 	if !strings.Contains(desired.Data["bloodraven.cnf"], "binlog-encryption=ON") {
 		t.Fatalf("desired revision missing encryption settings:\n%s", desired.Data["bloodraven.cnf"])
 	}
-
-	// The ordered updater changes both halves in one PodTemplate update.
+	// A failed Deployment write leaves both restartability revisions in
+	// place and the live pod template internally coherent. Retrying the same
+	// ordered update then switches config and keyring wiring atomically.
+	r.Client = &failDeploymentUpdateClient{Client: r.Client, remaining: 2}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := r.reconcileDeployment(context.Background(), &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage); err == nil {
+			t.Fatalf("injected Deployment update failure %d was not returned", attempt)
+		}
+		unrolled = getDeployment(t, r, "dc1")
+		if got := deploymentConfigMapName(unrolled); got != canonical {
+			t.Fatalf("failed update %d changed config reference = %q, want %q", attempt, got, canonical)
+		}
+		if findVolume(unrolled.Spec.Template.Spec.Volumes, keyringVolumeName) != nil {
+			t.Fatalf("failed update %d left an unencrypted config paired with keyring wiring", attempt)
+		}
+	}
 	if err := r.reconcileDeployment(context.Background(), &refreshed, refreshed.Spec.Sites[0], 101, defaultMySQLImage); err != nil {
-		t.Fatalf("apply ordered site update: %v", err)
+		t.Fatalf("retry ordered site update: %v", err)
 	}
 	rolled := getDeployment(t, r, "dc1")
 	if got := deploymentConfigMapName(rolled); got != desiredName {

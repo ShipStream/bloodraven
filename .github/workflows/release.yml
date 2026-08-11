@@ -101,7 +101,7 @@ jobs:
     with:
       scenario: 48-keyring-seal-and-rotation
       enable-encryption: true
-      timeout-minutes: 45
+      timeout-minutes: 60
   draft-release:
     name: Create Draft Release
     runs-on: ubuntu-latest

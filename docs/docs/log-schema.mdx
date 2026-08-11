@@ -63,7 +63,7 @@ Sidecar records additionally carry:
 - Site identifiers (`site`, `oldPrimary`, `newPrimary`, `promotedSite`, `donor`, `recipient`, `activeSite`, `authoritativeActiveSite`) all carry the bare site name as defined in `spec.sites[].name`.
 - GTID fields (`promotionGtid`, `divergentGtid`, `oldPrimaryGtid`, `newPrimaryGtid`, `followerGtid`, `activeGtid`) carry MySQL GTID-set strings exactly as MySQL returns them — never parsed or canonicalised.
 - Counts (`count`, `divergentTransactions`, `attempt`, `maxRetries`) are JSON numbers, not strings.
-- Durations (`leaseTimeout`, `pollInterval`, `delay`) are emitted by `slog`'s default `time.Duration` rendering — currently a string like `"30s"`. Treat as opaque if you need to parse, prefer the metric of the same name.
+- Durations (`leaseTimeout`, `pollInterval`, `delay`, `timeout`) are emitted by `slog`'s default `time.Duration` rendering — currently a string like `"30s"`. Treat as opaque if you need to parse, prefer the metric of the same name.
 
 ## Event reference
 
@@ -170,7 +170,7 @@ Every per-site state change emits one record. Use this to replay the topology ti
 | WARN | `split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities` | (context) | Opt-in `splitBrainPolicy` is fencing the lower-priority site. The poll-driven retry of a persistent split-brain re-emits this at WARN at most every 30s (DEBUG in between). |
 | INFO | `fencing returning old primary (split brain after failover)` | `site`, `fg` | A second site came back writable after a failover; the operator is fencing every writable site except the one holding live primary authority. Emitted at INFO on the first fence of a given split-brain and at DEBUG on the poll-driven retries in between. |
 | ERROR | `failed to fence returning old primary` | `site`, `error`, `fg` | The `super_read_only=ON` write above failed. The next poll retries. DEBUG on retries, matching the INFO/DEBUG pairing of the fence itself. |
-| INFO | `post-fence application connections evicted` | `site`, `count`, `fg` | Operator-side recovery removed one or more sessions that survived the sidecar's best-effort fence eviction. It repeats after one second until an empty pass or timeout. |
+| INFO | `post-fence application connections evicted` | `site`, `count`, `fg` | Operator-side recovery removed one or more sessions that survived the sidecar's best-effort fence eviction. It retries on later topology polls until an empty pass or timeout, without blocking the poll loop between passes. |
 | WARN | `post-fence application connection drain retry failed` | `site`, `error`, `fg` | A recovery drain pass could not enumerate or kill sessions. The operator retries within `spec.connectionDrainTimeout`. |
 | INFO | `post-fence application connection drain complete` | `site`, `fg` | An empty eviction pass proved no application sessions remain. Old-primary recovery may now complete. |
 | WARN | `post-fence application connection drain timed out` | `site`, `timeout`, `fg` | The dedicated drain budget expired. Recovery proceeds because `super_read_only=ON` still prevents writes; a surviving session is limited to stale reads. |

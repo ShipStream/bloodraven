@@ -99,12 +99,17 @@ jobs:
 
       - name: Run E2E (${{ inputs.profile }} profile)
         if: inputs.scenario == ''
-        run: make test-e2e E2E_PROFILE=${{ inputs.profile }} E2E_JUNIT_OUT=playground/chaos-results/e2e-${{ inputs.profile }}-junit.xml
+        env:
+          E2E_PROFILE: ${{ inputs.profile }}
+          E2E_JUNIT_OUT: playground/chaos-results/e2e-${{ inputs.profile }}-junit.xml
+        run: make test-e2e E2E_PROFILE="$E2E_PROFILE" E2E_JUNIT_OUT="$E2E_JUNIT_OUT"
         timeout-minutes: ${{ inputs.timeout-minutes }}
 
       - name: Run E2E scenario ${{ inputs.scenario }}
         if: inputs.scenario != ''
-        run: make chaos-run SCENARIO=${{ inputs.scenario }}
+        env:
+          E2E_SCENARIO: ${{ inputs.scenario }}
+        run: make chaos-run SCENARIO="$E2E_SCENARIO"
         timeout-minutes: ${{ inputs.timeout-minutes }}
 
       - name: Upload JUnit results
