@@ -40,6 +40,12 @@ const (
 // fail against a misconfigured profile.
 const maxFailedRetention = 10
 
+// maxBackupPendingDuration caps how long a MysqlBackup waits for a healthy
+// source before it is failed terminally. A missing source is normally
+// transient (failover / ordered update); if it persists, the CR must stop
+// occupying the schedule and become eligible for failed-backup pruning.
+const maxBackupPendingDuration = 30 * time.Minute
+
 // MysqlBackupReconciler reconciles MysqlBackup resources.
 type MysqlBackupReconciler struct {
 	client.Client
@@ -143,38 +149,54 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Resolve the named profile.
-	profile := findProfile(&fg, backup.Spec.ProfileName)
-	if profile == nil {
-		return r.failBackup(ctx, &backup, "ProfileNotFound",
-			fmt.Sprintf("profile %q not found on MysqlFailoverGroup %q",
-				backup.Spec.ProfileName, fg.Name))
-	}
-
-	// Pick the source site (replica-first, primary fallback).
-	maxLag := int64(300)
-	if fg.Spec.Backup != nil && fg.Spec.Backup.MaxLagSecondsForSource > 0 {
-		maxLag = fg.Spec.Backup.MaxLagSecondsForSource
-	}
-	sourceSite, reason, err := selectSourceSite(&fg, backup.Spec.SourceSiteOverride, maxLag)
-	if err != nil {
-		return r.failBackup(ctx, &backup, "NoHealthySource", err.Error())
-	}
-
-	// Ensure derived creds Secret (parses the group's DSN into user/password).
-	credsName := backupCredsSecretName(backup.Name)
-	if err := r.ensureDerivedCredsSecret(ctx, &fg, &backup, credsName); err != nil {
-		return ctrl.Result{}, fmt.Errorf("ensure creds secret: %w", err)
-	}
-
-	// Ensure the Job exists.
+	// Look up the Job before resolving any mutable launch-time inputs. Once a
+	// Job exists its source and storage configuration are pinned in its pod
+	// template. Re-running source selection here used to make an unrelated
+	// failover terminally fail an already-running backup whenever
+	// status.activeSite was briefly empty.
 	var job batchv1.Job
 	jobName := backupJobName(backup.Name)
 	jobKey := types.NamespacedName{Namespace: backup.Namespace, Name: jobName}
-	if err := r.Get(ctx, jobKey, &job); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("get job: %w", err)
+	jobErr := r.Get(ctx, jobKey, &job)
+	if jobErr != nil && !apierrors.IsNotFound(jobErr) {
+		return ctrl.Result{}, fmt.Errorf("get job: %w", jobErr)
+	}
+
+	// The live profile is needed to launch a Job and is useful for
+	// best-effort status backfills after completion. An existing Job remains
+	// observable even if the profile changes or is removed while it runs.
+	profile := findProfile(&fg, backup.Spec.ProfileName)
+
+	if apierrors.IsNotFound(jobErr) {
+		if profile == nil {
+			return r.failBackup(ctx, &backup, "ProfileNotFound",
+				fmt.Sprintf("profile %q not found on MysqlFailoverGroup %q",
+					backup.Spec.ProfileName, fg.Name))
 		}
+
+		// Pick the source site once (replica-first, primary fallback). With no
+		// explicit override, an unavailable topology is transient: keep the CR
+		// Pending and retry instead of turning an ordinary failover window into
+		// a terminal backup failure.
+		maxLag := int64(300)
+		if fg.Spec.Backup != nil && fg.Spec.Backup.MaxLagSecondsForSource > 0 {
+			maxLag = fg.Spec.Backup.MaxLagSecondsForSource
+		}
+		sourceSite, reason, err := selectSourceSite(&fg, backup.Spec.SourceSiteOverride, maxLag)
+		if err != nil {
+			if backup.Spec.SourceSiteOverride != "" {
+				return r.failBackup(ctx, &backup, "NoHealthySource", err.Error())
+			}
+			return r.pendBackup(ctx, &backup, "NoHealthySource", err.Error())
+		}
+
+		// Ensure derived creds Secret (parses the group's DSN into
+		// user/password) before creating the Job that mounts it.
+		credsName := backupCredsSecretName(backup.Name)
+		if err := r.ensureDerivedCredsSecret(ctx, &fg, &backup, credsName); err != nil {
+			return ctrl.Result{}, fmt.Errorf("ensure creds secret: %w", err)
+		}
+
 		// Build & create.
 		built, err := BuildBackupJob(BackupJobInputs{
 			FailoverGroup:        &fg,
@@ -231,6 +253,14 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, fmt.Errorf("patch status after job create: %w", err)
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// The Job owns the source decision from here on. New Jobs persist it in
+	// labelSite as a crash-safe fallback for the narrow create-before-status
+	// window; status.sourceSite covers Jobs created by older operators.
+	sourceSite := backup.Status.SourceSite
+	if sourceSite == "" {
+		sourceSite = job.Labels[labelSite]
 	}
 
 	// Job exists — observe its status.
@@ -472,12 +502,22 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 
 // failBackup transitions a MysqlBackup to Failed with the given reason.
 func (r *MysqlBackupReconciler) failBackup(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string) (ctrl.Result, error) {
+	return r.failBackupOpts(ctx, backup, reason, message, false /*clearPreLaunchJob*/)
+}
+
+// failBackupOpts is failBackup with an option to drop stale Job attribution.
+// clearPreLaunchJob is set on the no-Job path (pending deadline exceeded) so a
+// terminal Failed status never advertises a Job that does not exist.
+func (r *MysqlBackupReconciler) failBackupOpts(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string, clearPreLaunchJob bool) (ctrl.Result, error) {
 	now := metav1.Now()
 	patch := client.MergeFrom(backup.DeepCopy())
 	backup.Status.Phase = v1alpha1.BackupPhaseFailed
 	backup.Status.CompletionTime = &now
 	backup.Status.Message = message
 	backup.Status.ObservedGeneration = backup.Generation
+	if clearPreLaunchJob {
+		clearPreLaunchJobStatus(backup, now)
+	}
 	setCondition(&backup.Status.Conditions, metav1.Condition{
 		Type:               ConditionBackupReady,
 		Status:             metav1.ConditionFalse,
@@ -491,6 +531,72 @@ func (r *MysqlBackupReconciler) failBackup(ctx context.Context, backup *v1alpha1
 	}
 	r.Recorder.Eventf(backup, corev1.EventTypeWarning, reason, "%s", message)
 	return ctrl.Result{}, nil
+}
+
+// clearPreLaunchJobStatus drops Job attribution that is only valid while a
+// backup Job exists. Used on the no-Job path (Pending retry or terminal fail
+// before launch) so status never advertises a deleted/GC'd Job.
+func clearPreLaunchJobStatus(backup *v1alpha1.MysqlBackup, now metav1.Time) {
+	backup.Status.StartTime = nil
+	backup.Status.JobName = ""
+	backup.Status.SourceSite = ""
+	backup.Status.ActiveSiteAtStart = ""
+	setCondition(&backup.Status.Conditions, metav1.Condition{
+		Type:               ConditionBackupJobCreated,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: backup.Generation,
+		LastTransitionTime: now,
+		Reason:             "NotCreated",
+		Message:            "backup Job has not been created yet",
+	})
+}
+
+// pendBackup records a retryable pre-launch dependency failure. A missing
+// healthy source is expected during failover and ordered updates; it must not
+// consume the one-shot MysqlBackup CR before a Job has even been created.
+//
+// If the wait exceeds maxBackupPendingDuration the CR is failed terminally so
+// stalled backups do not accumulate while the schedule keeps creating new ones.
+// Callers only reach this path when no Job exists yet; clear any stale
+// Job-related status so Pending/Failed never advertises a Job that is gone.
+func (r *MysqlBackupReconciler) pendBackup(ctx context.Context, backup *v1alpha1.MysqlBackup, reason, message string) (ctrl.Result, error) {
+	now := metav1.Now()
+	// A missing source is normally transient. If it persists, fail the CR so
+	// it stops occupying the schedule and becomes eligible for pruning.
+	if !backup.CreationTimestamp.IsZero() {
+		if age := now.Sub(backup.CreationTimestamp.Time); age > maxBackupPendingDuration {
+			return r.failBackupOpts(ctx, backup, reason,
+				fmt.Sprintf("%s (pending for %s)", message, age.Truncate(time.Second)),
+				true /*clearPreLaunchJob*/)
+		}
+	}
+
+	wasPending := backup.Status.Phase == v1alpha1.BackupPhasePending
+	patch := client.MergeFrom(backup.DeepCopy())
+	backup.Status.Phase = v1alpha1.BackupPhasePending
+	backup.Status.CompletionTime = nil
+	// Pre-launch: no Job exists. Drop any leftover Job attribution left by a
+	// deleted/GC'd Job so status matches the live cluster.
+	clearPreLaunchJobStatus(backup, now)
+	backup.Status.Message = message
+	backup.Status.ObservedGeneration = backup.Generation
+	setCondition(&backup.Status.Conditions, metav1.Condition{
+		Type:               ConditionBackupReady,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: backup.Generation,
+		LastTransitionTime: now,
+		Reason:             reason,
+		Message:            message,
+	})
+	if err := r.Status().Patch(ctx, backup, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("patch pending status: %w", err)
+	}
+	// Preserve the NoHealthySource signal operators used to get from failBackup,
+	// but only on the transition into Pending — not on every 15s retry.
+	if !wasPending {
+		r.Recorder.Eventf(backup, corev1.EventTypeWarning, reason, "%s", message)
+	}
+	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
 
 // ensureDerivedCredsSecret creates or updates the per-backup Secret

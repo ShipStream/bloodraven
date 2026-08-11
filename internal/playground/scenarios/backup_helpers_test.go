@@ -68,3 +68,28 @@ func TestConditionTrue(t *testing.T) {
 		t.Fatalf("Missing condition should not be true")
 	}
 }
+
+func TestConditionTrueForGeneration(t *testing.T) {
+	conds := []metav1.Condition{{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: 4,
+	}}
+	tests := []struct {
+		name       string
+		condType   string
+		generation int64
+		want       bool
+	}{
+		{name: "stale", condType: "Ready", generation: 5, want: false},
+		{name: "matching", condType: "Ready", generation: 4, want: true},
+		{name: "missing type", condType: "Missing", generation: 4, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := conditionTrueForGeneration(conds, tt.condType, tt.generation); got != tt.want {
+				t.Fatalf("conditionTrueForGeneration(%q, %d)=%v, want %v", tt.condType, tt.generation, got, tt.want)
+			}
+		})
+	}
+}

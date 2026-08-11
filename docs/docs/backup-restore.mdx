@@ -86,6 +86,16 @@ primary when the replica is unreachable, not replicating, or lagging
 beyond `spec.backup.maxLagSecondsForSource` (default `300`). Override
 per-backup with `spec.sourceSiteOverride` on a `MysqlBackup` CR.
 
+If no healthy source is available before a Job is created, the backup stays
+`Pending` with reason `NoHealthySource` and retries for up to 30 minutes; a
+normal failover window does not consume the one-shot backup as a terminal
+failure. The reconciler emits a warning Event on the transition into
+`Pending`. If no healthy source appears within that window the CR fails
+terminally (still with reason `NoHealthySource`) so retention pruning can
+reclaim it. Once the Job is created, its selected source is pinned. Later
+reconciles observe that Job without re-running source selection against a
+topology that may be changing.
+
 When `ActiveSite` changes *while* a backup is in flight, the backup
 reconciler emits an `InFlightFailover` warning event on the CR. This
 is a soft signal: the artifact is still a valid point-in-time snapshot
