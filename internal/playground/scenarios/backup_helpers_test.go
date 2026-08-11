@@ -93,3 +93,29 @@ func TestConditionTrueForGeneration(t *testing.T) {
 		})
 	}
 }
+
+func TestBackupProfileRolloutReady(t *testing.T) {
+	mfg := &v1alpha1.MysqlFailoverGroup{
+		ObjectMeta: metav1.ObjectMeta{Generation: 5},
+		Status: v1alpha1.MysqlFailoverGroupStatus{
+			ActiveSite: "iad",
+			Conditions: []metav1.Condition{{
+				Type:               "Ready",
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: 4,
+			}},
+		},
+	}
+
+	if !backupProfileRolloutReady(mfg, false) {
+		t.Fatal("plain backup profile should not wait for an unrelated topology status rewrite")
+	}
+	if backupProfileRolloutReady(mfg, true) {
+		t.Fatal("PITR profile should reject Ready=True from an older generation")
+	}
+
+	mfg.Status.Conditions[0].ObservedGeneration = mfg.Generation
+	if !backupProfileRolloutReady(mfg, true) {
+		t.Fatal("PITR profile should accept a completed current-generation rollout")
+	}
+}
