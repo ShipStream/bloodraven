@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -417,9 +416,11 @@ func (a *KeyringAgent) push(ctx context.Context, raw []byte, digest string) erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("escrow rejected with status %d: %s",
-			resp.StatusCode, strings.TrimSpace(string(msg)))
+		// Never propagate the response body into LastError. The sidecar
+		// status is copied into the MysqlFailoverGroup status, and an
+		// upstream error page may contain credentials, tokens, or key
+		// material. The HTTP status is sufficient and safe diagnostics.
+		return fmt.Errorf("escrow rejected with HTTP status %d", resp.StatusCode)
 	}
 
 	var out escrowResponse

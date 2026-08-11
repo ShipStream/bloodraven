@@ -1,6 +1,7 @@
 package sidecar
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -24,27 +25,7 @@ import (
 // for the cert-manager ca.crt the operator mounts at /etc/mysql/tls.
 func writeCAFile(t *testing.T) string {
 	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "sidecar-test-ca"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		IsCA:                  true,
-		KeyUsage:              x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("create cert: %v", err)
-	}
-	path := filepath.Join(t.TempDir(), "ca.crt")
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
-		t.Fatalf("write ca: %v", err)
-	}
+	path, _, _ := writeCAWithKey(t)
 	return path
 }
 
@@ -144,8 +125,8 @@ func TestConfigFromEnv_TLSStampsDSN(t *testing.T) {
 	if parsed.TLS == nil || parsed.TLS.ServerName != "mysql-lion-dc1.shared-lion.svc.cluster.local" {
 		t.Errorf("resolved TLS config does not verify the per-site Service name: %+v", parsed.TLS)
 	}
-	if parsed.TLS != nil && parsed.TLS.InsecureSkipVerify {
-		t.Error("the sidecar must verify the server certificate, not skip verification")
+	if parsed.TLS != nil && parsed.TLS.VerifyConnection == nil {
+		t.Error("the sidecar must install explicit server-certificate verification")
 	}
 }
 
@@ -255,6 +236,122 @@ func TestConfigFromEnv_TLSHandshakeAgainstSiteServiceSAN(t *testing.T) {
 	}
 }
 
+// TestRegisterMySQLTLS_ReloadsRotatedCA proves that the driver config reads the
+// mounted CA again for each new handshake. cert-manager updates Secret volumes
+// in place, and a long-running sidecar must trust the replacement issuer without
+// waiting for a pod restart.
+func TestRegisterMySQLTLS_ReloadsRotatedCA(t *testing.T) {
+	const siteSAN = "mysql-lion-dc1.shared-lion.svc.cluster.local"
+	caPath, firstCA, firstKey := writeCAWithKey(t)
+	secondCAPath, secondCA, secondKey := writeCAWithKey(t)
+
+	clearMySQLTLSEnv(t)
+	t.Setenv("BLOODRAVEN_MYSQL_TLS_CA_FILE", caPath)
+	t.Setenv("BLOODRAVEN_MYSQL_TLS_SERVER_NAME", siteSAN)
+	name, err := registerMySQLTLS()
+	if err != nil {
+		t.Fatalf("registerMySQLTLS: %v", err)
+	}
+	parsed, err := mysqldriver.ParseDSN("u:p@tcp(127.0.0.1:3306)/?tls=" + name)
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+
+	firstLeaf := issueLeaf(t, firstCA, firstKey, siteSAN)
+	assertTLSHandshake(t, parsed.TLS, firstLeaf, false)
+
+	rotatedPEM, err := os.ReadFile(secondCAPath)
+	if err != nil {
+		t.Fatalf("read rotated CA: %v", err)
+	}
+	if err := os.WriteFile(caPath, rotatedPEM, 0o600); err != nil {
+		t.Fatalf("rotate CA: %v", err)
+	}
+	secondLeaf := issueLeaf(t, secondCA, secondKey, siteSAN)
+	assertTLSHandshake(t, parsed.TLS, secondLeaf, false)
+	assertTLSHandshake(t, parsed.TLS, firstLeaf, true)
+}
+
+// TestRegisterMySQLTLS_ReloadsRotatedClientCertificate covers the mTLS half of
+// Secret rotation. The callback returns the current keypair, not the copy that
+// happened to be mounted when the sidecar started.
+func TestRegisterMySQLTLS_ReloadsRotatedClientCertificate(t *testing.T) {
+	const siteSAN = "mysql-lion-dc1.shared-lion.svc.cluster.local"
+	caPath, ca, caKey := writeCAWithKey(t)
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	first := issueLeaf(t, ca, caKey, "client-one")
+	writeTLSKeyPair(t, certPath, keyPath, first)
+
+	clearMySQLTLSEnv(t)
+	t.Setenv("BLOODRAVEN_MYSQL_TLS_CA_FILE", caPath)
+	t.Setenv("BLOODRAVEN_MYSQL_TLS_SERVER_NAME", siteSAN)
+	t.Setenv("BLOODRAVEN_MYSQL_TLS_CERT_FILE", certPath)
+	t.Setenv("BLOODRAVEN_MYSQL_TLS_KEY_FILE", keyPath)
+	name, err := registerMySQLTLS()
+	if err != nil {
+		t.Fatalf("registerMySQLTLS: %v", err)
+	}
+	parsed, err := mysqldriver.ParseDSN("u:p@tcp(127.0.0.1:3306)/?tls=" + name)
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+	if parsed.TLS.GetClientCertificate == nil {
+		t.Fatal("TLS config has no client-certificate reload callback")
+	}
+	gotFirst, err := parsed.TLS.GetClientCertificate(&tls.CertificateRequestInfo{})
+	if err != nil {
+		t.Fatalf("load first client certificate: %v", err)
+	}
+
+	second := issueLeaf(t, ca, caKey, "client-two")
+	writeTLSKeyPair(t, certPath, keyPath, second)
+	gotSecond, err := parsed.TLS.GetClientCertificate(&tls.CertificateRequestInfo{})
+	if err != nil {
+		t.Fatalf("load rotated client certificate: %v", err)
+	}
+	if bytes.Equal(gotFirst.Certificate[0], gotSecond.Certificate[0]) {
+		t.Fatal("client certificate callback returned stale material after rotation")
+	}
+}
+
+func assertTLSHandshake(t *testing.T, clientConfig *tls.Config, serverCert tls.Certificate, wantErr bool) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("loopback listener unavailable: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+		s := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{serverCert}})
+		_ = s.Handshake()
+		_ = s.Close()
+	}()
+
+	raw, err := net.DialTimeout("tcp", ln.Addr().String(), 10*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer raw.Close()
+	c := tls.Client(raw, clientConfig.Clone())
+	if err := c.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	err = c.Handshake()
+	if wantErr && err == nil {
+		t.Fatal("TLS handshake succeeded, want certificate verification failure")
+	}
+	if !wantErr && err != nil {
+		t.Fatalf("TLS handshake failed: %v", err)
+	}
+}
+
 // writeCAWithKey generates a CA, writes its certificate to disk, and
 // returns the path plus the material needed to issue leaves from it.
 func writeCAWithKey(t *testing.T) (string, *x509.Certificate, *ecdsa.PrivateKey) {
@@ -309,6 +406,24 @@ func issueLeaf(t *testing.T, caCert *x509.Certificate, caKey *ecdsa.PrivateKey, 
 		t.Fatalf("create leaf: %v", err)
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+func writeTLSKeyPair(t *testing.T, certPath, keyPath string, cert tls.Certificate) {
+	t.Helper()
+	key, ok := cert.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		t.Fatalf("private key type = %T, want *ecdsa.PrivateKey", cert.PrivateKey)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal client key: %v", err)
+	}
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}), 0o600); err != nil {
+		t.Fatalf("write client certificate: %v", err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatalf("write client key: %v", err)
+	}
 }
 
 // TestWithMySQLTLSConfig_PreservesExplicitChoice guards the legacy

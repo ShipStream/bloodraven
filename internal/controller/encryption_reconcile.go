@@ -310,7 +310,9 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 const maxSidecarErrorInStatus = 200
 
 // withSidecarError appends the sidecar's own last error to a waiting
-// message.
+// message. Escrow HTTP failures contain only the status code: the sidecar
+// deliberately strips response bodies before LastError crosses this status
+// boundary because an upstream error page may contain sensitive material.
 //
 // A stalled escrow is otherwise indistinguishable from a slow one: the
 // operator polls /keyring/status, which already carries the reason the

@@ -482,19 +482,19 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	for i, site := range fg.Spec.Sites {
 		var dsn string
 		var err error
-		if fg.Spec.UsesCredentials() {
-			tlsConfigName := ""
-			if fg.Spec.TLS != nil {
-				// Dial the always-published internal Service while retaining the
-				// client-facing hostname as TLS ServerName for existing certificates.
-				tlsConfigName, err = mysqlTLSConfig(ctx, r.client, fg, siteServiceHost(fg.Name, site.Name, fg.Namespace))
-				if err != nil {
-					for j := 0; j < i; j++ {
-						siteMySQL[j].Close()
-					}
-					return fmt.Errorf("configure TLS for site %s: %w", site.Name, err)
+		tlsConfigName := ""
+		if fg.Spec.TLS != nil {
+			// Dial the always-published internal Service while retaining the
+			// client-facing hostname as TLS ServerName for existing certificates.
+			tlsConfigName, err = mysqlTLSConfig(ctx, r.client, fg, siteServiceHost(fg.Name, site.Name, fg.Namespace))
+			if err != nil {
+				for j := 0; j < i; j++ {
+					siteMySQL[j].Close()
 				}
+				return fmt.Errorf("configure TLS for site %s: %w", site.Name, err)
 			}
+		}
+		if fg.Spec.UsesCredentials() {
 			dsn = buildSiteDSNFromCreds(
 				string(secret.Data["username"]),
 				string(secret.Data["password"]),
@@ -504,16 +504,6 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 			dsnBytes, ok := secret.Data["dsn"]
 			if !ok {
 				return fmt.Errorf("secret %s missing 'dsn' key", secretNN)
-			}
-			tlsConfigName := ""
-			if fg.Spec.TLS != nil {
-				tlsConfigName, err = mysqlTLSConfig(ctx, r.client, fg, siteServiceHost(fg.Name, site.Name, fg.Namespace))
-				if err != nil {
-					for j := 0; j < i; j++ {
-						siteMySQL[j].Close()
-					}
-					return fmt.Errorf("configure TLS for site %s: %w", site.Name, err)
-				}
 			}
 			dsn, err = buildSiteDSN(string(dsnBytes), fg, site, tlsConfigName)
 			if err != nil {

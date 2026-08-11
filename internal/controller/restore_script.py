@@ -59,6 +59,7 @@ import datetime
 import glob
 import json
 import os
+import ssl
 import subprocess
 import sys
 import urllib.parse
@@ -78,20 +79,26 @@ def _tls_options():
 
     BLOODRAVEN_TLS is set by the operator whenever the failover group has
     spec.tls, which also means mysqld runs with
-    require_secure_transport=ON. The CA the operator mounts is used when
-    it is present so the connection is verified rather than merely
-    encrypted; REQUIRED is the fallback when no CA reached the pod.
-    PREFERRED (the client default) is kept for non-TLS groups so their
-    behaviour is unchanged.
+    require_secure_transport=ON. TLS-enabled jobs require the mounted CA
+    to be present and usable so they cannot silently downgrade to an
+    encrypted-but-unverified connection. PREFERRED (the client default)
+    is kept for non-TLS groups so their behaviour is unchanged.
     """
     if not _bool("BLOODRAVEN_TLS"):
         return "PREFERRED", ""
     ca = (os.environ.get("BLOODRAVEN_TLS_CA_FILE") or "").strip()
-    if ca and os.path.exists(ca):
-        return "VERIFY_CA", ca
-    return "REQUIRED", ""
-
-
+    if not ca:
+        raise RuntimeError(
+            "BLOODRAVEN_TLS=1 requires BLOODRAVEN_TLS_CA_FILE"
+        )
+    try:
+        # Validate before either mysqlsh or the PITR mysql client connects.
+        ssl.create_default_context(cafile=ca)
+    except (OSError, ssl.SSLError) as exc:
+        raise RuntimeError(
+            "BLOODRAVEN_TLS_CA_FILE is not a usable CA file: {}".format(exc)
+        )
+    return "VERIFY_CA", ca
 
 def _host_port(addr, default_port=3306):
     if not addr:

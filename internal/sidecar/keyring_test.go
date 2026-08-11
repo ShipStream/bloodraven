@@ -340,6 +340,12 @@ func TestKeyringAgent_RetriesOnServerError(t *testing.T) {
 	if got.LastError == "" {
 		t.Error("the rejection should surface on status so the operator can report it")
 	}
+	if !strings.Contains(got.LastError, "HTTP status 403") {
+		t.Errorf("LastError = %q, want only the safe HTTP status", got.LastError)
+	}
+	if strings.Contains(got.LastError, "nope") {
+		t.Errorf("LastError exposed the escrow response body: %q", got.LastError)
+	}
 }
 
 func TestKeyringAgent_NoEscrowWhenDisarmed(t *testing.T) {
