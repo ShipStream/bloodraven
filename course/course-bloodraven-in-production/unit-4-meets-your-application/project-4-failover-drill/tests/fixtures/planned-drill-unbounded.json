@@ -1,0 +1,56 @@
+{
+  "drill": {
+    "mode": "planned",
+    "group": "orders",
+    "namespace": "bloodraven-playground",
+    "demotedSite": "pdx",
+    "label": "baseline: unfixed pool",
+    "trigger": "kubectl -n bloodraven-playground annotate mysqlfailovergroup orders bloodraven.shipstream.io/planned-failover=iad",
+    "capturedAt": "2026-08-12T10:05:00Z",
+    "pool": {
+      "maxOpenConns": 5,
+      "connMaxLifetime": null,
+      "readWriteSplit": false,
+      "retryOnErrorCodes": []
+    },
+    "appToleration": {
+      "key": "shipstream.io/db-readonly-orders",
+      "value": "true",
+      "effect": "NoExecute",
+      "tolerationSeconds": 60
+    }
+  },
+  "status": {
+    "activeSite": "iad",
+    "lastFailover": "2026-08-12T10:00:38Z",
+    "lastFailoverTarget": "iad",
+    "promotionGtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-191447",
+    "plannedFailover": {
+      "phase": "Succeeded",
+      "targetSite": "iad",
+      "transactionsLost": 0,
+      "sourceGtidAtFence": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-191447",
+      "drainTimeout": "30s",
+      "maxLagWait": "5m",
+      "connectionsRemainingAtDrainEnd": 3,
+      "drainLog": "drain budget exhausted after 30s with 3 connection(s) remaining on \"pdx\"; proceeding"
+    },
+    "sites": [
+      {
+        "name": "iad",
+        "role": "primary-candidate",
+        "state": "writable"
+      },
+      {
+        "name": "pdx",
+        "role": "primary-candidate",
+        "state": "read-only"
+      },
+      {
+        "name": "reader",
+        "role": "read-only",
+        "state": "read-only"
+      }
+    ]
+  }
+}

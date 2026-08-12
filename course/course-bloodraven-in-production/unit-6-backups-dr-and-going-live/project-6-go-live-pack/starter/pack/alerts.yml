@@ -1,0 +1,116 @@
+# Prometheus alerting rules for the MysqlFailoverGroup `orders`.
+#
+# `orders` runs three sites:
+#   iad     role: primary-candidate
+#   pdx     role: primary-candidate
+#   reader  role: read-only
+#
+# Thresholds you should keep as they are, because a fixture depends on them:
+#   BloodravenReplicationLagging  > 300   (spec.replication.maxLagSeconds default)
+#
+# Thresholds that are yours to choose (they are SLOs, not Bloodraven defaults):
+#   BloodravenBackupStale         > 86400
+#   BloodravenFailoverOccurred    increase over 1h
+---
+groups:
+  - name: bloodraven-orders
+    rules:
+      - alert: BloodravenOperatorDown
+        expr: 'up{job="bloodraven"} == 0'
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No operator is deciding anything for orders."
+          at3am: "MySQL keeps serving reads and writes. Nothing will detect a failure or promote a candidate until this clears."
+
+      - alert: BloodravenNoWritableSite
+        expr: 'absent(bloodraven_site_state{state="writable"} == 1)'
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "orders has no writable site."
+          at3am: "Writes are down now. Either the matrix refused to elect, or a promotion has not landed."
+
+      - alert: BloodravenSplitBrainResolved
+        expr: 'increase(bloodraven_split_brain_auto_resolve_total[15m]) > 0'
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Split brain was auto-resolved on orders."
+          at3am: "Two sides took writes. The loser was fenced by policy, and its unreplicated writes are gone."
+
+      # TODO A --------------------------------------------------------------
+      # Scenario 42 soaks the reader past three times maxLagSeconds and
+      # asserts the group stays Ready, no failover fires, no cooldown is
+      # consumed, and only the reader endpoint sheds. That is designed
+      # behaviour, so this rule must not page for it.
+      #
+      # Exclude the read-only site by label, and leave the threshold at 300
+      # so a genuinely lagging primary-candidate still pages.
+      - alert: BloodravenReplicationLagging
+        expr: 'bloodraven_replication_lag_seconds > 300'
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replication lag on orders is past maxLagSeconds."
+          at3am: "Your RPO is drifting. This is not a promotion gate — a beyond-threshold candidate is still promoted."
+
+      - alert: BloodravenReplicationDown
+        expr: 'bloodraven_replication_running == 0'
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A replication applier thread on orders has stopped."
+          at3am: "Your RPO stops improving from this moment. Nothing automatic will fix it."
+
+      - alert: BloodravenDivergentTransactions
+        expr: 'bloodraven_divergent_transactions > 0'
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A site on orders holds transactions the primary never saw."
+          at3am: "A human has to decide on a reclone. The site will not rejoin on its own."
+
+      # TODO B --------------------------------------------------------------
+      # `bloodraven_backup_age_seconds` does not exist. The shipped operator
+      # exports a last-success timestamp gauge instead, so an age has to be
+      # derived from it. Rewrite this expression against a metric in
+      # SHIPPED_METRICS and keep the 24-hour SLO.
+      - alert: BloodravenBackupStale
+        expr: 'bloodraven_backup_age_seconds > 86400'
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No successful backup of orders in 24 hours."
+          at3am: "Your recovery story is ageing out. The data plane is fine."
+
+      - alert: BloodravenPITRArchiveLagging
+        expr: 'bloodraven_archiver_backlog_files > 0'
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sealed binlogs for orders are not reaching the bucket."
+          at3am: "MySQL is serving normally and your PITR RPO is silently drifting. This is the silent degradation."
+
+      # TODO C --------------------------------------------------------------
+      # One required alert is missing: BloodravenKeyringNotSealed.
+      # `Sealed` is the steady state; any other phase means the site is
+      # running with a writable keyring or failed to escrow one. The metric
+      # is a one-hot gauge over the phase label.
+
+      - alert: BloodravenFailoverOccurred
+        expr: 'increase(bloodraven_failovers_total[1h]) > 0'
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "An emergency failover completed on orders."
+          at3am: "Informational and operator-scoped. It says the operator finished, not that traffic recovered."

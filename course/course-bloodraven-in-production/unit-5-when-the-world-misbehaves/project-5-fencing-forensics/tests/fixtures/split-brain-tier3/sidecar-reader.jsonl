@@ -1,0 +1,2 @@
+{"time":"2026-08-12T14:01:03.220Z","level":"INFO","msg":"safety net: set super_read_only=ON as precaution on startup","fg":"orders","pod":"mysql-orders-reader-7c8b5d69f-nb4wq"}
+{"time":"2026-08-12T14:01:03.505Z","level":"WARN","msg":"safety net: could not query active site, staying fenced","error":"Get \"http://bloodraven.bloodraven-playground.svc:8080/active-site\": context deadline exceeded","fg":"orders","pod":"mysql-orders-reader-7c8b5d69f-nb4wq"}

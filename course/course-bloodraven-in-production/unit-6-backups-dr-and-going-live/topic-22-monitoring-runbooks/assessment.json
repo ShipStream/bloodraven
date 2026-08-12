@@ -1,0 +1,130 @@
+{
+  "flashcards": [
+    {
+      "front": "`bloodraven_site_state`",
+      "back": "State-set gauge, labels `{site, state}` — 1 for the site's current state and 0 for the other three. Zero writable core sites means writes are down right now.",
+      "orderIndex": 0
+    },
+    {
+      "front": "Your `bloodraven_replication_lag_seconds > 30` rule has been silent for an hour while `pdx` has not replicated at all. Why?",
+      "back": "The gauge reads `-1`, not a large number, when lag is NULL because the site is not replicating. A positive threshold never crosses it — `bloodraven_replication_running{site,thread}` == 0 is the rule that catches a stopped replica.",
+      "orderIndex": 1
+    },
+    {
+      "front": "`bloodraven_failovers_total` — what does an increment prove, and what does it not?",
+      "back": "It proves the operator completed a MySQL promotion on `target_site`; the counter is stamped before the DNS flip so a DNS outage cannot erase it. It does not prove traffic recovered, which is why `BloodravenFailoverOccurred` is informational, not a page.",
+      "orderIndex": 2
+    },
+    {
+      "front": "`bloodraven_divergent_transactions`",
+      "back": "Gauge per site, 0 when healthy. Above 0 means that site is `RecoveryBlocked` and will wait forever until a human makes a reclone decision.",
+      "orderIndex": 3
+    },
+    {
+      "front": "`bloodraven_split_brain_auto_resolve_total`",
+      "back": "Counter labelled by the winning site. Every increment means two sides took writes and the loser's unreplicated writes were discarded — the loss is surfaced loudly, not prevented.",
+      "orderIndex": 4
+    },
+    {
+      "front": "`bloodraven_primary_reassert_total` is climbing steadily. What do you go and check?",
+      "back": "Sidecar connectivity to the operator's auxiliary Service — something keeps fencing the promoted primary, typically a sidecar re-fencing on a stale lease straight after promotion.",
+      "orderIndex": 5
+    },
+    {
+      "front": "`bloodraven_poll_latency_seconds` — why alert at p99 > 2?",
+      "back": "2 s is the `pollInterval` default. Once p99 poll latency reaches the poll interval, the 6 s detection budget is no longer real and only the per-site 5 s probe ceiling is holding the loop together.",
+      "orderIndex": 6
+    },
+    {
+      "front": "`bloodraven_archiver_backlog_files` — which component emits it, and about what?",
+      "back": "The per-site sidecar's PITR archiver, labels `{namespace, group, site}`. It counts sealed binlogs not yet uploaded at the end of the last scan; only the primary archives and only sealed binlogs ever upload.",
+      "orderIndex": 7
+    },
+    {
+      "front": "`bloodraven_backup_last_success_timestamp_seconds` — what caps the staleness threshold you set on it?",
+      "back": "`binlog-expire-logs-seconds`, 1209600 s (14 days) by default. Past that floor PITR has no binlog material left to bridge your last backup to now, so your threshold must sit well below it.",
+      "orderIndex": 8
+    },
+    {
+      "front": "`bloodraven_keyring_phase` — the alerting form",
+      "back": "One-hot gauge over the five phases, labels `{mysql_namespace, failover_group, site, phase}`. Alert on `{phase=\"sealed\"} == 0` for any site that should be protected.",
+      "orderIndex": 9
+    },
+    {
+      "front": "`bloodraven_dns_flips_total`",
+      "back": "Counter per target site. A `bloodraven_failovers_total` increment with no matching flip means the CR promoted correctly while external-dns never moved the record — still a write outage.",
+      "orderIndex": 10
+    },
+    {
+      "front": "`bloodraven_state_transitions_total`",
+      "back": "Counter labelled `{site, from, to}`. Forensics, never a page — it is what you read after the incident to reconstruct the order sites changed state in.",
+      "orderIndex": 11
+    },
+    {
+      "front": "The label matcher that stops a soaked reader paging you",
+      "back": "`{site!=\"reader\"}` — `bloodraven_replication_lag_seconds` carries a `site` label only, so the exclusion is by site name and you maintain it by hand each time you add a reader.",
+      "orderIndex": 12
+    },
+    {
+      "front": "Which alert tells you the application is still broken after a successful failover?",
+      "back": "None that Bloodraven ships. You write it: repeated read-only errors, write failures and pool exhaustion from your own application.",
+      "orderIndex": 13
+    }
+  ],
+  "quiz": [
+    {
+      "question": "It is 3am and one Bloodraven alert has fired for `orders`. The counter application has not missed a write, both `iad` and `pdx` are serving, and replication lag is flat. Which alert is it?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 0,
+      "options": [
+        "`BloodravenOperatorDown`",
+        "`BloodravenNoWritableSite`",
+        "`BloodravenNoPrimary`",
+        "`BloodravenReplicationDown`"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "The operator is on the failure-detection and promotion path, not the request path — a healthy primary and replica keep serving with zero operator involvement, and sidecar fencing preserves correctness however long it is gone. So the only alert compatible with 'writes are fine' is the one saying nobody is deciding anything; what you have lost is failover cover, which is why it is a ticket that escalates rather than an instant page. `BloodravenNoWritableSite` and `BloodravenNoPrimary` are both built on `bloodraven_site_state` and both mean writes are down now, which contradicts the counter app still writing. `BloodravenReplicationDown` fires off `bloodraven_replication_running == 0`, which contradicts flat lag on a running replica. (objective 10)"
+    },
+    {
+      "question": "Chaos scenario 42 applies `SOURCE_DELAY` to the `read-only` site `reader` and soaks `orders` for three times `maxLagSeconds` while the primary keeps taking writes. Which single alert in a carelessly written set would page you, and exactly what do you change to fix it?",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 1,
+      "sampleAnswer": "`BloodravenReplicationLagging`, written as `bloodraven_replication_lag_seconds > 30`. Add a site-label exclusion for the reader: `bloodraven_replication_lag_seconds{site!=\"reader\"} > 30`. Nothing else in the set moves — scenario 42 asserts the group stays Ready, activeSite never changes, no failover is recorded and no anti-flap cooldown is consumed. The only reaction is that `reader` leaves the endpoints of `mysql-orders-replicas` once its lag passes `readOnlyMaxLagSeconds`, which is the designed behaviour of the read-only role, not a fault. The exclusion has to name the site because the gauge carries a `site` label only — there is no `role` label to filter on.",
+      "graderNotes": "A strong answer names `BloodravenReplicationLagging` (or an equivalent rule on `bloodraven_replication_lag_seconds`), writes the corrected expression with a `site!=\"reader\"` matcher, and justifies the exclusion by scenario 42's assertions — group stays Ready, no failover, no cooldown consumed, only the reader endpoint sheds. Credit the observation that the exclusion must be by site name because the metric has no `role` label. Do not credit answers that propose raising the threshold, lengthening `for:`, or silencing the alert in the alertmanager route: those hide a real replica falling behind as well as the reader.",
+      "explanation": "The reader shedding its endpoint is the read-only role working as designed, so an alert on it is a page for a non-event the system already handled. Raising the threshold or extending `for:` would also mute a genuinely lagging `pdx`; the exclusion is surgical because it removes exactly the one site whose lag has no bearing on RPO. (objectives 10, 12)"
+    },
+    {
+      "question": "You wrote automation that watches the failover group's condition and acts when the reason equals `Failover`. It has never fired, through several confirmed promotions. Why?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 2,
+      "options": [
+        "The condition reason is only written on state transitions, and a 12 s promotion is too fast for a scrape to observe",
+        "The failover row of the decision matrix sets `Reason = \"Degraded\"`; `Failover` is not one of the five reasons the code can emit",
+        "Condition reasons are only populated when `spec.splitBrainPolicy.sitePriorities` is set, and yours is empty",
+        "A promotion sets the reason to `SplitBrain` until the old primary rejoins as a replica"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "The matrix emits exactly five reasons — `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss` — and the failover row is stamped `Degraded`, so a matcher on `Failover` sits green forever. Use `bloodraven_failovers_total` for 'a failover happened'. The scrape-timing option is tempting but wrong twice over: the matrix is evaluated every poll so status always carries the current topology, and the reason would still be the wrong string at any scrape interval. `sitePriorities` governs split-brain auto-resolution only; it does not gate whether conditions carry reasons. And `SplitBrain` is a distinct matrix row requiring more than one writable core site, which a completed promotion is not. (objective 10)"
+    },
+    {
+      "question": "`bloodraven_archiver_backlog_files{site=\"iad\"}` has been non-zero at every scrape for five minutes. `orders` is Ready, the counter app is writing normally and replication lag is 0. What is actually degrading?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 3,
+      "options": [
+        "Replication to `pdx` is behind by that many binlog files and RPO on a failover is growing",
+        "The primary's binlog volume is filling and MySQL will stop accepting writes when it does",
+        "Your point-in-time recovery window — sealed binlogs are not reaching object storage, so a restore can only reach the last archived file",
+        "The last several backup verifications failed and the artifacts are unrestorable"
+      ],
+      "correctOptionIndex": 2,
+      "explanation": "The gauge counts sealed binlogs the sidecar archiver has not yet uploaded. The data plane is untouched — MySQL serves, replication ships, the group is Ready — but PITR reaches only the last binlog event you actually archived, so every minute of backlog is recovery window you no longer have. This is the silent degradation pattern: nothing is broken now, your recovery story is. The replication option confuses two different streams: async replication to `pdx` is a MySQL-to-MySQL binlog stream and has nothing to do with uploads to object storage, and lag is 0 anyway. Disk pressure is a plausible downstream consequence of unarchived files piling up, but the gauge measures upload backlog, not free space. And backup verification has its own metric family and its own alert; a failed verification does not move this gauge. (objective 10)"
+    },
+    {
+      "question": "`BloodravenFailoverOccurred` fires and then resolves. That is sufficient evidence that your application is writing again.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 4,
+      "correctAnswer": false,
+      "explanation": "The reversal: the alert is informational and operator-scoped — it says the operator finished a promotion, not that traffic recovered. Bloodraven cannot see your connection pool still holding a session to the demoted primary, your driver without `rejectReadOnly`, or a JVM DNS cache ignoring the record's TTL. It cannot even guarantee DNS moved: a promotion that increments `bloodraven_failovers_total` with no matching `bloodraven_dns_flips_total` increment is still a write outage. No shipped alert covers 'the application is broken after a successful failover' — that rule is yours to write, on repeated read-only errors and write failures from your own application. (objectives 10, 11)"
+    }
+  ]
+}

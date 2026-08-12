@@ -1,0 +1,6 @@
+node_modules/
+dist/
+
+# Python bytecode from running project starters and tests locally
+__pycache__/
+*.pyc

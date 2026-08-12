@@ -107,6 +107,40 @@
   text-decoration: none;
 }
 
+/* Two hero calls to action sit side by side, and wrap rather than overflow
+   on a narrow viewport. */
+.hero-bloodraven .hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+/* Secondary hero action: outlined so it reads as the second choice beside the
+   solid "Get Started", while staying legible over the hero image in both
+   themes (the overlay behind it differs per theme, so the border and text are
+   fixed white rather than a token). */
+.hero-bloodraven .button--hero-secondary {
+  background: rgba(0, 0, 0, 0.28);
+  color: #fff;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  font-size: 1.1rem;
+  padding: 0.75rem 2rem;
+  border-radius: 8px;
+  font-weight: 600;
+  transition: background 0.2s, border-color 0.2s, transform 0.15s;
+  text-shadow: none;
+  backdrop-filter: blur(2px);
+}
+
+.hero-bloodraven .button--hero-secondary:hover {
+  background: rgba(0, 0, 0, 0.45);
+  border-color: #fff;
+  color: #fff;
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+
 /* Light mode hero overlay is heavier so text stays readable */
 [data-theme='light'] .hero-bloodraven::after {
   background: linear-gradient(

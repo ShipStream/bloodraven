@@ -1,0 +1,109 @@
+{
+  "flashcards": [
+    {
+      "front": "`spec.failoverCooldown` — default, and what the playground uses",
+      "back": "`5m` by default (CRD default and the operator's own fallback when the field is nil). The playground manifest overrides it to `30s` for fast experimentation.",
+      "orderIndex": 0
+    },
+    {
+      "front": "Where in the poll cycle is the anti-flap cooldown actually enforced?",
+      "back": "In exactly one place: an `if` immediately before the promotion call, after the cross-site table has already chosen a candidate. Nothing else in the poll consults it.",
+      "orderIndex": 1
+    },
+    {
+      "front": "The log line the operator emits when the cooldown blocks a promotion",
+      "back": "`failover blocked by anti-flap cooldown`, at INFO, with fields `lastFailover` and `cooldown`.",
+      "orderIndex": 2
+    },
+    {
+      "front": "Name three mutating subsystems that keep running while the cooldown is ticking",
+      "back": "Source convergence, old-primary recovery, and reclone — each runs from its own poll call site and never reads `failoverCooldown`. (DNS reconcile and both fencing paths are in the same group.)",
+      "orderIndex": 3
+    },
+    {
+      "front": "The two annotation keys that carry the failover history on the object itself",
+      "back": "`bloodraven.shipstream.io/last-failover` (the instant, RFC3339 UTC at second precision) and `bloodraven.shipstream.io/last-failover-target` (the promoted site name), written together in one JSON merge patch.",
+      "orderIndex": 4
+    },
+    {
+      "front": "Why is the failover record written to both status and annotations?",
+      "back": "Status is a subresource: its writes travel a separate API path with their own RBAC rule (`mysqlfailovergroups/status`) and admission chain, so one path can be broken or denied while the other still records the promotion.",
+      "orderIndex": 5
+    },
+    {
+      "front": "`FailoverClockSkewGrace`",
+      "back": "`5 * time.Minute` — a durable copy stamped more than five minutes ahead of local time is discarded rather than installed, because the cooldown gate reads negative elapsed time as still active.",
+      "orderIndex": 6
+    },
+    {
+      "front": "The verbatim `msg` the operator logs when it restores writability on a fenced promoted primary",
+      "back": "`re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability`, at WARN, with field `site`.",
+      "orderIndex": 7
+    },
+    {
+      "front": "Which metric counts primary re-asserts, and what does a climbing value mean?",
+      "back": "`bloodraven_primary_reassert_total{site}` — a steadily increasing counter means something keeps fencing the promoted primary, so investigate sidecar connectivity to the operator.",
+      "orderIndex": 8
+    },
+    {
+      "front": "`spec.updateStrategy`",
+      "back": "Documented but inert: the field exists in the CRD, yet no Go code outside the type definition reads it. Ordered update triggers on spec drift alone, so setting `Recreate` changes nothing.",
+      "orderIndex": 9
+    }
+  ],
+  "quiz": [
+    {
+      "question": "`orders` failed over to `pdx` ninety seconds ago and `spec.failoverCooldown` is the default `5m`. A stale `iad` now comes back writable, giving two writable sites. The operator will leave both writable until the cooldown expires.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 0,
+      "correctAnswer": false,
+      "explanation": "The reversal: the cooldown gates promotion and nothing else, so split-brain fencing is not delayed by it at all. `iad` is fenced on the next poll, from its own cross-site call site, which never reads `failoverCooldown`. The tempting model — cooldown as a five-minute freeze on the whole group — also predicts wrongly for source convergence, old-primary recovery, reclone and DNS reconcile, all of which keep running. (objective 7)",
+      "difficulty": "medium"
+    },
+    {
+      "question": "During a rolling image change on `orders`, `bloodraven_failovers_total` increments for `pdx`. The last emergency failover was ninety seconds earlier, `spec.failoverCooldown` is `5m`, and no `failover blocked by anti-flap cooldown` line appears anywhere in the operator log. What happened?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 1,
+      "options": [
+        "The ordered-update handoff promoted `pdx`; that path calls `recordFailover` and increments the counter but is never cooldown-gated, so the guard was never reached",
+        "The operator restarted during the update and rehydrated an empty `lastFailover`, so the cooldown evaluated as expired",
+        "The counter increments on promotion attempts rather than completed promotions, and attempts are not gated",
+        "`spec.updateStrategy: Recreate` disables anti-flap for the duration of the rollout"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "The ordered-update handoff is a separate promotion path with no cooldown check anywhere in it, yet its completion callback stamps the durable failover record and increments `bloodraven_failovers_total` — so the counter moves without the guard ever being consulted, which is also why there is no log line. Option 2 would produce a rehydration warning and requires a restart you did not observe; rehydration also prefers the later of the two durable copies rather than emptying them. Option 3 is wrong: the counter is incremented after a successful promotion, not on attempts. Option 4 is the inert-field trap — `spec.updateStrategy` is read by no Go code outside its type definition and cannot disable anything. (objective 7)",
+      "difficulty": "hard"
+    },
+    {
+      "question": "The operator restarts. `status.lastFailover` reads `10:04:00Z`, the `bloodraven.shipstream.io/last-failover` annotation reads `10:06:00Z`, and the local clock is `10:07:00Z`. Which record does the restarted operator install as its cooldown baseline?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 2,
+      "options": [
+        "The status copy, because status is the authoritative subresource and the annotations are only a fallback",
+        "The annotation copy at `10:06:00Z`, because rehydration takes whichever copy is stamped later",
+        "Neither — a disagreement between the two copies is treated as corrupt and the cooldown restarts empty",
+        "Neither copy directly: the operator averages them to bound clock skew between the two write paths"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "Rehydration takes the later of the two, because the two paths fail independently: the annotation is ahead precisely when the status write was rejected. `10:06:00Z` is only one minute ahead of local time, well inside `FailoverClockSkewGrace` of `5m`, so it is plausible and gets installed. Option 1 inverts the design — neither copy outranks the other, status only wins an exact tie. Option 3 describes the failure the duplication exists to prevent: discarding history is what resets a cooldown and lets a promotion happen inside the window. Option 4 is invented; there is no averaging, only a later-wins comparison with a future-date guard. (objective 8)",
+      "difficulty": "medium"
+    },
+    {
+      "question": "Every site in `orders` is read-only, no site is unreachable, and `lastFailoverTarget` names `pdx`. All the re-assert preconditions hold except one: the promotion GTID recorded in status was hand-edited during an incident and no longer parses. What does the operator do, and why is that the right behaviour?",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 3,
+      "sampleAnswer": "It refuses the re-assert. It logs `primary re-assert refused: recorded promotion GTID set failed to parse — status corrupted or manually edited?` at WARN and returns without touching MySQL, leaving the group on its NoPrimary alert for a human. It does not treat the unparseable value as absent and skip the GTID gate. The whole safety argument for re-asserting a fenced primary is that the target's GTID_EXECUTED provably contains the recorded promotion GTID set and every peer's set; if the recorded invariant cannot be read, it cannot have been verified, so proceeding would restore writability on a site that might be missing transactions.",
+      "graderNotes": "A strong answer covers: (1) refuse, not skip — the operator returns without mutating MySQL; (2) the reason is that the operator itself wrote that value from MySQL, so a parse failure means corruption or manual tampering; (3) the safety argument depends on the recorded invariant being trustworthy, so an unreadable invariant is not a satisfied one; (4) the consequence is that the group stays wedged and alerting until a human intervenes. Bonus: naming the log msg, or noting that skipping the gate would be the dangerous inversion.",
+      "explanation": "The refusal is the point. A parse failure is evidence that status has been corrupted or edited, and the re-assert is only safe because the recorded promotion GTID set can be checked against the target's live `GTID_EXECUTED`. Treating an unreadable value as 'no constraint' would convert the strongest gate into no gate at exactly the moment the data is least trustworthy. (objective 9)",
+      "difficulty": "hard"
+    },
+    {
+      "question": "With `spec.failoverCooldown` at the shipped `5m`, `orders` failed over to `pdx` two minutes ago and every site is now read-only. A primary re-assert cannot fire until the five minutes are up.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 4,
+      "correctAnswer": false,
+      "explanation": "The reversal: the re-assert can fire right now. It reuses the `failoverCooldown` duration as its rate limit, but measures it against a separate timer, `lastReassert`, which is never compared against `lastFailover`. Two minutes after a failover, `lastReassert` is still zero, so the rate limit is satisfied even though an automatic promotion would be blocked for another three minutes. Assuming one shared clock is the common wrong model, and it makes the re-assert look impossible exactly when it is the thing rescuing the group. (objectives 7, 9)",
+      "difficulty": "hard"
+    }
+  ]
+}

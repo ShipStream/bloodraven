@@ -1,0 +1,93 @@
+{
+  "apiVersion": "shipstream.io/v1alpha1",
+  "kind": "MysqlFailoverGroup",
+  "metadata": {
+    "name": "orders",
+    "namespace": "bloodraven-playground",
+    "generation": 4
+  },
+  "spec": {
+    "image": "mysql:9.7",
+    "secretName": "mysql-credentials",
+    "pollInterval": "2s",
+    "failureThreshold": 3,
+    "recoveryThreshold": 2,
+    "failoverCooldown": "30s",
+    "dns": {
+      "hostname": "orders-db.example.local",
+      "ttl": 10
+    },
+    "replication": {
+      "maxLagSeconds": 30
+    },
+    "sites": [
+      {
+        "name": "iad",
+        "role": "primary-candidate",
+        "zone": "zone-iad"
+      },
+      {
+        "name": "pdx",
+        "role": "primary-candidate",
+        "zone": "zone-pdx"
+      },
+      {
+        "name": "reader",
+        "role": "read-only",
+        "zone": "zone-reader"
+      }
+    ]
+  },
+  "status": {
+    "activeSite": "iad",
+    "sites": [
+      {
+        "name": "iad",
+        "state": "writable",
+        "lastSeen": "2026-08-12T09:14:32Z",
+        "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
+        "replicating": false
+      },
+      {
+        "name": "pdx",
+        "state": "read-only",
+        "lastSeen": "2026-08-12T09:14:32Z",
+        "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-51004",
+        "replicating": true,
+        "sourceHost": "mysql-orders-iad-internal.bloodraven-playground.svc.cluster.local",
+        "sourceConvergenceState": "Converged",
+        "sourceConvergenceReason": "DirectSource",
+        "secondsBehindSource": 300
+      },
+      {
+        "name": "reader",
+        "state": "read-only",
+        "lastSeen": "2026-08-12T09:14:32Z",
+        "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
+        "replicating": true,
+        "sourceHost": "mysql-orders-iad-internal.bloodraven-playground.svc.cluster.local",
+        "sourceConvergenceState": "Converged",
+        "sourceConvergenceReason": "DirectSource",
+        "secondsBehindSource": 0
+      }
+    ],
+    "conditions": [
+      {
+        "type": "Ready",
+        "status": "True",
+        "observedGeneration": 4,
+        "lastTransitionTime": "2026-08-12T09:14:32Z",
+        "reason": "TopologyPolled",
+        "message": "At least one site is writable and replication is healthy"
+      },
+      {
+        "type": "Degraded",
+        "status": "True",
+        "observedGeneration": 4,
+        "lastTransitionTime": "2026-08-12T09:14:32Z",
+        "reason": "ReplicationLagging",
+        "message": "Replication lag on pdx is 300s (threshold 30s)"
+      }
+    ]
+  }
+}

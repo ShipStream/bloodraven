@@ -1,0 +1,120 @@
+{
+  "flashcards": [
+    {
+      "front": "Partition scenario A",
+      "back": "The operator cannot reach site A while site B is reachable — the only one of the five shapes that produces an automatic promotion. Exercised by chaos scenarios 09 and 06 plus the DST fault `partitionOperatorSite`.",
+      "orderIndex": 0
+    },
+    {
+      "front": "Partition scenario B",
+      "back": "The replica site is isolated while the primary stays reachable to the operator. Exercised by chaos scenario 17, a negative-assertion suite that fails if a failover or a self-fence ever happens.",
+      "orderIndex": 1
+    },
+    {
+      "front": "Partition scenario C",
+      "back": "The MySQL-to-MySQL link is broken while the operator still polls both sites cleanly. Covered by the deterministic simulator only, as the `partitionPair` fault — no live chaos scenario exercises it.",
+      "orderIndex": 2
+    },
+    {
+      "front": "Partition scenario D",
+      "back": "Asymmetric peer reachability — `iad` reaches `pdx` but `pdx` cannot reach `iad`. Analysis only: the DST fault model keys link state on a symmetric `pairKey`, so one-way reachability is unrepresentable and no test of any kind exercises this shape.",
+      "orderIndex": 3
+    },
+    {
+      "front": "Partition scenario E",
+      "back": "Every site is unreachable to the operator — total loss, no promotion, because no reachable candidate exists. Covered only indirectly, by chaos scenario 11, which scales every site to zero rather than breaking a network.",
+      "orderIndex": 4
+    },
+    {
+      "front": "Why a broken cross-site replication link triggers no automatic operator action",
+      "back": "Because from the operator's point of view it is indistinguishable from \"the replica fell behind because of I/O pressure\" — the observable evidence is identical, so human judgement decides.",
+      "orderIndex": 5
+    },
+    {
+      "front": "Injection trap: host-netns iptables rules on a k3d node",
+      "back": "They do not partition Kubernetes Service traffic — kube-proxy's DNAT happens in different chains, so the operator keeps reaching MySQL through the ClusterIP while you believe the link is severed.",
+      "orderIndex": 6
+    },
+    {
+      "front": "Injection trap: how a NetworkPolicy becomes a silent no-op",
+      "back": "A CNI that evaluates the policy post-DNAT sees the backend pod IP, so a rule written against the Service ClusterIP never matches — chaos 33's DNS deny kept resolving through the whole 45-second hold.",
+      "orderIndex": 7
+    },
+    {
+      "front": "What Kubernetes does with a pod on a node that has become unreachable",
+      "back": "Nothing. It refuses to delete the pod, which sits `Terminating` or `Unknown` indefinitely — deliberately, to protect at-most-one identity.",
+      "orderIndex": 8
+    },
+    {
+      "front": "What force-deleting a stuck `Terminating` pod costs you",
+      "back": "At-most-one identity: the API object disappears while the process may still be running on the partitioned node.",
+      "orderIndex": 9
+    },
+    {
+      "front": "Who sets a pod's `Terminating` status",
+      "back": "The API server, not the kubelet — which is why on an unreachable node the container never gets the message and keeps running.",
+      "orderIndex": 10
+    },
+    {
+      "front": "What `ReadWriteOnce` actually restricts",
+      "back": "Access to one node, not one pod — storage attach is not a fencing mechanism.",
+      "orderIndex": 11
+    }
+  ],
+  "quiz": [
+    {
+      "question": "`orders` pages you. `iad` is still writable and the counter app is still committing, but `pdx` has stopped answering the operator's polls entirely and its site state has gone to `unreachable`. Which documented partition scenario is this?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 0,
+      "options": [
+        "Scenario A — the operator cannot reach one site while the other is reachable",
+        "Scenario B — the replica site is isolated while the primary stays reachable",
+        "Scenario C — the MySQL-to-MySQL link is broken while the operator reaches both sites",
+        "Scenario E — both sites are unreachable to the operator"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "The isolated site is the replica and the primary is untouched, which is scenario B: no failover, and no self-fence either, because a read-only instance has no writability to take away. Scenario A is tempting because it is also 'operator cannot reach a site' — but A is the shape where the unreachable site is the one holding writes, which is what makes a promotion available at all; here promoting would move writes away from a healthy primary. Scenario C requires the operator to still poll both sites cleanly, and `pdx` has stopped answering polls, so the discriminator rules it out. Scenario E needs every site unreachable; `iad` is answering. (objective 7)"
+    },
+    {
+      "question": "Different page, same group. Both `iad` and `pdx` answer the operator's polls on every tick: `iad` reads writable, `pdx` reads read-only. But `pdx`'s replication IO thread has stopped and `secondsBehindSource` is climbing. Which scenario is this?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 1,
+      "options": [
+        "Scenario B — the replica site is isolated from the operator and from replication",
+        "Scenario C — the MySQL-to-MySQL link is broken while the operator reaches both",
+        "Scenario D — asymmetric peer reachability between the two sidecars",
+        "Scenario A — the operator cannot reach one of the two sites at all"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "B and C share the visible replication symptom, so the discriminator is the operator's own reachability: in C the operator polls both sites cleanly and only the binlog stream is severed, which is exactly what is described. Scenario B is the near-miss — it looks identical from the replication metrics alone, but B means the replica site is isolated, and a site that answers `SELECT @@read_only` every two seconds is not isolated. Scenario D is about one-way *peer* reachability between sidecars and would not stop the replication stream on its own. Scenario A requires a site to be `unreachable` to the operator, and neither is. (objectives 7, 9)"
+    },
+    {
+      "question": "A cross-site replication link stays broken for twenty minutes while `iad` remains writable. Once `secondsBehindSource` passes `spec.replication.maxLagSeconds`, Bloodraven will promote `pdx` to recover replication.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 2,
+      "correctAnswer": false,
+      "explanation": "The reversal: crossing the lag threshold moves a condition, never a primary. `spec.replication.maxLagSeconds` drives only the `ReplicationLagging` Degraded condition — it is not a promotion gate and it is not a promotion trigger. The failover row of the decision matrix needs zero writable sites, and `iad` is still writable, so there is no path to a promotion no matter how far `pdx` falls behind. This is deliberate rather than lazy: from the operator's point of view a broken link and a replica starved of I/O look identical, so acting on the difference would mean guessing. Human judgement decides, and the operator declining to act is the system working. (objective 8)"
+    },
+    {
+      "question": "To test scenario A you SSH to the k3d node hosting `iad` and add an iptables DROP rule for port 3306 in the host network namespace. You then watch the operator report `iad` as `writable` and `Ready=True` for the whole test window. What have you actually learned?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 3,
+      "options": [
+        "That the operator correctly declined to act on a replica-side problem, which is the documented scenario B response",
+        "That this is scenario D: the operator can still read from `iad` even though `iad` can no longer be written to",
+        "Nothing about partitions — the injection never landed, since kube-proxy's DNAT is in different chains",
+        "That the sidecar suppressed its self-fence because at least one peer stayed reachable, which is the documented lease rule"
+      ],
+      "correctOptionIndex": 2,
+      "explanation": "Host-netns iptables rules on a k3d node do not partition Kubernetes Service traffic, so the run is a confident false pass: an experiment that injects nothing looks exactly like an experiment that proved the system healthy. The first option treats a green result as evidence of correct behaviour, which is the specific mistake — you cannot grade a response to a stimulus that never arrived. The second reads the operator's own status as ground truth, and status is precisely what a partition makes believable rather than wrong. The fourth invokes a real rule to explain a result the rule never produced, since nothing here ever reached the sidecar's fencing path. The fix is an independent check that the partition exists — a disposable canary, run before the real target is touched. (objective 9)"
+    },
+    {
+      "question": "During a partition, `iad`'s MySQL pod is stuck `Terminating` because its node is unreachable. A colleague proposes `kubectl delete pod --force --grace-period=0` to \"clear it out\" so the promotion can settle. What may that pod still be doing after the command returns, and what does that imply about where the fence has to come from?",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 4,
+      "sampleAnswer": "It may still be running and still writing. Force-delete only removes the API object; `Terminating` was set by the API server, not the kubelet, so on an unreachable node the container never gets the message and keeps writing to its PV. That breaks at-most-one identity: the cluster now believes the pod is gone while a second writable MySQL may exist. `ReadWriteOnce` does not save you either — it restricts access to one node, not one pod, so storage attach is not fencing. Since nothing above MySQL can be relied on to stop a partitioned `iad` from accepting writes, the fence has to be a decision the site makes about itself: the sidecar's self-fence.",
+      "graderNotes": "A strong answer covers: (1) the process may still be running and still writing to the PV; (2) force-delete removes only the API object and therefore breaks at-most-one; (3) `Terminating` is set by the API server, not the kubelet, which is why an unreachable node's container never stops; (4) `ReadWriteOnce` is per node, not per pod, so storage attach is not fencing; (5) the conclusion — a partitioned site must self-fence because no layer above it can be relied on to stop it. An answer that only says \"the pod object disappears\" has missed the data-integrity consequence.",
+      "explanation": "Kubernetes refuses to delete pods on unreachable nodes on purpose, to protect at-most-one identity; forcing the delete trades that protection for tidiness in the API and buys a possible second writer. All four Kubernetes facts point the same way, and together they are the argument for the sidecar's self-fence being the real barrier rather than a backstop. (objective 9)"
+    }
+  ]
+}

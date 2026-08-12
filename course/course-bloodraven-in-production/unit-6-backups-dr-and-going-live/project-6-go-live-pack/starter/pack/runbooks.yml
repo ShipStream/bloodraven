@@ -1,0 +1,52 @@
+# One page: alert -> runbook anchor -> the one command you type first.
+#
+# The anchor points into your own runbook, not into the Bloodraven docs
+# site. Format: runbook.md#<lowercase-slug>.
+#
+# The first command is what the on-call engineer types in the first
+# thirty seconds, before reading anything. `kubectl bloodraven status
+# orders` is the sensible default; name the ones where it differs.
+#
+# The plugin has exactly seven subcommands: status, promote, reclone,
+# backup, verify-backup, version, help. It only writes resources the
+# operator already reads and never talks to MySQL, so nothing here can
+# be a back door.
+#
+# TODO D ----------------------------------------------------------------
+# Three alerts have no usable entry: BloodravenDivergentTransactions has
+# none at all, BloodravenPITRArchiveLagging has an empty firstCommand,
+# and BloodravenKeyringNotSealed is the alert you add in TODO C. Fill in
+# all three.
+---
+runbooks:
+  BloodravenOperatorDown:
+    anchor: runbook.md#operator-down
+    firstCommand: kubectl -n bloodraven-system get pods -l app.kubernetes.io/name=bloodraven
+
+  BloodravenNoWritableSite:
+    anchor: runbook.md#no-writable-site
+    firstCommand: kubectl bloodraven status orders
+
+  BloodravenSplitBrainResolved:
+    anchor: runbook.md#split-brain-auto-resolved
+    firstCommand: kubectl bloodraven status orders -o wide
+
+  BloodravenReplicationLagging:
+    anchor: runbook.md#replication-lagging
+    firstCommand: kubectl bloodraven status orders
+
+  BloodravenReplicationDown:
+    anchor: runbook.md#replication-down
+    firstCommand: kubectl bloodraven status orders
+
+  BloodravenBackupStale:
+    anchor: runbook.md#backup-stale
+    firstCommand: kubectl bloodraven backup orders --profile nightly
+
+  BloodravenPITRArchiveLagging:
+    anchor: runbook.md#pitr-archive-lagging
+    firstCommand: ""
+
+  BloodravenFailoverOccurred:
+    anchor: runbook.md#failover-occurred
+    firstCommand: kubectl bloodraven status orders

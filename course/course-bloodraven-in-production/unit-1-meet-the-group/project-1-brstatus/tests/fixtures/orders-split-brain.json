@@ -1,0 +1,89 @@
+{
+  "apiVersion": "shipstream.io/v1alpha1",
+  "kind": "MysqlFailoverGroup",
+  "metadata": {
+    "name": "orders",
+    "namespace": "bloodraven-playground",
+    "generation": 4
+  },
+  "spec": {
+    "image": "mysql:9.7",
+    "secretName": "mysql-credentials",
+    "pollInterval": "2s",
+    "failureThreshold": 3,
+    "recoveryThreshold": 2,
+    "failoverCooldown": "30s",
+    "dns": {
+      "hostname": "orders-db.example.local",
+      "ttl": 10
+    },
+    "replication": {
+      "maxLagSeconds": 30
+    },
+    "sites": [
+      {
+        "name": "iad",
+        "role": "primary-candidate",
+        "zone": "zone-iad"
+      },
+      {
+        "name": "pdx",
+        "role": "primary-candidate",
+        "zone": "zone-pdx"
+      },
+      {
+        "name": "reader",
+        "role": "read-only",
+        "zone": "zone-reader"
+      }
+    ]
+  },
+  "status": {
+    "activeSite": "",
+    "sites": [
+      {
+        "name": "iad",
+        "state": "writable",
+        "lastSeen": "2026-08-12T09:14:32Z",
+        "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
+        "replicating": false
+      },
+      {
+        "name": "pdx",
+        "state": "writable",
+        "lastSeen": "2026-08-12T09:14:32Z",
+        "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58402",
+        "replicating": false
+      },
+      {
+        "name": "reader",
+        "state": "read-only",
+        "lastSeen": "2026-08-12T09:14:32Z",
+        "gtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-58311",
+        "replicating": true,
+        "sourceHost": "mysql-orders-iad-internal.bloodraven-playground.svc.cluster.local",
+        "sourceConvergenceState": "Converged",
+        "sourceConvergenceReason": "DirectSource",
+        "secondsBehindSource": 0
+      }
+    ],
+    "conditions": [
+      {
+        "type": "Ready",
+        "status": "False",
+        "observedGeneration": 4,
+        "lastTransitionTime": "2026-08-12T09:14:32Z",
+        "reason": "TopologyPolled",
+        "message": "No site is writable"
+      },
+      {
+        "type": "Degraded",
+        "status": "True",
+        "observedGeneration": 4,
+        "lastTransitionTime": "2026-08-12T09:14:32Z",
+        "reason": "SplitBrain",
+        "message": "SPLIT BRAIN: 2 sites are writable (iad, pdx)"
+      }
+    ]
+  }
+}

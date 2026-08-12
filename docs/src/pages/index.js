@@ -1,4 +1,5 @@
 import Link from '@docusaurus/Link';
+import useBaseUrl from '@docusaurus/useBaseUrl';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import HomepageFeatures from '@site/src/components/HomepageFeatures';
@@ -14,10 +15,18 @@ function HomepageHeader() {
           {siteConfig.title}
         </Heading>
         <p className="hero__subtitle">{siteConfig.tagline}</p>
-        <div>
+        <div className="hero-actions">
           <Link className="button button--hero button--lg" to="/docs/">
             Get Started
           </Link>
+          {/* Plain anchor, not <Link>: the course is a self-contained static
+              site under static/course/, so it has no Docusaurus route and the
+              broken-link checker would reject a routed link to it. */}
+          <a
+            className="button button--hero-secondary button--lg"
+            href={useBaseUrl('/course/')}>
+            Take the Course
+          </a>
         </div>
       </div>
     </header>

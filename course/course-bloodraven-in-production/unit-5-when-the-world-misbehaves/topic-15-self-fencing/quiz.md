@@ -1,0 +1,85 @@
+# Quiz — Self-fencing: the sidecar's two rules
+
+<!-- Rendered from course.json by course-template/tools/render-views.mjs.
+     Edit course.json, then re-render. Edits here are overwritten. -->
+
+## Question 1
+
+**Type:** MULTIPLE_CHOICE
+
+The `pdx` sidecar in `orders` logs `SELF-FENCING: ... setting super_read_only=ON`. From the same bundle you can see the operator pod was Running and answering `/healthz` throughout, and `pdx` was successfully pinging the `iad` and `reader` sidecars the whole time. Which rule fired?
+
+- Rule #1 — the cached authoritative active site was a different site to `pdx`
+- Rule #2 — `pdx` lost its lease because the operator stopped confirming its role
+- Rule #2 — `pdx` reached its peers but could not reach the operator's `/active-site` endpoint
+- The startup safety net — the sidecar restarted and could not confirm its role
+
+**Correct option index:** 0
+
+**Explanation:**
+
+Rule #2 needs the operator AND every peer silent beyond leaseTimeout; here both were answering, so it cannot have fired — that rules out both rule #2 options. The second option also misdescribes the lease: it tracks reachability of `/healthz` and `/peer/ping`, not any per-site role confirmation. The third option confuses two endpoints — a failed `/active-site` read leaves the topology cache to age silently and is not a lease signal at all. The safety net is out because its lines are prefixed `safety net:` and it runs once at boot, before the monitor exists; a `SELF-FENCING:` line can only come from the monitor. That leaves rule #1: the monitor learned, from the operator or relayed by a peer, that the active site is somebody else, and fenced immediately without consulting the lease. (objective 1)
+
+## Question 2
+
+**Type:** MULTIPLE_CHOICE
+
+A site is read-only and its sidecar log contains exactly one relevant line: `safety net: confirmed standby site, staying fenced`. What happened?
+
+- The pod started, fenced itself before asking anything, and the operator named a different site as active — it has never been allowed to write
+- The pod was serving writes and rule #1 fenced it when the operator failed over to another site
+- The pod could not reach the operator at boot, so it failed closed and stayed fenced
+- The monitor's lease expired and rule #2 fenced the site while every peer was unreachable
+
+**Correct option index:** 0
+
+**Explanation:**
+
+The `safety net:` prefix places this before the monitor was even constructed, so no rule fired and the pod never held writes — that eliminates the rule #1 and rule #2 options, both of which describe a pod that was writing and lost the argument (and both of which would log `SELF-FENCING:`). The 'could not reach the operator' option names a real safety-net exit, but a different one: that path logs `safety net: could not query active site, staying fenced`. `confirmed standby site` means the operator answered, and named a site other than this one. The distinction matters in triage: a safety-net line is a pod that never got permission, a monitor line is a demotion. (objective 3)
+
+## Question 3
+
+**Type:** MULTIPLE_CHOICE
+
+An engineer reports that a site Bloodraven considers fenced still accepted a write from an admin account holding `SUPER`. What is the most likely explanation?
+
+- Only `read_only=ON` is in effect on that instance; `read_only` permits updates from `CONNECTION_ADMIN` or `SUPER`
+- `super_read_only=ON` is in effect but does not apply to sessions that were already open when it was set
+- `super_read_only=ON` is in effect; it only blocks writes that would generate binlog events
+- The fence landed but replication threads re-applied the admin's statement, making it look like a live write
+
+**Correct option index:** 0
+
+**Explanation:**
+
+`read_only` is the weaker of the pair — the server 'permits no client updates except from users who have the CONNECTION_ADMIN privilege (or the deprecated SUPER privilege)'. `super_read_only` is the actual barrier, prohibiting client updates 'even from users who have CONNECTION_ADMIN or SUPER'. So a SUPER write landing means the stronger flag is not set. The second option invents a grandfathering rule that does not exist: the variable is evaluated per statement, not per session, which is exactly why fencing does not need to close sockets. The third option is backwards — the restriction is on client updates by privilege, not on binlog generation. The fourth confuses direction: replication threads apply what the source sent, they do not resurrect a locally rejected statement. (objective 1)
+
+## Question 4
+
+**Type:** TRUE_FALSE
+
+Adding a `role: read-only` reader site to `orders` makes the lease-expiry fence more likely to fire, because there is now one more peer whose silence the monitor must account for.
+
+**Correct answer:** false
+
+**Explanation:**
+
+The reversal: an extra peer makes rule #2 *less* likely to fire, not more. Rule #2 requires the operator and every peer to be silent for the full leaseTimeout, so each additional peer is one more party that can single-handedly suppress the fence — and a reader counts as a peer, since it answers `/peer/ping` and relays topology. 'A reachable peer without fresh authoritative topology can still suppress the lease-only all-peers-unreachable fence. This is retained compatibility behavior, not a quorum guarantee.' Nothing counts votes or requires a majority: one reachable reader is enough to keep an otherwise isolated primary writable. Size your group knowing that a reader added for read scaling widened that window. (objective 2)
+
+## Question 5
+
+**Type:** SHORT_ANSWER
+
+A fence call from the sidecar sits for several seconds before returning, and on another occasion returns an error. Explain both, and say what the monitor must not conclude from the error.
+
+**Sample answer:**
+
+`SET GLOBAL super_read_only = ON` does not cut writers off — it blocks while other clients have an ongoing statement, an active `LOCK TABLES WRITE`, or an ongoing commit, until those locks are released and the statements and transactions end. That is the multi-second wait: the fence is queuing behind live write traffic on the very primary it is trying to demote. Separately, the statement fails outright if the issuing session holds explicit `LOCK TABLES` locks or a pending transaction. The error must not be read as 'the fence did not land': cancelling the context tears down the client connection, it does not roll back a write the server already applied, so an error means 'unknown'. Treating it as a definite failure is what once made the monitor re-fence a site it had just promoted; the correct move is to re-read the instance and find out.
+
+**A full-credit answer shows:**
+
+A strong answer covers: (a) the SET blocks on ongoing statements, LOCK TABLES WRITE, or ongoing commits, so the delay is contention with live traffic rather than a slow operator; (b) it fails outright when the issuing session holds explicit locks or a pending transaction; (c) an errored SET GLOBAL may still have landed, because tearing down the connection does not roll back an applied write, so the result is ambiguous and must be resolved by re-reading rather than assumed to be a failure. Mentioning that fencing does not close sockets, so surviving sessions can still serve stale reads, is a bonus, not a requirement.
+
+**Explanation:**
+
+Both behaviours come from MySQL, not from Bloodraven: the fence is a blocking `SET GLOBAL`, and its failure mode is ambiguous rather than clean. An engineer who assumes the fence is instantaneous will misread a slow demotion as a hung sidecar, and one who assumes an error means 'not fenced' will re-fence a site that is already fenced — potentially one the operator has just promoted. (objective 1)

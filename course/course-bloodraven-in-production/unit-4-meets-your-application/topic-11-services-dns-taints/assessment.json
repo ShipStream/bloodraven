@@ -1,0 +1,120 @@
+{
+  "flashcards": [
+    {
+      "front": "How many Service objects does Bloodraven create for a failover group, and what is the formula?",
+      "back": "2 × len(sites) + 2 — two per-site kinds plus two shared kinds. Three-site `orders` therefore has eight Service objects.",
+      "orderIndex": 0
+    },
+    {
+      "front": "`mysql-orders-iad-internal` — what is this Service for?",
+      "back": "Sidecar and peer traffic only. It carries the sidecar port beside MySQL, publishes not-ready addresses, and is the canonical replication source host. Applications never use it.",
+      "orderIndex": 1
+    },
+    {
+      "front": "Which labels are in the `mysql-<group>-primary` selector?",
+      "back": "Two: `app.kubernetes.io/instance=<group>` and `shipstream.io/role=primary`. No `healthy` key, and `publishNotReadyAddresses` is false.",
+      "orderIndex": 2
+    },
+    {
+      "front": "Which labels are in the `mysql-<group>-replicas` selector?",
+      "back": "Three: `app.kubernetes.io/instance=<group>`, `shipstream.io/role=replica`, and `shipstream.io/healthy=yes`.",
+      "orderIndex": 3
+    },
+    {
+      "front": "What stamps a pod with `role=\"fenced\"`?",
+      "back": "A full-instance in-place restore, or a planned failover once it enters Draining — both strip the primary role from the source pod.",
+      "orderIndex": 4
+    },
+    {
+      "front": "Name the five conjuncts a `role: read-only` site must satisfy to be labelled `healthy=yes`.",
+      "back": "Source convergence `converged`; `replicating` true; non-nil `secondsBehindSource`; reported source host canonically equal to the active site's internal per-site Service (a direct source); and lag within `EffectiveReadOnlyMaxLagSeconds()`.",
+      "orderIndex": 5
+    },
+    {
+      "front": "What do the shared Services do when authority is invalid or incomplete?",
+      "back": "They shed every endpoint — every site is left non-primary and every reader non-serving, so clients get a connection failure instead of a stale read.",
+      "orderIndex": 6
+    },
+    {
+      "front": "apiVersion and kind of the object Bloodraven writes for DNS steering?",
+      "back": "`externaldns.k8s.io/v1alpha1`, kind `DNSEndpoint`. An approved upstream proposal targets `v1beta1`, with no date attached.",
+      "orderIndex": 7
+    },
+    {
+      "front": "What is the DNSEndpoint object named, and what record type does it always carry?",
+      "back": "`bloodraven-<group>` — so `bloodraven-orders` — and always an `A` record.",
+      "orderIndex": 8
+    },
+    {
+      "front": "Default value of `spec.dns.ttl`?",
+      "back": "60 seconds. The playground overrides it to 10.",
+      "orderIndex": 9
+    },
+    {
+      "front": "Give the full taint Bloodraven applies to a demoted site's nodes in group `orders`.",
+      "back": "`shipstream.io/db-readonly-orders=true:NoExecute` — prefix `shipstream.io/db-readonly-`, group suffix, constant value `true`, effect `NoExecute`.",
+      "orderIndex": 10
+    },
+    {
+      "front": "Which site role is never tainted?",
+      "back": "`read-only`. A reader is already read-only, so there is no demotion to enforce; the tainter returns early for it (and for an empty taint selector).",
+      "orderIndex": 11
+    }
+  ],
+  "quiz": [
+    {
+      "question": "A nightly reconciliation job writes heavily to `orders`. A BI reporting job only reads from it. Which Services should each bind to?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 0,
+      "options": [
+        "Reconciliation job → `mysql-orders-primary`; BI job → `mysql-orders-replicas`",
+        "Reconciliation job → `mysql-orders-pdx` (the current active site); BI job → `mysql-orders-replicas`",
+        "Reconciliation job → `mysql-orders-primary`; BI job → `mysql-orders-reader-internal`",
+        "Both jobs → `mysql-orders-primary`, because only the primary is guaranteed to have current data"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "`-primary` selects on `role=primary` and follows the promotion; `-replicas` selects on `role=replica` plus `healthy=yes` and drops a lagging or non-converged reader automatically. Option 2 pins writes to whichever site is active today — the per-site Service does not follow a promotion, so the job writes to a read-only MySQL the moment `orders` fails over. Option 3 sends reads at the internal per-site Service, which exists for sidecar and peer traffic and applies no health gate at all. Option 4 is the common over-caution: it works, but it puts every reporting query on the write path and throws away the reader tier you are paying for. (objective 1)"
+    },
+    {
+      "question": "A planned failover has stamped `role=\"fenced\"` on the source site's MySQL pod. Which Services still reach that pod, and which do not?",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 1,
+      "sampleAnswer": "Neither shared Service reaches it. `mysql-orders-primary` requires `role=primary` and `mysql-orders-replicas` requires `role=replica` plus `healthy=yes`; `\"fenced\"` matches neither, so the pod drops out of both at once. Its own per-site Service, `mysql-orders-<site>`, selects on name/instance/site and does not look at `role`, so that one still reaches it — which is how you keep an operator path to a fenced instance.",
+      "graderNotes": "A strong answer names both shared Services and why the label misses each selector, and says the per-site Service still selects the pod because `role` is not in its selector. Credit answers that note this is what fencing looks like at the Service layer. Do not credit an answer claiming the pod is unreachable from everywhere, or that fencing works by deleting the Service.",
+      "explanation": "Fencing at the Service layer is a label change, not an object deletion. Because the two shared selectors name mutually exclusive role values, one label edit removes the pod from application writes and application reads in a single step, while the per-site Service keeps it reachable for diagnosis. (objective 1)"
+    },
+    {
+      "question": "The `reader` site in `orders` reports `replicating: true`, source convergence `converged`, and `secondsBehindSource: 45`. The group sets `replication.maxLagSeconds: 30` and does not set `readOnlyMaxLagSeconds`. Why is `reader` absent from `mysql-orders-replicas`?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 2,
+      "options": [
+        "`role: read-only` sites are never members of `-replicas`; they are reachable only through their own per-site Service",
+        "The lag conjunct fails: `readOnlyMaxLagSeconds` is unset, so the effective reader threshold inherits `maxLagSeconds` = 30, and 45 > 30 leaves the pod labelled `healthy=no`",
+        "`maxLagSeconds` only drives the `ReplicationLagging` condition, so it cannot affect Services — the pod must be failing its readiness probe instead",
+        "Endpoints are withheld until the anti-flap cooldown from the last failover has expired"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "All five reader conjuncts must hold; four of five is `healthy=no`, and here the fifth — lag within `EffectiveReadOnlyMaxLagSeconds()` — is the one that fails, because a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`. Option 1 inverts the design: serving reads is exactly what a `read-only` site is for. Option 3 is a real half-truth worth unlearning — `maxLagSeconds` does drive the `ReplicationLagging` condition, but it is also what the reader threshold inherits, so it reaches the endpoint list too. Option 4 confuses the failover cooldown, which gates promotion, with endpoint membership, which is recomputed every reconcile. (objective 1)"
+    },
+    {
+      "question": "An RBAC rule denied the operator's `DNSEndpoint` apply during the promotion of `orders`. Once the rule is fixed, an operator has to re-run the failover or re-apply the record by hand to get DNS pointing at the new primary.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 3,
+      "correctAnswer": false,
+      "explanation": "The reverse is true: nobody has to do anything. `reconcileDNS` runs on every poll, re-derives the desired target from live topology rather than replaying a memoized one, and the write itself is one idempotent server-side apply with forced ownership — no create/update split. So the record heals on a later poll, with no second failover and no MySQL mutation, and the heal survives an operator restart because nothing needed to be remembered. Chaos scenario 38 is exactly this experiment. What manual action cannot fix is the other half: the operator cannot accelerate DNS propagation once the record is written. (objective 2)"
+    },
+    {
+      "question": "Bloodraven taints iad's nodes with `shipstream.io/db-readonly-orders=true:NoExecute` after promoting pdx. What happens to workloads already running on those nodes?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 4,
+      "options": [
+        "Nothing is evicted; the taint only stops new pods being scheduled onto iad's nodes until it is removed",
+        "Every pod on the node is evicted — tolerations affect scheduling decisions only, not running pods",
+        "A pod with no matching toleration is evicted immediately; a pod tolerating the taint with `tolerationSeconds: 60` stays bound for 60 s and is then evicted by the node lifecycle controller",
+        "Pods covered by a PodDisruptionBudget stay on the node; only pods without one are evicted"
+      ],
+      "correctOptionIndex": 2,
+      "explanation": "That is upstream `NoExecute` semantics, and chaos scenario 21 verifies it against a real promotion: the non-tolerating canary is evicted while a canary tolerating the same taint stays `Running`. Option 1 describes `NoSchedule`, the effect people assume; `NoExecute` reaches pods that are already running, which is the entire point of using it for a demotion. Option 2 forgets that a toleration on the key is exactly what keeps a pod bound — scenario 21's tolerating canary stays put. Option 4 is the most dangerous distractor: a PDB protects only against *voluntary* evictions, and a taint-driven eviction is not one. (objective 3)"
+    }
+  ]
+}

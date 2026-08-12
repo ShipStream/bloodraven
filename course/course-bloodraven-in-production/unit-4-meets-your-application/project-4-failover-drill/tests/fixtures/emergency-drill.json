@@ -1,0 +1,50 @@
+{
+  "drill": {
+    "mode": "emergency",
+    "group": "orders",
+    "namespace": "bloodraven-playground",
+    "demotedSite": "iad",
+    "injection": "kubectl -n bloodraven-playground scale deployment mysql-orders-iad --replicas=0",
+    "capturedAt": "2026-08-11T09:20:00Z",
+    "pool": {
+      "maxOpenConns": 5,
+      "connMaxLifetime": "30s",
+      "readWriteSplit": true,
+      "retryOnErrorCodes": [
+        1290,
+        1792
+      ]
+    }
+  },
+  "status": {
+    "activeSite": "pdx",
+    "lastFailover": "2026-08-11T09:14:18Z",
+    "lastFailoverTarget": "pdx",
+    "promotionGtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-184213",
+    "conditions": [
+      {
+        "type": "Degraded",
+        "status": "True",
+        "reason": "Degraded",
+        "message": "iad unreachable while pdx is primary"
+      }
+    ],
+    "sites": [
+      {
+        "name": "iad",
+        "role": "primary-candidate",
+        "state": "unreachable"
+      },
+      {
+        "name": "pdx",
+        "role": "primary-candidate",
+        "state": "writable"
+      },
+      {
+        "name": "reader",
+        "role": "read-only",
+        "state": "read-only"
+      }
+    ]
+  }
+}

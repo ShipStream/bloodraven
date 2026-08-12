@@ -1,6 +1,6 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration dst dst-repro fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile
+.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration dst dst-repro fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-check
 
 ##@ General
 
@@ -139,3 +139,49 @@ chaos-run-all: build-playground-chaos ## Run every registered chaos scenario in 
 chaos-run-all-profile: build-playground-chaos ## Run chaos scenarios filtered by profile (PROFILE=smoke|release|full)
 	@if [ -z "$(PROFILE)" ]; then echo "usage: make chaos-run-all-profile PROFILE=smoke"; exit 2; fi
 	./bin/playground-chaos run-all --profile=$(PROFILE)
+
+##@ Course
+
+COURSE_DIR ?= course
+COURSE_SLUG ?= course-bloodraven-in-production
+COURSE_STATIC ?= docs/static/course
+
+course-build: ## Build the "Bloodraven in Production" course site
+	@# npm ci when the lockfile is present (CI, and any clean checkout) so the
+	@# committed site is reproducible; npm install only as a fallback.
+	cd $(COURSE_DIR) && \
+		if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; \
+		else npm install --no-audit --no-fund; fi && \
+		npm run build
+
+course: course-build ## Build the course and sync it into docs/static/course
+	rm -rf $(COURSE_STATIC)
+	mkdir -p $(COURSE_STATIC)
+	cp -r $(COURSE_DIR)/$(COURSE_SLUG)/dist/. $(COURSE_STATIC)/
+	@echo "synced $$(find $(COURSE_STATIC) -type f | wc -l) file(s) into $(COURSE_STATIC)"
+
+course-verify: course-build ## Run the course content gates and runtime tests
+	@# Both run against dist/, so the build above is a real dependency, not
+	@# just ordering: `verify` reads the built pages and `test` drives them in
+	@# jsdom.
+	cd $(COURSE_DIR) && npm run verify && npm run test
+
+course-check: ## Fail if docs/static/course is stale relative to the course source
+	@$(MAKE) --no-print-directory course >/dev/null
+	@# git status --porcelain, not git diff: diff only reports tracked files, so
+	@# an untracked or newly added page under docs/static/course would slip past.
+	@status="$$(git status --porcelain -- $(COURSE_STATIC))"; \
+	if [ -n "$$status" ]; then \
+		if git ls-files --error-unmatch $(COURSE_STATIC) >/dev/null 2>&1; then \
+			echo "ERROR: $(COURSE_STATIC) is stale."; \
+			echo "The committed course site no longer matches the course source."; \
+			echo "Run 'make course' and commit the result."; \
+		else \
+			echo "ERROR: $(COURSE_STATIC) is not committed yet."; \
+			echo "It is generated output that ships with the docs site, like charts/bloodraven/crds."; \
+			echo "Run 'make course' and commit $(COURSE_STATIC)."; \
+		fi; \
+		echo "$$status" | head -20; \
+		exit 1; \
+	fi
+	@echo "$(COURSE_STATIC) is up to date."

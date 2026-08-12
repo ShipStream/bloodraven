@@ -1,0 +1,9 @@
+{"time":"2026-08-12T09:13:54.002Z","level":"INFO","msg":"state transition","site":"iad","from":"writable","to":"unreachable","fg":"bloodraven-playground/orders"}
+{"time":"2026-08-12T09:13:54.051Z","level":"INFO","msg":"initiating failover","candidate":"pdx","oldPrimary":"iad","fg":"bloodraven-playground/orders"}
+{"time":"2026-08-12T09:13:54.108Z","level":"WARN","msg":"failed to fence old primary (may be unreachable)","error":"dial tcp 10.42.1.9:3306: i/o timeout","fg":"bloodraven-playground/orders"}
+{"time":"2026-08-12T09:14:00.004Z","level":"INFO","msg":"failover complete","promotedSite":"pdx","promotionGtid":"3e11fa47-71ca-11e1-9e33-c80aa9429562:1-118942","fg":"bloodraven-playground/orders"}
+{"time":"2026-08-12T09:14:00.182Z","level":"INFO","msg":"promotion confirmed: site is writable","site":"pdx","fg":"bloodraven-playground/orders"}
+{"time":"2026-08-12T09:14:00.190Z","level":"INFO","msg":"state transition","site":"pdx","from":"read-only","to":"writable","fg":"bloodraven-playground/orders"}
+{"time":"2026-08-12T09:16:00.310Z","level":"INFO","msg":"state transition","site":"iad","from":"unreachable","to":"writable","fg":"bloodraven-playground/orders"}
+{"time":"2026-08-12T09:16:00.312Z","level":"WARN","msg":"ALERT","message":"SPLIT BRAIN: 2 sites are writable (iad, pdx)","fg":"bloodraven-playground/orders"}
+{"time":"2026-08-12T09:16:04.120Z","level":"INFO","msg":"state transition","site":"iad","from":"writable","to":"read-only","fg":"bloodraven-playground/orders"}

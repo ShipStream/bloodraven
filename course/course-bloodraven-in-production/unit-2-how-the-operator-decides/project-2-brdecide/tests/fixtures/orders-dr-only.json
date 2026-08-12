@@ -1,0 +1,68 @@
+{
+  "apiVersion": "shipstream.io/v1alpha1",
+  "kind": "MysqlFailoverGroup",
+  "metadata": {
+    "name": "orders",
+    "namespace": "bloodraven-playground"
+  },
+  "spec": {
+    "image": "mysql:9.7",
+    "sites": [
+      {
+        "name": "iad",
+        "role": "primary-candidate"
+      },
+      {
+        "name": "pdx",
+        "role": "primary-candidate"
+      },
+      {
+        "name": "lhr",
+        "role": "dr-only"
+      },
+      {
+        "name": "reader",
+        "role": "read-only"
+      }
+    ],
+    "failoverCooldown": "5m",
+    "splitBrainPolicy": {
+      "sitePriorities": [
+        "iad",
+        "pdx"
+      ]
+    }
+  },
+  "status": {
+    "sites": [
+      {
+        "name": "iad",
+        "state": "unreachable",
+        "role": "primary-candidate",
+        "replicating": false,
+        "secondsBehindSource": null
+      },
+      {
+        "name": "pdx",
+        "state": "unreachable",
+        "role": "primary-candidate",
+        "replicating": false,
+        "secondsBehindSource": null
+      },
+      {
+        "name": "lhr",
+        "state": "read-only",
+        "role": "dr-only",
+        "replicating": true,
+        "secondsBehindSource": 0
+      },
+      {
+        "name": "reader",
+        "state": "read-only",
+        "role": "read-only",
+        "replicating": true,
+        "secondsBehindSource": 3
+      }
+    ]
+  }
+}
