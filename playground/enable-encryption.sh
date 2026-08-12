@@ -1,29 +1,27 @@
 #!/usr/bin/env bash
 # Bloodraven Playground — enable data-at-rest encryption
 #
-# Turns on spec.encryptionAtRest on the playground failover group. This
-# is opt-in and additive: setup.sh brings the playground up unencrypted,
-# and this script converts it in place so you can exercise the keyring
-# lifecycle without a second cluster.
+# Turns on spec.encryptionAtRest on a TLS-enabled playground failover
+# group. TLS must be present from the initial setup so the encryption
+# rollout changes only one restart-sensitive concern at a time.
 #
 # What it does:
-#   1. Waits for the unencrypted playground to hold a healthy baseline.
-#   2. Generates a self-signed CA + server certificate and creates the
-#      TLS Secret the operator mounts. Encryption requires spec.tls
-#      because MySQL mandates a secure connection to clone encrypted
-#      data, and Bloodraven bootstraps every replica with CLONE INSTANCE.
-#   3. Patches the MFG with spec.tls + spec.encryptionAtRest.
+#   1. Verifies the playground started with the expected MySQL TLS
+#      Secret and waits for a healthy baseline.
+#   2. Enables the operator's keyring escrow TLS listener.
+#   3. Patches the MFG with spec.encryptionAtRest.
 #   4. Stamps the encryption-adopt annotation, because the playground is
 #      already serving and the operator otherwise refuses (existing
 #      tablespaces stay plaintext — see the warning below).
 #   5. Waits for every site to reach phase=Sealed.
 #
 # Usage:
-#   ./playground/enable-encryption.sh              # convert in place
-#   ./playground/enable-encryption.sh --fresh      # wipe MySQL first, so
-#                                                  # every tablespace is
-#                                                  # encrypted from birth
-#   ./playground/enable-encryption.sh --status     # report only
+#   BLOODRAVEN_SETUP_TLS=1 ./playground/setup.sh    # initial setup
+#   ./playground/enable-encryption.sh               # convert in place
+#   ./playground/enable-encryption.sh --fresh       # wipe MySQL first, so
+#                                                   # every tablespace is
+#                                                   # encrypted from birth
+#   ./playground/enable-encryption.sh --status      # report only
 #
 # IMPORTANT: without --fresh, tables that already exist stay plaintext.
 # MySQL only encrypts what is written after the fact. That is fine for
@@ -79,12 +77,17 @@ require_playground_context
 
 FRESH=0
 STATUS_ONLY=0
+PREPARE_TLS=0
 for arg in "$@"; do
 	case "$arg" in
-		--fresh)  FRESH=1 ;;
-		--status) STATUS_ONLY=1 ;;
-		-h|--help) sed -n '2,30p' "$0"; exit 0 ;;
-		*) die "unknown argument: $arg" ;;
+	--fresh) FRESH=1 ;;
+	--status) STATUS_ONLY=1 ;;
+	--prepare-tls) PREPARE_TLS=1 ;;
+	-h | --help)
+		sed -n '2,29p' "$0"
+		exit 0
+		;;
+	*) die "unknown argument: $arg" ;;
 	esac
 done
 
@@ -106,10 +109,14 @@ if [[ "$STATUS_ONLY" == "1" ]]; then
 	exit 0
 fi
 
-kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" >/dev/null 2>&1 \
-	|| die "no MysqlFailoverGroup $FG in $NAMESPACE — run ./playground/setup.sh first"
-
-wait_for_stable_baseline "before restarting the operator for escrow TLS"
+if [[ "$PREPARE_TLS" != "1" ]]; then
+	kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" >/dev/null 2>&1 \
+		|| die "no MysqlFailoverGroup $FG in $NAMESPACE - run BLOODRAVEN_SETUP_TLS=1 ./playground/setup.sh first"
+	configured_tls=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" \
+		-o jsonpath='{.spec.tls.secretName}')
+	[[ "$configured_tls" == "$TLS_SECRET" ]] \
+		|| die "the playground was not created with MySQL TLS; recreate it with BLOODRAVEN_SETUP_TLS=1 ./playground/setup.sh before enabling encryption"
+fi
 
 # ---------------------------------------------------------------------
 # 2. TLS material
@@ -192,6 +199,12 @@ EOF
 	ok "created escrow TLS secret $ESCROW_TLS_SECRET"
 fi
 
+if [[ "$PREPARE_TLS" == "1" ]]; then
+	exit 0
+fi
+
+wait_for_stable_baseline "before restarting the operator for escrow TLS"
+
 info "enabling the operator keyring escrow TLS listener"
 helm upgrade bloodraven "$SCRIPT_DIR/../charts/bloodraven" \
 	--namespace "$NAMESPACE" --reuse-values \
@@ -215,19 +228,12 @@ wait_for_stable_baseline "before enabling encryption"
 # ---------------------------------------------------------------------
 # JSON Patch, not merge patch: merge and strategic-merge patches drop
 # required fields on this CRD (the documented mfg patch trap).
-info "enabling spec.tls and spec.encryptionAtRest"
-kubectl -n "$NAMESPACE" patch mysqlfailovergroup "$FG" --type=json -p "$(cat <<EOF
-[
-  {"op": "add", "path": "/spec/tls", "value": {
-     "secretName": "${TLS_SECRET}",
-     "issuerRef": {"name": "playground-ca", "kind": "Issuer"}
-  }},
+info "enabling spec.encryptionAtRest"
+kubectl -n "$NAMESPACE" patch mysqlfailovergroup "$FG" --type=json -p '[
   {"op": "add", "path": "/spec/encryptionAtRest", "value": {
      "enabled": true
   }}
-]
-EOF
-)"
+]'
 
 if [[ "$FRESH" != "1" ]]; then
 	warn "the playground is already serving, so pre-existing tables stay plaintext"

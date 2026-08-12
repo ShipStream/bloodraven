@@ -85,6 +85,11 @@ jobs:
           kind load docker-image bloodraven:playground bloodraven-sidecar:playground bloodraven-counter:playground bloodraven-dashboard:playground bloodraven-dns-webhook:playground --name bloodraven-e2e
 
       - name: Deploy playground
+        env:
+          # Encryption adoption must start from a TLS-consistent group.
+          # A live TLS conversion would introduce a second ordered
+          # rollout and make the encryption scenario nondeterministic.
+          BLOODRAVEN_SETUP_TLS: ${{ inputs.enable-encryption && '1' || '0' }}
         run: |
           set -o pipefail
           ./playground/setup.sh 2>&1 | tee playground/setup.log

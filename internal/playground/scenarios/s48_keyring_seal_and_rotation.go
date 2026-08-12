@@ -8,6 +8,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
+	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -406,13 +407,15 @@ func s48VerifyNewEscrowVersion(state *s48RunState) runner.Step {
 					state.sealedSecret, err)
 			}
 
-			// Read real data back through the rotated key. A rotation
-			// that silently stranded the tablespace keys would show up
-			// here and nowhere else.
-			db, err := env.MySQL(state.replicaSite)
+			// Open a fresh port-forward after the rotation replaced the
+			// pod. env.MySQL caches per-site clients for the whole
+			// scenario, so reusing it here would stay pinned to the
+			// pre-rotation pod sandbox.
+			db, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, state.replicaSite, env.Creds)
 			if err != nil {
-				return fmt.Errorf("open mysql on %s: %w", state.replicaSite, err)
+				return fmt.Errorf("open mysql on %s after rotation: %w", state.replicaSite, err)
 			}
+			defer db.Close()
 			if _, err := db.ScalarInt(ctx, "SELECT COUNT(*) FROM information_schema.INNODB_TABLESPACES"); err != nil {
 				return fmt.Errorf("reading tablespace metadata after rotation failed on %s: %w", state.replicaSite, err)
 			}

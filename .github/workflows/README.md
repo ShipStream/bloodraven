@@ -112,7 +112,7 @@ The chart repo is served directly off the `gh-pages` branch via `raw.githubuserc
 - Manual dispatch with profile selection (smoke / release / full) plus encryption
 - Pull requests with the `e2e` label (smoke profile plus encryption)
 
-The reusable workflow (`_e2e.yml`) creates a kind cluster with Calico CNI and deploys the playground. Normal jobs run `playground-chaos run-all` with the selected profile. The dedicated encryption job converts the default live group with `playground/enable-encryption.sh` and runs `48-keyring-seal-and-rotation` explicitly, covering adoption, sealing, key placement, and replica rotation against real MySQL. Jobs upload JUnit results where available, chaos forensics, setup logs, and kind logs as artifacts.
+The reusable workflow (`_e2e.yml`) creates a kind cluster with Calico CNI and deploys the playground. Normal jobs run `playground-chaos run-all` with the selected profile. The dedicated encryption job creates the group with MySQL and escrow TLS from its first generation, adopts encryption with `playground/enable-encryption.sh`, and runs `48-keyring-seal-and-rotation` explicitly. This covers adoption, sealing, key placement, replica rotation, pod replacement, and post-rotation reads against real MySQL without overlapping a separate live TLS rollout. Jobs upload JUnit results where available, chaos forensics, setup logs, and kind logs as artifacts.
 
 Profiles:
 | Profile | Scenarios | Use case |

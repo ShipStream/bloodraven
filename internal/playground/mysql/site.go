@@ -109,8 +109,8 @@ func Open(ctx context.Context, k *pgkube.Client, namespace, fg, site string, cre
 	// playground, where the operator sets require_secure_transport=ON and
 	// a plaintext connection would simply be refused. Certificate
 	// verification is deliberately skipped — the playground CA is
-	// generated on the fly by enable-encryption.sh and the tunnel is a
-	// port-forward to localhost.
+	// generated on the fly by setup.sh when BLOODRAVEN_SETUP_TLS=1,
+	// and the tunnel is a port-forward to localhost.
 	dsn := fmt.Sprintf("%s:%s@tcp(127.0.0.1:%d)/?multiStatements=true&parseTime=true&tls=preferred",
 		creds.RootUser, creds.RootPassword, pf.LocalPort)
 	db, err := sql.Open("mysql", dsn)
