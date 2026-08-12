@@ -78,9 +78,17 @@ require_playground_context
 FRESH=0
 STATUS_ONLY=0
 PREPARE_TLS=0
+# In CI, prefer a wipe-first enable so every tablespace is encrypted from
+# birth and the keyring bootstrap is not racing a multi-site ordered update
+# of a live workload. Override with --no-fresh if a job specifically wants
+# partial-coverage adoption.
+case "${CI:-}" in
+1 | true | TRUE | yes | YES) FRESH=1 ;;
+esac
 for arg in "$@"; do
 	case "$arg" in
 	--fresh) FRESH=1 ;;
+	--no-fresh) FRESH=0 ;;
 	--status) STATUS_ONLY=1 ;;
 	--prepare-tls) PREPARE_TLS=1 ;;
 	-h | --help)
@@ -203,15 +211,22 @@ if [[ "$PREPARE_TLS" == "1" ]]; then
 	exit 0
 fi
 
-wait_for_stable_baseline "before restarting the operator for escrow TLS"
-
-info "enabling the operator keyring escrow TLS listener"
-helm upgrade bloodraven "$SCRIPT_DIR/../charts/bloodraven" \
-	--namespace "$NAMESPACE" --reuse-values \
-	--set auxiliary.escrowTLS.enabled=true \
-	--set auxiliary.escrowTLS.existingSecret="$ESCROW_TLS_SECRET" \
-	--timeout=180s
-kubectl -n "$NAMESPACE" rollout status deployment/bloodraven --timeout=180s
+# Prefer the chart's escrowTLS secret mount: a prior setup with
+# BLOODRAVEN_SETUP_TLS already armed the listener, and a no-op helm
+# upgrade still rolls the operator and races the encryption adoption.
+if kubectl -n "$NAMESPACE" get deploy bloodraven -o yaml 2>/dev/null \
+	| grep -q "name: ${ESCROW_TLS_SECRET}"; then
+	ok "operator already has escrow TLS configured; skipping helm upgrade"
+else
+	wait_for_stable_baseline "before restarting the operator for escrow TLS"
+	info "enabling the operator keyring escrow TLS listener"
+	helm upgrade bloodraven "$SCRIPT_DIR/../charts/bloodraven" \
+		--namespace "$NAMESPACE" --reuse-values \
+		--set auxiliary.escrowTLS.enabled=true \
+		--set auxiliary.escrowTLS.existingSecret="$ESCROW_TLS_SECRET" \
+		--timeout=180s
+	kubectl -n "$NAMESPACE" rollout status deployment/bloodraven --timeout=180s
+fi
 
 # ---------------------------------------------------------------------
 # 3. Optional wipe, so every tablespace is encrypted from birth
@@ -235,18 +250,28 @@ kubectl -n "$NAMESPACE" patch mysqlfailovergroup "$FG" --type=json -p '[
   }}
 ]'
 
-if [[ "$FRESH" != "1" ]]; then
+# The operator refuses encryption on any group with an ActiveSite unless
+# this annotation is present — including after --fresh, because reset-mysql
+# re-establishes a healthy primary before we get here. --fresh still matters
+# for data coverage (new tablespaces are encrypted from birth); the
+# annotation only acknowledges the timing of the flag flip.
+if [[ "$FRESH" == "1" ]]; then
+	ok "acknowledging encryption enable after --fresh wipe (annotation required while ActiveSite is set)"
+else
 	warn "the playground is already serving, so pre-existing tables stay plaintext"
 	warn "acknowledging with the encryption-adopt annotation (use --fresh for full coverage)"
-	kubectl -n "$NAMESPACE" annotate mysqlfailovergroup "$FG" \
-		bloodraven.shipstream.io/encryption-adopt=confirm --overwrite
 fi
+kubectl -n "$NAMESPACE" annotate mysqlfailovergroup "$FG" \
+	bloodraven.shipstream.io/encryption-adopt=confirm --overwrite
 
 # ---------------------------------------------------------------------
 # 5. Wait for every site to seal
 # ---------------------------------------------------------------------
-info "waiting for every site to reach phase=Sealed (up to 10 minutes)"
-deadline=$(( $(date +%s) + 600 ))
+# Three-site ordered update + keyring escrow regularly needs more than
+# 10 minutes on kind (CI runners are especially slow around the primary
+# handoff). 15 minutes still fails fast when the keyring never loads.
+info "waiting for every site to reach phase=Sealed (up to 15 minutes)"
+deadline=$(( $(date +%s) + 900 ))
 while [[ $(date +%s) -lt $deadline ]]; do
 	sealed=$(kubectl -n "$NAMESPACE" get mysqlfailovergroup "$FG" \
 		-o jsonpath='{.status.encryptionAtRest.sealed}' 2>/dev/null || echo "")
@@ -261,8 +286,25 @@ while [[ $(date +%s) -lt $deadline ]]; do
 	sleep 10
 done
 
-warn "sites did not all seal within 10 minutes"
+warn "sites did not all seal within 15 minutes"
 report_status
+echo
+info "forensics: keyring component files and status on one MySQL pod"
+pod=$(kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=mysql,shipstream.io/site" \
+	-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [[ -n "$pod" ]]; then
+	kubectl -n "$NAMESPACE" exec "$pod" -c mysql -- sh -c '
+		echo "--- mounts ---"
+		ls -la /usr/sbin/mysqld.my /usr/lib64/mysql/plugin/component_keyring_file.cnf /run/mysql-keyring 2>&1 || true
+		echo "--- mysqld.my ---"
+		cat /usr/sbin/mysqld.my 2>&1 || true
+		echo "--- component_keyring_file.cnf ---"
+		cat /usr/lib64/mysql/plugin/component_keyring_file.cnf 2>&1 || true
+		echo "--- bloodraven.cnf (encryption lines) ---"
+		grep -E "encrypt|keyring" /etc/mysql/conf.d/bloodraven.cnf 2>&1 || true
+	' 2>&1 || warn "could not exec into $pod for forensics"
+	kubectl -n "$NAMESPACE" logs "$pod" -c sidecar --tail=30 2>&1 || true
+fi
 echo
 warn "check the operator logs and status messages above; see"
 warn "docs/docs/runbooks.mdx#keyring-not-sealed"

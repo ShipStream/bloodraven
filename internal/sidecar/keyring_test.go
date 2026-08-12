@@ -552,6 +552,45 @@ func TestKeyringAgent_EncryptsSystemTablespaceOnPrimary(t *testing.T) {
 	}
 }
 
+func TestKeyringAgent_BootstrapsMasterKeyOnEmptyKeyring(t *testing.T) {
+	// Adoption can leave a valid empty component_keyring_file document
+	// with no master key; ROTATE is what seeds it so later DDL works.
+	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
+	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.readOnly = false
+	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f.agent.tick(context.Background())
+
+	if got := f.mysql.rotateCalls.Load(); got != 1 {
+		t.Fatalf("rotate calls = %d, want 1 to seed an empty keyring", got)
+	}
+	if got := f.mysql.encryptCalls.Load(); got != 1 {
+		t.Errorf("encrypt calls = %d, want 1 after bootstrap", got)
+	}
+}
+
+func TestKeyringAgent_SkipsMasterKeyBootstrapOnReplica(t *testing.T) {
+	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
+	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.readOnly = true
+	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f.agent.tick(context.Background())
+	if got := f.mysql.rotateCalls.Load(); got != 0 {
+		t.Errorf("rotate calls = %d, want 0 on a replica", got)
+	}
+	if got := f.mysql.encryptCalls.Load(); got != 0 {
+		t.Errorf("encrypt calls = %d, want 0 on a replica", got)
+	}
+}
+
 func TestKeyringAgent_SkipsSystemTablespaceOnReplica(t *testing.T) {
 	// ALTER TABLESPACE is replicated DDL; running it on a read-only
 	// replica just fails, and the primary's statement will reach it.

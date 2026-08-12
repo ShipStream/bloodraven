@@ -376,19 +376,50 @@ func (a *KeyringAgent) refreshMySQLView(ctx context.Context) error {
 	a.mu.Unlock()
 	viewErr := errors.Join(err, coverageErr)
 
-	// Close the one coverage gap that default_table_encryption cannot:
-	// the `mysql` system tablespace holding the data dictionary. Only
-	// attempt it on a writable instance — this is replicated DDL, so
-	// running it on the primary carries it to the replicas, and running
-	// it on a read-only replica would just fail.
+	needWrite := false
+	emptyKeyring := false
+	if a.cfg.EscrowArmed && comp != nil && comp.Status == "Active" && !comp.ReadOnly {
+		if raw, readErr := os.ReadFile(a.cfg.Path); readErr == nil && emptyKeyringDocument(raw) {
+			emptyKeyring = true
+			needWrite = true
+		}
+	}
 	if a.cfg.EncryptSystemTablespace && cov != nil && !cov.SystemTablespaceEncrypted {
-		readOnly, err := a.mysql.IsReadOnly(qCtx)
-		if err != nil {
-			return errors.Join(viewErr, fmt.Errorf("query read_only before encrypting system tablespace: %w", err))
+		needWrite = true
+	}
+	if !needWrite {
+		return viewErr
+	}
+
+	// Only the writable primary may create keys or rewrite tablespaces.
+	// Replicas wait for the primary's binlog (or for promotion).
+	readOnly, roErr := a.mysql.IsReadOnly(qCtx)
+	if roErr != nil {
+		return errors.Join(viewErr, fmt.Errorf("query read_only: %w", roErr))
+	}
+	if readOnly {
+		return viewErr
+	}
+
+	// Bootstrap: an empty component_keyring_file document has no master
+	// key, so ALTER TABLESPACE ENCRYPTION fails with Error 3185.
+	// binlog/redo encryption usually seeds the keyring at startup, but
+	// on some adoption paths the keyring stays empty until something
+	// creates a key. ROTATE INNODB MASTER KEY is the explicit
+	// create-if-missing path and is safe on a writable keyring.
+	if emptyKeyring {
+		if err := a.mysql.RotateInnoDBMasterKey(qCtx); err != nil {
+			a.logger.Warn("could not bootstrap innodb master key", "error", err, "site", a.site)
+			return errors.Join(viewErr, fmt.Errorf("bootstrap innodb master key: %w", err))
 		}
-		if readOnly {
-			return viewErr
-		}
+		a.logger.Info("bootstrapped innodb master key into empty keyring", "site", a.site)
+	}
+
+	// Close the one coverage gap that default_table_encryption cannot:
+	// the `mysql` system tablespace holding the data dictionary. This is
+	// replicated DDL, so running it on the primary carries it to the
+	// replicas.
+	if a.cfg.EncryptSystemTablespace && cov != nil && !cov.SystemTablespaceEncrypted {
 		if err := a.mysql.EncryptSystemTablespace(qCtx); err != nil {
 			a.logger.Warn("could not encrypt the mysql system tablespace", "error", err, "site", a.site)
 			return errors.Join(viewErr, fmt.Errorf("encrypt system tablespace: %w", err))
