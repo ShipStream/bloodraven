@@ -18,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v11"
+	encryptionPodRenderVersion = "encryption-pod-render-v12"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -417,33 +417,30 @@ func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string
 	kr := fg.Spec.EffectiveKeyring()
 	manifestDst := path.Join(kr.MysqldDir, "mysqld.my")
 	componentDst := path.Join(mysqlRuntimePluginDir, "component_keyring_file.cnf")
-	pluginSODst := path.Join(mysqlRuntimePluginDir, "component_keyring_file.so")
 	// bash -ec '<script>' mysqld --flag…  →  $0=mysqld, $1=--flag…
 	//
-	// Stage onto the runtime emptyDir (plugin .so, cnf, errmsg.sys) and
-	// the container overlay (mysqld.my next to the binary). GHA kind has
-	// been observed to fail open() of image-layer paths for the dropped-
-	// privilege mysqld process even when those paths exist for the shell.
+	// Stage a full plugin_dir + lc-messages-dir onto the runtime emptyDir
+	// and plant mysqld.my next to the binary. Overlay our component cnf
+	// after the tree copy so it wins over any image default.
 	script := fmt.Sprintf(`set -euo pipefail
 src=%q
 rt=%q
-mkdir -p "$rt/plugin" "$rt/share/english"
+mkdir -p "$rt/plugin" "$rt/share"
+# Full trees: mysql_clone and other plugins resolve via plugin_dir.
+cp -a %q/. "$rt/plugin/"
+cp -a %q/. "$rt/share/"
 cp "$src/%s" %q
 cp "$src/%s" %q
-cp %q %q
-cp %q/english/errmsg.sys "$rt/share/english/errmsg.sys"
-chmod 644 %q %q %q "$rt/share/english/errmsg.sys"
-chmod 755 %q
+chmod 644 %q %q
 exec %s "$0" "$@"
 `,
 		keyringComponentSrcMount,
 		mysqlRuntimeMount,
+		mysqlImagePluginDir,
+		mysqlImageMessagesDir,
 		keyringManifestKey, manifestDst,
 		keyringComponentKey, componentDst,
-		mysqlImagePluginSO, pluginSODst,
-		mysqlImageMessagesDir,
-		manifestDst, componentDst, pluginSODst,
-		pluginSODst,
+		manifestDst, componentDst,
 		mysqlDockerEntrypoint,
 	)
 	command = []string{"/bin/bash", "-ec", script}

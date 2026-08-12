@@ -449,8 +449,9 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 		keyringComponentKey,
 		"/opt/mysql/bin/mysqld.my",
 		mysqlRuntimePluginDir,
-		mysqlImagePluginSO,
-		"errmsg.sys",
+		mysqlImagePluginDir,
+		mysqlImageMessagesDir,
+		"cp -a",
 		mysqlDockerEntrypoint,
 	} {
 		if !strings.Contains(script, want) {
