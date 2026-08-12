@@ -634,6 +634,34 @@ func siteConfigMapName(group, site string) string {
 	return fmt.Sprintf("mysql-%s-%s-config", group, site)
 }
 
+// mysqlSecurityContext returns the mysql container security context.
+// When encryption is enabled, AppArmor and seccomp are set Unconfined:
+// GHA kind runners otherwise surface "Can't find error-message file"
+// for a path that exists and fail to load component_keyring_file
+// (MY-013712) despite valid global and local manifests. User-supplied
+// containerSecurityContext is still honored and only these two fields
+// are filled in when unset.
+func mysqlSecurityContext(fg *v1alpha1.MysqlFailoverGroup) *corev1.SecurityContext {
+	sc := fg.Spec.ContainerSecurityContext.DeepCopy()
+	if !fg.Spec.EncryptionEnabled() {
+		return sc
+	}
+	if sc == nil {
+		sc = &corev1.SecurityContext{}
+	}
+	if sc.AppArmorProfile == nil {
+		sc.AppArmorProfile = &corev1.AppArmorProfile{
+			Type: corev1.AppArmorProfileTypeUnconfined,
+		}
+	}
+	if sc.SeccompProfile == nil {
+		sc.SeccompProfile = &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeUnconfined,
+		}
+	}
+	return sc
+}
+
 // configInitScript copies the operator-managed my.cnf fragments into the
 // conf emptyDir. When encryption is enabled it also plants a local
 // component manifest in the datadir (see encryptionConfigInitSnippet).
@@ -1087,7 +1115,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			// DeepCopy so each container has an independent pointer
 			// (the cached spec pointer must not be shared across
 			// containers in the rendered PodSpec).
-			SecurityContext: fg.Spec.ContainerSecurityContext.DeepCopy(),
+			// Encryption additionally unconfines AppArmor/seccomp so the
+			// keyring component can load on hosts whose runtime defaults
+			// block mysqld from reading errmsg.sys / loading components.
+			SecurityContext: mysqlSecurityContext(fg),
 		}
 
 		operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
@@ -1377,16 +1408,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 		// Operator annotations take precedence over user-supplied annotations.
 		podAnnotations[specHashAnnotation] = specHash
-		// Encryption loads component_keyring_file from a global/local
-		// mysqld.my and opens the keyring data file. On AppArmor-enabled
-		// hosts (GHA kind runners included) the default container profile
-		// has been observed to make mysqld report "Can't find error-message
-		// file" for a path that exists and refuse to load the keyring
-		// component (MY-013712) even with valid manifests mounted. Opt the
-		// mysqld container out of AppArmor when encryption is on.
-		if fg.Spec.EncryptionEnabled() {
-			podAnnotations["container.apparmor.security.beta.kubernetes.io/mysql"] = "unconfined"
-		}
 
 		deploy.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{

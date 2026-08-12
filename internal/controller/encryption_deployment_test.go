@@ -84,10 +84,14 @@ func TestReconcile_EncryptedFreshDeployRendersUnsealed(t *testing.T) {
 		t.Fatal("sanity: data mount missing")
 	}
 
-	// Encrypted mysqld needs AppArmor unconfined on hosts whose default
-	// container profile blocks component loading (GHA kind).
-	if got := d.Spec.Template.Annotations["container.apparmor.security.beta.kubernetes.io/mysql"]; got != "unconfined" {
-		t.Errorf("mysql AppArmor annotation = %q, want unconfined", got)
+	// Encrypted mysqld needs AppArmor/seccomp unconfined on hosts whose
+	// default container profile blocks component loading (GHA kind).
+	mysqlSC := containerByName(d.Spec.Template.Spec.Containers, "mysql").SecurityContext
+	if mysqlSC == nil || mysqlSC.AppArmorProfile == nil || mysqlSC.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
+		t.Errorf("mysql AppArmorProfile = %+v, want Unconfined", mysqlSC)
+	}
+	if mysqlSC == nil || mysqlSC.SeccompProfile == nil || mysqlSC.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
+		t.Errorf("mysql SeccompProfile = %+v, want Unconfined", mysqlSC)
 	}
 }
 
