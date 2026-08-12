@@ -266,19 +266,27 @@ func TestKeyringAgent_EscrowEligibility(t *testing.T) {
 				if err := os.WriteFile(f.keyring, emptyDoc, 0o600); err != nil {
 					t.Fatalf("write: %v", err)
 				}
-				// Replica-first during ordered rollout must not escrow
-				// the bootstrap document before any writable site creates a key.
+				// Install the encrypt side-effect before the replica tick so an
+				// accidental call would both count and mutate the keyring.
+				f.mysql.encryptSysFunc = func() error {
+					return os.WriteFile(f.keyring, populated, 0o600)
+				}
+				// Replica-first during ordered rollout must not encrypt or
+				// escrow the bootstrap document before a writable site creates a key.
 				f.agent.tick(context.Background())
+				if got := f.mysql.encryptCalls.Load(); got != 0 {
+					t.Fatalf("read-only replica invoked system-tablespace encryption %d times", got)
+				}
 				received, _ := f.escrow.snapshot()
 				if len(received) != 0 {
 					t.Fatalf("escrowed the keyless bootstrap document: %q", received[0])
 				}
 
 				f.mysql.readOnly = false
-				f.mysql.encryptSysFunc = func() error {
-					return os.WriteFile(f.keyring, populated, 0o600)
-				}
 				f.agent.tick(context.Background())
+				if got := f.mysql.encryptCalls.Load(); got != 1 {
+					t.Fatalf("encryption calls = %d, want 1", got)
+				}
 			},
 			wantEscrowCount: 1,
 			wantEscrowBody:  string(populated),
