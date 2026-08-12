@@ -107,10 +107,13 @@ None of these are optional. Bloodraven cannot verify them for you.
   bearer token are never sent over the plaintext auxiliary listener.
 - **MySQL 9.x Community** (or any build shipping
   `component_keyring_file`). Verified against `mysql:9.7`.
-- **Image-specific paths.** MySQL only reads its global component
-  manifest from the directory holding the `mysqld` binary, and its global
-  component config from `plugin_dir`. Defaults match the official
-  `mysql:9.x` images. If you run a different image, check them:
+- **Image-specific paths.** Bloodraven copies the image's `mysqld` binary
+  to a private runtime path and places the global component manifest next
+  to that copy. It places the global component config in the image's
+  `plugin_dir`. The private executable path also prevents a host-level,
+  path-attached `/usr/sbin/mysqld` AppArmor profile from breaking component
+  loading inside kind. Defaults match the official `mysql:9.x` images. If
+  you run a different image, check the source binary and plugin paths:
 
   ```bash
   docker run --rm --entrypoint sh <image> -c \
@@ -556,8 +559,8 @@ on those nodes.
 | `coverage.binaryLog` | `true` | `binlog_encryption` (binary + relay logs) |
 | `coverage.systemTablespace` | `true` | `ALTER TABLESPACE mysql ENCRYPTION='Y'` |
 | `keyring.dataFileDir` | `/run/mysql-keyring` | Keyring mount point. Must be outside the actual MySQL datadir. Admission rejects `/var/lib/mysql` and descendants; custom-image datadirs require manual verification. |
-| `keyring.mysqldDir` | `/usr/sbin` | Directory holding `mysqld`; the global manifest is mounted here. |
-| `keyring.pluginDir` | `/usr/lib64/mysql/plugin` | MySQL `plugin_dir`; the global component config is mounted here. |
+| `keyring.mysqldDir` | `/usr/sbin` | Directory holding the image's source `mysqld`; Bloodraven copies it to a private runtime path and places the global manifest beside the copy. |
+| `keyring.pluginDir` | `/usr/lib64/mysql/plugin` | MySQL `plugin_dir`; Bloodraven materializes the global component config here before startup. |
 | `keyring.retainVersions` | `5` | Superseded escrow versions kept per site (2–50). |
 | `keyring.escrowTimeoutSeconds` | `600` | How long before a site that has not escrowed is reported `Failed`. It stays unsealed and keeps retrying either way. |
 

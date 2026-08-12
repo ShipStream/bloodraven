@@ -18,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v16"
+	encryptionPodRenderVersion = "encryption-pod-render-v17"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -48,6 +48,15 @@ const (
 	// Official MySQL Community image entrypoint. Used by the encryption
 	// launcher so we still get the image's init/user-switch logic.
 	mysqlDockerEntrypoint = "/usr/local/bin/docker-entrypoint.sh"
+
+	// mysqlRuntimeBinDir holds a private copy of mysqld plus its global
+	// component manifest. Ubuntu hosts can carry a path-attached
+	// /usr/sbin/mysqld AppArmor profile. That host profile attaches after
+	// the container runtime's Unconfined choice and then denies files in
+	// the container overlay, which MySQL misleadingly reports as a missing
+	// errmsg.sys and an unloaded keyring component. Executing the identical
+	// binary from this Bloodraven-owned path avoids that host-only profile.
+	mysqlRuntimeBinDir = "/opt/bloodraven/mysql/bin"
 
 	// keyringVolumeSizeLimit caps the memory-backed keyring emptyDir.
 	// A file keyring holding a handful of master keys is well under 1
@@ -385,32 +394,64 @@ func buildEncryptionFragments(
 // `docker run mysql:… --flag` invocation.
 func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command, args []string) {
 	kr := fg.Spec.EffectiveKeyring()
-	manifestDst := path.Join(kr.MysqldDir, "mysqld.my")
+	mysqlImageBasedir := path.Dir(kr.MysqldDir)
+	mysqlImageBinary := path.Join(kr.MysqldDir, "mysqld")
+	mysqlRuntimeBinary := path.Join(mysqlRuntimeBinDir, "mysqld")
+	mysqlRuntimeBasedir := path.Dir(mysqlRuntimeBinDir)
+	pluginRelative := strings.TrimPrefix(strings.TrimPrefix(kr.PluginDir, mysqlImageBasedir), "/")
+	mysqlRuntimePluginDir := path.Join(mysqlRuntimeBasedir, pluginRelative)
+	manifestDst := mysqlRuntimeBinary + ".my"
 	componentDst := path.Join(kr.PluginDir, "component_keyring_file.cnf")
 	// bash -ec '<script>' mysqld --flag…  →  $0=mysqld, $1=--flag…
-	// Materialize the two component files onto image-owned paths (real
-	// overlay files, not kubelet subPath binds), then hand off to the
-	// official entrypoint with default image basedir/plugin_dir.
+	// Copy mysqld away from the host-profiled /usr/sbin path, materialize
+	// its adjacent manifest and the component config as real overlay files,
+	// then put the private binary first on PATH. The entrypoint still sees
+	// argv[0] == "mysqld", so its config validation, uid switch, fresh-db
+	// initialization, and final exec behavior remain unchanged.
 	script := fmt.Sprintf(`set -euo pipefail
 src=%q
+mkdir -p %q
+mkdir -p %q
+ln -sfn %q %q
+ln -sfn %q %q
+cp %q %q
 cp "$src/%s" %q
 cp "$src/%s" %q
+chmod 755 %q
 chmod 644 %q %q
+test -x %q
 test -r %q
 test -r %q
 test -x %q
+export PATH=%q:"$PATH"
 exec %s "$0" "$@"
 `,
 		keyringComponentSrcMount,
+		mysqlRuntimeBinDir,
+		path.Dir(mysqlRuntimePluginDir),
+		kr.PluginDir, mysqlRuntimePluginDir,
+		path.Join(mysqlImageBasedir, "share"), path.Join(mysqlRuntimeBasedir, "share"),
+		mysqlImageBinary, mysqlRuntimeBinary,
 		keyringManifestKey, manifestDst,
 		keyringComponentKey, componentDst,
+		mysqlRuntimeBinary,
 		manifestDst, componentDst,
+		mysqlRuntimeBinary,
 		manifestDst, componentDst,
 		path.Join(kr.PluginDir, "component_keyring_file.so"),
+		mysqlRuntimeBinDir,
 		mysqlDockerEntrypoint,
 	)
 	command = []string{"/bin/bash", "-ec", script}
-	args = append([]string{"mysqld"}, mysqlArgs...)
+	// Relocating mysqld makes it derive basedir/plugin_dir from the private
+	// path. Restore the source image's layout so the relative component URN,
+	// errmsg.sys, and the rest of the official entrypoint keep resolving
+	// exactly as they did for the image binary.
+	args = append([]string{
+		"mysqld",
+		"--basedir=" + mysqlImageBasedir,
+		"--plugin-dir=" + kr.PluginDir,
+	}, mysqlArgs...)
 	return command, args
 }
 

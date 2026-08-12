@@ -440,16 +440,22 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 		keyringComponentSrcMount,
 		keyringManifestKey,
 		keyringComponentKey,
-		"/opt/mysql/bin/mysqld.my",
+		"/opt/mysql/bin/mysqld",
+		mysqlRuntimeBinDir + "/mysqld",
+		mysqlRuntimeBinDir + "/mysqld.my",
+		"export PATH=",
 		"/opt/mysql/lib/plugin/component_keyring_file.cnf",
+		"/opt/bloodraven/mysql/lib/plugin",
+		"/opt/bloodraven/mysql/share",
 		mysqlDockerEntrypoint,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("launcher script missing %q:\n%s", want, script)
 		}
 	}
-	if len(args) < 2 || args[0] != "mysqld" || args[1] != "--server-id=1" {
-		t.Errorf("launcher args = %v, want mysqld --server-id=1 …", args)
+	if len(args) < 4 || args[0] != "mysqld" || args[1] != "--basedir=/opt/mysql" ||
+		args[2] != "--plugin-dir=/opt/mysql/lib/plugin" || args[3] != "--server-id=1" {
+		t.Errorf("launcher args = %v, want mysqld with source-image paths before --server-id=1", args)
 	}
 }
 
