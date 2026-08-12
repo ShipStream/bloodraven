@@ -152,11 +152,12 @@ func TestKeyringConfigMapData(t *testing.T) {
 }
 
 func TestKeyringInitScript(t *testing.T) {
-	// Fresh bootstrap: MySQL needs the file to exist (it aborts startup
-	// on a missing keyring data file) but an empty one is fine.
+	// Fresh bootstrap needs a valid empty component_keyring_file
+	// document. A zero-length file disables the component and makes
+	// startup encryption abort with "Check keyring fail".
 	fresh := keyringInitScript(false)
-	if !strings.Contains(fresh, `: > "$data_file"`) {
-		t.Errorf("fresh bootstrap must create an empty keyring:\n%s", fresh)
+	if !strings.Contains(fresh, `{"version":"1.0","elements":[]}`) {
+		t.Errorf("fresh bootstrap must create a valid empty keyring:\n%s", fresh)
 	}
 	if strings.Contains(fresh, keyringSeedMountPath) {
 		t.Errorf("fresh bootstrap must not reference a seed:\n%s", fresh)

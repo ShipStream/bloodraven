@@ -18,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v3"
+	encryptionPodRenderVersion = "encryption-pod-render-v4"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -353,10 +353,11 @@ func keyringTokenMode(fg *v1alpha1.MysqlFailoverGroup) int32 {
 //
 // Two things have to be true or InnoDB aborts startup:
 //
-//  1. The data file must exist. component_keyring_file reports "Failed
-//     to read keyring file" for a missing one and InnoDB then fails with
-//     "Check keyring fail". A zero-length file is accepted and is
-//     exactly what a fresh bootstrap needs.
+//  1. The data file must contain a valid component_keyring_file document.
+//     A missing or zero-length file disables the component. With startup
+//     encryption enabled, InnoDB then fails with "Check keyring fail".
+//     Fresh bootstrap therefore starts from the canonical empty document;
+//     MySQL adds the first master key while initializing encrypted state.
 //  2. The containing DIRECTORY must be writable by mysqld's uid, not
 //     just the file. component_keyring_file writes a new key by creating
 //     a temporary file alongside the keyring and renaming over it, so a
@@ -372,7 +373,7 @@ func keyringTokenMode(fg *v1alpha1.MysqlFailoverGroup) int32 {
 // are already owned correctly and the chown is skipped rather than
 // failed.
 func keyringInitScript(seeded bool) string {
-	seed := `: > "$data_file"`
+	seed := `printf '%s\n' '{"version":"1.0","elements":[]}' > "$data_file"`
 	if seeded {
 		seed = `cp "$seed_file" "$data_file"`
 	}
