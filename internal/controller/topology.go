@@ -281,6 +281,13 @@ type TopologyManager struct {
 	promotedAt            time.Time
 	promotionGtidExecuted string // GTID set at last promotion
 
+	// authorityEpoch advances whenever a promotion completes outside or
+	// inside the poll goroutine. Poll captures it before probing MySQL and
+	// discards observations from an older epoch, preventing a concurrent
+	// ordered-update handoff from being overwritten by pre-promotion reads.
+	// Protected by mu.
+	authorityEpoch uint64
+
 	// DNS steering state. reconcileDNS drives the record to the CURRENT
 	// active site on every poll; these two fields only memoize what this
 	// process knows about the record so a converged cluster does not
@@ -577,6 +584,7 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 	rec := FailoverRecord{LastFailover: now, LastFailoverTarget: target}
 
 	tm.mu.Lock()
+	tm.authorityEpoch++
 	tm.promotionGtidExecuted = promotionGtid
 	tm.promotedSite = target
 	tm.promotedAt = now
@@ -942,6 +950,10 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		duration time.Duration
 	}
 
+	tm.mu.RLock()
+	pollAuthorityEpoch := tm.authorityEpoch
+	tm.mu.RUnlock()
+
 	pollSite := func(site *siteTracker) pollResult {
 		start := tm.clock.Now()
 		pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -983,6 +995,10 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 
 	// Update lastSeen and state under the lock.
 	tm.mu.Lock()
+	if tm.authorityEpoch != pollAuthorityEpoch {
+		tm.mu.Unlock()
+		return
+	}
 	prevStates := make([]state.SiteState, len(tm.sites))
 	for i := range tm.sites {
 		if results[i].err == nil {
@@ -1019,6 +1035,10 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// promotion and writable confirmation; this block verifies the promoted site
 	// is still writable and clears the guard flag to allow future failovers.
 	tm.mu.Lock()
+	if tm.authorityEpoch != pollAuthorityEpoch {
+		tm.mu.Unlock()
+		return
+	}
 	if tm.promotedSite != "" {
 		tm.reconcilePendingPromotionLocked()
 	}

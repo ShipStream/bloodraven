@@ -1116,6 +1116,66 @@ func TestPendingPromotionClearsWhenDifferentSiteWritable(t *testing.T) {
 	}
 }
 
+type blockingReadOnlyMySQL struct {
+	*mockMySQL
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (m *blockingReadOnlyMySQL) CheckReadOnly(context.Context) (bool, error) {
+	m.mu.Lock()
+	readOnly, err := m.readOnly, m.err
+	m.mu.Unlock()
+	m.started <- struct{}{}
+	<-m.release
+	return readOnly, err
+}
+
+func TestPoll_DoesNotSupersedeConcurrentPromotionWithStaleObservations(t *testing.T) {
+	oldPrimary := &mockMySQL{readOnly: false}
+	newPrimary := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(oldPrimary, newPrimary)
+	pollN(tm, 2)
+
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	tm.sites[0].mysql = &blockingReadOnlyMySQL{mockMySQL: oldPrimary, started: started, release: release}
+	tm.sites[1].mysql = &blockingReadOnlyMySQL{mockMySQL: newPrimary, started: started, release: release}
+
+	pollDone := make(chan struct{})
+	go func() {
+		tm.Poll(context.Background())
+		close(pollDone)
+	}()
+	<-started
+	<-started
+
+	oldPrimary.mu.Lock()
+	oldPrimary.readOnly = true
+	oldPrimary.mu.Unlock()
+	newPrimary.mu.Lock()
+	newPrimary.readOnly = false
+	newPrimary.mu.Unlock()
+	tm.recordFailover(context.Background(), tm.clock.Now(), "dc2", "uuid:1-10")
+
+	close(release)
+	<-pollDone
+
+	tm.mu.RLock()
+	pending := tm.promotedSite
+	tm.mu.RUnlock()
+	if pending != "dc2" {
+		t.Fatalf("stale poll superseded pending promotion: got %q, want dc2", pending)
+	}
+
+	tm.sites[0].mysql = oldPrimary
+	tm.sites[1].mysql = newPrimary
+	tm.Poll(context.Background())
+	if got := tm.Status().ActiveSite; got != "dc2" {
+		t.Fatalf("active site after fresh poll = %q, want dc2", got)
+	}
+}
+
 func TestStatusActiveSiteBothWritable(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{readOnly: false}
