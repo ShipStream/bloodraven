@@ -208,42 +208,101 @@ func TestKeyringAgent_MissingFileIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestKeyringAgent_EmptyFileIsNotEscrowed(t *testing.T) {
-	// MySQL needs the file to exist before it starts, so an empty
-	// keyring is the normal pre-initialization state. Escrowing it would
-	// record a useless "version 1" the operator might then seal against.
-	f := newAgentFixture(t, nil)
-	if err := os.WriteFile(f.keyring, nil, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	f.agent.tick(context.Background())
+func TestKeyringAgent_EscrowEligibility(t *testing.T) {
+	// Escrow must ignore bootstrap placeholders (empty file or empty
+	// component document) and only push after real key material exists.
+	// The ordered-rollout case also covers a replica that starts first
+	// and must wait until a writable site creates a key via ALTER TABLESPACE.
+	emptyDoc := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	populated := []byte("{\"version\":\"1.0\",\"elements\":[{\"key\":\"master\"}]}\n")
 
-	got := f.agent.Snapshot()
-	if !got.Present || got.Size != 0 || got.Digest != "" {
-		t.Errorf("status = %+v", got)
-	}
-	received, _ := f.escrow.snapshot()
-	if len(received) != 0 {
-		t.Fatal("an empty keyring must not be escrowed")
-	}
-}
+	cases := []struct {
+		name            string
+		cfg             func(*KeyringConfig)
+		setup           func(t *testing.T, f *agentFixture)
+		wantEscrowCount int
+		wantEscrowBody  string
+		checkStatus     func(t *testing.T, got KeyringStatus)
+	}{
+		{
+			name: "empty file is not escrowed",
+			setup: func(t *testing.T, f *agentFixture) {
+				// MySQL needs the file to exist before it starts; escrowing
+				// it would record a useless "version 1" the operator might
+				// then seal against.
+				if err := os.WriteFile(f.keyring, nil, 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				f.agent.tick(context.Background())
+			},
+			wantEscrowCount: 0,
+			checkStatus: func(t *testing.T, got KeyringStatus) {
+				if !got.Present || got.Size != 0 || got.Digest != "" {
+					t.Errorf("status = %+v", got)
+				}
+			},
+		},
+		{
+			name: "empty bootstrap document is not escrowed",
+			setup: func(t *testing.T, f *agentFixture) {
+				if err := os.WriteFile(f.keyring, emptyDoc, 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				f.agent.tick(context.Background())
+			},
+			wantEscrowCount: 0,
+			checkStatus: func(t *testing.T, got KeyringStatus) {
+				if !got.Present || got.Size != int64(len(emptyDoc)) || got.Digest != "" {
+					t.Errorf("status = %+v", got)
+				}
+			},
+		},
+		{
+			name: "populated keyring after primary encryption is escrowed",
+			cfg:  func(c *KeyringConfig) { c.EncryptSystemTablespace = true },
+			setup: func(t *testing.T, f *agentFixture) {
+				f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+				f.mysql.readOnly = true
+				if err := os.WriteFile(f.keyring, emptyDoc, 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				// Replica-first during ordered rollout must not escrow
+				// the bootstrap document before any writable site creates a key.
+				f.agent.tick(context.Background())
+				received, _ := f.escrow.snapshot()
+				if len(received) != 0 {
+					t.Fatalf("escrowed the keyless bootstrap document: %q", received[0])
+				}
 
-func TestKeyringAgent_EmptyKeyringDocumentIsNotEscrowed(t *testing.T) {
-	f := newAgentFixture(t, nil)
-	raw := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
-	if err := os.WriteFile(f.keyring, raw, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
+				f.mysql.readOnly = false
+				f.mysql.encryptSysFunc = func() error {
+					return os.WriteFile(f.keyring, populated, 0o600)
+				}
+				f.agent.tick(context.Background())
+			},
+			wantEscrowCount: 1,
+			wantEscrowBody:  string(populated),
+		},
 	}
 
-	f.agent.tick(context.Background())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAgentFixture(t, tc.cfg)
+			tc.setup(t, f)
 
-	got := f.agent.Snapshot()
-	if !got.Present || got.Size != int64(len(raw)) || got.Digest != "" {
-		t.Errorf("status = %+v", got)
-	}
-	received, _ := f.escrow.snapshot()
-	if len(received) != 0 {
-		t.Fatal("a keyring document with no keys must not be escrowed")
+			received, _ := f.escrow.snapshot()
+			if len(received) != tc.wantEscrowCount {
+				t.Fatalf("escrow count = %d, want %d (payloads=%q)", len(received), tc.wantEscrowCount, received)
+			}
+			if tc.wantEscrowCount > 0 && tc.wantEscrowBody != "" {
+				if got := string(received[0]); got != tc.wantEscrowBody {
+					t.Fatalf("escrowed %q, want %q", got, tc.wantEscrowBody)
+				}
+			}
+			if tc.checkStatus != nil {
+				tc.checkStatus(t, f.agent.Snapshot())
+			}
+		})
 	}
 }
 
@@ -482,39 +541,6 @@ func TestKeyringAgent_EncryptsSystemTablespaceOnPrimary(t *testing.T) {
 
 	if got := f.mysql.encryptCalls.Load(); got != 1 {
 		t.Errorf("encrypt calls = %d, want 1", got)
-	}
-}
-
-func TestKeyringAgent_WaitsForPrimaryKeyBeforeEscrow(t *testing.T) {
-	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
-	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
-	f.mysql.readOnly = true
-	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
-	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	// A replica can start first during an ordered rollout. It must not
-	// escrow the bootstrap document before any writable site creates a key.
-	f.agent.tick(context.Background())
-	received, _ := f.escrow.snapshot()
-	if len(received) != 0 {
-		t.Fatalf("escrowed the keyless bootstrap document: %q", received[0])
-	}
-
-	populated := []byte("{\"version\":\"1.0\",\"elements\":[{\"key\":\"master\"}]}\n")
-	f.mysql.readOnly = false
-	f.mysql.encryptSysFunc = func() error {
-		return os.WriteFile(f.keyring, populated, 0o600)
-	}
-	f.agent.tick(context.Background())
-
-	received, _ = f.escrow.snapshot()
-	if len(received) != 1 {
-		t.Fatalf("expected one push, got %d", len(received))
-	}
-	if got := string(received[0]); got != string(populated) {
-		t.Fatalf("escrowed %q, want the keyring after ALTER TABLESPACE", got)
 	}
 }
 

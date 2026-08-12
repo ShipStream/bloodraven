@@ -155,40 +155,65 @@ func TestKeyringInitScript(t *testing.T) {
 	// Fresh bootstrap needs a valid empty component_keyring_file
 	// document. A zero-length file disables the component and makes
 	// startup encryption abort with "Check keyring fail".
+	//
+	// The keyring DIRECTORY has to be writable by mysqld's uid, not just
+	// the file: component_keyring_file stores a new key by creating a temp
+	// file alongside the keyring and renaming over it. Preparing only the
+	// file leaves a root-owned directory and MySQL fails --initialize with
+	// an opaque "InnoDB Database creation was aborted with error Generic
+	// error" (verified against mysql:9.7). Directory chmod/chown must run
+	// only as root — a memory-backed emptyDir is already root-owned 0777,
+	// and doing it unconditionally trips set -e in a non-root init container.
+	cases := []struct {
+		name     string
+		seeded   bool
+		want     []string
+		prohibit []string
+	}{
+		{
+			name:   "fresh bootstrap",
+			seeded: false,
+			want: []string{
+				`{"version":"1.0","elements":[]}`,
+				`chmod 700 "$data_dir"`,
+				`chown 999:999 "$data_dir"`,
+			},
+			prohibit: []string{
+				keyringSeedMountPath,
+				"/run/mysql-keyring", // paths must be positional args
+			},
+		},
+		{
+			name:   "seeded unseal",
+			seeded: true,
+			want: []string{
+				`cp "$seed_file" "$data_file"`,
+				"chmod 600",
+				`id -u`,
+				"chown 999:999",
+			},
+			prohibit: []string{
+				"/run/mysql-keyring",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := keyringInitScript(tc.seeded)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q:\n%s", want, got)
+				}
+			}
+			for _, bad := range tc.prohibit {
+				if strings.Contains(got, bad) {
+					t.Errorf("must not contain %q:\n%s", bad, got)
+				}
+			}
+		})
+	}
+
 	fresh := keyringInitScript(false)
-	if !strings.Contains(fresh, `{"version":"1.0","elements":[]}`) {
-		t.Errorf("fresh bootstrap must create a valid empty keyring:\n%s", fresh)
-	}
-	if strings.Contains(fresh, keyringSeedMountPath) {
-		t.Errorf("fresh bootstrap must not reference a seed:\n%s", fresh)
-	}
-
-	seeded := keyringInitScript(true)
-	if !strings.Contains(seeded, `cp "$seed_file" "$data_file"`) {
-		t.Errorf("seeded unseal must copy from the escrow Secret:\n%s", seeded)
-	}
-	for _, want := range []string{"chmod 600", `id -u`, "chown 999:999"} {
-		if !strings.Contains(seeded, want) {
-			t.Errorf("init script missing %q:\n%s", want, seeded)
-		}
-	}
-
-	// The DIRECTORY has to be writable by mysqld's uid, not just the
-	// file: component_keyring_file stores a new key by creating a temp
-	// file alongside the keyring and renaming over it. Preparing only
-	// the file leaves a root-owned directory and MySQL fails
-	// --initialize with an opaque "InnoDB Database creation was aborted
-	// with error Generic error" (verified against mysql:9.7).
-	if !strings.Contains(fresh, `chmod 700 "$data_dir"`) {
-		t.Errorf("init script must prepare the keyring directory, not just the file:\n%s", fresh)
-	}
-	if !strings.Contains(fresh, `chown 999:999 "$data_dir"`) {
-		t.Errorf("init script must chown the keyring directory:\n%s", fresh)
-	}
-
-	// ...but only as root. A memory-backed emptyDir is root-owned 0777,
-	// so a hardened non-root init container cannot chmod it and does not
-	// need to. Doing it unconditionally trips `set -e` and wedges the pod.
 	rootOnly := fresh[strings.Index(fresh, `if [ "$(id -u)" = "0" ]`):]
 	for _, mustBeGuarded := range []string{
 		`chown 999:999 "$data_dir"`,
@@ -197,9 +222,6 @@ func TestKeyringInitScript(t *testing.T) {
 		if !strings.Contains(rootOnly, mustBeGuarded) {
 			t.Errorf("%q must be inside the root-only branch:\n%s", mustBeGuarded, fresh)
 		}
-	}
-	if strings.Contains(fresh, "/run/mysql-keyring") {
-		t.Errorf("paths must be passed as positional arguments, not interpolated into the shell script:\n%s", fresh)
 	}
 }
 
