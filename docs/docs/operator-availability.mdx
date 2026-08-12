@@ -100,8 +100,15 @@ This is the case the wishlist asked us to document explicitly.
 | …operator still down… | Nothing happens. There is no component elected or authorized to promote the replica. | Writes remain unavailable. Operator's CR status is stale (no new polls have been recorded). |
 | t<sub>r</sub> | Operator pod is rescheduled and starts leading. | Operator begins polling both sites. |
 | t<sub>r</sub> + `failureThreshold × pollInterval` ≈ 6 s | Operator declares the dead primary `unreachable` and the live replica `read-only`. | Debounced state visible in `status.sites[]`. |
-| t<sub>r</sub> + ≈ 6 s + [relay drain](./failover.mdx#failover-sequence) (up to 30 s) | Operator promotes the replica, updates the `-primary` Service selector, flips the DNSEndpoint. | `FailoverExecuted` Event. `-primary` Service now routes to the new primary. |
-| t<sub>r</sub> + ≈ 37 s | Writes resume on the new primary, from whichever app instance reconnects first. | Apps see the outage end. If replication was current before t<sub>p</sub>, no transactions are lost; if the replica was behind, transactions committed on the dead primary beyond its `seconds_behind_source` at the moment of failure are lost (normal async-replication RPO). |
+| t<sub>r</sub> + ≈ 6 s + [relay drain](./failover.mdx#failover-sequence) (up to 30 s) | Operator promotes the replica, records the promotion, and best-effort flips the DNSEndpoint. | `FailoverExecuted` Event. MySQL is writable on the target; Service-label and taint convergence is still poll-driven. |
+| t<sub>r</sub> + ≈ 37 s | MySQL promotion completes; Service-label and taint convergence follows successful topology polls. | Apps using the new site's direct endpoint or updated DNS can reconnect first; the `-primary` Service follows after the candidate is debounced to `writable`. Transactions committed on the dead primary but never received by the replica are outside normal asynchronous-replication RPO. |
+
+These post-restart numbers use the base cadence because a newly started
+topology manager has no retained in-memory failure count. During normal
+operation, a manager that has already observed a sustained site outage backs
+its group poll loop off to as much as 30 seconds. A second site failure in that
+state can take up to about 90 seconds to collect the default three failed
+polls; do not apply the 6-second first-fault estimate to that compound case.
 
 **Application perspective.** From the application side, an
 operator-down + primary-failure outage looks like this:
@@ -112,10 +119,12 @@ operator-down + primary-failure outage looks like this:
    fenced.
 2. Reads keep succeeding throughout (the `-replicas` Service still has
    a healthy endpoint, as long as the replica stays up).
-3. Writes resume once the operator finishes its first post-restart
-   failover cycle, roughly **operator-startup time + 6 s (debounce) +
-   up to 30 s (relay drain) ≈ 10–40 s** after the operator pod comes
-   back. If the old primary is still alive but isolated, there may
+3. The target MySQL becomes writable once the operator finishes its first
+   post-restart failover cycle, roughly **operator-startup time + 6 s
+   (debounce) + up to 30 s (relay drain) ≈ 10–40 s** after the operator pod
+   comes back. Clients using updated DNS or the target's site endpoint can
+   reconnect then. The `-primary` Service follows after successful polls
+   debounce the target to `writable`. If the old primary is still alive but isolated, there may
    also be an additional stale-primary fencing window driven by
    `leaseTimeout` plus the sidecar check interval; that fencing only
    applies to a still-writable old primary and may already have
@@ -268,9 +277,10 @@ continuing to accept writes even when its peer is reachable — see
 [Operator-down + partial partition](#operator-down--partial-partition-stale-primary-scenario).
 
 **Why not scale the operator horizontally?** Because the failure-detection
-loop is the bottleneck, not the operator process. Polling happens every
-`pollInterval` (default 2 s) with `failureThreshold` debounce (default
-3). Adding a second replica cannot shorten that loop — both replicas
+loop is the bottleneck, not the operator process. Polling starts at the
+`pollInterval` base (default 2 seconds) with `failureThreshold` debounce
+(default 3), then backs off to a 30-second cap after a confirmed persistent
+failure. Adding a second replica cannot shorten that loop — both replicas
 would see the same polls — and leader election adds its own election
 latency when the lease expires. The current design keeps the writable
 path on one goroutine with observable state, which is far easier to

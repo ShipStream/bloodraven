@@ -1634,6 +1634,61 @@ func TestReconcile_DefersExistingDeploymentWhenRunnerUnavailable(t *testing.T) {
 	}
 }
 
+func TestReconcile_RecreateUpdatesExistingDeployments(t *testing.T) {
+	ctx := context.Background()
+	fg := newTestFG()
+	fg.Spec.UpdateStrategy = "Recreate"
+	r, c := newReconciler(fg)
+	nn := types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("initial reconcile: %v", err)
+	}
+
+	var fresh v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &fresh); err != nil {
+		t.Fatalf("get failover group: %v", err)
+	}
+	fresh.Spec.Image = "mysql:9.7.1"
+	if err := c.Update(ctx, &fresh); err != nil {
+		t.Fatalf("update failover group: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: nn}); err != nil {
+		t.Fatalf("reconcile recreate update: %v", err)
+	}
+
+	for _, site := range []string{"dc1", "dc2"} {
+		var deployment appsv1.Deployment
+		if err := c.Get(ctx, types.NamespacedName{
+			Name: resourceName(fg.Name, site), Namespace: fg.Namespace,
+		}, &deployment); err != nil {
+			t.Fatalf("get deployment %s: %v", site, err)
+		}
+		if got := deployment.Spec.Template.Spec.Containers[0].Image; got != "mysql:9.7.1" {
+			t.Errorf("deployment %s image = %q, want recreated image", site, got)
+		}
+	}
+}
+
+func TestCheckSpecDrift_RecreateClearsOrderedDrift(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.UpdateStrategy = "Recreate"
+	logger := testLogger()
+	tm := NewTopologyManager(testTopologyConfig(), []internalmysql.Checker{
+		&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true},
+	}, NewFailoverController(logger), nil, nil, BootstrapConfig{}, newMockTainter(), platform.NewHub(logger), &mockDNS{}, logger)
+	tm.SetSpecDriftSites([]string{"dc1", "dc2"})
+
+	runner := &TopologyManagerRunner{logger: logger}
+	runner.checkSpecDrift(context.Background(), fg, tm)
+
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	if len(tm.specDriftSites) != 0 {
+		t.Fatalf("Recreate left ordered drift queued: %v", tm.specDriftSites)
+	}
+}
+
 func TestReconcile_StartupDefersExistingDeploymentsBeforeManagerRegistration(t *testing.T) {
 	ctx := context.Background()
 	fg := newTestFG()

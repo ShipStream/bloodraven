@@ -241,15 +241,19 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// The UpdateController manages site-by-site Deployment updates to avoid
 	// simultaneous restarts of both sites (which causes a TOTAL LOSS window).
 	orderedUpdateActive := fg.Status.UpdatePhase != ""
+	recreateUpdates := fg.Spec.UpdateStrategy == "Recreate"
 
-	// Defer every existing Deployment to the ordered update path: the reconciler firing on a CR spec
-	// change must not restart both sites simultaneously. The runner's
+	// With OrderedUpdate (including its defaulted empty value in unit tests),
+	// defer every existing Deployment to the ordered update path: the
+	// reconciler firing on a CR spec change must not restart both sites
+	// simultaneously. The runner's
 	// checkSpecDrift compares the desired hash against the live Deployment
 	// annotation, so leaving the existing Deployment untouched is what causes
 	// drift to be observed and the ordered update to start. New Deployments
-	// (initial bootstrap) are always created here. This guard deliberately does
-	// not depend on runner wiring or manager registration: existing Deployments
-	// are never safe to patch from the bulk reconciliation loop.
+	// (initial bootstrap) are always created here. Recreate explicitly opts into
+	// bulk reconciliation, so all existing site Deployments are patched in one
+	// pass and their pod restarts may overlap. An already-running ordered update
+	// remains authoritative even if the field changes mid-rollout.
 	deploymentReader := client.Reader(r.Client)
 	if r.APIReader != nil {
 		deploymentReader = r.APIReader
@@ -263,16 +267,18 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, fmt.Errorf("reconcile pvc %s: %w", site.Name, err)
 		}
 		if !orderedUpdateActive {
-			deferDeployment := false
+			deferDeployment := !recreateUpdates
 			var existing appsv1.Deployment
-			deployNN := types.NamespacedName{
-				Namespace: fg.Namespace,
-				Name:      resourceName(fg.Name, site.Name),
-			}
-			if err := deploymentReader.Get(ctx, deployNN, &existing); err == nil {
-				deferDeployment = true
-			} else if !errors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("get deployment %s: %w", site.Name, err)
+			if deferDeployment {
+				deployNN := types.NamespacedName{
+					Namespace: fg.Namespace,
+					Name:      resourceName(fg.Name, site.Name),
+				}
+				if err := deploymentReader.Get(ctx, deployNN, &existing); errors.IsNotFound(err) {
+					deferDeployment = false
+				} else if err != nil {
+					return ctrl.Result{}, fmt.Errorf("get deployment %s: %w", site.Name, err)
+				}
 			}
 			if !deferDeployment {
 				if err := r.reconcileDeployment(ctx, &fg, site, serverID, image); err != nil {

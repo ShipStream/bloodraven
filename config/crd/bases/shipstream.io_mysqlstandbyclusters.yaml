@@ -6113,8 +6113,10 @@ spec:
                         type: object
                       pollInterval:
                         default: 2s
-                        description: 'PollInterval is how often to poll MySQL instances.
-                          Default: 2s'
+                        description: |-
+                          PollInterval is the base interval for polling MySQL instances. After a
+                          site reaches FailureThreshold and continues failing, the effective
+                          interval backs off exponentially to a 30s cap. Default: 2s.
                         type: string
                       recoveryThreshold:
                         default: 2

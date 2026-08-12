@@ -15,10 +15,10 @@ backup into a throwaway MySQL instance to prove the backup is actually
 loadable, and exports a freshness gauge so alerting can fire on stale
 or broken verifications.
 
-Phase 1 established the CRD and the dump-load contract. Phase 2 layers
-PITR binlog replay and configurable scalar sanity queries on top of the
-same CRD. See `WISHLIST.md` #8 for remaining roadmap items (`kubectl`
-plugin integration, Grafana panels).
+The same CRD supports dump-load verification, optional point-in-time recovery
+(PITR) binlog replay, and configurable scalar sanity queries. You can start a
+run from its schedule, a raw CR, or the `kubectl bloodraven verify-backup`
+command.
 
 ## Concepts
 
@@ -52,9 +52,13 @@ matches an expectation," respectively.
 The feature deliberately does not cover:
 
 - Logical equivalence with the live primary (a different tool).
-- Backup encryption decryption (wishlist #13).
 - Application-level rehearsal of writes / traffic cutover
   (wishlist #7, #11).
+
+Encrypted profiles are supported. The verification Job uses the same
+`bloodraven decrypt-download` init container as restore, with the profile's
+`encryption.passphraseSecret`, and loads only the decrypted artifact. See
+[Backup encryption: Verification](./backup-encryption.mdx#verification).
 
 ## Scheduling a verification
 
@@ -103,8 +107,17 @@ they cannot share a PVC and `Allow` just stacks failed runs.
 
 ## Running a one-off verification
 
-Any operator with permission to create `MysqlBackupVerification` CRs
-can trigger an ad-hoc run:
+Use the kubectl plugin to verify the latest successful backup for a profile:
+
+```bash
+kubectl bloodraven verify-backup orders --profile nightly -n bloodraven
+```
+
+Add `--backup <name>` to select a historical backup, or `--wait` to block until
+the run reaches `Succeeded` or `Failed`. See the
+[kubectl plugin reference](./kubectl-plugin.mdx#verify-backup).
+
+You can also create the `MysqlBackupVerification` CR directly:
 
 ```bash
 kubectl create -f - <<'EOF'
@@ -189,7 +202,7 @@ A verification CR passes through these phases:
 | `Pending`      | Accepted; finalizer stamped; no ephemeral resources yet.            |
 | `Provisioning` | Ephemeral PVC + derived credentials Secret created.                 |
 | `Restoring`    | The verification Job is running `verify.sh` + `restore.py`.         |
-| `Checking`     | Reserved for Phase 2 sanity queries; Phase 1 bypasses this phase.   |
+| `Checking`     | Defined in the API; the current Job runs sanity queries during `Restoring` and does not enter this phase. |
 | `Cleaning`     | Reconciler is deleting ephemeral resources.                         |
 | `Succeeded`    | Terminal success. Gauge advances; ephemeral resources cleaned up.   |
 | `Failed`       | Terminal failure. See `KeepOnFailure` below.                        |
@@ -295,11 +308,8 @@ of its managed state.
 
 ## Known limitations
 
-- No backup encryption support &mdash; will follow wishlist #13.
-- No `kubectl bloodraven verify-backup` subcommand yet &mdash; will
-  follow wishlist #18.
 - The `Checking` phase value is defined in the CRD enum but the
-  reconciler does not currently transition through it at runtime; the
+  reconciler does not transition through it at runtime; the
   sanity query runs inside the same Job container as the restore and
   the phase goes `Restoring → Succeeded|Failed` directly. Sanity
   results land on `status.sanityCheck` either way.

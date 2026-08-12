@@ -475,9 +475,11 @@ curl "http://localhost:8082/active-site?namespace=default&group=orders"
 ### `GET /ws/status`
 
 WebSocket endpoint that streams the full topology of each failover group in
-real time. A message is sent at the end of every operator poll cycle (default
-every 2s per group), not only on state transitions, so dashboards can render
-live counters and health indicators.
+real time. A message is sent at the end of every operator poll cycle, not only
+on state transitions, so dashboards can render live counters and health
+indicators. The default healthy cadence is every 2 seconds per group. After a
+confirmed persistent site failure, adaptive polling can reduce the stream to
+one message every 30 seconds until successful probes reset the backoff.
 
 Each message is a JSON object with camelCase keys:
 
