@@ -18,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v13"
+	encryptionPodRenderVersion = "encryption-pod-render-v14"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -46,14 +46,12 @@ const (
 	// component files into place.
 	keyringComponentSrcMount = "/run/bloodraven/keyring-component-src"
 
-	// mysqlRuntimeMount is a memory-backed emptyDir the launcher
-	// populates with a full copy of the image plugin_dir and
-	// lc-messages-dir. On GHA kind, mysqld has been observed to fail
-	// open() of image-layer paths even after materializing mysqld.my on
-	// the container overlay. A sparse plugin_dir is not enough:
-	// --plugin-load-add=mysql_clone.so and other components also resolve
-	// relative to plugin_dir, so the whole tree is staged.
-	mysqlRuntimeMount       = "/run/bloodraven/mysql-runtime"
+	// mysqlRuntimeMount is a disk-backed emptyDir at a short path outside
+	// /run (AppArmor-ish denials were observed for /run/bloodraven/...)
+	// and outside the datadir (files there would abort mysqld
+	// --initialize). Full plugin + share trees are staged so mysql_clone
+	// and component loads resolve.
+	mysqlRuntimeMount       = "/mysql-runtime"
 	mysqlRuntimePluginDir   = mysqlRuntimeMount + "/plugin"
 	mysqlRuntimeMessagesDir = mysqlRuntimeMount + "/share"
 	// Image paths the launcher copies FROM.
@@ -64,9 +62,8 @@ const (
 	// launcher so we still get the image's init/user-switch logic.
 	mysqlDockerEntrypoint = "/usr/local/bin/docker-entrypoint.sh"
 
-	// mysqlRuntimeVolumeSizeLimit bounds the runtime emptyDir. A MySQL
-	// 9.7 plugin dir is ~29 MiB and share is ~12 MiB; 128 MiB leaves
-	// headroom for image growth.
+	// mysqlRuntimeVolumeSizeLimit bounds the runtime emptyDir (~40 MiB
+	// for MySQL 9.7 plugin+share; 128 MiB headroom).
 	mysqlRuntimeVolumeSizeLimit = "128Mi"
 
 	// keyringVolumeSizeLimit caps the memory-backed keyring emptyDir.
@@ -246,14 +243,12 @@ func buildEncryptionFragments(
 
 	// ConfigMap sources + writable runtime emptyDir for the launcher.
 	// See keyringComponentSrcMount / mysqlRuntimeMount.
-	// Disk-backed emptyDir (not Memory/tmpfs): GHA kind rejected
-	// dlopen of staged .so files from a memory emptyDir with
-	// "Permission denied" (noexec-style). Default emptyDir is
-	// node-disk backed and executable.
 	runtimeLimit := resource.MustParse(mysqlRuntimeVolumeSizeLimit)
 	out.PodVolumes = append(out.PodVolumes, corev1.Volume{
 		Name: mysqlRuntimeVolumeName,
 		VolumeSource: corev1.VolumeSource{
+			// Disk-backed (not Memory): tmpfs returned Permission denied
+			// on dlopen in GHA kind.
 			EmptyDir: &corev1.EmptyDirVolumeSource{
 				SizeLimit: &runtimeLimit,
 			},
@@ -430,14 +425,23 @@ func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string
 src=%q
 rt=%q
 mkdir -p "$rt/plugin" "$rt/share"
-# Full trees: mysql_clone and other plugins resolve via plugin_dir.
-cp -a %q/. "$rt/plugin/"
-cp -a %q/. "$rt/share/"
+# Stage once per PVC (idempotent). Full trees so mysql_clone resolves.
+if [ ! -f "$rt/plugin/component_keyring_file.so" ] || [ ! -f "$rt/share/english/errmsg.sys" ]; then
+  cp -a %q/. "$rt/plugin/"
+  cp -a %q/. "$rt/share/"
+fi
 cp "$src/%s" %q
 cp "$src/%s" %q
-# World-readable/executable so uid 999 can dlopen after gosu.
+# Own as mysqld uid so gosu'd process can dlopen/read.
+if [ "$(id -u)" = "0" ]; then
+  chown -R 999:999 "$rt"
+fi
 chmod -R a+rX "$rt"
 chmod 644 %q %q
+# Prove the staged tree is usable before handing off to entrypoint.
+test -r "$rt/share/english/errmsg.sys"
+test -x "$rt/plugin/component_keyring_file.so"
+test -r %q
 exec %s "$0" "$@"
 `,
 		keyringComponentSrcMount,
@@ -447,6 +451,7 @@ exec %s "$0" "$@"
 		keyringManifestKey, manifestDst,
 		keyringComponentKey, componentDst,
 		manifestDst, componentDst,
+		componentDst,
 		mysqlDockerEntrypoint,
 	)
 	command = []string{"/bin/bash", "-ec", script}
