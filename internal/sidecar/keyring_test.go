@@ -44,6 +44,7 @@ type fakeKeyringMySQL struct {
 	readOnly       bool
 	readOnlyErr    error
 	encryptSysErr  error
+	encryptSysFunc func() error
 }
 
 func (f *fakeKeyringMySQL) KeyringComponentStatus(context.Context) (*KeyringComponentStatus, error) {
@@ -66,6 +67,9 @@ func (f *fakeKeyringMySQL) RotateInnoDBMasterKey(context.Context) error {
 
 func (f *fakeKeyringMySQL) EncryptSystemTablespace(context.Context) error {
 	f.encryptCalls.Add(1)
+	if f.encryptSysFunc != nil {
+		return f.encryptSysFunc()
+	}
 	return f.encryptSysErr
 }
 
@@ -459,6 +463,28 @@ func TestKeyringAgent_EncryptsSystemTablespaceOnPrimary(t *testing.T) {
 
 	if got := f.mysql.encryptCalls.Load(); got != 1 {
 		t.Errorf("encrypt calls = %d, want 1", got)
+	}
+}
+
+func TestKeyringAgent_EscrowsKeyringAfterSystemTablespaceMutation(t *testing.T) {
+	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.readOnly = false
+	if err := os.WriteFile(f.keyring, []byte("before-system-tablespace-key"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f.mysql.encryptSysFunc = func() error {
+		return os.WriteFile(f.keyring, []byte("after-system-tablespace-key"), 0o600)
+	}
+
+	f.agent.tick(context.Background())
+
+	received, _ := f.escrow.snapshot()
+	if len(received) != 1 {
+		t.Fatalf("expected one push, got %d", len(received))
+	}
+	if got := string(received[0]); got != "after-system-tablespace-key" {
+		t.Fatalf("escrowed %q, want the keyring after ALTER TABLESPACE", got)
 	}
 }
 

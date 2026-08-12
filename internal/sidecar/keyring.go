@@ -285,6 +285,12 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 		}
 	}
 
+	// Sample MySQL and perform the system-tablespace fix-up before reading
+	// the keyring. ALTER TABLESPACE may add a master key; escrowing bytes
+	// captured before that statement can make the next sealed restart
+	// unrecoverable even though the operator verified the stale digest.
+	viewErr := a.refreshMySQLView(ctx)
+
 	raw, err := os.ReadFile(a.cfg.Path)
 	if err != nil {
 		a.mu.Lock()
@@ -312,8 +318,6 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 	a.status.Digest = digest
 	alreadyEscrowed := a.status.EscrowedDigest == digest && digest != ""
 	a.mu.Unlock()
-
-	viewErr := a.refreshMySQLView(ctx)
 
 	if !a.cfg.EscrowArmed || digest == "" || alreadyEscrowed {
 		a.setOperationalError(viewErr)
