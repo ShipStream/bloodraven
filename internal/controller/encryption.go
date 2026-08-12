@@ -18,12 +18,12 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v10"
+	encryptionPodRenderVersion = "encryption-pod-render-v11"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
-	// ConfigMap; the mysql container copies them onto the real paths
-	// before starting mysqld (see encryptionMysqlLauncher).
+	// ConfigMap; the mysql container copies them into place before
+	// starting mysqld (see encryptionMysqlLauncher).
 	keyringManifestKey  = "keyring-manifest.json"
 	keyringComponentKey = "keyring-component.json"
 
@@ -32,6 +32,7 @@ const (
 	keyringVolumeName      = "keyring"
 	keyringSeedVolumeName  = "keyring-seed"
 	keyringTokenVolumeName = "keyring-token"
+	mysqlRuntimeVolumeName = "mysql-runtime"
 
 	// Mount points for the two operator-managed Secrets that never go
 	// near mysqld: the seed (previous escrow version, consumed by the
@@ -42,16 +43,30 @@ const (
 
 	// keyringComponentSrcMount is where the per-site ConfigMap is
 	// mounted into the mysql container so the launcher can copy the
-	// component files onto the image-owned paths. SubPath mounts onto
-	// /usr/sbin/mysqld.my and plugin_dir were observed in GHA kind to
-	// leave those files visible to the shell while mysqld still never
-	// loaded component_keyring_file (MY-013712 / Error 3185); a real
-	// file on the container overlay works.
+	// component files into place.
 	keyringComponentSrcMount = "/run/bloodraven/keyring-component-src"
+
+	// mysqlRuntimeMount is a memory-backed emptyDir the launcher
+	// populates with a private plugin_dir and lc-messages-dir. On GHA
+	// kind, mysqld has been observed to fail open() of image-layer paths
+	// (errmsg.sys at the correct absolute path; component .so load
+	// never completes) even after materializing mysqld.my on the
+	// container overlay. Serving those assets from an emptyDir avoids
+	// the broken image-layer open path.
+	mysqlRuntimeMount       = "/run/bloodraven/mysql-runtime"
+	mysqlRuntimePluginDir   = mysqlRuntimeMount + "/plugin"
+	mysqlRuntimeMessagesDir = mysqlRuntimeMount + "/share"
+	// Image paths the launcher copies FROM.
+	mysqlImagePluginSO    = "/usr/lib64/mysql/plugin/component_keyring_file.so"
+	mysqlImageMessagesDir = "/usr/share/mysql-9.7"
 
 	// Official MySQL Community image entrypoint. Used by the encryption
 	// launcher so we still get the image's init/user-switch logic.
 	mysqlDockerEntrypoint = "/usr/local/bin/docker-entrypoint.sh"
+
+	// mysqlRuntimeVolumeSizeLimit bounds the runtime emptyDir (plugin
+	// .so ~0.5 MiB plus errmsg.sys ~0.5 MiB; 8 MiB is generous).
+	mysqlRuntimeVolumeSizeLimit = "8Mi"
 
 	// keyringVolumeSizeLimit caps the memory-backed keyring emptyDir.
 	// A file keyring holding a handful of master keys is well under 1
@@ -228,16 +243,27 @@ func buildEncryptionFragments(
 	kr := fg.Spec.EffectiveKeyring()
 	dataFilePath := path.Join(kr.DataFileDir, v1alpha1.KeyringDataFileName)
 
-	// ConfigMap is mounted as a directory of sources; the launcher
-	// (encryptionMysqlLauncher) copies the two component files onto
-	// the image-owned paths before exec'ing mysqld. SubPath mounts onto
-	// those paths are intentionally not used — see
-	// keyringComponentSrcMount.
+	// ConfigMap sources + writable runtime emptyDir for the launcher.
+	// See keyringComponentSrcMount / mysqlRuntimeMount.
+	runtimeLimit := resource.MustParse(mysqlRuntimeVolumeSizeLimit)
+	out.PodVolumes = append(out.PodVolumes, corev1.Volume{
+		Name: mysqlRuntimeVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: &runtimeLimit,
+			},
+		},
+	})
 	out.MysqlVolumeMounts = append(out.MysqlVolumeMounts,
 		corev1.VolumeMount{
 			Name:      "config",
 			MountPath: keyringComponentSrcMount,
 			ReadOnly:  true,
+		},
+		corev1.VolumeMount{
+			Name:      mysqlRuntimeVolumeName,
+			MountPath: mysqlRuntimeMount,
 		},
 		corev1.VolumeMount{
 			Name:      keyringVolumeName,
@@ -378,36 +404,63 @@ func buildEncryptionFragments(
 }
 
 // encryptionMysqlLauncher returns the container Command and Args that
-// materialize the keyring component files onto image-owned paths and
-// then hand off to the official MySQL entrypoint.
+// stage keyring/component assets onto writable paths and hand off to
+// the official MySQL entrypoint.
 //
 // mysqlArgs are the mysqld flags (starting with --server-id=..., not
 // including the "mysqld" binary name). They become $1..$n after a $0 of
 // "mysqld" so the entrypoint sees the same argv shape as a normal
-// `docker run mysql:… --flag` invocation.
+// `docker run mysql:… --flag` invocation. Callers must already have
+// pointed --plugin-dir and --lc-messages-dir at the runtime emptyDir
+// (see encryptionMySQLPathArgs).
 func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command, args []string) {
 	kr := fg.Spec.EffectiveKeyring()
 	manifestDst := path.Join(kr.MysqldDir, "mysqld.my")
-	componentDst := path.Join(kr.PluginDir, "component_keyring_file.cnf")
+	componentDst := path.Join(mysqlRuntimePluginDir, "component_keyring_file.cnf")
+	pluginSODst := path.Join(mysqlRuntimePluginDir, "component_keyring_file.so")
 	// bash -ec '<script>' mysqld --flag…  →  $0=mysqld, $1=--flag…
-	// Copy before exec so mysqld opens real overlay files rather than
-	// kubelet subPath bind mounts (see keyringComponentSrcMount).
+	//
+	// Stage onto the runtime emptyDir (plugin .so, cnf, errmsg.sys) and
+	// the container overlay (mysqld.my next to the binary). GHA kind has
+	// been observed to fail open() of image-layer paths for the dropped-
+	// privilege mysqld process even when those paths exist for the shell.
 	script := fmt.Sprintf(`set -euo pipefail
 src=%q
+rt=%q
+mkdir -p "$rt/plugin" "$rt/share/english"
 cp "$src/%s" %q
 cp "$src/%s" %q
-chmod 644 %q %q
+cp %q %q
+cp %q/english/errmsg.sys "$rt/share/english/errmsg.sys"
+chmod 644 %q %q %q "$rt/share/english/errmsg.sys"
+chmod 755 %q
 exec %s "$0" "$@"
 `,
 		keyringComponentSrcMount,
+		mysqlRuntimeMount,
 		keyringManifestKey, manifestDst,
 		keyringComponentKey, componentDst,
-		manifestDst, componentDst,
+		mysqlImagePluginSO, pluginSODst,
+		mysqlImageMessagesDir,
+		manifestDst, componentDst, pluginSODst,
+		pluginSODst,
 		mysqlDockerEntrypoint,
 	)
 	command = []string{"/bin/bash", "-ec", script}
 	args = append([]string{"mysqld"}, mysqlArgs...)
 	return command, args
+}
+
+// encryptionMySQLPathArgs pins basedir / plugin_dir / lc-messages-dir for
+// encrypted pods. plugin_dir and lc-messages-dir point at the launcher-
+// populated runtime emptyDir; basedir stays on the image so the binary
+// and its adjacent mysqld.my resolve normally.
+func encryptionMySQLPathArgs() []string {
+	return []string{
+		"--basedir=/usr",
+		"--plugin-dir=" + mysqlRuntimePluginDir,
+		"--lc-messages-dir=" + mysqlRuntimeMessagesDir,
+	}
 }
 
 // keyringTokenMode picks the projection mode for the escrow bearer

@@ -1062,19 +1062,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			"--skip-replica-start=ON",
 			"--plugin-load-add=mysql_clone.so",
 		}
-		// Encryption needs a stable basedir/plugin_dir/lc-messages-dir.
-		// On GHA kind, mysqld has been observed to report
-		// "Can't find error-message file '/usr/share/mysql-9.7/...'" and
-		// skip component_keyring_file load (MY-013712) even when those
-		// paths exist. Pin the install paths on the command line so
-		// component loading cannot depend on broken auto-detection.
+		// Encryption: pin basedir and point plugin_dir / lc-messages-dir
+		// at the launcher-populated runtime emptyDir (see
+		// encryptionMySQLPathArgs / encryptionMysqlLauncher).
 		if fg.Spec.EncryptionEnabled() {
-			kr := fg.Spec.EffectiveKeyring()
-			mysqlArgs = append(mysqlArgs,
-				"--basedir=/usr",
-				"--plugin-dir="+kr.PluginDir,
-				"--lc-messages-dir=/usr/share/mysql-9.7",
-			)
+			mysqlArgs = append(mysqlArgs, encryptionMySQLPathArgs()...)
 		}
 		if fg.Spec.TLS != nil {
 			// Keep the server-side TLS contract on the mysqld command line as

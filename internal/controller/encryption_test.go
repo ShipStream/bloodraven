@@ -423,9 +423,7 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 	}
 	frags := buildEncryptionFragments(fg, fg.Spec.Sites[0], true, "s", false)
 
-	// Component sources are mounted as a directory; the launcher copies
-	// them onto MysqldDir/PluginDir before mysqld starts. SubPath mounts
-	// onto those image-owned paths are intentionally avoided.
+	// Component sources + runtime emptyDir for the launcher.
 	src := findMount(frags.MysqlVolumeMounts, keyringComponentSrcMount)
 	if src == nil {
 		t.Fatal("component sources must be mounted for the launcher to copy")
@@ -433,14 +431,11 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 	if src.Name != "config" {
 		t.Errorf("component sources should come from the per-site ConfigMap volume, got %q", src.Name)
 	}
-	if src.SubPath != "" {
-		t.Errorf("component sources must be a full ConfigMap mount, not subPath %q", src.SubPath)
+	if findMount(frags.MysqlVolumeMounts, mysqlRuntimeMount) == nil {
+		t.Fatal("runtime emptyDir must be mounted for staged plugin/share paths")
 	}
-	if findMount(frags.MysqlVolumeMounts, "/opt/mysql/bin/mysqld.my") != nil {
-		t.Error("must not subPath-mount mysqld.my; launcher materializes it")
-	}
-	if findMount(frags.MysqlVolumeMounts, "/opt/mysql/lib/plugin/component_keyring_file.cnf") != nil {
-		t.Error("must not subPath-mount component_keyring_file.cnf; launcher materializes it")
+	if findVolume(frags.PodVolumes, mysqlRuntimeVolumeName) == nil {
+		t.Fatal("runtime emptyDir volume missing from fragments")
 	}
 
 	cmd, args := encryptionMysqlLauncher(fg, []string{"--server-id=1"})
@@ -453,7 +448,9 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 		keyringManifestKey,
 		keyringComponentKey,
 		"/opt/mysql/bin/mysqld.my",
-		"/opt/mysql/lib/plugin/component_keyring_file.cnf",
+		mysqlRuntimePluginDir,
+		mysqlImagePluginSO,
+		"errmsg.sys",
 		mysqlDockerEntrypoint,
 	} {
 		if !strings.Contains(script, want) {
@@ -462,6 +459,12 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 	}
 	if len(args) < 2 || args[0] != "mysqld" || args[1] != "--server-id=1" {
 		t.Errorf("launcher args = %v, want mysqld --server-id=1 …", args)
+	}
+
+	pathArgs := encryptionMySQLPathArgs()
+	joined := strings.Join(pathArgs, " ")
+	if !strings.Contains(joined, mysqlRuntimePluginDir) || !strings.Contains(joined, mysqlRuntimeMessagesDir) {
+		t.Errorf("path args must pin runtime plugin/share dirs, got %v", pathArgs)
 	}
 }
 
