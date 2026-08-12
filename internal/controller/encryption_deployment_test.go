@@ -86,12 +86,24 @@ func TestReconcile_EncryptedFreshDeployRendersUnsealed(t *testing.T) {
 
 	// Encrypted mysqld needs AppArmor/seccomp unconfined on hosts whose
 	// default container profile blocks component loading (GHA kind).
-	mysqlSC := containerByName(d.Spec.Template.Spec.Containers, "mysql").SecurityContext
+	mysqlSC := mysqlC.SecurityContext
 	if mysqlSC == nil || mysqlSC.AppArmorProfile == nil || mysqlSC.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
 		t.Errorf("mysql AppArmorProfile = %+v, want Unconfined", mysqlSC)
 	}
 	if mysqlSC == nil || mysqlSC.SeccompProfile == nil || mysqlSC.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
 		t.Errorf("mysql SeccompProfile = %+v, want Unconfined", mysqlSC)
+	}
+
+	// Launcher copies component files onto image paths, then execs the
+	// official entrypoint. Plain Args-only rendering cannot do that.
+	if len(mysqlC.Command) < 3 || mysqlC.Command[0] != "/bin/bash" {
+		t.Errorf("encrypted mysql must use the component launcher command, got %v", mysqlC.Command)
+	}
+	if findMount(mysqlC.VolumeMounts, keyringComponentSrcMount) == nil {
+		t.Error("encrypted mysql must mount ConfigMap sources for the launcher")
+	}
+	if len(mysqlC.Args) < 1 || mysqlC.Args[0] != "mysqld" {
+		t.Errorf("launcher args must start with mysqld, got %v", mysqlC.Args)
 	}
 }
 

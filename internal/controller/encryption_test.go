@@ -423,24 +423,45 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 	}
 	frags := buildEncryptionFragments(fg, fg.Spec.Sites[0], true, "s", false)
 
-	// MySQL only reads the global manifest from the mysqld directory and
-	// the global component config from plugin_dir. Both have to be
-	// subPath mounts: mounting a volume over either directory would hide
-	// the mysqld binary or the component .so.
-	manifest := findMount(frags.MysqlVolumeMounts, "/opt/mysql/bin/mysqld.my")
-	if manifest == nil {
-		t.Fatal("manifest must be mounted next to the mysqld binary")
+	// Component sources are mounted as a directory; the launcher copies
+	// them onto MysqldDir/PluginDir before mysqld starts. SubPath mounts
+	// onto those image-owned paths are intentionally avoided.
+	src := findMount(frags.MysqlVolumeMounts, keyringComponentSrcMount)
+	if src == nil {
+		t.Fatal("component sources must be mounted for the launcher to copy")
 	}
-	if manifest.SubPath != keyringManifestKey {
-		t.Errorf("manifest subPath = %q, want %q", manifest.SubPath, keyringManifestKey)
+	if src.Name != "config" {
+		t.Errorf("component sources should come from the per-site ConfigMap volume, got %q", src.Name)
 	}
-	if manifest.Name != "config" {
-		t.Errorf("manifest should come from the per-site ConfigMap volume, got %q", manifest.Name)
+	if src.SubPath != "" {
+		t.Errorf("component sources must be a full ConfigMap mount, not subPath %q", src.SubPath)
+	}
+	if findMount(frags.MysqlVolumeMounts, "/opt/mysql/bin/mysqld.my") != nil {
+		t.Error("must not subPath-mount mysqld.my; launcher materializes it")
+	}
+	if findMount(frags.MysqlVolumeMounts, "/opt/mysql/lib/plugin/component_keyring_file.cnf") != nil {
+		t.Error("must not subPath-mount component_keyring_file.cnf; launcher materializes it")
 	}
 
-	cnf := findMount(frags.MysqlVolumeMounts, "/opt/mysql/lib/plugin/component_keyring_file.cnf")
-	if cnf == nil || cnf.SubPath != keyringComponentKey {
-		t.Fatalf("component config must be subPath-mounted into plugin_dir: %+v", cnf)
+	cmd, args := encryptionMysqlLauncher(fg, []string{"--server-id=1"})
+	if len(cmd) < 3 || cmd[0] != "/bin/bash" {
+		t.Fatalf("launcher command = %v, want bash -ec <script>", cmd)
+	}
+	script := cmd[2]
+	for _, want := range []string{
+		keyringComponentSrcMount,
+		keyringManifestKey,
+		keyringComponentKey,
+		"/opt/mysql/bin/mysqld.my",
+		"/opt/mysql/lib/plugin/component_keyring_file.cnf",
+		mysqlDockerEntrypoint,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("launcher script missing %q:\n%s", want, script)
+		}
+	}
+	if len(args) < 2 || args[0] != "mysqld" || args[1] != "--server-id=1" {
+		t.Errorf("launcher args = %v, want mysqld --server-id=1 …", args)
 	}
 }
 

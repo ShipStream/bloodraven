@@ -1134,6 +1134,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			// block mysqld from reading errmsg.sys / loading components.
 			SecurityContext: mysqlSecurityContext(fg),
 		}
+		// Encryption: copy component files onto image-owned paths, then
+		// exec the official entrypoint. Replaces plain Args so the
+		// launcher owns argv0. See encryptionMysqlLauncher.
+		if fg.Spec.EncryptionEnabled() {
+			cmd, args := encryptionMysqlLauncher(fg, mysqlArgs)
+			mysqlContainer.Command = cmd
+			mysqlContainer.Args = args
+		}
 
 		operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
 

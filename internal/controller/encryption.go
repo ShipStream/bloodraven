@@ -18,13 +18,12 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v9"
+	encryptionPodRenderVersion = "encryption-pod-render-v10"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
-	// ConfigMap and are projected with subPath mounts, which is the only
-	// way to drop a single file into a directory that already has
-	// content (mounting a volume over /usr/sbin would hide mysqld).
+	// ConfigMap; the mysql container copies them onto the real paths
+	// before starting mysqld (see encryptionMysqlLauncher).
 	keyringManifestKey  = "keyring-manifest.json"
 	keyringComponentKey = "keyring-component.json"
 
@@ -40,6 +39,19 @@ const (
 	// sidecar).
 	keyringSeedMountPath  = "/run/bloodraven/keyring-seed"
 	keyringTokenMountPath = "/run/bloodraven/keyring-token"
+
+	// keyringComponentSrcMount is where the per-site ConfigMap is
+	// mounted into the mysql container so the launcher can copy the
+	// component files onto the image-owned paths. SubPath mounts onto
+	// /usr/sbin/mysqld.my and plugin_dir were observed in GHA kind to
+	// leave those files visible to the shell while mysqld still never
+	// loaded component_keyring_file (MY-013712 / Error 3185); a real
+	// file on the container overlay works.
+	keyringComponentSrcMount = "/run/bloodraven/keyring-component-src"
+
+	// Official MySQL Community image entrypoint. Used by the encryption
+	// launcher so we still get the image's init/user-switch logic.
+	mysqlDockerEntrypoint = "/usr/local/bin/docker-entrypoint.sh"
 
 	// keyringVolumeSizeLimit caps the memory-backed keyring emptyDir.
 	// A file keyring holding a handful of master keys is well under 1
@@ -216,19 +228,15 @@ func buildEncryptionFragments(
 	kr := fg.Spec.EffectiveKeyring()
 	dataFilePath := path.Join(kr.DataFileDir, v1alpha1.KeyringDataFileName)
 
-	// The two files MySQL will only read from image-owned directories.
-	// Both come from the per-site ConfigMap already mounted as "config".
+	// ConfigMap is mounted as a directory of sources; the launcher
+	// (encryptionMysqlLauncher) copies the two component files onto
+	// the image-owned paths before exec'ing mysqld. SubPath mounts onto
+	// those paths are intentionally not used — see
+	// keyringComponentSrcMount.
 	out.MysqlVolumeMounts = append(out.MysqlVolumeMounts,
 		corev1.VolumeMount{
 			Name:      "config",
-			MountPath: path.Join(kr.MysqldDir, "mysqld.my"),
-			SubPath:   keyringManifestKey,
-			ReadOnly:  true,
-		},
-		corev1.VolumeMount{
-			Name:      "config",
-			MountPath: path.Join(kr.PluginDir, "component_keyring_file.cnf"),
-			SubPath:   keyringComponentKey,
+			MountPath: keyringComponentSrcMount,
 			ReadOnly:  true,
 		},
 		corev1.VolumeMount{
@@ -367,6 +375,39 @@ func buildEncryptionFragments(
 	})
 
 	return out
+}
+
+// encryptionMysqlLauncher returns the container Command and Args that
+// materialize the keyring component files onto image-owned paths and
+// then hand off to the official MySQL entrypoint.
+//
+// mysqlArgs are the mysqld flags (starting with --server-id=..., not
+// including the "mysqld" binary name). They become $1..$n after a $0 of
+// "mysqld" so the entrypoint sees the same argv shape as a normal
+// `docker run mysql:… --flag` invocation.
+func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command, args []string) {
+	kr := fg.Spec.EffectiveKeyring()
+	manifestDst := path.Join(kr.MysqldDir, "mysqld.my")
+	componentDst := path.Join(kr.PluginDir, "component_keyring_file.cnf")
+	// bash -ec '<script>' mysqld --flag…  →  $0=mysqld, $1=--flag…
+	// Copy before exec so mysqld opens real overlay files rather than
+	// kubelet subPath bind mounts (see keyringComponentSrcMount).
+	script := fmt.Sprintf(`set -euo pipefail
+src=%q
+cp "$src/%s" %q
+cp "$src/%s" %q
+chmod 644 %q %q
+exec %s "$0" "$@"
+`,
+		keyringComponentSrcMount,
+		keyringManifestKey, manifestDst,
+		keyringComponentKey, componentDst,
+		manifestDst, componentDst,
+		mysqlDockerEntrypoint,
+	)
+	command = []string{"/bin/bash", "-ec", script}
+	args = append([]string{"mysqld"}, mysqlArgs...)
+	return command, args
 }
 
 // keyringTokenMode picks the projection mode for the escrow bearer
