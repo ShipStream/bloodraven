@@ -115,6 +115,42 @@ func TestKeyringManifestIsValidJSON(t *testing.T) {
 	if m["components"] != "file://component_keyring_file" {
 		t.Errorf("components = %v", m["components"])
 	}
+	if m["read_local_manifest"] != true {
+		t.Errorf("read_local_manifest = %v, want true so the datadir fallback is consulted", m["read_local_manifest"])
+	}
+	var local map[string]any
+	if err := json.Unmarshal([]byte(keyringLocalManifestJSON()), &local); err != nil {
+		t.Fatalf("local manifest is not valid JSON: %v", err)
+	}
+	if local["components"] != "file://component_keyring_file" {
+		t.Errorf("local components = %v", local["components"])
+	}
+	if _, ok := local["read_local_manifest"]; ok {
+		t.Error("local manifest must not carry read_local_manifest (global-only field)")
+	}
+}
+
+func TestConfigInitScriptPlantsLocalManifestWhenEncryptionOn(t *testing.T) {
+	fg := encTestFG()
+	script := configInitScript(fg, 101)
+	if !strings.Contains(script, "/var/lib/mysql/mysqld.my") {
+		t.Fatalf("encrypted config init must plant a local manifest:\n%s", script)
+	}
+	if !strings.Contains(script, "file://component_keyring_file") {
+		t.Fatalf("local manifest snippet missing component URN:\n%s", script)
+	}
+	mounts := configInitVolumeMounts(fg)
+	if findMount(mounts, "/var/lib/mysql") == nil {
+		t.Fatal("encrypted config init must mount the datadir")
+	}
+
+	plain := configInitScript(newTestFG(), 101)
+	if strings.Contains(plain, "mysqld.my") {
+		t.Fatalf("unencrypted config init must not plant a keyring manifest:\n%s", plain)
+	}
+	if findMount(configInitVolumeMounts(newTestFG()), "/var/lib/mysql") != nil {
+		t.Fatal("unencrypted config init must not mount the datadir")
+	}
 }
 
 func TestKeyringComponentConfig(t *testing.T) {

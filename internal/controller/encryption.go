@@ -18,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v5"
+	encryptionPodRenderVersion = "encryption-pod-render-v6"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -105,18 +105,48 @@ type encryptionFragments struct {
 	PodVolumes []corev1.Volume
 }
 
-// keyringManifestJSON is the content of the global component manifest
-// (`mysqld.my`). MySQL reads this only from the directory holding the
-// mysqld binary, which is why it is projected with a subPath mount
-// rather than written by an init container.
+// keyringManifestJSON is the global component manifest (`mysqld.my`
+// next to the mysqld binary). Projected via subPath into MysqldDir.
 //
-// read_local_manifest is set false explicitly so a leftover datadir
-// mysqld.my (or an empty local file) cannot suppress the global
-// component list. Omitting the key has worked in docker, but CI kind
-// runners have been observed to start with encryption my.cnf and the
-// global files mounted while still reporting no keyring component.
+// read_local_manifest is true so the datadir-local copy written by the
+// config init container is also consulted. That local copy is the
+// fallback for environments (notably GHA kind) that have been observed
+// to ignore a valid global subPath mount while still running with the
+// encryption my.cnf and reporting MY-013712 / no keyring component.
 func keyringManifestJSON() string {
-	return "{\n  \"read_local_manifest\": false,\n  \"components\": \"file://component_keyring_file\"\n}\n"
+	return "{\n  \"read_local_manifest\": true,\n  \"components\": \"file://component_keyring_file\"\n}\n"
+}
+
+// keyringLocalManifestJSON is the datadir-local component manifest.
+// Local manifests do not take the read_local_manifest key (that flag is
+// global-only); they only list components.
+func keyringLocalManifestJSON() string {
+	return "{\n  \"components\": \"file://component_keyring_file\"\n}\n"
+}
+
+// encryptionConfigInitSnippet is appended to the operator-managed
+// config init container when encryption is on. It plants a local
+// mysqld.my in the datadir so the keyring component still loads when
+// the global subPath mount is ignored by the runtime.
+//
+// Only writes into an already-initialized datadir: placing any file in
+// an empty datadir makes `mysqld --initialize` abort with "data
+// directory has files in it". Fresh encrypted-from-birth still relies
+// on the global mount for the first initialize.
+func encryptionConfigInitSnippet() string {
+	// Inline the local-manifest bytes rather than reusing the ConfigMap
+	// global file: that one carries read_local_manifest, which is not a
+	// local-manifest field.
+	return fmt.Sprintf(`
+if [ -d /var/lib/mysql/mysql ] || [ -f /var/lib/mysql/ibdata1 ]; then
+  cat > /var/lib/mysql/mysqld.my <<'BR_KEYRING_LOCAL_MANIFEST'
+%s
+BR_KEYRING_LOCAL_MANIFEST
+  if [ "$(id -u)" = "0" ]; then
+    chown 999:999 /var/lib/mysql/mysqld.my
+  fi
+  chmod 644 /var/lib/mysql/mysqld.my
+fi`, strings.TrimRight(keyringLocalManifestJSON(), "\n"))
 }
 
 // keyringComponentConfigJSON is the content of the global

@@ -295,9 +295,11 @@ pod=$(kubectl -n "$NAMESPACE" get pods -l "app.kubernetes.io/name=mysql,shipstre
 if [[ -n "$pod" ]]; then
 	kubectl -n "$NAMESPACE" exec "$pod" -c mysql -- sh -c '
 		echo "--- mounts ---"
-		ls -la /usr/sbin/mysqld.my /usr/lib64/mysql/plugin/component_keyring_file.cnf /run/mysql-keyring 2>&1 || true
-		echo "--- mysqld.my ---"
+		ls -la /usr/sbin/mysqld.my /var/lib/mysql/mysqld.my /usr/lib64/mysql/plugin/component_keyring_file.cnf /usr/lib64/mysql/plugin/component_keyring_file.so /usr/share/mysql-9.7/english/errmsg.sys /run/mysql-keyring 2>&1 || true
+		echo "--- global mysqld.my ---"
 		cat /usr/sbin/mysqld.my 2>&1 || true
+		echo "--- local datadir mysqld.my ---"
+		cat /var/lib/mysql/mysqld.my 2>&1 || true
 		echo "--- component_keyring_file.cnf ---"
 		cat /usr/lib64/mysql/plugin/component_keyring_file.cnf 2>&1 || true
 		echo "--- bloodraven.cnf (encryption lines) ---"

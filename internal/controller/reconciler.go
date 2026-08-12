@@ -634,6 +634,37 @@ func siteConfigMapName(group, site string) string {
 	return fmt.Sprintf("mysql-%s-%s-config", group, site)
 }
 
+// configInitScript copies the operator-managed my.cnf fragments into the
+// conf emptyDir. When encryption is enabled it also plants a local
+// component manifest in the datadir (see encryptionConfigInitSnippet).
+func configInitScript(fg *v1alpha1.MysqlFailoverGroup, serverID int32) string {
+	script := fmt.Sprintf(
+		"cp /etc/mysql/config-map/bloodraven.cnf /etc/mysql/conf.d/bloodraven.cnf && printf '[mysqld]\\nserver-id=%d\\n' > /etc/mysql/conf.d/server-id.cnf",
+		serverID,
+	)
+	if fg.Spec.EncryptionEnabled() {
+		script += encryptionConfigInitSnippet()
+	}
+	return script
+}
+
+// configInitVolumeMounts returns the volume mounts for the config init
+// container. The datadir is only mounted when encryption needs to write
+// a local mysqld.my there.
+func configInitVolumeMounts(fg *v1alpha1.MysqlFailoverGroup) []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{
+		{Name: "config", MountPath: "/etc/mysql/config-map"},
+		{Name: "conf", MountPath: "/etc/mysql/conf.d"},
+	}
+	if fg.Spec.EncryptionEnabled() {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "data",
+			MountPath: "/var/lib/mysql",
+		})
+	}
+	return mounts
+}
+
 // desiredSiteConfigData renders the complete ConfigMap payload for one site.
 // Keeping naming and reconciliation on this shared value prevents a
 // content-addressed name from ever disagreeing with the bytes mounted by the
@@ -1374,12 +1405,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 					Image: image,
 					Command: []string{
 						"sh", "-c",
-						fmt.Sprintf("cp /etc/mysql/config-map/bloodraven.cnf /etc/mysql/conf.d/bloodraven.cnf && printf '[mysqld]\\nserver-id=%d\\n' > /etc/mysql/conf.d/server-id.cnf", serverID),
+						configInitScript(fg, serverID),
 					},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "config", MountPath: "/etc/mysql/config-map"},
-						{Name: "conf", MountPath: "/etc/mysql/conf.d"},
-					},
+					VolumeMounts: configInitVolumeMounts(fg),
 					// Mirror the main mysql container's user-supplied
 					// SecurityContext onto the operator-injected init
 					// container. Without this, Restricted PSS admission
