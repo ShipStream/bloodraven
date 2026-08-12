@@ -112,8 +112,8 @@ func TestKeyringManifestIsValidJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(keyringManifestJSON()), &m); err != nil {
 		t.Fatalf("manifest is not valid JSON: %v", err)
 	}
-	if m["components"] != "file:///usr/lib64/mysql/plugin/component_keyring_file" {
-		t.Errorf("components = %v, want absolute URN", m["components"])
+	if m["components"] != "file://component_keyring_file" {
+		t.Errorf("components = %v", m["components"])
 	}
 	if _, ok := m["read_local_manifest"]; ok {
 		t.Error("global manifest must not set read_local_manifest; keep global-only loading simple")
@@ -122,7 +122,7 @@ func TestKeyringManifestIsValidJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(keyringLocalManifestJSON()), &local); err != nil {
 		t.Fatalf("local manifest is not valid JSON: %v", err)
 	}
-	if local["components"] != "file:///usr/lib64/mysql/plugin/component_keyring_file" {
+	if local["components"] != "file://component_keyring_file" {
 		t.Errorf("local components = %v", local["components"])
 	}
 	if _, ok := local["read_local_manifest"]; ok {

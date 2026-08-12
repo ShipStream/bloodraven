@@ -18,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v15"
+	encryptionPodRenderVersion = "encryption-pod-render-v16"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -122,18 +122,18 @@ type encryptionFragments struct {
 // to ignore a valid global subPath mount while still running with the
 // encryption my.cnf and reporting MY-013712 / no keyring component.
 func keyringManifestJSON() string {
-	// Absolute URN so component load does not depend on plugin_dir
-	// resolution. Do not set read_local_manifest: a local datadir
-	// fallback is still planted separately, but global-only loading
-	// is the primary path.
-	return "{\n  \"components\": \"file:///usr/lib64/mysql/plugin/component_keyring_file\"\n}\n"
+	// Relative URN (file://name) resolved against plugin_dir. Absolute
+	// file:///… URNs fail with MY-013709 on MySQL 9.7. Do not set
+	// read_local_manifest: keep global-only loading simple; a local
+	// datadir copy is still planted as a secondary path.
+	return "{\n  \"components\": \"file://component_keyring_file\"\n}\n"
 }
 
 // keyringLocalManifestJSON is the datadir-local component manifest.
 // Local manifests do not take the read_local_manifest key (that flag is
 // global-only); they only list components.
 func keyringLocalManifestJSON() string {
-	return "{\n  \"components\": \"file:///usr/lib64/mysql/plugin/component_keyring_file\"\n}\n"
+	return "{\n  \"components\": \"file://component_keyring_file\"\n}\n"
 }
 
 // encryptionConfigInitSnippet is appended to the operator-managed
