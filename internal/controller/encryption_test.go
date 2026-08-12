@@ -112,17 +112,17 @@ func TestKeyringManifestIsValidJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(keyringManifestJSON()), &m); err != nil {
 		t.Fatalf("manifest is not valid JSON: %v", err)
 	}
-	if m["components"] != "file://component_keyring_file" {
-		t.Errorf("components = %v", m["components"])
+	if m["components"] != "file:///usr/lib64/mysql/plugin/component_keyring_file" {
+		t.Errorf("components = %v, want absolute URN", m["components"])
 	}
-	if m["read_local_manifest"] != true {
-		t.Errorf("read_local_manifest = %v, want true so the datadir fallback is consulted", m["read_local_manifest"])
+	if _, ok := m["read_local_manifest"]; ok {
+		t.Error("global manifest must not set read_local_manifest; keep global-only loading simple")
 	}
 	var local map[string]any
 	if err := json.Unmarshal([]byte(keyringLocalManifestJSON()), &local); err != nil {
 		t.Fatalf("local manifest is not valid JSON: %v", err)
 	}
-	if local["components"] != "file://component_keyring_file" {
+	if local["components"] != "file:///usr/lib64/mysql/plugin/component_keyring_file" {
 		t.Errorf("local components = %v", local["components"])
 	}
 	if _, ok := local["read_local_manifest"]; ok {
@@ -136,7 +136,7 @@ func TestConfigInitScriptPlantsLocalManifestWhenEncryptionOn(t *testing.T) {
 	if !strings.Contains(script, "/var/lib/mysql/mysqld.my") {
 		t.Fatalf("encrypted config init must plant a local manifest:\n%s", script)
 	}
-	if !strings.Contains(script, "file://component_keyring_file") {
+	if !strings.Contains(script, "component_keyring_file") {
 		t.Fatalf("local manifest snippet missing component URN:\n%s", script)
 	}
 	mounts := configInitVolumeMounts(fg)
@@ -423,7 +423,7 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 	}
 	frags := buildEncryptionFragments(fg, fg.Spec.Sites[0], true, "s", false)
 
-	// Component sources + runtime emptyDir for the launcher.
+	// Component sources for the launcher.
 	src := findMount(frags.MysqlVolumeMounts, keyringComponentSrcMount)
 	if src == nil {
 		t.Fatal("component sources must be mounted for the launcher to copy")
@@ -431,13 +431,6 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 	if src.Name != "config" {
 		t.Errorf("component sources should come from the per-site ConfigMap volume, got %q", src.Name)
 	}
-	if findMount(frags.MysqlVolumeMounts, mysqlRuntimeMount) == nil {
-		t.Fatal("runtime emptyDir must be mounted for staged plugin/share paths")
-	}
-	if findVolume(frags.PodVolumes, mysqlRuntimeVolumeName) == nil {
-		t.Fatal("runtime emptyDir volume missing from fragments")
-	}
-
 	cmd, args := encryptionMysqlLauncher(fg, []string{"--server-id=1"})
 	if len(cmd) < 3 || cmd[0] != "/bin/bash" {
 		t.Fatalf("launcher command = %v, want bash -ec <script>", cmd)
@@ -448,10 +441,7 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 		keyringManifestKey,
 		keyringComponentKey,
 		"/opt/mysql/bin/mysqld.my",
-		mysqlRuntimePluginDir,
-		mysqlImagePluginDir,
-		mysqlImageMessagesDir,
-		"cp -a",
+		"/opt/mysql/lib/plugin/component_keyring_file.cnf",
 		mysqlDockerEntrypoint,
 	} {
 		if !strings.Contains(script, want) {
@@ -460,12 +450,6 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 	}
 	if len(args) < 2 || args[0] != "mysqld" || args[1] != "--server-id=1" {
 		t.Errorf("launcher args = %v, want mysqld --server-id=1 …", args)
-	}
-
-	pathArgs := encryptionMySQLPathArgs()
-	joined := strings.Join(pathArgs, " ")
-	if !strings.Contains(joined, mysqlRuntimePluginDir) || !strings.Contains(joined, mysqlRuntimeMessagesDir) {
-		t.Errorf("path args must pin runtime plugin/share dirs, got %v", pathArgs)
 	}
 }
 

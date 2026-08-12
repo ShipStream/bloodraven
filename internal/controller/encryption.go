@@ -18,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v14"
+	encryptionPodRenderVersion = "encryption-pod-render-v15"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -32,7 +32,6 @@ const (
 	keyringVolumeName      = "keyring"
 	keyringSeedVolumeName  = "keyring-seed"
 	keyringTokenVolumeName = "keyring-token"
-	mysqlRuntimeVolumeName = "mysql-runtime"
 
 	// Mount points for the two operator-managed Secrets that never go
 	// near mysqld: the seed (previous escrow version, consumed by the
@@ -46,25 +45,9 @@ const (
 	// component files into place.
 	keyringComponentSrcMount = "/run/bloodraven/keyring-component-src"
 
-	// mysqlRuntimeMount is a disk-backed emptyDir at a short path outside
-	// /run (AppArmor-ish denials were observed for /run/bloodraven/...)
-	// and outside the datadir (files there would abort mysqld
-	// --initialize). Full plugin + share trees are staged so mysql_clone
-	// and component loads resolve.
-	mysqlRuntimeMount       = "/mysql-runtime"
-	mysqlRuntimePluginDir   = mysqlRuntimeMount + "/plugin"
-	mysqlRuntimeMessagesDir = mysqlRuntimeMount + "/share"
-	// Image paths the launcher copies FROM.
-	mysqlImagePluginDir   = "/usr/lib64/mysql/plugin"
-	mysqlImageMessagesDir = "/usr/share/mysql-9.7"
-
 	// Official MySQL Community image entrypoint. Used by the encryption
 	// launcher so we still get the image's init/user-switch logic.
 	mysqlDockerEntrypoint = "/usr/local/bin/docker-entrypoint.sh"
-
-	// mysqlRuntimeVolumeSizeLimit bounds the runtime emptyDir (~40 MiB
-	// for MySQL 9.7 plugin+share; 128 MiB headroom).
-	mysqlRuntimeVolumeSizeLimit = "128Mi"
 
 	// keyringVolumeSizeLimit caps the memory-backed keyring emptyDir.
 	// A file keyring holding a handful of master keys is well under 1
@@ -139,14 +122,18 @@ type encryptionFragments struct {
 // to ignore a valid global subPath mount while still running with the
 // encryption my.cnf and reporting MY-013712 / no keyring component.
 func keyringManifestJSON() string {
-	return "{\n  \"read_local_manifest\": true,\n  \"components\": \"file://component_keyring_file\"\n}\n"
+	// Absolute URN so component load does not depend on plugin_dir
+	// resolution. Do not set read_local_manifest: a local datadir
+	// fallback is still planted separately, but global-only loading
+	// is the primary path.
+	return "{\n  \"components\": \"file:///usr/lib64/mysql/plugin/component_keyring_file\"\n}\n"
 }
 
 // keyringLocalManifestJSON is the datadir-local component manifest.
 // Local manifests do not take the read_local_manifest key (that flag is
 // global-only); they only list components.
 func keyringLocalManifestJSON() string {
-	return "{\n  \"components\": \"file://component_keyring_file\"\n}\n"
+	return "{\n  \"components\": \"file:///usr/lib64/mysql/plugin/component_keyring_file\"\n}\n"
 }
 
 // encryptionConfigInitSnippet is appended to the operator-managed
@@ -241,28 +228,14 @@ func buildEncryptionFragments(
 	kr := fg.Spec.EffectiveKeyring()
 	dataFilePath := path.Join(kr.DataFileDir, v1alpha1.KeyringDataFileName)
 
-	// ConfigMap sources + writable runtime emptyDir for the launcher.
-	// See keyringComponentSrcMount / mysqlRuntimeMount.
-	runtimeLimit := resource.MustParse(mysqlRuntimeVolumeSizeLimit)
-	out.PodVolumes = append(out.PodVolumes, corev1.Volume{
-		Name: mysqlRuntimeVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			// Disk-backed (not Memory): tmpfs returned Permission denied
-			// on dlopen in GHA kind.
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				SizeLimit: &runtimeLimit,
-			},
-		},
-	})
+	// ConfigMap sources for the launcher (mysqld.my + component cnf).
+	// Keep image plugin_dir / lc-messages-dir; staging those onto
+	// emptyDir hit Permission denied on dlopen in GHA kind.
 	out.MysqlVolumeMounts = append(out.MysqlVolumeMounts,
 		corev1.VolumeMount{
 			Name:      "config",
 			MountPath: keyringComponentSrcMount,
 			ReadOnly:  true,
-		},
-		corev1.VolumeMount{
-			Name:      mysqlRuntimeVolumeName,
-			MountPath: mysqlRuntimeMount,
 		},
 		corev1.VolumeMount{
 			Name:      keyringVolumeName,
@@ -403,72 +376,42 @@ func buildEncryptionFragments(
 }
 
 // encryptionMysqlLauncher returns the container Command and Args that
-// stage keyring/component assets onto writable paths and hand off to
-// the official MySQL entrypoint.
+// materialize keyring component files onto image-owned paths and hand
+// off to the official MySQL entrypoint.
 //
 // mysqlArgs are the mysqld flags (starting with --server-id=..., not
 // including the "mysqld" binary name). They become $1..$n after a $0 of
 // "mysqld" so the entrypoint sees the same argv shape as a normal
-// `docker run mysql:… --flag` invocation. Callers must already have
-// pointed --plugin-dir and --lc-messages-dir at the runtime emptyDir
-// (see encryptionMySQLPathArgs).
+// `docker run mysql:… --flag` invocation.
 func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command, args []string) {
 	kr := fg.Spec.EffectiveKeyring()
 	manifestDst := path.Join(kr.MysqldDir, "mysqld.my")
-	componentDst := path.Join(mysqlRuntimePluginDir, "component_keyring_file.cnf")
+	componentDst := path.Join(kr.PluginDir, "component_keyring_file.cnf")
 	// bash -ec '<script>' mysqld --flag…  →  $0=mysqld, $1=--flag…
-	//
-	// Stage a full plugin_dir + lc-messages-dir onto the runtime emptyDir
-	// and plant mysqld.my next to the binary. Overlay our component cnf
-	// after the tree copy so it wins over any image default.
+	// Materialize the two component files onto image-owned paths (real
+	// overlay files, not kubelet subPath binds), then hand off to the
+	// official entrypoint with default image basedir/plugin_dir.
 	script := fmt.Sprintf(`set -euo pipefail
 src=%q
-rt=%q
-mkdir -p "$rt/plugin" "$rt/share"
-# Stage once per PVC (idempotent). Full trees so mysql_clone resolves.
-if [ ! -f "$rt/plugin/component_keyring_file.so" ] || [ ! -f "$rt/share/english/errmsg.sys" ]; then
-  cp -a %q/. "$rt/plugin/"
-  cp -a %q/. "$rt/share/"
-fi
 cp "$src/%s" %q
 cp "$src/%s" %q
-# Own as mysqld uid so gosu'd process can dlopen/read.
-if [ "$(id -u)" = "0" ]; then
-  chown -R 999:999 "$rt"
-fi
-chmod -R a+rX "$rt"
 chmod 644 %q %q
-# Prove the staged tree is usable before handing off to entrypoint.
-test -r "$rt/share/english/errmsg.sys"
-test -x "$rt/plugin/component_keyring_file.so"
 test -r %q
+test -r %q
+test -x %q
 exec %s "$0" "$@"
 `,
 		keyringComponentSrcMount,
-		mysqlRuntimeMount,
-		mysqlImagePluginDir,
-		mysqlImageMessagesDir,
 		keyringManifestKey, manifestDst,
 		keyringComponentKey, componentDst,
 		manifestDst, componentDst,
-		componentDst,
+		manifestDst, componentDst,
+		path.Join(kr.PluginDir, "component_keyring_file.so"),
 		mysqlDockerEntrypoint,
 	)
 	command = []string{"/bin/bash", "-ec", script}
 	args = append([]string{"mysqld"}, mysqlArgs...)
 	return command, args
-}
-
-// encryptionMySQLPathArgs pins basedir / plugin_dir / lc-messages-dir for
-// encrypted pods. plugin_dir and lc-messages-dir point at the launcher-
-// populated runtime emptyDir; basedir stays on the image so the binary
-// and its adjacent mysqld.my resolve normally.
-func encryptionMySQLPathArgs() []string {
-	return []string{
-		"--basedir=/usr",
-		"--plugin-dir=" + mysqlRuntimePluginDir,
-		"--lc-messages-dir=" + mysqlRuntimeMessagesDir,
-	}
 }
 
 // keyringTokenMode picks the projection mode for the escrow bearer

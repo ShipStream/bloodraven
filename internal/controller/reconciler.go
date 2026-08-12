@@ -1062,12 +1062,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			"--skip-replica-start=ON",
 			"--plugin-load-add=mysql_clone.so",
 		}
-		// Encryption: pin basedir and point plugin_dir / lc-messages-dir
-		// at the launcher-populated runtime emptyDir (see
-		// encryptionMySQLPathArgs / encryptionMysqlLauncher).
-		if fg.Spec.EncryptionEnabled() {
-			mysqlArgs = append(mysqlArgs, encryptionMySQLPathArgs()...)
-		}
+
 		if fg.Spec.TLS != nil {
 			// Keep the server-side TLS contract on the mysqld command line as
 			// well as in bloodraven.cnf. The sidecar verifies the per-site
