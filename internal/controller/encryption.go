@@ -18,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v4"
+	encryptionPodRenderVersion = "encryption-pod-render-v5"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -109,18 +109,25 @@ type encryptionFragments struct {
 // (`mysqld.my`). MySQL reads this only from the directory holding the
 // mysqld binary, which is why it is projected with a subPath mount
 // rather than written by an init container.
+//
+// read_local_manifest is set false explicitly so a leftover datadir
+// mysqld.my (or an empty local file) cannot suppress the global
+// component list. Omitting the key has worked in docker, but CI kind
+// runners have been observed to start with encryption my.cnf and the
+// global files mounted while still reporting no keyring component.
 func keyringManifestJSON() string {
-	return "{\n  \"components\": \"file://component_keyring_file\"\n}\n"
+	return "{\n  \"read_local_manifest\": false,\n  \"components\": \"file://component_keyring_file\"\n}\n"
 }
 
 // keyringComponentConfigJSON is the content of the global
 // `component_keyring_file.cnf`. MySQL reads this only from plugin_dir.
 //
-// Both keys are mandatory: component_keyring_file refuses to initialize
-// if either "path" or "read_only" is missing, and InnoDB then refuses to
-// start because it cannot find a keyring.
+// path and read_only are mandatory: component_keyring_file refuses to
+// initialize if either is missing. read_local_config is set false for
+// the same reason as the manifest: a local config under the data
+// directory must not override the operator-managed global file.
 func keyringComponentConfigJSON(dataFilePath string, readOnly bool) string {
-	return fmt.Sprintf("{\n  \"path\": %q,\n  \"read_only\": %t\n}\n", dataFilePath, readOnly)
+	return fmt.Sprintf("{\n  \"read_local_config\": false,\n  \"path\": %q,\n  \"read_only\": %t\n}\n", dataFilePath, readOnly)
 }
 
 // encryptionMySQLSettings returns the my.cnf settings that turn on

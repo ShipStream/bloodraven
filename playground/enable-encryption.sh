@@ -214,8 +214,8 @@ fi
 # Prefer the chart's escrowTLS secret mount: a prior setup with
 # BLOODRAVEN_SETUP_TLS already armed the listener, and a no-op helm
 # upgrade still rolls the operator and races the encryption adoption.
-if kubectl -n "$NAMESPACE" get deploy bloodraven -o yaml 2>/dev/null \
-	| grep -q "name: ${ESCROW_TLS_SECRET}"; then
+if kubectl -n "$NAMESPACE" get deploy bloodraven -o jsonpath='{range .spec.template.spec.volumes[*]}{.secret.secretName}{"\n"}{end}' 2>/dev/null \
+	| grep -qx "$ESCROW_TLS_SECRET"; then
 	ok "operator already has escrow TLS configured; skipping helm upgrade"
 else
 	wait_for_stable_baseline "before restarting the operator for escrow TLS"
