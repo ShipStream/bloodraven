@@ -307,7 +307,7 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 	}
 
 	digest := ""
-	if len(raw) > 0 {
+	if len(raw) > 0 && !emptyKeyringDocument(raw) {
 		sum := sha256.Sum256(raw)
 		digest = "sha256:" + hex.EncodeToString(sum[:])
 	}
@@ -332,6 +332,22 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 		return
 	}
 	metrics.KeyringEscrowPushesTotal.WithLabelValues(a.group, a.site, "success").Inc()
+}
+
+// emptyKeyringDocument recognizes the valid bootstrap file written by
+// keyring-init before MySQL has created any keys. It must not be escrowed:
+// sealing a pod against this document leaves encrypted redo/binlogs without
+// a recoverable master key on the next restart.
+//
+// Unknown or malformed content is not classified as empty here. MySQL owns
+// the on-disk format, and refusing a future valid format would strand an
+// otherwise healthy site; the sealed restart and component-status checks
+// remain the final validation.
+func emptyKeyringDocument(raw []byte) bool {
+	var doc struct {
+		Elements *[]json.RawMessage `json:"elements"`
+	}
+	return json.Unmarshal(raw, &doc) == nil && doc.Elements != nil && len(*doc.Elements) == 0
 }
 
 // refreshMySQLView samples the keyring component status and the

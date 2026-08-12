@@ -228,6 +228,25 @@ func TestKeyringAgent_EmptyFileIsNotEscrowed(t *testing.T) {
 	}
 }
 
+func TestKeyringAgent_EmptyKeyringDocumentIsNotEscrowed(t *testing.T) {
+	f := newAgentFixture(t, nil)
+	raw := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	if err := os.WriteFile(f.keyring, raw, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f.agent.tick(context.Background())
+
+	got := f.agent.Snapshot()
+	if !got.Present || got.Size != int64(len(raw)) || got.Digest != "" {
+		t.Errorf("status = %+v", got)
+	}
+	received, _ := f.escrow.snapshot()
+	if len(received) != 0 {
+		t.Fatal("a keyring document with no keys must not be escrowed")
+	}
+}
+
 // --- escrow ---------------------------------------------------------
 
 func TestKeyringAgent_PushesKeyring(t *testing.T) {
@@ -466,24 +485,35 @@ func TestKeyringAgent_EncryptsSystemTablespaceOnPrimary(t *testing.T) {
 	}
 }
 
-func TestKeyringAgent_EscrowsKeyringAfterSystemTablespaceMutation(t *testing.T) {
+func TestKeyringAgent_WaitsForPrimaryKeyBeforeEscrow(t *testing.T) {
 	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
 	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
-	f.mysql.readOnly = false
-	if err := os.WriteFile(f.keyring, []byte("before-system-tablespace-key"), 0o600); err != nil {
+	f.mysql.readOnly = true
+	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	f.mysql.encryptSysFunc = func() error {
-		return os.WriteFile(f.keyring, []byte("after-system-tablespace-key"), 0o600)
+
+	// A replica can start first during an ordered rollout. It must not
+	// escrow the bootstrap document before any writable site creates a key.
+	f.agent.tick(context.Background())
+	received, _ := f.escrow.snapshot()
+	if len(received) != 0 {
+		t.Fatalf("escrowed the keyless bootstrap document: %q", received[0])
 	}
 
+	populated := []byte("{\"version\":\"1.0\",\"elements\":[{\"key\":\"master\"}]}\n")
+	f.mysql.readOnly = false
+	f.mysql.encryptSysFunc = func() error {
+		return os.WriteFile(f.keyring, populated, 0o600)
+	}
 	f.agent.tick(context.Background())
 
-	received, _ := f.escrow.snapshot()
+	received, _ = f.escrow.snapshot()
 	if len(received) != 1 {
 		t.Fatalf("expected one push, got %d", len(received))
 	}
-	if got := string(received[0]); got != "after-system-tablespace-key" {
+	if got := string(received[0]); got != string(populated) {
 		t.Fatalf("escrowed %q, want the keyring after ALTER TABLESPACE", got)
 	}
 }
