@@ -83,6 +83,12 @@ func TestReconcile_EncryptedFreshDeployRendersUnsealed(t *testing.T) {
 	if dataMount := findMount(mysqlC.VolumeMounts, "/var/lib/mysql"); dataMount == nil {
 		t.Fatal("sanity: data mount missing")
 	}
+
+	// Encrypted mysqld needs AppArmor unconfined on hosts whose default
+	// container profile blocks component loading (GHA kind).
+	if got := d.Spec.Template.Annotations["container.apparmor.security.beta.kubernetes.io/mysql"]; got != "unconfined" {
+		t.Errorf("mysql AppArmor annotation = %q, want unconfined", got)
+	}
 }
 
 func TestReconcile_EncryptedConfigMapCarriesComponentFiles(t *testing.T) {

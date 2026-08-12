@@ -1377,6 +1377,16 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		}
 		// Operator annotations take precedence over user-supplied annotations.
 		podAnnotations[specHashAnnotation] = specHash
+		// Encryption loads component_keyring_file from a global/local
+		// mysqld.my and opens the keyring data file. On AppArmor-enabled
+		// hosts (GHA kind runners included) the default container profile
+		// has been observed to make mysqld report "Can't find error-message
+		// file" for a path that exists and refuse to load the keyring
+		// component (MY-013712) even with valid manifests mounted. Opt the
+		// mysqld container out of AppArmor when encryption is on.
+		if fg.Spec.EncryptionEnabled() {
+			podAnnotations["container.apparmor.security.beta.kubernetes.io/mysql"] = "unconfined"
+		}
 
 		deploy.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
