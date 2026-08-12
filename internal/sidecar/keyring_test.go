@@ -39,12 +39,13 @@ type fakeKeyringMySQL struct {
 	componentCalls atomic.Int32
 	coverageCalls  atomic.Int32
 	rotateErr      error
+	rotateFunc     func(context.Context) error
 	rotateCalls    atomic.Int32
 	encryptCalls   atomic.Int32
 	readOnly       bool
 	readOnlyErr    error
 	encryptSysErr  error
-	encryptSysFunc func() error
+	encryptSysFunc func(context.Context) error
 }
 
 func (f *fakeKeyringMySQL) KeyringComponentStatus(context.Context) (*KeyringComponentStatus, error) {
@@ -60,15 +61,18 @@ func (f *fakeKeyringMySQL) EncryptionCoverage(context.Context) (*KeyringCoverage
 	return f.coverage, f.coverageErr
 }
 
-func (f *fakeKeyringMySQL) RotateInnoDBMasterKey(context.Context) error {
+func (f *fakeKeyringMySQL) RotateInnoDBMasterKey(ctx context.Context) error {
 	f.rotateCalls.Add(1)
+	if f.rotateFunc != nil {
+		return f.rotateFunc(ctx)
+	}
 	return f.rotateErr
 }
 
-func (f *fakeKeyringMySQL) EncryptSystemTablespace(context.Context) error {
+func (f *fakeKeyringMySQL) EncryptSystemTablespace(ctx context.Context) error {
 	f.encryptCalls.Add(1)
 	if f.encryptSysFunc != nil {
-		return f.encryptSysFunc()
+		return f.encryptSysFunc(ctx)
 	}
 	return f.encryptSysErr
 }
@@ -268,7 +272,7 @@ func TestKeyringAgent_EscrowEligibility(t *testing.T) {
 				}
 				// Install the encrypt side-effect before the replica tick so an
 				// accidental call would both count and mutate the keyring.
-				f.mysql.encryptSysFunc = func() error {
+				f.mysql.encryptSysFunc = func(context.Context) error {
 					return os.WriteFile(f.keyring, populated, 0o600)
 				}
 				// Replica-first during ordered rollout must not encrypt or
@@ -570,6 +574,60 @@ func TestKeyringAgent_BootstrapsMasterKeyOnEmptyKeyring(t *testing.T) {
 	}
 	if got := f.mysql.encryptCalls.Load(); got != 1 {
 		t.Errorf("encrypt calls = %d, want 1 after bootstrap", got)
+	}
+}
+
+func TestKeyringAgent_KeyringWriteDDLUsesIndependentDeadlines(t *testing.T) {
+	f := newAgentFixture(t, func(c *KeyringConfig) {
+		c.EscrowArmed = true
+		c.EncryptSystemTablespace = true
+	})
+	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.readOnly = false
+	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var rotateCtx context.Context
+	f.mysql.rotateFunc = func(ctx context.Context) error {
+		rotateCtx = ctx
+		assertKeyringWriteDeadline(t, ctx)
+		return nil
+	}
+	f.mysql.encryptSysFunc = func(ctx context.Context) error {
+		assertKeyringWriteDeadline(t, ctx)
+		if rotateCtx == nil {
+			t.Fatal("system tablespace encryption ran before master-key bootstrap")
+		}
+		if err := rotateCtx.Err(); !errors.Is(err, context.Canceled) {
+			t.Errorf("rotation context error = %v, want context canceled", err)
+		}
+		if ctx == rotateCtx {
+			t.Error("master-key rotation and system tablespace encryption shared a context")
+		}
+		return nil
+	}
+
+	f.agent.tick(context.Background())
+	if got := f.mysql.rotateCalls.Load(); got != 1 {
+		t.Fatalf("rotate calls = %d, want 1", got)
+	}
+	if got := f.mysql.encryptCalls.Load(); got != 1 {
+		t.Fatalf("encrypt calls = %d, want 1", got)
+	}
+}
+
+func assertKeyringWriteDeadline(t *testing.T, ctx context.Context) {
+	t.Helper()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("keyring write context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining < 29*time.Second || remaining > 30*time.Second {
+		t.Errorf("keyring write deadline remaining = %v, want approximately 30s", remaining)
 	}
 }
 

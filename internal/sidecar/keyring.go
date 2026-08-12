@@ -408,7 +408,10 @@ func (a *KeyringAgent) refreshMySQLView(ctx context.Context) error {
 	// creates a key. ROTATE INNODB MASTER KEY is the explicit
 	// create-if-missing path and is safe on a writable keyring.
 	if emptyKeyring {
-		if err := a.mysql.RotateInnoDBMasterKey(qCtx); err != nil {
+		writeCtx, writeCancel := context.WithTimeout(ctx, 30*time.Second)
+		err := a.mysql.RotateInnoDBMasterKey(writeCtx)
+		writeCancel()
+		if err != nil {
 			a.logger.Warn("could not bootstrap innodb master key", "error", err, "site", a.site)
 			return errors.Join(viewErr, fmt.Errorf("bootstrap innodb master key: %w", err))
 		}
@@ -420,7 +423,10 @@ func (a *KeyringAgent) refreshMySQLView(ctx context.Context) error {
 	// replicated DDL, so running it on the primary carries it to the
 	// replicas.
 	if a.cfg.EncryptSystemTablespace && cov != nil && !cov.SystemTablespaceEncrypted {
-		if err := a.mysql.EncryptSystemTablespace(qCtx); err != nil {
+		writeCtx, writeCancel := context.WithTimeout(ctx, 30*time.Second)
+		err := a.mysql.EncryptSystemTablespace(writeCtx)
+		writeCancel()
+		if err != nil {
 			a.logger.Warn("could not encrypt the mysql system tablespace", "error", err, "site", a.site)
 			return errors.Join(viewErr, fmt.Errorf("encrypt system tablespace: %w", err))
 		}
