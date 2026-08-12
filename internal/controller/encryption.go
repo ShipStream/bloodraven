@@ -47,26 +47,27 @@ const (
 	keyringComponentSrcMount = "/run/bloodraven/keyring-component-src"
 
 	// mysqlRuntimeMount is a memory-backed emptyDir the launcher
-	// populates with a private plugin_dir and lc-messages-dir. On GHA
-	// kind, mysqld has been observed to fail open() of image-layer paths
-	// (errmsg.sys at the correct absolute path; component .so load
-	// never completes) even after materializing mysqld.my on the
-	// container overlay. Serving those assets from an emptyDir avoids
-	// the broken image-layer open path.
+	// populates with a full copy of the image plugin_dir and
+	// lc-messages-dir. On GHA kind, mysqld has been observed to fail
+	// open() of image-layer paths even after materializing mysqld.my on
+	// the container overlay. A sparse plugin_dir is not enough:
+	// --plugin-load-add=mysql_clone.so and other components also resolve
+	// relative to plugin_dir, so the whole tree is staged.
 	mysqlRuntimeMount       = "/run/bloodraven/mysql-runtime"
 	mysqlRuntimePluginDir   = mysqlRuntimeMount + "/plugin"
 	mysqlRuntimeMessagesDir = mysqlRuntimeMount + "/share"
 	// Image paths the launcher copies FROM.
-	mysqlImagePluginSO    = "/usr/lib64/mysql/plugin/component_keyring_file.so"
+	mysqlImagePluginDir   = "/usr/lib64/mysql/plugin"
 	mysqlImageMessagesDir = "/usr/share/mysql-9.7"
 
 	// Official MySQL Community image entrypoint. Used by the encryption
 	// launcher so we still get the image's init/user-switch logic.
 	mysqlDockerEntrypoint = "/usr/local/bin/docker-entrypoint.sh"
 
-	// mysqlRuntimeVolumeSizeLimit bounds the runtime emptyDir (plugin
-	// .so ~0.5 MiB plus errmsg.sys ~0.5 MiB; 8 MiB is generous).
-	mysqlRuntimeVolumeSizeLimit = "8Mi"
+	// mysqlRuntimeVolumeSizeLimit bounds the runtime emptyDir. A MySQL
+	// 9.7 plugin dir is ~29 MiB and share is ~12 MiB; 128 MiB leaves
+	// headroom for image growth.
+	mysqlRuntimeVolumeSizeLimit = "128Mi"
 
 	// keyringVolumeSizeLimit caps the memory-backed keyring emptyDir.
 	// A file keyring holding a handful of master keys is well under 1
