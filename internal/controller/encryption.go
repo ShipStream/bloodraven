@@ -18,7 +18,7 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v12"
+	encryptionPodRenderVersion = "encryption-pod-render-v13"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
@@ -246,12 +246,15 @@ func buildEncryptionFragments(
 
 	// ConfigMap sources + writable runtime emptyDir for the launcher.
 	// See keyringComponentSrcMount / mysqlRuntimeMount.
+	// Disk-backed emptyDir (not Memory/tmpfs): GHA kind rejected
+	// dlopen of staged .so files from a memory emptyDir with
+	// "Permission denied" (noexec-style). Default emptyDir is
+	// node-disk backed and executable.
 	runtimeLimit := resource.MustParse(mysqlRuntimeVolumeSizeLimit)
 	out.PodVolumes = append(out.PodVolumes, corev1.Volume{
 		Name: mysqlRuntimeVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium:    corev1.StorageMediumMemory,
 				SizeLimit: &runtimeLimit,
 			},
 		},
@@ -432,6 +435,8 @@ cp -a %q/. "$rt/plugin/"
 cp -a %q/. "$rt/share/"
 cp "$src/%s" %q
 cp "$src/%s" %q
+# World-readable/executable so uid 999 can dlopen after gosu.
+chmod -R a+rX "$rt"
 chmod 644 %q %q
 exec %s "$0" "$@"
 `,
