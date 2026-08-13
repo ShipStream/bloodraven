@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -1066,7 +1067,26 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			return err
 		}
 		// Apply status changes to the freshly-fetched object.
+		//
+		// freshFG.Status is a snapshot taken before this function started
+		// computing, so assigning it wholesale would carry stale copies of
+		// every field this writer does not own back over the top of
+		// concurrent writes. The encryption state machine is the other
+		// writer on this object and it merge-patches only its own subtree,
+		// so its fields are re-read here rather than replayed from the
+		// snapshot. Clobbering them is not cosmetic: losing an
+		// Escrowed/Sealed advance re-renders the site unsealed and rolls
+		// the pod, and losing a Failed hides a site whose key custody is
+		// gone.
+		encryption := fresh.Status.EncryptionAtRest
+		encryptionCond := apimeta.FindStatusCondition(fresh.Status.Conditions, conditionEncryptionReady)
 		fresh.Status = freshFG.Status
+		fresh.Status.EncryptionAtRest = encryption
+		if encryptionCond != nil {
+			setCondition(&fresh.Status.Conditions, *encryptionCond)
+		} else {
+			removeCondition(&fresh.Status.Conditions, conditionEncryptionReady)
+		}
 		return r.client.Status().Update(ctx, &fresh)
 	}); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1461,6 +1481,18 @@ func setCondition(conditions *[]metav1.Condition, c metav1.Condition) {
 		}
 	}
 	*conditions = append(*conditions, c)
+}
+
+// removeCondition drops a condition type from the slice. Used when a
+// writer that does not own a condition has to restore "absent" rather
+// than replay a stale copy of it.
+func removeCondition(conditions *[]metav1.Condition, condType string) {
+	for i := range *conditions {
+		if (*conditions)[i].Type == condType {
+			*conditions = append((*conditions)[:i], (*conditions)[i+1:]...)
+			return
+		}
+	}
 }
 
 // buildSiteDSN takes a base DSN and replaces the host with the site

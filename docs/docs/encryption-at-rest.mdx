@@ -490,14 +490,22 @@ kubectl patch secret "$SECRET" --type=merge -p="{
     \"name\":\"orders\",\"uid\":\"${FG_UID}\",\"controller\":true,\"blockOwnerDeletion\":true
   }]},\"immutable\":true
 }"
-
-SITE_INDEX=$(kubectl get mysqlfailovergroup orders -o json | \
-  jq -er '.status.encryptionAtRest.sites | map(.name) | index("iad")')
-kubectl patch mysqlfailovergroup orders --subresource=status --type=json -p="[
-  {\"op\":\"test\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/name\",\"value\":\"iad\"},
-  {\"op\":\"replace\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/phase\",\"value\":\"Sealed\"}
-]"
 ```
+
+The operator takes it from there. Its steady-state check re-runs on the
+next reconcile, and once the Secret is back, hashes to the recorded
+digest, **and** MySQL confirms it is running that same keyring, the site
+returns to `Sealed` and emits `KeyringRecovered`. Do not force the phase
+back by patching status: that skips the confirmation that makes the
+restore safe. A site that stays `Failed` saying it is waiting for MySQL
+to confirm the keyring is telling you the bytes you restored are not the
+bytes the instance is using — leave the pod alone and treat the site as
+re-clone-only.
+
+Throughout this, the site keeps its sealed rendering. A `Failed` site
+that was previously sealed is never rolled back onto a writable keyring,
+precisely because that would discard the in-memory copy you are
+recovering from.
 
 If the pod is already gone, that site's data is unrecoverable. Delete its
 unreadable PVC and use the confirmed reclone annotation; the operator

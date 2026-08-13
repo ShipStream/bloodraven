@@ -22,6 +22,21 @@ func (c *Client) GetSecret(ctx context.Context, namespace, name string) (*corev1
 	return sec, nil
 }
 
+// GetConfigMap fetches a ConfigMap by name. Encryption scenarios use it
+// to check the adopt-atomicity invariant: the my.cnf a site's Deployment
+// actually references must agree with the keyring wiring in that
+// Deployment's pod spec, or the site CrashLoops on its next restart.
+func (c *Client) GetConfigMap(ctx context.Context, namespace, name string) (*corev1.ConfigMap, error) {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	cm, err := c.Kubernetes.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get configmap %s/%s: %w", namespace, name, err)
+	}
+	return cm, nil
+}
+
 // ListSecretsByLabel returns the Secrets in a namespace matching a label
 // selector, e.g. the keyring escrow versions for one site.
 func (c *Client) ListSecretsByLabel(ctx context.Context, namespace, selector string) (*corev1.SecretList, error) {

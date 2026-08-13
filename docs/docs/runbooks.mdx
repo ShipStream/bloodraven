@@ -226,16 +226,25 @@ and makes that site's data unrecoverable.
      }]},\"immutable\":true
    }"
 
-   SITE_INDEX=$(kubectl get mysqlfailovergroup orders -n orders -o json | \
-     jq -er '.status.encryptionAtRest.sites | map(.name) | index("iad")')
-   kubectl patch mysqlfailovergroup orders -n orders --subresource=status \
-     --type=json -p="[
-       {\"op\":\"test\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/name\",\"value\":\"iad\"},
-       {\"op\":\"replace\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/phase\",\"value\":\"Sealed\"}
-     ]"
+   ```
+
+   Do **not** force the phase back to `Sealed` by patching status. The
+   operator re-runs its own drift check on the next reconcile: once the
+   Secret is present, hashes to the recorded digest, and MySQL confirms
+   it is running that same keyring, the site returns to `Sealed` on its
+   own and emits `KeyringRecovered`. Forcing the phase would skip exactly
+   the confirmation that makes the restore safe.
+
+   ```bash
+   kubectl get mysqlfailovergroup orders -n orders \
+     -o jsonpath='{.status.encryptionAtRest.sites[?(@.name=="iad")].phase}{"\n"}'
    ```
 
    Verify that the site returns to `Sealed` without restarting the pod.
+   If it stays `Failed` with a message about waiting for MySQL to confirm
+   the keyring, the bytes you restored are not the bytes the running
+   instance is using — do not restart the pod, and treat the site as
+   re-clone-only.
 3. If the pod is already gone, that site's data is unrecoverable.
    Delete the unreadable PVC, then re-clone it from a healthy peer. The
    confirmation token is mandatory because this permanently discards the

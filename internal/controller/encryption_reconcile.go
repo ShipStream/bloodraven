@@ -209,7 +209,20 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 	}
 
 	switch site.Phase {
-	case v1alpha1.KeyringPhasePending, v1alpha1.KeyringPhaseUnsealed, v1alpha1.KeyringPhaseFailed:
+	case v1alpha1.KeyringPhaseFailed:
+		// A site that failed while sealed keeps the sealed rendering
+		// (see SiteKeyringSealed), so it cannot make progress down the
+		// unsealed path — its Deployment will never roll onto a writable
+		// keyring and the site would sit at "waiting for the Deployment to
+		// roll" forever. Re-run the sealed drift check instead so the
+		// documented recovery (restore the escrow Secret from the live
+		// keyring while the pod is still up) actually converges.
+		if fg.SiteKeyringSealed(site.Name) {
+			return r.verifySealedSite(ctx, fg, site, store, fetch)
+		}
+		return r.advanceUnsealedSite(ctx, fg, site, store, fetch)
+
+	case v1alpha1.KeyringPhasePending, v1alpha1.KeyringPhaseUnsealed:
 		return r.advanceUnsealedSite(ctx, fg, site, store, fetch)
 
 	case v1alpha1.KeyringPhaseEscrowed:
@@ -426,6 +439,12 @@ func (r *MysqlFailoverGroupReconciler) verifySealedSite(
 
 	// Sample coverage opportunistically. A sidecar that is briefly
 	// unreachable must not knock a healthy site out of Sealed.
+	//
+	// confirmed records that MySQL itself vouched for the escrow this
+	// reconcile: the component is read-only AND the keyring it has open
+	// hashes to the version the operator recorded. Only that combination
+	// is strong enough to bring a Failed site back to Sealed.
+	confirmed := false
 	if live, err := fetch(ctx, fg, site.Name); err == nil && live.Enabled {
 		applyCoverage(site, live)
 		if live.Component != nil && !live.Component.ReadOnly {
@@ -435,6 +454,41 @@ func (r *MysqlFailoverGroupReconciler) verifySealedSite(
 				"site %s: keyring component is writable but the site is marked sealed", site.Name)
 			return true, nil
 		}
+		// A sealed pod running a keyring that is not the escrowed one is
+		// the stale-projection failure: the Deployment was rolled back
+		// onto a superseded version, or status advanced without the pod
+		// following. Tablespaces rewrapped under the newer master key
+		// will not decrypt, so this has to be loud rather than silently
+		// tolerated by the steady-state check.
+		if live.Digest != "" && live.Digest != site.KeyringDigest {
+			site.Phase = v1alpha1.KeyringPhaseFailed
+			site.Message = fmt.Sprintf(
+				"the running keyring does not match escrow %s; the pod may be projecting a superseded version",
+				site.KeyringSecret)
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringDigestMismatch",
+				"site %s: live keyring digest does not match escrow %s", site.Name, site.KeyringSecret)
+			return true, nil
+		}
+		confirmed = live.Digest != "" && live.Digest == site.KeyringDigest
+	}
+
+	// Recovery from Failed. Reaching here means the escrow Secret exists
+	// again and still hashes to the recorded digest; requiring MySQL to
+	// confirm the same bytes as well is what keeps "restore the Secret"
+	// from silently re-blessing a site whose keys have since diverged.
+	if site.Phase == v1alpha1.KeyringPhaseFailed {
+		if !confirmed {
+			site.Message = fmt.Sprintf(
+				"escrow %s is present again; waiting for MySQL to confirm it is running that keyring",
+				site.KeyringSecret)
+			return true, nil
+		}
+		site.Phase = v1alpha1.KeyringPhaseSealed
+		site.UnsealReason = ""
+		site.UnsealedSince = nil
+		site.Message = fmt.Sprintf("sealed against %s", site.KeyringSecret)
+		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "KeyringRecovered",
+			"site %s recovered to Sealed against escrow %s", site.Name, site.KeyringSecret)
 	}
 
 	// Housekeeping only — safe to ignore failures.
