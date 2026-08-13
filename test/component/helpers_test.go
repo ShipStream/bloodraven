@@ -137,10 +137,25 @@ func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
 	return nil
 }
 
+// ShowReplicaStatus returns a deep copy of the replica status.
+//
+// Returning m.replicaStatus directly hands the caller a pointer into state that
+// StartReplica and ChangeReplicationSource mutate under m.mu. The caller reads
+// those fields outside the lock, so the mutex protects the pointer but not the
+// pointee, and -race flags it once bootstrap runs on its own goroutine (see
+// TestBootstrap_FailAndRetry). Copying keeps the mock's locking honest.
 func (m *mockMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.replicaStatus, nil
+	if m.replicaStatus == nil {
+		return nil, nil
+	}
+	status := *m.replicaStatus
+	if m.replicaStatus.SecondsBehindSource != nil {
+		lag := *m.replicaStatus.SecondsBehindSource
+		status.SecondsBehindSource = &lag
+	}
+	return &status, nil
 }
 
 func (m *mockMySQL) ChangeReplicationSource(_ context.Context, opts mysql.ReplicationSourceOpts) error {

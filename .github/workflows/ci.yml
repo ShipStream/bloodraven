@@ -138,8 +138,10 @@ jobs:
         with:
           # The course site builder needs Node 20.19+ / 22.13+ / 24+.
           node-version: 22
-          cache: npm
-          cache-dependency-path: course/package-lock.json
+          # No npm cache: course/package-lock.json is intentionally untracked
+          # (removed in bd776fd), and setup-node hard-fails when
+          # cache-dependency-path resolves to nothing. course-build falls back
+          # to `npm install` when the lockfile is absent.
       - name: Run course content gates and runtime tests
         run: make course-verify
       - name: Check docs/static/course drift
