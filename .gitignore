@@ -1,6 +1,10 @@
 orchestrator
 bin/
 
+# Scratch space: local notes, vendored upstream references, API tokens.
+# Never commit anything from here.
+.tmp/
+
 k3d-default.yaml
 playground/chaos-results/
 

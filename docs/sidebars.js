@@ -4,6 +4,7 @@
 const sidebars = {
   docsSidebar: [
     'intro',
+    'licensing',
     {
       type: 'category',
       label: 'Get Started',

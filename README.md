@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/ShipStream/bloodraven/actions/workflows/ci.yml/badge.svg)](https://github.com/ShipStream/bloodraven/actions/workflows/ci.yml)
 [![E2E (real-cluster chaos)](https://github.com/ShipStream/bloodraven/actions/workflows/e2e.yml/badge.svg)](https://github.com/ShipStream/bloodraven/actions/workflows/e2e.yml)
+[![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-blue)](./LICENSE)
 
 With Bloodraven you can run MySQL async replication failover groups across Kubernetes sites. Bloodraven owns pod creation, MySQL configuration, health monitoring, promotion, DNS steering through external-dns, node taints, clone-based bootstrap, sidecar self-fencing, and optional Dragonfly cache/session sidekicks that follow the active MySQL site.
 
@@ -13,6 +14,7 @@ Bloodraven is built for site-level failover where applications can accept non-ze
 
 | Goal | Start here |
 |---|---|
+| Understand licensing and pricing | [Licensing](https://bloodraven.readthedocs.io/en/latest/docs/licensing) |
 | Try the full demo locally | [Playground](https://bloodraven.readthedocs.io/en/latest/docs/playground) |
 | Create a first failover group | [Getting Started](https://bloodraven.readthedocs.io/en/latest/docs/getting-started) |
 | Install for production | [Production Install](https://bloodraven.readthedocs.io/en/latest/docs/install-production) |
@@ -206,3 +208,20 @@ See the [Architecture](https://bloodraven.readthedocs.io/en/latest/docs/architec
 **Relay log drain is best-effort.** The 30-second drain timeout is non-fatal. If relay logs can't be fully applied, such as after a SQL thread error, failover proceeds anyway. Data in the relay log may be lost, but the alternative -- blocking failover indefinitely -- is worse for availability.
 
 **Anti-flap cooldown.** After a failover, further failovers are blocked for 5 minutes by default (configurable via `failoverCooldown`). This prevents cascading failovers when infrastructure is unstable.
+
+## License
+
+Bloodraven is **source-available**, not open source. It is licensed under the [Business Source License 1.1](./LICENSE), which is not OSI-approved, so we do not call it open source.
+
+**Free, no license required:**
+
+- All non-production use — dev, test, staging, CI, evaluation, demo — at any scale, forever.
+- Production use by individuals, non-commercial users, non-profits, and companies under $1M annual revenue.
+
+**Requires a one-time commercial license:** production use by companies over $1M annual revenue. $990 per failover group, or $4,900 for unlimited groups across your organization. Perpetual, with 12 months of updates included; renewal is optional and you keep every version published while your update period was active. See [pricing](https://bloodraven.readthedocs.io/en/latest/docs/licensing) and [commercial terms](./LICENSE-COMMERCIAL.md).
+
+**Every version converts to Apache 2.0 two years after publication.** That is written into the license as the Change Date and cannot be revoked, so code you depend on cannot be taken away from you.
+
+There is no license server, activation, feature gating, or phone-home. The software is fully functional without a key. Compliance is on the honor system.
+
+Contributions are welcome from everyone — see [CONTRIBUTING.md](./CONTRIBUTING.md) and the [CLA](./CLA.md). Licensing questions: licensing@shipstream.io

@@ -25,3 +25,7 @@ kubeVersion: ">=1.26.0"
 
 annotations:
   category: Database
+  # Source-available, not open source. Free for non-production use at any scale,
+  # and for production use by individuals, non-profits, and companies under $1M
+  # revenue. See https://bloodraven.readthedocs.io/en/latest/docs/licensing
+  artifacthub.io/license: BUSL-1.1

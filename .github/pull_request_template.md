@@ -6,6 +6,11 @@
 
 - 
 
+## Contributor checklist
+
+- [ ] I have signed the [CLA](../blob/main/CLA.md) (first-time contributors; the bot will prompt you).
+- [ ] This change contains no code copied from GPL, AGPL, or other copyleft-licensed sources.
+
 <details>
 <summary>Observability change checklist</summary>
 

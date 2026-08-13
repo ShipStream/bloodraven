@@ -132,6 +132,10 @@ const config = {
             title: 'More',
             items: [
               {
+                label: 'Licensing And Pricing',
+                to: '/docs/licensing',
+              },
+              {
                 label: 'GitHub',
                 href: 'https://github.com/ShipStream/bloodraven',
               },
