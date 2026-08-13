@@ -13,7 +13,8 @@
 #   4. Stamps the encryption-adopt annotation, because the playground is
 #      already serving and the operator otherwise refuses (existing
 #      tablespaces stay plaintext — see the warning below).
-#   5. Waits for every site to reach phase=Sealed.
+#   5. Waits for every site to reach phase=Sealed and for the ordered
+#      rollout's anti-flap cooldown to expire.
 #
 # Usage:
 #   BLOODRAVEN_SETUP_TLS=1 ./playground/setup.sh    # initial setup
@@ -277,6 +278,7 @@ while [[ $(date +%s) -lt $deadline ]]; do
 		-o jsonpath='{.status.encryptionAtRest.sealed}' 2>/dev/null || echo "")
 	if [[ "$sealed" == "true" ]]; then
 		ok "every site is sealed against an escrowed keyring"
+		wait_for_stable_baseline "after the encryption rollout"
 		report_status
 		echo
 		info "run the keyring chaos scenario with:"
