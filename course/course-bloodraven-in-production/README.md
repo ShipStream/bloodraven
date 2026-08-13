@@ -50,7 +50,7 @@ You are on call for a MySQL that has to survive losing an entire site. This unit
 
 Under the failover machinery there is a two-second poll loop and a small table. The loop turns each site into one of four states with a debounce in front of it; the table turns the set of states into exactly one action. This unit teaches you to run that table in your head, then read the same decision back out of the logs and the metrics so you are never guessing what the operator is about to do. Knowing the table is not the same as knowing the timing — Unit 3 holds a site down and puts a clock on it.
 
-**The poll loop and per-site state** — Every two seconds, one `SELECT @@read_only` per site. Four states, two debounce counters that behave asymmetrically on purpose, and an adaptive backoff nobody documented.
+**The poll loop and per-site state** — Every two seconds, one `SELECT @@read_only` per site. Four states, two debounce counters that behave asymmetrically on purpose, and an adaptive backoff that quietly rewrites your detection budget.
 
   1. Walk a site from `unknown` to `writable`, `read-only` or `unreachable` and say what each transition needs
   2. Work out the detection delay from `pollInterval` and `failureThreshold` (2s × 3 = 6s by default)

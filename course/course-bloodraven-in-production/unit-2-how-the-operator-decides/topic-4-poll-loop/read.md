@@ -159,10 +159,10 @@ never was. It gates the opposite transition — the way back to `writable` — a
 is the single most common wrong answer about this operator. The 5 s probe ceiling is not a term
 either; it bounds one probe, it does not pace the loop.
 
-## The backoff nobody documented
+## The backoff that changes your detection budget
 
-Here is the part that appears in no documentation and will surprise you at 3 a.m. The poll interval
-is adaptive. Once any site's `failCount` climbs past `failureThreshold`, the interval doubles per
+Here is the part that surprises people at 3 a.m., because the 6 s figure everyone memorises is only
+the *first* fault's. The poll interval is adaptive. Once any site's `failCount` climbs past `failureThreshold`, the interval doubles per
 extra failure — `interval := base * time.Duration(1<<uint(backoffFails))` — with the exponent capped
 at `maxPollBackoffExponent = 4` and a 30 s hard cap on top.
 
@@ -175,8 +175,12 @@ consequence you came for. `pdx` has been down for five minutes, so the loop is p
 including its probes of `iad`, which is fine. Now `iad` dies. Detection needs three consecutive
 failures, and they now arrive 30 s apart: **30 s × 3 = 90 s**, not 6 s. Fifteen times slower, on the
 site that matters, at exactly the moment you have no spare site left. The backoff is trading
-detection latency for polling waste, and one existing outage silently spends that trade on every
-other site.
+detection latency for polling waste, and one existing outage spends that trade on every other site.
+
+This is design rather than defect, and worth putting in your runbook beside the 6 s figure — the
+`failover.mdx` page states the same bound and tells you to use it for alerting and compound-failure
+recovery estimates. Take the pair: **6 s for the first fault, up to 90 s for a second one while the
+first is still down.** A single number is the wrong shape for this answer.
 
 ## One bypass
 

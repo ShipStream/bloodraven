@@ -15,7 +15,7 @@ The learner can already predict the operator's decision from a status dump. Now 
 **Then the sequence — teach the code, not the docs.** The published ten-step list in the documentation is wrong in five ways, and this course teaches `internal/controller/failover.go`. Give the steps in order, each with its fatality:
 
 1. Fence the old primary — `SET GLOBAL super_read_only = ON`. Error only **warns**; the old primary is usually unreachable, which is the whole reason we are here.
-2. **Kill application connections on the old primary** — entirely undocumented. `SELECT id FROM information_schema.processlist WHERE id != CONNECTION_ID() AND command NOT IN ('Binlog Dump', 'Binlog Dump GTID')`, then `KILL <id>` per row. Note what the WHERE clause protects: replication dump threads survive.
+2. **Kill application connections on the old primary** — `SELECT id FROM information_schema.processlist WHERE id != CONNECTION_ID() AND command NOT IN ('Binlog Dump', 'Binlog Dump GTID')`, then `KILL <id>` per row. Note what the WHERE clause protects: replication dump threads survive.
 3. Relay-log drain on the candidate, 30 s budget, **non-fatal** — on timeout the operator logs a warning and promotes anyway.
 4. `STOP REPLICA` — **fatal**.
 5. `RESET REPLICA ALL` — **fatal**.

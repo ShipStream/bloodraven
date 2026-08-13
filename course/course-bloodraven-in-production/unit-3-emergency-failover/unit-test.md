@@ -45,13 +45,13 @@ Only the four statements that change the candidate's own replication and read-on
 
 **Type:** TRUE_FALSE
 
-During the failover you watch a `shipstream.io/db-readonly-*:NoExecute` taint land on `iad`'s node before `pdx` is writable. You conclude the taint is one of the ordered steps of the promotion sequence, as the documentation's step list shows it.
+During the failover you watch a `shipstream.io/db-readonly-*:NoExecute` taint land on `iad`'s node before `pdx` is writable. You conclude the taint is one of the ordered steps of the promotion sequence.
 
 **Correct answer:** false
 
 **Explanation:**
 
-The documentation's step list is wrong here, and this course teaches `internal/controller/failover.go`. Taints are a pure function of per-site state transitions, applied earlier in the same poll by a different code path: writable-to-anything-else adds the taint, anything-else-to-writable removes it, read-only to unreachable does nothing. The taint appears around a failover because the same transition drives both, not because the promotion applies it. Source convergence is the docs' other phantom step — an independent poll stage with its own 20 s budget. Both are neighbours in the poll, not links in the chain. The genuinely undocumented step is the one the doc list omits: step 2, killing application connections on the old primary. (objective 2)
+Ordering is not membership, and this is the inference the timing invites. Taints are a pure function of per-site state transitions, applied earlier in the same poll by a different code path: writable-to-anything-else adds the taint, anything-else-to-writable removes it, read-only to unreachable does nothing. The taint appears around a failover because the same transition drives both, not because the promotion applies it. Source convergence is the docs' other phantom step — an independent poll stage with its own 20 s budget. Both are neighbours in the poll, not links in the chain. The genuinely undocumented step is the one the doc list omits: step 2, killing application connections on the old primary. (objective 2)
 
 ## Question 4
 
