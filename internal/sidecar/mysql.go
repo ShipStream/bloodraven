@@ -422,11 +422,56 @@ func mysqlBool(value sql.NullString) bool {
 // rendering MySQL rejects it with ER_CANNOT_FIND_KEY_IN_KEYRING, which
 // is precisely the guardrail that stops an ad-hoc rotation from
 // stranding data behind a key nobody escrowed.
+// The rotation is deliberately kept out of the binary log.
+//
+// MySQL binlogs ALTER INSTANCE ROTATE INNODB MASTER KEY so that a
+// rotation on a source propagates to its replicas. Bloodraven inverts
+// that: it refuses to rotate the active primary (losing the keyring
+// mid-rotation there costs data rather than a re-clone) and rotates the
+// REPLICA instead. A binlogged rotation on a replica is written under
+// that replica's own server UUID, so the replica ends up permanently one
+// transaction ahead of the primary. Replication keeps running — the
+// divergence is latent — but the next time anything has to restart or
+// re-point it (a pod replace, a failover, a source-convergence pass) the
+// operator's GTID check correctly refuses to start a follower that is
+// ahead of its source, and the only recovery is a re-clone.
+//
+// Suppressing the binlog is also the semantically correct scope, not
+// just a workaround: every site holds its own keyring and its own escrow
+// version, so a master-key rotation is a per-instance physical operation
+// that rewraps that instance's tablespace keys in place. It has no
+// business replicating. (ALTER TABLESPACE ... ENCRYPTION is the
+// opposite — a logical schema change that must replicate — which is why
+// EncryptSystemTablespace below is left alone and only ever runs on the
+// writable primary.)
 func (m *LiveMysql) RotateInnoDBMasterKey(ctx context.Context) error {
-	if _, err := m.db.ExecContext(ctx, "ALTER INSTANCE ROTATE INNODB MASTER KEY"); err != nil {
-		return fmt.Errorf("alter instance rotate innodb master key: %w", err)
+	// A pinned connection: sql_log_bin is a session variable, so it has
+	// to be set on the same connection that runs the rotation.
+	conn, err := m.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open connection for master key rotation: %w", err)
 	}
-	return nil
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
+		return fmt.Errorf("disable binary logging for master key rotation: %w", err)
+	}
+
+	_, rotateErr := conn.ExecContext(ctx, "ALTER INSTANCE ROTATE INNODB MASTER KEY")
+	if rotateErr != nil {
+		rotateErr = fmt.Errorf("alter instance rotate innodb master key: %w", rotateErr)
+	}
+
+	// Restore before the connection goes back to the pool, or every later
+	// statement that reuses it would silently stop replicating. Uses a
+	// context detached from cancellation so a timed-out rotation cannot
+	// skip the restore. A failure here means the connection is unsafe to
+	// reuse, so it is surfaced rather than swallowed.
+	if _, err := conn.ExecContext(context.WithoutCancel(ctx), "SET SESSION sql_log_bin = 1"); err != nil {
+		return errors.Join(rotateErr, fmt.Errorf(
+			"restore sql_log_bin after master key rotation: %w", err))
+	}
+	return rotateErr
 }
 
 // EncryptSystemTablespace encrypts the `mysql` tablespace. It reuses the

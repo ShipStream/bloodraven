@@ -583,6 +583,36 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// topology manager must ask the reconciler to unseal the site first.
 	// deployReconciler is the reconciler; the type assertion keeps the
 	// runner from depending on the concrete type.
+	//
+	// KNOWN BUG (reclone livelock) — see docs/docs/encryption-at-rest.mdx.
+	//
+	// Once this gate is wired, recloning an encrypted site livelocks:
+	// RequestKeyringUnseal moves the site to Unsealed/Clone, the encryption
+	// reconciler immediately re-verifies the escrow and advances it back to
+	// Escrowed (which renders sealed), the pod rolls onto the read-only
+	// projection, and the next clone attempt unseals it again. The operator
+	// logs "bootstrap deferred: waiting for the recipient keyring to be
+	// unsealed" forever and the clone never runs. Observed on a live
+	// playground by scenario 51.
+	//
+	// The cause is in the state machine, not here: advanceUnsealedSite does
+	// not treat UnsealReason=Clone as sticky — it must stay unsealed until
+	// the clone has actually run — and nothing signals clone completion
+	// back to it. Fixing that is the real work; this condition only
+	// controls how often the bug is reachable.
+	//
+	// Note the condition does NOT make the bug rare. It is evaluated when
+	// the manager is built, so any operator restart on a group with
+	// encryption enabled wires the gate. It is only skipped in the window
+	// between adopting encryption and the next manager rebuild — which is
+	// why the ungated path was the one exercised on first adoption.
+	//
+	// Empirically the ungated clone succeeds on MySQL 9.7: a recipient
+	// seeded from its own escrow already holds a usable master key, and
+	// CLONE INSTANCE rewraps the donor's tablespace keys under it without
+	// creating one. So the gate is belt-and-braces rather than
+	// load-bearing, and the safe fix is to make the Clone phase sticky
+	// rather than to remove the gate.
 	if gate, ok := r.deployReconciler.(KeyringGate); ok && fg.Spec.EncryptionEnabled() {
 		tm.SetKeyringGate(gate)
 	}

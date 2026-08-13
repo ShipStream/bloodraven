@@ -1346,6 +1346,41 @@ itself, then the roll back to sealed).
 **Cleanup**: clears the reclone annotation if the scenario bailed out
 before the operator consumed it.
 
+:::danger Known bug — recloning an encrypted site livelocks
+**This scenario does not pass on the current code, and that is the
+finding.** Once the clone gate is wired, a reclone never completes:
+
+1. `RequestKeyringUnseal` moves the recipient to `Unsealed`/`Clone`.
+2. The encryption reconciler re-verifies the escrow and advances it
+   straight back to `Escrowed`, which renders the *sealed* keyring.
+3. The pod rolls onto the read-only projection.
+4. The next clone attempt sees a sealed recipient and unseals it again.
+
+The operator logs `bootstrap deferred: waiting for the recipient keyring
+to be unsealed` indefinitely. The cause is that `advanceUnsealedSite`
+does not treat `UnsealReason=Clone` as sticky — it must stay unsealed
+until the clone has actually run — and nothing signals clone completion
+back to it.
+
+The gate is wired whenever the topology manager is built while encryption
+is enabled, so **any operator restart on an encrypted group is enough to
+reach this.** It is only skipped in the window between adopting
+encryption and the next manager rebuild, which is why a first adoption
+appears to work.
+
+Recovery: `kubectl annotate mysqlfailovergroup <name>
+bloodraven.shipstream.io/reclone-site-` — the site re-seals and the group
+settles on its own.
+
+Empirically the ungated clone succeeds on MySQL 9.7 (a recipient seeded
+from its own escrow already holds a usable master key and `CLONE
+INSTANCE` rewraps under it), so the fix is to make the `Clone` phase
+sticky, not to remove the gate.
+
+Until then the unseal step is **reported, not asserted**. Set
+`BLOODRAVEN_CHAOS_REQUIRE_CLONE_GATE=1` to make it fail hard once fixed.
+:::
+
 ---
 
 ## Execution Plan

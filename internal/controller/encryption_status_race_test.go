@@ -178,3 +178,40 @@ func TestUpdateCRStatus_DoesNotResurrectDeletedEncryptionStatus(t *testing.T) {
 		t.Fatalf("topology poll resurrected a cleared encryption status: %+v", after.Status.EncryptionAtRest)
 	}
 }
+
+// TestEncryptionToggleDoesNotRestartTheTopologyManager pins the reason
+// the clone gate must be wired unconditionally in startManager.
+//
+// The topology manager is only rebuilt when its TopologyConfig changes,
+// and TopologyConfig deliberately carries nothing about encryption —
+// turning encryption on must not tear down and rebuild the poller under
+// a live cluster. The consequence is that a manager built while
+// encryption was off is the SAME manager serving the group after
+// adoption, so anything wired behind a spec.encryptionAtRest check at
+// construction time is never wired at all on the adoption path.
+//
+// That is exactly what happens to the CLONE INSTANCE unseal gate today:
+// playground/enable-encryption.sh turns encryption on for a running
+// group, the manager is never rebuilt, and a later reclone into a sealed
+// recipient skips the unseal entirely (found by playground scenario 51).
+//
+// The gate is still wired behind EncryptionEnabled() on purpose. Making
+// it unconditional livelocks the reclone, because advanceUnsealedSite
+// re-seals an Unsealed/Clone site as soon as it can verify the escrow and
+// nothing signals clone completion back to it — see the KNOWN GAP note in
+// startManager. Both halves have to land together.
+//
+// If this test ever fails because encryption became part of
+// TopologyConfig, that closes half the gap on its own: the manager would
+// then be rebuilt on adoption and the gate would start firing — which
+// means the Clone phase must be made sticky in the same change, or
+// reclone livelocks.
+func TestEncryptionToggleDoesNotRestartTheTopologyManager(t *testing.T) {
+	plain := CRConfigToTopologyConfig(newTestFG())
+	encrypted := CRConfigToTopologyConfig(encTestFG())
+
+	if !plain.Equal(encrypted) {
+		t.Fatal("TopologyConfig now distinguishes encrypted groups; the clone-gate wiring " +
+			"comment in startManager assumes it does not")
+	}
+}
