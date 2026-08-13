@@ -3,7 +3,7 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Front:** The keyring phases a site of `orders` can be in
+**Front:** The keyring phases a site of `playground` can be in
 
 **Back:** Five: `Pending`, `Unsealed`, `Escrowed`, `Sealed`, `Failed` — the CRD enum is `"";Pending;Unsealed;Escrowed;Sealed;Failed`.
 
@@ -27,7 +27,7 @@
 
 ---
 
-**Front:** A site of `orders` reads `phase: Unsealed`. What do you read next before concluding anything?
+**Front:** A site of `playground` reads `phase: Unsealed`. What do you read next before concluding anything?
 
 **Back:** `unsealReason` — `Bootstrap`, `Clone` or `Rotation` — plus the rotation target, because the phase string alone cannot tell you which.
 

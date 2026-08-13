@@ -1,0 +1,4 @@
+brprep: ledger-db/ledger
+REJECT spec.sites[].name must be unique
+verdict: NOT APPLYABLE (1 rejection(s))
+exit=1

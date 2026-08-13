@@ -1,7 +1,7 @@
 # Five partitions, five answers
 
-`orders` is healthy on your three-site k3d playground: `iad` writable, `pdx` read-only and
-replicating, the counter app committing continuously. Then the page: "the network is partitioned."
+`playground` is healthy on your three-site k3d playground: `iad` writable, `pdx` read-only and
+replicating, the counter app reading and writing without complaint. Then the page: "the network is partitioned."
 That is not a diagnosis. Five different failures wear it, and they do not share a response — one
 promotes, three deliberately do nothing, and one has never been injected in a test.
 
@@ -32,7 +32,7 @@ rarely blinds both. The widget below is the taxonomy; the list is *why* each ans
   "title": "The five documented partition shapes",
   "rows": [
     {
-      "aspect": "Observed symptom in `orders`",
+      "aspect": "Observed symptom in `playground`",
       "cells": [
         "`iad` → unreachable after 6 s; `pdx` stays read-only and replicating until the link fully breaks",
         "`pdx` → unreachable, or replication IO/SQL stops and lag climbs; `iad` stays writable",
@@ -150,7 +150,8 @@ the time the CNI saw it, so the exception never matched and DNS resolved through
       "cmd": "# canary policy v2: except the ClusterIP AND every CoreDNS backend pod IP",
       "out": "PROBE dns=fail"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
@@ -175,7 +176,7 @@ writing. Four Kubernetes facts, none of them a bug:
    never gets the message: it keeps running and keeps writing to the PV.
 4. `ReadWriteOnce` means one **node**, not one pod. Storage attach is not fencing.
 
-The conclusion for `orders` is unavoidable: nothing above MySQL stops a partitioned
+The conclusion for `playground` is unavoidable: nothing above MySQL stops a partitioned
 `iad` from writing — not the scheduler, not the API server, not the volume layer, and certainly not
 you with a `kubectl delete --force`. That is why a partitioned site must fence *itself*.
 
@@ -185,7 +186,7 @@ Work it in order.
 
 1. **Confirm the partition is real** before believing any symptom — reachability from a third
    vantage point, never the operator's own status.
-2. **Identify the shape.** `kubectl get mysqlfailovergroup orders -o jsonpath='{.status.activeSite}'`,
+2. **Identify the shape.** `kubectl get mysqlfailovergroup playground -o jsonpath='{.status.activeSite}'`,
    then per-site state:
    `-o jsonpath='{range .status.sites[*]}{.name}: {.state} lag={.secondsBehindSource} recovery={.recoveryState}{"\n"}{end}'`.
    Which sites are unreachable, and is anything still writable? That maps to A–E directly.

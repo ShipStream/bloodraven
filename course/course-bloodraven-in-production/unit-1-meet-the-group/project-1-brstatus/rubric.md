@@ -8,7 +8,7 @@ the bottom for reference.
 | 1 | The verdict and exit code come from the group's conditions | 28 |
 | 2 | Reader endpoint eligibility is role-aware and complete | 27 |
 | 3 | Absent lag is distinguished from zero lag | 15 |
-| 4 | The tool was run against the live `orders` group | 10 |
+| 4 | The tool was run against the live `playground` group | 10 |
 | 5 | Craft: the output stays one screen and the code survives a thin status | 20 |
 | | **Total** | **100** |
 
@@ -38,7 +38,7 @@ The `read-only` branch tests all five conjuncts together: `sourceConvergenceStat
 `effective_readonly_max_lag(spec)`.
 
 Every other role is served on `state` alone — `writable` or `read-only` — with no lag gate. A
-`primary-candidate` replica 300 seconds behind stays behind `mysql-orders-replicas` and is still
+`primary-candidate` replica 300 seconds behind stays behind `mysql-playground-replicas` and is still
 `SERVING yes`. That is the operator's real behaviour, not a simplification.
 
 - **27** — both branches correct, five conjuncts present, the correct threshold helper called.
@@ -55,9 +55,9 @@ Every other role is served on `state` alone — `writable` or `read-only` — wi
 - **8** — only one of the two is right.
 - **0** — `or 0`, `get(..., 0)`, or any other collapse of null into zero in both places.
 
-## 4. The tool was run against the live `orders` group — 10
+## 4. The tool was run against the live `playground` group — 10
 
-`artefacts/orders-live.json` is present, is a single `MysqlFailoverGroup` captured from the running
+`artefacts/playground-live.json` is present, is a single `MysqlFailoverGroup` captured from the running
 playground rather than a copied fixture — its `metadata.creationTimestamp`, `metadata.uid` and
 `status.sites[].lastSeen` are populated — and the submission shows `brstatus` output for it.
 

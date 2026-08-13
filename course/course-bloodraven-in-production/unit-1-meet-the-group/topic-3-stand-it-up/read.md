@@ -1,6 +1,6 @@
 # Stand it up and read its status
 
-You can name the parts of `orders` on paper. Now put it on a cluster and make it tell you what it is
+You can name the parts of `playground` on paper. Now put it on a cluster and make it tell you what it is
 doing. Everything this course looks at later — a promotion nobody triggered, a switchover you did,
 an exact count of lost transactions — is read out of one `MysqlFailoverGroup` status block. Learn to
 read that block now and every later unit becomes a matter of noticing what changed.
@@ -20,6 +20,13 @@ k3d cluster create bloodraven --agents 3
 
 kind and minikube work too — one server plus three agents either way.
 
+One non-technical prerequisite while you are here, because it is easier to answer now than after
+somebody has built on it: Bloodraven is **source-available, not open source**, and the terms under
+which your organisation may run it in production are a licensing question rather than a `git clone`.
+The baseline, the direction of travel and the two commands that settle it are in section D of the
+[version appendix](../sources.html#version-appendix) — check there rather than trusting a course to
+stay current on this one. Nothing in this course depends on the answer; your production plan might.
+
 ## Bring it up
 
 From the repository root, one script does the whole thing (objective 7):
@@ -32,13 +39,14 @@ It labels one worker per site, builds and loads the images, installs the CRDs an
 Helm, creates the `MysqlFailoverGroup` with two `primary-candidate` sites and one `read-only` reader,
 seeds the DNS pipeline, and deploys the dashboard and counter app.
 
-One edit first. The shipped manifest names the group `playground`; this course names it `orders`,
-because every object derives its name from the group and `mysql-orders-primary` is the Service your
-application connects to. Set `metadata.name: orders` in
-`playground/manifests/failovergroup.yaml` and substitute the same wherever the scripts hard-code a
-group-derived name — the `mysql-playground-<site>` Deployments, the `playground-dragonfly*` objects,
-`mysqlfailovergroup playground` lookups, the `shipstream.io/db-readonly-playground` toleration keys.
-Prefer not to? Keep the shipped name and read `playground` wherever this course writes `orders`.
+**Change nothing.** Every command in this course is written against the group exactly as the shipped
+manifest creates it — `metadata.name: playground` in `bloodraven-playground` — so each one is
+copy-pasteable with no edit and no substitution. That is deliberate, and it is not only convenience:
+the group name is baked into node labels, toleration keys, Helm `--set` flags and a Go constant in
+`internal/playground/kube/client.go`, so renaming it quietly breaks `make chaos-run`,
+`./playground/verify-backup.sh` and the whole E2E suite — tooling this course goes on to use. Read
+`playground` throughout as *the group you will actually run*; nothing about it is toy except the
+timings, which the last section of this topic makes explicit.
 
 Three MySQL pods, each running `mysql` beside its `sidecar` container, so a healthy site reads `2/2`:
 
@@ -79,18 +87,19 @@ which of two `read-only` sites is the dedicated reader, read the spec.
   "title": "Read the healthy group",
   "lines": [
     {
-      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup orders -o jsonpath='{.status.activeSite}{\"\\n\"}'",
+      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.activeSite}{\"\\n\"}'",
       "out": "iad"
     },
     {
-      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup orders -o jsonpath='{range .status.sites[*]}{.name}{\"\\t\"}{.state}{\"\\t\"}{.replicating}{\"\\t\"}{.secondsBehindSource}{\"\\n\"}{end}'",
+      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{range .status.sites[*]}{.name}{\"\\t\"}{.state}{\"\\t\"}{.replicating}{\"\\t\"}{.secondsBehindSource}{\"\\n\"}{end}'",
       "out": "iad\twritable\t\t\npdx\tread-only\ttrue\t0\nreader\tread-only\ttrue\t0"
     },
     {
-      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup orders -o jsonpath='{.status.conditions[?(@.type==\"Degraded\")].reason}{\"\\n\"}'",
+      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.conditions[?(@.type==\"Degraded\")].reason}{\"\\n\"}'",
       "out": "Healthy"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
@@ -125,17 +134,29 @@ kubectl -n bloodraven-playground port-forward svc/dashboard 8091:8091
 kubectl -n bloodraven-playground port-forward svc/counter-app 8090:8090
 ```
 
-The counter app at `localhost:8090` connects through `mysql-orders-primary` and does nothing but
-`UPDATE counter_db.counters SET value = value + 1 WHERE id = 1`. Press **+ Increment** a few times,
-then go looking for that row on the replica — by name, not through the primary Service (objective 9):
+The counter app at `localhost:8090` connects through `mysql-playground-primary` and has exactly two code
+paths, which is worth noticing now because Unit 3 turns on the difference between them:
+
+| Path | What it runs | When |
+| --- | --- | --- |
+| **read** — `GET /api/counter` | `SELECT value, updated_at …`, then `SELECT @@global.read_only` and `SELECT @@hostname` **on the same connection** | the page polls it every two seconds |
+| **write** — `POST /api/increment` | `UPDATE counter_db.counters SET value = value + 1 WHERE id = 1` | only when you press **+ Increment** |
+
+Nothing writes on a timer. That is deliberate: it lets you decide when a write happens and watch what
+it does. And because the read path asks the same connection who it is talking to, the JSON it returns
+carries `dbHost` and `readOnly` beside `value` — three fields that will, in Unit 3, disagree with the
+cluster in a way you can see.
+
+Press **+ Increment** a few times, then go looking for that row on the replica — by name, not through
+the primary Service (objective 9):
 
 ```bash
-kubectl -n bloodraven-playground exec deploy/mysql-orders-pdx -c mysql -- \
+kubectl -n bloodraven-playground exec deploy/mysql-playground-pdx -c mysql -- \
   env MYSQL_PWD=playground-root-pw mysql -h127.0.0.1 -uroot -Nse \
   "SELECT value, updated_at FROM counter_db.counters WHERE id = 1"
 ```
 
-Same `value` you just clicked to. That round trip — write through `mysql-orders-primary`, read it
+Same `value` you just clicked to. That round trip — write through `mysql-playground-primary`, read it
 back out of `pdx` by name — is the whole data plane in two commands.
 
 ## One honest warning
@@ -155,10 +176,10 @@ v0.9.1.
 
 ## Where you are
 
-`orders` is up: three sites, `iad` writable and named in `activeSite`, `pdx` and `reader` read-only
-and replicating at `0` seconds behind, `Degraded` reason `Healthy`, and a counter application writing
-through `mysql-orders-primary` while you watch. You can describe that state field by field, and say
-which numbers are playground-tuned.
+`playground` is up: three sites, `iad` writable and named in `activeSite`, `pdx` and `reader` read-only
+and replicating at `0` seconds behind, `Degraded` reason `Healthy`, and a counter application reading
+and writing through `mysql-playground-primary` while you watch. You can describe that state field by
+field, and say which numbers are playground-tuned.
 
 Then a site stops answering, and the fields you just learned start moving — `state` to `unreachable`,
 the reason off `Healthy`. The operator sees exactly what you see. What it decides to do about that,

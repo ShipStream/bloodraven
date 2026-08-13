@@ -1,5 +1,5 @@
-{"time":"2026-08-12T21:40:02.004Z","level":"WARN","msg":"failed to fence old primary (may be unreachable)","error":"dial tcp 10.42.1.9:3306: i/o timeout","fg":"bloodraven-playground/orders"}
-{"time":"2026-08-12T21:40:02.910Z","level":"ERROR","msg":"failed to fence returning old primary","site":"iad","error":"Error 1290 (HY000): The MySQL server is running with the --super-read-only option","fg":"bloodraven-playground/orders"}
-{"time":"2026-08-12T21:40:03.001Z","level":"INFO","msg":"failover blocked by anti-flap cooldown","lastFailover":"2026-08-12T21:38:41Z","cooldown":"5m0s","fg":"bloodraven-playground/orders"}
-{"time":"2026-08-12T21:40:04.220Z","level":"INFO","msg":"promotion confirmed: site is writable","site":"pdx","fg":"bloodraven-playground/orders"}
-{"time":"2026-08-12T21:40:05.002Z","level":"WARN","msg":"re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability","site":"pdx","fg":"bloodraven-playground/orders"}
+{"time":"2026-08-12T21:40:02.004Z","level":"WARN","msg":"failed to fence old primary (may be unreachable)","error":"dial tcp 10.42.1.9:3306: i/o timeout","fg":"bloodraven-playground/playground"}
+{"time":"2026-08-12T21:40:02.910Z","level":"ERROR","msg":"failed to fence returning old primary","site":"iad","error":"Error 1290 (HY000): The MySQL server is running with the --super-read-only option","fg":"bloodraven-playground/playground"}
+{"time":"2026-08-12T21:40:03.001Z","level":"INFO","msg":"failover blocked by anti-flap cooldown","lastFailover":"2026-08-12T21:38:41Z","cooldown":"5m0s","fg":"bloodraven-playground/playground"}
+{"time":"2026-08-12T21:40:04.220Z","level":"INFO","msg":"promotion confirmed: site is writable","site":"pdx","fg":"bloodraven-playground/playground"}
+{"time":"2026-08-12T21:40:05.002Z","level":"WARN","msg":"re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability","site":"pdx","fg":"bloodraven-playground/playground"}

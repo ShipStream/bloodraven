@@ -1,12 +1,12 @@
 # Verify, and restore
 
-`orders` takes a nightly dump, ships sealed binlogs, and has a retention policy, and the counter app has been writing to it throughout. You have written a great deal of backup configuration and read back none of it. So you cannot answer the only question that matters at 3am: does last night's artifact load?
+`playground` takes a nightly dump, ships sealed binlogs, and has a retention policy, and the counter app has been reading and writing through it throughout. You have written a great deal of backup configuration and read back none of it. So you cannot answer the only question that matters at 3am: does last night's artifact load?
 
 ## Schrödinger backups
 
 The API type says it plainly. A verification "restores a MysqlBackup artifact into an ephemeral, throwaway MySQL instance to prove the backup can actually be loaded. Unverified backups are schrödinger backups." Until something reads it, last night's object in S3 is not a backup. It is a file that is the right size.
 
-`MysqlBackupVerification` is the CR that reads it, and the mechanism is deliberately unglamorous. The run gets an **ephemeral PVC** as its datadir — dedicated per run, deleted on cleanup, lifecycle never shared with the backup PVC — and an in-pod `mysqld` that binds `127.0.0.1` with **no Service**, so the instance is unreachable from outside its own network namespace. Nothing can point at it by accident, and nothing it does can touch `orders`. The PVC is auto-sized to `max(10Gi, ceil(1.5 × backup.status.sizeBytes / 10Gi) × 10Gi)` — a **10 GiB floor**, because a fresh datadir plus a small dump is already a few hundred megabytes. On failure, `keepOnFailure` (default `true`) leaves the Pod and PVC in place so you can `kubectl exec` in and look at the wreckage.
+`MysqlBackupVerification` is the CR that reads it, and the mechanism is deliberately unglamorous. The run gets an **ephemeral PVC** as its datadir — dedicated per run, deleted on cleanup, lifecycle never shared with the backup PVC — and an in-pod `mysqld` that binds `127.0.0.1` with **no Service**, so the instance is unreachable from outside its own network namespace. Nothing can point at it by accident, and nothing it does can touch `playground`. The PVC is auto-sized to `max(10Gi, ceil(1.5 × backup.status.sizeBytes / 10Gi) × 10Gi)` — a **10 GiB floor**, because a fresh datadir plus a small dump is already a few hundred megabytes. On failure, `keepOnFailure` (default `true`) leaves the Pod and PVC in place so you can `kubectl exec` in and look at the wreckage.
 
 ## The sanity check has exact semantics
 
@@ -16,22 +16,23 @@ The detail that earns its keep: **an empty result set is treated as scalar 0**. 
 
 Failures split into two reasons, not one. `SanityCheckFailed` means the scalar came back below `expect.minRows`, or the query errored — the data is wrong. `SanityCheckTimeout` means the query exceeded `expect.maxDurationSeconds` (default 60) — the instance is wedged. Different problems, different pagers.
 
-Pick an assertion whose expected value is structural rather than a moving row count. `SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'orders'` returns 1 when the schema landed and 0 when it did not, and `minRows: 1` turns that into a pass/fail.
+Pick an assertion whose expected value is structural rather than a moving row count. `SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'counter_db'` returns 1 when the schema landed and 0 when it did not, and `minRows: 1` turns that into a pass/fail.
 
 ```widget
 {
   "type": "terminal",
-  "title": "Verify last night's nightly backup for orders",
+  "title": "Verify last night's nightly backup for playground",
   "lines": [
     {
-      "cmd": "kubectl bloodraven verify-backup orders --profile nightly",
-      "out": "Created MysqlBackupVerification bloodraven-playground/orders-nightly-verify-9k2rt (profile=nightly, triggeredBy=manual)\nWatch with: kubectl get mysqlbackupverification orders-nightly-verify-9k2rt -n bloodraven-playground -w"
+      "cmd": "kubectl bloodraven verify-backup playground --profile nightly",
+      "out": "Created MysqlBackupVerification bloodraven-playground/playground-nightly-verify-9k2rt (profile=nightly, triggeredBy=manual)\nWatch with: kubectl get mysqlbackupverification playground-nightly-verify-9k2rt -n bloodraven-playground -w"
     },
     {
-      "cmd": "kubectl get mysqlbackupverification orders-nightly-verify-9k2rt -o jsonpath='{.status.phase} {.status.sanityCheck.ran} {.status.sanityCheck.resultRow}'",
+      "cmd": "kubectl get mysqlbackupverification playground-nightly-verify-9k2rt -o jsonpath='{.status.phase} {.status.sanityCheck.ran} {.status.sanityCheck.resultRow}'",
       "out": "Succeeded true 1"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
@@ -50,7 +51,7 @@ Operators reach for a `MysqlRestore` CR. **There is no restore CR.** Restore is 
 | Field | Shape | Use it to |
 | --- | --- | --- |
 | `spec.initFromBackup` | one-shot; gates normal bootstrap, skipped after success even if left in place | seed a brand-new group from an artifact |
-| `spec.restoreInPlace` | re-runnable; no teardown-and-rename cycle | repair the live `orders` you already have |
+| `spec.restoreInPlace` | re-runnable; no teardown-and-rename cycle | repair the live `playground` you already have |
 
 An in-place restore runs against a live cluster, so it walks discrete phases one step per reconcile, and an operator restart always lands on a well-defined observable state.
 
@@ -105,4 +106,4 @@ Where it surfaces matters more than the wording. This is a **reconciler error, n
 
 GitLab, January 2017: five backup mechanisms, none usable. `pg_dump` silently failing on a version mismatch, empty S3 uploads, misconfigured alert emails. They recovered from an incidental six-hour-old staging snapshot. Every one of those five would have passed a config review — the YAML was fine, the cron fired, the bucket existed. None would have passed a verification, because not one had ever been read back.
 
-You can now verify a backup for `orders`, restore it in place through the confirm token, and state precisely what your verification did and did not prove. Which leaves the artifact itself: a dump of your customers' orders, sitting in an object store, in plaintext. What happens when you encrypt the data at rest instead?
+You can now verify a backup for `playground`, restore it in place through the confirm token, and state precisely what your verification did and did not prove. Which leaves the artifact itself: a dump of your customers' playground, sitting in an object store, in plaintext. What happens when you encrypt the data at rest instead?

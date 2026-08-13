@@ -1,4 +1,4 @@
-# Failover drill record — `orders`
+# Failover drill record — `playground`
 
 Fill this in from `brdrill` output. Keep the drills separate: they are different
 events making different claims. Replace every `TODO`.

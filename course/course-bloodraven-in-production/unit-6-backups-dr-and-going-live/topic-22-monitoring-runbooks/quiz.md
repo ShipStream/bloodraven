@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-It is 3am and one Bloodraven alert has fired for `orders`. The counter application has not missed a write, both `iad` and `pdx` are serving, and replication lag is flat. Which alert is it?
+It is 3am and one Bloodraven alert has fired for `playground`. The counter application has not missed a write, both `iad` and `pdx` are serving, and replication lag is flat. Which alert is it?
 
 - `BloodravenOperatorDown`
 - `BloodravenNoWritableSite`
@@ -24,11 +24,11 @@ The operator is on the failure-detection and promotion path, not the request pat
 
 **Type:** SHORT_ANSWER
 
-Chaos scenario 42 applies `SOURCE_DELAY` to the `read-only` site `reader` and soaks `orders` for three times `maxLagSeconds` while the primary keeps taking writes. Which single alert in a carelessly written set would page you, and exactly what do you change to fix it?
+Chaos scenario 42 applies `SOURCE_DELAY` to the `read-only` site `reader` and soaks `playground` for three times `maxLagSeconds` while the primary keeps taking writes. Which single alert in a carelessly written set would page you, and exactly what do you change to fix it?
 
 **Sample answer:**
 
-`BloodravenReplicationLagging`, written as `bloodraven_replication_lag_seconds > 30`. Add a site-label exclusion for the reader: `bloodraven_replication_lag_seconds{site!="reader"} > 30`. Nothing else in the set moves — scenario 42 asserts the group stays Ready, activeSite never changes, no failover is recorded and no anti-flap cooldown is consumed. The only reaction is that `reader` leaves the endpoints of `mysql-orders-replicas` once its lag passes `readOnlyMaxLagSeconds`, which is the designed behaviour of the read-only role, not a fault. The exclusion has to name the site because the gauge carries a `site` label only — there is no `role` label to filter on.
+`BloodravenReplicationLagging`, written as `bloodraven_replication_lag_seconds > 30`. Add a site-label exclusion for the reader: `bloodraven_replication_lag_seconds{site!="reader"} > 30`. Nothing else in the set moves — scenario 42 asserts the group stays Ready, activeSite never changes, no failover is recorded and no anti-flap cooldown is consumed. The only reaction is that `reader` leaves the endpoints of `mysql-playground-replicas` once its lag passes `readOnlyMaxLagSeconds`, which is the designed behaviour of the read-only role, not a fault. The exclusion has to name the site because the gauge carries a `site` label only — there is no `role` label to filter on.
 
 **A full-credit answer shows:**
 
@@ -59,7 +59,7 @@ The matrix emits exactly five reasons — `Healthy`, `Degraded`, `SplitBrain`, `
 
 **Type:** MULTIPLE_CHOICE
 
-`bloodraven_archiver_backlog_files{site="iad"}` has been non-zero at every scrape for five minutes. `orders` is Ready, the counter app is writing normally and replication lag is 0. What is actually degrading?
+`bloodraven_archiver_backlog_files{site="iad"}` has been non-zero at every scrape for five minutes. `playground` is Ready, the counter app is writing normally and replication lag is 0. What is actually degrading?
 
 - Replication to `pdx` is behind by that many binlog files and RPO on a failover is growing
 - The primary's binlog volume is filling and MySQL will stop accepting writes when it does

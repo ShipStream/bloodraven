@@ -1,7 +1,7 @@
 # The poll loop and per-site state
 
-`orders` is healthy. Three sites — `iad` writable, `pdx` and `reader` read-only — and the counter
-application is committing rows into `iad` without knowing the other two exist. Nothing is on fire,
+`playground` is healthy. Three sites — `iad` writable, `pdx` and `reader` read-only — and the counter
+application is reading and writing against `iad` without knowing the other two exist. Nothing is on fire,
 which makes this the only calm moment you will get to ask the question that decides your outage
 budget: what is the operator actually doing in the two seconds between one status read and the next?
 
@@ -56,11 +56,11 @@ state machine. There are four states, and they are exactly these:
 
 ## The artifact: the three knobs, and the function they feed
 
-Nothing in `orders` changed since you stood it up. What changed is that three lines of that spec are
+Nothing in `playground` changed since you stood it up. What changed is that three lines of that spec are
 now load-bearing rather than boilerplate:
 
 ```yaml
-# orders — unchanged since topic 3; these three lines are the subject now
+# playground — unchanged since topic 3; these three lines are the subject now
 spec:
   pollInterval: 2s        # <-- the tick
   failureThreshold: 3     # <-- consecutive failures before "unreachable"
@@ -181,7 +181,7 @@ other site.
 ## One bypass
 
 Last thing. A writable observation on a **non-promotable** site — anything whose role is not
-`primary-candidate`, so `reader` in `orders` — skips `recoveryThreshold` entirely and records
+`primary-candidate`, so `reader` in `playground` — skips `recoveryThreshold` entirely and records
 `writable` on the first poll. The comment in the code is the whole argument: a writable
 non-promotable site is an immediate safety fact, and authority invalidation must not be debounced
 behind the normal recovery threshold. Being slow to believe a new primary is prudence. Being slow to

@@ -1,10 +1,10 @@
 # The old primary comes back
 
-`orders` is serving from `pdx`. The counter application is still writing, and `iad` has sat at zero
+`playground` is serving from `pdx`. The counter application is reading and writing again, and `iad` has sat at zero
 replicas since you took it down. Bring it back:
 
 ```bash
-kubectl -n bloodraven-playground scale deployment/mysql-orders-iad --replicas=1
+kubectl -n bloodraven-playground scale deployment/mysql-playground-iad --replicas=1
 ```
 
 Everything that follows is decided by exactly one test. You should be able to call the outcome before
@@ -107,7 +107,7 @@ Three transactions under the returning site's own UUID that `pdx` never saw. Rea
 copy a prefix:
 
 ```bash
-NS=bloodraven-playground; FG=orders; SITE=iad
+NS=bloodraven-playground; FG=playground; SITE=iad
 DG=$(kubectl -n $NS get mfg $FG -o jsonpath="{.status.sites[?(@.name==\"$SITE\")].divergentGtid}")
 kubectl -n $NS annotate mfg $FG bloodraven.shipstream.io/reclone-site="$SITE:${DG:0:8}" --overwrite
 ```
@@ -118,13 +118,13 @@ kubectl -n $NS annotate mfg $FG bloodraven.shipstream.io/reclone-site="$SITE:${D
  {"text":"=","label":"","note":"kubectl annotate syntax."},
  {"text":"iad","label":"site name","note":"Must match an entry in spec.sites[].name. Bare, with no ':' suffix, this is the cold form — accepted only when no divergentGtid is recorded."},
  {"text":":","label":"separator","note":"Everything after the first colon is the confirmation token."},
- {"text":"3E11FA47","label":"divergentGtid prefix","note":"Hot reclone: at least 8 characters, and a true prefix of the observed status.sites[].divergentGtid. The cold form puts confirm=orders here instead."}]}
+ {"text":"3E11FA47","label":"divergentGtid prefix","note":"Hot reclone: at least 8 characters, and a true prefix of the observed status.sites[].divergentGtid. The cold form puts confirm=playground here instead."}]}
 ```
 
 Four teeth. A hot reclone — the site has a recorded `divergentGtid` — needs a prefix of at least 8
 characters matching that set; a mismatch is rejected. A cold reclone, where nothing is recorded, still
 wipes the datadir, so it demands a literal confirm token equal to the failover-group name:
-`iad:confirm=orders`. The interlock keys on **`divergentGtid` presence only**, never on `RecoveryState` —
+`iad:confirm=playground`. The interlock keys on **`divergentGtid` presence only**, never on `RecoveryState` —
 `RecoveryBlocked` is a downstream UX field that can be transiently unset during a reconcile, so clearing
 it by hand changes nothing. And a rejected annotation emits a `RecloneRejected` warning event and is
 then **deleted**, so it cannot spam the reconciler. Two real rejections, verbatim:
@@ -169,8 +169,9 @@ anything wrong.
 
 ## Where this leaves you
 
-`orders` is whole: `pdx` primary, `iad` back as a replica, nothing divergent reported anywhere. Yet the
-counter application noticed none of it — not the promotion, not the rejoin — because it is still writing
-through a socket it opened to `iad` before the failover. The promotion was correct, fast and complete,
-and the one party that mattered missed it entirely. Unit 4 takes that up: Services, DNS, connection
-pools, and what an application has to do to follow a primary that moved.
+`playground` is whole: `pdx` primary, `iad` back as a replica, nothing divergent reported anywhere. And
+nothing in this topic told the counter application any of it. Its reads went on succeeding against
+whatever socket it happened to hold; its writes failed for as long as that socket pointed at a fenced
+site, and started working again for reasons it never learned. The promotion was correct, fast and
+complete, and the one party that mattered was never in the conversation. Unit 4 takes that up:
+Services, DNS, connection pools, and what an application has to do to follow a primary that moved.

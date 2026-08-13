@@ -1,6 +1,6 @@
 # What it cost you
 
-`orders` is back. `pdx` took writes 12.0 seconds after you took `iad` down, and the counter
+`playground` is back. `pdx` took writes 12.0 seconds after you took `iad` down, and the counter
 application is incrementing again. The incident review will not ask how fast that was. It will ask
 how many writes you lost — and "some" is not an answer you can put in a ticket.
 
@@ -76,10 +76,10 @@ them, it is a default.**
 
 So: a tenant who sets `sync_binlog=0` in `spec.mysqlConf` gets `sync_binlog=0`, and your written RPO
 promise quietly becomes fiction. A tenant who sets `gtid_mode=OFF` gets `gtid_mode=ON` anyway. Do not
-trust the diagram — read the file `orders` actually rendered:
+trust the diagram — read the file `playground` actually rendered:
 
 ```console
-$ kubectl -n bloodraven-playground get configmap mysql-orders-iad-config \
+$ kubectl -n bloodraven-playground get configmap mysql-playground-iad-config \
     -o jsonpath='{.data.bloodraven\.cnf}' | grep -E 'sync-binlog|gtid-mode|flush-log'
 gtid-mode=ON
 innodb-flush-log-at-trx-commit=2
@@ -116,7 +116,7 @@ One wrinkle before you eyeball a set. MySQL 9.x GTID sets can carry user-defined
 
 ## The measurement
 
-Here is a real `orders` status after an emergency promotion to `pdx`, with the two fields that matter
+Here is a real `playground` status after an emergency promotion to `pdx`, with the two fields that matter
 and everything else elided:
 
 ```yaml
@@ -145,26 +145,27 @@ an estimate.
   "title": "Doing the subtraction yourself",
   "lines": [
     {
-      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup orders -o jsonpath='{.status.sites[?(@.name==\"iad\")].divergentGtid}'",
+      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.sites[?(@.name==\"iad\")].divergentGtid}'",
       "out": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:20-23"
     },
     {
       "cmd": "mysql -N -e \"SELECT GTID_SUBTRACT('a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-23', 'a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:1-19,a3c3f9e8-5f9d-11f1-bf37-568bfb8d0365:1-7')\"",
       "out": "a2cc879c-5f9d-11f1-9fae-8e47bc2a4544:20-23"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
 ## The distractor: `maxLagSeconds`
 
-`spec.replication.maxLagSeconds` defaults to 300, and the playground manifest for `orders` sets 30. It
+`spec.replication.maxLagSeconds` defaults to 300, and the playground manifest for `playground` sets 30. It
 drives exactly one thing: a `ReplicationLagging` reason on the `Degraded` condition when a site's
 reported lag exceeds it. It is **not** a promotion gate. Nothing in candidate selection consults it.
 If `iad` dies while `pdx` is 400 seconds behind, Bloodraven promotes `pdx` anyway — because no writable
 site at all is almost always worse. If you believe `maxLagSeconds` bounds your RPO, your RPO is
 whatever the lag happened to be at the moment of the crash. What does bound it is a true GTID-superset
-test, which is why a planned switchover is RPO 0 by construction; that path is Unit 5.
+test, which is why a planned switchover is RPO 0 by construction; that path is Unit 4.
 
 ## Pick your row
 

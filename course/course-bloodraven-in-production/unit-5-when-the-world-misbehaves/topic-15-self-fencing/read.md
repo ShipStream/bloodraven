@@ -1,12 +1,12 @@
 # Self-fencing: the sidecar's two rules
 
-Scale the operator to zero and watch `orders` carry on:
+Scale the operator to zero and watch `playground` carry on:
 
 ```bash
 kubectl -n bloodraven-playground scale deployment/bloodraven --replicas=0
 ```
 
-The counter app keeps writing to `iad`. Nothing pages, nothing promotes, nothing fences. That is
+Press **+ Increment**: the write still lands on `iad`. Nothing pages, nothing promotes, nothing fences. That is
 correct and it is the point — "A healthy primary and replica keep serving reads and writes with zero
 operator involvement. The operator is on the failure-detection and promotion path, not the request
 path." So ask the opposite question. With the operator gone, what would ever stop `iad` accepting
@@ -17,7 +17,7 @@ writes if it could no longer confirm it is still the active site? Not the operat
 Every MySQL pod runs a `bloodraven-sidecar` container, and inside it a `FencingMonitor`. Each tick it
 pings the operator's `/healthz`, reads the operator's `/active-site`, pings every peer sidecar's
 `/peer/ping`, reads every peer's `/peer/active-site` — and then evaluates. Evaluation runs **two**
-rules (`internal/sidecar/fencing.go:374-455`):
+rules, in `FencingMonitor.evaluate` (`internal/sidecar/fencing.go`):
 
 - **Rule #1 — topology mismatch.** The cached operator-authoritative active site is known and is
   *not* this site. Fence immediately, regardless of lease timing.
@@ -48,10 +48,10 @@ a site that was already read-only.
 
 ## The thing that is not a rule
 
-`Server.RunSafetyNet` (`internal/sidecar/server.go:225-276`) is a separate one-shot, wired in
-`cmd/sidecar/main.go:128-131`. It completes **before** the `FencingMonitor` is constructed. The
-published architecture page lists it as a third bullet next to the two rules; it is not part of the
-monitor at all.
+`Server.RunSafetyNet` (`internal/sidecar/server.go`) is a separate one-shot, called from
+`cmd/sidecar/main.go`. It completes **before** the `FencingMonitor` is constructed, so it is not a
+third rule and never runs again. Anything that presents it beside the two rules is describing the
+sidecar's startup, not its steady state.
 
 It fences first and asks afterwards. On boot it sets `super_read_only=ON`, then queries the operator
 for the active site, and only clears the fence if the answer names this site. So it fails closed by
@@ -72,7 +72,7 @@ incident.
 ## Where the belief comes from: `Adopt` versus `Set`
 
 The monitor's `TopologyCache` has two writers with deliberately different tempers
-(`internal/sidecar/topology_cache.go:38-59`):
+(`internal/sidecar/topology_cache.go`):
 
 - **`Set`** — used for values read straight from the operator. Unconditional overwrite, no timestamp
   comparison, because "the operator is always authoritative".
@@ -97,7 +97,7 @@ behavior, not a quorum guarantee" — no counting, no majority, no tie-break. An
 reader counts as a peer: it relays topology and answers `/peer/ping`, and "A reachable peer without
 fresh authoritative topology can still suppress the lease-only all-peers-unreachable fence."
 
-So **adding a reader makes the lease fence less likely to fire.** On `orders` today, `iad` has two
+So **adding a reader makes the lease fence less likely to fire.** On `playground` today, `iad` has two
 peers — `pdx` and `reader` — which means rule #2 needs three parties (operator + 2 peers) silent for
 the full 20 s, up from two before the reader existed. Sit with that before you size your next group.
 A reader you added for read scaling has quietly widened the window in which an isolated primary keeps

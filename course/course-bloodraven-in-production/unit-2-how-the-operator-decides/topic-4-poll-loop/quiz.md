@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` runs at defaults: `pollInterval: 2s`, `failureThreshold: 3`, `recoveryThreshold: 2`. All three sites have been healthy for hours. `iad` stops answering entirely. How long until the operator records `iad` as `unreachable`?
+`playground` runs at defaults: `pollInterval: 2s`, `failureThreshold: 3`, `recoveryThreshold: 2`. All three sites have been healthy for hours. `iad` stops answering entirely. How long until the operator records `iad` as `unreachable`?
 
 - 6 s
 - 10 s
@@ -75,7 +75,7 @@ The adaptive backoff is driven by the worst `failCount` across all sites, so `pd
 
 **Type:** TRUE_FALSE
 
-`reader` in `orders` has `role: read-only`. It answers `read_only=0` on one probe. The operator waits for `recoveryThreshold` consecutive writable answers before recording it as `writable`, exactly as it would for a `primary-candidate` site.
+`reader` in `playground` has `role: read-only`. It answers `read_only=0` on one probe. The operator waits for `recoveryThreshold` consecutive writable answers before recording it as `writable`, exactly as it would for a `primary-candidate` site.
 
 **Correct answer:** false
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """brdrill — turn a failover drill capture into a drill record.
 
-You give it two artefacts from one drill against the `orders` failover group:
+You give it two artefacts from one drill against the `playground` failover group:
 
   --probe   a JSONL probe log, one line per write or read attempt your writer made
   --drill   a JSON capture of the drill: what you triggered, and the group status

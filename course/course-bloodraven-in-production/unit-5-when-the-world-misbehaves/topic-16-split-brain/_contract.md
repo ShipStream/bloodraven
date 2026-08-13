@@ -30,7 +30,7 @@ Teach one concrete source of split brain the learner will actually hit: a freshl
 
 Ground it in the wider world. GitHub's October 2018 incident: a 43-second partition left East and West each holding writes the other never saw, and recovery took over 24 hours — the partition was seconds, the cleanup was a day. Orchestrator issue #854: a *graceful* takeover still split-brained, because the new master was made writable before the old one was set read-only, leaving the demoted master holding transactions the cluster never got. And the Pacemaker position on quorum: loss of quorum can take an unbounded time to detect and react to, and the ultimate cure is fencing, locking the other side out. Bloodraven agrees with that last one — that is what the whole fencing layer is.
 
-Finish with objective 6 as a procedure the learner can run on `orders`: pick a winner (by policy or by hand), fence the loser, audit the divergence with `status.sites[].divergentGtid` and the `bloodraven_divergent_transactions` gauge, then reclone with the `bloodraven.shipstream.io/reclone-site` annotation the learner already met. Keep the reclone step as a callback, not a re-teach.
+Finish with objective 6 as a procedure the learner can run on `playground`: pick a winner (by policy or by hand), fence the loser, audit the divergence with `status.sites[].divergentGtid` and the `bloodraven_divergent_transactions` gauge, then reclone with the `bloodraven.shipstream.io/reclone-site` annotation the learner already met. Keep the reclone step as a callback, not a re-teach.
 
 Do NOT cover the partition shapes or their test coverage (topic 3), or what happens when the operator itself is down (topic 4).
 
@@ -43,5 +43,5 @@ Do NOT cover the partition shapes or their test coverage (topic 3), or what happ
 ## Handoff
 
 **Inherits:** The learner can attribute a fence to a specific sidecar rule and knows fencing blocks rather than cuts off writers.
-**Leaves:** The learner can state which split-brain tier `orders` is on, justify or change its `sitePriorities`, and run the pick-fence-audit-reclone recovery.
+**Leaves:** The learner can state which split-brain tier `playground` is on, justify or change its `sitePriorities`, and run the pick-fence-audit-reclone recovery.
 **Do not cover:** Partition shapes and their coverage (topic 3), operator downtime and cooldown behaviour (topic 4), backup or DR recovery (Unit 6).

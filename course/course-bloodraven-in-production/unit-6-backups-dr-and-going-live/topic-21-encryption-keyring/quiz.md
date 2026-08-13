@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-You enable `spec.encryptionAtRest` on `orders` and watch `status.encryptionAtRest.sites[]`. Which phase tells you a site is finished and protected?
+You enable `spec.encryptionAtRest` on `playground` and watch `status.encryptionAtRest.sites[]`. Which phase tells you a site is finished and protected?
 
 - `Escrowed` — the keyring is safely captured in a Secret and the digest is verified
 - `Sealed` — the keyring is projected read-only and mysqld cannot add keys
@@ -24,7 +24,7 @@ You enable `spec.encryptionAtRest` on `orders` and watch `status.encryptionAtRes
 
 **Type:** MULTIPLE_CHOICE
 
-`pdx` was `Sealed`. You annotate `orders` with `rotate-keyring=pdx` and the site now reads `phase: Unsealed`. What is happening?
+`pdx` was `Sealed`. You annotate `playground` with `rotate-keyring=pdx` and the site now reads `phase: Unsealed`. What is happening?
 
 - The rotation failed and the site fell back to its bootstrap state, so its escrowed keyring is gone
 - The site is running a writable memory-backed keyring so it can mint a new master key, and is not protected until it re-seals
@@ -41,7 +41,7 @@ Rotation is the one transition that moves backwards out of `Sealed`, re-entering
 
 **Type:** MULTIPLE_CHOICE
 
-Your cluster has no API-server encryption at rest for Secrets. You enable `spec.encryptionAtRest` on `orders` anyway and every site reaches `Sealed`. What have you actually achieved?
+Your cluster has no API-server encryption at rest for Secrets. You enable `spec.encryptionAtRest` on `playground` anyway and every site reaches `Sealed`. What have you actually achieved?
 
 - Full protection: the keyring never touches a persistent disk, so where etcd stores Secrets is irrelevant
 - Nothing at all — the operator refuses to seal sites in a cluster without API-server encryption
@@ -70,7 +70,7 @@ The reversal: it is a hard CEL rejection at admission, not a recommendation — 
 
 **Type:** SHORT_ANSWER
 
-`orders` has three sites: `iad` (active primary), `pdx` (replica) and `reader` (`role: read-only`). You need every site's master key rotated. Which site cannot be rotated right now, why, and what do you do about it?
+`playground` has three sites: `iad` (active primary), `pdx` (replica) and `reader` (`role: read-only`). You need every site's master key rotated. Which site cannot be rotated right now, why, and what do you do about it?
 
 **Sample answer:**
 
@@ -82,4 +82,4 @@ A strong answer names `iad` and ties the refusal to its role as active primary r
 
 **Explanation:**
 
-The unrotatable site is defined by current role, not identity: whichever site is active is the one the operator refuses, so the answer changes the moment you fail over. `reader` is a tempting wrong answer because it is excluded from other things — it can never be promoted and is never a backup source — but nothing stops it rotating. The fix is the planned failover from Unit 5: make `iad` a replica and the refusal evaporates. (objective 9)
+The unrotatable site is defined by current role, not identity: whichever site is active is the one the operator refuses, so the answer changes the moment you fail over. `reader` is a tempting wrong answer because it is excluded from other things — it can never be promoted and is never a backup source — but nothing stops it rotating. The fix is the planned failover from Unit 4: make `iad` a replica and the refusal evaporates. (objective 9)

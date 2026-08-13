@@ -5,7 +5,7 @@
 
 It reads the JSON of one MysqlFailoverGroup, exactly as printed by
 
-    kubectl -n bloodraven-playground get mysqlfailovergroup orders -o json
+    kubectl -n bloodraven-playground get mysqlfailovergroup playground -o json
 
 and prints a header line, one line per site, and a verdict. The exit code
 carries the verdict so you can put brstatus in a loop or a check script:
@@ -46,7 +46,7 @@ def load_group(path):
     if not isinstance(obj, dict) or obj.get("kind") != "MysqlFailoverGroup":
         raise ValueError(
             "expected one MysqlFailoverGroup object, got kind=%r "
-            "(name the group: kubectl get mysqlfailovergroup orders -o json)"
+            "(name the group: kubectl get mysqlfailovergroup playground -o json)"
             % (obj.get("kind") if isinstance(obj, dict) else type(obj).__name__)
         )
     return obj

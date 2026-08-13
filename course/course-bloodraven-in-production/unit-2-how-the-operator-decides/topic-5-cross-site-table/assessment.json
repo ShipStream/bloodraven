@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "In `orders`, `iad` (primary-candidate) is writable and `reader` (role: read-only) comes up writable after a pod restart. `pdx` is read-only. What does EvalCrossSite return?",
+      "question": "In `playground`, `iad` (primary-candidate) is writable and `reader` (role: read-only) comes up writable after a pod restart. `pdx` is read-only. What does EvalCrossSite return?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -76,7 +76,7 @@
       "explanation": "The tally loop routes any writable site whose role is not primary-candidate into FenceSites and `continue`s, so `reader` never joins the writable tally; the fence-first guard then fires and returns immediately. SplitBrain is wrong because len(writable) counts core sites only and equals 1 here — and even with two writable candidates the fence-first return would preempt it. Healthy is the trap version of the same fact: readers are excluded from coreCount and the tallies, but a writable one is not merely ignored, it is an anomaly that produces an alert. The last option invents an unreachable site that does not exist. (objectives 4, 6)"
     },
     {
-      "question": "`orders` has `iad` and `pdx` both reachable and both read-only, and no site unreachable. What does the operator do?",
+      "question": "`playground` has `iad` and `pdx` both reachable and both read-only, and no site unreachable. What does the operator do?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 1,
       "options": [
@@ -117,7 +117,7 @@
       "explanation": "Ordering the candidate list is not the same as choosing from it. The matrix is pure and cannot read GTID_EXECUTED at all, so the freshness comparison necessarily happens in the caller, after the table has spoken. (objective 4)"
     },
     {
-      "question": "The matrix reports Reason \"NoPrimary\" for `orders` on one poll and \"Degraded\" on the next, without any promotion or fencing having run in between. What best explains it?",
+      "question": "The matrix reports Reason \"NoPrimary\" for `playground` on one poll and \"Degraded\" on the next, without any promotion or fencing having run in between. What best explains it?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 5,
       "options": [

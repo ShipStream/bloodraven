@@ -1,10 +1,10 @@
 {
   "drill": {
     "mode": "planned",
-    "group": "orders",
+    "group": "playground",
     "namespace": "bloodraven-playground",
     "demotedSite": "iad",
-    "trigger": "kubectl -n bloodraven-playground annotate mysqlfailovergroup orders bloodraven.shipstream.io/planned-failover=pdx",
+    "trigger": "kubectl -n bloodraven-playground annotate mysqlfailovergroup playground bloodraven.shipstream.io/planned-failover=pdx",
     "capturedAt": "2026-08-11T09:45:00Z",
     "pool": {
       "maxOpenConns": 5,

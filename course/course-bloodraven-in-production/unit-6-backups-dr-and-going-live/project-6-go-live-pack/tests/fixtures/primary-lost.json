@@ -163,8 +163,8 @@
     {
       "name": "bloodraven_archiver_backlog_files",
       "labels": {
-        "namespace": "orders",
-        "group": "orders",
+        "namespace": "playground",
+        "group": "playground",
         "site": "iad"
       },
       "value": 0
@@ -172,7 +172,7 @@
     {
       "name": "bloodraven_backup_last_success_timestamp_seconds",
       "labels": {
-        "group": "orders",
+        "group": "playground",
         "profile": "nightly"
       },
       "value": 1786532400
@@ -180,8 +180,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "iad",
         "phase": "pending"
       },
@@ -190,8 +190,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "iad",
         "phase": "unsealed"
       },
@@ -200,8 +200,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "iad",
         "phase": "escrowed"
       },
@@ -210,8 +210,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "iad",
         "phase": "sealed"
       },
@@ -220,8 +220,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "iad",
         "phase": "failed"
       },
@@ -230,8 +230,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "pdx",
         "phase": "pending"
       },
@@ -240,8 +240,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "pdx",
         "phase": "unsealed"
       },
@@ -250,8 +250,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "pdx",
         "phase": "escrowed"
       },
@@ -260,8 +260,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "pdx",
         "phase": "sealed"
       },
@@ -270,8 +270,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "pdx",
         "phase": "failed"
       },
@@ -280,8 +280,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "reader",
         "phase": "pending"
       },
@@ -290,8 +290,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "reader",
         "phase": "unsealed"
       },
@@ -300,8 +300,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "reader",
         "phase": "escrowed"
       },
@@ -310,8 +310,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "reader",
         "phase": "sealed"
       },
@@ -320,8 +320,8 @@
     {
       "name": "bloodraven_keyring_phase",
       "labels": {
-        "mysql_namespace": "orders",
-        "failover_group": "orders",
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
         "site": "reader",
         "phase": "failed"
       },

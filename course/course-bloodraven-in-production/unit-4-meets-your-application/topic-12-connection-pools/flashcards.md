@@ -27,9 +27,9 @@
 
 ---
 
-**Front:** In v0.9.1, what is the status of Bloodraven's own fix for the stale-connection gap?
+**Front:** Which of Bloodraven's three paths actually drains application connections?
 
-**Back:** Still open: issue #123 is unresolved and PR #137 is unmerged.
+**Back:** Only **planned failover**, and it drains *ahead* of the switch, repeatedly, inside `drainTimeout`. Emergency failover is best-effort during the sequence and then retried per poll inside `spec.connectionDrainTimeout` (default `30s`) — but only while the fenced site answers. An autonomous sidecar self-fence does not retry at all. See the version appendix, row A1, for the dated state of the gap.
 
 ---
 

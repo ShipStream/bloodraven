@@ -11,7 +11,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` runs at defaults — `pollInterval: 2s`, `failureThreshold: 3`, `recoveryThreshold: 2`. `pdx` is currently recorded as `unreachable`. Its next three probes all return `read_only=0`. What does the operator record, and when?
+`playground` runs at defaults — `pollInterval: 2s`, `failureThreshold: 3`, `recoveryThreshold: 2`. `pdx` is currently recorded as `unreachable`. Its next three probes all return `read_only=0`. What does the operator record, and when?
 
 - `writable` on the first success — a successful probe zeroes `failCount`, and a site with no failures is writable
 - `writable` on the second consecutive success; after the first success it still reads `unreachable`
@@ -28,7 +28,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-You are tailing the operator log for `orders`. The last successful poll of `reader` was at `12:04:10`; at `12:04:12` you see WARN `failed to check replica status`, and at `12:04:16` INFO `state transition` with `site=reader`, `from=read-only`, `to=unreachable`. At `12:05:02` the `reader` pod is back and answering `read_only=1`. What is the next INFO line for that site, and how long after it starts answering?
+You are tailing the operator log for `playground`. The last successful poll of `reader` was at `12:04:10`; at `12:04:12` you see WARN `failed to check replica status`, and at `12:04:16` INFO `state transition` with `site=reader`, `from=read-only`, `to=unreachable`. At `12:05:02` the `reader` pod is back and answering `read_only=1`. What is the next INFO line for that site, and how long after it starts answering?
 
 - INFO `state transition` `from=unreachable` `to=read-only`, on the first successful poll
 - INFO `state transition` `from=unreachable` `to=read-only`, six seconds later — the same `pollInterval` × `failureThreshold` sum runs in both directions
@@ -45,7 +45,7 @@ A `read_only=1` answer returns `StateReadOnly` immediately, with no counter in t
 
 **Type:** MULTIPLE_CHOICE
 
-A four-site `orders`: `iad` (`primary-candidate`) writable, `pdx` (`primary-candidate`) read-only, `dr` (`role: dr-only`) just restarted and is answering `read_only=0`, `reader` (`role: read-only`) read-only. What does `EvalCrossSite` return on this poll?
+A four-site `playground`: `iad` (`primary-candidate`) writable, `pdx` (`primary-candidate`) read-only, `dr` (`role: dr-only`) just restarted and is answering `read_only=0`, `reader` (`role: read-only`) read-only. What does `EvalCrossSite` return on this poll?
 
 - `SplitBrain` — `dr-only` sites count toward `coreCount`, so two core sites are writable and `len(writable) > 1` holds
 - `Healthy` — `dr-only` is non-promotable, so like `role: read-only` it is dropped before the tallies and only `iad` is visible
@@ -62,7 +62,7 @@ The pre-tally loop routes any site that is writable while its role is not `prima
 
 **Type:** TRUE_FALSE
 
-The `reader` pod in `orders` restarts and comes up writable for a few seconds before anything fences it. The operator records `reader` as `writable` on that single poll rather than waiting for `recoveryThreshold`, and fences it on that same poll without waiting for a state transition.
+The `reader` pod in `playground` restarts and comes up writable for a few seconds before anything fences it. The operator records `reader` as `writable` on that single poll rather than waiting for `recoveryThreshold`, and fences it on that same poll without waiting for a state transition.
 
 **Correct answer:** true
 
@@ -74,7 +74,7 @@ Both halves hold, and they are two separate deliberate bypasses. A writable obse
 
 **Type:** SHORT_ANSWER
 
-`orders` failed over to `pdx` two minutes ago. `spec.failoverCooldown` is the shipped `5m`. Now every core site reads `read-only` and none is unreachable. Describe what the cross-site table produces, whether the operator can restore writability before the five minutes are up, and what must hold for it to do so.
+`playground` failed over to `pdx` two minutes ago. `spec.failoverCooldown` is the shipped `5m`. Now every core site reads `read-only` and none is unreachable. Describe what the cross-site table produces, whether the operator can restore writability before the five minutes are up, and what must hold for it to do so.
 
 **Sample answer:**
 
@@ -92,7 +92,7 @@ The point of the question is the seam between a pure function and a stateful ope
 
 **Type:** MULTIPLE_CHOICE
 
-Ninety seconds after `orders` failed over to `pdx`, the old primary `iad` comes back: reachable, read-only, still configured to replicate from nothing. `spec.failoverCooldown` is `5m`. Which statement describes what the operator does before those five minutes elapse?
+Ninety seconds after `playground` failed over to `pdx`, the old primary `iad` comes back: reachable, read-only, still configured to replicate from nothing. `spec.failoverCooldown` is `5m`. Which statement describes what the operator does before those five minutes elapse?
 
 - Source convergence repoints `iad` at `pdx` and old-primary recovery runs its `STOP REPLICA` / `RESET REPLICA ALL` / `CHANGE REPLICATION SOURCE` rejoin; only a second promotion is blocked
 - Nothing mutating touches `iad` — the cooldown freezes cross-site action for the whole group until it expires
@@ -109,7 +109,7 @@ The cooldown is one `if` immediately before the promotion call: if `lastFailover
 
 **Type:** TRUE_FALSE
 
-The `mysqlfailovergroups/status` RBAC rule was dropped from the operator's ClusterRole during an upgrade, so status writes have been failing silently while ordinary object patches keep succeeding. `orders` fails over to `pdx`, then the operator pod restarts a minute later. The restarted operator has no failover history and will promote again immediately if the table asks it to.
+The `mysqlfailovergroups/status` RBAC rule was dropped from the operator's ClusterRole during an upgrade, so status writes have been failing silently while ordinary object patches keep succeeding. `playground` fails over to `pdx`, then the operator pod restarts a minute later. The restarted operator has no failover history and will promote again immediately if the table asks it to.
 
 **Correct answer:** false
 
@@ -121,7 +121,7 @@ It still has the history, and that is exactly why the record is written twice. E
 
 **Type:** MULTIPLE_CHOICE
 
-You scrape the operator's `/metrics` for `orders` and see: `bloodraven_site_state{site="iad",state="writable"} 1`; `{site="pdx",state="unreachable"} 1`; `{site="reader",state="read-only"} 1` (the other three series for each site are `0`); `bloodraven_replication_lag_seconds{site="pdx"} 4`; `{site="reader"} 0`; `bloodraven_state_transitions_total{site="pdx",from="read-only",to="unreachable"} 1`; and `rate(bloodraven_poll_latency_seconds_count[1m])` non-zero for all three sites. What is the group doing?
+You scrape the operator's `/metrics` for `playground` and see: `bloodraven_site_state{site="iad",state="writable"} 1`; `{site="pdx",state="unreachable"} 1`; `{site="reader",state="read-only"} 1` (the other three series for each site are `0`); `bloodraven_replication_lag_seconds{site="pdx"} 4`; `{site="reader"} 0`; `bloodraven_state_transitions_total{site="pdx",from="read-only",to="unreachable"} 1`; and `rate(bloodraven_poll_latency_seconds_count[1m])` non-zero for all three sites. What is the group doing?
 
 - `iad` is the primary and `pdx` is replicating four seconds behind it, so the group is healthy with a small amount of lag; the `unreachable` series is a transient the state-set has not cleared yet
 - `reader` is not replicating — its `0` is the sentinel the operator writes when `Seconds_Behind_Source` is NULL — while `pdx` is the only working replica
@@ -138,7 +138,7 @@ You scrape the operator's `/metrics` for `orders` and see: `bloodraven_site_stat
 
 **Type:** MULTIPLE_CHOICE
 
-In `orders`, `bloodraven_replication_lag_seconds{site="pdx"}` and `{site="reader"}` both read `120`. `pdx` is `role: primary-candidate`, `reader` is `role: read-only`. The group sets `replication.maxLagSeconds: 300` and does not set `readOnlyMaxLagSeconds` at all. What follows?
+A second failover group — not `playground`, which overrides both — leaves `spec.replication` almost alone: it sets `maxLagSeconds: 300` and does not set `readOnlyMaxLagSeconds` at all. `bloodraven_replication_lag_seconds{site="pdx"}` and `{site="reader"}` both read `120`; `pdx` is `role: primary-candidate`, `reader` is `role: read-only`. What follows?
 
 - Neither breaches: `pdx` is judged against `maxLagSeconds` 300, and a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`, so `reader` is judged against 300 too
 - `reader` breaches: with `readOnlyMaxLagSeconds` unset the reader gate defaults to zero reported lag, so `reader` drops out of the `-replicas` endpoint
@@ -155,7 +155,7 @@ In `orders`, `bloodraven_replication_lag_seconds{site="pdx"}` and `{site="reader
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` failed over to `pdx` ninety seconds ago; `spec.failoverCooldown` is `5m`. Now `pdx` goes unreachable and `iad` is read-only. What do you see on this poll?
+`playground` failed over to `pdx` ninety seconds ago; `spec.failoverCooldown` is `5m`. Now `pdx` goes unreachable and `iad` is read-only. What do you see on this poll?
 
 - `Reason = "Degraded"` with `PromotionCandidates = [iad]` and no alert, plus INFO `failover blocked by anti-flap cooldown` with fields `lastFailover` and `cooldown` — and no promotion
 - `Reason = "CooldownBlocked"` on the `Degraded` condition, so you can alert on the block directly

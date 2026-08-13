@@ -2,6 +2,14 @@
 
 **Unit 5 — When the world misbehaves · project · `code-notebook` · Python**
 
+> **Optional.** The heaviest project in the course, and the most specialised. Nothing later depends on
+> it. Skip it if you are short of time, and take the deliverable instead of the code: a read-only site
+> is explained by exactly one of three causes — rule #1 (a live operator disagrees about the active
+> site), rule #2 (operator *and* every peer silent past `leaseTimeout`), or the startup safety net (the
+> pod never got permission) — and the log prefixes tell them apart. `safety net:` means never allowed
+> to write; `SELF-FENCING:` / `SELF-FENCED:` means was writing and lost the argument. Being able to say
+> which, from a log bundle, is the whole objective.
+
 ## Goal
 
 Build a timeline tool that reads a bundle of operator and sidecar logs from an injected fault and
@@ -20,7 +28,7 @@ cluster, and neither does the grader.
 
 ## How this works
 
-A site on `orders` is read-only and you did not put it there. That is the whole problem. Three
+A site on `playground` is read-only and you did not put it there. That is the whole problem. Three
 different mechanisms could have done it — the sidecar's rule #1, the sidecar's rule #2, or the
 startup safety net — plus three ways the operator fences a site itself, and they mean completely
 different things. Rule #1 is a pod that was told somebody else is active. Rule #2 is a pod that
@@ -44,7 +52,7 @@ tests/fixtures/partition-a/
 and prints one timeline of every fence, with its cause and a verdict, plus the writable sites
 nobody fenced at all. Exit 0 when everything checks out, 1 when it does not.
 
-Three bundles ship with the project, all from `orders`:
+Three bundles ship with the project, all from `playground`:
 
 | Bundle | What it is |
 |---|---|
@@ -91,14 +99,14 @@ rather than on plumbing:
 - `parse_time()` handles the RFC3339Nano stamps the binaries emit. `parse_duration()` handles
   `slog`'s duration rendering (`"20s"`).
 - `evidence()`, `report()` and the exit code are done. **Do not change the report format** — the
-  tests read it. `group_name()` pulls `orders` out of the `fg` field.
+  tests read it. `group_name()` pulls `playground` out of the `fg` field.
 - The four TODOs already return placeholder values, so the starter runs before you touch it. It
   reports zero fences on a bundle that plainly contains several.
 
 ## Expected output
 
 ```text
-FENCE TIMELINE — orders (bundle: split-brain-tier3)
+FENCE TIMELINE — playground (bundle: split-brain-tier3)
   11 records scanned, 3 fence events
 
   2026-08-12T14:01:03.505Z  reader   safety-net     correct    error=Get "http://…/active-site": context deadline exceeded
@@ -222,7 +230,7 @@ primary authority.
 
 - [ ] **Run the starter and see what it misses**
 
-      Copy `starter/brfence.py` to `brfence.py` at the project root and run `python3 brfence.py tests/fixtures/partition-a`. It already loads the bundle, orders it by time and prints a report. It finds nothing. Open `tests/fixtures/partition-a/sidecar-iad.jsonl` and confirm by eye that the bundle contains two `SELF-FENCED:` lines the tool is silent about. That gap is TODO A through TODO D.
+      Copy `starter/brfence.py` to `brfence.py` at the project root and run `python3 brfence.py tests/fixtures/partition-a`. It already loads the bundle, playground it by time and prints a report. It finds nothing. Open `tests/fixtures/partition-a/sidecar-iad.jsonl` and confirm by eye that the bundle contains two `SELF-FENCED:` lines the tool is silent about. That gap is TODO A through TODO D.
 
       *Done when:* `python3 brfence.py tests/fixtures/partition-a`, unmodified, exits 0 and its second line ends with `0 fence events`.
 

@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-The `pdx` sidecar in `orders` logs `SELF-FENCING: ... setting super_read_only=ON`. From the same bundle you can see the operator pod was Running and answering `/healthz` throughout, and `pdx` was successfully pinging the `iad` and `reader` sidecars the whole time. Which rule fired?
+The `pdx` sidecar in `playground` logs `SELF-FENCING: ... setting super_read_only=ON`. From the same bundle you can see the operator pod was Running and answering `/healthz` throughout, and `pdx` was successfully pinging the `iad` and `reader` sidecars the whole time. Which rule fired?
 
 - Rule #1 — the cached authoritative active site was a different site to `pdx`
 - Rule #2 — `pdx` lost its lease because the operator stopped confirming its role
@@ -58,7 +58,7 @@ An engineer reports that a site Bloodraven considers fenced still accepted a wri
 
 **Type:** TRUE_FALSE
 
-Adding a `role: read-only` reader site to `orders` makes the lease-expiry fence more likely to fire, because there is now one more peer whose silence the monitor must account for.
+Adding a `role: read-only` reader site to `playground` makes the lease-expiry fence more likely to fire, because there is now one more peer whose silence the monitor must account for.
 
 **Correct answer:** false
 

@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` has been sitting in `WaitingForLag` for two minutes. `pdx` reports `Seconds_Behind_Source = 0` and is well inside `spec.replication.maxLagSeconds`. What is the operator actually waiting for before it will promote?
+`playground` has been sitting in `WaitingForLag` for two minutes. `pdx` reports `Seconds_Behind_Source = 0` and is well inside `spec.replication.maxLagSeconds`. What is the operator actually waiting for before it will promote?
 
 - Replication lag on `pdx` to fall below `spec.replication.maxLagSeconds`, whose default is 300.
 - `pdx`'s `GTID_EXECUTED` to contain the source's `GTID_EXECUTED` snapshot taken at the fence.
@@ -36,7 +36,7 @@ The reversal: the drain is a deadline, not a barrier. When the budget is exhaust
 
 **Type:** MULTIPLE_CHOICE
 
-Four planned failovers on `orders` failed in four different ways. Which one leaves the source primary fenced and requires a human to put the cluster right?
+Four planned failovers on `playground` failed in four different ways. Which one leaves the source primary fenced and requires a human to put the cluster right?
 
 - `LagTimeout` while in `WaitingForLag`, after `maxLagWait` expired against a lagging target.
 - `InvalidGTID` while in `WaitingForLag`, when one of the two GTID sets would not parse.
@@ -53,7 +53,7 @@ Rollback — unfencing the source — exists only in `WaitingForLag`. Both failu
 
 **Type:** SHORT_ANSWER
 
-A planned failover of `orders` from `iad` to `pdx` has rolled back twice with `LagTimeout`; `pdx` is genuinely behind because of a long-running batch job. A colleague proposes annotating with `pdx:maxLagWait=30m` so the gate has time to close. Argue the call.
+A planned failover of `playground` from `iad` to `pdx` has rolled back twice with `LagTimeout`; `pdx` is genuinely behind because of a long-running batch job. A colleague proposes annotating with `pdx:maxLagWait=30m` so the gate has time to close. Argue the call.
 
 **Sample answer:**
 
@@ -71,7 +71,7 @@ The lag gate that never closes is the failure mode you want, because it is the o
 
 **Type:** MULTIPLE_CHOICE
 
-Ninety seconds after an emergency failover promoted `pdx`, you annotate `orders` to plan a switchover back to `iad`. It lands in `Failed` with reason `CooldownActive`. What happened, and what is the correct response?
+Ninety seconds after an emergency failover promoted `pdx`, you annotate `playground` to plan a switchover back to `iad`. It lands in `Failed` with reason `CooldownActive`. What happened, and what is the correct response?
 
 - The annotation value was malformed; re-apply it as `iad:maxLagWait=5m` and it will be accepted.
 - The anti-flap cooldown gates planned admission too, and `onCooldown` defaults to `reject`.

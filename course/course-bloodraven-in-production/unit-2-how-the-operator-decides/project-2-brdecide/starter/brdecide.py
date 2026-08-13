@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """brdecide — predict the cross-site decision the Bloodraven operator would take.
 
-Feed it a MysqlFailoverGroup object (``kubectl get mysqlfailovergroup orders -o json``)
+Feed it a MysqlFailoverGroup object (``kubectl get mysqlfailovergroup playground -o json``)
 and a clock. It prints the action, the alert, the ``Reason`` string that reaches
 ``status.conditions``, and whether ``spec.failoverCooldown`` will let the promotion run.
 
-    python starter/brdecide.py --status tests/fixtures/orders-healthy.json
-    python starter/brdecide.py --status tests/fixtures/orders-iad-down-cooldown.json \
+    python starter/brdecide.py --status tests/fixtures/playground-healthy.json
+    python starter/brdecide.py --status tests/fixtures/playground-iad-down-cooldown.json \
         --now 2026-08-12T12:04:16Z --json
 
 Everything peripheral is already wired: argument parsing, loading the object, joining

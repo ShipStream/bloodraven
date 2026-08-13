@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "`pdx` is primary on `orders` with `GTID_EXECUTED` = `A:1-15`. You scale `iad` back up and it comes back read-only with `A:1-15,B:1-3`. What does the operator do?",
+      "question": "`pdx` is primary on `playground` with `GTID_EXECUTED` = `A:1-15`. You scale `iad` back up and it comes back read-only with `A:1-15,B:1-3`. What does the operator do?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -76,7 +76,7 @@
       "explanation": "The test is one-directional: does the NEW primary's set contain the OLD primary's? `pdx` holds `A:1-15`, which does not contain `B:1-3`, so the operator computes old minus new, writes `B:1-3` and the count 3 to `status.sites[].divergentGtid` and `divergentTransactionCount`, sets `bloodraven_divergent_transactions`, and stops. The “`iad` contains everything `pdx` has” answer runs the comparison backwards — that inversion is false after almost any failover, because the new primary keeps taking writes, and it passes precisely when the old primary is ahead, the one case that must block. The “internal transactions are ignored” answer invents an exemption that does not exist: the operator compares GTID sets and cannot tell which transactions were internal, which is exactly why a clean pod kill can leave a site blocked. The “fresh datadir, clone it” answer confuses the emptiness test with the containment test — emptiness is decided from shared GTID UUIDs, and `iad` shares `A` with `pdx`, so it is a returning member and runs the divergence comparison rather than being cloned over (objective 7)."
     },
     {
-      "question": "`iad` is `RecoveryBlocked` and its `divergentGtid` begins `589f4b67`. You run `kubectl annotate mfg orders bloodraven.shipstream.io/reclone-site=iad:589f4b`. What happens?",
+      "question": "`iad` is `RecoveryBlocked` and its `divergentGtid` begins `589f4b67`. You run `kubectl annotate mfg playground bloodraven.shipstream.io/reclone-site=iad:589f4b`. What happens?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 1,
       "options": [
@@ -86,14 +86,14 @@
         "The value is parsed as a cold reclone, so `iad`'s datadir is wiped and rebuilt from `pdx` immediately, without any further confirmation being required."
       ],
       "correctOptionIndex": 2,
-      "explanation": "The interlock checks length before it checks match: a prefix under 8 characters is rejected outright, even though it happens to be a genuine prefix of the divergent set. The rejection emits a `RecloneRejected` warning event and the annotation is then deleted, so you must re-annotate rather than wait. The “a correct prefix is enough” answer is the tempting one — but the floor exists to make the token specific to one incident, not merely plausible. The “wait for the next re-verification” answer misreads the 30 s cadence, which re-verifies the divergence report, not the annotation; the annotation is already gone by then. The “parsed as a cold reclone” answer inverts the two forms — a colon-suffixed value is a hot reclone token, the cold form is `iad:confirm=orders`, and nothing about a short prefix converts one into the other (objective 8)."
+      "explanation": "The interlock checks length before it checks match: a prefix under 8 characters is rejected outright, even though it happens to be a genuine prefix of the divergent set. The rejection emits a `RecloneRejected` warning event and the annotation is then deleted, so you must re-annotate rather than wait. The “a correct prefix is enough” answer is the tempting one — but the floor exists to make the token specific to one incident, not merely plausible. The “wait for the next re-verification” answer misreads the 30 s cadence, which re-verifies the divergence report, not the annotation; the annotation is already gone by then. The “parsed as a cold reclone” answer inverts the two forms — a colon-suffixed value is a hot reclone token, the cold form is `iad:confirm=playground`, and nothing about a short prefix converts one into the other (objective 8)."
     },
     {
-      "question": "`iad` has no `divergentGtid` in status, but you want to rebuild it from `pdx` anyway. You run `kubectl annotate mfg orders bloodraven.shipstream.io/reclone-site=iad` and it is rejected. What does the operator require instead, and why is the bare site name not enough here?",
+      "question": "`iad` has no `divergentGtid` in status, but you want to rebuild it from `pdx` anyway. You run `kubectl annotate mfg playground bloodraven.shipstream.io/reclone-site=iad` and it is rejected. What does the operator require instead, and why is the bare site name not enough here?",
       "type": "SHORT_ANSWER",
       "orderIndex": 2,
-      "sampleAnswer": "It wants the cold form with the confirm token: `bloodraven.shipstream.io/reclone-site=iad:confirm=orders`, where the token is a literal string equal to the failover group's name. With no divergentGtid recorded there is no GTID prefix to prove intent against, but `CLONE INSTANCE` still wipes iad's datadir, so the group name stands in as the anti-fat-finger confirmation — you cannot destroy a site by typing one site name. The rejection message prints the exact value to set, and the rejected annotation is deleted, so re-annotate with the confirm form.",
-      "graderNotes": "A strong answer gives the form `<siteName>:confirm=<groupName>` and uses the group name (`orders`), not the site name or the GTID; and explains that a cold reclone is still destructive, so the interlock demands a confirmation even with nothing divergent recorded. Credit for noting the rejection message names the exact string and that the rejected annotation is deleted from the CR. Deduct if the answer supplies a GTID prefix (there is none to supply) or claims the bare form always works when no divergence is recorded.",
+      "sampleAnswer": "It wants the cold form with the confirm token: `bloodraven.shipstream.io/reclone-site=iad:confirm=playground`, where the token is a literal string equal to the failover group's name. With no divergentGtid recorded there is no GTID prefix to prove intent against, but `CLONE INSTANCE` still wipes iad's datadir, so the group name stands in as the anti-fat-finger confirmation — you cannot destroy a site by typing one site name. The rejection message prints the exact value to set, and the rejected annotation is deleted, so re-annotate with the confirm form.",
+      "graderNotes": "A strong answer gives the form `<siteName>:confirm=<groupName>` and uses the group name (`playground`), not the site name or the GTID; and explains that a cold reclone is still destructive, so the interlock demands a confirmation even with nothing divergent recorded. Credit for noting the rejection message names the exact string and that the rejected annotation is deleted from the CR. Deduct if the answer supplies a GTID prefix (there is none to supply) or claims the bare form always works when no divergence is recorded.",
       "explanation": "The interlock branches on whether `divergentGtid` is populated. Populated means a hot reclone and an 8-character matching prefix. Empty means a cold reclone, which is exactly when the operator has no observed value to check you against — so the confirm token equal to the failover-group name takes its place (objective 8)."
     },
     {
@@ -101,7 +101,7 @@
       "type": "TRUE_FALSE",
       "orderIndex": 3,
       "correctAnswer": false,
-      "explanation": "The reversal: the interlock never reads `RecoveryState`. It keys on the presence of `divergentGtid` alone, precisely because `RecoveryBlocked` is a downstream UX field that can be transiently unset during a reconcile — gating on it would let a routine reconcile blip open the destructive path. With `divergentGtid` still populated, the bare form is rejected exactly as before. And there is no hand-edit that helps: clear `divergentGtid` too and you fall into the cold branch, which demands `iad:confirm=orders` instead. Either way the rejected annotation is deleted and a `RecloneRejected` event is emitted (objective 8)."
+      "explanation": "The reversal: the interlock never reads `RecoveryState`. It keys on the presence of `divergentGtid` alone, precisely because `RecoveryBlocked` is a downstream UX field that can be transiently unset during a reconcile — gating on it would let a routine reconcile blip open the destructive path. With `divergentGtid` still populated, the bare form is rejected exactly as before. And there is no hand-edit that helps: clear `divergentGtid` too and you fall into the cold branch, which demands `iad:confirm=playground` instead. Either way the rejected annotation is deleted and a `RecloneRejected` event is emitted (objective 8)."
     },
     {
       "question": "`iad` is blocked with 3 divergent transactions that you have already dumped and want to keep. Which pair are the sanctioned ways out?",

@@ -1,20 +1,20 @@
-# The go-live pack for `orders`
+# The go-live pack for `playground`
 
 **Unit 6 — Backups, disaster recovery, and going live.** The capstone.
 
 ## The goal
 
-Assemble the artefacts you would actually hand an on-call rotation: a Prometheus rules file built only from metric names the operator really exports, a one-page alert-to-runbook-to-first-command map, and a DR drill record showing you restored `orders` and measured how far back you could reach. Then let a checker prove the thing that matters — that your rules stay silent while a reader soaks past three times `maxLagSeconds`.
+Assemble the artefacts you would actually hand an on-call rotation: a Prometheus rules file built only from metric names the operator really exports, a one-page alert-to-runbook-to-first-command map, and a DR drill record showing you restored `playground` and measured how far back you could reach. Then let a checker prove the thing that matters — that your rules stay silent while a reader soaks past three times `maxLagSeconds`.
 
 ## How this works
 
-`orders` runs three sites: `iad` and `pdx` as `primary-candidate`, and `reader` with `role: read-only`. You have already backed it up, verified it, restored it in place and turned on encryption at rest. What is missing is the pack you hand to the rotation.
+`playground` runs three sites: `iad` and `pdx` as `primary-candidate`, and `reader` with `role: read-only`. You have already backed it up, verified it, restored it in place and turned on encryption at rest. What is missing is the pack you hand to the rotation.
 
 The pack lives in `starter/pack/`:
 
 | File | What it is |
 |---|---|
-| `alerts.yml` | Prometheus alerting rules for `orders` |
+| `alerts.yml` | Prometheus alerting rules for `playground` |
 | `runbooks.yml` | alert → runbook anchor → the one command typed first |
 | `drill.json` | the record of the DR drill you ran |
 
@@ -28,13 +28,13 @@ It runs as given and reports twelve problems. Fix them in order.
 
 ## Your tasks
 
-**TODO A — `pack/alerts.yml`.** `BloodravenReplicationLagging` currently reads every site. Chaos scenario 42 soaks the reader past three times `maxLagSeconds` with both replication threads still running, and asserts the group stays `Ready`, no failover fires, no cooldown is consumed, and only the reader endpoint sheds. That is the role model doing its job, not a fault. Exclude the read-only site by label matcher and keep the threshold at `300`, the `spec.replication.maxLagSeconds` default, so a genuinely lagging `primary-candidate` still pages.
+**TODO A — `pack/alerts.yml`.** `BloodravenReplicationLagging` currently reads every site. Chaos scenario 42 soaks the reader past three times `maxLagSeconds` with both replication threads still running, and asserts the group stays `Ready`, no failover fires, no cooldown is consumed, and only the reader endpoint sheds. That is the role model doing its job, not a fault. Exclude the read-only site by label matcher and keep the threshold at `30` — the value `playground` actually sets in `spec.replication.maxLagSeconds` — so a genuinely lagging `primary-candidate` still pages. The shipped CRD default is `300`; a rule's number tracks the group's spec, never the default.
 
 **TODO B — `pack/alerts.yml`.** `BloodravenBackupStale` reads `bloodraven_backup_age_seconds`. That metric does not exist. The shipped operator exports a last-success timestamp gauge, so an age has to be derived from it with `time() -`. Rewrite the expression against a name in `SHIPPED_METRICS`.
 
 **TODO C — `pack/alerts.yml`.** Add `BloodravenKeyringNotSealed`. `Sealed` is the steady state; the metric is a one-hot gauge over the `phase` label, so alert when the sealed series reads `0`.
 
-**TODO D — `pack/runbooks.yml`.** Three alerts have no usable entry. Each needs an `anchor` of the form `runbook.md#<slug>` and a `firstCommand` starting with `kubectl`. The plugin has exactly seven subcommands — `status`, `promote`, `reclone`, `backup`, `verify-backup`, `version`, `help` — and it only writes resources the operator already reads, never talking to MySQL. `kubectl bloodraven status orders` is the sensible default.
+**TODO D — `pack/runbooks.yml`.** Three alerts have no usable entry. Each needs an `anchor` of the form `runbook.md#<slug>` and a `firstCommand` starting with `kubectl`. The plugin has exactly seven subcommands — `status`, `promote`, `reclone`, `backup`, `verify-backup`, `version`, `help` — and it only writes resources the operator already reads, never talking to MySQL. `kubectl bloodraven status playground` is the sensible default.
 
 **TODO E — `pack/drill.json`.** Fill `proved`, `assumed`, `applicationSideAlertOwner` and `handoverNote`. Use only these terms:
 
@@ -84,7 +84,7 @@ Exit code 0.
 
 - Use only metric names the shipped operator exports. `SHIPPED_METRICS` in `golive.py` is the list; do not add to it from memory. A rule against a metric that does not exist is a rule that can never fire.
 - Do not edit anything under `tests/`. The fixtures are the grading input.
-- Keep the `BloodravenReplicationLagging` threshold at `300`. The backup-staleness and failover-window thresholds are SLOs you choose, not Bloodraven defaults.
+- Keep the `BloodravenReplicationLagging` threshold at `30`, which is what `playground` sets. The backup-staleness and failover-window thresholds are SLOs you choose, not Bloodraven defaults.
 - Do not remove a rule to silence it. The reader exclusion has to be an exclusion.
 - `BloodravenFailoverOccurred` carries `severity: info`. It says the operator finished, not that traffic recovered.
 - There is no `Failover` condition reason to match on. The failover row of the decision matrix emits `Reason="Degraded"`.
@@ -104,7 +104,7 @@ Exit code 0.
       *Done when:* `python3 starter/golive.py` prints `[metrics]  clean` and `[coverage] clean`, and the `post-failover-divergence` fixture line reads `5 firing, expected 5  OK`.
 
 - [ ] **4. Make the lag alert ignore the reader on purpose (TODO A)**
-      This is the centrepiece. Add a site-label exclusion for the `read-only` site to `BloodravenReplicationLagging` and leave the threshold at `300`. Do not delete the rule and do not raise the threshold — `pdx` at 640 seconds behind is a genuine RPO drift on a promotable candidate and must still page. Remember what the threshold is and is not: `maxLagSeconds` drives only the `ReplicationLagging` condition. It is not a promotion gate, so a candidate past it is still promoted, because no writable site at all is almost always worse.
+      This is the centrepiece. Add a site-label exclusion for the `read-only` site to `BloodravenReplicationLagging` and leave the threshold at `30`. Do not delete the rule and do not raise the threshold — `pdx` at 64 seconds behind is a genuine RPO drift on a promotable candidate and must still page. Remember what the threshold is and is not: `maxLagSeconds` drives only the `ReplicationLagging` condition. It is not a promotion gate, so a candidate past it is still promoted, because no writable site at all is almost always worse.
       *Done when:* `python3 starter/golive.py` prints both `fixture reader-soak-3x: 0 firing, expected 0  OK` and `fixture candidate-lagging: 1 firing, expected 1  OK`.
 
 - [ ] **5. Finish the alert-to-runbook-to-first-command map (TODO D)**
@@ -116,7 +116,7 @@ Exit code 0.
       *Done when:* `python3 starter/golive.py` prints `[drill]    clean` and an `[owner]` line that is not `application-side alerting owned by: (nobody)`.
 
 - [ ] **7. Green the whole pack and hand it over**
-      Run the checker one last time against every fixture. `RESULT: READY` means your rules page for the four incident fixtures, stay silent for the soaked reader, use only metrics that exist, carry a first command each, and sit behind a drill record that separates proof from assumption. Read your own `handoverNote` back and decide whether you would sign it. That statement — what `orders` will and will not do for an on-call rotation — is the deliverable of the whole course.
+      Run the checker one last time against every fixture. `RESULT: READY` means your rules page for the four incident fixtures, stay silent for the soaked reader, use only metrics that exist, carry a first command each, and sit behind a drill record that separates proof from assumption. Read your own `handoverNote` back and decide whether you would sign it. That statement — what `playground` will and will not do for an on-call rotation — is the deliverable of the whole course.
       *Done when:* `python3 starter/golive.py` exits 0 and prints `RESULT: READY`.
 
 ## How this is graded

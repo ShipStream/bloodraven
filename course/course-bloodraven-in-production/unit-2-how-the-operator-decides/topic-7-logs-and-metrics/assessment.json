@@ -53,7 +53,7 @@
   ],
   "quiz": [
     {
-      "question": "You scrape `/metrics` on the operator managing `orders` and get: `bloodraven_site_state{site=\"pdx\",state=\"writable\"} 0`, `{site=\"pdx\",state=\"read-only\"} 0`, `{site=\"pdx\",state=\"unreachable\"} 1`, `{site=\"pdx\",state=\"unknown\"} 0`. What state is `pdx` in?",
+      "question": "You scrape `/metrics` on the operator managing `playground` and get: `bloodraven_site_state{site=\"pdx\",state=\"writable\"} 0`, `{site=\"pdx\",state=\"read-only\"} 0`, `{site=\"pdx\",state=\"unreachable\"} 1`, `{site=\"pdx\",state=\"unknown\"} 0`. What state is `pdx` in?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -73,20 +73,20 @@
       "explanation": "The reversal: `-1` is the worst reading on this gauge, not the best. The operator sets `-1` when `Seconds_Behind_Source` comes back NULL, which means the site is not replicating at all — no stream, no lag to measure. `0` means an active stream reporting itself caught up. Treating them alike, as a naive dashboard or an `avg()` over the series will, hides a dead replica behind a green tile. (objective 11)"
     },
     {
-      "question": "In `orders`, `bloodraven_replication_lag_seconds{site=\"reader\"}` reads 45. The group has `maxLagSeconds: 300` and `readOnlyMaxLagSeconds: 30`; `reader` is the `role: read-only` site. What follows?",
+      "question": "In `playground`, `bloodraven_replication_lag_seconds{site=\"reader\"}` reads 45. `playground` sets `maxLagSeconds: 30` and `readOnlyMaxLagSeconds: 10`; `reader` is the `role: read-only` site. What follows?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
-        "The group goes Degraded with reason `ReplicationLagging`, because 45 breaches a configured lag threshold",
+        "The group goes Degraded with reason `ReplicationLagging`, because 45 breaches both configured lag thresholds",
         "`reader` is dropped from the `-replicas` reader endpoint; the group's own health is unchanged",
-        "`reader` becomes ineligible for promotion until it catches back up under 30 seconds",
-        "Nothing changes anywhere — 45 is well inside `maxLagSeconds: 300`, which is the group's lag threshold"
+        "`reader` becomes ineligible for promotion until it catches back up under 10 seconds",
+        "Nothing changes anywhere — a reader is expected to lag, so no threshold applies to it at all"
       ],
       "correctOptionIndex": 1,
       "explanation": "The lag gauge carries only a `site` label, so you must join it against the site's role yourself. `reader` is `role: read-only`, so its lag is judged against `readOnlyMaxLagSeconds` (30), and breaching it costs the site its reader-endpoint eligibility — nothing more. `ReplicationLagging` is driven by `maxLagSeconds` against the group's core sites, and 45 is nowhere near 300, so the group's condition is untouched. \"Ineligible for promotion\" mistakes cause for effect: a `read-only` site can *never* be promoted and is excluded from `coreCount` entirely, whatever its lag. And \"nothing changes\" is the failure of the join itself — applying the group threshold to a site that has its own. (objective 12)"
     },
     {
-      "question": "On `orders`, `bloodraven_state_transitions_total` has been flat for ten minutes while `bloodraven_poll_latency_seconds_count` keeps climbing and the observed latencies are rising. What is the most defensible reading?",
+      "question": "On `playground`, `bloodraven_state_transitions_total` has been flat for ten minutes while `bloodraven_poll_latency_seconds_count` keeps climbing and the observed latencies are rising. What is the most defensible reading?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 3,
       "options": [

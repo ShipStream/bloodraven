@@ -1,6 +1,6 @@
 # When the operator is down
 
-`orders` is healthy on the three-site playground: `iad` writable, `pdx` read-only and replicating, the reader tracking behind them, the counter app writing continuously through `mysql-orders-primary`. Scale the operator to zero and watch what breaks. The lesson is that nothing does.
+`playground` is healthy on the three-site playground: `iad` writable, `pdx` read-only and replicating, the reader tracking behind them, the counter app polling `mysql-playground-primary` for reads and writing on demand. Scale the operator to zero and watch what breaks. The lesson is that nothing does.
 
 ```widget
 {
@@ -13,17 +13,18 @@
     },
     {
       "cmd": "curl -s localhost:8090/api/counter",
-      "out": "{\"value\":<n>,\"dbHost\":\"mysql-orders-iad-…\",\"readOnly\":false}"
+      "out": "{\"value\":<n>,\"dbHost\":\"mysql-playground-iad-…\",\"readOnly\":false}"
     },
     {
       "cmd": "# sixty seconds later, operator still at 0\ncurl -s localhost:8090/api/counter",
-      "out": "{\"value\":<n+k, k>0>,\"dbHost\":\"mysql-orders-iad-…\",\"readOnly\":false}   # still climbing"
+      "out": "{\"value\":<n+k, k>0>,\"dbHost\":\"mysql-playground-iad-…\",\"readOnly\":false}   # still climbing"
     },
     {
-      "cmd": "kubectl -n bloodraven-playground get mfg orders -o jsonpath='{.status.sites[*].lastSeen}'",
+      "cmd": "kubectl -n bloodraven-playground get mfg playground -o jsonpath='{.status.sites[*].lastSeen}'",
       "out": "<the last poll before the scale-down — identical sixty seconds later>"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
@@ -33,7 +34,7 @@ The counter keeps incrementing, `readOnly` stays `false`, and the only thing tha
 
 **Correctness** — no split brain, no silent divergence — is preserved by the sidecar fencing layer regardless of how long the operator is gone. The sidecars are separate processes with their own timers, and a dead operator is exactly what their lease rule exists for. A MySQL pod that restarts mid-outage comes up fenced and stays fenced: the startup safety net cannot get an authoritative answer and refuses to guess.
 
-**Availability** is not. If the primary dies while the operator is down, nothing promotes the replica, and `orders` has no writable site until the operator returns.
+**Availability** is not. If the primary dies while the operator is down, nothing promotes the replica, and `playground` has no writable site until the operator returns.
 
 | Behaviour | At zero replicas |
 | --- | --- |
@@ -62,7 +63,7 @@ The direction you meet on call is the opposite. The cooldown **blocks a second f
 
 ## Wait, or promote by hand
 
-Objective 12 turns on one fact about the break-glass tool. `kubectl bloodraven promote orders pdx` writes the `bloodraven.shipstream.io/planned-failover` annotation and returns. The plugin only writes resources the operator already reads; it never talks to MySQL. It is not a back door around the operator's logic — it is a request *to* that logic, and it needs a live operator to execute it. Inside the cooldown it hits the same gate: `spec.plannedFailover.onCooldown` defaults to `reject`, so the request fails outright unless you set `defer`, which parks it until cooldown expiry.
+Objective 12 turns on one fact about the break-glass tool. `kubectl bloodraven promote playground pdx` writes the `bloodraven.shipstream.io/planned-failover` annotation and returns. The plugin only writes resources the operator already reads; it never talks to MySQL. It is not a back door around the operator's logic — it is a request *to* that logic, and it needs a live operator to execute it. Inside the cooldown it hits the same gate: `spec.plannedFailover.onCooldown` defaults to `reject`, so the request fails outright unless you set `defer`, which parks it until cooldown expiry.
 
 The rule that falls out:
 

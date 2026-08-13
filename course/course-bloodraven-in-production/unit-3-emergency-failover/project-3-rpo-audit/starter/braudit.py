@@ -4,7 +4,7 @@
 Usage:
     python3 braudit.py <capture.json> [--now 2026-04-30T21:00:00Z]
 
-The capture is whatever `kubectl get mysqlfailovergroup orders -o json` printed
+The capture is whatever `kubectl get mysqlfailovergroup playground -o json` printed
 after the promotion. Everything peripheral is already wired: argument parsing,
 capture loading, GTID rendering, report rendering, exit-code plumbing.
 

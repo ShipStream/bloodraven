@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "A planned switchover of `orders` reports Succeeded. You dump the status and `sessionsPreserved` is absent — the key is not in the YAML at all. What have you learned about the counter app's session store?",
+      "question": "A planned switchover of `playground` reports Succeeded. You dump the status and `sessionsPreserved` is absent — the key is not in the YAML at all. What have you learned about the counter app's session store?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -104,7 +104,7 @@
       "explanation": "The mechanism is the lesson: the AND-gate of role and traffic, plus deletion rather than devaluation, is what makes the endpoint shed atomic and gives the takeover no dual-master window. (objective 12)"
     },
     {
-      "question": "You deploy `orders` with a Dragonfly image older than the stated v1.38.0 minimum. What actually happens?",
+      "question": "You deploy `playground` with a Dragonfly image older than the stated v1.38.0 minimum. What actually happens?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 4,
       "options": [

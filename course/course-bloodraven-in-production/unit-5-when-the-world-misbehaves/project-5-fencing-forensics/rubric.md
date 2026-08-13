@@ -42,7 +42,7 @@ Defined in `project.json`, mirrored in `tests/test_brfence.py`. Each prints `PAS
 
 ### `canonical_timeline` — 40 marks
 
-Correctness on the canonical input. Runs the tool against `tests/fixtures/partition-a`, a shape-A partition on `orders`: `iad` self-fences on rule-2 while isolated, the restarted `reader` sidecar stays fenced by the startup safety net, and `iad` self-fences again on rule-1 after its mysqld comes back writable. Asserts three fence events with the right site, cause and verdict in time order, no premature fences, no unfenced writable sites, and exit 0.
+Correctness on the canonical input. Runs the tool against `tests/fixtures/partition-a`, a shape-A partition on `playground`: `iad` self-fences on rule-2 while isolated, the restarted `reader` sidecar stays fenced by the startup safety net, and `iad` self-fences again on rule-1 after its mysqld comes back writable. Asserts three fence events with the right site, cause and verdict in time order, no premature fences, no unfenced writable sites, and exit 0.
 
 ### `awkward_bundle_generality` — 25 marks
 

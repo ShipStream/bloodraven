@@ -1,23 +1,24 @@
 # Services, DNS steering, and taints
 
-`orders` has failed over. pdx is writable, iad is fenced, you have the exact count of transactions the
-promotion cost you — and the counter application is still quietly reading from iad, the demoted site,
-with nothing paging anyone. Topic 2 answers *why that connection survived*. This topic answers the
-other half: what Bloodraven actually moves when it promotes a site, and where each mechanism stops.
+`playground` has failed over. pdx is writable, iad is fenced, you have the exact count of transactions the
+promotion cost you — and the counter application is still reading from iad, the demoted site, while any
+write it attempts comes back `ERROR 1290`, with nothing paging anyone. The next topic answers *why that
+connection survived*. This one answers the other half: what Bloodraven actually moves when it promotes
+a site, and where each mechanism stops.
 
 There are three surfaces — Services, one DNS object, one node taint.
 
 ## Four Services, eight objects
 
 Bloodraven reconciles four *kinds* of Service per group — two per-site, two shared — so the object
-count is `2 × len(sites) + 2` — for three-site `orders` (iad, pdx, reader), eight objects.
+count is `2 × len(sites) + 2` — for three-site `playground` (iad, pdx, reader), eight objects.
 
 | Service | Selector | Who may use it |
 | --- | --- | --- |
-| `mysql-orders-<site>` | name + instance + site (plus `healthy=yes` on a `read-only` site) | site-pinned tooling, debugging |
-| `mysql-orders-<site>-internal` | name + instance + site | sidecar and peer traffic only |
-| `mysql-orders-primary` | instance + `shipstream.io/role=primary` | writes |
-| `mysql-orders-replicas` | instance + `role=replica` + `healthy=yes` | reads |
+| `mysql-playground-<site>` | name + instance + site (plus `healthy=yes` on a `read-only` site) | site-pinned tooling, debugging |
+| `mysql-playground-<site>-internal` | name + instance + site | sidecar and peer traffic only |
+| `mysql-playground-primary` | instance + `shipstream.io/role=primary` | writes |
+| `mysql-playground-replicas` | instance + `role=replica` + `healthy=yes` | reads |
 
 Applications get two of those four: `-primary` for writes, `-replicas` for reads (objective 1). The
 internal per-site Service is never yours. It publishes the sidecar port alongside MySQL, sets
@@ -26,7 +27,7 @@ canonical replication source host name. Point an application at it and you have 
 guarantee below.
 
 Count the labels on the two shared Services; the counts are the lesson. `-primary` is **two**:
-`app.kubernetes.io/instance=orders` and `shipstream.io/role=primary`. There is no `healthy` key on it,
+`app.kubernetes.io/instance=playground` and `shipstream.io/role=primary`. There is no `healthy` key on it,
 and `publishNotReadyAddresses` is `false`. `-replicas` is **three**: instance, `role=replica`,
 and `shipstream.io/healthy=yes`. The operator stamps `role` and `healthy` onto the pods on each
 reconcile; the Services never change, only the labels underneath them.
@@ -64,10 +65,11 @@ taken from `spec.dns.ttl` (default 60; the playground overrides it to 10).
   "title": "The DNS object after the promotion",
   "lines": [
     {
-      "cmd": "kubectl -n bloodraven-playground get dnsendpoint bloodraven-orders -o yaml",
-      "out": "apiVersion: externaldns.k8s.io/v1alpha1\nkind: DNSEndpoint\nmetadata:\n  name: bloodraven-orders\nspec:\n  endpoints:\n  - dnsName: orders-db.example.local   # spec.dns.hostname\n    recordType: A\n    recordTTL: 10                       # spec.dns.ttl (default 60)\n    targets:\n    - 10.96.100.20                        # CHANGED: was 10.96.100.10"
+      "cmd": "kubectl -n bloodraven-playground get dnsendpoint bloodraven-playground -o yaml",
+      "out": "apiVersion: externaldns.k8s.io/v1alpha1\nkind: DNSEndpoint\nmetadata:\n  name: bloodraven-playground\nspec:\n  endpoints:\n  - dnsName: playground-db.example.local   # spec.dns.hostname\n    recordType: A\n    recordTTL: 10                       # spec.dns.ttl (default 60)\n    targets:\n    - 10.96.100.20                        # CHANGED: was 10.96.100.10"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
@@ -93,7 +95,7 @@ the DNS target stays stale — a perfect failover and an unreachable database at
 ## The taint
 
 ```widget
-{"type":"anatomy","title":"The taint Bloodraven applies to a demoted site's nodes","parts":[{"text":"shipstream.io/db-readonly-","label":"key prefix","note":"Fixed constant TaintKeyPrefix. Namespaced to ShipStream so it cannot collide with your own taints."},{"text":"orders","label":"group suffix","note":"The failover group name. Two groups on one node taint independently — this is why the key is per-group."},{"text":"=true","label":"value","note":"Constant TaintValue. It never varies, so a toleration on the key alone with operator Exists is the normal way to tolerate it."},{"text":":NoExecute","label":"effect","note":"Not NoSchedule. This one reaches pods that are already running on the node."}]}
+{"type":"anatomy","title":"The taint Bloodraven applies to a demoted site's nodes","parts":[{"text":"shipstream.io/db-readonly-","label":"key prefix","note":"Fixed constant TaintKeyPrefix. Namespaced to ShipStream so it cannot collide with your own taints."},{"text":"playground","label":"group suffix","note":"The failover group name. Two groups on one node taint independently — this is why the key is per-group."},{"text":"=true","label":"value","note":"Constant TaintValue. It never varies, so a toleration on the key alone with operator Exists is the normal way to tolerate it."},{"text":":NoExecute","label":"effect","note":"Not NoSchedule. This one reaches pods that are already running on the node."}]}
 ```
 
 Recall from Unit 2: the taint is a pure function of a per-site state transition,
@@ -113,7 +115,9 @@ a non-tolerating canary while a canary tolerating the same taint stays `Running`
 
 You can now name every surface Bloodraven moves on a promotion — pod labels behind four Services, one
 `DNSEndpoint`, one node taint — and where each stops: at the endpoint list, at external-dns's front
-door, at the node boundary. Which makes the counter application far more interesting than it was. Its pod was never on iad's node, so nothing evicted it. It never re-resolved a hostname,
-so the TTL never applied. And it is not asking `-replicas` for an endpoint, because it already has
-one. It is holding an open socket to a MySQL that has been read-only since the promotion. Every
-mechanism in this topic fired correctly, and every one of them missed.
+door, at the node boundary. Which makes the counter application far more interesting than it was. Its pod was never on iad's node,
+so nothing evicted it. It never re-resolved a hostname, so the TTL never applied. And it never asked
+`-primary` for an endpoint at all, because it already had one. It is holding an open socket to a MySQL
+that has been read-only since the promotion. Every mechanism in this topic fired correctly, and every
+one of them missed — because all three act on *routing*, and nothing here routes a connection that has
+already been established.

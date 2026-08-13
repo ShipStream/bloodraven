@@ -32,6 +32,6 @@ Do NOT cover how the old primary rejoins, `RecoveryBlocked`, or reclone (topic 3
 
 ## Handoff
 
-**Inherits:** The learner has driven an emergency failover on `orders` and knows the promotion sequence and its timing.
+**Inherits:** The learner has driven an emergency failover on `playground` and knows the promotion sequence and its timing.
 **Leaves:** The learner can state the RPO contract, separate durability guarantees from durability defaults in a rendered config, and produce an exact lost-transaction count for the failover they just ran.
 **Do not cover:** Old-primary rejoin, divergence handling, reclone (topic 3); PITR and restore (Unit 6); planned failover mechanics (Unit 5).

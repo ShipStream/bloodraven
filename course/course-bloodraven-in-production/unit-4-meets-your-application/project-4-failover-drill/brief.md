@@ -1,15 +1,15 @@
 # Make the writer survive
 
-*Unit 4 project — Where failover meets your application. Running example: the `orders` failover
+*Unit 4 project — Where failover meets your application. Running example: the `playground` failover
 group on the three-site `bloodraven-playground`.*
 
 ## Goal
 
-Instrument a writer against `orders`, run both a planned and an emergency failover underneath it, and produce a drill record with the measured write-gap for each — so the recovery time you claim for your application is one you observed rather than one you assumed.
+Instrument a writer against `playground`, run both a planned and an emergency failover underneath it, and produce a drill record with the measured write-gap for each — so the recovery time you claim for your application is one you observed rather than one you assumed.
 
 ## How this works
 
-`orders` has moved its primary before. What you have never done is measure what that cost the
+`playground` has moved its primary before. What you have never done is measure what that cost the
 application. This project produces that number twice — once for a planned move and once for an
 emergency one — and then makes you defend it.
 
@@ -80,9 +80,9 @@ functions are the only thing being graded.
 ```
 $ python3 brdrill.py --probe tests/fixtures/emergency-probe.jsonl \
       --drill tests/fixtures/emergency-drill.json
-DRILL RECORD — orders / emergency / iad -> pdx
+DRILL RECORD — playground / emergency / iad -> pdx
   namespace            bloodraven-playground
-  trigger              kubectl -n bloodraven-playground scale deployment mysql-orders-iad --replicas=0
+  trigger              kubectl -n bloodraven-playground scale deployment mysql-playground-iad --replicas=0
   promotedAt           2026-08-11T09:14:18.000Z
   lastWriteOldSite     2026-08-11T09:14:05.500Z
   firstWriteNewSite    2026-08-11T09:14:19.500Z
@@ -118,7 +118,7 @@ DRILL RECORD — orders / emergency / iad -> pdx
 - [ ] **TODO B — split the errors your writer actually saw** — Implement `error_classes`. Codes 1290 and 1792 are read-only refusals — the write that finally fails against a demoted primary. A null code is a transport failure. Everything else is `other`, and blanket retry-everything would replay it.
   *Done when:* `brdrill.py --probe tests/fixtures/planned-probe.jsonl --drill tests/fixtures/planned-drill.json` prints the `errors` line as `readOnlyRefusal=2 connection=6 other=2`.
 
-- [ ] **TODO C — find the stale-read window** — Implement `stale_read_window`. Successful reads served by the demoted site at or after `status.lastFailover`. In the baseline capture that window is the unfixed writer reading from a site that stopped being authoritative, and it ends only when the `shipstream.io/db-readonly-orders:NoExecute` taint's `tolerationSeconds` expires and the pod is evicted.
+- [ ] **TODO C — find the stale-read window** — Implement `stale_read_window`. Successful reads served by the demoted site at or after `status.lastFailover`. In the baseline capture that window is the unfixed writer reading from a site that stopped being authoritative, and it ends only when the `shipstream.io/db-readonly-playground:NoExecute` taint's `tolerationSeconds` expires and the pod is evicted.
   *Done when:* `brdrill.py --probe tests/fixtures/planned-probe-unbounded.jsonl --drill tests/fixtures/planned-drill-unbounded.json` prints `staleReads` as `56` and `staleReadSeconds` as `27.5`, while the emergency capture prints `staleReads` as `0`.
 
 - [ ] **TODO D — say what the drill did and did not prove** — Implement `verdict`, in the exact wording from the docstring. Planned reaching `Succeeded` with `transactionsLost: 0` claims RPO 0 by construction — fence, snapshot `GTID_EXECUTED`, promote only on a superset. Emergency claims nothing; its RPO is a `divergentGtid` audit, which this capture does not contain.

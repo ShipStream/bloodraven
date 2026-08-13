@@ -7,7 +7,7 @@
 
 **Type:** TRUE_FALSE
 
-`orders` failed over to `pdx` ninety seconds ago and `spec.failoverCooldown` is the default `5m`. A stale `iad` now comes back writable, giving two writable sites. The operator will leave both writable until the cooldown expires.
+`playground` failed over to `pdx` ninety seconds ago and `spec.failoverCooldown` is the default `5m`. A stale `iad` now comes back writable, giving two writable sites. The operator will leave both writable until the cooldown expires.
 
 **Correct answer:** false
 
@@ -19,18 +19,18 @@ The reversal: the cooldown gates promotion and nothing else, so split-brain fenc
 
 **Type:** MULTIPLE_CHOICE
 
-During a rolling image change on `orders`, `bloodraven_failovers_total` increments for `pdx`. The last emergency failover was ninety seconds earlier, `spec.failoverCooldown` is `5m`, and no `failover blocked by anti-flap cooldown` line appears anywhere in the operator log. What happened?
+During a rolling image change on `playground`, `bloodraven_failovers_total` increments for `pdx`. The last emergency failover was ninety seconds earlier, `spec.failoverCooldown` is `5m`, and no `failover blocked by anti-flap cooldown` line appears anywhere in the operator log. What happened?
 
 - The ordered-update handoff promoted `pdx`; that path calls `recordFailover` and increments the counter but is never cooldown-gated, so the guard was never reached
 - The operator restarted during the update and rehydrated an empty `lastFailover`, so the cooldown evaluated as expired
 - The counter increments on promotion attempts rather than completed promotions, and attempts are not gated
-- `spec.updateStrategy: Recreate` disables anti-flap for the duration of the rollout
+- `spec.updateStrategy: Recreate` was set, which disables anti-flap for the duration of the rollout
 
 **Correct option index:** 0
 
 **Explanation:**
 
-The ordered-update handoff is a separate promotion path with no cooldown check anywhere in it, yet its completion callback stamps the durable failover record and increments `bloodraven_failovers_total` — so the counter moves without the guard ever being consulted, which is also why there is no log line. Option 2 would produce a rehydration warning and requires a restart you did not observe; rehydration also prefers the later of the two durable copies rather than emptying them. Option 3 is wrong: the counter is incremented after a successful promotion, not on attempts. Option 4 is the inert-field trap — `spec.updateStrategy` is read by no Go code outside its type definition and cannot disable anything. (objective 7)
+The ordered-update handoff is a separate promotion path with no cooldown check anywhere in it, yet its completion callback stamps the durable failover record and increments `bloodraven_failovers_total` — so the counter moves without the guard ever being consulted, which is also why there is no log line. Option 2 would produce a rehydration warning and requires a restart you did not observe; rehydration also prefers the later of the two durable copies rather than emptying them. Option 3 is wrong: the counter is incremented after a successful promotion, not on attempts. Option 4 invents a coupling that does not exist: `spec.updateStrategy` decides whether a spec change rolls one site at a time or all at once, and touches nothing about anti-flap. (objective 7)
 
 ## Question 3
 
@@ -53,7 +53,7 @@ Rehydration takes the later of the two, because the two paths fail independently
 
 **Type:** SHORT_ANSWER
 
-Every site in `orders` is read-only, no site is unreachable, and `lastFailoverTarget` names `pdx`. All the re-assert preconditions hold except one: the promotion GTID recorded in status was hand-edited during an incident and no longer parses. What does the operator do, and why is that the right behaviour?
+Every site in `playground` is read-only, no site is unreachable, and `lastFailoverTarget` names `pdx`. All the re-assert preconditions hold except one: the promotion GTID recorded in status was hand-edited during an incident and no longer parses. What does the operator do, and why is that the right behaviour?
 
 **Sample answer:**
 
@@ -71,7 +71,7 @@ The refusal is the point. A parse failure is evidence that status has been corru
 
 **Type:** TRUE_FALSE
 
-With `spec.failoverCooldown` at the shipped `5m`, `orders` failed over to `pdx` two minutes ago and every site is now read-only. A primary re-assert cannot fire until the five minutes are up.
+With `spec.failoverCooldown` at the shipped `5m`, `playground` failed over to `pdx` two minutes ago and every site is now read-only. A primary re-assert cannot fire until the five minutes are up.
 
 **Correct answer:** false
 

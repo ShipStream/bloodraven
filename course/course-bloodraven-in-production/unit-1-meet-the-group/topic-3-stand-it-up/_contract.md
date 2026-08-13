@@ -4,7 +4,7 @@
 **Objectives (unit-numbered):**
 7. Bring up a three-site group with `./playground/setup.sh` and confirm every site reports Ready   [obj 7]
 8. Read a `MysqlFailoverGroup` status and name the active site, each site's state, and the replica's lag   [obj 8]
-9. Watch the counter application write through `mysql-orders-primary` and find the same row on the replica   [obj 9]
+9. Watch the counter application write through `mysql-playground-primary` and find the same row on the replica   [obj 9]
 
 ## Topic generation prompt
 
@@ -12,12 +12,12 @@ This is the hands-on topic that creates the running example every later unit tou
 
 ## Requested activities
 
-- READ: 900-1100 words. Prerequisites, cluster creation, setup, then status literacy in depth, then the counter app and the replica check, then the playground-overrides warning. End with the learner staring at a healthy `orders` and able to describe it precisely. One `terminal` widget on the status read.
+- READ: 900-1100 words. Prerequisites, cluster creation, setup, then status literacy in depth, then the counter app and the replica check, then the playground-overrides warning. End with the learner staring at a healthy `playground` and able to describe it precisely. One `terminal` widget on the status read.
 - FLASHCARDS: Status fields and condition reasons — `activeSite`, `state`, `replicating`, `secondsBehindSource`, `gtidExecuted`, and the five condition reasons. 8-10 cards.
 - QUIZ: 5 questions reading a given status dump: which site is active, which is a reader, whether the group is healthy, and what a `secondsBehindSource` of null means as against zero.
 
 ## Handoff
 
-**Inherits:** The learner can name the parts of `orders` and each site's role.
-**Leaves:** `orders` is running with three sites and a counter application writing to it; the learner can read its status and describe the current state precisely.
+**Inherits:** The learner can name the parts of `playground` and each site's role.
+**Leaves:** `playground` is running with three sites and a counter application reading and writing through it; the learner can read its status and describe the current state precisely.
 **Do not cover:** What the operator does with these states, debounce, failover, or any chaos injection.

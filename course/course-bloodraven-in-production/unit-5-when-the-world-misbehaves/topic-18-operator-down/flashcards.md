@@ -3,7 +3,7 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Front:** The operator pod for `orders` is deleted while both MySQL sites are healthy. What do applications see?
+**Front:** The operator pod for `playground` is deleted while both MySQL sites are healthy. What do applications see?
 
 **Back:** Nothing. Reads and writes keep flowing — the operator is on the failure-detection and promotion path, not the request path.
 
@@ -51,7 +51,7 @@
 
 ---
 
-**Front:** What `kubectl bloodraven promote orders pdx` actually does.
+**Front:** What `kubectl bloodraven promote playground pdx` actually does.
 
 **Back:** Writes the `bloodraven.shipstream.io/planned-failover` annotation the operator reads. It never touches MySQL, so it needs a live operator to execute.
 

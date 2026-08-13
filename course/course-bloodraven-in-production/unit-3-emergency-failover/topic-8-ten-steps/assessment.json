@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "The operator begins a failover on `orders` and the very first statement — SET GLOBAL super_read_only = ON against the dead `iad` primary — fails with a connection error. What happens next?",
+      "question": "The operator begins a failover on `playground` and the very first statement — SET GLOBAL super_read_only = ON against the dead `iad` primary — fails with a connection error. What happens next?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -109,7 +109,7 @@
       "explanation": "Writable confirmation runs synchronously in the same call stack as the promotion — not deferred to the next poll — and on failure the operator logs that promotion succeeded but DNS was not flipped, and returns. Option 1 is the most common misreading: taints are a pure function of per-site state transitions and are applied earlier in the same poll by a different code path, so they merely appear alongside a failover. Option 2 is source convergence, an independent poll stage with its own 20 s budget; the published sequence lists it as a step, and that is a documentation error. Option 4 belongs to old-primary recovery, which runs later and only once the old primary comes back. Neighbours in the poll are not links in the chain. (objective 2)"
     },
     {
-      "question": "A failover on `orders` measures 36 s from primary kill to `activeSite` flip, where your previous runs all landed at 12 s. Account for the extra 24 seconds, and say what you would check to confirm your explanation.",
+      "question": "A failover on `playground` measures 36 s from primary kill to `activeSite` flip, where your previous runs all landed at 12 s. Account for the extra 24 seconds, and say what you would check to confirm your explanation.",
       "type": "SHORT_ANSWER",
       "orderIndex": 4,
       "sampleAnswer": "Both runs pay the same 6 s of detection (pollInterval 2 s x failureThreshold 3), so detection is not the difference. In the 12 s runs the candidate is already caught up, so the relay-log drain hits its early-exit condition — SQL thread running, Seconds_Behind_Source 0 — and returns almost immediately. In the 36 s run the candidate had relay logs it had fetched but not applied, so the drain spent essentially its whole 30 s budget before the operator promoted anyway (the drain is non-fatal on timeout): 36.005 s - 12.0 s = 24.0 s of extra wall clock. To confirm it, I would look for the warning 'relay log drain did not complete cleanly, proceeding with promotion' in the operator log, and for a stopped or lagging SQL applier on the candidate in the period before the kill — scenario 14 produces exactly this by pausing the applier and seeding five seconds of writes.",

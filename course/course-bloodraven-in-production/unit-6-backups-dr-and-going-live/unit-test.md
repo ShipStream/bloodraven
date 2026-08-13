@@ -3,7 +3,7 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Assesses:** Quick check: can you say which site a backup ran from and why, what a `Succeeded` verification did not prove, which site in `orders` cannot have its keyring rotated right now, and why an alert on `bloodraven_replication_lag_seconds` might page you for a reader doing exactly what it was designed to do?
+**Assesses:** Quick check: can you say which site a backup ran from and why, what a `Succeeded` verification did not prove, which site in `playground` cannot have its keyring rotated right now, and why an alert on `bloodraven_replication_lag_seconds` might page you for a reader doing exactly what it was designed to do?
 
 **Passing score:** 70%
 
@@ -11,7 +11,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-The `nightly` profile on `orders` fires at 02:00 with no `sourceSiteOverride` and `maxLagSecondsForSource` left at its default. At that moment: `iad` (`primary-candidate`) is the active site, `writable`; `pdx` (`primary-candidate`) is `read-only`, both replication threads running, `secondsBehindSource: 412`; `reader` (`role: read-only`) is `read-only`, replicating, `secondsBehindSource: 3`. Which site runs the dump, and what reason string lands in status?
+The `nightly` profile on `playground` fires at 02:00 with no `sourceSiteOverride` and `maxLagSecondsForSource` left at its default. At that moment: `iad` (`primary-candidate`) is the active site, `writable`; `pdx` (`primary-candidate`) is `read-only`, both replication threads running, `secondsBehindSource: 412`; `reader` (`role: read-only`) is `read-only`, replicating, `secondsBehindSource: 3`. Which site runs the dump, and what reason string lands in status?
 
 - `reader`, `"replica-preferred"` — it is the freshest replica and the one site carrying no promotion duty
 - `pdx`, `"replica-preferred"` — replica-first is the rule, and the lag figure only drives the `ReplicationLagging` condition
@@ -28,7 +28,7 @@ The `nightly` profile on `orders` fires at 02:00 with no `sourceSiteOverride` an
 
 **Type:** TRUE_FALSE
 
-You add `pointInTime.stopDatetime` under `spec.restoreInPlace` on `orders` while `spec.backup.pitr.enabled` is still `false`. Your `kubectl apply` will be rejected by the API server, carrying the message `pointInTime is set but spec.backup.pitr.enabled=false; PITR restore requires the failover group to have continuous binlog archival configured on the source`.
+You add `pointInTime.stopDatetime` under `spec.restoreInPlace` on `playground` while `spec.backup.pitr.enabled` is still `false`. Your `kubectl apply` will be rejected by the API server, carrying the message `pointInTime is set but spec.backup.pitr.enabled=false; PITR restore requires the failover group to have continuous binlog archival configured on the source`.
 
 **Correct answer:** false
 
@@ -40,10 +40,10 @@ The message is exactly right; where it arrives is not. This is a **reconciler er
 
 **Type:** MULTIPLE_CHOICE
 
-A `MysqlBackupVerification` for last night's `nightly` artifact reads `phase: Succeeded`, `sanityCheck.ran: true`, `sanityCheck.resultRow: 1`. The configured check was `SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'orders'` with `minRows: 1`. In the incident review, what may you state that this run proved?
+A `MysqlBackupVerification` for last night's `nightly` artifact reads `phase: Succeeded`, `sanityCheck.ran: true`, `sanityCheck.resultRow: 1`. The configured check was `SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = 'counter_db'` with `minRows: 1`. In the incident review, what may you state that this run proved?
 
-- That the artifact is byte-consistent with the live `orders` primary as it stood when the nightly dump began
-- That the artifact loads into a real mysqld and the `orders` schema was in the copy that loaded — nothing more
+- That the artifact is byte-consistent with the live `playground` primary as it stood when the nightly dump began
+- That the artifact loads into a real mysqld and the `playground` schema was in the copy that loaded — nothing more
 - That the incident restore path is rehearsed end to end: the dump loads and application traffic can be cut over to it
 - Only that the verify pod started — `resultRow: 1` is what an empty result set reports, so the assertion carries no information
 
@@ -57,7 +57,7 @@ A `Succeeded` proves two things: the artifact loads into a real mysqld, and your
 
 **Type:** MULTIPLE_CHOICE
 
-An in-place restore of `orders` completed on 20 May with `spec.restoreInPlace.confirm: "2026-05-20T14:32:00Z"`, and `status.restoreInPlace.confirmTokenUsed` now records that value. The manifest lives in Git and Argo CD re-syncs it every night, unchanged. What happens on tonight's sync?
+An in-place restore of `playground` completed on 20 May with `spec.restoreInPlace.confirm: "2026-05-20T14:32:00Z"`, and `status.restoreInPlace.confirmTokenUsed` now records that value. The manifest lives in Git and Argo CD re-syncs it every night, unchanged. What happens on tonight's sync?
 
 - The restore re-runs — `restoreInPlace` is the re-runnable field, which is exactly what 'no teardown-and-rename cycle' means
 - The sync fails at admission: the API server rejects any `confirm` that is not strictly greater than `confirmTokenUsed`
@@ -74,7 +74,7 @@ An in-place restore of `orders` completed on 20 May with `spec.restoreInPlace.co
 
 **Type:** MULTIPLE_CHOICE
 
-You are asked to rotate every keyring in `orders` this evening. Right now `kubectl get mfg orders -o jsonpath='{.status.encryptionAtRest.sites}'` shows `iad Sealed` (and `iad` is the active primary), `pdx Unsealed` with `unsealReason: Rotation`, `reader Sealed`. What is the correct read of that state and the correct plan?
+You are asked to rotate every keyring in `playground` this evening. Right now `kubectl get mfg playground -o jsonpath='{.status.encryptionAtRest.sites}'` shows `iad Sealed` (and `iad` is the active primary), `pdx Unsealed` with `unsealReason: Rotation`, `reader Sealed`. What is the correct read of that state and the correct plan?
 
 - `iad` reads `Sealed`, so rotate it first while the group is quiet — the rotation refusal applies only to sites sitting in `Unsealed`
 - `pdx` is mid-rotation and unprotected until it reads `Sealed`; then rotate `reader`, planned-failover to `pdx`, and rotate `iad` last
@@ -91,7 +91,7 @@ You are asked to rotate every keyring in `orders` this evening. Right now `kubec
 
 **Type:** TRUE_FALSE
 
-`orders` runs with `spec.encryptionAtRest.enabled: true` and every site at `Sealed`. Your cluster has no API-server encryption at rest configured for Secrets. The operator will surface this: at least one site will report keyring phase `Failed`, because the escrow Secret cannot be protected.
+`playground` runs with `spec.encryptionAtRest.enabled: true` and every site at `Sealed`. Your cluster has no API-server encryption at rest configured for Secrets. The operator will surface this: at least one site will report keyring phase `Failed`, because the escrow Secret cannot be protected.
 
 **Correct answer:** false
 
@@ -103,7 +103,7 @@ The opposite is true, and the silence is the hazard. `Failed` means something Bl
 
 **Type:** MULTIPLE_CHOICE
 
-At 03:12 `BloodravenReplicationLagging` pages on-call for `orders`. The firing series is `bloodraven_replication_lag_seconds{site="reader"}`, the rule is `bloodraven_replication_lag_seconds > 30 for: 5m`, and `reader` is `role: read-only`, both threads running against the correct source, already shed from the `mysql-orders-replicas` endpoints. What is the correct fix?
+At 03:12 `BloodravenReplicationLagging` pages on-call for `playground`. The firing series is `bloodraven_replication_lag_seconds{site="reader"}`, the rule is `bloodraven_replication_lag_seconds > 30 for: 5m`, and `reader` is `role: read-only`, both threads running against the correct source, already shed from the `mysql-playground-replicas` endpoints. What is the correct fix?
 
 - Add `role!="read-only"` to the matcher — the operator stamps each site's role onto the lag series for exactly this purpose
 - Raise the threshold past `readOnlyMaxLagSeconds`, so the reader sheds from the replicas Service before the rule can fire
@@ -114,19 +114,19 @@ At 03:12 `BloodravenReplicationLagging` pages on-call for `orders`. The firing s
 
 **Explanation:**
 
-A converged-but-slow reader is designed behaviour, not a fault: chaos scenario 42 soaks a reader past three times `maxLagSeconds` and asserts that `Ready` stays `True`, `activeSite` never changes, `lastFailover` is unchanged so no cooldown is consumed, and the only reaction anywhere is the reader leaving `mysql-orders-replicas` once it passes `readOnlyMaxLagSeconds`. So the rule must exclude it. Option one is the exclusion everyone reaches for and the metric cannot support: `bloodraven_replication_lag_seconds` carries a `site` label **only** — no `role` label, no `group` label — which is why the exclusion is by name and grows a maintenance burden with every reader you add. Option two inverts cause and effect: the shed already happened at 03:12 and the alert fired anyway, because endpoint membership has no bearing on whether a gauge crosses a threshold. Option four is wrong on the role model from Unit 1 — a `role: read-only` site is never promotable and cannot even source a backup; it is not a spare. Note what the exclusion does not buy you either: `> 30` never fires when the gauge reads `-1`, which is what a site that has stopped replicating entirely reports, so `BloodravenReplicationDown` on `bloodraven_replication_running{site,thread}` has to be a separate rule. (objectives 10, 12)
+A converged-but-slow reader is designed behaviour, not a fault: chaos scenario 42 soaks a reader past three times `maxLagSeconds` and asserts that `Ready` stays `True`, `activeSite` never changes, `lastFailover` is unchanged so no cooldown is consumed, and the only reaction anywhere is the reader leaving `mysql-playground-replicas` once it passes `readOnlyMaxLagSeconds`. So the rule must exclude it. Option one is the exclusion everyone reaches for and the metric cannot support: `bloodraven_replication_lag_seconds` carries a `site` label **only** — no `role` label, no `group` label — which is why the exclusion is by name and grows a maintenance burden with every reader you add. Option two inverts cause and effect: the shed already happened at 03:12 and the alert fired anyway, because endpoint membership has no bearing on whether a gauge crosses a threshold. Option four is wrong on the role model from Unit 1 — a `role: read-only` site is never promotable and cannot even source a backup; it is not a spare. Note what the exclusion does not buy you either: `> 30` never fires when the gauge reads `-1`, which is what a site that has stopped replicating entirely reports, so `BloodravenReplicationDown` on `bloodraven_replication_running{site,thread}` has to be a separate rule. (objectives 10, 12)
 
 ## Question 8
 
 **Type:** SHORT_ANSWER
 
-02:41 — `BloodravenPITRArchiveLagging` fires for `orders` on `min_over_time(bloodraven_archiver_backlog_files[5m]) > 0`. The counter app is writing normally, `iad` is `writable`, and the group reads `Ready: True`. At 03:10, while you are still working the page, the `iad` node loses its PVC entirely and `pdx` is promoted. Answer three things: what that alert meant for the data plane, the first command you run, and precisely what PITR can and cannot give you for the window between 02:41 and 03:10.
+02:41 — `BloodravenPITRArchiveLagging` fires for `playground` on `min_over_time(bloodraven_archiver_backlog_files[5m]) > 0`. The counter app is writing normally, `iad` is `writable`, and the group reads `Ready: True`. At 03:10, while you are still working the page, the `iad` node loses its PVC entirely and `pdx` is promoted. Answer three things: what that alert meant for the data plane, the first command you run, and precisely what PITR can and cannot give you for the window between 02:41 and 03:10.
 
 **Sample answer:**
 
-The alert meant nothing for the data plane. A backup storage failure has no data-plane impact at all: MySQL kept serving reads and writes, the counter kept counting, `orders` stayed `Healthy` and `Ready: True`, and my PITR RPO drifted backwards in silence. That is the textbook silent degradation, and the reason the alert exists is that nothing else would have told me.
+The alert meant nothing for the data plane. A backup storage failure has no data-plane impact at all: MySQL kept serving reads and writes, the counter kept counting, `playground` stayed `Healthy` and `Ready: True`, and my PITR RPO drifted backwards in silence. That is the textbook silent degradation, and the reason the alert exists is that nothing else would have told me.
 
-First command: `kubectl -n bloodraven-playground logs deploy/mysql-orders-iad -c sidecar`. The archiver runs inside the per-site sidecar, not the operator, so the default first command `kubectl bloodraven status` would have shown me a perfectly healthy group and taught me nothing.
+First command: `kubectl -n bloodraven-playground logs deploy/mysql-playground-iad -c sidecar`. The archiver runs inside the per-site sidecar, not the operator, so the default first command `kubectl bloodraven status` would have shown me a perfectly healthy group and taught me nothing.
 
 For 02:41-03:10: whatever sealed binlogs made it into the bucket before the backlog stalled are still replayable. Everything after that is gone in two separate ways. First, only **sealed** binlogs upload — the last entry in the index is the file MySQL is writing to right now and the archiver drops it, so the active binlog was never a candidate for upload, and it lived on the destroyed PVC. It is gone forever, along with every transaction in it. Second, even restoring from `pdx` cannot conjure it back: PITR cannot reach past the async-replication cutoff, because transactions `iad` committed but never shipped are not in `pdx`'s binlog stream and therefore not in PITR's replay material. Neither of those is a bug. If I want a shorter unarchived tail next time the lever is `maxBinlogSize` (default `100M` when PITR is enabled), which is written into the generated my.cnf before `spec.mysqlConf` is merged, so my override still wins.
 
@@ -142,12 +142,12 @@ The three parts map to three separate facts the unit teaches. Backup and PITR ar
 
 **Type:** MULTIPLE_CHOICE
 
-The cluster hosting `orders` is in `us-west`. Your `kubectl --context=west` calls have been timing out for eleven minutes, and the `MysqlStandbyCluster` in `us-east` reads `BucketReadable: True`, `SourceConfigKnown: True`. A colleague on the office VPN reports the west counter application is still incrementing and still reporting a writable site. What do you do next?
+The cluster hosting `playground` is in `us-west`. Your `kubectl --context=west` calls have been timing out for eleven minutes, and the `MysqlStandbyCluster` in `us-east` reads `BucketReadable: True`, `SourceConfigKnown: True`. A colleague on the office VPN reports the west counter application is still incrementing and still reporting a writable site. What do you do next?
 
 - Declare the source dead and start the DR bootstrap — an unreachable API server is the authoritative liveness signal for a whole cluster
 - Wait. You have one signal, and a second observation contradicts it; control plane and data plane fail separately
 - Activate the standby cluster — `BucketReadable: True` means it has validated the dump and can restore and promote on request from you
-- Create the DR group now and let the operator's `DNSEndpoint` move `orders.example.com` to `us-east` once the new group reports `Ready`
+- Create the DR group now and let the operator's `DNSEndpoint` move `playground.example.com` to `us-east` once the new group reports `Ready`
 
 **Correct option index:** 1
 
@@ -159,7 +159,7 @@ The checklist demands at least **two of three** independent signals before you d
 
 **Type:** SHORT_ANSWER
 
-You are the sign-off for taking `orders` live tomorrow. Give a verdict — **block**, or **accept with a named owner** — on each of these five, and say why in one line each. (a) The only backup profile is `storage.type: PVC`, on a claim in the same storage class as the data PVCs. (b) `spec.mysqlConf` is set by another team and nobody has read `sync_binlog` off the running instance. (c) No backup has ever been verified. (d) The runbook's failover timings were measured in the playground. (e) `replication.maxLagSeconds: 300`, and the runbook says 'the operator will not promote a replica more than 300 s behind'.
+You are the sign-off for taking `playground` live tomorrow. Give a verdict — **block**, or **accept with a named owner** — on each of these five, and say why in one line each. (a) The only backup profile is `storage.type: PVC`, on a claim in the same storage class as the data PVCs. (b) `spec.mysqlConf` is set by another team and nobody has read `sync_binlog` off the running instance. (c) No backup has ever been verified. (d) The runbook's failover timings were measured in the playground. (e) `replication.maxLagSeconds` is set, and the runbook says 'the operator will not promote a replica more than `maxLagSeconds` behind'.
 
 **Sample answer:**
 

@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A scheduled backup of `orders` fires. `iad` is the active site and is `writable`; `pdx` is `read-only` and replicating but reports `secondsBehindSource` of 900, well past the 300-second default; `reader` is idle with `role: read-only`. Which site runs the dump, and what reason string lands in status?
+A scheduled backup of `playground` fires. `iad` is the active site and is `writable`; `pdx` is `read-only` and replicating but reports `secondsBehindSource` of 900, well past the 300-second default; `reader` is idle with `role: read-only`. Which site runs the dump, and what reason string lands in status?
 
 - `pdx`, reason `"replica-preferred"` — replica-first is the whole point of the setting
 - `iad`, reason `"primary-fallback"`
@@ -24,7 +24,7 @@ Replica-first is conditional, not unconditional: a replica qualifies only while 
 
 **Type:** MULTIPLE_CHOICE
 
-To keep dump load off both primary candidates, you set `sourceSiteOverride: reader` on a MysqlBackup for `orders`. What happens?
+To keep dump load off both primary candidates, you set `sourceSiteOverride: reader` on a MysqlBackup for `playground`. What happens?
 
 - The dump runs on `reader` and status records `"override"` — an explicit override outranks the role check
 - The dump runs on `reader` but status records `"replica-preferred"`, since the reader is a replica
@@ -41,7 +41,7 @@ Options 1 and 2 assume the override is a trump card over the role; it is not. Ro
 
 **Type:** MULTIPLE_CHOICE
 
-A clean archiver scan has just completed on the primary of `orders`. `mysql-bin.index` lists `mysql-bin.000041` through `mysql-bin.000045`. Which file is not in object storage, and why?
+A clean archiver scan has just completed on the primary of `playground`. `mysql-bin.index` lists `mysql-bin.000041` through `mysql-bin.000045`. Which file is not in object storage, and why?
 
 - `mysql-bin.000041` — the oldest file, already removed by the retention sweep
 - `mysql-bin.000045` — it is the active binlog, the tail of the index, and the archiver drops it
@@ -58,7 +58,7 @@ The archiver reads the index and drops the last entry, because that is the file 
 
 **Type:** TRUE_FALSE
 
-PITR is enabled on `orders` and archival is healthy. The primary's node and its PVC are destroyed. A PITR restore can still replay right up to the last transaction the primary committed.
+PITR is enabled on `playground` and archival is healthy. The primary's node and its PVC are destroyed. A PITR restore can still replay right up to the last transaction the primary committed.
 
 **Correct answer:** false
 
@@ -70,7 +70,7 @@ The reversal: healthy archival does not mean complete archival. The previously-a
 
 **Type:** SHORT_ANSWER
 
-You want to shrink the unarchived tail on `orders` — the window of committed transactions that PITR would lose if the primary's PVC were destroyed right now. What do you change, and what does it cost you?
+You want to shrink the unarchived tail on `playground` — the window of committed transactions that PITR would lose if the primary's PVC were destroyed right now. What do you change, and what does it cost you?
 
 **Sample answer:**
 

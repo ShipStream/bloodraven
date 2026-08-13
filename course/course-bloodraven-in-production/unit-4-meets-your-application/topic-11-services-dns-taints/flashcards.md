@@ -5,11 +5,11 @@
 
 **Front:** How many Service objects does Bloodraven create for a failover group, and what is the formula?
 
-**Back:** 2 × len(sites) + 2 — two per-site kinds plus two shared kinds. Three-site `orders` therefore has eight Service objects.
+**Back:** 2 × len(sites) + 2 — two per-site kinds plus two shared kinds. Three-site `playground` therefore has eight Service objects.
 
 ---
 
-**Front:** `mysql-orders-iad-internal` — what is this Service for?
+**Front:** `mysql-playground-iad-internal` — what is this Service for?
 
 **Back:** Sidecar and peer traffic only. It carries the sidecar port beside MySQL, publishes not-ready addresses, and is the canonical replication source host. Applications never use it.
 
@@ -53,7 +53,7 @@
 
 **Front:** What is the DNSEndpoint object named, and what record type does it always carry?
 
-**Back:** `bloodraven-<group>` — so `bloodraven-orders` — and always an `A` record.
+**Back:** `bloodraven-<group>` — so `bloodraven-playground` — and always an `A` record.
 
 ---
 
@@ -63,9 +63,9 @@
 
 ---
 
-**Front:** Give the full taint Bloodraven applies to a demoted site's nodes in group `orders`.
+**Front:** Give the full taint Bloodraven applies to a demoted site's nodes in group `playground`.
 
-**Back:** `shipstream.io/db-readonly-orders=true:NoExecute` — prefix `shipstream.io/db-readonly-`, group suffix, constant value `true`, effect `NoExecute`.
+**Back:** `shipstream.io/db-readonly-playground=true:NoExecute` — prefix `shipstream.io/db-readonly-`, group suffix, constant value `true`, effect `NoExecute`.
 
 ---
 

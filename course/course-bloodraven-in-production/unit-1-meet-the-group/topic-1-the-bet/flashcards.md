@@ -29,7 +29,7 @@
 
 **Front:** Active site
 
-**Back:** The one site in the group currently allowed to accept writes; `mysql-orders-primary` points at it.
+**Back:** The one site in the group currently allowed to accept writes; `mysql-playground-primary` points at it.
 
 ---
 

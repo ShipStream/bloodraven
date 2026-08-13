@@ -1,7 +1,7 @@
 {
   "flashcards": [
     {
-      "front": "The operator pod for `orders` is deleted while both MySQL sites are healthy. What do applications see?",
+      "front": "The operator pod for `playground` is deleted while both MySQL sites are healthy. What do applications see?",
       "back": "Nothing. Reads and writes keep flowing — the operator is on the failure-detection and promotion path, not the request path.",
       "orderIndex": 0
     },
@@ -41,7 +41,7 @@
       "orderIndex": 7
     },
     {
-      "front": "What `kubectl bloodraven promote orders pdx` actually does.",
+      "front": "What `kubectl bloodraven promote playground pdx` actually does.",
       "back": "Writes the `bloodraven.shipstream.io/planned-failover` annotation the operator reads. It never touches MySQL, so it needs a live operator to execute.",
       "orderIndex": 8
     },
@@ -53,11 +53,11 @@
   ],
   "quiz": [
     {
-      "question": "The operator for `orders` has been at zero replicas for ten minutes. Which observation is genuinely caused by the operator's absence?",
+      "question": "The operator for `playground` has been at zero replicas for ten minutes. Which observation is genuinely caused by the operator's absence?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
-        "`status.sites[].lastSeen` on the `orders` CR is ten minutes stale",
+        "`status.sites[].lastSeen` on the `playground` CR is ten minutes stale",
         "`pdx` has stopped replicating from `iad`",
         "Reads through the `-replicas` Service have started failing",
         "The sidecar on `iad` has stopped enforcing its fencing rules"
@@ -70,7 +70,7 @@
       "type": "TRUE_FALSE",
       "orderIndex": 1,
       "correctAnswer": false,
-      "explanation": "The reversal: a longer outage does not enlarge the loss. RPO is fixed at the instant the primary died — the set of transactions that committed there but had not yet reached the survivor is sealed at that moment, because the dead primary is not replicating anything more. The operator that arrives two hours later promotes the same replica across the same GTID gap. What the two hours cost is write availability: `orders` had no writable site for the whole window. The intuition that drives people to answer 'true' is the correct one for a *lagging* replica under a *live* primary, where the gap grows with time — but a dead primary has stopped producing transactions to fall behind on (objectives 10, 11)."
+      "explanation": "The reversal: a longer outage does not enlarge the loss. RPO is fixed at the instant the primary died — the set of transactions that committed there but had not yet reached the survivor is sealed at that moment, because the dead primary is not replicating anything more. The operator that arrives two hours later promotes the same replica across the same GTID gap. What the two hours cost is write availability: `playground` had no writable site for the whole window. The intuition that drives people to answer 'true' is the correct one for a *lagging* replica under a *live* primary, where the gap grows with time — but a dead primary has stopped producing transactions to fall behind on (objectives 10, 11)."
     },
     {
       "question": "You want failover to complete faster, so you set `replicaCount: 3` on the Bloodraven chart. What actually changes?",
@@ -86,7 +86,7 @@
       "explanation": "Leader election makes the extra replicas idle standbys, so the only thing they shorten is recovery from a leader crash. They do not poll in parallel — exactly one replica holds the lease and is the sole writer of status, DNS, and promotion commands, so detection still costs 2 s × 3 = 6 s on defaults. 'Nothing at all' is wrong in the other direction: the replicas really are scheduled and really do shorten the takeover gap, so this is a cheap availability improvement, just not a latency one. And there is no vote: promotion is a single-leader decision, not a quorum, so believing the standbys add safety review is a dangerous misreading of what leader election does (objective 10)."
     },
     {
-      "question": "The `orders` primary is down and there is no writable site. The operator pod is in CrashLoopBackOff on a bad image you pushed ten minutes ago, and the anti-flap cooldown has four minutes left to run. What do you do, and why?",
+      "question": "The `playground` primary is down and there is no writable site. The operator pod is in CrashLoopBackOff on a bad image you pushed ten minutes ago, and the anti-flap cooldown has four minutes left to run. What do you do, and why?",
       "type": "SHORT_ANSWER",
       "orderIndex": 3,
       "sampleAnswer": "Roll the operator image back and get the operator running — that is the promotion path. `kubectl bloodraven promote` only writes the planned-failover annotation on the group, and the operator is the thing that reads it, so with the operator crashlooping the annotation just queues an intent and nothing promotes. Once the operator is up it will detect the dead primary in about 6 s and promote, and the cooldown does not lengthen the write outage further than its remaining four minutes; if I need the manual path to survive that window I set `spec.plannedFailover.onCooldown: defer` so the request is parked and retried at cooldown expiry rather than rejected outright. What I do not do is clear `read_only` on the replica by hand: with the operator down the sidecar still holds its last authoritative `activeSite`, sees a writable site that disagrees with it, and fences it straight back.",

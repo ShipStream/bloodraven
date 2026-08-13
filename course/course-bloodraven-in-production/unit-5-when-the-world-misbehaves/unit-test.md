@@ -3,7 +3,7 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Assesses:** Quick check: can you say which rule fenced a site, which split-brain tier `orders` is on, and why a broken cross-site replication link produces no automatic action?
+**Assesses:** Quick check: can you say which rule fenced a site, which split-brain tier `playground` is on, and why a broken cross-site replication link produces no automatic action?
 
 **Passing score:** 70%
 
@@ -11,7 +11,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A log bundle from `orders`. The `pdx` sidecar logs `SELF-FENCING:` and then `SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore`. From the same bundle: the operator pod was Running and answering `/healthz` throughout, and both `iad` and the reader answered `/peer/ping` on every tick in the minute before the fence. Which rule fired, and how do you know from that evidence alone?
+A log bundle from `playground`. The `pdx` sidecar logs `SELF-FENCING:` and then `SELF-FENCED: super_read_only=ON has been set, only Bloodraven can restore`. From the same bundle: the operator pod was Running and answering `/healthz` throughout, and both `iad` and the reader answered `/peer/ping` on every tick in the minute before the fence. Which rule fired, and how do you know from that evidence alone?
 
 - Rule #2, lease expiry — a `SELF-FENCED:` line is only ever emitted after `leaseTimeout` elapses, so the peers must have been silent for 20 s whatever the ping log says.
 - Rule #1, topology mismatch — the cached authoritative `activeSite` was non-empty and named a site other than `pdx`, and rule #1 fires and returns before the lease is ever consulted.
@@ -28,7 +28,7 @@ The monitor evaluates two rules per tick, in a fixed order: rule #1 topology mis
 
 **Type:** MULTIPLE_CHOICE
 
-You added a `role: read-only` reader to `orders` for reporting. Months later the active site `iad` loses its network path to the operator and to `pdx`, but the reader sits in the same rack and its sidecar keeps answering `/peer/ping` on every tick. Defaults are unchanged (`leaseTimeout` 20 s, `peerCheckInterval` 5 s). Twenty-five seconds into the isolation, what is `iad` doing?
+You added a `role: read-only` reader to `playground` for reporting. Months later the active site `iad` loses its network path to the operator and to `pdx`, but the reader sits in the same rack and its sidecar keeps answering `/peer/ping` on every tick. Defaults are unchanged (`leaseTimeout` 20 s, `peerCheckInterval` 5 s). Twenty-five seconds into the isolation, what is `iad` doing?
 
 - Fenced at T+20 s: the lease expired because a majority of the parties it tracks — the operator and `pdx` — went silent, and two out of three is a quorum loss.
 - Fenced at T+20 s: a `role: read-only` site is excluded from the peer set, so only the operator and `pdx` counted, and both were silent for the whole window.
@@ -45,7 +45,7 @@ The lease rule is an all-parties rule, not a vote. One reachable peer keeps the 
 
 **Type:** TRUE_FALSE
 
-The operator for `orders` has been at zero replicas for twenty minutes. During that window the `pdx` MySQL pod is rescheduled onto another node. True or false: the rescheduled pod comes back up writable and stays writable until the operator returns to fence it.
+The operator for `playground` has been at zero replicas for twenty minutes. During that window the `pdx` MySQL pod is rescheduled onto another node. True or false: the rescheduled pod comes back up writable and stays writable until the operator returns to fence it.
 
 **Correct answer:** false
 
@@ -57,7 +57,7 @@ False. `Server.RunSafetyNet` is a one-shot that completes before the `FencingMon
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` has two core sites, `iad` and `pdx`, plus a `role: read-only` reader. You restart the `pdx` pod and the group goes to `SPLIT BRAIN: 2 sites are writable (iad, pdx)`. `spec.splitBrainPolicy` is omitted from the manifest entirely. `status.lastFailoverTarget` is `iad`, and `iad` is right now writable and still `role: primary-candidate`. What does the operator do?
+`playground` has two core sites, `iad` and `pdx`, plus a `role: read-only` reader. You restart the `pdx` pod and the group goes to `SPLIT BRAIN: 2 sites are writable (iad, pdx)`. `spec.splitBrainPolicy` is omitted from the manifest entirely. `status.lastFailoverTarget` is `iad`, and `iad` is right now writable and still `role: primary-candidate`. What does the operator do?
 
 - Nothing but alert. With no `sitePriorities` there is no policy to apply, so this is tier 3 and resolution is manual by design.
 - Falls back to the order the sites are declared in under `spec.sites` and keeps whichever is listed first.
@@ -74,7 +74,7 @@ The three tiers are evaluated in order, and tier 1 — prior failover history �
 
 **Type:** SHORT_ANSWER
 
-Tier 2 has just fired on `orders`. The operator log reads `split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities` with `winner=iad` and `fencedSite=pdx`, and the incident channel says "auto-resolved, nothing to do". Explain why that reading is wrong, and give the steps you run next.
+Tier 2 has just fired on `playground`. The operator log reads `split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities` with `winner=iad` and `fencedSite=pdx`, and the incident channel says "auto-resolved, nothing to do". Explain why that reading is wrong, and give the steps you run next.
 
 **Sample answer:**
 
@@ -92,7 +92,7 @@ The auto-resolve is the operator executing your standing decision about which wr
 
 **Type:** MULTIPLE_CHOICE
 
-A page on `orders`: "the network is partitioned". You look. `status.activeSite` is `iad`, `iad` is `writable`, `pdx` is `read-only`, `lastSeen` is fresh on every site including the reader, no site is `unreachable`, `pdx`'s IO thread is stopped and `secondsBehindSource` is climbing, and `bloodraven_failovers_total` has not moved. Which of the five documented shapes is this?
+A page on `playground`: "the network is partitioned". You look. `status.activeSite` is `iad`, `iad` is `writable`, `pdx` is `read-only`, `lastSeen` is fresh on every site including the reader, no site is `unreachable`, `pdx`'s IO thread is stopped and `secondsBehindSource` is climbing, and `bloodraven_failovers_total` has not moved. Which of the five documented shapes is this?
 
 - A — the operator cannot reach `iad` while `pdx` stays reachable.
 - B — the replica is isolated while the primary stays reachable.
@@ -143,7 +143,7 @@ Step one of the checklist is to confirm the partition is real before believing a
 
 **Type:** TRUE_FALSE
 
-The `orders` primary dies at 02:00. The operator happens to be down and is not restored until 04:00, at which point it promotes `pdx`. True or false: the two-hour delay widens the RPO — more committed transactions are lost than if the operator had been up at 02:00.
+The `playground` primary dies at 02:00. The operator happens to be down and is not restored until 04:00, at which point it promotes `pdx`. True or false: the two-hour delay widens the RPO — more committed transactions are lost than if the operator had been up at 02:00.
 
 **Correct answer:** false
 
@@ -157,7 +157,7 @@ False, and the line is worth memorising: operator downtime costs write availabil
 
 It is 02:10 in that outage. `iad` is gone, `pdx` is read-only, healthy and caught up, writes are down, and the operator is in CrashLoopBackOff on a bad image you pushed — the rollback will take about five minutes. Which action actually gets writes back?
 
-- Run `kubectl bloodraven promote orders pdx` now — the plugin talks to MySQL directly, so it promotes without waiting for the operator.
+- Run `kubectl bloodraven promote playground pdx` now — the plugin talks to MySQL directly, so it promotes without waiting for the operator.
 - `SET GLOBAL read_only = OFF` on `pdx` by hand — fastest path, and with the operator down there is nothing to disagree with it.
 - Roll the operator image back and let it promote. The promotion path *is* the operator: the plugin only writes resources the operator already reads, so `promote` is a request to that logic, not a substitute for it.
 - Wait for `spec.failoverCooldown` to expire — the cooldown is what is blocking the promotion, and it clears on its own.
@@ -166,4 +166,4 @@ It is 02:10 in that outage. `iad` is gone, `pdx` is read-only, healthy and caugh
 
 **Explanation:**
 
-Break-glass promotion is not a back door. `kubectl bloodraven promote orders pdx` writes the `bloodraven.shipstream.io/planned-failover` annotation and returns; it never talks to MySQL, so annotating a group nobody is watching only queues an intent — which kills option 1. Option 2 is the one that looks fastest and fails on its own terms: clearing `read_only` makes `pdx` writable while its sidecar's cached authoritative `activeSite` still names `iad`, so rule #1 sees a topology mismatch and fences it straight back, without ever consulting the lease. Option 4 misreads the blocker — a crashlooping operator is the reason nothing promotes, and the cooldown gates a decision that no one is currently making; it is also the trap in the other direction, since a live cooldown would reject a hand-driven promotion outright unless `spec.plannedFailover.onCooldown` is set to `defer`. Fix the operator first: it is the only thing that can promote, and once it is back it promotes within roughly 6 s of detection plus the drain. If the operator were coming back inside the cooldown with no writable site, waiting would win for the same reason — the hand-driven path cannot start sooner. (objectives 1, 12)
+Break-glass promotion is not a back door. `kubectl bloodraven promote playground pdx` writes the `bloodraven.shipstream.io/planned-failover` annotation and returns; it never talks to MySQL, so annotating a group nobody is watching only queues an intent — which kills option 1. Option 2 is the one that looks fastest and fails on its own terms: clearing `read_only` makes `pdx` writable while its sidecar's cached authoritative `activeSite` still names `iad`, so rule #1 sees a topology mismatch and fences it straight back, without ever consulting the lease. Option 4 misreads the blocker — a crashlooping operator is the reason nothing promotes, and the cooldown gates a decision that no one is currently making; it is also the trap in the other direction, since a live cooldown would reject a hand-driven promotion outright unless `spec.plannedFailover.onCooldown` is set to `defer`. Fix the operator first: it is the only thing that can promote, and once it is back it promotes within roughly 6 s of detection plus the drain. If the operator were coming back inside the cooldown with no writable site, waiting would win for the same reason — the hand-driven path cannot start sooner. (objectives 1, 12)

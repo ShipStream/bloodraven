@@ -16,10 +16,11 @@ const FeatureList = [
     title: 'Get Your Team Up to Speed',
     description: (
       <>
-        <CourseLink /> is a hands-on course for devops and sysadmins \u2014 six
-        units, six graded projects, and a local three-site cluster you break on
-        purpose. Your team learns how failover actually behaves without reading
-        the docs end to end.
+        <CourseLink /> is a hands-on course for devops and sysadmins \u2014 seven
+        units, seven graded projects, and a local three-site cluster you break on
+        purpose. Your team learns how failover actually behaves \u2014 and how to
+        build, secure and upgrade a group \u2014 without reading the docs end to
+        end.
       </>
     ),
   },

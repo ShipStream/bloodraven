@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "`orders` pages you. `iad` is still writable and the counter app is still committing, but `pdx` has stopped answering the operator's polls entirely and its site state has gone to `unreachable`. Which documented partition scenario is this?",
+      "question": "`playground` pages you. `iad` is still writable and the counter app is still committing, but `pdx` has stopped answering the operator's polls entirely and its site state has gone to `unreachable`. Which documented partition scenario is this?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [

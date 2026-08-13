@@ -28,7 +28,7 @@ That first line is the design point stated outright: two or more sites (`spec.si
 
 **Type:** MULTIPLE_CHOICE
 
-You are reviewing an architecture document that depends on `orders`. Four lines describe what the team expects Bloodraven to do for them. Which one is the expectation Bloodraven will actually meet?
+You are reviewing an architecture document that depends on `playground`. Four lines describe what the team expects Bloodraven to do for them. Which one is the expectation Bloodraven will actually meet?
 
 - "Bloodraven runs external-dns for us, so DNS publishing is one less component we have to deploy and keep alive ourselves."
 - "Bloodraven reports the transactions lost on promotion — a count as a metric, the exact GTID set in status — so we reconcile by hand."
@@ -62,7 +62,7 @@ This is the trade, made visible: Bloodraven buys write availability with consist
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` reports `activeSite: iad`; `iad` state `writable`; `pdx` state `read-only`, `replicating: true`; and `reader` — declared `role: read-only` in the spec — state `writable`. What `reason` does the `Degraded` condition carry, and what happens to `reader`?
+`playground` reports `activeSite: iad`; `iad` state `writable`; `pdx` state `read-only`, `replicating: true`; and `reader` — declared `role: read-only` in the spec — state `writable`. What `reason` does the `Degraded` condition carry, and what happens to `reader`?
 
 - `SplitBrain`, and the operator resolves it by picking a winner between `iad` and `reader`
 - `Healthy`, and nothing happens to `reader` — a `read-only` site is excluded from the tallies, so the operator ignores it entirely
@@ -79,7 +79,7 @@ Two rules meet here. A `role: read-only` site is excluded from `coreCount` and f
 
 **Type:** TRUE_FALSE
 
-PITR is enabled on `orders`. Both the `iad` and `pdx` sidecars are archiving binlogs to your object store, which gives you two independent archive streams to restore from.
+PITR is enabled on `playground`. Both the `iad` and `pdx` sidecars are archiving binlogs to your object store, which gives you two independent archive streams to restore from.
 
 **Correct answer:** false
 
@@ -109,26 +109,26 @@ Confirming a group is up is two checks, not one: containers running is a Kuberne
 
 **Type:** MULTIPLE_CHOICE
 
-You press **+ Increment** five times in the counter app, which writes through `mysql-orders-primary`. You want to prove that the resulting row actually reached `pdx`. Which check proves it?
+You press **+ Increment** five times in the counter app, which writes through `mysql-playground-primary`. You want to prove that the resulting row actually reached `pdx`. Which check proves it?
 
-- `kubectl exec deploy/mysql-orders-pdx -c mysql -- mysql -h127.0.0.1 -Nse "SELECT value, updated_at FROM counter_db.counters WHERE id = 1"`, and compare the value with the counter
+- `kubectl exec deploy/mysql-playground-pdx -c mysql -- mysql -h127.0.0.1 -Nse "SELECT value, updated_at FROM counter_db.counters WHERE id = 1"`, and compare the value with the counter
 - Read `status.sites[]` and confirm `pdx` shows `secondsBehindSource: 0`, which means it has applied everything the primary has committed
-- Query `SELECT value FROM counter_db.counters WHERE id = 1` through the `mysql-orders-replicas` Service and compare the value with the counter
+- Query `SELECT value FROM counter_db.counters WHERE id = 1` through the `mysql-playground-replicas` Service and compare the value with the counter
 - Read `status.sites[]` and confirm `pdx` shows `replicating: true`, the operator's verdict that replication on that follower is healthy
 
 **Correct option index:** 0
 
 **Explanation:**
 
-Only reading the row out of `pdx` by name proves the row is on `pdx`. `secondsBehindSource: 0` does not: it compares the last transaction executed against the last event *downloaded*, so it reads zero when the receiver thread has stalled or the replica is idle — a replica that stopped fetching an hour ago still reports 0. `replicating: true` is a verdict on replication health, not a statement that any particular transaction has landed. And `mysql-orders-replicas` is the wrong endpoint for this experiment: it selects every replica currently carrying `shipstream.io/healthy=yes`, so the answer might have come from `reader` rather than `pdx` and you would have proved nothing about the site you asked about. Write through the group endpoint, read back by site name. (objective 9)
+Only reading the row out of `pdx` by name proves the row is on `pdx`. `secondsBehindSource: 0` does not: it compares the last transaction executed against the last event *downloaded*, so it reads zero when the receiver thread has stalled or the replica is idle — a replica that stopped fetching an hour ago still reports 0. `replicating: true` is a verdict on replication health, not a statement that any particular transaction has landed. And `mysql-playground-replicas` is the wrong endpoint for this experiment: it selects every replica currently carrying `shipstream.io/healthy=yes`, so the answer might have come from `reader` rather than `pdx` and you would have proved nothing about the site you asked about. Write through the group endpoint, read back by site name. (objective 9)
 
 ## Question 8
 
 **Type:** MULTIPLE_CHOICE
 
-Authority in `orders` moves from `iad` to `pdx`. Your application holds no connection open and simply opens a new one to `mysql-orders-primary`. What concretely makes that `INSERT` land on the `pdx` pod?
+Authority in `playground` moves from `iad` to `pdx`. Your application holds no connection open and simply opens a new one to `mysql-playground-primary`. What concretely makes that `INSERT` land on the `pdx` pod?
 
-- The operator rewrites the `mysql-orders-primary` Service's selector so it names the `pdx` site instead of `iad`
+- The operator rewrites the `mysql-playground-primary` Service's selector so it names the `pdx` site instead of `iad`
 - The `DNSEndpoint` A record for the group hostname is repointed at the `pdx` load-balancer IP, which is what moves in-cluster traffic
 - The `pdx` sidecar takes over the primary role and forwards traffic to its local `mysqld` on behalf of the group endpoint
 - The operator stamps `shipstream.io/role=primary` on the `pdx` pod and removes it from `iad`; the Service's fixed selector then matches a different pod and the endpoint follows
@@ -137,7 +137,7 @@ Authority in `orders` moves from `iad` to `pdx`. Your application holds no conne
 
 **Explanation:**
 
-The `-primary` Service selector is fixed at two labels — `app.kubernetes.io/instance=orders` and `shipstream.io/role=primary` — and never changes. The operator owns the pod labels, so moving authority is a label write; the endpoint controller does the rest, which is also exactly how a pod stamped `role=fenced` drops out of both group endpoints without being deleted. Rewriting the selector to name a site is the plausible-sounding inversion of that mechanism and would defeat the point: the selector is stable so the Service object never has to change. The `DNSEndpoint` object matters for clients resolving the group's external hostname; a pod resolving `mysql-orders-primary` inside the cluster never consults it. And nothing proxies MySQL traffic — the sidecar decides nothing about routing and forwards no queries; it fences its own `mysqld` locally, which is what it can do when the operator is gone, while the operator is the only component that decides across sites. (objectives 4, 5)
+The `-primary` Service selector is fixed at two labels — `app.kubernetes.io/instance=playground` and `shipstream.io/role=primary` — and never changes. The operator owns the pod labels, so moving authority is a label write; the endpoint controller does the rest, which is also exactly how a pod stamped `role=fenced` drops out of both group endpoints without being deleted. Rewriting the selector to name a site is the plausible-sounding inversion of that mechanism and would defeat the point: the selector is stable so the Service object never has to change. The `DNSEndpoint` object matters for clients resolving the group's external hostname; a pod resolving `mysql-playground-primary` inside the cluster never consults it. And nothing proxies MySQL traffic — the sidecar decides nothing about routing and forwards no queries; it fences its own `mysqld` locally, which is what it can do when the operator is gone, while the operator is the only component that decides across sites. (objectives 4, 5)
 
 ## Question 9
 

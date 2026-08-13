@@ -2,13 +2,13 @@
 
 **Unit:** 6 — Backups, disaster recovery, and going live
 **Objectives (unit-numbered):**
-1. Choose S3 or PVC storage for `orders` and say what PVC-local costs you   [obj 1]
+1. Choose S3 or PVC storage for `playground` and say what PVC-local costs you   [obj 1]
 2. Say which site a backup runs from and why a `read-only` reader is never eligible   [obj 2]
 3. Trace a sealed binlog from rotation to object storage, and name what can never be archived   [obj 3]
 
 ## Topic generation prompt
 
-Open on `orders`: three sites, a counter application writing every second, and a failover story that is now complete. None of it survives losing the cluster or a bad `DELETE` at 14:02 last Tuesday. That is what backups and PITR are for, and they are a separate subsystem with separate failure modes.
+Open on `playground`: three sites, a counter application reading and writing through it, and a failover story that is now complete. None of it survives losing the cluster or a bad `DELETE` at 14:02 last Tuesday. That is what backups and PITR are for, and they are a separate subsystem with separate failure modes.
 
 Teach storage choice first: S3-style object storage or a PVC, and be blunt that PVC-local backups are not durable — a backup that shares a failure domain with the data it protects is an assumption, not a backup. Then source selection, because it is the part operators get wrong. `selectSourceSite` picks a replica first and falls back to the primary, and it records exactly which happened via three reason strings you will see in status: `"override"`, `"replica-preferred"`, `"primary-fallback"`. Sites with `role: read-only` are excluded as backup sources outright, and an explicit `sourceSiteOverride` naming one is **rejected** with an error — the same non-promotable logic from Unit 1 shows up here as non-sourceable. Give `maxLagSecondsForSource`, default 300, as the gate that sends a stale replica's job to the primary instead.
 
@@ -25,5 +25,5 @@ Close on the hard limits, which are the point of the whole topic. On PVC loss th
 ## Handoff
 
 **Inherits:** From Unit 5 — the learner can explain every fence they see, and no read-only site surprises them.
-**Leaves:** The learner can configure backups and PITR for `orders`, name the backup source and its reason string, and state exactly what is not recoverable.
+**Leaves:** The learner can configure backups and PITR for `playground`, name the backup source and its reason string, and state exactly what is not recoverable.
 **Do not cover:** Verification, restore, the RFC 3339 confirm token (topic 2), encryption at rest (topic 3), alerting (topic 4).

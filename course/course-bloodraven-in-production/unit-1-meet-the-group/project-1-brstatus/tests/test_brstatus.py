@@ -14,8 +14,8 @@ from _harness import calls_within, function_def, run, source, strings_within
 
 
 def test_healthy_group_summary():
-    """orders is healthy: one writable site, both followers caught up."""
-    result = run("orders-healthy.json")
+    """playground is healthy: one writable site, both followers caught up."""
+    result = run("playground-healthy.json")
 
     assert result.code == 0, result.explain("expected exit 0 on a healthy group")
     assert result.verdict == "OK", result.explain("expected VERDICT: OK")
@@ -39,7 +39,7 @@ def test_healthy_group_summary():
     )
     assert iad["SERVING"] == "no", result.explain(
         "the primary carries role=primary and is never behind "
-        "mysql-orders-replicas"
+        "mysql-playground-replicas"
     )
 
     pdx = result.site("pdx")
@@ -55,7 +55,7 @@ def test_healthy_group_summary():
 
 def test_lagging_reader_is_not_an_unhealthy_group():
     """The inversion. Lag means opposite things depending on the role."""
-    soaking = run("orders-reader-soaking.json")
+    soaking = run("playground-reader-soaking.json")
 
     assert soaking.code == 0, soaking.explain(
         "a read-only reader 300s behind a 30s threshold does not degrade the "
@@ -68,7 +68,7 @@ def test_lagging_reader_is_not_an_unhealthy_group():
     )
     assert soaking.site("reader")["SERVING"] == "no", soaking.explain(
         "300s is past readOnlyMaxLagSeconds (inherited 30s), so the reader "
-        "drops out of mysql-orders-replicas"
+        "drops out of mysql-playground-replicas"
     )
     assert soaking.site("pdx")["SERVING"] == "yes", soaking.explain(
         "pdx is caught up and still serving"
@@ -77,7 +77,7 @@ def test_lagging_reader_is_not_an_unhealthy_group():
         "iad omits spec.sites[].role, which defaults to primary-candidate"
     )
 
-    lagging = run("orders-candidate-lagging.json")
+    lagging = run("playground-candidate-lagging.json")
 
     assert lagging.code == 1, lagging.explain(
         "a primary-candidate replica 300s behind DOES degrade the group; the "
@@ -91,7 +91,7 @@ def test_lagging_reader_is_not_an_unhealthy_group():
     assert lagging.site("pdx")["SERVING"] == "yes", lagging.explain(
         "the lag gate applies only to read-only sites; a lagging "
         "primary-candidate replica keeps healthy=yes and stays behind "
-        "mysql-orders-replicas"
+        "mysql-playground-replicas"
     )
     assert lagging.site("reader")["SERVING"] == "yes", lagging.explain(
         "the reader is caught up here"
@@ -101,7 +101,7 @@ def test_lagging_reader_is_not_an_unhealthy_group():
 def test_awkward_status_null_lag_and_lost_authority():
     """Absent is not zero, an explicit zero threshold is meaningful, and a
     group with no authority sheds every endpoint."""
-    detached = run("orders-reader-detached.json")
+    detached = run("playground-reader-detached.json")
 
     assert detached.code == 0, detached.explain(
         "a detached reader still does not degrade the group"
@@ -116,7 +116,7 @@ def test_awkward_status_null_lag_and_lost_authority():
         "not replicating, not converged, and following the wrong source"
     )
 
-    zero = run("orders-zero-readonly-lag.json")
+    zero = run("playground-zero-readonly-lag.json")
 
     assert zero.code == 0, zero.explain("this group is not degraded")
     assert zero.site("reader")["SERVING"] == "no", zero.explain(
@@ -127,7 +127,7 @@ def test_awkward_status_null_lag_and_lost_authority():
         "pdx is a primary-candidate: no lag gate applies to it at all"
     )
 
-    none = run("orders-no-primary.json")
+    none = run("playground-no-primary.json")
 
     assert none.code == 2, none.explain(
         "Degraded is True and there is no active site: that is CRITICAL"
@@ -141,7 +141,7 @@ def test_awkward_status_null_lag_and_lost_authority():
             "invalid authority sheds every endpoint, including %s" % name
         )
 
-    split = run("orders-split-brain.json")
+    split = run("playground-split-brain.json")
 
     assert split.code == 2, split.explain(
         "two writable sites leave activeSite empty, so the verdict is CRITICAL"

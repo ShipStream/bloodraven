@@ -1,6 +1,6 @@
 # Cooldown, history, and the one exception
 
-`orders` has just failed over. `iad` went unreachable, `pdx` was promoted, the counter app is
+`playground` has just failed over. `iad` went unreachable, `pdx` was promoted, the counter app is
 writing again. The cross-site table you ran in the last topic is still evaluating every poll, and it
 will happily select another promotion the second `pdx` looks unreachable — a flap that can walk the
 group across every site in under a minute. The thing that stops it is memory: `spec.failoverCooldown`.
@@ -32,7 +32,7 @@ Here is where wrong mental models get built. Operators read "cooldown" and pictu
 freeze on the group. It is not that. Every other mutating action in the poll cycle runs from its own
 call site, and none of them consults `tm.failoverCooldown`.
 
-| Still runs during the cooldown | Consequence for `orders` |
+| Still runs during the cooldown | Consequence for `playground` |
 | --- | --- |
 | Split-brain fencing | A second writable site is fenced on the next poll, not five minutes later |
 | Non-promotable fencing | A writable `reader` is fenced every poll, unconditionally |
@@ -154,9 +154,22 @@ A re-assert is not, because `lastReassert` is still zero. On the playground's `3
 same asymmetry compresses: automatic promotion is blocked until T+30s (leaving 30 − 12.0 = 18.0 s of
 block after a 12.0 s failover), while the first re-assert is available immediately.
 
-One last trap while you are here: `spec.updateStrategy` exists in the CRD and the docs describe it as
-a control, but no Go code outside the type definition reads it. Ordered update triggers on spec drift
-alone. Setting `Recreate` changes nothing.
+One last field while you are here, because its history is a lesson in itself. `spec.updateStrategy`
+takes `OrderedUpdate` (the default) or `Recreate`, and it does two different things to the same spec
+change. Under `OrderedUpdate` the reconciler deliberately leaves existing site Deployments alone; the
+runner then notices the drift between the desired spec hash and the live Deployment annotation and
+hands the rollout to the ordered updater, one site at a time. Under `Recreate` the runner clears the
+drift list outright and the reconciler patches every site Deployment in one pass, so their pod
+restarts may overlap — which is exactly the both-sites-down window `OrderedUpdate` exists to avoid.
+Reach for `Recreate` only when you are certain you can afford to lose the primary and the standby at
+the same moment.
+
+The lesson is the history. At `v0.9.1` — the release this course is grounded against — that field was
+**inert**: it existed in the CRD, the documentation described it as a control, and no Go outside the
+type definition read it. It was made live in a commit merged after the release. The reading above is
+current; the version appendix, row A3, records the change and the command that re-checks it. Fields
+that do nothing yet, and fields that quietly start doing something, are the same hazard from opposite
+directions, and `kubectl explain` cannot tell you which one you are looking at. Only the code can.
 
 ## Where that leaves you
 

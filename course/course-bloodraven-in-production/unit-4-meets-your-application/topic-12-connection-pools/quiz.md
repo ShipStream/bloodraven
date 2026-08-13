@@ -7,7 +7,7 @@
 
 **Type:** TRUE_FALSE
 
-During a failover drill on `orders`, your application's `SELECT` queries keep returning rows the whole time. A colleague concludes the application must already be talking to the newly promoted `pdx`. Is that conclusion sound?
+During a failover drill on `playground`, your application's `SELECT` queries keep returning rows the whole time. A colleague concludes the application must already be talking to the newly promoted `pdx`. Is that conclusion sound?
 
 **Correct answer:** false
 
@@ -44,11 +44,11 @@ It does not run at all. `KillAppConnections` is step 2 of the failover sequence 
 
 **A full-credit answer shows:**
 
-A strong answer covers: (1) it does not run, because the old primary must be reachable from the operator; (2) it is best-effort, single-pass and never retried even when it does run; (3) the consequence — established application connections survive and serve stale reads until the next promotion or demotion; (4) bonus for noting no alert fires, or that only planned failover truly drains. An answer that says the kill 'fails' or 'retries later' has missed the guard and the single-pass property.
+A strong answer covers: (1) it does not run, because the old primary must be reachable from the operator; (2) it is best-effort during the sequence and, after promotion, retried once per poll inside `spec.connectionDrainTimeout` — but every one of those passes is a SQL statement against the site being drained, so an unreachable site gets none of them; (3) the consequence — established application connections survive and serve stale reads until the next promotion or demotion; (4) bonus for noting no alert fires, or that only planned failover truly drains. An answer that says the kill 'fails' or 'will retry later' has missed the point: the limit is reachability, not the retry count.
 
 **Explanation:**
 
-The mitigation exists and is real, but it is precisely absent in the failure modes that produce this symptom — a held-down site or a partition. Both leave the old primary unreachable to the operator while it remains perfectly reachable to an application co-located with it. Issue #123 is open and PR #137 unmerged for exactly this reason. (objective 4)
+The mitigation exists and is real, but it is precisely absent in the failure modes that produce this symptom — a held-down site or a partition. Both leave the old primary unreachable to the operator while it remains perfectly reachable to an application co-located with it. The retry window the operator does have is bounded by `spec.connectionDrainTimeout`, and every attempt in it is a statement issued over a connection to the site being drained — so the bound that matters is reachability, not the budget. (objective 4)
 
 ## Question 4
 

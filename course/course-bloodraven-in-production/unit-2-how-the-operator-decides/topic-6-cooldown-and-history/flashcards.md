@@ -59,4 +59,4 @@
 
 **Front:** `spec.updateStrategy`
 
-**Back:** Documented but inert: the field exists in the CRD, yet no Go code outside the type definition reads it. Ordered update triggers on spec drift alone, so setting `Recreate` changes nothing.
+**Back:** `OrderedUpdate` (default) leaves existing site Deployments untouched so the runner sees spec drift and rolls one site at a time; `Recreate` clears the drift list and patches every site Deployment in one pass, so pod restarts may overlap. It was **inert at v0.9.1** and made live after the release — see the version appendix, row A3.

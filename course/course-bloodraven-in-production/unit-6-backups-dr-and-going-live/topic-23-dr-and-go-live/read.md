@@ -1,16 +1,16 @@
 # Losing a whole cluster, and the go-live gate
 
-`orders` has survived everything you have thrown at it *inside* one cluster: a killed primary
+`playground` has survived everything you have thrown at it *inside* one cluster: a killed primary
 promoted in 12.0 s, a split brain resolved by `sitePriorities`, five shapes of partition, the
 operator itself going away, a datadir wiped and restored from a bucket. Every one of those had an
-operator watching. Now the cluster hosting `orders` is gone — the API server does not answer, the
+operator watching. Now the cluster hosting `playground` is gone — the API server does not answer, the
 nodes do not answer, and what you still have is an S3 prefix in another region. There is no
 failover group left to fail over.
 
 ## Fence the source first, because that is where the danger is
 
 Your instinct is to restore. Resist it for ten minutes. A restore into a DR cluster while the
-source is still accepting writes gives you two writable copies of `orders`, and **Bloodraven v1
+source is still accepting writes gives you two writable copies of `playground`, and **Bloodraven v1
 does not automatically detect or resolve cross-cluster split brain** (objective 13). Inside one
 cluster the operator sees every site every 2 s and the decision matrix flags `SPLIT BRAIN` the
 instant more than one core site is writable. Across clusters, nothing holds both halves. No
@@ -95,18 +95,18 @@ spec:
       role: primary-candidate
       lbIP: 10.1.20.12
   dns:
-    hostname: orders-east.example.com
+    hostname: playground-east.example.com
     ttl: 60                                 # shipped default, not the playground's 10
   initFromBackup:                           # the same one-shot restore field from Unit 6
     source:
       s3:
         bucket: shipstream-backups
-        prefix: orders/west/orders-nightly-20260520
+        prefix: playground/west/playground-nightly-20260520
         region: us-west-2
         credentialsSecret: s3-dr-readonly-creds
     decryption:
       passphraseSecret:
-        name: orders-backup-passphrase      # mirrored into the DR namespace in advance
+        name: playground-backup-passphrase      # mirrored into the DR namespace in advance
     pointInTime:
       stopDatetime: "2026-05-20T14:32:00Z"  # omit to recover to the dump's GTID
 ```
@@ -118,17 +118,18 @@ runs exactly as it did on day one of this course.
 ```widget
 {
   "type": "terminal",
-  "title": "kubectl bloodraven status orders on the DR cluster (excerpted)",
+  "title": "kubectl bloodraven status playground on the DR cluster (excerpted)",
   "lines": [
     {
-      "cmd": "kubectl bloodraven status orders --context=dr -n orders",
-      "out": "MysqlFailoverGroup: orders/orders\n  Active site: east-1\n  Ready: True\n  DNS: orders-east.example.com (TTL 60s)\n\nSites:\n  NAME    ROLE               ZONE        STATE      REPL  LAG  RECOVERY  LAST-SEEN\n  east-1  primary-candidate  us-east-1a  writable   no    -    -         2s\n  east-2  primary-candidate  us-east-1b  read-only  yes   0s   -         2s\n\nInitial restore (initFromBackup):\n  Phase: Succeeded\n  Target site: east-1"
+      "cmd": "kubectl bloodraven status playground --context=dr -n bloodraven-dr",
+      "out": "MysqlFailoverGroup: bloodraven-dr/playground\n  Active site: east-1\n  Ready: True\n  DNS: playground-east.example.com (TTL 60s)\n\nSites:\n  NAME    ROLE               ZONE        STATE      REPL  LAG  RECOVERY  LAST-SEEN\n  east-1  primary-candidate  us-east-1a  writable   no    -    -         2s\n  east-2  primary-candidate  us-east-1b  read-only  yes   0s   -         2s\n\nInitial restore (initFromBackup):\n  Phase: Succeeded\n  Target site: east-1"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
-Then DNS, by the same `DNSEndpoint` path from Unit 4: one object named `bloodraven-orders`,
+Then DNS, by the same `DNSEndpoint` path from Unit 4: one object named `bloodraven-playground`,
 server-side-applied every poll, one `A` record at `spec.dns.ttl`. The catch is the same catch —
 **the operator cannot accelerate DNS propagation**, and here it is worse, because the operator only
 owns the per-cluster record. The global application-facing name is yours to flip, by weight,
@@ -156,15 +157,15 @@ Now commit to a verdict on each of these. Not "noted" — block or accept-with-a
 | Backups on a PVC only | PVC-local backups are not durable; the failure that takes the PVC takes them. | **Block.** |
 | No backup ever verified | An unverified backup is an assumption. Schrödinger backups. | **Block.** |
 | The application-side write gap | No shipped alert covers it. Unowned, it is invisible until an incident. | **Block** until somebody owns it by name. |
-| `maxLagSeconds: 300` | Drives only the `ReplicationLagging` condition. It is **not** a promotion gate — a replica beyond the threshold is still promoted. | Accept, owner must know this. |
+| `replication.maxLagSeconds` (whatever you set) | Drives only the `ReplicationLagging` condition. It is **not** a promotion gate — a replica beyond the threshold is still promoted. `playground` sets `30`; a group that omits the field gets `300`. Either way it gates nothing. | Accept, owner must know this. |
 | Runbook timings from the playground | The playground overrides the shipped defaults: `failoverCooldown: 30s` (vs 5m), `maxLagSeconds: 30` (vs 300), `dns.ttl: 10` (vs 60). No timing you measured there transfers. | Accept, owner re-measures on real config. |
 | A `role: read-only` reader in the group | It can neither be promoted nor source a backup. It is not a spare. | Accept, owner must know this. |
 
 Disagree with any of my verdicts if you can say *why*. That is the point of the exercise.
 
-## What you can now say about `orders`
+## What you can now say about `playground`
 
-`orders` began as three sites and a counter application on a laptop. It is now a group whose
+`playground` began as three sites and a counter application on a laptop. It is now a group whose
 failure modes you can enumerate, whose alerts do not lie, whose backups have been restored at least
 once, and which you could hand to an on-call rotation tonight — with an honest statement attached:
 it promotes unattended in about 12 seconds, it switches over on purpose at RPO 0 by construction,

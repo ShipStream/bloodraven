@@ -98,20 +98,20 @@ def check(fixture: str, expected: dict, now: str = NOW) -> None:
 
 
 # --------------------------------------------------------------------------
-# 1. The canonical decisions for `orders`
+# 1. The canonical decisions for `playground`
 # --------------------------------------------------------------------------
 CANONICAL = {
-    "orders-healthy.json": {
+    "playground-healthy.json": {
         "coreCount": 2, "writable": ["iad"], "readOnly": ["pdx"], "unreachable": [],
         "fenceSites": [], "reason": "Healthy", "alert": None, "splitBrain": False,
         "promotionCandidates": [], "willRun": [],
     },
-    "orders-iad-down.json": {
+    "playground-iad-down.json": {
         "coreCount": 2, "writable": [], "readOnly": ["pdx"], "unreachable": ["iad"],
         "reason": "Degraded", "alert": None, "promotionCandidates": ["pdx"],
         "promotionBlockedBy": None, "willRun": ["promote"],
     },
-    "orders-reader-writable.json": {
+    "playground-reader-writable.json": {
         "coreCount": 2, "writable": ["iad"], "fenceSites": ["reader"],
         "reason": "Degraded", "splitBrain": False,
         "alert": "writable non-promotable site requires fencing (reader)",
@@ -119,28 +119,28 @@ CANONICAL = {
     },
     # Order is the behaviour: two writable candidates AND a writable reader.
     # Fence-first returns before the split-brain row is ever reached.
-    "orders-reader-writable-split-brain.json": {
+    "playground-reader-writable-split-brain.json": {
         "coreCount": 2, "writable": ["iad", "pdx"], "fenceSites": ["reader"],
         "reason": "Degraded", "splitBrain": False,
         "alert": "writable non-promotable site requires fencing (reader)",
         "promotionCandidates": [], "willRun": ["fence:reader"],
     },
-    "orders-split-brain.json": {
+    "playground-split-brain.json": {
         "coreCount": 2, "writable": ["iad", "pdx"], "fenceSites": [],
         "reason": "SplitBrain", "splitBrain": True,
         "alert": "SPLIT BRAIN: 2 sites are writable (iad, pdx)",
         "promotionCandidates": [],
     },
-    "orders-all-read-only.json": {
+    "playground-all-read-only.json": {
         "coreCount": 2, "readOnly": ["iad", "pdx"], "unreachable": [],
         "reason": "NoPrimary", "alert": "NO PRIMARY: both sites are read-only",
         "promotionCandidates": [], "willRun": [],
     },
-    "orders-total-loss.json": {
+    "playground-total-loss.json": {
         "coreCount": 2, "unreachable": ["iad", "pdx"], "reason": "TotalLoss",
         "alert": "TOTAL LOSS: all sites are unreachable", "promotionCandidates": [],
     },
-    "orders-peer-down.json": {
+    "playground-peer-down.json": {
         "coreCount": 2, "writable": ["iad"], "unreachable": ["pdx"],
         "reason": "Degraded", "alert": "pdx unreachable while iad is primary",
         "promotionCandidates": [], "willRun": [],
@@ -160,14 +160,14 @@ AWKWARD = {
     # A dr-only site is non-promotable but still counts toward coreCount and
     # still lands in a tally. Excluding it like a reader would read 2 == 2 and
     # report TotalLoss; promoting it would name lhr as a candidate.
-    "orders-dr-only.json": {
+    "playground-dr-only.json": {
         "coreCount": 3, "readOnly": ["lhr"], "unreachable": ["iad", "pdx"],
         "reason": "NoPrimary", "alert": "NO PRIMARY: no writable site available",
         "promotionCandidates": [], "willRun": [],
     },
     # Fence-first also preempts TotalLoss: both candidates are unreachable and
     # the reader is writable, so len(unreachable) == coreCount never gets asked.
-    "orders-reader-writable-total-loss.json": {
+    "playground-reader-writable-total-loss.json": {
         "coreCount": 2, "unreachable": ["iad", "pdx"], "fenceSites": ["reader"],
         "reason": "Degraded",
         "alert": "writable non-promotable site requires fencing (reader)",
@@ -175,32 +175,32 @@ AWKWARD = {
     },
     # Every site unknown at startup: no tally holds anything, and the message is
     # the general one, not the two-site one.
-    "orders-unknown-startup.json": {
+    "playground-unknown-startup.json": {
         "coreCount": 2, "writable": [], "readOnly": [], "unreachable": [],
         "reason": "NoPrimary", "alert": "NO PRIMARY: no writable site available",
     },
     # sitePriorities reorders the tiebreak list; the site that is not listed goes last.
-    "orders-priority-order.json": {
+    "playground-priority-order.json": {
         "coreCount": 3, "reason": "Degraded", "promotionCandidates": ["sfo", "pdx"],
         "willRun": ["promote"],
     },
     # A site absent from status.sites is unknown, not missing.
-    "orders-reader-unpolled.json": {
+    "playground-reader-unpolled.json": {
         "coreCount": 2, "writable": ["iad"], "readOnly": ["pdx"], "reason": "Healthy",
     },
     # The annotation is an hour ahead — outside the 5m grace, so it is discarded.
-    "orders-history-skewed.json": {
+    "playground-history-skewed.json": {
         "lastFailover": "2026-08-12T12:03:16Z", "lastFailoverSource": "status",
         "lastFailoverTarget": "pdx", "cooldownRemaining": 240.0,
         "promotionBlockedBy": "cooldown", "willRun": [],
     },
     # Equal timestamps describe the same promotion: the tie goes to status.
-    "orders-history-tie.json": {
+    "playground-history-tie.json": {
         "lastFailoverSource": "status", "cooldownRemaining": 44.0,
     },
     # Stamped 2m ahead but inside the grace: kept, and negative elapsed time
     # still counts as inside the cooldown.
-    "orders-history-near-future.json": {
+    "playground-history-near-future.json": {
         "lastFailoverSource": "status", "cooldownRemaining": 420.0,
         "promotionBlockedBy": "cooldown", "willRun": [],
     },
@@ -219,7 +219,7 @@ def cooldown_gate() -> None:
     # A writable reader 10s into a 30s cooldown. Fencing a writable
     # non-promotable site is not gated: it runs every poll. A tool that wraps
     # the whole decision in the cooldown emits an empty willRun here.
-    check("orders-reader-writable-cooldown.json", {
+    check("playground-reader-writable-cooldown.json", {
         "reason": "Degraded",
         "alert": "writable non-promotable site requires fencing (reader)",
         "fenceSites": ["reader"],
@@ -233,7 +233,7 @@ def cooldown_gate() -> None:
     # 90s into the shipped 5m cooldown with a promotion selected. The table
     # still ran: the reason and the candidate list are unchanged, and only the
     # promotion is withheld. A tool that returns early on cooldown loses them.
-    check("orders-iad-down-cooldown.json", {
+    check("playground-iad-down-cooldown.json", {
         "reason": "Degraded",
         "alert": None,
         "promotionCandidates": ["pdx"],
@@ -244,7 +244,7 @@ def cooldown_gate() -> None:
 
     # The annotation copy is an hour newer than the status copy. Reading status
     # alone puts the promotion outside the default 5m cooldown and lets it run.
-    check("orders-history-conflict.json", {
+    check("playground-history-conflict.json", {
         "lastFailover": "2026-08-12T12:00:00Z",
         "lastFailoverSource": "annotation",
         "lastFailoverTarget": "pdx",
@@ -255,7 +255,7 @@ def cooldown_gate() -> None:
     })
 
     # Same topology, no history at all: the promotion is not blocked.
-    check("orders-iad-down.json", {
+    check("playground-iad-down.json", {
         "promotionBlockedBy": None,
         "cooldownRemaining": 0.0,
         "willRun": ["promote"],

@@ -15,7 +15,7 @@
 
 ---
 
-**Front:** A non-primary site of `orders` is replicating and well inside `maxLagSecondsForSource`, but the operator observes it as `writable`. Is it eligible as a backup source?
+**Front:** A non-primary site of `playground` is replicating and well inside `maxLagSecondsForSource`, but the operator observes it as `writable`. Is it eligible as a backup source?
 
 **Back:** No. `"replica-preferred"` requires the observed state to be `read-only`; a writable non-primary is skipped and selection falls through.
 

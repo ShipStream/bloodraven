@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""go-live pack checker for the failover group `orders`.
+"""go-live pack checker for the failover group `playground`.
 
 Reads three artefacts out of ``pack/`` and reports whether the pack is
 fit to hand to an on-call rotation:
@@ -61,7 +61,7 @@ SHIPPED_METRICS = {
 # It is the only non-Bloodraven name this pack is allowed to use.
 ALLOWED_FOREIGN_METRICS = {"up"}
 
-# The minimum alert set for `orders`.
+# The minimum alert set for `playground`.
 REQUIRED_ALERTS = [
     "BloodravenOperatorDown",
     "BloodravenNoWritableSite",
@@ -106,7 +106,7 @@ ASSUMED_REQUIRED = {
 
 BACKUP_SOURCE_REASONS = {"override", "replica-preferred", "primary-fallback"}
 
-# `orders` runs three sites. `reader` carries role: read-only, so it can
+# `playground` runs three sites. `reader` carries role: read-only, so it can
 # neither be promoted nor source a backup.
 READ_ONLY_SITES = {"reader"}
 
@@ -345,7 +345,7 @@ def report(pack_dir, fixtures_dir, out=sys.stdout):
     drill = load_drill(pack_dir / "drill.json")
 
     problems = 0
-    print("go-live pack for `orders`", file=out)
+    print("go-live pack for `playground`", file=out)
     print("=" * 46, file=out)
     print(f"{len(rules)} alert rules, {len(runbooks)} runbook entries", file=out)
     print("", file=out)
@@ -433,7 +433,7 @@ def report(pack_dir, fixtures_dir, out=sys.stdout):
 
 def main(argv=None):
     here = Path(__file__).resolve().parent
-    parser = argparse.ArgumentParser(description="check the go-live pack for `orders`")
+    parser = argparse.ArgumentParser(description="check the go-live pack for `playground`")
     parser.add_argument("--pack", type=Path, default=here / "pack")
     parser.add_argument(
         "--fixtures", type=Path, default=here.parent / "tests" / "fixtures"

@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A scheduled verification of the `orders` nightly profile reports `Succeeded`, with `status.sanityCheck.resultRow: "1"` against a `minRows: 1` floor. What has it proved?
+A scheduled verification of the `playground` nightly profile reports `Succeeded`, with `status.sanityCheck.resultRow: "1"` against a `minRows: 1` floor. What has it proved?
 
 - The artifact loads into a real mysqld, and your scalar assertion held. Nothing about the live primary.
 - The artifact is logically equivalent to the live primary as it stood when the dump was taken.
@@ -24,7 +24,7 @@ A verification restores the artifact into an ephemeral throwaway mysqld and runs
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` is live and healthy, but a bad migration last night corrupted one schema. You want last night's dump loaded back into the running group. Which field do you set?
+`playground` is live and healthy, but a bad migration last night corrupted one schema. You want last night's dump loaded back into the running group. Which field do you set?
 
 - `spec.initFromBackup`, pointed at the MysqlBackup, since that is the restore entry point.
 - `spec.restoreInPlace`, with `confirm` set to the current RFC 3339 timestamp.

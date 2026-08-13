@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-The cluster hosting `orders` has stopped answering: `kubectl --context=source get nodes` times out. That is your only signal so far. What does the source-fencing checklist say to do next?
+The cluster hosting `playground` has stopped answering: `kubectl --context=source get nodes` times out. That is your only signal so far. What does the source-fencing checklist say to do next?
 
 - Bootstrap the DR group now — an unreachable API server means the MySQL workloads are gone with it
 - Get a second independent signal before touching the DR cluster, because nothing in Bloodraven will catch a cross-cluster split brain if you are wrong
@@ -36,7 +36,7 @@ The reversal: those two conditions prove only that the DR cluster could read the
 
 **Type:** MULTIPLE_CHOICE
 
-The source cluster is fenced and you are standing up a fresh `MysqlFailoverGroup` named `orders` in the DR cluster, to be populated from the S3 prefix the dead cluster was writing to. Which field does that?
+The source cluster is fenced and you are standing up a fresh `MysqlFailoverGroup` named `playground` in the DR cluster, to be populated from the S3 prefix the dead cluster was writing to. Which field does that?
 
 - `spec.restoreInPlace`, with an RFC 3339 confirm token naming the dump
 - `spec.initFromBackup`, pointed at the source bucket prefix
@@ -53,7 +53,7 @@ The source cluster is fenced and you are standing up a fresh `MysqlFailoverGroup
 
 **Type:** MULTIPLE_CHOICE
 
-You are writing the on-call runbook for `orders` and want every step to be a `kubectl bloodraven` invocation. Which of these is not a subcommand the plugin has?
+You are writing the on-call runbook for `playground` and want every step to be a `kubectl bloodraven` invocation. Which of these is not a subcommand the plugin has?
 
 - `promote`
 - `reclone`
@@ -70,7 +70,7 @@ The surface is exactly seven: status, promote, reclone, backup, verify-backup, v
 
 **Type:** SHORT_ANSWER
 
-You are signing off `orders` for production tonight. Four findings are open: (a) nobody can say what `sync_binlog` is on the running instances; (b) `spec.replication.maxLagSeconds` sits at the default 300; (c) the nightly S3 backup has never been verified; (d) the runbook quotes a 30-second anti-flap cooldown, taken from a playground run. Which do you block the launch on, and what do you attach to the ones you accept?
+You are signing off `playground` for production tonight. Four findings are open: (a) nobody can say what `sync_binlog` is on the running instances; (b) `spec.replication.maxLagSeconds` is set and nobody has said what it gates; (c) the nightly S3 backup has never been verified; (d) the runbook quotes a 30-second anti-flap cooldown, taken from a playground run. Which do you block the launch on, and what do you attach to the ones you accept?
 
 **Sample answer:**
 

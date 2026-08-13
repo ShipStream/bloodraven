@@ -1,58 +1,58 @@
-{"ts": "2026-08-11T09:40:00.000Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:00.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:00.500Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:00.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:01.000Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:01.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:01.500Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:01.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:02.000Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:02.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:02.500Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:02.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:03.000Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:03.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:03.500Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:03.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:04.000Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:04.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:04.500Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:04.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:05.000Z","op": "write","ok": false,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": true,"error": {"code": 1290,"message": "The MySQL server is running with the --read-only option so it cannot execute this statement"}}
-{"ts": "2026-08-11T09:40:05.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:05.500Z","op": "write","ok": false,"site": "iad","dbHost": "mysql-orders-iad-6d4f9c8b7-2xk9v","readOnly": true,"error": {"code": 1792,"message": "Cannot execute statement in a READ ONLY transaction."}}
-{"ts": "2026-08-11T09:40:05.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:00.000Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:00.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:00.500Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:00.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:01.000Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:01.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:01.500Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:01.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:02.000Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:02.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:02.500Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:02.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:03.000Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:03.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:03.500Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:03.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:04.000Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:04.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:04.500Z","op": "write","ok": true,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:04.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:05.000Z","op": "write","ok": false,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": true,"error": {"code": 1290,"message": "The MySQL server is running with the --read-only option so it cannot execute this statement"}}
+{"ts": "2026-08-11T09:40:05.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:05.500Z","op": "write","ok": false,"site": "iad","dbHost": "mysql-playground-iad-6d4f9c8b7-2xk9v","readOnly": true,"error": {"code": 1792,"message": "Cannot execute statement in a READ ONLY transaction."}}
+{"ts": "2026-08-11T09:40:05.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
 {"ts": "2026-08-11T09:40:06.000Z","op": "write","ok": false,"site": null,"dbHost": null,"readOnly": null,"error": {"code": null,"message": "invalid connection"}}
-{"ts": "2026-08-11T09:40:06.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:06.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
 {"ts": "2026-08-11T09:40:06.500Z","op": "write","ok": false,"site": null,"dbHost": null,"readOnly": null,"error": {"code": null,"message": "dial tcp 10.43.44.9:3306: connect: connection refused"}}
-{"ts": "2026-08-11T09:40:06.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:06.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
 {"ts": "2026-08-11T09:40:07.000Z","op": "write","ok": false,"site": null,"dbHost": null,"readOnly": null,"error": {"code": null,"message": "dial tcp 10.43.44.9:3306: connect: connection refused"}}
-{"ts": "2026-08-11T09:40:07.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:07.250Z","op": "read","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": true,"error": null}
 {"ts": "2026-08-11T09:40:07.500Z","op": "write","ok": false,"site": null,"dbHost": null,"readOnly": null,"error": {"code": null,"message": "dial tcp 10.43.44.9:3306: connect: connection refused"}}
-{"ts": "2026-08-11T09:40:07.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:07.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
 {"ts": "2026-08-11T09:40:08.000Z","op": "write","ok": false,"site": null,"dbHost": null,"readOnly": null,"error": {"code": null,"message": "dial tcp 10.43.44.9:3306: connect: connection refused"}}
-{"ts": "2026-08-11T09:40:08.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:08.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
 {"ts": "2026-08-11T09:40:08.500Z","op": "write","ok": false,"site": null,"dbHost": null,"readOnly": null,"error": {"code": null,"message": "dial tcp 10.43.44.9:3306: connect: connection refused"}}
-{"ts": "2026-08-11T09:40:08.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:09.000Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:09.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:09.500Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:09.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:10.000Z","op": "write","ok": false,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": {"code": 1205,"message": "Lock wait timeout exceeded; try restarting transaction"}}
-{"ts": "2026-08-11T09:40:10.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:10.500Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:10.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:11.000Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:11.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:11.500Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:11.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:12.000Z","op": "write","ok": false,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": {"code": 1205,"message": "Lock wait timeout exceeded; try restarting transaction"}}
-{"ts": "2026-08-11T09:40:12.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:12.500Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:12.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:13.000Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:13.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:13.500Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:13.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
-{"ts": "2026-08-11T09:40:14.000Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-orders-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
-{"ts": "2026-08-11T09:40:14.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-orders-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:08.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:09.000Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:09.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:09.500Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:09.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:10.000Z","op": "write","ok": false,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": {"code": 1205,"message": "Lock wait timeout exceeded; try restarting transaction"}}
+{"ts": "2026-08-11T09:40:10.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:10.500Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:10.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:11.000Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:11.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:11.500Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:11.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:12.000Z","op": "write","ok": false,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": {"code": 1205,"message": "Lock wait timeout exceeded; try restarting transaction"}}
+{"ts": "2026-08-11T09:40:12.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:12.500Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:12.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:13.000Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:13.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:13.500Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:13.750Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}
+{"ts": "2026-08-11T09:40:14.000Z","op": "write","ok": true,"site": "pdx","dbHost": "mysql-playground-pdx-5b8c7d64f-q7m2t","readOnly": false,"error": null}
+{"ts": "2026-08-11T09:40:14.250Z","op": "read","ok": true,"site": "reader","dbHost": "mysql-playground-reader-79d4c9f56-h4v8n","readOnly": true,"error": null}

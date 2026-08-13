@@ -8,7 +8,7 @@
 
 ## Topic generation prompt
 
-Open on `orders` with the operator deliberately scaled to zero. The counter app keeps writing to the active site and nothing bad happens — that is the point. What stops that site writing when it can no longer confirm it is the active site is the sidecar, not the operator.
+Open on `playground` with the operator deliberately scaled to zero. The counter app keeps writing to the active site and nothing bad happens — that is the point. What stops that site writing when it can no longer confirm it is the active site is the sidecar, not the operator.
 
 Teach the `FencingMonitor` in `internal/sidecar/fencing.go` exactly as implemented: **two** rules, not three. Rule #1 is topology mismatch. Rule #2 is lease expiry. Rule #1 fires first and returns, so a site that has learned the active site is somebody else fences without ever consulting the lease. The published documentation describes a three-rule monitor; it is wrong, and this course teaches the code. Before either rule runs the monitor checks `@@read_only` and returns early: a read-only instance never self-fences, because there is nothing left to fence.
 
@@ -30,6 +30,6 @@ Do NOT cover split-brain detection or resolution, `sitePriorities`, the partitio
 
 ## Handoff
 
-**Inherits:** The application now survives a promotion — the learner has pinned pool and DNS behaviour and has a measured write-gap for `orders` across a failover.
+**Inherits:** The application now survives a promotion — the learner has pinned pool and DNS behaviour and has a measured write-gap for `playground` across a failover.
 **Leaves:** The learner can attribute an unexpectedly read-only site to rule #1, rule #2, or the startup safety net, from logs alone, and can say why fencing sometimes blocks or fails.
 **Do not cover:** Split-brain tiers and `sitePriorities` (topic 2), partition shapes (topic 3), operator downtime and the cooldown (topic 4), backups and DR (Unit 6).

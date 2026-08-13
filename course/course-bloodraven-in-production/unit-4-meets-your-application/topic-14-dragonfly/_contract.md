@@ -8,7 +8,7 @@
 
 ## Topic generation prompt
 
-Open with the scope boundary and hold it for the whole topic: Dragonfly here is **cache and session state, never durable application data**. If losing it costs you a transaction, it was in the wrong place. Everything else in this topic follows from that one sentence — it is why the emergency budget is small, why the fallback is allowed to lose sessions, and why nothing about Dragonfly is ever permitted to affect MySQL durability. For `orders`, the concrete framing is the counter app's session store: nice to keep across a promotion, never the record of truth.
+Open with the scope boundary and hold it for the whole topic: Dragonfly here is **cache and session state, never durable application data**. If losing it costs you a transaction, it was in the wrong place. Everything else in this topic follows from that one sentence — it is why the emergency budget is small, why the fallback is allowed to lose sessions, and why nothing about Dragonfly is ever permitted to affect MySQL durability. For `playground`, the concrete framing is the counter app's session store: nice to keep across a promotion, never the record of truth.
 
 Teach the Service mechanism first, because it is the cleanest idea in the topic. The active Dragonfly Service AND-gates two labels — a role label and a traffic label. Shedding an endpoint **deletes** the traffic key rather than stamping a disabled value, and the reason is precise: the active-Service selector is an exists-and-equals check on `enabled`, so removing the key removes the endpoint atomically, whereas writing some "disabled" value would depend on the selector agreeing about what disabled means. Have the learner derive the consequence: during a takeover there is no window in which both instances match the active selector.
 
@@ -28,6 +28,6 @@ Do NOT cover backup, PITR, or snapshot paths — Unit 6 owns those. Do NOT re-te
 
 ## Handoff
 
-**Inherits:** The learner can move `orders`' primary on purpose and knows the planned phase list, including the two Dragonfly phases.
+**Inherits:** The learner can move `playground`' primary on purpose and knows the planned phase list, including the two Dragonfly phases.
 **Leaves:** The learner can state Bloodraven's Dragonfly guarantee and its limits, read `sessionsPreserved` correctly, and explain the atomic endpoint shed. The application half of failover is complete.
 **Do not cover:** Backup, PITR, verification, or restore (Unit 6); operator observability and blindness (Unit 5).

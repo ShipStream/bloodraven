@@ -34,7 +34,7 @@ check(tuple(sorted(brdrill.READ_ONLY_REFUSAL_CODES)) == (1290, 1792),
 
 # Planned drill, fixed writer: two read-only refusals (one 1290 from the
 # fence, one 1792 from a transaction that was already open), six transport
-# failures while mysql-orders-primary had no endpoint, and two lock-wait
+# failures while mysql-playground-primary had no endpoint, and two lock-wait
 # timeouts that a retry policy must NOT treat as a failover symptom.
 planned = brdrill.error_classes(brdrill.load_probe(FIX / "planned-probe.jsonl"))
 check(planned is not None, "error_classes returned None — TODO B is unimplemented")

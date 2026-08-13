@@ -1,7 +1,7 @@
 # Backups and the binlog archiver
 
-`orders` runs on three sites — `iad`, `pdx`, and `reader` — with a counter application writing
-every second. The failover story is complete: a primary dies, a candidate is writable about 12
+`playground` runs on three sites — `iad`, `pdx`, and `reader` — with a counter application reading and
+writing through it. The failover story is complete: a primary dies, a candidate is writable about 12
 seconds later, and you can read the exact loss from `divergentGtid`. None of that survives losing
 the cluster. None of it survives a bad `DELETE` at 14:02 last Tuesday either — that statement
 replicates to every site in milliseconds, and every fence you built preserves it faithfully.
@@ -16,7 +16,7 @@ most consequential one in the block (objective 1).
 ```widget
 {
   "type": "compare",
-  "title": "Backup storage for orders",
+  "title": "Backup storage for playground",
   "rows": [
     {
       "aspect": "Where do the objects land?",
@@ -42,7 +42,7 @@ most consequential one in the block (objective 1).
     {
       "aspect": "Reasonable use",
       "cells": [
-        "Production protection for orders",
+        "Production protection for playground",
         "Playground, staging a dump you are about to move elsewhere"
       ]
     }
@@ -87,7 +87,7 @@ authoritative, so it is not promotable — and here, not sourceable.
 
 ## The artifact
 
-Add to `orders`:
+Add to `playground`:
 
 ```yaml
 spec:
@@ -98,10 +98,10 @@ spec:
         storage:
           type: S3                       # not PVC — see above
           s3:
-            bucket: orders-backups
-            prefix: orders
+            bucket: playground-backups
+            prefix: playground
             endpointURL: http://minio.bloodraven-playground:9000
-            credentialsSecret: orders-backup-s3
+            credentialsSecret: playground-backup-s3
         retention: 7                     # default
     pitr:
       enabled: true                      # NEW — turns the archiver on
@@ -188,11 +188,11 @@ replica's binlog stream, and therefore not in PITR's replay material. Restoring 
 cannot conjure writes the survivor never saw.
 
 Now the sting. A backup storage failure has **no data-plane impact whatsoever**. MySQL keeps
-serving reads and writes, the counter keeps counting, `orders` stays `Healthy`, and your PITR RPO
+serving reads and writes, the counter keeps counting, `playground` stays `Healthy`, and your PITR RPO
 drifts backwards in silence for as long as nobody looks. That is the textbook silent degradation,
 and it is exactly why Unit 6 has an alerting topic.
 
-You can now configure backups and PITR for `orders`, name the site a backup ran from and the reason
+You can now configure backups and PITR for `playground`, name the site a backup ran from and the reason
 string that explains it, and state precisely what is not recoverable. What you cannot yet do is
 prove any of it works — the artefact in the bucket is untested until something loads it. That is
 the next question.

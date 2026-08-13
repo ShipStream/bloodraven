@@ -1,6 +1,6 @@
 # Planned failover: moving the primary on purpose
 
-`orders` is healthy. `iad` is writable, `pdx` and `reader` are read-only, and the counter app is still
+`playground` is healthy. `iad` is writable, `pdx` and `reader` are read-only, and the counter app is still
 writing through the `-primary` Service with the bounded-lifetime pool you fixed in the last topic.
 Nothing is broken and nobody is paged — but `iad`'s nodes are being rebuilt on Tuesday and the primary
 has to move. This is the one primary move you get to schedule, and the only one where Bloodraven shuts
@@ -22,21 +22,22 @@ the next reconcile, like `reclone-site`.
 ```widget
 {
   "type": "terminal",
-  "title": "Moving orders' primary from iad to pdx",
+  "title": "Moving playground' primary from iad to pdx",
   "lines": [
     {
-      "cmd": "kubectl -n bloodraven-playground annotate mysqlfailovergroup orders bloodraven.shipstream.io/planned-failover=pdx",
-      "out": "mysqlfailovergroup.shipstream.io/orders annotated"
+      "cmd": "kubectl -n bloodraven-playground annotate mysqlfailovergroup playground bloodraven.shipstream.io/planned-failover=pdx",
+      "out": "mysqlfailovergroup.shipstream.io/playground annotated"
     },
     {
-      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup orders -o jsonpath='{.status.plannedFailover.phase}'",
+      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.plannedFailover.phase}'",
       "out": "WaitingForLag"
     },
     {
-      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup orders -o jsonpath='{.status.plannedFailover.phase} {.status.plannedFailover.transactionsLost}'",
+      "cmd": "kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.plannedFailover.phase} {.status.plannedFailover.transactionsLost}'",
       "out": "Succeeded 0"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
@@ -172,7 +173,7 @@ attempted soon after an emergency one is refused and the annotation cleared, not
 
 ## What you have now
 
-You can move `orders`' primary on purpose, follow `status.plannedFailover.phase` to `Succeeded`, read
+You can move `playground`' primary on purpose, follow `status.plannedFailover.phase` to `Succeeded`, read
 `transactionsLost: 0`, and argue the superset gate to anyone who thinks it is a lag threshold. You can
 also say which failures hand you the cluster back intact and which hand you a fenced primary and a
 pager. Everything above assumed MySQL was the only thing moving. Next: what happens when there is a

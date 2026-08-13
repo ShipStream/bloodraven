@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "A tenant adds both sync_binlog: \"0\" and gtid_mode: \"OFF\" to spec.mysqlConf on the orders group. What does the rendered per-site config contain after the next reconcile?",
+      "question": "A tenant adds both sync_binlog: \"0\" and gtid_mode: \"OFF\" to spec.mysqlConf on the playground group. What does the rendered per-site config contain after the next reconcile?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [

@@ -21,8 +21,8 @@
       "orderIndex": 3
     },
     {
-      "front": "In v0.9.1, what is the status of Bloodraven's own fix for the stale-connection gap?",
-      "back": "Still open: issue #123 is unresolved and PR #137 is unmerged.",
+      "front": "Which of Bloodraven's three paths actually drains application connections?",
+      "back": "Only **planned failover**, and it drains *ahead* of the switch, repeatedly, inside `drainTimeout`. Emergency failover is best-effort during the sequence and then retried per poll inside `spec.connectionDrainTimeout` (default `30s`) — but only while the fenced site answers. An autonomous sidecar self-fence does not retry at all. See the version appendix, row A1, for the dated state of the gap.",
       "orderIndex": 4
     },
     {
@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "During a failover drill on `orders`, your application's `SELECT` queries keep returning rows the whole time. A colleague concludes the application must already be talking to the newly promoted `pdx`. Is that conclusion sound?",
+      "question": "During a failover drill on `playground`, your application's `SELECT` queries keep returning rows the whole time. A colleague concludes the application must already be talking to the newly promoted `pdx`. Is that conclusion sound?",
       "type": "TRUE_FALSE",
       "orderIndex": 0,
       "correctAnswer": false,
@@ -87,8 +87,8 @@
       "type": "SHORT_ANSWER",
       "orderIndex": 2,
       "sampleAnswer": "It does not run at all. `KillAppConnections` is step 2 of the failover sequence and executes against the old primary only when the operator has a working handle to it; under a partition the operator cannot reach `iad`, so the kill pass is skipped, exactly as it was when the site was held down in Unit 3. Even when it does run it is one best-effort pass, never retried, and it spares only its own session and the binlog dump threads. So the application's established connections to `iad` survive intact. They keep serving reads that succeed and are stale, until `iad` is next promoted or demoted. Nothing alerts on it — `BloodravenFailoverOccurred` only reports that a promotion happened.",
-      "graderNotes": "A strong answer covers: (1) it does not run, because the old primary must be reachable from the operator; (2) it is best-effort, single-pass and never retried even when it does run; (3) the consequence — established application connections survive and serve stale reads until the next promotion or demotion; (4) bonus for noting no alert fires, or that only planned failover truly drains. An answer that says the kill 'fails' or 'retries later' has missed the guard and the single-pass property.",
-      "explanation": "The mitigation exists and is real, but it is precisely absent in the failure modes that produce this symptom — a held-down site or a partition. Both leave the old primary unreachable to the operator while it remains perfectly reachable to an application co-located with it. Issue #123 is open and PR #137 unmerged for exactly this reason. (objective 4)"
+      "graderNotes": "A strong answer covers: (1) it does not run, because the old primary must be reachable from the operator; (2) it is best-effort during the sequence and, after promotion, retried once per poll inside `spec.connectionDrainTimeout` — but every one of those passes is a SQL statement against the site being drained, so an unreachable site gets none of them; (3) the consequence — established application connections survive and serve stale reads until the next promotion or demotion; (4) bonus for noting no alert fires, or that only planned failover truly drains. An answer that says the kill 'fails' or 'will retry later' has missed the point: the limit is reachability, not the retry count.",
+      "explanation": "The mitigation exists and is real, but it is precisely absent in the failure modes that produce this symptom — a held-down site or a partition. Both leave the old primary unreachable to the operator while it remains perfectly reachable to an application co-located with it. The retry window the operator does have is bounded by `spec.connectionDrainTimeout`, and every attempt in it is a statement issued over a connection to the site being drained — so the bound that matters is reachability, not the budget. (objective 4)"
     },
     {
       "question": "You want to shorten the window in which your application can read stale data from a demoted site. Which change actually shortens it?",

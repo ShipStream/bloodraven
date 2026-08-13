@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` reports `activeSite: iad`, and its site entries read: `iad` state `writable`, no other fields; `pdx` state `read-only`, `replicating: true`, `secondsBehindSource: 0`; `reader` state `read-only`, `replicating: true`, `secondsBehindSource: 0`. Which site is the primary, and what in the dump establishes it?
+`playground` reports `activeSite: iad`, and its site entries read: `iad` state `writable`, no other fields; `pdx` state `read-only`, `replicating: true`, `secondsBehindSource: 0`; `reader` state `read-only`, `replicating: true`, `secondsBehindSource: 0`. Which site is the primary, and what in the dump establishes it?
 
 - `iad` — it is named in `activeSite` and it is the one site whose state is `writable`
 - `pdx` — it is the only site the operator reports as `replicating`, which is what a primary does
@@ -41,7 +41,7 @@ Role is spec, not status: `status.sites[]` carries name, state, lastSeen, replic
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` now reports `activeSite: iad`; `iad` state `writable`; `pdx` state `read-only`, `replicating: true`; `reader` state `unreachable`. What `reason` does the `Degraded` condition carry?
+`playground` now reports `activeSite: iad`; `iad` state `writable`; `pdx` state `read-only`, `replicating: true`; `reader` state `unreachable`. What `reason` does the `Degraded` condition carry?
 
 - `Healthy` — `role: read-only` sites are excluded from the writable/read-only/unreachable tallies
 - `Degraded` — one site is unreachable while the primary is up
@@ -58,7 +58,7 @@ The reasons are computed over core sites only, and a site with `role: read-only`
 
 **Type:** TRUE_FALSE
 
-Your counter application has just written through `mysql-orders-primary`. `status.sites[]` shows `pdx` with `replicating: true` and `secondsBehindSource: 0`, so that write is certainly present on `pdx`.
+Your counter application has just written through `mysql-playground-primary`. `status.sites[]` shows `pdx` with `replicating: true` and `secondsBehindSource: 0`, so that write is certainly present on `pdx`.
 
 **Correct answer:** false
 

@@ -11,10 +11,10 @@
 
 **Type:** MULTIPLE_CHOICE
 
-You need a completed emergency failover on `orders` that stays completed: `iad` must go down and stay down while you walk an auditor through `status.activeSite`, the failover record and the counter application. Which injection gives you that, deterministically?
+You need a completed emergency failover on `playground` that stays completed: `iad` must go down and stay down while you walk an auditor through `status.activeSite`, the failover record and the counter application. Which injection gives you that, deterministically?
 
 - `kubectl delete pod -l shipstream.io/site=iad --grace-period=0 --force`
-- `kubectl scale deployment mysql-orders-iad --replicas=0`
+- `kubectl scale deployment mysql-playground-iad --replicas=0`
 - SQL `SHUTDOWN` inside the mysql container, leaving the pod and PVC in place
 - Killing the mysqld process so the pod crashes with its PVC intact
 
@@ -28,7 +28,7 @@ Scale-to-0 removes the pod and keeps the site down, which is exactly why scenari
 
 **Type:** MULTIPLE_CHOICE
 
-Four separate incidents on `orders`, each with a single error at a different point of `Execute()`. In which one does `Execute()` return early, leaving `pdx` still read-only and no promotion recorded?
+Four separate incidents on `playground`, each with a single error at a different point of `Execute()`. In which one does `Execute()` return early, leaving `pdx` still read-only and no promotion recorded?
 
 - `SET GLOBAL super_read_only = ON` against the old primary returns a connection error
 - The relay-log drain on `pdx` hits its 30 s budget without catching up
@@ -74,11 +74,11 @@ A clean primary kill measures 12.0 s to the `activeSite` flip, reproducible acro
 
 **Type:** SHORT_ANSWER
 
-A tenant's incident review asks you to write down the RPO commitment for the emergency path on `orders`, and specifically whether `sync_binlog=1` is part of that commitment. Answer both, and say how you would verify the second on this group rather than asserting it.
+A tenant's incident review asks you to write down the RPO commitment for the emergency path on `playground`, and specifically whether `sync_binlog=1` is part of that commitment. Answer both, and say how you would verify the second on this group rather than asserting it.
 
 **Sample answer:**
 
-The contract is one sentence: an emergency failover can lose every transaction that committed on the dying primary but had not yet replicated to the surviving site. Replication between sites is asynchronous and nothing in the CRD closes that window on the emergency path. `sync_binlog=1` is a default, not a guarantee: it is written into the base my.cnf map before `spec.mysqlConf` overrides are applied, so a tenant who sets `sync_binlog: "0"` gets 0, silently, with no warning and no admission rejection. The test is ordering — written after the overrides it is a guarantee, written before them it is a default. The un-weakenable invariants are the block written last: `gtid_mode=ON`, `enforce_gtid_consistency=ON`, `log_replica_updates=ON`, `log_bin`, `skip_replica_start=ON`, the clone plugin load, plus `skip-log-bin`/`disable-log-bin` deleted outright. So I would not trust the layer diagram; I would read the rendered per-site ConfigMap: `kubectl -n bloodraven-playground get configmap mysql-orders-iad-config -o jsonpath='{.data.bloodraven\.cnf}' | grep -E 'sync-binlog|gtid-mode|flush-log'` and report what is actually in the file. I would also flag `innodb_flush_log_at_trx_commit=2`, which Bloodraven ships for throughput: the MySQL manual attributes the loss to any unexpected mysqld process exit, not only power loss, and says it can erase up to N seconds of transactions.
+The contract is one sentence: an emergency failover can lose every transaction that committed on the dying primary but had not yet replicated to the surviving site. Replication between sites is asynchronous and nothing in the CRD closes that window on the emergency path. `sync_binlog=1` is a default, not a guarantee: it is written into the base my.cnf map before `spec.mysqlConf` overrides are applied, so a tenant who sets `sync_binlog: "0"` gets 0, silently, with no warning and no admission rejection. The test is ordering — written after the overrides it is a guarantee, written before them it is a default. The un-weakenable invariants are the block written last: `gtid_mode=ON`, `enforce_gtid_consistency=ON`, `log_replica_updates=ON`, `log_bin`, `skip_replica_start=ON`, the clone plugin load, plus `skip-log-bin`/`disable-log-bin` deleted outright. So I would not trust the layer diagram; I would read the rendered per-site ConfigMap: `kubectl -n bloodraven-playground get configmap mysql-playground-iad-config -o jsonpath='{.data.bloodraven\.cnf}' | grep -E 'sync-binlog|gtid-mode|flush-log'` and report what is actually in the file. I would also flag `innodb_flush_log_at_trx_commit=2`, which Bloodraven ships for throughput: the MySQL manual attributes the loss to any unexpected mysqld process exit, not only power loss, and says it can erase up to N seconds of transactions.
 
 **A full-credit answer shows:**
 
@@ -148,7 +148,7 @@ The direction is the other way: the test is whether the **new** primary's set co
 
 **Type:** MULTIPLE_CHOICE
 
-`iad` is blocked with `divergentGtid` starting `589f4b67`. You annotate `bloodraven.shipstream.io/reclone-site=iad:deadbeef`, and moments later `kubectl get mfg orders -o yaml` shows no such annotation at all. What happened?
+`iad` is blocked with `divergentGtid` starting `589f4b67`. You annotate `bloodraven.shipstream.io/reclone-site=iad:deadbeef`, and moments later `kubectl get mfg playground -o yaml` shows no such annotation at all. What happened?
 
 - The reconciler accepted it and cleared the annotation as the clone started
 - It was rejected; the operator emitted a `RecloneRejected` warning event and deleted the annotation

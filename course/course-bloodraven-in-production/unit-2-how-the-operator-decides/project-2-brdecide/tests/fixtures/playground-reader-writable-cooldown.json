@@ -1,0 +1,64 @@
+{
+  "apiVersion": "shipstream.io/v1alpha1",
+  "kind": "MysqlFailoverGroup",
+  "metadata": {
+    "name": "playground",
+    "namespace": "bloodraven-playground",
+    "annotations": {
+      "bloodraven.shipstream.io/last-failover": "2026-08-12T12:04:06Z",
+      "bloodraven.shipstream.io/last-failover-target": "iad"
+    }
+  },
+  "spec": {
+    "image": "mysql:9.7",
+    "sites": [
+      {
+        "name": "iad",
+        "role": "primary-candidate"
+      },
+      {
+        "name": "pdx",
+        "role": "primary-candidate"
+      },
+      {
+        "name": "reader",
+        "role": "read-only"
+      }
+    ],
+    "failoverCooldown": "30s",
+    "splitBrainPolicy": {
+      "sitePriorities": [
+        "iad",
+        "pdx"
+      ]
+    }
+  },
+  "status": {
+    "sites": [
+      {
+        "name": "iad",
+        "state": "writable",
+        "role": "primary-candidate",
+        "replicating": false,
+        "secondsBehindSource": null
+      },
+      {
+        "name": "pdx",
+        "state": "read-only",
+        "role": "primary-candidate",
+        "replicating": true,
+        "secondsBehindSource": 0
+      },
+      {
+        "name": "reader",
+        "state": "writable",
+        "role": "read-only",
+        "replicating": false,
+        "secondsBehindSource": null
+      }
+    ],
+    "activeSite": "iad",
+    "lastFailover": "2026-08-12T12:04:06Z",
+    "lastFailoverTarget": "iad"
+  }
+}

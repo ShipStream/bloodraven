@@ -1,20 +1,22 @@
 # Split brain, and what `sitePriorities` really buys you
 
-`orders` is telling you something new. The counter application is still writing, both `iad` and `pdx` are answering, and the group's condition reads `SPLIT BRAIN: 2 sites are writable (iad, pdx)` with reason `SplitBrain`. The matrix emits that the moment more than one core site reports `read_only=0` — strictly `len(writable) > 1`, with the `read-only` `reader` site excluded from the tally. Two writable primary-candidates, then. What does the operator do about it?
+`playground` is telling you something new. The counter application's writes are still landing, both `iad` and `pdx` are answering, and the group's condition reads `SPLIT BRAIN: 2 sites are writable (iad, pdx)` with reason `SplitBrain`. The matrix emits that the moment more than one core site reports `read_only=0` — strictly `len(writable) > 1`, with the `read-only` `reader` site excluded from the tally. Two writable primary-candidates, then. What does the operator do about it?
 
-That depends entirely on one field, and the first thing to know is that the documentation gets its name wrong.
+That depends entirely on one field, and there is a habit to install before you go looking for it.
 
-## The field that does not exist
-
-**`spec.splitBrainPolicy.preferSite` does not exist.** The published failover page describes it in prose and — worst of all — in a copy-pasteable YAML block whose `metadata.name` is `orders`. Apply that YAML and nothing happens: the API server prunes fields absent from the CRD schema. No admission error, no event, no warning in the log. Your group keeps the tier-3 behaviour it had before, and you find out at 3am when a split brain sits there alerting and nothing fences.
+## Ask the cluster, not the page
 
 The real field is `spec.splitBrainPolicy.sitePriorities`: an ordered list of site names. The operator promotes the first entry that is currently writable.
+
+The reason to be emphatic about the *name* is a failure mode with no error message anywhere in it. A `MysqlFailoverGroup` that names a field the CRD schema does not define is not rejected — **the API server prunes the unknown field and admits the object**. No admission error, no Kubernetes event, no line in the operator log, and `kubectl get -o yaml` comes back without it because it was never stored. Your group silently keeps whatever behaviour it had, and you find out at 3am when a split brain sits there alerting and nothing fences.
+
+That is not a hypothetical: for part of Bloodraven's history the published failover page described a field called `preferSite` — in prose, and in a copy-pasteable YAML block — that no shipped CRD has ever defined. The page has since been corrected; the dated record is in the [version appendix](../sources.html#version-appendix), row B1. The habit outlives the instance.
+
+Two commands make it impossible to be caught by this class of error. `kubectl explain mysqlfailovergroup.spec.splitBrainPolicy` renders the schema the API server actually validates against, which is the only schema that matters. And `grep -rn preferSite config/crd/bases/ charts/bloodraven/crds/` returns nothing, which is the whole story in one line. Documentation drifts from CRDs in both directions and at unpredictable speed. The CRD is the contract.
 
 ```widget
 {"type":"anatomy","title":"The field that actually ships","parts":[{"text":"splitBrainPolicy:","label":"optional block","note":"Omit it entirely and you are on tier 3 — alert only."},{"text":"  sitePriorities:","label":"the real field","note":"Not preferSite. An ordered list, not a single name. MaxItems 16, matching spec.sites."},{"text":"    - iad","label":"first choice","note":"Wins if it is currently writable AND role: primary-candidate."},{"text":"    - pdx","label":"fallback","note":"Wins only if iad is not currently writable. Order is the whole policy."}]}
 ```
-
-Two habits stop this class of failure. Ask the cluster — `kubectl explain mysqlfailovergroup.spec.splitBrainPolicy` renders the schema the API server actually validates against, not the schema someone wrote a page about. Or grep what shipped: `grep -rn preferSite config/crd/bases/ charts/bloodraven/crds/` returns no match, which is the whole story in one line. Documentation drifts from CRDs; the CRD is the contract.
 
 ## The three tiers, in evaluation order
 
@@ -49,7 +51,8 @@ CEL rejects priority entries that do not name a `primary-candidate` site: *"spli
       "cmd": "kubectl -n bloodraven-playground logs deploy/bloodraven | grep -E 'ALERT|split-brain'",
       "out": "{\"level\":\"WARN\",\"msg\":\"ALERT\",\"message\":\"SPLIT BRAIN: 2 sites are writable (iad, pdx)\"}\n{\"level\":\"WARN\",\"msg\":\"split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities\",\"winner\":\"iad\",\"fencedSite\":\"pdx\"}"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
@@ -63,11 +66,11 @@ The project's own docs flag this with a danger admonition. Carry the sentence ou
 
 ## Where your split brains will actually come from
 
-Not from exotic partitions. From restarting a pod. A freshly created or freshly cloned MySQL pod comes up **writable** for several seconds before anything fences it. A recorded run has the new `pdx` pod Running and writable at **T+22s** and `ALERT: SPLIT BRAIN` at **T+33s** — eleven seconds with two sites taking writes. Restart a pod on `orders` and you reproduce that today.
+Not from exotic partitions. From restarting a pod. A freshly created or freshly cloned MySQL pod comes up **writable** for several seconds before anything fences it. A recorded run has the new `pdx` pod Running and writable at **T+22s** and `ALERT: SPLIT BRAIN` at **T+33s** — eleven seconds with two sites taking writes. Restart a pod on `playground` and you reproduce that today.
 
 The wider world says the same in bigger numbers. GitHub's October 2018 incident: a **43-second** partition left East and West each holding writes the other never saw, and recovery took over **24 hours**. The partition was seconds; the cleanup was a day. Orchestrator issue #854 shows a *graceful* takeover split-brained anyway, because the new master was made writable before the old one was set read-only, leaving the demoted master holding transactions the cluster never got. And Pacemaker on quorum: its loss *"can take an unbounded amount of time to detect and react to… The ultimate cure is to use fencing and lock the other side out."* Bloodraven agrees. The fencing layer is that agreement made executable.
 
-## Recovering `orders` from a split brain
+## Recovering `playground` from a split brain
 
 Four steps, in order:
 
@@ -76,4 +79,4 @@ Four steps, in order:
 3. **Audit the divergence.** `status.sites[].divergentGtid` holds the exact set the loser has and the winner never saw; the `bloodraven_divergent_transactions` gauge holds the count. The condition reason is `DivergentTransactions` and its message names the annotation you need.
 4. **Reclone.** The `bloodraven.shipstream.io/reclone-site` annotation you already met — `<siteName>:<divergentGtidPrefix>`, at least 8 characters, matched against the observed `divergentGtid` so you cannot fat-finger it.
 
-You can now state which tier `orders` is on, justify or change its `sitePriorities`, and run pick-fence-audit-reclone without guessing. What you cannot yet say is what happens to any of it when the operator itself is not there to run it.
+You can now state which tier `playground` is on, justify or change its `sitePriorities`, and run pick-fence-audit-reclone without guessing. What you cannot yet say is what happens to any of it when the operator itself is not there to run it.

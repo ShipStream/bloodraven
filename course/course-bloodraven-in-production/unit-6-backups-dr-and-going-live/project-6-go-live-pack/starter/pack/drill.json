@@ -1,13 +1,13 @@
 {
   "_todo": "TODO E — fill proved[], assumed[], applicationSideAlertOwner and handoverNote. Everything else is the record of the drill you ran.",
-  "group": "orders",
+  "group": "playground",
   "runAt": "2026-08-12T02:10:00Z",
   "profile": "nightly",
   "backupSourceSite": "pdx",
   "backupSourceReason": "replica-preferred",
   "verification": {
     "result": "Succeeded",
-    "sanityCheck": "SELECT COUNT(*) FROM orders.counter",
+    "sanityCheck": "SELECT COUNT(*) FROM playground.counter",
     "sanityCheckValue": 1
   },
   "restore": {

@@ -1,0 +1,67 @@
+{
+  "apiVersion": "shipstream.io/v1alpha1",
+  "kind": "MysqlFailoverGroup",
+  "metadata": {
+    "name": "playground",
+    "namespace": "bloodraven-playground"
+  },
+  "spec": {
+    "image": "mysql:9.7",
+    "sites": [
+      {
+        "name": "iad",
+        "role": "primary-candidate"
+      },
+      {
+        "name": "pdx",
+        "role": "primary-candidate"
+      },
+      {
+        "name": "reader",
+        "role": "read-only"
+      }
+    ],
+    "failoverCooldown": "5m",
+    "splitBrainPolicy": {
+      "sitePriorities": [
+        "iad",
+        "pdx"
+      ]
+    }
+  },
+  "status": {
+    "sites": [
+      {
+        "name": "iad",
+        "state": "unreachable",
+        "role": "primary-candidate",
+        "replicating": false,
+        "secondsBehindSource": null
+      },
+      {
+        "name": "pdx",
+        "state": "read-only",
+        "role": "primary-candidate",
+        "replicating": true,
+        "secondsBehindSource": 0
+      },
+      {
+        "name": "reader",
+        "state": "read-only",
+        "role": "read-only",
+        "replicating": true,
+        "secondsBehindSource": 3
+      }
+    ],
+    "activeSite": "iad",
+    "conditions": [
+      {
+        "type": "Degraded",
+        "status": "False",
+        "reason": "Healthy",
+        "message": "all sites healthy",
+        "lastTransitionTime": "2026-08-12T12:03:00Z"
+      }
+    ]
+  }
+}

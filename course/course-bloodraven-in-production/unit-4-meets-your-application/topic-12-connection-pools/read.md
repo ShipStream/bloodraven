@@ -2,12 +2,13 @@
 
 Unit 3 left you standing in front of a wall. You held `iad` down, the operator promoted `pdx` in
 **12.0 seconds** measured from the kill, the `DNSEndpoint` A record moved, the
-`mysql-orders-primary` selector moved to the surviving site, and every status field on `orders` said
-exactly what it should. And the counter application carried on serving successful reads out of the
-demoted site, with no alert anywhere.
+`mysql-playground-primary` selector moved to the surviving site, and every status field on `playground` said
+exactly what it should. And the counter application went on serving successful, stale reads out of the
+demoted site — while the first write anyone attempted came back `ERROR 1290` — with nothing anywhere
+paging.
 
-Nothing in that list was broken. The failover was correct. Your application was broken, and the
-mechanism is small enough to state in three sentences.
+Nothing in that list was broken. The failover was correct. Your application was broken, in two
+different ways at once, and the mechanism behind both is small enough to state in three sentences.
 
 ## Three sentences
 
@@ -24,27 +25,31 @@ waits for them; it never cuts a writer off. So a surviving session keeps serving
 site is next promoted or demoted. Those reads succeed, return plausible data, and are wrong by
 however far the demoted site has drifted.
 
-**Three: the operator has exactly one mitigation, and it did not run.** Step 2 of the failover
-sequence calls `KillAppConnections` on the old primary:
+**Three: the operator's mitigations all need a reachable old primary, and yours was not.** Step 2 of
+the failover sequence calls `KillAppConnections`:
 `SELECT id FROM information_schema.processlist WHERE id != CONNECTION_ID() AND command NOT IN
 ('Binlog Dump', 'Binlog Dump GTID')`, then `KILL` on each id. It kills everything except itself and
-the binlog dump threads.
+the binlog dump threads. After promotion, the operator keeps going: each topology poll makes one more
+bounded eviction pass against the fenced former primary until a pass finds no sessions or
+`spec.connectionDrainTimeout` (default `30s`) expires.
 
-You are already objecting: *but the operator kills app connections.* It does — and knowing its
-limits precisely is the difference between an assumption and a control. It is best-effort,
-single-pass, and never retried. Failures are logged as a warning and the sequence carries on. And it
-runs **only if the old primary is reachable** — the whole block is guarded on the operator having a
-working handle to it. In the Unit 3 scenario the site was held down, so the kill could not run at
-all. In a partition it will not run either, which is the case that stings: `iad`'s mysqld is up and
-answering your application, and unreachable only from the operator.
+You are already objecting: *but the operator kills app connections.* It does — and knowing the limit
+precisely is the difference between an assumption and a control. The limit is not the retry count. It
+is the word *reachable*: every one of those passes is a SQL statement, issued over a connection to the
+site being drained. In the Unit 3 scenario `iad` was scaled to zero, so there was nothing to connect
+to and every pass was a no-op. The case that really stings is the partition, where `iad`'s mysqld is up
+and answering your application perfectly well, and unreachable only from the operator.
 
+Set `spec.connectionDrainTimeout` against your own pool, not against a feeling. It bounds how long the
+operator keeps trying; your pool's maximum connection lifetime bounds how long a survivor can last. The
+larger of the two is your real stale-read window.
 ```widget
 {
   "type": "sequence",
   "title": "The connection that never moves",
   "actors": [
     "counter-app",
-    "mysql-orders-primary",
+    "mysql-playground-primary",
     "iad",
     "pdx"
   ],
@@ -85,21 +90,31 @@ answering your application, and unreachable only from the operator.
       "note": "A write is the only operation that surfaces the fence."
     }
   ],
-  "caption": "Six of the nine steps involve a socket that was correct when it was opened and wrong ever after. Only the last one tells you."
+  "caption": "Every message after the promotion travels a socket that was correct when it was opened and wrong ever after. Only the write says so."
 }
 ```
 
-## The project says so itself
+## This is a known gap, and it is only half closed
 
-This is not a lesson invented for the course. Issue **#123 is open** and PR **#137 is unmerged** in
-v0.9.1 — a live, acknowledged gap, not history. The project's own wording is that an autonomous
-sidecar self-fence has no operator-side connection drain, and that only **planned failover** actually
-drains. Nothing else does.
+None of this is a lesson invented for the course. The project has tracked it as a defect, narrowed it,
+and left the part you just met open — the dated record is in the
+[version appendix](../sources.html#version-appendix), row A1, which is where to look before you quote
+a version.
 
-The observability half is worse. No alert in Bloodraven's alert-to-runbook map fires for this.
-`BloodravenFailoverOccurred` watches the operator's own counter, `bloodraven_failovers_total` — it
-tells you a promotion happened, and its "first checks" column in `docs/docs/alert-runbook-map.mdx`
-already lists **app writes** as something a human goes and looks at. Nothing is watching your pool.
+What is settled is the shape. There are exactly three connection-drain behaviours, and only one of
+them is unconditional:
+
+| Path | Drains connections? |
+|---|---|
+| **Planned failover** | Yes. Repeatedly, inside `drainTimeout`, before the write endpoint moves. It is the only path that drains *ahead* of the switch. |
+| **Emergency failover** | Best-effort during the sequence, then retried per poll inside `spec.connectionDrainTimeout` — but only while the fenced site answers. |
+| **Autonomous sidecar self-fence** | The sidecar kills what it can and does not retry, because it cannot safely tell an application session from the operator's own. |
+
+The observability half is worse, and no release has changed it. No shipped alert fires for "the
+application is still broken after a successful failover." `BloodravenFailoverOccurred` watches the
+operator's own counter, `bloodraven_failovers_total` — it tells you a promotion happened, and its
+"first checks" column already lists **app writes** as something a human goes and looks at. Nothing is
+watching your pool. That alert is yours to write, and Unit 6 makes you write it.
 
 ## Four ecosystems, one shape
 
@@ -172,8 +187,8 @@ The real fix is three parts and none of them works alone:
 2. **Retry on the right error class** — the read-only write errors, 1290 and 1792 — not blanket
    retry-everything, which will happily replay a statement that failed for an entirely different
    reason.
-3. **A read/write split**, so writes resolve through `mysql-orders-primary` and only reads go to
-   `mysql-orders-replicas`.
+3. **A read/write split**, so writes resolve through `mysql-playground-primary` and only reads go to
+   `mysql-playground-replicas`.
 
 ## The artifact
 
@@ -181,18 +196,21 @@ The playground's counter application already carries parts one and three, and it
 diagnostic that makes the failure visible:
 
 ```go
-// playground/counter-app/main.go:89-90
+// connectLoop, in playground/counter-app/main.go — part one of the fix, already applied
 conn.SetMaxOpenConns(5)
 conn.SetConnMaxLifetime(30 * time.Second)
 
-// playground/counter-app/main.go:179-186 — asked on the same connection the read came from
+// handleCounter — asked on the same connection the read came from
 conn.QueryRow(`SELECT @@global.read_only`).Scan(&readOnly)
 conn.QueryRow(`SELECT @@hostname`).Scan(&host)
 ```
 
 That is why the counter's `/api/counter` response carries `readOnly` and `dbHost` beside `value`.
-Hit it during a failover and you are not guessing: the read succeeds, `readOnly` is `true`, and
-`dbHost` still names the demoted site. Three fields, one connection, the whole mechanism on screen.
+Hit it inside thirty seconds of a failover and you are not guessing: the read succeeds, `readOnly` is
+`true`, and `dbHost` still names the demoted site. Three fields, one connection, the whole mechanism
+on screen. Wait longer than thirty seconds and it has healed itself — because `SetConnMaxLifetime(30s)`
+is doing exactly what part one of the fix is supposed to do. The bug is easiest to see in an
+application that has already been half-fixed.
 
 ## Choosing a strategy
 
@@ -201,7 +219,7 @@ Bloodraven moves labels, records and taints; the strategy is yours.
 
 | Strategy | How the pool gets refreshed | Choose it when |
 |---|---|---|
-| **Taint-based** | The `shipstream.io/db-readonly-<group>` `NoExecute` taint from topic 11 evicts the non-tolerating app pod at the demoted site; the restart guarantees a fresh pool | The app is co-located with MySQL and restarting it is cheap |
+| **Taint-based** | The `shipstream.io/db-readonly-<group>` `NoExecute` taint from the previous topic evicts the non-tolerating app pod at the demoted site; the restart guarantees a fresh pool | The app is co-located with MySQL and restarting it is cheap |
 | **Service-based** | The app stays up; bounded lifetime plus error-class retry carries it across | Restarts are expensive, or the app is not site-pinned |
 | **Site-local warm standby** | An instance runs at every site; only the one co-located with the current primary takes writes | Cross-site write latency is the binding constraint |
 
@@ -216,5 +234,5 @@ application.
 So you measure. You can now explain the stale-read mechanism from first principles, name Bloodraven's
 one mitigation and its exact limits, choose between the three strategies, and state the three-part
 pool fix. What you cannot yet state is your own write-gap in seconds — the interval between the last
-write the counter app completed against `iad` and the first it completed against `pdx`. That is the
+write *your writer* completed against `iad` and the first it completed against `pdx`. That is the
 unit project, and it is the only number about your application that is worth anything.

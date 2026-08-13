@@ -1,12 +1,12 @@
 # The nine steps of a promotion
 
-`orders` is healthy. `iad` is writable, `pdx` and `reader` are read-only, and the counter application
-is committing through `mysql-orders-primary` without pausing. You can already predict which matrix row
-fires and which site becomes the candidate. Stop predicting and pull the plug.
+`playground` is healthy. `iad` is writable, `pdx` and `reader` are read-only, and the counter application is
+reading and writing through `mysql-playground-primary` without complaint. You can already predict which
+matrix row fires and which site becomes the candidate. Stop predicting and pull the plug.
 
 ```bash
-kubectl -n bloodraven-playground scale deployment mysql-orders-iad --replicas=0
-kubectl -n bloodraven-playground get mysqlfailovergroup orders \
+kubectl -n bloodraven-playground scale deployment mysql-playground-iad --replicas=0
+kubectl -n bloodraven-playground get mysqlfailovergroup playground \
   -o jsonpath='{.status.activeSite}{"\n"}'
 ```
 
@@ -35,10 +35,10 @@ completing the failover. The genuine no-failover cases are different in kind:
 
 ## The sequence the code actually runs
 
-The documentation's ten-step list does not match `internal/controller/failover.go`: it omits a step,
-misstates fatality, and counts two of the promotion's poll neighbours as links in the chain. This
-course teaches the code. There are nine steps, and what matters about each is whether an error aborts
-the failover or merely produces a log line.
+`FailoverController.Execute` in `internal/controller/failover.go` is the whole promotion, and it is
+short enough to read in one sitting. There are nine steps. What matters about each is not what it
+does — you can guess most of that — but whether an error aborts the failover or merely produces a log
+line.
 
 ```widget
 {
@@ -86,9 +86,10 @@ flip is logged and heals on the next poll; a forgotten promotion would not.
   "lines": [
     {
       "cmd": "kubectl -n bloodraven-playground logs -l app.kubernetes.io/name=bloodraven | grep 'failover complete'",
-      "out": "{\"time\":\"2026-04-30T20:55:52.912585929Z\",\"level\":\"INFO\",\"msg\":\"failover complete\",\"fg\":\"bloodraven-playground/orders\",\"promotedSite\":\"pdx\",\"promotionGtid\":\"0e29fbce-44d6-11f1-b93f-2e1a52f79466:1-9\"}"
+      "out": "{\"time\":\"2026-04-30T20:55:52.912585929Z\",\"level\":\"INFO\",\"msg\":\"failover complete\",\"fg\":\"bloodraven-playground/playground\",\"promotedSite\":\"pdx\",\"promotionGtid\":\"0e29fbce-44d6-11f1-b93f-2e1a52f79466:1-9\"}"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
@@ -100,8 +101,9 @@ anything-else-to-writable removes it, read-only ↔ unreachable does nothing. A 
 failover because the same transition triggers both.
 
 **Source convergence is not part of it either.** It is an independent poll stage with its own 20 s
-budget, repointing replicas at whichever site is now authoritative. The docs present both as ordered
-steps. They are neighbours in the poll, not links in the chain.
+budget, repointing replicas at whichever site is now authoritative. Both are neighbours in the poll,
+not links in the chain — which matters the moment one of them fails, because a failed taint or a
+failed repoint retries on the next poll rather than aborting a promotion.
 
 ## Inside the 30-second drain
 
@@ -121,31 +123,52 @@ The difference is entirely the drain. Both runs pay the same 6 s of detection �
 `failureThreshold` 3. In the 12 s case the candidate is already caught up and the drain returns at once
 on its early-exit condition. In the 36 s case it has relay logs to apply and spends its whole budget:
 36.005 s − 12.0 s = 24.0 s of extra wall clock. Learn 12 s typical and roughly 37 s worst case (6 s
-detect + 30 s drain), and be able to say which you are looking at; the documentation's 30–45 s figure
-is unsourced and contradicted by the recorded runs. One caveat before you trust your own stopwatch: the
+detect + 30 s drain), and be able to say which you are looking at. Published wall-clock figures for
+failover — anyone's, including Bloodraven's own pages — are estimates; the run recorded under
+`playground/chaos-results/` is the measurement, and it is the one you can produce yourself. One caveat before you trust your own stopwatch: the
 playground overrides `failoverCooldown` to 30 s against a shipped default of 5 m. The timings here are
 real. The cooldown is not.
 
-> **You did everything right, and your application never noticed. That is the problem.**
+> **The promotion was flawless. Your application still needs telling — and only one half of it
+> complains.**
 >
 > `iad` is scaled to zero and staying down. The operator promoted `pdx` in about twelve seconds, the
-> DNS record flipped, the `-primary` Service selector moved. And the counter application kept working
-> — no errors, no alerts, reads succeeding.
+> DNS record flipped, the `-primary` Service selector moved. Now go and look at the counter app,
+> because what it does next is two different failures wearing one incident.
 >
-> Then you check which site it is reading from. It is `iad`. The site you just demoted.
+> The browser polls `/api/counter` every two seconds. That is a **read**, and it keeps succeeding —
+> on the pooled socket the app opened to `iad` before any of this happened. The response comes back
+> `200`, the value it carries is whatever `iad` had when it stopped being primary, and the app's own
+> `dbHost` field still names `iad`. Nothing errors. Nothing retries. The number on the screen simply
+> stops moving, and a number that stops moving looks exactly like a quiet Tuesday.
 >
-> This is not a mistake you made and it is not a misconfiguration. `super_read_only` blocks writes but
-> closes no sockets, so a session that was already open keeps right on serving stale reads. The
-> operator's one mitigation, `KillAppConnections`, runs only when the old primary is reachable and is
-> never retried — and you have held the site down, so it cannot run at all. Issue #123 is open and PR
-> #137 is unmerged: a live, acknowledged gap. Nothing in the alert map fires for it.
+> Now press **+ Increment**. *That* is the write, and it fails immediately and loudly:
+> `ERROR 1290 (HY000): The MySQL server is running with the --read-only option`, surfaced as an HTTP
+> 500. Writes do not drift. They break on the first attempt, with an error code that names the cause.
 >
-> The mental model to carry out of here: the operator's job ends at a label selector and a DNS record,
-> and a socket that was already open is outside its reach. Unit 4 is where you close it. Not yet.
+> So the failure is not subtle. It is **split in half**: writes fail fast and visibly, reads succeed
+> and lie. And the reason nobody was paged is neither of those — it is that nothing anywhere is
+> watching the only signal that would have caught it. `BloodravenFailoverOccurred` fires off the
+> operator's own counter and says the operator finished, not that traffic recovered. Not one shipped
+> alert watches application write failures. The half that screams is the half nothing is listening
+> to.
+>
+> The mechanism is worth stating exactly, because Unit 4 builds three fixes on it. `super_read_only`
+> blocks writes but **closes no sockets**, so a session that was already open keeps serving reads from
+> a demoted site. The operator's one countermeasure, `KillAppConnections`, needs a *reachable* old
+> primary — and you have held `iad` down, so there is nothing to connect to and nothing to kill.
+>
+> One honest caveat before you go looking, because it is also the first half of the fix. The counter
+> app sets `SetConnMaxLifetime(30 * time.Second)`, so its stale window closes on its own inside about
+> thirty seconds. Look within thirty seconds of the promotion or you will miss it — and notice that
+> the reason it self-heals is a pool setting somebody chose, not anything Bloodraven did.
+>
+> The model to carry out of here: the operator's job ends at a label selector and a DNS record, and a
+> socket that was already open is outside its reach. Unit 4 is where you close it. Not yet.
 
 ## Where this leaves you
 
-You have driven a real emergency failover on `orders`, you can recite the nine steps with fatality per
+You have driven a real emergency failover on `playground`, you can recite the nine steps with fatality per
 step, and you can look at a 36 s run and name the 24 s the drain spent. You have also seen something
 that should bother you. Before you fix it you need the other half of the story: not how long the
 failover took, but which transactions did not make it. That count is in the group's status right now,

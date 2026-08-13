@@ -3,7 +3,7 @@
 **Unit:** 6 — Backups, disaster recovery, and going live
 **Objectives (unit-numbered):**
 4. Run a backup verification and say precisely what a `Succeeded` result proved   [obj 4]
-5. Restore `orders` in place using the RFC 3339 confirmation token   [obj 5]
+5. Restore `playground` in place using the RFC 3339 confirmation token   [obj 5]
 6. Explain why a `pointInTime` request is rejected when PITR is disabled   [obj 6]
 
 ## Topic generation prompt
@@ -26,6 +26,6 @@ Close on GitLab's January 2017 outage: five backup mechanisms, none of them usab
 
 ## Handoff
 
-**Inherits:** The learner can configure backups and PITR for `orders` and knows what is not recoverable.
-**Leaves:** The learner can verify a backup, restore `orders` in place through the confirm token, and say exactly what their verification did and did not prove.
+**Inherits:** The learner can configure backups and PITR for `playground` and knows what is not recoverable.
+**Leaves:** The learner can verify a backup, restore `playground` in place through the confirm token, and say exactly what their verification did and did not prove.
 **Do not cover:** Encryption at rest, the keyring lifecycle (topic 3), metrics and alerting (topic 4), cross-cluster DR (topic 5).

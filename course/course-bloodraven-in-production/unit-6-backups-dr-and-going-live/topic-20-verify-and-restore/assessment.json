@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "A scheduled verification of the `orders` nightly profile reports `Succeeded`, with `status.sanityCheck.resultRow: \"1\"` against a `minRows: 1` floor. What has it proved?",
+      "question": "A scheduled verification of the `playground` nightly profile reports `Succeeded`, with `status.sanityCheck.resultRow: \"1\"` against a `minRows: 1` floor. What has it proved?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -76,7 +76,7 @@
       "explanation": "A verification restores the artifact into an ephemeral throwaway mysqld and runs whatever scalar you asserted. That is the entire contract, and it says nothing about the live primary. Logical equivalence with the primary is explicitly out of scope — it needs a different tool, and the verification never contacts the primary to compare. An RTO claim is wrong twice over: the verification loads into a cold, isolated instance with its own PVC and no Service, not into your production path, so its wall clock is not your recovery time. And application-level rehearsal of writes or traffic cutover is the thing verification deliberately does not do — that is a DR drill. A Succeeded is the cheap half of the problem, and the half that otherwise fails silently. (objective 4)"
     },
     {
-      "question": "`orders` is live and healthy, but a bad migration last night corrupted one schema. You want last night's dump loaded back into the running group. Which field do you set?",
+      "question": "`playground` is live and healthy, but a bad migration last night corrupted one schema. You want last night's dump loaded back into the running group. Which field do you set?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 1,
       "options": [

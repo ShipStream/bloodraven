@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-The operator begins a failover on `orders` and the very first statement — SET GLOBAL super_read_only = ON against the dead `iad` primary — fails with a connection error. What happens next?
+The operator begins a failover on `playground` and the very first statement — SET GLOBAL super_read_only = ON against the dead `iad` primary — fails with a connection error. What happens next?
 
 - The failover aborts and is retried on the next poll, because promoting without fencing risks split brain
 - The operator logs a warning and carries straight on to the next step
@@ -70,7 +70,7 @@ Writable confirmation runs synchronously in the same call stack as the promotion
 
 **Type:** SHORT_ANSWER
 
-A failover on `orders` measures 36 s from primary kill to `activeSite` flip, where your previous runs all landed at 12 s. Account for the extra 24 seconds, and say what you would check to confirm your explanation.
+A failover on `playground` measures 36 s from primary kill to `activeSite` flip, where your previous runs all landed at 12 s. Account for the extra 24 seconds, and say what you would check to confirm your explanation.
 
 **Sample answer:**
 

@@ -1,17 +1,19 @@
 # The bet Bloodraven makes
 
-`orders` is a `MysqlFailoverGroup`: the MySQL behind a warehouse system, spread across the sites
-`iad` and `pdx`, with a third site called `reader`. A counter application writes to it in a loop
-through the `mysql-orders-primary` Service and never stops. One of those sites will go away — a
-node, a rack, a region, a drain run at the wrong hour. The question is not whether, but what
-`orders` does in the ninety seconds afterwards, and how many committed transactions you can still
-account for once it is over.
+`playground` is a `MysqlFailoverGroup` — the name the shipped manifest gives it, and the name every
+command in this course uses with no edit. Read it as the group you will actually run: three sites,
+`iad` and `pdx` plus a third called `reader`, holding the MySQL behind a warehouse system. A counter
+application is pointed at it through the `mysql-playground-primary` Service; its page reads the
+counter every two seconds and its one button writes. One of those sites will go away — a node, a
+rack, a region, a drain run at the wrong hour. The question is not whether, but what `playground`
+does in the ninety seconds afterwards, and how many committed transactions you can still account for
+once it is over.
 
 ## The deployment Bloodraven is built for
 
 Bloodraven targets one shape and is explicit about it: **two or more MySQL sites, ordinary
 asynchronous replication, exactly one site writable at a time, and a non-zero RPO accepted on
-unplanned loss.** `spec.sites` takes between 2 and 16 entries; `orders` uses three. That is the
+unplanned loss.** `spec.sites` takes between 2 and 16 entries; `playground` uses three. That is the
 whole design point.
 
 *Asynchronous* means a write commits on the primary and is acknowledged to your application before
@@ -97,15 +99,15 @@ losing the ability to write while a cross-site link misbehaves is the worse outc
 
 ## The starting state
 
-Nothing has changed yet; this is `orders` as it ships, excerpted:
+Nothing has changed yet; this is `playground` as it ships, excerpted:
 
 ```yaml
 apiVersion: shipstream.io/v1alpha1
 kind: MysqlFailoverGroup
 metadata:
-  name: orders
+  name: playground
 spec:
-  image: mysql:9.7            # 9.7 is the current MySQL LTS
+  image: mysql:9.7            # the one MySQL baseline Bloodraven supports — pin it, never mysql:9
   sites:                      # MinItems 2, MaxItems 16
     - name: iad
       role: primary-candidate
@@ -114,7 +116,7 @@ spec:
     - name: reader
       role: read-only
   dns:
-    hostname: orders-db.example.local
+    hostname: playground-db.example.local
   # ... splitBrainPolicy, replication, sidecar, storage elided
 ```
 
@@ -131,12 +133,6 @@ the new one's, publishes the count as `bloodraven_divergent_transactions`, and r
 `status.sites[].divergentGtid`. All of it is exercised by 49 registered chaos scenarios against real
 clusters.
 
-Settle one thing before you plan a dependency. Bloodraven v0.9.1 was published on 2026-08-11 from a
-public, unarchived GitHub repository — and it carries **no licence**. The API reports
-`"license": null` and there is no `LICENSE` file in the repo root. Public source is not open source;
-everything is reserved by default. If your organisation needs a right to use, fork or vendor it,
-that is a conversation, not a `git clone`.
-
 ## Where this leaves you
 
 You can now say what deployment Bloodraven targets, and what it will refuse to do for you. You can
@@ -147,7 +143,7 @@ also name a failover group's four parts, without yet knowing what any of them do
   "type": "tree",
   "title": "What a failover group is made of",
   "root": {
-    "name": "MysqlFailoverGroup orders",
+    "name": "MysqlFailoverGroup playground",
     "children": [
       {
         "name": "sites — iad, pdx, reader (each a MySQL pod plus a sidecar container)"
@@ -156,10 +152,10 @@ also name a failover group's four parts, without yet knowing what any of them do
         "name": "the operator — one Deployment, watching the CR"
       },
       {
-        "name": "Services — mysql-orders-primary, mysql-orders-replicas, and one per site"
+        "name": "Services — mysql-playground-primary, mysql-playground-replicas, and one per site"
       },
       {
-        "name": "a DNS record — a DNSEndpoint object named bloodraven-orders"
+        "name": "a DNS record — a DNSEndpoint object named bloodraven-playground"
       }
     ]
   }

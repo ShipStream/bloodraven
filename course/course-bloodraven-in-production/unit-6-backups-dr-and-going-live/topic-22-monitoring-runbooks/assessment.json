@@ -73,7 +73,7 @@
   ],
   "quiz": [
     {
-      "question": "It is 3am and one Bloodraven alert has fired for `orders`. The counter application has not missed a write, both `iad` and `pdx` are serving, and replication lag is flat. Which alert is it?",
+      "question": "It is 3am and one Bloodraven alert has fired for `playground`. The counter application has not missed a write, both `iad` and `pdx` are serving, and replication lag is flat. Which alert is it?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -86,10 +86,10 @@
       "explanation": "The operator is on the failure-detection and promotion path, not the request path — a healthy primary and replica keep serving with zero operator involvement, and sidecar fencing preserves correctness however long it is gone. So the only alert compatible with 'writes are fine' is the one saying nobody is deciding anything; what you have lost is failover cover, which is why it is a ticket that escalates rather than an instant page. `BloodravenNoWritableSite` and `BloodravenNoPrimary` are both built on `bloodraven_site_state` and both mean writes are down now, which contradicts the counter app still writing. `BloodravenReplicationDown` fires off `bloodraven_replication_running == 0`, which contradicts flat lag on a running replica. (objective 10)"
     },
     {
-      "question": "Chaos scenario 42 applies `SOURCE_DELAY` to the `read-only` site `reader` and soaks `orders` for three times `maxLagSeconds` while the primary keeps taking writes. Which single alert in a carelessly written set would page you, and exactly what do you change to fix it?",
+      "question": "Chaos scenario 42 applies `SOURCE_DELAY` to the `read-only` site `reader` and soaks `playground` for three times `maxLagSeconds` while the primary keeps taking writes. Which single alert in a carelessly written set would page you, and exactly what do you change to fix it?",
       "type": "SHORT_ANSWER",
       "orderIndex": 1,
-      "sampleAnswer": "`BloodravenReplicationLagging`, written as `bloodraven_replication_lag_seconds > 30`. Add a site-label exclusion for the reader: `bloodraven_replication_lag_seconds{site!=\"reader\"} > 30`. Nothing else in the set moves — scenario 42 asserts the group stays Ready, activeSite never changes, no failover is recorded and no anti-flap cooldown is consumed. The only reaction is that `reader` leaves the endpoints of `mysql-orders-replicas` once its lag passes `readOnlyMaxLagSeconds`, which is the designed behaviour of the read-only role, not a fault. The exclusion has to name the site because the gauge carries a `site` label only — there is no `role` label to filter on.",
+      "sampleAnswer": "`BloodravenReplicationLagging`, written as `bloodraven_replication_lag_seconds > 30`. Add a site-label exclusion for the reader: `bloodraven_replication_lag_seconds{site!=\"reader\"} > 30`. Nothing else in the set moves — scenario 42 asserts the group stays Ready, activeSite never changes, no failover is recorded and no anti-flap cooldown is consumed. The only reaction is that `reader` leaves the endpoints of `mysql-playground-replicas` once its lag passes `readOnlyMaxLagSeconds`, which is the designed behaviour of the read-only role, not a fault. The exclusion has to name the site because the gauge carries a `site` label only — there is no `role` label to filter on.",
       "graderNotes": "A strong answer names `BloodravenReplicationLagging` (or an equivalent rule on `bloodraven_replication_lag_seconds`), writes the corrected expression with a `site!=\"reader\"` matcher, and justifies the exclusion by scenario 42's assertions — group stays Ready, no failover, no cooldown consumed, only the reader endpoint sheds. Credit the observation that the exclusion must be by site name because the metric has no `role` label. Do not credit answers that propose raising the threshold, lengthening `for:`, or silencing the alert in the alertmanager route: those hide a real replica falling behind as well as the reader.",
       "explanation": "The reader shedding its endpoint is the read-only role working as designed, so an alert on it is a page for a non-event the system already handled. Raising the threshold or extending `for:` would also mute a genuinely lagging `pdx`; the exclusion is surgical because it removes exactly the one site whose lag has no bearing on RPO. (objectives 10, 12)"
     },
@@ -107,7 +107,7 @@
       "explanation": "The matrix emits exactly five reasons — `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss` — and the failover row is stamped `Degraded`, so a matcher on `Failover` sits green forever. Use `bloodraven_failovers_total` for 'a failover happened'. The scrape-timing option is tempting but wrong twice over: the matrix is evaluated every poll so status always carries the current topology, and the reason would still be the wrong string at any scrape interval. `sitePriorities` governs split-brain auto-resolution only; it does not gate whether conditions carry reasons. And `SplitBrain` is a distinct matrix row requiring more than one writable core site, which a completed promotion is not. (objective 10)"
     },
     {
-      "question": "`bloodraven_archiver_backlog_files{site=\"iad\"}` has been non-zero at every scrape for five minutes. `orders` is Ready, the counter app is writing normally and replication lag is 0. What is actually degrading?",
+      "question": "`bloodraven_archiver_backlog_files{site=\"iad\"}` has been non-zero at every scrape for five minutes. `playground` is Ready, the counter app is writing normally and replication lag is 0. What is actually degrading?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 3,
       "options": [

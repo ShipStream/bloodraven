@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-In `orders`, `iad` (primary-candidate) is writable and `reader` (role: read-only) comes up writable after a pod restart. `pdx` is read-only. What does EvalCrossSite return?
+In `playground`, `iad` (primary-candidate) is writable and `reader` (role: read-only) comes up writable after a pod restart. `pdx` is read-only. What does EvalCrossSite return?
 
 - Reason "SplitBrain" with alert `SPLIT BRAIN: 2 sites are writable (iad, reader)`
 - Reason "Degraded" with alert `writable non-promotable site requires fencing (reader)`, returning before any other row is evaluated
@@ -24,7 +24,7 @@ The tally loop routes any writable site whose role is not primary-candidate into
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` has `iad` and `pdx` both reachable and both read-only, and no site unreachable. What does the operator do?
+`playground` has `iad` and `pdx` both reachable and both read-only, and no site unreachable. What does the operator do?
 
 - Promotes whichever of `iad` or `pdx` has the freshest GTID set, since both are eligible primary-candidates
 - Promotes `iad`, because it is first in `spec.splitBrainPolicy.sitePriorities`
@@ -88,7 +88,7 @@ Ordering the candidate list is not the same as choosing from it. The matrix is p
 
 **Type:** MULTIPLE_CHOICE
 
-The matrix reports Reason "NoPrimary" for `orders` on one poll and "Degraded" on the next, without any promotion or fencing having run in between. What best explains it?
+The matrix reports Reason "NoPrimary" for `playground` on one poll and "Degraded" on the next, without any promotion or fencing having run in between. What best explains it?
 
 - A bug: the reason can only change when the operator has taken a mutating cross-site action
 - The matrix is evaluated on every poll so status always carries the current condition, while the mutating cross-site actions remain transition-driven — a site's state changed, and that alone moves the reason

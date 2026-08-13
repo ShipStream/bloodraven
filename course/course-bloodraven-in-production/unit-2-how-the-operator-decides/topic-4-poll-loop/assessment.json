@@ -53,7 +53,7 @@
   ],
   "quiz": [
     {
-      "question": "`orders` runs at defaults: `pollInterval: 2s`, `failureThreshold: 3`, `recoveryThreshold: 2`. All three sites have been healthy for hours. `iad` stops answering entirely. How long until the operator records `iad` as `unreachable`?",
+      "question": "`playground` runs at defaults: `pollInterval: 2s`, `failureThreshold: 3`, `recoveryThreshold: 2`. All three sites have been healthy for hours. `iad` stops answering entirely. How long until the operator records `iad` as `unreachable`?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -105,7 +105,7 @@
       "explanation": "The adaptive backoff is driven by the worst `failCount` across all sites, so `pdx`'s sustained outage has pushed the single loop to its 30 s hard cap. `iad` still needs `failureThreshold` = 3 consecutive failures, and they now arrive 30 s apart: 30 s × 3 = 90 s. 6 s is the healthy-cluster answer (2 s × 3) and assumes the interval is still the base — the trap the backoff sets, because it is undocumented and cluster-wide rather than per-site. 30 s is the interval itself, mistaken for the detection delay; the threshold still needs three of them. 12 s reads the 30 s cap as if only the failing site backed off while `iad` kept some faster cadence — there is one loop, not one per site. (objective 2)"
     },
     {
-      "question": "`reader` in `orders` has `role: read-only`. It answers `read_only=0` on one probe. The operator waits for `recoveryThreshold` consecutive writable answers before recording it as `writable`, exactly as it would for a `primary-candidate` site.",
+      "question": "`reader` in `playground` has `role: read-only`. It answers `read_only=0` on one probe. The operator waits for `recoveryThreshold` consecutive writable answers before recording it as `writable`, exactly as it would for a `primary-candidate` site.",
       "type": "TRUE_FALSE",
       "orderIndex": 4,
       "correctAnswer": false,

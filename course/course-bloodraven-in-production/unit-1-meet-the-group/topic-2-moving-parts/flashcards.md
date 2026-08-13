@@ -3,21 +3,21 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Front:** The `mysql-orders-primary` Service selects on which pod labels?
+**Front:** The `mysql-playground-primary` Service selects on which pod labels?
 
-**Back:** Two: `app.kubernetes.io/instance=orders` and `shipstream.io/role=primary`. No health label.
+**Back:** Two: `app.kubernetes.io/instance=playground` and `shipstream.io/role=primary`. No health label.
 
 ---
 
-**Front:** The `mysql-orders-replicas` Service selects on which pod labels?
+**Front:** The `mysql-playground-replicas` Service selects on which pod labels?
 
-**Back:** Three: `app.kubernetes.io/instance=orders`, `shipstream.io/role=replica`, and `shipstream.io/healthy=yes`.
+**Back:** Three: `app.kubernetes.io/instance=playground`, `shipstream.io/role=replica`, and `shipstream.io/healthy=yes`.
 
 ---
 
 **Front:** How many Service objects does the operator create for a group, and what is the formula?
 
-**Back:** `2 × len(sites) + 2` — two per-site kinds plus two group-wide kinds. For three-site `orders`: eight.
+**Back:** `2 × len(sites) + 2` — two per-site kinds plus two group-wide kinds. For three-site `playground`: eight.
 
 ---
 

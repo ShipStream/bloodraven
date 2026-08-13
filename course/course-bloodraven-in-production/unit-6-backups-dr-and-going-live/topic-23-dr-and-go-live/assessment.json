@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "The cluster hosting `orders` has stopped answering: `kubectl --context=source get nodes` times out. That is your only signal so far. What does the source-fencing checklist say to do next?",
+      "question": "The cluster hosting `playground` has stopped answering: `kubectl --context=source get nodes` times out. That is your only signal so far. What does the source-fencing checklist say to do next?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -83,7 +83,7 @@
       "explanation": "The reversal: those two conditions prove only that the DR cluster could read the bucket and parse the dump metadata. `MysqlStandbyCluster` is observability only today — no MySQL contact, no restore Jobs, no activation. It tells you a DR bootstrap would be possible and roughly how far back the dump plus archived binlog window could reach; it has not loaded a byte of that dump into a mysqld. Proving restorability is a separate act, and the only thing that proves it is a verification that actually restored the artifact. (objective 14)"
     },
     {
-      "question": "The source cluster is fenced and you are standing up a fresh `MysqlFailoverGroup` named `orders` in the DR cluster, to be populated from the S3 prefix the dead cluster was writing to. Which field does that?",
+      "question": "The source cluster is fenced and you are standing up a fresh `MysqlFailoverGroup` named `playground` in the DR cluster, to be populated from the S3 prefix the dead cluster was writing to. Which field does that?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
@@ -96,7 +96,7 @@
       "explanation": "`spec.initFromBackup` is the one-shot restore-on-first-boot field: it gates bootstrap until `status.restore.phase` reads `Succeeded`, then clone and replication proceed normally. Option 1 names the wrong restore entry point — `restoreInPlace` is re-runnable and operates against an already-live active primary, which a brand-new DR group does not have. Option 3 is the trap the standby CRD sets: `spec.template` does hold the shape of the group that a future activation would materialise, but activation is not implemented, so nothing consumes it. Option 4 confuses the archive with the restore — PITR governs whether binlogs were shipped at the source, and it must have been enabled there for a `pointInTime` request to be accepted at all, but it does not itself restore anything. (objective 14)"
     },
     {
-      "question": "You are writing the on-call runbook for `orders` and want every step to be a `kubectl bloodraven` invocation. Which of these is not a subcommand the plugin has?",
+      "question": "You are writing the on-call runbook for `playground` and want every step to be a `kubectl bloodraven` invocation. Which of these is not a subcommand the plugin has?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 3,
       "options": [
@@ -109,7 +109,7 @@
       "explanation": "The surface is exactly seven: status, promote, reclone, backup, verify-backup, version, help. There is no `restore`, and the reason is structural rather than an oversight — restore is not a CR at all, it is two fields on the failover group's spec, and the plugin's design rule is that it only writes resources the operator already reads and never talks to MySQL directly. `promote` and `reclone` exist because both are annotation-driven on the group, so the plugin can write them and inherit every gate. `verify-backup` exists because a verification really is its own CR that the operator reconciles into a throwaway instance. A runbook step that says `kubectl bloodraven restore` will fail at 3am with `unknown command`. (objective 15)"
     },
     {
-      "question": "You are signing off `orders` for production tonight. Four findings are open: (a) nobody can say what `sync_binlog` is on the running instances; (b) `spec.replication.maxLagSeconds` sits at the default 300; (c) the nightly S3 backup has never been verified; (d) the runbook quotes a 30-second anti-flap cooldown, taken from a playground run. Which do you block the launch on, and what do you attach to the ones you accept?",
+      "question": "You are signing off `playground` for production tonight. Four findings are open: (a) nobody can say what `sync_binlog` is on the running instances; (b) `spec.replication.maxLagSeconds` is set and nobody has said what it gates; (c) the nightly S3 backup has never been verified; (d) the runbook quotes a 30-second anti-flap cooldown, taken from a playground run. Which do you block the launch on, and what do you attach to the ones you accept?",
       "type": "SHORT_ANSWER",
       "orderIndex": 4,
       "sampleAnswer": "Block on (a) and (c). `sync_binlog=1` is only an overridable default — it is written into the base my.cnf before `spec.mysqlConf` is applied, so any override in the group's config wins silently. Until somebody reads the value off a running instance, the durability claim in the runbook is unverified, and it is the claim every RPO statement rests on. (c) is the same failure in a different place: an unverified backup is an assumption, and GitLab's 2017 outage is what an assumption looks like when it is finally tested. Accept (b) and (d) with a named owner. For (b) the owner must know that `maxLagSeconds` drives only the `ReplicationLagging` condition and is not a promotion gate — a replica beyond 300 seconds is still promoted, because no writable site is almost always worse. For (d) the owner re-measures every runbook timing against the shipped defaults, since the playground overrides `failoverCooldown` to 30s (against 5m), `maxLagSeconds` to 30 (against 300) and `dns.ttl` to 10 (against 60), so no playground timing transfers unchanged.",

@@ -7,18 +7,18 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A nightly reporting job against `orders` runs long analytical SELECTs and must never issue a write. It can tolerate a few seconds of staleness but not minutes. Which Service should it connect to?
+A nightly reporting job against `playground` runs long analytical SELECTs and must never issue a write. It can tolerate a few seconds of staleness but not minutes. Which Service should it connect to?
 
-- `mysql-orders-replicas`
-- `mysql-orders-primary`, because it is the only endpoint guaranteed to have a pod behind it
-- `mysql-orders-reader`, because the `reader` site is the read-only site
-- `mysql-orders-reader-internal`, the stable in-cluster address
+- `mysql-playground-replicas`
+- `mysql-playground-primary`, because it is the only endpoint guaranteed to have a pod behind it
+- `mysql-playground-reader`, because the `reader` site is the read-only site
+- `mysql-playground-reader-internal`, the stable in-cluster address
 
 **Correct option index:** 0
 
 **Explanation:**
 
-`mysql-orders-replicas` is the read endpoint, and its third selector label `shipstream.io/healthy=yes` is exactly the staleness gate the job needs: a reader pod only earns that label when it is converged, replicating, and within `readOnlyMaxLagSeconds`. Pointing at `mysql-orders-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-orders-reader` pins the job to one site with no health gate at all — if that site stops replicating it keeps serving increasingly stale rows. `mysql-orders-reader-internal` is the per-site address replication and the sidecars use; it is not an application endpoint and carries the same no-health-gate problem. (objective 4)
+`mysql-playground-replicas` is the group read endpoint — instance, `shipstream.io/role=replica` and `shipstream.io/healthy=yes` — so it pools every replica currently fit to serve and drops one silently when it is not. Pointing at `mysql-playground-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-playground-reader` is the near miss, and worth being exact about: because `reader` is a `role: read-only` site, its per-site Service *does* carry the same `healthy=yes` gate, so staleness is covered — but it pins the job to one pod, and the moment that pod loses the label the Service has no endpoints at all rather than falling back to `pdx`. `mysql-playground-reader-internal` is the one with no health gate: it exists for sidecar and peer traffic and sets `publishNotReadyAddresses: true`, so it will hand you a pod that is not serving yet. (objective 4)
 
 ## Question 2
 
@@ -26,16 +26,16 @@ A nightly reporting job against `orders` runs long analytical SELECTs and must n
 
 During the draining phase of a planned failover, the operator stamps the `iad` pod `shipstream.io/role=fenced`. Which Service still resolves to that pod?
 
-- `mysql-orders-iad`, the per-site Service, which selects on site rather than role
-- `mysql-orders-primary` — the pod is still the active site in status, so the write endpoint still points at it
-- `mysql-orders-replicas` — losing the primary role makes it a replica
+- `mysql-playground-iad`, the per-site Service, which selects on site rather than role
+- `mysql-playground-primary` — the pod is still the active site in status, so the write endpoint still points at it
+- `mysql-playground-replicas` — losing the primary role makes it a replica
 - None; the operator deletes the pod as part of fencing
 
 **Correct option index:** 0
 
 **Explanation:**
 
-The per-site Services select on instance and `shipstream.io/site`, never on role, so `mysql-orders-iad` and `mysql-orders-iad-internal` still reach the pod — which is how the operator and the sidecars keep talking to a fenced instance. `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)
+The per-site Services select on name, instance and `shipstream.io/site` — never on role — so `mysql-playground-iad` and `mysql-playground-iad-internal` still reach the pod, which is how the operator and the sidecars keep talking to a fenced instance. (`iad` is a `primary-candidate`; on a `role: read-only` site the per-site Service adds a `healthy=yes` conjunct, but role is still not in the selector.) `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)
 
 ## Question 3
 
@@ -71,9 +71,9 @@ The decision is forced by storage topology, not by design taste: inotify and dir
 
 **Type:** MULTIPLE_CHOICE
 
-The operator Deployment in `orders` is scaled to zero and stays down for an hour while the counter application keeps writing. What happens?
+The operator Deployment in `playground` is scaled to zero and stays down for an hour while the counter application keeps writing. What happens?
 
-- Writes keep flowing through `mysql-orders-primary`, and each site's sidecar can still fence its own MySQL, but nothing will be promoted if the primary dies
+- Writes keep flowing through `mysql-playground-primary`, and each site's sidecar can still fence its own MySQL, but nothing will be promoted if the primary dies
 - Writes stop immediately, because every write is proxied through the operator
 - The `-primary` and `-replicas` Services shed their endpoints, since the operator is no longer confirming the topology
 - Nothing changes — the sidecars elect a new leader among themselves and take over promotion decisions

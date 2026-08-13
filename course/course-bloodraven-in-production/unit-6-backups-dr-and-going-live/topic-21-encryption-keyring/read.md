@@ -1,10 +1,10 @@
 # Encryption at rest and the keyring lifecycle
 
-Restoring `orders` proved you can get the data back. Your security review asks the other question: what happens when someone else gets it? Today the `orders` PVCs hold InnoDB tablespaces, redo, undo and binlogs in the clear on three k3d worker nodes. So you add `spec.encryptionAtRest.enabled: true` and apply — and the API server rejects the object before the operator ever sees it. That rejection is the first honest thing this feature tells you.
+Restoring `playground` proved you can get the data back. Your security review asks the other question: what happens when someone else gets it? Today the `playground` PVCs hold InnoDB tablespaces, redo, undo and binlogs in the clear on three k3d worker nodes. So you add `spec.encryptionAtRest.enabled: true` and apply — and the API server rejects the object before the operator ever sees it. That rejection is the first honest thing this feature tells you.
 
 ## A lifecycle, not a flag
 
-`spec.encryptionAtRest.enabled` is a boolean. What it starts is not. Each site in `orders` — `iad`, `pdx` and the `reader` — walks its own keyring through a phase machine, and the CRD enum names **five** values (objective 7):
+`spec.encryptionAtRest.enabled` is a boolean. What it starts is not. Each site in `playground` — `iad`, `pdx` and the `reader` — walks its own keyring through a phase machine, and the CRD enum names **five** values (objective 7):
 
 ```go
 // +kubebuilder:validation:Enum="";Pending;Unsealed;Escrowed;Sealed;Failed
@@ -14,7 +14,7 @@ type SiteKeyringPhase string
 ```widget
 {
   "type": "flow",
-  "title": "Keyring phases for one site of orders",
+  "title": "Keyring phases for one site of playground",
   "steps": [
     {
       "label": "Pending",
@@ -79,18 +79,18 @@ Now the constraint objective 9 turns on: **the operator refuses to rotate the ac
 
 > The operator refuses to rotate the active primary. Rotation necessarily runs with a writable keyring, and the only window in which a keyring can be lost is that one.
 
-Lose a replica's keyring in that window and you re-clone the site from a healthy peer. Lose the primary's and you have lost data. So the site you cannot rotate is not a fixed name — it is whichever site is currently active. On `orders` right now that is `iad`.
+Lose a replica's keyring in that window and you re-clone the site from a healthy peer. Lose the primary's and you have lost data. So the site you cannot rotate is not a fixed name — it is whichever site is currently active. On `playground` right now that is `iad`.
 
-Work through the consequence for the three sites. `pdx` is a replica and rotatable. The `reader` is `role: read-only` and never a primary, so it is rotatable too. `iad` becomes rotatable by no longer being primary — via the planned failover you already run from Unit 5, at RPO 0 by construction.
+Work through the consequence for the three sites. `pdx` is a replica and rotatable. The `reader` is `role: read-only` and never a primary, so it is rotatable too. `iad` becomes rotatable by no longer being primary — via the planned failover you already run from Unit 4, at RPO 0 by construction.
 
 ```widget
 {
   "type": "order",
-  "title": "Rotating all three sites of orders",
+  "title": "Rotating all three sites of playground",
   "items": [
-    "1. Rotate pdx — kubectl annotate mysqlfailovergroup orders bloodraven.shipstream.io/rotate-keyring=pdx --overwrite — wait for Sealed.",
+    "1. Rotate pdx — kubectl annotate mysqlfailovergroup playground bloodraven.shipstream.io/rotate-keyring=pdx --overwrite — wait for Sealed.",
     "2. Rotate reader — Same annotation, target reader. One site at a time; each rotation mints a new immutable escrow Secret version.",
-    "3. Planned failover to pdx — kubectl annotate mysqlfailovergroup orders bloodraven.shipstream.io/planned-failover=pdx — iad is now a replica.",
+    "3. Planned failover to pdx — kubectl annotate mysqlfailovergroup playground bloodraven.shipstream.io/planned-failover=pdx — iad is now a replica.",
     "4. Rotate iad — Now permitted. Rotation is also refused while an ordered update or a planned failover is in flight, and while no active primary is known."
   ]
 }
@@ -101,14 +101,14 @@ Work through the consequence for the three sites. `pdx` is a replica and rotatab
 Where you previously read `.status.sites[]` for replication state, you now read one more block:
 
 ```bash
-kubectl get mysqlfailovergroup orders \
+kubectl get mysqlfailovergroup playground \
   -o jsonpath='{range .status.encryptionAtRest.sites[*]}{.name}{"\t"}{.phase}{"\t"}{.message}{"\n"}{end}'
 ```
 
-Three sites at `Sealed`, each `sealed against mysql-orders-<site>-keyring-v1`, with `status.encryptionAtRest.sealed: true` — that is the finished state. During step 1 above, `pdx` reads `Unsealed` with `unsealReason: Rotation`, and comes back as `v2`. The phase string is identical to the one it showed at bootstrap; only the reason and the version distinguish them.
+Three sites at `Sealed`, each `sealed against mysql-playground-<site>-keyring-v1`, with `status.encryptionAtRest.sealed: true` — that is the finished state. During step 1 above, `pdx` reads `Unsealed` with `unsealReason: Rotation`, and comes back as `v2`. The phase string is identical to the one it showed at bootstrap; only the reason and the version distinguish them.
 
 One last currency check, because keyring advice ages badly. The current component is `component_keyring_file`, verified against the default `mysql:9.7` image. The `keyring_file` **plugin** was removed in MySQL 8.4.0 along with the `keyring_file_data` system variable — any runbook or blog post naming the plugin is describing something that no longer exists. And Oracle's own caveat belongs in the conversation if someone is enabling this for an auditor: `component_keyring_file` and `component_keyring_encrypted_file` "are not intended as a regulatory compliance solution".
 
 ## Handoff
 
-You can enable encryption at rest on `orders` with its real prerequisites — TLS, because the CRD makes you; API-server encryption and Secret RBAC, because nothing will make you — read any site's keyring phase and know whether it means protected or mid-flight, and rotate all three sites in an order that never opens the primary's keyring. What none of this tells you is when a site quietly stops being sealed at 3am. That is a signal, and signals need somewhere to go.
+You can enable encryption at rest on `playground` with its real prerequisites — TLS, because the CRD makes you; API-server encryption and Secret RBAC, because nothing will make you — read any site's keyring phase and know whether it means protected or mid-flight, and rotate all three sites in an order that never opens the primary's keyring. What none of this tells you is when a site quietly stops being sealed at 3am. That is a signal, and signals need somewhere to go.

@@ -2,7 +2,7 @@
 """brfence — fencing forensics for one MysqlFailoverGroup log bundle.
 
 Reads a directory of JSON-lines logs collected from a single injected fault on
-`orders` and reports every fence, what caused it, and whether the record's own
+`playground` and reports every fence, what caused it, and whether the record's own
 evidence supports it.
 
     python3 brfence.py tests/fixtures/partition-a
@@ -173,7 +173,7 @@ def group_name(records: list) -> str:
         fg = rec.get("fg")
         if fg:
             return fg.split("/")[-1]
-    return "orders"
+    return "playground"
 
 
 def evidence(rec: dict) -> str:

@@ -2,11 +2,11 @@
   "flashcards": [
     {
       "front": "How many Service objects does Bloodraven create for a failover group, and what is the formula?",
-      "back": "2 × len(sites) + 2 — two per-site kinds plus two shared kinds. Three-site `orders` therefore has eight Service objects.",
+      "back": "2 × len(sites) + 2 — two per-site kinds plus two shared kinds. Three-site `playground` therefore has eight Service objects.",
       "orderIndex": 0
     },
     {
-      "front": "`mysql-orders-iad-internal` — what is this Service for?",
+      "front": "`mysql-playground-iad-internal` — what is this Service for?",
       "back": "Sidecar and peer traffic only. It carries the sidecar port beside MySQL, publishes not-ready addresses, and is the canonical replication source host. Applications never use it.",
       "orderIndex": 1
     },
@@ -42,7 +42,7 @@
     },
     {
       "front": "What is the DNSEndpoint object named, and what record type does it always carry?",
-      "back": "`bloodraven-<group>` — so `bloodraven-orders` — and always an `A` record.",
+      "back": "`bloodraven-<group>` — so `bloodraven-playground` — and always an `A` record.",
       "orderIndex": 8
     },
     {
@@ -51,8 +51,8 @@
       "orderIndex": 9
     },
     {
-      "front": "Give the full taint Bloodraven applies to a demoted site's nodes in group `orders`.",
-      "back": "`shipstream.io/db-readonly-orders=true:NoExecute` — prefix `shipstream.io/db-readonly-`, group suffix, constant value `true`, effect `NoExecute`.",
+      "front": "Give the full taint Bloodraven applies to a demoted site's nodes in group `playground`.",
+      "back": "`shipstream.io/db-readonly-playground=true:NoExecute` — prefix `shipstream.io/db-readonly-`, group suffix, constant value `true`, effect `NoExecute`.",
       "orderIndex": 10
     },
     {
@@ -63,28 +63,28 @@
   ],
   "quiz": [
     {
-      "question": "A nightly reconciliation job writes heavily to `orders`. A BI reporting job only reads from it. Which Services should each bind to?",
+      "question": "A nightly reconciliation job writes heavily to `playground`. A BI reporting job only reads from it. Which Services should each bind to?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
-        "Reconciliation job → `mysql-orders-primary`; BI job → `mysql-orders-replicas`",
-        "Reconciliation job → `mysql-orders-pdx` (the current active site); BI job → `mysql-orders-replicas`",
-        "Reconciliation job → `mysql-orders-primary`; BI job → `mysql-orders-reader-internal`",
-        "Both jobs → `mysql-orders-primary`, because only the primary is guaranteed to have current data"
+        "Reconciliation job → `mysql-playground-primary`; BI job → `mysql-playground-replicas`",
+        "Reconciliation job → `mysql-playground-pdx` (the current active site); BI job → `mysql-playground-replicas`",
+        "Reconciliation job → `mysql-playground-primary`; BI job → `mysql-playground-reader-internal`",
+        "Both jobs → `mysql-playground-primary`, because only the primary is guaranteed to have current data"
       ],
       "correctOptionIndex": 0,
-      "explanation": "`-primary` selects on `role=primary` and follows the promotion; `-replicas` selects on `role=replica` plus `healthy=yes` and drops a lagging or non-converged reader automatically. Option 2 pins writes to whichever site is active today — the per-site Service does not follow a promotion, so the job writes to a read-only MySQL the moment `orders` fails over. Option 3 sends reads at the internal per-site Service, which exists for sidecar and peer traffic and applies no health gate at all. Option 4 is the common over-caution: it works, but it puts every reporting query on the write path and throws away the reader tier you are paying for. (objective 1)"
+      "explanation": "`-primary` selects on `role=primary` and follows the promotion; `-replicas` selects on `role=replica` plus `healthy=yes` and drops a lagging or non-converged reader automatically. Option 2 pins writes to whichever site is active today — the per-site Service does not follow a promotion, so the job writes to a read-only MySQL the moment `playground` fails over. Option 3 sends reads at the internal per-site Service, which exists for sidecar and peer traffic and applies no health gate at all. Option 4 is the common over-caution: it works, but it puts every reporting query on the write path and throws away the reader tier you are paying for. (objective 1)"
     },
     {
       "question": "A planned failover has stamped `role=\"fenced\"` on the source site's MySQL pod. Which Services still reach that pod, and which do not?",
       "type": "SHORT_ANSWER",
       "orderIndex": 1,
-      "sampleAnswer": "Neither shared Service reaches it. `mysql-orders-primary` requires `role=primary` and `mysql-orders-replicas` requires `role=replica` plus `healthy=yes`; `\"fenced\"` matches neither, so the pod drops out of both at once. Its own per-site Service, `mysql-orders-<site>`, selects on name/instance/site and does not look at `role`, so that one still reaches it — which is how you keep an operator path to a fenced instance.",
+      "sampleAnswer": "Neither shared Service reaches it. `mysql-playground-primary` requires `role=primary` and `mysql-playground-replicas` requires `role=replica` plus `healthy=yes`; `\"fenced\"` matches neither, so the pod drops out of both at once. Its own per-site Service, `mysql-playground-<site>`, selects on name/instance/site and does not look at `role`, so that one still reaches it — which is how you keep an operator path to a fenced instance.",
       "graderNotes": "A strong answer names both shared Services and why the label misses each selector, and says the per-site Service still selects the pod because `role` is not in its selector. Credit answers that note this is what fencing looks like at the Service layer. Do not credit an answer claiming the pod is unreachable from everywhere, or that fencing works by deleting the Service.",
       "explanation": "Fencing at the Service layer is a label change, not an object deletion. Because the two shared selectors name mutually exclusive role values, one label edit removes the pod from application writes and application reads in a single step, while the per-site Service keeps it reachable for diagnosis. (objective 1)"
     },
     {
-      "question": "The `reader` site in `orders` reports `replicating: true`, source convergence `converged`, and `secondsBehindSource: 45`. The group sets `replication.maxLagSeconds: 30` and does not set `readOnlyMaxLagSeconds`. Why is `reader` absent from `mysql-orders-replicas`?",
+      "question": "The `reader` site in `playground` reports `replicating: true`, source convergence `converged`, and `secondsBehindSource: 45`. The group sets `replication.maxLagSeconds: 30` and does not set `readOnlyMaxLagSeconds`. Why is `reader` absent from `mysql-playground-replicas`?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
@@ -97,14 +97,14 @@
       "explanation": "All five reader conjuncts must hold; four of five is `healthy=no`, and here the fifth — lag within `EffectiveReadOnlyMaxLagSeconds()` — is the one that fails, because a nil `readOnlyMaxLagSeconds` inherits `maxLagSeconds`. Option 1 inverts the design: serving reads is exactly what a `read-only` site is for. Option 3 is a real half-truth worth unlearning — `maxLagSeconds` does drive the `ReplicationLagging` condition, but it is also what the reader threshold inherits, so it reaches the endpoint list too. Option 4 confuses the failover cooldown, which gates promotion, with endpoint membership, which is recomputed every reconcile. (objective 1)"
     },
     {
-      "question": "An RBAC rule denied the operator's `DNSEndpoint` apply during the promotion of `orders`. Once the rule is fixed, an operator has to re-run the failover or re-apply the record by hand to get DNS pointing at the new primary.",
+      "question": "An RBAC rule denied the operator's `DNSEndpoint` apply during the promotion of `playground`. Once the rule is fixed, an operator has to re-run the failover or re-apply the record by hand to get DNS pointing at the new primary.",
       "type": "TRUE_FALSE",
       "orderIndex": 3,
       "correctAnswer": false,
       "explanation": "The reverse is true: nobody has to do anything. `reconcileDNS` runs on every poll, re-derives the desired target from live topology rather than replaying a memoized one, and the write itself is one idempotent server-side apply with forced ownership — no create/update split. So the record heals on a later poll, with no second failover and no MySQL mutation, and the heal survives an operator restart because nothing needed to be remembered. Chaos scenario 38 is exactly this experiment. What manual action cannot fix is the other half: the operator cannot accelerate DNS propagation once the record is written. (objective 2)"
     },
     {
-      "question": "Bloodraven taints iad's nodes with `shipstream.io/db-readonly-orders=true:NoExecute` after promoting pdx. What happens to workloads already running on those nodes?",
+      "question": "Bloodraven taints iad's nodes with `shipstream.io/db-readonly-playground=true:NoExecute` after promoting pdx. What happens to workloads already running on those nodes?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 4,
       "options": [

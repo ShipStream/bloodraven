@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A planned switchover of `orders` reports Succeeded. You dump the status and `sessionsPreserved` is absent — the key is not in the YAML at all. What have you learned about the counter app's session store?
+A planned switchover of `playground` reports Succeeded. You dump the status and `sessionsPreserved` is absent — the key is not in the YAML at all. What have you learned about the counter app's session store?
 
 - Nothing about the outcome — the field is unknown, and you have to look at the promotion method, the log line and the event to find out
 - Sessions were lost; an absent boolean serialises the same as false
@@ -71,7 +71,7 @@ The mechanism is the lesson: the AND-gate of role and traffic, plus deletion rat
 
 **Type:** MULTIPLE_CHOICE
 
-You deploy `orders` with a Dragonfly image older than the stated v1.38.0 minimum. What actually happens?
+You deploy `playground` with a Dragonfly image older than the stated v1.38.0 minimum. What actually happens?
 
 - Admission rejects the MysqlFailoverGroup — a CEL rule enforces the minimum version
 - The operator accepts it but falls back to REPLICAOF NO ONE on every promotion, so sessions are never preserved

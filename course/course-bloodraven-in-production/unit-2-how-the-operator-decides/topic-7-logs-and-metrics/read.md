@@ -1,6 +1,6 @@
 # Reading the operator's mind from logs and metrics
 
-`orders` has three sites: `iad` and `pdx` as `primary-candidate`, `reader` as `role: read-only`. The counter application is still writing. You can now run the cross-site table in your head and say whether cooldown will let the operator act on it. What you cannot do yet is check your answer against the live group. Two surfaces make that possible, and neither is a dashboard: the structured log, and the operator's `/metrics` endpoint on `:8080`.
+`playground` has three sites: `iad` and `pdx` as `primary-candidate`, `reader` as `role: read-only`. The counter application is still reading and writing. You can now run the cross-site table in your head and say whether cooldown will let the operator act on it. What you cannot do yet is check your answer against the live group. Two surfaces make that possible, and neither is a dashboard: the structured log, and the operator's `/metrics` endpoint on `:8080`.
 
 ## The log is an interface
 
@@ -24,14 +24,15 @@ It is mirrored exactly once by the counter `bloodraven_state_transitions_total{s
   "title": "reader goes away and comes back",
   "lines": [
     {
-      "cmd": "kubectl -n bloodraven-playground logs -l app.kubernetes.io/name=bloodraven -f | jq -c 'select(.fg==\"bloodraven-playground/orders\")'",
-      "out": "{\"time\":\"2026-08-12T12:04:12.114Z\",\"level\":\"WARN\",\"msg\":\"failed to check replica status\",\"site\":\"reader\",\"error\":\"dial tcp 10.43.62.14:3306: connect: connection refused\",\"fg\":\"bloodraven-playground/orders\"}\n{\"time\":\"2026-08-12T12:04:16.118Z\",\"level\":\"INFO\",\"msg\":\"state transition\",\"site\":\"reader\",\"from\":\"read-only\",\"to\":\"unreachable\",\"fg\":\"bloodraven-playground/orders\"}"
+      "cmd": "kubectl -n bloodraven-playground logs -l app.kubernetes.io/name=bloodraven -f | jq -c 'select(.fg==\"bloodraven-playground/playground\")'",
+      "out": "{\"time\":\"2026-08-12T12:04:12.114Z\",\"level\":\"WARN\",\"msg\":\"failed to check replica status\",\"site\":\"reader\",\"error\":\"dial tcp 10.43.62.14:3306: connect: connection refused\",\"fg\":\"bloodraven-playground/playground\"}\n{\"time\":\"2026-08-12T12:04:16.118Z\",\"level\":\"INFO\",\"msg\":\"state transition\",\"site\":\"reader\",\"from\":\"read-only\",\"to\":\"unreachable\",\"fg\":\"bloodraven-playground/playground\"}"
     },
     {
       "cmd": "# the pod is back and answering. What is the next INFO line?",
-      "out": "{\"time\":\"2026-08-12T12:05:02.340Z\",\"level\":\"INFO\",\"msg\":\"state transition\",\"site\":\"reader\",\"from\":\"unreachable\",\"to\":\"read-only\",\"fg\":\"bloodraven-playground/orders\"}"
+      "out": "{\"time\":\"2026-08-12T12:05:02.340Z\",\"level\":\"INFO\",\"msg\":\"state transition\",\"site\":\"reader\",\"from\":\"unreachable\",\"to\":\"read-only\",\"fg\":\"bloodraven-playground/playground\"}"
     }
-  ]
+  ],
+  "caption": "Recorded output. **Run** reveals what is already on the page — nothing executes, and no cluster is contacted."
 }
 ```
 
@@ -64,20 +65,20 @@ The line you predicted takes a single poll. There is no six-second wait on the w
 
 `bloodraven_replication_lag_seconds` is set only for replicating sites, and the operator writes **`-1` when `Seconds_Behind_Source` is NULL — that is, when the site is not replicating at all**. This matters more than any threshold you might pick. A reading of `0` means "caught up as far as MySQL can tell". A reading of `-1` means "there is no replication stream here". A dashboard that renders both as "low lag, everything green" inverts the most important signal on the page. Sort your queries so `-1` is never averaged with real seconds.
 
-One more trap: when a site goes `unreachable`, the operator neither updates nor deletes its lag gauge (`internal/controller/topology.go:1157-1182` only deletes for a `writable` site). The last value it published stays on the series. A lag gauge is fresh only as long as the poll loop is turning.
+One more trap: when a site goes `unreachable`, the operator neither updates nor deletes its lag gauge — the `DeleteLabelValues` branch in the poll's metric-emission loop is reached only for a site whose state is `writable`. The last value it published stays on the series. A lag gauge is fresh only as long as the poll loop is turning.
 
 ## A lagging replica versus a lagging reader
 
-`bloodraven_replication_lag_seconds` carries only `site`. There is no `role` label, so telling a lagging replica apart from a lagging reader is a join you perform yourself, against the group spec. In `orders` that join is trivial and worth doing consciously:
+`bloodraven_replication_lag_seconds` carries only `site`. There is no `role` label, so telling a lagging replica apart from a lagging reader is a join you perform yourself, against the group spec. In `playground` that join is trivial and worth doing consciously:
 
 | | `pdx` (`primary-candidate`) | `reader` (`read-only`) |
 |---|---|---|
 | Counted in `coreCount`? | yes | no — excluded from every tally |
 | Can it be promoted? | yes | never |
-| Lag judged against | `maxLagSeconds` (default 300) | `readOnlyMaxLagSeconds` |
-| Consequence of breaching it | the group's `ReplicationLagging` Degraded condition | the site drops out of the `-replicas` reader endpoint |
+| Lag judged against | `maxLagSeconds` (30 on `playground`, 300 shipped) | `readOnlyMaxLagSeconds` (10 on `playground`; nil inherits `maxLagSeconds`) |
+| Consequence of breaching it | the group's `ReplicationLagging` Degraded condition | the site drops out of the `-replicas` reader endpoint — and nothing else, because the condition loop skips `read-only` sites entirely |
 
-`readOnlyMaxLagSeconds` has **no default**. When it is nil it inherits `maxLagSeconds`; but an explicit `0` is meaningful and demands zero reported lag. Setting it to `0` is not "unset" — it is the strictest possible reader gate, and it is one of five conjuncts the reader endpoint requires (converged source, replicating, non-nil lag, canonical direct source host, and lag within the threshold). So a reader at 45 s with `readOnlyMaxLagSeconds: 30` sheds its endpoint and changes nothing about the group's health or its failover decision. A candidate at 45 s with `maxLagSeconds: 300` does the opposite: it stays in the endpoint and stays promotable.
+`readOnlyMaxLagSeconds` has **no default**. When it is nil it inherits `maxLagSeconds`; but an explicit `0` is meaningful and demands zero reported lag. Setting it to `0` is not "unset" — it is the strictest possible reader gate, and it is one of five conjuncts the reader endpoint requires (converged source, replicating, non-nil lag, canonical direct source host, and lag within the threshold). The asymmetry goes further than the numbers. The loop that raises `ReplicationLagging`, `ReplicationBroken` and `ReplicationError` **skips every `role: read-only` site before it reads a threshold at all**, so a reader cannot contribute to the group's `Degraded` condition however far behind it gets. On `playground` — `maxLagSeconds: 30`, `readOnlyMaxLagSeconds: 10` — a reader at 45 s is past both numbers and still changes nothing except its own reader-endpoint membership. A `primary-candidate` at 45 s does the opposite: it stays in the endpoint, stays promotable, and *does* put `ReplicationLagging` on the group.
 
 ## Forensics: two minutes of confident nonsense
 
@@ -93,4 +94,4 @@ The wrong first diagnosis is its own lesson. The maintainers initially blamed co
 
 ## Where this leaves you
 
-You can now watch `orders` decide in real time — the `state transition` line, the state-set gauges, the transition counter — and, just as importantly, tell a genuine reading from a frozen one. Everything is in place to stop predicting and start measuring. Unit 3 holds a site down for real and puts a clock on the result.
+You can now watch `playground` decide in real time — the `state transition` line, the state-set gauges, the transition counter — and, just as importantly, tell a genuine reading from a frozen one. Everything is in place to stop predicting and start measuring. Unit 3 holds a site down for real and puts a clock on the result.

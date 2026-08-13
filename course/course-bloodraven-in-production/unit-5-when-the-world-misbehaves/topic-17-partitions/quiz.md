@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` pages you. `iad` is still writable and the counter app is still committing, but `pdx` has stopped answering the operator's polls entirely and its site state has gone to `unreachable`. Which documented partition scenario is this?
+`playground` pages you. `iad` is still writable and the counter app is still committing, but `pdx` has stopped answering the operator's polls entirely and its site state has gone to `unreachable`. Which documented partition scenario is this?
 
 - Scenario A — the operator cannot reach one site while the other is reachable
 - Scenario B — the replica site is isolated while the primary stays reachable

@@ -1,6 +1,6 @@
 # Cache and sessions that follow the primary
 
-You can move `orders`' primary on purpose, and you know the phase list it walks. Two of those phases —
+You can move `playground`' primary on purpose, and you know the phase list it walks. Two of those phases —
 `WaitingForDragonflySync` and `PromotingDragonfly` — have gone unexplained. They exist because the
 counter app does not only write to MySQL. It keeps a session store in Dragonfly, one pod per site, and
 when the primary moves that store must move with it or every logged-in user is bounced.
@@ -13,12 +13,12 @@ cache/session state: emergency failover never blocks on it" (`api/v1alpha1/drago
 
 Hold that sentence; the rest of this topic is derived from it. It is why the emergency budget is small,
 why one promotion path may lose sessions outright, and why nothing Dragonfly does may ever affect MySQL
-durability. For `orders`: the counter app's session store is nice to keep across a promotion, never the
+durability. For `playground`: the counter app's session store is nice to keep across a promotion, never the
 record of truth.
 
 ## One Service, two labels, AND-gated
 
-Bloodraven creates one app-facing Service, `orders-dragonfly`, whose selector AND-gates two labels the
+Bloodraven creates one app-facing Service, `playground-dragonfly`, whose selector AND-gates two labels the
 operator stamps on Dragonfly pods: `shipstream.io/dragonfly-role=master` and
 `shipstream.io/dragonfly-traffic=enabled`. A pod is an endpoint only when **both** match. Role says
 which pod is master; traffic is the canonical "this pod serves writes" gate.
@@ -124,7 +124,7 @@ Two settings shape which of the three you get:
   and the cache outcome is whatever it is. `fail` aborts before MySQL promotion and rolls the source
   fence back.
 
-`orders` pins both at their defaults:
+`playground` pins both at their defaults:
 
 ```yaml
 # playground/manifests/failovergroup.yaml  (unchanged from earlier topics)
@@ -149,16 +149,19 @@ with no official documentation page. The reference is the Dragonfly source
 (`src/server/server_family.cc`) and the v1.5.0 release notes — "Support atomic replica takeover" — not
 a manual. If you audit this path, that is where you read.
 
-## Two pieces of version honesty
+## Version discipline is yours, not the operator's
 
 "Dragonfly v1.38.0 or later" is a **support policy, not a guardrail**. Nothing in the API types, the
 controller, or the chart enforces or checks a Dragonfly version. The only CEL rules on `spec.dragonfly`
 are that an image is required when Dragonfly is enabled, and that it may not be `:latest`. Run a build
-older than the takeover command itself and Bloodraven will not stop you; it will fail in ways nobody has
-characterised.
+older than `REPLTAKEOVER` itself and Bloodraven will not stop you; it will fail in ways nobody has
+characterised, on a path that by design never returns an error to its caller.
 
-And the pin has drifted: the repo pins `v1.38.0` (2026-04-14) against a current stable of `v1.40.1`
-(2026-08-06) — two minors. Same lesson twice. Version discipline here is yours, not the operator's.
+That is the durable half. The perishable half is which numbers are current — the repo's pin, and
+upstream's latest stable, both move — so it lives in the
+[version appendix](../sources.html#version-appendix), row C2, along with the command that re-checks
+both. When this course was written those two numbers were two minors apart, which is the ordinary
+condition of a pin nobody is forced to update.
 
 ## Where this leaves you
 

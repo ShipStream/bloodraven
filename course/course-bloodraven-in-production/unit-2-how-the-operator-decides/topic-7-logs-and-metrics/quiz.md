@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-You scrape `/metrics` on the operator managing `orders` and get: `bloodraven_site_state{site="pdx",state="writable"} 0`, `{site="pdx",state="read-only"} 0`, `{site="pdx",state="unreachable"} 1`, `{site="pdx",state="unknown"} 0`. What state is `pdx` in?
+You scrape `/metrics` on the operator managing `playground` and get: `bloodraven_site_state{site="pdx",state="writable"} 0`, `{site="pdx",state="read-only"} 0`, `{site="pdx",state="unreachable"} 1`, `{site="pdx",state="unknown"} 0`. What state is `pdx` in?
 
 - `unreachable` — the series set to 1 names the current state
 - `unknown` — three of four states report 0, so the operator has no opinion
@@ -36,12 +36,12 @@ The reversal: `-1` is the worst reading on this gauge, not the best. The operato
 
 **Type:** MULTIPLE_CHOICE
 
-In `orders`, `bloodraven_replication_lag_seconds{site="reader"}` reads 45. The group has `maxLagSeconds: 300` and `readOnlyMaxLagSeconds: 30`; `reader` is the `role: read-only` site. What follows?
+In `playground`, `bloodraven_replication_lag_seconds{site="reader"}` reads 45. `playground` sets `maxLagSeconds: 30` and `readOnlyMaxLagSeconds: 10`; `reader` is the `role: read-only` site. What follows?
 
-- The group goes Degraded with reason `ReplicationLagging`, because 45 breaches a configured lag threshold
+- The group goes Degraded with reason `ReplicationLagging`, because 45 breaches both configured lag thresholds
 - `reader` is dropped from the `-replicas` reader endpoint; the group's own health is unchanged
-- `reader` becomes ineligible for promotion until it catches back up under 30 seconds
-- Nothing changes anywhere — 45 is well inside `maxLagSeconds: 300`, which is the group's lag threshold
+- `reader` becomes ineligible for promotion until it catches back up under 10 seconds
+- Nothing changes anywhere — a reader is expected to lag, so no threshold applies to it at all
 
 **Correct option index:** 1
 
@@ -53,7 +53,7 @@ The lag gauge carries only a `site` label, so you must join it against the site'
 
 **Type:** MULTIPLE_CHOICE
 
-On `orders`, `bloodraven_state_transitions_total` has been flat for ten minutes while `bloodraven_poll_latency_seconds_count` keeps climbing and the observed latencies are rising. What is the most defensible reading?
+On `playground`, `bloodraven_state_transitions_total` has been flat for ten minutes while `bloodraven_poll_latency_seconds_count` keeps climbing and the observed latencies are rising. What is the most defensible reading?
 
 - The poll loop is frozen on a hung MySQL read and every gauge it publishes is stale
 - A failover is in flight; transitions are suppressed until the promotion is confirmed

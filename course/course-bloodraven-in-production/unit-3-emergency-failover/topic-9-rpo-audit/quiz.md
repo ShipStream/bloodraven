@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A tenant adds both sync_binlog: "0" and gtid_mode: "OFF" to spec.mysqlConf on the orders group. What does the rendered per-site config contain after the next reconcile?
+A tenant adds both sync_binlog: "0" and gtid_mode: "OFF" to spec.mysqlConf on the playground group. What does the rendered per-site config contain after the next reconcile?
 
 - sync-binlog=0 and gtid-mode=OFF — spec.mysqlConf is the last layer applied
 - sync-binlog=0 and gtid-mode=ON

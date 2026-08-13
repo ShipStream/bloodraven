@@ -7,9 +7,9 @@
 
 **Type:** MULTIPLE_CHOICE
 
-The operator for `orders` has been at zero replicas for ten minutes. Which observation is genuinely caused by the operator's absence?
+The operator for `playground` has been at zero replicas for ten minutes. Which observation is genuinely caused by the operator's absence?
 
-- `status.sites[].lastSeen` on the `orders` CR is ten minutes stale
+- `status.sites[].lastSeen` on the `playground` CR is ten minutes stale
 - `pdx` has stopped replicating from `iad`
 - Reads through the `-replicas` Service have started failing
 - The sidecar on `iad` has stopped enforcing its fencing rules
@@ -30,7 +30,7 @@ A primary crashes, and the operator happens to be down; it is restored two hours
 
 **Explanation:**
 
-The reversal: a longer outage does not enlarge the loss. RPO is fixed at the instant the primary died — the set of transactions that committed there but had not yet reached the survivor is sealed at that moment, because the dead primary is not replicating anything more. The operator that arrives two hours later promotes the same replica across the same GTID gap. What the two hours cost is write availability: `orders` had no writable site for the whole window. The intuition that drives people to answer 'true' is the correct one for a *lagging* replica under a *live* primary, where the gap grows with time — but a dead primary has stopped producing transactions to fall behind on (objectives 10, 11).
+The reversal: a longer outage does not enlarge the loss. RPO is fixed at the instant the primary died — the set of transactions that committed there but had not yet reached the survivor is sealed at that moment, because the dead primary is not replicating anything more. The operator that arrives two hours later promotes the same replica across the same GTID gap. What the two hours cost is write availability: `playground` had no writable site for the whole window. The intuition that drives people to answer 'true' is the correct one for a *lagging* replica under a *live* primary, where the gap grows with time — but a dead primary has stopped producing transactions to fall behind on (objectives 10, 11).
 
 ## Question 3
 
@@ -53,7 +53,7 @@ Leader election makes the extra replicas idle standbys, so the only thing they s
 
 **Type:** SHORT_ANSWER
 
-The `orders` primary is down and there is no writable site. The operator pod is in CrashLoopBackOff on a bad image you pushed ten minutes ago, and the anti-flap cooldown has four minutes left to run. What do you do, and why?
+The `playground` primary is down and there is no writable site. The operator pod is in CrashLoopBackOff on a bad image you pushed ten minutes ago, and the anti-flap cooldown has four minutes left to run. What do you do, and why?
 
 **Sample answer:**
 

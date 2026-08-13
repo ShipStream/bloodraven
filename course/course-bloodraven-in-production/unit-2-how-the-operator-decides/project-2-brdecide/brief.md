@@ -2,6 +2,13 @@
 
 **Unit 2 — How the operator decides · project · `code-notebook` · Python**
 
+> **Optional.** This is a drill, not a dependency: nothing in Units 3–7 requires you to have built
+> `brdecide`. What you give up by skipping it is the one thing reading cannot give you — being *made*
+> to run the table on inputs you did not choose, including the four-site group, the writable reader
+> that preempts `TotalLoss`, and the history record stamped inside the future-clock grace. If you skip
+> it, at least read `tests/fixtures/` and predict each verdict out loud before opening the harness's
+> expectations; that is the same exercise at a tenth of the cost.
+
 ## Goal
 
 Build a tool that takes a failover-group status plus a clock and prints the decision the operator
@@ -19,20 +26,20 @@ checks it for you.
 
 You have run the cross-site table in your head. Now write it down, where a machine can check it.
 
-`brdecide` reads a `MysqlFailoverGroup` object — the same JSON `kubectl get mysqlfailovergroup orders
+`brdecide` reads a `MysqlFailoverGroup` object — the same JSON `kubectl get mysqlfailovergroup playground
 -o json` gives you — plus a clock reading, and prints what the operator would do with it. Nothing
 talks to a cluster. Every input is a fixture in `tests/fixtures/`, so the answers are reproducible and
 you can check yours against a known one.
 
 ```
-python starter/brdecide.py --status tests/fixtures/orders-iad-down.json --now 2026-08-12T12:04:16Z
-python starter/brdecide.py --status tests/fixtures/orders-iad-down-cooldown.json --now 2026-08-12T12:04:16Z --json
+python starter/brdecide.py --status tests/fixtures/playground-iad-down.json --now 2026-08-12T12:04:16Z
+python starter/brdecide.py --status tests/fixtures/playground-iad-down-cooldown.json --now 2026-08-12T12:04:16Z --json
 ```
 
 The starter runs as given. It prints `Reason (unset)` and `coreCount 0`, because the four functions
 that matter are empty.
 
-The running example is `orders`: `iad` and `pdx` as `primary-candidate`, `reader` as
+The running example is `playground`: `iad` and `pdx` as `primary-candidate`, `reader` as
 `role: read-only`. Some fixtures add a fourth site to make a point.
 
 ## Your tasks
@@ -73,7 +80,7 @@ verdict — sometimes stale by design. Do not read your answer out of it.
 ## Expected output
 
 ```
-brdecide — bloodraven-playground/orders at 2026-08-12T12:04:16Z
+brdecide — bloodraven-playground/playground at 2026-08-12T12:04:16Z
 
   sites         iad=unreachable(primary-candidate)  pdx=read-only(primary-candidate)  reader=read-only(read-only)
   coreCount     2
@@ -103,23 +110,23 @@ brdecide — bloodraven-playground/orders at 2026-08-12T12:04:16Z
 ## Steps
 
 - [ ] **Count the sites the way the matrix counts them** — fill in TODO A. Done when
-      `orders-healthy.json` prints `"coreCount": 2`, `"writable": ["iad"]`, `"readOnly": ["pdx"]`;
-      `orders-reader-writable.json` prints `"fenceSites": ["reader"]` with `reader` in no tally; and
-      `orders-dr-only.json` prints `"coreCount": 3` with `"readOnly": ["lhr"]`.
-- [ ] **Evaluate the rows in order, fence-first at the top** — done when `orders-healthy.json`,
-      `orders-peer-down.json`, `orders-split-brain.json`, `orders-total-loss.json` and
-      `orders-reader-writable-split-brain.json` print `Healthy`, `Degraded`, `SplitBrain`, `TotalLoss`
+      `playground-healthy.json` prints `"coreCount": 2`, `"writable": ["iad"]`, `"readOnly": ["pdx"]`;
+      `playground-reader-writable.json` prints `"fenceSites": ["reader"]` with `reader` in no tally; and
+      `playground-dr-only.json` prints `"coreCount": 3` with `"readOnly": ["lhr"]`.
+- [ ] **Evaluate the rows in order, fence-first at the top** — done when `playground-healthy.json`,
+      `playground-peer-down.json`, `playground-split-brain.json`, `playground-total-loss.json` and
+      `playground-reader-writable-split-brain.json` print `Healthy`, `Degraded`, `SplitBrain`, `TotalLoss`
       and `Degraded`, and the last prints `"splitBrain": false`.
-- [ ] **Make the failover row demand all three conjuncts** — done when `orders-iad-down.json` prints
-      `"promotionCandidates": ["pdx"]` with `"alert": null`, `orders-all-read-only.json` prints
-      `NoPrimary` with `NO PRIMARY: both sites are read-only`, and `orders-dr-only.json` prints
+- [ ] **Make the failover row demand all three conjuncts** — done when `playground-iad-down.json` prints
+      `"promotionCandidates": ["pdx"]` with `"alert": null`, `playground-all-read-only.json` prints
+      `NoPrimary` with `NO PRIMARY: both sites are read-only`, and `playground-dr-only.json` prints
       `"promotionCandidates": []`.
-- [ ] **Rehydrate the history from whichever copy survived** — done when `orders-history-conflict.json`
-      prints `"lastFailoverSource": "annotation"`, and `orders-history-skewed.json` and
-      `orders-history-tie.json` both print `"lastFailoverSource": "status"`.
-- [ ] **Gate the promotion, and nothing else** — done when `orders-iad-down-cooldown.json` prints
+- [ ] **Rehydrate the history from whichever copy survived** — done when `playground-history-conflict.json`
+      prints `"lastFailoverSource": "annotation"`, and `playground-history-skewed.json` and
+      `playground-history-tie.json` both print `"lastFailoverSource": "status"`.
+- [ ] **Gate the promotion, and nothing else** — done when `playground-iad-down-cooldown.json` prints
       `"promotionBlockedBy": "cooldown"`, `"cooldownRemaining": 210.0`, `"willRun": []` and still
-      `"promotionCandidates": ["pdx"]`; and `orders-reader-writable-cooldown.json` prints
+      `"promotionCandidates": ["pdx"]`; and `playground-reader-writable-cooldown.json` prints
       `"willRun": ["fence:reader"]` with `"promotionBlockedBy": null`.
 - [ ] **Run the whole fixture set** — `python3 tests/harness.py` exits 0 and prints `PASS`.
 - [ ] **Record the reason string the docs get wrong** — add a `# NOTE:` comment to `brdecide.py`

@@ -5,7 +5,7 @@
 #
 # The first command is what the on-call engineer types in the first
 # thirty seconds, before reading anything. `kubectl bloodraven status
-# orders` is the sensible default; name the ones where it differs.
+# playground` is the sensible default; name the ones where it differs.
 #
 # The plugin has exactly seven subcommands: status, promote, reclone,
 # backup, verify-backup, version, help. It only writes resources the
@@ -25,23 +25,23 @@ runbooks:
 
   BloodravenNoWritableSite:
     anchor: runbook.md#no-writable-site
-    firstCommand: kubectl bloodraven status orders
+    firstCommand: kubectl bloodraven status playground
 
   BloodravenSplitBrainResolved:
     anchor: runbook.md#split-brain-auto-resolved
-    firstCommand: kubectl bloodraven status orders -o wide
+    firstCommand: kubectl bloodraven status playground -o wide
 
   BloodravenReplicationLagging:
     anchor: runbook.md#replication-lagging
-    firstCommand: kubectl bloodraven status orders
+    firstCommand: kubectl bloodraven status playground
 
   BloodravenReplicationDown:
     anchor: runbook.md#replication-down
-    firstCommand: kubectl bloodraven status orders
+    firstCommand: kubectl bloodraven status playground
 
   BloodravenBackupStale:
     anchor: runbook.md#backup-stale
-    firstCommand: kubectl bloodraven backup orders --profile nightly
+    firstCommand: kubectl bloodraven backup playground --profile nightly
 
   BloodravenPITRArchiveLagging:
     anchor: runbook.md#pitr-archive-lagging
@@ -49,4 +49,4 @@ runbooks:
 
   BloodravenFailoverOccurred:
     anchor: runbook.md#failover-occurred
-    firstCommand: kubectl bloodraven status orders
+    firstCommand: kubectl bloodraven status playground

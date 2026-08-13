@@ -1,35 +1,35 @@
 # The moving parts
 
-`orders` is running. Three sites — `iad`, `pdx` and `reader` — and a counter application writing to
-it without pause. What you cannot yet say is *which pod* the counter's next `INSERT` lands on, or who
-decided it should be that one. Four things stand between the application and a MySQL data directory.
-Meet them in the order a write meets them.
+`playground` is running. Three sites — `iad`, `pdx` and `reader` — and a counter application whose page
+reads the counter every two seconds and whose one button writes to it. What you cannot yet say is
+*which pod* that button's next `UPDATE` lands on, or who decided it should be that one. Four things
+stand between the application and a MySQL data directory. Meet them in the order a write meets them.
 
 ## First contact: the Services
 
-The counter does not connect to a pod. It connects to `mysql-orders-primary`.
+The counter does not connect to a pod. It connects to `mysql-playground-primary`.
 
 ```widget
-{"type":"anatomy","title":"mysql-orders-primary","parts":[
+{"type":"anatomy","title":"mysql-playground-primary","parts":[
  {"text":"mysql-","label":"prefix","note":"Fixed. Every Service the operator creates for a group starts here, so one label selector or one NetworkPolicy can scope the whole group."},
- {"text":"orders","label":"group name","note":"The metadata.name of the MysqlFailoverGroup. Substituted into every object name the operator owns."},
+ {"text":"playground","label":"group name","note":"The metadata.name of the MysqlFailoverGroup. Substituted into every object name the operator owns."},
  {"text":"-primary","label":"role suffix","note":"One of four suffix shapes: -primary, -replicas, -<site>, and -<site>-internal. This one selects whichever pod currently carries shipstream.io/role=primary."}]}
 ```
 
 Bloodraven creates **four kinds** of Service per group. Four *kinds*, not four objects — a common
 misreading, and the arithmetic matters when you write NetworkPolicies or audit what the operator
-owns. Two kinds are per-site, two are group-wide, so the count is `2 × len(sites) + 2`. For `orders`:
+owns. Two kinds are per-site, two are group-wide, so the count is `2 × len(sites) + 2`. For `playground`:
 `2 × 3 + 2` = **eight Services**.
 
 | Service | Scope | What it is for |
 | --- | --- | --- |
-| `mysql-orders-primary` | group | The write endpoint. Exactly one pod behind it, or none. |
-| `mysql-orders-replicas` | group | The read endpoint. Every replica currently fit to serve. |
-| `mysql-orders-<site>` | per site | Site-local access — `mysql-orders-iad`, `mysql-orders-pdx`, `mysql-orders-reader`. |
-| `mysql-orders-<site>-internal` | per site | The stable in-cluster address replication and the sidecars point at. |
+| `mysql-playground-primary` | group | The write endpoint. Exactly one pod behind it, or none. |
+| `mysql-playground-replicas` | group | The read endpoint. Every replica currently fit to serve. |
+| `mysql-playground-<site>` | per site | Site-local access — `mysql-playground-iad`, `mysql-playground-pdx`, `mysql-playground-reader`. |
+| `mysql-playground-<site>-internal` | per site | The stable in-cluster address replication and the sidecars point at. |
 
 The two group-wide Services differ in exactly the way that matters. `-primary` selects on **two**
-labels: `app.kubernetes.io/instance=orders` and `shipstream.io/role=primary`. `-replicas` selects on
+labels: `app.kubernetes.io/instance=playground` and `shipstream.io/role=primary`. `-replicas` selects on
 **three**: instance, `shipstream.io/role=replica`, and `shipstream.io/healthy=yes`. Both set
 `publishNotReadyAddresses: false`.
 
@@ -38,6 +38,13 @@ only when five conditions hold together: source convergence is `Converged`, the 
 replicating, its reported lag is non-nil, its source host is the canonical `-internal` address of the
 active site, and that lag is at or under `readOnlyMaxLagSeconds`. Fail one and the pod silently
 leaves the read endpoint. The write endpoint has no such gate — nothing for it to lag behind.
+
+The per-site pair is where people misremember the rule, so be exact. Neither of them looks at `role`.
+`mysql-playground-<site>` selects on name, instance and `shipstream.io/site` — **plus `healthy=yes`, but
+only when that site's role is `read-only`**. So `mysql-playground-reader` carries the same staleness gate
+`-replicas` does, while `mysql-playground-iad` and `mysql-playground-pdx` carry none. The `-internal` Service
+carries no gate on any site and sets `publishNotReadyAddresses: true`, which is the point of it: peers
+and sidecars must reach a pod that is not serving yet.
 
 Now the consequence worth carrying into every later unit. Those selectors are *label matches on the
 pod*, and the operator owns the labels. During an in-place restore or the draining phase of a planned
@@ -52,16 +59,16 @@ for.
   "type": "tree",
   "title": "Eight Services for a three-site group",
   "root": {
-    "name": "orders",
+    "name": "playground",
     "children": [
       {
         "name": "group-wide (2)",
         "children": [
           {
-            "name": "mysql-orders-primary"
+            "name": "mysql-playground-primary"
           },
           {
-            "name": "mysql-orders-replicas"
+            "name": "mysql-playground-replicas"
           }
         ]
       },
@@ -69,10 +76,10 @@ for.
         "name": "iad",
         "children": [
           {
-            "name": "mysql-orders-iad"
+            "name": "mysql-playground-iad"
           },
           {
-            "name": "mysql-orders-iad-internal"
+            "name": "mysql-playground-iad-internal"
           }
         ]
       },
@@ -80,10 +87,10 @@ for.
         "name": "pdx",
         "children": [
           {
-            "name": "mysql-orders-pdx"
+            "name": "mysql-playground-pdx"
           },
           {
-            "name": "mysql-orders-pdx-internal"
+            "name": "mysql-playground-pdx-internal"
           }
         ]
       },
@@ -91,10 +98,10 @@ for.
         "name": "reader",
         "children": [
           {
-            "name": "mysql-orders-reader"
+            "name": "mysql-playground-reader"
           },
           {
-            "name": "mysql-orders-reader-internal"
+            "name": "mysql-playground-reader-internal"
           }
         ]
       }
@@ -107,7 +114,7 @@ Confirm the count rather than trusting the arithmetic:
 
 ```
 kubectl get svc -n bloodraven-playground \
-  -l app.kubernetes.io/instance=orders -o name
+  -l app.kubernetes.io/instance=playground -o name
 ```
 
 Eight lines. Six of them carry a site name.
@@ -151,7 +158,7 @@ mount it. The archiver has to run where the data is. Two behaviours follow: it a
 Each site declares a role. The enum has three values, it defaults to `primary-candidate`, and one
 rule separates them: **promotability is exactly `role == primary-candidate`.**
 
-| Role | May be promoted? | Counted in the topology tallies? | In `orders` |
+| Role | May be promoted? | Counted in the topology tallies? | In `playground` |
 | --- | --- | --- | --- |
 | `primary-candidate` | Yes — the only role that may | Yes | `iad`, `pdx` |
 | `dr-only` | Never | **Yes** — it counts, it just cannot win | none |
@@ -165,8 +172,8 @@ naming one is hard-refused with `only primary-candidate sites may be promoted`.
 
 ## Where you now stand
 
-You can trace the counter's write: `mysql-orders-primary` → the pod labelled `role=primary` →
-whichever of `iad` or `pdx` is the active site. You can name every pod's role in `orders` without
+You can trace the counter's write: `mysql-playground-primary` → the pod labelled `role=primary` →
+whichever of `iad` or `pdx` is the active site. You can name every pod's role in `playground` without
 guessing: `iad` and `pdx` are promotable, `reader` never is, and only one is writable at any moment. And you can say what each layer buys you — the operator decides, the sidecar
 enforces, the archiver rides along because the PVC will not travel.
 

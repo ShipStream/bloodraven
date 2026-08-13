@@ -160,6 +160,19 @@ course: course-build ## Build the course and sync it into docs/static/course
 	cp -r $(COURSE_DIR)/$(COURSE_SLUG)/dist/. $(COURSE_STATIC)/
 	@echo "synced $$(find $(COURSE_STATIC) -type f | wc -l) file(s) into $(COURSE_STATIC)"
 
+COURSE_SERVE_ADDR ?= 0.0.0.0
+COURSE_SERVE_PORT ?= 8092
+
+course-serve: course-build ## Serve the built course site for review (production build, never the dev server)
+	@# Review and screenshot the *production* build. `npm run dev` in $(COURSE_DIR)
+	@# runs Astro's Vite dev server, which injects /@vite/client and an HMR
+	@# websocket into every page — fine for authoring, wrong for anything anyone
+	@# is asked to sign off, because it is not the artefact that ships. This
+	@# target serves exactly what `make course` copies into $(COURSE_STATIC).
+	@echo "serving $(COURSE_DIR)/$(COURSE_SLUG)/dist on http://$(COURSE_SERVE_ADDR):$(COURSE_SERVE_PORT)/"
+	@cd $(COURSE_DIR)/$(COURSE_SLUG)/dist && \
+		python3 -m http.server $(COURSE_SERVE_PORT) --bind $(COURSE_SERVE_ADDR)
+
 course-verify: course-build ## Run the course content gates and runtime tests
 	@# Both run against dist/, so the build above is a real dependency, not
 	@# just ordering: `verify` reads the built pages and `test` drives them in

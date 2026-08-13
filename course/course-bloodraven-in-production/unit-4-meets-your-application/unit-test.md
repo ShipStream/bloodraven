@@ -11,24 +11,24 @@
 
 **Type:** MULTIPLE_CHOICE
 
-A new export job is being deployed against the three-site `orders` group (iad, pdx, reader). It writes a small audit row per run and then reads several million rows back out. A colleague has already put `mysql-orders-reader-internal` in the read config because "it always has an endpoint, even when the pod is still starting". Which binding is right?
+A new export job is being deployed against the three-site `playground` group (iad, pdx, reader). It writes a small audit row per run and then reads several million rows back out. A colleague has already put `mysql-playground-reader-internal` in the read config because "it always has an endpoint, even when the pod is still starting". Which binding is right?
 
-- Writes to `mysql-orders-primary`, reads to `mysql-orders-reader-internal` — pinning reads to the reader site's own Service is the only way to keep the export job off the primary while the group is degraded.
-- Writes to `mysql-orders-primary`, reads to `mysql-orders-replicas` — the internal per-site Service exists for sidecar and peer traffic, and its `publishNotReadyAddresses: true` is exactly why it will hand you a pod that is not serving yet.
-- Writes to `mysql-orders-iad`, the per-site Service of the site that is currently writable, reads to `mysql-orders-replicas` — naming the site makes the write path unambiguous.
-- Both through `mysql-orders-primary` — `mysql-orders-replicas` can select nothing at all when the reader's eligibility conjuncts fail, so the write endpoint is the only one safe to depend on.
+- Writes to `mysql-playground-primary`, reads to `mysql-playground-reader-internal` — pinning reads to the reader site's own Service is the only way to keep the export job off the primary while the group is degraded.
+- Writes to `mysql-playground-primary`, reads to `mysql-playground-replicas` — the internal per-site Service exists for sidecar and peer traffic, and its `publishNotReadyAddresses: true` is exactly why it will hand you a pod that is not serving yet.
+- Writes to `mysql-playground-iad`, the per-site Service of the site that is currently writable, reads to `mysql-playground-replicas` — naming the site makes the write path unambiguous.
+- Both through `mysql-playground-primary` — `mysql-playground-replicas` can select nothing at all when the reader's eligibility conjuncts fail, so the write endpoint is the only one safe to depend on.
 
 **Correct option index:** 1
 
 **Explanation:**
 
-Applications get two of the four Service kinds: `-primary` for writes, `-replicas` for reads. The internal per-site Service is never yours — it publishes the sidecar port, carries the canonical replication source host, and sets `publishNotReadyAddresses: true` so peers can reach a pod that is not serving yet. Your colleague's reason for choosing it is precisely the reason not to. Option 1 inverts that guarantee into a feature. Option 3 pins writes to a site: `mysql-orders-iad` selects iad whatever iad's role is, so the day pdx is promoted the job writes at a read-only site and gets ERROR 1290 — the `-primary` selector moves, a per-site selector never does. Option 4 misreads endpoint shedding. A `-replicas` Service that selects nothing is the design working: five conjuncts must all hold before a reader appears behind it, and a refused connection is a failure your retry logic can see, where a successful read of yesterday's data is not. Concentrating a multi-million-row scan on the primary to dodge that is trading a visible failure for an invisible one. (objective 1)
+Applications get two of the four Service kinds: `-primary` for writes, `-replicas` for reads. The internal per-site Service is never yours — it publishes the sidecar port, carries the canonical replication source host, and sets `publishNotReadyAddresses: true` so peers can reach a pod that is not serving yet. Your colleague's reason for choosing it is precisely the reason not to. Option 1 inverts that guarantee into a feature. Option 3 pins writes to a site: `mysql-playground-iad` selects iad whatever iad's role is, so the day pdx is promoted the job writes at a read-only site and gets ERROR 1290 — the `-primary` selector moves, a per-site selector never does. Option 4 misreads endpoint shedding. A `-replicas` Service that selects nothing is the design working: five conjuncts must all hold before a reader appears behind it, and a refused connection is a failure your retry logic can see, where a successful read of yesterday's data is not. Concentrating a multi-million-row scan on the primary to dodge that is trading a visible failure for an invisible one. (objective 1)
 
 ## Question 2
 
 **Type:** MULTIPLE_CHOICE
 
-pdx has been promoted. `kubectl get dnsendpoint bloodraven-orders -o yaml` shows `recordType: A`, `recordTTL: 60`, and `targets` already holding pdx's IP; the operator logged `failover complete` fifty seconds ago. Clients resolving the hostname are still being sent to iad. Which reading of the situation is correct?
+pdx has been promoted. `kubectl get dnsendpoint bloodraven-playground -o yaml` shows `recordType: A`, `recordTTL: 60`, and `targets` already holding pdx's IP; the operator logged `failover complete` fifty seconds ago. Clients resolving the hostname are still being sent to iad. Which reading of the situation is correct?
 
 - `recordTTL` is the cadence at which Bloodraven re-applies the record, so lowering `spec.dns.ttl` would have made the operator publish the new target sooner.
 - The record moves only on a create-or-update transition, so an apply that was rejected once stays stale until somebody re-applies it by hand.
@@ -45,7 +45,7 @@ Writing the `DNSEndpoint` is where Bloodraven's authority ends. The operator can
 
 **Type:** MULTIPLE_CHOICE
 
-After promoting pdx, Bloodraven taints iad's nodes with `shipstream.io/db-readonly-orders=true:NoExecute`. On one of those nodes sit a batch worker with no tolerations and a metrics agent that tolerates the key with `tolerationSeconds: 600`. The `reader` site's MySQL pod sits on a third node. What happens?
+After promoting pdx, Bloodraven taints iad's nodes with `shipstream.io/db-readonly-playground=true:NoExecute`. On one of those nodes sit a batch worker with no tolerations and a metrics agent that tolerates the key with `tolerationSeconds: 600`. The `reader` site's MySQL pod sits on a third node. What happens?
 
 - The batch worker is evicted immediately. The metrics agent stays bound for its 600 s, after which the node lifecycle controller evicts it. The reader's node is never tainted at all — a `role: read-only` site is already read-only, so there is nothing to demote.
 - All three go immediately: `NoExecute` evicts every pod on a tainted node, and `tolerationSeconds` only has meaning under `NoSchedule`.
@@ -91,10 +91,10 @@ Every mechanism fired correctly and every one of them missed, which is the whole
 
 **Type:** MULTIPLE_CHOICE
 
-A long-running JVM service talks to `orders`. It runs in a third site with no MySQL in it, and restarting it is expensive — a cold instance takes a long warm-up before it serves at rate. Cross-site write latency is comfortably within budget. Which approach gets it across a primary move?
+A long-running JVM service talks to `playground`. It runs in a third site with no MySQL in it, and restarting it is expensive — a cold instance takes a long warm-up before it serves at rate. Cross-site write latency is comfortably within budget. Which approach gets it across a primary move?
 
-- Taint-based: drop the service's toleration for `shipstream.io/db-readonly-orders` so the `NoExecute` taint evicts it at a promotion and it returns with a fresh pool.
-- Service-based: keep it up, bound the pool's connection lifetime, retry specifically on the read-only write errors 1290 and 1792, and split reads to `mysql-orders-replicas` while writes resolve through `mysql-orders-primary`.
+- Taint-based: drop the service's toleration for `shipstream.io/db-readonly-playground` so the `NoExecute` taint evicts it at a promotion and it returns with a fresh pool.
+- Service-based: keep it up, bound the pool's connection lifetime, retry specifically on the read-only write errors 1290 and 1792, and split reads to `mysql-playground-replicas` while writes resolve through `mysql-playground-primary`.
 - Site-local warm standby: run an instance at every site and let only the one co-located with the current primary take writes.
 - Service-based, tuned for the failure: raise the pool size so a promotion has spare connections, set `reconnect=true`, and drop `spec.dns.ttl` to 10.
 
@@ -108,7 +108,7 @@ The selection rule is about where the app runs and what a restart costs. Service
 
 **Type:** SHORT_ANSWER
 
-You annotate `orders` with `bloodraven.shipstream.io/planned-failover=pdx`. `status.plannedFailover.phase` walks Pending, Validating, Draining, and then sits in `WaitingForLag` for four minutes; pdx is genuinely behind because of a long batch job. Explain what the operator did at `Draining`, what it is comparing in `WaitingForLag`, why `transactionsLost: 0` is a construction rather than a measurement, and what you should do about the stuck gate.
+You annotate `playground` with `bloodraven.shipstream.io/planned-failover=pdx`. `status.plannedFailover.phase` walks Pending, Validating, Draining, and then sits in `WaitingForLag` for four minutes; pdx is genuinely behind because of a long batch job. Explain what the operator did at `Draining`, what it is comparing in `WaitingForLag`, why `transactionsLost: 0` is a construction rather than a measurement, and what you should do about the stuck gate.
 
 **Sample answer:**
 
@@ -126,7 +126,7 @@ Planned failover is RPO 0 by construction, and the construction is an ordering, 
 
 **Type:** MULTIPLE_CHOICE
 
-A planned failover of `orders` from iad to pdx logs `drain budget exhausted after 30s with 3 connection(s) remaining on "iad"; proceeding`, then reaches `Succeeded` with `transactionsLost: 0`. The application's pool sets a maximum connection lifetime of ten minutes. What is the situation, and what do you change?
+A planned failover of `playground` from iad to pdx logs `drain budget exhausted after 30s with 3 connection(s) remaining on "iad"; proceeding`, then reaches `Succeeded` with `transactionsLost: 0`. The application's pool sets a maximum connection lifetime of ten minutes. What is the situation, and what do you change?
 
 - The drain is a barrier: the operator keeps killing until iad is clear, so the log line is a report and the pool's lifetime has no bearing on it.
 - Those three connections were already dead — stamping iad's pod `fenced` dropped it out of the `-primary` Service, and an endpoint removal tears down the flows behind it.
@@ -161,7 +161,7 @@ Two misreadings are being separated here. The first is treating nil as false: a 
 
 **Type:** TRUE_FALSE
 
-While Bloodraven moves the Dragonfly master, both the old and the new instance briefly satisfy the active `orders-dragonfly` Service selector, so for a moment session writes can be load-balanced across two masters.
+While Bloodraven moves the Dragonfly master, both the old and the new instance briefly satisfy the active `playground-dragonfly` Service selector, so for a moment session writes can be load-balanced across two masters.
 
 **Correct answer:** false
 

@@ -1,11 +1,11 @@
 {
   "drill": {
     "mode": "planned",
-    "group": "orders",
+    "group": "playground",
     "namespace": "bloodraven-playground",
     "demotedSite": "pdx",
     "label": "baseline: unfixed pool",
-    "trigger": "kubectl -n bloodraven-playground annotate mysqlfailovergroup orders bloodraven.shipstream.io/planned-failover=iad",
+    "trigger": "kubectl -n bloodraven-playground annotate mysqlfailovergroup playground bloodraven.shipstream.io/planned-failover=iad",
     "capturedAt": "2026-08-12T10:05:00Z",
     "pool": {
       "maxOpenConns": 5,
@@ -14,7 +14,7 @@
       "retryOnErrorCodes": []
     },
     "appToleration": {
-      "key": "shipstream.io/db-readonly-orders",
+      "key": "shipstream.io/db-readonly-playground",
       "value": "true",
       "effect": "NoExecute",
       "tolerationSeconds": 60

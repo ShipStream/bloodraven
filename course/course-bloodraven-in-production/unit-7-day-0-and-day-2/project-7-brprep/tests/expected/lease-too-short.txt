@@ -1,0 +1,4 @@
+brprep: ledger-db/ledger
+REJECT sidecar.leaseTimeout must be at least 3x sidecar.peerCheckInterval
+verdict: NOT APPLYABLE (1 rejection(s))
+exit=1

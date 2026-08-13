@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "`orders` has been sitting in `WaitingForLag` for two minutes. `pdx` reports `Seconds_Behind_Source = 0` and is well inside `spec.replication.maxLagSeconds`. What is the operator actually waiting for before it will promote?",
+      "question": "`playground` has been sitting in `WaitingForLag` for two minutes. `pdx` reports `Seconds_Behind_Source = 0` and is well inside `spec.replication.maxLagSeconds`. What is the operator actually waiting for before it will promote?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -83,7 +83,7 @@
       "explanation": "The reversal: the drain is a deadline, not a barrier. When the budget is exhausted with connections remaining, the operator logs `drain budget exhausted after %s with %d connection(s) remaining on %q; proceeding` and proceeds to promotion, so a stuck client cannot block a switchover indefinitely. Nothing is unfenced and nothing aborts. That is why your pool's maximum connection lifetime has to be shorter than the drain budget — connections that outlive the drain are the ones that go on serving stale reads against a demoted primary. (objective 7)"
     },
     {
-      "question": "Four planned failovers on `orders` failed in four different ways. Which one leaves the source primary fenced and requires a human to put the cluster right?",
+      "question": "Four planned failovers on `playground` failed in four different ways. Which one leaves the source primary fenced and requires a human to put the cluster right?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
@@ -96,7 +96,7 @@
       "explanation": "Rollback — unfencing the source — exists only in `WaitingForLag`. Both failures reachable there, `LagTimeout` and `InvalidGTID`, unfence the source and leave it the active primary with nothing lost. `CooldownActive` fires at `Validating`, before the source was ever fenced, so there is nothing to undo. `ExecuteFailed` in `Promoting` is past that boundary: it stamps `Failed` without unfencing, with a message saying manual recovery is required. A failure in `Resuming` behaves the same way. (objective 9)"
     },
     {
-      "question": "A planned failover of `orders` from `iad` to `pdx` has rolled back twice with `LagTimeout`; `pdx` is genuinely behind because of a long-running batch job. A colleague proposes annotating with `pdx:maxLagWait=30m` so the gate has time to close. Argue the call.",
+      "question": "A planned failover of `playground` from `iad` to `pdx` has rolled back twice with `LagTimeout`; `pdx` is genuinely behind because of a long-running batch job. A colleague proposes annotating with `pdx:maxLagWait=30m` so the gate has time to close. Argue the call.",
       "type": "SHORT_ANSWER",
       "orderIndex": 3,
       "sampleAnswer": "Do not raise it — fix the lag first. The rollback is the good outcome: `LagTimeout` in `WaitingForLag` unfences `iad`, which stays the active primary with nothing lost, so both failed attempts cost only the fenced window. Raising `maxLagWait` to 30m does not make `pdx` apply relay logs any faster; it only extends the period during which `iad` is fenced with `super_read_only=ON` and the counter app's writes are being refused. Kill or wait out the batch job, confirm `pdx` is applying, then re-annotate with the default 5m and the gate will close on its own.",
@@ -104,7 +104,7 @@
       "explanation": "The lag gate that never closes is the failure mode you want, because it is the only one that hands the cluster back intact. Lengthening `maxLagWait` trades a safe, reversible refusal for a longer write outage on a primary that is already fenced, without changing whether the target can catch up. (objective 9)"
     },
     {
-      "question": "Ninety seconds after an emergency failover promoted `pdx`, you annotate `orders` to plan a switchover back to `iad`. It lands in `Failed` with reason `CooldownActive`. What happened, and what is the correct response?",
+      "question": "Ninety seconds after an emergency failover promoted `pdx`, you annotate `playground` to plan a switchover back to `iad`. It lands in `Failed` with reason `CooldownActive`. What happened, and what is the correct response?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 4,
       "options": [

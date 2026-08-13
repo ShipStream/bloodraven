@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` is split-brained — `iad` and `pdx` are both writable — and `spec.splitBrainPolicy.sitePriorities` is `[iad]`. Dump A has `status.lastFailoverTarget` empty. Dump B has `status.lastFailoverTarget: pdx`, with `pdx` writable and still `primary-candidate`. Which site ends up writable in each?
+`playground` is split-brained — `iad` and `pdx` are both writable — and `spec.splitBrainPolicy.sitePriorities` is `[iad]`. Dump A has `status.lastFailoverTarget` empty. Dump B has `status.lastFailoverTarget: pdx`, with `pdx` writable and still `primary-candidate`. Which site ends up writable in each?
 
 - `iad` in both — `sitePriorities` is your standing decision and the operator honours it either way
 - `iad` in A, `pdx` in B — usable history is tier 1 and pre-empts the policy list entirely
@@ -24,7 +24,7 @@ The tiers are evaluated in order. In B the recorded target is live, writable and
 
 **Type:** MULTIPLE_CHOICE
 
-`orders` is split-brained with no usable failover history, and `spec.splitBrainPolicy` is omitted entirely. `spec.sites` declares `iad` first and `pdx` second. What does the operator do?
+`playground` is split-brained with no usable failover history, and `spec.splitBrainPolicy` is omitted entirely. `spec.sites` declares `iad` first and `pdx` second. What does the operator do?
 
 - Falls back to the declaration order in `spec.sites` and promotes `iad`
 - Promotes whichever site has been writable longest, since that is the more established primary
@@ -53,7 +53,7 @@ The opposite is true, and the reversal is the point of the topic. Normal promoti
 
 **Type:** MULTIPLE_CHOICE
 
-You copy the `splitBrainPolicy: preferSite: iad` block from the published failover documentation into `orders` and `kubectl apply` it. The command reports the group configured. What have you actually changed?
+You copy the `splitBrainPolicy: preferSite: iad` block from the published failover documentation into `playground` and `kubectl apply` it. The command reports the group configured. What have you actually changed?
 
 - Nothing — the field is not in the CRD schema, so it was pruned and the group stays on tier 3
 - The group now resolves split brains in favour of `iad`, since `preferSite` is the legacy alias for `sitePriorities`
@@ -70,11 +70,11 @@ You copy the `splitBrainPolicy: preferSite: iad` block from the published failov
 
 **Type:** SHORT_ANSWER
 
-Your colleague proposes setting `sitePriorities: [iad, pdx]` on `orders` and describes it in the change ticket as "prevents data loss from split brain". Correct the framing, and describe what you would actually do to the loser after a resolution fires.
+Your colleague proposes setting `sitePriorities: [iad, pdx]` on `playground` and describes it in the change ticket as "prevents data loss from split brain". Correct the framing, and describe what you would actually do to the loser after a resolution fires.
 
 **Sample answer:**
 
-`sitePriorities` does not prevent data loss — it decides in advance which data you are willing to lose. It makes resolution fast and deterministic at the cost of silently discarding the loser's unreplicated writes; the loss is surfaced loudly but not prevented, and it does not stop split brain from occurring in the first place. It is a policy, not a safety feature. After a resolution fires on `orders`, the winner (`iad`) keeps authority and `pdx` is fenced with `SET GLOBAL super_read_only = ON`. I would then audit the damage before touching anything: read `status.sites[].divergentGtid` for the exact set of transactions `pdx` holds that `iad` never saw, and the `bloodraven_divergent_transactions` gauge for the count — the condition reason will be `DivergentTransactions`. Only once that is captured would I recover `pdx` with the `bloodraven.shipstream.io/reclone-site` annotation, giving it `pdx:<divergentGtidPrefix>` of at least 8 characters so the request is matched against the observed divergence rather than applied blind.
+`sitePriorities` does not prevent data loss — it decides in advance which data you are willing to lose. It makes resolution fast and deterministic at the cost of silently discarding the loser's unreplicated writes; the loss is surfaced loudly but not prevented, and it does not stop split brain from occurring in the first place. It is a policy, not a safety feature. After a resolution fires on `playground`, the winner (`iad`) keeps authority and `pdx` is fenced with `SET GLOBAL super_read_only = ON`. I would then audit the damage before touching anything: read `status.sites[].divergentGtid` for the exact set of transactions `pdx` holds that `iad` never saw, and the `bloodraven_divergent_transactions` gauge for the count — the condition reason will be `DivergentTransactions`. Only once that is captured would I recover `pdx` with the `bloodraven.shipstream.io/reclone-site` annotation, giving it `pdx:<divergentGtidPrefix>` of at least 8 characters so the request is matched against the observed divergence rather than applied blind.
 
 **A full-credit answer shows:**
 

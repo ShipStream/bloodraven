@@ -53,7 +53,7 @@
   ],
   "quiz": [
     {
-      "question": "`orders` reports `activeSite: iad`, and its site entries read: `iad` state `writable`, no other fields; `pdx` state `read-only`, `replicating: true`, `secondsBehindSource: 0`; `reader` state `read-only`, `replicating: true`, `secondsBehindSource: 0`. Which site is the primary, and what in the dump establishes it?",
+      "question": "`playground` reports `activeSite: iad`, and its site entries read: `iad` state `writable`, no other fields; `pdx` state `read-only`, `replicating: true`, `secondsBehindSource: 0`; `reader` state `read-only`, `replicating: true`, `secondsBehindSource: 0`. Which site is the primary, and what in the dump establishes it?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
@@ -79,7 +79,7 @@
       "explanation": "Role is spec, not status: `status.sites[]` carries name, state, lastSeen, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and `status.sites[].role` simply does not exist. The third confuses role with state: both a `primary-candidate` follower and a `read-only` reader sit in state `read-only` when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — `lbIP` is spec, and status never mirrors it. (objective 8)"
     },
     {
-      "question": "`orders` now reports `activeSite: iad`; `iad` state `writable`; `pdx` state `read-only`, `replicating: true`; `reader` state `unreachable`. What `reason` does the `Degraded` condition carry?",
+      "question": "`playground` now reports `activeSite: iad`; `iad` state `writable`; `pdx` state `read-only`, `replicating: true`; `reader` state `unreachable`. What `reason` does the `Degraded` condition carry?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 2,
       "options": [
@@ -92,7 +92,7 @@
       "explanation": "The reasons are computed over core sites only, and a site with `role: read-only` is not a core site — so a dead reader leaves the tally at one writable, zero unreachable, which is `Healthy`. The second option is the most tempting and would be right if the unreachable site were `pdx`: a live primary with an unreachable *core* peer is exactly the `Degraded` shape, but the reader does not count. `TotalLoss` requires every core site unreachable, not one site of any kind. `NoPrimary` describes the opposite situation — no writable site at all, every core site read-only — and here `iad` is writable. (objective 8)"
     },
     {
-      "question": "Your counter application has just written through `mysql-orders-primary`. `status.sites[]` shows `pdx` with `replicating: true` and `secondsBehindSource: 0`, so that write is certainly present on `pdx`.",
+      "question": "Your counter application has just written through `mysql-playground-primary`. `status.sites[]` shows `pdx` with `replicating: true` and `secondsBehindSource: 0`, so that write is certainly present on `pdx`.",
       "type": "TRUE_FALSE",
       "orderIndex": 3,
       "correctAnswer": false,
