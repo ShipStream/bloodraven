@@ -378,7 +378,7 @@ func (r *resetter) clearMFGStatus(ctx context.Context, _ []v1alpha1.SiteSpec) er
 		return err
 	}
 	var ops []pgkube.JSONPatchOp
-	for _, field := range []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget", "promotionGtidExecuted", "plannedFailover", "updatePhase", "recovery", "dragonfly"} {
+	for _, field := range []string{"activeSite", "sites", "conditions", "lastFailover", "lastFailoverTarget", "promotionGtidExecuted", "plannedFailover", "updatePhase", "recovery", "dragonfly", "encryptionAtRest"} {
 		if _, ok := fields[field]; ok {
 			ops = append(ops, pgkube.JSONPatchOp{Op: "remove", Path: "/status/" + field})
 		}

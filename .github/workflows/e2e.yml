@@ -37,3 +37,16 @@ jobs:
     uses: ./.github/workflows/_e2e.yml
     with:
       profile: ${{ github.event_name == 'pull_request' && 'smoke' || (github.event.inputs.profile || 'release') }}
+
+  # Label gating is intentionally PR-only: schedule and manual runs always
+  # exercise encryption, while release publication uses release.yml's gate.
+  encryption:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e'))
+    uses: ./.github/workflows/_e2e.yml
+    with:
+      scenario: 48-keyring-seal-and-rotation
+      enable-encryption: true
+      timeout-minutes: 90

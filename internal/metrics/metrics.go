@@ -70,7 +70,7 @@ var (
 
 	SplitBrainAutoResolveTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "bloodraven_split_brain_auto_resolve_total",
-		Help: "Total number of split-brain incidents auto-resolved by spec.splitBrainPolicy.preferSite. The label is the preferred (winning) site.",
+		Help: "Total successful losing-site fences while auto-resolving split brain by spec.splitBrainPolicy.sitePriorities. The label is the preferred (winning) site.",
 	}, []string{"prefer_site"})
 
 	// PrimaryReassertTotal counts restorations of writability on the last

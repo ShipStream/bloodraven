@@ -95,7 +95,7 @@ E2E_JUNIT_OUT ?= playground/chaos-results/e2e-$(E2E_PROFILE)-junit.xml
 E2E_ARGS ?=
 
 test-e2e: build-playground-chaos ## Run real-cluster E2E tests (E2E_PROFILE=release|smoke|full; requires kind/k3d)
-	./bin/playground-chaos run-all --profile=$(E2E_PROFILE) --auto-reset --continue-on-failure --junit-out=$(E2E_JUNIT_OUT) $(E2E_ARGS)
+	./bin/playground-chaos run-all --profile="$${E2E_PROFILE}" --auto-reset --continue-on-failure --junit-out="$${E2E_JUNIT_OUT}" $(E2E_ARGS)
 
 test-e2e-smoke: build-playground-chaos ## Run real-cluster E2E smoke (smoke profile — requires kind/k3d)
 	$(MAKE) test-e2e E2E_PROFILE=smoke E2E_JUNIT_OUT=playground/chaos-results/e2e-smoke-junit.xml
@@ -130,15 +130,15 @@ chaos-check: build-playground-chaos ## Verify the playground baseline is healthy
 	./bin/playground-chaos check
 
 chaos-run: build-playground-chaos ## Run a single scenario (SCENARIO=<id>)
-	@if [ -z "$(SCENARIO)" ]; then echo "usage: make chaos-run SCENARIO=01-clean-primary-kill"; exit 2; fi
-	./bin/playground-chaos run $(SCENARIO)
+	@if [ -z "$${SCENARIO}" ]; then echo "usage: make chaos-run SCENARIO=01-clean-primary-kill"; exit 2; fi
+	./bin/playground-chaos run "$${SCENARIO}"
 
 chaos-run-all: build-playground-chaos ## Run every registered chaos scenario in order
 	./bin/playground-chaos run-all
 
 chaos-run-all-profile: build-playground-chaos ## Run chaos scenarios filtered by profile (PROFILE=smoke|release|full)
-	@if [ -z "$(PROFILE)" ]; then echo "usage: make chaos-run-all-profile PROFILE=smoke"; exit 2; fi
-	./bin/playground-chaos run-all --profile=$(PROFILE)
+	@if [ -z "$${PROFILE}" ]; then echo "usage: make chaos-run-all-profile PROFILE=smoke"; exit 2; fi
+	./bin/playground-chaos run-all --profile="$${PROFILE}"
 
 ##@ Course
 

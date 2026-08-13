@@ -14,6 +14,12 @@ and what an operator should do after connectivity returns.
 
 Timing assumes the defaults: `pollInterval=2s`, `failureThreshold=3`,
 `sidecar.leaseTimeout=20s`, and a 30-second relay-log drain timeout.
+`pollInterval` is the base cadence. Continued failures after a site is marked
+`unreachable` back the group loop off exponentially to a 30-second cap. A
+first isolated partition still debounces in about 6 seconds; a second fault
+during a sustained partition can take up to about 90 seconds to reach the
+three-poll threshold. Sidecar lease timing is independent of this operator
+poll backoff.
 
 ## First principles
 
@@ -39,7 +45,7 @@ surviving side of a site partition; all operator polls to `iad` time out.
 | Operator action | After debounce, promotes `pdx` via the normal emergency failover path, updates Services/DNS, and taints old-site nodes. |
 | Sidecar action | If `iad` is still running but isolated from both operator and peers, its sidecar sets `super_read_only=ON` at roughly T+20s. |
 | Metrics | `bloodraven_site_state{site="iad",state="unreachable"}=1`, `bloodraven_failovers_total{target_site="pdx"}` increments on successful promotion, `bloodraven_dns_flips_total{site="pdx"}` increments when DNS is updated, `bloodraven_taint_operations_total{site="iad",action="taint"}` increments. |
-| Events | Expect the same failover lifecycle events as an unreachable primary: failover started/completed and, if the old primary later returns diverged, `DataLossDetected`. |
+| Events | Expect `FailoverExecuted` after the promotion and, if the old primary later returns diverged, `DataLossDetected`. |
 | RPO | Bounded by what had replicated to `pdx` before the partition. Any writes accepted only on `iad` after the partition are divergent when `iad` returns. |
 
 Recovery after heal:

@@ -285,6 +285,12 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 		}
 	}
 
+	// Sample MySQL and perform the system-tablespace fix-up before reading
+	// the keyring. ALTER TABLESPACE may add a master key; escrowing bytes
+	// captured before that statement can make the next sealed restart
+	// unrecoverable even though the operator verified the stale digest.
+	viewErr := a.refreshMySQLView(ctx)
+
 	raw, err := os.ReadFile(a.cfg.Path)
 	if err != nil {
 		a.mu.Lock()
@@ -301,7 +307,7 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 	}
 
 	digest := ""
-	if len(raw) > 0 {
+	if len(raw) > 0 && !emptyKeyringDocument(raw) {
 		sum := sha256.Sum256(raw)
 		digest = "sha256:" + hex.EncodeToString(sum[:])
 	}
@@ -312,8 +318,6 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 	a.status.Digest = digest
 	alreadyEscrowed := a.status.EscrowedDigest == digest && digest != ""
 	a.mu.Unlock()
-
-	viewErr := a.refreshMySQLView(ctx)
 
 	if !a.cfg.EscrowArmed || digest == "" || alreadyEscrowed {
 		a.setOperationalError(viewErr)
@@ -328,6 +332,22 @@ func (a *KeyringAgent) tick(ctx context.Context) {
 		return
 	}
 	metrics.KeyringEscrowPushesTotal.WithLabelValues(a.group, a.site, "success").Inc()
+}
+
+// emptyKeyringDocument recognizes the valid bootstrap file written by
+// keyring-init before MySQL has created any keys. It must not be escrowed:
+// sealing a pod against this document leaves encrypted redo/binlogs without
+// a recoverable master key on the next restart.
+//
+// Unknown or malformed content is not classified as empty here. MySQL owns
+// the on-disk format, and refusing a future valid format would strand an
+// otherwise healthy site; the sealed restart and component-status checks
+// remain the final validation.
+func emptyKeyringDocument(raw []byte) bool {
+	var doc struct {
+		Elements *[]json.RawMessage `json:"elements"`
+	}
+	return json.Unmarshal(raw, &doc) == nil && doc.Elements != nil && len(*doc.Elements) == 0
 }
 
 // refreshMySQLView samples the keyring component status and the
@@ -356,20 +376,57 @@ func (a *KeyringAgent) refreshMySQLView(ctx context.Context) error {
 	a.mu.Unlock()
 	viewErr := errors.Join(err, coverageErr)
 
-	// Close the one coverage gap that default_table_encryption cannot:
-	// the `mysql` system tablespace holding the data dictionary. Only
-	// attempt it on a writable instance — this is replicated DDL, so
-	// running it on the primary carries it to the replicas, and running
-	// it on a read-only replica would just fail.
+	needWrite := false
+	emptyKeyring := false
+	if a.cfg.EscrowArmed && comp != nil && comp.Status == "Active" && !comp.ReadOnly {
+		if raw, readErr := os.ReadFile(a.cfg.Path); readErr == nil && emptyKeyringDocument(raw) {
+			emptyKeyring = true
+			needWrite = true
+		}
+	}
 	if a.cfg.EncryptSystemTablespace && cov != nil && !cov.SystemTablespaceEncrypted {
-		readOnly, err := a.mysql.IsReadOnly(qCtx)
+		needWrite = true
+	}
+	if !needWrite {
+		return viewErr
+	}
+
+	// Only the writable primary may create keys or rewrite tablespaces.
+	// Replicas wait for the primary's binlog (or for promotion).
+	readOnly, roErr := a.mysql.IsReadOnly(qCtx)
+	if roErr != nil {
+		return errors.Join(viewErr, fmt.Errorf("query read_only: %w", roErr))
+	}
+	if readOnly {
+		return viewErr
+	}
+
+	// Bootstrap: an empty component_keyring_file document has no master
+	// key, so ALTER TABLESPACE ENCRYPTION fails with Error 3185.
+	// binlog/redo encryption usually seeds the keyring at startup, but
+	// on some adoption paths the keyring stays empty until something
+	// creates a key. ROTATE INNODB MASTER KEY is the explicit
+	// create-if-missing path and is safe on a writable keyring.
+	if emptyKeyring {
+		writeCtx, writeCancel := context.WithTimeout(ctx, 30*time.Second)
+		err := a.mysql.RotateInnoDBMasterKey(writeCtx)
+		writeCancel()
 		if err != nil {
-			return errors.Join(viewErr, fmt.Errorf("query read_only before encrypting system tablespace: %w", err))
+			a.logger.Warn("could not bootstrap innodb master key", "error", err, "site", a.site)
+			return errors.Join(viewErr, fmt.Errorf("bootstrap innodb master key: %w", err))
 		}
-		if readOnly {
-			return viewErr
-		}
-		if err := a.mysql.EncryptSystemTablespace(qCtx); err != nil {
+		a.logger.Info("bootstrapped innodb master key into empty keyring", "site", a.site)
+	}
+
+	// Close the one coverage gap that default_table_encryption cannot:
+	// the `mysql` system tablespace holding the data dictionary. This is
+	// replicated DDL, so running it on the primary carries it to the
+	// replicas.
+	if a.cfg.EncryptSystemTablespace && cov != nil && !cov.SystemTablespaceEncrypted {
+		writeCtx, writeCancel := context.WithTimeout(ctx, 30*time.Second)
+		err := a.mysql.EncryptSystemTablespace(writeCtx)
+		writeCancel()
+		if err != nil {
 			a.logger.Warn("could not encrypt the mysql system tablespace", "error", err, "site", a.site)
 			return errors.Join(viewErr, fmt.Errorf("encrypt system tablespace: %w", err))
 		}

@@ -8,6 +8,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
+	pgmysql "github.com/shipstream/bloodraven/internal/playground/mysql"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
@@ -50,10 +51,10 @@ type s48RunState struct {
 //     case where losing the keyring mid-rotation would cost data rather
 //     than a re-clone.
 //
-// Quarantined from the batch profiles: it requires a playground brought
-// up with TLS and encryption enabled (`./playground/enable-encryption.sh`),
-// which is not the default baseline the other scenarios assume. Run it
-// explicitly with `make chaos-run SCENARIO=48-keyring-seal-and-rotation`.
+// Kept out of shared batch profiles because it requires a playground brought
+// up with TLS and encryption enabled (`./playground/enable-encryption.sh`).
+// CI runs it explicitly in a dedicated encryption job; local runs use
+// `make chaos-run SCENARIO=48-keyring-seal-and-rotation`.
 func scenario48KeyringSealAndRotation() runner.Scenario {
 	state := &s48RunState{}
 	return runner.Scenario{
@@ -66,8 +67,8 @@ func scenario48KeyringSealAndRotation() runner.Scenario {
 		Risk:    "medium",
 		DocLink: "playground/chaos-scenarios.md#48-keyring-seal-and-rotation",
 		Timeout: 20 * time.Minute,
-		Quarantine: "requires a playground with TLS + spec.encryptionAtRest enabled; " +
-			"run ./playground/enable-encryption.sh first, then run this scenario explicitly",
+		Quarantine: "requires the dedicated TLS + spec.encryptionAtRest baseline; " +
+			"CI and local encryption jobs run this scenario explicitly",
 		Precheck: s48Precheck(state),
 		Steps: []runner.Step{
 			s48VerifySealedState(state),
@@ -406,13 +407,15 @@ func s48VerifyNewEscrowVersion(state *s48RunState) runner.Step {
 					state.sealedSecret, err)
 			}
 
-			// Read real data back through the rotated key. A rotation
-			// that silently stranded the tablespace keys would show up
-			// here and nowhere else.
-			db, err := env.MySQL(state.replicaSite)
+			// Open a fresh port-forward after the rotation replaced the
+			// pod. env.MySQL caches per-site clients for the whole
+			// scenario, so reusing it here would stay pinned to the
+			// pre-rotation pod sandbox.
+			db, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, state.replicaSite, env.Creds)
 			if err != nil {
-				return fmt.Errorf("open mysql on %s: %w", state.replicaSite, err)
+				return fmt.Errorf("open mysql on %s after rotation: %w", state.replicaSite, err)
 			}
+			defer db.Close()
 			if _, err := db.ScalarInt(ctx, "SELECT COUNT(*) FROM information_schema.INNODB_TABLESPACES"); err != nil {
 				return fmt.Errorf("reading tablespace metadata after rotation failed on %s: %w", state.replicaSite, err)
 			}

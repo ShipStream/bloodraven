@@ -150,6 +150,14 @@ func (m *LiveMysql) IsReadOnly(ctx context.Context) (bool, error) {
 	}
 	return readOnly == 1, nil
 }
+func (m *LiveMysql) IsSuperReadOnly(ctx context.Context) (bool, error) {
+	var superReadOnly int
+	err := m.db.QueryRowContext(ctx, "SELECT @@super_read_only").Scan(&superReadOnly)
+	if err != nil {
+		return false, fmt.Errorf("query super_read_only: %w", err)
+	}
+	return superReadOnly == 1, nil
+}
 
 func (m *LiveMysql) SetSuperReadOnly(ctx context.Context) error {
 	_, err := m.db.ExecContext(ctx, "SET GLOBAL super_read_only = ON")

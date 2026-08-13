@@ -53,33 +53,40 @@ replica's IO thread acknowledges receipt of those events, the bytes
 exist only on the primary. If the primary (and its PVC) vanish in that
 window, those transactions are unrecoverable from the replica.
 
-## The theoretical bound: `seconds_behind_source`
+## The lag signal: `seconds_behind_source`
 
-The strictest lower bound on RPO is the replication lag at the moment
-of failure. That lag is surfaced three ways:
+Replication lag near the moment of failure is a useful RPO estimate, not a
+strict bound. It is surfaced three ways:
 
 - `status.sites[].secondsBehindSource` on the `MysqlFailoverGroup` CR
   (populated for the replica site on every poll).
 - The `bloodraven_replication_lag_seconds` Prometheus gauge.
 - `SHOW REPLICA STATUS` column `Seconds_Behind_Source` on the replica.
 
-**Typical value under healthy operation: &lt; 1 second.** Bloodraven polls
-every 2 s (configurable via `spec.pollInterval`) and asserts replication
-health on every poll; a replica that lags past
+**Typical value under healthy operation: &lt; 1 second.** Bloodraven's default
+base poll interval is 2 seconds (configurable with `spec.pollInterval`), and it
+asserts replication health on every poll. A replica that lags past
 `spec.replication.maxLagSeconds` (default `300` s) transitions the CR's
 `Degraded` condition to `True` with reason `ReplicationLagging`.
 
-Concretely: if the replica was reporting `secondsBehindSource=0` at
-`T−2s` and the primary dies at `T`, the largest window of
-unreplicated-committed work is bounded by how many transactions the
-primary accepted in that ≤ 2 s interval. In practical throughput terms
-this is "at most a few hundred transactions for a typical OLTP
-workload", and in many real outages it is zero — the replica had
-already seen every committed transaction.
+Under a healthy topology, the last status sample is normally no more than one
+base interval plus probe time old. If the replica reported
+`secondsBehindSource=0` at `T−2s` and the primary dies at `T`, that observation
+is evidence of recent catch-up, but it does not prove that every commit after
+the sample reached the replica. MySQL's lag value can also be zero while a
+commit is still between the primary and the replica IO thread.
+
+After a site reaches `failureThreshold` and continues failing, Bloodraven backs
+the shared group poll loop off exponentially to a 30-second cap. During that
+outage, lag status for the surviving sites can therefore be up to one effective
+interval old, and a second fault can take up to about 90 seconds to reach the
+default three-poll failure threshold. This affects observation freshness and
+compound-fault recovery time; it does not itself change which transactions
+were replicated. See [Failover: Debouncing](./failover.mdx#state-transitions).
 
 ### Relay-log drain narrows the window further
 
-Step 2 of the [failover sequence](./failover.mdx#failover-sequence) is
+Step 3 of the [failover sequence](./failover.mdx#failover-sequence) is
 a bounded-wait relay-log drain on the candidate: before the candidate
 is promoted, the operator gives it up to 30 s to apply any relay-log
 events the IO thread had already fetched but the SQL thread hadn't

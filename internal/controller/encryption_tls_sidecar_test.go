@@ -22,10 +22,11 @@ import (
 	"github.com/shipstream/bloodraven/internal/sidecar"
 )
 
-// These tests cover the spec.tls + spec.encryptionAtRest combination,
-// which no non-quarantined E2E scenario exercises (playground scenario 48
-// needs ./playground/enable-encryption.sh and is excluded from every
-// profile). Both bugs they pin were found in a 0.9.0 lab drill:
+// These tests cover the spec.tls + spec.encryptionAtRest combination.
+// Playground scenario 48 exercises it in a dedicated encryption CI job rather
+// than a shared batch profile because it requires
+// ./playground/enable-encryption.sh. Both bugs they pin were found in a 0.9.0
+// lab drill:
 //
 //  1. The escrow token was projected mode 0400 into a pod with no
 //     fsGroup, so the non-root sidecar could never read it and no site
@@ -175,6 +176,23 @@ func TestEncryption_SidecarMySQLDSNUsesTLS(t *testing.T) {
 			if !strings.Contains(cm.Data["bloodraven.cnf"], "require-secure-transport=ON") {
 				t.Fatalf("premise broken: spec.tls should set require-secure-transport=ON:\n%s",
 					cm.Data["bloodraven.cnf"])
+			}
+
+			mysqlContainer := containerByName(getDeployment(t, r, "dc1").Spec.Template.Spec.Containers, "mysql")
+			if mysqlContainer == nil {
+				t.Fatal("deployment has no mysql container")
+			}
+			mysqlArgs := strings.Join(mysqlContainer.Args, "\n")
+			for _, want := range []string{
+				"--ssl-ca=/etc/mysql/tls/ca.crt",
+				"--ssl-cert=/etc/mysql/tls/tls.crt",
+				"--ssl-key=/etc/mysql/tls/tls.key",
+				"--require-secure-transport=ON",
+			} {
+				if !strings.Contains(mysqlArgs, want) {
+					t.Fatalf("mysql args missing %q; server could fall back to its auto-generated certificate:\n%s",
+						want, mysqlArgs)
+				}
 			}
 
 			sc := sidecarContainer(t, r, "dc1")
@@ -421,8 +439,12 @@ func redactDSN(dsn string) string {
 
 func siteConfigMap(t *testing.T, r *MysqlFailoverGroupReconciler, site string) *corev1.ConfigMap {
 	t.Helper()
+	deployment := getDeployment(t, r, site)
 	var cm corev1.ConfigMap
-	key := types.NamespacedName{Namespace: "shared-lion", Name: siteConfigMapName("lion", site)}
+	key := types.NamespacedName{
+		Namespace: "shared-lion",
+		Name:      deploymentConfigMapName(deployment),
+	}
 	if err := r.Get(t.Context(), key, &cm); err != nil {
 		t.Fatalf("get configmap for %s: %v", site, err)
 	}

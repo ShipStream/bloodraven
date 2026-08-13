@@ -420,6 +420,13 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 	if tm.isUpdating() {
 		return
 	}
+	// Recreate is owned by the bulk reconciler, which patches every site
+	// Deployment in one pass. Never let a partial or transient drift snapshot
+	// route this strategy back through the ordered updater.
+	if fg.Spec.UpdateStrategy == "Recreate" {
+		tm.SetSpecDriftSites(nil)
+		return
+	}
 
 	// Fetch TLS/credential secret data for spec hash computation.
 	var tlsSecretData map[string][]byte
