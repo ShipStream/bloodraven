@@ -166,8 +166,7 @@ course-verify: course-build ## Run the course content gates and runtime tests
 	@# jsdom.
 	cd $(COURSE_DIR) && npm run verify && npm run test
 
-course-check: ## Fail if docs/static/course is stale relative to the course source
-	@$(MAKE) --no-print-directory course >/dev/null
+course-check: course ## Fail if docs/static/course is stale relative to the course source
 	@# git status --porcelain, not git diff: diff only reports tracked files, so
 	@# an untracked or newly added page under docs/static/course would slip past.
 	@status="$$(git status --porcelain -- $(COURSE_STATIC))"; \
