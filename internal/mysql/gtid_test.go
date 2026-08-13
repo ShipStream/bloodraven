@@ -180,7 +180,7 @@ func TestParseGTIDSet_TaggedGTID(t *testing.T) {
 	if len(gs) != 1 {
 		t.Fatalf("expected 1 UUID, got %d", len(gs))
 	}
-	intervals := gs["3e11fa47-71ca-11e1-9e33-c80aa9429562"]
+	intervals := gs["3e11fa47-71ca-11e1-9e33-c80aa9429562:mytag"]
 	if len(intervals) != 1 {
 		t.Fatalf("expected 1 interval, got %d", len(intervals))
 	}
@@ -194,7 +194,7 @@ func TestParseGTIDSet_TaggedGTID_SingleTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	intervals := gs["uuid1"]
+	intervals := gs["uuid1:admin"]
 	if len(intervals) != 1 {
 		t.Fatalf("expected 1 interval, got %d", len(intervals))
 	}
@@ -208,7 +208,7 @@ func TestParseGTIDSet_TaggedGTID_MultipleIntervals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	intervals := gs["uuid1"]
+	intervals := gs["uuid1:mytag"]
 	if len(intervals) != 2 {
 		t.Fatalf("expected 2 intervals, got %d", len(intervals))
 	}
@@ -233,14 +233,58 @@ func TestParseGTIDSet_TaggedGTID_Mixed(t *testing.T) {
 		t.Errorf("uuid1: expected 1-5, got %d-%d", gs["uuid1"][0].Start, gs["uuid1"][0].End)
 	}
 
-	if len(gs["uuid2"]) != 2 {
-		t.Fatalf("uuid2: expected 2 intervals, got %d", len(gs["uuid2"]))
+	if len(gs["uuid2:data"]) != 2 {
+		t.Fatalf("uuid2:data: expected 2 intervals, got %d", len(gs["uuid2:data"]))
 	}
-	if gs["uuid2"][0].Start != 1 || gs["uuid2"][0].End != 3 {
-		t.Errorf("uuid2 interval 0: expected 1-3, got %d-%d", gs["uuid2"][0].Start, gs["uuid2"][0].End)
+	if gs["uuid2:data"][0].Start != 1 || gs["uuid2:data"][0].End != 3 {
+		t.Errorf("uuid2:data interval 0: expected 1-3, got %d-%d", gs["uuid2:data"][0].Start, gs["uuid2:data"][0].End)
 	}
-	if gs["uuid2"][1].Start != 7 || gs["uuid2"][1].End != 9 {
-		t.Errorf("uuid2 interval 1: expected 7-9, got %d-%d", gs["uuid2"][1].Start, gs["uuid2"][1].End)
+	if gs["uuid2:data"][1].Start != 7 || gs["uuid2:data"][1].End != 9 {
+		t.Errorf("uuid2:data interval 1: expected 7-9, got %d-%d", gs["uuid2:data"][1].Start, gs["uuid2:data"][1].End)
+	}
+}
+
+func TestParseGTIDSet_TaggedSourcesRemainDistinct(t *testing.T) {
+	gs, err := ParseGTIDSet("uuid1:1-5,uuid1:blue:1-5,uuid1:green:1-5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, sid := range []string{"uuid1", "uuid1:blue", "uuid1:green"} {
+		if got := gs[sid]; len(got) != 1 || got[0] != (Interval{Start: 1, End: 5}) {
+			t.Errorf("source %q intervals = %+v, want 1-5", sid, got)
+		}
+	}
+	if got, want := gs.String(), "uuid1:1-5,uuid1:blue:1-5,uuid1:green:1-5"; got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+}
+
+func TestGTIDSet_TaggedSourceArithmetic(t *testing.T) {
+	blue, err := ParseGTIDSet("uuid1:blue:1-5")
+	if err != nil {
+		t.Fatalf("parse blue: %v", err)
+	}
+	green, err := ParseGTIDSet("uuid1:green:1-5")
+	if err != nil {
+		t.Fatalf("parse green: %v", err)
+	}
+	untagged, err := ParseGTIDSet("uuid1:1-5")
+	if err != nil {
+		t.Fatalf("parse untagged: %v", err)
+	}
+
+	for name, other := range map[string]GTIDSet{"different tag": green, "untagged": untagged} {
+		t.Run(name, func(t *testing.T) {
+			if blue.Contains(other) {
+				t.Fatal("tagged set unexpectedly contains a distinct source identifier")
+			}
+			if blue.HasCommonUUIDs(other) {
+				t.Fatal("distinct tagged source identifiers unexpectedly overlap")
+			}
+			if got := blue.Subtract(other).String(); got != "uuid1:blue:1-5" {
+				t.Fatalf("Subtract() = %q, want tagged transactions preserved", got)
+			}
+		})
 	}
 }
 

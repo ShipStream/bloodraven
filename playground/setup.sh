@@ -12,6 +12,8 @@
 #     experimental, and the image-load path is faster on docker).
 #     Set BLOODRAVEN_CONTAINER_RUNTIME=podman to force podman if both
 #     are installed.
+#     Set BLOODRAVEN_SETUP_TLS=1 to configure MySQL and the keyring
+#     escrow listener with TLS before the failover group is created.
 #
 # Cluster setup (do once, before running this script):
 #
@@ -69,6 +71,18 @@ HELM_INSTALL_CRDS=false
 case "${BLOODRAVEN_SETUP_HELM_INSTALL_CRDS:-}" in
   1|true|TRUE|yes|YES) HELM_INSTALL_CRDS=true ;;
 esac
+
+SETUP_TLS=false
+case "${BLOODRAVEN_SETUP_TLS:-}" in
+  1|true|TRUE|yes|YES) SETUP_TLS=true ;;
+esac
+ESCROW_TLS_HELM_ARGS=()
+if [[ "$SETUP_TLS" == "true" ]]; then
+  ESCROW_TLS_HELM_ARGS=(
+    --set auxiliary.escrowTLS.enabled=true
+    --set auxiliary.escrowTLS.existingSecret=bloodraven-escrow-tls
+  )
+fi
 if [[ "$HELM_INSTALL_CRDS" == "true" ]] && helm status bloodraven -n "$NAMESPACE" >/dev/null 2>&1; then
   fail "BLOODRAVEN_SETUP_HELM_INSTALL_CRDS=1 requires a fresh Helm release. Helm installs CRDs from charts/bloodraven/crds only on first install and will not upgrade or repair them on helm upgrade; unset BLOODRAVEN_SETUP_HELM_INSTALL_CRDS to apply CRDs explicitly before upgrading."
 fi
@@ -260,6 +274,10 @@ fi
 info "Creating namespace and deploying manifests..."
 kubectl apply -f "$SCRIPT_DIR/manifests/namespace.yaml"
 kubectl apply -f "$SCRIPT_DIR/manifests/mysql-secret.yaml"
+if [[ "$SETUP_TLS" == "true" ]]; then
+  info "Preparing TLS before the operator and failover group are created..."
+  "$SCRIPT_DIR/enable-encryption.sh" --prepare-tls
+fi
 
 # Auto-detect the cluster's default StorageClass provisioner and patch the
 # playground StorageClass to use it, so it works on k3d, kind, and minikube.
@@ -305,6 +323,7 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set 'tolerations[4].operator=Exists' \
   --set 'tolerations[4].effect=NoExecute' \
   --set leaderElection.enabled=false \
+  "${ESCROW_TLS_HELM_ARGS[@]}" \
   --timeout=180s
 # Don't use --wait; the operator may take a moment to pass readiness after
 # leader election / first reconcile. We wait for it explicitly below.
@@ -312,10 +331,24 @@ info "Waiting for operator deployment to roll out..."
 kubectl -n "$NAMESPACE" rollout status deployment/bloodraven --timeout=180s
 ok "Operator deployed"
 
-# ── 9. Deploy the MysqlFailoverGroup CR ──────────────────────────────────
+# MySQL TLS must be present on the first observed generation. Adding it
+# later would make old pods and freshly rendered configuration disagree
+# about their connection contract during an ordered rollout.
 info "Creating MysqlFailoverGroup CR..."
-sed "s|sidecarImage: bloodraven-sidecar|sidecarImage: ${IMG_PREFIX}bloodraven-sidecar|" \
-  "$SCRIPT_DIR/manifests/failovergroup.yaml" | kubectl apply -f -
+if [[ "$SETUP_TLS" == "true" ]]; then
+  {
+    while IFS= read -r line; do
+      printf '%s\n' "$line"
+      if [[ "$line" == "  secretName: mysql-credentials" ]]; then
+        printf '  tls:\n    secretName: mysql-playground-tls\n    issuerRef:\n      name: playground-ca\n      kind: Issuer\n'
+      fi
+    done < <(sed "s|sidecarImage: bloodraven-sidecar|sidecarImage: ${IMG_PREFIX}bloodraven-sidecar|" \
+      "$SCRIPT_DIR/manifests/failovergroup.yaml")
+  } | kubectl apply -f -
+else
+  sed "s|sidecarImage: bloodraven-sidecar|sidecarImage: ${IMG_PREFIX}bloodraven-sidecar|" \
+    "$SCRIPT_DIR/manifests/failovergroup.yaml" | kubectl apply -f -
+fi
 
 info "Seeding DNSEndpoint CR (so external-dns chain works immediately)..."
 kubectl apply -f "$SCRIPT_DIR/manifests/dnsendpoint-seed.yaml"

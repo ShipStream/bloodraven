@@ -38,9 +38,23 @@ stateDiagram-v2
 
 **Debouncing:**
 
-- A site transitions to `unreachable` only after **failureThreshold** consecutive failed polls (default: 3). With a 2-second poll interval, this means 6 seconds of downtime before the operator considers the site unreachable.
+- A site transitions to `unreachable` only after **failureThreshold** consecutive failed polls (default: 3). For the first fault in an otherwise healthy group, the default 2-second base interval means about 6 seconds of downtime before the operator considers the site unreachable.
 - A site transitions to `writable` only after **recoveryThreshold** consecutive successful polls showing `read_only=0` (default: 2). This prevents premature promotion on transient successes.
 - Transitions to `read-only` are immediate (single poll) since this is a safe, non-destructive state.
+
+`spec.pollInterval` is a base interval, not a permanently flat cadence. Once
+any site has reached `failureThreshold` and continues to fail, the shared group
+poll loop backs off exponentially: with the defaults, later intervals progress
+from 2 seconds to 4, 8, 16, and then the 30-second cap. A successful probe
+resets that site's failure count, and the next interval returns to the base
+when no other site remains in backoff.
+
+This does not delay detection of the first isolated failure: the backoff starts
+only after the site is already `unreachable`. It does affect compound outages.
+If one site has been down long enough for polling to reach the 30-second cap, a
+second site that fails can take three capped polls, or up to about 90 seconds,
+to reach the default `failureThreshold`. Use that bound for alerting and
+compound-failure recovery estimates.
 
 ### Cross-site evaluation
 
@@ -49,13 +63,19 @@ After updating individual site states, the operator evaluates the pair together:
 | Site A | Site B | Action |
 |---|---|---|
 | `writable` | `read-only` | **Healthy** -- no action needed |
-| `unreachable` | `read-only` | **Failover** -- promote Site B |
-| `read-only` | `unreachable` | **Failover** -- promote Site A |
+| `unreachable` | `read-only` | **Promote Site B** -- the `Degraded` condition reason is `Degraded` until topology converges |
+| `read-only` | `unreachable` | **Promote Site A** -- the `Degraded` condition reason is `Degraded` until topology converges |
 | `writable` | `writable` | **Split brain** -- see [Split-brain resolution](#split-brain-resolution) |
 | `read-only` | `read-only` | **No primary** -- alert, no automatic action (with one exception, below) |
 | `unreachable` | `unreachable` | **Total loss** -- alert, no automatic action |
 
 The operator only takes automatic action for the failover case (and, opt-in, for split brain). All other anomalous states require human investigation.
+
+`Failover` is not a `Degraded` condition reason. Alert on
+`Degraded=True, reason=Degraded` for this topology state, on the
+`FailoverExecuted` Kubernetes Event for a completed promotion, or on an
+increase in `bloodraven_failovers_total`. A condition alert that matches
+`reason=Failover` never fires because the operator does not emit that value.
 
 The table is the two-candidate core reduced to two columns. In an N-site
 group, only `primary-candidate` sites can be the active site, promotion target,
@@ -78,40 +98,48 @@ The re-assert is rate-limited to once per `failoverCooldown`, logs `re-asserting
 
 ## Failover sequence
 
-When the operator decides to fail over to a candidate site, it executes these steps in order:
+When the operator decides to fail over to a candidate site, it executes these
+steps in order:
 
-1. **Fence the old primary**: `SET GLOBAL super_read_only=ON`
-   - If the old primary is unreachable, this step is skipped (it is already isolated)
+1. **Best-effort fence the old primary** with
+   `SET GLOBAL super_read_only=ON`. If no old-primary connection is available,
+   the sequence continues because the failed site is already isolated from the
+   operator.
+2. **Best-effort evict application connections from the old primary** so
+   clients reconnect through the primary Service or DNS. A failure is logged
+   and does not block promotion.
+3. **Drain relay logs on the candidate**, bounded by 30 seconds. A timeout or
+   drain error is logged and promotion continues; the drain narrows the normal
+   asynchronous-replication RPO but is not a zero-RPO gate.
+4. **Stop replication on the candidate** with `STOP REPLICA`. Failure stops
+   the promotion attempt.
+5. **Remove the candidate's replication configuration** with
+   `RESET REPLICA ALL`. Failure stops the promotion attempt.
+6. **Capture the promotion GTID** with `SELECT @@global.gtid_executed` before
+   the candidate accepts writes. A read failure is logged and leaves the
+   recorded value empty; it does not stop promotion.
+7. **Clear `super_read_only` on the candidate**. This is required because a
+   sidecar or earlier fence may have set it. Failure stops the promotion.
+8. **Clear `read_only` on the candidate**, making it writable. Failure stops
+   the promotion.
+9. **Confirm writability immediately** with a bounded `read_only` probe. This
+   is part of the same promotion attempt, not the next topology poll. If the
+   probe fails, DNS and failover bookkeeping are not advanced, although the
+   preceding write may already have made MySQL writable.
+10. **Record and publish the promotion**. The operator records anti-flap and
+    promotion-GTID state and increments `bloodraven_failovers_total` before it
+    best-effort updates the `DNSEndpoint`. A DNS write failure does not undo a
+    successful MySQL promotion; poll-driven DNS reconciliation keeps retrying.
+    Dragonfly follow-along, when enabled, starts after this MySQL path.
 
-2. **Drain relay logs on the candidate** (30-second timeout)
-   - Waits for the candidate to finish applying any relay log events so that no committed transactions are lost
-
-3. **Stop replication on the candidate**: `STOP REPLICA`
-
-4. **Reset replication on the candidate**: `RESET REPLICA ALL`
-   - Clears all replication configuration so the candidate operates as an independent primary
-
-5. **Record promotion GTID**: `SELECT @@global.gtid_executed`
-   - Captures the candidate's GTID set before it starts accepting writes, stored in `status.promotionGtidExecuted` for data-loss accounting
-
-6. **Promote the candidate**: `SET GLOBAL read_only=0`
-   - Makes the candidate writable
-
-7. **Wait for confirmation**
-   - The next poll cycle confirms the candidate is in the `writable` state
-
-8. **Update DNSEndpoint**
-   - Creates or updates the `DNSEndpoint` CR so that the A-record points to the candidate site's load balancer IP. external-dns syncs this to the configured DNS provider.
-
-9. **Update node taints**
-   - Taint old active site nodes: `shipstream.io/db-readonly-<group>=true:NoExecute`
-   - Untaint new active site nodes: remove the `shipstream.io/db-readonly-<group>` taint
-
-10. **Converge every follower's source**
-    - Candidate, `dr-only`, and `read-only` followers are verified against the
-      newly confirmed active primary
-    - Each follower must replicate directly from the primary; replication
-      chains are not accepted as converged
+Node taints, the `-primary` Service selector, and follower source convergence
+are poll-driven consequences rather than steps inside
+`FailoverController.Execute`. The old site's transition to `unreachable`
+applies its taint before promotion. Later successful polls debounce the new
+primary to `writable` and remove its taint; the status update then lets the
+resource reconciler move pod role labels and Service endpoints. Direct-source
+convergence separately verifies and repairs each remaining follower after
+replica status collection.
 
 ## Direct-source convergence
 
@@ -166,8 +194,9 @@ On each poll cycle, if a site is read-only with no active replication (the signa
 Only a **genuinely fresh datadir** is skipped and left to bootstrap/auto-clone. Freshness is decided from GTID history, not from the absence of user schemas: a site whose `GTID_EXECUTED` UUIDs share nothing with the new primary (server-init transactions under a brand-new `server_uuid`) may still be treated as empty when it also has no user schemas. A returning cluster member always carries the cluster's shared UUIDs, so a schemaless but previously participating site still runs the divergence comparison — never a silent clone-over. If the new primary cannot be probed for this check, the operator fails safe toward recovery rather than toward the fresh-datadir path. The sequence:
 
 1. **Fence** the returning site with `SET GLOBAL super_read_only=ON` (defensive — the sidecar may have already fenced it)
-2. **Query `@@global.gtid_executed`** on both the old and new primary
-3. **Compare GTID sets** to determine if the old primary has any transactions not on the new primary
+2. **Drain application sessions** until a pass finds none or `spec.connectionDrainTimeout` elapses (default `30s`). Each topology poll performs at most one bounded eviction pass, so recovery waits without blocking failure detection or failover progress. This runs after promotion, so it cannot kill the operator's promotion session. A timeout does not block recovery because the fence prevents writes; any survivor is limited to stale reads.
+3. **Query `@@global.gtid_executed`** on both the old and new primary
+4. **Compare GTID sets** to determine if the old primary has any transactions not on the new primary
 
 If the old primary returns **writable** (e.g., power was cut before the sidecar could self-fence), the operator first detects this as a split-brain condition and fences it immediately. The fence is retried on **every** poll cycle while the split-brain persists — a transient error on the first attempt (a network blip during the site's recovery turbulence) does not leave the returning site writable. Recovery proceeds once the site transitions to read-only.
 
@@ -181,7 +210,7 @@ If the new primary's GTID set contains all transactions from the old primary, th
 4. `CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1`
 5. `START REPLICA`
 
-While the sequence runs, `status.sites[].recoveryState` is `RecoveryInProgress` and the `RecoveryPending` condition is `True` with reason `RecoveryInProgress`. The operator keeps that state until MySQL reports healthy replication, then writes `replicating=true` and `gtidExecuted` for the read-only site and clears recovery state.
+While the sequence runs, `status.sites[].recoveryState` is `RecoveryInProgress` and the `RecoveryPending` condition is `True` with reason `RecoveryInProgress`. The operator keeps that state until MySQL reports healthy replication and the bounded application-connection drain has completed, then writes `replicating=true` and `gtidExecuted` for the read-only site and clears recovery state.
 
 ### Divergence detected (manual intervention required)
 
@@ -193,7 +222,7 @@ If the old primary has committed transactions that never replicated to the new p
 - Sets the `RecoveryPending` condition to `True` with reason `DivergentTransactions`
 - Emits the `bloodraven_divergent_transactions` Prometheus metric
 
-While a site is `RecoveryBlocked`, the operator re-verifies the divergence roughly every 30 seconds rather than freezing the first report. If the site diverges *further* before you resolve it (for example its pod respawned writable, accepted a few writes, and was re-fenced), `divergentGtid` and the count refresh to the full current set. If the divergence is resolved externally — you replay the missing transactions onto the new primary so its GTID set comes to contain the old primary's — the re-check notices containment and automatically rejoins the site as a replica.
+While a site is `RecoveryBlocked`, the operator re-verifies the divergence roughly every 30 seconds rather than freezing the first report. If the site diverges *further* before you resolve it (for example its pod respawned writable, accepted a few writes, and was re-fenced), `divergentGtid` and the count refresh to the full current set. A writable observation does not erase that evidence unless the site is both the recorded failover target and the unique, directly confirmed writable primary; split-brain remains blocked. If the divergence is resolved externally — you replay the missing transactions onto the new primary so its GTID set comes to contain the old primary's — the re-check notices containment and automatically rejoins the site as a replica.
 
 :::danger
 Divergent transactions mean the old primary accepted writes that the new primary never received. These transactions are effectively lost from the replication stream. There are exactly two sanctioned ways out: **re-clone** the site from the current primary (discarding the divergent transactions after you have extracted what you need), or **replay the divergent transactions onto the new primary** so its GTID set comes to contain the old primary's — the periodic re-verification then rejoins the site automatically. Do not manually reconfigure replication on the divergent site — conflicting GTID sets will cause replication errors.
@@ -225,17 +254,17 @@ Old primary recovery requires replication credentials (`MYSQL_REPLICATION_USER` 
 When the state machine observes both sites as `writable` simultaneously, the operator's response is tiered:
 
 1. **After a prior operator-initiated failover** -- The operator already knows which site it promoted (`status.lastFailoverTarget`). The other site being writable means the old primary returned. The operator fences it immediately (`SET GLOBAL super_read_only=ON`) and recovery proceeds on the next poll. This runs regardless of `spec.splitBrainPolicy`.
-2. **No prior failover history, `spec.splitBrainPolicy.preferSite` is set** -- The operator fences the non-preferred site and re-promotes the preferred one through the standard failover path (relay-log drain, `RESET REPLICA ALL`, promotion GTID record, `read_only=0`, writable confirmation, DNS flip). The anti-flap cooldown still applies to this promotion.
-3. **No prior failover history, no `preferSite` configured** -- The operator alerts only (`SPLIT BRAIN: both sites are writable`) and takes no automated action. This is the default.
+2. **No prior failover history, `spec.splitBrainPolicy.sitePriorities` is non-empty** -- The first listed site that is currently writable wins. The operator fences every other writable site and re-promotes the winner through the standard failover path. The anti-flap cooldown still applies to this promotion.
+3. **No prior failover history, no priorities configured** -- The operator alerts only (`SPLIT BRAIN: both sites are writable`) and takes no automated action. This is the default.
 
-### When `preferSite` applies
+### When `sitePriorities` applies
 
-`preferSite` is a tiebreaker for states the operator cannot resolve from its own history. The two common triggers:
+`sitePriorities` is an ordered tiebreaker for states the operator cannot resolve from its own history. The two common triggers:
 
-- **Fresh deploy with existing data.** Both sites come up writable and `lastFailoverTarget` is empty because this operator instance has never failed anything over. Without `preferSite`, the operator alerts and waits for an admin.
-- **Operator restart amnesia.** In-memory `lastFailoverTarget` is repopulated at startup from the newer of `status.lastFailoverTarget` and the out-of-band annotation (see [Where the cooldown is stored](#where-the-cooldown-is-stored)), so a failure on either durable path no longer costs the operator its history. But if a split brain occurred during the restart window — for example, an old primary came back *while* the operator was restarting — the operator may never have had an opportunity to record the most recent failover at all. `preferSite` provides a deterministic answer in this case.
+- **Fresh deploy with existing data.** Both sites come up writable and `lastFailoverTarget` is empty because this operator instance has never failed anything over. Without `sitePriorities`, the operator alerts and waits for an admin.
+- **Operator restart amnesia.** In-memory `lastFailoverTarget` is repopulated at startup from the newer of `status.lastFailoverTarget` and the out-of-band annotation (see [Where the cooldown is stored](#where-the-cooldown-is-stored)), so a failure on either durable path no longer costs the operator its history. But if a split brain occurred during the restart window — for example, an old primary came back *while* the operator was restarting — the operator may never have had an opportunity to record the most recent failover at all. `sitePriorities` provides a deterministic answer in this case.
 
-When history *is* available (case 1 above), the operator trusts it and does **not** consult `preferSite`. This preserves the invariant that the site most recently promoted keeps its writes.
+When history *is* available (case 1 above), the operator trusts it and does **not** consult `sitePriorities`. This preserves the invariant that the site most recently promoted keeps its writes.
 
 ### Configuration
 
@@ -251,28 +280,28 @@ spec:
     - name: pdx
       # ...
   splitBrainPolicy:
-    preferSite: iad  # "iad always wins ties"
+    sitePriorities: [iad, pdx]  # iad wins when writable; pdx is next
 ```
 
-`preferSite` must match one of `spec.sites[].name`; the CRD's CEL validation rejects mismatches at admission time.
+Every entry must match a `primary-candidate` in `spec.sites`; the CRD's CEL validation rejects other names and non-promotable sites at admission time. An empty or omitted list leaves unresolvable split brain in alert-only mode.
 
 ### Data-loss implications
 
 :::danger
-`preferSite` is a **policy** decision, not a safety feature. When the operator fences the losing site to resolve a split brain:
+`sitePriorities` is a **policy** decision, not a safety feature. When the operator fences a losing site to resolve a split brain:
 
 - Any transactions committed on the losing site that did *not* replicate to the winner are isolated.
 - Those transactions are *not* automatically replayed, merged, or preserved. They remain on the losing site's PVC but are outside the replication stream.
 - When the fenced site attempts to rejoin, Bloodraven's existing divergent-GTID detection compares `executed_gtid_set` on both sides. If the loser has GTIDs the winner never saw, rejoin is **blocked** and the site must be recloned to recover. The divergent GTID set and transaction count are recorded in `status.sites[].divergentGtid` and `status.sites[].divergentTransactionCount`.
-- In other words, `preferSite` makes split-brain resolution fast and deterministic at the cost of silently losing the loser's unreplicated writes. The loss is surfaced loudly (`RecoveryBlocked` condition, `bloodraven_divergent_transactions` gauge) but not prevented.
+- In other words, `sitePriorities` makes split-brain resolution fast and deterministic by selecting one history branch. The loser's unreplicated writes are isolated and surfaced through the `RecoveryBlocked` condition and `bloodraven_divergent_transactions` gauge, but they are not merged into the winner.
 :::
 
-Choose `preferSite` only when your operational model has a clear authoritative site -- for example, a primary region that you always want writes to land in, with the other region serving as a pure DR replica whose occasional writes during a split brain are acceptable to discard.
+Configure `sitePriorities` only when your operational model has a clear authority order -- for example, a primary region that should win whenever it is writable, followed by explicit fallback regions.
 
 ### Observability
 
-- Metric: `bloodraven_split_brain_auto_resolve_total{prefer_site="<name>"}` -- counter, incremented each time the operator resolves a split brain by fencing the non-preferred site.
-- Log event: `split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.preferSite` at `warn` level, with `preferSite` and `fencedSite` fields.
+- Metric: `bloodraven_split_brain_auto_resolve_total{prefer_site="<name>"}` -- counter, incremented for a successful losing-site fence; the retained label name identifies the winning site.
+- Log event: `split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities` at `WARN`, with `winner` and `fencedSite` fields.
 - The standard failover log, metric (`bloodraven_failovers_total`), and DNS-flip metric (`bloodraven_dns_flips_total`) also fire, since split-brain resolution runs through the same promotion path.
 
 ## Anti-flap cooldown

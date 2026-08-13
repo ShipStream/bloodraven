@@ -39,7 +39,11 @@ func newRecoveryHarness(t *testing.T, dc1, dc2 *mockMySQL) *testHarness {
 
 func TestRecovery_OldPrimaryReturnsReadOnly_NoDivergence(t *testing.T) {
 	// dc1 primary (writable), dc2 replica (read-only)
-	dc1 := &mockMySQL{readOnly: false, gtidExecuted: "uuid1:1-10"}
+	dc1 := &mockMySQL{
+		readOnly:              false,
+		gtidExecuted:          "uuid1:1-10",
+		killConnectionResults: []int{1, 0},
+	}
 	dc2 := &mockMySQL{readOnly: true, gtidExecuted: "uuid1:1-10"}
 	h := newRecoveryHarness(t, dc1, dc2)
 
@@ -72,16 +76,32 @@ func TestRecovery_OldPrimaryReturnsReadOnly_NoDivergence(t *testing.T) {
 	dc1.gtidExecuted = "uuid1:1-10"
 	dc1.mu.Unlock()
 
-	// Poll to detect recovery.
-	h.pollN(2) // recovery threshold for dc1 to become read-only
-
-	// dc1 should now have replication configured (recovery auto-ran).
+	// The old primary already has enough successful observations from before
+	// the outage to be reclassified read-only on its first returning poll.
+	// Its surviving application session is evicted on that poll, but recovery
+	// does not mutate replication until a later poll observes an empty pass.
+	h.pollN(1)
 	dc1.mu.Lock()
 	replConfigured := dc1.replicationSourceSet && dc1.replicaStarted
+	killCalls := dc1.killConnectionCalls
 	dc1.mu.Unlock()
+	if replConfigured {
+		t.Fatal("dc1 recovery started before the post-self-fence drain completed")
+	}
+	if killCalls != 1 {
+		t.Fatalf("post-self-fence drain calls = %d, want 1 eviction pass", killCalls)
+	}
 
+	h.pollN(1)
+	dc1.mu.Lock()
+	replConfigured = dc1.replicationSourceSet && dc1.replicaStarted
+	killCalls = dc1.killConnectionCalls
+	dc1.mu.Unlock()
 	if !replConfigured {
-		t.Error("dc1 should have been auto-recovered as replica (replication configured)")
+		t.Error("dc1 should have been auto-recovered after an empty drain pass")
+	}
+	if killCalls != 2 {
+		t.Errorf("post-self-fence drain calls = %d, want eviction then empty pass", killCalls)
 	}
 }
 

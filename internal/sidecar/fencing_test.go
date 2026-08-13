@@ -38,6 +38,12 @@ func (m *mockFencer) IsReadOnly(_ context.Context) (bool, error) {
 	}
 	return m.readOnly, nil
 }
+func (m *mockFencer) IsSuperReadOnly(_ context.Context) (bool, error) {
+	if m.readOnlyErr != nil {
+		return false, m.readOnlyErr
+	}
+	return m.superReadOnly, nil
+}
 
 func (m *mockFencer) SetSuperReadOnly(_ context.Context) error {
 	m.superReadOnly = true
@@ -950,9 +956,10 @@ func TestFencingResolvesAnAmbiguousFenceWrite(t *testing.T) {
 		}
 	})
 
-	// An unreadable instance is unknown, not fenced. Claiming the fence
-	// here would suppress the retry that is the actual remedy.
-	t.Run("probe unavailable", func(t *testing.T) {
+	// An unavailable confirmation probe is retried on the next tick. The
+	// monitor must preserve process-local attribution without claiming the
+	// fence before MySQL confirms it.
+	t.Run("probe unavailable then recovers", func(t *testing.T) {
 		a := &ambiguousFencer{mockFencer: newMockFencer(false), applyWrite: true}
 		fm, _ := newMonitor(a)
 		a.readOnlyErr = fmt.Errorf("connection refused")
@@ -961,6 +968,30 @@ func TestFencingResolvesAnAmbiguousFenceWrite(t *testing.T) {
 
 		if fm.IsFenced() {
 			t.Error("IsFenced() is true although the confirming read failed; the outcome is unknown")
+		}
+		if !fm.fencePending {
+			t.Fatal("ambiguous fence was not retained for a later confirmation")
+		}
+
+		a.readOnlyErr = nil
+		fm.evaluate(context.Background())
+		if !fm.IsFenced() {
+			t.Error("IsFenced() stayed false after the next tick confirmed super_read_only=ON")
+		}
+		if fm.fencePending {
+			t.Error("pending confirmation was not cleared")
+		}
+	})
+
+	t.Run("read_only alone does not confirm super fence", func(t *testing.T) {
+		a := &ambiguousFencer{mockFencer: newMockFencer(false), applyWrite: false}
+		a.readOnly = true
+		fm, _ := newMonitor(a)
+
+		fm.evaluate(context.Background())
+
+		if fm.IsFenced() {
+			t.Error("read_only=ON without super_read_only was attributed to this monitor")
 		}
 	})
 }

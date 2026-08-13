@@ -1185,10 +1185,13 @@ with TLS and `spec.encryptionAtRest` enabled, which is not the baseline
 the other scenarios assume:
 
 ```bash
-./playground/setup.sh
+BLOODRAVEN_SETUP_TLS=1 ./playground/setup.sh
 ./playground/enable-encryption.sh --fresh   # wipe + encrypt from birth
 make chaos-run SCENARIO=48-keyring-seal-and-rotation
 ```
+
+TLS is configured before the failover group is first observed so the
+encryption adoption does not overlap a second restart-sensitive rollout.
 
 `--fresh` wipes MySQL first so every tablespace is encrypted from birth.
 Without it the script converts in place, which leaves pre-existing tables

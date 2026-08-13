@@ -7,7 +7,8 @@ import (
 	"strings"
 )
 
-// GTIDSet represents a set of GTID intervals per server UUID.
+// GTIDSet represents a set of GTID intervals per source identifier. A source
+// identifier is either a server UUID or a tagged server UUID ("uuid:tag").
 type GTIDSet map[string][]Interval
 
 // Interval represents a range of transaction sequence numbers.
@@ -65,19 +66,24 @@ func ParseGTIDSet(s string) (GTIDSet, error) {
 		// Use a strict syntactic check: a segment is an interval if it contains only digits with
 		// an optional single hyphen separator. This avoids conflating a malformed interval (e.g.
 		// "5-3" with start>end, or "1-2-3") with a tag, which would silently skip the bad segment.
-		tagIndex := 1
+		sid := uuid
+		intervalIndex := 1
 		if len(segments) >= 3 {
 			secondSeg := segments[1]
 			if !isIntervalSegment(secondSeg) {
 				if !isTagSegment(secondSeg) {
 					return nil, fmt.Errorf("invalid segment %q in GTID entry %q: not an interval or valid tag", secondSeg, part)
 				}
-				tagIndex = 2
+				// MySQL treats uuid and uuid:tag as distinct source identifiers.
+				// Retain the tag in the map key so set arithmetic cannot merge
+				// transactions from different tagged sources.
+				sid = uuid + ":" + secondSeg
+				intervalIndex = 2
 			}
 		}
 
 		hasInterval := false
-		for i := tagIndex; i < len(segments); i++ {
+		for i := intervalIndex; i < len(segments); i++ {
 			seg := strings.TrimSpace(segments[i])
 			if seg == "" {
 				continue
@@ -86,7 +92,7 @@ func ParseGTIDSet(s string) (GTIDSet, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid interval %q in GTID entry %q: %w", seg, part, err)
 			}
-			result[uuid] = append(result[uuid], iv)
+			result[sid] = append(result[sid], iv)
 			hasInterval = true
 		}
 		if !hasInterval {
@@ -257,7 +263,8 @@ func subtractInterval(a, b Interval) []Interval {
 	return result
 }
 
-// HasCommonUUIDs returns true if the two sets share at least one server UUID.
+// HasCommonUUIDs returns true if the two sets share at least one source
+// identifier. For tagged GTIDs, the identifier includes the tag.
 func (g GTIDSet) HasCommonUUIDs(other GTIDSet) bool {
 	for uuid := range g {
 		if _, ok := other[uuid]; ok {

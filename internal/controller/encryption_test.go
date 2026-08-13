@@ -115,6 +115,42 @@ func TestKeyringManifestIsValidJSON(t *testing.T) {
 	if m["components"] != "file://component_keyring_file" {
 		t.Errorf("components = %v", m["components"])
 	}
+	if _, ok := m["read_local_manifest"]; ok {
+		t.Error("global manifest must not set read_local_manifest; keep global-only loading simple")
+	}
+	var local map[string]any
+	if err := json.Unmarshal([]byte(keyringLocalManifestJSON()), &local); err != nil {
+		t.Fatalf("local manifest is not valid JSON: %v", err)
+	}
+	if local["components"] != "file://component_keyring_file" {
+		t.Errorf("local components = %v", local["components"])
+	}
+	if _, ok := local["read_local_manifest"]; ok {
+		t.Error("local manifest must not carry read_local_manifest (global-only field)")
+	}
+}
+
+func TestConfigInitScriptPlantsLocalManifestWhenEncryptionOn(t *testing.T) {
+	fg := encTestFG()
+	script := configInitScript(fg, 101)
+	if !strings.Contains(script, "/var/lib/mysql/mysqld.my") {
+		t.Fatalf("encrypted config init must plant a local manifest:\n%s", script)
+	}
+	if !strings.Contains(script, "component_keyring_file") {
+		t.Fatalf("local manifest snippet missing component URN:\n%s", script)
+	}
+	mounts := configInitVolumeMounts(fg)
+	if findMount(mounts, "/var/lib/mysql") == nil {
+		t.Fatal("encrypted config init must mount the datadir")
+	}
+
+	plain := configInitScript(newTestFG(), 101)
+	if strings.Contains(plain, "mysqld.my") {
+		t.Fatalf("unencrypted config init must not plant a keyring manifest:\n%s", plain)
+	}
+	if findMount(configInitVolumeMounts(newTestFG()), "/var/lib/mysql") != nil {
+		t.Fatal("unencrypted config init must not mount the datadir")
+	}
 }
 
 func TestKeyringComponentConfig(t *testing.T) {
@@ -152,42 +188,68 @@ func TestKeyringConfigMapData(t *testing.T) {
 }
 
 func TestKeyringInitScript(t *testing.T) {
-	// Fresh bootstrap: MySQL needs the file to exist (it aborts startup
-	// on a missing keyring data file) but an empty one is fine.
+	// Fresh bootstrap needs a valid empty component_keyring_file
+	// document. A zero-length file disables the component and makes
+	// startup encryption abort with "Check keyring fail".
+	//
+	// The keyring DIRECTORY has to be writable by mysqld's uid, not just
+	// the file: component_keyring_file stores a new key by creating a temp
+	// file alongside the keyring and renaming over it. Preparing only the
+	// file leaves a root-owned directory and MySQL fails --initialize with
+	// an opaque "InnoDB Database creation was aborted with error Generic
+	// error" (verified against mysql:9.7). Directory chmod/chown must run
+	// only as root — a memory-backed emptyDir is already root-owned 0777,
+	// and doing it unconditionally trips set -e in a non-root init container.
+	cases := []struct {
+		name     string
+		seeded   bool
+		want     []string
+		prohibit []string
+	}{
+		{
+			name:   "fresh bootstrap",
+			seeded: false,
+			want: []string{
+				`{"version":"1.0","elements":[]}`,
+				`chmod 700 "$data_dir"`,
+				`chown 999:999 "$data_dir"`,
+			},
+			prohibit: []string{
+				keyringSeedMountPath,
+				"/run/mysql-keyring", // paths must be positional args
+			},
+		},
+		{
+			name:   "seeded unseal",
+			seeded: true,
+			want: []string{
+				`cp "$seed_file" "$data_file"`,
+				"chmod 600",
+				`id -u`,
+				"chown 999:999",
+			},
+			prohibit: []string{
+				"/run/mysql-keyring",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := keyringInitScript(tc.seeded)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q:\n%s", want, got)
+				}
+			}
+			for _, bad := range tc.prohibit {
+				if strings.Contains(got, bad) {
+					t.Errorf("must not contain %q:\n%s", bad, got)
+				}
+			}
+		})
+	}
+
 	fresh := keyringInitScript(false)
-	if !strings.Contains(fresh, `: > "$data_file"`) {
-		t.Errorf("fresh bootstrap must create an empty keyring:\n%s", fresh)
-	}
-	if strings.Contains(fresh, keyringSeedMountPath) {
-		t.Errorf("fresh bootstrap must not reference a seed:\n%s", fresh)
-	}
-
-	seeded := keyringInitScript(true)
-	if !strings.Contains(seeded, `cp "$seed_file" "$data_file"`) {
-		t.Errorf("seeded unseal must copy from the escrow Secret:\n%s", seeded)
-	}
-	for _, want := range []string{"chmod 600", `id -u`, "chown 999:999"} {
-		if !strings.Contains(seeded, want) {
-			t.Errorf("init script missing %q:\n%s", want, seeded)
-		}
-	}
-
-	// The DIRECTORY has to be writable by mysqld's uid, not just the
-	// file: component_keyring_file stores a new key by creating a temp
-	// file alongside the keyring and renaming over it. Preparing only
-	// the file leaves a root-owned directory and MySQL fails
-	// --initialize with an opaque "InnoDB Database creation was aborted
-	// with error Generic error" (verified against mysql:9.7).
-	if !strings.Contains(fresh, `chmod 700 "$data_dir"`) {
-		t.Errorf("init script must prepare the keyring directory, not just the file:\n%s", fresh)
-	}
-	if !strings.Contains(fresh, `chown 999:999 "$data_dir"`) {
-		t.Errorf("init script must chown the keyring directory:\n%s", fresh)
-	}
-
-	// ...but only as root. A memory-backed emptyDir is root-owned 0777,
-	// so a hardened non-root init container cannot chmod it and does not
-	// need to. Doing it unconditionally trips `set -e` and wedges the pod.
 	rootOnly := fresh[strings.Index(fresh, `if [ "$(id -u)" = "0" ]`):]
 	for _, mustBeGuarded := range []string{
 		`chown 999:999 "$data_dir"`,
@@ -196,9 +258,6 @@ func TestKeyringInitScript(t *testing.T) {
 		if !strings.Contains(rootOnly, mustBeGuarded) {
 			t.Errorf("%q must be inside the root-only branch:\n%s", mustBeGuarded, fresh)
 		}
-	}
-	if strings.Contains(fresh, "/run/mysql-keyring") {
-		t.Errorf("paths must be passed as positional arguments, not interpolated into the shell script:\n%s", fresh)
 	}
 }
 
@@ -364,24 +423,39 @@ func TestBuildEncryptionFragments_ComponentFilePaths(t *testing.T) {
 	}
 	frags := buildEncryptionFragments(fg, fg.Spec.Sites[0], true, "s", false)
 
-	// MySQL only reads the global manifest from the mysqld directory and
-	// the global component config from plugin_dir. Both have to be
-	// subPath mounts: mounting a volume over either directory would hide
-	// the mysqld binary or the component .so.
-	manifest := findMount(frags.MysqlVolumeMounts, "/opt/mysql/bin/mysqld.my")
-	if manifest == nil {
-		t.Fatal("manifest must be mounted next to the mysqld binary")
+	// Component sources for the launcher.
+	src := findMount(frags.MysqlVolumeMounts, keyringComponentSrcMount)
+	if src == nil {
+		t.Fatal("component sources must be mounted for the launcher to copy")
 	}
-	if manifest.SubPath != keyringManifestKey {
-		t.Errorf("manifest subPath = %q, want %q", manifest.SubPath, keyringManifestKey)
+	if src.Name != "config" {
+		t.Errorf("component sources should come from the per-site ConfigMap volume, got %q", src.Name)
 	}
-	if manifest.Name != "config" {
-		t.Errorf("manifest should come from the per-site ConfigMap volume, got %q", manifest.Name)
+	cmd, args := encryptionMysqlLauncher(fg, []string{"--server-id=1"})
+	if len(cmd) < 3 || cmd[0] != "/bin/bash" {
+		t.Fatalf("launcher command = %v, want bash -ec <script>", cmd)
 	}
-
-	cnf := findMount(frags.MysqlVolumeMounts, "/opt/mysql/lib/plugin/component_keyring_file.cnf")
-	if cnf == nil || cnf.SubPath != keyringComponentKey {
-		t.Fatalf("component config must be subPath-mounted into plugin_dir: %+v", cnf)
+	script := cmd[2]
+	for _, want := range []string{
+		keyringComponentSrcMount,
+		keyringManifestKey,
+		keyringComponentKey,
+		"/opt/mysql/bin/mysqld",
+		mysqlRuntimeBinDir + "/mysqld",
+		mysqlRuntimeBinDir + "/mysqld.my",
+		"export PATH=",
+		"/opt/mysql/lib/plugin/component_keyring_file.cnf",
+		"/opt/bloodraven/mysql/lib/plugin",
+		"/opt/bloodraven/mysql/share",
+		mysqlDockerEntrypoint,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("launcher script missing %q:\n%s", want, script)
+		}
+	}
+	if len(args) < 4 || args[0] != "mysqld" || args[1] != "--basedir=/opt/mysql" ||
+		args[2] != "--plugin-dir=/opt/mysql/lib/plugin" || args[3] != "--server-id=1" {
+		t.Errorf("launcher args = %v, want mysqld with source-image paths before --server-id=1", args)
 	}
 }
 

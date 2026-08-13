@@ -1454,6 +1454,15 @@ spec:
                           my.cnf). Default: 3600 (1 hour).
                         minimum: 60
                         type: integer
+                      connectionDrainTimeout:
+                        default: 30s
+                        description: |-
+                          ConnectionDrainTimeout bounds the operator-side retry window for
+                          evicting application sessions from a fenced former primary after an
+                          emergency failover or autonomous self-fence. This drain runs only
+                          after promotion has completed, so it cannot kill the operator's
+                          promotion session. Default: 30s.
+                        type: string
                       containerSecurityContext:
                         description: |-
                           ContainerSecurityContext optionally sets the container-level security
@@ -6104,8 +6113,10 @@ spec:
                         type: object
                       pollInterval:
                         default: 2s
-                        description: 'PollInterval is how often to poll MySQL instances.
-                          Default: 2s'
+                        description: |-
+                          PollInterval is the base interval for polling MySQL instances. After a
+                          site reaches FailureThreshold and continues failing, the effective
+                          interval backs off exponentially to a 30s cap. Default: 2s.
                         type: string
                       recoveryThreshold:
                         default: 2

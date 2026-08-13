@@ -115,21 +115,25 @@ Setup takes about 2 minutes depending on your machine.
 | `./playground/chaos.sh cordon pdx` | Site capacity or scheduling failure |
 | `./playground/chaos.sh recover` | Infrastructure recovery after an incident |
 | `./playground/reset-mysql.sh` | Destructive lab reset, not a production recovery command |
-| `./playground/enable-encryption.sh` | Turning on [data-at-rest encryption](./encryption-at-rest.mdx) — generates playground TLS material and converts the group |
+| `./playground/enable-encryption.sh` | Turning on [data-at-rest encryption](./encryption-at-rest.mdx) on a playground created with `BLOODRAVEN_SETUP_TLS=1` |
 
 ## Data-at-rest encryption in the playground
 
-The playground comes up unencrypted. To exercise the keyring lifecycle:
+The playground comes up unencrypted. Create it with TLS from the first
+generation, then exercise the keyring lifecycle:
 
 ```bash
+BLOODRAVEN_SETUP_TLS=1 ./playground/setup.sh
 ./playground/enable-encryption.sh --fresh    # wipe MySQL, then encrypt from birth
 ./playground/enable-encryption.sh --status   # per-site phase + escrow versions
 ```
 
-The script generates a self-signed CA and server certificate (encryption
-requires `spec.tls`, because MySQL mandates a secure connection to clone
-encrypted data), patches the failover group, and waits for every site to
-reach `phase: Sealed`.
+`BLOODRAVEN_SETUP_TLS=1` generates a self-signed CA and server
+certificate, configures the escrow listener, and puts `spec.tls` on the
+failover group before the operator first observes it. Keeping TLS out of
+the later encryption rollout avoids mixing two independent,
+restart-sensitive configuration changes. Encryption requires TLS because
+MySQL mandates a secure connection to clone encrypted data.
 
 `--fresh` wipes MySQL first so every tablespace is encrypted from birth.
 Without it the script converts in place and stamps the
@@ -143,8 +147,9 @@ Once sealed, run the dedicated chaos scenario:
 make chaos-run SCENARIO=48-keyring-seal-and-rotation
 ```
 
-It is quarantined from the batch profiles precisely because it needs this
-non-default baseline. See
+It stays quarantined from the shared batch profiles because it needs this
+non-default baseline. CI creates the dedicated group with TLS, executes
+`enable-encryption.sh`, and then runs the scenario explicitly. See
 [chaos-scenarios.md § 48](https://github.com/ShipStream/bloodraven/blob/main/playground/chaos-scenarios.md).
 
 ## Reset when things go wrong

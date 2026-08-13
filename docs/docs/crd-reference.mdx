@@ -54,10 +54,11 @@ Review runbooks before changing `spec.restoreInPlace`, restore-related `confirm`
 | `credentials` | CredentialsSpec | No | -- | Per-role MySQL credential management. The operator creates MySQL users with role-appropriate privileges and rotates passwords when secrets change. Mutually exclusive with `secretName`. |
 | `dns` | DNSSpec | Yes | -- | DNS configuration for traffic steering via external-dns |
 | `tls` | TLSSpec | No | -- | TLS configuration (cert-manager integration) |
-| `pollInterval` | duration | No | `2s` | How often the operator polls each MySQL instance |
+| `pollInterval` | duration | No | `2s` | Base interval for polling each MySQL instance. After a site reaches `failureThreshold` and continues failing, the shared group cadence backs off exponentially to a 30-second cap. |
 | `failureThreshold` | int | No | `3` | Consecutive failed polls before a site is marked unreachable |
 | `recoveryThreshold` | int | No | `2` | Consecutive successful polls before a site is marked writable |
 | `failoverCooldown` | duration | No | `5m` | Minimum time between automatic failovers |
+| `connectionDrainTimeout` | duration | No | `30s` | Maximum operator-side retry window for evicting stale application sessions from a fenced former primary after promotion |
 | `splitBrainPolicy` | SplitBrainPolicySpec | No | -- | Opt-in automated resolution when multiple sites are writable and the operator has no prior failover history. See [SplitBrainPolicySpec](#splitbrainpolicyspec). |
 | `sidecar` | SidecarSpec | No | -- | Sidecar-container knobs (lease timeout, peer check interval, Bloodraven aux endpoint). |
 | `sidecarResources` | ResourceRequirements | No | -- | Compute resources (requests/limits) for the sidecar container |

@@ -82,7 +82,9 @@ type MysqlFailoverGroupSpec struct {
 	// DNS configures the external DNS record managed via the external-dns DNSEndpoint CRD.
 	DNS DNSSpec `json:"dns"`
 
-	// PollInterval is how often to poll MySQL instances. Default: 2s
+	// PollInterval is the base interval for polling MySQL instances. After a
+	// site reaches FailureThreshold and continues failing, the effective
+	// interval backs off exponentially to a 30s cap. Default: 2s.
 	// +kubebuilder:default="2s"
 	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
 
@@ -99,6 +101,15 @@ type MysqlFailoverGroupSpec struct {
 	// FailoverCooldown is the minimum time between failovers. Default: 5m
 	// +kubebuilder:default="5m"
 	FailoverCooldown *metav1.Duration `json:"failoverCooldown,omitempty"`
+
+	// ConnectionDrainTimeout bounds the operator-side retry window for
+	// evicting application sessions from a fenced former primary after an
+	// emergency failover or autonomous self-fence. This drain runs only
+	// after promotion has completed, so it cannot kill the operator's
+	// promotion session. Default: 30s.
+	// +kubebuilder:default="30s"
+	// +optional
+	ConnectionDrainTimeout *metav1.Duration `json:"connectionDrainTimeout,omitempty"`
 
 	// Sidecar configures sidecar behavior.
 	Sidecar SidecarSpec `json:"sidecar,omitempty"`

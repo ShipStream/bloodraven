@@ -50,6 +50,9 @@ type mockMySQL struct {
 	superReadOnlyErr         error
 	superReadOnlyHadDeadline bool
 	clonePrimaryHost         string
+	killConnectionResults    []int
+	killConnectionErrs       []error
+	killConnectionCalls      int
 }
 
 func testBoolPtr(v bool) *bool {
@@ -214,7 +217,21 @@ func TestEmitStatusSnapshotPreservesPersistentTopologyDegradation(t *testing.T) 
 		t.Fatalf("update-only snapshot cleared degradation: %+v", snapshot)
 	}
 }
-func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) { return 0, nil }
+func (m *mockMySQL) KillAppConnections(_ context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	i := m.killConnectionCalls
+	m.killConnectionCalls++
+	var killed int
+	if i < len(m.killConnectionResults) {
+		killed = m.killConnectionResults[i]
+	}
+	var err error
+	if i < len(m.killConnectionErrs) {
+		err = m.killConnectionErrs[i]
+	}
+	return killed, err
+}
 func (m *mockMySQL) StopReplica(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1099,6 +1116,66 @@ func TestPendingPromotionClearsWhenDifferentSiteWritable(t *testing.T) {
 	}
 }
 
+type blockingReadOnlyMySQL struct {
+	*mockMySQL
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (m *blockingReadOnlyMySQL) CheckReadOnly(context.Context) (bool, error) {
+	m.mu.Lock()
+	readOnly, err := m.readOnly, m.err
+	m.mu.Unlock()
+	m.started <- struct{}{}
+	<-m.release
+	return readOnly, err
+}
+
+func TestPoll_DoesNotSupersedeConcurrentPromotionWithStaleObservations(t *testing.T) {
+	oldPrimary := &mockMySQL{readOnly: false}
+	newPrimary := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(oldPrimary, newPrimary)
+	pollN(tm, 2)
+
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	tm.sites[0].mysql = &blockingReadOnlyMySQL{mockMySQL: oldPrimary, started: started, release: release}
+	tm.sites[1].mysql = &blockingReadOnlyMySQL{mockMySQL: newPrimary, started: started, release: release}
+
+	pollDone := make(chan struct{})
+	go func() {
+		tm.Poll(context.Background())
+		close(pollDone)
+	}()
+	<-started
+	<-started
+
+	oldPrimary.mu.Lock()
+	oldPrimary.readOnly = true
+	oldPrimary.mu.Unlock()
+	newPrimary.mu.Lock()
+	newPrimary.readOnly = false
+	newPrimary.mu.Unlock()
+	tm.recordFailover(context.Background(), tm.clock.Now(), "dc2", "uuid:1-10")
+
+	close(release)
+	<-pollDone
+
+	tm.mu.RLock()
+	pending := tm.promotedSite
+	tm.mu.RUnlock()
+	if pending != "dc2" {
+		t.Fatalf("stale poll superseded pending promotion: got %q, want dc2", pending)
+	}
+
+	tm.sites[0].mysql = oldPrimary
+	tm.sites[1].mysql = newPrimary
+	tm.Poll(context.Background())
+	if got := tm.Status().ActiveSite; got != "dc2" {
+		t.Fatalf("active site after fresh poll = %q, want dc2", got)
+	}
+}
+
 func TestStatusActiveSiteBothWritable(t *testing.T) {
 	site0 := &mockMySQL{readOnly: false}
 	site1 := &mockMySQL{readOnly: false}
@@ -1683,6 +1760,139 @@ func TestCheckRecovery_ClearsHealthyRecoverySiteWithoutReplicationCredentials(t 
 	tm.mu.RUnlock()
 	if rec != nil {
 		t.Fatalf("recovery state not cleared: %+v", rec)
+	}
+}
+
+func TestCheckRecovery_PreservesBlockedRecordedTargetDuringSplitBrain(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: false}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+
+	tm.mu.Lock()
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateWritable
+	tm.recovery["dc2"] = &siteRecovery{
+		state:          recoveryStateBlocked,
+		divergentGtid:  "aaaa:50-55",
+		divergentCount: 6,
+		drainComplete:  true,
+	}
+	tm.lastFailoverTarget = "dc2"
+	tm.mu.Unlock()
+
+	if tm.clearHealthyRecoverySites(context.Background(), nil) {
+		t.Fatal("split-brain must not clear blocked divergence from the recorded target")
+	}
+	tm.mu.RLock()
+	rec := tm.recovery["dc2"]
+	tm.mu.RUnlock()
+	if rec == nil || rec.divergentGtid != "aaaa:50-55" {
+		t.Fatalf("divergence evidence was lost without unique authority: %+v", rec)
+	}
+	if rec.drainComplete {
+		t.Fatal("writable rogue site retained stale drain completion")
+	}
+
+	site0.readOnly = true
+	tm.sites[0].state = state.StateReadOnly
+	if !tm.clearHealthyRecoverySites(context.Background(), nil) {
+		t.Fatal("unique, directly confirmed recorded target should clear stale divergence")
+	}
+}
+
+func TestCheckRecovery_DrainsSurvivingConnectionsBeforeCompletion(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{
+		readOnly:              true,
+		killConnectionResults: []int{2, 1, 0},
+	}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	tm.mu.Lock()
+	tm.sites[0].state = state.StateWritable
+	tm.sites[1].state = state.StateReadOnly
+	tm.recovery["dc2"] = &siteRecovery{state: recoveryStateInProgress}
+	tm.lastFailoverTarget = "dc1"
+	tm.sites[1].sourceConvergenceState = sourceConvergenceConverged
+	tm.mu.Unlock()
+
+	repl := []*mysql.ReplicaStatus{
+		nil,
+		{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1"},
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		changed := tm.checkRecovery(context.Background(), repl)
+		if attempt < 3 && changed {
+			t.Fatalf("recovery completed after drain pass %d, before the empty pass", attempt)
+		}
+		if attempt == 3 && !changed {
+			t.Fatal("healthy recovery state was not completed after the empty pass")
+		}
+	}
+	if site1.killConnectionCalls != 3 {
+		t.Fatalf("connection drain calls = %d, want 3 passes ending at zero", site1.killConnectionCalls)
+	}
+	tm.mu.RLock()
+	rec := tm.recovery["dc2"]
+	tm.mu.RUnlock()
+	if rec != nil {
+		t.Fatalf("recovery state cleared before drain completion: %+v", rec)
+	}
+}
+
+func TestCheckRecovery_DrainsBeforeOldPrimaryMutation(t *testing.T) {
+	gtid := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: gtid}
+	site1 := &mockMySQL{
+		readOnly:              true,
+		gtidExecuted:          gtid,
+		killConnectionResults: []int{1, 0},
+	}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+	setRecoveredTopology(tm)
+
+	if changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}); changed {
+		t.Fatal("recovery mutation started before the drain reached an empty pass")
+	}
+	if got := site1.startReplicaCallCount(); got != 0 {
+		t.Fatalf("recovery mutated old primary during drain: %d sequences", got)
+	}
+	if changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil}); !changed {
+		t.Fatal("expected recovery to start after the empty drain pass")
+	}
+	if site1.killConnectionCalls != 2 {
+		t.Fatalf("connection drain calls = %d, want 2", site1.killConnectionCalls)
+	}
+	if got := site1.startReplicaCallCount(); got != 1 {
+		t.Fatalf("recovery did not proceed after clean drain: %d sequences", got)
+	}
+}
+
+func TestCheckRecovery_DrainRetriesAfterKillError(t *testing.T) {
+	gtid := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: gtid}
+	site1 := &mockMySQL{
+		readOnly:              true,
+		gtidExecuted:          gtid,
+		killConnectionResults: []int{0, 1, 0},
+		killConnectionErrs:    []error{errors.New("process list unavailable"), nil, nil},
+	}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(site0, site1)
+	setRecoveredTopology(tm)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		changed := tm.checkRecovery(context.Background(), []*mysql.ReplicaStatus{nil, nil})
+		if attempt < 3 && changed {
+			t.Fatalf("recovery completed after drain attempt %d", attempt)
+		}
+		if attempt == 3 && !changed {
+			t.Fatal("recovery did not resume after retry reached an empty pass")
+		}
+	}
+	if site1.killConnectionCalls != 3 {
+		t.Fatalf("connection drain calls = %d, want error, eviction, then empty pass", site1.killConnectionCalls)
+	}
+	if got := site1.startReplicaCallCount(); got != 1 {
+		t.Fatalf("recovery sequence count = %d, want 1", got)
 	}
 }
 

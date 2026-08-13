@@ -43,8 +43,8 @@ graph TB
     DE[DNSEndpoint CR]
     ED[external-dns]
 
-    OP -- "poll every 2s" --> POD_A
-    OP -- "poll every 2s" --> POD_B
+    OP -- "poll (2s base, 30s backoff cap)" --> POD_A
+    OP -- "poll (2s base, 30s backoff cap)" --> POD_B
     OP -- "INFO replication" --> DF_A
     OP -- "INFO replication" --> DF_B
     OP -- "REPLICAOF / REPLTAKEOVER" --> DF_A
@@ -71,9 +71,9 @@ down. For each `MysqlFailoverGroup`, it:
 1. Creates a MySQL Deployment, Service, and PVC per site
 2. Creates a `mysql-<name>-primary` Service whose selector tracks the active site
 3. Creates a `mysql-<name>-replicas` Service whose selector matches healthy read replicas
-4. Runs a polling loop (default 2s) that connects to each site's MySQL instance and evaluates the replication topology
+4. Runs a polling loop with a 2-second default base interval that connects to each site's MySQL instance and evaluates the replication topology; after a confirmed persistent failure, the group cadence backs off exponentially to a 30-second cap
 5. Applies the [state machine](./failover.mdx#state-machine) logic to decide whether to failover, alert, or do nothing
-6. On failover, executes the [failover sequence](./failover.mdx#failover-sequence) including DNSEndpoint updates and node tainting
+6. On failover, executes the [promotion sequence](./failover.mdx#failover-sequence), updates the DNSEndpoint, and reconciles node taints and Service selectors from subsequent topology observations
 7. When Dragonfly is enabled, creates per-site Dragonfly StatefulSets and Services, observes `INFO replication`, keeps replicas attached to the active master, and promotes Dragonfly during planned and emergency failover
 
 The operator exposes:

@@ -39,11 +39,13 @@ type fakeKeyringMySQL struct {
 	componentCalls atomic.Int32
 	coverageCalls  atomic.Int32
 	rotateErr      error
+	rotateFunc     func(context.Context) error
 	rotateCalls    atomic.Int32
 	encryptCalls   atomic.Int32
 	readOnly       bool
 	readOnlyErr    error
 	encryptSysErr  error
+	encryptSysFunc func(context.Context) error
 }
 
 func (f *fakeKeyringMySQL) KeyringComponentStatus(context.Context) (*KeyringComponentStatus, error) {
@@ -59,13 +61,19 @@ func (f *fakeKeyringMySQL) EncryptionCoverage(context.Context) (*KeyringCoverage
 	return f.coverage, f.coverageErr
 }
 
-func (f *fakeKeyringMySQL) RotateInnoDBMasterKey(context.Context) error {
+func (f *fakeKeyringMySQL) RotateInnoDBMasterKey(ctx context.Context) error {
 	f.rotateCalls.Add(1)
+	if f.rotateFunc != nil {
+		return f.rotateFunc(ctx)
+	}
 	return f.rotateErr
 }
 
-func (f *fakeKeyringMySQL) EncryptSystemTablespace(context.Context) error {
+func (f *fakeKeyringMySQL) EncryptSystemTablespace(ctx context.Context) error {
 	f.encryptCalls.Add(1)
+	if f.encryptSysFunc != nil {
+		return f.encryptSysFunc(ctx)
+	}
 	return f.encryptSysErr
 }
 
@@ -204,23 +212,109 @@ func TestKeyringAgent_MissingFileIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestKeyringAgent_EmptyFileIsNotEscrowed(t *testing.T) {
-	// MySQL needs the file to exist before it starts, so an empty
-	// keyring is the normal pre-initialization state. Escrowing it would
-	// record a useless "version 1" the operator might then seal against.
-	f := newAgentFixture(t, nil)
-	if err := os.WriteFile(f.keyring, nil, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	f.agent.tick(context.Background())
+func TestKeyringAgent_EscrowEligibility(t *testing.T) {
+	// Escrow must ignore bootstrap placeholders (empty file or empty
+	// component document) and only push after real key material exists.
+	// The ordered-rollout case also covers a replica that starts first
+	// and must wait until a writable site creates a key via ALTER TABLESPACE.
+	emptyDoc := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	populated := []byte("{\"version\":\"1.0\",\"elements\":[{\"key\":\"master\"}]}\n")
 
-	got := f.agent.Snapshot()
-	if !got.Present || got.Size != 0 || got.Digest != "" {
-		t.Errorf("status = %+v", got)
+	cases := []struct {
+		name            string
+		cfg             func(*KeyringConfig)
+		setup           func(t *testing.T, f *agentFixture)
+		wantEscrowCount int
+		wantEscrowBody  string
+		checkStatus     func(t *testing.T, got KeyringStatus)
+	}{
+		{
+			name: "empty file is not escrowed",
+			setup: func(t *testing.T, f *agentFixture) {
+				// MySQL needs the file to exist before it starts; escrowing
+				// it would record a useless "version 1" the operator might
+				// then seal against.
+				if err := os.WriteFile(f.keyring, nil, 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				f.agent.tick(context.Background())
+			},
+			wantEscrowCount: 0,
+			checkStatus: func(t *testing.T, got KeyringStatus) {
+				if !got.Present || got.Size != 0 || got.Digest != "" {
+					t.Errorf("status = %+v", got)
+				}
+			},
+		},
+		{
+			name: "empty bootstrap document is not escrowed",
+			setup: func(t *testing.T, f *agentFixture) {
+				if err := os.WriteFile(f.keyring, emptyDoc, 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				f.agent.tick(context.Background())
+			},
+			wantEscrowCount: 0,
+			checkStatus: func(t *testing.T, got KeyringStatus) {
+				if !got.Present || got.Size != int64(len(emptyDoc)) || got.Digest != "" {
+					t.Errorf("status = %+v", got)
+				}
+			},
+		},
+		{
+			name: "populated keyring after primary encryption is escrowed",
+			cfg:  func(c *KeyringConfig) { c.EncryptSystemTablespace = true },
+			setup: func(t *testing.T, f *agentFixture) {
+				f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+				f.mysql.readOnly = true
+				if err := os.WriteFile(f.keyring, emptyDoc, 0o600); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				// Install the encrypt side-effect before the replica tick so an
+				// accidental call would both count and mutate the keyring.
+				f.mysql.encryptSysFunc = func(context.Context) error {
+					return os.WriteFile(f.keyring, populated, 0o600)
+				}
+				// Replica-first during ordered rollout must not encrypt or
+				// escrow the bootstrap document before a writable site creates a key.
+				f.agent.tick(context.Background())
+				if got := f.mysql.encryptCalls.Load(); got != 0 {
+					t.Fatalf("read-only replica invoked system-tablespace encryption %d times", got)
+				}
+				received, _ := f.escrow.snapshot()
+				if len(received) != 0 {
+					t.Fatalf("escrowed the keyless bootstrap document: %q", received[0])
+				}
+
+				f.mysql.readOnly = false
+				f.agent.tick(context.Background())
+				if got := f.mysql.encryptCalls.Load(); got != 1 {
+					t.Fatalf("encryption calls = %d, want 1", got)
+				}
+			},
+			wantEscrowCount: 1,
+			wantEscrowBody:  string(populated),
+		},
 	}
-	received, _ := f.escrow.snapshot()
-	if len(received) != 0 {
-		t.Fatal("an empty keyring must not be escrowed")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAgentFixture(t, tc.cfg)
+			tc.setup(t, f)
+
+			received, _ := f.escrow.snapshot()
+			if len(received) != tc.wantEscrowCount {
+				t.Fatalf("escrow count = %d, want %d (payloads=%q)", len(received), tc.wantEscrowCount, received)
+			}
+			if tc.wantEscrowCount > 0 && tc.wantEscrowBody != "" {
+				if got := string(received[0]); got != tc.wantEscrowBody {
+					t.Fatalf("escrowed %q, want %q", got, tc.wantEscrowBody)
+				}
+			}
+			if tc.checkStatus != nil {
+				tc.checkStatus(t, f.agent.Snapshot())
+			}
+		})
 	}
 }
 
@@ -459,6 +553,99 @@ func TestKeyringAgent_EncryptsSystemTablespaceOnPrimary(t *testing.T) {
 
 	if got := f.mysql.encryptCalls.Load(); got != 1 {
 		t.Errorf("encrypt calls = %d, want 1", got)
+	}
+}
+
+func TestKeyringAgent_BootstrapsMasterKeyOnEmptyKeyring(t *testing.T) {
+	// Adoption can leave a valid empty component_keyring_file document
+	// with no master key; ROTATE is what seeds it so later DDL works.
+	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
+	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.readOnly = false
+	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f.agent.tick(context.Background())
+
+	if got := f.mysql.rotateCalls.Load(); got != 1 {
+		t.Fatalf("rotate calls = %d, want 1 to seed an empty keyring", got)
+	}
+	if got := f.mysql.encryptCalls.Load(); got != 1 {
+		t.Errorf("encrypt calls = %d, want 1 after bootstrap", got)
+	}
+}
+
+func TestKeyringAgent_KeyringWriteDDLUsesIndependentDeadlines(t *testing.T) {
+	f := newAgentFixture(t, func(c *KeyringConfig) {
+		c.EscrowArmed = true
+		c.EncryptSystemTablespace = true
+	})
+	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.readOnly = false
+	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var rotateCtx context.Context
+	f.mysql.rotateFunc = func(ctx context.Context) error {
+		rotateCtx = ctx
+		assertKeyringWriteDeadline(t, ctx)
+		return nil
+	}
+	f.mysql.encryptSysFunc = func(ctx context.Context) error {
+		assertKeyringWriteDeadline(t, ctx)
+		if rotateCtx == nil {
+			t.Fatal("system tablespace encryption ran before master-key bootstrap")
+		}
+		if err := rotateCtx.Err(); !errors.Is(err, context.Canceled) {
+			t.Errorf("rotation context error = %v, want context canceled", err)
+		}
+		if ctx == rotateCtx {
+			t.Error("master-key rotation and system tablespace encryption shared a context")
+		}
+		return nil
+	}
+
+	f.agent.tick(context.Background())
+	if got := f.mysql.rotateCalls.Load(); got != 1 {
+		t.Fatalf("rotate calls = %d, want 1", got)
+	}
+	if got := f.mysql.encryptCalls.Load(); got != 1 {
+		t.Fatalf("encrypt calls = %d, want 1", got)
+	}
+}
+
+func assertKeyringWriteDeadline(t *testing.T, ctx context.Context) {
+	t.Helper()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("keyring write context has no deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining < 29*time.Second || remaining > 30*time.Second {
+		t.Errorf("keyring write deadline remaining = %v, want approximately 30s", remaining)
+	}
+}
+
+func TestKeyringAgent_SkipsMasterKeyBootstrapOnReplica(t *testing.T) {
+	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
+	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.readOnly = true
+	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f.agent.tick(context.Background())
+	if got := f.mysql.rotateCalls.Load(); got != 0 {
+		t.Errorf("rotate calls = %d, want 0 on a replica", got)
+	}
+	if got := f.mysql.encryptCalls.Load(); got != 0 {
+		t.Errorf("encrypt calls = %d, want 0 on a replica", got)
 	}
 }
 

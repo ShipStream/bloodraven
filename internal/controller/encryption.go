@@ -18,13 +18,12 @@ const (
 	// Bump when encryption pod rendering changes without a corresponding
 	// CRD field change, so already-encrypted pods roll forward onto the
 	// new rendering. ComputeSpecHash includes this value.
-	encryptionPodRenderVersion = "encryption-pod-render-v3"
+	encryptionPodRenderVersion = "encryption-pod-render-v17"
 
 	// ConfigMap keys carrying the two files MySQL insists on reading
 	// from image-owned directories. They live in the existing per-site
-	// ConfigMap and are projected with subPath mounts, which is the only
-	// way to drop a single file into a directory that already has
-	// content (mounting a volume over /usr/sbin would hide mysqld).
+	// ConfigMap; the mysql container copies them into place before
+	// starting mysqld (see encryptionMysqlLauncher).
 	keyringManifestKey  = "keyring-manifest.json"
 	keyringComponentKey = "keyring-component.json"
 
@@ -40,6 +39,24 @@ const (
 	// sidecar).
 	keyringSeedMountPath  = "/run/bloodraven/keyring-seed"
 	keyringTokenMountPath = "/run/bloodraven/keyring-token"
+
+	// keyringComponentSrcMount is where the per-site ConfigMap is
+	// mounted into the mysql container so the launcher can copy the
+	// component files into place.
+	keyringComponentSrcMount = "/run/bloodraven/keyring-component-src"
+
+	// Official MySQL Community image entrypoint. Used by the encryption
+	// launcher so we still get the image's init/user-switch logic.
+	mysqlDockerEntrypoint = "/usr/local/bin/docker-entrypoint.sh"
+
+	// mysqlRuntimeBinDir holds a private copy of mysqld plus its global
+	// component manifest. Ubuntu hosts can carry a path-attached
+	// /usr/sbin/mysqld AppArmor profile. That host profile attaches after
+	// the container runtime's Unconfined choice and then denies files in
+	// the container overlay, which MySQL misleadingly reports as a missing
+	// errmsg.sys and an unloaded keyring component. Executing the identical
+	// binary from this Bloodraven-owned path avoids that host-only profile.
+	mysqlRuntimeBinDir = "/opt/bloodraven/mysql/bin"
 
 	// keyringVolumeSizeLimit caps the memory-backed keyring emptyDir.
 	// A file keyring holding a handful of master keys is well under 1
@@ -105,22 +122,63 @@ type encryptionFragments struct {
 	PodVolumes []corev1.Volume
 }
 
-// keyringManifestJSON is the content of the global component manifest
-// (`mysqld.my`). MySQL reads this only from the directory holding the
-// mysqld binary, which is why it is projected with a subPath mount
-// rather than written by an init container.
+// keyringManifestJSON is the global component manifest (`mysqld.my`
+// next to the mysqld binary). Projected via subPath into MysqldDir.
+//
+// read_local_manifest is true so the datadir-local copy written by the
+// config init container is also consulted. That local copy is the
+// fallback for environments (notably GHA kind) that have been observed
+// to ignore a valid global subPath mount while still running with the
+// encryption my.cnf and reporting MY-013712 / no keyring component.
 func keyringManifestJSON() string {
+	// Relative URN (file://name) resolved against plugin_dir. Absolute
+	// file:///… URNs fail with MY-013709 on MySQL 9.7. Do not set
+	// read_local_manifest: keep global-only loading simple; a local
+	// datadir copy is still planted as a secondary path.
 	return "{\n  \"components\": \"file://component_keyring_file\"\n}\n"
+}
+
+// keyringLocalManifestJSON is the datadir-local component manifest.
+// Local manifests do not take the read_local_manifest key (that flag is
+// global-only); they only list components.
+func keyringLocalManifestJSON() string {
+	return "{\n  \"components\": \"file://component_keyring_file\"\n}\n"
+}
+
+// encryptionConfigInitSnippet is appended to the operator-managed
+// config init container when encryption is on. It plants a local
+// mysqld.my in the datadir so the keyring component still loads when
+// the global subPath mount is ignored by the runtime.
+//
+// Only writes into an already-initialized datadir: placing any file in
+// an empty datadir makes `mysqld --initialize` abort with "data
+// directory has files in it". Fresh encrypted-from-birth still relies
+// on the global mount for the first initialize.
+func encryptionConfigInitSnippet() string {
+	// Inline the local-manifest bytes rather than reusing the ConfigMap
+	// global file: that one carries read_local_manifest, which is not a
+	// local-manifest field.
+	return fmt.Sprintf(`
+if [ -d /var/lib/mysql/mysql ] || [ -f /var/lib/mysql/ibdata1 ]; then
+  cat > /var/lib/mysql/mysqld.my <<'BR_KEYRING_LOCAL_MANIFEST'
+%s
+BR_KEYRING_LOCAL_MANIFEST
+  if [ "$(id -u)" = "0" ]; then
+    chown 999:999 /var/lib/mysql/mysqld.my
+  fi
+  chmod 644 /var/lib/mysql/mysqld.my
+fi`, strings.TrimRight(keyringLocalManifestJSON(), "\n"))
 }
 
 // keyringComponentConfigJSON is the content of the global
 // `component_keyring_file.cnf`. MySQL reads this only from plugin_dir.
 //
-// Both keys are mandatory: component_keyring_file refuses to initialize
-// if either "path" or "read_only" is missing, and InnoDB then refuses to
-// start because it cannot find a keyring.
+// path and read_only are mandatory: component_keyring_file refuses to
+// initialize if either is missing. read_local_config is set false for
+// the same reason as the manifest: a local config under the data
+// directory must not override the operator-managed global file.
 func keyringComponentConfigJSON(dataFilePath string, readOnly bool) string {
-	return fmt.Sprintf("{\n  \"path\": %q,\n  \"read_only\": %t\n}\n", dataFilePath, readOnly)
+	return fmt.Sprintf("{\n  \"read_local_config\": false,\n  \"path\": %q,\n  \"read_only\": %t\n}\n", dataFilePath, readOnly)
 }
 
 // encryptionMySQLSettings returns the my.cnf settings that turn on
@@ -179,19 +237,13 @@ func buildEncryptionFragments(
 	kr := fg.Spec.EffectiveKeyring()
 	dataFilePath := path.Join(kr.DataFileDir, v1alpha1.KeyringDataFileName)
 
-	// The two files MySQL will only read from image-owned directories.
-	// Both come from the per-site ConfigMap already mounted as "config".
+	// ConfigMap sources for the launcher (mysqld.my + component cnf).
+	// Keep image plugin_dir / lc-messages-dir; staging those onto
+	// emptyDir hit Permission denied on dlopen in GHA kind.
 	out.MysqlVolumeMounts = append(out.MysqlVolumeMounts,
 		corev1.VolumeMount{
 			Name:      "config",
-			MountPath: path.Join(kr.MysqldDir, "mysqld.my"),
-			SubPath:   keyringManifestKey,
-			ReadOnly:  true,
-		},
-		corev1.VolumeMount{
-			Name:      "config",
-			MountPath: path.Join(kr.PluginDir, "component_keyring_file.cnf"),
-			SubPath:   keyringComponentKey,
+			MountPath: keyringComponentSrcMount,
 			ReadOnly:  true,
 		},
 		corev1.VolumeMount{
@@ -332,6 +384,77 @@ func buildEncryptionFragments(
 	return out
 }
 
+// encryptionMysqlLauncher returns the container Command and Args that
+// materialize keyring component files onto image-owned paths and hand
+// off to the official MySQL entrypoint.
+//
+// mysqlArgs are the mysqld flags (starting with --server-id=..., not
+// including the "mysqld" binary name). They become $1..$n after a $0 of
+// "mysqld" so the entrypoint sees the same argv shape as a normal
+// `docker run mysql:… --flag` invocation.
+func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command, args []string) {
+	kr := fg.Spec.EffectiveKeyring()
+	mysqlImageBasedir := path.Dir(kr.MysqldDir)
+	mysqlImageBinary := path.Join(kr.MysqldDir, "mysqld")
+	mysqlRuntimeBinary := path.Join(mysqlRuntimeBinDir, "mysqld")
+	mysqlRuntimeBasedir := path.Dir(mysqlRuntimeBinDir)
+	pluginRelative := strings.TrimPrefix(strings.TrimPrefix(kr.PluginDir, mysqlImageBasedir), "/")
+	mysqlRuntimePluginDir := path.Join(mysqlRuntimeBasedir, pluginRelative)
+	manifestDst := mysqlRuntimeBinary + ".my"
+	componentDst := path.Join(kr.PluginDir, "component_keyring_file.cnf")
+	// bash -ec '<script>' mysqld --flag…  →  $0=mysqld, $1=--flag…
+	// Copy mysqld away from the host-profiled /usr/sbin path, materialize
+	// its adjacent manifest and the component config as real overlay files,
+	// then put the private binary first on PATH. The entrypoint still sees
+	// argv[0] == "mysqld", so its config validation, uid switch, fresh-db
+	// initialization, and final exec behavior remain unchanged.
+	script := fmt.Sprintf(`set -euo pipefail
+src=%q
+mkdir -p %q
+mkdir -p %q
+ln -sfn %q %q
+ln -sfn %q %q
+cp %q %q
+cp "$src/%s" %q
+cp "$src/%s" %q
+chmod 755 %q
+chmod 644 %q %q
+test -x %q
+test -r %q
+test -r %q
+test -x %q
+export PATH=%q:"$PATH"
+exec %s "$0" "$@"
+`,
+		keyringComponentSrcMount,
+		mysqlRuntimeBinDir,
+		path.Dir(mysqlRuntimePluginDir),
+		kr.PluginDir, mysqlRuntimePluginDir,
+		path.Join(mysqlImageBasedir, "share"), path.Join(mysqlRuntimeBasedir, "share"),
+		mysqlImageBinary, mysqlRuntimeBinary,
+		keyringManifestKey, manifestDst,
+		keyringComponentKey, componentDst,
+		mysqlRuntimeBinary,
+		manifestDst, componentDst,
+		mysqlRuntimeBinary,
+		manifestDst, componentDst,
+		path.Join(kr.PluginDir, "component_keyring_file.so"),
+		mysqlRuntimeBinDir,
+		mysqlDockerEntrypoint,
+	)
+	command = []string{"/bin/bash", "-ec", script}
+	// Relocating mysqld makes it derive basedir/plugin_dir from the private
+	// path. Restore the source image's layout so the relative component URN,
+	// errmsg.sys, and the rest of the official entrypoint keep resolving
+	// exactly as they did for the image binary.
+	args = append([]string{
+		"mysqld",
+		"--basedir=" + mysqlImageBasedir,
+		"--plugin-dir=" + kr.PluginDir,
+	}, mysqlArgs...)
+	return command, args
+}
+
 // keyringTokenMode picks the projection mode for the escrow bearer
 // token. See the keyringTokenMode* constants for why the mode depends on
 // whether the pod declares an fsGroup.
@@ -353,10 +476,11 @@ func keyringTokenMode(fg *v1alpha1.MysqlFailoverGroup) int32 {
 //
 // Two things have to be true or InnoDB aborts startup:
 //
-//  1. The data file must exist. component_keyring_file reports "Failed
-//     to read keyring file" for a missing one and InnoDB then fails with
-//     "Check keyring fail". A zero-length file is accepted and is
-//     exactly what a fresh bootstrap needs.
+//  1. The data file must contain a valid component_keyring_file document.
+//     A missing or zero-length file disables the component. With startup
+//     encryption enabled, InnoDB then fails with "Check keyring fail".
+//     Fresh bootstrap therefore starts from the canonical empty document;
+//     MySQL adds the first master key while initializing encrypted state.
 //  2. The containing DIRECTORY must be writable by mysqld's uid, not
 //     just the file. component_keyring_file writes a new key by creating
 //     a temporary file alongside the keyring and renaming over it, so a
@@ -372,7 +496,7 @@ func keyringTokenMode(fg *v1alpha1.MysqlFailoverGroup) int32 {
 // are already owned correctly and the chown is skipped rather than
 // failed.
 func keyringInitScript(seeded bool) string {
-	seed := `: > "$data_file"`
+	seed := `printf '%s\n' '{"version":"1.0","elements":[]}' > "$data_file"`
 	if seeded {
 		seed = `cp "$seed_file" "$data_file"`
 	}
