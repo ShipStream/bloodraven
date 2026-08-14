@@ -3,10 +3,12 @@ package sidecar
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
@@ -417,16 +419,72 @@ func mysqlBool(value sql.NullString) bool {
 	return s == "1" || strings.EqualFold(s, "on") || strings.EqualFold(s, "true")
 }
 
+// sqlLogBinRestoreTimeout bounds the detached SET SESSION sql_log_bin=1
+// after a master-key rotation. The statement is instantaneous on a
+// healthy server; the deadline only exists so a wedged MySQL cannot
+// stall the keyring tick forever.
+const sqlLogBinRestoreTimeout = 5 * time.Second
+
 // RotateInnoDBMasterKey issues the master-key rotation. It only
 // succeeds against a writable keyring: with the sealed (read_only)
 // rendering MySQL rejects it with ER_CANNOT_FIND_KEY_IN_KEYRING, which
 // is precisely the guardrail that stops an ad-hoc rotation from
 // stranding data behind a key nobody escrowed.
+// The rotation is deliberately kept out of the binary log.
+//
+// MySQL binlogs ALTER INSTANCE ROTATE INNODB MASTER KEY so that a
+// rotation on a source propagates to its replicas. Bloodraven inverts
+// that: it refuses to rotate the active primary (losing the keyring
+// mid-rotation there costs data rather than a re-clone) and rotates the
+// REPLICA instead. A binlogged rotation on a replica is written under
+// that replica's own server UUID, so the replica ends up permanently one
+// transaction ahead of the primary. Replication keeps running — the
+// divergence is latent — but the next time anything has to restart or
+// re-point it (a pod replace, a failover, a source-convergence pass) the
+// operator's GTID check correctly refuses to start a follower that is
+// ahead of its source, and the only recovery is a re-clone.
+//
+// Suppressing the binlog is also the semantically correct scope, not
+// just a workaround: every site holds its own keyring and its own escrow
+// version, so a master-key rotation is a per-instance physical operation
+// that rewraps that instance's tablespace keys in place. It has no
+// business replicating. (ALTER TABLESPACE ... ENCRYPTION is the
+// opposite — a logical schema change that must replicate — which is why
+// EncryptSystemTablespace below is left alone and only ever runs on the
+// writable primary.)
 func (m *LiveMysql) RotateInnoDBMasterKey(ctx context.Context) error {
-	if _, err := m.db.ExecContext(ctx, "ALTER INSTANCE ROTATE INNODB MASTER KEY"); err != nil {
-		return fmt.Errorf("alter instance rotate innodb master key: %w", err)
+	// A pinned connection: sql_log_bin is a session variable, so it has
+	// to be set on the same connection that runs the rotation.
+	conn, err := m.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open connection for master key rotation: %w", err)
 	}
-	return nil
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
+		return fmt.Errorf("disable binary logging for master key rotation: %w", err)
+	}
+
+	_, rotateErr := conn.ExecContext(ctx, "ALTER INSTANCE ROTATE INNODB MASTER KEY")
+	if rotateErr != nil {
+		rotateErr = fmt.Errorf("alter instance rotate innodb master key: %w", rotateErr)
+	}
+
+	// Restore before the connection goes back to the pool, or every later
+	// statement that reuses it would silently stop replicating. Detach
+	// from the caller's cancellation so a timed-out rotation cannot skip
+	// the restore, but keep a short deadline so a wedged server cannot
+	// stall the keyring tick forever. A failure here means the connection
+	// is unsafe to reuse: mark it bad so Close discards it instead of
+	// returning a session that still has sql_log_bin=0 to the pool.
+	restoreCtx, cancelRestore := context.WithTimeout(context.WithoutCancel(ctx), sqlLogBinRestoreTimeout)
+	defer cancelRestore()
+	if _, err := conn.ExecContext(restoreCtx, "SET SESSION sql_log_bin = 1"); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return errors.Join(rotateErr, fmt.Errorf(
+			"restore sql_log_bin after master key rotation: %w", err))
+	}
+	return rotateErr
 }
 
 // EncryptSystemTablespace encrypts the `mysql` tablespace. It reuses the

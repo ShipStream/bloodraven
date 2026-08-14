@@ -20,7 +20,10 @@ on:
         default: 90
         type: number
       scenario:
-        description: "Optional single scenario ID; bypasses profile selection"
+        description: >-
+          Optional comma-separated scenario IDs; bypasses profile selection.
+          Scenarios run in order against the same cluster, so put destructive
+          ones last.
         required: false
         default: ""
         type: string
@@ -110,11 +113,23 @@ jobs:
         run: make test-e2e E2E_PROFILE="$E2E_PROFILE" E2E_JUNIT_OUT="$E2E_JUNIT_OUT"
         timeout-minutes: ${{ inputs.timeout-minutes }}
 
-      - name: Run E2E scenario ${{ inputs.scenario }}
+      - name: Run E2E scenarios ${{ inputs.scenario }}
         if: inputs.scenario != ''
         env:
-          E2E_SCENARIO: ${{ inputs.scenario }}
-        run: make chaos-run SCENARIO="$E2E_SCENARIO"
+          E2E_SCENARIOS: ${{ inputs.scenario }}
+        run: |
+          set -euo pipefail
+          # Sequential on purpose: these share one cluster and the list is
+          # ordered least- to most-destructive. A failure stops the run so
+          # forensics are captured against the state that produced it.
+          IFS=',' read -ra ids <<< "$E2E_SCENARIOS"
+          for id in "${ids[@]}"; do
+            id="$(echo "$id" | xargs)"
+            [ -n "$id" ] || continue
+            echo "::group::chaos-run $id"
+            make chaos-run SCENARIO="$id"
+            echo "::endgroup::"
+          done
         timeout-minutes: ${{ inputs.timeout-minutes }}
 
       - name: Upload JUnit results

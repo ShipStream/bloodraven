@@ -1239,17 +1239,153 @@ watch -n2 "kubectl -n bloodraven-playground get mysqlfailovergroup playground \
 
 **Known follow-ups** not automated here:
 
-- **Clone into an encrypted recipient**: covered implicitly whenever a
-  reclone runs on an encrypted playground (the operator unseals the
-  recipient first), but there is no dedicated scenario asserting the
-  unseal → clone → re-escrow → seal ordering.
+- **Clone into an encrypted recipient**: now scenario 51 below.
 - **Escrow Secret loss**: deleting a sealed site's escrow Secret should
   raise `KeyringEscrowMissing` and phase `Failed`. Destructive and
   easy to get wrong by hand; see
-  `docs/docs/runbooks.mdx#keyring-escrow-lost`.
+  `docs/docs/runbooks.mdx#keyring-escrow-lost`. The operator-side
+  behaviour — `Failed`, the sealed rendering retained so the live
+  keyring is not thrown away, and automatic recovery once the Secret is
+  restored — is pinned by unit tests in
+  `internal/controller/encryption_chaos_test.go`.
 - **Node loss with an unsealed site**: verifies the bounded-loss claim
   (a lost keyring costs a re-clone, never data). Needs real node
   eviction, not a pod kill.
+- **Escrow endpoint outage with the operator alive**: needs a
+  NetworkPolicy that denies only the operator's `:8443` escrow port
+  without also cutting the sidecar's lease traffic to the operator —
+  a chaos primitive that does not exist yet. The state-machine
+  behaviour (stay `Unsealed`, surface the sidecar's own reason in
+  `.status`, go `Failed` after `escrowTimeoutSeconds`, never seal) is
+  covered by unit tests.
+
+---
+
+## 50. Encrypted Pod Replace
+
+**Automated**: `make chaos-run SCENARIO=50-encrypted-pod-replace`
+
+**Quarantined from every batch profile** — same encryption baseline as
+scenario 48 (`BLOODRAVEN_SETUP_TLS=1 ./playground/setup.sh` then
+`./playground/enable-encryption.sh`).
+
+**Hypothesis**: every encrypted site pairs encryption `my.cnf` with
+keyring wiring; deleting the sealed replica's pod destroys its tmpfs
+keyring, and the replacement pod comes back Ready without an InnoDB
+keyring abort, on the *same* escrow version, with the data still
+decrypting.
+
+**What it actually proves**:
+
+1. **Adopt atomicity (#136), checked live.** For every site, the
+   ConfigMap the Deployment actually references must carry encryption
+   settings if and only if the pod spec carries keyring wiring. A site
+   that violates this looks healthy until the moment it restarts, then
+   aborts with `Check keyring fail`.
+2. **The sealed rendering is self-sufficient.** The replacement pod has
+   no in-memory or tmpfs keyring to inherit — only the escrow Secret. If
+   the Secret projection or the component manifest copy is wrong, the pod
+   never becomes Ready. The failure path greps the mysql container for
+   `Check keyring fail` so a brick is reported as a brick rather than a
+   timeout.
+3. **No silent re-bootstrap.** The escrow version must be unchanged. A
+   version bump would mean the site created fresh keys, which do not match
+   what its tablespaces were written with.
+4. **The data actually decrypts.** Rows written before the kill read back,
+   the keyring component is `Read_only=Yes`, and `Data_file` is still
+   outside `/var/lib/mysql`.
+
+**Expected duration**: ~3-6 minutes (dominated by pod recreation and the
+replica catching up).
+
+**Cleanup**: none — the Deployment controller recreates the pod.
+
+---
+
+## 51. Encrypted Reclone
+
+**Automated**: `make chaos-run SCENARIO=51-encrypted-reclone`
+
+**Quarantined and destructive** — it wipes and rebuilds the replica's
+datadir. Same encryption baseline as scenarios 48 and 50.
+
+**Hypothesis**: annotating `reclone-site` on a `Sealed` replica moves it
+to `Unsealed`/`Clone` with a memory-backed keyring *before* any
+`CLONE INSTANCE` runs; the clone completes; the site returns to `Sealed`
+against an escrow version no older than the pre-clone one, with the
+keyring still off the data PVC and the donor's rows readable.
+
+**Why the ordering matters**: a clone recipient re-encrypts the donor's
+tablespace keys under its own new master key. A read-only keyring cannot
+accept them, so MySQL fails the clone — or, worse, a half-configured
+recipient ends up with a datadir nobody can read. The operator therefore
+has to roll the pod onto the unsealed rendering and wait for it to be
+Ready before starting the clone. `RequestKeyringUnseal` returning `false`
+is what defers it.
+
+**What it actually proves**:
+
+1. **The cold-reclone interlock accepts the documented form.** The
+   recipient has no divergent GTID, so the annotation must carry
+   `:confirm=<group>`.
+2. **The unseal really flips the rendering.** When the transient
+   `Unsealed`/`Clone` window is caught, the Deployment's keyring volume
+   must be an `emptyDir`, not the Secret. A status field alone is not
+   evidence. If the window is missed because the whole cycle completed
+   inside one poll, that is noted and the end-state assertions carry the
+   proof instead.
+3. **The escrow never goes backwards.** A recipient seeded from its own
+   escrow already holds a usable master key, and `CLONE INSTANCE` rewraps
+   the donor's tablespace keys under that key — so the version is allowed
+   to stay put. A *lower* version would mean the site resealed onto
+   superseded key material.
+4. **The window closes.** `Read_only=Yes` again, `Data_file` outside
+   `/var/lib/mysql`, donor rows present, and a non-zero count of
+   encrypted tablespaces.
+
+**Expected duration**: ~6-15 minutes (pod roll for the unseal, the clone
+itself, then the roll back to sealed).
+
+**Cleanup**: clears the reclone annotation if the scenario bailed out
+before the operator consumed it.
+
+:::danger Known bug — recloning an encrypted site livelocks
+**Once the clone gate is wired, this scenario does not pass, and that is
+the finding.** The CI encryption job adopts encryption on a live group
+and does not restart the operator, so the gate stays off and the
+ungated clone + reseal path still completes. After any operator restart
+on an encrypted group the gate is wired and a reclone never completes:
+
+1. `RequestKeyringUnseal` moves the recipient to `Unsealed`/`Clone`.
+2. The encryption reconciler re-verifies the escrow and advances it
+   straight back to `Escrowed`, which renders the *sealed* keyring.
+3. The pod rolls onto the read-only projection.
+4. The next clone attempt sees a sealed recipient and unseals it again.
+
+The operator logs `bootstrap deferred: waiting for the recipient keyring
+to be unsealed` indefinitely. The cause is that `advanceUnsealedSite`
+does not treat `UnsealReason=Clone` as sticky — it must stay unsealed
+until the clone has actually run — and nothing signals clone completion
+back to it.
+
+The gate is wired whenever the topology manager is built while encryption
+is enabled, so **any operator restart on an encrypted group is enough to
+reach this.** It is only skipped in the window between adopting
+encryption and the next manager rebuild, which is why a first adoption
+appears to work.
+
+Recovery: `kubectl annotate mysqlfailovergroup <name>
+bloodraven.shipstream.io/reclone-site-` — the site re-seals and the group
+settles on its own.
+
+Empirically the ungated clone succeeds on MySQL 9.7 (a recipient seeded
+from its own escrow already holds a usable master key and `CLONE
+INSTANCE` rewraps under it), so the fix is to make the `Clone` phase
+sticky, not to remove the gate.
+
+Until then the unseal step is **reported, not asserted**. Set
+`BLOODRAVEN_CHAOS_REQUIRE_CLONE_GATE=1` to make it fail hard once fixed.
+:::
 
 ---
 

@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -582,6 +583,36 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// topology manager must ask the reconciler to unseal the site first.
 	// deployReconciler is the reconciler; the type assertion keeps the
 	// runner from depending on the concrete type.
+	//
+	// KNOWN BUG (reclone livelock) — see docs/docs/encryption-at-rest.mdx.
+	//
+	// Once this gate is wired, recloning an encrypted site livelocks:
+	// RequestKeyringUnseal moves the site to Unsealed/Clone, the encryption
+	// reconciler immediately re-verifies the escrow and advances it back to
+	// Escrowed (which renders sealed), the pod rolls onto the read-only
+	// projection, and the next clone attempt unseals it again. The operator
+	// logs "bootstrap deferred: waiting for the recipient keyring to be
+	// unsealed" forever and the clone never runs. Observed on a live
+	// playground by scenario 51.
+	//
+	// The cause is in the state machine, not here: advanceUnsealedSite does
+	// not treat UnsealReason=Clone as sticky — it must stay unsealed until
+	// the clone has actually run — and nothing signals clone completion
+	// back to it. Fixing that is the real work; this condition only
+	// controls how often the bug is reachable.
+	//
+	// Note the condition does NOT make the bug rare. It is evaluated when
+	// the manager is built, so any operator restart on a group with
+	// encryption enabled wires the gate. It is only skipped in the window
+	// between adopting encryption and the next manager rebuild — which is
+	// why the ungated path was the one exercised on first adoption.
+	//
+	// Empirically the ungated clone succeeds on MySQL 9.7: a recipient
+	// seeded from its own escrow already holds a usable master key, and
+	// CLONE INSTANCE rewraps the donor's tablespace keys under it without
+	// creating one. So the gate is belt-and-braces rather than
+	// load-bearing, and the safe fix is to make the Clone phase sticky
+	// rather than to remove the gate.
 	if gate, ok := r.deployReconciler.(KeyringGate); ok && fg.Spec.EncryptionEnabled() {
 		tm.SetKeyringGate(gate)
 	}
@@ -1066,7 +1097,26 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			return err
 		}
 		// Apply status changes to the freshly-fetched object.
+		//
+		// freshFG.Status is a snapshot taken before this function started
+		// computing, so assigning it wholesale would carry stale copies of
+		// every field this writer does not own back over the top of
+		// concurrent writes. The encryption state machine is the other
+		// writer on this object and it merge-patches only its own subtree,
+		// so its fields are re-read here rather than replayed from the
+		// snapshot. Clobbering them is not cosmetic: losing an
+		// Escrowed/Sealed advance re-renders the site unsealed and rolls
+		// the pod, and losing a Failed hides a site whose key custody is
+		// gone.
+		encryption := fresh.Status.EncryptionAtRest
+		encryptionCond := apimeta.FindStatusCondition(fresh.Status.Conditions, conditionEncryptionReady)
 		fresh.Status = freshFG.Status
+		fresh.Status.EncryptionAtRest = encryption
+		if encryptionCond != nil {
+			setCondition(&fresh.Status.Conditions, *encryptionCond)
+		} else {
+			removeCondition(&fresh.Status.Conditions, conditionEncryptionReady)
+		}
 		return r.client.Status().Update(ctx, &fresh)
 	}); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1461,6 +1511,18 @@ func setCondition(conditions *[]metav1.Condition, c metav1.Condition) {
 		}
 	}
 	*conditions = append(*conditions, c)
+}
+
+// removeCondition drops a condition type from the slice. Used when a
+// writer that does not own a condition has to restore "absent" rather
+// than replay a stale copy of it.
+func removeCondition(conditions *[]metav1.Condition, condType string) {
+	for i := range *conditions {
+		if (*conditions)[i].Type == condType {
+			*conditions = append((*conditions)[:i], (*conditions)[i+1:]...)
+			return
+		}
+	}
 }
 
 // buildSiteDSN takes a base DSN and replaces the host with the site

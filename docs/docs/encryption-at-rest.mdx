@@ -437,6 +437,34 @@ The annotation is cleared automatically once the target site is Sealed
 again. Rotation is also refused while an ordered update or a planned
 failover is in flight.
 
+**Rotation is per-site and never replicates.** Each site holds its own
+keyring and its own escrow version, so `ALTER INSTANCE ROTATE INNODB
+MASTER KEY` is a physical operation that rewraps *that instance's*
+tablespace keys in place. MySQL would normally write it to the binary
+log — which propagates a source's rotation to its replicas — but
+Bloodraven rotates the *replica*, so the sidecar issues the statement
+with `sql_log_bin = 0`.
+
+That is load-bearing, not cosmetic. A binlogged rotation on a replica is
+recorded under the replica's own server UUID, which leaves it one
+transaction ahead of its source; the divergence stays invisible until the
+rotated site is promoted, at which point the ex-primary replicates the
+rotation, cannot create a master key against its sealed read-only
+keyring, and stops with:
+
+```
+Error 'Can't find master key from keyring, please check in the server log
+if a keyring is loaded and initialized successfully.'
+Query: 'ALTER INSTANCE ROTATE INNODB MASTER KEY', Error_code: MY-003185
+```
+
+At that point the group is running on a single writable site with no
+usable failover target, and the ex-primary needs a re-clone. Step 2
+above is precisely the promotion that triggers it, so this affected the
+supported procedure itself. Fixed in the sidecar; pinned by
+`TestRotateInnoDBMasterKey_IsNotBinlogged` and exercised end to end by
+playground scenarios 48 and 50.
+
 Each rotation mints a new immutable escrow Secret version.
 `keyring.retainVersions` (default 5) controls how many superseded
 versions are kept; the version a site is currently sealed against is
@@ -490,14 +518,47 @@ kubectl patch secret "$SECRET" --type=merge -p="{
     \"name\":\"orders\",\"uid\":\"${FG_UID}\",\"controller\":true,\"blockOwnerDeletion\":true
   }]},\"immutable\":true
 }"
-
-SITE_INDEX=$(kubectl get mysqlfailovergroup orders -o json | \
-  jq -er '.status.encryptionAtRest.sites | map(.name) | index("iad")')
-kubectl patch mysqlfailovergroup orders --subresource=status --type=json -p="[
-  {\"op\":\"test\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/name\",\"value\":\"iad\"},
-  {\"op\":\"replace\",\"path\":\"/status/encryptionAtRest/sites/${SITE_INDEX}/phase\",\"value\":\"Sealed\"}
-]"
 ```
+
+The operator takes it from there. Its steady-state check re-runs on the
+next reconcile, and once the Secret is back, hashes to the recorded
+digest, **and** MySQL confirms it is running that same keyring, the site
+returns to `Sealed` and emits `KeyringRecovered`. Do not force the phase
+back by patching status: that skips the confirmation that makes the
+restore safe. A site that stays `Failed` saying it is waiting for MySQL
+to confirm the keyring is telling you the bytes you restored are not the
+bytes the instance is using — leave the pod alone and treat the site as
+re-clone-only.
+
+Throughout this, the site keeps its sealed rendering. A `Failed` site
+that was previously sealed is never rolled back onto a writable keyring,
+precisely because that would discard the in-memory copy you are
+recovering from.
+
+:::danger Known bug — recloning an encrypted site livelocks
+A reclone of an encrypted site does not currently complete once the
+operator's clone gate is active. `RequestKeyringUnseal` moves the
+recipient to `Unsealed`/`Clone`; the encryption reconciler re-verifies the
+escrow and advances it straight back to `Escrowed`, which re-renders the
+sealed keyring; the pod rolls; and the next clone attempt unseals it
+again. The operator logs `bootstrap deferred: waiting for the recipient
+keyring to be unsealed` indefinitely.
+
+The gate becomes active whenever the topology manager is built while
+encryption is enabled, so any operator restart on an encrypted group is
+enough to reach this.
+
+To break out, remove the annotation — the site re-seals and the group
+settles on its own:
+
+```bash
+kubectl annotate mysqlfailovergroup orders bloodraven.shipstream.io/reclone-site-
+```
+
+Root cause: `advanceUnsealedSite` does not treat `UnsealReason=Clone` as
+sticky (it must stay unsealed until the clone has run) and nothing signals
+clone completion back to it. Tracked by playground scenario 51.
+:::
 
 If the pod is already gone, that site's data is unrecoverable. Delete its
 unreadable PVC and use the confirmed reclone annotation; the operator
