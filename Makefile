@@ -147,12 +147,15 @@ COURSE_SLUG ?= course-bloodraven-in-production
 COURSE_STATIC ?= site/public/courses
 
 course-build: ## Build the "Bloodraven in Production" course site
-	@# npm ci when the lockfile is present (CI, and any clean checkout) so the
-	@# committed site is reproducible; npm install only as a fallback.
+	@# --frozen-lockfile when the lockfile is present (CI, and any clean
+	@# checkout) so the committed site is reproducible and an upstream publish
+	@# cannot silently change the built output; plain install only as a
+	@# fallback. Bump the template with an explicit `bun update` and commit the
+	@# rebuilt site alongside the lockfile.
 	cd $(COURSE_DIR) && \
-		if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; \
-		else npm install --no-audit --no-fund; fi && \
-		npm run build
+		if [ -f bun.lock ]; then bun install --frozen-lockfile; \
+		else bun install; fi && \
+		bun run build
 
 course: course-build ## Build the course and sync it into site/public/courses
 	rm -rf $(COURSE_STATIC)
@@ -177,7 +180,7 @@ course-verify: course-build ## Run the course content gates and runtime tests
 	@# Both run against dist/, so the build above is a real dependency, not
 	@# just ordering: `verify` reads the built pages and `test` drives them in
 	@# jsdom.
-	cd $(COURSE_DIR) && npm run verify && npm run test
+	cd $(COURSE_DIR) && bun run verify && bun run test
 
 course-check: course ## Fail if site/public/courses is stale relative to the course source
 	@# git status --porcelain, not git diff: diff only reports tracked files, so

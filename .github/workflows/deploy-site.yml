@@ -1,0 +1,79 @@
+name: Deploy Site
+
+# Publishes the bloodraven.dev Docus site under `site/` to Railway.
+#
+# Setup:
+#   1. Create a Railway *project* token (Railway -> project -> Settings ->
+#      Tokens). A project token is scoped to one project and environment, so
+#      the CLI needs no interactive login and no `railway link` step.
+#   2. Store it as the repo secret `RAILWAY_TOKEN`.
+#   3. If the Railway service is not named `bloodraven-site`, set a repo
+#      variable `RAILWAY_SERVICE` to the real name.
+#
+# Railway builds the uploaded directory with Nixpacks per `site/railway.json`;
+# `site/.railwayignore` keeps build artifacts out of the upload.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/deploy-site.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize deploys so two pushes cannot race the same service. Superseded
+# runs are dropped while pending rather than cancelled mid-upload, so the
+# last commit to `site/` is always the one that ends up live.
+concurrency:
+  group: deploy-site
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Railway
+    runs-on: ubuntu-latest
+    environment:
+      name: bloodraven.dev
+      url: https://bloodraven.dev
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_SERVICE: ${{ vars.RAILWAY_SERVICE || 'bloodraven-site' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Require RAILWAY_TOKEN
+        # Without a token the CLI treats this as a cold first run and would
+        # offer to create a brand new project. Fail loudly instead.
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "::error::RAILWAY_TOKEN is not set. Add a Railway project token as a repository secret; see the header of .github/workflows/deploy-site.yml."
+            exit 1
+          fi
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli@5.41.0
+
+      - name: Deploy site/ to Railway
+        working-directory: site
+        # --ci streams build logs and exits when the build finishes, instead of
+        # tailing the deploy log forever. --service is explicit so the CLI never
+        # falls back to creating a new project/service. No `-y`: an unattended
+        # run should fail rather than silently provision new infrastructure.
+        run: railway up --ci --service "$RAILWAY_SERVICE"
+
+      - name: Summarize
+        if: success()
+        run: |
+          {
+            echo "### Site deployed"
+            echo
+            echo "Service \`$RAILWAY_SERVICE\` updated from \`${GITHUB_SHA:0:7}\`."
+            echo
+            echo "<https://bloodraven.dev>"
+          } >> "$GITHUB_STEP_SUMMARY"

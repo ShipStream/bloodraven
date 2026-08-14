@@ -32,6 +32,12 @@ jobs:
   cla:
     name: Check CLA signature
     runs-on: ubuntu-latest
+    # The `secrets` context is not available to `if:` conditions (only `github`,
+    # `env`, `needs`, `vars`, ... are). Referencing it there is a workflow-file
+    # syntax error that fails the run before any job starts, so mirror the
+    # secret into a job-level env var and branch on that instead.
+    env:
+      CLA_SIGNATURES_TOKEN: ${{ secrets.CLA_SIGNATURES_TOKEN }}
     # Only run on PR comments, not issue comments.
     if: >-
       github.event_name == 'pull_request_target' ||
@@ -40,7 +46,7 @@ jobs:
         github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
     steps:
       - name: Report that CLA enforcement is not configured
-        if: ${{ secrets.CLA_SIGNATURES_TOKEN == '' }}
+        if: ${{ env.CLA_SIGNATURES_TOKEN == '' }}
         run: |
           {
             echo "### CLA check skipped"
@@ -50,7 +56,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: CLA Assistant
-        if: ${{ secrets.CLA_SIGNATURES_TOKEN != '' }}
+        if: ${{ env.CLA_SIGNATURES_TOKEN != '' }}
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

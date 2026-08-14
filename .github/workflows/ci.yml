@@ -134,14 +134,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
       - uses: actions/setup-node@v6
         with:
-          # The course site builder needs Node 20.19+ / 22.13+ / 24+.
+          # bun drives install and the build (see the `course-build` target),
+          # but the Astro-based builder targets Node, so keep a supported Node
+          # on PATH for anything that shells out to it.
           node-version: 22
-          # No npm cache: course/package-lock.json is intentionally untracked
-          # (removed in bd776fd), and setup-node hard-fails when
-          # cache-dependency-path resolves to nothing. course-build falls back
-          # to `npm install` when the lockfile is absent.
       - name: Run course content gates and runtime tests
         run: make course-verify
       - name: Check site/public/courses drift
