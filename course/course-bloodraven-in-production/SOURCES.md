@@ -2,7 +2,7 @@
 
 Grounding ledger for **Bloodraven in Production**. Every load-bearing number, API, and claim in this
 course traces to a row here. Rows were produced by a six-angle grounding expedition against the
-Bloodraven repository at `v0.9.1` (`main` @ `ecb1799`, `git describe` = `v0.9.1-3-gecb1799`), the
+Bloodraven repository at `v1.0.0` (`v1.0.0` @ `bbcfcc0`, `git describe` = `v1.0.0`), the
 shipped CRDs and Helm chart, the recorded chaos-run forensics, the public GitHub issue tracker, and
 current upstream documentation.
 
@@ -25,8 +25,8 @@ figures is allowed where the derivation is shown.
 
 ## Version appendix
 
-**Baseline: Bloodraven `v0.9.1` (`main` @ `ecb1799`). Every row in this section was last re-verified
-on 2026-08-13.**
+**Baseline: Bloodraven `v1.0.0` (`v1.0.0` @ `bbcfcc0`). Version-pin rows in this section were
+updated on 2026-08-14. Remaining rows were last re-verified on 2026-08-13.**
 
 The units are written to survive a release. This section is where the things that *cannot* live:
 issue numbers, unmerged pull requests, "the published page currently says X", upstream version pins,
@@ -71,7 +71,7 @@ the same argument in a different direction.
 |---|---|---|---|
 | **C1** | MySQL baseline | `mysql:9.7` — Bloodraven's single supported baseline, and the current MySQL **LTS** (Oracle's July 2026 GA announcement lists `9.7.2 LTS` beside `8.4.11 LTS` and `26.7.0 Innovation`). 8.0, 8.4, 9.8+ and 5.7 are all unsupported by the operator. | `grep -n 'default=' api/v1alpha1/types.go \| grep -i image`; <https://dev.mysql.com/doc/relnotes/mysql/9.7/en/> |
 | **C2** | Dragonfly | The repo pins `v1.38.0` (2026-04-14) against a current stable of `v1.40.1` (2026-08-06) — two minors of drift, and nothing enforces either number. | `grep -rn 'dragonflydb/dragonfly:v' playground/manifests/` |
-| **C3** | Operator chart | Chart `0.9.1`, appVersion `0.9.1`, `kubeVersion: ">=1.26.0"`. | `grep -n 'version\|kubeVersion' charts/bloodraven/Chart.yaml` |
+| **C3** | Operator chart | Chart `1.0.0`, appVersion `1.0.0`, `kubeVersion: ">=1.26.0"`. | `grep -n 'version\|kubeVersion' charts/bloodraven/Chart.yaml` |
 | **C4** | external-dns API | `externaldns.k8s.io/v1alpha1` is still the current group version. An approved proposal targets `v1beta1` with no date attached. | `kubectl api-resources \| grep dnsendpoint` |
 | **C5** | MySQL keyring | `component_keyring_file`. The `keyring_file` **plugin** and `keyring_file_data` were removed in MySQL 8.4.0; any runbook naming the plugin describes something that no longer exists. | `SELECT * FROM performance_schema.keyring_component_status` |
 
@@ -82,16 +82,15 @@ Settle this before you plan a dependency on Bloodraven, because it is not a tech
 This is the fastest-moving row on the page, so treat the command as the authority and the prose as
 context.
 
-At the **`v0.9.1`** baseline this course is grounded on, the repository was public and unarchived and
-carried **no licence at all**: the GitHub API reported `"licenseInfo": null` and there was no `LICENSE`
-file in the repository root. With no licence granted, everything is reserved by default — public source
-is not open source.
+At the **`v1.0.0`** baseline this course is grounded on, the repository ships the **Business Source
+License 1.1** (`LICENSE`) and a commercial license (`LICENSE-COMMERCIAL.md`). The GitHub API reports
+`"licenseInfo": "Other"` (`NOASSERTION`) because BUSL is not an OSI licence. Bloodraven is
+**source-available, not open source** — you may read, build and modify it. Production use at a
+commercial company is free only under the Additional Use Grant (individuals, non-profits, and
+entities under $1M revenue); otherwise it is a commercial-license question.
 
-That has since changed, and in the direction that matters for planning: licensing terms are being
-introduced for **v0.10.0 and later**. What has not changed is the shape of the answer. Bloodraven is
-**source-available, not open source** — you may read, build and modify it, and running it in production
-at a commercial company is a licensing question with a real answer rather than an assumed one. Settle
-it from the repository, not from this page:
+At **`v0.9.1`** the repository carried **no licence at all**. Terms arrived for **v0.10.0 and later**.
+The shape of the answer has not changed: settle it from the repository, not from this page:
 
 ```bash
 ls LICENSE*
@@ -354,8 +353,8 @@ This course is separately licensed; see the notice in the page footer.
 
 | # | Claim | Value / verbatim quote | Source | Angle |
 |---|---|---|---|---|
-| 190 | Release under study: **v0.9.1**; chart `version: 0.9.1`, `appVersion: "0.9.1"`, `kubeVersion: ">=1.26.0"` | `charts/bloodraven/Chart.yaml:5-6, 25`; `git tag` | | A2 |
-| 191 | MySQL image default `mysql:9.7`; sidecar image `ghcr.io/shipstream/bloodraven-sidecar:0.9.1` | `api/v1alpha1/types.go:46, 50` | | A2 |
+| 190 | Release under study: **v1.0.0**; chart `version: 1.0.0`, `appVersion: "1.0.0"`, `kubeVersion: ">=1.26.0"` | `charts/bloodraven/Chart.yaml:5-6, 25`; `git tag` | | A2 |
+| 191 | MySQL image default `mysql:9.7`; sidecar image `ghcr.io/shipstream/bloodraven-sidecar:1.0.0` | `api/v1alpha1/types.go:46, 50` | | A2 |
 | 192 | `spec.sites` MinItems 2 / MaxItems 16 | `api/v1alpha1/types.go:63-64` | | A2 |
 | 193 | **49 registered chaos scenarios** (49 files, each with exactly one `runner.Register`). Profiles: smoke = 4, release = 17, full = 49 | `internal/playground/scenarios/*.go`; `internal/playground/runner/profile.go:34-38, 48-67, 97-98` | | A2 |
 | 194 | The playground overrides shipped defaults: `failoverCooldown: 30s` (vs 5 m), `replication.maxLagSeconds: 30` (vs 300), `dns.ttl: 10` (vs 60). It matches defaults for `pollInterval`, `failureThreshold`, `recoveryThreshold`, `leaseTimeout`, `peerCheckInterval`, `maxSyncWait` | `playground/manifests/failovergroup.yaml:10-13, 18, 76-79, 92-94` | | A2 |
@@ -424,8 +423,8 @@ This course is separately licensed; see the notice in the page footer.
 | 247 | `REPLTAKEOVER` exists, is an **ADMIN-port, GLOBAL_TRANS** command taking a timeout in seconds, and was introduced in Dragonfly **v1.5.0** (2023-07-03). It has no official docs page | `CI{"REPLTAKEOVER", CO::ADMIN \| CO::GLOBAL_TRANS, -2, 0, 0, acl::kReplTakeOver}`; `// REPLTAKEOVER <seconds> [SAVE]`; v1.5.0 notes "feat: Support atomic replica takeover … pull/1314" | `dragonflydb/dragonfly` `src/server/server_family.cc:4104, 3493`; GitHub releases API | A3 |
 | 248 | The Dragonfly pin has **drifted two minors**: repo pins `v1.38.0` (2026-04-14), current stable is `v1.40.1` (2026-08-06) | `docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0` vs upstream `v1.40.1 2026-08-06T06:54:05Z` | `playground/manifests/failovergroup.yaml:87`; GitHub releases API | A3 |
 | 249 | `sigs.k8s.io/controller-runtime v0.24.1` is the current latest; `k8s.io/*` at v0.36.2 is current minor, one patch behind. No material deprecation affects this operator | `go.mod:14-18`; GitHub releases API | A3 |
-| 250 | Bloodraven **v0.9.1**, published 2026-08-11. The repo is public and not archived | `"tag_name": "v0.9.1"`, `"published_at": "2026-08-11T21:45:05Z"`; `"private": false`, `"visibility": "public"`, `"archived": false` | https://api.github.com/repos/ShipStream/bloodraven | A3 |
-| 251 | **Bloodraven carried no licence at the `v0.9.1` baseline** — `"license": null` from the GitHub API and no LICENSE file in the repo root, so public source with all rights reserved rather than open source. **Superseded**: terms are being introduced for v0.10.0 and later. The course states the baseline and points at version-appendix row D, which carries the re-check commands | repo root contents listing contained no LICENSE entry at `v0.9.1` | https://api.github.com/repos/ShipStream/bloodraven ; https://api.github.com/repos/ShipStream/bloodraven/contents/ | A3 |
+| 250 | Bloodraven **v1.0.0**, published 2026-08-14. The repo is public and not archived | `"tag_name": "v1.0.0"`, `"published_at": "2026-08-14T03:53:57Z"`; `"private": false`, `"visibility": "public"`, `"archived": false` | https://api.github.com/repos/ShipStream/bloodraven | A3 |
+| 251 | **Bloodraven ships BUSL-1.1 at the `v1.0.0` baseline** — `LICENSE` plus `LICENSE-COMMERCIAL.md` in the repo root; the GitHub API reports `"license": "Other"` (`NOASSERTION`) because BUSL is not OSI. At `v0.9.1` there was no licence file. The course states the baseline and points at version-appendix row D, which carries the re-check commands | `LICENSE` opens `Licensed Work: Bloodraven Version 0.10.0 or later`; `ls LICENSE*` | https://api.github.com/repos/ShipStream/bloodraven ; https://api.github.com/repos/ShipStream/bloodraven/contents/ | A3 |
 
 ### The playground counter application
 

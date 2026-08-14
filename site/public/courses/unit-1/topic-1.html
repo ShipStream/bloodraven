@@ -29,7 +29,7 @@ not a vocabulary list. It is a real group on your laptop, and a status dump you 
 
 
 
-<table><thead><tr><th>You need</th><th>Why</th></tr></thead><tbody><tr><td><strong>docker</strong> or <strong>podman</strong></td><td>Builds the images locally. Prefer docker — k3d’s podman support is experimental.</td></tr><tr><td><strong>kubectl</strong></td><td>Everything from here is <code>kubectl</code>.</td></tr><tr><td><strong>helm</strong></td><td>Installs the operator. Chart <code>0.9.1</code>, appVersion <code>0.9.1</code>, <code>kubeVersion: ">=1.26.0"</code>.</td></tr><tr><td><strong>A cluster with at least three worker nodes</strong></td><td>One worker per site. The third is dedicated to the reader so storage-loss testing is deterministic.</td></tr></tbody></table>
+<table><thead><tr><th>You need</th><th>Why</th></tr></thead><tbody><tr><td><strong>docker</strong> or <strong>podman</strong></td><td>Builds the images locally. Prefer docker — k3d’s podman support is experimental.</td></tr><tr><td><strong>kubectl</strong></td><td>Everything from here is <code>kubectl</code>.</td></tr><tr><td><strong>helm</strong></td><td>Installs the operator. Chart <code>1.0.0</code>, appVersion <code>1.0.0</code>, <code>kubeVersion: ">=1.26.0"</code>.</td></tr><tr><td><strong>A cluster with at least three worker nodes</strong></td><td>One worker per site. The third is dedicated to the reader so storage-loss testing is deterministic.</td></tr></tbody></table>
 <pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">k3d</span><span style="color:#032F62;--shiki-dark:#96D0FF"> cluster</span><span style="color:#032F62;--shiki-dark:#96D0FF"> create</span><span style="color:#032F62;--shiki-dark:#96D0FF"> bloodraven</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> --agents</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> 3</span></span></code></pre>
 <p>kind and minikube work too — one server plus three agents either way.</p>
 <p>One non-technical check while you are here. Bloodraven is <strong>source-available, not open source</strong>.
@@ -175,7 +175,7 @@ A timing you observe here is <strong>not</strong> the shipped default:</p>
 <table><thead><tr><th>Setting</th><th>Playground</th><th>Shipped default</th></tr></thead><tbody><tr><td><code>failoverCooldown</code></td><td><code>30s</code></td><td><code>5m</code></td></tr><tr><td><code>replication.maxLagSeconds</code></td><td><code>30</code></td><td><code>300</code></td></tr><tr><td><code>dns.ttl</code></td><td><code>10</code></td><td><code>60</code></td></tr></tbody></table>
 <p>Everything else matches: <code>pollInterval</code>, <code>failureThreshold</code>, <code>recoveryThreshold</code>, <code>leaseTimeout</code>,
 <code>peerCheckInterval</code> and <code>maxSyncWait</code> sit at their defaults. MySQL is <code>mysql:9.7</code>, the operator
-v0.9.1.</p>
+v1.0.0.</p>
 <h2 id="words-for-the-first-hour">Words for the first hour</h2>
 <p>You will meet these on every later page. One sentence each.</p>
 
