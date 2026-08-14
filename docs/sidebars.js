@@ -59,6 +59,7 @@ const sidebars = {
         'network-partitions',
         'failure-mode-matrix',
         'upgrade-policy',
+        'upgrade-0.9-to-1.0',
         'gitops',
       ],
     },

@@ -111,7 +111,8 @@ If Grafana dashboard ConfigMaps are rendered by the Bloodraven Helm release, kee
 
 ## Safe upgrade workflow
 
-1. Read [Upgrade Policy](./upgrade-policy.mdx).
+1. Read [Upgrade Policy](./upgrade-policy.mdx). For 0.9.x to 1.0.0, follow
+   [How to upgrade from 0.9 to 1.0](./upgrade-0.9-to-1.0.mdx).
 2. Apply CRD updates before controller image updates.
 3. Roll the operator.
 4. Watch reconciliation on a non-production failover group.
