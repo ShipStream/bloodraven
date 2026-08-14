@@ -148,16 +148,25 @@ jobs:
           node-version: 22
       - name: Run course content gates and runtime tests
         run: make course-verify
+      - name: Rebuild the course site
+        # Separate from the drift check below so a build failure is not
+        # reported as drift, and so the artifact step can tell the two apart.
+        run: make course
       - name: Check site/public/courses drift
         # site/public/courses is generated output committed to the repo, the
-        # same arrangement as charts/bloodraven/crds. Rebuild and fail if the
-        # committed copy no longer matches the course source.
-        run: make course-check
+        # same arrangement as charts/bloodraven/crds. Fail if the committed
+        # copy no longer matches what the rebuild produced.
+        id: drift
+        run: make course-drift
       - name: Upload rebuilt course site on drift
         # The drift check names the files that differ but not how. The built
         # CSS is one long minified line, so a text diff in the log is useless;
         # grab the artifact and diff it against the committed tree instead.
-        if: failure()
+        #
+        # Gated on the drift step specifically: bare `failure()` also fires
+        # when an earlier step failed, which would upload a tree that was
+        # never rebuilt.
+        if: failure() && steps.drift.outcome == 'failure'
         uses: actions/upload-artifact@v7
         with:
           name: course-rebuilt
