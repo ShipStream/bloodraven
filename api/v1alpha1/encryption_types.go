@@ -195,9 +195,10 @@ const (
 	KeyringPhaseFailed SiteKeyringPhase = "Failed"
 )
 
-// KeyringUnsealReason records why a site is currently unsealed. It is
-// purely diagnostic, but it is also what the operator uses to decide
-// whether re-sealing is safe to attempt.
+// KeyringUnsealReason records why a site is currently unsealed. Empty
+// when the site is sealed, or when a clone hold has been released and
+// reseal is in progress. Clone is a control signal: the operator must
+// not advance that site to Escrowed until the clone bootstrap finishes.
 // +kubebuilder:validation:Enum="";Bootstrap;Clone;Rotation
 type KeyringUnsealReason string
 
@@ -247,7 +248,7 @@ type SiteEncryptionStatus struct {
 	Phase SiteKeyringPhase `json:"phase,omitempty"`
 
 	// UnsealReason records why the site is unsealed. Empty when the site
-	// is sealed.
+	// is sealed, or after a clone hold is released and reseal has begun.
 	// +optional
 	UnsealReason KeyringUnsealReason `json:"unsealReason,omitempty"`
 

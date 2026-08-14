@@ -3,7 +3,6 @@ package scenarios
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -48,10 +47,9 @@ type s51RunState struct {
 // (RequestKeyringUnseal returning false is what defers it).
 //
 // What this asserts that a unit test cannot: that the gate is actually
-// WIRED in the running operator. The unit tests inject the gate directly,
-// so they passed while production never set it on a group that had
-// encryption enabled after its topology manager was built — the adoption
-// path. This scenario caught that; see the note in startManager.
+// WIRED in the running operator, including on groups that adopted
+// encryption after their topology manager was built. The gate is always
+// set; RequestKeyringUnseal is a no-op while encryption is off.
 //
 // Note what is deliberately NOT asserted: that the clone mints a new
 // escrow version. A recipient seeded from its own escrow already holds a
@@ -74,9 +72,7 @@ func scenario51EncryptedReclone() runner.Scenario {
 		DocLink: "playground/chaos-scenarios.md#51-encrypted-reclone",
 		Timeout: 20 * time.Minute,
 		Quarantine: "destructive (wipes the replica datadir) and requires the dedicated TLS + " +
-			"spec.encryptionAtRest baseline; CI and local encryption jobs run this scenario explicitly. " +
-			"The unseal-before-clone step is skipped until the clone gate is wired on adopted groups — " +
-			"see the KNOWN GAP note in startManager",
+			"spec.encryptionAtRest baseline; CI and local encryption jobs run this scenario explicitly.",
 		Precheck: s51Precheck(state),
 		Steps: []runner.Step{
 			s51SeedDonorData(state),
@@ -181,16 +177,8 @@ func s51RequestReclone(state *s51RunState) runner.Step {
 
 // s51ObserveUnsealBeforeClone checks the clone gate: the site must reach
 // Unsealed/Clone and its pod must actually re-render onto a writable
-// keyring before CLONE INSTANCE runs.
-//
-// SKIPPED BY DEFAULT. The gate is not wired on groups that had encryption
-// enabled after their topology manager was built (the adoption path), and
-// wiring it as-is livelocks the reclone — see the KNOWN GAP note in
-// startManager. Both halves have to land together, so rather than fail
-// every run on a documented gap, this step reports whether the gate fired
-// and only asserts the ordering when it did. Set
-// BLOODRAVEN_CHAOS_REQUIRE_CLONE_GATE=1 to make it a hard assertion once
-// the gap is closed.
+// keyring before CLONE INSTANCE runs. Escrowed/Clone is the #144
+// livelock and must fail.
 func s51ObserveUnsealBeforeClone(state *s51RunState) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
@@ -199,9 +187,8 @@ func s51ObserveUnsealBeforeClone(state *s51RunState) runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
 
-			sawUnsealed := false
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				fmt.Sprintf("site %s observed Unsealed for clone (or already past it)", state.replicaSite),
+				fmt.Sprintf("site %s observed Unsealed/Clone", state.replicaSite),
 				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.EncryptionAtRest == nil {
 						return false, "status.encryptionAtRest not populated", nil
@@ -210,34 +197,19 @@ func s51ObserveUnsealBeforeClone(state *s51RunState) runner.Step {
 					if s == nil {
 						return false, "no status entry for " + state.replicaSite, nil
 					}
-					if s.UnsealReason == v1alpha1.UnsealReasonClone {
-						// Unsealed or already advanced to Escrowed while
-						// still carrying the Clone reason — either way the
-						// gate fired before CLONE INSTANCE ran.
-						sawUnsealed = s.Phase == v1alpha1.KeyringPhaseUnsealed
+					if s.UnsealReason == v1alpha1.UnsealReasonClone &&
+						(s.Phase == v1alpha1.KeyringPhaseEscrowed || s.Phase == v1alpha1.KeyringPhaseSealed) {
+						return false, fmt.Sprintf("phase=%s reason=Clone — the #144 livelock", s.Phase),
+							fmt.Errorf("site %s advanced to %s while still held for clone", state.replicaSite, s.Phase)
+					}
+					if s.UnsealReason == v1alpha1.UnsealReasonClone && s.Phase == v1alpha1.KeyringPhaseUnsealed {
 						return true, "", nil
 					}
 					return false, fmt.Sprintf("phase=%s reason=%s v%d (%s)",
 						s.Phase, s.UnsealReason, s.KeyringVersion, s.Message), nil
 				})
 			if err != nil {
-				if os.Getenv("BLOODRAVEN_CHAOS_REQUIRE_CLONE_GATE") == "1" {
-					return fmt.Errorf("waiting for the clone unseal: %w", err)
-				}
-				env.Capture.Note(
-					"clone gate never fired: the recipient was cloned without being unsealed first. " +
-						"This is the documented KNOWN GAP in startManager (the gate is not wired on groups " +
-						"that adopted encryption after their topology manager was built). The remaining " +
-						"steps still verify that the clone completed and the site re-sealed correctly.")
-				env.Logger.Warn("clone unseal gate did not fire; continuing (known gap)",
-					"site", state.replicaSite)
-				return nil
-			}
-
-			if !sawUnsealed {
-				env.Capture.Note("the site was already past Unsealed when first sampled, " +
-					"but still carried unsealReason=Clone — the gate fired")
-				return nil
+				return fmt.Errorf("waiting for the clone unseal: %w", err)
 			}
 
 			// Caught it mid-window. The status flip is only the operator's

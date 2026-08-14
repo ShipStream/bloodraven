@@ -376,7 +376,9 @@ type TopologyManager struct {
 	// read-only keyring cannot accept. The gate asks the reconciler to
 	// unseal the recipient and reports whether it is ready yet; a clone
 	// that starts against a sealed recipient fails partway and leaves
-	// the data directory unusable. Nil when encryption is disabled.
+	// the data directory unusable. RequestKeyringUnseal is a no-op when
+	// encryption is off, so the gate is wired even on plaintext groups.
+	// Nil only in tests that do not exercise the gate.
 	keyringGate KeyringGate
 
 	// autoBootstrapSuppressed is set by the runner while a one-shot
@@ -413,6 +415,11 @@ type TopologyManager struct {
 	// repeating an already-successful destructive clone. Poll retries
 	// only the durable annotation removal while this is set.
 	recloneCompletedSite string
+
+	// cloneHoldReleaseSite retries NotifyCloneComplete after a finished
+	// bootstrap whose release write failed. Poll retries only the
+	// release — it must not start another CLONE INSTANCE.
+	cloneHoldReleaseSite string
 
 	// StatusCallback is invoked after each poll cycle that produces a state change.
 	// The runner sets this to push status updates to the CR.
@@ -1155,6 +1162,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// failover, and without replaying a target that a later promotion has
 	// already superseded.
 	tm.reconcileDNS(ctx)
+
+	// Retry a failed Clone-hold release before starting any new clone.
+	tm.releaseCloneHold(ctx)
 
 	// Process pending reclone annotation.
 	recloneStarted := tm.checkReclone(ctx)
@@ -2319,12 +2329,15 @@ var errSiteNotFound = fmt.Errorf("planned-failover: site not found in topology m
 // running encryption-at-rest. RequestKeyringUnseal returns true when the
 // site's keyring is already writable and the clone may proceed; false
 // means the operator has recorded the unseal request and the caller
-// should retry after the pod has rolled.
+// should retry after the pod has rolled. NotifyCloneComplete releases
+// the Clone hold after bootstrap finishes so the site can reseal.
 //
-// Implemented by MysqlFailoverGroupReconciler. Nil in tests and in
-// deployments with encryption disabled.
+// Implemented by MysqlFailoverGroupReconciler. Nil in tests that do not
+// exercise the gate. RequestKeyringUnseal is a no-op when encryption is
+// disabled, so production always wires the gate.
 type KeyringGate interface {
 	RequestKeyringUnseal(ctx context.Context, nn types.NamespacedName, site string) (bool, error)
+	NotifyCloneComplete(ctx context.Context, nn types.NamespacedName, site string) error
 }
 
 // SetKeyringGate wires the encryption-at-rest clone gate. Safe to call
@@ -2936,8 +2949,8 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 	// before CLONE INSTANCE runs. Deferring here (rather than failing)
 	// is deliberate — the reconciler unseals the site and rolls its pod,
 	// and the next poll cycle picks the bootstrap back up.
+	nn := types.NamespacedName{Namespace: tm.cfg.Namespace, Name: tm.cfg.Name}
 	if gate := tm.getKeyringGate(); gate != nil {
-		nn := types.NamespacedName{Namespace: tm.cfg.Namespace, Name: tm.cfg.Name}
 		ready, err := gate.RequestKeyringUnseal(ctx, nn, recipient)
 		if err != nil {
 			tm.logger.Error("bootstrap deferred: keyring unseal request failed",
@@ -2955,6 +2968,11 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 	tm.bootstrapErr = nil
 	tm.bootstrapSource = source
 	tm.bootstrapRecipient = recipient
+	// A leftover release from a previous attempt must not fire while
+	// this clone is running — that would reseal the pod mid-CLONE.
+	if tm.cloneHoldReleaseSite == recipient {
+		tm.cloneHoldReleaseSite = ""
+	}
 	tm.mu.Unlock()
 
 	tm.logger.Info("starting bootstrap",
@@ -2978,6 +2996,18 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		}
 		if err == nil {
 			err = tm.runBootstrap(ctx, donorSite.mysql, recipientSite.mysql, donorSite.host, recipient, allowSkipClone)
+		}
+		if gate := tm.getKeyringGate(); gate != nil {
+			notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			notifyErr := gate.NotifyCloneComplete(notifyCtx, nn, recipient)
+			cancel()
+			if notifyErr != nil {
+				tm.logger.Error("could not release clone keyring hold",
+					"recipient", recipient, "error", notifyErr)
+				tm.mu.Lock()
+				tm.cloneHoldReleaseSite = recipient
+				tm.mu.Unlock()
+			}
 		}
 		var recloneCallbackErr error
 		if source == "reclone" && tm.RecloneCompleteCallback != nil {
@@ -3800,6 +3830,44 @@ func (tm *TopologyManager) executeRecovery(ctx context.Context, oldPrimaryIdx, n
 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
 	tm.logger.Info("old primary recovery complete", "site", oldPrimary.name, "source", newPrimaryHost)
+}
+
+// releaseCloneHold retries NotifyCloneComplete after a bootstrap whose
+// release write failed. It never starts a clone.
+func (tm *TopologyManager) releaseCloneHold(ctx context.Context) {
+	tm.mu.RLock()
+	site := tm.cloneHoldReleaseSite
+	tm.mu.RUnlock()
+	if site == "" {
+		return
+	}
+	if tm.isBootstrapping() {
+		tm.mu.RLock()
+		recipient := tm.bootstrapRecipient
+		tm.mu.RUnlock()
+		if recipient == site {
+			return
+		}
+	}
+	gate := tm.getKeyringGate()
+	if gate == nil {
+		tm.mu.Lock()
+		if tm.cloneHoldReleaseSite == site {
+			tm.cloneHoldReleaseSite = ""
+		}
+		tm.mu.Unlock()
+		return
+	}
+	nn := types.NamespacedName{Namespace: tm.cfg.Namespace, Name: tm.cfg.Name}
+	if err := gate.NotifyCloneComplete(ctx, nn, site); err != nil {
+		tm.logger.Error("retrying clone keyring hold release", "site", site, "error", err)
+		return
+	}
+	tm.mu.Lock()
+	if tm.cloneHoldReleaseSite == site {
+		tm.cloneHoldReleaseSite = ""
+	}
+	tm.mu.Unlock()
 }
 
 // checkReclone processes a pending reclone annotation. If a reclone was

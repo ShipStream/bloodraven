@@ -303,6 +303,15 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 		return checkEscrowDeadline(fg, site), nil
 	}
 
+	// Clone is sticky: the recipient must keep a writable keyring until
+	// CLONE INSTANCE (and the post-clone mysqld restart) has finished.
+	// Advancing to Escrowed here re-renders the sealed Secret projection
+	// and the pod rolls, which is the #144 livelock.
+	if site.UnsealReason == v1alpha1.UnsealReasonClone {
+		site.Message = "keyring verified; holding unsealed until CLONE INSTANCE completes"
+		return true, nil
+	}
+
 	site.Phase = v1alpha1.KeyringPhaseEscrowed
 	site.KeyringSecret = current.Name
 	site.KeyringVersion = current.Version
@@ -505,6 +514,13 @@ func (r *MysqlFailoverGroupReconciler) verifySealedSite(
 // make a site that silently never escrows show up as a loud condition
 // and a firing alert instead of sitting in Unsealed forever.
 func checkEscrowDeadline(fg *v1alpha1.MysqlFailoverGroup, site *v1alpha1.SiteEncryptionStatus) bool {
+	// A Clone hold is waiting on bootstrap, not escrow. The clone has
+	// its own timeout; flipping Failed here would either strand the
+	// clone or — after NotifyCloneComplete clears the reason — render
+	// a Failed site with a leftover KeyringSecret as sealed.
+	if site.UnsealReason == v1alpha1.UnsealReasonClone {
+		return true
+	}
 	if site.UnsealedSince == nil {
 		now := metav1.Now()
 		site.UnsealedSince = &now
@@ -548,8 +564,11 @@ func (r *MysqlFailoverGroupReconciler) rotationAllowed(fg *v1alpha1.MysqlFailove
 // read-only keyring cannot accept — MySQL fails the clone rather than
 // silently producing an unreadable data directory.
 //
-// Returns true when the site is already unsealed and the clone may
-// proceed. Callers that get false must retry after the pod has rolled.
+// Returns true when the site is already unsealed for clone and the
+// Deployment is running the writable rendering. Callers that get false
+// must retry after the pod has rolled. A first stamp of UnsealReason=Clone
+// always returns false so the encryption reconciler observes the hold
+// before the clone starts.
 func (r *MysqlFailoverGroupReconciler) RequestKeyringUnseal(
 	ctx context.Context, nn types.NamespacedName, site string,
 ) (bool, error) {
@@ -567,41 +586,138 @@ func (r *MysqlFailoverGroupReconciler) RequestKeyringUnseal(
 	if s == nil {
 		return false, nil
 	}
+	if s.UnsealReason == v1alpha1.UnsealReasonRotation {
+		return false, nil
+	}
 	switch s.Phase {
 	case v1alpha1.KeyringPhaseUnsealed, v1alpha1.KeyringPhasePending:
-		return r.deploymentReadyWithUnsealedKeyring(ctx, &fg, site)
+		if s.UnsealReason == v1alpha1.UnsealReasonClone {
+			return r.deploymentReadyWithUnsealedKeyring(ctx, &fg, site)
+		}
+		if err := r.stampCloneUnseal(ctx, nn, site); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
 
-	now := metav1.Now()
-	if s.KeyringSecret != "" {
-		var seed corev1.Secret
-		err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: s.KeyringSecret}, &seed)
-		switch {
-		case apierrors.IsNotFound(err):
-			// An explicitly confirmed reclone is the recovery path after the
-			// old keyring is irretrievably lost. Do not render the missing
-			// Secret as a seed; the replacement PVC starts with a fresh
-			// keyring and CLONE INSTANCE rewraps the donor's tablespace keys.
-			s.KeyringSecret = ""
-			s.KeyringVersion = 0
-			s.KeyringDigest = ""
-			s.LastEscrowTime = nil
-		case err != nil:
-			return false, fmt.Errorf("check keyring seed before clone unseal: %w", err)
-		}
-	}
-	s.Phase = v1alpha1.KeyringPhaseUnsealed
-	s.UnsealReason = v1alpha1.UnsealReasonClone
-	s.UnsealedSince = &now
-	s.Message = "unsealed so CLONE INSTANCE can rewrap tablespace keys under a new master key"
-	fg.Status.EncryptionAtRest.Sealed = false
-	setEncryptionCondition(&fg)
-	if err := r.patchEncryptionStatus(ctx, &fg); err != nil {
+	if err := r.unsealSiteForClone(ctx, nn, site); err != nil {
 		return false, err
 	}
 	r.Recorder.Eventf(&fg, corev1.EventTypeNormal, "KeyringUnsealed",
 		"site %s unsealed for clone", site)
 	return false, nil
+}
+
+// NotifyCloneComplete releases a Clone hold so the encryption reconciler
+// can escrow and reseal. Idempotent when encryption is off or the site
+// is not held for clone. Forces Phase=Unsealed so a Failed/Clone site
+// cannot become SiteKeyringSealed by clearing the reason alone.
+func (r *MysqlFailoverGroupReconciler) NotifyCloneComplete(
+	ctx context.Context, nn types.NamespacedName, site string,
+) error {
+	return r.mutateSiteEncryption(ctx, nn, site, func(fg *v1alpha1.MysqlFailoverGroup, s *v1alpha1.SiteEncryptionStatus) (bool, error) {
+		if !fg.Spec.EncryptionEnabled() || s == nil {
+			return false, nil
+		}
+		if s.UnsealReason != v1alpha1.UnsealReasonClone {
+			return false, nil
+		}
+		now := metav1.Now()
+		s.Phase = v1alpha1.KeyringPhaseUnsealed
+		s.UnsealReason = ""
+		s.UnsealedSince = &now
+		s.Message = "clone completed; resealing"
+		return true, nil
+	})
+}
+
+func (r *MysqlFailoverGroupReconciler) stampCloneUnseal(ctx context.Context, nn types.NamespacedName, site string) error {
+	return r.mutateSiteEncryption(ctx, nn, site, func(_ *v1alpha1.MysqlFailoverGroup, s *v1alpha1.SiteEncryptionStatus) (bool, error) {
+		if s == nil || s.UnsealReason == v1alpha1.UnsealReasonClone {
+			return false, nil
+		}
+		if s.UnsealReason == v1alpha1.UnsealReasonRotation {
+			return false, nil
+		}
+		now := metav1.Now()
+		s.UnsealReason = v1alpha1.UnsealReasonClone
+		s.UnsealedSince = &now
+		s.Message = "unsealed so CLONE INSTANCE can rewrap tablespace keys under a new master key"
+		return true, nil
+	})
+}
+
+func (r *MysqlFailoverGroupReconciler) unsealSiteForClone(ctx context.Context, nn types.NamespacedName, site string) error {
+	return r.mutateSiteEncryption(ctx, nn, site, func(fg *v1alpha1.MysqlFailoverGroup, s *v1alpha1.SiteEncryptionStatus) (bool, error) {
+		if s == nil {
+			return false, nil
+		}
+		if s.Phase == v1alpha1.KeyringPhaseUnsealed && s.UnsealReason == v1alpha1.UnsealReasonClone {
+			return false, nil
+		}
+		if s.KeyringSecret != "" {
+			var seed corev1.Secret
+			err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: s.KeyringSecret}, &seed)
+			switch {
+			case apierrors.IsNotFound(err):
+				// An explicitly confirmed reclone is the recovery path after the
+				// old keyring is irretrievably lost. Do not render the missing
+				// Secret as a seed; the replacement PVC starts with a fresh
+				// keyring and CLONE INSTANCE rewraps the donor's tablespace keys.
+				s.KeyringSecret = ""
+				s.KeyringVersion = 0
+				s.KeyringDigest = ""
+				s.LastEscrowTime = nil
+			case err != nil:
+				return false, fmt.Errorf("check keyring seed before clone unseal: %w", err)
+			}
+		}
+		now := metav1.Now()
+		s.Phase = v1alpha1.KeyringPhaseUnsealed
+		s.UnsealReason = v1alpha1.UnsealReasonClone
+		s.UnsealedSince = &now
+		s.Message = "unsealed so CLONE INSTANCE can rewrap tablespace keys under a new master key"
+		return true, nil
+	})
+}
+
+// mutateSiteEncryption applies a point mutation to one site's encryption
+// status inside RetryOnConflict. It re-reads the object on every attempt
+// so a concurrent peer-site transition is not overwritten by a stale
+// snapshot. The write is still a full status Update of the freshly-read
+// object.
+func (r *MysqlFailoverGroupReconciler) mutateSiteEncryption(
+	ctx context.Context,
+	nn types.NamespacedName,
+	site string,
+	fn func(fg *v1alpha1.MysqlFailoverGroup, s *v1alpha1.SiteEncryptionStatus) (bool, error),
+) error {
+	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+		var latest v1alpha1.MysqlFailoverGroup
+		if err := r.Get(ctx, nn, &latest); err != nil {
+			return err
+		}
+		var s *v1alpha1.SiteEncryptionStatus
+		if latest.Status.EncryptionAtRest != nil {
+			s = latest.Status.EncryptionAtRest.SiteEncryptionStatusByName(site)
+		}
+		write, err := fn(&latest, s)
+		if err != nil || !write {
+			return err
+		}
+		if st := latest.Status.EncryptionAtRest; st != nil {
+			allSealed := true
+			for i := range st.Sites {
+				if st.Sites[i].Phase != v1alpha1.KeyringPhaseSealed {
+					allSealed = false
+					break
+				}
+			}
+			st.Sealed = allSealed
+			setEncryptionCondition(&latest)
+		}
+		return r.Status().Update(ctx, &latest)
+	})
 }
 
 func (r *MysqlFailoverGroupReconciler) deploymentReadyWithUnsealedKeyring(
@@ -789,12 +905,55 @@ func (r *MysqlFailoverGroupReconciler) patchEncryptionStatus(ctx context.Context
 		}, &latest); err != nil {
 			return err
 		}
-		latest.Status.EncryptionAtRest = desired.DeepCopy()
-		if desiredCond != nil {
+		latest.Status.EncryptionAtRest = mergeEncryptionStatus(desired, latest.Status.EncryptionAtRest)
+		if latest.Spec.EncryptionEnabled() && latest.Status.EncryptionAtRest != nil {
+			setEncryptionCondition(&latest)
+		} else if desiredCond != nil {
 			setCondition(&latest.Status.Conditions, *desiredCond)
 		}
 		return r.Status().Update(ctx, &latest)
 	})
+}
+
+// mergeEncryptionStatus applies a reconciler snapshot without undoing a
+// concurrent Clone hold or release written by the topology gate.
+func mergeEncryptionStatus(desired, latest *v1alpha1.EncryptionAtRestStatus) *v1alpha1.EncryptionAtRestStatus {
+	if desired == nil {
+		return nil
+	}
+	out := desired.DeepCopy()
+	if latest == nil {
+		return out
+	}
+	for i := range out.Sites {
+		live := latest.SiteEncryptionStatusByName(out.Sites[i].Name)
+		if live == nil {
+			continue
+		}
+		// A live Clone hold wins over any stale snapshot that never
+		// observed it (Bootstrap, Failed, Escrowed, Sealed, …).
+		if live.UnsealReason == v1alpha1.UnsealReasonClone &&
+			out.Sites[i].UnsealReason != v1alpha1.UnsealReasonClone {
+			out.Sites[i] = *live.DeepCopy()
+			continue
+		}
+		// A live non-Clone state wins over a stale Clone hold, including
+		// a release that has already advanced to Escrowed/Sealed.
+		if live.UnsealReason != v1alpha1.UnsealReasonClone &&
+			out.Sites[i].UnsealReason == v1alpha1.UnsealReasonClone {
+			out.Sites[i] = *live.DeepCopy()
+			continue
+		}
+	}
+	allSealed := true
+	for i := range out.Sites {
+		if out.Sites[i].Phase != v1alpha1.KeyringPhaseSealed {
+			allSealed = false
+			break
+		}
+	}
+	out.Sealed = allSealed
+	return out
 }
 
 func (r *MysqlFailoverGroupReconciler) clearRotateAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
