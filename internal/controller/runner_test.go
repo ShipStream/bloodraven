@@ -325,6 +325,37 @@ func TestStopManager(t *testing.T) {
 	runner.StopManager(nn)
 }
 
+func TestStopManagedTopologyWaitTimesOut(t *testing.T) {
+	done := make(chan struct{})
+	start := time.Now()
+	stopManagedTopologyWait(&managedTopology{done: done}, 20*time.Millisecond)
+	elapsed := time.Since(start)
+	if elapsed < 20*time.Millisecond {
+		t.Fatalf("returned too fast: %v", elapsed)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("wait was not bounded: elapsed %v", elapsed)
+	}
+}
+
+func TestStopManagedTopologyWaitReturnsOnDone(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	start := time.Now()
+	stopManagedTopologyWait(&managedTopology{done: done}, time.Minute)
+	if time.Since(start) > 200*time.Millisecond {
+		t.Fatalf("should return immediately when done is closed, elapsed %v", time.Since(start))
+	}
+}
+
+func TestStopManagedTopologyHaltsMetrics(t *testing.T) {
+	tm := &TopologyManager{}
+	stopManagedTopologyWait(&managedTopology{tm: tm}, time.Millisecond)
+	if !tm.siteMetricsHalted() {
+		t.Fatal("expected HaltSiteMetrics to be set before the wait")
+	}
+}
+
 func TestStopManager_NotFound(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	runner := &TopologyManagerRunner{

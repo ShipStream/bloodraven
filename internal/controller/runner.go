@@ -873,18 +873,40 @@ func clearManagedSiteGauges(tm *TopologyManager) {
 	}
 }
 
-// stopManagedTopology cancels the manager and waits for its goroutine
-// to return so a subsequent series delete cannot be undone by an
-// in-flight Poll. A nil done channel (test-injected managers) is a no-op wait.
+// managerStopWait bounds how long stopManagedTopology waits for Run to
+// exit. A hung MySQL call that ignores its probe context must not wedge
+// the runner's sync / StopManager / stopAll path forever.
+const managerStopWait = 30 * time.Second
+
+// stopManagedTopology cancels the manager and waits (bounded) for its
+// goroutine to return so a subsequent series delete cannot be undone by
+// an in-flight Poll. A nil done channel (test-injected managers) is a
+// no-op wait.
 func stopManagedTopology(mt *managedTopology) {
+	stopManagedTopologyWait(mt, managerStopWait)
+}
+
+func stopManagedTopologyWait(mt *managedTopology, wait time.Duration) {
 	if mt == nil {
 		return
+	}
+	if mt.tm != nil {
+		mt.tm.HaltSiteMetrics()
 	}
 	if mt.cancel != nil {
 		mt.cancel()
 	}
-	if mt.done != nil {
-		<-mt.done
+	if mt.done == nil {
+		return
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-mt.done:
+	case <-timer.C:
+		if mt.tm != nil && mt.tm.logger != nil {
+			mt.tm.logger.Warn("timed out waiting for topology manager to stop; dropping site gauges anyway")
+		}
 	}
 }
 
