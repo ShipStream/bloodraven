@@ -11,7 +11,7 @@
 
 **Front:** Why is changing a `msg` string in Bloodraven a breaking change?
 
-**Back:** The `msg` strings in the Event reference are a published stability contract that downstream log pipelines filter on by exact match; they change only with a deprecation note in `CHANGELOG.md`.
+**Back:** The `msg` strings in the Event reference are a published stability contract that downstream log pipelines filter on by exact match; they change only with a deprecation note in the release notes.
 
 ---
 
