@@ -54,7 +54,7 @@ func TestEncryptionScenariosCoverTheChaosPlanMinimum(t *testing.T) {
 	required := map[string]string{
 		"48-keyring-seal-and-rotation": "EXP-15: replica rotation happy path + primary rotation refused",
 		"50-encrypted-pod-replace":     "EXP-12/EXP-04: sealed pod replace re-projects the escrow and the data decrypts",
-		"51-encrypted-reclone":         "EXP-06: clone recipient unseals before CLONE INSTANCE, then re-seals on a new version",
+		"51-encrypted-reclone":         "EXP-06: clone recipient unseals before CLONE INSTANCE, then re-seals on an escrow no older than the pre-clone version",
 	}
 	for id, why := range required {
 		if _, ok := runner.DefaultRegistry.Get(id); !ok {

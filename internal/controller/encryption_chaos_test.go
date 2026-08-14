@@ -130,8 +130,9 @@ func TestEncryptionChaos_RestoredEscrowSecretRecoversSealed(t *testing.T) {
 		t.Fatalf("restore escrow: %v", err)
 	}
 
-	// Failed re-enters the unsealed advance path, which re-verifies the
-	// escrow and moves through Escrowed to Sealed.
+	// A Failed site that still renders sealed re-enters verifySealedSite,
+	// which re-verifies the escrow Secret and requires MySQL to confirm
+	// the same digest before recovering straight to Sealed.
 	for i := 0; i < 3; i++ {
 		if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
 			t.Fatalf("reconcile %d: %v", i, err)
@@ -143,6 +144,41 @@ func TestEncryptionChaos_RestoredEscrowSecretRecoversSealed(t *testing.T) {
 	}
 	if s.KeyringDigest != digest {
 		t.Errorf("digest = %q, want the restored keyring digest", s.KeyringDigest)
+	}
+}
+
+// Digest match alone is not enough to leave Failed: a sidecar that did
+// not report the keyring component has not confirmed Read_only.
+func TestEncryptionChaos_RestoredEscrowDoesNotRecoverWithoutReadOnlyEvidence(t *testing.T) {
+	fg := encTestFG()
+	raw := []byte("keyring")
+	digest := keyringDigest(raw)
+	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
+		Sites: []v1alpha1.SiteEncryptionStatus{{
+			Name: "dc1", Phase: v1alpha1.KeyringPhaseFailed,
+			KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest,
+			Message: "escrow Secret mysql-lion-dc1-keyring-v1 is missing",
+		}},
+	}
+	r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
+		"dc1": {Enabled: true, Present: true, Digest: digest},
+	}), fg, sealedDeployment(fg, "dc1", "mysql-lion-dc1-keyring-v1"))
+	ctx := context.Background()
+
+	store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
+	if _, err := store.put(ctx, fg, "dc1", raw); err != nil {
+		t.Fatalf("restore escrow: %v", err)
+	}
+
+	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	s := siteStatus(fg, "dc1")
+	if s.Phase != v1alpha1.KeyringPhaseFailed {
+		t.Fatalf("phase = %q (%s), want Failed until MySQL reports a read-only keyring", s.Phase, s.Message)
+	}
+	if !strings.Contains(s.Message, "waiting for MySQL to confirm") {
+		t.Errorf("message = %q, want the waiting-for-confirmation wording", s.Message)
 	}
 }
 

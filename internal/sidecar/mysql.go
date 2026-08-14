@@ -3,10 +3,12 @@ package sidecar
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 )
@@ -417,6 +419,12 @@ func mysqlBool(value sql.NullString) bool {
 	return s == "1" || strings.EqualFold(s, "on") || strings.EqualFold(s, "true")
 }
 
+// sqlLogBinRestoreTimeout bounds the detached SET SESSION sql_log_bin=1
+// after a master-key rotation. The statement is instantaneous on a
+// healthy server; the deadline only exists so a wedged MySQL cannot
+// stall the keyring tick forever.
+const sqlLogBinRestoreTimeout = 5 * time.Second
+
 // RotateInnoDBMasterKey issues the master-key rotation. It only
 // succeeds against a writable keyring: with the sealed (read_only)
 // rendering MySQL rejects it with ER_CANNOT_FIND_KEY_IN_KEYRING, which
@@ -463,11 +471,16 @@ func (m *LiveMysql) RotateInnoDBMasterKey(ctx context.Context) error {
 	}
 
 	// Restore before the connection goes back to the pool, or every later
-	// statement that reuses it would silently stop replicating. Uses a
-	// context detached from cancellation so a timed-out rotation cannot
-	// skip the restore. A failure here means the connection is unsafe to
-	// reuse, so it is surfaced rather than swallowed.
-	if _, err := conn.ExecContext(context.WithoutCancel(ctx), "SET SESSION sql_log_bin = 1"); err != nil {
+	// statement that reuses it would silently stop replicating. Detach
+	// from the caller's cancellation so a timed-out rotation cannot skip
+	// the restore, but keep a short deadline so a wedged server cannot
+	// stall the keyring tick forever. A failure here means the connection
+	// is unsafe to reuse: mark it bad so Close discards it instead of
+	// returning a session that still has sql_log_bin=0 to the pool.
+	restoreCtx, cancelRestore := context.WithTimeout(context.WithoutCancel(ctx), sqlLogBinRestoreTimeout)
+	defer cancelRestore()
+	if _, err := conn.ExecContext(restoreCtx, "SET SESSION sql_log_bin = 1"); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		return errors.Join(rotateErr, fmt.Errorf(
 			"restore sql_log_bin after master key rotation: %w", err))
 	}

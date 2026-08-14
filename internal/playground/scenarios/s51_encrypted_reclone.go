@@ -82,7 +82,7 @@ func scenario51EncryptedReclone() runner.Scenario {
 			s51SeedDonorData(state),
 			s51RequestReclone(state),
 			s51ObserveUnsealBeforeClone(state),
-			s51VerifyResealedOnNewVersion(state),
+			s51VerifyResealedAfterClone(state),
 		},
 		Cleanup: s51Cleanup(state),
 	}
@@ -286,19 +286,21 @@ func s51ObserveUnsealBeforeClone(state *s51RunState) runner.Step {
 	}
 }
 
-// s51VerifyResealedOnNewVersion waits out the clone and asserts the
-// end state: a new escrow version, a read-only keyring off the data
+// s51VerifyResealedAfterClone waits out the clone and asserts the
+// end state: an escrow version no older than pre-clone, the operator
+// consumed the reclone annotation, a read-only keyring off the data
 // volume, and the donor's rows present.
-func s51VerifyResealedOnNewVersion(state *s51RunState) runner.Step {
+func s51VerifyResealedAfterClone(state *s51RunState) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "the recipient re-seals on a new escrow version with the cloned data readable",
+		Name:  "the recipient re-seals without regressing the escrow version, with the cloned data readable",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
 
 			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				fmt.Sprintf("site %s re-sealed after the clone (was v%d)", state.replicaSite, state.escrowBefore),
+				fmt.Sprintf("site %s re-sealed after the clone (was v%d) and the operator consumed the annotation",
+					state.replicaSite, state.escrowBefore),
 				func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 					if m.Status.EncryptionAtRest == nil {
 						return false, "status.encryptionAtRest not populated", nil
@@ -313,6 +315,14 @@ func s51VerifyResealedOnNewVersion(state *s51RunState) runner.Step {
 					}
 					if s.Phase != v1alpha1.KeyringPhaseSealed {
 						return false, fmt.Sprintf("phase=%s reason=%s (%s)", s.Phase, s.UnsealReason, s.Message), nil
+					}
+					// The operator clears the annotation only after the
+					// clone actually finishes. Sealed alone is not proof:
+					// the replica starts sealed, so a never-consumed
+					// annotation plus rows arriving via replication would
+					// otherwise false-pass.
+					if _, present := m.GetAnnotations()["bloodraven.shipstream.io/reclone-site"]; present {
+						return false, "reclone annotation still present (clone not completed)", nil
 					}
 					return true, "", nil
 				})
@@ -403,7 +413,7 @@ func s51Cleanup(state *s51RunState) func(context.Context, *runner.Env) error {
 		// this only covers the paths that bailed out before that.
 		mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 		if err != nil {
-			return nil
+			return fmt.Errorf("read MFG to clear leftover reclone annotation: %w", err)
 		}
 		if _, present := mfg.GetAnnotations()["bloodraven.shipstream.io/reclone-site"]; !present {
 			state.annotated = false

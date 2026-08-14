@@ -92,7 +92,9 @@ func (c rotateFakeConnector) Driver() driver.Driver                        { ret
 
 type rotateFakeDriver struct{}
 
-func (rotateFakeDriver) Open(string) (driver.Conn, error) { return nil, errors.New("use the connector") }
+func (rotateFakeDriver) Open(string) (driver.Conn, error) {
+	return nil, errors.New("use the connector")
+}
 
 func newRotateFakeMysql(t *testing.T, conn *rotateFakeConn) *LiveMysql {
 	t.Helper()
@@ -188,6 +190,54 @@ func TestRotateInnoDBMasterKey_ReportsAFailedRestore(t *testing.T) {
 	if !errors.Is(err, restoreFail) {
 		t.Errorf("restore failure did not survive into the error: %v", err)
 	}
+}
+
+// A generic restore error (not a dropped connection) must still discard
+// the session. go-sql-driver/mysql does not reset sql_log_bin in
+// ResetSession, so returning that connection to the pool would leave
+// later writes silently unreplicated.
+func TestRotateInnoDBMasterKey_DiscardsConnectionAfterFailedRestore(t *testing.T) {
+	restoreFail := errors.New("ER_UNKNOWN_ERROR")
+	conn := &rotateFakeConn{restoreErr: restoreFail}
+	connector := &countingRotateConnector{conn: conn}
+	db := sql.OpenDB(connector)
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	m := &LiveMysql{db: db}
+
+	if err := m.RotateInnoDBMasterKey(context.Background()); err == nil {
+		t.Fatal("a failed sql_log_bin restore was swallowed")
+	}
+	first := connector.connects()
+
+	conn.restoreErr = nil
+	if err := m.RotateInnoDBMasterKey(context.Background()); err != nil {
+		t.Fatalf("second rotate after a discarded restore: %v", err)
+	}
+	if got := connector.connects(); got <= first {
+		t.Fatalf("failed restore returned the connection to the pool (connects stayed at %d)", got)
+	}
+}
+
+type countingRotateConnector struct {
+	mu        sync.Mutex
+	conn      *rotateFakeConn
+	nConnects int
+}
+
+func (c *countingRotateConnector) Connect(context.Context) (driver.Conn, error) {
+	c.mu.Lock()
+	c.nConnects++
+	c.mu.Unlock()
+	return c.conn, nil
+}
+
+func (c *countingRotateConnector) Driver() driver.Driver { return rotateFakeDriver{} }
+
+func (c *countingRotateConnector) connects() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.nConnects
 }
 
 // EncryptSystemTablespace is the deliberate counter-case: ALTER

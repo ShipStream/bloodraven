@@ -1312,7 +1312,7 @@ datadir. Same encryption baseline as scenarios 48 and 50.
 **Hypothesis**: annotating `reclone-site` on a `Sealed` replica moves it
 to `Unsealed`/`Clone` with a memory-backed keyring *before* any
 `CLONE INSTANCE` runs; the clone completes; the site returns to `Sealed`
-against an escrow version strictly newer than the pre-clone one, with the
+against an escrow version no older than the pre-clone one, with the
 keyring still off the data PVC and the donor's rows readable.
 
 **Why the ordering matters**: a clone recipient re-encrypts the donor's
@@ -1334,8 +1334,11 @@ is what defers it.
    evidence. If the window is missed because the whole cycle completed
    inside one poll, that is noted and the end-state assertions carry the
    proof instead.
-3. **The clone re-escrows.** Re-sealing on the *same* escrow version
-   would mean the escrow no longer describes the keys the site is running.
+3. **The escrow never goes backwards.** A recipient seeded from its own
+   escrow already holds a usable master key, and `CLONE INSTANCE` rewraps
+   the donor's tablespace keys under that key — so the version is allowed
+   to stay put. A *lower* version would mean the site resealed onto
+   superseded key material.
 4. **The window closes.** `Read_only=Yes` again, `Data_file` outside
    `/var/lib/mysql`, donor rows present, and a non-zero count of
    encrypted tablespaces.
@@ -1347,8 +1350,11 @@ itself, then the roll back to sealed).
 before the operator consumed it.
 
 :::danger Known bug — recloning an encrypted site livelocks
-**This scenario does not pass on the current code, and that is the
-finding.** Once the clone gate is wired, a reclone never completes:
+**Once the clone gate is wired, this scenario does not pass, and that is
+the finding.** The CI encryption job adopts encryption on a live group
+and does not restart the operator, so the gate stays off and the
+ungated clone + reseal path still completes. After any operator restart
+on an encrypted group the gate is wired and a reclone never completes:
 
 1. `RequestKeyringUnseal` moves the recipient to `Unsealed`/`Clone`.
 2. The encryption reconciler re-verifies the escrow and advances it

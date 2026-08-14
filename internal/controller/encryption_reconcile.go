@@ -469,7 +469,8 @@ func (r *MysqlFailoverGroupReconciler) verifySealedSite(
 				"site %s: live keyring digest does not match escrow %s", site.Name, site.KeyringSecret)
 			return true, nil
 		}
-		confirmed = live.Digest != "" && live.Digest == site.KeyringDigest
+		confirmed = live.Component != nil && live.Component.ReadOnly &&
+			live.Digest != "" && live.Digest == site.KeyringDigest
 	}
 
 	// Recovery from Failed. Reaching here means the escrow Secret exists
