@@ -152,6 +152,13 @@ course-build: ## Build the "Bloodraven in Production" course site
 	@# cannot silently change the built output; plain install only as a
 	@# fallback. Bump the template with an explicit `bun update` and commit the
 	@# rebuilt site alongside the lockfile.
+	@#
+	@# If a local build disagrees with CI on site.css, suspect the bun cache
+	@# before the source: the template writes build output back into its own
+	@# package directory (node_modules/witherspoon-course-template/.build/),
+	@# and bun installs packages as hardlinks into the global cache, so that
+	@# write poisons every later install on the machine. `bun pm cache rm &&
+	@# rm -rf course/node_modules` restores agreement with a clean checkout.
 	cd $(COURSE_DIR) && \
 		if [ -f bun.lock ]; then bun install --frozen-lockfile; \
 		else bun install; fi && \
