@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/metrics"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
@@ -319,6 +320,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		if ok {
 			r.logger.Info("config changed, restarting topology manager", "fg", nn)
+			clearRemovedSiteGauges(existing.tm, cfg)
 			existing.cancel()
 		}
 
@@ -347,6 +349,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	for nn, mt := range r.managers {
 		if _, ok := seen[nn]; !ok {
 			r.logger.Info("stopping topology manager for deleted fg", "fg", nn)
+			clearManagedSiteGauges(mt.tm)
 			mt.cancel()
 			delete(r.managers, nn)
 		}
@@ -836,8 +839,39 @@ func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {
 		return
 	}
 	r.logger.Info("stopping topology manager via StopManager", "fg", nn)
+	clearManagedSiteGauges(mt.tm)
 	mt.cancel()
 	delete(r.managers, nn)
+}
+
+// clearManagedSiteGauges drops site-scoped gauge series for every site
+// still tracked by tm. Safe to call with a nil manager.
+func clearManagedSiteGauges(tm *TopologyManager) {
+	if tm == nil {
+		return
+	}
+	for i := range tm.sites {
+		metrics.DeleteSiteGauges(tm.cfg.Namespace, tm.cfg.Name, tm.sites[i].name)
+	}
+}
+
+// clearRemovedSiteGauges drops series for sites present on the old
+// manager but absent from the replacement config. Sites that remain
+// are left alone so a restart cannot race the new manager's first emit.
+func clearRemovedSiteGauges(old *TopologyManager, next TopologyConfig) {
+	if old == nil {
+		return
+	}
+	keep := make(map[string]struct{}, len(next.Sites))
+	for _, s := range next.Sites {
+		keep[s.Name] = struct{}{}
+	}
+	for i := range old.sites {
+		if _, ok := keep[old.sites[i].name]; ok {
+			continue
+		}
+		metrics.DeleteSiteGauges(old.cfg.Namespace, old.cfg.Name, old.sites[i].name)
+	}
 }
 
 // updateCRStatus writes topology state to the CR status subresource. It
