@@ -3859,7 +3859,10 @@ func (tm *TopologyManager) releaseCloneHold(ctx context.Context) {
 		return
 	}
 	nn := types.NamespacedName{Namespace: tm.cfg.Namespace, Name: tm.cfg.Name}
-	if err := gate.NotifyCloneComplete(ctx, nn, site); err != nil {
+	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	err := gate.NotifyCloneComplete(notifyCtx, nn, site)
+	cancel()
+	if err != nil {
 		tm.logger.Error("retrying clone keyring hold release", "site", site, "error", err)
 		return
 	}

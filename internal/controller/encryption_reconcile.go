@@ -304,11 +304,12 @@ func (r *MysqlFailoverGroupReconciler) advanceUnsealedSite(
 	}
 
 	// Clone is sticky: the recipient must keep a writable keyring until
-	// CLONE INSTANCE (and the post-clone mysqld restart) has finished.
-	// Advancing to Escrowed here re-renders the sealed Secret projection
-	// and the pod rolls, which is the #144 livelock.
+	// bootstrap finishes (CLONE INSTANCE, the post-clone mysqld restart,
+	// and replication setup). Advancing to Escrowed here re-renders the
+	// sealed Secret projection and the pod rolls, which is the #144
+	// livelock.
 	if site.UnsealReason == v1alpha1.UnsealReasonClone {
-		site.Message = "keyring verified; holding unsealed until CLONE INSTANCE completes"
+		site.Message = "keyring verified; holding unsealed until clone bootstrap finishes"
 		return true, nil
 	}
 
@@ -626,7 +627,7 @@ func (r *MysqlFailoverGroupReconciler) NotifyCloneComplete(
 		s.Phase = v1alpha1.KeyringPhaseUnsealed
 		s.UnsealReason = ""
 		s.UnsealedSince = &now
-		s.Message = "clone completed; resealing"
+		s.Message = "clone bootstrap finished; resealing"
 		return true, nil
 	})
 }
