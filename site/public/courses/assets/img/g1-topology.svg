@@ -1,44 +1,44 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540" width="960" height="540" role="img">
   <rect width="960" height="540" fill="#ffffff"/>
-  <text x="480" y="36" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#1a1d23">One writable site. Everyone else copies from it.</text>
+  <text x="480" y="36" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="20" font-weight="600" fill="#1a1d23">One writable site. Everyone else copies from it.</text>
 
   <rect x="380" y="58" width="200" height="64" rx="10" fill="#ede9fe" stroke="#6d28d9" stroke-width="1.5"/>
-  <text x="480" y="86" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#4c1d95">counter app</text>
-  <text x="480" y="106" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#6d28d9">reads + Increment</text>
+  <text x="480" y="86" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="17" font-weight="600" fill="#4c1d95">counter app</text>
+  <text x="480" y="106" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" fill="#6d28d9">reads + Increment</text>
 
   <rect x="355" y="162" width="250" height="44" rx="22" fill="#f1f5f9" stroke="#334155" stroke-width="1.5"/>
-  <text x="480" y="189" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" fill="#1e293b">mysql-playground-primary</text>
+  <text x="480" y="189" text-anchor="middle" font-family="ui-monospace, monospace" font-size="16" fill="#1e293b">mysql-playground-primary</text>
 
   <line x1="480" y1="122" x2="480" y2="162" stroke="#334155" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <rect x="70" y="300" width="200" height="110" rx="10" fill="#e8f6ee" stroke="#1b7f4e" stroke-width="2"/>
-  <text x="170" y="336" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="700" fill="#14532d">IAD</text>
-  <text x="170" y="360" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="#1b7f4e">writable</text>
-  <text x="170" y="384" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#166534">takes writes</text>
+  <text x="170" y="336" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="21" font-weight="700" fill="#14532d">IAD</text>
+  <text x="170" y="360" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#1b7f4e">writable</text>
+  <text x="170" y="384" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" fill="#166534">takes writes</text>
 
   <rect x="380" y="300" width="200" height="110" rx="10" fill="#e8f1fa" stroke="#2b6cb0" stroke-width="1.5"/>
-  <text x="480" y="336" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="700" fill="#1e3a5f">PDX</text>
-  <text x="480" y="360" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="#2b6cb0">replica</text>
-  <text x="480" y="384" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#1e4e8c">copies from IAD</text>
+  <text x="480" y="336" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="21" font-weight="700" fill="#1e3a5f">PDX</text>
+  <text x="480" y="360" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#2b6cb0">replica</text>
+  <text x="480" y="384" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" fill="#1e4e8c">copies from IAD</text>
 
   <rect x="690" y="300" width="200" height="110" rx="10" fill="#f1f5f9" stroke="#64748b" stroke-width="1.5"/>
-  <text x="790" y="336" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="700" fill="#334155">READER</text>
-  <text x="790" y="360" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="#64748b">read-only</text>
-  <text x="790" y="384" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#475569">never promoted</text>
+  <text x="790" y="336" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="21" font-weight="700" fill="#334155">READER</text>
+  <text x="790" y="360" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#64748b">read-only</text>
+  <text x="790" y="384" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" fill="#475569">never promoted</text>
 
   <line x1="480" y1="206" x2="170" y2="300" stroke="#1b7f4e" stroke-width="2" marker-end="url(#arrowG)"/>
   <line x1="270" y1="355" x2="380" y2="355" stroke="#2b6cb0" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrowB)"/>
   <line x1="270" y1="375" x2="690" y2="355" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrowK)"/>
 
   <rect x="720" y="70" width="180" height="70" rx="10" fill="#fef3c7" stroke="#b45309" stroke-width="1.5"/>
-  <text x="810" y="100" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="14" font-weight="600" fill="#92400e">operator</text>
-  <text x="810" y="120" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#b45309">polls, not traffic</text>
+  <text x="810" y="100" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="17" font-weight="600" fill="#92400e">operator</text>
+  <text x="810" y="120" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" fill="#b45309">polls, not traffic</text>
   <line x1="720" y1="120" x2="270" y2="300" stroke="#b45309" stroke-width="1" stroke-dasharray="3 4"/>
   <line x1="780" y1="140" x2="480" y2="300" stroke="#b45309" stroke-width="1" stroke-dasharray="3 4"/>
   <line x1="820" y1="140" x2="790" y2="300" stroke="#b45309" stroke-width="1" stroke-dasharray="3 4"/>
 
-  <text x="480" y="460" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#5c6570">Dashed arrows: replication. Solid green: writes. Amber dashes: the operator watching.</text>
-  <text x="480" y="510" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="#334155">playground — three sites on your laptop</text>
+  <text x="480" y="460" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" fill="#5c6570">Dashed arrows: replication. Solid green: writes. Amber dashes: the operator watching.</text>
+  <text x="480" y="510" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" fill="#334155">playground — three sites on your laptop</text>
 
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">

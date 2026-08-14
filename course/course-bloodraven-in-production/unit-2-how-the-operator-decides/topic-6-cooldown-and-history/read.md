@@ -162,7 +162,7 @@ restarts may overlap — which is exactly the both-sites-down window `OrderedUpd
 Reach for `Recreate` only when you are certain you can afford to lose the primary and the standby at
 the same moment.
 
-The lesson is the history. At `v0.9.1` — the release this course is grounded against — that field was
+The lesson is the history. At `v0.9.1` — the release this course was first grounded against — that field was
 **inert**: it existed in the CRD, the documentation described it as a control, and no Go outside the
 type definition read it. It was made live in a commit merged after the release. The reading above is
 current; the version appendix, row A3, records the change and the command that re-checks it. Fields

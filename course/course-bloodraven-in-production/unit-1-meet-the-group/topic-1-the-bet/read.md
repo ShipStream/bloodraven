@@ -131,7 +131,7 @@ snapshotted, and the target promoted only once its own executed set covers that 
 And when transactions really are lost you get a number, not a shrug: the operator computes
 the set difference, publishes the count, and records the set in `status.sites[].divergentGtid`.
 
-All of it is exercised by 49 registered chaos scenarios against real clusters.
+All of it is exercised by 51 registered chaos scenarios against real clusters.
 
 ## Where this leaves you
 

@@ -100,7 +100,7 @@
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 3,
       "options": [
-        "`failoverCooldown` defaults to `5m` belongs on the card; 'issue #123 is open' belongs in the appendix, because one is a CRD default and the other is a fact with a date on it",
+        "`failoverCooldown` defaults to `5m` belongs on the card; 'issue #144 is open' belongs in the appendix, because one is a CRD default and the other is a fact with a date on it",
         "Both belong on the card: the appendix is only for sources and citations",
         "Both belong in the appendix: anything traceable to the repository is version-specific",
         "`failoverCooldown` belongs in the appendix because defaults change between releases; issue numbers belong on the card because they never change"

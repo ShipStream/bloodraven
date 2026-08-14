@@ -40,7 +40,7 @@ A network partition isolates `iad` from the operator while your application, whi
 
 **Sample answer:**
 
-It does not run at all. `KillAppConnections` is step 2 of the failover sequence and executes against the old primary only when the operator has a working handle to it; under a partition the operator cannot reach `iad`, so the kill pass is skipped, exactly as it was when the site was held down in Unit 3. Even when it does run it is one best-effort pass, never retried, and it spares only its own session and the binlog dump threads. So the application's established connections to `iad` survive intact. They keep serving reads that succeed and are stale, until `iad` is next promoted or demoted. Nothing alerts on it — `BloodravenFailoverOccurred` only reports that a promotion happened.
+It does not run at all. `KillAppConnections` is step 2 of the failover sequence and, after promotion, one bounded eviction pass per topology poll until a pass finds no sessions or `spec.connectionDrainTimeout` expires. Every pass needs a working handle to the old primary; under a partition the operator cannot reach `iad`, so every drain pass is a no-op, exactly as it was when the site was held down in Unit 3. The application's established connections to `iad` survive intact. They keep serving reads that succeed and are stale, until `iad` is next promoted or demoted. Nothing alerts on it — `BloodravenFailoverOccurred` only reports that a promotion happened.
 
 **A full-credit answer shows:**
 
