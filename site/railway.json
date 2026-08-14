@@ -1,0 +1,15 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "_comment": "Install only, no npm ci here: Nixpacks already runs it in its install phase, and a second run tries to rmdir the mounted /app/node_modules/.cache volume and fails with EBUSY.",
+    "buildCommand": "npm run build"
+  },
+  "deploy": {
+    "startCommand": "node .output/server/index.mjs",
+    "healthcheckPath": "/",
+    "healthcheckTimeout": 120,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}

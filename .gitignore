@@ -13,3 +13,9 @@ playground/chaos-results/
 .golangci-cache/
 .gomodcache/
 
+
+# Docus site (site/) build artefacts
+site/node_modules/
+site/.nuxt/
+site/.output/
+site/.data/
