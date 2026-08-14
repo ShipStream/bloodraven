@@ -1,0 +1,110 @@
+{
+  "flashcards": [
+    {
+      "front": "Asynchronous replication",
+      "back": "A write commits and is acknowledged on the primary before any other site has seen it — nothing waits for a peer.",
+      "orderIndex": 0
+    },
+    {
+      "front": "RPO (recovery point objective)",
+      "back": "How much recently committed data you accept losing. Bloodraven's RPO on sudden primary loss is not zero.",
+      "orderIndex": 1
+    },
+    {
+      "front": "RTO (recovery time objective)",
+      "back": "How long you accept being unable to write. This is where Bloodraven spends its engineering budget.",
+      "orderIndex": 2
+    },
+    {
+      "front": "Failover group",
+      "back": "One `MysqlFailoverGroup` resource: two to sixteen MySQL sites, exactly one of them writable at a time.",
+      "orderIndex": 3
+    },
+    {
+      "front": "Active site",
+      "back": "The one site in the group currently allowed to accept writes; `mysql-playground-primary` points at it.",
+      "orderIndex": 4
+    },
+    {
+      "front": "Split brain",
+      "back": "Two sites accepting writes at the same time, so each accumulates transactions the other never saw.",
+      "orderIndex": 5
+    },
+    {
+      "front": "Fencing",
+      "back": "Forcing an instance to stop accepting writes — in MySQL, setting `super_read_only=ON` on it.",
+      "orderIndex": 6
+    },
+    {
+      "front": "Why `super_read_only` rather than `read_only` for fencing?",
+      "back": "`read_only` still permits updates from `CONNECTION_ADMIN` (or the deprecated `SUPER`); `super_read_only` blocks even those.",
+      "orderIndex": 7
+    },
+    {
+      "front": "GTID",
+      "back": "A global transaction identifier — a per-transaction ID that makes two servers' executed-transaction sets directly comparable.",
+      "orderIndex": 8
+    },
+    {
+      "front": "`status.sites[].divergentGtid`",
+      "back": "The set of transactions the old primary executed that the new primary never received — the exact, countable data loss.",
+      "orderIndex": 9
+    }
+  ],
+  "quiz": [
+    {
+      "question": "A payments team runs a ledger. Their requirement is that a sudden loss of the primary must lose zero committed transactions. They want to use Bloodraven for this. What is the correct response?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 0,
+      "options": [
+        "Bloodraven is the wrong tool for that requirement; a quorum system such as Group Replication is what they want",
+        "Bloodraven works if they set a low `maxLagSeconds`, which prevents promotion of a replica that is behind",
+        "Bloodraven works if they add a third site, because three sites give the group a quorum",
+        "Bloodraven works if they enable synchronous replication in the group's MySQL configuration"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "Bloodraven's contract is that an emergency failover can lose every transaction that committed on the dying primary but had not yet replicated to the surviving site. Zero RPO on sudden loss is an explicit non-goal, so the requirement and the tool do not match. Tuning a lag threshold does not help: lag thresholds drive a Degraded condition, not the promotion decision — the alternative of no writable site at all is almost always worse, so Bloodraven promotes anyway. Adding a third site does not help either: Bloodraven has no quorum in the first place; the count of sites changes nothing about the async commit path. And there is no synchronous mode to enable — Bloodraven does not provide synchronous replication at all. (objectives 1, 2)"
+    },
+    {
+      "question": "Bloodraven cannot keep writes available when one of only two sites is lost, because two members are not enough to form a quorum.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 1,
+      "correctAnswer": false,
+      "explanation": "The reversal: this is exactly backwards, and it is the quorum system that has the two-site problem, not Bloodraven. Bloodraven has no quorum requirement — one site is writable and an external operator arbitrates who that is, so two sites is a legitimate topology that tolerates losing one. A majority-based system is the one where losing one of two members leaves the survivor read-only, which is why people bolt a witness node onto such deployments. The engineer holding this misconception has generalised quorum thinking from Group Replication or etcd onto a design that deliberately does not use it. (objectives 1, 3)"
+    },
+    {
+      "question": "After a site failure and promotion, an operations team wants the returning old primary's unreplicated writes automatically merged back into the new primary. What does Bloodraven do?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 2,
+      "options": [
+        "It merges them automatically once the old primary is reachable again, using GTID identity to avoid duplicates",
+        "It reports them — the divergent GTID set and its transaction count — and leaves the decision to a human",
+        "It rolls the old primary's divergent transactions back so the two sites match again",
+        "It replays them into the new primary only when replication lag was inside `maxLagSeconds` at the time of failure"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "Reconciling divergent writes is a published non-goal: Bloodraven makes the loss observable, not invisible. It computes the set difference between the old primary's GTIDs and the new primary's, records the set in `status.sites[].divergentGtid`, publishes the count as `bloodraven_divergent_transactions`, and stops there. Automatic merging is the tempting wrong answer because GTIDs make the transactions identifiable — identifiable is not the same as safely mergeable, since two divergent histories can conflict semantically. Automatic rollback is equally wrong: nothing in Bloodraven throws data away on your behalf; the diverged instance is reported so you can decide. And the lag threshold has nothing to do with it — it is not a gate on anything in the recovery path. (objectives 2, 3)"
+    },
+    {
+      "question": "A team accepts Bloodraven's RPO but wants no application impact at all during a promotion. Which consequence of Bloodraven's non-goals must their architecture plan for?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 3,
+      "options": [
+        "The operator will refuse to promote until every application has disconnected",
+        "The DNS record is updated by Bloodraven itself, so propagation is bounded by the group's configured TTL",
+        "Their connection pool will not become failover-aware on its own, and can serve connections to a demoted primary that pass validation",
+        "PVC-local backups will be replayed automatically to close the write gap"
+      ],
+      "correctOptionIndex": 2,
+      "explanation": "Making connection pools failover-aware is an explicit non-goal, and the failure is quiet rather than loud: a demoted primary is alive and answers a validation query perfectly well, so the pool hands the connection back and only the next write fails. That is a real, open upstream complaint against HikariCP, and the reason MySQL drivers added `rejectReadOnly` handling. Refusing to promote until clients disconnect is wrong and would defeat the whole point — availability is what Bloodraven is buying. Bloodraven does not replace external-dns, so it does not perform propagation and cannot bound it. And PVC-local backups are named in the non-goals as exactly the thing that is not durable after storage loss, so they close no gap at all. (objective 2)"
+    },
+    {
+      "question": "You are advising an infrastructure team choosing between Bloodraven and Group Replication for two datacentres on a wide-area link. What is the trade each side is making, and which fact about the two datacentres decides it?",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 4,
+      "sampleAnswer": "A quorum system trades write availability for consistency: it refuses writes rather than accept ones it might have to discard, so every commit pays a cross-node round trip and a minority side goes read-only. Bloodraven trades the other way — it trades consistency on unplanned loss for write availability and operational simplicity, accepting that an emergency failover can lose every transaction that committed on the dying primary but had not yet replicated to the surviving site. Both are defensible. The deciding fact is what the business does with the data: if losing a small window of committed writes is customer-visible (a ledger, a system of record), take Group Replication and pay the latency; if being unable to write while the cross-site link misbehaves is the worse outcome, take Bloodraven. The two-datacentre shape also pushes towards Bloodraven, because two members cannot form a quorum without inventing a witness.",
+      "graderNotes": "A strong answer names both directions of the trade — quorum gives up write availability to protect consistency, Bloodraven gives up consistency-on-unplanned-loss to protect write availability and simplicity — and states that both are legitimate rather than declaring one wrong. It must identify the deciding input as the business tolerance for losing recently committed writes, not as a technical preference. Credit for noting that a two-member group has no majority, or that async commits do not pay a cross-site round trip. Do not give credit for an answer that treats Bloodraven's non-zero RPO as a defect to be fixed.",
+      "explanation": "The point is that this is a design-point choice, not a quality ranking. Bloodraven is optimised for the two-site, geographically separated, accept-non-zero-RPO deployment; Group Replication is optimised for three-or-more nodes on a low-latency link with zero RPO. Answers that pick a winner without naming what is given up have missed the objective. (objectives 1, 3)"
+    }
+  ]
+}

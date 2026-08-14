@@ -1,0 +1,6 @@
+{"time":"2026-08-12T14:02:11.117Z","level":"INFO","msg":"state transition","site":"pdx","from":"read-only","to":"writable","fg":"bloodraven-playground/playground"}
+{"time":"2026-08-12T14:02:11.119Z","level":"WARN","msg":"ALERT","message":"SPLIT BRAIN: 2 sites are writable (iad, pdx)","fg":"bloodraven-playground/playground"}
+{"time":"2026-08-12T14:02:13.121Z","level":"WARN","msg":"ALERT","message":"SPLIT BRAIN: 2 sites are writable (iad, pdx)","fg":"bloodraven-playground/playground"}
+{"time":"2026-08-12T14:02:15.130Z","level":"WARN","msg":"fenced writable non-promotable site","site":"reader","role":"read-only","fg":"bloodraven-playground/playground"}
+{"time":"2026-08-12T14:02:17.140Z","level":"INFO","msg":"failover blocked by anti-flap cooldown","lastFailover":"2026-08-12T13:59:02Z","cooldown":"5m0s","fg":"bloodraven-playground/playground"}
+{"time":"2026-08-12T14:04:22.006Z","level":"INFO","msg":"state transition","site":"iad","from":"writable","to":"read-only","fg":"bloodraven-playground/playground"}

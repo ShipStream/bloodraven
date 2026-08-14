@@ -1,0 +1,110 @@
+{
+  "flashcards": [
+    {
+      "front": "`spec.splitBrainPolicy.sitePriorities`",
+      "back": "An ordered list of site names. During split-brain auto-resolution the operator promotes the first entry that is currently writable and `primary-candidate`, and fences every other writable site.",
+      "orderIndex": 0
+    },
+    {
+      "front": "`spec.splitBrainPolicy.preferSite`",
+      "back": "A field that exists only in the documentation. It is not in the CRD schema, so the API server prunes it on apply — no error, no event, no effect.",
+      "orderIndex": 1
+    },
+    {
+      "front": "You want to confirm that a field the docs describe actually exists on this cluster. What do you run?",
+      "back": "`kubectl explain mysqlfailovergroup.spec.splitBrainPolicy` to read the live schema, or grep the shipped CRD under `config/crd/bases/` and `charts/bloodraven/crds/`.",
+      "orderIndex": 2
+    },
+    {
+      "front": "Tier 1's guard — the three conditions the recorded `lastFailoverTarget` must satisfy",
+      "back": "The site must exist (`keepSite != nil`), be currently `StateWritable`, and be `isPromotable()`. All three, as a conjunction.",
+      "orderIndex": 3
+    },
+    {
+      "front": "`state.ResolveSplitBrain(writable, sitePriorities)`",
+      "back": "Walks `sitePriorities` in order and returns the earliest entry that is currently writable and `primary-candidate` as `winner`; every other writable site is returned as a loser for the caller to fence.",
+      "orderIndex": 4
+    },
+    {
+      "front": "Why is GTID freshness deliberately not consulted when picking a split-brain winner?",
+      "back": "Because every writable side may carry unique writes, so no GTID set contains the other and there is no \"freshest\" that is safe to promote. Winner selection is therefore policy-driven.",
+      "orderIndex": 5
+    },
+    {
+      "front": "The CEL rule guarding `sitePriorities`",
+      "back": "Every entry must match the name of a site whose `role` is `primary-candidate`; the group is rejected at admission otherwise.",
+      "orderIndex": 6
+    },
+    {
+      "front": "The two log keys carried by the split-brain auto-resolve `Warn`",
+      "back": "`winner` and `fencedSite` — on the message \"split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities\".",
+      "orderIndex": 7
+    },
+    {
+      "front": "Why does the split-brain fence retry count writable candidates directly instead of trusting `action.SplitBrain`?",
+      "back": "Because the matrix reports `SplitBrain=false` whenever a writable non-promotable site needs fencing first, and a stable split brain emits no further transitions — so a fence that failed once would never be retried.",
+      "orderIndex": 8
+    },
+    {
+      "front": "What becomes of the loser's unreplicated writes after a priority-based resolution?",
+      "back": "They are isolated on the loser's PVC — reported as `status.sites[].divergentGtid` and the `bloodraven_divergent_transactions` gauge, and recoverable only by recloning that site.",
+      "orderIndex": 9
+    }
+  ],
+  "quiz": [
+    {
+      "question": "`playground` is split-brained — `iad` and `pdx` are both writable — and `spec.splitBrainPolicy.sitePriorities` is `[iad]`. Dump A has `status.lastFailoverTarget` empty. Dump B has `status.lastFailoverTarget: pdx`, with `pdx` writable and still `primary-candidate`. Which site ends up writable in each?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 0,
+      "options": [
+        "`iad` in both — `sitePriorities` is your standing decision and the operator honours it either way",
+        "`iad` in A, `pdx` in B — usable history is tier 1 and pre-empts the policy list entirely",
+        "`iad` in A, and B alerts only because the recorded target and the policy disagree",
+        "A alerts only because there is no history to act on, and B resolves to `pdx`"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "The tiers are evaluated in order. In B the recorded target is live, writable and promotable, so tier 1 fires and fences everything except `pdx` — `sitePriorities` is never consulted, which is exactly the case where policy and history give different answers and history wins. In A there is no usable history, so tier 2 runs `ResolveSplitBrain` and `iad`, the earliest currently-writable primary-candidate in the list, wins. Option 1 is the common misreading that policy is the top-level control; it is the fallback. Option 3 invents a conflict-detection behaviour the operator does not have — it does not compare the two and give up. Option 4 gets A wrong: a non-empty `sitePriorities` is precisely what stops the no-history case from being alert-only. (objective 4)"
+    },
+    {
+      "question": "`playground` is split-brained with no usable failover history, and `spec.splitBrainPolicy` is omitted entirely. `spec.sites` declares `iad` first and `pdx` second. What does the operator do?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 1,
+      "options": [
+        "Falls back to the declaration order in `spec.sites` and promotes `iad`",
+        "Promotes whichever site has been writable longest, since that is the more established primary",
+        "Alerts only — `ResolveSplitBrain` returns no winner and no automated action is taken",
+        "Fences both sites so that neither can accept writes until a human intervenes"
+      ],
+      "correctOptionIndex": 2,
+      "explanation": "An empty `sitePriorities` makes `ResolveSplitBrain` return `(\"\", nil)` immediately: tier 3, alert only, manual resolution by design. Option 1 is the single most dangerous assumption here — the function documents explicitly that it *never* falls back to declared order, precisely so a winner is never picked by chance. Option 2 invents a heuristic the operator does not have; nothing tracks how long a site has been writable for this purpose. Option 4 sounds safe but is not what happens — with no policy the operator takes no automated action at all, so both sites keep accepting writes and the divergence keeps growing while you decide. (objective 4)"
+    },
+    {
+      "question": "When two sites are writable, Bloodraven promotes the one with the freshest GTID set, exactly as it does when choosing a replica to promote after a primary dies.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 2,
+      "correctAnswer": false,
+      "explanation": "The opposite is true, and the reversal is the point of the topic. Normal promotion *is* GTID-freshest — `pickFreshestCandidate` takes the most caught-up replica to minimise loss, with the priority list acting only as a tiebreaker. Split-brain winner selection deliberately does not consult GTID at all, because every writable side may carry unique writes: neither GTID set contains the other, so there is no \"freshest\" that is safe. Same system, opposite selector, for a good reason. (objective 5)"
+    },
+    {
+      "question": "You copy the `splitBrainPolicy: preferSite: iad` block from the published failover documentation into `playground` and `kubectl apply` it. The command reports the group configured. What have you actually changed?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 3,
+      "options": [
+        "Nothing — the field is not in the CRD schema, so it was pruned and the group stays on tier 3",
+        "The group now resolves split brains in favour of `iad`, since `preferSite` is the legacy alias for `sitePriorities`",
+        "Nothing, and admission rejected the apply with a CEL error naming the unknown field",
+        "The group is now on tier 1, because `preferSite` seeds `status.lastFailoverTarget` with `iad`"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "`preferSite` does not exist in the CRD. The API server prunes unknown fields, so the apply succeeds and changes nothing — the group keeps whatever tier it had, which with no `sitePriorities` is tier 3, alert only. Option 2 is the belief the documentation invites; there is no alias, and no code outside the docs reads that name. Option 3 gets the outcome half right but the mechanism wrong, and the difference matters operationally: an admission rejection would have told you at apply time, whereas silent pruning is what costs you an hour at 3am. Option 4 confuses policy with history — nothing writes `lastFailoverTarget` except a recorded failover. Verify with `kubectl explain` or by grepping the shipped CRD. (objective 5)"
+    },
+    {
+      "question": "Your colleague proposes setting `sitePriorities: [iad, pdx]` on `playground` and describes it in the change ticket as \"prevents data loss from split brain\". Correct the framing, and describe what you would actually do to the loser after a resolution fires.",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 4,
+      "sampleAnswer": "`sitePriorities` does not prevent data loss — it decides in advance which data you are willing to lose. It makes resolution fast and deterministic at the cost of silently discarding the loser's unreplicated writes; the loss is surfaced loudly but not prevented, and it does not stop split brain from occurring in the first place. It is a policy, not a safety feature. After a resolution fires on `playground`, the winner (`iad`) keeps authority and `pdx` is fenced with `SET GLOBAL super_read_only = ON`. I would then audit the damage before touching anything: read `status.sites[].divergentGtid` for the exact set of transactions `pdx` holds that `iad` never saw, and the `bloodraven_divergent_transactions` gauge for the count — the condition reason will be `DivergentTransactions`. Only once that is captured would I recover `pdx` with the `bloodraven.shipstream.io/reclone-site` annotation, giving it `pdx:<divergentGtidPrefix>` of at least 8 characters so the request is matched against the observed divergence rather than applied blind.",
+      "graderNotes": "A strong answer covers: (1) the correction — policy, not safety; it chooses which writes to discard rather than preventing loss, and does not prevent split brain; (2) the loss is surfaced but not prevented; (3) the recovery order — pick a winner, fence the loser, audit, then reclone; (4) the audit surfaces by name: `status.sites[].divergentGtid` and the `bloodraven_divergent_transactions` gauge; (5) reclone via the `bloodraven.shipstream.io/reclone-site` annotation. An answer that jumps straight to recloning without auditing first has missed the step where the lost transactions are still recoverable as evidence.",
+      "explanation": "The project's own docs carry a danger admonition on exactly this point: priority-based resolution \"makes split-brain resolution fast and deterministic at the cost of silently losing the loser's unreplicated writes. The loss is surfaced loudly but not prevented.\" The recovery procedure is pick-fence-audit-reclone in that order, and the audit step is the one people skip — once the site is recloned, the divergent transactions are gone for good. (objectives 5, 6)"
+    }
+  ]
+}

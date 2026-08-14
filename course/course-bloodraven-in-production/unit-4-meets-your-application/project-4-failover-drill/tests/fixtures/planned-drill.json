@@ -1,0 +1,51 @@
+{
+  "drill": {
+    "mode": "planned",
+    "group": "playground",
+    "namespace": "bloodraven-playground",
+    "demotedSite": "iad",
+    "trigger": "kubectl -n bloodraven-playground annotate mysqlfailovergroup playground bloodraven.shipstream.io/planned-failover=pdx",
+    "capturedAt": "2026-08-11T09:45:00Z",
+    "pool": {
+      "maxOpenConns": 5,
+      "connMaxLifetime": "30s",
+      "readWriteSplit": true,
+      "retryOnErrorCodes": [
+        1290,
+        1792
+      ]
+    }
+  },
+  "status": {
+    "activeSite": "pdx",
+    "lastFailover": "2026-08-11T09:40:08Z",
+    "lastFailoverTarget": "pdx",
+    "promotionGtidExecuted": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-184002",
+    "plannedFailover": {
+      "phase": "Succeeded",
+      "targetSite": "pdx",
+      "transactionsLost": 0,
+      "sourceGtidAtFence": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-184002",
+      "drainTimeout": "30s",
+      "maxLagWait": "5m",
+      "connectionsRemainingAtDrainEnd": 0
+    },
+    "sites": [
+      {
+        "name": "iad",
+        "role": "primary-candidate",
+        "state": "read-only"
+      },
+      {
+        "name": "pdx",
+        "role": "primary-candidate",
+        "state": "writable"
+      },
+      {
+        "name": "reader",
+        "role": "read-only",
+        "state": "read-only"
+      }
+    ]
+  }
+}

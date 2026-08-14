@@ -1,0 +1,120 @@
+{
+  "flashcards": [
+    {
+      "front": "The bar for declaring a DR source dead",
+      "back": "At least two of three independent signals: the source operator's /active-site returns 5xx, the source cluster's API server is unreachable, and source MySQL is TCP-unreachable from a third vantage point outside both clusters.",
+      "orderIndex": 0
+    },
+    {
+      "front": "Cross-cluster split brain in Bloodraven v1",
+      "back": "Nothing detects or resolves it. No operator watches both clusters, so the human fencing decision is the safety mechanism.",
+      "orderIndex": 1
+    },
+    {
+      "front": "`BucketReadable=True` on a MysqlStandbyCluster",
+      "back": "The DR cluster listed the source bucket prefix and could read it.",
+      "orderIndex": 2
+    },
+    {
+      "front": "`SourceConfigKnown=True` on a MysqlStandbyCluster",
+      "back": "The source dump metadata parsed, so status.discovered now carries the dump name, location, GTID set and archived binlog window.",
+      "orderIndex": 3
+    },
+    {
+      "front": "What a MysqlStandbyCluster does when its source cluster dies",
+      "back": "Nothing. Phase 1 is observability only: no MySQL contact, no restore Jobs, no activation.",
+      "orderIndex": 4
+    },
+    {
+      "front": "`spec.restoreInPlace` (as distinct from the DR-bootstrap field)",
+      "back": "A re-runnable restore into the already-live active primary, gated by an RFC 3339 confirm token — not the path that stands up a new group in a DR cluster.",
+      "orderIndex": 5
+    },
+    {
+      "front": "The seven `kubectl bloodraven` subcommands",
+      "back": "status, promote, reclone, backup, verify-backup, version, help.",
+      "orderIndex": 6
+    },
+    {
+      "front": "Why `kubectl bloodraven promote` obeys every gate the annotation obeys",
+      "back": "The plugin only writes resources the operator already reads, and never talks to MySQL directly — there is no back door in it.",
+      "orderIndex": 7
+    },
+    {
+      "front": "`sync_binlog=1` in a Bloodraven group",
+      "back": "An overridable default written into the base my.cnf before spec.mysqlConf is applied, so a user override wins silently — read the value off the running instance.",
+      "orderIndex": 8
+    },
+    {
+      "front": "`spec.replication.maxLagSeconds` (default 300)",
+      "back": "It drives only the ReplicationLagging Degraded condition; a replica beyond the threshold is still promoted.",
+      "orderIndex": 9
+    },
+    {
+      "front": "The three playground values that are not the shipped defaults",
+      "back": "failoverCooldown 30s (default 5m), replication.maxLagSeconds 30 (default 300), and dns.ttl 10 (default 60).",
+      "orderIndex": 10
+    },
+    {
+      "front": "The DNS limit during a DR cutover",
+      "back": "The operator cannot accelerate DNS propagation, and it owns only the per-cluster record — the global application-facing name is flipped by you.",
+      "orderIndex": 11
+    }
+  ],
+  "quiz": [
+    {
+      "question": "The cluster hosting `playground` has stopped answering: `kubectl --context=source get nodes` times out. That is your only signal so far. What does the source-fencing checklist say to do next?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 0,
+      "options": [
+        "Bootstrap the DR group now — an unreachable API server means the MySQL workloads are gone with it",
+        "Get a second independent signal before touching the DR cluster, because nothing in Bloodraven will catch a cross-cluster split brain if you are wrong",
+        "Bootstrap the DR group but declare its sites `role: dr-only`, so the operator fences the source copy automatically",
+        "Wait until the source operator raises a `SPLIT BRAIN` alert, then bootstrap the DR group"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "Two of three signals is the bar because Bloodraven v1 does not automatically detect or resolve cross-cluster split brain — no operator watches both clusters, so your judgement is the only safety mechanism. Option 1 confuses the control plane with the data plane: Kubernetes will not even delete pods on an unreachable node, so the containers keep running and keep writing to the PV. Option 3 misapplies site roles: role-based fencing only acts on sites inside one failover group, and the DR group has no visibility of the source at all. Option 4 expects the decision matrix to work across clusters, but `SPLIT BRAIN` is raised only when more than one core site of a single group is writable — and in any case you cannot receive an alert from a cluster you cannot reach. (objective 13)"
+    },
+    {
+      "question": "A `MysqlStandbyCluster` in your DR cluster reports `BucketReadable=True` and `SourceConfigKnown=True`. This proves the source archive can be restored into the DR cluster.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 1,
+      "correctAnswer": false,
+      "explanation": "The reversal: those two conditions prove only that the DR cluster could read the bucket and parse the dump metadata. `MysqlStandbyCluster` is observability only today — no MySQL contact, no restore Jobs, no activation. It tells you a DR bootstrap would be possible and roughly how far back the dump plus archived binlog window could reach; it has not loaded a byte of that dump into a mysqld. Proving restorability is a separate act, and the only thing that proves it is a verification that actually restored the artifact. (objective 14)"
+    },
+    {
+      "question": "The source cluster is fenced and you are standing up a fresh `MysqlFailoverGroup` named `playground` in the DR cluster, to be populated from the S3 prefix the dead cluster was writing to. Which field does that?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 2,
+      "options": [
+        "`spec.restoreInPlace`, with an RFC 3339 confirm token naming the dump",
+        "`spec.initFromBackup`, pointed at the source bucket prefix",
+        "`spec.template` on the `MysqlStandbyCluster`, by requesting activation",
+        "`spec.backup.pitr.enabled`, which replays the archived binlogs into the new group"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "`spec.initFromBackup` is the one-shot restore-on-first-boot field: it gates bootstrap until `status.restore.phase` reads `Succeeded`, then clone and replication proceed normally. Option 1 names the wrong restore entry point — `restoreInPlace` is re-runnable and operates against an already-live active primary, which a brand-new DR group does not have. Option 3 is the trap the standby CRD sets: `spec.template` does hold the shape of the group that a future activation would materialise, but activation is not implemented, so nothing consumes it. Option 4 confuses the archive with the restore — PITR governs whether binlogs were shipped at the source, and it must have been enabled there for a `pointInTime` request to be accepted at all, but it does not itself restore anything. (objective 14)"
+    },
+    {
+      "question": "You are writing the on-call runbook for `playground` and want every step to be a `kubectl bloodraven` invocation. Which of these is not a subcommand the plugin has?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 3,
+      "options": [
+        "`promote`",
+        "`reclone`",
+        "`restore`",
+        "`verify-backup`"
+      ],
+      "correctOptionIndex": 2,
+      "explanation": "The surface is exactly seven: status, promote, reclone, backup, verify-backup, version, help. There is no `restore`, and the reason is structural rather than an oversight — restore is not a CR at all, it is two fields on the failover group's spec, and the plugin's design rule is that it only writes resources the operator already reads and never talks to MySQL directly. `promote` and `reclone` exist because both are annotation-driven on the group, so the plugin can write them and inherit every gate. `verify-backup` exists because a verification really is its own CR that the operator reconciles into a throwaway instance. A runbook step that says `kubectl bloodraven restore` will fail at 3am with `unknown command`. (objective 15)"
+    },
+    {
+      "question": "You are signing off `playground` for production tonight. Four findings are open: (a) nobody can say what `sync_binlog` is on the running instances; (b) `spec.replication.maxLagSeconds` is set and nobody has said what it gates; (c) the nightly S3 backup has never been verified; (d) the runbook quotes a 30-second anti-flap cooldown, taken from a playground run. Which do you block the launch on, and what do you attach to the ones you accept?",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 4,
+      "sampleAnswer": "Block on (a) and (c). `sync_binlog=1` is only an overridable default — it is written into the base my.cnf before `spec.mysqlConf` is applied, so any override in the group's config wins silently. Until somebody reads the value off a running instance, the durability claim in the runbook is unverified, and it is the claim every RPO statement rests on. (c) is the same failure in a different place: an unverified backup is an assumption, and GitLab's 2017 outage is what an assumption looks like when it is finally tested. Accept (b) and (d) with a named owner. For (b) the owner must know that `maxLagSeconds` drives only the `ReplicationLagging` condition and is not a promotion gate — a replica beyond 300 seconds is still promoted, because no writable site is almost always worse. For (d) the owner re-measures every runbook timing against the shipped defaults, since the playground overrides `failoverCooldown` to 30s (against 5m), `maxLagSeconds` to 30 (against 300) and `dns.ttl` to 10 (against 60), so no playground timing transfers unchanged.",
+      "graderNotes": "A strong answer blocks on (a) and (c) and accepts (b) and (d) with a named owner, and gives the mechanism in each case: sync_binlog is an overridable default written before spec.mysqlConf so an override wins silently; an unverified backup is an assumption; maxLagSeconds drives only the ReplicationLagging condition and is explicitly not a promotion gate; the playground overrides failoverCooldown, maxLagSeconds and dns.ttl so its timings do not transfer. A different split is acceptable if the reasoning names the mechanism — for example blocking on (d) because a runbook with wrong timings misleads during an incident. An answer that merely labels the items without a mechanism, or that treats maxLagSeconds as a promotion gate, is weak.",
+      "explanation": "The gate is about verdicts, not notes. The two blockers are the ones where an unexamined assumption sits underneath a durability claim: an unread `sync_binlog` and an untested backup. The two acceptable items are dangerous only through ignorance — a lagging replica really is promoted, and playground timings really are not the shipped defaults — so they are survivable when a named human holds them and fatal when nobody does. (objective 15)"
+    }
+  ]
+}

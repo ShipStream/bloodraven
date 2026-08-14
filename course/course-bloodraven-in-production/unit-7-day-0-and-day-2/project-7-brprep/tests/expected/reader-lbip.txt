@@ -1,0 +1,4 @@
+brprep: ledger-db/ledger
+REJECT taintNodeSelector and lbIP are required unless role is read-only
+verdict: NOT APPLYABLE (1 rejection(s))
+exit=1

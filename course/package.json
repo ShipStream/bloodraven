@@ -1,0 +1,15 @@
+{
+  "name": "bloodraven-in-production-site",
+  "private": true,
+  "scripts": {
+    "build": "witherspoon-course build --course ./course-bloodraven-in-production",
+    "dev": "witherspoon-course dev --course ./course-bloodraven-in-production",
+    "verify": "witherspoon-course verify --course ./course-bloodraven-in-production",
+    "test": "witherspoon-course test --course ./course-bloodraven-in-production",
+    "check-widgets": "witherspoon-course check-widgets --course ./course-bloodraven-in-production",
+    "render-views": "witherspoon-course render-views --course ./course-bloodraven-in-production"
+  },
+  "dependencies": {
+    "witherspoon-course-template": "^1.1.0"
+  }
+}

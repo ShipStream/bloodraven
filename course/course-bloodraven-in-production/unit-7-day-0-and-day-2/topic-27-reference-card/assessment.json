@@ -1,0 +1,120 @@
+{
+  "flashcards": [
+    {
+      "front": "Detection delay, from first principles",
+      "back": "`pollInterval` × `failureThreshold` = 2 s × 3 = **6 s**. `recoveryThreshold` gates the opposite transition and is never a term in that sum; neither is the 5 s per-probe ceiling.",
+      "orderIndex": 0
+    },
+    {
+      "front": "The three playground overrides",
+      "back": "`failoverCooldown` 30s (shipped 5m), `replication.maxLagSeconds` 30 (shipped 300), `dns.ttl` 10 (shipped 60). Everything else matches the shipped defaults, so no timing measured in the playground transfers unchanged.",
+      "orderIndex": 1
+    },
+    {
+      "front": "The five condition reasons",
+      "back": "`Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss`. There is no `Failover` reason — a rule matching one never fires.",
+      "orderIndex": 2
+    },
+    {
+      "front": "The four fatal steps of a promotion",
+      "back": "`STOP REPLICA`, `RESET REPLICA ALL`, `SET GLOBAL super_read_only = OFF`, `SET GLOBAL read_only = OFF`. Everything else — fencing the old primary, killing its connections, the relay-log drain, recording the promotion GTID — warns and carries on.",
+      "orderIndex": 3
+    },
+    {
+      "front": "Which two things are *not* steps of the failover sequence",
+      "back": "Node taints (a pure function of per-site transitions, applied earlier in the same poll) and source convergence (an independent poll stage with its own 20 s budget). Both are poll neighbours, not links in the chain.",
+      "orderIndex": 4
+    },
+    {
+      "front": "The four Service kinds and the object count",
+      "back": "`-primary`, `-replicas`, `<site>`, `<site>-internal` — `2 × len(sites) + 2` objects, so eight for three sites.",
+      "orderIndex": 5
+    },
+    {
+      "front": "`bloodraven_replication_lag_seconds` reading `-1`",
+      "back": "Not a small lag: the site is not replicating at all. A dashboard that averages `-1` with real seconds inverts the most important signal on the page.",
+      "orderIndex": 6
+    },
+    {
+      "front": "The label-set trap across metrics",
+      "back": "Site metrics carry `{site}` only. The archiver carries `{namespace, group, site}`, backup metrics `{group, profile}`, and `bloodraven_keyring_phase` `{mysql_namespace, failover_group, site, phase}` — four words for two concepts.",
+      "orderIndex": 7
+    },
+    {
+      "front": "The three roles in one line each",
+      "back": "`primary-candidate` — the only promotable role, counted everywhere. `dr-only` — never promoted but **counted** in `coreCount` and the tallies. `read-only` — never promoted, invisible to the matrix, never tainted, refused as a backup source, skipped by every replication condition.",
+      "orderIndex": 8
+    },
+    {
+      "front": "The three annotations you apply by hand",
+      "back": "`planned-failover=<site>[:maxLagWait=…]`, `reclone-site=<site>:<divergentGtid prefix ≥8 chars>` (cold form `<site>:confirm=<group>`), and `rotate-keyring=<site>`. All under `bloodraven.shipstream.io/`, all consumed and cleared.",
+      "orderIndex": 9
+    },
+    {
+      "front": "Which two annotations the operator writes and you never should",
+      "back": "`bloodraven.shipstream.io/last-failover` and `…/last-failover-target`, RFC3339 at second precision, written as a pair by one JSON merge patch.",
+      "orderIndex": 10
+    },
+    {
+      "front": "What belongs in the version appendix rather than in your memory",
+      "back": "Anything dated: issue and PR numbers, upstream version pins, licence status, and 'the published page currently says X'. Check it before quoting any of them.",
+      "orderIndex": 11
+    }
+  ],
+  "quiz": [
+    {
+      "question": "Your on-call runbook says 'the operator detects a dead site in about 10 seconds (2 s poll × 3 failures, plus 2 recovery polls × 2 s)'. Correct it.",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 0,
+      "options": [
+        "Detection is 6 s — `pollInterval` × `failureThreshold`. `recoveryThreshold` gates the transition back to `writable` and is never a term in the detection sum",
+        "Detection is 11 s — the sum is right but the 5 s per-probe ceiling has to be added once",
+        "Detection is 10 s and the runbook is correct; `recoveryThreshold` is consulted before a site is declared unreachable",
+        "Detection cannot be stated as a fixed number because the poll interval is adaptive from the first failure onward"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "Adding `recoveryThreshold` to the detection sum is the single most common wrong answer about this operator. The two counters gate opposite transitions: `failureThreshold` guards the way to `unreachable`, `recoveryThreshold` guards the way back to `writable`. Option 2 adds the per-probe ceiling, which bounds one probe and does not pace the loop. Option 4 overstates the backoff: it engages only once a site's `failCount` climbs *past* `failureThreshold`, so the first detection is always 6 s — but it is a real caveat worth adding to the runbook for the second fault during an existing outage, where the answer becomes 30 s × 3 = 90 s. (objectives 10, 11)"
+    },
+    {
+      "question": "A colleague is building an alert set for a new group and copies your `BloodravenPITRArchiveLagging` rule, changing only the group name in the label matcher. It never fires, even during a real archiver backlog. What did they get wrong?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 1,
+      "options": [
+        "The label sets are not uniform: archiver metrics carry `{namespace, group, site}` while backup metrics carry `{group, profile}` and site metrics carry `{site}` alone, so a selector copied between families silently matches nothing",
+        "`bloodraven_archiver_backlog_files` is a counter, not a gauge, so it needs `increase()` before it can be compared to a threshold",
+        "Archiver metrics are exported by the sidecar on a different port, so the scrape config needs a second job before any rule against them can fire",
+        "The rule needs a `for:` duration shorter than `archivePollInterval`, or the backlog clears before the rule's evaluation window closes"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "A selector naming a label the series does not carry matches nothing and reports nothing — the failure mode of an alert that is silently always-green. Reading the label set before copying a selector is the habit; the reference card exists so that reading takes five seconds. Options 2 and 4 are plausible-sounding PromQL claims that do not hold here. Option 3 confuses where the archiver runs with where its metrics are exported. (objective 11)"
+    },
+    {
+      "question": "You remember from this course that Bloodraven ships without a licence file and that a particular fix was still an open issue. Both are safe to state in a production readiness review.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 2,
+      "correctAnswer": false,
+      "explanation": "Neither is safe to state without re-checking, and that is what the version appendix is for. Both facts were true and grounded on the date the course was written, and both are exactly the kind that move: an issue gets closed, a pull request merges, a `LICENSE` file appears. The appendix records each with a date and the command that re-checks it — `gh issue view`, `gh repo view --json licenseInfo`, a `grep` over the source — so one lookup replaces a guess. The mechanisms you learned do not expire. The dated facts about them do. (objective 12)"
+    },
+    {
+      "question": "Which of these belongs on the reference card, and which belongs in the version appendix?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 3,
+      "options": [
+        "`failoverCooldown` defaults to `5m` belongs on the card; 'issue #123 is open' belongs in the appendix, because one is a CRD default and the other is a fact with a date on it",
+        "Both belong on the card: the appendix is only for sources and citations",
+        "Both belong in the appendix: anything traceable to the repository is version-specific",
+        "`failoverCooldown` belongs in the appendix because defaults change between releases; issue numbers belong on the card because they never change"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "The split is between facts that describe a mechanism and facts that describe a moment. A CRD default is readable off the shipped CRD at any time and changes rarely and loudly; an issue's state changes quietly and without a release. Option 4 inverts it exactly — an issue number is stable but its *state* is the fact you care about, and that is the perishable part. Option 3 would make the card empty, which defeats the point of having one screen at 3am. (objective 12)"
+    },
+    {
+      "question": "You are handed a group you have never seen. Using only the reference card, write the four commands or reads you would perform first, and say what each one rules in or out.",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 4,
+      "sampleAnswer": "One: `kubectl get mysqlfailovergroup <group> -o jsonpath='{.status.activeSite}'` — an empty answer means authority is ambiguous and every Service endpoint has been shed, which is the shape of split brain and of no-primary; a name means there is one writable authority. Two: the `Degraded` condition's `reason`, which is one of exactly five strings and tells me the topology shape rather than the action — and specifically rules out looking for a `Failover` reason, which does not exist. Three: `status.updatePhase` — non-empty means somebody is mid-rollout and any failover I am looking at is theirs, not a fault. Four: the per-site rows, `state` plus `secondsBehindSource` plus `recoveryState`, remembering that the writable primary's replication keys are absent rather than zero, that a lag of `-1` means not replicating at all, and that `role` is not in status so I have to read `spec.sites[].role` to tell a `read-only` reader from a lagging candidate.",
+      "graderNotes": "A strong answer names `status.activeSite` and reads an empty value correctly (ambiguous authority, endpoints shed); names the `Degraded` reason and that there are five of them with no `Failover`; checks `status.updatePhase` to separate a rollout from an incident; and reads the per-site rows with at least two of the three traps — absent-is-not-zero, `-1` is not a small lag, and role lives in spec rather than status. Credit any order that starts with authority and ends with per-site detail.",
+      "explanation": "The value of the card is not that it contains these facts but that it puts them one screen apart, so the first thirty seconds of an incident are spent reading rather than recalling. Every trap in the answer above is one this course spent a topic on. (objectives 10, 11)"
+    }
+  ]
+}

@@ -1,0 +1,184 @@
+---
+sidebar_position: 3
+---
+
+# Licensing and pricing
+
+Bloodraven is **source-available**, not open source. The full source is public,
+you can read it, build it, modify it, and contribute to it. Running it in
+production at a commercial company requires a one-time license.
+
+We are deliberate about that wording. Bloodraven is licensed under the
+[Business Source License 1.1](https://github.com/ShipStream/bloodraven/blob/main/LICENSE),
+which is not an [OSI-approved](https://opensource.org/licenses) open source
+license, so we do not call it one.
+
+## Do I need to pay?
+
+| You are | Production use | Price |
+|---|---|---|
+| An individual, for personal or non-commercial use | Free | $0 |
+| A student, researcher, or educator, non-commercially | Free | $0 |
+| A non-profit or charity | Free | $0 |
+| A company under $1M annual revenue | Free | $0 |
+| Anyone, for dev / test / staging / CI / evaluation | Free forever, any scale | $0 |
+| A company over $1M annual revenue, running production | Licensed | see below |
+
+If you are not sure, email **licensing@shipstream.io** and ask. The answer is
+free and we will put it in writing.
+
+## Pricing
+
+One-time charges. No subscription required.
+
+| Edition | Price | What you get |
+|---|---|---|
+| **Community** | **Free** | Everything above. No key, no signup, no expiry. |
+| **Production** | **$990** per failover group | Production use of one failover group, perpetual, plus 12 months of updates. |
+| **Organization** | **$4,900** | Unlimited failover groups across your company, perpetual, plus 12 months of updates. |
+
+Renewing updates after the first 12 months is **optional**:
+
+| Renewal | Price |
+|---|---|
+| Production, per failover group | $390 / year |
+| Organization | $1,900 / year |
+
+**Your license never expires.** If you stop renewing, you keep the perpetual
+right to run every version published while your update period was active. You
+just stop receiving new ones until you renew.
+
+A failover group is one `MySQLFailoverGroup` resource, however many sites,
+replicas, or read-only instances it contains. Two sites is still one failover
+group. The Organization edition is usually cheaper at five or more.
+
+Optional, sold separately:
+
+| Add-on | Price | What it is |
+|---|---|---|
+| **Priority Triage** | $6,000 / year | Named email channel, best-effort response during US business hours, priority issue triage, roadmap input. No SLA, no on-call, no emergency incident response. |
+
+[Full commercial terms](https://github.com/ShipStream/bloodraven/blob/main/LICENSE-COMMERCIAL.md)
+· 30-day refund, no questions asked.
+
+## What you are actually buying
+
+Bloodraven is not a support contract with software attached. It is the reverse.
+
+What is included, for everyone, free:
+
+- Every page of [these docs](/docs/), including the
+  [runbooks](/docs/runbooks), the [failure mode matrix](/docs/failure-mode-matrix),
+  and the [known limitations](/docs/known-limitations) we publish up front.
+- The [playground](/docs/playground), which reproduces the full two-site
+  topology and every chaos scenario locally.
+- Published results from the deterministic simulation and chaos suites.
+- Bug reports on GitHub, from licensees and non-licensees alike.
+
+What is **not** included at any price except Priority Triage: technical support,
+an SLA, on-call coverage, emergency incident response, installation help,
+consulting, or guaranteed feature delivery. See
+[commercial terms §6](https://github.com/ShipStream/bloodraven/blob/main/LICENSE-COMMERCIAL.md#6-what-is-not-included).
+
+We would rather write documentation once than answer the same question fifty
+times, and we price accordingly. If you need a vendor to call at 3am, buy a
+managed database service instead — that is a legitimate choice and Bloodraven is
+not trying to replace it.
+
+## How buying works
+
+Licenses are sold through [Polar](https://polar.sh), which is the merchant of
+record. Polar handles VAT and sales tax worldwide and issues a proper invoice
+for expense reports and procurement.
+
+You get a license key by email at checkout. **You do not need it to run
+Bloodraven.** There is no activation, no license server, no feature gating, and
+no phone-home. The software is fully functional without a key and always will
+be. Your receipt is the license, and compliance is on the honor system.
+
+The key exists only so you have something concrete to file: an artifact for your
+own procurement records, expense report, and internal software inventory.
+
+:::note Planned for v0.10.0
+An optional `spec.license` field will let you record the key in the failover
+group so the operator can verify it **offline** — no network calls — and log
+your organization, edition, and update-period expiry at startup, plus expose
+them as Prometheus metric labels. This is for your own compliance auditing. It
+will never gate functionality or change operator behavior. Not yet implemented;
+until then, the emailed receipt is the whole mechanism.
+:::
+
+## Why source-available and not Apache 2.0
+
+Two reasons, and we would rather state them plainly than let you guess.
+
+**We want you to be able to audit this.** Bloodraven automatically promotes
+production databases and fences nodes it believes are unsafe. You should not run
+software like that on trust. Every promotion decision, every fencing path, and
+every split-brain guard is in the repository for you to read before you deploy
+it.
+
+**We want it to still exist in five years.** Bloodraven is maintained by
+ShipStream, which runs it in production for its own warehouse management system.
+Licensing revenue is what justifies the maintenance time. A free-with-paid-support
+model would push us toward selling support, which we do not want to sell and you
+probably do not want to buy.
+
+## What happens if ShipStream stops maintaining Bloodraven
+
+Every version converts to the **Apache License 2.0 two years after it is
+published**. This is written into the
+[license](https://github.com/ShipStream/bloodraven/blob/main/LICENSE) as the
+Change Date — it is automatic and we cannot revoke it.
+
+In practice: the version you are running today becomes fully open source, forever,
+in two years, no matter what happens to us. If ShipStream disappears, the project
+does not become unusable and you are not locked out of code you depend on.
+
+Two years is shorter than the four-year maximum the license allows, and shorter
+than what most BSL projects choose. That is intentional.
+
+## Contributing
+
+Pull requests are welcome from everyone, licensed or not. First-time
+contributors sign a [CLA](https://github.com/ShipStream/bloodraven/blob/main/CLA.md),
+which is a license grant rather than a copyright assignment — you keep the
+copyright in your own work. See
+[CONTRIBUTING.md](https://github.com/ShipStream/bloodraven/blob/main/CONTRIBUTING.md).
+
+## Common questions
+
+**Can I fork it?**
+Yes. The license permits copying, modification, and derivative works. What it
+does not permit is offering Bloodraven, or a substantially similar derivative,
+to third parties as a hosted or managed service.
+
+**Can I run it for my own SaaS product's databases?**
+Yes, with a license. That is ordinary internal production use. What you cannot
+do is resell Bloodraven itself, or offer managed MySQL to third parties with it.
+
+**Do staging and DR sites need separate licenses?**
+Staging, dev, test, CI, and evaluation are free at any scale. A standby or DR
+*site within a production failover group* is already covered by that group's
+license — a two-site production group is one license, not two.
+
+**We are over $1M revenue but only use it for internal tooling.**
+That is still production use if it serves a live system. It is one failover
+group, so $990.
+
+**What if we grow past $1M mid-year?**
+Buy a license when you cross the threshold. We are not going to audit you.
+
+**Do you offer volume, multi-year, or PO billing?**
+Yes. Email **licensing@shipstream.io**.
+
+**Can we get a signed agreement, a W-9, or a security questionnaire completed?**
+Yes, for Organization purchases. Email **licensing@shipstream.io** before buying.
+
+**Is there a trial?**
+The free tier is the trial and it has no time limit. Run it in staging as long
+as you want. There is also a 30-day refund on any purchase.
+
+---
+
+Questions this page does not answer: **licensing@shipstream.io**

@@ -1,0 +1,121 @@
+{
+  "apiVersion": "shipstream.io/v1alpha1",
+  "kind": "MysqlFailoverGroup",
+  "metadata": {
+    "name": "ledger",
+    "namespace": "ledger-db"
+  },
+  "spec": {
+    "image": "mysql:9.7",
+    "sidecarImage": "ghcr.io/shipstream/bloodraven-sidecar:0.9.1",
+    "credentials": {
+      "operatorSecret": "ledger-operator",
+      "appSecret": "ledger-app",
+      "readOnlySecret": "ledger-readonly",
+      "monitorSecret": "ledger-monitor",
+      "backupSecret": "ledger-backup"
+    },
+    "dns": {
+      "hostname": "ledger-db.example.com",
+      "ttl": 60
+    },
+    "updateStrategy": "OrderedUpdate",
+    "splitBrainPolicy": {
+      "sitePriorities": [
+        "iad"
+      ]
+    },
+    "replication": {
+      "maxLagSeconds": 300,
+      "readOnlyMaxLagSeconds": 30
+    },
+    "sidecar": {
+      "leaseTimeout": "20s",
+      "peerCheckInterval": "5s"
+    },
+    "backup": {
+      "profiles": [
+        {
+          "name": "nightly",
+          "storage": {
+            "type": "S3",
+            "s3": {
+              "bucket": "ledger-backups",
+              "prefix": "ledger"
+            }
+          },
+          "retention": 7
+        }
+      ]
+    },
+    "sites": [
+      {
+        "name": "iad",
+        "role": "primary-candidate",
+        "zone": "zone-iad",
+        "storage": {
+          "storageClassName": "fast-ssd",
+          "size": "500Gi"
+        },
+        "resources": {
+          "requests": {
+            "cpu": "2",
+            "memory": "8Gi"
+          },
+          "limits": {
+            "cpu": "2",
+            "memory": "8Gi"
+          }
+        },
+        "lbIP": "10.20.30.11",
+        "taintNodeSelector": {
+          "shipstream.io/failover-group.ledger": "true",
+          "shipstream.io/site.ledger": "iad"
+        }
+      },
+      {
+        "name": "pdx",
+        "role": "dr-only",
+        "zone": "zone-pdx",
+        "storage": {
+          "storageClassName": "fast-ssd",
+          "size": "500Gi"
+        },
+        "resources": {
+          "requests": {
+            "cpu": "2",
+            "memory": "8Gi"
+          },
+          "limits": {
+            "cpu": "2",
+            "memory": "8Gi"
+          }
+        },
+        "lbIP": "10.20.30.12",
+        "taintNodeSelector": {
+          "shipstream.io/failover-group.ledger": "true",
+          "shipstream.io/site.ledger": "pdx"
+        }
+      },
+      {
+        "name": "reader",
+        "role": "read-only",
+        "zone": "zone-reader",
+        "storage": {
+          "storageClassName": "fast-ssd",
+          "size": "500Gi"
+        },
+        "resources": {
+          "requests": {
+            "cpu": "2",
+            "memory": "8Gi"
+          },
+          "limits": {
+            "cpu": "2",
+            "memory": "8Gi"
+          }
+        }
+      }
+    ]
+  }
+}

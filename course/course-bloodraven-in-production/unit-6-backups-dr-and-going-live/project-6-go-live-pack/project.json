@@ -1,0 +1,152 @@
+{
+  "learningGoals": [
+    {
+      "title": "Write alerting rules that page for real loss and stay silent for designed behaviour",
+      "description": null
+    },
+    {
+      "title": "Produce a DR drill record that states what was proved and what was only assumed",
+      "description": null
+    },
+    {
+      "title": "Give every alert a runbook anchor and one first command, so on-call types something in the first thirty seconds",
+      "description": null
+    }
+  ],
+  "config": {
+    "title": "The go-live pack for `playground`",
+    "description": "Assemble the three artefacts you would hand an on-call rotation for `playground` — a Prometheus rules file built only from metric names the operator really exports, a one-page alert-to-runbook-to-first-command map, and a DR drill record — then prove the rules stay silent while a reader soaks past three times `maxLagSeconds`.",
+    "language": "python",
+    "instructions": "## How this works\n\n`playground` runs three sites: `iad` and `pdx` as `primary-candidate`, and `reader` with `role: read-only`. You have already backed it up, verified it, restored it in place and turned on encryption at rest. What is missing is the pack you hand to the rotation.\n\nThe pack lives in `starter/pack/`:\n\n| File | What it is |\n|---|---|\n| `alerts.yml` | Prometheus alerting rules for `playground` |\n| `runbooks.yml` | alert → runbook anchor → the one command typed first |\n| `drill.json` | the record of the DR drill you ran |\n\n`starter/golive.py` checks all three and replays six metric fixtures from `tests/fixtures/` through your rules. Run it:\n\n```\npython3 starter/golive.py\n```\n\nIt runs as given and reports twelve problems. Fix them in order.\n\n## Your tasks\n\n**TODO A — `pack/alerts.yml`.** `BloodravenReplicationLagging` currently reads every site. Chaos scenario 42 soaks the reader past three times `maxLagSeconds` with both replication threads still running, and asserts the group stays `Ready`, no failover fires, no cooldown is consumed, and only the reader endpoint sheds. That is the role model doing its job, not a fault. Exclude the read-only site by label matcher and keep the threshold at `30` — the value `playground` actually sets in `spec.replication.maxLagSeconds` — so a genuinely lagging `primary-candidate` still pages. The shipped CRD default is `300`; a rule's number tracks the group's spec, never the default.\n\n**TODO B — `pack/alerts.yml`.** `BloodravenBackupStale` reads `bloodraven_backup_age_seconds`. That metric does not exist. The shipped operator exports a last-success timestamp gauge, so an age has to be derived from it with `time() -`. Rewrite the expression against a name in `SHIPPED_METRICS`.\n\n**TODO C — `pack/alerts.yml`.** Add `BloodravenKeyringNotSealed`. `Sealed` is the steady state; the metric is a one-hot gauge over the `phase` label, so alert when the sealed series reads `0`.\n\n**TODO D — `pack/runbooks.yml`.** Three alerts have no usable entry. Each needs an `anchor` of the form `runbook.md#<slug>` and a `firstCommand` starting with `kubectl`. The plugin has exactly seven subcommands — `status`, `promote`, `reclone`, `backup`, `verify-backup`, `version`, `help` — and it only writes resources the operator already reads, never talking to MySQL. `kubectl bloodraven status playground` is the sensible default.\n\n**TODO E — `pack/drill.json`.** Fill `proved`, `assumed`, `applicationSideAlertOwner` and `handoverNote`. Use only these terms:\n\n- `proved`: `artifact-loads`, `sanity-check-passed`, `restore-in-place-completed`, `reader-endpoint-returned`, `dns-record-updated`\n- `assumed`: `logical-equivalence-with-live-primary`, `application-traffic-cutover`, `cross-cluster-split-brain-detection`, `dns-propagation-time`\n\nA `Succeeded` verification proves the artifact loads and your scalar assertion held. It never proves logical equivalence with the live primary or an application-level rehearsal of traffic cutover, so both of those belong in `assumed` on every honest record. `applicationSideAlertOwner` is a named human: no shipped alert fires for \"the application is still broken after a successful failover\", so somebody owns that one by name or nobody does. `handoverNote` is one line saying what this pack will not tell the rotation.\n\n**TODO F — `starter/golive.py`.** Implement `check_metric_allowlist(rules)`. Return sorted `(alert, metric)` tuples for every metric outside `SHIPPED_METRICS` and `ALLOWED_FOREIGN_METRICS`. `promeval.metric_names_in(expr)` pulls the names out for you.\n\n**TODO G — `starter/golive.py`.** Implement `check_runbook_coverage(rules, runbooks)`. Return sorted `(alert, problem)` tuples for every alert with no entry, an empty or malformed anchor, an empty `firstCommand`, or a `firstCommand` that does not start with `kubectl`. The wording of `problem` is yours; which alerts you flag is graded.\n\n## What the scaffolding is for\n\n`starter/promeval.py` is a small PromQL-subset evaluator. It handles `<selector> <cmp> <number>`, `absent(...)`, `time() - <selector> <cmp> <number>` and `increase(<selector>[<window>]) <cmp> <number>`, with `=`, `!=`, `=~` and `!~` matchers. Two simplifications you should know about: evaluation is instantaneous, so a rule's `for:` is never simulated (it is still required on every paging rule, because a rule without one pages on a single bad scrape); and `increase(m[15m])` reads a pre-computed series out of the fixture's `increases` block rather than computing anything.\n\n`golive.py` already does argument parsing, YAML and JSON loading, the coverage and drill checks, evaluation and report formatting. Only TODO F and TODO G are yours.\n\nA fixture verdict grades `Alert@site` keys, not bare alert names, so an alert that fires for the wrong site is a `MISMATCH`.\n\n## Expected output\n\nWhen the pack is finished:\n\n```\n[metrics]  clean\n[runbooks] clean\n[coverage] clean\n[drill]    clean\n[owner]    application-side alerting owned by: <a named human>\n\nfixture replay\n----------------------------------------------\n  fixture candidate-lagging: 1 firing, expected 1  OK\n  fixture operator-down: 1 firing, expected 1  OK\n  fixture post-failover-divergence: 5 firing, expected 5  OK\n  fixture primary-lost: 2 firing, expected 2  OK\n  fixture reader-soak-3x: 0 firing, expected 0  OK\n  fixture split-brain-resolved: 2 firing, expected 2  OK\n\nRESULT: READY\n```\n\nExit code 0.\n\n## Rules\n\n- Use only metric names the shipped operator exports. `SHIPPED_METRICS` in `golive.py` is the list; do not add to it from memory. A rule against a metric that does not exist is a rule that can never fire.\n- Do not edit anything under `tests/`. The fixtures are the grading input.\n- Keep the `BloodravenReplicationLagging` threshold at `30`, which is what `playground` sets. The backup-staleness and failover-window thresholds are SLOs you choose, not Bloodraven defaults.\n- Do not remove a rule to silence it. The reader exclusion has to be an exclusion.\n- `BloodravenFailoverOccurred` carries `severity: info`. It says the operator finished, not that traffic recovered.\n- There is no `Failover` condition reason to match on. The failover row of the decision matrix emits `Reason=\"Degraded\"`.",
+    "starterCells": [
+      {
+        "id": "cell-intro",
+        "type": "markdown",
+        "content": "# The go-live pack for `playground`\n\nThree sites: `iad` and `pdx` are `primary-candidate`, `reader` is `role: read-only`. A counter application has been writing to the group for six units. You can now fail it over, fence it, back it up, verify it, restore it and encrypt it.\n\nWhat you cannot yet do is hand it to someone else at 3am. That is this project.\n\nYou are building three artefacts and one checker:\n\n- `starter/pack/alerts.yml` — the minimum alert set, built only from metrics the operator really exports\n- `starter/pack/runbooks.yml` — one page: alert, runbook anchor, first command\n- `starter/pack/drill.json` — the DR drill record, splitting what you proved from what you assumed\n- `starter/golive.py` — the checker that replays six metric fixtures through your rules\n\nRun `python3 starter/golive.py`. It works as given and tells you what is wrong.",
+        "readOnly": true
+      },
+      {
+        "id": "cell-the-point",
+        "type": "markdown",
+        "content": "## The one that matters\n\nChaos scenario 42 applies `SOURCE_DELAY` to the reader and soaks it for three times `maxLagSeconds`. Both replication threads keep running on the correct source. The scenario then asserts that the group stays `Ready`, the active site never changes, `lastFailover` never moves, no anti-flap cooldown is consumed, and the reader simply leaves `mysql-playground-replicas` until it catches up.\n\nSo a reader at 91 seconds of lag — past three times the 30 seconds `playground` sets — is the role model working exactly as designed. An alert on `bloodraven_replication_lag_seconds` without a site exclusion pages you for it, at 3am, for something the system already handled.\n\nThe checker replays that soak as `tests/fixtures/reader-soak-3x.json` and expects **zero** alerts. It also replays `candidate-lagging.json`, where `pdx` — a real `primary-candidate` — sits 64 seconds behind, and expects **exactly one**. You cannot pass both by deleting the rule or raising the threshold.",
+        "readOnly": true
+      },
+      {
+        "id": "cell-files",
+        "type": "markdown",
+        "content": "## Layout\n\n```\nstarter/\n  golive.py          # TODO F, TODO G — everything else is wired\n  promeval.py        # PromQL-subset evaluator, scaffolding\n  pack/\n    alerts.yml       # TODO A, TODO B, TODO C\n    runbooks.yml     # TODO D\n    drill.json       # TODO E\ntests/\n  fixtures/*.json    # six metric snapshots — do not edit\n  harness.py\n  checks.py\n```\n\nThe fixtures are one scrape each, not a window. `for:` durations are never simulated, and `increase(m[15m])` reads a pre-computed series from the fixture's `increases` block.",
+        "readOnly": true
+      }
+    ]
+  },
+  "steps": [
+    {
+      "id": "step-run-the-checker",
+      "title": "Run the checker and read the twelve problems",
+      "description": "Run `python3 starter/golive.py` before changing anything. It loads nine alert rules, eight runbook entries and the drill record, then replays six fixtures. Read the whole report: two checks are unimplemented, one required alert is missing, the drill record claims nothing and hands over nothing, and two fixtures mismatch. The `SPURIOUS BloodravenReplicationLagging@reader` line under `reader-soak-3x` is the one this project is about.",
+      "completionCriteria": "`python3 starter/golive.py` exits 1 and prints a line starting `RESULT: NOT READY`."
+    },
+    {
+      "id": "step-implement-checks",
+      "title": "Implement the metric allowlist and the runbook coverage check (TODO F, TODO G)",
+      "description": "In `starter/golive.py`, replace the two `return None` stubs. `check_metric_allowlist(rules)` returns sorted `(alert, metric)` tuples for every metric outside `SHIPPED_METRICS | ALLOWED_FOREIGN_METRICS`; use `promeval.metric_names_in(expr)` to extract them. `check_runbook_coverage(rules, runbooks)` returns sorted `(alert, problem)` tuples for every alert with no entry, an anchor that is empty or does not match `ANCHOR_RE`, an empty `firstCommand`, or a `firstCommand` that does not start with `kubectl`. Both return `[]` when clean. The report will now tell you the truth about the other files.",
+      "completionCriteria": "`python3 starter/golive.py` prints neither `[metrics]  not implemented (TODO F)` nor `[runbooks] not implemented (TODO G)`, and its `[metrics]` line names `BloodravenBackupStale -> bloodraven_backup_age_seconds`."
+    },
+    {
+      "id": "step-real-metrics-only",
+      "title": "Rebuild BloodravenBackupStale on a real metric and add BloodravenKeyringNotSealed (TODO B, TODO C)",
+      "description": "`bloodraven_backup_age_seconds` does not exist, so the rule can never fire — the exact failure mode the checker exists to catch. The operator exports `bloodraven_backup_last_success_timestamp_seconds` per `(group, profile)`; derive the age with `time() -` and keep the 24-hour SLO. Then add `BloodravenKeyringNotSealed`: `bloodraven_keyring_phase` is a one-hot gauge over the `phase` label and `Sealed` is the steady state, so alert when the sealed series reads `0`. Any other phase means the site is running with a writable keyring or failed to escrow one.",
+      "completionCriteria": "`python3 starter/golive.py` prints `[metrics]  clean` and `[coverage] clean`, and the `post-failover-divergence` fixture line reads `5 firing, expected 5  OK`."
+    },
+    {
+      "id": "step-ignore-reader-lag",
+      "title": "Make the lag alert ignore the reader on purpose (TODO A)",
+      "description": "This is the centrepiece. Add a site-label exclusion for the `read-only` site to `BloodravenReplicationLagging` and leave the threshold at `30`. Do not delete the rule and do not raise the threshold — `pdx` at 64 seconds behind is a genuine RPO drift on a promotable candidate and must still page. Remember what the threshold is and is not: `maxLagSeconds` drives only the `ReplicationLagging` condition. It is not a promotion gate, so a candidate past it is still promoted, because no writable site at all is almost always worse.",
+      "completionCriteria": "`python3 starter/golive.py` prints both `fixture reader-soak-3x: 0 firing, expected 0  OK` and `fixture candidate-lagging: 1 firing, expected 1  OK`."
+    },
+    {
+      "id": "step-runbook-map",
+      "title": "Finish the alert-to-runbook-to-first-command map (TODO D)",
+      "description": "Three alerts have no usable entry: `BloodravenDivergentTransactions` has none, `BloodravenPITRArchiveLagging` has an empty `firstCommand`, and `BloodravenKeyringNotSealed` is the alert you just added. Give each an anchor of the form `runbook.md#<slug>` and one command starting with `kubectl`. Every command must be something a rotation member can run cold, which is why the plugin is safe to hand over: it only writes resources the operator already reads and never talks to MySQL.",
+      "completionCriteria": "`python3 starter/golive.py` prints `[runbooks] clean`."
+    },
+    {
+      "id": "step-drill-record",
+      "title": "Write the drill record honestly (TODO E)",
+      "description": "Fill `proved`, `assumed`, `applicationSideAlertOwner` and `handoverNote` in `pack/drill.json` using only the vocabulary in the instructions. Your verification returned `Succeeded` and your in-place restore reached `Succeeded` through an RFC 3339 confirm token, so the artifact loads and the sanity check held. Neither proves logical equivalence with the live primary, and neither rehearses an application traffic cutover — both belong in `assumed`. Name a human for the application-side alert: Bloodraven cannot see your pool, your driver's `rejectReadOnly` handling, or your JVM's DNS cache, so no shipped alert fires when the application is still broken after a successful failover. Then write `handoverNote`: one line on what this pack will not tell the rotation.",
+      "completionCriteria": "`python3 starter/golive.py` prints `[drill]    clean` and an `[owner]` line that is not `application-side alerting owned by: (nobody)`."
+    },
+    {
+      "id": "step-hand-it-over",
+      "title": "Green the whole pack and hand it over",
+      "description": "Run the checker one last time against every fixture. `RESULT: READY` means your rules page for the four incident fixtures, stay silent for the soaked reader, use only metrics that exist, carry a first command each, and sit behind a drill record that separates proof from assumption. Read your own `handoverNote` back and decide whether you would sign it. That statement — what `playground` will and will not do for an on-call rotation — is the deliverable of the whole course.",
+      "completionCriteria": "`python3 starter/golive.py` exits 0 and prints `RESULT: READY`."
+    }
+  ],
+  "rubric": [
+    {
+      "criterion": "The alert set discriminates real loss from designed behaviour",
+      "weight": 30,
+      "description": "All ten required alerts are present. `BloodravenReplicationLagging` excludes the `read-only` site by label matcher while keeping the threshold at 30 — the value `playground` sets — so the scenario 42 soak is silent and a 64-second `pdx` still pages. The rule was excluded, not deleted, not defanged by a raised threshold, and not narrowed to a hard-coded single site. `BloodravenFailoverOccurred` carries `severity: info`; every paging rule carries a non-zero `for:`. Full marks require both halves — silence on the reader and noise on the candidate."
+    },
+    {
+      "criterion": "Every rule is built from a metric the shipped operator exports",
+      "weight": 20,
+      "description": "No expression references a name outside `SHIPPED_METRICS` plus Prometheus' own `up`. `BloodravenBackupStale` derives an age from `bloodraven_backup_last_success_timestamp_seconds` with `time() -` rather than an invented age gauge, and `BloodravenKeyringNotSealed` reads the one-hot `bloodraven_keyring_phase{phase=\"sealed\"} == 0`. `check_metric_allowlist` is implemented and catches a planted bad metric rather than returning an empty list unconditionally."
+    },
+    {
+      "criterion": "The runbook map gets on-call to a command in thirty seconds",
+      "weight": 20,
+      "description": "Every alert in the rules file has an entry with a well-formed `runbook.md#<slug>` anchor and one `kubectl` command. The commands are real: they use the seven subcommands the plugin actually has, and where a generic `kubectl bloodraven status playground` is not the right first move the entry says what is. `check_runbook_coverage` flags a removed entry and an emptied `firstCommand` and reports each exactly once."
+    },
+    {
+      "criterion": "The drill record separates what was proved from what was assumed",
+      "weight": 15,
+      "description": "`proved` and `assumed` both use the supplied vocabulary and are non-empty. `logical-equivalence-with-live-primary` and `application-traffic-cutover` appear in `assumed` and never in `proved`. `backupSourceSite` is not the read-only site and `backupSourceReason` is one of `override`, `replica-preferred`, `primary-fallback`. `applicationSideAlertOwner` names a human, and `handoverNote` states one thing the pack will not tell the rotation."
+    },
+    {
+      "criterion": "Craft: the pack reads like something you would hand over",
+      "weight": 15,
+      "description": "Rule names and annotations say what the alert means at 3am, not what the expression computes. The two implemented checks are short, return the documented shape, and do not crash on a malformed or missing entry — a missing runbook key is a finding, not a `KeyError`. The report runs clean with no stray debug output. A second engineer could read `alerts.yml` and `runbooks.yml` and take the pager without asking a question."
+    }
+  ],
+  "testCases": [
+    {
+      "name": "reader_soak_stays_silent",
+      "code": "import sys, pathlib\np = pathlib.Path.cwd()\nfor c in [p, *p.parents]:\n    if (c / 'tests' / 'harness.py').exists():\n        sys.path.insert(0, str(c / 'tests'))\n        break\nimport checks\nprint(checks.reader_soak_stays_silent())",
+      "expectedOutput": "PASS",
+      "weight": 30,
+      "description": "Catches a shortcut: alerting on `bloodraven_replication_lag_seconds` with no site-label exclusion, or silencing it by deleting the rule or raising the threshold. Replays the scenario 42 soak (`reader` at 91s, both threads running, group Ready) and requires zero firing alerts, then replays `candidate-lagging` (`pdx` at 64s) and requires exactly `BloodravenReplicationLagging@pdx`. A blanket suppression fails the second half; a missing exclusion fails the first."
+    },
+    {
+      "name": "real_loss_still_pages",
+      "code": "import sys, pathlib\np = pathlib.Path.cwd()\nfor c in [p, *p.parents]:\n    if (c / 'tests' / 'harness.py').exists():\n        sys.path.insert(0, str(c / 'tests'))\n        break\nimport checks\nprint(checks.real_loss_still_pages())",
+      "expectedOutput": "PASS",
+      "weight": 30,
+      "description": "Correctness on the canonical inputs. Replays four incident fixtures — no writable site with a stopped receiver thread, a post-failover group with 7 divergent transactions and an unsealed keyring and a stale backup and an archiver backlog, an operator-down scrape with a perfectly healthy data plane, and an auto-resolved split brain — and requires the exact `Alert@site` set for each. Firing for the wrong site is a failure."
+    },
+    {
+      "name": "only_shipped_metrics_and_full_runbook_map",
+      "code": "import sys, pathlib\np = pathlib.Path.cwd()\nfor c in [p, *p.parents]:\n    if (c / 'tests' / 'harness.py').exists():\n        sys.path.insert(0, str(c / 'tests'))\n        break\nimport checks\nprint(checks.only_shipped_metrics_and_full_runbook_map())",
+      "expectedOutput": "PASS",
+      "weight": 25,
+      "description": "Structural: the two checks must exist and work, not just return empty. Asserts all ten required alerts are present, that `check_metric_allowlist` clears the finished rules but returns exactly `[('BogusAlert', 'bloodraven_backup_age_seconds')]` for a planted rule, and that `check_runbook_coverage` clears the finished map but flags a removed entry and an emptied `firstCommand` exactly once each."
+    },
+    {
+      "name": "drill_record_separates_proved_from_assumed",
+      "code": "import sys, pathlib\np = pathlib.Path.cwd()\nfor c in [p, *p.parents]:\n    if (c / 'tests' / 'harness.py').exists():\n        sys.path.insert(0, str(c / 'tests'))\n        break\nimport checks\nprint(checks.drill_record_separates_proved_from_assumed())",
+      "expectedOutput": "PASS",
+      "weight": 15,
+      "description": "Grades the DR drill record. `logical-equivalence-with-live-primary` and `application-traffic-cutover` must sit in `assumed` and never in `proved`, both lists must use the supplied vocabulary, `backupSourceSite` must not be the read-only site, `backupSourceReason` must be one of the three reason strings, `restore.confirm` must parse as RFC 3339, and `applicationSideAlertOwner` must name someone."
+    }
+  ],
+  "environment": {
+    "image": "python:3.13-slim",
+    "gpu": null,
+    "packages": [
+      "pyyaml==6.0.3"
+    ],
+    "compileFlags": [],
+    "timeoutMs": 60000
+  }
+}

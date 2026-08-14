@@ -1,0 +1,25 @@
+{
+  "_todo": "TODO E — fill proved[], assumed[], applicationSideAlertOwner and handoverNote. Everything else is the record of the drill you ran.",
+  "group": "playground",
+  "runAt": "2026-08-12T02:10:00Z",
+  "profile": "nightly",
+  "backupSourceSite": "pdx",
+  "backupSourceReason": "replica-preferred",
+  "verification": {
+    "result": "Succeeded",
+    "sanityCheck": "SELECT COUNT(*) FROM playground.counter",
+    "sanityCheckValue": 1
+  },
+  "restore": {
+    "path": "restoreInPlace",
+    "confirm": "2026-08-12T02:41:00Z",
+    "phase": "Succeeded"
+  },
+  "pointInTime": null,
+  "earliestReachablePoint": "2026-07-29T21:00:00Z",
+  "earliestReachableBasis": "oldest sealed binlog still in the bucket; floor set by binlog-expire-logs-seconds=1209600 (14 days) counted back from the drill date 2026-08-12",
+  "proved": [],
+  "assumed": [],
+  "applicationSideAlertOwner": "",
+  "handoverNote": ""
+}

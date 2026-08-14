@@ -1,0 +1,120 @@
+{
+  "flashcards": [
+    {
+      "front": "The `mysql-playground-primary` Service selects on which pod labels?",
+      "back": "Two: `app.kubernetes.io/instance=playground` and `shipstream.io/role=primary`. No health label.",
+      "orderIndex": 0
+    },
+    {
+      "front": "The `mysql-playground-replicas` Service selects on which pod labels?",
+      "back": "Three: `app.kubernetes.io/instance=playground`, `shipstream.io/role=replica`, and `shipstream.io/healthy=yes`.",
+      "orderIndex": 1
+    },
+    {
+      "front": "How many Service objects does the operator create for a group, and what is the formula?",
+      "back": "`2 × len(sites) + 2` — two per-site kinds plus two group-wide kinds. For three-site `playground`: eight.",
+      "orderIndex": 2
+    },
+    {
+      "front": "A pod is stamped `shipstream.io/role=fenced`. What changes at the Service layer?",
+      "back": "It matches neither the `-primary` nor the `-replicas` selector, so it drops out of both group endpoints while still running.",
+      "orderIndex": 3
+    },
+    {
+      "front": "What does the operator do that no sidecar can?",
+      "back": "Decide across sites — it is the only component that sees every site and picks which one is primary.",
+      "orderIndex": 4
+    },
+    {
+      "front": "What does the sidecar do that the operator cannot?",
+      "back": "Fence its own MySQL — set `super_read_only=ON` locally — with the operator dead or unreachable.",
+      "orderIndex": 5
+    },
+    {
+      "front": "Why can the binlog archiver not run centrally in the operator?",
+      "back": "It needs the MySQL data PVC mounted, and a `ReadWriteOnce` PVC is bound to one node — so it must run in the pod that has it.",
+      "orderIndex": 6
+    },
+    {
+      "front": "Which binlog files does the archiver upload?",
+      "back": "Only sealed ones — it drops the last entry of the index, which is the binlog MySQL is currently writing.",
+      "orderIndex": 7
+    },
+    {
+      "front": "Role: `primary-candidate`",
+      "back": "The only role that may be promoted. Promotability is exactly `role == primary-candidate`.",
+      "orderIndex": 8
+    },
+    {
+      "front": "Role: `dr-only`",
+      "back": "Counted in the topology tallies like any core site, but never eligible for promotion.",
+      "orderIndex": 9
+    },
+    {
+      "front": "Role: `read-only`",
+      "back": "Excluded from `coreCount` and all three state tallies; never taints a node and cannot be a backup source.",
+      "orderIndex": 10
+    },
+    {
+      "front": "Active site versus primary candidate — what is the difference?",
+      "back": "`primary-candidate` is a static role you declare in `spec.sites`; the active site is the one site currently holding writable authority.",
+      "orderIndex": 11
+    }
+  ],
+  "quiz": [
+    {
+      "question": "A nightly reporting job against `playground` runs long analytical SELECTs and must never issue a write. It can tolerate a few seconds of staleness but not minutes. Which Service should it connect to?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 0,
+      "options": [
+        "`mysql-playground-replicas`",
+        "`mysql-playground-primary`, because it is the only endpoint guaranteed to have a pod behind it",
+        "`mysql-playground-reader`, because the `reader` site is the read-only site",
+        "`mysql-playground-reader-internal`, the stable in-cluster address"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "`mysql-playground-replicas` is the group read endpoint — instance, `shipstream.io/role=replica` and `shipstream.io/healthy=yes` — so it pools every replica currently fit to serve and drops one silently when it is not. Pointing at `mysql-playground-primary` works but wastes the primary's capacity on reads and puts an accidental write one bug away from succeeding. `mysql-playground-reader` is the near miss, and worth being exact about: because `reader` is a `role: read-only` site, its per-site Service *does* carry the same `healthy=yes` gate, so staleness is covered — but it pins the job to one pod, and the moment that pod loses the label the Service has no endpoints at all rather than falling back to `pdx`. `mysql-playground-reader-internal` is the one with no health gate: it exists for sidecar and peer traffic and sets `publishNotReadyAddresses: true`, so it will hand you a pod that is not serving yet. (objective 4)"
+    },
+    {
+      "question": "During the draining phase of a planned failover, the operator stamps the `iad` pod `shipstream.io/role=fenced`. Which Service still resolves to that pod?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 1,
+      "options": [
+        "`mysql-playground-iad`, the per-site Service, which selects on site rather than role",
+        "`mysql-playground-primary` — the pod is still the active site in status, so the write endpoint still points at it",
+        "`mysql-playground-replicas` — losing the primary role makes it a replica",
+        "None; the operator deletes the pod as part of fencing"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "The per-site Services select on name, instance and `shipstream.io/site` — never on role — so `mysql-playground-iad` and `mysql-playground-iad-internal` still reach the pod, which is how the operator and the sidecars keep talking to a fenced instance. (`iad` is a `primary-candidate`; on a `role: read-only` site the per-site Service adds a `healthy=yes` conjunct, but role is still not in the selector.) `-primary` requires `role=primary` and `-replicas` requires `role=replica`; `fenced` is neither, which is the entire mechanism. Nothing is deleted: the pod keeps running, keeps its PVC and keeps its IP — only its label changed. (objective 4)"
+    },
+    {
+      "question": "A `dr-only` site holds the freshest GTID set when the primary dies, so Bloodraven will promote it rather than lose those transactions.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 2,
+      "correctAnswer": false,
+      "explanation": "The reversal: GTID freshness never rescues a non-candidate, because promotability is checked first and is exactly `role == primary-candidate`. A `dr-only` site is counted in the topology tallies — unlike a `read-only` site it is a full core participant — which is what makes this tempting, but counting and being promotable are different properties. If such a site ever comes up writable it is routed to fencing rather than accepted. To make a site promotable you change its declared role; you cannot earn it with fresh data. (objective 6)"
+    },
+    {
+      "question": "The binlog archiver runs inside the per-pod sidecar rather than centrally in the operator. Give the physical reason, and say what would break if it were moved into the operator.",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 3,
+      "sampleAnswer": "The archiver has to inotify-watch `mysql-bin.index` in `/var/lib/mysql` and read the sealed binlog files directly off disk, so it needs the MySQL data PVC mounted. That PVC is ReadWriteOnce, which binds it to a single node — the node running that site's MySQL pod. A central operator scheduled on any other node simply could not mount it, so it would have no way to see rotations or read the files. The sidecar is co-located with the data by construction, so it gets the mount (read-only) for free.",
+      "graderNotes": "A strong answer covers: (a) the archiver needs the data PVC mounted, for inotify on the binlog index and for direct file reads; (b) the PVC is ReadWriteOnce, meaning one node, so a central component elsewhere cannot mount it; (c) the sidecar is in the same pod, hence on the same node as the data. Credit also for noting the mount is read-only, or that the archiver gates on `@@read_only` so only the primary uploads. Do not credit 'to reduce operator load' or 'for scalability' alone — the constraint is a mount constraint, not a performance one.",
+      "explanation": "The decision is forced by storage topology, not by design taste: inotify and direct binlog reads both require the data volume, and ReadWriteOnce means one node, not one pod. Anything that must touch the data directory has to run where the data directory is. (objective 5)"
+    },
+    {
+      "question": "The operator Deployment in `playground` is scaled to zero and stays down for an hour while the counter application keeps writing. What happens?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 4,
+      "options": [
+        "Writes keep flowing through `mysql-playground-primary`, and each site's sidecar can still fence its own MySQL, but nothing will be promoted if the primary dies",
+        "Writes stop immediately, because every write is proxied through the operator",
+        "The `-primary` and `-replicas` Services shed their endpoints, since the operator is no longer confirming the topology",
+        "Nothing changes — the sidecars elect a new leader among themselves and take over promotion decisions"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "The operator is on the failure-detection and promotion path, not the request path, so a healthy primary and replica keep serving with zero operator involvement; correctness is still held by the sidecars, which fence locally without asking anyone. Writes do not stop — nothing is proxied through the operator, and its single replica with leader election exists for safe single-writer decisions, not for traffic. Endpoints do not shed either: shedding is an active label write the operator performs, and a dead operator writes nothing, so the labels simply freeze as they were. And the sidecars never elect anything — they enforce locally and have no cross-site view to decide a promotion with. (objectives 4, 5)"
+    }
+  ]
+}

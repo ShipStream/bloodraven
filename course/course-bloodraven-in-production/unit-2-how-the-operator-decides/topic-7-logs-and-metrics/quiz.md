@@ -1,0 +1,85 @@
+# Quiz — Reading the operator's mind from logs and metrics
+
+<!-- Rendered from course.json by course-template/tools/render-views.mjs.
+     Edit course.json, then re-render. Edits here are overwritten. -->
+
+## Question 1
+
+**Type:** MULTIPLE_CHOICE
+
+You scrape `/metrics` on the operator managing `playground` and get: `bloodraven_site_state{site="pdx",state="writable"} 0`, `{site="pdx",state="read-only"} 0`, `{site="pdx",state="unreachable"} 1`, `{site="pdx",state="unknown"} 0`. What state is `pdx` in?
+
+- `unreachable` — the series set to 1 names the current state
+- `unknown` — three of four states report 0, so the operator has no opinion
+- It is ambiguous; a state-set needs a separate `current` series to be read
+- `read-only` — `unreachable` is a transient probe flag, not a site state
+
+**Correct option index:** 0
+
+**Explanation:**
+
+`bloodraven_site_state` is a state-set: every poll writes all four state labels for every site, with `1` on the current state and `0` on the others. You read the set and find the `1` — here, `unreachable`. "Three zeros means unknown" inverts the encoding: zeros are how a state-set says "not this one", and `unknown` has its own series which is also 0. There is no separate `current` series and none is needed — the encoding is unambiguous by construction. And `unreachable` is one of the four real per-site states (`unknown`, `unreachable`, `read-only`, `writable`), not a flag layered on top of another state. (objective 11)
+
+## Question 2
+
+**Type:** TRUE_FALSE
+
+`bloodraven_replication_lag_seconds{site="pdx"}` reads `-1`. This is a floor artefact meaning the replica is fully caught up — effectively the same good news as `0`.
+
+**Correct answer:** false
+
+**Explanation:**
+
+The reversal: `-1` is the worst reading on this gauge, not the best. The operator sets `-1` when `Seconds_Behind_Source` comes back NULL, which means the site is not replicating at all — no stream, no lag to measure. `0` means an active stream reporting itself caught up. Treating them alike, as a naive dashboard or an `avg()` over the series will, hides a dead replica behind a green tile. (objective 11)
+
+## Question 3
+
+**Type:** MULTIPLE_CHOICE
+
+In `playground`, `bloodraven_replication_lag_seconds{site="reader"}` reads 45. `playground` sets `maxLagSeconds: 30` and `readOnlyMaxLagSeconds: 10`; `reader` is the `role: read-only` site. What follows?
+
+- The group goes Degraded with reason `ReplicationLagging`, because 45 breaches both configured lag thresholds
+- `reader` is dropped from the `-replicas` reader endpoint; the group's own health is unchanged
+- `reader` becomes ineligible for promotion until it catches back up under 10 seconds
+- Nothing changes anywhere — a reader is expected to lag, so no threshold applies to it at all
+
+**Correct option index:** 1
+
+**Explanation:**
+
+The lag gauge carries only a `site` label, so you must join it against the site's role yourself. `reader` is `role: read-only`, so its lag is judged against `readOnlyMaxLagSeconds` (30), and breaching it costs the site its reader-endpoint eligibility — nothing more. `ReplicationLagging` is driven by `maxLagSeconds` against the group's core sites, and 45 is nowhere near 300, so the group's condition is untouched. "Ineligible for promotion" mistakes cause for effect: a `read-only` site can *never* be promoted and is excluded from `coreCount` entirely, whatever its lag. And "nothing changes" is the failure of the join itself — applying the group threshold to a site that has its own. (objective 12)
+
+## Question 4
+
+**Type:** MULTIPLE_CHOICE
+
+On `playground`, `bloodraven_state_transitions_total` has been flat for ten minutes while `bloodraven_poll_latency_seconds_count` keeps climbing and the observed latencies are rising. What is the most defensible reading?
+
+- The poll loop is frozen on a hung MySQL read and every gauge it publishes is stale
+- A failover is in flight; transitions are suppressed until the promotion is confirmed
+- The poll loop is alive and completing cycles, probes are slow, and no site has changed state
+- The site-state gauges have gone stale, because the operator only refreshes them on a transition
+
+**Correct option index:** 2
+
+**Explanation:**
+
+A climbing `_count` is the loop's heartbeat: cycles are finishing, so the readings are current. Rising latency says the probes are slow — worth investigating — and a flat transition counter says nothing has changed state, which for a healthy group is the normal, boring case. The frozen-loop signature is the opposite of what you were given: in issue #93 the `_count` stopped advancing entirely, for every site, because the operator writes its gauges only after waiting on all probes. A failover would show up as transitions, not their absence. And the state-set gauges are re-emitted every poll cycle, not only on a transition, so a turning loop keeps them fresh. (objectives 10, 11)
+
+## Question 5
+
+**Type:** SHORT_ANSWER
+
+In issue #93 the operator reported `activeSite=iad`, `state=writable` and `Ready=True` for two minutes while the `iad` sidecar had already self-fenced under a deny-all NetworkPolicy. The first fix attempted was `SetConnMaxLifetime(10s)` on the MySQL pool. Explain why that could not have worked, and what the artefacts should have pointed at instead.
+
+**Sample answer:**
+
+`SetConnMaxLifetime` only recycles connections the pool holds. The connection in question was parked in a blocked read on a blackholed socket, so it was never returned to the pool and therefore never became eligible for recycling — the setting could not reach it. The real failure was that `Poll()` waits on every site's probe before doing anything, and `database/sql` context cancellation does not reliably abort a read already parked on such a socket, so one hung probe froze the whole loop. Since the state-set gauges, the transition counter and the status conditions are all written after that wait returns, the operator kept republishing its last known state with full confidence. The artefact that names it is `bloodraven_poll_latency_seconds_count` flatlining across every site — no cycle completed — not the site-state gauges, which look perfectly healthy precisely because they are frozen. The fix has to bound the I/O itself so a blackholed read returns and the site trips `failureThreshold`.
+
+**A full-credit answer shows:**
+
+A strong answer covers: (1) a connection blocked in a read is never returned to the pool, so a max-lifetime setting never applies to it; (2) `Poll` waits on all sites, so one hung probe freezes the entire loop; (3) a frozen loop republishes stale state with no error signal, which is why the status looked healthy; (4) the diagnostic tell is the poll-latency histogram's `_count` going flat across all sites rather than any site-state or lag series. Credit partial answers that get (1) and (2). An answer that blames conntrack, MySQL, or the NetworkPolicy evaluation order without reaching the blocked-read/frozen-loop mechanism has missed it.
+
+**Explanation:**
+
+The discrimination is between a fix aimed at the pool and a failure that lives below the pool. Pool-level knobs — max lifetime, max idle, health checks on checkout — all operate on connections the pool can see; a connection stuck in a read it will never finish is invisible to all of them. Reading the artefacts the same way generalises: the state gauges and conditions tell you what the operator believes, and only the poll-latency `_count` tells you when it last checked. (objectives 10, 11)

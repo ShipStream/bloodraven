@@ -1,0 +1,346 @@
+<!DOCTYPE html><html lang="en" class="no-js" data-theme="light" style="--accent: #ad568a; --accent-ink: #ffffff;"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>brprep — the day-0 pre-flight and the change plan — Bloodraven in Production</title><meta name="description" content="Write a shell pre-flight that reads a MysqlFailoverGroup manifest and reports what the API server will reject, what it will silently admit, and what an ordered update of it would actually do — so the first time anyone sees your production group's problems is before it is applied, not during an incident."><meta name="theme-color" content="#ad568a"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%233f7ac4'/%3E%3Ctext x='16' y='22' font-family='system-ui,sans-serif' font-size='18' font-weight='700' text-anchor='middle' fill='%23ffffff'%3EB%3C/text%3E%3C/svg%3E"><link rel="stylesheet" href="../assets/site.css"><script type="application/json" id="course-config">{"slug":"bloodraven-in-production","passingScore":70,"totalTopics":27,"rel":"../","units":[{"id":"u1","title":"Meet the group","topics":["u1t1","u1t2","u1t3"]},{"id":"u2","title":"How the operator decides","topics":["u2t1","u2t2","u2t3","u2t4"]},{"id":"u3","title":"Emergency failover, end to end","topics":["u3t1","u3t2","u3t3"]},{"id":"u4","title":"Where failover meets your application","topics":["u4t1","u4t2","u4t3","u4t4"]},{"id":"u5","title":"When the world misbehaves","topics":["u5t1","u5t2","u5t3","u5t4"]},{"id":"u6","title":"Backups, disaster recovery, and going live","topics":["u6t1","u6t2","u6t3","u6t4","u6t5"]},{"id":"u7","title":"Day 0 and day 2","topics":["u7t1","u7t2","u7t3","u7t4"]}]}</script></head> <body data-page-path="unit-7/project-1.html"> <a class="skip" href="#main">Skip to content</a> <header class="site-header"> <div class="wrap"> <a class="brand" href="../index.html"> <span class="brand__mark" aria-hidden="true">B</span> <span class="brand__text">Bloodraven in Production</span> </a> <span class="crumb">Day 0 and day 2 / brprep — the day-0 pre-flight and the change plan</span> <div class="search" data-search data-home="../index.html"> <label class="skip" for="site-search">Search this course</label> <input id="site-search" type="search" placeholder="Search  /" autocomplete="off"> <div class="search__results" role="listbox" aria-label="Search results" hidden></div> </div> <button class="btn btn--quiet" type="button" data-theme-toggle aria-label="Theme: light. Click to change.">
+○
+</button> </div> <div class="readbar" data-readbar aria-hidden="true"></div> </header> <main id="main" class="wrap">  <h1>brprep — the day-0 pre-flight and the change plan</h1> <div class="callout"> <h2 class="callout__title">Goal</h2> <p>Write a shell pre-flight that reads a MysqlFailoverGroup manifest and reports what the API server will reject, what it will silently admit, and what an ordered update of it would actually do — so the first time anyone sees your production group's problems is before it is applied, not during an incident.</p> </div> <section class="reading"><p><em>Unit 7 project — Day 0 and day 2. No Python, no cluster: <code>bash</code> and <code>jq</code> against JSON fixtures.</em></p>
+<h2 id="goal">Goal</h2>
+<p>Write a shell pre-flight that reads a <code>MysqlFailoverGroup</code> manifest and reports what the API server
+will reject, what it will silently admit, and what an ordered update of it would actually do — so the
+first time anyone sees your production group’s problems is before it is applied, not during an
+incident.</p>
+<h2 id="how-this-works">How this works</h2>
+<p>Topic 1 of this unit drew the line that matters on day 0: <strong>admission validates the object, and
+nothing validates the object against the cluster.</strong> A manifest that sets both credential modes is
+refused in milliseconds. A manifest whose <code>taintNodeSelector</code> names labels no node carries is
+accepted, applied, and silently does nothing for the rest of its life.</p>
+<p><code>brprep</code> makes that line executable. It reads a manifest as JSON and prints three kinds of line:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Line</th><th>Meaning</th><th>Effect on the exit code</th></tr></thead><tbody><tr><td><code>REJECT &#x3C;rule></code></td><td>the API server refuses this object — a CEL rule or a schema bound</td><td>exit <code>1</code></td></tr><tr><td><code>WARN &#x3C;finding></code></td><td>admission accepts it, and it will hurt later</td><td>none — exit stays <code>0</code></td></tr><tr><td>the change plan</td><td>what an ordered update to <code>--target-image</code> would do</td><td>none</td></tr></tbody></table>
+<p>That split is the point of the project. A tool that treats every finding as an error is a tool people
+turn off.</p>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">./starter/brprep.sh</span><span style="color:#032F62;--shiki-dark:#96D0FF"> tests/fixtures/good.json</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> --target-image</span><span style="color:#032F62;--shiki-dark:#96D0FF"> mysql:9.8</span></span></code></pre>
+<p>Everything runs against the eight manifests in <code>tests/fixtures/</code>. No cluster is needed to finish the
+code. If you have a live group, <code>kubectl get mysqlfailovergroup &#x3C;name> -o json</code> produces exactly the
+input shape, and so does <code>yq -o json &#x3C; manifest.yaml</code>.</p>
+<h2 id="your-tasks">Your tasks</h2>
+<p>Open <code>starter/brprep.sh</code>. Three functions are stubbed, marked <code>TODO A</code>, <code>TODO B</code> and <code>TODO C</code>. Run the
+grader first, before you change anything:</p>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">./tests/run.sh</span></span></code></pre>
+<p>It reports nine failing fixtures. Read the diff for <code>good</code> first — that is the shape everything else
+is measured against.</p>
+<p><strong>TODO A — <code>check_admission</code>.</strong> Print one <code>REJECT &#x3C;rule></code> line per admission rule the manifest
+violates, in the order the <code>RULE_*</code> constants are declared. A clean manifest prints nothing at all. The nine rules
+are documented in the script — seven CEL rules on the CRD plus the <code>MinItems</code>/<code>MaxItems</code> bound on
+<code>spec.sites</code>, all of them refusals at <code>kubectl apply</code> — and two are worth flagging here.</p>
+<p><em>The role default is load-bearing.</em> <code>spec.sites[].role</code> is optional and defaults to
+<code>primary-candidate</code>, so a site with no <code>role</code> key counts toward the two-candidate minimum and is
+required to carry <code>lbIP</code> and <code>taintNodeSelector</code>. Reading a missing role as “not a candidate” fails
+half the fixtures.</p>
+<p><em>The reader exemption is the discriminator.</em> <code>taintNodeSelector</code> and <code>lbIP</code> are required <strong>unless</strong>
+the role is <code>read-only</code> — because a reader is never promoted and never tainted, so it needs neither.
+<code>tests/fixtures/reader-lbip.json</code> has a legitimate reader without them <em>and</em> a <code>primary-candidate</code>
+missing both. A check that demands them unconditionally fails it; a check that never demands them
+fails too.</p>
+<p><strong>TODO B — <code>check_silent</code>.</strong> Print one <code>WARN &#x3C;finding></code> line per day-0 mistake nothing validates, using
+the <code>WARN_*</code> templates verbatim. Six findings, documented in the script:</p>
+<ul>
+<li>a floating image tag — <code>mysql:9</code> and <code>mysql:latest</code> float, <code>mysql:9.7</code> does not</li>
+<li>a backup profile on <code>storage.type: PVC</code>, named</li>
+<li>a site whose <code>requests</code> do not equal its <code>limits</code>, named — no Guaranteed QoS, so the kubelet may
+evict your primary first</li>
+<li><code>readOnlyMaxLagSeconds</code> above <code>maxLagSeconds</code></li>
+<li><code>encryptionAtRest</code> enabled with no backup profile at all</li>
+<li><code>updateStrategy: Recreate</code></li>
+</ul>
+<p>None of these may change the exit code.</p>
+<p><strong>TODO C — <code>plan_upgrade</code>.</strong> Turn <code>--target-image</code> into a written plan: which standby is upgraded
+first and why, that a real promotion follows, which site ends up active, and the three observable
+consequences — a <code>bloodraven_failovers_total</code> increment, a <code>lastFailover</code> stamp that consumes the
+anti-flap budget, and a DNS flip. Print <code>no change</code> when the target already matches <code>spec.image</code>.</p>
+<p>A plan that says “the pods will restart” is not a plan. The whole reason this belongs in a change
+record is that a routine image bump moves your primary and fires a failover alert, and somebody is
+going to be woken up by it.</p>
+<h2 id="what-the-scaffolding-is-for">What the scaffolding is for</h2>
+<p>You do not have to write any of this:</p>
+<ul>
+<li>argument parsing, the <code>MysqlFailoverGroup</code> kind check, and the exit-code plumbing</li>
+<li><code>q &#x3C;jq-filter></code>, a one-line reader over the manifest — use it for every field access; <code>grep</code> over
+JSON is how a checker starts lying to you</li>
+<li><code>secs &#x3C;duration></code>, Go-duration to whole seconds, so the <code>spec.sidecar</code> interval rules are arithmetic
+rather than string comparison. It returns <code>0</code> for an empty or unparsable value, which is never a
+valid setting and therefore always reads as “violates the minimum”</li>
+<li>the exact <code>RULE_*</code> and <code>WARN_*</code> strings. The grader matches these tokens, so do not reword them</li>
+<li>the report assembly and the <code>verdict:</code> line</li>
+</ul>
+<h2 id="expected-output">Expected output</h2>
+<p>A clean manifest with a plan:</p>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="text"><code><span class="line"><span>$ ./starter/brprep.sh tests/fixtures/good.json --target-image mysql:9.8</span></span>
+<span class="line"><span>brprep: ledger-db/ledger</span></span>
+<span class="line"><span>plan: mysql:9.7 -> mysql:9.8</span></span>
+<span class="line"><span>1. upgrade standby pdx first (a replica may run a newer MySQL than its source; a source may not run a newer MySQL than its replica)</span></span>
+<span class="line"><span>2. promote pdx through the ordinary nine-step sequence</span></span>
+<span class="line"><span>3. upgrade the former active iad, now a standby</span></span>
+<span class="line"><span>active site after this rollout: pdx</span></span>
+<span class="line"><span>expect: bloodraven_failovers_total increments</span></span>
+<span class="line"><span>expect: lastFailover is stamped and consumes the anti-flap cooldown</span></span>
+<span class="line"><span>expect: the DNSEndpoint A record flips</span></span>
+<span class="line"><span>verdict: APPLYABLE (0 finding(s))</span></span>
+<span class="line"><span>$ echo $?</span></span>
+<span class="line"><span>0</span></span></code></pre>
+<p>And a manifest that will apply cleanly and then disappoint you:</p>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="text"><code><span class="line"><span>$ ./starter/brprep.sh tests/fixtures/silently-wrong.json</span></span>
+<span class="line"><span>brprep: ledger-db/ledger</span></span>
+<span class="line"><span>WARN spec.image is a floating tag; pin an immutable one or a restart can drift you onto an unsupported MySQL</span></span>
+<span class="line"><span>WARN backup profile nightly uses storage.type PVC; a backup sharing a failure domain with the data is an assumption, not a backup</span></span>
+<span class="line"><span>WARN site iad sets resources.requests != resources.limits; without Guaranteed QoS the kubelet may evict this MySQL first</span></span>
+<span class="line"><span>WARN replication.readOnlyMaxLagSeconds (300) is above maxLagSeconds (30); the reader endpoint is now looser than the group threshold</span></span>
+<span class="line"><span>WARN updateStrategy Recreate patches every site Deployment in one pass; both sites can restart at once</span></span>
+<span class="line"><span>verdict: APPLYABLE (5 finding(s))</span></span>
+<span class="line"><span>$ echo $?</span></span>
+<span class="line"><span>0</span></span></code></pre>
+<p>Five findings, zero rejections, exit <code>0</code>. That manifest is a perfectly valid <code>MysqlFailoverGroup</code> and
+a bad idea, and no cluster anywhere will tell you so.</p>
+<p>Then the cluster half, if you have one:</p>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">kubectl</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -n</span><span style="color:#032F62;--shiki-dark:#96D0FF"> bloodraven-playground</span><span style="color:#032F62;--shiki-dark:#96D0FF"> get</span><span style="color:#032F62;--shiki-dark:#96D0FF"> mysqlfailovergroup</span><span style="color:#032F62;--shiki-dark:#96D0FF"> playground</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -o</span><span style="color:#032F62;--shiki-dark:#96D0FF"> json</span><span style="color:#D73A49;--shiki-dark:#F47067"> ></span><span style="color:#032F62;--shiki-dark:#96D0FF"> playground-live.json</span></span>
+<span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">./starter/brprep.sh</span><span style="color:#032F62;--shiki-dark:#96D0FF"> playground-live.json</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> --target-image</span><span style="color:#032F62;--shiki-dark:#96D0FF"> mysql:9.8</span></span></code></pre>
+<p>The playground group will show findings — it sets <code>failoverCooldown: 30s</code> and <code>maxLagSeconds: 30</code>
+precisely so experiments finish while you are watching. Read them and decide which ones you would
+carry into production and which are playground-only. That decision is the Unit 6 go-live gate, arrived
+at from the other direction.</p>
+<h2 id="rules">Rules</h2>
+<ul>
+<li><code>bash</code> and <code>jq</code> only. No Python, no <code>kubectl</code>, no network, no <code>yq</code> at grading time.</li>
+<li>Read every field through <code>q</code> / <code>jq</code>. A regex over JSON works on the fixtures and fails on the first
+real manifest with different key ordering or a multi-line value.</li>
+<li>Keep <code>set -euo pipefail</code>, and keep the function names — the grader calls the script, but a
+structural check looks for them.</li>
+<li>Findings never change the exit code. Rejections always do.</li>
+<li>Output must be stable and diffable: no timestamps, no absolute paths, no colour.</li>
+<li>Do not edit anything under <code>tests/</code>. The fixtures and expectations are the grader’s copy; changing
+them changes the question rather than the answer.</li>
+</ul></section> <section> <h2>Steps</h2> <ul class="checklist" data-checklist="u7p1"> <li> <input type="checkbox" id="step-u7p1-0"> <label for="step-u7p1-0">  <strong>Run the pre-flight before changing anything</strong> <p><code>./tests/run.sh</code> drives <code>starter/brprep.sh</code> over eight fixtures. It runs as given and gets every one of them wrong in the same way: <code>check_admission</code> and <code>check_silent</code> return nothing, and <code>plan_upgrade</code> prints a placeholder. Read the expected output beside the actual for <code>fixtures/good.json</code> first — that is the shape everything else is measured against.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> exits non-zero and reports 9 failing fixtures.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-1"> <label for="step-u7p1-1">  <strong>Implement check_admission (TODO A)</strong> <p>Emit one <code>REJECT &#x3C;rule></code> line per CEL rule the manifest violates, in the fixed order given in the script. The nine rules are listed in the brief; each maps to a <code>jq</code> expression over the manifest. A manifest that violates none produces no output at all.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> reports <code>admission</code> matching for all nine cases, including <code>both-credentials.json</code>, <code>one-candidate.json</code>, <code>reader-lbip.json</code> and <code>lease-too-short.json</code>.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-2"> <label for="step-u7p1-2">  <strong>Implement check_silent (TODO B)</strong> <p>Emit one <code>WARN &#x3C;finding></code> line per day-0 mistake that admission does not catch: a floating image tag, a PVC-only backup profile, requests not equal to limits on a MySQL container, a <code>readOnlyMaxLagSeconds</code> above <code>maxLagSeconds</code>, a group with <code>encryptionAtRest</code> and no verified backup profile, and <code>updateStrategy: Recreate</code>. These are findings, not errors — they never change the exit code on their own.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> reports <code>silent</code> matching for all nine cases, and <code>fixtures/silently-wrong.json</code> produces exactly five WARN lines.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-3"> <label for="step-u7p1-3">  <strong>Implement plan_upgrade (TODO C)</strong> <p>Given <code>--target-image</code>, print the ordered-update plan: the standby site that goes first, the promotion that follows, the site that ends up active, and the three observable consequences — a <code>bloodraven_failovers_total</code> increment, a <code>lastFailover</code> stamp that consumes the anti-flap budget, and a DNS flip. Print <code>no change</code> when the target image already matches <code>spec.image</code>.</p> <span class="criteria">Done when: <code>./tests/run.sh</code> exits 0 with <code>ALL 9 FIXTURES MATCH</code>.</span> </label> </li><li> <input type="checkbox" id="step-u7p1-4"> <label for="step-u7p1-4">  <strong>Run it against a manifest you wrote</strong> <p>Write a <code>MysqlFailoverGroup</code> for a group of your own — a real one if you have it, the <code>ledger</code> shape from topic 1 of this unit otherwise — convert it with <code>yq -o json</code> or by hand, and run <code>brprep</code> over it. Fix what it finds. Keep the output; it is the first page of a change record.</p> <span class="criteria">Done when: <code>starter/brprep.sh &#x3C;your-manifest>.json</code> runs and reports zero REJECT lines.</span> </label> </li> </ul> </section><section id="project-rubric"> <h2>How it is graded</h2> <div class="scroll-x"><table><thead><tr><th scope="col">Criterion</th><th scope="col">What earns it</th><th scope="col">Weight</th></tr></thead><tbody><tr><th scope="row">Admission rules reproduced faithfully</th><td>All nine admission rules are checked, each against the manifest rather than against a hard-coded fixture name, and each emits the exact <code>REJECT &#x3C;rule></code> token in the fixed order. A manifest violating several produces several lines. <code>reader-lbip.json</code> is the discriminator: <code>lbIP</code> and <code>taintNodeSelector</code> are required <em>unless</em> the role is <code>read-only</code>, so a check that demands them unconditionally fails it, and a check that never demands them fails <code>good.json</code>'s mutation.</td><td>35</td></tr><tr><th scope="row">Silent findings separated from rejections</th><td><code>check_silent</code> reports the six documented findings as <code>WARN</code> and never as <code>REJECT</code>, and never changes the exit code by itself. The floating-tag check catches <code>mysql:9</code> and <code>mysql:latest</code> but not <code>mysql:9.7</code>. The QoS check compares requests to limits for both CPU and memory rather than checking that limits merely exist.</td><td>30</td></tr><tr><th scope="row">The change plan is specific and correct</th><td><code>plan_upgrade</code> names the standby that is upgraded first, states that a real promotion follows, names the site that ends up active, and lists the three observable consequences. It prints <code>no change</code> when the target already matches. A plan that says 'the pods will restart' without naming the promotion or the moved primary does not earn this.</td><td>25</td></tr><tr><th scope="row">Shell discipline</th><td><code>set -euo pipefail</code> retained, <code>jq</code> used for every field read rather than <code>grep</code>/<code>sed</code> over JSON, no <code>eval</code>, and the script exits 0 with findings but non-zero with rejections. Output is stable and diffable — no timestamps, no absolute paths.</td><td>10</td></tr><tr><th scope="row">Total</th><td></td><td><strong>100</strong></td></tr></tbody></table></div> </section><section id="project-test-cases"> <h2>Test cases</h2> <div class="scroll-x"> <table> <thead> <tr> <th scope="col">Test</th> <th scope="col">Checks</th> <th scope="col">Expected</th> <th scope="col">Weight</th> </tr> </thead> <tbody> <tr> <th scope="row">good_manifest_is_clean</th> <td> A production-shaped manifest with a reader produces no REJECT and no WARN. Catches a shortcut: a checker that emits findings unconditionally. </td> <td> <code>PASS</code> </td> <td>15</td> </tr><tr> <th scope="row">admission_rules_all_nine</th> <td> Each fixture violates one rule and must produce exactly that one REJECT line. Catches a shortcut: reporting every rule whenever any rule fails. </td> <td> <code>PASS</code> </td> <td>30</td> </tr><tr> <th scope="row">reader_exemption</th> <td> Adversarial: the reader legitimately has no <code>lbIP</code> and no <code>taintNodeSelector</code>, while a <code>primary-candidate</code> in the same manifest is missing both. Exactly one REJECT. Catches both a check that demands them unconditionally and one that never demands them. </td> <td> <code>PASS</code> </td> <td>20</td> </tr><tr> <th scope="row">silent_findings_do_not_reject</th> <td> Five WARN lines, zero REJECT lines, exit code 0. Catches a shortcut: treating findings as errors so the fixture 'fails' for the wrong reason. </td> <td> <code>PASS</code> </td> <td>20</td> </tr><tr> <th scope="row">change_plan_names_the_promotion</th> <td> The plan for <code>good.json</code> at a new image names the standby first, the promotion, the resulting active site and the three consequences; the plan at the current image prints <code>no change</code>. </td> <td> <code>PASS</code> </td> <td>15</td> </tr> </tbody> </table> </div>  </section><section id="project-starter"> <h2>Starter files</h2> <details class="filelist card"> <summary>1 files</summary>  <h3>brprep.sh</h3> <pre>                    <code>#!/usr/bin/env bash
+# brprep — day-0 pre-flight for a MysqlFailoverGroup manifest.
+#
+#   ./brprep.sh &lt;manifest.json&gt; [--target-image &lt;tag&gt;]
+#
+# Reads a MysqlFailoverGroup as JSON (yq -o json &lt; manifest.yaml, or kubectl
+# get -o json) and reports three things:
+#
+#   REJECT &lt;rule&gt;   the API server will refuse this object — a CEL rule on the
+#                   CRD, reproduced here so you find out before you apply
+#   WARN &lt;finding&gt;  admission will happily accept this, and it will hurt later
+#   the change plan for an ordered update to --target-image
+#
+# Exit codes:  0 clean or warnings only · 1 one or more REJECTs · 2 bad input
+#
+# Standard tools only: bash and jq. No cluster, no kubectl, no network.
+set -euo pipefail
+
+# ---------------------------------------------------------------- input
+
+MANIFEST=&quot;&quot;
+TARGET_IMAGE=&quot;&quot;
+while [ $# -gt 0 ]; do
+  case &quot;$1&quot; in
+    --target-image) TARGET_IMAGE=&quot;${2:-}&quot;; shift 2 ;;
+    -h|--help) sed -n &#39;2,14p&#39; &quot;$0&quot;; exit 0 ;;
+    -*) echo &quot;brprep: unknown flag $1&quot; &gt;&amp;2; exit 2 ;;
+    *) MANIFEST=&quot;$1&quot;; shift ;;
+  esac
+done
+
+[ -n &quot;$MANIFEST&quot; ] || { echo &quot;usage: brprep.sh &lt;manifest.json&gt; [--target-image &lt;tag&gt;]&quot; &gt;&amp;2; exit 2; }
+[ -r &quot;$MANIFEST&quot; ] || { echo &quot;brprep: cannot read $MANIFEST&quot; &gt;&amp;2; exit 2; }
+command -v jq &gt;/dev/null 2&gt;&amp;1 || { echo &quot;brprep: jq is required&quot; &gt;&amp;2; exit 2; }
+
+jq -e &#39;.kind == &quot;MysqlFailoverGroup&quot;&#39; &quot;$MANIFEST&quot; &gt;/dev/null 2&gt;&amp;1 \
+  || { echo &quot;brprep: $MANIFEST is not a MysqlFailoverGroup&quot; &gt;&amp;2; exit 2; }
+
+# q &lt;jq-filter&gt; — read one value out of the manifest.
+q() { jq -r &quot;$1&quot; &quot;$MANIFEST&quot;; }
+
+# ---------------------------------------------------------------- scaffolding
+#
+# Everything below this line up to TODO A is written for you.
+
+# secs &lt;duration&gt; — Go duration (&quot;20s&quot;, &quot;5m&quot;, &quot;1h30m&quot;) to whole seconds.
+# Prints 0 for an empty or unparsable value, which is never a valid setting
+# and therefore always reads as &quot;violates the minimum&quot;.
+secs() {
+  local d=&quot;${1:-}&quot; total=0 n unit
+  [ -n &quot;$d&quot; ] || { echo 0; return; }
+  while [[ &quot;$d&quot; =~ ^([0-9]+)(h|m|s|ms)(.*)$ ]]; do
+    n=&quot;${BASH_REMATCH[1]}&quot;; unit=&quot;${BASH_REMATCH[2]}&quot;; d=&quot;${BASH_REMATCH[3]}&quot;
+    case &quot;$unit&quot; in
+      h) total=$(( total + n * 3600 )) ;;
+      m) total=$(( total + n * 60 )) ;;
+      s) total=$(( total + n )) ;;
+      ms) : ;;   # sub-second precision is never load-bearing for these fields
+    esac
+  done
+  echo &quot;$total&quot;
+}
+
+# The nine admission rules, in the fixed order brprep reports them. Seven are
+# CEL rules on the CRD; the site-count one is a MinItems/MaxItems constraint on
+# the schema. Both are refusals at `kubectl apply`, which is all brprep claims.
+# The grader matches these tokens exactly, so do not reword them.
+RULE_CREDENTIALS=&quot;exactly one of secretName or credentials must be set&quot;
+RULE_SITE_COUNT=&quot;spec.sites must contain between 2 and 16 entries&quot;
+RULE_SITE_NAMES=&quot;spec.sites[].name must be unique&quot;
+RULE_TWO_CANDIDATES=&quot;spec.sites must contain at least two sites with role primary-candidate&quot;
+RULE_PRIORITIES=&quot;splitBrainPolicy.sitePriorities entries must match the names of sites with role primary-candidate&quot;
+RULE_SITE_FIELDS=&quot;taintNodeSelector and lbIP are required unless role is read-only&quot;
+RULE_PEER_INTERVAL=&quot;sidecar.peerCheckInterval must be at least 1s&quot;
+RULE_LEASE_MIN=&quot;sidecar.leaseTimeout must be at least 3s&quot;
+RULE_LEASE_RATIO=&quot;sidecar.leaseTimeout must be at least 3x sidecar.peerCheckInterval&quot;
+
+# The six silent findings, in the fixed order brprep reports them.
+WARN_FLOATING_TAG=&quot;spec.image is a floating tag; pin an immutable one or a restart can drift you onto an unsupported MySQL&quot;
+WARN_PVC_BACKUP=&quot;backup profile %s uses storage.type PVC; a backup sharing a failure domain with the data is an assumption, not a backup&quot;
+WARN_QOS=&quot;site %s sets resources.requests != resources.limits; without Guaranteed QoS the kubelet may evict this MySQL first&quot;
+WARN_READER_GATE=&quot;replication.readOnlyMaxLagSeconds (%s) is above maxLagSeconds (%s); the reader endpoint is now looser than the group threshold&quot;
+WARN_UNVERIFIED_ENCRYPTION=&quot;encryptionAtRest is enabled but no backup profile is configured; an encrypted group with no verified restore path is one keyring away from unrecoverable&quot;
+WARN_RECREATE=&quot;updateStrategy Recreate patches every site Deployment in one pass; both sites can restart at once&quot;
+
+# ---------------------------------------------------------------- TODO A
+#
+# check_admission — print one `REJECT &lt;rule&gt;` line per CEL rule this manifest
+# violates, in the order the RULE_* constants are declared above. A manifest
+# that violates none prints nothing at all.
+#
+# The nine rules, and what each one actually checks:
+#
+#   RULE_CREDENTIALS    exactly one of .spec.secretName and .spec.credentials
+#                       is present and non-empty. Both, or neither, is a
+#                       rejection.
+#   RULE_SITE_COUNT     2 &lt;= (.spec.sites | length) &lt;= 16.
+#   RULE_SITE_NAMES     every .spec.sites[].name is distinct.
+#   RULE_TWO_CANDIDATES at least two sites have role &quot;primary-candidate&quot;.
+#                       Remember the CRD default: an omitted role *is*
+#                       primary-candidate, so count a missing role as one.
+#   RULE_PRIORITIES     every entry of .spec.splitBrainPolicy.sitePriorities
+#                       names a site whose effective role is
+#                       primary-candidate. An absent list is fine.
+#   RULE_SITE_FIELDS    every site whose effective role is NOT &quot;read-only&quot; has
+#                       both .lbIP and .taintNodeSelector. A read-only site
+#                       needs neither — it is never promoted and never tainted.
+#                       This is the one the fixtures try hardest to break.
+#   RULE_PEER_INTERVAL  secs(.spec.sidecar.peerCheckInterval) &gt;= 1, when set.
+#   RULE_LEASE_MIN      secs(.spec.sidecar.leaseTimeout) &gt;= 3, when set.
+#   RULE_LEASE_RATIO    secs(leaseTimeout) &gt;= 3 * secs(peerCheckInterval),
+#                       when both are set.
+#
+# Return 0 always; the caller counts the lines.
+check_admission() {
+  : # TODO A — replace this
+}
+
+# ---------------------------------------------------------------- TODO B
+#
+# check_silent — print one `WARN &lt;finding&gt;` line per day-0 mistake that
+# admission accepts. Use the WARN_* templates above verbatim, filling the
+# printf placeholders. Order is the order they are declared.
+#
+#   WARN_FLOATING_TAG          .spec.image has no tag at all, or a tag of
+#                              &quot;latest&quot;, or a tag with no dot in it
+#                              (&quot;mysql:9&quot; floats, &quot;mysql:9.7&quot; does not).
+#   WARN_PVC_BACKUP            any .spec.backup.profiles[] with
+#                              .storage.type == &quot;PVC&quot;. One line per profile,
+#                              naming it.
+#   WARN_QOS                   any site where requests.cpu != limits.cpu or
+#                              requests.memory != limits.memory. Compare the
+#                              strings; a site that omits resources entirely
+#                              is not a finding here.
+#   WARN_READER_GATE           .spec.replication.readOnlyMaxLagSeconds is set
+#                              and strictly greater than maxLagSeconds.
+#   WARN_UNVERIFIED_ENCRYPTION .spec.encryptionAtRest.enabled is true and
+#                              .spec.backup.profiles is absent or empty.
+#   WARN_RECREATE              .spec.updateStrategy == &quot;Recreate&quot;.
+#
+# These are findings, never errors: they must not change the exit code.
+check_silent() {
+  : # TODO B — replace this
+}
+
+# ---------------------------------------------------------------- TODO C
+#
+# plan_upgrade — given $TARGET_IMAGE, print the ordered-update plan.
+#
+# When $TARGET_IMAGE is empty, print nothing. When it equals .spec.image,
+# print exactly:
+#
+#     no change
+#
+# Otherwise print, in this order and one per line:
+#
+#     plan: mysql:9.7 -&gt; mysql:9.8
+#     1. upgrade standby &lt;site&gt; first (a replica may run a newer MySQL than
+#        its source; a source may not run a newer MySQL than its replica)
+#     2. promote &lt;site&gt; through the ordinary nine-step sequence
+#     3. upgrade the former active &lt;site&gt;, now a standby
+#     active site after this rollout: &lt;site&gt;
+#     expect: bloodraven_failovers_total increments
+#     expect: lastFailover is stamped and consumes the anti-flap cooldown
+#     expect: the DNSEndpoint A record flips
+#
+# The standby is the *second* site whose effective role is primary-candidate,
+# in `spec.sites` order; the former active is the first. This manifest carries
+# no status, so declaration order is the only signal available — say so in
+# your own runbook, and read `status.activeSite` when you have a live group.
+plan_upgrade() {
+  : # TODO C — replace this
+}
+
+# ---------------------------------------------------------------- report
+
+echo &quot;brprep: $(q &#39;.metadata.namespace // &quot;default&quot;&#39;)/$(q &#39;.metadata.name&#39;)&quot;
+
+rejects=&quot;$(check_admission || true)&quot;
+warns=&quot;$(check_silent || true)&quot;
+
+[ -n &quot;$rejects&quot; ] &amp;&amp; printf &#39;%s\n&#39; &quot;$rejects&quot;
+[ -n &quot;$warns&quot; ] &amp;&amp; printf &#39;%s\n&#39; &quot;$warns&quot;
+
+plan=&quot;$(plan_upgrade || true)&quot;
+[ -n &quot;$plan&quot; ] &amp;&amp; printf &#39;%s\n&#39; &quot;$plan&quot;
+
+if [ -n &quot;$rejects&quot; ]; then
+  echo &quot;verdict: NOT APPLYABLE ($(printf &#39;%s\n&#39; &quot;$rejects&quot; | wc -l | tr -d &#39; &#39;) rejection(s))&quot;
+  exit 1
+fi
+echo &quot;verdict: APPLYABLE ($( [ -n &quot;$warns&quot; ] &amp;&amp; printf &#39;%s\n&#39; &quot;$warns&quot; | wc -l | tr -d &#39; &#39; || echo 0 ) finding(s))&quot;
+exit 0
+</code>
+                  </pre>  </details> </section><p class="card">
+Projects are not auto-graded here. The rubric and the test cases above are the grading
+          contract — run them yourself on your own machine.
+</p>   </main> <footer class="site-footer"> <div class="wrap">  <p class="pager"> <a href="../unit-7/test.html">← Day 0 and day 2</a>  </p>  <p> <a href="../index.html">Syllabus</a> ·
+<a href="../certificate.html">Completion record</a> ·
+<a href="../sources.html">Sources</a> ·
+<button class="btn btn--quiet" type="button" data-reset>Reset progress</button> </p> <p class="site-license" data-license-id="all-rights-reserved"> <span>© 2026 ShipStream, LLC. </span> All rights reserved. </p> </div> </footer> <div aria-live="polite" class="skip" data-live></div> <dialog id="reset-dialog"> <h2>Erase saved progress?</h2> <p>
+This erases all quiz scores, reading progress, project checklists, and your name on the
+        certificate. It cannot be undone, and it affects only this course in this browser.
+</p> <div class="dialog__actions"> <button class="btn" type="button" data-reset-cancel>Cancel</button> <button class="btn btn--primary" type="button" data-reset-confirm>Erase</button> </div> </dialog> <script src="../assets/search-index.js" defer></script> <script src="../assets/site.js" defer></script> </body> </html>

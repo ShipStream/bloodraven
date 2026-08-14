@@ -1,0 +1,120 @@
+{
+  "flashcards": [
+    {
+      "front": "What class of state is Bloodraven's Dragonfly integration for?",
+      "back": "Cache and session state only, never durable application data — the CRD calls it \"non-durable cache/session state: emergency failover never blocks on it\".",
+      "orderIndex": 0
+    },
+    {
+      "front": "Which two labels does the active Dragonfly Service AND-gate?",
+      "back": "shipstream.io/dragonfly-role=master AND shipstream.io/dragonfly-traffic=enabled — a pod is an endpoint only when both match.",
+      "orderIndex": 1
+    },
+    {
+      "front": "You need to shed a Dragonfly pod from the active Service. What does the operator do to the traffic label?",
+      "back": "Deletes the key outright. The selector is an exists-and-equals check on \"enabled\", so a missing key sheds the endpoint with no ambiguity.",
+      "orderIndex": 2
+    },
+    {
+      "front": "You find the log line \"dragonfly emergency: target promoted via REPLICAOF NO ONE (sessions lost)\". Which branch ran?",
+      "back": "The emergency fallback: REPLTAKEOVER was tried first and failed, so the target was promoted as an empty master.",
+      "orderIndex": 3
+    },
+    {
+      "front": "What does the planned Dragonfly path do when REPLTAKEOVER fails?",
+      "back": "There is no REPLICAOF NO ONE fallback. onSyncTimeout decides: proceed continues flagged unpreserved, fail rolls back the MySQL fence.",
+      "orderIndex": 4
+    },
+    {
+      "front": "How long is the emergency Dragonfly budget, and where is it set?",
+      "back": "10 seconds, hard-coded in the operator (const budget = 10 * time.Second). It is not configurable.",
+      "orderIndex": 5
+    },
+    {
+      "front": "Where does status.plannedFailover.dragonfly.sessionsPreserved come from after an emergency promotion?",
+      "back": "Nowhere — emergency promotions never write the field. The outcome lives only in the log line and the Kubernetes event.",
+      "orderIndex": 6
+    },
+    {
+      "front": "spec.dragonfly.plannedFailover.maxSyncWait — default and second job?",
+      "back": "30s. As well as bounding WaitingForDragonflySync it is passed as the REPLTAKEOVER timeout argument.",
+      "orderIndex": 7
+    },
+    {
+      "front": "Why does the Dragonfly client set its read deadline to maxSyncWait + 5 s?",
+      "back": "So the client cannot give up before the server has spent its full drain budget and leave the caller unsure whether the promotion happened. At the 30 s default that is a 35 s deadline.",
+      "orderIndex": 8
+    },
+    {
+      "front": "onSyncTimeout — allowed values and default?",
+      "back": "An enum of proceed or fail, defaulting to proceed: the promotion goes ahead and the cache outcome is whatever it is.",
+      "orderIndex": 9
+    },
+    {
+      "front": "What kind of command is REPLTAKEOVER, and when did it appear?",
+      "back": "An ADMIN-port, GLOBAL_TRANS command taking a timeout in seconds, introduced in Dragonfly v1.5.0 and never given an official documentation page.",
+      "orderIndex": 10
+    },
+    {
+      "front": "Which two CEL rules does the CRD actually enforce on spec.dragonfly?",
+      "back": "An image is required when Dragonfly is enabled, and the image may not be tagged :latest. Nothing checks the Dragonfly version.",
+      "orderIndex": 11
+    }
+  ],
+  "quiz": [
+    {
+      "question": "A planned switchover of `playground` reports Succeeded. You dump the status and `sessionsPreserved` is absent — the key is not in the YAML at all. What have you learned about the counter app's session store?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 0,
+      "options": [
+        "Nothing about the outcome — the field is unknown, and you have to look at the promotion method, the log line and the event to find out",
+        "Sessions were lost; an absent boolean serialises the same as false",
+        "Sessions were preserved; the operator only writes the field when something went wrong",
+        "The switchover silently skipped the Dragonfly phases, so the session store is still on the old master"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "`sessionsPreserved` is a `*bool` and its three states are true, false and nil — nil means unknown, for example because Dragonfly was disabled for that attempt. Reading absent as false makes you chase an incident that did not happen; reading it as success makes you miss one that did. \"Sessions were lost\" is the classic misread of a nil pointer as its zero value: `omitempty` drops nil, not false. \"Only written on failure\" is backwards — a clean REPLTAKEOVER explicitly stamps true. And an absent field is not evidence about routing: the traffic-label shed and the role flip are what move the active Service, and they leave their own traces. (objective 11)"
+    },
+    {
+      "question": "Your primary dies. The Dragonfly target's REPLTAKEOVER fails. What does the operator do next, and what does it cost?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 1,
+      "options": [
+        "Retries REPLTAKEOVER until maxSyncWait expires, then aborts the whole failover",
+        "Falls back to REPLICAOF NO ONE, promoting the target as an empty master — sessions are lost, and it logs exactly that",
+        "Rolls back the MySQL promotion so cache and database stay consistent with each other",
+        "Leaves both Dragonfly pods as replicas so no site can serve stale session data"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "The emergency path is REPLTAKEOVER first, REPLICAOF NO ONE second, and the operator logs \"target promoted via REPLICAOF NO ONE (sessions lost)\". It buys availability with sessions because an emergency promotion cannot be retried — that trade is only acceptable because Dragonfly holds cache, never durable data. Retrying until maxSyncWait misreads the budget: the emergency attempt is bounded at 10 s regardless. Rolling back MySQL inverts the whole design — no Dragonfly outcome is ever permitted to affect MySQL. Leaving both as replicas would mean the cache serves nothing at all, which is worse than an empty master. (objectives 10, 11)"
+    },
+    {
+      "question": "A Dragonfly pod is wedged and answers nothing. Your MySQL primary then dies. The emergency MySQL promotion will be delayed while the operator waits on Dragonfly.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 2,
+      "correctAnswer": false,
+      "explanation": "The opposite is true: MySQL failover is never delayed by cache. The Dragonfly attempt runs after MySQL has already been promoted, under a hard-coded 10 s budget, and by explicit design it never returns an error to its caller, never blocks longer than that budget, and never leaves Dragonfly in a state that affects MySQL durability. The tempting reasoning — \"co-managed subsystems must be waited on\" — is exactly what the 10 s bound and the best-effort contract exist to refuse. (objective 10)"
+    },
+    {
+      "question": "During a takeover the operator sheds an endpoint from the active Dragonfly Service by deleting the `shipstream.io/dragonfly-traffic` key rather than setting it to a disabled value. Explain why deletion is the safer mechanism, and what property of the takeover it buys.",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 3,
+      "sampleAnswer": "The active Service selector is an exists-and-equals check on the value \"enabled\", so removing the key removes the endpoint immediately and unambiguously. Writing something like traffic=disabled would only work if the selector and the writer agreed on what \"disabled\" means — the selector does not test for a disabled value, it tests for enabled, so any other value happens to work by accident rather than by contract. Because the sequence strips the source's key before promoting the target and stamps the target's key only afterwards, and an absent key can never match, there is no window in which both instances satisfy the active selector. No moment where the Service load-balances session writes across two masters.",
+      "graderNotes": "A strong answer covers: (1) the selector is an exists-and-equals check on \"enabled\", so a missing key cannot match; (2) a written \"disabled\" value would depend on selector and writer agreeing on a magic string, i.e. correctness by convention rather than by mechanism; (3) the consequence — strip-before-promote plus an unmatched absent key means no window where both pods are endpoints of the active Service. Credit an answer that names the role label as the other half of the AND-gate. Do not credit an answer that only says \"deletion is atomic\" without saying what the selector actually tests.",
+      "explanation": "The mechanism is the lesson: the AND-gate of role and traffic, plus deletion rather than devaluation, is what makes the endpoint shed atomic and gives the takeover no dual-master window. (objective 12)"
+    },
+    {
+      "question": "You deploy `playground` with a Dragonfly image older than the stated v1.38.0 minimum. What actually happens?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 4,
+      "options": [
+        "Admission rejects the MysqlFailoverGroup — a CEL rule enforces the minimum version",
+        "The operator accepts it but falls back to REPLICAOF NO ONE on every promotion, so sessions are never preserved",
+        "Nothing stops you. The version floor is a support policy, not a guardrail; the only CEL rules are that an image is required and that it may not be `:latest`",
+        "The Helm chart refuses to install because the chart pins a minimum Dragonfly appVersion"
+      ],
+      "correctOptionIndex": 2,
+      "explanation": "Nothing in the API types, the controller or the chart enforces or checks a Dragonfly version, so an older build is admitted and will simply fail in ways nobody has characterised. The two CEL rules that do exist are narrower than people assume: image required when Dragonfly is enabled, and no `:latest`. \"Admission rejects it\" and \"the chart refuses\" are the same wrong instinct — treating a documented minimum as an enforced one. \"Falls back cleanly to REPLICAOF NO ONE\" is a more subtle trap: the operator has no version knowledge to make that decision with, so you get undefined behaviour rather than a graceful degradation. Note too that the shipped playground pin has itself drifted two minors behind current stable — version discipline is yours. (objective 10)"
+    }
+  ]
+}

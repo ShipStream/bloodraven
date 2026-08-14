@@ -1,0 +1,85 @@
+# Quiz — When the operator is down
+
+<!-- Rendered from course.json by course-template/tools/render-views.mjs.
+     Edit course.json, then re-render. Edits here are overwritten. -->
+
+## Question 1
+
+**Type:** MULTIPLE_CHOICE
+
+The operator for `playground` has been at zero replicas for ten minutes. Which observation is genuinely caused by the operator's absence?
+
+- `status.sites[].lastSeen` on the `playground` CR is ten minutes stale
+- `pdx` has stopped replicating from `iad`
+- Reads through the `-replicas` Service have started failing
+- The sidecar on `iad` has stopped enforcing its fencing rules
+
+**Correct option index:** 0
+
+**Explanation:**
+
+Status is written only by the operator, so stale `lastSeen` is the signature of operator absence and of nothing else. Replication is MySQL-to-MySQL — the operator never carries the data, so a stopped replica is a real replication fault you must diagnose on its own merits. Reads are served by MySQL through a Service whose endpoints already exist; a read outage during operator downtime means the replica itself is unwell. And sidecars are separate processes with their own timers: a dead operator is precisely the condition their lease rule exists for, so fencing is the one thing that does not stop. Attributing any of the last three to the operator sends you to the wrong pod (objective 10).
+
+## Question 2
+
+**Type:** TRUE_FALSE
+
+A primary crashes, and the operator happens to be down; it is restored two hours later and promotes the replica. Compared with the same crash handled immediately, more transactions are lost.
+
+**Correct answer:** false
+
+**Explanation:**
+
+The reversal: a longer outage does not enlarge the loss. RPO is fixed at the instant the primary died — the set of transactions that committed there but had not yet reached the survivor is sealed at that moment, because the dead primary is not replicating anything more. The operator that arrives two hours later promotes the same replica across the same GTID gap. What the two hours cost is write availability: `playground` had no writable site for the whole window. The intuition that drives people to answer 'true' is the correct one for a *lagging* replica under a *live* primary, where the gap grows with time — but a dead primary has stopped producing transactions to fall behind on (objectives 10, 11).
+
+## Question 3
+
+**Type:** MULTIPLE_CHOICE
+
+You want failover to complete faster, so you set `replicaCount: 3` on the Bloodraven chart. What actually changes?
+
+- Detection is roughly three times faster, because three replicas poll the sites in parallel
+- Only the gap between a crashed leader and a new one taking over; detection still costs `pollInterval × failureThreshold`
+- Nothing at all — the chart ignores `replicaCount` when leader election is enabled
+- Promotion is safer, because the standby replicas vote on the promotion decision
+
+**Correct option index:** 1
+
+**Explanation:**
+
+Leader election makes the extra replicas idle standbys, so the only thing they shorten is recovery from a leader crash. They do not poll in parallel — exactly one replica holds the lease and is the sole writer of status, DNS, and promotion commands, so detection still costs 2 s × 3 = 6 s on defaults. 'Nothing at all' is wrong in the other direction: the replicas really are scheduled and really do shorten the takeover gap, so this is a cheap availability improvement, just not a latency one. And there is no vote: promotion is a single-leader decision, not a quorum, so believing the standbys add safety review is a dangerous misreading of what leader election does (objective 10).
+
+## Question 4
+
+**Type:** SHORT_ANSWER
+
+The `playground` primary is down and there is no writable site. The operator pod is in CrashLoopBackOff on a bad image you pushed ten minutes ago, and the anti-flap cooldown has four minutes left to run. What do you do, and why?
+
+**Sample answer:**
+
+Roll the operator image back and get the operator running — that is the promotion path. `kubectl bloodraven promote` only writes the planned-failover annotation on the group, and the operator is the thing that reads it, so with the operator crashlooping the annotation just queues an intent and nothing promotes. Once the operator is up it will detect the dead primary in about 6 s and promote, and the cooldown does not lengthen the write outage further than its remaining four minutes; if I need the manual path to survive that window I set `spec.plannedFailover.onCooldown: defer` so the request is parked and retried at cooldown expiry rather than rejected outright. What I do not do is clear `read_only` on the replica by hand: with the operator down the sidecar still holds its last authoritative `activeSite`, sees a writable site that disagrees with it, and fences it straight back.
+
+**A full-credit answer shows:**
+
+A strong answer covers: (1) fixing the operator is the fastest path to writes because the plugin only writes resources the operator reads; (2) the plugin is not a back door — it never talks to MySQL; (3) the cooldown gates the planned path too, with `onCooldown` defaulting to `reject` and `defer` as the alternative; (4) hand-editing MySQL is fought by the sidecar's topology-mismatch rule. An answer that says 'promote by hand with the plugin' without noticing that the plugin needs a live operator has missed the decision.
+
+**Explanation:**
+
+The decision rule is: if the operator is coming back and there is no writable site, waiting wins, because the hand-driven path cannot start any sooner; if the operator is not coming back, restoring it *is* the promotion. The trap is treating `kubectl bloodraven promote` as an operator-independent break-glass. It writes an annotation and returns — the plugin only writes resources the operator already reads and never talks to MySQL, which is what keeps it from being a back door around the operator's logic (objective 12).
+
+## Question 5
+
+**Type:** MULTIPLE_CHOICE
+
+The operator issues `SET GLOBAL super_read_only = ON` against a site and the call returns a context-cancelled error. What does that tell you about the server's state?
+
+- The statement did not take effect; the server rolls back on client disconnect
+- The statement is still queued and will apply when the connection is re-established
+- Nothing definite — the write may already have been applied, so the state must be re-read before deciding anything
+- The site is unreachable, so the next action should target the other site
+
+**Correct option index:** 2
+
+**Explanation:**
+
+Cancelling the context tears down the client connection; it does not roll back a write the server already applied, so the only honest reading is 'unknown — go and look'. Bloodraven shipped a bug from the first option: treating the returned error as a failure made the monitor re-fence a site it had just successfully promoted. The second is wrong because nothing is queued — the statement either executed on the server or it did not, and the client no longer knows which. The fourth is the most expensive mistake, because an error tells you *you stopped waiting*, not that the remote side did nothing; acting on the other site while the first may have applied the write is how you turn ambiguity into divergence (objective 12).

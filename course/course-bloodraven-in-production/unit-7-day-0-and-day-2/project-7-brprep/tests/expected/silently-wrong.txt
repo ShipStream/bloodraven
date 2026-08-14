@@ -1,0 +1,8 @@
+brprep: ledger-db/ledger
+WARN spec.image is a floating tag; pin an immutable one or a restart can drift you onto an unsupported MySQL
+WARN backup profile nightly uses storage.type PVC; a backup sharing a failure domain with the data is an assumption, not a backup
+WARN site iad sets resources.requests != resources.limits; without Guaranteed QoS the kubelet may evict this MySQL first
+WARN replication.readOnlyMaxLagSeconds (300) is above maxLagSeconds (30); the reader endpoint is now looser than the group threshold
+WARN updateStrategy Recreate patches every site Deployment in one pass; both sites can restart at once
+verdict: APPLYABLE (5 finding(s))
+exit=0

@@ -1,0 +1,559 @@
+<!DOCTYPE html><html lang="en" class="no-js" data-theme="light" style="--accent: #3f7ac4; --accent-ink: #ffffff;"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Make the writer survive — Bloodraven in Production</title><meta name="description" content="Instrument a writer against `playground`, run both a planned and an emergency failover underneath it, and produce a drill record with the measured write-gap for each — so the recovery time you claim for your application is one you observed rather than one you assumed."><meta name="theme-color" content="#3f7ac4"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%233f7ac4'/%3E%3Ctext x='16' y='22' font-family='system-ui,sans-serif' font-size='18' font-weight='700' text-anchor='middle' fill='%23ffffff'%3EB%3C/text%3E%3C/svg%3E"><link rel="stylesheet" href="../assets/site.css"><script type="application/json" id="course-config">{"slug":"bloodraven-in-production","passingScore":70,"totalTopics":27,"rel":"../","units":[{"id":"u1","title":"Meet the group","topics":["u1t1","u1t2","u1t3"]},{"id":"u2","title":"How the operator decides","topics":["u2t1","u2t2","u2t3","u2t4"]},{"id":"u3","title":"Emergency failover, end to end","topics":["u3t1","u3t2","u3t3"]},{"id":"u4","title":"Where failover meets your application","topics":["u4t1","u4t2","u4t3","u4t4"]},{"id":"u5","title":"When the world misbehaves","topics":["u5t1","u5t2","u5t3","u5t4"]},{"id":"u6","title":"Backups, disaster recovery, and going live","topics":["u6t1","u6t2","u6t3","u6t4","u6t5"]},{"id":"u7","title":"Day 0 and day 2","topics":["u7t1","u7t2","u7t3","u7t4"]}]}</script></head> <body data-page-path="unit-4/project-1.html"> <a class="skip" href="#main">Skip to content</a> <header class="site-header"> <div class="wrap"> <a class="brand" href="../index.html"> <span class="brand__mark" aria-hidden="true">B</span> <span class="brand__text">Bloodraven in Production</span> </a> <span class="crumb">Where failover meets your application / Make the writer survive</span> <div class="search" data-search data-home="../index.html"> <label class="skip" for="site-search">Search this course</label> <input id="site-search" type="search" placeholder="Search  /" autocomplete="off"> <div class="search__results" role="listbox" aria-label="Search results" hidden></div> </div> <button class="btn btn--quiet" type="button" data-theme-toggle aria-label="Theme: light. Click to change.">
+○
+</button> </div> <div class="readbar" data-readbar aria-hidden="true"></div> </header> <main id="main" class="wrap">  <h1>Make the writer survive</h1> <div class="callout"> <h2 class="callout__title">Goal</h2> <p>Instrument a writer against <code>playground</code>, run both a planned and an emergency failover underneath it, and produce a drill record with the measured write-gap for each — so the recovery time you claim for your application is one you observed rather than one you assumed.</p> </div> <section class="reading"><p><em>Unit 4 project — Where failover meets your application. Running example: the <code>playground</code> failover
+group on the three-site <code>bloodraven-playground</code>.</em></p>
+<h2 id="goal">Goal</h2>
+<p>Instrument a writer against <code>playground</code>, run both a planned and an emergency failover underneath it, and produce a drill record with the measured write-gap for each — so the recovery time you claim for your application is one you observed rather than one you assumed.</p>
+<h2 id="how-this-works">How this works</h2>
+<p><code>playground</code> has moved its primary before. What you have never done is measure what that cost the
+application. This project produces that number twice — once for a planned move and once for an
+emergency one — and then makes you defend it.</p>
+<p>The number is the <strong>write-gap</strong>: the interval between the last write your application completed
+against the demoted site and the first it completed against the promoted one. Not the first
+successful query. Not the first successful read. The first completed <em>write</em>. A read that succeeds
+during the outage tells you the demoted host is alive — which it usually is — not that you recovered.</p>
+<p>You are handed four captures from <code>bloodraven-playground</code>, each a pair:</p>
+<ul>
+<li>a <strong>probe log</strong> (<code>*.jsonl</code>), one line per write or read the writer attempted, with <code>ts</code>, <code>op</code>,
+<code>ok</code>, <code>site</code>, <code>dbHost</code>, <code>readOnly</code> and <code>error</code>;</li>
+<li>a <strong>drill capture</strong> (<code>*-drill.json</code>), holding what was triggered plus the group status afterwards:
+<code>activeSite</code>, <code>lastFailover</code>, <code>lastFailoverTarget</code>, and for a planned move
+<code>status.plannedFailover</code>.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Capture</th><th>What happened</th></tr></thead><tbody><tr><td><code>emergency-probe.jsonl</code> + <code>emergency-drill.json</code></td><td><code>iad</code> scaled to 0, operator promoted <code>pdx</code>. Fixed writer: 30 s connection lifetime, read/write split, retry on 1290/1792</td></tr><tr><td><code>planned-probe.jsonl</code> + <code>planned-drill.json</code></td><td><code>bloodraven.shipstream.io/planned-failover=pdx</code>, same fixed writer</td></tr><tr><td><code>planned-probe-unbounded.jsonl</code> + <code>planned-drill-unbounded.json</code></td><td>the same planned procedure a day later, <code>pdx</code> -> <code>iad</code>, run against the <strong>unfixed</strong> writer: one pool for reads and writes, no lifetime bound, no split, no error-class retry</td></tr><tr><td><code>unclosed-probe.jsonl</code> + <code>emergency-drill.json</code></td><td>the emergency drill again, with the probe process killed before the gap ever closed</td></tr></tbody></table>
+<p>If your playground is up, run both drills yourself and capture your own artefacts in the same shape —
+<code>brdrill</code> reads either. If it is not, the supplied captures are real enough to do the work, and they
+are what the grader uses.</p>
+<h2 id="your-tasks">Your tasks</h2>
+<p>Open <code>starter/brdrill.py</code>. Four functions are stubbed, marked <code>TODO A</code> .. <code>TODO D</code>. Each returns
+<code>None</code> today, which is why the starter prints <code>not computed</code> and exits 1.</p>
+<p><strong>TODO A — <code>write_gap(samples, drill)</code>.</strong> Find the last successful <code>write</code> on
+<code>demoted_site(drill)</code> and the first successful <code>write</code> on <code>promoted_site(drill)</code> after it. Return
+<code>oldSite</code>, <code>newSite</code>, <code>lastWriteOldSite</code>, <code>firstWriteNewSite</code>, <code>gapSeconds</code> (rounded to three
+decimals) and <code>closed</code>. When either end is missing, <code>closed</code> is <code>False</code> and <code>gapSeconds</code> is <code>None</code> —
+never <code>0</code>. A gap you did not observe is not a gap of zero.</p>
+<p><strong>TODO B — <code>error_classes(samples)</code>.</strong> Count failed samples into <code>readOnlyRefusal</code> (error code
+1290 or 1792), <code>connection</code> (no error code at all — the transport failed, the server never
+answered) and <code>other</code>. All three keys always present. This is the split your retry policy runs on:
+retry the refusals, not the lock-wait timeouts.</p>
+<p><strong>TODO C — <code>stale_read_window(samples, drill)</code>.</strong> Count successful <code>read</code> samples served by the
+demoted site at or after <code>promotion_instant(drill)</code>, and report <code>count</code>, <code>first</code>, <code>last</code> and
+<code>seconds</code>. Two traps: <code>readOnly</code> is <code>true</code> on the <code>reader</code> site by design, so read-only is not the
+same as stale; and a clean kill produces zero stale reads, because the host is gone.</p>
+<p><strong>TODO D — <code>verdict(drill)</code>.</strong> Return the RPO verdict, in exactly the wording given in the
+docstring. A planned failover that reached <code>Succeeded</code> with <code>transactionsLost: 0</code> may claim RPO 0 by
+construction — the operator fenced the source, snapshotted its <code>GTID_EXECUTED</code>, and promoted only
+once the target’s set <em>contained</em> that snapshot. An emergency failover may claim nothing of the
+kind; its RPO comes from <code>divergentGtid</code> on the old primary, which this drill did not look at.</p>
+<p>Then run the comparison, and write <code>starter/drill-record.md</code>.</p>
+<h2 id="what-the-scaffolding-is-for">What the scaffolding is for</h2>
+<p>Everything that is not the measurement is already written: <code>argparse</code> wiring, JSONL and JSON
+loading, RFC3339 parsing (<code>parse_ts</code>) and rendering (<code>iso</code>), timestamp-ordering of samples, the
+<code>demoted_site</code> / <code>promoted_site</code> / <code>promotion_instant</code> accessors, record assembly in
+<code>build_record</code>, both output formats, the <code>--baseline</code> comparison, and the exit codes (0 complete,
+1 something not computed, 2 gap never closed). Do not rewrite them; they are there so the four
+functions are the only thing being graded.</p>
+<h2 id="expected-output">Expected output</h2>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="plaintext"><code><span class="line"><span>$ python3 brdrill.py --probe tests/fixtures/emergency-probe.jsonl \</span></span>
+<span class="line"><span>      --drill tests/fixtures/emergency-drill.json</span></span>
+<span class="line"><span>DRILL RECORD — playground / emergency / iad -> pdx</span></span>
+<span class="line"><span>  namespace            bloodraven-playground</span></span>
+<span class="line"><span>  trigger              kubectl -n bloodraven-playground scale deployment mysql-playground-iad --replicas=0</span></span>
+<span class="line"><span>  promotedAt           2026-08-11T09:14:18.000Z</span></span>
+<span class="line"><span>  lastWriteOldSite     2026-08-11T09:14:05.500Z</span></span>
+<span class="line"><span>  firstWriteNewSite    2026-08-11T09:14:19.500Z</span></span>
+<span class="line"><span>  writeGapSeconds      14.0</span></span>
+<span class="line"><span>  gapClosed            true</span></span>
+<span class="line"><span>  staleReads           0</span></span>
+<span class="line"><span>  staleReadSeconds     0.0</span></span>
+<span class="line"><span>  errors               readOnlyRefusal=0 connection=28 other=0</span></span>
+<span class="line"><span>  verdict              RPO not established by this drill — audit divergentGtid on the old primary</span></span>
+<span class="line"><span>  samples              102 (writes 51, reads 51)</span></span></code></pre>
+<h2 id="rules">Rules</h2>
+<ul>
+<li>Python standard library only. No live cluster is needed to complete or grade this.</li>
+<li>Do not edit anything under <code>tests/</code>. The captures are the evidence.</li>
+<li>Do not hardcode <code>iad</code> or <code>pdx</code>. One of the drills moves the primary the other way, and your tool
+should not care.</li>
+<li>Do not hardcode timestamps or counts. Every number in the record must fall out of the capture.</li>
+<li>Keep the three <code>verdict</code> strings exactly as the docstring gives them.</li>
+<li>14.0 s and 4.5 s are properties of these captures, not figures this course claims. The only
+numbers here that belong to Bloodraven are its own: 6 s detection (<code>pollInterval</code> 2 s ×
+<code>failureThreshold</code> 3) and 12.0 s to the <code>activeSite</code> flip on a clean kill.</li>
+</ul>
+<h2 id="steps">Steps</h2>
+<ul class="contains-task-list">
+<li class="task-list-item">
+<p><input type="checkbox" disabled> <strong>Run the starter and read what it will not tell you</strong> — From the project root, run <code>python3 starter/brdrill.py --probe tests/fixtures/emergency-probe.jsonl --drill tests/fixtures/emergency-drill.json</code>. It builds the whole record — group, mode, sites, promotion instant, sample counts — and reports <code>not computed</code> for every measurement. That is the shape of the answer; the four TODOs are the answer.
+<em>Done when:</em> The command runs without a traceback, prints a line containing <code>writeGapSeconds</code> and <code>not computed</code>, and exits 1.</p>
+</li>
+<li class="task-list-item">
+<p><input type="checkbox" disabled> <strong>TODO A — measure the write-gap</strong> — Implement <code>write_gap</code>. Last successful write on the demoted site, first successful write on the promoted site after it, difference in seconds. Reads do not close a write-gap. A capture that never shows a write landing on the new primary returns <code>closed: False</code> and <code>gapSeconds: None</code>.
+<em>Done when:</em> <code>brdrill.py --probe tests/fixtures/emergency-probe.jsonl --drill tests/fixtures/emergency-drill.json</code> prints <code>writeGapSeconds</code> as <code>14.0</code> and <code>gapClosed</code> as <code>true</code>; and <code>--probe tests/fixtures/unclosed-probe.jsonl --drill tests/fixtures/emergency-drill.json</code> prints <code>writeGapSeconds</code> as <code>UNCLOSED</code> and exits 2.</p>
+</li>
+<li class="task-list-item">
+<p><input type="checkbox" disabled> <strong>TODO B — split the errors your writer actually saw</strong> — Implement <code>error_classes</code>. Codes 1290 and 1792 are read-only refusals — the write that finally fails against a demoted primary. A null code is a transport failure. Everything else is <code>other</code>, and blanket retry-everything would replay it.
+<em>Done when:</em> <code>brdrill.py --probe tests/fixtures/planned-probe.jsonl --drill tests/fixtures/planned-drill.json</code> prints the <code>errors</code> line as <code>readOnlyRefusal=2 connection=6 other=2</code>.</p>
+</li>
+<li class="task-list-item">
+<p><input type="checkbox" disabled> <strong>TODO C — find the stale-read window</strong> — Implement <code>stale_read_window</code>. Successful reads served by the demoted site at or after <code>status.lastFailover</code>. In the baseline capture that window is the unfixed writer reading from a site that stopped being authoritative, and it ends only when the <code>shipstream.io/db-readonly-playground:NoExecute</code> taint’s <code>tolerationSeconds</code> expires and the pod is evicted.
+<em>Done when:</em> <code>brdrill.py --probe tests/fixtures/planned-probe-unbounded.jsonl --drill tests/fixtures/planned-drill-unbounded.json</code> prints <code>staleReads</code> as <code>56</code> and <code>staleReadSeconds</code> as <code>27.5</code>, while the emergency capture prints <code>staleReads</code> as <code>0</code>.</p>
+</li>
+<li class="task-list-item">
+<p><input type="checkbox" disabled> <strong>TODO D — say what the drill did and did not prove</strong> — Implement <code>verdict</code>, in the exact wording from the docstring. Planned reaching <code>Succeeded</code> with <code>transactionsLost: 0</code> claims RPO 0 by construction — fence, snapshot <code>GTID_EXECUTED</code>, promote only on a superset. Emergency claims nothing; its RPO is a <code>divergentGtid</code> audit, which this capture does not contain.
+<em>Done when:</em> The planned run prints a <code>verdict</code> beginning <code>RPO 0 by construction</code>, the emergency run prints one beginning <code>RPO not established by this drill</code>, and the emergency command now exits 0.</p>
+</li>
+<li class="task-list-item">
+<p><input type="checkbox" disabled> <strong>Prove the pool fix, do not assert it</strong> — Compare the fixed writer’s planned drill against the baseline capture taken with the unfixed one. Same procedure, same operator, same 30 s <code>drainTimeout</code> — the only difference is bounded connection lifetime, a read/write split, and error-class retry.
+<em>Done when:</em> <code>brdrill.py --probe tests/fixtures/planned-probe.jsonl --drill tests/fixtures/planned-drill.json --baseline tests/fixtures/planned-probe-unbounded.jsonl --baseline-drill tests/fixtures/planned-drill-unbounded.json</code> prints <code>baselineGapSeconds</code> as <code>63.5</code> and <code>gapDeltaSeconds</code> as <code>-59.0</code>.</p>
+</li>
+<li class="task-list-item">
+<p><input type="checkbox" disabled> <strong>Write the drill record</strong> — Fill in <code>starter/drill-record.md</code> from the tool’s output. Both drills, all three captures, and a clean line between what these captures measured and what you are carrying over from elsewhere. If you ran the drills on your own playground, record your numbers instead and say which cluster they came from.
+<em>Done when:</em> <code>starter/drill-record.md</code> contains a <code>## Measured</code> heading, an <code>## Assumed</code> heading, no remaining <code>TODO</code>, both write-gap values, and both <code>verdict</code> strings.</p>
+</li>
+<li class="task-list-item">
+<p><input type="checkbox" disabled> <strong>Notice which seconds were never Bloodraven’s</strong> — Bloodraven’s measured emergency promotion is 12.0 s to the <code>activeSite</code> flip, of which 6 s is detection (<code>pollInterval</code> 2 s × <code>failureThreshold</code> 3). Your emergency write-gap is longer than that. Subtract, and the remainder is the part of the outage that belongs to your writer — probe granularity before the kill, and pool recovery after the promotion. That remainder is the only part you can shorten.
+<em>Done when:</em> <code>starter/drill-record.md</code> contains a line beginning <code>Not Bloodraven's:</code> giving the emergency write-gap minus 12.0 s, with the subtraction shown (14.0 - 12.0 = 2.0).</p>
+</li>
+</ul>
+<h2 id="how-this-is-graded">How this is graded</h2>
+<p>Three ways at once: these steps, the human rubric in <a href="#project-rubric"><code>rubric.md</code></a>, and four machine
+tests run from <code>tests/</code> against the captures in <code>tests/fixtures/</code>. The tests do not need a cluster.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Test</th><th>Weight</th></tr></thead><tbody><tr><td><code>emergency_drill_write_gap</code></td><td>40</td></tr><tr><td><code>reads_do_not_close_a_write_gap</code></td><td>30</td></tr><tr><td><code>unclosed_gap_is_not_zero</code></td><td>15</td></tr><tr><td><code>error_classes_and_verdict</code></td><td>15</td></tr></tbody></table>
+<p>See <a href="#project-rubric"><code>rubric.md</code></a> for the criterion weights and what each one is looking for.</p></section> <section> <h2>Steps</h2> <ul class="checklist" data-checklist="u4p1"> <li> <input type="checkbox" id="step-u4p1-0"> <label for="step-u4p1-0">  <strong>Run the starter and read what it will not tell you</strong> <p>From the project root, run <code>python3 starter/brdrill.py --probe tests/fixtures/emergency-probe.jsonl --drill tests/fixtures/emergency-drill.json</code>. It builds the whole record — group, mode, sites, promotion instant, sample counts — and reports <code>not computed</code> for every measurement. That is the shape of the answer; the four TODOs are the answer.</p> <span class="criteria">Done when: The command runs without a traceback, prints a line containing <code>writeGapSeconds</code> and <code>not computed</code>, and exits 1.</span> </label> </li><li> <input type="checkbox" id="step-u4p1-1"> <label for="step-u4p1-1">  <strong>TODO A — measure the write-gap</strong> <p>Implement <code>write_gap</code>. Last successful write on the demoted site, first successful write on the promoted site after it, difference in seconds. Reads do not close a write-gap. A capture that never shows a write landing on the new primary returns <code>closed: False</code> and <code>gapSeconds: None</code>.</p> <span class="criteria">Done when: <code>brdrill.py --probe tests/fixtures/emergency-probe.jsonl --drill tests/fixtures/emergency-drill.json</code> prints <code>writeGapSeconds</code> as <code>14.0</code> and <code>gapClosed</code> as <code>true</code>; and <code>--probe tests/fixtures/unclosed-probe.jsonl --drill tests/fixtures/emergency-drill.json</code> prints <code>writeGapSeconds</code> as <code>UNCLOSED</code> and exits 2.</span> </label> </li><li> <input type="checkbox" id="step-u4p1-2"> <label for="step-u4p1-2">  <strong>TODO B — split the errors your writer actually saw</strong> <p>Implement <code>error_classes</code>. Codes 1290 and 1792 are read-only refusals — the write that finally fails against a demoted primary. A null code is a transport failure. Everything else is <code>other</code>, and blanket retry-everything would replay it.</p> <span class="criteria">Done when: <code>brdrill.py --probe tests/fixtures/planned-probe.jsonl --drill tests/fixtures/planned-drill.json</code> prints the <code>errors</code> line as <code>readOnlyRefusal=2 connection=6 other=2</code>.</span> </label> </li><li> <input type="checkbox" id="step-u4p1-3"> <label for="step-u4p1-3">  <strong>TODO C — find the stale-read window</strong> <p>Implement <code>stale_read_window</code>. Successful reads served by the demoted site at or after <code>status.lastFailover</code>. In the baseline capture that window is the unfixed writer reading from a site that stopped being authoritative, and it ends only when the <code>shipstream.io/db-readonly-playground:NoExecute</code> taint's <code>tolerationSeconds</code> expires and the pod is evicted.</p> <span class="criteria">Done when: <code>brdrill.py --probe tests/fixtures/planned-probe-unbounded.jsonl --drill tests/fixtures/planned-drill-unbounded.json</code> prints <code>staleReads</code> as <code>56</code> and <code>staleReadSeconds</code> as <code>27.5</code>, while the emergency capture prints <code>staleReads</code> as <code>0</code>.</span> </label> </li><li> <input type="checkbox" id="step-u4p1-4"> <label for="step-u4p1-4">  <strong>TODO D — say what the drill did and did not prove</strong> <p>Implement <code>verdict</code>, in the exact wording from the docstring. Planned reaching <code>Succeeded</code> with <code>transactionsLost: 0</code> claims RPO 0 by construction — fence, snapshot <code>GTID_EXECUTED</code>, promote only on a superset. Emergency claims nothing; its RPO is a <code>divergentGtid</code> audit, which this capture does not contain.</p> <span class="criteria">Done when: The planned run prints a <code>verdict</code> beginning <code>RPO 0 by construction</code>, the emergency run prints one beginning <code>RPO not established by this drill</code>, and the emergency command now exits 0.</span> </label> </li><li> <input type="checkbox" id="step-u4p1-5"> <label for="step-u4p1-5">  <strong>Prove the pool fix, do not assert it</strong> <p>Compare the fixed writer's planned drill against the baseline capture taken with the unfixed one. Same procedure, same operator, same 30 s <code>drainTimeout</code> — the only difference is bounded connection lifetime, a read/write split, and error-class retry.</p> <span class="criteria">Done when: <code>brdrill.py --probe tests/fixtures/planned-probe.jsonl --drill tests/fixtures/planned-drill.json --baseline tests/fixtures/planned-probe-unbounded.jsonl --baseline-drill tests/fixtures/planned-drill-unbounded.json</code> prints <code>baselineGapSeconds</code> as <code>63.5</code> and <code>gapDeltaSeconds</code> as <code>-59.0</code>.</span> </label> </li><li> <input type="checkbox" id="step-u4p1-6"> <label for="step-u4p1-6">  <strong>Write the drill record</strong> <p>Fill in <code>starter/drill-record.md</code> from the tool's output. Both drills, all three captures, and a clean line between what these captures measured and what you are carrying over from elsewhere. If you ran the drills on your own playground, record your numbers instead and say which cluster they came from.</p> <span class="criteria">Done when: <code>starter/drill-record.md</code> contains a <code>## Measured</code> heading, an <code>## Assumed</code> heading, no remaining <code>TODO</code>, both write-gap values, and both <code>verdict</code> strings.</span> </label> </li><li> <input type="checkbox" id="step-u4p1-7"> <label for="step-u4p1-7">  <strong>Notice which seconds were never Bloodraven's</strong> <p>Bloodraven's measured emergency promotion is 12.0 s to the <code>activeSite</code> flip, of which 6 s is detection (<code>pollInterval</code> 2 s × <code>failureThreshold</code> 3). Your emergency write-gap is longer than that. Subtract, and the remainder is the part of the outage that belongs to your writer — probe granularity before the kill, and pool recovery after the promotion. That remainder is the only part you can shorten.</p> <span class="criteria">Done when: <code>starter/drill-record.md</code> contains a line beginning <code>Not Bloodraven's:</code> giving the emergency write-gap minus 12.0 s, with the subtraction shown (14.0 - 12.0 = 2.0).</span> </label> </li> </ul> </section><section id="project-rubric"> <h2>How it is graded</h2> <div class="scroll-x"><table><thead><tr><th scope="col">Criterion</th><th scope="col">What earns it</th><th scope="col">Weight</th></tr></thead><tbody><tr><th scope="row">The write-gap is measured from writes, per site, and reports an unclosed gap as unclosed</th><td><code>write_gap</code> selects on <code>op == "write"</code> and <code>ok</code> being true, uses <code>demoted_site(drill)</code> and <code>promoted_site(drill)</code> rather than literal site names, and requires the closing write to come after the opening one. When either end is absent the result is <code>closed: False</code> with <code>gapSeconds: None</code>, and the CLI prints <code>UNCLOSED</code> and exits 2. Full marks require all three: writes only, sites from the drill, and no zero substituted for an unmeasured gap.</td><td>30</td></tr><tr><th scope="row">Stale reads and error classes are counted on the right signal</th><td><code>stale_read_window</code> counts successful reads served by the demoted site at or after <code>status.lastFailover</code>, and returns a real zero for the emergency capture rather than a crash or a <code>None</code>. It does not use <code>readOnly</code> as the test, which would sweep in the <code>reader</code> site, which reports read_only=1 by design. <code>error_classes</code> returns all three keys always, puts both 1290 and 1792 in <code>readOnlyRefusal</code>, and puts a null error code in <code>connection</code> rather than <code>other</code>.</td><td>20</td></tr><tr><th scope="row">The verdict separates what the drill proved from what it did not</th><td><code>verdict</code> claims RPO 0 only for a planned failover that reached <code>Succeeded</code> with <code>transactionsLost: 0</code>, and attributes it to the GTID superset gate rather than to the measured gap. A planned failover in any other phase, and every emergency failover, return a not-established string. Credit is lost if a write-gap is anywhere presented as an RPO, or if an emergency drill is allowed to claim zero loss.</td><td>20</td></tr><tr><th scope="row">The drill record is a usable operational artefact</th><td><code>drill-record.md</code> names both drills with their triggers and the direction each moved the primary, carries the measured gaps and the baseline delta, keeps <code>## Measured</code> and <code>## Assumed</code> genuinely separate, and states what the drill did not prove. The attribution line subtracts Bloodraven's 12.0 s promotion from the emergency gap and shows the arithmetic. No <code>TODO</code> left behind.</td><td>15</td></tr><tr><th scope="row">Craft: clear code, honest failure handling, no invented data</th><td>The four functions are short and readable, return the documented shapes exactly, and do not mutate the loaded samples. Missing ends, empty selections and absent <code>plannedFailover</code> blocks are handled without tracebacks and without silently substituting defaults. No timestamp, count or site name is hardcoded from the fixtures; every printed number is derived from the capture that was loaded.</td><td>15</td></tr><tr><th scope="row">Total</th><td></td><td><strong>100</strong></td></tr></tbody></table></div> </section><section id="project-test-cases"> <h2>Test cases</h2> <div class="scroll-x"> <table> <thead> <tr> <th scope="col">Test</th> <th scope="col">Checks</th> <th scope="col">Expected</th> <th scope="col">Weight</th> </tr> </thead> <tbody> <tr> <th scope="row">emergency_drill_write_gap</th> <td> Correctness on the canonical capture: the clean-kill emergency drill must measure a 14.0 s write-gap from 09:14:05.500Z to 09:14:19.500Z, report zero stale reads (the host was gone), and refuse to claim an RPO. Checks the endpoints, not just the difference. </td> <td> <code>PASS</code> </td> <td>40</td> </tr><tr> <th scope="row">reads_do_not_close_a_write_gap</th> <td> Catches a shortcut: counting any successful sample as recovery. In the baseline capture the unfixed writer keeps getting successful READS from the demoted primary for the whole outage while every write is refused with 1290, so an <code>op</code>-blind implementation reports 2.25 s instead of 63.5 s. The same test also moves the primary pdx -> iad, so a tool that hardcodes the site names from the emergency capture fails here too. </td> <td> <code>PASS</code> </td> <td>30</td> </tr><tr> <th scope="row">unclosed_gap_is_not_zero</th> <td> Generality on an awkward capture: the probe process died two seconds before the promotion landed, so the gap never closed. The tool must report <code>closed: False</code>, <code>gapSeconds: None</code>, print <code>UNCLOSED</code> and exit 2 — a zero here would be a measurement nobody took. </td> <td> <code>PASS</code> </td> <td>15</td> </tr><tr> <th scope="row">error_classes_and_verdict</th> <td> Structural: asserts the error taxonomy exists and is used. Both 1290 and 1792 land in <code>readOnlyRefusal</code>, a null code lands in <code>connection</code>, a lock-wait timeout lands in <code>other</code>, all three keys are always present, and <code>verdict</code> is derived from <code>status.plannedFailover.phase</code> and <code>transactionsLost</code> — a planned failover stalled in <code>WaitingForLag</code> may not claim RPO 0. </td> <td> <code>PASS</code> </td> <td>15</td> </tr> </tbody> </table> </div>  </section><section id="project-starter"> <h2>Starter files</h2> <details class="filelist card"> <summary>2 files</summary>  <h3>brdrill.py</h3> <pre>                    <code>#!/usr/bin/env python3
+&quot;&quot;&quot;brdrill — turn a failover drill capture into a drill record.
+
+You give it two artefacts from one drill against the `playground` failover group:
+
+  --probe   a JSONL probe log, one line per write or read attempt your writer made
+  --drill   a JSON capture of the drill: what you triggered, and the group status
+            afterwards (activeSite, lastFailover, lastFailoverTarget, and for a
+            planned move, status.plannedFailover)
+
+It prints a drill record: the measured write-gap, the stale-read window, the
+error classes your writer actually saw, and an RPO verdict.
+
+Everything peripheral is wired already — argument parsing, JSONL and JSON
+loading, timestamp parsing, record assembly, both output formats, and the exit
+codes. Four functions are left for you. Each is marked TODO A .. TODO D and is
+referenced by letter from the project instructions.
+
+Usage:
+  python3 brdrill.py --probe P.jsonl --drill D.json
+  python3 brdrill.py --probe P.jsonl --drill D.json --json
+  python3 brdrill.py --probe P.jsonl --drill D.json \
+      --baseline B.jsonl --baseline-drill BD.json
+
+Exit codes: 0 record complete and the gap closed; 1 something is still
+`not computed`; 2 the gap never closed in this capture.
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+
+# The two MySQL error codes a write gets from a demoted primary. A pooled
+# connection that survived a promotion fails here first — never on a health
+# check, which passes, because the server is alive and merely read-only.
+READ_ONLY_REFUSAL_CODES = (1290, 1792)
+
+
+# --------------------------------------------------------------------------
+# Wired: loading and parsing.
+# --------------------------------------------------------------------------
+
+def parse_ts(value: str) -&gt; datetime:
+    &quot;&quot;&quot;Parse an RFC3339 timestamp from a probe log or a status field.&quot;&quot;&quot;
+    if not isinstance(value, str) or not value:
+        raise ValueError(&quot;not a timestamp: %r&quot; % (value,))
+    text = value.strip()
+    if text.endswith(&quot;Z&quot;):
+        text = text[:-1] + &quot;+00:00&quot;
+    dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def iso(dt):
+    &quot;&quot;&quot;Render a datetime back as RFC3339 with millisecond precision.&quot;&quot;&quot;
+    if dt is None:
+        return None
+    return dt.strftime(&quot;%Y-%m-%dT%H:%M:%S.%f&quot;)[:-3] + &quot;Z&quot;
+
+
+def load_probe(path):
+    &quot;&quot;&quot;Load a JSONL probe log. Blank lines are skipped; `ts` is parsed into
+    `at`. Samples are returned in timestamp order, whatever order they were
+    written in.&quot;&quot;&quot;
+    samples = []
+    with open(path, &quot;r&quot;, encoding=&quot;utf-8&quot;) as fh:
+        for lineno, line in enumerate(fh, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(&quot;%s:%d: not JSON: %s&quot; % (path, lineno, exc))
+            try:
+                row[&quot;at&quot;] = parse_ts(row.get(&quot;ts&quot;))
+            except ValueError as exc:
+                raise SystemExit(&quot;%s:%d: %s&quot; % (path, lineno, exc))
+            samples.append(row)
+    if not samples:
+        raise SystemExit(&quot;%s: no probe samples&quot; % path)
+    samples.sort(key=lambda r: r[&quot;at&quot;])
+    return samples
+
+
+def load_drill(path):
+    &quot;&quot;&quot;Load a drill capture and check the fields every record needs.&quot;&quot;&quot;
+    with open(path, &quot;r&quot;, encoding=&quot;utf-8&quot;) as fh:
+        drill = json.load(fh)
+    for section in (&quot;drill&quot;, &quot;status&quot;):
+        if section not in drill:
+            raise SystemExit(&quot;%s: missing top-level %r&quot; % (path, section))
+    for field in (&quot;mode&quot;, &quot;group&quot;, &quot;demotedSite&quot;):
+        if not drill[&quot;drill&quot;].get(field):
+            raise SystemExit(&quot;%s: missing drill.%s&quot; % (path, field))
+    for field in (&quot;lastFailover&quot;, &quot;lastFailoverTarget&quot;):
+        if not drill[&quot;status&quot;].get(field):
+            raise SystemExit(&quot;%s: missing status.%s&quot; % (path, field))
+    return drill
+
+
+def demoted_site(drill):
+    &quot;&quot;&quot;The site the primary moved off. You record it when you run the drill.&quot;&quot;&quot;
+    return drill[&quot;drill&quot;][&quot;demotedSite&quot;]
+
+
+def promoted_site(drill):
+    &quot;&quot;&quot;The site the primary moved to, straight out of the group status.&quot;&quot;&quot;
+    return drill[&quot;status&quot;][&quot;lastFailoverTarget&quot;]
+
+
+def promotion_instant(drill):
+    &quot;&quot;&quot;When the operator stamped the promotion. `status.lastFailover` is
+    RFC3339 at second precision, so it is coarser than your probe log.&quot;&quot;&quot;
+    return parse_ts(drill[&quot;status&quot;][&quot;lastFailover&quot;])
+
+
+# --------------------------------------------------------------------------
+# TODO A — write_gap
+#
+# Return a dict describing the write-gap: the interval between the last write
+# your application completed against the demoted site and the first it
+# completed against the promoted one.
+#
+#   {&quot;oldSite&quot;: str, &quot;newSite&quot;: str,
+#    &quot;lastWriteOldSite&quot;: datetime|None, &quot;firstWriteNewSite&quot;: datetime|None,
+#    &quot;gapSeconds&quot;: float|None, &quot;closed&quot;: bool}
+#
+# `lastWriteOldSite` is the last sample with op == &quot;write&quot;, ok true, and
+# site == demoted_site(drill). `firstWriteNewSite` is the earliest sample with
+# op == &quot;write&quot;, ok true, site == promoted_site(drill), and a timestamp after
+# `lastWriteOldSite`. `gapSeconds` is the difference in seconds, rounded to
+# three decimals. `closed` is True only when both ends were found; when it is
+# False, `gapSeconds` is None — do not fall back to 0.
+#
+# Reads are not writes. A read that succeeds during the outage tells you the
+# site is alive, not that your application recovered.
+# --------------------------------------------------------------------------
+
+def write_gap(samples, drill):
+    return None  # TODO A
+
+
+# --------------------------------------------------------------------------
+# TODO B — error_classes
+#
+# Return counts of the failed samples by error class, with all three keys
+# always present:
+#
+#   {&quot;readOnlyRefusal&quot;: int, &quot;connection&quot;: int, &quot;other&quot;: int}
+#
+# Classify each sample with ok false by its error code:
+#   * code in READ_ONLY_REFUSAL_CODES  -&gt; &quot;readOnlyRefusal&quot;
+#   * code is null/missing             -&gt; &quot;connection&quot; (the client never got a
+#                                          server error; the transport failed)
+#   * anything else                    -&gt; &quot;other&quot;
+#
+# This is the split that decides what your retry policy may retry. Blanket
+# retry-everything replays statements that failed for reasons a retry cannot fix.
+# --------------------------------------------------------------------------
+
+def error_classes(samples):
+    return None  # TODO B
+
+
+# --------------------------------------------------------------------------
+# TODO C — stale_read_window
+#
+# Return the window during which reads kept succeeding against the demoted
+# site after the promotion had already been stamped:
+#
+#   {&quot;count&quot;: int, &quot;first&quot;: datetime|None, &quot;last&quot;: datetime|None,
+#    &quot;seconds&quot;: float}
+#
+# Count samples with op == &quot;read&quot;, ok true, site == demoted_site(drill), and a
+# timestamp at or after promotion_instant(drill). `seconds` is last - first
+# rounded to three decimals, or 0.0 when there are fewer than two.
+#
+# Two traps. `readOnly` is true on the `reader` site by design, so a reader
+# that reports read_only=1 is not stale — the site is. And a clean kill
+# produces no stale reads at all: the host is gone, so the reads fail. Zero
+# here is a real answer, not a missing one.
+# --------------------------------------------------------------------------
+
+def stale_read_window(samples, drill):
+    return None  # TODO C
+
+
+# --------------------------------------------------------------------------
+# TODO D — verdict
+#
+# Return the RPO verdict for this drill as a string. Exactly these three:
+#
+#   mode &quot;planned&quot;, status.plannedFailover.phase == &quot;Succeeded&quot; and
+#   transactionsLost == 0:
+#     &quot;RPO 0 by construction (target GTID_EXECUTED contained sourceGtidAtFence
+#      before promotion)&quot;            &lt;- one line, single spaces
+#
+#   mode &quot;planned&quot;, any other phase:
+#     &quot;planned failover did not reach Succeeded (phase=&lt;phase&gt;) — RPO not established&quot;
+#
+#   mode &quot;emergency&quot;:
+#     &quot;RPO not established by this drill — audit divergentGtid on the old primary&quot;
+#
+# A write-gap is not an RPO. The gap says how long your application could not
+# write; the RPO says how much committed work the promotion threw away. Only
+# the planned path can claim zero, and it claims it from the GTID superset
+# gate, not from this capture.
+# --------------------------------------------------------------------------
+
+def verdict(drill):
+    return None  # TODO D
+
+
+# --------------------------------------------------------------------------
+# Wired: record assembly and output.
+# --------------------------------------------------------------------------
+
+def build_record(samples, drill):
+    gap = write_gap(samples, drill)
+    errors = error_classes(samples)
+    stale = stale_read_window(samples, drill)
+    writes = sum(1 for s in samples if s.get(&quot;op&quot;) == &quot;write&quot;)
+    reads = sum(1 for s in samples if s.get(&quot;op&quot;) == &quot;read&quot;)
+    record = {
+        &quot;group&quot;: drill[&quot;drill&quot;][&quot;group&quot;],
+        &quot;namespace&quot;: drill[&quot;drill&quot;].get(&quot;namespace&quot;),
+        &quot;mode&quot;: drill[&quot;drill&quot;][&quot;mode&quot;],
+        &quot;oldSite&quot;: demoted_site(drill),
+        &quot;newSite&quot;: promoted_site(drill),
+        &quot;promotedAt&quot;: iso(promotion_instant(drill)),
+        &quot;trigger&quot;: drill[&quot;drill&quot;].get(&quot;trigger&quot;) or drill[&quot;drill&quot;].get(&quot;injection&quot;),
+        &quot;samples&quot;: {&quot;total&quot;: len(samples), &quot;writes&quot;: writes, &quot;reads&quot;: reads},
+        &quot;lastWriteOldSite&quot;: iso(gap[&quot;lastWriteOldSite&quot;]) if gap else None,
+        &quot;firstWriteNewSite&quot;: iso(gap[&quot;firstWriteNewSite&quot;]) if gap else None,
+        &quot;writeGapSeconds&quot;: gap[&quot;gapSeconds&quot;] if gap else None,
+        &quot;gapClosed&quot;: gap[&quot;closed&quot;] if gap else None,
+        &quot;staleReads&quot;: stale[&quot;count&quot;] if stale else None,
+        &quot;staleReadSeconds&quot;: stale[&quot;seconds&quot;] if stale else None,
+        &quot;staleReadFirst&quot;: iso(stale[&quot;first&quot;]) if stale else None,
+        &quot;staleReadLast&quot;: iso(stale[&quot;last&quot;]) if stale else None,
+        &quot;errors&quot;: errors,
+        &quot;verdict&quot;: verdict(drill),
+        &quot;_complete&quot;: all(x is not None for x in (gap, errors, stale)) and verdict(drill) is not None,
+    }
+    return record
+
+
+def _cell(value):
+    if value is None:
+        return &quot;not computed&quot;
+    if value is True:
+        return &quot;true&quot;
+    if value is False:
+        return &quot;false&quot;
+    return str(value)
+
+
+def format_record(record):
+    lines = []
+    lines.append(&quot;DRILL RECORD — %s / %s / %s -&gt; %s&quot; % (
+        record[&quot;group&quot;], record[&quot;mode&quot;], record[&quot;oldSite&quot;], record[&quot;newSite&quot;]))
+    rows = [
+        (&quot;namespace&quot;, record[&quot;namespace&quot;]),
+        (&quot;trigger&quot;, record[&quot;trigger&quot;]),
+        (&quot;promotedAt&quot;, record[&quot;promotedAt&quot;]),
+        (&quot;lastWriteOldSite&quot;, record[&quot;lastWriteOldSite&quot;]),
+        (&quot;firstWriteNewSite&quot;, record[&quot;firstWriteNewSite&quot;]),
+        (&quot;writeGapSeconds&quot;, &quot;UNCLOSED&quot; if record[&quot;gapClosed&quot;] is False else record[&quot;writeGapSeconds&quot;]),
+        (&quot;gapClosed&quot;, record[&quot;gapClosed&quot;]),
+        (&quot;staleReads&quot;, record[&quot;staleReads&quot;]),
+        (&quot;staleReadSeconds&quot;, record[&quot;staleReadSeconds&quot;]),
+    ]
+    errors = record[&quot;errors&quot;]
+    if errors is None:
+        rows.append((&quot;errors&quot;, None))
+    else:
+        rows.append((&quot;errors&quot;, &quot;readOnlyRefusal=%d connection=%d other=%d&quot; % (
+            errors.get(&quot;readOnlyRefusal&quot;, 0), errors.get(&quot;connection&quot;, 0), errors.get(&quot;other&quot;, 0))))
+    rows.append((&quot;verdict&quot;, record[&quot;verdict&quot;]))
+    rows.append((&quot;samples&quot;, &quot;%d (writes %d, reads %d)&quot; % (
+        record[&quot;samples&quot;][&quot;total&quot;], record[&quot;samples&quot;][&quot;writes&quot;], record[&quot;samples&quot;][&quot;reads&quot;])))
+    if &quot;baselineGapSeconds&quot; in record:
+        rows.append((&quot;baselineGapSeconds&quot;, record[&quot;baselineGapSeconds&quot;]))
+        rows.append((&quot;gapDeltaSeconds&quot;, record[&quot;gapDeltaSeconds&quot;]))
+    for key, value in rows:
+        lines.append(&quot;  %-20s %s&quot; % (key, _cell(value)))
+    return &quot;\n&quot;.join(lines)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=&quot;turn a failover drill capture into a drill record&quot;)
+    parser.add_argument(&quot;--probe&quot;, required=True, help=&quot;JSONL probe log from the writer&quot;)
+    parser.add_argument(&quot;--drill&quot;, required=True, help=&quot;JSON drill capture (trigger + group status)&quot;)
+    parser.add_argument(&quot;--baseline&quot;, help=&quot;probe log from an earlier run to compare against&quot;)
+    parser.add_argument(&quot;--baseline-drill&quot;, help=&quot;drill capture belonging to --baseline&quot;)
+    parser.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;, help=&quot;emit the record as JSON&quot;)
+    args = parser.parse_args(argv)
+
+    record = build_record(load_probe(args.probe), load_drill(args.drill))
+
+    if args.baseline or args.baseline_drill:
+        if not (args.baseline and args.baseline_drill):
+            raise SystemExit(&quot;--baseline and --baseline-drill must be given together&quot;)
+        base_gap = write_gap(load_probe(args.baseline), load_drill(args.baseline_drill))
+        base_seconds = base_gap[&quot;gapSeconds&quot;] if base_gap else None
+        record[&quot;baselineGapSeconds&quot;] = base_seconds
+        if base_seconds is None or record[&quot;writeGapSeconds&quot;] is None:
+            record[&quot;gapDeltaSeconds&quot;] = None
+        else:
+            record[&quot;gapDeltaSeconds&quot;] = round(record[&quot;writeGapSeconds&quot;] - base_seconds, 3)
+
+    if args.json:
+        print(json.dumps({k: v for k, v in record.items() if k != &quot;_complete&quot;}, indent=2))
+    else:
+        print(format_record(record))
+
+    if not record[&quot;_complete&quot;]:
+        return 1
+    if record[&quot;gapClosed&quot;] is False:
+        return 2
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+</code>
+                  </pre>  <h3>drill-record.md</h3> <pre>                    <code># Failover drill record — `playground`
+
+Fill this in from `brdrill` output. Keep the drills separate: they are different
+events making different claims. Replace every `TODO`.
+
+## Drills
+
+| Drill | Trigger | Moved | Capture |
+| --- | --- | --- | --- |
+| emergency | TODO | TODO -&gt; TODO | `tests/fixtures/emergency-probe.jsonl` |
+| planned | TODO | TODO -&gt; TODO | `tests/fixtures/planned-probe.jsonl` |
+| planned, baseline (unfixed pool) | TODO | TODO -&gt; TODO | `tests/fixtures/planned-probe-unbounded.jsonl` |
+
+## Measured
+
+Only numbers these captures produced. Paste the `brdrill` lines.
+
+- emergency: `writeGapSeconds` TODO
+- planned: `writeGapSeconds` TODO
+- planned, baseline: `writeGapSeconds` TODO, `gapDeltaSeconds` TODO
+- stale reads, baseline: TODO reads over TODO s, first at TODO
+- error classes, planned: TODO
+
+## Assumed
+
+Everything carried over rather than observed here — the RPO verdicts, and any
+claim about what happens on a capture you did not take.
+
+- verdict (emergency): TODO
+- verdict (planned): TODO
+- what this drill did **not** prove: TODO
+
+## Attribution
+
+Bloodraven&#39;s measured emergency promotion is 12.0 s to the `activeSite` flip
+(detection is `pollInterval` × `failureThreshold` = 2 s × 3 = 6 s of it). Subtract
+it from your emergency write-gap and the remainder belongs to your writer.
+
+Not Bloodraven&#39;s: TODO s
+
+## What would change the number
+
+TODO — name the pool setting, the drain budget, or the strategy, and say which
+direction it moves the gap.
+</code>
+                  </pre>  </details> </section><p class="card">
+Projects are not auto-graded here. The rubric and the test cases above are the grading
+          contract — run them yourself on your own machine.
+</p>   </main> <footer class="site-footer"> <div class="wrap">  <p class="pager"> <a href="../unit-4/test.html">← The application&#39;s half of failover</a> <a href="../unit-5/topic-1.html">Self-fencing: the sidecar&#39;s two rules →</a> </p>  <p> <a href="../index.html">Syllabus</a> ·
+<a href="../certificate.html">Completion record</a> ·
+<a href="../sources.html">Sources</a> ·
+<button class="btn btn--quiet" type="button" data-reset>Reset progress</button> </p> <p class="site-license" data-license-id="all-rights-reserved"> <span>© 2026 ShipStream, LLC. </span> All rights reserved. </p> </div> </footer> <div aria-live="polite" class="skip" data-live></div> <dialog id="reset-dialog"> <h2>Erase saved progress?</h2> <p>
+This erases all quiz scores, reading progress, project checklists, and your name on the
+        certificate. It cannot be undone, and it affects only this course in this browser.
+</p> <div class="dialog__actions"> <button class="btn" type="button" data-reset-cancel>Cancel</button> <button class="btn btn--primary" type="button" data-reset-confirm>Erase</button> </div> </dialog> <script src="../assets/search-index.js" defer></script> <script src="../assets/site.js" defer></script> </body> </html>

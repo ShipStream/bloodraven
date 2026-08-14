@@ -1,0 +1,351 @@
+{
+  "id": "reader-soak-3x",
+  "title": "Reader soaked past 3x maxLagSeconds; group untouched (chaos scenario 42)",
+  "note": "SOURCE_DELAY on the reader only. Both replication threads keep running on the correct source, lag passes 90s (3 x maxLagSeconds 30), the group stays Ready, no failover fires and no cooldown is consumed. The reader has already left mysql-playground-replicas. Nothing here is a fault.",
+  "now": 1786536000,
+  "samples": [
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "iad",
+        "state": "writable"
+      },
+      "value": 1
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "iad",
+        "state": "read-only"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "iad",
+        "state": "unreachable"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "iad",
+        "state": "unknown"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "pdx",
+        "state": "writable"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "pdx",
+        "state": "read-only"
+      },
+      "value": 1
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "pdx",
+        "state": "unreachable"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "pdx",
+        "state": "unknown"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "reader",
+        "state": "writable"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "reader",
+        "state": "read-only"
+      },
+      "value": 1
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "reader",
+        "state": "unreachable"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_site_state",
+      "labels": {
+        "site": "reader",
+        "state": "unknown"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_replication_lag_seconds",
+      "labels": {
+        "site": "pdx"
+      },
+      "value": 2
+    },
+    {
+      "name": "bloodraven_replication_lag_seconds",
+      "labels": {
+        "site": "reader"
+      },
+      "value": 91
+    },
+    {
+      "name": "bloodraven_replication_running",
+      "labels": {
+        "site": "pdx",
+        "thread": "io"
+      },
+      "value": 1
+    },
+    {
+      "name": "bloodraven_replication_running",
+      "labels": {
+        "site": "pdx",
+        "thread": "sql"
+      },
+      "value": 1
+    },
+    {
+      "name": "bloodraven_replication_running",
+      "labels": {
+        "site": "reader",
+        "thread": "io"
+      },
+      "value": 1
+    },
+    {
+      "name": "bloodraven_replication_running",
+      "labels": {
+        "site": "reader",
+        "thread": "sql"
+      },
+      "value": 1
+    },
+    {
+      "name": "bloodraven_divergent_transactions",
+      "labels": {
+        "site": "iad"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_divergent_transactions",
+      "labels": {
+        "site": "pdx"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_divergent_transactions",
+      "labels": {
+        "site": "reader"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_archiver_backlog_files",
+      "labels": {
+        "namespace": "playground",
+        "group": "playground",
+        "site": "iad"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_backup_last_success_timestamp_seconds",
+      "labels": {
+        "group": "playground",
+        "profile": "nightly"
+      },
+      "value": 1786532400
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "iad",
+        "phase": "pending"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "iad",
+        "phase": "unsealed"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "iad",
+        "phase": "escrowed"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "iad",
+        "phase": "sealed"
+      },
+      "value": 1
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "iad",
+        "phase": "failed"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "pdx",
+        "phase": "pending"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "pdx",
+        "phase": "unsealed"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "pdx",
+        "phase": "escrowed"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "pdx",
+        "phase": "sealed"
+      },
+      "value": 1
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "pdx",
+        "phase": "failed"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "reader",
+        "phase": "pending"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "reader",
+        "phase": "unsealed"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "reader",
+        "phase": "escrowed"
+      },
+      "value": 0
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "reader",
+        "phase": "sealed"
+      },
+      "value": 1
+    },
+    {
+      "name": "bloodraven_keyring_phase",
+      "labels": {
+        "mysql_namespace": "playground",
+        "failover_group": "playground",
+        "site": "reader",
+        "phase": "failed"
+      },
+      "value": 0
+    },
+    {
+      "name": "up",
+      "labels": {
+        "job": "bloodraven",
+        "namespace": "bloodraven-system"
+      },
+      "value": 1
+    }
+  ],
+  "increases": {
+    "15m": [],
+    "1h": []
+  },
+  "expectedAlerts": []
+}

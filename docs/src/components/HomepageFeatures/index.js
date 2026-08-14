@@ -1,7 +1,29 @@
 import clsx from 'clsx';
 import Heading from '@theme/Heading';
+import useBaseUrl from '@docusaurus/useBaseUrl';
+
+/* The course is a self-contained static site under static/course/, so it has
+   no Docusaurus route. Link to it with a plain anchor and useBaseUrl \u2014 a
+   routed <Link> would be rejected by onBrokenLinks: 'throw', and a hardcoded
+   path would break if baseUrl ever changes. */
+function CourseLink() {
+  return <a href={useBaseUrl('/course/')}>Bloodraven in Production</a>;
+}
 
 const FeatureList = [
+  {
+    icon: '\uD83C\uDF93',
+    title: 'Get Your Team Up to Speed',
+    description: (
+      <>
+        <CourseLink /> is a hands-on course for devops and sysadmins \u2014 seven
+        units, seven graded projects, and a local three-site cluster you break on
+        purpose. Your team learns how failover actually behaves \u2014 and how to
+        build, secure and upgrade a group \u2014 without reading the docs end to
+        end.
+      </>
+    ),
+  },
   {
     icon: '\u26A1',
     title: 'Automated Failover',
@@ -95,7 +117,7 @@ const FeatureList = [
     title: 'Chaos-Tested in CI',
     description: (
       <>
-        30+ automated chaos scenarios — primary kills, network partitions,
+        49 automated chaos scenarios — primary kills, network partitions,
         split-brain, self-fencing, data wipes, backup and PITR verification —
         run nightly against real Kubernetes clusters, and a smoke subset gates
         every release before artifacts ship.

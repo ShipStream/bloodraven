@@ -1,0 +1,141 @@
+{
+  "learningGoals": [
+    {
+      "title": "Implement the cross-site evaluation table in evaluation order, fence-first return included",
+      "description": null
+    },
+    {
+      "title": "Separate the decision from its execution gate by applying `failoverCooldown` only where the operator does",
+      "description": null
+    }
+  ],
+  "config": {
+    "title": "brdecide — the failover predictor",
+    "description": "Build a tool that takes a MysqlFailoverGroup status plus a clock and prints the decision the operator would take: the action, the alert, the `Reason` string that reaches `status.conditions`, and whether `failoverCooldown` will let it run.",
+    "language": "python",
+    "instructions": "## How this works\n\nYou have run the cross-site table in your head. Now write it down, where a machine can check it.\n\n`brdecide` reads a `MysqlFailoverGroup` object — the same JSON `kubectl get mysqlfailovergroup playground -o json` gives you — plus a clock reading, and prints what the operator would do with it. Nothing talks to a cluster. Every input is a fixture in `tests/fixtures/`, so the answers are reproducible and you can check yours against a known one.\n\n```\npython starter/brdecide.py --status tests/fixtures/playground-iad-down.json --now 2026-08-12T12:04:16Z\npython starter/brdecide.py --status tests/fixtures/playground-iad-down-cooldown.json --now 2026-08-12T12:04:16Z --json\n```\n\nThe starter runs as given. It prints `Reason (unset)` and `coreCount 0`, because the four functions that matter are empty.\n\nThe running example is `playground`: `iad` and `pdx` as `primary-candidate`, `reader` as `role: read-only`. Some fixtures add a fourth site to make a point.\n\n## Your tasks\n\n**TODO A — the pre-pass.** In `tally()`, walk the observations once. Increment `coreCount` for every site whose role is not `read-only` — a `dr-only` site counts, an `unknown` state counts. Route any site that is `writable` while its role is not `primary-candidate` into `fenceSites` and skip it, so it never reaches a tally. Skip `role: read-only` sites entirely. Everything left lands in the tally for its state; `unknown` lands in none of them.\n\n**TODO B — the rows.** In `evaluate_cross_site()`, evaluate the rows in the order the code does and return at the first one that fires: fence-first, TotalLoss, SplitBrain, Failover, NoPrimary, Degraded, Healthy. Exact conditions, alert strings and `Reason` values are in the docstring. Two of them are easy to get wrong: the failover row needs three conjuncts at once — zero writable **and** at least one unreachable **and** at least one read-only — and it is the only acting row that sets no alert.\n\n**TODO C — the history.** In `rehydrate_last_failover()`, choose between the two durable copies of `lastFailover`: the status subresource and the `bloodraven.shipstream.io/last-failover` annotation. Discard either one stamped more than 5 minutes ahead of `now`, install the later of what survives, and give ties to status.\n\n**TODO D — the gate.** In `apply_gate()`, build `willRun`. Fencing a writable non-promotable site runs every poll. A promotion is the one thing `failoverCooldown` gates. Report `cooldownRemaining` whenever there is a record to measure against, even when nothing is waiting on it.\n\nThen run `python3 tests/harness.py` until it prints `PASS`.\n\n## What the scaffolding is for\n\nEverything peripheral is wired: argument parsing, loading the object, the join of `spec.sites[].role` to `status.sites[].state` (a site absent from status is `unknown`, not missing), Go duration parsing, reading both history copies, `rank_promotion_candidates()`, and both output formats. The `--json` output is what the tests read, so keep its keys as `new_action()` defines them.\n\n`status.conditions` is in the fixtures because it is in a real object. It is the **previous** poll's verdict — sometimes stale by design. Do not read your answer out of it.\n\n## Expected output\n\n```\nbrdecide — bloodraven-playground/playground at 2026-08-12T12:04:16Z\n\n  sites         iad=unreachable(primary-candidate)  pdx=read-only(primary-candidate)  reader=read-only(read-only)\n  coreCount     2\n  tallies       writable=[] readOnly=['pdx'] unreachable=['iad']\n  fenceSites    -\n\n  Reason        Degraded\n  Alert         (none)\n  SplitBrain    no\n  Candidates    pdx  (tiebreak order — GTID freshness picks the winner)\n\n  lastFailover  2026-08-12T12:02:46Z → pdx  (from status)\n  cooldown      5m0s configured, 3m30s remaining\n  BLOCKED       promotion blocked by cooldown\n  willRun       (nothing)\n```\n\n## Rules\n\n- `evaluate_cross_site()` stays pure. No clock, no history, no cooldown — the real `EvalCrossSite` never consults any of them, and a test asserts yours does not either.\n- Use only the five reason strings the operator actually emits: `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary`, `TotalLoss`. The docs name a sixth, `Failover`. It does not exist.\n- Alert strings are verbatim, including the comma-space joins.\n- Standard library only. Do not edit `tests/`.\n",
+    "starterCells": [
+      {
+        "id": "cell-brief",
+        "type": "markdown",
+        "content": "# brdecide — the failover predictor\n\nOne function decides everything visible about `playground`: `EvalCrossSite` in `internal/state/matrix.go`. It takes the per-site observations from the poll loop and returns a single action — the alert, the `Reason` that lands in `status.conditions`, and whether a promotion is on the table at all.\n\nYou are going to write it, plus the two things layered around it: the failover history the operator rehydrates on restart, and the one gate that can refuse to execute what the table selected.\n\nRun it against the fixtures in `tests/fixtures/`. No cluster required.",
+        "readOnly": true
+      },
+      {
+        "id": "cell-rows",
+        "type": "markdown",
+        "content": "## The rows, in the order the code evaluates them\n\nA row fires only if every row above it declined. This ordering *is* the behaviour.\n\n| # | Fires when | `Reason` | Alert |\n|---|---|---|---|\n| 1 | `fenceSites` is non-empty | `Degraded` | `writable non-promotable site requires fencing (<sites>)` |\n| 2 | `len(unreachable) == coreCount` | `TotalLoss` | `TOTAL LOSS: all sites are unreachable` |\n| 3 | `len(writable) > 1` | `SplitBrain` | `SPLIT BRAIN: <n> sites are writable (<sites>)` |\n| 4 | no writable **and** ≥1 unreachable **and** ≥1 read-only **and** a candidate ranks | `Degraded` | *(none — the only acting row without one)* |\n| 5 | still no writable site | `NoPrimary` | `NO PRIMARY: both sites are read-only` when exactly two read-only and zero unreachable, else `NO PRIMARY: no writable site available` |\n| 6 | one writable **and** ≥1 unreachable | `Degraded` | `<unreachable> unreachable while <writable> is primary` |\n| 7 | one writable, zero unreachable | `Healthy` | *(none)* |\n\nBefore any of it: `coreCount` counts every site whose role is not `read-only` (`dr-only` counts), writable non-candidates are routed to `fenceSites` and skipped, and `role: read-only` sites are dropped.",
+        "readOnly": true
+      },
+      {
+        "id": "cell-gate",
+        "type": "markdown",
+        "content": "## After the table\n\n`spec.failoverCooldown` (default `5m`) is enforced in exactly one place: immediately before the promotion call, after the table has already chosen a candidate.\n\n```go\nif !lastFailover.IsZero() && tm.clock.Since(lastFailover) < tm.failoverCooldown {\n    tm.logger.Info(\"failover blocked by anti-flap cooldown\",\n        \"lastFailover\", lastFailover, \"cooldown\", tm.failoverCooldown)\n    return\n}\n```\n\nThat is the whole mechanism. Split-brain fencing, non-promotable fencing, source convergence, old-primary recovery, reclone and DNS reconcile each run from their own call site and none of them consults it.\n\nThe `lastFailover` it measures against lives in two durable places — the status subresource and the `bloodraven.shipstream.io/last-failover` annotation — because the two API paths fail independently. On restart the operator installs the later copy, discards anything stamped more than `FailoverClockSkewGrace` (5 minutes) ahead of local time, and gives ties to status.",
+        "readOnly": true
+      }
+    ]
+  },
+  "steps": [
+    {
+      "id": "step-tally",
+      "title": "Count the sites the way the matrix counts them",
+      "description": "Fill in TODO A. One pass over the observations produces `coreCount`, `fenceSites` and the three tallies. Readers are invisible to the matrix; `dr-only` sites are not. A writable non-candidate is routed out before it can be tallied.",
+      "completionCriteria": "`python starter/brdecide.py --status tests/fixtures/playground-healthy.json --now 2026-08-12T12:04:16Z --json` prints `\"coreCount\": 2`, `\"writable\": [\"iad\"]` and `\"readOnly\": [\"pdx\"]`; the same command on `tests/fixtures/playground-reader-writable.json` prints `\"fenceSites\": [\"reader\"]` with `reader` in none of the three tallies; and on `tests/fixtures/playground-dr-only.json` it prints `\"coreCount\": 3` and `\"readOnly\": [\"lhr\"]`."
+    },
+    {
+      "id": "step-rows-order",
+      "title": "Evaluate the rows in order, fence-first at the top",
+      "description": "Fill in the first three rows and the last two of TODO B. Order is the behaviour: a writable reader alongside two writable candidates is a fencing job, not a split brain, because the fence-first return happens above the split-brain row.",
+      "completionCriteria": "With `--now 2026-08-12T12:04:16Z --json`, the fixtures `playground-healthy.json`, `playground-peer-down.json`, `playground-split-brain.json`, `playground-total-loss.json` and `playground-reader-writable-split-brain.json` print `\"reason\"` values `Healthy`, `Degraded`, `SplitBrain`, `TotalLoss` and `Degraded` respectively, and `playground-reader-writable-split-brain.json` prints `\"splitBrain\": false` with `\"alert\": \"writable non-promotable site requires fencing (reader)\"`."
+    },
+    {
+      "id": "step-failover-row",
+      "title": "Make the failover row demand all three conjuncts",
+      "description": "Finish TODO B with the failover and NoPrimary rows. Zero writable is not enough: without an unreachable peer the operator refuses to auto-elect, because all-read-only is a startup or recovery state that needs human input. And a `dr-only` replica never ranks as a candidate.",
+      "completionCriteria": "`playground-iad-down.json` prints `\"promotionCandidates\": [\"pdx\"]` with `\"reason\": \"Degraded\"` and `\"alert\": null`; `playground-all-read-only.json` prints `\"reason\": \"NoPrimary\"` and `\"alert\": \"NO PRIMARY: both sites are read-only\"`; `playground-dr-only.json` prints `\"promotionCandidates\": []` and `\"alert\": \"NO PRIMARY: no writable site available\"`."
+    },
+    {
+      "id": "step-history",
+      "title": "Rehydrate the history from whichever copy survived",
+      "description": "Fill in TODO C. Two durable copies exist because the status subresource and the object's annotations travel different API paths with different RBAC, so either can be the fresher one. Take the later, discard anything more than five minutes ahead of the clock, give ties to status.",
+      "completionCriteria": "`playground-history-conflict.json` prints `\"lastFailoverSource\": \"annotation\"` and `\"lastFailoverTarget\": \"pdx\"`; `playground-history-skewed.json` prints `\"lastFailoverSource\": \"status\"` and `\"lastFailover\": \"2026-08-12T12:03:16Z\"`; `playground-history-tie.json` prints `\"lastFailoverSource\": \"status\"`."
+    },
+    {
+      "id": "step-gate",
+      "title": "Gate the promotion, and nothing else",
+      "description": "Fill in TODO D. `failoverCooldown` sits in front of one call. Fencing a writable non-promotable site is not behind it — that runs every poll, unconditionally, so a failed fence is retried without waiting for a transition.",
+      "completionCriteria": "`playground-iad-down-cooldown.json` prints `\"promotionBlockedBy\": \"cooldown\"`, `\"cooldownRemaining\": 210.0` and `\"willRun\": []` while still printing `\"promotionCandidates\": [\"pdx\"]`; `playground-reader-writable-cooldown.json` prints `\"willRun\": [\"fence:reader\"]` with `\"promotionBlockedBy\": null`."
+    },
+    {
+      "id": "step-harness",
+      "title": "Run the whole fixture set",
+      "description": "Run the harness over every fixture, including the awkward topologies: a four-site group, an all-unknown startup, a site the operator has not polled yet, and a record stamped two minutes in the future.",
+      "completionCriteria": "`python3 tests/harness.py` exits 0 and prints `PASS` as its final line."
+    },
+    {
+      "id": "step-note-the-defect",
+      "title": "Record the reason string the docs get wrong",
+      "description": "The published docs table names an outcome `Failover`. The code emits something else, and an alerting rule matching the docs will never fire — not rarely, never. Write down which string you had to implement, next to the one the docs promise.",
+      "completionCriteria": "`brdecide.py` contains a comment line beginning `# NOTE:` whose text contains both `Failover` and `Degraded`."
+    }
+  ],
+  "rubric": [
+    {
+      "criterion": "The rows are evaluated in the operator's order, with the fence-first return above everything",
+      "weight": 35,
+      "description": "`evaluate_cross_site()` is a sequence of guarded early returns in the order fence-first, TotalLoss, SplitBrain, Failover, NoPrimary, Degraded, Healthy — not an unordered set of cases or a lookup keyed on a state tuple. Full marks require: the fence-first branch returning before the TotalLoss and SplitBrain rows can be reached; the failover row demanding zero writable, at least one unreachable and at least one read-only simultaneously; the failover row setting `PromotionCandidates` and `Reason` but no alert; both `NoPrimary` messages present with the two-site variant conditioned on exactly two read-only and zero unreachable; and every alert string reproduced verbatim, comma-space joins included. Deduct for any invented reason string outside the five the operator emits."
+    },
+    {
+      "criterion": "The cooldown gates the promotion and nothing else, and the history it measures against is rehydrated correctly",
+      "weight": 25,
+      "description": "`apply_gate()` blocks only `promote`, and only when a promotion was selected, a record exists, and the elapsed time is under the cooldown; `fence:<site>` entries are emitted regardless of the cooldown state. `cooldownRemaining` is reported whenever a record exists, including when nothing is waiting on it, and negative elapsed time counts as inside the window. `rehydrate_last_failover()` discards a copy stamped more than five minutes ahead of `now`, installs the later of what survives, and gives ties to status. The candidate list and `Reason` survive a blocked promotion unchanged — the table still ran."
+    },
+    {
+      "criterion": "The pre-pass tallies sites by role the way the matrix does",
+      "weight": 20,
+      "description": "`tally()` increments `coreCount` for every non-`read-only` role, so a `dr-only` site counts toward `coreCount` and lands in a tally while a `read-only` site does neither. A writable non-`primary-candidate` site goes to `fenceSites` and is skipped before any tally sees it. `unknown` sites count toward `coreCount` and appear in no tally. Deduct if `dr-only` is treated as a reader, if a fenced site is double-counted in the writable tally, or if the promotion candidate list can contain a non-`primary-candidate` site."
+    },
+    {
+      "criterion": "Craft: the decision is separated from its gate, and the output is readable under pressure",
+      "weight": 20,
+      "description": "`evaluate_cross_site()` takes only observations and priorities and touches no clock, history or cooldown, so the table can be reasoned about and tested on its own. The default text report is scannable at 3am: the reason, the alert and what will actually run are each on their own labelled line, and a blocked promotion is visibly distinct from a decision with nothing to do. A malformed or unreadable `--status` file produces a one-line diagnostic on stderr and a non-zero exit, not a traceback. Comments explain the non-obvious rules — why the failover row sets no alert, why the tie goes to status — rather than restating the code."
+    }
+  ],
+  "testCases": [
+    {
+      "name": "canonical_playground_decisions",
+      "code": "import os, sys\nroot = os.getcwd()\nwhile root != os.path.dirname(root) and not os.path.isdir(os.path.join(root, 'tests', 'fixtures')):\n    root = os.path.dirname(root)\nsys.path.insert(0, os.path.join(root, 'tests'))\nfrom harness import canonical\ncanonical()\nprint('PASS')",
+      "expectedOutput": "PASS",
+      "weight": 40,
+      "description": "The eight canonical states of `playground` — healthy, primary up with a peer down, primary gone with a live replica, a writable reader, a writable reader alongside two writable candidates, split brain, all read-only, and total loss — each produce the right `Reason`, the verbatim alert string, the right tallies and the right `willRun`. Includes a fixture whose `status.conditions` still carries the previous poll's stale `Healthy` reason, so echoing the condition back fails here."
+    },
+    {
+      "name": "awkward_topologies_and_history",
+      "code": "import os, sys\nroot = os.getcwd()\nwhile root != os.path.dirname(root) and not os.path.isdir(os.path.join(root, 'tests', 'fixtures')):\n    root = os.path.dirname(root)\nsys.path.insert(0, os.path.join(root, 'tests'))\nfrom harness import awkward\nawkward()\nprint('PASS')",
+      "expectedOutput": "PASS",
+      "weight": 20,
+      "description": "Generality on inputs the two-site mental model does not cover: a four-site group with a `dr-only` replica that counts toward `coreCount` but can never be promoted, a writable reader that preempts TotalLoss, an all-`unknown` startup, a `sitePriorities` list that reorders the tiebreak, a site absent from `status.sites` entirely, and history records that are skewed, tied, or stamped inside the future-clock grace."
+    },
+    {
+      "name": "cooldown_gates_promotion_only",
+      "code": "import os, sys\nroot = os.getcwd()\nwhile root != os.path.dirname(root) and not os.path.isdir(os.path.join(root, 'tests', 'fixtures')):\n    root = os.path.dirname(root)\nsys.path.insert(0, os.path.join(root, 'tests'))\nfrom harness import cooldown_gate\ncooldown_gate()\nprint('PASS')",
+      "expectedOutput": "PASS",
+      "weight": 25,
+      "description": "Catches a shortcut: wrapping the whole decision in the cooldown instead of the single call it actually guards. A writable `reader` ten seconds into a 30 s cooldown must still emit `fence:reader` — fencing a non-promotable site is not gated. A promotion ninety seconds into a 5 m cooldown must still report its `Reason` and candidate list while withholding only `promote`. Also catches reading `lastFailover` from the status copy alone: one fixture's annotation is an hour newer, and the status copy on its own would let a blocked promotion run."
+    },
+    {
+      "name": "table_stays_pure",
+      "code": "import os, sys\nroot = os.getcwd()\nwhile root != os.path.dirname(root) and not os.path.isdir(os.path.join(root, 'tests', 'fixtures')):\n    root = os.path.dirname(root)\nsys.path.insert(0, os.path.join(root, 'tests'))\nfrom harness import purity\npurity()\nprint('PASS')",
+      "expectedOutput": "PASS",
+      "weight": 15,
+      "description": "Structural: `evaluate_cross_site(observations, site_priorities)` must still exist with exactly that signature, its executable body must reference no clock, cooldown or failover history, and calling it directly must return `Degraded` with candidates `['pdx']` and no alert. `apply_gate()` must be where the cooldown lives. This is the real `EvalCrossSite` contract — the function is pure, and split-brain resolution and the anti-flap gate are layered on by the caller."
+    }
+  ],
+  "environment": {
+    "image": "python:3.13-slim",
+    "gpu": null,
+    "packages": [],
+    "compileFlags": [],
+    "timeoutMs": 60000
+  }
+}

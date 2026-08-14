@@ -1,0 +1,273 @@
+<!DOCTYPE html><html lang="en" class="no-js" data-theme="light" style="--accent: #008f67; --accent-ink: #ffffff;"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Stand it up and read its status — Bloodraven in Production</title><meta name="description" content="Two minutes to a live three-site group with an app reading and writing through it. Then the skill everything else rests on: reading the status and saying what is true right now."><meta name="theme-color" content="#008f67"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%233f7ac4'/%3E%3Ctext x='16' y='22' font-family='system-ui,sans-serif' font-size='18' font-weight='700' text-anchor='middle' fill='%23ffffff'%3EB%3C/text%3E%3C/svg%3E"><link rel="stylesheet" href="../assets/site.css"><script type="application/json" id="course-config">{"slug":"bloodraven-in-production","passingScore":70,"totalTopics":27,"rel":"../","units":[{"id":"u1","title":"Meet the group","topics":["u1t1","u1t2","u1t3"]},{"id":"u2","title":"How the operator decides","topics":["u2t1","u2t2","u2t3","u2t4"]},{"id":"u3","title":"Emergency failover, end to end","topics":["u3t1","u3t2","u3t3"]},{"id":"u4","title":"Where failover meets your application","topics":["u4t1","u4t2","u4t3","u4t4"]},{"id":"u5","title":"When the world misbehaves","topics":["u5t1","u5t2","u5t3","u5t4"]},{"id":"u6","title":"Backups, disaster recovery, and going live","topics":["u6t1","u6t2","u6t3","u6t4","u6t5"]},{"id":"u7","title":"Day 0 and day 2","topics":["u7t1","u7t2","u7t3","u7t4"]}]}</script></head> <body data-page-path="unit-1/topic-1.html"> <a class="skip" href="#main">Skip to content</a> <header class="site-header"> <div class="wrap"> <a class="brand" href="../index.html"> <span class="brand__mark" aria-hidden="true">B</span> <span class="brand__text">Bloodraven in Production</span> </a> <span class="crumb">Meet the group / Stand it up and read its status</span> <div class="search" data-search data-home="../index.html"> <label class="skip" for="site-search">Search this course</label> <input id="site-search" type="search" placeholder="Search  /" autocomplete="off"> <div class="search__results" role="listbox" aria-label="Search results" hidden></div> </div> <button class="btn btn--quiet" type="button" data-theme-toggle aria-label="Theme: light. Click to change.">
+○
+</button> </div> <div class="readbar" data-readbar aria-hidden="true"></div> </header> <main id="main" class="wrap">  <nav class="subnav" aria-label="Sections"> <a href="#reading">Reading</a> <a href="#flashcards">Flashcards</a> <a href="#quiz">Quiz</a> </nav> <h1>Stand it up and read its status</h1> <p class="lede"> Two minutes to a live three-site group with an app reading and writing through it. Then the skill everything else rests on: reading the status and saying what is true right now. </p> <div class="callout"> <h2 class="callout__title">By the end of this topic you can</h2> <ol class="objectives"> <li> Bring up a three-site group with <code>./playground/setup.sh</code> and confirm every site reports Ready </li><li> Read a <code>MysqlFailoverGroup</code> status and name the active site, each site's state, and the replica's lag </li><li> Watch the counter application write through <code>mysql-playground-primary</code> and find the same row on the replica </li> </ol> </div><section id="reading" class="reading"> <p>This course is about a MySQL that has to survive losing a whole site. The fastest way in is
+not a vocabulary list. It is a real group on your laptop, and a status dump you can read.</p>
+<figure class="figure"><div class="figure__frame"><img src="../assets/img/g1-topology.svg" width="960" height="540" alt="Three MySQL sites — IAD writable, PDX and READER as replicas — with the counter app writing through mysql-playground-primary and a small operator off to the side." loading="lazy" decoding="async" /></div><figcaption>What you are about to start. One site takes writes. The other two copy from it. The operator is not on the request path.</figcaption></figure>
+<h2 id="before-you-start">Before you start</h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>You need</th><th>Why</th></tr></thead><tbody><tr><td><strong>docker</strong> or <strong>podman</strong></td><td>Builds the images locally. Prefer docker — k3d’s podman support is experimental.</td></tr><tr><td><strong>kubectl</strong></td><td>Everything from here is <code>kubectl</code>.</td></tr><tr><td><strong>helm</strong></td><td>Installs the operator. Chart <code>0.9.1</code>, appVersion <code>0.9.1</code>, <code>kubeVersion: ">=1.26.0"</code>.</td></tr><tr><td><strong>A cluster with at least three worker nodes</strong></td><td>One worker per site. The third is dedicated to the reader so storage-loss testing is deterministic.</td></tr></tbody></table>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">k3d</span><span style="color:#032F62;--shiki-dark:#96D0FF"> cluster</span><span style="color:#032F62;--shiki-dark:#96D0FF"> create</span><span style="color:#032F62;--shiki-dark:#96D0FF"> bloodraven</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> --agents</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> 3</span></span></code></pre>
+<p>kind and minikube work too — one server plus three agents either way.</p>
+<p>One non-technical check while you are here. Bloodraven is <strong>source-available, not open source</strong>.
+Whether your organisation may run it in production is a licensing question, not a <code>git clone</code>.
+The baseline and the two commands that settle it live in section D of the
+<a href="../sources.html#version-appendix">version appendix</a>. Nothing in this course depends on the
+answer. Your production plan might.</p>
+<h2 id="bring-it-up">Bring it up</h2>
+<p>From the repository root:</p>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">./playground/setup.sh</span></span></code></pre>
+<p>That script labels one worker per site, builds and loads the images, installs the CRDs and the
+operator, creates the group, and deploys a dashboard and a counter app. About two minutes.</p>
+<p><strong>Change nothing.</strong> Every command in this course is written against the group exactly as that
+script creates it — <code>metadata.name: playground</code> in <code>bloodraven-playground</code>. The group name is
+baked into node labels, Helm flags and a Go constant, so renaming it quietly breaks later tools.</p>
+<p>Three MySQL pods. Each runs <code>mysql</code> beside a <code>sidecar</code> container, so a healthy site reads <code>2/2</code>:</p>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">kubectl</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -n</span><span style="color:#032F62;--shiki-dark:#96D0FF"> bloodraven-playground</span><span style="color:#032F62;--shiki-dark:#96D0FF"> get</span><span style="color:#032F62;--shiki-dark:#96D0FF"> pods</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -l</span><span style="color:#032F62;--shiki-dark:#96D0FF"> app.kubernetes.io/name=mysql</span></span></code></pre>
+<h2 id="read-the-status">Read the status</h2>
+<p><code>status</code> is the operator’s report on the group. A handful of fields carry everything you will
+read for the rest of the course.</p>
+<p><code>status.activeSite</code> is the site the operator currently treats as writable. One name, or empty.</p>
+<p><code>status.sites[]</code> runs parallel to <code>spec.sites</code>. Per site:</p>
+<ul>
+<li><strong><code>.state</code></strong> — one of four values: <code>writable</code>, <code>read-only</code>, <code>unreachable</code>, <code>unknown</code>. It comes
+from one query per poll, <code>SELECT @@read_only</code>: <code>0</code> is <code>writable</code>, <code>1</code> is <code>read-only</code>, a failed
+connection is <code>unreachable</code>.</li>
+<li><strong><code>.replicating</code></strong> — whether the operator currently regards replication on that follower as
+healthy. It is a verdict, not a raw thread flag.</li>
+<li><strong><code>.secondsBehindSource</code></strong> — MySQL’s <code>Seconds_Behind_Source</code> for that follower.</li>
+<li><strong><code>.gtidExecuted</code></strong> — the transaction history that follower has actually applied.</li>
+</ul>
+<p>There is a trap in that list. The operator probes replication only on sites whose state is
+<code>read-only</code>, so the writable primary’s entry carries no <code>replicating</code>, no <code>secondsBehindSource</code>
+and no <code>gtidExecuted</code> at all — those keys are absent, not zero. Absence means “not measured
+here”, never <code>false</code>.</p>
+<p>And <code>.role</code> is not there at all. Role lives in <code>spec.sites[].role</code>. To tell which of two
+<code>read-only</code> sites is the dedicated reader, read the spec.</p>
+<figure class="wx wx--terminal" data-widget="terminal"><div class="wx__head"><span class="wx__kind">Try it</span><b class="wx__title">Read the healthy group</b></div><div class="wx__body"><div class="wx-term"><div class="wx-line" data-line="0"><div class="wx-line__cmd"><span class="wx-prompt" aria-hidden="true"><span class="wx-prompt__sigil">$</span></span><code>kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.activeSite}{&quot;\n&quot;}'</code><button class="wx-run" type="button" hidden>Run</button></div><pre class="wx-line__out"><code>iad</code></pre></div><div class="wx-line" data-line="1"><div class="wx-line__cmd"><span class="wx-prompt" aria-hidden="true"><span class="wx-prompt__sigil">$</span></span><code>kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{range .status.sites[*]}{.name}{&quot;\t&quot;}{.state}{&quot;\t&quot;}{.replicating}{&quot;\t&quot;}{.secondsBehindSource}{&quot;\n&quot;}{end}'</code><button class="wx-run" type="button" hidden>Run</button></div><pre class="wx-line__out"><code>iad	writable		
+pdx	read-only	true	0
+reader	read-only	true	0</code></pre></div><div class="wx-line" data-line="2"><div class="wx-line__cmd"><span class="wx-prompt" aria-hidden="true"><span class="wx-prompt__sigil">$</span></span><code>kubectl -n bloodraven-playground get mysqlfailovergroup playground -o jsonpath='{.status.conditions[?(@.type==&quot;Degraded&quot;)].reason}{&quot;\n&quot;}'</code><button class="wx-run" type="button" hidden>Run</button></div><pre class="wx-line__out"><code>Healthy</code></pre></div></div></div><figcaption class="wx__cap">Recorded output. <strong>Run</strong> reveals what is already on the page — nothing executes, and no cluster is contacted.</figcaption></figure>
+<p>Two blank columns on the <code>iad</code> row. That is the point.</p>
+<h2 id="conditions-and-the-five-reasons">Conditions and the five reasons</h2>
+<p>The group carries a <code>Ready</code> condition — true when a site is writable and replication is healthy —
+and a <code>Degraded</code> condition with a <code>reason</code> string. Five reasons come from the decision table.
+Each describes a <em>shape</em>, not an action:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Reason</th><th>The shape it describes</th></tr></thead><tbody><tr><td><code>Healthy</code></td><td>Exactly one core site writable, none unreachable. <code>Degraded</code> is <code>False</code>.</td></tr><tr><td><code>Degraded</code></td><td>Anything short of healthy that is not one of the three below — a live primary with an unreachable peer, or a writable non-promotable site awaiting fencing.</td></tr><tr><td><code>SplitBrain</code></td><td>More than one core site is writable at the same time.</td></tr><tr><td><code>NoPrimary</code></td><td>No core site is writable and none is unreachable — every one of them is read-only.</td></tr><tr><td><code>TotalLoss</code></td><td>Every core site is unreachable.</td></tr></tbody></table>
+<p>Two surprises. There is no <code>Failover</code> reason: the topology one promotion away from recovery
+reports <code>Degraded</code>. And <strong><code>role: read-only</code> sites are excluded from those tallies</strong> — a dead
+reader never reads as <code>TotalLoss</code>.</p>
+<p>What the operator <em>does</em> about each shape is Unit 2. Here, you only read them.</p>
+<h2 id="watch-a-write-land-on-both-sides">Watch a write land on both sides</h2>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">kubectl</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -n</span><span style="color:#032F62;--shiki-dark:#96D0FF"> bloodraven-playground</span><span style="color:#032F62;--shiki-dark:#96D0FF"> port-forward</span><span style="color:#032F62;--shiki-dark:#96D0FF"> svc/dashboard</span><span style="color:#032F62;--shiki-dark:#96D0FF"> 8091:8091</span></span>
+<span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">kubectl</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -n</span><span style="color:#032F62;--shiki-dark:#96D0FF"> bloodraven-playground</span><span style="color:#032F62;--shiki-dark:#96D0FF"> port-forward</span><span style="color:#032F62;--shiki-dark:#96D0FF"> svc/counter-app</span><span style="color:#032F62;--shiki-dark:#96D0FF"> 8090:8090</span></span></code></pre>
+<p>The counter app at <code>localhost:8090</code> connects through <code>mysql-playground-primary</code>. It has exactly
+two code paths:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Path</th><th>What it runs</th><th>When</th></tr></thead><tbody><tr><td><strong>read</strong> — <code>GET /api/counter</code></td><td><code>SELECT value, updated_at …</code>, then <code>SELECT @@global.read_only</code> and <code>SELECT @@hostname</code> <strong>on the same connection</strong></td><td>the page polls it every two seconds</td></tr><tr><td><strong>write</strong> — <code>POST /api/increment</code></td><td><code>UPDATE counter_db.counters SET value = value + 1 WHERE id = 1</code></td><td>only when you press <strong>+ Increment</strong></td></tr></tbody></table>
+<p>Nothing writes on a timer. You decide when a write happens. And because the read path asks the
+same connection who it is talking to, the JSON carries <code>dbHost</code> and <code>readOnly</code> beside <code>value</code>.
+In Unit 3 those three fields will disagree with the cluster in a way you can see.</p>
+<p>Press <strong>+ Increment</strong> a few times, then go looking for that row on the replica — by name, not
+through the primary Service:</p>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">kubectl</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -n</span><span style="color:#032F62;--shiki-dark:#96D0FF"> bloodraven-playground</span><span style="color:#032F62;--shiki-dark:#96D0FF"> exec</span><span style="color:#032F62;--shiki-dark:#96D0FF"> deploy/mysql-playground-pdx</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -c</span><span style="color:#032F62;--shiki-dark:#96D0FF"> mysql</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> --</span><span style="color:#005CC5;--shiki-dark:#F47067"> \</span></span>
+<span class="line"><span style="color:#032F62;--shiki-dark:#96D0FF">  env</span><span style="color:#032F62;--shiki-dark:#96D0FF"> MYSQL_PWD=playground-root-pw</span><span style="color:#032F62;--shiki-dark:#96D0FF"> mysql</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -h127.0.0.1</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -uroot</span><span style="color:#005CC5;--shiki-dark:#6CB6FF"> -Nse</span><span style="color:#005CC5;--shiki-dark:#F47067"> \</span></span>
+<span class="line"><span style="color:#032F62;--shiki-dark:#96D0FF">  "SELECT value, updated_at FROM counter_db.counters WHERE id = 1"</span></span></code></pre>
+<p>Same <code>value</code> you just clicked to. That round trip is the whole data plane in two commands.</p>
+<h2 id="one-honest-warning">One honest warning</h2>
+<p>The playground overrides shipped defaults so experiments finish while you are still watching.
+A timing you observe here is <strong>not</strong> the shipped default:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Setting</th><th>Playground</th><th>Shipped default</th></tr></thead><tbody><tr><td><code>failoverCooldown</code></td><td><code>30s</code></td><td><code>5m</code></td></tr><tr><td><code>replication.maxLagSeconds</code></td><td><code>30</code></td><td><code>300</code></td></tr><tr><td><code>dns.ttl</code></td><td><code>10</code></td><td><code>60</code></td></tr></tbody></table>
+<p>Everything else matches: <code>pollInterval</code>, <code>failureThreshold</code>, <code>recoveryThreshold</code>, <code>leaseTimeout</code>,
+<code>peerCheckInterval</code> and <code>maxSyncWait</code> sit at their defaults. MySQL is <code>mysql:9.7</code>, the operator
+v0.9.1.</p>
+<h2 id="words-for-the-first-hour">Words for the first hour</h2>
+<p>You will meet these on every later page. One sentence each.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Word</th><th>Meaning here</th></tr></thead><tbody><tr><td><strong>Site</strong></td><td>One MySQL plus its sidecar, pinned to one place (<code>iad</code>, <code>pdx</code>, <code>reader</code>).</td></tr><tr><td><strong>Primary</strong></td><td>The one site that currently accepts writes. Named in <code>status.activeSite</code>.</td></tr><tr><td><strong>Replica</strong></td><td>A site that copies from the primary and is not taking writes.</td></tr><tr><td><strong>Failover</strong></td><td>Promoting a replica to primary because the old primary is gone or being moved.</td></tr><tr><td><strong>Operator</strong></td><td>The controller that polls sites and decides who is primary. Not on the request path.</td></tr><tr><td><strong>Sidecar</strong></td><td>A second container in each MySQL pod. It can stop its own MySQL writing without asking the operator.</td></tr><tr><td><strong>Service</strong></td><td>A Kubernetes name your app connects to. <code>-primary</code> always points at whoever is writable <em>right now</em>.</td></tr><tr><td><strong>RPO</strong></td><td>How much recently committed data you accept losing. Bloodraven’s RPO on a crash is not zero.</td></tr><tr><td><strong>RTO</strong></td><td>How long you accept being unable to write. This is where Bloodraven spends its budget.</td></tr><tr><td><strong>GTID</strong></td><td>A unique id for every transaction. The set of them is how you count what a failover cost.</td></tr><tr><td><strong>Fence</strong></td><td><code>SET GLOBAL super_read_only = ON</code>. Blocks writes. Does <strong>not</strong> close existing connections.</td></tr></tbody></table>
+<p>The full card is Unit 7. This is enough to start.</p>
+<h2 id="where-you-are">Where you are</h2>
+<p><code>playground</code> is up: three sites, <code>iad</code> writable and named in <code>activeSite</code>, <code>pdx</code> and <code>reader</code>
+read-only and replicating at <code>0</code> seconds behind, <code>Degraded</code> reason <code>Healthy</code>, and a counter
+application reading and writing through <code>mysql-playground-primary</code>.</p>
+<p>Next: what those pods actually are, and which of them is allowed to become primary.</p> <p> <button class="btn btn--primary" type="button" data-mark-read="u1t1">
+Mark as read
+</button> </p> </section> <section id="flashcards"> <h2>Flashcards</h2> <div class="deck" data-deck> <div class="fc"> <div class="fc__inner"> <div class="fc__face"> <div> <p><code>status.activeSite</code></p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>The single site the operator currently treats as the writable authority — one site name, or empty when no site holds authority.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>How a site's <code>status.sites[].state</code> is decided</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>From one query per poll, <code>SELECT @@read_only</code>: <code>0</code> gives <code>writable</code>, <code>1</code> gives <code>read-only</code>, a failed connection gives <code>unreachable</code>, and a site not yet polled is <code>unknown</code>.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p><code>status.sites[].replicating</code></p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>The operator's verdict on whether replication is healthy on that follower — populated only for sites currently in <code>read-only</code> state, never for the writable primary.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p><code>status.sites[].gtidExecuted</code></p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>The executed GTID set read from that follower's replication status: the transaction history it has actually applied.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>A site entry that carries no <code>replicating</code>, no <code>secondsBehindSource</code> and no <code>gtidExecuted</code> key at all</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>It is the writable primary. The operator only probes replication on <code>read-only</code> sites, so those keys are absent rather than zero or false.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>Condition reason <code>Healthy</code></p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>Exactly one core site is writable and none is unreachable; the <code>Degraded</code> condition reads <code>False</code>.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>Condition reason <code>Degraded</code></p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>Any shape short of healthy that is not split brain, no primary or total loss — including a live primary with an unreachable peer.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>Condition reason <code>SplitBrain</code></p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>More than one core site is writable at the same time.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>Condition reason <code>NoPrimary</code></p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>No core site is writable and none is unreachable — every core site is read-only.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>Condition reason <code>TotalLoss</code></p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>Every core site is unreachable.</p> </div> </div> </div> </div> <div class="deck__bar"> <button class="btn" type="button" data-deck-prev aria-label="Previous card">←</button> <button class="btn" type="button" data-deck-next aria-label="Next card">→</button> <button class="btn" type="button" data-deck-shuffle>Shuffle</button> <span class="deck__count">1 / 10</span> </div> </div> </section> <section id="quiz"> <h2>Quiz</h2> <div class="quiz" data-quiz> <script type="application/json" id="quiz-data">{"id":"u1t1","kind":"quiz","objectiveNames":{"1":"Say when Bloodraven is the right tool by naming the two-site, non-zero-RPO deployment it targets","2":"Name three things Bloodraven refuses to do, from its own non-goals list","3":"Explain why asynchronous replication with automatic promotion was chosen over Group Replication","4":"Trace a write from the application through `mysql-playground-primary` to the pod that currently owns it","5":"Say what the sidecar does that the operator cannot, and why the binlog archiver lives there","6":"Tell `primary-candidate`, `dr-only` and `read-only` sites apart by what each is allowed to become","7":"Bring up a three-site group with `./playground/setup.sh` and confirm every site reports Ready","8":"Read a `MysqlFailoverGroup` status and name the active site, each site's state, and the replica's lag","9":"Watch the counter application write through `mysql-playground-primary` and find the same row on the replica"},"questions":[{"type":"MULTIPLE_CHOICE","correctOptionIndex":0,"objectives":[8]},{"type":"MULTIPLE_CHOICE","correctOptionIndex":0,"objectives":[8]},{"type":"MULTIPLE_CHOICE","correctOptionIndex":0,"objectives":[8]},{"type":"TRUE_FALSE","correctAnswer":false,"objectives":[8,9]},{"type":"SHORT_ANSWER","objectives":[8]}]}</script>  <div class="quiz__meter" data-quiz-meter hidden> <div class="bar" style="flex:1"><span style="width:0%"></span></div> <span data-quiz-count>0 / 5</span>  <button class="btn btn--quiet quiz__reset" type="button" data-quiz-reset hidden>
+Reset
+</button> </div> <div class="q"> <fieldset> <legend>
+Question 1 of 5 </legend> <div class="qstem"> <p><code>playground</code> reports <code>activeSite: iad</code>, and its site entries read: <code>iad</code> state <code>writable</code>, no other fields; <code>pdx</code> state <code>read-only</code>, <code>replicating: true</code>, <code>secondsBehindSource: 0</code>; <code>reader</code> state <code>read-only</code>, <code>replicating: true</code>, <code>secondsBehindSource: 0</code>. Which site is the primary, and what in the dump establishes it?</p> </div> <label class="opt"> <input type="radio" name="q-u1t1-0" value="0"> <span> <code>iad</code> — it is named in <code>activeSite</code> and it is the one site whose state is <code>writable</code> </span> </label><label class="opt"> <input type="radio" name="q-u1t1-0" value="1"> <span> <code>pdx</code> — it is the only site the operator reports as <code>replicating</code>, which is what a primary does </span> </label><label class="opt"> <input type="radio" name="q-u1t1-0" value="2"> <span> <code>iad</code> — it is the first entry in <code>status.sites[]</code>, and the operator lists the primary first </span> </label><label class="opt"> <input type="radio" name="q-u1t1-0" value="3"> <span> You cannot tell: <code>activeSite</code> records the last site that was promoted, not the site that is writable now </span> </label> </fieldset> <button class="btn btn--primary" type="button" data-check>
+Check answer
+</button>  <details> <summary>Show answer</summary> <p> <strong>Answer:</strong>  <code>iad</code> — it is named in <code>activeSite</code> and it is the one site whose state is <code>writable</code> </p>  <p><code>activeSite</code> names the site the operator currently treats as the writable authority, and <code>iad</code> is the only entry in state <code>writable</code> — the two agree, which is what a healthy group looks like. <code>pdx</code> is wrong because <code>replicating: true</code> marks a follower applying the primary's stream, not a primary; the primary is never probed for replication at all. The first-entry answer is wrong because <code>status.sites[]</code> runs parallel to <code>spec.sites</code>, in declaration order, with no relation to who is primary. The last option confuses <code>activeSite</code> with <code>status.lastFailoverTarget</code>, which is the field that records a past promotion. (objective 8)</p> </details> <div class="explain" hidden> <strong>Explanation</strong>  <p><code>activeSite</code> names the site the operator currently treats as the writable authority, and <code>iad</code> is the only entry in state <code>writable</code> — the two agree, which is what a healthy group looks like. <code>pdx</code> is wrong because <code>replicating: true</code> marks a follower applying the primary's stream, not a primary; the primary is never probed for replication at all. The first-entry answer is wrong because <code>status.sites[]</code> runs parallel to <code>spec.sites</code>, in declaration order, with no relation to who is primary. The last option confuses <code>activeSite</code> with <code>status.lastFailoverTarget</code>, which is the field that records a past promotion. (objective 8)</p> </div>  </div><div class="q"> <fieldset> <legend>
+Question 2 of 5 </legend> <div class="qstem"> <p>Same dump. <code>pdx</code> and <code>reader</code> both read state <code>read-only</code>, <code>replicating: true</code>, <code>secondsBehindSource: 0</code>. How do you establish which of them is the dedicated non-promotable reader?</p> </div> <label class="opt"> <input type="radio" name="q-u1t1-1" value="0"> <span> Read <code>spec.sites[].role</code> — the status block carries no role field </span> </label><label class="opt"> <input type="radio" name="q-u1t1-1" value="1"> <span> Read <code>status.sites[].role</code>, which reports <code>read-only</code> for the reader and <code>primary-candidate</code> for <code>pdx</code> </span> </label><label class="opt"> <input type="radio" name="q-u1t1-1" value="2"> <span> The reader is the site whose <code>state</code> is <code>read-only</code> while the other candidate's state would be <code>unknown</code> </span> </label><label class="opt"> <input type="radio" name="q-u1t1-1" value="3"> <span> The reader is the one with no <code>lbIP</code> in its status entry </span> </label> </fieldset> <button class="btn btn--primary" type="button" data-check>
+Check answer
+</button>  <details> <summary>Show answer</summary> <p> <strong>Answer:</strong>  Read <code>spec.sites[].role</code> — the status block carries no role field </p>  <p>Role is spec, not status: <code>status.sites[]</code> carries name, state, lastSeen, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and <code>status.sites[].role</code> simply does not exist. The third confuses role with state: both a <code>primary-candidate</code> follower and a <code>read-only</code> reader sit in state <code>read-only</code> when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — <code>lbIP</code> is spec, and status never mirrors it. (objective 8)</p> </details> <div class="explain" hidden> <strong>Explanation</strong>  <p>Role is spec, not status: <code>status.sites[]</code> carries name, state, lastSeen, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and <code>status.sites[].role</code> simply does not exist. The third confuses role with state: both a <code>primary-candidate</code> follower and a <code>read-only</code> reader sit in state <code>read-only</code> when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — <code>lbIP</code> is spec, and status never mirrors it. (objective 8)</p> </div>  </div><div class="q"> <fieldset> <legend>
+Question 3 of 5 </legend> <div class="qstem"> <p><code>playground</code> now reports <code>activeSite: iad</code>; <code>iad</code> state <code>writable</code>; <code>pdx</code> state <code>read-only</code>, <code>replicating: true</code>; <code>reader</code> state <code>unreachable</code>. What <code>reason</code> does the <code>Degraded</code> condition carry?</p> </div> <label class="opt"> <input type="radio" name="q-u1t1-2" value="0"> <span> <code>Healthy</code> — <code>role: read-only</code> sites are excluded from the writable/read-only/unreachable tallies </span> </label><label class="opt"> <input type="radio" name="q-u1t1-2" value="1"> <span> <code>Degraded</code> — one site is unreachable while the primary is up </span> </label><label class="opt"> <input type="radio" name="q-u1t1-2" value="2"> <span> <code>TotalLoss</code> — a site the operator cannot reach counts as lost </span> </label><label class="opt"> <input type="radio" name="q-u1t1-2" value="3"> <span> <code>NoPrimary</code> — the group is down to one writable site with no spare reader </span> </label> </fieldset> <button class="btn btn--primary" type="button" data-check>
+Check answer
+</button>  <details> <summary>Show answer</summary> <p> <strong>Answer:</strong>  <code>Healthy</code> — <code>role: read-only</code> sites are excluded from the writable/read-only/unreachable tallies </p>  <p>The reasons are computed over core sites only, and a site with <code>role: read-only</code> is not a core site — so a dead reader leaves the tally at one writable, zero unreachable, which is <code>Healthy</code>. The second option is the most tempting and would be right if the unreachable site were <code>pdx</code>: a live primary with an unreachable <em>core</em> peer is exactly the <code>Degraded</code> shape, but the reader does not count. <code>TotalLoss</code> requires every core site unreachable, not one site of any kind. <code>NoPrimary</code> describes the opposite situation — no writable site at all, every core site read-only — and here <code>iad</code> is writable. (objective 8)</p> </details> <div class="explain" hidden> <strong>Explanation</strong>  <p>The reasons are computed over core sites only, and a site with <code>role: read-only</code> is not a core site — so a dead reader leaves the tally at one writable, zero unreachable, which is <code>Healthy</code>. The second option is the most tempting and would be right if the unreachable site were <code>pdx</code>: a live primary with an unreachable <em>core</em> peer is exactly the <code>Degraded</code> shape, but the reader does not count. <code>TotalLoss</code> requires every core site unreachable, not one site of any kind. <code>NoPrimary</code> describes the opposite situation — no writable site at all, every core site read-only — and here <code>iad</code> is writable. (objective 8)</p> </div>  </div><div class="q"> <fieldset> <legend>
+Question 4 of 5 </legend> <div class="qstem"> <p>Your counter application has just written through <code>mysql-playground-primary</code>. <code>status.sites[]</code> shows <code>pdx</code> with <code>replicating: true</code> and <code>secondsBehindSource: 0</code>, so that write is certainly present on <code>pdx</code>.</p> </div> <label class="opt"> <input type="radio" name="q-u1t1-3" value="0"> <span> False </span> </label><label class="opt"> <input type="radio" name="q-u1t1-3" value="1"> <span> True </span> </label> </fieldset> <button class="btn btn--primary" type="button" data-check>
+Check answer
+</button>  <details> <summary>Show answer</summary> <p> <strong>Answer:</strong>  False </p>  <p>The reversal: a zero does not prove the replica is caught up. <code>Seconds_Behind_Source</code> compares the last transaction the replica has executed against the last event it has <em>downloaded</em>, so it reads 0 when the receiver thread has stalled or the replica is simply idle — a replica that stopped fetching an hour ago can still report 0. That is why the check in this topic is to go and read the row: <code>SELECT value, updated_at FROM counter_db.counters WHERE id = 1</code> against <code>pdx</code> by name. Nothing in the status block substitutes for reading the data. (objectives 8, 9)</p> </details> <div class="explain" hidden> <strong>Explanation</strong>  <p>The reversal: a zero does not prove the replica is caught up. <code>Seconds_Behind_Source</code> compares the last transaction the replica has executed against the last event it has <em>downloaded</em>, so it reads 0 when the receiver thread has stalled or the replica is simply idle — a replica that stopped fetching an hour ago can still report 0. That is why the check in this topic is to go and read the row: <code>SELECT value, updated_at FROM counter_db.counters WHERE id = 1</code> against <code>pdx</code> by name. Nothing in the status block substitutes for reading the data. (objectives 8, 9)</p> </div>  </div><div class="q"> <fieldset> <legend>
+Question 5 of 5 </legend> <div class="qstem"> <p>In one status dump <code>pdx</code> shows <code>secondsBehindSource: 0</code>; in another, <code>pdx</code> has no <code>secondsBehindSource</code> key at all. What does each tell you, and what is the trap in treating them as the same?</p> </div>  <label class="skip" for="sa-u1t1-4">
+Your answer
+</label> <textarea id="sa-u1t1-4" rows="4" placeholder="Write your answer…"></textarea>  </fieldset> <button class="btn btn--primary" type="button" data-check>
+Check answer
+</button>  <details> <summary>Show answer</summary> <p> <strong>Answer:</strong>  <p><code>secondsBehindSource: 0</code> is a reported measurement — MySQL answered the replication probe and gave a lag of zero seconds. An absent key means no value was reported: MySQL returned NULL, which is what it does when replication is not running, or the operator never probed that site at all, which is the case for the writable primary. Treating absence as zero reads a site that is not replicating as a site that is perfectly caught up — precisely backwards. Absence means unmeasured, not good.</p> </p> <p> <strong>A full-credit answer shows:</strong> A strong answer covers: (1) <code>0</code> is a value MySQL actually reported; (2) an absent key is a null/unreported value, arising when replication is not running or when the site was never probed — the primary is never probed; (3) the failure mode is inverted meaning, reading 'unmeasured' as 'zero lag'. Credit also for noting the field is optional in the status schema, so it is omitted rather than serialised as null. </p> <p>The two look alike in a quick scan and mean opposite things. A reported <code>0</code> says the probe ran; an absent key says it did not, or MySQL had nothing to report. On a healthy group the primary's entry is the everyday example of the absent form, which is why it is worth learning on a healthy cluster rather than in an incident. (objective 8)</p> </details> <div class="explain" hidden> <strong>Explanation</strong>  <p> <strong>Sample answer</strong> <p><code>secondsBehindSource: 0</code> is a reported measurement — MySQL answered the replication probe and gave a lag of zero seconds. An absent key means no value was reported: MySQL returned NULL, which is what it does when replication is not running, or the operator never probed that site at all, which is the case for the writable primary. Treating absence as zero reads a site that is not replicating as a site that is perfectly caught up — precisely backwards. Absence means unmeasured, not good.</p> </p> <p> <strong>A full-credit answer shows</strong> <p>A strong answer covers: (1) <code>0</code> is a value MySQL actually reported; (2) an absent key is a null/unreported value, arising when replication is not running or when the site was never probed — the primary is never probed; (3) the failure mode is inverted meaning, reading 'unmeasured' as 'zero lag'. Credit also for noting the field is optional in the status schema, so it is omitted rather than serialised as null.</p> </p> <p>The two look alike in a quick scan and mean opposite things. A reported <code>0</code> says the probe ran; an absent key says it did not, or MySQL had nothing to report. On a healthy group the primary's entry is the everyday example of the absent form, which is why it is worth learning on a healthy cluster rather than in an incident. (objective 8)</p> </div> <div class="self-grade" hidden> <span class="note">
+Short answers are self-graded — nothing is sent anywhere.
+</span> <button class="btn" type="button" data-self="got">
+I got it
+</button> <button class="btn" type="button" data-self="missed">
+I missed it
+</button> </div> </div> <div class="quiz__result" hidden></div> </div> </section>   </main> <footer class="site-footer"> <div class="wrap">  <p class="pager"> <span></span> <a href="../unit-1/topic-2.html">The moving parts →</a> </p>  <p> <a href="../index.html">Syllabus</a> ·
+<a href="../certificate.html">Completion record</a> ·
+<a href="../sources.html">Sources</a> ·
+<button class="btn btn--quiet" type="button" data-reset>Reset progress</button> </p> <p class="site-license" data-license-id="all-rights-reserved"> <span>© 2026 ShipStream, LLC. </span> All rights reserved. </p> </div> </footer> <div aria-live="polite" class="skip" data-live></div> <dialog id="reset-dialog"> <h2>Erase saved progress?</h2> <p>
+This erases all quiz scores, reading progress, project checklists, and your name on the
+        certificate. It cannot be undone, and it affects only this course in this browser.
+</p> <div class="dialog__actions"> <button class="btn" type="button" data-reset-cancel>Cancel</button> <button class="btn btn--primary" type="button" data-reset-confirm>Erase</button> </div> </dialog> <script src="../assets/search-index.js" defer></script> <script src="../assets/site.js" defer></script> </body> </html>

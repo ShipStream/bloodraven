@@ -1,0 +1,488 @@
+<!DOCTYPE html><html lang="en" class="no-js" data-theme="light" style="--accent: #ad568a; --accent-ink: #ffffff;"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>The card you keep — Bloodraven in Production</title><meta name="description" content="Every default, reason string, promotion step, Service selector and metric label set on one screen — plus a glossary, and a rule for which facts belong in the dated appendix instead."><meta name="theme-color" content="#ad568a"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%233f7ac4'/%3E%3Ctext x='16' y='22' font-family='system-ui,sans-serif' font-size='18' font-weight='700' text-anchor='middle' fill='%23ffffff'%3EB%3C/text%3E%3C/svg%3E"><link rel="stylesheet" href="../assets/site.css"><script type="application/json" id="course-config">{"slug":"bloodraven-in-production","passingScore":70,"totalTopics":27,"rel":"../","units":[{"id":"u1","title":"Meet the group","topics":["u1t1","u1t2","u1t3"]},{"id":"u2","title":"How the operator decides","topics":["u2t1","u2t2","u2t3","u2t4"]},{"id":"u3","title":"Emergency failover, end to end","topics":["u3t1","u3t2","u3t3"]},{"id":"u4","title":"Where failover meets your application","topics":["u4t1","u4t2","u4t3","u4t4"]},{"id":"u5","title":"When the world misbehaves","topics":["u5t1","u5t2","u5t3","u5t4"]},{"id":"u6","title":"Backups, disaster recovery, and going live","topics":["u6t1","u6t2","u6t3","u6t4","u6t5"]},{"id":"u7","title":"Day 0 and day 2","topics":["u7t1","u7t2","u7t3","u7t4"]}]}</script></head> <body data-page-path="unit-7/topic-4.html"> <a class="skip" href="#main">Skip to content</a> <header class="site-header"> <div class="wrap"> <a class="brand" href="../index.html"> <span class="brand__mark" aria-hidden="true">B</span> <span class="brand__text">Bloodraven in Production</span> </a> <span class="crumb">Day 0 and day 2 / The card you keep</span> <div class="search" data-search data-home="../index.html"> <label class="skip" for="site-search">Search this course</label> <input id="site-search" type="search" placeholder="Search  /" autocomplete="off"> <div class="search__results" role="listbox" aria-label="Search results" hidden></div> </div> <button class="btn btn--quiet" type="button" data-theme-toggle aria-label="Theme: light. Click to change.">
+○
+</button> </div> <div class="readbar" data-readbar aria-hidden="true"></div> </header> <main id="main" class="wrap">  <nav class="subnav" aria-label="Sections"> <a href="#reading">Reading</a> <a href="#flashcards">Flashcards</a> <a href="#quiz">Quiz</a> </nav> <h1>The card you keep</h1> <p class="lede"> Every default, reason string, promotion step, Service selector and metric label set on one screen — plus a glossary, and a rule for which facts belong in the dated appendix instead. </p> <div class="callout"> <h2 class="callout__title">By the end of this topic you can</h2> <ol class="objectives"> <li> Recall any shipped default and its playground override from one page </li><li> Name the five condition reasons, the nine promotion steps with fatality, and the four Service kinds without looking them up </li><li> Use the version appendix to decide whether a fact you remember is still true </li> </ol> </div><section id="reading" class="reading"> <p>Everything from here is reference. Nothing in this topic is new; all of it is spread across the six
+units behind you, which is exactly the problem — at 03:00 nobody reads a course. Print this page, or
+keep the tab open. It is the one screen the rest of the course was building toward.</p>
+<p>Two rules for using it. <strong>Numbers marked <em>shipped</em> are CRD defaults; numbers marked <em>playground</em> are
+what the local group overrides them to.</strong> And anything with a date on it belongs to the
+<a href="../sources.html#version-appendix">version appendix</a> rather than to this card — check there before you
+quote a version, an issue number or a documentation defect.</p>
+<h2 id="timings-and-thresholds">Timings and thresholds</h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Setting</th><th>Shipped default</th><th>Playground</th><th>What it actually controls</th></tr></thead><tbody><tr><td><code>pollInterval</code></td><td><code>2s</code></td><td>same</td><td>The poll tick. One <code>SELECT @@read_only</code> per site, in parallel, each under a 5 s ceiling.</td></tr><tr><td><code>failureThreshold</code></td><td><code>3</code></td><td>same</td><td>Consecutive failed polls before <code>unreachable</code>. <strong>Detection = <code>pollInterval</code> × <code>failureThreshold</code> = 6 s.</strong></td></tr><tr><td><code>recoveryThreshold</code></td><td><code>2</code></td><td>same</td><td>Consecutive writable polls before <code>writable</code>. <strong>Not a term in the detection sum.</strong></td></tr><tr><td>—</td><td>adaptive</td><td>same</td><td>Undocumented backoff: past <code>failureThreshold</code> the whole loop’s interval doubles per extra failure, exponent capped at 4, hard cap 30 s. One site down ⇒ a second fault takes 30 × 3 = 90 s to detect.</td></tr><tr><td><code>failoverCooldown</code></td><td><code>5m</code></td><td><code>30s</code></td><td>Gates <strong>automatic promotion only</strong>, at one call site, immediately before the promotion call.</td></tr><tr><td><code>connectionDrainTimeout</code></td><td><code>30s</code></td><td>same</td><td>Bounds the post-promotion retry window for evicting sessions from a fenced former primary — only while it is reachable.</td></tr><tr><td><code>replication.maxLagSeconds</code></td><td><code>300</code></td><td><code>30</code></td><td>The <code>ReplicationLagging</code> Degraded reason. <strong>Never a promotion gate.</strong> Skipped entirely for <code>role: read-only</code> sites.</td></tr><tr><td><code>replication.readOnlyMaxLagSeconds</code></td><td><em>(nil — inherits <code>maxLagSeconds</code>)</em></td><td><code>10</code></td><td>Reader-endpoint membership only. An explicit <code>0</code> means zero reported lag, and is not the same as unset.</td></tr><tr><td><code>dns.ttl</code></td><td><code>60</code></td><td><code>10</code></td><td><code>recordTTL</code> on the <code>DNSEndpoint</code>. The floor on how long a stale answer survives.</td></tr><tr><td><code>sidecar.leaseTimeout</code></td><td><code>20s</code></td><td>same</td><td>Rule #2 self-fence window. CEL: ≥ 3 s, and ≥ 3 × <code>peerCheckInterval</code>.</td></tr><tr><td><code>sidecar.peerCheckInterval</code></td><td><code>5s</code></td><td>same</td><td>Sidecar tick. CEL: ≥ 1 s. 20 / 5 = <strong>4 ticks</strong> of silence before a lease fence.</td></tr><tr><td>relay-log drain</td><td><code>30s</code></td><td>same</td><td>Step 3 of the promotion. Non-fatal on timeout.</td></tr><tr><td>source convergence</td><td><code>20s</code></td><td>same</td><td>A separate poll stage, not a failover step.</td></tr><tr><td><code>plannedFailover.maxLagWait</code></td><td><code>5m</code></td><td>same</td><td>The GTID-superset gate. Rollback lives here.</td></tr><tr><td><code>plannedFailover.drainTimeout</code></td><td><code>30s</code></td><td>same</td><td>Connection drain before the write endpoint moves. Exhaustion proceeds anyway.</td></tr><tr><td><code>plannedFailover.onCooldown</code></td><td><code>reject</code></td><td>same</td><td><code>defer</code> parks the request instead of refusing it.</td></tr><tr><td><code>dragonfly.plannedFailover.maxSyncWait</code></td><td><code>30s</code></td><td>same</td><td>Also the <code>REPLTAKEOVER</code> timeout argument; the client adds 5 s of I/O grace.</td></tr><tr><td>Dragonfly emergency budget</td><td><code>10s</code></td><td>same</td><td>Hard-coded. MySQL failover is never delayed by cache.</td></tr><tr><td><code>backup.maxLagSecondsForSource</code></td><td><code>300</code></td><td>—</td><td>Picks the backup source. A different setting from <code>maxLagSeconds</code>, with the same default.</td></tr><tr><td><code>backup.pitr.archivePollInterval</code></td><td><code>60s</code></td><td>—</td><td>Archiver ticker beside inotify.</td></tr><tr><td><code>backup.pitr.maxBinlogSize</code></td><td><code>100M</code></td><td>—</td><td>Written <em>before</em> <code>spec.mysqlConf</code>, so your override wins.</td></tr><tr><td><code>backup.retention</code></td><td><code>7</code></td><td>—</td><td>Backups kept per profile.</td></tr><tr><td>Measured failover, clean</td><td><strong>12.0 s</strong></td><td>—</td><td>Nine-plus recorded runs, 12.004–12.02 s, one outlier at 13.008 s.</td></tr><tr><td>Measured failover, full drain</td><td><strong>36.0 s</strong></td><td>—</td><td>6 s detection + a 30 s drain that spent its whole budget.</td></tr></tbody></table>
+<h2 id="the-five-condition-reasons">The five condition reasons</h2>
+<p>There are exactly five, they come straight from <code>EvalCrossSite</code>, and <strong><code>Failover</code> is not one of them.</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Reason</th><th>The topology it describes</th></tr></thead><tbody><tr><td><code>Healthy</code></td><td>Exactly one core site writable, none unreachable. <code>Degraded</code> is <code>False</code>.</td></tr><tr><td><code>Degraded</code></td><td>Everything else that is not one of the three below — including <em>the promotion is about to happen</em> and <em>a writable non-promotable site needs fencing</em>.</td></tr><tr><td><code>SplitBrain</code></td><td>More than one <strong>core</strong> site writable. Readers are excluded from the tally.</td></tr><tr><td><code>NoPrimary</code></td><td>No core site writable and none unreachable. Will not self-heal; the matrix refuses to auto-elect.</td></tr><tr><td><code>TotalLoss</code></td><td>Every core site unreachable.</td></tr></tbody></table>
+<p>Replication adds its own reasons to <code>Degraded</code>: <code>ReplicationLagging</code>, <code>ReplicationBroken</code>,
+<code>ReplicationError</code>, <code>ReplicationSourceMismatch</code>. All four skip <code>role: read-only</code> sites entirely.</p>
+<p><strong>Evaluation order</strong> (a row fires only if every row above declined):
+fence-first early return → <code>TotalLoss</code> → <code>SplitBrain</code> → failover → <code>NoPrimary</code> → degraded-with-peer-down → <code>Healthy</code>.</p>
+<h2 id="the-nine-promotion-steps-with-fatality">The nine promotion steps, with fatality</h2>
+<p><code>FailoverController.Execute</code>, in order. <strong>Fatal</strong> means the promotion aborts; everything else logs and
+carries on.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>#</th><th>Step</th><th>On error</th></tr></thead><tbody><tr><td>1</td><td><code>SET GLOBAL super_read_only = ON</code> on the old primary</td><td>warns only</td></tr><tr><td>2</td><td>Kill application connections on the old primary</td><td>warns only</td></tr><tr><td>3</td><td>Relay-log drain on the candidate, 30 s budget</td><td>warns, promotes anyway</td></tr><tr><td>4</td><td><code>STOP REPLICA</code> on the candidate</td><td><strong>fatal</strong></td></tr><tr><td>5</td><td><code>RESET REPLICA ALL</code> on the candidate</td><td><strong>fatal</strong></td></tr><tr><td>6</td><td><code>SELECT @@global.gtid_executed</code> → <code>promotionGtidExecuted</code></td><td>warns only</td></tr><tr><td>7</td><td><code>SET GLOBAL super_read_only = OFF</code></td><td><strong>fatal</strong></td></tr><tr><td>8</td><td><code>SET GLOBAL read_only = OFF</code></td><td><strong>fatal</strong></td></tr><tr><td>9</td><td>Writable confirmation, synchronously</td><td>logs, skips the DNS flip, returns</td></tr></tbody></table>
+<p>Then, outside the sequence: the durable failover record and the counter are stamped <strong>before</strong> DNS.
+Node taints and source convergence are poll neighbours, not steps.</p>
+<h2 id="the-four-service-kinds">The four Service kinds</h2>
+<p><code>2 × len(sites) + 2</code> objects. Eight for a three-site group.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Service</th><th>Selector</th><th>Application use</th></tr></thead><tbody><tr><td><code>mysql-&#x3C;group>-primary</code></td><td>instance + <code>role=primary</code></td><td><strong>writes</strong></td></tr><tr><td><code>mysql-&#x3C;group>-replicas</code></td><td>instance + <code>role=replica</code> + <code>healthy=yes</code></td><td><strong>reads</strong></td></tr><tr><td><code>mysql-&#x3C;group>-&#x3C;site></code></td><td>name + instance + site, <strong>plus <code>healthy=yes</code> on a <code>read-only</code> site</strong></td><td>site-pinned tooling only</td></tr><tr><td><code>mysql-&#x3C;group>-&#x3C;site>-internal</code></td><td>name + instance + site, no health gate, <code>publishNotReadyAddresses: true</code></td><td>never yours — sidecar and peer traffic</td></tr></tbody></table>
+<p><code>role="fenced"</code> matches neither shared Service. A <code>read-only</code> site earns <code>healthy=yes</code> only when
+<strong>all five</strong> hold: converged source, replicating, non-nil lag, canonical <em>direct</em> source host, and lag
+within <code>readOnlyMaxLagSeconds</code>.</p>
+<h2 id="metrics-and-their-label-sets">Metrics, and their label sets</h2>
+<p>Label sets are <strong>not uniform</strong>. Read them before you copy a selector between rules.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Metric</th><th>Labels</th></tr></thead><tbody><tr><td><code>bloodraven_site_state</code></td><td><code>site</code>, <code>state</code> — a one-hot over <code>writable</code>/<code>read-only</code>/<code>unreachable</code>/<code>unknown</code></td></tr><tr><td><code>bloodraven_replication_lag_seconds</code></td><td><code>site</code> only — <strong><code>-1</code> means not replicating</strong>, not a small lag</td></tr><tr><td><code>bloodraven_replication_running</code></td><td><code>site</code>, <code>thread</code> (<code>io</code>/<code>sql</code>)</td></tr><tr><td><code>bloodraven_state_transitions_total</code></td><td><code>site</code>, <code>from</code>, <code>to</code></td></tr><tr><td><code>bloodraven_poll_latency_seconds</code></td><td><code>site</code> — its <code>_count</code> is the loop’s heartbeat</td></tr><tr><td><code>bloodraven_failovers_total</code></td><td><code>target_site</code></td></tr><tr><td><code>bloodraven_planned_failovers_total</code></td><td><code>target_site</code>, <code>result</code></td></tr><tr><td><code>bloodraven_divergent_transactions</code></td><td><code>site</code></td></tr><tr><td><code>bloodraven_primary_reassert_total</code></td><td><code>site</code></td></tr><tr><td><code>bloodraven_split_brain_auto_resolve_total</code></td><td><code>prefer_site</code></td></tr><tr><td><code>bloodraven_dns_flips_total</code></td><td><code>site</code></td></tr><tr><td><code>bloodraven_replication_source_state</code></td><td><code>namespace</code>, <code>group</code>, <code>site</code>, <code>state</code></td></tr><tr><td><code>bloodraven_archiver_backlog_files</code></td><td><code>namespace</code>, <code>group</code>, <code>site</code></td></tr><tr><td><code>bloodraven_backup_last_success_timestamp_seconds</code></td><td><code>group</code>, <code>profile</code></td></tr><tr><td><code>bloodraven_backup_verified_timestamp_seconds</code></td><td><code>group</code>, <code>profile</code></td></tr><tr><td><code>bloodraven_keyring_phase</code></td><td><code>mysql_namespace</code>, <code>failover_group</code>, <code>site</code>, <code>phase</code> — one-hot</td></tr></tbody></table>
+<p>Four words for two concepts: <code>namespace</code> / <code>mysql_namespace</code>, and <code>group</code> / <code>failover_group</code>. That is
+not a typo in this table.</p>
+<h2 id="annotations-you-apply-by-hand">Annotations you apply by hand</h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Key</th><th>Value</th><th>Notes</th></tr></thead><tbody><tr><td><code>bloodraven.shipstream.io/planned-failover</code></td><td><code>&#x3C;site></code> or <code>&#x3C;site>:maxLagWait=10m</code></td><td>Consumed and cleared. Unknown override keys are rejected.</td></tr><tr><td><code>bloodraven.shipstream.io/reclone-site</code></td><td><code>&#x3C;site>:&#x3C;divergentGtid prefix ≥8 chars></code></td><td>Cold form, when nothing is recorded: <code>&#x3C;site>:confirm=&#x3C;group></code>.</td></tr><tr><td><code>bloodraven.shipstream.io/rotate-keyring</code></td><td><code>&#x3C;site></code></td><td>Refused on the active primary.</td></tr></tbody></table>
+<p>Written <strong>by the operator</strong>, never by you: <code>bloodraven.shipstream.io/last-failover</code> and
+<code>…/last-failover-target</code>, RFC3339 at second precision, as a pair.</p>
+<h2 id="roles-in-one-line-each">Roles, in one line each</h2>
+<ul>
+<li><strong><code>primary-candidate</code></strong> — the only promotable role. Counted in every tally.</li>
+<li><strong><code>dr-only</code></strong> — never promoted, but <strong>counted</strong> in <code>coreCount</code> and the tallies. A full topology participant that cannot win.</li>
+<li><strong><code>read-only</code></strong> — never promoted, invisible to the matrix, never tainted, refused as a backup source, and skipped by every replication condition. Not a spare.</li>
+</ul>
+<h2 id="glossary">Glossary</h2>
+<p><strong>Active site</strong> — the one site <code>status.activeSite</code> names as the writable authority. One name, or
+empty; empty means authority is ambiguous, and every endpoint is shed.</p>
+<p><strong>Anti-flap cooldown</strong> — <code>failoverCooldown</code>. Suppresses automatic promotion and nothing else.</p>
+<p><strong>Core site</strong> — any site whose role is not <code>read-only</code>. What the matrix counts.</p>
+<p><strong>Divergent GTID set</strong> — <code>GTID_SUBTRACT(old primary, new primary)</code>: the transactions the old primary
+holds that the new one never saw. Its cardinality is your lost-transaction count.</p>
+<p><strong>Fencing</strong> — <code>SET GLOBAL super_read_only = ON</code>. Blocks writes even from <code>SUPER</code>. <strong>Closes no sockets</strong>,
+so surviving sessions keep serving stale reads. At the Service layer, a separate thing: stamping the
+pod <code>role=fenced</code>, which matches neither shared selector.</p>
+<p><strong>GTID set</strong> — the transaction history a server has executed, as <code>uuid:interval[:interval…]</code>,
+comma-separated across UUIDs. In MySQL 9.x a set may carry a user tag, <code>uuid:tag:interval</code>, and the tag
+is part of the identity — <code>uuid:A:1-3</code> and <code>uuid:B:1-3</code> are six transactions, not three.</p>
+<p><strong>Ordered update</strong> — the operator-driven rollout of a spec change: standby first, then a real failover,
+then the old active. Triggered by spec-hash drift; not cooldown-gated.</p>
+<p><strong>Promotability</strong> — exactly <code>role == primary-candidate</code>. Not earned by having the freshest data.</p>
+<p><strong>RPO / RTO</strong> — how much recently committed data you accept losing / how long you accept being unable
+to write. Bloodraven’s RPO on sudden primary loss is not zero, by design; its whole engineering budget
+goes to RTO.</p>
+<p><strong>Self-fence</strong> — the sidecar setting <code>super_read_only=ON</code> on its own MySQL without asking anyone.
+Rule #1: the known authoritative active site is somebody else. Rule #2: the operator <em>and every peer</em>
+have been silent past <code>leaseTimeout</code>.</p>
+<p><strong>Safety net</strong> — a <em>different</em> thing from self-fencing: a one-shot at sidecar startup that fences
+first and asks afterwards, and completes before the fencing monitor exists. <code>safety net:</code> in a log
+means a pod that has never been allowed to write; <code>SELF-FENCED:</code> means one that was writing and lost
+the argument.</p>
+<p><strong>Sealed</strong> — the steady-state keyring phase: the keyring file is projected read-only from the escrow
+Secret, so mysqld physically cannot add a key. <code>Unsealed</code> is mid-flight, and rotation re-enters it
+<em>from</em> <code>Sealed</code>, so the phase string alone is ambiguous — read it beside <code>unsealReason</code>.</p>
+<p><strong>Source convergence</strong> — the independent poll stage that repoints replicas at the current authority.
+Demands a <strong>direct</strong> source; a replica chained off another replica does not count as converged.</p>
+<p><strong>Split brain</strong> — more than one core site writable at once. <code>sitePriorities</code> does not prevent it and
+merges nothing; it is a standing decision about whose unreplicated writes you will discard.</p>
+<p><strong>Star topology</strong> — every replica replicates directly from the active site. Bloodraven does not accept
+chains.</p>
+<p><strong><code>super_read_only</code> vs <code>read_only</code></strong> — <code>super_read_only</code> also blocks users holding <code>CONNECTION_ADMIN</code>
+or <code>SUPER</code>, which plain <code>read_only</code> does not. Setting <code>super_read_only=ON</code> implicitly forces
+<code>read_only=ON</code>; clearing <code>read_only</code> implicitly clears <code>super_read_only</code>.</p>
+<h2 id="where-this-leaves-you">Where this leaves you</h2>
+<p>You have a card. Use it to stop looking things up, and use the version appendix to check anything on
+it that carries a date. What you can now say about a group you are handed is what the whole course was
+for: what it will do next, what it will refuse to do, what it will cost you when it does, and which of
+those numbers you measured yourself.</p> <p> <button class="btn btn--primary" type="button" data-mark-read="u7t4">
+Mark as read
+</button> </p> </section> <section id="flashcards"> <h2>Flashcards</h2> <div class="deck" data-deck> <div class="fc"> <div class="fc__inner"> <div class="fc__face"> <div> <p>Detection delay, from first principles</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p><code>pollInterval</code> × <code>failureThreshold</code> = 2 s × 3 = <strong>6 s</strong>. <code>recoveryThreshold</code> gates the opposite transition and is never a term in that sum; neither is the 5 s per-probe ceiling.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>The three playground overrides</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p><code>failoverCooldown</code> 30s (shipped 5m), <code>replication.maxLagSeconds</code> 30 (shipped 300), <code>dns.ttl</code> 10 (shipped 60). Everything else matches the shipped defaults, so no timing measured in the playground transfers unchanged.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>The five condition reasons</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p><code>Healthy</code>, <code>Degraded</code>, <code>SplitBrain</code>, <code>NoPrimary</code>, <code>TotalLoss</code>. There is no <code>Failover</code> reason — a rule matching one never fires.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>The four fatal steps of a promotion</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p><code>STOP REPLICA</code>, <code>RESET REPLICA ALL</code>, <code>SET GLOBAL super_read_only = OFF</code>, <code>SET GLOBAL read_only = OFF</code>. Everything else — fencing the old primary, killing its connections, the relay-log drain, recording the promotion GTID — warns and carries on.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>Which two things are <em>not</em> steps of the failover sequence</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>Node taints (a pure function of per-site transitions, applied earlier in the same poll) and source convergence (an independent poll stage with its own 20 s budget). Both are poll neighbours, not links in the chain.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>The four Service kinds and the object count</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p><code>-primary</code>, <code>-replicas</code>, <code>&#x3C;site></code>, <code>&#x3C;site>-internal</code> — <code>2 × len(sites) + 2</code> objects, so eight for three sites.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p><code>bloodraven_replication_lag_seconds</code> reading <code>-1</code></p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>Not a small lag: the site is not replicating at all. A dashboard that averages <code>-1</code> with real seconds inverts the most important signal on the page.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>The label-set trap across metrics</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>Site metrics carry <code>{site}</code> only. The archiver carries <code>{namespace, group, site}</code>, backup metrics <code>{group, profile}</code>, and <code>bloodraven_keyring_phase</code> <code>{mysql_namespace, failover_group, site, phase}</code> — four words for two concepts.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>The three roles in one line each</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p><code>primary-candidate</code> — the only promotable role, counted everywhere. <code>dr-only</code> — never promoted but <strong>counted</strong> in <code>coreCount</code> and the tallies. <code>read-only</code> — never promoted, invisible to the matrix, never tainted, refused as a backup source, skipped by every replication condition.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>The three annotations you apply by hand</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p><code>planned-failover=&#x3C;site>[:maxLagWait=…]</code>, <code>reclone-site=&#x3C;site>:&#x3C;divergentGtid prefix ≥8 chars></code> (cold form <code>&#x3C;site>:confirm=&#x3C;group></code>), and <code>rotate-keyring=&#x3C;site></code>. All under <code>bloodraven.shipstream.io/</code>, all consumed and cleared.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>Which two annotations the operator writes and you never should</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p><code>bloodraven.shipstream.io/last-failover</code> and <code>…/last-failover-target</code>, RFC3339 at second precision, written as a pair by one JSON merge patch.</p> </div> </div> </div> </div><div class="fc" hidden> <div class="fc__inner"> <div class="fc__face"> <div> <p>What belongs in the version appendix rather than in your memory</p> </div> <span class="fc__hint" aria-hidden="true">Click or press space to flip</span> </div> <div class="fc__face fc__face--back"> <div> <p>Anything dated: issue and PR numbers, upstream version pins, licence status, and 'the published page currently says X'. Check it before quoting any of them.</p> </div> </div> </div> </div> <div class="deck__bar"> <button class="btn" type="button" data-deck-prev aria-label="Previous card">←</button> <button class="btn" type="button" data-deck-next aria-label="Next card">→</button> <button class="btn" type="button" data-deck-shuffle>Shuffle</button> <span class="deck__count">1 / 12</span> </div> </div> </section> <section id="quiz"> <h2>Quiz</h2> <div class="quiz" data-quiz> <script type="application/json" id="quiz-data">{"id":"u7t4","kind":"quiz","objectiveNames":{"1":"Write a `MysqlFailoverGroup` into an empty namespace and say, line by line, which earlier unit decided it","2":"Choose between `secretName` and `credentials` and name the users and grants each one produces","3":"Separate the mistakes admission rejects from the ones you discover during an incident","4":"Wire `spec.tls` to a cert-manager issuer and design a SAN list every client can verify against","5":"Explain why a certificate renewal rolls your pods and moves your primary","6":"Say what TLS changes about replication, cloning, and the backup path","7":"Roll a MySQL image change and name the ordered-update phase you are in from status","8":"Say why the standby is upgraded first, and what makes the updater abort early","9":"Upgrade the operator without letting Helm silently leave the CRDs behind","10":"Recall any shipped default and its playground override from one page","11":"Name the five condition reasons, the nine promotion steps with fatality, and the four Service kinds without looking them up","12":"Use the version appendix to decide whether a fact you remember is still true"},"questions":[{"type":"MULTIPLE_CHOICE","correctOptionIndex":0,"objectives":[10,11]},{"type":"MULTIPLE_CHOICE","correctOptionIndex":0,"objectives":[11]},{"type":"TRUE_FALSE","correctAnswer":false,"objectives":[12]},{"type":"MULTIPLE_CHOICE","correctOptionIndex":0,"objectives":[12]},{"type":"SHORT_ANSWER","objectives":[10,11]}]}</script>  <div class="quiz__meter" data-quiz-meter hidden> <div class="bar" style="flex:1"><span style="width:0%"></span></div> <span data-quiz-count>0 / 5</span>  <button class="btn btn--quiet quiz__reset" type="button" data-quiz-reset hidden>
+Reset
+</button> </div> <div class="q"> <fieldset> <legend>
+Question 1 of 5 </legend> <div class="qstem"> <p>Your on-call runbook says 'the operator detects a dead site in about 10 seconds (2 s poll × 3 failures, plus 2 recovery polls × 2 s)'. Correct it.</p> </div> <label class="opt"> <input type="radio" name="q-u7t4-0" value="0"> <span> Detection is 6 s — <code>pollInterval</code> × <code>failureThreshold</code>. <code>recoveryThreshold</code> gates the transition back to <code>writable</code> and is never a term in the detection sum </span> </label><label class="opt"> <input type="radio" name="q-u7t4-0" value="1"> <span> Detection is 11 s — the sum is right but the 5 s per-probe ceiling has to be added once </span> </label><label class="opt"> <input type="radio" name="q-u7t4-0" value="2"> <span> Detection is 10 s and the runbook is correct; <code>recoveryThreshold</code> is consulted before a site is declared unreachable </span> </label><label class="opt"> <input type="radio" name="q-u7t4-0" value="3"> <span> Detection cannot be stated as a fixed number because the poll interval is adaptive from the first failure onward </span> </label> </fieldset> <button class="btn btn--primary" type="button" data-check>
+Check answer
+</button>  <details> <summary>Show answer</summary> <p> <strong>Answer:</strong>  Detection is 6 s — <code>pollInterval</code> × <code>failureThreshold</code>. <code>recoveryThreshold</code> gates the transition back to <code>writable</code> and is never a term in the detection sum </p>  <p>Adding <code>recoveryThreshold</code> to the detection sum is the single most common wrong answer about this operator. The two counters gate opposite transitions: <code>failureThreshold</code> guards the way to <code>unreachable</code>, <code>recoveryThreshold</code> guards the way back to <code>writable</code>. Option 2 adds the per-probe ceiling, which bounds one probe and does not pace the loop. Option 4 overstates the backoff: it engages only once a site's <code>failCount</code> climbs <em>past</em> <code>failureThreshold</code>, so the first detection is always 6 s — but it is a real caveat worth adding to the runbook for the second fault during an existing outage, where the answer becomes 30 s × 3 = 90 s. (objectives 10, 11)</p> </details> <div class="explain" hidden> <strong>Explanation</strong>  <p>Adding <code>recoveryThreshold</code> to the detection sum is the single most common wrong answer about this operator. The two counters gate opposite transitions: <code>failureThreshold</code> guards the way to <code>unreachable</code>, <code>recoveryThreshold</code> guards the way back to <code>writable</code>. Option 2 adds the per-probe ceiling, which bounds one probe and does not pace the loop. Option 4 overstates the backoff: it engages only once a site's <code>failCount</code> climbs <em>past</em> <code>failureThreshold</code>, so the first detection is always 6 s — but it is a real caveat worth adding to the runbook for the second fault during an existing outage, where the answer becomes 30 s × 3 = 90 s. (objectives 10, 11)</p> </div>  </div><div class="q"> <fieldset> <legend>
+Question 2 of 5 </legend> <div class="qstem"> <p>A colleague is building an alert set for a new group and copies your <code>BloodravenPITRArchiveLagging</code> rule, changing only the group name in the label matcher. It never fires, even during a real archiver backlog. What did they get wrong?</p> </div> <label class="opt"> <input type="radio" name="q-u7t4-1" value="0"> <span> The label sets are not uniform: archiver metrics carry <code>{namespace, group, site}</code> while backup metrics carry <code>{group, profile}</code> and site metrics carry <code>{site}</code> alone, so a selector copied between families silently matches nothing </span> </label><label class="opt"> <input type="radio" name="q-u7t4-1" value="1"> <span> <code>bloodraven_archiver_backlog_files</code> is a counter, not a gauge, so it needs <code>increase()</code> before it can be compared to a threshold </span> </label><label class="opt"> <input type="radio" name="q-u7t4-1" value="2"> <span> Archiver metrics are exported by the sidecar on a different port, so the scrape config needs a second job before any rule against them can fire </span> </label><label class="opt"> <input type="radio" name="q-u7t4-1" value="3"> <span> The rule needs a <code>for:</code> duration shorter than <code>archivePollInterval</code>, or the backlog clears before the rule's evaluation window closes </span> </label> </fieldset> <button class="btn btn--primary" type="button" data-check>
+Check answer
+</button>  <details> <summary>Show answer</summary> <p> <strong>Answer:</strong>  The label sets are not uniform: archiver metrics carry <code>{namespace, group, site}</code> while backup metrics carry <code>{group, profile}</code> and site metrics carry <code>{site}</code> alone, so a selector copied between families silently matches nothing </p>  <p>A selector naming a label the series does not carry matches nothing and reports nothing — the failure mode of an alert that is silently always-green. Reading the label set before copying a selector is the habit; the reference card exists so that reading takes five seconds. Options 2 and 4 are plausible-sounding PromQL claims that do not hold here. Option 3 confuses where the archiver runs with where its metrics are exported. (objective 11)</p> </details> <div class="explain" hidden> <strong>Explanation</strong>  <p>A selector naming a label the series does not carry matches nothing and reports nothing — the failure mode of an alert that is silently always-green. Reading the label set before copying a selector is the habit; the reference card exists so that reading takes five seconds. Options 2 and 4 are plausible-sounding PromQL claims that do not hold here. Option 3 confuses where the archiver runs with where its metrics are exported. (objective 11)</p> </div>  </div><div class="q"> <fieldset> <legend>
+Question 3 of 5 </legend> <div class="qstem"> <p>You remember from this course that Bloodraven ships without a licence file and that a particular fix was still an open issue. Both are safe to state in a production readiness review.</p> </div> <label class="opt"> <input type="radio" name="q-u7t4-2" value="0"> <span> False </span> </label><label class="opt"> <input type="radio" name="q-u7t4-2" value="1"> <span> True </span> </label> </fieldset> <button class="btn btn--primary" type="button" data-check>
+Check answer
+</button>  <details> <summary>Show answer</summary> <p> <strong>Answer:</strong>  False </p>  <p>Neither is safe to state without re-checking, and that is what the version appendix is for. Both facts were true and grounded on the date the course was written, and both are exactly the kind that move: an issue gets closed, a pull request merges, a <code>LICENSE</code> file appears. The appendix records each with a date and the command that re-checks it — <code>gh issue view</code>, <code>gh repo view --json licenseInfo</code>, a <code>grep</code> over the source — so one lookup replaces a guess. The mechanisms you learned do not expire. The dated facts about them do. (objective 12)</p> </details> <div class="explain" hidden> <strong>Explanation</strong>  <p>Neither is safe to state without re-checking, and that is what the version appendix is for. Both facts were true and grounded on the date the course was written, and both are exactly the kind that move: an issue gets closed, a pull request merges, a <code>LICENSE</code> file appears. The appendix records each with a date and the command that re-checks it — <code>gh issue view</code>, <code>gh repo view --json licenseInfo</code>, a <code>grep</code> over the source — so one lookup replaces a guess. The mechanisms you learned do not expire. The dated facts about them do. (objective 12)</p> </div>  </div><div class="q"> <fieldset> <legend>
+Question 4 of 5 </legend> <div class="qstem"> <p>Which of these belongs on the reference card, and which belongs in the version appendix?</p> </div> <label class="opt"> <input type="radio" name="q-u7t4-3" value="0"> <span> <code>failoverCooldown</code> defaults to <code>5m</code> belongs on the card; 'issue #123 is open' belongs in the appendix, because one is a CRD default and the other is a fact with a date on it </span> </label><label class="opt"> <input type="radio" name="q-u7t4-3" value="1"> <span> Both belong on the card: the appendix is only for sources and citations </span> </label><label class="opt"> <input type="radio" name="q-u7t4-3" value="2"> <span> Both belong in the appendix: anything traceable to the repository is version-specific </span> </label><label class="opt"> <input type="radio" name="q-u7t4-3" value="3"> <span> <code>failoverCooldown</code> belongs in the appendix because defaults change between releases; issue numbers belong on the card because they never change </span> </label> </fieldset> <button class="btn btn--primary" type="button" data-check>
+Check answer
+</button>  <details> <summary>Show answer</summary> <p> <strong>Answer:</strong>  <code>failoverCooldown</code> defaults to <code>5m</code> belongs on the card; 'issue #123 is open' belongs in the appendix, because one is a CRD default and the other is a fact with a date on it </p>  <p>The split is between facts that describe a mechanism and facts that describe a moment. A CRD default is readable off the shipped CRD at any time and changes rarely and loudly; an issue's state changes quietly and without a release. Option 4 inverts it exactly — an issue number is stable but its <em>state</em> is the fact you care about, and that is the perishable part. Option 3 would make the card empty, which defeats the point of having one screen at 3am. (objective 12)</p> </details> <div class="explain" hidden> <strong>Explanation</strong>  <p>The split is between facts that describe a mechanism and facts that describe a moment. A CRD default is readable off the shipped CRD at any time and changes rarely and loudly; an issue's state changes quietly and without a release. Option 4 inverts it exactly — an issue number is stable but its <em>state</em> is the fact you care about, and that is the perishable part. Option 3 would make the card empty, which defeats the point of having one screen at 3am. (objective 12)</p> </div>  </div><div class="q"> <fieldset> <legend>
+Question 5 of 5 </legend> <div class="qstem"> <p>You are handed a group you have never seen. Using only the reference card, write the four commands or reads you would perform first, and say what each one rules in or out.</p> </div>  <label class="skip" for="sa-u7t4-4">
+Your answer
+</label> <textarea id="sa-u7t4-4" rows="4" placeholder="Write your answer…"></textarea>  </fieldset> <button class="btn btn--primary" type="button" data-check>
+Check answer
+</button>  <details> <summary>Show answer</summary> <p> <strong>Answer:</strong>  <p>One: <code>kubectl get mysqlfailovergroup &#x3C;group> -o jsonpath='{.status.activeSite}'</code> — an empty answer means authority is ambiguous and every Service endpoint has been shed, which is the shape of split brain and of no-primary; a name means there is one writable authority. Two: the <code>Degraded</code> condition's <code>reason</code>, which is one of exactly five strings and tells me the topology shape rather than the action — and specifically rules out looking for a <code>Failover</code> reason, which does not exist. Three: <code>status.updatePhase</code> — non-empty means somebody is mid-rollout and any failover I am looking at is theirs, not a fault. Four: the per-site rows, <code>state</code> plus <code>secondsBehindSource</code> plus <code>recoveryState</code>, remembering that the writable primary's replication keys are absent rather than zero, that a lag of <code>-1</code> means not replicating at all, and that <code>role</code> is not in status so I have to read <code>spec.sites[].role</code> to tell a <code>read-only</code> reader from a lagging candidate.</p> </p> <p> <strong>A full-credit answer shows:</strong> A strong answer names <code>status.activeSite</code> and reads an empty value correctly (ambiguous authority, endpoints shed); names the <code>Degraded</code> reason and that there are five of them with no <code>Failover</code>; checks <code>status.updatePhase</code> to separate a rollout from an incident; and reads the per-site rows with at least two of the three traps — absent-is-not-zero, <code>-1</code> is not a small lag, and role lives in spec rather than status. Credit any order that starts with authority and ends with per-site detail. </p> <p>The value of the card is not that it contains these facts but that it puts them one screen apart, so the first thirty seconds of an incident are spent reading rather than recalling. Every trap in the answer above is one this course spent a topic on. (objectives 10, 11)</p> </details> <div class="explain" hidden> <strong>Explanation</strong>  <p> <strong>Sample answer</strong> <p>One: <code>kubectl get mysqlfailovergroup &#x3C;group> -o jsonpath='{.status.activeSite}'</code> — an empty answer means authority is ambiguous and every Service endpoint has been shed, which is the shape of split brain and of no-primary; a name means there is one writable authority. Two: the <code>Degraded</code> condition's <code>reason</code>, which is one of exactly five strings and tells me the topology shape rather than the action — and specifically rules out looking for a <code>Failover</code> reason, which does not exist. Three: <code>status.updatePhase</code> — non-empty means somebody is mid-rollout and any failover I am looking at is theirs, not a fault. Four: the per-site rows, <code>state</code> plus <code>secondsBehindSource</code> plus <code>recoveryState</code>, remembering that the writable primary's replication keys are absent rather than zero, that a lag of <code>-1</code> means not replicating at all, and that <code>role</code> is not in status so I have to read <code>spec.sites[].role</code> to tell a <code>read-only</code> reader from a lagging candidate.</p> </p> <p> <strong>A full-credit answer shows</strong> <p>A strong answer names <code>status.activeSite</code> and reads an empty value correctly (ambiguous authority, endpoints shed); names the <code>Degraded</code> reason and that there are five of them with no <code>Failover</code>; checks <code>status.updatePhase</code> to separate a rollout from an incident; and reads the per-site rows with at least two of the three traps — absent-is-not-zero, <code>-1</code> is not a small lag, and role lives in spec rather than status. Credit any order that starts with authority and ends with per-site detail.</p> </p> <p>The value of the card is not that it contains these facts but that it puts them one screen apart, so the first thirty seconds of an incident are spent reading rather than recalling. Every trap in the answer above is one this course spent a topic on. (objectives 10, 11)</p> </div> <div class="self-grade" hidden> <span class="note">
+Short answers are self-graded — nothing is sent anywhere.
+</span> <button class="btn" type="button" data-self="got">
+I got it
+</button> <button class="btn" type="button" data-self="missed">
+I missed it
+</button> </div> </div> <div class="quiz__result" hidden></div> </div> </section>   </main> <footer class="site-footer"> <div class="wrap">  <p class="pager"> <a href="../unit-7/topic-3.html">← Upgrading without an incident</a> <a href="../unit-7/test.html">Day 0 and day 2 →</a> </p>  <p> <a href="../index.html">Syllabus</a> ·
+<a href="../certificate.html">Completion record</a> ·
+<a href="../sources.html">Sources</a> ·
+<button class="btn btn--quiet" type="button" data-reset>Reset progress</button> </p> <p class="site-license" data-license-id="all-rights-reserved"> <span>© 2026 ShipStream, LLC. </span> All rights reserved. </p> </div> </footer> <div aria-live="polite" class="skip" data-live></div> <dialog id="reset-dialog"> <h2>Erase saved progress?</h2> <p>
+This erases all quiz scores, reading progress, project checklists, and your name on the
+        certificate. It cannot be undone, and it affects only this course in this browser.
+</p> <div class="dialog__actions"> <button class="btn" type="button" data-reset-cancel>Cancel</button> <button class="btn btn--primary" type="button" data-reset-confirm>Erase</button> </div> </dialog> <script src="../assets/search-index.js" defer></script> <script src="../assets/site.js" defer></script> </body> </html>

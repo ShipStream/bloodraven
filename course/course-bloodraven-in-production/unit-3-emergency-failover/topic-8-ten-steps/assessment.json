@@ -1,0 +1,120 @@
+{
+  "flashcards": [
+    {
+      "front": "The step of the failover sequence that appears nowhere in the documentation",
+      "back": "Step 2 — kill application connections on the old primary: SELECT id FROM information_schema.processlist WHERE id != CONNECTION_ID() AND command NOT IN ('Binlog Dump', 'Binlog Dump GTID'), then KILL each id.",
+      "orderIndex": 0
+    },
+    {
+      "front": "Which threads does the connection-kill query deliberately spare, and why?",
+      "back": "Binlog Dump and Binlog Dump GTID — the replication dump threads, so killing application sessions does not tear down replication to the surviving sites.",
+      "orderIndex": 1
+    },
+    {
+      "front": "The four steps of Execute() whose error aborts the failover",
+      "back": "STOP REPLICA, RESET REPLICA ALL, SET GLOBAL super_read_only = OFF, SET GLOBAL read_only = OFF — the four that change the candidate's own replication and read-only state.",
+      "orderIndex": 2
+    },
+    {
+      "front": "Relay-log drain: budget, first wait, wait ceiling",
+      "back": "30 s budget; the first wait is 500 ms and doubles each round to a 4 s ceiling.",
+      "orderIndex": 3
+    },
+    {
+      "front": "The relay-log drain's early-exit condition",
+      "back": "The SQL thread is running and Seconds_Behind_Source reads 0 — the drain returns immediately.",
+      "orderIndex": 4
+    },
+    {
+      "front": "A site reports super_read_only = ON. What does that tell you?",
+      "back": "It has been fenced — super_read_only is what the sidecar and the operator fence with, and it blocks writes even from CONNECTION_ADMIN or SUPER.",
+      "orderIndex": 5
+    },
+    {
+      "front": "Measured time for status.activeSite to flip after a clean primary kill on the playground",
+      "back": "12.0 s, reproducible across nine-plus independent recorded runs (12.004 s to 12.02 s, one outlier at 13.008 s).",
+      "orderIndex": 6
+    },
+    {
+      "front": "What scenario 14 does to the replica before it kills the primary",
+      "back": "Pauses the replica's SQL applier and seeds five seconds of writes, so the candidate has unapplied relay logs when the drain starts.",
+      "orderIndex": 7
+    },
+    {
+      "front": "What the operator stamps before it flips DNS, and why",
+      "back": "The durable failover record and the failover counter — deliberately, so a DNS-provider outage cannot erase the fact that a promotion happened.",
+      "orderIndex": 8
+    },
+    {
+      "front": "Which code path applies the node taint around a failover?",
+      "back": "The per-site transition handler, earlier in the same poll — taints are a pure function of the state transition, not a step of the failover sequence.",
+      "orderIndex": 9
+    },
+    {
+      "front": "Source convergence: budget and where it runs",
+      "back": "An independent poll stage with its own 20 s budget, repointing replicas at the authoritative site — not a link in the promotion chain.",
+      "orderIndex": 10
+    },
+    {
+      "front": "Why does scenario 01 hold the site down with scale-to-0 instead of deleting the pod?",
+      "back": "Determinism — a pod-delete races the ~5 s Deployment respawn, and that race can restore the original topology through split-brain recovery instead of completing the failover.",
+      "orderIndex": 11
+    }
+  ],
+  "quiz": [
+    {
+      "question": "The operator begins a failover on `playground` and the very first statement — SET GLOBAL super_read_only = ON against the dead `iad` primary — fails with a connection error. What happens next?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 0,
+      "options": [
+        "The failover aborts and is retried on the next poll, because promoting without fencing risks split brain",
+        "The operator logs a warning and carries straight on to the next step",
+        "The candidate is promoted but left read-only until the fence can be confirmed",
+        "The operator skips the relay-log drain and promotes immediately, to shorten the unfenced window"
+      ],
+      "correctOptionIndex": 1,
+      "explanation": "Fencing the old primary is a warn-only step: the code logs 'failed to fence old primary (may be unreachable)' and continues. That is the design, not an oversight — the old primary is usually unreachable, which is the whole reason a failover is running. Option 1 is the common belief that fencing gates promotion; it does not, and if it did, an unreachable primary would block every failover you actually need. Option 3 invents a half-promoted state that does not exist in Execute(): the two read-only clears are unconditional and fatal on error. Option 4 confuses two independent things — the drain's 30 s budget is about the candidate's relay logs and is never shortened by what happened on the old primary. Only STOP REPLICA, RESET REPLICA ALL and the two read-only clears abort the sequence. (objective 2)"
+    },
+    {
+      "question": "A `kubectl delete pod --grace-period=0 --force` against the primary will not trigger a failover, because the Deployment recreates the pod in under five seconds.",
+      "type": "TRUE_FALSE",
+      "orderIndex": 1,
+      "correctAnswer": false,
+      "explanation": "The reversal: a force-delete does trigger failover, and the fast respawn does not save the primary. Scenario 09b force-deletes the primary and hard-waits for activeSite to flip and lastFailover to stamp before it even reaches its real assertion — and it passes. The debounce never looks at pod objects; it looks at whether mysqld answers CheckReadOnly, and a cold container start plus InnoDB recovery comfortably exceeds the 6 s detection window (pollInterval 2 s x failureThreshold 3). The genuinely marginal injection is a container restart in place — scenario 16 issues SQL SHUTDOWN, keeps the pod, PVC and IP, and explicitly accepts either outcome depending on how fast the kubelet restarts the container against that same ~6 s window. Scale-to-0 is preferred in scenario 01 for determinism, not because delete fails. (objective 1)"
+    },
+    {
+      "question": "Promotion clears `super_read_only` and then `read_only`. Given the candidate is about to accept writes either way, why does the sequence care about `super_read_only` specifically?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 2,
+      "options": [
+        "It is the variable the sidecar fences with, and it blocks writes even from CONNECTION_ADMIN or SUPER, which `read_only` alone does not",
+        "MySQL refuses `SET GLOBAL read_only = OFF` while `super_read_only` is ON, so the order is forced by the server",
+        "Clearing it is what lets the new primary stop applying replicated transactions from its old source",
+        "`super_read_only` is the only one of the two that persists across a mysqld restart, so clearing it is what makes the promotion durable"
+      ],
+      "correctOptionIndex": 0,
+      "explanation": "super_read_only is the real barrier — the MySQL manual is explicit that it prohibits updates even from users holding CONNECTION_ADMIN or SUPER, while read_only does not — and it is exactly what the sidecar's fencing sets. A candidate arriving at promotion may already be fenced, so the promotion has to clear that specific variable. Option 2 is backwards: MySQL couples the two the other way round, and setting read_only=OFF implicitly forces super_read_only=OFF. Option 3 confuses fencing with replication control: replication threads keep applying under super_read_only, which is precisely why STOP REPLICA and RESET REPLICA ALL are separate, fatal steps. Option 4 invents persistence — neither variable survives a restart on its own, and durability of the promotion comes from the failover record stamped before the DNS flip. (objective 2)"
+    },
+    {
+      "question": "Which of these is actually a step inside the failover sequence in `internal/controller/failover.go`?",
+      "type": "MULTIPLE_CHOICE",
+      "orderIndex": 3,
+      "options": [
+        "Applying the NoExecute taint to the old primary's node",
+        "Repointing the surviving replicas at the newly promoted site",
+        "Confirming the candidate is writable before the DNS record is flipped",
+        "Recording the old primary's divergent GTID set"
+      ],
+      "correctOptionIndex": 2,
+      "explanation": "Writable confirmation runs synchronously in the same call stack as the promotion — not deferred to the next poll — and on failure the operator logs that promotion succeeded but DNS was not flipped, and returns. Option 1 is the most common misreading: taints are a pure function of per-site state transitions and are applied earlier in the same poll by a different code path, so they merely appear alongside a failover. Option 2 is source convergence, an independent poll stage with its own 20 s budget; the published sequence lists it as a step, and that is a documentation error. Option 4 belongs to old-primary recovery, which runs later and only once the old primary comes back. Neighbours in the poll are not links in the chain. (objective 2)"
+    },
+    {
+      "question": "A failover on `playground` measures 36 s from primary kill to `activeSite` flip, where your previous runs all landed at 12 s. Account for the extra 24 seconds, and say what you would check to confirm your explanation.",
+      "type": "SHORT_ANSWER",
+      "orderIndex": 4,
+      "sampleAnswer": "Both runs pay the same 6 s of detection (pollInterval 2 s x failureThreshold 3), so detection is not the difference. In the 12 s runs the candidate is already caught up, so the relay-log drain hits its early-exit condition — SQL thread running, Seconds_Behind_Source 0 — and returns almost immediately. In the 36 s run the candidate had relay logs it had fetched but not applied, so the drain spent essentially its whole 30 s budget before the operator promoted anyway (the drain is non-fatal on timeout): 36.005 s - 12.0 s = 24.0 s of extra wall clock. To confirm it, I would look for the warning 'relay log drain did not complete cleanly, proceeding with promotion' in the operator log, and for a stopped or lagging SQL applier on the candidate in the period before the kill — scenario 14 produces exactly this by pausing the applier and seeding five seconds of writes.",
+      "graderNotes": "A strong answer: (a) names detection as the constant 6 s and derives it from pollInterval x failureThreshold; (b) attributes the whole difference to the relay-log drain, not to detection, DNS or the promotion statements; (c) states the drain's 30 s budget and its early-exit condition (SQL thread running and Seconds_Behind_Source = 0) as the reason the fast case is fast; (d) notes the drain is non-fatal, so the promotion proceeded anyway; (e) offers a checkable artefact — the drain warning in the operator log, or an unapplied relay-log backlog on the candidate. Answers that blame DNS propagation, the anti-flap cooldown, or a slower promotion have missed it.",
+      "explanation": "The 12.0 s and 36.005 s figures are both measured, and the gap is entirely the drain: the same 6 s detection, then either an instant early exit or a full 30 s budget spent applying relay logs. This is also why the worst case is around 37 s (6 s detect + 30 s drain) rather than the documentation's unsourced 30-45 s. (objectives 2, 3)"
+    }
+  ]
+}
