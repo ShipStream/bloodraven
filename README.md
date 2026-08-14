@@ -122,7 +122,7 @@ locations, and verification results.
 - controller-runtime v0.23.3
 - k8s.io/api v0.35.3
 - MySQL 9.7 LTS with clone plugin
-- Optional managed Dragonfly v1.38.0+
+- Optional managed Dragonfly v1.38.0+ (runtime probe reports whether the image advertises `REPLTAKEOVER`)
 
 ## Architecture snapshot
 

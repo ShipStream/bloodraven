@@ -21,7 +21,7 @@ func init() {
 //   - cause Bloodraven to autonomously promote the surviving replica
 //     and emit DragonflyPromotionStarted/Completed events
 //   - flip status.dragonfly.activeSite to the peer site
-//   - increment bloodraven_dragonfly_promotions_total{result="success"}
+//   - increment bloodraven_dragonfly_promotions_total{result="success|sessions_lost"}
 //   - re-attach the respawned old master as a replica with link=up
 //
 // Mapped to PLANS-Dragonfly-Chaos-Scenarios.md scenario D7.
@@ -217,19 +217,23 @@ func settleDragonflyOldMasterRejoinsAsReplica() runner.Step {
 func verifyDragonflyPromotionsMetricS23() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  `bloodraven_dragonfly_promotions_total{result="success"} >= 1`,
+		Name:  `bloodraven_dragonfly_promotions_total{result="success|sessions_lost"} >= 1`,
 		Do: func(ctx context.Context, env *runner.Env) error {
 			target := ctxFetch(env, "promotionTarget")
 			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
 			return env.Wait.UntilMetric(waitCtx, env.Metrics,
-				fmt.Sprintf(`dragonfly_promotions_total{target_site=%q,result="success"} >= 1`, target),
+				fmt.Sprintf(`dragonfly_promotions_total{target_site=%q,result="success|sessions_lost"} >= 1`, target),
 				func(snap *pgmetrics.Snapshot) (bool, string) {
-					v, _ := snap.Counter("bloodraven_dragonfly_promotions_total", map[string]string{
+					ok, _ := snap.Counter("bloodraven_dragonfly_promotions_total", map[string]string{
 						"target_site": target,
 						"result":      "success",
 					})
-					return v >= 1, fmt.Sprintf("counter=%g", v)
+					lost, _ := snap.Counter("bloodraven_dragonfly_promotions_total", map[string]string{
+						"target_site": target,
+						"result":      "sessions_lost",
+					})
+					return ok+lost >= 1, fmt.Sprintf("success=%g sessions_lost=%g", ok, lost)
 				},
 			)
 		},

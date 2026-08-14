@@ -13,8 +13,8 @@ import (
 // inline-array commands out, simple-string / bulk-string / error replies in.
 //
 // We deliberately do not depend on a full Redis client library — the
-// command set is six commands wide and we benefit from owning the
-// connection lifecycle and timeout policy directly.
+// command set is small and we benefit from owning the connection
+// lifecycle and timeout policy directly.
 
 // MaxBulkStringSize caps the bulk-string length we will allocate
 // per reply. Bloodraven only issues INFO replication / persistence
@@ -23,6 +23,14 @@ import (
 // against a wedged or malicious server returning a huge n that would
 // otherwise allocate unbounded memory before the read fails.
 const MaxBulkStringSize = 4 << 20 // 4 MiB
+
+// MaxArrayElements caps the number of elements in one RESP array.
+// COMMAND INFO replies are small; this is defense against a huge *n.
+const MaxArrayElements = 1024
+
+// MaxArrayDepth caps nested RESP array depth. Command metadata is
+// only a couple of levels deep.
+const MaxArrayDepth = 8
 
 // writeCommand writes an array-of-bulk-strings command, e.g.:
 //
@@ -85,11 +93,89 @@ func readReply(r *bufio.Reader) (string, error) {
 		}
 		return string(buf), nil
 	case '*':
-		// We do not currently issue commands that return arrays, but
-		// callers should still get a sane error rather than a hang.
+		// String-oriented callers (PING/INFO/OK) do not expect arrays.
+		// Do not silently consume: HasCommand uses readValue instead.
 		return "", fmt.Errorf("dragonfly: unexpected array reply")
 	default:
 		return "", fmt.Errorf("dragonfly: unknown reply prefix %q", string(prefix))
+	}
+}
+
+// respValue is a typed RESP reply used by HasCommand. readReply stays
+// string-only so PING/INFO/OK cannot accidentally treat an array as
+// success.
+type respValue struct {
+	typ     byte
+	str     string
+	integer int64
+	null    bool
+	array   []respValue
+}
+
+func readValue(r *bufio.Reader, depth int) (respValue, error) {
+	if depth > MaxArrayDepth {
+		return respValue{}, fmt.Errorf("dragonfly: RESP array nesting exceeds %d", MaxArrayDepth)
+	}
+	prefix, err := r.ReadByte()
+	if err != nil {
+		return respValue{}, err
+	}
+	line, err := readLine(r)
+	if err != nil {
+		return respValue{}, err
+	}
+	switch prefix {
+	case '+':
+		return respValue{typ: '+', str: line}, nil
+	case '-':
+		return respValue{}, &ServerError{Message: line}
+	case ':':
+		n, err := strconv.ParseInt(line, 10, 64)
+		if err != nil {
+			return respValue{}, fmt.Errorf("dragonfly: invalid integer reply %q: %w", line, err)
+		}
+		return respValue{typ: ':', integer: n, str: line}, nil
+	case '$':
+		n, err := strconv.Atoi(line)
+		if err != nil {
+			return respValue{}, fmt.Errorf("dragonfly: invalid bulk-string length %q: %w", line, err)
+		}
+		if n < 0 {
+			return respValue{typ: '$', null: true}, nil
+		}
+		if n > MaxBulkStringSize {
+			return respValue{}, fmt.Errorf("dragonfly: bulk-string length %d exceeds cap %d", n, MaxBulkStringSize)
+		}
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return respValue{}, err
+		}
+		if _, err := r.Discard(2); err != nil {
+			return respValue{}, err
+		}
+		return respValue{typ: '$', str: string(buf)}, nil
+	case '*':
+		n, err := strconv.Atoi(line)
+		if err != nil {
+			return respValue{}, fmt.Errorf("dragonfly: invalid array length %q: %w", line, err)
+		}
+		if n < 0 {
+			return respValue{typ: '*', null: true}, nil
+		}
+		if n > MaxArrayElements {
+			return respValue{}, fmt.Errorf("dragonfly: array length %d exceeds cap %d", n, MaxArrayElements)
+		}
+		arr := make([]respValue, n)
+		for i := 0; i < n; i++ {
+			elt, err := readValue(r, depth+1)
+			if err != nil {
+				return respValue{}, err
+			}
+			arr[i] = elt
+		}
+		return respValue{typ: '*', array: arr}, nil
+	default:
+		return respValue{}, fmt.Errorf("dragonfly: unknown reply prefix %q", string(prefix))
 	}
 }
 
@@ -123,4 +209,16 @@ func IsServerError(err error, prefix string) bool {
 		return false
 	}
 	return strings.HasPrefix(strings.ToUpper(se.Message), prefix)
+}
+
+// IsUnknownCommand reports whether err is a server error whose message
+// contains "unknown command". IsServerError cannot express this: it
+// matches an uppercase prefix, and Dragonfly replies
+// `-ERR unknown command '…'`.
+func IsUnknownCommand(err error) bool {
+	var se *ServerError
+	if !errors.As(err, &se) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(se.Message), "unknown command")
 }

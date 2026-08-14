@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,6 +70,9 @@ type DragonflyConnection interface {
 	// connections from the (now-demoted) old master after a planned
 	// failover, mirroring upstream Dragonfly operator PR #436.
 	ClientKillType(ctx context.Context, kind string) error
+	// HasCommand reports whether the instance advertises name in its
+	// command table. Used to probe REPLTAKEOVER support.
+	HasCommand(ctx context.Context, name string) (bool, error)
 	Close() error
 }
 
@@ -238,6 +242,11 @@ type DragonflySiteSnapshot struct {
 	Reachable bool
 	Info      dragonfly.ReplicationInfo
 	Persist   dragonfly.PersistenceInfo
+	// ReplTakeover is the COMMAND INFO probe for this tick. Nil means
+	// the site was not probed (unreachable, INFO failed, or probe I/O
+	// error). True/false are confirmed results and must not flip
+	// Reachable or DragonflySiteUp.
+	ReplTakeover *bool
 }
 
 // observe collects per-site Dragonfly state. Connections are opened and
@@ -278,6 +287,14 @@ func (m *DragonflyManager) observe(ctx context.Context, fg *v1alpha1.MysqlFailov
 			// Persistence info is best-effort; an error here does not
 			// disqualify the site, but loading state may be missed.
 			persist = dragonfly.PersistenceInfo{}
+		}
+		// Probe last so a parser bug cannot desync INFO replies.
+		// A probe error leaves ReplTakeover nil and must not flip
+		// reachability or the up gauge.
+		if supported, probeErr := conn.HasCommand(ctx, "REPLTAKEOVER"); probeErr != nil {
+			m.logger.Debug("dragonfly: REPLTAKEOVER capability probe failed", "site", site.Name, "error", probeErr)
+		} else {
+			snap.ReplTakeover = &supported
 		}
 		_ = conn.Close()
 		snap.Reachable = true
@@ -321,6 +338,12 @@ func (m *DragonflyManager) fetchPassword(ctx context.Context, fg *v1alpha1.Mysql
 // only patch when there is a meaningful change, to keep API-server load
 // proportional to actual state transitions.
 func (m *DragonflyManager) patchStatus(ctx context.Context, snaps []DragonflySiteSnapshot) {
+	var (
+		patched       bool
+		prevSupported *bool
+		nextSupported *bool
+		eventFG       v1alpha1.MysqlFailoverGroup
+	)
 	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		var fg v1alpha1.MysqlFailoverGroup
 		if err := m.client.Get(ctx, m.fgKey, &fg); err != nil {
@@ -335,6 +358,14 @@ func (m *DragonflyManager) patchStatus(ctx context.Context, snaps []DragonflySit
 			return nil
 		}
 
+		patched = true
+		prevSupported = nil
+		if fg.Status.Dragonfly != nil {
+			prevSupported = fg.Status.Dragonfly.ReplTakeoverSupported
+		}
+		nextSupported = desired.ReplTakeoverSupported
+		eventFG = fg
+
 		base := fg.DeepCopy()
 		fg.Status.Dragonfly = &desired
 		patch := client.MergeFrom(base)
@@ -342,6 +373,10 @@ func (m *DragonflyManager) patchStatus(ctx context.Context, snaps []DragonflySit
 	})
 	if err != nil {
 		m.logger.Error("dragonfly: status patch failed", "error", err)
+		return
+	}
+	if patched {
+		m.emitReplTakeoverTransition(&eventFG, prevSupported, nextSupported)
 	}
 }
 
@@ -416,7 +451,108 @@ func buildDragonflyStatus(fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySite
 		st.LastPromotionTarget = fg.Status.Dragonfly.LastPromotionTarget
 		st.Upgrade = fg.Status.Dragonfly.Upgrade
 	}
+	applyReplTakeoverStatus(&st, fg, snaps)
 	return st
+}
+
+// applyReplTakeoverStatus folds per-site COMMAND INFO probes into the
+// group-level capability fields. Pessimistic: false if any probed site
+// lacks the command; true only if at least one probe succeeded and
+// every probe was true. A tick with no probes keeps the previous
+// result so a transient outage cannot wipe a known-false warning.
+// ProbeTime is stamped only when the boolean or message changes.
+func applyReplTakeoverStatus(st *v1alpha1.DragonflyStatus, fg *v1alpha1.MysqlFailoverGroup, snaps []DragonflySiteSnapshot) {
+	supported, msg := foldReplTakeover(snaps)
+	var prev *v1alpha1.DragonflyStatus
+	if fg.Status.Dragonfly != nil {
+		prev = fg.Status.Dragonfly
+	}
+	if supported == nil {
+		if prev != nil {
+			st.ReplTakeoverSupported = prev.ReplTakeoverSupported
+			st.ReplTakeoverProbeTime = prev.ReplTakeoverProbeTime
+			st.ReplTakeoverProbeMessage = prev.ReplTakeoverProbeMessage
+		}
+		return
+	}
+	// A known-false result must survive a partial probe (one site
+	// restarting, mixed-image rollout). Only accept true — or a
+	// rewritten false message — when every snapshot was probed.
+	if prev != nil && prev.ReplTakeoverSupported != nil && !*prev.ReplTakeoverSupported && probeIncomplete(snaps) {
+		st.ReplTakeoverSupported = prev.ReplTakeoverSupported
+		st.ReplTakeoverProbeTime = prev.ReplTakeoverProbeTime
+		st.ReplTakeoverProbeMessage = prev.ReplTakeoverProbeMessage
+		return
+	}
+	st.ReplTakeoverSupported = supported
+	st.ReplTakeoverProbeMessage = msg
+	if prev != nil && boolPtrEqual(prev.ReplTakeoverSupported, supported) && prev.ReplTakeoverProbeMessage == msg {
+		st.ReplTakeoverProbeTime = prev.ReplTakeoverProbeTime
+		return
+	}
+	now := metav1.Now()
+	st.ReplTakeoverProbeTime = &now
+}
+
+func probeIncomplete(snaps []DragonflySiteSnapshot) bool {
+	for _, s := range snaps {
+		if s.ReplTakeover == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func foldReplTakeover(snaps []DragonflySiteSnapshot) (supported *bool, msg string) {
+	var missing []string
+	anyTrue := false
+	for _, s := range snaps {
+		if s.ReplTakeover == nil {
+			continue
+		}
+		if !*s.ReplTakeover {
+			missing = append(missing, s.Name)
+			continue
+		}
+		anyTrue = true
+	}
+	if len(missing) > 0 {
+		v := false
+		return &v, fmt.Sprintf("REPLTAKEOVER not advertised on %s", strings.Join(missing, ", "))
+	}
+	if anyTrue {
+		v := true
+		return &v, ""
+	}
+	return nil, ""
+}
+
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func (m *DragonflyManager) emitReplTakeoverTransition(fg *v1alpha1.MysqlFailoverGroup, prev, next *bool) {
+	if boolPtrEqual(prev, next) {
+		return
+	}
+	if next != nil && !*next {
+		m.logger.Warn("dragonfly: REPLTAKEOVER not advertised", "fg", m.fgKey.String())
+		if m.recorder != nil {
+			m.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyReplTakeoverUnsupported,
+				"Dragonfly does not advertise REPLTAKEOVER; emergency promotion will fall back to REPLICAOF NO ONE (session continuity not guaranteed)")
+		}
+		return
+	}
+	if prev != nil && !*prev && next != nil && *next {
+		m.logger.Info("dragonfly: REPLTAKEOVER capability restored", "fg", m.fgKey.String())
+		if m.recorder != nil {
+			m.recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyReplTakeoverSupported,
+				"Dragonfly now advertises REPLTAKEOVER")
+		}
+	}
 }
 
 // activeDragonflySiteFromObservation chooses the site that should be treated
@@ -749,9 +885,11 @@ func (m *DragonflyManager) TryEmergencyPromote(ctx context.Context, target, oldS
 		return false
 	}
 	m.logger.Info("dragonfly emergency: target promoted via REPLICAOF NO ONE (sessions lost)", "site", target, "fg", fgKey)
-	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "success").Inc()
+	metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, target, "sessions_lost").Inc()
 	if m.recorder != nil {
 		m.recorder.Eventf(&fg, corev1.EventTypeWarning, ReasonDragonflyPromotionCompleted,
+			"emergency: target Dragonfly %q promoted via REPLICAOF NO ONE (sessions lost)", target)
+		m.recorder.Eventf(&fg, corev1.EventTypeWarning, ReasonDragonflySessionsLost,
 			"emergency: target Dragonfly %q promoted via REPLICAOF NO ONE (sessions lost)", target)
 	}
 	sourceDemoted := m.applyEmergencyPromotionLabels(emCtx, &fg, target, oldSource)
@@ -986,6 +1124,18 @@ func dragonflyStatusEqual(a, b *v1alpha1.DragonflyStatus) bool {
 		return false
 	}
 	if a.LastPromotionTarget != b.LastPromotionTarget {
+		return false
+	}
+	if !boolPtrEqual(a.ReplTakeoverSupported, b.ReplTakeoverSupported) {
+		return false
+	}
+	if a.ReplTakeoverProbeMessage != b.ReplTakeoverProbeMessage {
+		return false
+	}
+	if (a.ReplTakeoverProbeTime == nil) != (b.ReplTakeoverProbeTime == nil) {
+		return false
+	}
+	if a.ReplTakeoverProbeTime != nil && b.ReplTakeoverProbeTime != nil && !a.ReplTakeoverProbeTime.Equal(b.ReplTakeoverProbeTime) {
 		return false
 	}
 	if len(a.Sites) != len(b.Sites) {

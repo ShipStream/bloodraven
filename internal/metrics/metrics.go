@@ -340,10 +340,13 @@ var (
 	}, []string{"group", "site"})
 
 	// DragonflyPromotionsTotal counts Dragonfly promotion attempts and
-	// their outcome. Result labels: "success", "failed", "skipped".
+	// their outcome. Result labels: "success", "failed", "skipped",
+	// "sessions_lost". sessions_lost is a successful REPLICAOF NO ONE
+	// fallback after REPLTAKEOVER failed — the target is writable but
+	// session continuity is not guaranteed.
 	DragonflyPromotionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "bloodraven_dragonfly_promotions_total",
-		Help: "Number of Dragonfly promotion attempts labelled by result (success|failed|skipped).",
+		Help: "Number of Dragonfly promotion attempts labelled by result (success|failed|skipped|sessions_lost).",
 	}, []string{"group", "target_site", "result"})
 
 	// DragonflyManagerPanicsTotal counts panics recovered in the

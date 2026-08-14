@@ -6680,6 +6680,27 @@ spec:
                     - Degraded
                     - Promoting
                     type: string
+                  replTakeoverProbeMessage:
+                    description: |-
+                      ReplTakeoverProbeMessage explains a false result (which sites
+                      lacked the command). Empty when supported or not yet probed.
+                    type: string
+                  replTakeoverProbeTime:
+                    description: |-
+                      ReplTakeoverProbeTime is when ReplTakeoverSupported or
+                      ReplTakeoverProbeMessage last changed.
+                    format: date-time
+                    type: string
+                  replTakeoverSupported:
+                    description: |-
+                      ReplTakeoverSupported is true when every successfully probed
+                      reachable site advertised the REPLTAKEOVER command. False means at
+                      least one probed site lacks it — emergency promotion will fall
+                      back to REPLICAOF NO ONE. Nil means the operator has not yet
+                      completed a probe (sites down, AUTH failing, or first tick
+                      pending). This reports the running command table, not the image
+                      tag; v1.38.0+ remains the supported pin.
+                    type: boolean
                   sites:
                     description: |-
                       Sites is the per-site Dragonfly observation, parallel in spirit
