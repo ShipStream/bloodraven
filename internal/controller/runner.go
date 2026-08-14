@@ -36,7 +36,10 @@ import (
 type managedTopology struct {
 	tm     *TopologyManager
 	cancel context.CancelFunc
-	cfg    TopologyConfig
+	// done is closed when the manager goroutine returns. nil in tests
+	// that inject a manager without starting Run.
+	done chan struct{}
+	cfg  TopologyConfig
 
 	// archiver polls each sidecar's /archiver/status endpoint and caches
 	// the latest snapshot for updateCRStatus to copy into status.pitr.
@@ -320,8 +323,10 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		if ok {
 			r.logger.Info("config changed, restarting topology manager", "fg", nn)
-			clearRemovedSiteGauges(existing.tm, cfg)
-			existing.cancel()
+			// Wait for the old poll loop to exit before dropping its
+			// series, otherwise an in-flight Poll can resurrect them.
+			stopManagedTopology(existing)
+			clearManagedSiteGauges(existing.tm)
 		}
 
 		if err := r.startManager(ctx, fg, cfg); err != nil {
@@ -345,16 +350,20 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 	}
 
 	// Stop managers for deleted CRs.
+	var stopping []*managedTopology
 	r.mu.Lock()
 	for nn, mt := range r.managers {
 		if _, ok := seen[nn]; !ok {
 			r.logger.Info("stopping topology manager for deleted fg", "fg", nn)
-			clearManagedSiteGauges(mt.tm)
-			mt.cancel()
 			delete(r.managers, nn)
+			stopping = append(stopping, mt)
 		}
 	}
 	r.mu.Unlock()
+	for _, mt := range stopping {
+		stopManagedTopology(mt)
+		clearManagedSiteGauges(mt.tm)
+	}
 
 	return nil
 }
@@ -677,10 +686,12 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	archiver := newArchiverPoller(fg.Namespace, fg.Name, siteNames, buildSidecarClients(fg),
 		r.logger.With("fg", nn.String()))
 
+	done := make(chan struct{})
 	r.mu.Lock()
 	r.managers[nn] = &managedTopology{
 		tm:        tm,
 		cancel:    cancel,
+		done:      done,
 		cfg:       cfg,
 		archiver:  archiver,
 		dragonfly: dfMgr,
@@ -688,6 +699,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	r.mu.Unlock()
 
 	go func() {
+		defer close(done)
 		r.logger.Info("starting topology manager", "fg", nn)
 		tm.Run(tmCtx)
 		for i := range siteMySQL {
@@ -779,12 +791,17 @@ func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1
 // stopAll cancels all running topology managers.
 func (r *TopologyManagerRunner) stopAll() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	stopping := make([]*managedTopology, 0, len(r.managers))
 	for nn, mt := range r.managers {
 		r.logger.Info("stopping topology manager", "fg", nn)
-		mt.cancel()
+		stopping = append(stopping, mt)
 	}
 	r.managers = make(map[types.NamespacedName]*managedTopology)
+	r.mu.Unlock()
+	for _, mt := range stopping {
+		stopManagedTopology(mt)
+		clearManagedSiteGauges(mt.tm)
+	}
 }
 
 // Status returns the StatusResponse for a named failover group.
@@ -832,16 +849,17 @@ func (r *TopologyManagerRunner) SetManagerForTest(nn types.NamespacedName, tm *T
 // This is called from the reconciler's finalizer handling when a CR is being deleted.
 func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	mt, ok := r.managers[nn]
 	if !ok {
+		r.mu.Unlock()
 		r.logger.Info("no topology manager found to stop", "fg", nn)
 		return
 	}
 	r.logger.Info("stopping topology manager via StopManager", "fg", nn)
-	clearManagedSiteGauges(mt.tm)
-	mt.cancel()
 	delete(r.managers, nn)
+	r.mu.Unlock()
+	stopManagedTopology(mt)
+	clearManagedSiteGauges(mt.tm)
 }
 
 // clearManagedSiteGauges drops site-scoped gauge series for every site
@@ -855,22 +873,18 @@ func clearManagedSiteGauges(tm *TopologyManager) {
 	}
 }
 
-// clearRemovedSiteGauges drops series for sites present on the old
-// manager but absent from the replacement config. Sites that remain
-// are left alone so a restart cannot race the new manager's first emit.
-func clearRemovedSiteGauges(old *TopologyManager, next TopologyConfig) {
-	if old == nil {
+// stopManagedTopology cancels the manager and waits for its goroutine
+// to return so a subsequent series delete cannot be undone by an
+// in-flight Poll. A nil done channel (test-injected managers) is a no-op wait.
+func stopManagedTopology(mt *managedTopology) {
+	if mt == nil {
 		return
 	}
-	keep := make(map[string]struct{}, len(next.Sites))
-	for _, s := range next.Sites {
-		keep[s.Name] = struct{}{}
+	if mt.cancel != nil {
+		mt.cancel()
 	}
-	for i := range old.sites {
-		if _, ok := keep[old.sites[i].name]; ok {
-			continue
-		}
-		metrics.DeleteSiteGauges(old.cfg.Namespace, old.cfg.Name, old.sites[i].name)
+	if mt.done != nil {
+		<-mt.done
 	}
 }
 
