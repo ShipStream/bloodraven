@@ -4,8 +4,7 @@ Grounding ledger for **Bloodraven in Production**. Every load-bearing number, AP
 course traces to a row here. Rows were produced by a six-angle grounding expedition against the
 Bloodraven repository at `v1.0.0` (`main` @ `bbcfcc0`, `git describe` = `v1.0.0`), the
 shipped CRDs and Helm chart, the recorded chaos-run forensics, the public GitHub issue tracker, and
-current upstream documentation. The units were first grounded at `v0.9.1`; this ledger and the
-version appendix were re-verified against the 1.0.0 release.
+current upstream documentation.
 
 **Repo paths** are relative to the Bloodraven repository root.
 
@@ -27,8 +26,7 @@ figures is allowed where the derivation is shown.
 ## Version appendix
 
 **Current release: Bloodraven `v1.0.0` (`main` @ `bbcfcc0`). Every row in this section was last
-re-verified on 2026-08-14.** Historical notes still name `v0.9.1` where that is the point — a fact
-that was true then and is no longer.
+re-verified on 2026-08-14.**
 
 The units are written to survive a release. This section is where the things that *cannot* live:
 issue numbers, unmerged pull requests, "the published page currently says X", upstream version pins,
@@ -36,17 +34,15 @@ and licence status. Each of those is correct on the date above and has a decent 
 a release or two later — so the topics link here instead of restating any of it, and one edit tracks
 upstream rather than a dozen.
 
-Two rows have **already moved** since the course was grounded, which is the argument for this page
-existing. If a row disagrees with what you observe, believe your cluster: the row is stale, the
+If a row disagrees with what you observe, believe your cluster: the row is stale, the
 mechanism it describes is not. Run the re-check command before you quote any of it in a meeting.
 
 ### A. Known gaps — what the course teaches, and whether it has been reported
 
 | # | The gap | Status on 2026-08-13 | Re-check with |
 |---|---|---|---|
-| **A1** | **Stale application connections survive a correct failover.** `super_read_only` closes no sockets, and the operator's drain cannot reach an unreachable host. Taught in Unit 3 topic 1 and Unit 4 topic 2. | **Narrowed, not closed.** Issue [#123](https://github.com/ShipStream/bloodraven/issues/123) is closed; PR [#137](https://github.com/ShipStream/bloodraven/pull/137) shipped in 1.0.0 as `spec.connectionDrainTimeout` (default `30s`). After promotion each topology poll makes one bounded eviction pass against the fenced former primary until a pass finds no sessions or the budget expires. **The Unit 3 scenario is unchanged** — a site held at zero replicas answers no eviction pass either. What the drain closes is the narrower case where the demoted primary is alive and reachable. An autonomous sidecar self-fence still has no operator-side drain. | `grep -n connectionDrainTimeout api/v1alpha1/types.go`; `gh issue view 123` |
-| **A2** | **One existing outage slows detection everywhere else.** `failCount` past `failureThreshold` doubles the whole loop's interval to a 30 s cap, so a second fault takes 30 s × 3 = 90 s to detect instead of 6 s. Unit 2 topic 1. | **Behaviour unchanged; the documentation gap is closed.** At `v0.9.1` no page mentioned the backoff at all. `docs/docs/failover.mdx` now describes it, including the 2→4→8→16→30 s progression and the same ~90 s compound-failure bound this course derives — so it is a design to plan around rather than a defect to report, and the number is now quotable from the docs as well as from the code. | `grep -n maxPollBackoffExponent internal/controller/topology.go` |
-| **A3** | **`spec.updateStrategy` is documented but inert.** Taught in Unit 2 topic 3 as a trap. | **Fixed — the course text has been corrected.** At `v0.9.1` nothing outside the type definition read the field. Commit `566d875`, merged after the release, made it live: `Recreate` opts existing site Deployments into bulk reconciliation in one pass, and `OrderedUpdate` (the default, including the empty value) defers them to the ordered updater. Unit 2 topic 3 and Unit 7 topic 3 now teach the live behaviour. | `grep -rn 'UpdateStrategy ==' internal/controller/` |
+| **A1** | **Stale application connections survive a correct failover.** `super_read_only` closes no sockets, and the operator's drain cannot reach an unreachable host. Taught in Unit 3 topic 1 and Unit 4 topic 2. | **Narrowed, not closed.** After promotion each topology poll makes one bounded eviction pass against the fenced former primary until a pass finds no sessions or `spec.connectionDrainTimeout` (default `30s`) expires. **The Unit 3 scenario is unchanged** — a site held at zero replicas answers no eviction pass either. What the drain closes is the narrower case where the demoted primary is alive and reachable. An autonomous sidecar self-fence still has no operator-side drain. | `grep -n connectionDrainTimeout api/v1alpha1/types.go` |
+| **A2** | **One existing outage slows detection everywhere else.** `failCount` past `failureThreshold` doubles the whole loop's interval to a 30 s cap, so a second fault takes 30 s × 3 = 90 s to detect instead of 6 s. Unit 2 topic 1. | **By design.** `docs/docs/failover.mdx` describes the 2→4→8→16→30 s progression and the same ~90 s compound-failure bound this course derives — a number to plan around, not a defect to report. | `grep -n maxPollBackoffExponent internal/controller/topology.go` |
 | **A4** | **Partition shape D — asymmetric peer reachability — has no test of any kind.** The simulator keys link state by a sorted `pairKey(a, b)`, so a one-way link is unrepresentable. Unit 5 topic 3. | **Present, and reported** as issue [#140](https://github.com/ShipStream/bloodraven/issues/140). Everything the course says about shape D is argued from the code and has never been observed under injection. That is stated in the topic on purpose. | `grep -n 'func pairKey' internal/dst/` |
 | **A5** | **Dragonfly version support is a policy, not a guardrail.** Nothing in the API types, the controller or the chart checks a Dragonfly version. Unit 4 topic 4. | **Present, and reported** as issue [#141](https://github.com/ShipStream/bloodraven/issues/141). The only CEL rules on `spec.dragonfly` are that an image is required when it is enabled and that the tag may not be `latest`. | `grep -n 'x-kubernetes-validations' -A3 config/crd/bases/shipstream.io_mysqlfailovergroups.yaml \| grep -i dragonfly` |
 | **A6** | **`bloodraven_replication_lag_seconds` carries no `role` label**, so a lag alert has to exclude reader sites by name and grows a maintenance burden with every reader added. Unit 6 topic 4. | **Present, and reported** as issue [#142](https://github.com/ShipStream/bloodraven/issues/142). | `curl -s localhost:8080/metrics \| grep bloodraven_replication_lag_seconds` |
@@ -60,7 +56,7 @@ documentation page is neither.** `kubectl explain` renders what the API server v
 was built from, not a running defect list — and three of the five have already been fixed, which is
 the same argument in a different direction.
 
-| # | What the page said at `v0.9.1` | Status on 2026-08-13 |
+| # | What a published page said | Status on 2026-08-14 |
 |---|---|---|
 | **B1** | `docs/docs/failover.mdx` documented `spec.splitBrainPolicy.preferSite`, including a copy-pasteable YAML block. The CRD has no such field, so the API server prunes it silently. | **Fixed.** The page documents `sitePriorities`. The habit the topic teaches — ask the cluster, not the page — is what generalises. |
 | **B2** | The cross-site evaluation table named an outcome `Failover`. The code emits `Reason = "Degraded"`, so a rule matching `reason=Failover` never fires. | **Fixed.** The table now gives `Degraded`, and the page carries an explicit paragraph saying a `reason=Failover` alert never fires. |
@@ -85,8 +81,7 @@ Settle this before you plan a dependency on Bloodraven, because it is not a tech
 This is the fastest-moving row on the page, so treat the command as the authority and the prose as
 context.
 
-At the original **`v0.9.1`** grounding the repository was public and unarchived and carried **no
-licence at all**. `v1.0.0` ships the [Business Source License 1.1](https://github.com/ShipStream/bloodraven/blob/v1.0.0/LICENSE): source-available,
+`v1.0.0` ships the [Business Source License 1.1](https://github.com/ShipStream/bloodraven/blob/v1.0.0/LICENSE): source-available,
 not OSI open source. Production use by a company over $1M annual revenue requires a commercial
 license; individuals, non-profits, education, and companies under that threshold stay free, as does
 non-production use at any scale. Settle current terms from the repository, not from remembered
@@ -424,7 +419,7 @@ This course is separately licensed; see the notice in the page footer.
 | 248 | The Dragonfly pin has **drifted two minors**: repo pins `v1.38.0` (2026-04-14), current stable is `v1.40.1` (2026-08-06) | `docker.dragonflydb.io/dragonflydb/dragonfly:v1.38.0` vs upstream `v1.40.1 2026-08-06T06:54:05Z` | `playground/manifests/failovergroup.yaml:87`; GitHub releases API | A3 |
 | 249 | `sigs.k8s.io/controller-runtime v0.24.1` is the current latest; `k8s.io/*` at v0.36.2 is current minor, one patch behind. No material deprecation affects this operator | `go.mod:14-18`; GitHub releases API | A3 |
 | 250 | Bloodraven **v1.0.0**, published 2026-08-14. The repo is public and not archived | `"tag_name": "v1.0.0"`, `"published_at": "2026-08-14T03:53:57Z"`; `"private": false`, `"visibility": "public"`, `"archived": false` | https://api.github.com/repos/ShipStream/bloodraven | A3 |
-| 251 | **`v1.0.0` ships BSL 1.1** (`LICENSE`, `LICENSE-COMMERCIAL.md`). GitHub reports `"licenseInfo": { "key": "other" }` because BSL is not an OSI SPDX key. At the `v0.9.1` baseline the repo had no licence file. The course points at version-appendix row D and the two re-check commands | `ls LICENSE*`; https://api.github.com/repos/ShipStream/bloodraven | A3 |
+| 251 | **`v1.0.0` ships BSL 1.1** (`LICENSE`, `LICENSE-COMMERCIAL.md`). GitHub reports `"licenseInfo": { "key": "other" }` because BSL is not an OSI SPDX key. The course points at version-appendix row D and the two re-check commands | `ls LICENSE*`; https://api.github.com/repos/ShipStream/bloodraven | A3 |
 
 ### The playground counter application
 
@@ -454,10 +449,6 @@ Claims considered and not used, with what was done about each.
   **Cut.**
 - **`spec.sites[].priority`** — no such field. **Cut**; ordering comes from the group-level
   `spec.splitBrainPolicy.sitePriorities` (row 66).
-- **`spec.updateStrategy` as an inert field** — true at `v0.9.1`, and no longer true. **Corrected**:
-  the course now teaches the live behaviour in Unit 2 topic 3 and Unit 7 topic 3, and version-appendix
-  row A3 carries the dated change. Kept in this list because the *original* claim was grounded and is
-  the reason the version appendix exists at all.
 - **`bloodraven_dr_restorable_timestamp_seconds`** — does not exist in `internal/`; the docs correctly
   scope it to Phase 2 under WISHLIST #7. **Cut** from Unit 6.
 - **Dragonfly "v1.38.0 minimum supported"** — nothing enforces or checks a version. **Taught as a
