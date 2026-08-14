@@ -1,0 +1,205 @@
+/*
+ * Bloodraven brand styling.
+ *
+ * Docus imports `<srcDir>/app.css` into the same Tailwind context as
+ * `tailwindcss` and `@nuxt/ui`, so `@theme` blocks, custom properties and
+ * keyframes defined here are available everywhere in the site.
+ */
+
+/* Docus only registers its own layer, the content dir and app.config.ts as
+   Tailwind sources, so this app's own components have to opt in explicitly or
+   their utility classes are never generated.
+   Docus inlines this file into `.nuxt/docus.css`, and Tailwind resolves
+   `@source` against the file it ends up in -- hence the `../app` form. The
+   `./` form is kept for the case where it is resolved against this file. */
+@source "../app/**/*.vue";
+@source "./**/*.vue";
+
+/* Blood: the primary action / writable / danger colour. Wired to Nuxt UI's
+   `primary` alias in app.config.ts so UButton, UInput and the docs chrome all
+   pick it up. */
+@theme static {
+  --color-blood-50: #fff1f3;
+  --color-blood-100: #ffe3e8;
+  --color-blood-200: #fecdd6;
+  --color-blood-300: #fda4b3;
+  --color-blood-400: #fb7185;
+  --color-blood-500: #f43f5e;
+  --color-blood-600: #e11d48;
+  --color-blood-700: #be123c;
+  --color-blood-800: #9f1239;
+  --color-blood-900: #881337;
+  --color-blood-950: #4c0519;
+
+  /* Signal: replica / live / replication. Declared here rather than relying on
+     Tailwind's stock `cyan`, which Nuxt UI trims out of the generated palette. */
+  --color-signal-50: #ecfeff;
+  --color-signal-100: #cffafe;
+  --color-signal-200: #a5f3fc;
+  --color-signal-300: #67e8f9;
+  --color-signal-400: #22d3ee;
+  --color-signal-500: #06b6d4;
+  --color-signal-600: #0891b2;
+  --color-signal-700: #0e7490;
+  --color-signal-800: #155e75;
+  --color-signal-900: #164e63;
+  --color-signal-950: #083344;
+}
+
+/*
+ * Page tokens. Scoped component styles read these, so a section only has to
+ * pick a background role (`--br-paper`, `--br-ink`) and the light/dark split is
+ * handled in one place.
+ *
+ * Ink bands stay ink in both colour modes -- they are deliberate dark bands,
+ * not "the dark theme". Paper bands are what flip.
+ */
+:root {
+  --br-ink: #070a0f;
+  --br-ink-soft: #0d121b;
+  --br-ink-card: #0d1118;
+  --br-ink-raised: #111721;
+
+  --br-paper: #f3f1eb;
+  --br-paper-2: #eae8e1;
+
+  --br-text: #111827;
+  --br-text-dim: #586170;
+  --br-text-faint: #737c8b;
+
+  --br-line-light: rgba(15, 23, 42, 0.13);
+  --br-line-dark: rgba(255, 255, 255, 0.12);
+  --br-line-dark-soft: rgba(255, 255, 255, 0.06);
+
+  --br-red: #e11d48;
+  --br-red-bright: #fb7185;
+  --br-red-deep: #be123c;
+  --br-cyan: #22d3ee;
+  --br-cyan-soft: #67e8f9;
+  --br-green: #34d399;
+  --br-amber: #fbbf24;
+
+  /* Text colours that only ever sit on an ink background. */
+  --br-on-ink: #edf1f6;
+  --br-on-ink-dim: #8792a4;
+  --br-on-ink-faint: #657084;
+
+  --br-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  --br-shell: min(1180px, calc(100% - 40px));
+}
+
+.dark {
+  --br-paper: #0a0d12;
+  --br-paper-2: #0d1117;
+
+  --br-text: #edf1f6;
+  --br-text-dim: #8792a4;
+  --br-text-faint: #737f92;
+
+  --br-line-light: rgba(255, 255, 255, 0.12);
+}
+
+/* Shared primitives for the landing sections. Defined globally so every
+   section component inherits the same rhythm instead of restating it. */
+.br-shell {
+  width: var(--br-shell);
+  margin-inline: auto;
+}
+
+.br-kicker {
+  font-family: var(--br-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--br-red);
+}
+
+.br-display {
+  margin: 0;
+  font-size: clamp(2.6rem, 5vw, 4.9rem);
+  line-height: 0.95;
+  letter-spacing: -0.055em;
+  font-weight: 760;
+  text-wrap: balance;
+}
+
+/* Outlined second line. Used on two section titles, deliberately -- more than
+   that and it stops being an accent.
+   The stroke colour must be explicit: `currentColor` resolves to this rule's
+   own `transparent` fill, which paints nothing at all. */
+.br-outline {
+  display: block;
+  color: transparent;
+  -webkit-text-stroke: 1.5px var(--br-stroke, var(--br-text));
+}
+
+/* In-page anchor jumps (the header's "Features" link, docs headings) glide
+   rather than teleport, so the reader keeps their place. */
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* Decorative arrow and box-drawing glyphs (↗ ↳ ↻ ◇ ▍) must render as text.
+   The UI sans stack has no coverage for them, so fontconfig hands them to Noto
+   Color Emoji and they paint as blue emoji tiles. */
+[aria-hidden='true'] {
+  font-family: var(--br-mono);
+  font-variant-emoji: text;
+}
+
+.br-focus:focus-visible {
+  outline: 3px solid var(--br-cyan);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+/* The header hosts stock Nuxt UI controls (GitHub link, theme toggle) whose
+   focus ring comes from a `utilities`-layer class. Keep one focus treatment
+   across the site. */
+.br-header button:focus-visible,
+.br-header a:focus-visible {
+  outline: 3px solid var(--br-cyan) !important;
+  outline-offset: 2px;
+}
+
+@keyframes br-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(2%, -3%, 0) scale(1.08); }
+}
+
+@keyframes br-pulse-ring {
+  70% { box-shadow: 0 0 0 8px rgba(251, 113, 133, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(251, 113, 133, 0); }
+}
+
+@keyframes br-blink {
+  50% { opacity: 0; }
+}
+
+@keyframes br-sweep {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes br-dash {
+  to { stroke-dashoffset: -24; }
+}
+
+@keyframes br-poll {
+  0%, 100% { opacity: 0.25; }
+  8% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-br-motion],
+  [data-br-motion] * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
