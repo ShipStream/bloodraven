@@ -19,7 +19,7 @@ not a vocabulary list. It is a real group on your laptop, and a status dump you 
 | --- | --- |
 | **docker** or **podman** | Builds the images locally. Prefer docker — k3d's podman support is experimental. |
 | **kubectl** | Everything from here is `kubectl`. |
-| **helm** | Installs the operator. Chart `0.9.1`, appVersion `0.9.1`, `kubeVersion: ">=1.26.0"`. |
+| **helm** | Installs the operator. Chart `1.0.0`, appVersion `1.0.0`, `kubeVersion: ">=1.26.0"`. |
 | **A cluster with at least three worker nodes** | One worker per site. The third is dedicated to the reader so storage-loss testing is deterministic. |
 
 ```bash
@@ -167,7 +167,7 @@ A timing you observe here is **not** the shipped default:
 
 Everything else matches: `pollInterval`, `failureThreshold`, `recoveryThreshold`, `leaseTimeout`,
 `peerCheckInterval` and `maxSyncWait` sit at their defaults. MySQL is `mysql:9.7`, the operator
-v0.9.1.
+v1.0.0.
 
 ## Words for the first hour
 

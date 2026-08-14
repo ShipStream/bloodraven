@@ -160,7 +160,7 @@ metadata:
   namespace: ledger-db
 spec:
   image: mysql:9.7                        # one supported baseline; pin it, never mysql:9
-  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:0.9.1   # match the operator's release
+  sidecarImage: ghcr.io/shipstream/bloodraven-sidecar:1.0.0   # match the operator's release
   credentials:                            # not secretName — per-role users, fixed grants
     operatorSecret: ledger-operator
     appSecret: ledger-app

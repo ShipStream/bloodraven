@@ -110,12 +110,6 @@ Use `Recreate` only when you can afford to lose the primary and the standby simu
 for a MySQL major-version bump: if one pod's in-place upgrade stalls, you have no healthy primary and
 no rollback path.
 
-There is a footnote on this field with a lesson attached: at `v0.9.1` it was **inert** — it existed in
-the CRD, the documentation described it, and nothing read it. It was made live after the release. The
-[version appendix](../sources.html#version-appendix), row A3, carries the dates and the command that
-re-checks it. A field that does nothing yet and a field that quietly starts doing something are the
-same hazard from opposite directions, and `kubectl explain` cannot tell you which one you have.
-
 ## What an image bump does to your dashboards
 
 Say this out loud before you run one, because otherwise your on-call will say it at 02:00.
