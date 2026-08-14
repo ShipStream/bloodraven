@@ -1,6 +1,6 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration dst dst-repro fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-check
+.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration dst dst-repro fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-check course-drift
 
 ##@ General
 
@@ -152,6 +152,13 @@ course-build: ## Build the "Bloodraven in Production" course site
 	@# cannot silently change the built output; plain install only as a
 	@# fallback. Bump the template with an explicit `bun update` and commit the
 	@# rebuilt site alongside the lockfile.
+	@#
+	@# If a local build disagrees with CI on site.css, suspect the bun cache
+	@# before the source: the template writes build output back into its own
+	@# package directory (node_modules/witherspoon-course-template/.build/),
+	@# and bun installs packages as hardlinks into the global cache, so that
+	@# write poisons every later install on the machine. `bun pm cache rm &&
+	@# rm -rf course/node_modules` restores agreement with a clean checkout.
 	cd $(COURSE_DIR) && \
 		if [ -f bun.lock ]; then bun install --frozen-lockfile; \
 		else bun install; fi && \
@@ -183,6 +190,14 @@ course-verify: course-build ## Run the course content gates and runtime tests
 	cd $(COURSE_DIR) && bun run verify && bun run test
 
 course-check: course ## Fail if site/public/courses is stale relative to the course source
+	@# Recursive rather than a `course course-drift` prerequisite list: make
+	@# does not order prerequisites under -j, and the comparison is only
+	@# meaningful after the rebuild has run.
+	@$(MAKE) --no-print-directory course-drift
+
+course-drift: ## Compare the committed course site against the working tree (no rebuild)
+	@# Split out of course-check so CI can rebuild and compare in separate
+	@# steps and tell a build failure apart from real drift.
 	@# git status --porcelain, not git diff: diff only reports tracked files, so
 	@# an untracked or newly added page under site/public/courses would slip past.
 	@status="$$(git status --porcelain -- $(COURSE_STATIC))"; \
