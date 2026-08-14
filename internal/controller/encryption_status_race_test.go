@@ -179,33 +179,17 @@ func TestUpdateCRStatus_DoesNotResurrectDeletedEncryptionStatus(t *testing.T) {
 	}
 }
 
-// TestEncryptionToggleDoesNotRestartTheTopologyManager pins the reason
-// the clone gate must be wired unconditionally in startManager.
-//
-// The topology manager is only rebuilt when its TopologyConfig changes,
-// and TopologyConfig deliberately carries nothing about encryption —
-// turning encryption on must not tear down and rebuild the poller under
-// a live cluster. The consequence is that a manager built while
-// encryption was off is the SAME manager serving the group after
-// adoption, so anything wired behind a spec.encryptionAtRest check at
-// construction time is never wired at all on the adoption path.
-//
-// That is exactly what happens to the CLONE INSTANCE unseal gate today:
-// playground/enable-encryption.sh turns encryption on for a running
-// group, the manager is never rebuilt, and a later reclone into a sealed
-// recipient skips the unseal entirely (found by playground scenario 51).
-//
-// The gate is still wired behind EncryptionEnabled() on purpose. Making
-// it unconditional livelocks the reclone, because advanceUnsealedSite
-// re-seals an Unsealed/Clone site as soon as it can verify the escrow and
-// nothing signals clone completion back to it — see the KNOWN GAP note in
-// startManager. Both halves have to land together.
+// TestEncryptionToggleDoesNotRestartTheTopologyManager pins that
+// TopologyConfig deliberately ignores encryption. Turning encryption on
+// must not tear down and rebuild the poller under a live cluster, so
+// startManager wires the clone gate unconditionally: RequestKeyringUnseal
+// is a no-op while encryption is off, and a later adoption is honoured
+// without a manager rebuild. UnsealReason=Clone is sticky until
+// NotifyCloneComplete, so that wiring cannot livelock a reclone.
 //
 // If this test ever fails because encryption became part of
-// TopologyConfig, that closes half the gap on its own: the manager would
-// then be rebuilt on adoption and the gate would start firing — which
-// means the Clone phase must be made sticky in the same change, or
-// reclone livelocks.
+// TopologyConfig, the adoption path would rebuild the manager on its
+// own. The gate can stay always-on either way.
 func TestEncryptionToggleDoesNotRestartTheTopologyManager(t *testing.T) {
 	plain := CRConfigToTopologyConfig(newTestFG())
 	encrypted := CRConfigToTopologyConfig(encTestFG())

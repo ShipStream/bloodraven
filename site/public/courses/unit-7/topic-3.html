@@ -58,11 +58,6 @@ at the same moment. That is the total-loss window <code>OrderedUpdate</code> exi
 <p>Use <code>Recreate</code> only when you can afford to lose the primary and the standby simultaneously, and never
 for a MySQL major-version bump: if one pod’s in-place upgrade stalls, you have no healthy primary and
 no rollback path.</p>
-<p>There is a footnote on this field with a lesson attached: at <code>v0.9.1</code> it was <strong>inert</strong> — it existed in
-the CRD, the documentation described it, and nothing read it. It was made live after the release. The
-<a href="../sources.html#version-appendix">version appendix</a>, row A3, carries the dates and the command that
-re-checks it. A field that does nothing yet and a field that quietly starts doing something are the
-same hazard from opposite directions, and <code>kubectl explain</code> cannot tell you which one you have.</p>
 <h2 id="what-an-image-bump-does-to-your-dashboards">What an image bump does to your dashboards</h2>
 <p>Say this out loud before you run one, because otherwise your on-call will say it at 02:00.</p>
 <p>The <code>Failover</code> phase performs a <strong>real promotion</strong>, through the same code path as an emergency

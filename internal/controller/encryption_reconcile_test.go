@@ -580,13 +580,65 @@ func TestRequestKeyringUnseal(t *testing.T) {
 		}
 	})
 
-	t.Run("already unsealed allows the clone", func(t *testing.T) {
+	t.Run("already unsealed for clone allows the clone", func(t *testing.T) {
 		fg := sealedGroupWithActive("dc1")
 		fg.Status.EncryptionAtRest.Sites[1].Phase = v1alpha1.KeyringPhaseUnsealed
+		fg.Status.EncryptionAtRest.Sites[1].UnsealReason = v1alpha1.UnsealReasonClone
 		r, _ := encReconciler(t, scriptedKeyring(nil), fg, unsealedDeployment(fg, "dc2"))
 		ok, err := r.RequestKeyringUnseal(ctx, nn, "dc2")
 		if err != nil || !ok {
 			t.Fatalf("ok=%v err=%v", ok, err)
+		}
+	})
+
+	t.Run("already unsealed for bootstrap is stamped Clone and defers", func(t *testing.T) {
+		fg := sealedGroupWithActive("dc1")
+		fg.Status.EncryptionAtRest.Sites[1].Phase = v1alpha1.KeyringPhaseUnsealed
+		fg.Status.EncryptionAtRest.Sites[1].UnsealReason = v1alpha1.UnsealReasonBootstrap
+		r, c := encReconciler(t, scriptedKeyring(nil), fg, unsealedDeployment(fg, "dc2"))
+		ok, err := r.RequestKeyringUnseal(ctx, nn, "dc2")
+		if err != nil {
+			t.Fatalf("unseal: %v", err)
+		}
+		if ok {
+			t.Fatal("first Clone stamp must defer so the hold is observed before CLONE INSTANCE starts")
+		}
+		var latest v1alpha1.MysqlFailoverGroup
+		if err := c.Get(ctx, nn, &latest); err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		s := latest.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2")
+		if s.UnsealReason != v1alpha1.UnsealReasonClone {
+			t.Fatalf("unsealReason = %q, want Clone", s.UnsealReason)
+		}
+		ok, err = r.RequestKeyringUnseal(ctx, nn, "dc2")
+		if err != nil || !ok {
+			t.Fatalf("second call ok=%v err=%v, want ready after the hold is stamped", ok, err)
+		}
+	})
+
+	t.Run("does not stamp Clone over an in-flight rotation", func(t *testing.T) {
+		for _, phase := range []v1alpha1.SiteKeyringPhase{
+			v1alpha1.KeyringPhaseUnsealed,
+			v1alpha1.KeyringPhaseEscrowed,
+			v1alpha1.KeyringPhaseFailed,
+		} {
+			fg := sealedGroupWithActive("dc1")
+			fg.Status.EncryptionAtRest.Sites[1].Phase = phase
+			fg.Status.EncryptionAtRest.Sites[1].UnsealReason = v1alpha1.UnsealReasonRotation
+			r, c := encReconciler(t, scriptedKeyring(nil), fg, unsealedDeployment(fg, "dc2"))
+			ok, err := r.RequestKeyringUnseal(ctx, nn, "dc2")
+			if err != nil || ok {
+				t.Fatalf("phase %s: ok=%v err=%v, want deferred during rotation", phase, ok, err)
+			}
+			var latest v1alpha1.MysqlFailoverGroup
+			if err := c.Get(ctx, nn, &latest); err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			s := latest.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2")
+			if s.UnsealReason != v1alpha1.UnsealReasonRotation || s.Phase != phase {
+				t.Fatalf("phase %s: status = %+v, want Rotation left intact", phase, s)
+			}
 		}
 	})
 
@@ -607,6 +659,210 @@ func TestRequestKeyringUnseal(t *testing.T) {
 			t.Fatalf("clone seed = %q, want %q", got, seedName)
 		}
 	})
+}
+
+func TestReconcileEncryption_CloneHoldDoesNotAdvanceToEscrowed(t *testing.T) {
+	fg := encTestFG()
+	raw := []byte("real-keyring")
+	digest := keyringDigest(raw)
+	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
+		Sites: []v1alpha1.SiteEncryptionStatus{
+			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
+				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
+			{Name: "dc2", Phase: v1alpha1.KeyringPhaseUnsealed,
+				UnsealReason:  v1alpha1.UnsealReasonClone,
+				KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
+		},
+	}
+	r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
+		"dc1": liveKeyring(digest, true),
+		"dc2": liveKeyring(digest, false),
+	}), fg, unsealedDeployment(fg, "dc2"))
+	store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
+	if _, err := store.put(context.Background(), fg, "dc2", raw); err != nil {
+		t.Fatalf("seed escrow: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+		s := siteStatus(fg, "dc2")
+		if s.Phase != v1alpha1.KeyringPhaseUnsealed || s.UnsealReason != v1alpha1.UnsealReasonClone {
+			t.Fatalf("pass %d: status = %+v, want Unsealed/Clone (the #144 livelock)", i, s)
+		}
+		if fg.SiteKeyringSealed("dc2") {
+			t.Fatal("Clone hold rendered sealed; the pod would roll and the clone would never run")
+		}
+	}
+}
+
+func TestReconcileEncryption_CloneHoldIgnoresEscrowDeadline(t *testing.T) {
+	fg := encTestFG()
+	fg.Spec.EncryptionAtRest.Keyring = &v1alpha1.KeyringSpec{EscrowTimeoutSeconds: 1}
+	stale := metav1.NewTime(time.Now().Add(-time.Hour))
+	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
+		Sites: []v1alpha1.SiteEncryptionStatus{
+			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed},
+			{Name: "dc2", Phase: v1alpha1.KeyringPhaseUnsealed,
+				UnsealReason: v1alpha1.UnsealReasonClone, UnsealedSince: &stale},
+		},
+	}
+	r, _ := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
+		"dc2": liveKeyring("", false),
+	}), fg, unsealedDeployment(fg, "dc2"))
+
+	if _, err := r.reconcileEncryptionAtRest(context.Background(), fg); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	s := siteStatus(fg, "dc2")
+	if s.Phase == v1alpha1.KeyringPhaseFailed {
+		t.Fatalf("Clone hold flipped to Failed on the escrow clock: %+v", s)
+	}
+	if s.UnsealReason != v1alpha1.UnsealReasonClone {
+		t.Fatalf("unsealReason = %q", s.UnsealReason)
+	}
+}
+
+func TestNotifyCloneComplete_ReleasesHoldThenReseals(t *testing.T) {
+	ctx := context.Background()
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
+	fg := encTestFG()
+	raw := []byte("real-keyring")
+	digest := keyringDigest(raw)
+	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
+		Sites: []v1alpha1.SiteEncryptionStatus{
+			{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
+				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
+			{Name: "dc2", Phase: v1alpha1.KeyringPhaseUnsealed,
+				UnsealReason:  v1alpha1.UnsealReasonClone,
+				KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest},
+		},
+	}
+	r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
+		"dc1": liveKeyring(digest, true),
+		"dc2": liveKeyring(digest, false),
+	}), fg, unsealedDeployment(fg, "dc2"))
+	store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
+	if _, err := store.put(ctx, fg, "dc2", raw); err != nil {
+		t.Fatalf("seed escrow: %v", err)
+	}
+
+	if err := r.NotifyCloneComplete(ctx, nn, "dc2"); err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	var latest v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &latest); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	s := latest.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2")
+	if s.UnsealReason != "" || s.Phase != v1alpha1.KeyringPhaseUnsealed {
+		t.Fatalf("after notify: %+v", s)
+	}
+
+	if _, err := r.reconcileEncryptionAtRest(ctx, &latest); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	s = siteStatus(&latest, "dc2")
+	if s.Phase != v1alpha1.KeyringPhaseEscrowed {
+		t.Fatalf("phase = %q, want Escrowed after the hold is released", s.Phase)
+	}
+	if !latest.SiteKeyringSealed("dc2") {
+		t.Fatal("released clone site must render sealed so the pod rolls")
+	}
+}
+
+func TestNotifyCloneComplete_FailedCloneDoesNotRenderSealed(t *testing.T) {
+	ctx := context.Background()
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
+	fg := sealedGroupWithActive("dc1")
+	fg.Status.EncryptionAtRest.Sites[1].Phase = v1alpha1.KeyringPhaseFailed
+	fg.Status.EncryptionAtRest.Sites[1].UnsealReason = v1alpha1.UnsealReasonClone
+	r, c := encReconciler(t, scriptedKeyring(nil), fg)
+
+	if err := r.NotifyCloneComplete(ctx, nn, "dc2"); err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	var latest v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, nn, &latest); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if latest.SiteKeyringSealed("dc2") {
+		t.Fatal("releasing Failed/Clone must not render sealed against the old escrow")
+	}
+	s := latest.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2")
+	if s.Phase != v1alpha1.KeyringPhaseUnsealed || s.UnsealReason != "" {
+		t.Fatalf("after notify: %+v", s)
+	}
+}
+
+func TestNotifyCloneComplete_Idempotent(t *testing.T) {
+	ctx := context.Background()
+	nn := types.NamespacedName{Namespace: "shared-lion", Name: "lion"}
+
+	t.Run("encryption off", func(t *testing.T) {
+		fg := newTestFG()
+		r, _ := encReconciler(t, nil, fg)
+		if err := r.NotifyCloneComplete(ctx, nn, "dc2"); err != nil {
+			t.Fatalf("notify: %v", err)
+		}
+	})
+	t.Run("already sealed", func(t *testing.T) {
+		fg := sealedGroupWithActive("dc1")
+		r, _ := encReconciler(t, scriptedKeyring(nil), fg)
+		if err := r.NotifyCloneComplete(ctx, nn, "dc2"); err != nil {
+			t.Fatalf("notify: %v", err)
+		}
+		if siteStatus(fg, "dc2").Phase != v1alpha1.KeyringPhaseSealed {
+			t.Fatal("notify must not disturb a sealed site")
+		}
+	})
+}
+
+func TestMergeEncryptionStatus_PreservesCloneHoldAndRelease(t *testing.T) {
+	hold := &v1alpha1.SiteEncryptionStatus{
+		Name: "dc2", Phase: v1alpha1.KeyringPhaseUnsealed,
+		UnsealReason: v1alpha1.UnsealReasonClone,
+	}
+	released := &v1alpha1.SiteEncryptionStatus{
+		Name: "dc2", Phase: v1alpha1.KeyringPhaseUnsealed,
+	}
+	staleAdvance := &v1alpha1.EncryptionAtRestStatus{
+		Sites: []v1alpha1.SiteEncryptionStatus{
+			{Name: "dc2", Phase: v1alpha1.KeyringPhaseEscrowed},
+		},
+	}
+	got := mergeEncryptionStatus(staleAdvance, &v1alpha1.EncryptionAtRestStatus{Sites: []v1alpha1.SiteEncryptionStatus{*hold}})
+	if s := got.SiteEncryptionStatusByName("dc2"); s.UnsealReason != v1alpha1.UnsealReasonClone || s.Phase != v1alpha1.KeyringPhaseUnsealed {
+		t.Fatalf("stale Escrowed overwrote a live Clone hold: %+v", s)
+	}
+
+	staleBootstrap := &v1alpha1.EncryptionAtRestStatus{
+		Sites: []v1alpha1.SiteEncryptionStatus{{
+			Name: "dc2", Phase: v1alpha1.KeyringPhaseUnsealed,
+			UnsealReason: v1alpha1.UnsealReasonBootstrap,
+		}},
+	}
+	got = mergeEncryptionStatus(staleBootstrap, &v1alpha1.EncryptionAtRestStatus{Sites: []v1alpha1.SiteEncryptionStatus{*hold}})
+	if s := got.SiteEncryptionStatusByName("dc2"); s.UnsealReason != v1alpha1.UnsealReasonClone {
+		t.Fatalf("stale Bootstrap overwrote a live Clone hold: %+v", s)
+	}
+
+	staleHold := &v1alpha1.EncryptionAtRestStatus{
+		Sites: []v1alpha1.SiteEncryptionStatus{*hold},
+	}
+	got = mergeEncryptionStatus(staleHold, &v1alpha1.EncryptionAtRestStatus{Sites: []v1alpha1.SiteEncryptionStatus{*released}})
+	if s := got.SiteEncryptionStatusByName("dc2"); s.UnsealReason != "" || s.Phase != v1alpha1.KeyringPhaseUnsealed {
+		t.Fatalf("stale Clone hold resurrected after release: %+v", s)
+	}
+
+	liveSealed := &v1alpha1.SiteEncryptionStatus{
+		Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed,
+	}
+	got = mergeEncryptionStatus(staleHold, &v1alpha1.EncryptionAtRestStatus{Sites: []v1alpha1.SiteEncryptionStatus{*liveSealed}})
+	if s := got.SiteEncryptionStatusByName("dc2"); s.Phase != v1alpha1.KeyringPhaseSealed || s.UnsealReason != "" {
+		t.Fatalf("stale Clone hold resurrected over live Sealed: %+v", s)
+	}
 }
 
 // --- adoption guard -------------------------------------------------

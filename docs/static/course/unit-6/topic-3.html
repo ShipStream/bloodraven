@@ -50,6 +50,11 @@
 </ol></li><li><ol start="4">
 <li>Rotate iad — Now permitted. Rotation is also refused while an ordered update or a planned failover is in flight, and while no active primary is known.</li>
 </ol></li></ol></div></div></figure>
+<p>Rotation is a per-instance physical operation — each site holds its own keyring — so 1.0.0 issues
+<code>ALTER INSTANCE ROTATE INNODB MASTER KEY</code> with <code>sql_log_bin = 0</code>. If that statement replicated, the
+replica would be one transaction ahead of its source and the next promotion would brick the
+ex-primary. Recloning an encrypted site unseals the recipient, holds it unsealed until
+<code>CLONE INSTANCE</code> and the post-clone restart finish, then reseals.</p>
 <h2 id="what-you-can-now-read">What you can now read</h2>
 <p>Where you previously read <code>.status.sites[]</code> for replication state, you now read one more block:</p>
 <pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="bash"><code><span class="line"><span style="color:#6F42C1;--shiki-dark:#F69D50">kubectl</span><span style="color:#032F62;--shiki-dark:#96D0FF"> get</span><span style="color:#032F62;--shiki-dark:#96D0FF"> mysqlfailovergroup</span><span style="color:#032F62;--shiki-dark:#96D0FF"> playground</span><span style="color:#005CC5;--shiki-dark:#F47067"> \</span></span>

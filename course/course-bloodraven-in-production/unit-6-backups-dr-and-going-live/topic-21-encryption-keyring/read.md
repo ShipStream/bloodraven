@@ -106,6 +106,12 @@ Work through the consequence for the three sites. `pdx` is a replica and rotatab
 }
 ```
 
+Rotation is a per-instance physical operation — each site holds its own keyring — so 1.0.0 issues
+`ALTER INSTANCE ROTATE INNODB MASTER KEY` with `sql_log_bin = 0`. If that statement replicated, the
+replica would be one transaction ahead of its source and the next promotion would brick the
+ex-primary. Recloning an encrypted site unseals the recipient, holds it unsealed until
+`CLONE INSTANCE` and the post-clone restart finish, then reseals.
+
 ## What you can now read
 
 Where you previously read `.status.sites[]` for replication state, you now read one more block:

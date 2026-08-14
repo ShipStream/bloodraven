@@ -6913,7 +6913,7 @@ spec:
                         unsealReason:
                           description: |-
                             UnsealReason records why the site is unsealed. Empty when the site
-                            is sealed.
+                            is sealed, or after a clone hold is released and reseal has begun.
                           enum:
                           - ""
                           - Bootstrap
