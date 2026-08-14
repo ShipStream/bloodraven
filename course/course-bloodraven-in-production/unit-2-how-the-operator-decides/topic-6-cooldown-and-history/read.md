@@ -162,6 +162,7 @@ restarts may overlap — which is exactly the both-sites-down window `OrderedUpd
 Reach for `Recreate` only when you are certain you can afford to lose the primary and the standby at
 the same moment.
 
+
 ## Where that leaves you
 
 You can now look at a decision the table selected and say whether it will actually execute right now:

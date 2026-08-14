@@ -2,7 +2,7 @@
 
 Grounding ledger for **Bloodraven in Production**. Every load-bearing number, API, and claim in this
 course traces to a row here. Rows were produced by a six-angle grounding expedition against the
-Bloodraven repository at `v1.0.0` (`main` @ `bbcfcc0`, `git describe` = `v1.0.0`), the
+Bloodraven repository at `v1.0.0` (`v1.0.0` @ `bbcfcc0`, `git describe` = `v1.0.0`), the
 shipped CRDs and Helm chart, the recorded chaos-run forensics, the public GitHub issue tracker, and
 current upstream documentation.
 
@@ -25,7 +25,7 @@ figures is allowed where the derivation is shown.
 
 ## Version appendix
 
-**Current release: Bloodraven `v1.0.0` (`main` @ `bbcfcc0`). Every row in this section was last
+**Current release: Bloodraven `v1.0.0` (`v1.0.0` @ `bbcfcc0`). Every row in this section was last
 re-verified on 2026-08-14.**
 
 The units are written to survive a release. This section is where the things that *cannot* live:

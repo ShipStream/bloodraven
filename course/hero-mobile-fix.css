@@ -1,0 +1,6 @@
+/* The published template keeps .hero--art at 16/9 + overflow:hidden on small
+   screens, which clips the title under the artwork. Drop this once the
+   template media query resets aspect-ratio and overflow. */
+@media (max-width: 44rem) {
+  .hero--art { aspect-ratio: auto; overflow: visible; }
+}

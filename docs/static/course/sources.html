@@ -7,7 +7,7 @@ These could not be traced to a primary source. They are listed here rather than 
           dropped.
 </p> <ul> <li> Pod-kill failover takes about 30-45 seconds (docs/docs/playground.mdx:101) — <em>cut</em> </li><li> Failover takes approximately 37 seconds end to end — <em>taught-as-method</em> </li><li> The playground ships 30+ chaos scenarios — <em>cut</em> </li><li> spec.splitBrainPolicy.preferSite selects a split-brain winner — <em>cut</em> </li><li> splitBrainPolicy supports Manual and PreferSite policy modes — <em>cut</em> </li><li> spec.sites[].priority playground promotion candidates — <em>cut</em> </li><li> spec.updateStrategy is live: OrderedUpdate rolls one site at a time, Recreate patches every site in one pass — <em>flagged</em> </li><li> bloodraven_dr_restorable_timestamp_seconds reports DR readiness — <em>cut</em> </li><li> Bloodraven enforces a minimum Dragonfly version of v1.38.0 — <em>taught-as-method</em> </li><li> Issue #93's soft-partition detection failure can be reproduced in the standard playground — <em>taught-as-method</em> </li><li> A specific wall-clock time for application recovery after a promotion — <em>taught-as-method</em> </li><li> The playground counter application writes to MySQL continuously — <em>cut</em> </li><li> Bloodraven is open-source software under a named licence — <em>flagged</em> </li> </ul> </section><section class="reading"> <p>Grounding ledger for <strong>Bloodraven in Production</strong>. Every load-bearing number, API, and claim in this
 course traces to a row here. Rows were produced by a six-angle grounding expedition against the
-Bloodraven repository at <code>v1.0.0</code> (<code>main</code> @ <code>bbcfcc0</code>, <code>git describe</code> = <code>v1.0.0</code>), the
+Bloodraven repository at <code>v1.0.0</code> (<code>v1.0.0</code> @ <code>bbcfcc0</code>, <code>git describe</code> = <code>v1.0.0</code>), the
 shipped CRDs and Helm chart, the recorded chaos-run forensics, the public GitHub issue tracker, and
 current upstream documentation.</p>
 <p><strong>Repo paths</strong> are relative to the Bloodraven repository root.</p>
@@ -26,7 +26,7 @@ Where the docs and the code disagree, this course teaches the code and says so.<
 it drifted from the code.</li>
 </ul>
 <h2 id="version-appendix">Version appendix</h2>
-<p><strong>Current release: Bloodraven <code>v1.0.0</code> (<code>main</code> @ <code>bbcfcc0</code>). Every row in this section was last
+<p><strong>Current release: Bloodraven <code>v1.0.0</code> (<code>v1.0.0</code> @ <code>bbcfcc0</code>). Every row in this section was last
 re-verified on 2026-08-14.</strong></p>
 <p>The units are written to survive a release. This section is where the things that <em>cannot</em> live:
 issue numbers, unmerged pull requests, "the published page currently says X", upstream version pins,
