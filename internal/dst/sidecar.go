@@ -299,13 +299,13 @@ func (t *simTransport) operatorReachable() bool {
 	return !c.operatorDead && !c.opLinkDown[t.from] && !c.byName[t.from].crashed
 }
 
-// peerReachable: sidecar-to-sidecar traffic follows the same site-to-site
-// link replication does.
+// peerReachable: sidecar-to-sidecar traffic follows the same directed
+// site-to-site link replication does (from → peer).
 func (t *simTransport) peerReachable(peer string) bool {
 	c := t.r.cluster
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return !c.byName[peer].crashed && !c.pairLinkDown[pairKey(t.from, peer)]
+	return !c.byName[peer].crashed && !c.dirLinkDown[dirKey(t.from, peer)]
 }
 
 // serveOperator mirrors the operator's auxiliary mux (cmd/bloodraven:

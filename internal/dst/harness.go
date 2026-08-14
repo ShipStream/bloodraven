@@ -473,6 +473,10 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 		r.cluster.SetPairLink(op.Site, op.Peer, true)
 	case OpHealPair:
 		r.cluster.SetPairLink(op.Site, op.Peer, false)
+	case OpPartOneWay:
+		r.cluster.SetDirLink(op.Site, op.Peer, true)
+	case OpHealOneWay:
+		r.cluster.SetDirLink(op.Site, op.Peer, false)
 	case OpRestartOperator:
 		r.restartOperator(poll)
 	case OpCrashOperatorMid:
@@ -516,6 +520,8 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 		r.cluster.SetDNSDenied(true)
 	case OpDNSHeal:
 		r.cluster.SetDNSDenied(false)
+	default:
+		panic(fmt.Sprintf("dst: applyOp unhandled kind %q", op.Kind))
 	}
 }
 
