@@ -3,10 +3,8 @@ package scenarios
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -440,65 +438,6 @@ func submitAndExpectRejection(ctx context.Context, env *runner.Env, value, expec
 		case <-clearCtx.Done():
 			return fmt.Errorf("annotation was not cleared within deadline (last err=%v)", err)
 		case <-tick.C:
-		}
-	}
-}
-
-// waitForMFGEvent polls the namespace's events for one whose
-// involvedObject.name matches the failover group, reason matches
-// expectedReason, lastTimestamp is at or after notBefore, and (when
-// expectedSnippet is non-empty) message contains expectedSnippet.
-//
-// We poll rather than using a watch because the executor doesn't yet
-// thread an EventClient, and the ~30s sync cadence means a 5s poll is
-// well within budget.
-func waitForMFGEvent(ctx context.Context, env *runner.Env, notBefore time.Time, expectedReason, expectedSnippet string) (corev1.Event, error) {
-	tick := time.NewTicker(2 * time.Second)
-	defer tick.Stop()
-	check := func() (corev1.Event, bool, error) {
-		events, err := env.Kube.RecentEvents(ctx, env.Namespace, 200)
-		if err != nil {
-			return corev1.Event{}, false, err
-		}
-		for _, ev := range events {
-			if ev.InvolvedObject.Kind != "MysqlFailoverGroup" || ev.InvolvedObject.Name != env.FG {
-				continue
-			}
-			if ev.Reason != expectedReason {
-				continue
-			}
-			ts := ev.LastTimestamp.Time
-			if ts.IsZero() {
-				ts = ev.EventTime.Time
-			}
-			// core/v1 Event.LastTimestamp is second-granularity, so an event
-			// emitted immediately after the annotation can appear slightly
-			// before the caller's sub-second notBefore value.
-			if ts.Before(notBefore.Add(-2 * time.Second)) {
-				continue
-			}
-			if expectedSnippet != "" && !strings.Contains(ev.Message, expectedSnippet) {
-				continue
-			}
-			return ev, true, nil
-		}
-		return corev1.Event{}, false, nil
-	}
-	if ev, ok, err := check(); err != nil {
-		return corev1.Event{}, err
-	} else if ok {
-		return ev, nil
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return corev1.Event{}, fmt.Errorf("no matching event (reason=%s snippet=%q) before deadline: %w", expectedReason, expectedSnippet, ctx.Err())
-		case <-tick.C:
-			if ev, ok, err := check(); err != nil {
-				return corev1.Event{}, err
-			} else if ok {
-				return ev, nil
-			}
 		}
 	}
 }

@@ -272,45 +272,121 @@ func s48RefuseRotationOnPrimary(state *s48RunState) runner.Step {
 		Phase: runner.PhaseInject,
 		Name:  "rotation targeting the active primary is refused",
 		Do: func(ctx context.Context, env *runner.Env) error {
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return err
+			}
+			if mfg.Status.ActiveSite != state.activeSite {
+				return fmt.Errorf("active site drifted from %s to %s before primary-rotation probe",
+					state.activeSite, mfg.Status.ActiveSite)
+			}
+			if err := s48RequirePrimarySealed(mfg, state.activeSite); err != nil {
+				return err
+			}
+
+			// Capture notBefore before the annotation so a leftover
+			// KeyringRotationRefused from a previous run cannot satisfy
+			// this one. LastTimestamp is second-granularity; matchMFGEvent
+			// allows 2s of slack.
+			before := time.Now()
 			if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG,
 				"bloodraven.shipstream.io/rotate-keyring", state.activeSite); err != nil {
 				return fmt.Errorf("annotate for primary rotation: %w", err)
 			}
 			state.rotated = true
 
-			// The primary must stay Sealed. Give the operator a few
-			// reconciles to act (or refuse to act) before concluding.
-			deadline := time.Now().Add(90 * time.Second)
-			for time.Now().Before(deadline) {
-				mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			// Two independent claims, two budgets:
+			//   1. a this-run, this-site primary-refusal event (90s)
+			//   2. the primary stayed Sealed for 30s after we observed it
+			// The hold is not truncated to fit the event budget.
+			snippet := fmt.Sprintf("refusing to rotate keyring on site %s: site is the active primary", state.activeSite)
+			const eventBudget = 90 * time.Second
+			const sealedHold = 30 * time.Second
+			eventDeadline := before.Add(eventBudget)
+			var eventSeenAt time.Time
+
+			tick := time.NewTicker(2 * time.Second)
+			defer tick.Stop()
+
+			check := func() error {
+				cur, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 				if err != nil {
 					return err
 				}
-				s := mfg.Status.EncryptionAtRest.SiteEncryptionStatusByName(state.activeSite)
-				if s == nil {
-					return fmt.Errorf("no encryption status for the active site")
+				if err := s48RequirePrimarySealed(cur, state.activeSite); err != nil {
+					return err
 				}
-				if s.Phase != v1alpha1.KeyringPhaseSealed {
-					return fmt.Errorf(
-						"active primary %s moved to phase %s — the operator must refuse to unseal the primary for rotation",
-						state.activeSite, s.Phase)
+				if eventSeenAt.IsZero() {
+					ev, ok, err := findMFGEvent(ctx, env, before, "KeyringRotationRefused", snippet)
+					if err != nil {
+						return fmt.Errorf("list events: %w", err)
+					}
+					if ok {
+						eventSeenAt = time.Now()
+						env.Logger.Info("operator refused primary rotation", "message", ev.Message)
+					} else if !time.Now().Before(eventDeadline) {
+						return fmt.Errorf("no KeyringRotationRefused event was emitted for the active primary %s", state.activeSite)
+					}
 				}
-				time.Sleep(5 * time.Second)
+				return nil
 			}
 
-			events, err := env.Kube.RecentEvents(ctx, env.Namespace, 200)
-			if err != nil {
-				return fmt.Errorf("list events: %w", err)
+			if err := check(); err != nil {
+				return err
 			}
-			for _, e := range events {
-				if e.Reason == "KeyringRotationRefused" {
-					env.Logger.Info("operator refused primary rotation", "message", e.Message)
+			for {
+				if s48RefusalHoldDone(eventSeenAt, time.Now(), sealedHold) {
+					// Success must be a fresh Sealed read at the hold
+					// boundary, not just the absence of an earlier failure.
+					cur, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+					if err != nil {
+						return err
+					}
+					if err := s48RequirePrimarySealed(cur, state.activeSite); err != nil {
+						return err
+					}
 					return s48ClearRotateAnnotation(ctx, env, state)
 				}
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("waiting for primary rotation refusal: %w", ctx.Err())
+				case <-tick.C:
+					if err := check(); err != nil {
+						return err
+					}
+				}
 			}
-			return fmt.Errorf("no KeyringRotationRefused event was emitted for the active primary")
 		},
 	}
+}
+
+// s48RequirePrimarySealed fails if encryption status is missing or the
+// named site is not Sealed. Used both before annotating and on every
+// poll so an unseal fails fast with the phase error, not a timeout.
+func s48RequirePrimarySealed(mfg *v1alpha1.MysqlFailoverGroup, site string) error {
+	if mfg.Status.EncryptionAtRest == nil {
+		return fmt.Errorf("no encryption status for the active site")
+	}
+	s := mfg.Status.EncryptionAtRest.SiteEncryptionStatusByName(site)
+	if s == nil {
+		return fmt.Errorf("no encryption status for the active site")
+	}
+	if s.Phase != v1alpha1.KeyringPhaseSealed {
+		return fmt.Errorf(
+			"active primary %s moved to phase %s — the operator must refuse to unseal the primary for rotation",
+			site, s.Phase)
+	}
+	return nil
+}
+
+// s48RefusalHoldDone is true once a refusal event has been observed
+// locally and hold has elapsed since that observation. eventSeenAt must
+// be wall-clock observation time, not the event's LastTimestamp.
+func s48RefusalHoldDone(eventSeenAt, now time.Time, hold time.Duration) bool {
+	if eventSeenAt.IsZero() {
+		return false
+	}
+	return !now.Before(eventSeenAt.Add(hold))
 }
 
 func s48ClearRotateAnnotation(ctx context.Context, env *runner.Env, state *s48RunState) error {
