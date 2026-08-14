@@ -15,10 +15,25 @@
     "list": [
       {"name": "datasource", "type": "datasource", "query": "prometheus", "current": {"text": "Prometheus", "value": "Prometheus"}, "refresh": 1},
       {
+        "name": "ns",
+        "label": "namespace",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {"query": "label_values(bloodraven_site_state, namespace)", "refId": "ns"},
+        "refresh": 2, "multi": true, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": "$__all"}
+      },
+      {
+        "name": "group",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {"query": "label_values(bloodraven_site_state{namespace=~\"$ns\"}, group)", "refId": "group"},
+        "refresh": 2, "multi": true, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": "$__all"}
+      },
+      {
         "name": "site",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
-        "query": {"query": "label_values(bloodraven_site_state, site)", "refId": "site"},
+        "query": {"query": "label_values(bloodraven_site_state{namespace=~\"$ns\", group=~\"$group\"}, site)", "refId": "site"},
         "refresh": 2, "multi": true, "includeAll": true, "allValue": ".*", "current": {"text": "All", "value": "$__all"}
       }
     ]
@@ -31,7 +46,7 @@
       "description": "Ignores the -1 sentinel. The highest lag across all replicating sites.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 5, "w": 8, "x": 0, "y": 0},
-      "targets": [{"expr": "max(bloodraven_replication_lag_seconds > -1)", "refId": "A"}],
+      "targets": [{"expr": "max(bloodraven_replication_lag_seconds{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"} > -1)", "refId": "A"}],
       "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [
         {"color": "green", "value": null}, {"color": "yellow", "value": 10}, {"color": "orange", "value": 60}, {"color": "red", "value": 300}
@@ -43,7 +58,7 @@
       "title": "Replication threads down",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 5, "w": 8, "x": 8, "y": 0},
-      "targets": [{"expr": "sum(bloodraven_replication_running == 0)", "refId": "A"}],
+      "targets": [{"expr": "sum(bloodraven_replication_running{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"} == 0)", "refId": "A"}],
       "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
       "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [
         {"color": "green", "value": null}, {"color": "red", "value": 1}
@@ -68,7 +83,7 @@
       "description": "-1 means the site is not in replication mode (it's the primary, or broken). Filter negative values in your alerting query.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 5},
-      "targets": [{"expr": "bloodraven_replication_lag_seconds{site=~\"$site\"}", "refId": "A", "legendFormat": "{{site}}"}],
+      "targets": [{"expr": "bloodraven_replication_lag_seconds{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}", "refId": "A", "legendFormat": "{{namespace}}/{{group}}/{{site}} ({{role}})"}],
       "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "spanNulls": true}, "thresholds": {"mode": "absolute", "steps": [
         {"color": "green", "value": null}, {"color": "yellow", "value": 30}, {"color": "red", "value": 300}
       ]}}}
@@ -79,7 +94,7 @@
       "title": "Replication threads — IO / SQL up?",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 13},
-      "targets": [{"expr": "bloodraven_replication_running{site=~\"$site\"}", "refId": "A", "legendFormat": "{{site}} / {{thread}}"}],
+      "targets": [{"expr": "bloodraven_replication_running{namespace=~\"$ns\", group=~\"$group\", site=~\"$site\"}", "refId": "A", "legendFormat": "{{namespace}}/{{group}}/{{site}} ({{role}}) / {{thread}}"}],
       "options": {"showValue": "auto", "mergeValues": true, "rowHeight": 0.9},
       "fieldConfig": {"defaults": {"mappings": [
         {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}}},

@@ -1116,7 +1116,7 @@ Issue #115 chaos proposal R4. Smoke-profile member: fast, no clone wait.
 - The promotable standby keeps replicating.
 - The reader stays `read-only` and never enters `SourceConvergenceState=Blocked` or `RecoveryBlocked`.
 - Observed reader lag exceeds `readOnlyMaxLagSeconds` and the client Service sheds the reader endpoint.
-- `bloodraven_replication_lag_seconds{site=reader}` exceeds the reader threshold while `bloodraven_replication_source_state{site=reader,state="converged"}` stays 1 — the metrics report the stall honestly.
+- `bloodraven_replication_lag_seconds{site=reader,role="read-only"}` exceeds the reader threshold while `bloodraven_replication_source_state{site=reader,state="converged"}` stays 1 — the metrics report the stall honestly. A core RPO alert on `{role=~"primary-candidate|dr-only"}` must stay silent.
 
 **Rollback**: `SOURCE_DELAY=0`; the reader must catch up, pass the serving contract, and rejoin its client Service. Cleanup always clears the delay and drops the soak database through the primary.
 

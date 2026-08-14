@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -227,6 +228,25 @@ func (t *siteTracker) isPromotable() bool {
 // suitable for feeding EvalCrossSite. Caller must hold tm.mu (read).
 func (t *siteTracker) observation() state.SiteObservation {
 	return state.SiteObservation{Name: t.name, Role: t.role, State: t.state}
+}
+
+// siteMetricLabels returns the identity labels for site-scoped gauges.
+func (tm *TopologyManager) siteMetricLabels(site *siteTracker) (namespace, group, name, role string) {
+	return tm.cfg.Namespace, tm.cfg.Name, site.name, string(site.role)
+}
+
+// HaltSiteMetrics prevents further site-gauge emission from this manager.
+// The runner calls this before waiting for Run to exit so a timed-out
+// join can still drop series without a late Poll rewriting them.
+func (tm *TopologyManager) HaltSiteMetrics() {
+	if tm == nil {
+		return
+	}
+	tm.metricsStopped.Store(true)
+}
+
+func (tm *TopologyManager) siteMetricsHalted() bool {
+	return tm != nil && tm.metricsStopped.Load()
 }
 
 // TopologyManager is the main control loop.
@@ -454,6 +474,11 @@ type TopologyManager struct {
 	lastPollTime time.Time
 	ready        bool
 	cancelFunc   context.CancelFunc
+
+	// metricsStopped is set when the runner is shutting this manager
+	// down. Poll skips site-gauge emission so a late cycle after a
+	// timed-out join cannot resurrect deleted series.
+	metricsStopped atomic.Bool
 }
 
 // SiteStatusEntry is a single site's status in the StatusResponse.
@@ -1082,15 +1107,20 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 
 	metrics.WSClientCount.Set(float64(tm.hub.ClientCount()))
 
-	// Emit site state metrics every poll cycle.
-	for i := range tm.sites {
-		currentState := tm.sites[i].state.String()
-		for _, s := range metrics.AllStates {
-			val := 0.0
-			if s == currentState {
-				val = 1.0
+	// Emit site state metrics every poll cycle. Delete first so a role
+	// change cannot leave a stale one-hot set under the previous role.
+	if !tm.siteMetricsHalted() {
+		for i := range tm.sites {
+			ns, group, name, role := tm.siteMetricLabels(&tm.sites[i])
+			metrics.DeleteSiteState(ns, group, name)
+			currentState := tm.sites[i].state.String()
+			for _, s := range metrics.AllStates {
+				val := 0.0
+				if s == currentState {
+					val = 1.0
+				}
+				metrics.SiteState.WithLabelValues(ns, group, name, role, s).Set(val)
 			}
-			metrics.SiteState.WithLabelValues(tm.sites[i].name, s).Set(val)
 		}
 	}
 
@@ -1189,29 +1219,31 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	}
 
 	// Emit replication metrics.
-	for i := range tm.sites {
-		name := tm.sites[i].name
-		if siteRepl[i] != nil {
-			if siteRepl[i].SecondsBehindSource != nil {
-				metrics.ReplicationLag.WithLabelValues(name).Set(float64(*siteRepl[i].SecondsBehindSource))
-			} else {
-				metrics.ReplicationLag.WithLabelValues(name).Set(-1)
+	if !tm.siteMetricsHalted() {
+		for i := range tm.sites {
+			ns, group, name, role := tm.siteMetricLabels(&tm.sites[i])
+			if siteRepl[i] != nil {
+				// Drop any previous role's series before writing the current one.
+				metrics.DeleteReplicationGauges(ns, group, name)
+				if siteRepl[i].SecondsBehindSource != nil {
+					metrics.ReplicationLag.WithLabelValues(ns, group, name, role).Set(float64(*siteRepl[i].SecondsBehindSource))
+				} else {
+					metrics.ReplicationLag.WithLabelValues(ns, group, name, role).Set(-1)
+				}
+				ioVal := 0.0
+				if siteRepl[i].IORunning {
+					ioVal = 1.0
+				}
+				sqlVal := 0.0
+				if siteRepl[i].SQLRunning {
+					sqlVal = 1.0
+				}
+				metrics.ReplicationRunning.WithLabelValues(ns, group, name, role, "io").Set(ioVal)
+				metrics.ReplicationRunning.WithLabelValues(ns, group, name, role, "sql").Set(sqlVal)
+			} else if tm.sites[i].state == state.StateWritable {
+				// Primary site: clear replication metrics (not a replica).
+				metrics.DeleteReplicationGauges(ns, group, name)
 			}
-			ioVal := 0.0
-			if siteRepl[i].IORunning {
-				ioVal = 1.0
-			}
-			sqlVal := 0.0
-			if siteRepl[i].SQLRunning {
-				sqlVal = 1.0
-			}
-			metrics.ReplicationRunning.WithLabelValues(name, "io").Set(ioVal)
-			metrics.ReplicationRunning.WithLabelValues(name, "sql").Set(sqlVal)
-		} else if tm.sites[i].state == state.StateWritable {
-			// Primary site: clear replication metrics (not a replica).
-			metrics.ReplicationLag.DeleteLabelValues(name)
-			metrics.ReplicationRunning.DeleteLabelValues(name, "io")
-			metrics.ReplicationRunning.DeleteLabelValues(name, "sql")
 		}
 	}
 	tm.emitSourceConvergenceMetrics()
