@@ -371,7 +371,7 @@ var AllSourceStates = []string{"converged", "pending", "blocked"}
 var KeyringPhase = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_keyring_phase",
 	Help: "1 for the site's current keyring phase, 0 for the others.",
-}, []string{"mysql_namespace", "failover_group", "site", "phase"})
+}, []string{"namespace", "group", "site", "phase"})
 
 // AllKeyringPhases is the bounded keyring phase set, used to zero out
 // stale series when a site transitions.
@@ -383,7 +383,7 @@ var AllKeyringPhases = []string{"pending", "unsealed", "escrowed", "sealed", "fa
 var KeyringEscrowVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_keyring_escrow_version",
 	Help: "Current keyring escrow Secret version per site.",
-}, []string{"mysql_namespace", "failover_group", "site"})
+}, []string{"namespace", "group", "site"})
 
 // KeyringEscrowPushesTotal counts sidecar escrow pushes by outcome.
 // Sustained failures mean a site cannot be sealed and is therefore
@@ -391,13 +391,13 @@ var KeyringEscrowVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 var KeyringEscrowPushesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "bloodraven_keyring_escrow_pushes_total",
 	Help: "Keyring escrow pushes from the sidecar to the operator, by outcome.",
-}, []string{"failover_group", "site", "outcome"})
+}, []string{"group", "site", "outcome"})
 
 // KeyringRotationsTotal counts master-key rotations by outcome.
 var KeyringRotationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "bloodraven_keyring_rotations_total",
 	Help: "InnoDB master key rotations attempted by the sidecar, by outcome.",
-}, []string{"failover_group", "site", "outcome"})
+}, []string{"group", "site", "outcome"})
 
 // EncryptionCoverageGaps counts observed coverage shortfalls per site:
 // user tablespaces still reporting ENCRYPTION='N'. Non-zero on a cluster
@@ -405,7 +405,7 @@ var KeyringRotationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 var EncryptionCoverageGaps = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_encryption_unencrypted_tablespaces",
 	Help: "User tablespaces still reporting ENCRYPTION='N' on a site.",
-}, []string{"mysql_namespace", "failover_group", "site"})
+}, []string{"namespace", "group", "site"})
 
 // EncryptionCoverageFlag reports individual coverage booleans observed
 // on the live instance (1 = encrypted). The `aspect` label is one of
@@ -413,7 +413,7 @@ var EncryptionCoverageGaps = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 var EncryptionCoverageFlag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_encryption_coverage",
 	Help: "Observed data-at-rest encryption coverage per aspect (1 = on).",
-}, []string{"mysql_namespace", "failover_group", "site", "aspect"})
+}, []string{"namespace", "group", "site", "aspect"})
 
 // SiteIdentity is the shared identity of a site-scoped gauge series.
 // Extra labels (role, state, thread) are not included so callers can
@@ -444,7 +444,7 @@ func DeleteSiteGauges(namespace, group, site string) {
 // DeleteKeyringSiteMetrics removes every gauge series for a site that is
 // no longer present in the failover-group spec.
 func DeleteKeyringSiteMetrics(namespace, group, site string) {
-	labels := prometheus.Labels{"mysql_namespace": namespace, "failover_group": group, "site": site}
+	labels := prometheus.Labels{"namespace": namespace, "group": group, "site": site}
 	KeyringPhase.DeletePartialMatch(labels)
 	KeyringEscrowVersion.DeletePartialMatch(labels)
 	EncryptionCoverageGaps.DeletePartialMatch(labels)

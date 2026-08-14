@@ -85,6 +85,86 @@ func TestRegisterIncludesMetrics(t *testing.T) {
 	}
 }
 
+func TestKeyringMetricsUseNamespaceAndGroup(t *testing.T) {
+	tests := []struct {
+		family    string
+		seed      func()
+		cleanup   func()
+		wantNames []string
+	}{
+		{
+			family: "bloodraven_keyring_phase",
+			seed: func() {
+				KeyringPhase.WithLabelValues("ns", "g", "iad", "sealed").Set(1)
+			},
+			cleanup:   func() { KeyringPhase.DeleteLabelValues("ns", "g", "iad", "sealed") },
+			wantNames: []string{"namespace", "group", "site", "phase"},
+		},
+		{
+			family: "bloodraven_keyring_escrow_version",
+			seed: func() {
+				KeyringEscrowVersion.WithLabelValues("ns", "g", "iad").Set(2)
+			},
+			cleanup:   func() { KeyringEscrowVersion.DeleteLabelValues("ns", "g", "iad") },
+			wantNames: []string{"namespace", "group", "site"},
+		},
+		{
+			family: "bloodraven_keyring_escrow_pushes_total",
+			seed: func() {
+				KeyringEscrowPushesTotal.WithLabelValues("g", "iad", "success").Inc()
+			},
+			cleanup:   func() { KeyringEscrowPushesTotal.DeleteLabelValues("g", "iad", "success") },
+			wantNames: []string{"group", "site", "outcome"},
+		},
+		{
+			family: "bloodraven_keyring_rotations_total",
+			seed: func() {
+				KeyringRotationsTotal.WithLabelValues("g", "iad", "success").Inc()
+			},
+			cleanup:   func() { KeyringRotationsTotal.DeleteLabelValues("g", "iad", "success") },
+			wantNames: []string{"group", "site", "outcome"},
+		},
+		{
+			family: "bloodraven_encryption_unencrypted_tablespaces",
+			seed: func() {
+				EncryptionCoverageGaps.WithLabelValues("ns", "g", "iad").Set(1)
+			},
+			cleanup:   func() { EncryptionCoverageGaps.DeleteLabelValues("ns", "g", "iad") },
+			wantNames: []string{"namespace", "group", "site"},
+		},
+		{
+			family: "bloodraven_encryption_coverage",
+			seed: func() {
+				EncryptionCoverageFlag.WithLabelValues("ns", "g", "iad", "redo_log").Set(1)
+			},
+			cleanup:   func() { EncryptionCoverageFlag.DeleteLabelValues("ns", "g", "iad", "redo_log") },
+			wantNames: []string{"namespace", "group", "site", "aspect"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.family, func(t *testing.T) {
+			reg := prometheus.NewRegistry()
+			Register(reg)
+			tt.seed()
+			t.Cleanup(tt.cleanup)
+			got := gatherOne(t, reg, tt.family)
+			if len(got.Metric) == 0 {
+				t.Fatal("no series")
+			}
+			labels := labelMap(got.Metric[0])
+			if len(labels) != len(tt.wantNames) {
+				t.Fatalf("labels %v, want names %v", labels, tt.wantNames)
+			}
+			for _, name := range tt.wantNames {
+				if _, ok := labels[name]; !ok {
+					t.Fatalf("missing label %q in %v", name, labels)
+				}
+			}
+		})
+	}
+}
+
 func TestDeleteKeyringSiteMetricsPreservesActiveSites(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(KeyringPhase, KeyringEscrowVersion, EncryptionCoverageGaps, EncryptionCoverageFlag)

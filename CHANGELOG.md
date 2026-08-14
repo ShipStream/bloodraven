@@ -38,3 +38,19 @@ added.
 The production course still describes the pre-change label set. It is
 not updated in this change; treat `site/content/docs/8.observability/`
 as authoritative.
+
+### Breaking: keyring label spelling
+
+Keyring and encryption-coverage metrics now use the same `namespace` /
+`group` spellings as the archiver, restore, and source-state families.
+Selectors copied from those families no longer silently match nothing.
+This rename is a separate commit and can be reverted on its own.
+
+| Metric | Before | After |
+|---|---|---|
+| `bloodraven_keyring_phase` | `mysql_namespace`, `failover_group`, `site`, `phase` | `namespace`, `group`, `site`, `phase` |
+| `bloodraven_keyring_escrow_version` | `mysql_namespace`, `failover_group`, `site` | `namespace`, `group`, `site` |
+| `bloodraven_keyring_escrow_pushes_total` | `failover_group`, `site`, `outcome` | `group`, `site`, `outcome` |
+| `bloodraven_keyring_rotations_total` | `failover_group`, `site`, `outcome` | `group`, `site`, `outcome` |
+| `bloodraven_encryption_unencrypted_tablespaces` | `mysql_namespace`, `failover_group`, `site` | `namespace`, `group`, `site` |
+| `bloodraven_encryption_coverage` | `mysql_namespace`, `failover_group`, `site`, `aspect` | `namespace`, `group`, `site`, `aspect` |
