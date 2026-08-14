@@ -1503,13 +1503,20 @@ func TestPickFreshestCandidate_SkipsUnreachable(t *testing.T) {
 // --- checkReclone tests ---
 
 type testKeyringGate struct {
-	ready bool
-	calls int
+	ready       bool
+	calls       atomic.Int32
+	notifyCalls atomic.Int32
+	notifyErr   error
 }
 
 func (g *testKeyringGate) RequestKeyringUnseal(context.Context, types.NamespacedName, string) (bool, error) {
-	g.calls++
+	g.calls.Add(1)
 	return g.ready, nil
+}
+
+func (g *testKeyringGate) NotifyCloneComplete(context.Context, types.NamespacedName, string) error {
+	g.notifyCalls.Add(1)
+	return g.notifyErr
 }
 
 func TestReclone_HappyPath(t *testing.T) {
@@ -1557,6 +1564,9 @@ func TestReclone_PreservesPendingRequestUntilKeyringUnsealed(t *testing.T) {
 	if tm.checkReclone(context.Background()) {
 		t.Fatal("reclone started before the keyring was unsealed")
 	}
+	if gate.notifyCalls.Load() != 0 {
+		t.Fatal("NotifyCloneComplete must not run before bootstrap starts")
+	}
 	tm.mu.RLock()
 	pending := tm.reclonePendingSite
 	tm.mu.RUnlock()
@@ -1575,8 +1585,11 @@ func TestReclone_PreservesPendingRequestUntilKeyringUnsealed(t *testing.T) {
 	tm.mu.RLock()
 	pending = tm.reclonePendingSite
 	tm.mu.RUnlock()
-	if pending != "" || gate.calls != 2 || consumed.Load() != 1 {
-		t.Fatalf("pending=%q calls=%d consumed=%d", pending, gate.calls, consumed.Load())
+	if pending != "" || gate.calls.Load() != 2 || consumed.Load() != 1 {
+		t.Fatalf("pending=%q calls=%d consumed=%d", pending, gate.calls.Load(), consumed.Load())
+	}
+	if gate.notifyCalls.Load() != 1 {
+		t.Fatalf("NotifyCloneComplete calls = %d, want 1 after bootstrap finishes", gate.notifyCalls.Load())
 	}
 }
 
@@ -1616,6 +1629,73 @@ func TestReclone_AnnotationCleanupFailureDoesNotRepeatSuccessfulClone(t *testing
 	tm.mu.RUnlock()
 	if completed != "" || cleanupCalls.Load() != 2 {
 		t.Fatalf("completed=%q cleanupCalls=%d", completed, cleanupCalls.Load())
+	}
+}
+
+func TestReleaseCloneHold_RetriesNotifyWithoutCloning(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	replica := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(primary, replica)
+	tm.autoBootstrapSuppressed = true
+	pollN(tm, 2)
+	gate := &testKeyringGate{ready: true, notifyErr: errors.New("status conflict")}
+	tm.SetKeyringGate(gate)
+	tm.SetRecloneSite("dc2")
+	if !tm.checkReclone(context.Background()) {
+		t.Fatal("expected reclone to start")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		tm.mu.RLock()
+		pending := tm.cloneHoldReleaseSite
+		phase := tm.bootstrapPhase
+		tm.mu.RUnlock()
+		if pending == "dc2" && bootstrapIdlePhase(phase) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	firstNotifies := gate.notifyCalls.Load()
+	if firstNotifies < 1 {
+		t.Fatal("expected NotifyCloneComplete after bootstrap")
+	}
+	gate.notifyErr = nil
+	tm.releaseCloneHold(context.Background())
+	tm.mu.RLock()
+	pending := tm.cloneHoldReleaseSite
+	phase := tm.bootstrapPhase
+	tm.mu.RUnlock()
+	if pending != "" {
+		t.Fatalf("cloneHoldReleaseSite = %q after successful retry", pending)
+	}
+	if gate.notifyCalls.Load() != firstNotifies+1 {
+		t.Fatalf("notify retry calls = %d, want %d", gate.notifyCalls.Load(), firstNotifies+1)
+	}
+	if phase == BootstrapPhaseCloning {
+		t.Fatal("notify retry started another clone")
+	}
+}
+
+func TestStartBootstrap_ClearsStaleCloneHoldRelease(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	replica := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(primary, replica)
+	tm.autoBootstrapSuppressed = true
+	pollN(tm, 2)
+	gate := &testKeyringGate{ready: true}
+	tm.SetKeyringGate(gate)
+	tm.mu.Lock()
+	tm.cloneHoldReleaseSite = "dc2"
+	tm.mu.Unlock()
+
+	if !tm.startBootstrapByName(context.Background(), "dc1", "dc2", "auto-clone") {
+		t.Fatal("expected bootstrap to start")
+	}
+	tm.mu.RLock()
+	pending := tm.cloneHoldReleaseSite
+	tm.mu.RUnlock()
+	if pending != "" {
+		t.Fatalf("cloneHoldReleaseSite = %q after starting a new clone; a stale release would reseal mid-CLONE", pending)
 	}
 }
 

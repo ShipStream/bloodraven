@@ -333,8 +333,11 @@ not rewrite anything already on disk. That is what
 ### On a new failover group
 
 Set `spec.encryptionAtRest.enabled: true` and `spec.tls` before the group
-first bootstraps. Every site comes up unsealed, creates its keys during
-initialization, escrows, and seals. Nothing else to do.
+first bootstraps. The first primary-candidate comes up unsealed, creates
+its keys, escrows, and seals. Every other site is seeded with
+`CLONE INSTANCE`: the operator unseals the recipient, holds it unsealed
+until the clone and the post-clone mysqld restart finish, then
+re-escrows and reseals. A single-site group has no clone step.
 
 :::caution Operator and sidecar images must both be current
 Because `spec.tls` sets `require_secure_transport=ON`, the sidecar's own
@@ -535,30 +538,13 @@ that was previously sealed is never rolled back onto a writable keyring,
 precisely because that would discard the in-memory copy you are
 recovering from.
 
-:::danger Known bug — recloning an encrypted site livelocks
-A reclone of an encrypted site does not currently complete once the
-operator's clone gate is active. `RequestKeyringUnseal` moves the
-recipient to `Unsealed`/`Clone`; the encryption reconciler re-verifies the
-escrow and advances it straight back to `Escrowed`, which re-renders the
-sealed keyring; the pod rolls; and the next clone attempt unseals it
-again. The operator logs `bootstrap deferred: waiting for the recipient
-keyring to be unsealed` indefinitely.
-
-The gate becomes active whenever the topology manager is built while
-encryption is enabled, so any operator restart on an encrypted group is
-enough to reach this.
-
-To break out, remove the annotation — the site re-seals and the group
-settles on its own:
-
-```bash
-kubectl annotate mysqlfailovergroup orders bloodraven.shipstream.io/reclone-site-
-```
-
-Root cause: `advanceUnsealedSite` does not treat `UnsealReason=Clone` as
-sticky (it must stay unsealed until the clone has run) and nothing signals
-clone completion back to it. Tracked by playground scenario 51.
-:::
+If a group was left oscillating `Unsealed`/`Clone` ↔ `Escrowed` on 1.0.0
+or 0.9.1, upgrade the operator. The Clone hold is now sticky, so the next
+bootstrap attempt (fresh-deploy and auto-clone keep retrying; a leftover
+reclone annotation also retries) actually runs `CLONE INSTANCE` and then
+reseals. If you already cleared the reclone annotation to break the old
+loop, re-annotate to finish the clone. Do not delete-and-recreate the
+group.
 
 If the pod is already gone, that site's data is unrecoverable. Delete its
 unreadable PVC and use the confirmed reclone annotation; the operator
