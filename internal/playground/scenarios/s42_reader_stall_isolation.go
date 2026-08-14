@@ -233,7 +233,7 @@ func s42VerifyStallObservability(state *s42RunState) runner.Step {
 				fmt.Sprintf("replication_lag_seconds{site=%q} > %g and replication_source_state{site=%q,state=\"converged\"} == 1",
 					state.topo.reader, readerMaxLag, state.topo.reader),
 				func(snap *pgmetrics.Snapshot) (bool, string) {
-					lag, lagOK := snap.Gauge("bloodraven_replication_lag_seconds", map[string]string{"site": state.topo.reader})
+					lag, lagOK := snap.Gauge("bloodraven_replication_lag_seconds", map[string]string{"site": state.topo.reader, "role": "read-only"})
 					converged, stateOK := snap.Gauge("bloodraven_replication_source_state", map[string]string{"site": state.topo.reader, "state": "converged"})
 					msg := fmt.Sprintf("lag=%g(ok=%v) converged=%g(ok=%v)", lag, lagOK, converged, stateOK)
 					return lagOK && lag > readerMaxLag && stateOK && converged == 1, msg

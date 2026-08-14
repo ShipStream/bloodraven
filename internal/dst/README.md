@@ -42,7 +42,9 @@ dimension rather than one per statement.
    history is rehydrated, the sidecar deployment shape (lease timeout,
    topology-aware fencing on/off, whether its tick lands before or after the
    operator's poll), and an explicit fault-op schedule (crashes with
-   fenced/writable boot modes, operator↔site and site↔site partitions,
+    fenced/writable boot modes, operator↔site partitions, symmetric
+    site↔site partitions (`partitionPair`, both directed cuts) and one-way
+    peer cuts (`partitionOneWay`),
    operator restarts, mid-`Execute` operator deaths, ambiguous mutations —
    applied but the operator saw an error — failing mutations, replication
    fetch/apply stalls, relay-drain stalls, rogue fences, rogue `read_only=0`,

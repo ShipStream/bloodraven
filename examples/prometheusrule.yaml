@@ -39,7 +39,7 @@ spec:
           annotations:
             summary: Bloodraven site {{ $labels.site }} is running with a writable keyring
             description: >-
-              Site {{ $labels.site }} in failover group {{ $labels.failover_group }} is not
+              Site {{ $labels.site }} in failover group {{ $labels.group }} is not
               sealed against an escrowed keyring. Check
               status.encryptionAtRest.sites[].message for what it is waiting on.
             runbook_url: https://bloodraven.dev/docs/operations/runbooks#keyring-not-sealed

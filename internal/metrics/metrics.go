@@ -86,13 +86,13 @@ var (
 
 	ReplicationLag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_replication_lag_seconds",
-		Help: "Replication lag in seconds. Only set for the replica site; -1 if lag is NULL (not replicating).",
-	}, []string{"site"})
+		Help: "Replication lag in seconds on a follower site. -1 if lag is NULL (not replicating). role is spec.sites[].role (primary-candidate, dr-only, or read-only).",
+	}, []string{"namespace", "group", "site", "role"})
 
 	ReplicationRunning = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_replication_running",
-		Help: "Whether a replication thread is running (1=yes, 0=no). Thread label is 'io' or 'sql'.",
-	}, []string{"site", "thread"})
+		Help: "Whether a replication thread is running (1=yes, 0=no). Thread label is 'io' or 'sql'. role is spec.sites[].role.",
+	}, []string{"namespace", "group", "site", "role", "thread"})
 
 	ReplicationSourceState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_replication_source_state",
@@ -101,8 +101,8 @@ var (
 
 	SiteState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "bloodraven_site_state",
-		Help: "Current site state as a state-set (1 for current state, 0 for others). State label is 'writable', 'read-only', 'unreachable', or 'unknown'.",
-	}, []string{"site", "state"})
+		Help: "Current site state as a state-set (1 for current state, 0 for others). State is 'writable', 'read-only', 'unreachable', or 'unknown'. role is spec.sites[].role.",
+	}, []string{"namespace", "group", "site", "role", "state"})
 
 	// --- Recovery metrics -----------------------------------------------
 
@@ -374,7 +374,7 @@ var AllSourceStates = []string{"converged", "pending", "blocked"}
 var KeyringPhase = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_keyring_phase",
 	Help: "1 for the site's current keyring phase, 0 for the others.",
-}, []string{"mysql_namespace", "failover_group", "site", "phase"})
+}, []string{"namespace", "group", "site", "phase"})
 
 // AllKeyringPhases is the bounded keyring phase set, used to zero out
 // stale series when a site transitions.
@@ -386,7 +386,7 @@ var AllKeyringPhases = []string{"pending", "unsealed", "escrowed", "sealed", "fa
 var KeyringEscrowVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_keyring_escrow_version",
 	Help: "Current keyring escrow Secret version per site.",
-}, []string{"mysql_namespace", "failover_group", "site"})
+}, []string{"namespace", "group", "site"})
 
 // KeyringEscrowPushesTotal counts sidecar escrow pushes by outcome.
 // Sustained failures mean a site cannot be sealed and is therefore
@@ -394,13 +394,13 @@ var KeyringEscrowVersion = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 var KeyringEscrowPushesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "bloodraven_keyring_escrow_pushes_total",
 	Help: "Keyring escrow pushes from the sidecar to the operator, by outcome.",
-}, []string{"failover_group", "site", "outcome"})
+}, []string{"group", "site", "outcome"})
 
 // KeyringRotationsTotal counts master-key rotations by outcome.
 var KeyringRotationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "bloodraven_keyring_rotations_total",
 	Help: "InnoDB master key rotations attempted by the sidecar, by outcome.",
-}, []string{"failover_group", "site", "outcome"})
+}, []string{"group", "site", "outcome"})
 
 // EncryptionCoverageGaps counts observed coverage shortfalls per site:
 // user tablespaces still reporting ENCRYPTION='N'. Non-zero on a cluster
@@ -408,7 +408,7 @@ var KeyringRotationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 var EncryptionCoverageGaps = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_encryption_unencrypted_tablespaces",
 	Help: "User tablespaces still reporting ENCRYPTION='N' on a site.",
-}, []string{"mysql_namespace", "failover_group", "site"})
+}, []string{"namespace", "group", "site"})
 
 // EncryptionCoverageFlag reports individual coverage booleans observed
 // on the live instance (1 = encrypted). The `aspect` label is one of
@@ -416,12 +416,38 @@ var EncryptionCoverageGaps = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 var EncryptionCoverageFlag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "bloodraven_encryption_coverage",
 	Help: "Observed data-at-rest encryption coverage per aspect (1 = on).",
-}, []string{"mysql_namespace", "failover_group", "site", "aspect"})
+}, []string{"namespace", "group", "site", "aspect"})
+
+// SiteIdentity is the shared identity of a site-scoped gauge series.
+// Extra labels (role, state, thread) are not included so callers can
+// DeletePartialMatch without knowing the last emitted role.
+func SiteIdentity(namespace, group, site string) prometheus.Labels {
+	return prometheus.Labels{"namespace": namespace, "group": group, "site": site}
+}
+
+// DeleteSiteState removes every bloodraven_site_state series for a site.
+func DeleteSiteState(namespace, group, site string) {
+	SiteState.DeletePartialMatch(SiteIdentity(namespace, group, site))
+}
+
+// DeleteReplicationGauges removes lag and thread-running series for a site.
+func DeleteReplicationGauges(namespace, group, site string) {
+	id := SiteIdentity(namespace, group, site)
+	ReplicationLag.DeletePartialMatch(id)
+	ReplicationRunning.DeletePartialMatch(id)
+}
+
+// DeleteSiteGauges removes every site-scoped gauge series for a site
+// (state, lag, replication threads). Used when a site or group goes away.
+func DeleteSiteGauges(namespace, group, site string) {
+	DeleteSiteState(namespace, group, site)
+	DeleteReplicationGauges(namespace, group, site)
+}
 
 // DeleteKeyringSiteMetrics removes every gauge series for a site that is
 // no longer present in the failover-group spec.
 func DeleteKeyringSiteMetrics(namespace, group, site string) {
-	labels := prometheus.Labels{"mysql_namespace": namespace, "failover_group": group, "site": site}
+	labels := prometheus.Labels{"namespace": namespace, "group": group, "site": site}
 	KeyringPhase.DeletePartialMatch(labels)
 	KeyringEscrowVersion.DeletePartialMatch(labels)
 	EncryptionCoverageGaps.DeletePartialMatch(labels)
