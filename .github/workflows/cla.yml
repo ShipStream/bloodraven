@@ -4,15 +4,17 @@ name: CLA
 # Signatures are stored as JSON on the `cla-signatures` branch of this repo.
 #
 # Setup, one time:
-#   1. Create a repo secret named CLA_SIGNATURES_TOKEN containing a fine-grained
-#      PAT with Contents: read/write on ShipStream/bloodraven. The action needs a
-#      PAT rather than GITHUB_TOKEN to commit signatures from a
-#      pull_request_target run.
-#   2. Create the empty `cla-signatures` branch:
-#        git switch --orphan cla-signatures && git commit --allow-empty -m "CLA signatures" && git push -u origin cla-signatures
+#   1. DONE - the orphan `cla-signatures` branch exists.
+#   2. Create a repo secret named CLA_SIGNATURES_TOKEN containing a PAT with
+#      Contents: read/write on ShipStream/bloodraven. contributor-assistant
+#      lists PERSONAL_ACCESS_TOKEN as required and cannot fall back to
+#      GITHUB_TOKEN: with it empty, its authenticated lookup of the signature
+#      branch fails as "Branch cla-signatures not found" even though the branch
+#      is there and the repo is public.
 #
-# Until the secret exists this workflow will fail on outside PRs. It is safe to
-# leave disabled until the repo starts accepting outside contributions.
+# Until that secret exists the enforcement step is skipped rather than failed,
+# so the check does not red-X every PR while the repo has no outside
+# contributors. Adding the secret activates enforcement with no further edits.
 
 on:
   issue_comment:
@@ -37,7 +39,18 @@ jobs:
        (github.event.comment.body == 'recheck' ||
         github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
     steps:
+      - name: Report that CLA enforcement is not configured
+        if: ${{ secrets.CLA_SIGNATURES_TOKEN == '' }}
+        run: |
+          {
+            echo "### CLA check skipped"
+            echo
+            echo "\`CLA_SIGNATURES_TOKEN\` is not set, so CLA enforcement is inactive."
+            echo "Add the secret to activate it; see the header of \`.github/workflows/cla.yml\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: CLA Assistant
+        if: ${{ secrets.CLA_SIGNATURES_TOKEN != '' }}
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
