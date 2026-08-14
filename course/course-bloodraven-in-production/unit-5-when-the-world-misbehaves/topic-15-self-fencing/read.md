@@ -33,6 +33,16 @@ instance never self-fences, because there is nothing left to fence. That single 
 replica's monitor is a permanent no-op, and why "the sidecar fenced it" is never the explanation for
 a site that was already read-only.
 
+```figure
+{
+  "src": "assets/img/g8-self-fence.svg",
+  "alt": "Sidecar decision tree. Can I still confirm I am the primary? Yes stays writable. No sets super_read_only. Two rules stacked: topology mismatch first, lease expiry second.",
+  "caption": "The sidecar decides locally. It does not ask the operator, and it does not need a quorum.",
+  "width": 960,
+  "height": 480
+}
+```
+
 ```widget
 {
   "type": "order",

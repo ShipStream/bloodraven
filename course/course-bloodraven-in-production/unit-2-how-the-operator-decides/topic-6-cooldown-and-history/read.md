@@ -1,10 +1,8 @@
 # Cooldown, history, and the one exception
 
-`playground` has just failed over. `iad` went unreachable, `pdx` was promoted, the counter app is
-writing again. The cross-site table you ran in the last topic is still evaluating every poll, and it
-will happily select another promotion the second `pdx` looks unreachable — a flap that can walk the
-group across every site in under a minute. The thing that stops it is memory: `spec.failoverCooldown`.
-Almost everyone overestimates its reach.
+`playground` has just failed over. `iad` is gone, `pdx` is primary, the counter is writing again.
+The table will happily select another promotion the second `pdx` looks unreachable. The thing that
+stops that flap is memory: `spec.failoverCooldown`. Almost everyone overestimates its reach.
 
 ## One guard, and only one
 

@@ -116,6 +116,16 @@ One wrinkle before you eyeball a set. MySQL 9.x GTID sets can carry user-defined
 
 ## The measurement
 
+```figure
+{
+  "src": "assets/img/g5-gtid-loss.svg",
+  "alt": "Two GTID bars. IAD holds transactions 1 through 23. PDX holds 1 through 19. The range 20-23 is highlighted amber and labelled 4 lost transactions.",
+  "caption": "What the failover cost. `20-23` is four transactions, not an estimate.",
+  "width": 960,
+  "height": 320
+}
+```
+
 Here is a real `playground` status after an emergency promotion to `pdx`, with the two fields that matter
 and everything else elided:
 

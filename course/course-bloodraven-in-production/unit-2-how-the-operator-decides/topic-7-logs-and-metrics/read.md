@@ -1,6 +1,8 @@
 # Reading the operator's mind from logs and metrics
 
-`playground` has three sites: `iad` and `pdx` as `primary-candidate`, `reader` as `role: read-only`. The counter application is still reading and writing. You can now run the cross-site table in your head and say whether cooldown will let the operator act on it. What you cannot do yet is check your answer against the live group. Two surfaces make that possible, and neither is a dashboard: the structured log, and the operator's `/metrics` endpoint on `:8080`.
+You can run the table in your head and say whether cooldown will let the operator act. What you
+cannot do yet is check that answer against the live group. Two surfaces make it possible, and
+neither is a dashboard: the structured log, and `/metrics` on `:8080`.
 
 ## The log is an interface
 

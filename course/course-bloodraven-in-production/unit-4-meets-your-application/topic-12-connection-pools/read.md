@@ -8,7 +8,19 @@ demoted site â€” while the first write anyone attempted came back `ERROR 1290` â
 paging.
 
 Nothing in that list was broken. The failover was correct. Your application was broken, in two
-different ways at once, and the mechanism behind both is small enough to state in three sentences.
+different ways at once.
+
+```figure
+{
+  "src": "assets/img/g6-stale-socket.svg",
+  "alt": "Split panel. The Service selector now points at PDX. An old TCP socket is still drawn to IAD, which is stamped super_read_only. A read arrow succeeds with stale data. A write arrow hits ERROR 1290.",
+  "caption": "Promotion worked. The socket did not move.",
+  "width": 960,
+  "height": 420
+}
+```
+
+The mechanism is small enough to state in three sentences.
 
 ## Three sentences
 

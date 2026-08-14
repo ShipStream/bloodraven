@@ -11,7 +11,17 @@ Bloodraven documents the five in `docs/docs/network-partitions.mdx`, labelled A 
 them is not how bad the network is. It is *which* link broke, and so what each of two independent
 deciders can still see. The operator decides from what it can poll — one `SELECT @@read_only` per
 site, per tick. The sidecar decides from what it can reach — Bloodraven, or any peer. A partition
-rarely blinds both. The widget below is the taxonomy; the list is *why* each answer is right.
+rarely blinds both. The figure is the map; the match below is the taxonomy; the list is *why* each answer is right.
+
+```figure
+{
+  "src": "assets/img/g7-partitions.svg",
+  "alt": "Five small network diagrams labelled A through E. Operator, IAD and PDX as three nodes. A red cut marks the broken link in each. Captions: A promotes, B does nothing, C does nothing, D does nothing, E nothing left to promote.",
+  "caption": "Same words — 'the network is partitioned'. Five different cuts. Five different answers.",
+  "width": 960,
+  "height": 560
+}
+```
 
 - **A — operator cannot reach site A, site B reachable.** `iad` goes `unreachable` after 6 s (2 s
   `pollInterval` × 3 `failureThreshold`); `pdx` is promoted. An isolated-but-alive `iad` self-fences
@@ -28,65 +38,28 @@ rarely blinds both. The widget below is the taxonomy; the list is *why* each ans
 
 ```widget
 {
-  "type": "compare",
-  "title": "The five documented partition shapes",
-  "rows": [
+  "type": "match",
+  "title": "Symptom in playground → the shape, and what acts",
+  "pairs": [
     {
-      "aspect": "Observed symptom in `playground`",
-      "cells": [
-        "`iad` → unreachable after 6 s; `pdx` stays read-only and replicating until the link fully breaks",
-        "`pdx` → unreachable, or replication IO/SQL stops and lag climbs; `iad` stays writable",
-        "Primary writable, replica read-only, IO thread stopped or lag rising — both sites poll fine",
-        "Polls look healthy; replication or peer checks fail one way only",
-        "Every site → unreachable; Degraded=True with total-loss semantics"
-      ]
+      "term": "iad unreachable after 6 s; pdx still read-only",
+      "match": "A — operator promotes pdx; isolated iad self-fences at ~T+20 s"
     },
     {
-      "aspect": "Operator response",
-      "cells": [
-        "Promotes `pdx` via the normal emergency path; Services, DNS and taints follow",
-        "None. The primary is healthy",
-        "None. Indistinguishable from lag or IO pressure",
-        "Follows what it can poll: no failover while the primary is reachable and writable",
-        "No promotion — there is no reachable candidate"
-      ]
+      "term": "pdx unreachable or lag climbing; iad still writable",
+      "match": "B — no failover, no self-fence (replica never self-fences)"
     },
     {
-      "aspect": "Sidecar response",
-      "cells": [
-        "`iad` self-fences at roughly T+20 s if isolated from operator *and* all peers",
-        "No self-fence — read-only instances never self-fence",
-        "No self-fence — the primary can still reach operator and peers",
-        "Self-fences only if operator *and* every peer are unreachable; one reachable peer suppresses it",
-        "Any still-running writable site self-fences after leaseTimeout"
-      ]
+      "term": "Both sites poll fine; replica IO thread stopped",
+      "match": "C — no automatic action; indistinguishable from lag"
     },
     {
-      "aspect": "How it is actually tested",
-      "cells": [
-        "Exercised: chaos 09 and 06, plus DST fault `partitionOperatorSite`",
-        "Exercised: chaos 17",
-        "DST only — fault `partitionPair`; no live chaos scenario",
-        "Analysis only — no test of any kind",
-        "Indirect only, via chaos 11 (total loss by scale-to-0)"
-      ]
-    }
-  ],
-  "columns": [
-    {
-      "label": "A: operator↛site"
+      "term": "Polls look healthy; peer checks fail one way only",
+      "match": "D — nothing promotes, nothing fences; analysis-only, never injected"
     },
     {
-      "label": "B: replica isolated"
-    },
-    {
-      "label": "C: MySQL↛MySQL"
-    },
-    {
-      "label": "D: asymmetric"
-    },
-    {
-      "label": "E: all sites lost"
+      "term": "Every site unreachable",
+      "match": "E — no reachable candidate; any still-up primary self-fences"
     }
   ]
 }

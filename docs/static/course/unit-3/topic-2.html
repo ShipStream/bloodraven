@@ -56,6 +56,7 @@ subtraction is the divergence primitive; its cardinality is your lost-transactio
 <code>uuid:tag:interval</code>, and a tag is treated as part of the UUID’s identity. <code>uuid:Domain_1:1-3</code> and
 <code>uuid:Domain_2:1-3</code> are six different transactions, not three. Let MySQL do the subtraction.</p>
 <h2 id="the-measurement">The measurement</h2>
+<figure class="figure"><div class="figure__frame"><img src="../assets/img/g5-gtid-loss.svg" width="960" height="320" alt="Two GTID bars. IAD holds transactions 1 through 23. PDX holds 1 through 19. The range 20-23 is highlighted amber and labelled 4 lost transactions." loading="lazy" decoding="async" /></div><figcaption>What the failover cost. <code>20-23</code> is four transactions, not an estimate.</figcaption></figure>
 <p>Here is a real <code>playground</code> status after an emergency promotion to <code>pdx</code>, with the two fields that matter
 and everything else elided:</p>
 <pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="yaml"><code><span class="line"><span style="color:#22863A;--shiki-dark:#8DDB8C">status</span><span style="color:#24292E;--shiki-dark:#ADBAC7">:</span></span>

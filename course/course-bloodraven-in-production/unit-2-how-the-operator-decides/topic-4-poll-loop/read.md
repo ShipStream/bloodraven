@@ -1,9 +1,8 @@
 # The poll loop and per-site state
 
-`playground` is healthy. Three sites — `iad` writable, `pdx` and `reader` read-only — and the counter
-application is reading and writing against `iad` without knowing the other two exist. Nothing is on fire,
-which makes this the only calm moment you will get to ask the question that decides your outage
-budget: what is the operator actually doing in the two seconds between one status read and the next?
+`playground` is healthy. `iad` is writable. `pdx` and `reader` are read-only. The counter is
+clicking. This is the only calm moment you will get to ask: what is the operator doing in the
+two seconds between one status read and the next?
 
 ## The loop, the probe, the four states
 
@@ -54,13 +53,23 @@ state machine. There are four states, and they are exactly these:
 }
 ```
 
+```figure
+{
+  "src": "assets/img/g3-state-machine.svg",
+  "alt": "Site state machine: unknown branches to writable, read-only, or unreachable. Read-only takes one poll, unreachable takes three, writable takes two. A callout says a second fault while the first is down takes 90 seconds, not 6.",
+  "caption": "One probe, four states. The arrows are not symmetric on purpose.",
+  "width": 960,
+  "height": 420
+}
+```
+
 ## The artifact: the three knobs, and the function they feed
 
 Nothing in `playground` changed since you stood it up. What changed is that three lines of that spec are
 now load-bearing rather than boilerplate:
 
 ```yaml
-# playground — unchanged since topic 3; these three lines are the subject now
+# playground — unchanged since you stood it up; these three lines are the subject now
 spec:
   pollInterval: 2s        # <-- the tick
   failureThreshold: 3     # <-- consecutive failures before "unreachable"

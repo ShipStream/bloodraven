@@ -115,6 +115,16 @@ proceeding with promotion` and promotes with whatever the candidate had applied.
 
 ## Twelve seconds, and thirty-six
 
+```figure
+{
+  "src": "assets/img/g4-failover-timeline.svg",
+  "alt": "Two stacked timelines on the same 40-second axis. The caught-up case is 6 seconds of detection plus an instant drain, 12 seconds total. The relay-log case is the same 6 seconds plus a 30-second drain, 36 seconds total. Four fatal steps are marked in red.",
+  "caption": "Same detection. The only difference is whether the drain has work to do.",
+  "width": 960,
+  "height": 420
+}
+```
+
 A clean primary kill flips `activeSite` in **12.0 s**, reproducible across nine-plus independent runs
 (12.004 s to 12.02 s, one outlier at 13.008 s). Scenario 14 pauses the replica's SQL applier, seeds
 five seconds of writes, kills the primary, and measures **36.005 s**.

@@ -7,6 +7,16 @@ the cluster. None of it survives a bad `DELETE` at 14:02 last Tuesday either —
 replicates to every site in milliseconds, and every fence you built preserves it faithfully.
 Backups and point-in-time recovery are a separate subsystem with separate failure modes.
 
+```figure
+{
+  "src": "assets/img/g9-binlog-path.svg",
+  "alt": "Path from a rotate on the primary, to a sealed binlog file, through the sidecar, into object storage. The last open file is greyed out and labelled still being written — never archived.",
+  "caption": "Only sealed files ship. The active binlog is still being written, so it is never archived.",
+  "width": 960,
+  "height": 280
+}
+```
+
 ## Storage first, and be blunt about it
 
 `spec.backup.profiles[].storage` is a tagged union with exactly two arms, `S3` and `PVC`, and a

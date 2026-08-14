@@ -8,16 +8,16 @@
 
 ## Topic generation prompt
 
-Teach the four moving parts of `playground` in the order a write meets them. Start with the Services: there are four *kinds* per group, and for a three-site group that is eight objects — be precise, because 'four Services' is a common misreading. Give the `-primary` selector as two labels and `-replicas` as three, from the grounded facts, and draw the consequence: a pod stamped `role=fenced` matches neither selector, which is how fencing works at the Service layer. Then the operator: a single-replica Deployment with leader election that polls every site and decides. Then the sidecar, and make its independence the point — it fences its own MySQL with the operator dead, and the binlog archiver lives there rather than in the operator because inotify plus direct binlog reads need the data PVC mounted, and a ReadWriteOnce PVC is bound to one node. Finish with the three roles and the single rule that distinguishes them: promotability is exactly `role == primary-candidate`. Use an `anatomy` widget on the string `mysql-playground-primary` breaking it into prefix, group name and role suffix. Do NOT explain how the operator decides to fail over, what the sidecar's fencing rules are, or the failover sequence — Unit 2 and Unit 5 own those.
+The learner already has a live cluster. Teach the four moving parts in the order a write meets them. Start with the Services: four kinds, eight objects for a three-site group. Give the `-primary` and `-replicas` selectors. Then the operator (not on the request path), then the sidecar (fences locally; archiver lives there because the PVC will not travel), then the three roles. Use one `anatomy` widget on `mysql-playground-primary`, one `tree` of the eight Services, and one write-path `figure`. Do NOT explain how the operator decides, what the sidecar's fencing rules are, or the failover sequence.
 
 ## Requested activities
 
-- READ: 900-1100 words. Trace one write end to end. Cover the four Service kinds with their real selectors, the object-count arithmetic, the operator's single-replica-plus-leader-election shape, the sidecar's independence and the PVC argument for the archiver, and the three roles. End with the learner able to name every pod's role in `playground`. One `anatomy` widget on `mysql-playground-primary`; optionally one `tree` widget showing the group's objects.
-- FLASHCARDS: Confusable pairs — `-primary` vs `-replicas` selector, operator vs sidecar responsibility, `primary-candidate` vs `dr-only` vs `read-only`, active site vs primary candidate. 10-12 cards.
-- QUIZ: 5 questions on which Service an application should use for a given workload, what a `role=fenced` pod is reachable through, why the archiver is in the sidecar, and what a `dr-only` site may become.
+- READ: 900-1100 words. Trace one write. Cover Services, operator, sidecar, roles.
+- FLASHCARDS: Confusable pairs.
+- QUIZ: 5 questions on Services, fencing-by-label, the archiver, and `dr-only`.
 
 ## Handoff
 
-**Inherits:** The learner knows what deployment Bloodraven targets and can name a failover group's parts.
-**Leaves:** The learner can trace a write to a specific pod and state each site's role and promotability in `playground`.
-**Do not cover:** The poll loop, the state machine, fencing rules, the failover sequence, DNS steering mechanics (Unit 4).
+**Inherits:** A running `playground` and status literacy from topic 1 of this unit.
+**Leaves:** The learner can trace a write to a specific pod and state each site's role.
+**Do not cover:** The poll loop, fencing rules, the failover sequence, DNS steering (Unit 4), the RPO contract (next topic).

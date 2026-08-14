@@ -22,13 +22,13 @@ You need Docker, kubectl, helm, and a machine that can run a three-worker k3d cl
 
 ### Unit 1 — Meet the group
 
-You are on call for a MySQL that has to survive losing an entire site. This unit gets a real three-site failover group running on your laptop with an application reading and writing through it, and gives you the vocabulary the rest of the course depends on: active site, primary candidate, reader, sidecar, star topology. By the end you can point at any pod and say what role it holds and what it is allowed to become. Then the obvious question: who decides that, and how fast?
+You are on call for a MySQL that has to survive losing an entire site. This unit puts a real three-site group on your laptop, then names the parts you can already see, then explains the bet Bloodraven is making. By the end you can point at any pod and say what role it holds and what it is allowed to become. Then the obvious question: who decides that, and how fast?
 
-**The bet Bloodraven makes** — Two sites, asynchronous replication, and an RPO that is deliberately not zero. What that buys, what it costs, and the six things Bloodraven refuses to do.
+**Stand it up and read its status** — Two minutes to a live three-site group with an app reading and writing through it. Then the skill everything else rests on: reading the status and saying what is true right now.
 
-  1. Say when Bloodraven is the right tool by naming the two-site, non-zero-RPO deployment it targets
-  2. Name three things Bloodraven refuses to do, from its own non-goals list
-  3. Explain why asynchronous replication with automatic promotion was chosen over Group Replication
+  7. Bring up a three-site group with `./playground/setup.sh` and confirm every site reports Ready
+  8. Read a `MysqlFailoverGroup` status and name the active site, each site's state, and the replica's lag
+  9. Watch the counter application write through `mysql-playground-primary` and find the same row on the replica
 
 **The moving parts** — An operator that polls, a sidecar that fences, four kinds of Service, and three site roles. Which component can do what — and which one can act when the other is gone.
 
@@ -36,11 +36,11 @@ You are on call for a MySQL that has to survive losing an entire site. This unit
   5. Say what the sidecar does that the operator cannot, and why the binlog archiver lives there
   6. Tell `primary-candidate`, `dr-only` and `read-only` sites apart by what each is allowed to become
 
-**Stand it up and read its status** — Two minutes to a live three-site group with an app reading and writing through it. Then the skill everything else rests on: reading the status and saying what is true right now.
+**The bet Bloodraven makes** — Two sites, asynchronous replication, and an RPO that is deliberately not zero. What that buys, what it costs, and the six things Bloodraven refuses to do.
 
-  7. Bring up a three-site group with `./playground/setup.sh` and confirm every site reports Ready
-  8. Read a `MysqlFailoverGroup` status and name the active site, each site's state, and the replica's lag
-  9. Watch the counter application write through `mysql-playground-primary` and find the same row on the replica
+  1. Say when Bloodraven is the right tool by naming the two-site, non-zero-RPO deployment it targets
+  2. Name three things Bloodraven refuses to do, from its own non-goals list
+  3. Explain why asynchronous replication with automatic promotion was chosen over Group Replication
 
 *Unit test — Reading a failover group* (10 questions, pass at 70%). Quick check: can you name the active site from a status dump, say which pod the `-primary` Service selects, and explain why a `read-only` site can never be promoted?
 

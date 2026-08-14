@@ -25,6 +25,7 @@ are perfectly reachable and rule #2 would stay quiet forever.</p>
 instance never self-fences, because there is nothing left to fence. That single line is why the
 replica’s monitor is a permanent no-op, and why “the sidecar fenced it” is never the explanation for
 a site that was already read-only.</p>
+<figure class="figure"><div class="figure__frame"><img src="../assets/img/g8-self-fence.svg" width="960" height="480" alt="Sidecar decision tree. Can I still confirm I am the primary? Yes stays writable. No sets super_read_only. Two rules stacked: topology mismatch first, lease expiry second." loading="lazy" decoding="async" /></div><figcaption>The sidecar decides locally. It does not ask the operator, and it does not need a quorum.</figcaption></figure>
 <figure class="wx wx--order" data-widget="order"><div class="wx__head"><span class="wx__kind">Order</span><b class="wx__title">One FencingMonitor tick</b></div><div class="wx__body"><p class="wx__lead">Put these in the order they happen.</p><div class="wx-order" data-order-game hidden><div class="wx-order__pool" data-pool aria-label="Steps to place"><button class="wx-tile" type="button" data-order="0"><ol>
 <li>Read @@read_only — Already read-only? Return. A read-only instance has nothing left to fence, so the rest of the tick is skipped entirely.</li>
 </ol></button><button class="wx-tile" type="button" data-order="1"><ol start="2">

@@ -11,6 +11,16 @@ Restoring `playground` proved you can get the data back. Your security review as
 type SiteKeyringPhase string
 ```
 
+```figure
+{
+  "src": "assets/img/g10-keyring-phases.svg",
+  "alt": "Keyring phases in a line: Pending, Unsealed, Escrowed, Sealed marked as the steady state. Failed drops off. A back-arrow from Sealed to Unsealed is labelled Rotation. A callout says never rotate the current primary.",
+  "caption": "Sealed is done. Unsealed is mid-flight — including a rotation that opened a sealed site on purpose.",
+  "width": 960,
+  "height": 320
+}
+```
+
 ```widget
 {
   "type": "flow",

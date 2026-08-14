@@ -187,156 +187,156 @@
   "units": [
     {
       "title": "Meet the group",
-      "description": "You are on call for a MySQL that has to survive losing an entire site. This unit gets a real three-site failover group running on your laptop with an application reading and writing through it, and gives you the vocabulary the rest of the course depends on: active site, primary candidate, reader, sidecar, star topology. By the end you can point at any pod and say what role it holds and what it is allowed to become. Then the obvious question: who decides that, and how fast?",
+      "description": "You are on call for a MySQL that has to survive losing an entire site. This unit puts a real three-site group on your laptop, then names the parts you can already see, then explains the bet Bloodraven is making. By the end you can point at any pod and say what role it holds and what it is allowed to become. Then the obvious question: who decides that, and how fast?",
       "orderIndex": 0,
       "hero": null,
       "topics": [
         {
-          "title": "The bet Bloodraven makes",
-          "description": "Two sites, asynchronous replication, and an RPO that is deliberately not zero. What that buys, what it costs, and the six things Bloodraven refuses to do.",
+          "title": "Stand it up and read its status",
+          "description": "Two minutes to a live three-site group with an app reading and writing through it. Then the skill everything else rests on: reading the status and saying what is true right now.",
           "orderIndex": 0,
-          "instructions": "# The bet Bloodraven makes\n\n**Unit:** 1 — Meet the group\n**Objectives (unit-numbered):**\n1. Say when Bloodraven is the right tool by naming the two-site, non-zero-RPO deployment it targets   [obj 1]\n2. Name three things Bloodraven refuses to do, from its own non-goals list   [obj 2]\n3. Explain why asynchronous replication with automatic promotion was chosen over Group Replication   [obj 3]\n\n## Topic generation prompt\n\nOpen on the situation: `playground` is a MySQL failover group serving a warehouse system across two sites, and the question is not whether a site will be lost but what happens in the ninety seconds afterwards. Teach the deployment target Bloodraven is built for — two or more sites, asynchronous replication, accepted non-zero RPO on unplanned loss — and be concrete that this is a *choice*, not a limitation nobody got round to fixing. Use the RPO contract sentence verbatim from the grounded facts. Then teach the non-goals honestly: no synchronous replication, no zero RPO after sudden primary loss, no reconciliation of divergent writes, no failover-aware connection pools, no durability for PVC-local backups. Land the Group Replication contrast: quorum systems trade write availability for consistency, Bloodraven trades consistency-on-unplanned-loss for write availability and operational simplicity, and both are defensible. Do NOT carry the licence question here: it is a prerequisite rather than part of the bet, and it lives in the course FAQ with the dated detail in the version appendix. Do NOT explain the state machine, the failover sequence, or any component internals; Unit 1 topic 2 owns the components and Unit 2 owns the decision loop.\n\n## Requested activities\n\n- READ: 700-900 words. Open on `playground` and the site-loss question. Cover the deployment target, the RPO contract in one sentence, the six non-goals, and the Group Replication trade. End by naming the four things that make up a failover group so the next topic can pick them up. Use one `compare` widget contrasting Bloodraven against synchronous/quorum replication on three questions: what happens to writes when a site is lost, what can be lost, and who decides.\n- FLASHCARDS: The vocabulary this course will use throughout — asynchronous replication, RPO, RTO, failover group, active site, split brain, fencing, GTID. 8-10 cards.\n- QUIZ: 5 questions on whether Bloodraven fits a given requirement (a team demanding zero RPO on sudden loss; a team that needs writes to survive losing one of two sites; a team wanting automatic merge of divergent writes), and on what the non-goals imply for an architecture.\n\n## Handoff\n\n**Inherits:** Nothing — this is the first topic. The learner knows they run MySQL and fear losing a site.\n**Leaves:** The learner can say what deployment Bloodraven targets and can name a failover group's parts by name, without yet knowing what any of them do.\n**Do not cover:** Component responsibilities (topic 2), the poll loop or state machine (Unit 2), anything about failover timing.",
+          "instructions": "# Stand it up and read its status\n\n**Unit:** 1 — Meet the group\n**Objectives (unit-numbered):**\n7. Bring up a three-site group with `./playground/setup.sh` and confirm every site reports Ready   [obj 7]\n8. Read a `MysqlFailoverGroup` status and name the active site, each site's state, and the replica's lag   [obj 8]\n9. Watch the counter application write through `mysql-playground-primary` and find the same row on the replica   [obj 9]\n\n## Topic generation prompt\n\nThis is the hands-on topic that creates the running example every later unit touches. Give the prerequisites (Docker or Podman, kubectl, helm, a cluster with at least three worker nodes — the third is dedicated to the reader so storage-loss testing is deterministic), the k3d creation command, and `./playground/setup.sh`. Then spend most of the reading on status literacy, because it is the skill the whole course rests on: `status.activeSite`, `status.sites[].state`, `.role`, `.replicating`, `.secondsBehindSource`, `.gtidExecuted`, and the group conditions with their reason strings — the five real reasons are `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary` and `TotalLoss`, and they come straight from the decision matrix. Show port-forwarding the dashboard and counter app, incrementing the counter, and finding the row on the replica. Include one honest warning, from the grounded facts: the playground overrides shipped defaults — `failoverCooldown: 30s` against a default of 5m, `maxLagSeconds: 30` against 300, `dns.ttl: 10` against 60 — so a timing observed here is not the shipped default. Use one `terminal` widget on the status output whose values the learner predicts before revealing. Do NOT interpret what the operator will *do* with any of these states; that is Unit 2's entire subject.\n\n## Requested activities\n\n- READ: 900-1100 words. Prerequisites, cluster creation, setup, then status literacy in depth, then the counter app and the replica check, then the playground-overrides warning. End with the learner staring at a healthy `playground` and able to describe it precisely. One `terminal` widget on the status read.\n- FLASHCARDS: Status fields and condition reasons — `activeSite`, `state`, `replicating`, `secondsBehindSource`, `gtidExecuted`, and the five condition reasons. 8-10 cards.\n- QUIZ: 5 questions reading a given status dump: which site is active, which is a reader, whether the group is healthy, and what a `secondsBehindSource` of null means as against zero.\n\n## Handoff\n\n**Inherits:** The learner can name the parts of `playground` and each site's role.\n**Leaves:** `playground` is running with three sites and a counter application reading and writing through it; the learner can read its status and describe the current state precisely.\n**Do not cover:** What the operator does with these states, debounce, failover, or any chaos injection.",
           "learningGoals": [
             {
-              "title": "Say when Bloodraven is the right tool by naming the two-site, non-zero-RPO deployment it targets",
+              "title": "Bring up a three-site group with `./playground/setup.sh` and confirm every site reports Ready",
               "description": null,
               "orderIndex": 0,
-              "unitObjectiveNumber": 1
+              "unitObjectiveNumber": 7
             },
             {
-              "title": "Name three things Bloodraven refuses to do, from its own non-goals list",
+              "title": "Read a `MysqlFailoverGroup` status and name the active site, each site's state, and the replica's lag",
               "description": null,
               "orderIndex": 1,
-              "unitObjectiveNumber": 2
+              "unitObjectiveNumber": 8
             },
             {
-              "title": "Explain why asynchronous replication with automatic promotion was chosen over Group Replication",
+              "title": "Watch the counter application write through `mysql-playground-primary` and find the same row on the replica",
               "description": null,
               "orderIndex": 2,
-              "unitObjectiveNumber": 3
+              "unitObjectiveNumber": 9
             }
           ],
           "activities": [
             {
               "type": "READ",
-              "path": "unit-1-meet-the-group/topic-1-the-bet/read.md"
+              "path": "unit-1-meet-the-group/topic-3-stand-it-up/read.md"
             },
             {
               "type": "FLASHCARDS",
-              "path": "unit-1-meet-the-group/topic-1-the-bet/flashcards.md"
+              "path": "unit-1-meet-the-group/topic-3-stand-it-up/flashcards.md"
             },
             {
               "type": "QUIZ",
-              "path": "unit-1-meet-the-group/topic-1-the-bet/quiz.md"
+              "path": "unit-1-meet-the-group/topic-3-stand-it-up/quiz.md"
             }
           ],
           "flashcards": [
             {
-              "front": "Asynchronous replication",
-              "back": "A write commits and is acknowledged on the primary before any other site has seen it — nothing waits for a peer.",
+              "front": "`status.activeSite`",
+              "back": "The single site the operator currently treats as the writable authority — one site name, or empty when no site holds authority.",
               "orderIndex": 0
             },
             {
-              "front": "RPO (recovery point objective)",
-              "back": "How much recently committed data you accept losing. Bloodraven's RPO on sudden primary loss is not zero.",
+              "front": "How a site's `status.sites[].state` is decided",
+              "back": "From one query per poll, `SELECT @@read_only`: `0` gives `writable`, `1` gives `read-only`, a failed connection gives `unreachable`, and a site not yet polled is `unknown`.",
               "orderIndex": 1
             },
             {
-              "front": "RTO (recovery time objective)",
-              "back": "How long you accept being unable to write. This is where Bloodraven spends its engineering budget.",
+              "front": "`status.sites[].replicating`",
+              "back": "The operator's verdict on whether replication is healthy on that follower — populated only for sites currently in `read-only` state, never for the writable primary.",
               "orderIndex": 2
             },
             {
-              "front": "Failover group",
-              "back": "One `MysqlFailoverGroup` resource: two to sixteen MySQL sites, exactly one of them writable at a time.",
+              "front": "`status.sites[].gtidExecuted`",
+              "back": "The executed GTID set read from that follower's replication status: the transaction history it has actually applied.",
               "orderIndex": 3
             },
             {
-              "front": "Active site",
-              "back": "The one site in the group currently allowed to accept writes; `mysql-playground-primary` points at it.",
+              "front": "A site entry that carries no `replicating`, no `secondsBehindSource` and no `gtidExecuted` key at all",
+              "back": "It is the writable primary. The operator only probes replication on `read-only` sites, so those keys are absent rather than zero or false.",
               "orderIndex": 4
             },
             {
-              "front": "Split brain",
-              "back": "Two sites accepting writes at the same time, so each accumulates transactions the other never saw.",
+              "front": "Condition reason `Healthy`",
+              "back": "Exactly one core site is writable and none is unreachable; the `Degraded` condition reads `False`.",
               "orderIndex": 5
             },
             {
-              "front": "Fencing",
-              "back": "Forcing an instance to stop accepting writes — in MySQL, setting `super_read_only=ON` on it.",
+              "front": "Condition reason `Degraded`",
+              "back": "Any shape short of healthy that is not split brain, no primary or total loss — including a live primary with an unreachable peer.",
               "orderIndex": 6
             },
             {
-              "front": "Why `super_read_only` rather than `read_only` for fencing?",
-              "back": "`read_only` still permits updates from `CONNECTION_ADMIN` (or the deprecated `SUPER`); `super_read_only` blocks even those.",
+              "front": "Condition reason `SplitBrain`",
+              "back": "More than one core site is writable at the same time.",
               "orderIndex": 7
             },
             {
-              "front": "GTID",
-              "back": "A global transaction identifier — a per-transaction ID that makes two servers' executed-transaction sets directly comparable.",
+              "front": "Condition reason `NoPrimary`",
+              "back": "No core site is writable and none is unreachable — every core site is read-only.",
               "orderIndex": 8
             },
             {
-              "front": "`status.sites[].divergentGtid`",
-              "back": "The set of transactions the old primary executed that the new primary never received — the exact, countable data loss.",
+              "front": "Condition reason `TotalLoss`",
+              "back": "Every core site is unreachable.",
               "orderIndex": 9
             }
           ],
           "quiz": {
             "questions": [
               {
-                "question": "A payments team runs a ledger. Their requirement is that a sudden loss of the primary must lose zero committed transactions. They want to use Bloodraven for this. What is the correct response?",
+                "question": "`playground` reports `activeSite: iad`, and its site entries read: `iad` state `writable`, no other fields; `pdx` state `read-only`, `replicating: true`, `secondsBehindSource: 0`; `reader` state `read-only`, `replicating: true`, `secondsBehindSource: 0`. Which site is the primary, and what in the dump establishes it?",
                 "type": "MULTIPLE_CHOICE",
                 "orderIndex": 0,
                 "options": [
-                  "Bloodraven is the wrong tool for that requirement; a quorum system such as Group Replication is what they want",
-                  "Bloodraven works if they set a low `maxLagSeconds`, which prevents promotion of a replica that is behind",
-                  "Bloodraven works if they add a third site, because three sites give the group a quorum",
-                  "Bloodraven works if they enable synchronous replication in the group's MySQL configuration"
+                  "`iad` — it is named in `activeSite` and it is the one site whose state is `writable`",
+                  "`pdx` — it is the only site the operator reports as `replicating`, which is what a primary does",
+                  "`iad` — it is the first entry in `status.sites[]`, and the operator lists the primary first",
+                  "You cannot tell: `activeSite` records the last site that was promoted, not the site that is writable now"
                 ],
                 "correctOptionIndex": 0,
-                "explanation": "Bloodraven's contract is that an emergency failover can lose every transaction that committed on the dying primary but had not yet replicated to the surviving site. Zero RPO on sudden loss is an explicit non-goal, so the requirement and the tool do not match. Tuning a lag threshold does not help: lag thresholds drive a Degraded condition, not the promotion decision — the alternative of no writable site at all is almost always worse, so Bloodraven promotes anyway. Adding a third site does not help either: Bloodraven has no quorum in the first place; the count of sites changes nothing about the async commit path. And there is no synchronous mode to enable — Bloodraven does not provide synchronous replication at all. (objectives 1, 2)"
+                "explanation": "`activeSite` names the site the operator currently treats as the writable authority, and `iad` is the only entry in state `writable` — the two agree, which is what a healthy group looks like. `pdx` is wrong because `replicating: true` marks a follower applying the primary's stream, not a primary; the primary is never probed for replication at all. The first-entry answer is wrong because `status.sites[]` runs parallel to `spec.sites`, in declaration order, with no relation to who is primary. The last option confuses `activeSite` with `status.lastFailoverTarget`, which is the field that records a past promotion. (objective 8)"
               },
               {
-                "question": "Bloodraven cannot keep writes available when one of only two sites is lost, because two members are not enough to form a quorum.",
-                "type": "TRUE_FALSE",
+                "question": "Same dump. `pdx` and `reader` both read state `read-only`, `replicating: true`, `secondsBehindSource: 0`. How do you establish which of them is the dedicated non-promotable reader?",
+                "type": "MULTIPLE_CHOICE",
                 "orderIndex": 1,
-                "correctAnswer": false,
-                "explanation": "The reversal: this is exactly backwards, and it is the quorum system that has the two-site problem, not Bloodraven. Bloodraven has no quorum requirement — one site is writable and an external operator arbitrates who that is, so two sites is a legitimate topology that tolerates losing one. A majority-based system is the one where losing one of two members leaves the survivor read-only, which is why people bolt a witness node onto such deployments. The engineer holding this misconception has generalised quorum thinking from Group Replication or etcd onto a design that deliberately does not use it. (objectives 1, 3)"
+                "options": [
+                  "Read `spec.sites[].role` — the status block carries no role field",
+                  "Read `status.sites[].role`, which reports `read-only` for the reader and `primary-candidate` for `pdx`",
+                  "The reader is the site whose `state` is `read-only` while the other candidate's state would be `unknown`",
+                  "The reader is the one with no `lbIP` in its status entry"
+                ],
+                "correctOptionIndex": 0,
+                "explanation": "Role is spec, not status: `status.sites[]` carries name, state, lastSeen, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and `status.sites[].role` simply does not exist. The third confuses role with state: both a `primary-candidate` follower and a `read-only` reader sit in state `read-only` when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — `lbIP` is spec, and status never mirrors it. (objective 8)"
               },
               {
-                "question": "After a site failure and promotion, an operations team wants the returning old primary's unreplicated writes automatically merged back into the new primary. What does Bloodraven do?",
+                "question": "`playground` now reports `activeSite: iad`; `iad` state `writable`; `pdx` state `read-only`, `replicating: true`; `reader` state `unreachable`. What `reason` does the `Degraded` condition carry?",
                 "type": "MULTIPLE_CHOICE",
                 "orderIndex": 2,
                 "options": [
-                  "It merges them automatically once the old primary is reachable again, using GTID identity to avoid duplicates",
-                  "It reports them — the divergent GTID set and its transaction count — and leaves the decision to a human",
-                  "It rolls the old primary's divergent transactions back so the two sites match again",
-                  "It replays them into the new primary only when replication lag was inside `maxLagSeconds` at the time of failure"
+                  "`Healthy` — `role: read-only` sites are excluded from the writable/read-only/unreachable tallies",
+                  "`Degraded` — one site is unreachable while the primary is up",
+                  "`TotalLoss` — a site the operator cannot reach counts as lost",
+                  "`NoPrimary` — the group is down to one writable site with no spare reader"
                 ],
-                "correctOptionIndex": 1,
-                "explanation": "Reconciling divergent writes is a published non-goal: Bloodraven makes the loss observable, not invisible. It computes the set difference between the old primary's GTIDs and the new primary's, records the set in `status.sites[].divergentGtid`, publishes the count as `bloodraven_divergent_transactions`, and stops there. Automatic merging is the tempting wrong answer because GTIDs make the transactions identifiable — identifiable is not the same as safely mergeable, since two divergent histories can conflict semantically. Automatic rollback is equally wrong: nothing in Bloodraven throws data away on your behalf; the diverged instance is reported so you can decide. And the lag threshold has nothing to do with it — it is not a gate on anything in the recovery path. (objectives 2, 3)"
+                "correctOptionIndex": 0,
+                "explanation": "The reasons are computed over core sites only, and a site with `role: read-only` is not a core site — so a dead reader leaves the tally at one writable, zero unreachable, which is `Healthy`. The second option is the most tempting and would be right if the unreachable site were `pdx`: a live primary with an unreachable *core* peer is exactly the `Degraded` shape, but the reader does not count. `TotalLoss` requires every core site unreachable, not one site of any kind. `NoPrimary` describes the opposite situation — no writable site at all, every core site read-only — and here `iad` is writable. (objective 8)"
               },
               {
-                "question": "A team accepts Bloodraven's RPO but wants no application impact at all during a promotion. Which consequence of Bloodraven's non-goals must their architecture plan for?",
-                "type": "MULTIPLE_CHOICE",
+                "question": "Your counter application has just written through `mysql-playground-primary`. `status.sites[]` shows `pdx` with `replicating: true` and `secondsBehindSource: 0`, so that write is certainly present on `pdx`.",
+                "type": "TRUE_FALSE",
                 "orderIndex": 3,
-                "options": [
-                  "The operator will refuse to promote until every application has disconnected",
-                  "The DNS record is updated by Bloodraven itself, so propagation is bounded by the group's configured TTL",
-                  "Their connection pool will not become failover-aware on its own, and can serve connections to a demoted primary that pass validation",
-                  "PVC-local backups will be replayed automatically to close the write gap"
-                ],
-                "correctOptionIndex": 2,
-                "explanation": "Making connection pools failover-aware is an explicit non-goal, and the failure is quiet rather than loud: a demoted primary is alive and answers a validation query perfectly well, so the pool hands the connection back and only the next write fails. That is a real, open upstream complaint against HikariCP, and the reason MySQL drivers added `rejectReadOnly` handling. Refusing to promote until clients disconnect is wrong and would defeat the whole point — availability is what Bloodraven is buying. Bloodraven does not replace external-dns, so it does not perform propagation and cannot bound it. And PVC-local backups are named in the non-goals as exactly the thing that is not durable after storage loss, so they close no gap at all. (objective 2)"
+                "correctAnswer": false,
+                "explanation": "The reversal: a zero does not prove the replica is caught up. `Seconds_Behind_Source` compares the last transaction the replica has executed against the last event it has *downloaded*, so it reads 0 when the receiver thread has stalled or the replica is simply idle — a replica that stopped fetching an hour ago can still report 0. That is why the check in this topic is to go and read the row: `SELECT value, updated_at FROM counter_db.counters WHERE id = 1` against `pdx` by name. Nothing in the status block substitutes for reading the data. (objectives 8, 9)"
               },
               {
-                "question": "You are advising an infrastructure team choosing between Bloodraven and Group Replication for two datacentres on a wide-area link. What is the trade each side is making, and which fact about the two datacentres decides it?",
+                "question": "In one status dump `pdx` shows `secondsBehindSource: 0`; in another, `pdx` has no `secondsBehindSource` key at all. What does each tell you, and what is the trap in treating them as the same?",
                 "type": "SHORT_ANSWER",
                 "orderIndex": 4,
-                "sampleAnswer": "A quorum system trades write availability for consistency: it refuses writes rather than accept ones it might have to discard, so every commit pays a cross-node round trip and a minority side goes read-only. Bloodraven trades the other way — it trades consistency on unplanned loss for write availability and operational simplicity, accepting that an emergency failover can lose every transaction that committed on the dying primary but had not yet replicated to the surviving site. Both are defensible. The deciding fact is what the business does with the data: if losing a small window of committed writes is customer-visible (a ledger, a system of record), take Group Replication and pay the latency; if being unable to write while the cross-site link misbehaves is the worse outcome, take Bloodraven. The two-datacentre shape also pushes towards Bloodraven, because two members cannot form a quorum without inventing a witness.",
-                "graderNotes": "A strong answer names both directions of the trade — quorum gives up write availability to protect consistency, Bloodraven gives up consistency-on-unplanned-loss to protect write availability and simplicity — and states that both are legitimate rather than declaring one wrong. It must identify the deciding input as the business tolerance for losing recently committed writes, not as a technical preference. Credit for noting that a two-member group has no majority, or that async commits do not pay a cross-site round trip. Do not give credit for an answer that treats Bloodraven's non-zero RPO as a defect to be fixed.",
-                "explanation": "The point is that this is a design-point choice, not a quality ranking. Bloodraven is optimised for the two-site, geographically separated, accept-non-zero-RPO deployment; Group Replication is optimised for three-or-more nodes on a low-latency link with zero RPO. Answers that pick a winner without naming what is given up have missed the objective. (objectives 1, 3)"
+                "sampleAnswer": "`secondsBehindSource: 0` is a reported measurement — MySQL answered the replication probe and gave a lag of zero seconds. An absent key means no value was reported: MySQL returned NULL, which is what it does when replication is not running, or the operator never probed that site at all, which is the case for the writable primary. Treating absence as zero reads a site that is not replicating as a site that is perfectly caught up — precisely backwards. Absence means unmeasured, not good.",
+                "graderNotes": "A strong answer covers: (1) `0` is a value MySQL actually reported; (2) an absent key is a null/unreported value, arising when replication is not running or when the site was never probed — the primary is never probed; (3) the failure mode is inverted meaning, reading 'unmeasured' as 'zero lag'. Credit also for noting the field is optional in the status schema, so it is omitted rather than serialised as null.",
+                "explanation": "The two look alike in a quick scan and mean opposite things. A reported `0` says the probe ran; an absent key says it did not, or MySQL had nothing to report. On a healthy group the primary's entry is the everyday example of the absent form, which is why it is worth learning on a healthy cluster rather than in an incident. (objective 8)"
               }
             ]
           }
@@ -502,151 +502,151 @@
           }
         },
         {
-          "title": "Stand it up and read its status",
-          "description": "Two minutes to a live three-site group with an app reading and writing through it. Then the skill everything else rests on: reading the status and saying what is true right now.",
+          "title": "The bet Bloodraven makes",
+          "description": "Two sites, asynchronous replication, and an RPO that is deliberately not zero. What that buys, what it costs, and the six things Bloodraven refuses to do.",
           "orderIndex": 2,
-          "instructions": "# Stand it up and read its status\n\n**Unit:** 1 — Meet the group\n**Objectives (unit-numbered):**\n7. Bring up a three-site group with `./playground/setup.sh` and confirm every site reports Ready   [obj 7]\n8. Read a `MysqlFailoverGroup` status and name the active site, each site's state, and the replica's lag   [obj 8]\n9. Watch the counter application write through `mysql-playground-primary` and find the same row on the replica   [obj 9]\n\n## Topic generation prompt\n\nThis is the hands-on topic that creates the running example every later unit touches. Give the prerequisites (Docker or Podman, kubectl, helm, a cluster with at least three worker nodes — the third is dedicated to the reader so storage-loss testing is deterministic), the k3d creation command, and `./playground/setup.sh`. Then spend most of the reading on status literacy, because it is the skill the whole course rests on: `status.activeSite`, `status.sites[].state`, `.role`, `.replicating`, `.secondsBehindSource`, `.gtidExecuted`, and the group conditions with their reason strings — the five real reasons are `Healthy`, `Degraded`, `SplitBrain`, `NoPrimary` and `TotalLoss`, and they come straight from the decision matrix. Show port-forwarding the dashboard and counter app, incrementing the counter, and finding the row on the replica. Include one honest warning, from the grounded facts: the playground overrides shipped defaults — `failoverCooldown: 30s` against a default of 5m, `maxLagSeconds: 30` against 300, `dns.ttl: 10` against 60 — so a timing observed here is not the shipped default. Use one `terminal` widget on the status output whose values the learner predicts before revealing. Do NOT interpret what the operator will *do* with any of these states; that is Unit 2's entire subject.\n\n## Requested activities\n\n- READ: 900-1100 words. Prerequisites, cluster creation, setup, then status literacy in depth, then the counter app and the replica check, then the playground-overrides warning. End with the learner staring at a healthy `playground` and able to describe it precisely. One `terminal` widget on the status read.\n- FLASHCARDS: Status fields and condition reasons — `activeSite`, `state`, `replicating`, `secondsBehindSource`, `gtidExecuted`, and the five condition reasons. 8-10 cards.\n- QUIZ: 5 questions reading a given status dump: which site is active, which is a reader, whether the group is healthy, and what a `secondsBehindSource` of null means as against zero.\n\n## Handoff\n\n**Inherits:** The learner can name the parts of `playground` and each site's role.\n**Leaves:** `playground` is running with three sites and a counter application reading and writing through it; the learner can read its status and describe the current state precisely.\n**Do not cover:** What the operator does with these states, debounce, failover, or any chaos injection.",
+          "instructions": "# The bet Bloodraven makes\n\n**Unit:** 1 — Meet the group\n**Objectives (unit-numbered):**\n1. Say when Bloodraven is the right tool by naming the two-site, non-zero-RPO deployment it targets   [obj 1]\n2. Name three things Bloodraven refuses to do, from its own non-goals list   [obj 2]\n3. Explain why asynchronous replication with automatic promotion was chosen over Group Replication   [obj 3]\n\n## Topic generation prompt\n\nOpen on the situation: `playground` is a MySQL failover group serving a warehouse system across two sites, and the question is not whether a site will be lost but what happens in the ninety seconds afterwards. Teach the deployment target Bloodraven is built for — two or more sites, asynchronous replication, accepted non-zero RPO on unplanned loss — and be concrete that this is a *choice*, not a limitation nobody got round to fixing. Use the RPO contract sentence verbatim from the grounded facts. Then teach the non-goals honestly: no synchronous replication, no zero RPO after sudden primary loss, no reconciliation of divergent writes, no failover-aware connection pools, no durability for PVC-local backups. Land the Group Replication contrast: quorum systems trade write availability for consistency, Bloodraven trades consistency-on-unplanned-loss for write availability and operational simplicity, and both are defensible. Do NOT carry the licence question here: it is a prerequisite rather than part of the bet, and it lives in the course FAQ with the dated detail in the version appendix. Do NOT explain the state machine, the failover sequence, or any component internals; Unit 1 topic 2 owns the components and Unit 2 owns the decision loop.\n\n## Requested activities\n\n- READ: 700-900 words. Open on `playground` and the site-loss question. Cover the deployment target, the RPO contract in one sentence, the six non-goals, and the Group Replication trade. End by naming the four things that make up a failover group so the next topic can pick them up. Use one `compare` widget contrasting Bloodraven against synchronous/quorum replication on three questions: what happens to writes when a site is lost, what can be lost, and who decides.\n- FLASHCARDS: The vocabulary this course will use throughout — asynchronous replication, RPO, RTO, failover group, active site, split brain, fencing, GTID. 8-10 cards.\n- QUIZ: 5 questions on whether Bloodraven fits a given requirement (a team demanding zero RPO on sudden loss; a team that needs writes to survive losing one of two sites; a team wanting automatic merge of divergent writes), and on what the non-goals imply for an architecture.\n\n## Handoff\n\n**Inherits:** Nothing — this is the first topic. The learner knows they run MySQL and fear losing a site.\n**Leaves:** The learner can say what deployment Bloodraven targets and can name a failover group's parts by name, without yet knowing what any of them do.\n**Do not cover:** Component responsibilities (topic 2), the poll loop or state machine (Unit 2), anything about failover timing.",
           "learningGoals": [
             {
-              "title": "Bring up a three-site group with `./playground/setup.sh` and confirm every site reports Ready",
+              "title": "Say when Bloodraven is the right tool by naming the two-site, non-zero-RPO deployment it targets",
               "description": null,
               "orderIndex": 0,
-              "unitObjectiveNumber": 7
+              "unitObjectiveNumber": 1
             },
             {
-              "title": "Read a `MysqlFailoverGroup` status and name the active site, each site's state, and the replica's lag",
+              "title": "Name three things Bloodraven refuses to do, from its own non-goals list",
               "description": null,
               "orderIndex": 1,
-              "unitObjectiveNumber": 8
+              "unitObjectiveNumber": 2
             },
             {
-              "title": "Watch the counter application write through `mysql-playground-primary` and find the same row on the replica",
+              "title": "Explain why asynchronous replication with automatic promotion was chosen over Group Replication",
               "description": null,
               "orderIndex": 2,
-              "unitObjectiveNumber": 9
+              "unitObjectiveNumber": 3
             }
           ],
           "activities": [
             {
               "type": "READ",
-              "path": "unit-1-meet-the-group/topic-3-stand-it-up/read.md"
+              "path": "unit-1-meet-the-group/topic-1-the-bet/read.md"
             },
             {
               "type": "FLASHCARDS",
-              "path": "unit-1-meet-the-group/topic-3-stand-it-up/flashcards.md"
+              "path": "unit-1-meet-the-group/topic-1-the-bet/flashcards.md"
             },
             {
               "type": "QUIZ",
-              "path": "unit-1-meet-the-group/topic-3-stand-it-up/quiz.md"
+              "path": "unit-1-meet-the-group/topic-1-the-bet/quiz.md"
             }
           ],
           "flashcards": [
             {
-              "front": "`status.activeSite`",
-              "back": "The single site the operator currently treats as the writable authority — one site name, or empty when no site holds authority.",
+              "front": "Asynchronous replication",
+              "back": "A write commits and is acknowledged on the primary before any other site has seen it — nothing waits for a peer.",
               "orderIndex": 0
             },
             {
-              "front": "How a site's `status.sites[].state` is decided",
-              "back": "From one query per poll, `SELECT @@read_only`: `0` gives `writable`, `1` gives `read-only`, a failed connection gives `unreachable`, and a site not yet polled is `unknown`.",
+              "front": "RPO (recovery point objective)",
+              "back": "How much recently committed data you accept losing. Bloodraven's RPO on sudden primary loss is not zero.",
               "orderIndex": 1
             },
             {
-              "front": "`status.sites[].replicating`",
-              "back": "The operator's verdict on whether replication is healthy on that follower — populated only for sites currently in `read-only` state, never for the writable primary.",
+              "front": "RTO (recovery time objective)",
+              "back": "How long you accept being unable to write. This is where Bloodraven spends its engineering budget.",
               "orderIndex": 2
             },
             {
-              "front": "`status.sites[].gtidExecuted`",
-              "back": "The executed GTID set read from that follower's replication status: the transaction history it has actually applied.",
+              "front": "Failover group",
+              "back": "One `MysqlFailoverGroup` resource: two to sixteen MySQL sites, exactly one of them writable at a time.",
               "orderIndex": 3
             },
             {
-              "front": "A site entry that carries no `replicating`, no `secondsBehindSource` and no `gtidExecuted` key at all",
-              "back": "It is the writable primary. The operator only probes replication on `read-only` sites, so those keys are absent rather than zero or false.",
+              "front": "Active site",
+              "back": "The one site in the group currently allowed to accept writes; `mysql-playground-primary` points at it.",
               "orderIndex": 4
             },
             {
-              "front": "Condition reason `Healthy`",
-              "back": "Exactly one core site is writable and none is unreachable; the `Degraded` condition reads `False`.",
+              "front": "Split brain",
+              "back": "Two sites accepting writes at the same time, so each accumulates transactions the other never saw.",
               "orderIndex": 5
             },
             {
-              "front": "Condition reason `Degraded`",
-              "back": "Any shape short of healthy that is not split brain, no primary or total loss — including a live primary with an unreachable peer.",
+              "front": "Fencing",
+              "back": "Forcing an instance to stop accepting writes — in MySQL, setting `super_read_only=ON` on it.",
               "orderIndex": 6
             },
             {
-              "front": "Condition reason `SplitBrain`",
-              "back": "More than one core site is writable at the same time.",
+              "front": "Why `super_read_only` rather than `read_only` for fencing?",
+              "back": "`read_only` still permits updates from `CONNECTION_ADMIN` (or the deprecated `SUPER`); `super_read_only` blocks even those.",
               "orderIndex": 7
             },
             {
-              "front": "Condition reason `NoPrimary`",
-              "back": "No core site is writable and none is unreachable — every core site is read-only.",
+              "front": "GTID",
+              "back": "A global transaction identifier — a per-transaction ID that makes two servers' executed-transaction sets directly comparable.",
               "orderIndex": 8
             },
             {
-              "front": "Condition reason `TotalLoss`",
-              "back": "Every core site is unreachable.",
+              "front": "`status.sites[].divergentGtid`",
+              "back": "The set of transactions the old primary executed that the new primary never received — the exact, countable data loss.",
               "orderIndex": 9
             }
           ],
           "quiz": {
             "questions": [
               {
-                "question": "`playground` reports `activeSite: iad`, and its site entries read: `iad` state `writable`, no other fields; `pdx` state `read-only`, `replicating: true`, `secondsBehindSource: 0`; `reader` state `read-only`, `replicating: true`, `secondsBehindSource: 0`. Which site is the primary, and what in the dump establishes it?",
+                "question": "A payments team runs a ledger. Their requirement is that a sudden loss of the primary must lose zero committed transactions. They want to use Bloodraven for this. What is the correct response?",
                 "type": "MULTIPLE_CHOICE",
                 "orderIndex": 0,
                 "options": [
-                  "`iad` — it is named in `activeSite` and it is the one site whose state is `writable`",
-                  "`pdx` — it is the only site the operator reports as `replicating`, which is what a primary does",
-                  "`iad` — it is the first entry in `status.sites[]`, and the operator lists the primary first",
-                  "You cannot tell: `activeSite` records the last site that was promoted, not the site that is writable now"
+                  "Bloodraven is the wrong tool for that requirement; a quorum system such as Group Replication is what they want",
+                  "Bloodraven works if they set a low `maxLagSeconds`, which prevents promotion of a replica that is behind",
+                  "Bloodraven works if they add a third site, because three sites give the group a quorum",
+                  "Bloodraven works if they enable synchronous replication in the group's MySQL configuration"
                 ],
                 "correctOptionIndex": 0,
-                "explanation": "`activeSite` names the site the operator currently treats as the writable authority, and `iad` is the only entry in state `writable` — the two agree, which is what a healthy group looks like. `pdx` is wrong because `replicating: true` marks a follower applying the primary's stream, not a primary; the primary is never probed for replication at all. The first-entry answer is wrong because `status.sites[]` runs parallel to `spec.sites`, in declaration order, with no relation to who is primary. The last option confuses `activeSite` with `status.lastFailoverTarget`, which is the field that records a past promotion. (objective 8)"
+                "explanation": "Bloodraven's contract is that an emergency failover can lose every transaction that committed on the dying primary but had not yet replicated to the surviving site. Zero RPO on sudden loss is an explicit non-goal, so the requirement and the tool do not match. Tuning a lag threshold does not help: lag thresholds drive a Degraded condition, not the promotion decision — the alternative of no writable site at all is almost always worse, so Bloodraven promotes anyway. Adding a third site does not help either: Bloodraven has no quorum in the first place; the count of sites changes nothing about the async commit path. And there is no synchronous mode to enable — Bloodraven does not provide synchronous replication at all. (objectives 1, 2)"
               },
               {
-                "question": "Same dump. `pdx` and `reader` both read state `read-only`, `replicating: true`, `secondsBehindSource: 0`. How do you establish which of them is the dedicated non-promotable reader?",
-                "type": "MULTIPLE_CHOICE",
+                "question": "Bloodraven cannot keep writes available when one of only two sites is lost, because two members are not enough to form a quorum.",
+                "type": "TRUE_FALSE",
                 "orderIndex": 1,
-                "options": [
-                  "Read `spec.sites[].role` — the status block carries no role field",
-                  "Read `status.sites[].role`, which reports `read-only` for the reader and `primary-candidate` for `pdx`",
-                  "The reader is the site whose `state` is `read-only` while the other candidate's state would be `unknown`",
-                  "The reader is the one with no `lbIP` in its status entry"
-                ],
-                "correctOptionIndex": 0,
-                "explanation": "Role is spec, not status: `status.sites[]` carries name, state, lastSeen, replication fields and recovery fields, and nothing about role. The second option is the common trap — the documentation talks about site roles beside site state and it is easy to assume both live in the same block; they do not, and `status.sites[].role` simply does not exist. The third confuses role with state: both a `primary-candidate` follower and a `read-only` reader sit in state `read-only` when they are healthy, which is exactly why the dump cannot separate them. The fourth invents a field — `lbIP` is spec, and status never mirrors it. (objective 8)"
+                "correctAnswer": false,
+                "explanation": "The reversal: this is exactly backwards, and it is the quorum system that has the two-site problem, not Bloodraven. Bloodraven has no quorum requirement — one site is writable and an external operator arbitrates who that is, so two sites is a legitimate topology that tolerates losing one. A majority-based system is the one where losing one of two members leaves the survivor read-only, which is why people bolt a witness node onto such deployments. The engineer holding this misconception has generalised quorum thinking from Group Replication or etcd onto a design that deliberately does not use it. (objectives 1, 3)"
               },
               {
-                "question": "`playground` now reports `activeSite: iad`; `iad` state `writable`; `pdx` state `read-only`, `replicating: true`; `reader` state `unreachable`. What `reason` does the `Degraded` condition carry?",
+                "question": "After a site failure and promotion, an operations team wants the returning old primary's unreplicated writes automatically merged back into the new primary. What does Bloodraven do?",
                 "type": "MULTIPLE_CHOICE",
                 "orderIndex": 2,
                 "options": [
-                  "`Healthy` — `role: read-only` sites are excluded from the writable/read-only/unreachable tallies",
-                  "`Degraded` — one site is unreachable while the primary is up",
-                  "`TotalLoss` — a site the operator cannot reach counts as lost",
-                  "`NoPrimary` — the group is down to one writable site with no spare reader"
+                  "It merges them automatically once the old primary is reachable again, using GTID identity to avoid duplicates",
+                  "It reports them — the divergent GTID set and its transaction count — and leaves the decision to a human",
+                  "It rolls the old primary's divergent transactions back so the two sites match again",
+                  "It replays them into the new primary only when replication lag was inside `maxLagSeconds` at the time of failure"
                 ],
-                "correctOptionIndex": 0,
-                "explanation": "The reasons are computed over core sites only, and a site with `role: read-only` is not a core site — so a dead reader leaves the tally at one writable, zero unreachable, which is `Healthy`. The second option is the most tempting and would be right if the unreachable site were `pdx`: a live primary with an unreachable *core* peer is exactly the `Degraded` shape, but the reader does not count. `TotalLoss` requires every core site unreachable, not one site of any kind. `NoPrimary` describes the opposite situation — no writable site at all, every core site read-only — and here `iad` is writable. (objective 8)"
+                "correctOptionIndex": 1,
+                "explanation": "Reconciling divergent writes is a published non-goal: Bloodraven makes the loss observable, not invisible. It computes the set difference between the old primary's GTIDs and the new primary's, records the set in `status.sites[].divergentGtid`, publishes the count as `bloodraven_divergent_transactions`, and stops there. Automatic merging is the tempting wrong answer because GTIDs make the transactions identifiable — identifiable is not the same as safely mergeable, since two divergent histories can conflict semantically. Automatic rollback is equally wrong: nothing in Bloodraven throws data away on your behalf; the diverged instance is reported so you can decide. And the lag threshold has nothing to do with it — it is not a gate on anything in the recovery path. (objectives 2, 3)"
               },
               {
-                "question": "Your counter application has just written through `mysql-playground-primary`. `status.sites[]` shows `pdx` with `replicating: true` and `secondsBehindSource: 0`, so that write is certainly present on `pdx`.",
-                "type": "TRUE_FALSE",
+                "question": "A team accepts Bloodraven's RPO but wants no application impact at all during a promotion. Which consequence of Bloodraven's non-goals must their architecture plan for?",
+                "type": "MULTIPLE_CHOICE",
                 "orderIndex": 3,
-                "correctAnswer": false,
-                "explanation": "The reversal: a zero does not prove the replica is caught up. `Seconds_Behind_Source` compares the last transaction the replica has executed against the last event it has *downloaded*, so it reads 0 when the receiver thread has stalled or the replica is simply idle — a replica that stopped fetching an hour ago can still report 0. That is why the check in this topic is to go and read the row: `SELECT value, updated_at FROM counter_db.counters WHERE id = 1` against `pdx` by name. Nothing in the status block substitutes for reading the data. (objectives 8, 9)"
+                "options": [
+                  "The operator will refuse to promote until every application has disconnected",
+                  "The DNS record is updated by Bloodraven itself, so propagation is bounded by the group's configured TTL",
+                  "Their connection pool will not become failover-aware on its own, and can serve connections to a demoted primary that pass validation",
+                  "PVC-local backups will be replayed automatically to close the write gap"
+                ],
+                "correctOptionIndex": 2,
+                "explanation": "Making connection pools failover-aware is an explicit non-goal, and the failure is quiet rather than loud: a demoted primary is alive and answers a validation query perfectly well, so the pool hands the connection back and only the next write fails. That is a real, open upstream complaint against HikariCP, and the reason MySQL drivers added `rejectReadOnly` handling. Refusing to promote until clients disconnect is wrong and would defeat the whole point — availability is what Bloodraven is buying. Bloodraven does not replace external-dns, so it does not perform propagation and cannot bound it. And PVC-local backups are named in the non-goals as exactly the thing that is not durable after storage loss, so they close no gap at all. (objective 2)"
               },
               {
-                "question": "In one status dump `pdx` shows `secondsBehindSource: 0`; in another, `pdx` has no `secondsBehindSource` key at all. What does each tell you, and what is the trap in treating them as the same?",
+                "question": "You are advising an infrastructure team choosing between Bloodraven and Group Replication for two datacentres on a wide-area link. What is the trade each side is making, and which fact about the two datacentres decides it?",
                 "type": "SHORT_ANSWER",
                 "orderIndex": 4,
-                "sampleAnswer": "`secondsBehindSource: 0` is a reported measurement — MySQL answered the replication probe and gave a lag of zero seconds. An absent key means no value was reported: MySQL returned NULL, which is what it does when replication is not running, or the operator never probed that site at all, which is the case for the writable primary. Treating absence as zero reads a site that is not replicating as a site that is perfectly caught up — precisely backwards. Absence means unmeasured, not good.",
-                "graderNotes": "A strong answer covers: (1) `0` is a value MySQL actually reported; (2) an absent key is a null/unreported value, arising when replication is not running or when the site was never probed — the primary is never probed; (3) the failure mode is inverted meaning, reading 'unmeasured' as 'zero lag'. Credit also for noting the field is optional in the status schema, so it is omitted rather than serialised as null.",
-                "explanation": "The two look alike in a quick scan and mean opposite things. A reported `0` says the probe ran; an absent key says it did not, or MySQL had nothing to report. On a healthy group the primary's entry is the everyday example of the absent form, which is why it is worth learning on a healthy cluster rather than in an incident. (objective 8)"
+                "sampleAnswer": "A quorum system trades write availability for consistency: it refuses writes rather than accept ones it might have to discard, so every commit pays a cross-node round trip and a minority side goes read-only. Bloodraven trades the other way — it trades consistency on unplanned loss for write availability and operational simplicity, accepting that an emergency failover can lose every transaction that committed on the dying primary but had not yet replicated to the surviving site. Both are defensible. The deciding fact is what the business does with the data: if losing a small window of committed writes is customer-visible (a ledger, a system of record), take Group Replication and pay the latency; if being unable to write while the cross-site link misbehaves is the worse outcome, take Bloodraven. The two-datacentre shape also pushes towards Bloodraven, because two members cannot form a quorum without inventing a witness.",
+                "graderNotes": "A strong answer names both directions of the trade — quorum gives up write availability to protect consistency, Bloodraven gives up consistency-on-unplanned-loss to protect write availability and simplicity — and states that both are legitimate rather than declaring one wrong. It must identify the deciding input as the business tolerance for losing recently committed writes, not as a technical preference. Credit for noting that a two-member group has no majority, or that async commits do not pay a cross-site round trip. Do not give credit for an answer that treats Bloodraven's non-zero RPO as a defect to be fixed.",
+                "explanation": "The point is that this is a design-point choice, not a quality ranking. Bloodraven is optimised for the two-site, geographically separated, accept-non-zero-RPO deployment; Group Replication is optimised for three-or-more nodes on a low-latency link with zero RPO. Answers that pick a winner without naming what is given up have missed the objective. (objectives 1, 3)"
               }
             ]
           }

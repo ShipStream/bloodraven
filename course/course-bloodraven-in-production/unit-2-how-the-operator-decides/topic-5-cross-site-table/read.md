@@ -1,6 +1,11 @@
 # The six-row table that decides everything
 
-`playground` has three sites: `iad` and `pdx` as `primary-candidate`, and `reader` as `role: read-only`. The counter application is reading through the `-primary` Service every two seconds and writing on every button press. You can now take a poll result and name each site's state — `writable`, `read-only`, `unreachable` or `unknown` — and you know a site takes `pollInterval × failureThreshold` = 2 s × 3 = **6 s** to reach `unreachable` (objective 2). What you cannot yet do is turn three of those labels into one decision. That is one function: `EvalCrossSite` in `internal/state/matrix.go`. It takes the per-site observations and the `sitePriorities` list, and returns a single `CrossSiteAction`. Everything visible about `playground` — the condition reason, the alert text, whether a promotion happens at all — falls out of it.
+You can name each site's state. A site takes `pollInterval × failureThreshold` = 2 s × 3 = **6 s**
+to reach `unreachable`. What you cannot yet do is turn three of those labels into one decision.
+
+That is one function: `EvalCrossSite` in `internal/state/matrix.go`. It takes the per-site
+observations and returns a single action. The condition reason, the alert text, and whether a
+promotion happens at all all fall out of it.
 
 ## The idea: order is the behaviour
 

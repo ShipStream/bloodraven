@@ -6,6 +6,7 @@ seconds later, and you can read the exact loss from <code>divergentGtid</code>. 
 the cluster. None of it survives a bad <code>DELETE</code> at 14:02 last Tuesday either — that statement
 replicates to every site in milliseconds, and every fence you built preserves it faithfully.
 Backups and point-in-time recovery are a separate subsystem with separate failure modes.</p>
+<figure class="figure"><div class="figure__frame"><img src="../assets/img/g9-binlog-path.svg" width="960" height="280" alt="Path from a rotate on the primary, to a sealed binlog file, through the sidecar, into object storage. The last open file is greyed out and labelled still being written — never archived." loading="lazy" decoding="async" /></div><figcaption>Only sealed files ship. The active binlog is still being written, so it is never archived.</figcaption></figure>
 <h2 id="storage-first-and-be-blunt-about-it">Storage first, and be blunt about it</h2>
 <p><code>spec.backup.profiles[].storage</code> is a tagged union with exactly two arms, <code>S3</code> and <code>PVC</code>, and a
 CEL rule that rejects a body which does not match the tag. That is the whole choice, and it is the
