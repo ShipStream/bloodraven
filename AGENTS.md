@@ -25,7 +25,7 @@ Use standard Go formatting: run `gofmt` on changed files and keep imports organi
 
 **Test-helper name collisions across files in the same package** are easy to hit because `go test` builds every `*_test.go` file in the package together. If you add a helper like `contains` or `drainEvents` in a new test file, grep the package first — duplicates produce a confusing build error that points only at the redeclaration site, not at the cause.
 
-Structured-log `msg` strings and field names listed in `docs/docs/log-schema.mdx` are a public stability contract — downstream log pipelines filter on them. When you touch a log call site whose `msg` appears in that doc's Event reference, either preserve the `msg` string and the documented field set exactly, or update `docs/docs/log-schema.mdx` in the same PR and call out the break in the PR description. The same applies to field naming: log keys are `camelCase` (per the contract), not `snake_case`.
+Structured-log `msg` strings and field names listed in `site/content/docs/8.observability/7.log-schema.md` are a public stability contract — downstream log pipelines filter on them. When you touch a log call site whose `msg` appears in that doc's Event reference, either preserve the `msg` string and the documented field set exactly, or update `site/content/docs/8.observability/7.log-schema.md` in the same PR and call out the break in the PR description. The same applies to field naming: log keys are `camelCase` (per the contract), not `snake_case`.
 
 ## Testing Guidelines
 Add table-driven unit tests beside the code they cover, using the existing `*_test.go` layout under `internal/`. Put cross-component behavior tests in `test/component`, API-server/controller-runtime tests in `test/envtest`, and real-cluster playground scenarios in `internal/playground/scenarios` through `cmd/playground-chaos`. Some tests create local HTTP listeners with `httptest`, so restricted sandboxes may fail even when local developer runs pass.
@@ -66,7 +66,7 @@ kubectl -n bloodraven-playground port-forward svc/dashboard 8091:8091
 kubectl -n bloodraven-playground port-forward svc/counter-app 8090:8090
 ```
 
-Full documentation: `docs/docs/playground.mdx`.
+Full documentation: `site/content/docs/3.get-started/3.playground.md`.
 
 ## Chaos & Integration Testing in the Playground
 
@@ -100,4 +100,4 @@ The runner stamps an in-progress marker on the MFG (`chaos.playground.bloodraven
 `./playground/reset-mysql.sh` now scales the operator to 0 before stripping taints (no taint/operator race), restarts `local-path-provisioner` to reset its 15-failure threshold, JSON-patches `/status` to clear `lastFailover{,Target}`/`promotionGtidExecuted`/`plannedFailover` (otherwise `isFreshDeploy` skips bootstrap and the cluster stalls on the matrix.go `NoPrimary` guard), and on wait-loop timeout dumps full forensics to `playground/chaos-results/reset-<timestamp>/` and exits non-zero.
 
 ## Architecture & Configuration Notes
-This project is a Go 1.26 Kubernetes operator built around a single custom resource and two binaries. When making material changes to reconciliation, failover, CRD types, sidecar behavior, or deployment model, update the relevant documentation in `docs/` to keep code and docs aligned.
+This project is a Go 1.26 Kubernetes operator built around a single custom resource and two binaries. When making material changes to reconciliation, failover, CRD types, sidecar behavior, or deployment model, update the relevant documentation in `site/content/docs/` to keep code and docs aligned.

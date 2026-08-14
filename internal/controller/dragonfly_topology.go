@@ -806,7 +806,7 @@ func (m *DragonflyManager) applyEmergencyPromotionLabels(ctx context.Context, fg
 // the old source, if reachable, to evict any clients still attached.
 // Bounded context, all errors logged and dropped.
 //
-// Log lines include `fg` per the docs/docs/log-schema.mdx Event
+// Log lines include `fg` per the site/content/docs/8.observability/7.log-schema.md Event
 // reference contract.
 func (m *DragonflyManager) bestEffortEmergencyClientKill(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, oldSource, password string) {
 	if oldSource == "" {

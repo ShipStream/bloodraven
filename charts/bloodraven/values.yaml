@@ -113,7 +113,7 @@ metrics:
 #
 # If you run Grafana some other way — provisioning from disk, or importing
 # JSON by hand — just copy the files from `charts/bloodraven/dashboards/`
-# directly, no Helm needed. See docs/docs/monitoring.mdx for all three paths.
+# directly, no Helm needed. See site/content/docs/8.observability/2.monitoring.md for all three paths.
 grafanaDashboards:
   # -- Render the dashboard ConfigMaps. Safe to enable even if you don't yet
   # run Grafana — the ConfigMaps sit idle until a sidecar discovers them.

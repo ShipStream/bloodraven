@@ -45,7 +45,7 @@ Grafana → Dashboards → New → Import → paste JSON → pick datasource. Re
 
 ## Prerequisites
 
-A Prometheus scraping the operator. The chart ships a `ServiceMonitor` — enable with `--set metrics.serviceMonitor.enabled=true`. See [`../templates/servicemonitor.yaml`](../templates/servicemonitor.yaml) and [`docs/docs/monitoring.mdx`](../../../docs/docs/monitoring.mdx) for alternatives (`PodMonitor`, raw scrape job).
+A Prometheus scraping the operator. The chart ships a `ServiceMonitor` — enable with `--set metrics.serviceMonitor.enabled=true`. See [`../templates/servicemonitor.yaml`](../templates/servicemonitor.yaml) and [`site/content/docs/8.observability/2.monitoring.md`](../../../site/content/docs/8.observability/2.monitoring.md) for alternatives (`PodMonitor`, raw scrape job).
 
 ## Updating the dashboards
 

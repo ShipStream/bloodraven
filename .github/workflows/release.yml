@@ -38,9 +38,9 @@ jobs:
           cache-dependency-path: go.sum
       - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
-          cache-dependency-path: docs/package-lock.json
+          cache-dependency-path: site/package-lock.json
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
       - name: Run golangci-lint
@@ -69,14 +69,14 @@ jobs:
             echo "Copy regenerated files: cp config/crd/bases/*.yaml charts/bloodraven/crds/ && commit."
             exit 1
           fi
-      - name: Install docs dependencies
-        working-directory: docs
+      - name: Install site dependencies
+        working-directory: site
         run: npm ci
-      - name: Build docs
-        working-directory: docs
+      - name: Build site
+        working-directory: site
         run: npm run build
       - name: Verify llms-full coverage
-        working-directory: docs
+        working-directory: site
         run: npm run verify:llms
 
   # E2E release gate — runs the *smoke* real-cluster E2E (core failover:

@@ -19,7 +19,7 @@
 # This is NOT Oracle "MySQL Enterprise TDE". Oracle states that file-based
 # keyrings are not intended as regulatory-compliance solutions.
 #
-# See docs/docs/encryption-at-rest.mdx for the full threat model.
+# See site/content/docs/4.configuration/8.encryption-at-rest.md for the full threat model.
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate

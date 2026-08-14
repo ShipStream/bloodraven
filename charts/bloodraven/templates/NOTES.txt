@@ -99,4 +99,4 @@ Next steps:
        kubectl patch configmap argocd-cm -n argocd \
          --patch-file bloodraven/argocd/argocd-cm-patch.yaml
 
-     See https://bloodraven.readthedocs.io/en/latest/docs/getting-started#argocd-integration
+     See https://bloodraven.dev/docs/operations/gitops#argo-cd-health-checks

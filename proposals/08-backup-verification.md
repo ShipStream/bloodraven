@@ -252,7 +252,7 @@ Following the AGENTS.md pre-PR gate:
 - **Phase 1** (this PR, or a small series):
   - CRD types + deepcopy + CRD YAML (config + Helm).
   - Reconciler with dump-load-only verification (no PITR replay, no sanity check). Metrics emitted.
-  - Docs page `docs/docs/backup-verification.mdx` linked from `backup-restore.mdx` and `monitoring.mdx`.
+  - Docs page `site/content/docs/7.backup-and-restore/6.backup-verification.md` linked from `backup-restore.mdx` and `monitoring.mdx`.
 - **Phase 2**:
   - PITR replay mode.
   - Sanity-check query with scalar comparison.
@@ -278,4 +278,4 @@ Following the AGENTS.md pre-PR gate:
 - Failure of any phase leaves either a clean cluster (success-path cleanup) or an inspectable verification Pod + PVC (failure path with `keepOnFailure: true`).
 - Pre-PR gate (AGENTS.md): `make generate && make manifests` clean, `make vet`, `make lint`, `make test`, `make test-envtest` all pass.
 - Helm chart ClusterRole mirrors the new kubebuilder RBAC markers.
-- Docs added: `docs/docs/backup-verification.mdx` + updates to `backup-restore.mdx`, `monitoring.mdx`, `production-hardening.mdx`.
+- Docs added: `site/content/docs/7.backup-and-restore/6.backup-verification.md` + updates to `backup-restore.mdx`, `monitoring.mdx`, `production-hardening.mdx`.

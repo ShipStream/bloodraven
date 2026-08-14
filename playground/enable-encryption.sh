@@ -27,7 +27,7 @@
 # IMPORTANT: without --fresh, tables that already exist stay plaintext.
 # MySQL only encrypts what is written after the fact. That is fine for
 # exercising the keyring lifecycle, but it is NOT what a production
-# adoption looks like — see docs/docs/encryption-at-rest.mdx.
+# adoption looks like — see site/content/docs/4.configuration/8.encryption-at-rest.md.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -311,5 +311,5 @@ if [[ -n "$pod" ]]; then
 fi
 echo
 warn "check the operator logs and status messages above; see"
-warn "docs/docs/runbooks.mdx#keyring-not-sealed"
+warn "https://bloodraven.dev/docs/operations/runbooks#keyring-not-sealed"
 exit 1

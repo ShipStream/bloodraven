@@ -282,7 +282,7 @@ type BackupProfile struct {
 	// deleting the Secret renders existing ciphertexts unrecoverable.
 	// Treat the Secret as part of the failover group's critical
 	// recovery material and back it up out-of-band. See
-	// docs/docs/backup-encryption.mdx for the wire format,
+	// https://bloodraven.dev/docs/backup-and-restore/backup-encryption for the wire format,
 	// threat model, and rotation guidance.
 	// +optional
 	Encryption *BackupEncryptionSpec `json:"encryption,omitempty"`

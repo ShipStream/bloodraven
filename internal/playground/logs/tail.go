@@ -1,6 +1,6 @@
 // Package logs streams a pod container's logs into a ring-buffered
 // matcher so scenarios can wait for documented msg= lines from the
-// public log contract (docs/docs/log-schema.mdx).
+// public log contract (site/content/docs/8.observability/7.log-schema.md).
 package logs
 
 import (

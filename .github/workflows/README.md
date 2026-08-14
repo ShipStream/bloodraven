@@ -20,10 +20,33 @@ Runs the full PR gate suite in parallel:
 | `test-component` | `make test-component` — component tests under `./test/component/` |
 | `test-envtest` | `make test-envtest` — controller tests using envtest (real API server) |
 | `generate-check` | Runs `make generate && make manifests` and fails if files are stale |
-| `docs-build` | Builds Docusaurus and verifies `llms-full.txt` includes every docs page |
+| `docs-build` | Builds the bloodraven.dev site under `site/` and verifies `llms-full.txt` includes every docs page |
 | `all-checks` | Summary job — use this as the single branch-protection required status check |
 
 **Permissions:** `contents: read` (default)
+
+---
+
+### `deploy-site.yml` — bloodraven.dev Deploy
+
+**Triggers:** Push to `main` touching `site/**`, and manual dispatch.
+
+**Permissions:** `contents: read`
+
+Uploads `site/` to the Railway service `bloodraven-site`, which builds it with
+Nixpacks (see `site/railway.json`) and serves <https://bloodraven.dev>.
+
+**Required secret:** `RAILWAY_TOKEN` — a Railway *project* token, which scopes
+the CLI to a single project and environment with no interactive login. The
+workflow fails fast when the secret is missing rather than letting the CLI
+offer to create a new project.
+
+**Optional variable:** `RAILWAY_SERVICE` — overrides the default service name
+`bloodraven-site`.
+
+> If the Railway project also has the GitHub repo connected for automatic
+> deploys, disconnect it in the Railway dashboard. Otherwise every push to
+> `main` deploys twice: once from Railway's own integration and once here.
 
 ---
 
@@ -31,12 +54,8 @@ Runs the full PR gate suite in parallel:
 
 **Triggers:** Manual dispatch and nightly schedule.
 
-ReadTheDocs already watches this repository and publishes `main` to
-`https://bloodraven.readthedocs.io/en/latest/`. This workflow keeps the
-GitHub side deliberately small: it crawls the published site and fails on
-same-site broken links or missing assets.
-
-The workflow does not trigger ReadTheDocs builds and requires no
+The published site is <https://bloodraven.dev>. This workflow crawls it
+and fails on same-site broken links or missing assets. It requires no
 repository secrets.
 
 ---
@@ -49,7 +68,7 @@ repository secrets.
 
 Steps:
 
-1. **CI gate** — Runs lint, builds, tests, generate drift checks, chart CRD drift checks, docs build, and `llms-full.txt` coverage before any release artifact is published.
+1. **CI gate** — Runs lint, builds, tests, generate drift checks, chart CRD drift checks, the bloodraven.dev site build, and `llms-full.txt` coverage before any release artifact is published.
 2. **Draft release** — Creates a draft GitHub Release with image locations, Helm chart locations, install examples, and auto-generated notes.
 3. **Docker images** — Builds multi-arch (`linux/amd64` + `linux/arm64`) images for both targets:
    - `ghcr.io/shipstream/bloodraven:{version}` and `:latest`

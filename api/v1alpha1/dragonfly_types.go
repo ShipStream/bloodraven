@@ -91,7 +91,7 @@ type DragonflySpec struct {
 	// the operator does not merge it with hardened defaults. To enable
 	// Restricted PSS, set the standard fields (RunAsNonRoot, RunAsUser,
 	// RunAsGroup, FSGroup, SeccompProfile). See
-	// docs/docs/production-hardening.mdx for the upgrade procedure.
+	// https://bloodraven.dev/docs/configuration/production-hardening for the upgrade procedure.
 	// +optional
 	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 

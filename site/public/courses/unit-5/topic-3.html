@@ -5,7 +5,7 @@ replicating, the counter app reading and writing without complaint. Then the pag
 That is not a diagnosis. Five different failures wear it, and they do not share a response — one
 promotes, three deliberately do nothing, and one has never been injected in a test.</p>
 <h2 id="five-shapes-not-one">Five shapes, not one</h2>
-<p>Bloodraven documents the five in <code>docs/docs/network-partitions.mdx</code>, labelled A to E. What separates
+<p>Bloodraven documents the five in <code>site/content/docs/6.operations/8.network-partitions.md</code>, labelled A to E. What separates
 them is not how bad the network is. It is <em>which</em> link broke, and so what each of two independent
 deciders can still see. The operator decides from what it can poll — one <code>SELECT @@read_only</code> per
 site, per tick. The sidecar decides from what it can reach — Bloodraven, or any peer. A partition

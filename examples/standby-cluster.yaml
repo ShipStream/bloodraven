@@ -43,7 +43,7 @@ spec:
         credentialsSecret: s3-dr-readonly-creds
     # Required when the source profile has encryption enabled.
     # The Secret must be copied to this namespace from the source cluster.
-    # See docs/docs/multi-cluster-dr.mdx — Passphrase distribution.
+    # See site/content/docs/5.architecture/3.multi-cluster-dr.md — Passphrase distribution.
     decryption:
       passphraseSecret:
         name: orders-backup-passphrase

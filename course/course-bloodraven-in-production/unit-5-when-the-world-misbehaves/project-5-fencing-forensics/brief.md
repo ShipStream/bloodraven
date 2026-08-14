@@ -36,7 +36,7 @@ could not reach anyone. The safety net is a pod that was never allowed to write 
 Same read-only outcome, three different incidents.
 
 You have the evidence. Both binaries write structured JSON to stdout, and
-`docs/docs/log-schema.mdx` is a stability contract: filter on `msg` and those strings will not move
+`site/content/docs/8.observability/7.log-schema.md` is a stability contract: filter on `msg` and those strings will not move
 without a deprecation note. So the forensics are mechanical, once you know the vocabulary.
 
 You are building `brfence`. It takes one bundle directory:

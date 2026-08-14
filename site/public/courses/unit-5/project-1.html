@@ -30,7 +30,7 @@ different things. Rule #1 is a pod that was told somebody else is active. Rule #
 could not reach anyone. The safety net is a pod that was never allowed to write in the first place.
 Same read-only outcome, three different incidents.</p>
 <p>You have the evidence. Both binaries write structured JSON to stdout, and
-<code>docs/docs/log-schema.mdx</code> is a stability contract: filter on <code>msg</code> and those strings will not move
+<code>site/content/docs/8.observability/7.log-schema.md</code> is a stability contract: filter on <code>msg</code> and those strings will not move
 without a deprecation note. So the forensics are mechanical, once you know the vocabulary.</p>
 <p>You are building <code>brfence</code>. It takes one bundle directory:</p>
 <pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="text"><code><span class="line"><span>tests/fixtures/partition-a/</span></span>

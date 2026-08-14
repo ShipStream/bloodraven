@@ -144,7 +144,7 @@ chaos-run-all-profile: build-playground-chaos ## Run chaos scenarios filtered by
 
 COURSE_DIR ?= course
 COURSE_SLUG ?= course-bloodraven-in-production
-COURSE_STATIC ?= docs/static/course
+COURSE_STATIC ?= site/public/courses
 
 course-build: ## Build the "Bloodraven in Production" course site
 	@# npm ci when the lockfile is present (CI, and any clean checkout) so the
@@ -154,7 +154,7 @@ course-build: ## Build the "Bloodraven in Production" course site
 		else npm install --no-audit --no-fund; fi && \
 		npm run build
 
-course: course-build ## Build the course and sync it into docs/static/course
+course: course-build ## Build the course and sync it into site/public/courses
 	rm -rf $(COURSE_STATIC)
 	mkdir -p $(COURSE_STATIC)
 	cp -r $(COURSE_DIR)/$(COURSE_SLUG)/dist/. $(COURSE_STATIC)/
@@ -179,9 +179,9 @@ course-verify: course-build ## Run the course content gates and runtime tests
 	@# jsdom.
 	cd $(COURSE_DIR) && npm run verify && npm run test
 
-course-check: course ## Fail if docs/static/course is stale relative to the course source
+course-check: course ## Fail if site/public/courses is stale relative to the course source
 	@# git status --porcelain, not git diff: diff only reports tracked files, so
-	@# an untracked or newly added page under docs/static/course would slip past.
+	@# an untracked or newly added page under site/public/courses would slip past.
 	@status="$$(git status --porcelain -- $(COURSE_STATIC))"; \
 	if [ -n "$$status" ]; then \
 		if git ls-files --error-unmatch $(COURSE_STATIC) >/dev/null 2>&1; then \

@@ -6,7 +6,7 @@
 
 ## Motivation
 
-Manual promotion in Bloodraven today is a three-step `kubectl exec` dance documented at `docs/docs/operations.mdx:9-38`: `SET GLOBAL super_read_only=ON` on the current primary, `STOP REPLICA; RESET REPLICA ALL;` on the target, `SET GLOBAL read_only=0`, then let the topology manager notice on its next poll and reconcile Services, DNS, and taints. The docs also carry a caution that this path **bypasses the anti-flap cooldown**, so an operator performing routine maintenance can unintentionally leave the cluster exposed to a follow-on emergency failover that the operator will refuse to execute.
+Manual promotion in Bloodraven today is a three-step `kubectl exec` dance documented at `site/content/docs/6.operations/2.operations.md:9-38`: `SET GLOBAL super_read_only=ON` on the current primary, `STOP REPLICA; RESET REPLICA ALL;` on the target, `SET GLOBAL read_only=0`, then let the topology manager notice on its next poll and reconcile Services, DNS, and taints. The docs also carry a caution that this path **bypasses the anti-flap cooldown**, so an operator performing routine maintenance can unintentionally leave the cluster exposed to a follow-on emergency failover that the operator will refuse to execute.
 
 Beyond the cooldown gap, the `kubectl exec` dance has three real problems:
 
@@ -213,7 +213,7 @@ Emitted by `r.recorder.Eventf` on the `MysqlFailoverGroup`, following the `Reclo
 
 ## Docs
 
-`docs/docs/operations.mdx:9-38` gets rewritten top-down: the `kubectl exec` dance becomes an appendix ("if the operator is unreachable and you must promote by hand"), and the primary flow is:
+`site/content/docs/6.operations/2.operations.md:9-38` gets rewritten top-down: the `kubectl exec` dance becomes an appendix ("if the operator is unreachable and you must promote by hand"), and the primary flow is:
 
 ```bash
 kubectl annotate mysqlfailovergroup orders \
@@ -222,11 +222,11 @@ kubectl annotate mysqlfailovergroup orders \
 kubectl get mysqlfailovergroup orders -o jsonpath='{.status.plannedFailover}'
 ```
 
-New page `docs/docs/planned-failover.mdx` covers: when to use it, pre-flight checks, what to expect in Events, how to interpret `transactionsLost`, the cooldown-rejection path, and the rollback behaviour on lag timeout.
+New page `site/content/docs/6.operations/7.planned-failover.md` covers: when to use it, pre-flight checks, what to expect in Events, how to interpret `transactionsLost`, the cooldown-rejection path, and the rollback behaviour on lag timeout.
 
-`docs/docs/failure-mode-matrix.mdx` gains a new row: *planned failover* × *each failure point* × *observable signal* × *operator action*.
+`site/content/docs/6.operations/9.failure-mode-matrix.md` gains a new row: *planned failover* × *each failure point* × *observable signal* × *operator action*.
 
-`docs/docs/durability-and-rpo.mdx` gets a paragraph clarifying that planned failover is the one Bloodraven operation with an RPO of zero by construction: the zero-lag gate guarantees `transactionsLost: 0` on success; any scenario that would produce loss routes to the Failed rollback instead.
+`site/content/docs/5.architecture/6.durability-and-rpo.md` gets a paragraph clarifying that planned failover is the one Bloodraven operation with an RPO of zero by construction: the zero-lag gate guarantees `transactionsLost: 0` on success; any scenario that would produce loss routes to the Failed rollback instead.
 
 ## Testing
 
@@ -286,4 +286,4 @@ Following the AGENTS.md pre-PR gate:
 - Pre-PR gate (AGENTS.md): `make generate && make manifests` clean, `make vet`, `make lint`, `make test`, `make test-envtest` all pass.
 - Helm chart ClusterRole requires no changes (planned failover uses existing primitives).
 - Helm chart CRD mirror: `config/crd/bases/shipstream.io_mysqlfailovergroups.yaml` regeneration copied to `charts/bloodraven/crds/`.
-- Docs added / updated: `docs/docs/planned-failover.mdx` (new), `operations.mdx` (rewritten manual-promotion section), `failure-mode-matrix.mdx` (new row), `durability-and-rpo.mdx` (zero-RPO paragraph).
+- Docs added / updated: `site/content/docs/6.operations/7.planned-failover.md` (new), `operations.mdx` (rewritten manual-promotion section), `failure-mode-matrix.mdx` (new row), `durability-and-rpo.mdx` (zero-RPO paragraph).

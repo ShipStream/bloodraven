@@ -32,7 +32,7 @@ import (
 // This is NOT Oracle "MySQL Enterprise Transparent Data Encryption".
 // Oracle explicitly states that the file-based keyring components are
 // not intended as regulatory-compliance solutions. See
-// docs/docs/encryption-at-rest.mdx for the full threat model.
+// https://bloodraven.dev/docs/configuration/encryption-at-rest for the full threat model.
 type EncryptionAtRestSpec struct {
 	// Enabled turns on data-at-rest encryption for every site in the
 	// group. Enabling requires spec.tls to be set, because MySQL
@@ -40,7 +40,7 @@ type EncryptionAtRestSpec struct {
 	//
 	// Encryption can only be enabled on a group that has not yet
 	// bootstrapped, or adopted by an existing group via the replica-first
-	// reclone procedure documented in docs/docs/encryption-at-rest.mdx.
+	// reclone procedure documented in https://bloodraven.dev/docs/configuration/encryption-at-rest.
 	// The operator rejects flipping this flag on a group whose sites
 	// already hold unencrypted data.
 	// +kubebuilder:default=false

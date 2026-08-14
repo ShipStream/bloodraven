@@ -1118,7 +1118,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			// spec.containerSecurityContext (opt-in; nil-by-default to
 			// preserve backward-compat with existing clusters). The
 			// operator does not merge with hardened defaults — see
-			// docs/docs/production-hardening.mdx for the rationale.
+			// site/content/docs/4.configuration/10.production-hardening.md for the rationale.
 			// DeepCopy so each container has an independent pointer
 			// (the cached spec pointer must not be shared across
 			// containers in the rendered PodSpec).
@@ -1476,7 +1476,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				// spec.podSecurityContext (opt-in; nil-by-default to
 				// preserve backward-compat with existing clusters whose
 				// /var/lib/mysql PVCs were created without FSGroup). See
-				// docs/docs/production-hardening.mdx for the migration
+				// site/content/docs/4.configuration/10.production-hardening.md for the migration
 				// procedure to enable Restricted PSS. DeepCopy so the
 				// rendered PodSpec does not alias the cached spec
 				// pointer.

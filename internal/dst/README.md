@@ -149,7 +149,7 @@ playground E2E suite as the fidelity check for this model.
   requires **both** durable paths (CR status and the out-of-band annotation
   store) to have been rejecting writes at once; nothing could then have
   carried the cooldown across the restart. See
-  `docs/docs/known-limitations.mdx` → Operator availability.
+  `site/content/docs/3.get-started/1.known-limitations.md` → Operator availability.
 
 `CooldownViolated` splits three ways so the inherent class cannot absorb a
 regression, and only the third is expected:

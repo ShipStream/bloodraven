@@ -72,7 +72,7 @@ const mysqlTLSMountPath = "/etc/mysql/tls"
 // The sidecar connects over loopback, and 127.0.0.1 is in no server
 // certificate, so it cannot verify against the address it dials. It
 // verifies against the per-site Service instead — the SAN
-// docs/docs/credentials-and-tls.mdx tells users to include, and the same
+// site/content/docs/4.configuration/6.credentials-and-tls.md tells users to include, and the same
 // name the operator's own credentials-mode client verifies (see the
 // mysqlTLSConfig call sites, which likewise dial the -internal Service).
 //

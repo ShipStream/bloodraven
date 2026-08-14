@@ -385,7 +385,7 @@ func writeCAWithKey(t *testing.T) (string, *x509.Certificate, *ecdsa.PrivateKey)
 }
 
 // issueLeaf mints a server certificate with the given DNS SAN, signed by
-// the test CA — the shape docs/docs/credentials-and-tls.mdx asks for.
+// the test CA — the shape site/content/docs/4.configuration/6.credentials-and-tls.md asks for.
 func issueLeaf(t *testing.T, caCert *x509.Certificate, caKey *ecdsa.PrivateKey, dnsName string) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

@@ -7,7 +7,7 @@ promotes, three deliberately do nothing, and one has never been injected in a te
 
 ## Five shapes, not one
 
-Bloodraven documents the five in `docs/docs/network-partitions.mdx`, labelled A to E. What separates
+Bloodraven documents the five in `site/content/docs/6.operations/8.network-partitions.md`, labelled A to E. What separates
 them is not how bad the network is. It is *which* link broke, and so what each of two independent
 deciders can still see. The operator decides from what it can poll — one `SELECT @@read_only` per
 site, per tick. The sidecar decides from what it can reach — Bloodraven, or any peer. A partition

@@ -445,7 +445,7 @@ func (r *MysqlFailoverGroupReconciler) bestEffortRestoreSourceTraffic(ctx contex
 // the old master so application clients reconnect through the active
 // Service. Bounded context, all errors logged and dropped.
 //
-// Log lines include `fg` per the docs/docs/log-schema.mdx Event
+// Log lines include `fg` per the site/content/docs/8.observability/7.log-schema.md Event
 // reference contract — downstream pipelines filter on `fg`.
 func (r *MysqlFailoverGroupReconciler) bestEffortClientKillSource(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sourceSite string) {
 	if sourceSite == "" {

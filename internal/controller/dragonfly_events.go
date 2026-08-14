@@ -1,7 +1,7 @@
 package controller
 
 // Event reasons emitted by the Dragonfly subsystem. Stable strings —
-// downstream filtering depends on them. See docs/docs/log-schema.mdx
+// downstream filtering depends on them. See site/content/docs/8.observability/7.log-schema.md
 // for the full reference.
 const (
 	ReasonDragonflyPromotionStarted         = "DragonflyPromotionStarted"

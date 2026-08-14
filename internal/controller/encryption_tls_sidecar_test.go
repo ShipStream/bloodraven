@@ -215,7 +215,7 @@ func TestEncryption_SidecarMySQLDSNUsesTLS(t *testing.T) {
 // the sidecar verifies. It dials 127.0.0.1, which is in no server
 // certificate, so the operator has to hand it a ServerName — and the only
 // name users are told to put in the SAN list is the per-site Service
-// (docs/docs/credentials-and-tls.mdx).
+// (site/content/docs/4.configuration/6.credentials-and-tls.md).
 func TestEncryption_SidecarTLSVerifiesAgainstDocumentedSAN(t *testing.T) {
 	fg := encTestFG()
 	r, _ := encReconciler(t, scriptedKeyring(nil), fg)

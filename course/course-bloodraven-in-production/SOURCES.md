@@ -20,7 +20,7 @@ figures is allowed where the derivation is shown.
   **`charts/bloodraven/crds/`** — the defaults and CEL rules that actually ship.
 - **`internal/playground/scenarios/`** (51 registered chaos scenarios) and
   **`playground/chaos-results/`** — real measured timings against a live cluster.
-- **`docs/docs/*.mdx`** — the official documentation, used as a cross-check. Rows below record where
+- **`site/content/docs/**/*.md`** — the official documentation, used as a cross-check. Rows below record where
   it drifted from the code.
 
 ## Version appendix
@@ -42,7 +42,7 @@ mechanism it describes is not. Run the re-check command before you quote any of 
 | # | The gap | Status on 2026-08-13 | Re-check with |
 |---|---|---|---|
 | **A1** | **Stale application connections survive a correct failover.** `super_read_only` closes no sockets, and the operator's drain cannot reach an unreachable host. Taught in Unit 3 topic 1 and Unit 4 topic 2. | **Narrowed, not closed.** After promotion each topology poll makes one bounded eviction pass against the fenced former primary until a pass finds no sessions or `spec.connectionDrainTimeout` (default `30s`) expires. **The Unit 3 scenario is unchanged** — a site held at zero replicas answers no eviction pass either. What the drain closes is the narrower case where the demoted primary is alive and reachable. An autonomous sidecar self-fence still has no operator-side drain. | `grep -n connectionDrainTimeout api/v1alpha1/types.go` |
-| **A2** | **One existing outage slows detection everywhere else.** `failCount` past `failureThreshold` doubles the whole loop's interval to a 30 s cap, so a second fault takes 30 s × 3 = 90 s to detect instead of 6 s. Unit 2 topic 1. | **By design.** `docs/docs/failover.mdx` describes the 2→4→8→16→30 s progression and the same ~90 s compound-failure bound this course derives — a number to plan around, not a defect to report. | `grep -n maxPollBackoffExponent internal/controller/topology.go` |
+| **A2** | **One existing outage slows detection everywhere else.** `failCount` past `failureThreshold` doubles the whole loop's interval to a 30 s cap, so a second fault takes 30 s × 3 = 90 s to detect instead of 6 s. Unit 2 topic 1. | **By design.** `site/content/docs/6.operations/6.failover.md` describes the 2→4→8→16→30 s progression and the same ~90 s compound-failure bound this course derives — a number to plan around, not a defect to report. | `grep -n maxPollBackoffExponent internal/controller/topology.go` |
 | **A4** | **Partition shape D — asymmetric peer reachability — has no test of any kind.** The simulator keys link state by a sorted `pairKey(a, b)`, so a one-way link is unrepresentable. Unit 5 topic 3. | **Present, and reported** as issue [#140](https://github.com/ShipStream/bloodraven/issues/140). Everything the course says about shape D is argued from the code and has never been observed under injection. That is stated in the topic on purpose. | `grep -n 'func pairKey' internal/dst/` |
 | **A5** | **Dragonfly version support is a policy, not a guardrail.** Nothing in the API types, the controller or the chart checks a Dragonfly version. Unit 4 topic 4. | **Present, and reported** as issue [#141](https://github.com/ShipStream/bloodraven/issues/141). The only CEL rules on `spec.dragonfly` are that an image is required when it is enabled and that the tag may not be `latest`. | `grep -n 'x-kubernetes-validations' -A3 config/crd/bases/shipstream.io_mysqlfailovergroups.yaml \| grep -i dragonfly` |
 | **A6** | **`bloodraven_replication_lag_seconds` carries no `role` label**, so a lag alert has to exclude reader sites by name and grows a maintenance burden with every reader added. Unit 6 topic 4. | **Present, and reported** as issue [#142](https://github.com/ShipStream/bloodraven/issues/142). | `curl -s localhost:8080/metrics \| grep bloodraven_replication_lag_seconds` |
@@ -58,11 +58,11 @@ the same argument in a different direction.
 
 | # | What a published page said | Status on 2026-08-14 |
 |---|---|---|
-| **B1** | `docs/docs/failover.mdx` documented `spec.splitBrainPolicy.preferSite`, including a copy-pasteable YAML block. The CRD has no such field, so the API server prunes it silently. | **Fixed.** The page documents `sitePriorities`. The habit the topic teaches — ask the cluster, not the page — is what generalises. |
+| **B1** | `site/content/docs/6.operations/6.failover.md` documented `spec.splitBrainPolicy.preferSite`, including a copy-pasteable YAML block. The CRD has no such field, so the API server prunes it silently. | **Fixed.** The page documents `sitePriorities`. The habit the topic teaches — ask the cluster, not the page — is what generalises. |
 | **B2** | The cross-site evaluation table named an outcome `Failover`. The code emits `Reason = "Degraded"`, so a rule matching `reason=Failover` never fires. | **Fixed.** The table now gives `Degraded`, and the page carries an explicit paragraph saying a `reason=Failover` alert never fires. |
 | **B3** | The failover sequence was published as ten steps that misstated fatality and counted node taints and source convergence — poll-driven neighbours — as links in the chain. | **Fixed.** Fatality now matches `internal/controller/failover.go` step for step, and the page states plainly that taints, the `-primary` selector and source convergence are poll-driven consequences rather than steps. The remaining difference is framing: the page's ten steps are this course's nine plus "record and publish the promotion", which the course teaches as the ordering fact that the durable record is stamped before DNS. |
 | **B4** | The cross-site table had no row for "the primary is fine and a peer is down", and no mention that the fence-first early return preempts every row below it. | **Still absent.** Both are real rows in `EvalCrossSite` and `playground` sits in the first one for the whole recovery window after a site failure. |
-| **B5** | `docs/docs/failover.mdx` quoted 30–45 s for a failover. The recorded runs give 12.0 s typical and 36.0 s with a full relay-log drain. | **Superseded rather than fixed** — treat any published wall-clock figure as an estimate and your own `chaos-results/` timings as the measurement. |
+| **B5** | `site/content/docs/6.operations/6.failover.md` quoted 30–45 s for a failover. The recorded runs give 12.0 s typical and 36.0 s with a full relay-log drain. | **Superseded rather than fixed** — treat any published wall-clock figure as an estimate and your own `chaos-results/` timings as the measurement. |
 
 ### C. Upstream and third-party pins
 
@@ -198,7 +198,7 @@ This course is separately licensed; see the notice in the page footer.
 | 72 | CEL validation: priority entries must name `primary-candidate` sites | `- message: splitBrainPolicy.sitePriorities entries must match the names of sites with role 'primary-candidate'` | `charts/bloodraven/crds/shipstream.io_mysqlfailovergroups.yaml:6468-6472` | A6 |
 | 73 | Emitted split-brain log msg names `sitePriorities` and carries `winner`/`fencedSite` | `tm.logger.Warn("split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities", "winner", winner, "fencedSite", loser)` | `internal/controller/topology.go:1710-1711` | A1 |
 | 74 | Split-brain fencing is retried on **non**-transition polls, counting writable candidates directly rather than trusting `action.SplitBrain` | `if !action.SplitBrain && writableCandidates < 2 { return false }` | `internal/controller/topology.go:1861-1878` | A1 |
-| 75 | Priority-based resolution is a **policy** decision, not a safety feature | `:::danger` … "makes split-brain resolution fast and deterministic at the cost of silently losing the loser's unreplicated writes. The loss is surfaced loudly but not prevented." | `docs/docs/failover.mdx:262-268` | A4 |
+| 75 | Priority-based resolution is a **policy** decision, not a safety feature | `:::danger` … "makes split-brain resolution fast and deterministic at the cost of silently losing the loser's unreplicated writes. The loss is surfaced loudly but not prevented." | `site/content/docs/6.operations/6.failover.md:262-268` | A4 |
 
 ### Old-primary recovery, divergence, reclone
 
@@ -229,18 +229,18 @@ This course is separately licensed; see the notice in the page footer.
 
 | # | Claim | Value / verbatim quote | Source | Angle |
 |---|---|---|---|---|
-| 96 | The RPO contract in one line | "An emergency failover can lose every transaction that committed on the dying primary but had not yet replicated to the surviving site." | `docs/docs/durability-and-rpo.mdx:16` | A2 |
+| 96 | The RPO contract in one line | "An emergency failover can lose every transaction that committed on the dying primary but had not yet replicated to the surviving site." | `site/content/docs/5.architecture/6.durability-and-rpo.md:16` | A2 |
 | 97 | `sync_binlog=1` is an **overridable default**, not a guarantee — set in the base my.cnf map, applied *before* `spec.mysqlConf` overrides | base map `internal/controller/reconciler.go:698`; overrides applied `:738-745` | | A2 |
 | 98 | `innodb_flush_log_at_trx_commit=2`, also overridable | `internal/controller/reconciler.go:703` | | A2 |
 | 99 | The **un-weakenable** invariants, written after user overrides: `gtid_mode=ON`, `enforce_gtid_consistency=ON`, `log_replica_updates=ON`, `log_bin`, `skip_replica_start=ON`, `plugin-load-add=mysql_clone.so`. `skip-log-bin` and `disable-log-bin` aliases are deleted outright | `internal/controller/reconciler.go:749-755, 765-771` | | A2 |
 | 100 | `binlog-expire-logs-seconds = 1209600` (14 days), overridable | `internal/controller/reconciler.go:699` | | A2 |
 | 101 | `spec.replication.maxLagSeconds` default 300, and it drives **only** the `ReplicationLagging` Degraded condition | `maxLagSeconds := freshFG.Spec.EffectiveMaxLagSeconds()` … `Reason: "ReplicationLagging"` | `internal/controller/runner.go:932, 965-974`; `api/v1alpha1/types.go:265-268` | A1/A2 |
-| 102 | It is **not** a promotion gate | "If the primary dies while the replica is beyond the threshold, **Bloodraven still promotes the replica**" — the alternative of no writable site at all is almost always worse | `docs/docs/durability-and-rpo.mdx:201-208`; never consulted by `pickFreshestCandidate` (`internal/controller/topology.go:1690-1730`) | A4 |
+| 102 | It is **not** a promotion gate | "If the primary dies while the replica is beyond the threshold, **Bloodraven still promotes the replica**" — the alternative of no writable site at all is almost always worse | `site/content/docs/5.architecture/6.durability-and-rpo.md:201-208`; never consulted by `pickFreshestCandidate` (`internal/controller/topology.go:1690-1730`) | A4 |
 | 103 | `readOnlyMaxLagSeconds` has **no** default; nil inherits `maxLagSeconds`, but an explicit `0` is meaningful (requires zero reported lag) | `api/v1alpha1/types.go:270-275`; `api/v1alpha1/site_helpers.go:86-93` | | A2 |
 | 104 | Planned failover is RPO 0 **by construction** | `// TransactionsLost … By construction this is 0 on a successful planned switchover`; mechanism = fence source → snapshot its GTID → promote only when target `GTID_EXECUTED` ⊇ that snapshot | `api/v1alpha1/planned_failover_types.go:140-143`; `internal/controller/planned_failover_reconciler.go:460-463, 607` | A6 |
 | 105 | The lag gate is a true GTID-set superset test, not a lag-seconds heuristic | `caughtUp, cmpErr := gtidContains(targetGtid, cur.SourceGtidAtFence)`; `gtidContains` → `return super.Contains(sub), nil` | `internal/controller/planned_failover_reconciler.go:607, 923-933` | A6 |
-| 106 | PVC loss → PITR does **not** recover the tail | "The previously-active binlog lived on the destroyed PVC. It is gone forever" | `docs/docs/durability-and-rpo.mdx:163-181` | A2/A4 |
-| 107 | PITR cannot reach back past the async-replication cutoff | "Transactions the old primary committed but never shipped are not in the replica's binlog stream and therefore not in PITR's replay material." | `docs/docs/durability-and-rpo.mdx:170-174` | A4 |
+| 106 | PVC loss → PITR does **not** recover the tail | "The previously-active binlog lived on the destroyed PVC. It is gone forever" | `site/content/docs/5.architecture/6.durability-and-rpo.md:163-181` | A2/A4 |
+| 107 | PITR cannot reach back past the async-replication cutoff | "Transactions the old primary committed but never shipped are not in the replica's binlog stream and therefore not in PITR's replay material." | `site/content/docs/5.architecture/6.durability-and-rpo.md:170-174` | A4 |
 
 ### Application integration, DNS, taints, Dragonfly
 
@@ -286,19 +286,19 @@ This course is separately licensed; see the notice in the page footer.
 | 140 | `leaseTimeout` default 20 s — operator **and every peer** must be silent for the full window. One reachable peer keeps the site writable | `api/v1alpha1/types.go:436-439`; `internal/sidecar/config.go:15, 39-43` | | A2 |
 | 141 | `peerCheckInterval` default 5 s | `api/v1alpha1/types.go:441-444`; `internal/sidecar/config.go:16` | | A2 |
 | 142 | CEL invariants: `peerCheckInterval ≥ 1s`, `leaseTimeout ≥ 3s`, `leaseTimeout ≥ 3 × peerCheckInterval`. The shipped 20 s / 5 s sits exactly at the 3× floor | `api/v1alpha1/types.go:432-434`; `internal/sidecar/config.go:12-14, 265-283` | | A2 |
-| 143 | The peer rule is explicitly **not a quorum**, and a reader counts as a peer | "A reachable peer without fresh authoritative topology can still suppress the lease-only all-peers-unreachable fence. **This is retained compatibility behavior, not a quorum guarantee**" | `docs/docs/multi-site.mdx:170-186` | A4 |
-| 144 | Fencing does not close sockets — a surviving session can serve **stale reads** until the site is next promoted or demoted | `docs/docs/log-schema.mdx:192`; `internal/sidecar/mysql.go:197` (`killableConnection`) | | A4 |
+| 143 | The peer rule is explicitly **not a quorum**, and a reader counts as a peer | "A reachable peer without fresh authoritative topology can still suppress the lease-only all-peers-unreachable fence. **This is retained compatibility behavior, not a quorum guarantee**" | `site/content/docs/5.architecture/2.multi-site.md:170-186` | A4 |
+| 144 | Fencing does not close sockets — a surviving session can serve **stale reads** until the site is next promoted or demoted | `site/content/docs/8.observability/7.log-schema.md:192`; `internal/sidecar/mysql.go:197` (`killableConnection`) | | A4 |
 | 145 | After promotion the operator retries one bounded eviction pass per topology poll until a pass finds no sessions or `spec.connectionDrainTimeout` (default `30s`) expires. Every pass needs a reachable old primary. An autonomous sidecar self-fence still has no operator-side drain. Planned failover drains ahead of the switch. | `api/v1alpha1/types.go` `ConnectionDrainTimeout`; issue [#123](https://github.com/ShipStream/bloodraven/issues/123) (CLOSED); PR [#137](https://github.com/ShipStream/bloodraven/pull/137) (merged) | | A4 |
 
 ### Operator availability and partitions
 
 | # | Claim | Value / verbatim quote | Source | Angle |
 |---|---|---|---|---|
-| 146 | The data plane does not need the operator | "A healthy primary and replica keep serving reads and writes with zero operator involvement. The operator is on the failure-detection and promotion path, not the request path." | `docs/docs/operator-availability.mdx:24-27` | A6 |
-| 147 | Availability and correctness fail separately | "Correctness — no split brain, no silent divergence … — is preserved by the sidecar fencing layer regardless of how long the operator is gone." / "Availability is not preserved during operator downtime." | `docs/docs/operator-availability.mdx:34-38, 116-119` | A6 |
+| 146 | The data plane does not need the operator | "A healthy primary and replica keep serving reads and writes with zero operator involvement. The operator is on the failure-detection and promotion path, not the request path." | `site/content/docs/5.architecture/5.operator-availability.md:24-27` | A6 |
+| 147 | Availability and correctness fail separately | "Correctness — no split brain, no silent divergence … — is preserved by the sidecar fencing layer regardless of how long the operator is gone." / "Availability is not preserved during operator downtime." | `site/content/docs/5.architecture/5.operator-availability.md:34-38, 116-119` | A6 |
 | 148 | Single replica with leader election | `replicaCount: 1`; `leaderElection:` enabled | `charts/bloodraven/values.yaml:7, 83-85` | A2/A6 |
 | 149 | Partition scenario coverage: A exercised (chaos 09, 06 + DST `partitionOperatorSite`); B exercised (chaos 17); C **DST only** (`partitionPair`); **D asymmetric is analysis-only** — `pairKey` is symmetric by construction, so DST cannot express one-way reachability; E only indirectly (chaos 11) | `internal/playground/scenarios/s09_*.go`, `s06_*.go`, `s17_*.go`, `s11_*.go`; `internal/dst/schedule.go:18, 21`; `internal/dst/sim.go:227` | | A6 |
-| 150 | Host-netns iptables does not partition Kubernetes Service traffic | "Host-level iptables rules in a k3d node are not reliable for Kubernetes Service traffic" | `docs/docs/network-partitions.mdx:121-126` | A4 |
+| 150 | Host-netns iptables does not partition Kubernetes Service traffic | "Host-level iptables rules in a k3d node are not reliable for Kubernetes Service traffic" | `site/content/docs/6.operations/8.network-partitions.md:121-126` | A4 |
 | 151 | A NetworkPolicy can be a silent no-op: chaos 33 found a CNI evaluating it **post-DNAT**, so the canary "kept resolving DNS through the full 45s hold" | `playground/chaos-scenarios.md` §33 "Observed defect and fix" | | A4 |
 | 152 | Issue #93: the operator reported `activeSite=iad, state=writable, Ready=True` for two minutes under a deny-all NetworkPolicy, because `Poll()` froze on a hung MySQL read — `database/sql` ctx cancellation does not reliably abort a read parked on a blackholed socket, and `Poll` waits on every site | issue [#93](https://github.com/ShipStream/bloodraven/issues/93) (CLOSED); fix commit `8bb66dd` / PR [#95](https://github.com/ShipStream/bloodraven/pull/95) | | A4 |
 | 153 | The first fix attempted was wrong: `SetConnMaxLifetime(10s)` "could not help: a connection parked in a blocked read is never returned to the pool, so it is never recycled" | commit `8bb66dd` body; issue #93 | | A4 |
@@ -306,9 +306,9 @@ This course is separately licensed; see the notice in the page footer.
 | 155 | Issue #46: a site reported as a healthy `read-only` peer had empty `slave_master_info` and was not replicating at all — replica health was inferred from `super_read_only` without verifying replication | issue [#46](https://github.com/ShipStream/bloodraven/issues/46) | | A4 |
 | 156 | A newly created or cloned MySQL pod comes up **writable** for seconds: "T+22s — new `pdx` pod Running, but **writable**… T+33s — `ALERT: SPLIT BRAIN`" | issues #46, #128 | | A4 |
 | 157 | A `SET GLOBAL` that returns an error may still have landed: "cancelling the context tears down the client connection, it does not roll back a write the server already applied." Treating it as failed made the monitor re-fence the site it had just promoted | commit `ddf0087` (PR [#122](https://github.com/ShipStream/bloodraven/pull/122)) | | A4 |
-| 158 | DNS propagation is external-dns's job: "**The operator cannot accelerate DNS propagation.** A stuck external-dns is an outage for writes even after the operator has 'finished'." Chaos 38 proves the CR can promote correctly while DNS stays stale under an RBAC denial | `docs/docs/failure-mode-matrix.mdx:37`; `playground/chaos-scenarios.md` §38 | | A4 |
-| 159 | Replication breaking cross-site triggers **no** automatic action: "This mode is indistinguishable, from the operator's point of view, from 'replica fell behind because of I/O pressure'. Human judgement decides." | `docs/docs/failure-mode-matrix.mdx:31` | | A4 |
-| 160 | The anti-flap cooldown survives a restart only if at least one of the two durable paths worked; `CooldownViolated(restart+stateLost)` is a documented inherent DST finding class | `docs/docs/known-limitations.mdx:51-74`; `internal/dst/README.md:145-166` | | A4 |
+| 158 | DNS propagation is external-dns's job: "**The operator cannot accelerate DNS propagation.** A stuck external-dns is an outage for writes even after the operator has 'finished'." Chaos 38 proves the CR can promote correctly while DNS stays stale under an RBAC denial | `site/content/docs/6.operations/9.failure-mode-matrix.md:37`; `playground/chaos-scenarios.md` §38 | | A4 |
+| 159 | Replication breaking cross-site triggers **no** automatic action: "This mode is indistinguishable, from the operator's point of view, from 'replica fell behind because of I/O pressure'. Human judgement decides." | `site/content/docs/6.operations/9.failure-mode-matrix.md:31` | | A4 |
+| 160 | The anti-flap cooldown survives a restart only if at least one of the two durable paths worked; `CooldownViolated(restart+stateLost)` is a documented inherent DST finding class | `site/content/docs/3.get-started/1.known-limitations.md:51-74`; `internal/dst/README.md:145-166` | | A4 |
 
 ### Backup, PITR, verification, restore, encryption, DR
 
@@ -328,7 +328,7 @@ This course is separately licensed; see the notice in the page footer.
 | 172 | What a verification proves | "A verification restores a MysqlBackup artifact into an ephemeral, throwaway MySQL instance to prove the backup can actually be loaded. Unverified backups are schrödinger backups" | `api/v1alpha1/mysqlbackupverification_types.go:19-32` | A6 |
 | 173 | Mechanism: ephemeral PVC + in-pod mysqld bound to 127.0.0.1, no Service; PVC floor 10 GiB | `verificationMinPVCSize = int64(10 * 1024 * 1024 * 1024) // 10 GiB` | `api/v1alpha1/mysqlbackupverification_types.go:26-32`; `internal/controller/backup_verification_job.go:46-50, 64-68` | A6 |
 | 174 | Sanity check runs via `mysql -B -N -e` wrapped in `timeout`, expects one row/one column, treats an empty result as scalar 0, and fails on `SanityCheckFailed` / `SanityCheckTimeout` | `api/v1alpha1/mysqlbackupverification_types.go:115-121, 146-152` | | A6 |
-| 175 | What verification does **not** prove: logical equivalence with the live primary, application-level rehearsal of writes or traffic cutover | `docs/docs/backup-verification.mdx:52-58` | | A6 |
+| 175 | What verification does **not** prove: logical equivalence with the live primary, application-level rehearsal of writes or traffic cutover | `site/content/docs/7.backup-and-restore/6.backup-verification.md:52-58` | | A6 |
 | 176 | Verification shipped with a real bug proving the point: scenario 31 failed with `ERROR 1062 Duplicate entry` because the verify mysqld ran `gtid_mode=OFF`, defeating GTID dedup on replay | issue [#101](https://github.com/ShipStream/bloodraven/issues/101) → PR [#105](https://github.com/ShipStream/bloodraven/pull/105) | | A4 |
 | 177 | There is **no restore CR**. Restore is two fields on the group: `spec.initFromBackup` (one-shot, gates bootstrap) and `spec.restoreInPlace` (re-runnable, no teardown/rename cycle) | `api/v1alpha1/types.go:158-163`; `api/v1alpha1/backup_types.go:694-762` | A6 |
 | 178 | In-place restore phases and the anti-fat-finger token | `+kubebuilder:validation:Enum="";Preflight;Fencing;Restoring;Resuming;Succeeded;Failed`; `// Confirm is a required anti-fat-finger token … Must be an RFC 3339 timestamp … strictly greater than the timestamp recorded in status.restoreInPlace.confirmTokenUsed` | `api/v1alpha1/backup_types.go:723-732, 775-782` | A6 |
@@ -336,11 +336,11 @@ This course is separately licensed; see the notice in the page footer.
 | 180 | Keyring phases — **five**, including `Failed` | `+kubebuilder:validation:Enum="";Pending;Unsealed;Escrowed;Sealed;Failed` | `api/v1alpha1/encryption_types.go:169-195` | A6 |
 | 181 | Rotation re-enters `Unsealed` from `Sealed` | `if site.Phase == v1alpha1.KeyringPhaseSealed && rotateTarget == site.Name` | `internal/controller/encryption_reconcile.go:197-204` | A6 |
 | 182 | The escrow lives in per-site **versioned Kubernetes Secrets**, owner-ref'd, with the digest recomputed rather than trusted | `labelKeyringVersion = "shipstream.io/keyring-version"`; `annotationKeyringDigest = "shipstream.io/keyring-digest"` | `internal/controller/encryption_escrow.go:24-32, 74-93, 191` | A6 |
-| 183 | etcd therefore joins your key custody | "The live keyring is projected from a Kubernetes Secret. **Kubernetes stores Secrets unencrypted in etcd by default.** Without API-server encryption at rest, enabling this feature does not protect your keys — it just moves them from the MySQL data disk to the control-plane disk." … "None of these are optional. Bloodraven cannot verify them for you." | `docs/docs/encryption-at-rest.mdx:62-85` | A6 |
+| 183 | etcd therefore joins your key custody | "The live keyring is projected from a Kubernetes Secret. **Kubernetes stores Secrets unencrypted in etcd by default.** Without API-server encryption at rest, enabling this feature does not protect your keys — it just moves them from the MySQL data disk to the control-plane disk." … "None of these are optional. Bloodraven cannot verify them for you." | `site/content/docs/4.configuration/8.encryption-at-rest.md:62-85` | A6 |
 | 184 | `encryptionAtRest` requires `spec.tls` as a **hard CEL rejection** | `- message: 'spec.encryptionAtRest.enabled requires spec.tls: MySQL requires a secure connection to clone encrypted data'` | `charts/bloodraven/crds/shipstream.io_mysqlfailovergroups.yaml:6497-6500` | A6 |
 | 185 | Rotation is refused on the active primary | `// The operator refuses to rotate the active primary. Rotation necessarily runs with a writable keyring, and the only window in which a keyring can be lost is that one` | `internal/controller/encryption_escrow.go:34-58` | A6 |
 | 186 | `MysqlStandbyCluster` is **observability only** today | `// … publishes two conditions — BucketReadable and SourceConfigKnown … **No MySQL contact, no restore jobs, no activation in Phase 1.**` | `api/v1alpha1/mysqlstandbycluster_types.go:16-22` | A6 |
-| 187 | The DR source-fencing checklist requires at least two of three independent signals, and "Bloodraven v1 does not automatically detect or resolve cross-cluster split-brain" | `docs/docs/multi-cluster-dr.mdx:200-237` | | A6 |
+| 187 | The DR source-fencing checklist requires at least two of three independent signals, and "Bloodraven v1 does not automatically detect or resolve cross-cluster split-brain" | `site/content/docs/5.architecture/3.multi-cluster-dr.md:200-237` | | A6 |
 | 188 | `kubectl bloodraven` subcommands: `status`, `promote`, `reclone`, `backup`, `verify-backup`, `version`, `help` | `switch args[0] { case "help", …: case "version": case "status": case "promote": case "reclone": case "backup": case "verify-backup": …}` | `cmd/kubectl-bloodraven/main.go:32-39, 72-90` | A6 |
 | 189 | The plugin only writes resources the operator already reads | `// The plugin only writes the resources the operator already reads … It never talks to MySQL directly` | `cmd/kubectl-bloodraven/main.go:6-9` | A6 |
 
@@ -353,13 +353,13 @@ This course is separately licensed; see the notice in the page footer.
 | 192 | `spec.sites` MinItems 2 / MaxItems 16 | `api/v1alpha1/types.go:63-64` | | A2 |
 | 193 | **51 registered chaos scenarios**. Profiles: smoke = 4, release = 17; full is every registered scenario whose `Quarantine` string is empty (encrypted 48/50/51 are quarantined from batch profiles) | `internal/playground/scenarios/*.go`; `internal/playground/runner/profile.go:34-38, 48-67, 93-96` | | A2 |
 | 194 | The playground overrides shipped defaults: `failoverCooldown: 30s` (vs 5 m), `replication.maxLagSeconds: 30` (vs 300), `dns.ttl: 10` (vs 60). It matches defaults for `pollInterval`, `failureThreshold`, `recoveryThreshold`, `leaseTimeout`, `peerCheckInterval`, `maxSyncWait` | `playground/manifests/failovergroup.yaml:10-13, 18, 76-79, 92-94` | | A2 |
-| 195 | The playground needs 3 worker nodes; the third is dedicated to the reader so storage-loss testing is deterministic | `docs/docs/playground.mdx:34` | | A2 |
+| 195 | The playground needs 3 worker nodes; the third is dedicated to the reader so storage-loss testing is deterministic | `site/content/docs/3.get-started/3.playground.md:34` | | A2 |
 | 196 | `chaos.sh kill-site` does `kubectl delete pod -l shipstream.io/site=<site> --grace-period=0 --force`, and deletes MySQL **and** Dragonfly pods at the site | `playground/chaos.sh:52-56` | | A2 |
 | 197 | Pod force-delete **does** trigger failover — scenario 09b hard-waits up to 90 s for `activeSite` to flip and `lastFailover` to stamp before reaching its real assertion, and passes | `internal/playground/scenarios/s09b_anti_flap_cooldown.go:119-127, 148-172` | | A2 |
 | 198 | Why the <5 s pod respawn does not save it: the Deployment recreates the **pod object** in ~5 s, but the debounce watches whether **mysqld answers `CheckReadOnly`**. A cold container start plus InnoDB recovery exceeds the 6 s window | `internal/controller/topology.go:1532-1545`; `internal/playground/scenarios/s09b_anti_flap_cooldown.go:38-43, 180-190` | | A2 |
 | 199 | Scenario 01 uses scale-to-0 for **determinism**, not because delete fails: "pod-delete races the Deployment respawn" and can restore the original topology via split-brain recovery instead of completing the failover | `internal/playground/scenarios/s01_clean_primary_kill.go:18-21`; `playground/chaos-scenarios.md:116, 367` | | A2 |
 | 200 | The genuine no-failover case is a **container restart in place**: scenario 16 issues SQL `SHUTDOWN`, pod/PVC/IP survive, and the scenario explicitly accepts either outcome "depending on how fast Kubernetes restarts the mysql container vs the operator's pollInterval × failureThreshold (~6s in playground config)" | `internal/playground/scenarios/s16_mysql_process_kill.go:18-42` | | A2 |
-| 201 | Pod crash with PVC intact is RPO 0 and **no failover at all** — the operator sees the primary return `writable` and keeps it | `docs/docs/durability-and-rpo.mdx:131` | | A2/A4 |
+| 201 | Pod crash with PVC intact is RPO 0 and **no failover at all** — the operator sees the primary return `writable` and keeps it | `site/content/docs/5.architecture/6.durability-and-rpo.md:131` | | A2/A4 |
 
 ### External behaviour and misconceptions from the wider world
 
@@ -429,23 +429,23 @@ This course is separately licensed; see the notice in the page footer.
 | 253 | The counter application reports which site served a request and whether that site is writable, which is how a stale read is detected at all | probes `@@global.read_only` and `@@hostname` | `playground/counter-app/main.go:179-186` | A1 |
 | 255 | Playground site load-balancer IPs, used as the DNSEndpoint A-record targets: `iad` is `10.96.100.10`, `pdx` is `10.96.100.20` | `- lbIP: 10.96.100.10` (iad) and `- lbIP: 10.96.100.20` (pdx) in the captured group spec | `playground/chaos-results/20260429T142107Z/01-clean-primary-kill/cluster.yaml:93,110` | A2 |
 | 256 | Playground DNS hostname and TTL | `"dns":{"hostname":"playground-db.example.local","ttl":10}` | same file, line 4 | A2 |
-| 254 | The counter application writes to **both** MySQL and Dragonfly on every increment; the MySQL counter is durable and the Dragonfly counter is the session-continuity signal. After a planned failover with `sessionsPreserved=true` the Dragonfly counter survives; after an emergency failover it usually resets to 0 | `docs/docs/playground.mdx:291` | | A2 |
+| 254 | The counter application writes to **both** MySQL and Dragonfly on every increment; the MySQL counter is durable and the Dragonfly counter is the session-continuity signal. After a planned failover with `sessionsPreserved=true` the Dragonfly counter survives; after an emergency failover it usually resets to 0 | `site/content/docs/3.get-started/3.playground.md:291` | | A2 |
 
 ## Ungrounded
 
 Claims considered and not used, with what was done about each.
 
-- **"Pod-kill failover takes about 30–45 seconds"** (`docs/docs/playground.mdx:101`) — unsourced in the
+- **"Pod-kill failover takes about 30–45 seconds"** (`site/content/docs/3.get-started/3.playground.md:101`) — unsourced in the
   docs and contradicted by nine-plus recorded runs at 12.0 s. **Cut**; the course teaches the measured
   12.0 s clean / 36.0 s with-relay-backlog pair from rows 40–41 instead.
 - **"~37 s total failover"** (`playground/chaos-scenarios.md:108`, `failure-mode-matrix.mdx:25`) —
   arithmetically defensible as 6 s detect + 30 s drain, but not what the suite measures. **Taught as a
   worst case only**, always beside the measured typical.
-- **"30+ chaos scenarios"** (`docs/docs/playground.mdx:231`) — stale. **Corrected** to 51 (row 193).
+- **"30+ chaos scenarios"** (`site/content/docs/3.get-started/3.playground.md:231`) — stale. **Corrected** to 51 (row 193).
 - **`spec.splitBrainPolicy.preferSite`** — the field does not exist in any shipped CRD. **Cut
   entirely**; the course teaches `sitePriorities` (row 66). The published page that described it has
   since been corrected — see version-appendix row B1.
-- **`Manual` / `PreferSite` as policy modes** (`docs/docs/failure-mode-matrix.mdx:35`) — no such enum.
+- **`Manual` / `PreferSite` as policy modes** (`site/content/docs/6.operations/9.failure-mode-matrix.md:35`) — no such enum.
   **Cut.**
 - **`spec.sites[].priority`** — no such field. **Cut**; ordering comes from the group-level
   `spec.splitBrainPolicy.sitePriorities` (row 66).
@@ -456,7 +456,7 @@ Claims considered and not used, with what was done about each.
 - **Issue #93 as a hands-on lab exercise** — reproduces on kind+Calico, masked on k3d/kube-router
   which flushes conntrack on policy change. **Converted to a forensics exercise** in Unit 2 using
   captured artefacts, rather than a live reproduction learners are told to attempt.
-- **"The counter application writes continuously"** (`docs/docs/playground.mdx` reads that way) — it
+- **"The counter application writes continuously"** (`site/content/docs/3.get-started/3.playground.md` reads that way) — it
   does not. `playground/counter-app` writes only on `POST /api/increment`, which the shipped UI issues
   on a button press; the page polls `GET /api/counter` — a read — every 2 000 ms. **Corrected
   throughout**, because the Unit 3 wall depends on the read path and the write path failing

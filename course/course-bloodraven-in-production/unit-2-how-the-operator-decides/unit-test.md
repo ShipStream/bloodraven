@@ -159,7 +159,7 @@ A second failover group — not `playground`, which overrides both — leaves `s
 
 - `Reason = "Degraded"` with `PromotionCandidates = [iad]` and no alert, plus INFO `failover blocked by anti-flap cooldown` with fields `lastFailover` and `cooldown` — and no promotion
 - `Reason = "CooldownBlocked"` on the `Degraded` condition, so you can alert on the block directly
-- `Reason = "Failover"`, as the cross-site evaluation table in `docs/docs/failover.mdx` publishes it, with the promotion deferred until the cooldown expires
+- `Reason = "Failover"`, as the cross-site evaluation table in `site/content/docs/6.operations/6.failover.md` publishes it, with the promotion deferred until the cooldown expires
 - No condition update at all — the matrix is skipped while the cooldown is running, so `status.conditions` keeps whatever it last wrote
 
 **Correct option index:** 0

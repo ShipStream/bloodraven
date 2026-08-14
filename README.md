@@ -8,19 +8,19 @@ With Bloodraven you can run MySQL async replication failover groups across Kuber
 
 Bloodraven is built for site-level failover where applications can accept non-zero recovery point objective (RPO) after sudden primary loss. It does not provide synchronous replication, zero RPO, or automatic conflict repair after divergent writes.
 
-**[Documentation](https://bloodraven.readthedocs.io/en/latest/)** - installation, operations, custom resource definition (CRD) reference, application integration, and more.
+**[Documentation](https://bloodraven.dev)** - installation, operations, custom resource definition (CRD) reference, application integration, and more.
 
 ## Choose your path
 
 | Goal | Start here |
 |---|---|
-| Understand licensing and pricing | [Licensing](https://bloodraven.readthedocs.io/en/latest/docs/licensing) |
-| Try the full demo locally | [Playground](https://bloodraven.readthedocs.io/en/latest/docs/playground) |
-| Create a first failover group | [Getting Started](https://bloodraven.readthedocs.io/en/latest/docs/getting-started) |
-| Install for production | [Production Install](https://bloodraven.readthedocs.io/en/latest/docs/install-production) |
-| Connect an application | [App Integration](https://bloodraven.readthedocs.io/en/latest/docs/app-integration) |
-| Handle an alert | [Operations Overview](https://bloodraven.readthedocs.io/en/latest/docs/operations-overview) |
-| Configure backups | [Backup Overview](https://bloodraven.readthedocs.io/en/latest/docs/backup-overview) |
+| Understand licensing and pricing | [Licensing](https://bloodraven.dev/docs/licensing) |
+| Try the full demo locally | [Playground](https://bloodraven.dev/docs/get-started/playground) |
+| Create a first failover group | [Getting Started](https://bloodraven.dev/docs/get-started/getting-started) |
+| Install for production | [Production Install](https://bloodraven.dev/docs/get-started/install-production) |
+| Connect an application | [App Integration](https://bloodraven.dev/docs/configuration/app-integration) |
+| Handle an alert | [Operations Overview](https://bloodraven.dev/docs/operations/operations-overview) |
+| Configure backups | [Backup Overview](https://bloodraven.dev/docs/backup-and-restore/backup-overview) |
 
 ## Standout features
 
@@ -29,7 +29,7 @@ Bloodraven is built for site-level failover where applications can accept non-ze
 - **Graceful planned switchover**: An admin can move the primary site with one command; Bloodraven waits for the replica to catch up first, so planned moves can have zero data loss.
 - **Backup, restore, PITR, and verification**: Bloodraven can create backups, archive binlogs for point-in-time recovery, encrypt artifacts, restore from them, and test backups by loading them into a throwaway MySQL.
 - **Dragonfly cache/session failover**: Bloodraven can manage Dragonfly alongside MySQL, move the active cache/session endpoint during failover, and try to preserve sessions during planned moves.
-- **Chaos-tested in CI**: 30+ automated chaos scenarios — primary kills, network partitions, split-brain, self-fencing, data wipes, backup/PITR verification — run against real Kubernetes clusters nightly, and a smoke subset gates every release before artifacts are published. The same [playground](https://bloodraven.readthedocs.io/en/latest/docs/playground) runs locally so you can test these failure modes yourself before you trust them in production.
+- **Chaos-tested in CI**: 30+ automated chaos scenarios — primary kills, network partitions, split-brain, self-fencing, data wipes, backup/PITR verification — run against real Kubernetes clusters nightly, and a smoke subset gates every release before artifacts are published. The same [playground](https://bloodraven.dev/docs/get-started/playground) runs locally so you can test these failure modes yourself before you trust them in production.
 
 ## Quickstart
 
@@ -49,7 +49,7 @@ k3d cluster create bloodraven --agents 2
 ./playground/teardown.sh
 ```
 
-See the [Playground guide](https://bloodraven.readthedocs.io/en/latest/docs/playground) for the full walkthrough.
+See the [Playground guide](https://bloodraven.dev/docs/get-started/playground) for the full walkthrough.
 
 ## What Bloodraven manages
 
@@ -195,13 +195,13 @@ graph TB
     APP --> DFSVC
 ```
 
-See the [Architecture](https://bloodraven.readthedocs.io/en/latest/docs/architecture) and [Failover](https://bloodraven.readthedocs.io/en/latest/docs/failover) docs for the state machine, failover sequences, and split-brain prevention layers.
+See the [Architecture](https://bloodraven.dev/docs/architecture/architecture) and [Failover](https://bloodraven.dev/docs/operations/failover) docs for the state machine, failover sequences, and split-brain prevention layers.
 
 ## Design decisions
 
 **Deployments, not StatefulSets.** Each site has its own storage class, zone affinity, and role. StatefulSets assume homogeneous replicas -- our pods are fundamentally different (one primary, one replica, different zones). Separate Deployments with `replicas: 1` give us per-site control without fighting StatefulSet semantics.
 
-**Non-HA control plane.** Bloodraven uses leader election but there's no standby. If Bloodraven is down, the MySQL pair continues operating normally. The sidecar self-fencing layer provides safety during controller outages. This is intentional -- the complexity of HA coordination for the controller itself would undermine the "single source of truth" design. See [Operator availability](./docs/docs/operator-availability.mdx) for the exact behavior during operator-down windows, including what a primary failure during that window looks like to applications.
+**Non-HA control plane.** Bloodraven uses leader election but there's no standby. If Bloodraven is down, the MySQL pair continues operating normally. The sidecar self-fencing layer provides safety during controller outages. This is intentional -- the complexity of HA coordination for the controller itself would undermine the "single source of truth" design. See [Operator availability](https://bloodraven.dev/docs/architecture/operator-availability) for the exact behavior during operator-down windows, including what a primary failure during that window looks like to applications.
 
 **DNS flip deferred until confirmed.** After promoting a candidate, Bloodraven doesn't immediately update DNS. It waits for the next poll to confirm `read_only=0` on the promoted site. This prevents pointing DNS at a node that failed promotion.
 
@@ -218,7 +218,7 @@ Bloodraven is **source-available**, not open source. It is licensed under the [B
 - All non-production use — dev, test, staging, CI, evaluation, demo — at any scale, forever.
 - Production use by individuals, non-commercial users, non-profits, and companies under $1M annual revenue.
 
-**Requires a one-time commercial license:** production use by companies over $1M annual revenue. $990 per failover group, or $4,900 for unlimited groups across your organization. Perpetual, with 12 months of updates included; renewal is optional and you keep every version published while your update period was active. See [pricing](https://bloodraven.readthedocs.io/en/latest/docs/licensing) and [commercial terms](./LICENSE-COMMERCIAL.md).
+**Requires a one-time commercial license:** production use by companies over $1M annual revenue. $990 per failover group, or $4,900 for unlimited groups across your organization. Perpetual, with 12 months of updates included; renewal is optional and you keep every version published while your update period was active. See [pricing](https://bloodraven.dev/docs/licensing) and [commercial terms](./LICENSE-COMMERCIAL.md).
 
 **Every version converts to Apache 2.0 two years after publication.** That is written into the license as the Change Date and cannot be revoked, so code you depend on cannot be taken away from you.
 

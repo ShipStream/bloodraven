@@ -50,7 +50,7 @@ func scenario49TenantDatabaseFailover() runner.Scenario {
 			"the operator re-applies it against the new primary (status.activeSite follows the group) with " +
 			"the database, the owner grant and the grants[] entry present there.",
 		Risk:     "low",
-		DocLink:  "docs/docs/tenant-databases.mdx",
+		DocLink:  "site/content/docs/4.configuration/7.tenant-databases.md",
 		Timeout:  8 * time.Minute,
 		Precheck: s49Precheck,
 		Steps: []runner.Step{

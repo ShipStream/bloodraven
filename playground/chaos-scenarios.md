@@ -1243,7 +1243,7 @@ watch -n2 "kubectl -n bloodraven-playground get mysqlfailovergroup playground \
 - **Escrow Secret loss**: deleting a sealed site's escrow Secret should
   raise `KeyringEscrowMissing` and phase `Failed`. Destructive and
   easy to get wrong by hand; see
-  `docs/docs/runbooks.mdx#keyring-escrow-lost`. The operator-side
+  `site/content/docs/6.operations/4.runbooks.md#keyring-escrow-lost`. The operator-side
   behaviour — `Failed`, the sealed rendering retained so the live
   keyring is not thrown away, and automatic recovery once the Secret is
   restored — is pinned by unit tests in

@@ -122,7 +122,7 @@ spec:
                       encryption enabled. Reuses BackupDecryptionSpec
                       (api/v1alpha1/backup_types.go:343-349). The Secret it references
                       must exist in this (DR) cluster's namespace — see
-                      docs/docs/multi-cluster-dr.mdx for the cross-cluster passphrase
+                      https://bloodraven.dev/docs/architecture/multi-cluster-dr for the cross-cluster passphrase
                       distribution runbook.
                     properties:
                       passphraseSecret:
@@ -168,7 +168,7 @@ spec:
                       PITR binlogs are stored. The bucket prefix layout follows
                       <storage.prefix>/<mysqlbackup-name>/ for dumps and
                       <storage.prefix>/binlogs/ for the PITR archive
-                      (docs/docs/backup-restore.mdx:570-577).
+                      (https://bloodraven.dev/docs/backup-and-restore/backup-restore).
                     minLength: 1
                     type: string
                   storage:
@@ -891,7 +891,7 @@ spec:
                                     deleting the Secret renders existing ciphertexts unrecoverable.
                                     Treat the Secret as part of the failover group's critical
                                     recovery material and back it up out-of-band. See
-                                    docs/docs/backup-encryption.mdx for the wire format,
+                                    https://bloodraven.dev/docs/backup-and-restore/backup-encryption for the wire format,
                                     threat model, and rotation guidance.
                                   properties:
                                     algorithm:
@@ -2015,7 +2015,7 @@ spec:
                               the operator does not merge it with hardened defaults. To enable
                               Restricted PSS, set the standard fields (RunAsNonRoot, RunAsUser,
                               RunAsGroup, FSGroup, SeccompProfile). See
-                              docs/docs/production-hardening.mdx for the upgrade procedure.
+                              https://bloodraven.dev/docs/configuration/production-hardening for the upgrade procedure.
                             properties:
                               appArmorProfile:
                                 description: |-
@@ -2448,7 +2448,7 @@ spec:
 
                               Encryption can only be enabled on a group that has not yet
                               bootstrapped, or adopted by an existing group via the replica-first
-                              reclone procedure documented in docs/docs/encryption-at-rest.mdx.
+                              reclone procedure documented in https://bloodraven.dev/docs/configuration/encryption-at-rest.
                               The operator rejects flipping this flag on a group whose sites
                               already hold unencrypted data.
                             type: boolean
@@ -5879,7 +5879,7 @@ spec:
                           will apply the value as-is to the pod; the operator does not merge it
                           with hardened defaults. To enable Restricted PSS, set the standard
                           fields (RunAsNonRoot, RunAsUser, RunAsGroup, FSGroup, SeccompProfile).
-                          See docs/docs/production-hardening.mdx for the upgrade procedure.
+                          See https://bloodraven.dev/docs/configuration/production-hardening for the upgrade procedure.
                         properties:
                           appArmorProfile:
                             description: |-

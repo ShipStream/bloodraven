@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import process from 'node:process';
 
-const baseUrl = new URL(process.env.PUBLIC_DOCS_BASE_URL || 'https://bloodraven.readthedocs.io/en/latest/');
+const baseUrl = new URL(process.env.PUBLIC_DOCS_BASE_URL || 'https://bloodraven.dev/');
 const maxPages = Number.parseInt(process.env.PUBLIC_DOCS_MAX_PAGES || '500', 10);
 const checkExternal = process.env.PUBLIC_DOCS_CHECK_EXTERNAL === 'true';
 const requestTimeoutMs = Number.parseInt(process.env.PUBLIC_DOCS_REQUEST_TIMEOUT_MS || '20000', 10);

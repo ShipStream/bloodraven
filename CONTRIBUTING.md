@@ -75,12 +75,12 @@ pushing. CI enforces each one, and catching them locally saves a round trip.
 ### Things that will get a PR sent back
 
 - Changing a structured-log `msg` string or field name listed in
-  `docs/docs/log-schema.mdx` without updating that document in the same PR.
+  `site/content/docs/8.observability/7.log-schema.md` without updating that document in the same PR.
   Those strings are a stability contract for downstream log pipelines.
 - Filenames ending in `_<goos>.go` (`_linux`, `_dragonfly`, `_js`, and friends).
   Go silently drops them from the build with no error.
 - Behavior changes to reconciliation, failover, CRD types, or the sidecar
-  without a corresponding documentation update under `docs/`.
+  without a corresponding documentation update under `site/content/docs/`.
 - New failover-path logic without either a component test in `test/component` or
   a playground scenario in `internal/playground/scenarios`.
 
@@ -96,7 +96,7 @@ cluster-visible behavior changes.
 
 - Synchronous replication or zero-RPO features. Bloodraven is deliberately an
   async-replication failover operator; see
-  [why-not-group-replication](./docs/docs/why-not-group-replication.mdx).
+  [why-not-group-replication](https://bloodraven.dev/docs/architecture/why-not-group-replication).
 - Support for database engines other than MySQL.
 - Vendored forks of upstream dependencies.
 - Features that add a hard dependency on a specific cloud provider.

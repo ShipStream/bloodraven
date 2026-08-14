@@ -128,7 +128,7 @@ type StandbySource struct {
 	// PITR binlogs are stored. The bucket prefix layout follows
 	// <storage.prefix>/<mysqlbackup-name>/ for dumps and
 	// <storage.prefix>/binlogs/ for the PITR archive
-	// (docs/docs/backup-restore.mdx:570-577).
+	// (https://bloodraven.dev/docs/backup-and-restore/backup-restore).
 	// +kubebuilder:validation:MinLength=1
 	ProfileName string `json:"profileName"`
 
@@ -137,7 +137,7 @@ type StandbySource struct {
 	// encryption enabled. Reuses BackupDecryptionSpec
 	// (api/v1alpha1/backup_types.go:343-349). The Secret it references
 	// must exist in this (DR) cluster's namespace — see
-	// docs/docs/multi-cluster-dr.mdx for the cross-cluster passphrase
+	// https://bloodraven.dev/docs/architecture/multi-cluster-dr for the cross-cluster passphrase
 	// distribution runbook.
 	// +optional
 	Decryption *BackupDecryptionSpec `json:"decryption,omitempty"`

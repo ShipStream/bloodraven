@@ -193,7 +193,7 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 		// Container-level security context applied verbatim from
 		// spec.dragonfly.containerSecurityContext (opt-in; nil-by-default
 		// to preserve backward-compat). See
-		// docs/docs/production-hardening.mdx for the rationale.
+		// site/content/docs/4.configuration/10.production-hardening.md for the rationale.
 		// DeepCopy so the cached spec pointer is not aliased in the
 		// rendered PodSpec (matches F4 fix on MySQL wiring).
 		SecurityContext: spec.ContainerSecurityContext.DeepCopy(),

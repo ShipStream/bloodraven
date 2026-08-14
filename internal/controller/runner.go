@@ -748,7 +748,7 @@ func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1
 
 	// The two restores below are logged under distinct msg strings rather
 	// than one msg with a source field: `restored lastFailoverTarget from CR
-	// status` is a documented stable event (docs/docs/log-schema.mdx), and
+	// status` is a documented stable event (site/content/docs/8.observability/7.log-schema.md), and
 	// the out-of-band case is worth alerting on in its own right — it means
 	// this group's status writes were failing when it last promoted.
 	if failoverRecord.LastFailoverTarget != "" {
