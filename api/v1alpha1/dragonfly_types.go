@@ -264,6 +264,26 @@ type DragonflyStatus struct {
 	// preserving sessions through a pre-upgrade snapshot.
 	// +optional
 	Upgrade *DragonflyUpgradeStatus `json:"upgrade,omitempty"`
+
+	// ReplTakeoverSupported is true when every successfully probed
+	// reachable site advertised the REPLTAKEOVER command. False means at
+	// least one probed site lacks it — emergency promotion will fall
+	// back to REPLICAOF NO ONE. Nil means the operator has not yet
+	// completed a probe (sites down, AUTH failing, or first tick
+	// pending). This reports the running command table, not the image
+	// tag; v1.38.0+ remains the supported pin.
+	// +optional
+	ReplTakeoverSupported *bool `json:"replTakeoverSupported,omitempty"`
+
+	// ReplTakeoverProbeTime is when ReplTakeoverSupported or
+	// ReplTakeoverProbeMessage last changed.
+	// +optional
+	ReplTakeoverProbeTime *metav1.Time `json:"replTakeoverProbeTime,omitempty"`
+
+	// ReplTakeoverProbeMessage explains a false result (which sites
+	// lacked the command). Empty when supported or not yet probed.
+	// +optional
+	ReplTakeoverProbeMessage string `json:"replTakeoverProbeMessage,omitempty"`
 }
 
 // DragonflyUpgradePhase describes the D6a snapshot-restore planned upgrade

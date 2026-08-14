@@ -1147,17 +1147,20 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// freshFG.Status is a snapshot taken before this function started
 		// computing, so assigning it wholesale would carry stale copies of
 		// every field this writer does not own back over the top of
-		// concurrent writes. The encryption state machine is the other
-		// writer on this object and it merge-patches only its own subtree,
-		// so its fields are re-read here rather than replayed from the
-		// snapshot. Clobbering them is not cosmetic: losing an
+		// concurrent writes. The encryption state machine and the
+		// DragonflyManager each merge-patch only their own subtree, so
+		// those fields are re-read here rather than replayed from the
+		// snapshot. Clobbering encryption is not cosmetic: losing an
 		// Escrowed/Sealed advance re-renders the site unsealed and rolls
 		// the pod, and losing a Failed hides a site whose key custody is
-		// gone.
+		// gone. Clobbering Dragonfly status drops capability probes and
+		// lastPromotion* stamps written on the other goroutine.
 		encryption := fresh.Status.EncryptionAtRest
 		encryptionCond := apimeta.FindStatusCondition(fresh.Status.Conditions, conditionEncryptionReady)
+		dragonfly := fresh.Status.Dragonfly
 		fresh.Status = freshFG.Status
 		fresh.Status.EncryptionAtRest = encryption
+		fresh.Status.Dragonfly = dragonfly
 		if encryptionCond != nil {
 			setCondition(&fresh.Status.Conditions, *encryptionCond)
 		} else {

@@ -105,6 +105,10 @@ func s39SeedAndPartition() runner.Step {
 				map[string]string{"target_site": peer, "result": "success"}); err != nil {
 				return err
 			}
+			if err := stashMetricCounter(ctx, env, "dfSessionsLostBefore", "bloodraven_dragonfly_promotions_total",
+				map[string]string{"target_site": peer, "result": "sessions_lost"}); err != nil {
+				return err
+			}
 			if err := stashMetricCounter(ctx, env, "mysqlFailoversBefore", "bloodraven_failovers_total",
 				map[string]string{"target_site": peer}); err != nil {
 				return err
@@ -243,20 +247,25 @@ func s39VerifyEndpointsAndMySQLUnchanged() runner.Step {
 func s39VerifyPromotionMetric() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  `bloodraven_dragonfly_promotions_total{result="success"} increments`,
+		Name:  `bloodraven_dragonfly_promotions_total{result="success|sessions_lost"} increments`,
 		Do: func(ctx context.Context, env *runner.Env) error {
 			target := ctxFetch(env, "dfTarget")
-			before, err := fetchStashedFloat(env, "dfPromotionsBefore")
+			beforeOK, err := fetchStashedFloat(env, "dfPromotionsBefore")
+			if err != nil {
+				return err
+			}
+			beforeLost, err := fetchStashedFloat(env, "dfSessionsLostBefore")
 			if err != nil {
 				return err
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
 			return env.Wait.UntilMetric(waitCtx, env.Metrics,
-				fmt.Sprintf(`dragonfly_promotions_total{target_site=%q,result="success"} increments from %g`, target, before),
+				fmt.Sprintf(`dragonfly_promotions_total{target_site=%q} increments from success=%g sessions_lost=%g`, target, beforeOK, beforeLost),
 				func(snap *pgmetrics.Snapshot) (bool, string) {
-					v, _ := snap.Counter("bloodraven_dragonfly_promotions_total", map[string]string{"target_site": target, "result": "success"})
-					return v > before, fmt.Sprintf("counter=%g before=%g", v, before)
+					ok, _ := snap.Counter("bloodraven_dragonfly_promotions_total", map[string]string{"target_site": target, "result": "success"})
+					lost, _ := snap.Counter("bloodraven_dragonfly_promotions_total", map[string]string{"target_site": target, "result": "sessions_lost"})
+					return ok > beforeOK || lost > beforeLost, fmt.Sprintf("success=%g/%g sessions_lost=%g/%g", ok, beforeOK, lost, beforeLost)
 				})
 		},
 	}

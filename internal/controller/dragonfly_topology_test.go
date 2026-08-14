@@ -45,6 +45,12 @@ type fakeDragonflyConn struct {
 	clientKillTypes []string
 	clientKillErr   error
 
+	// replTakeoverUnsupported is inverted so the zero value stays the
+	// happy path (command present). A bool named HasCommand would
+	// default every existing test into the unsupported branch.
+	replTakeoverUnsupported bool
+	hasCommandErr           error
+
 	closed bool
 }
 
@@ -77,6 +83,13 @@ func (c *fakeDragonflyConn) Save(_ context.Context) error {
 func (c *fakeDragonflyConn) ClientKillType(_ context.Context, kind string) error {
 	c.clientKillTypes = append(c.clientKillTypes, kind)
 	return c.clientKillErr
+}
+
+func (c *fakeDragonflyConn) HasCommand(_ context.Context, _ string) (bool, error) {
+	if c.hasCommandErr != nil {
+		return false, c.hasCommandErr
+	}
+	return !c.replTakeoverUnsupported, nil
 }
 
 func (c *fakeDragonflyConn) Close() error { c.closed = true; return nil }
@@ -1003,7 +1016,10 @@ func (panicOnInfoConn) ReplTakeover(_ context.Context, _ time.Duration) error {
 }
 func (panicOnInfoConn) Save(_ context.Context) error                     { return nil }
 func (panicOnInfoConn) ClientKillType(_ context.Context, _ string) error { return nil }
-func (panicOnInfoConn) Close() error                                     { return nil }
+func (panicOnInfoConn) HasCommand(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+func (panicOnInfoConn) Close() error { return nil }
 
 func drainEventsCh(ch <-chan string, max int, wait time.Duration) []string {
 	out := make([]string, 0, max)

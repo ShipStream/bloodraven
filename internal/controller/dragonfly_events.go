@@ -20,4 +20,13 @@ const (
 	// master after verifying it provably never accepted writes
 	// (connected_slaves=0 && master_repl_offset=0).
 	ReasonDragonflyOldSiteReconfigured = "DragonflyOldSiteReconfigured"
+	// ReasonDragonflyReplTakeoverUnsupported fires when a capability
+	// probe finds REPLTAKEOVER missing from the running command table.
+	ReasonDragonflyReplTakeoverUnsupported = "DragonflyReplTakeoverUnsupported"
+	// ReasonDragonflyReplTakeoverSupported fires on a false→true
+	// capability transition (image upgrade restored the command).
+	ReasonDragonflyReplTakeoverSupported = "DragonflyReplTakeoverSupported"
+	// ReasonDragonflySessionsLost fires when emergency promotion
+	// fell back to REPLICAOF NO ONE after REPLTAKEOVER failed.
+	ReasonDragonflySessionsLost = "DragonflySessionsLost"
 )
