@@ -1,0 +1,541 @@
+<!DOCTYPE html><html lang="en" class="no-js" data-theme="light" style="--accent: #008b8b; --accent-ink: #ffffff;"> <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>brdecide — the failover predictor — Bloodraven in Production</title><meta name="description" content="*(Optional — see the brief for the shorter `jq` route and what skipping it costs you.)* Build a tool that takes a failover-group status plus a clock and prints the decision the operator would take — the action, the alert, the `Reason` string, and whether cooldown will let it run. Check your own mental model against the real table now, on your terms, instead of at 3am while an incident checks it for you."><meta name="theme-color" content="#008b8b"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%233f7ac4'/%3E%3Ctext x='16' y='22' font-family='system-ui,sans-serif' font-size='18' font-weight='700' text-anchor='middle' fill='%23ffffff'%3EB%3C/text%3E%3C/svg%3E"><link rel="stylesheet" href="../assets/site.css"><script type="application/json" id="course-config">{"slug":"bloodraven-in-production","passingScore":70,"totalTopics":27,"rel":"../","units":[{"id":"u1","title":"Meet the group","topics":["u1t1","u1t2","u1t3"]},{"id":"u2","title":"How the operator decides","topics":["u2t1","u2t2","u2t3","u2t4"]},{"id":"u3","title":"Emergency failover, end to end","topics":["u3t1","u3t2","u3t3"]},{"id":"u4","title":"Where failover meets your application","topics":["u4t1","u4t2","u4t3","u4t4"]},{"id":"u5","title":"When the world misbehaves","topics":["u5t1","u5t2","u5t3","u5t4"]},{"id":"u6","title":"Backups, disaster recovery, and going live","topics":["u6t1","u6t2","u6t3","u6t4","u6t5"]},{"id":"u7","title":"Day 0 and day 2","topics":["u7t1","u7t2","u7t3","u7t4"]}]}</script></head> <body data-page-path="unit-2/project-1.html"> <a class="skip" href="#main">Skip to content</a> <header class="site-header"> <div class="wrap"> <a class="brand" href="../index.html"> <span class="brand__mark" aria-hidden="true">B</span> <span class="brand__text">Bloodraven in Production</span> </a> <span class="crumb">How the operator decides / brdecide — the failover predictor</span> <div class="search" data-search data-home="../index.html"> <label class="skip" for="site-search">Search this course</label> <input id="site-search" type="search" placeholder="Search  /" autocomplete="off"> <div class="search__results" role="listbox" aria-label="Search results" hidden></div> </div> <button class="btn btn--quiet" type="button" data-theme-toggle aria-label="Theme: light. Click to change.">
+○
+</button> </div> <div class="readbar" data-readbar aria-hidden="true"></div> </header> <main id="main" class="wrap">  <h1>brdecide — the failover predictor</h1> <div class="callout"> <h2 class="callout__title">Goal</h2> <p><em>(Optional — see the brief for the shorter <code>jq</code> route and what skipping it costs you.)</em> Build a tool that takes a failover-group status plus a clock and prints the decision the operator would take — the action, the alert, the <code>Reason</code> string, and whether cooldown will let it run. Check your own mental model against the real table now, on your terms, instead of at 3am while an incident checks it for you.</p> </div> <section class="reading"><p><strong>Unit 2 — How the operator decides · project · <code>code-notebook</code> · Python</strong></p>
+<blockquote>
+<p><strong>Optional.</strong> This is a drill, not a dependency: nothing in Units 3–7 requires you to have built
+<code>brdecide</code>. What you give up by skipping it is the one thing reading cannot give you — being <em>made</em>
+to run the table on inputs you did not choose, including the four-site group, the writable reader
+that preempts <code>TotalLoss</code>, and the history record stamped inside the future-clock grace. If you skip
+it, at least read <code>tests/fixtures/</code> and predict each verdict out loud before opening the harness’s
+expectations; that is the same exercise at a tenth of the cost.</p>
+</blockquote>
+<h2 id="goal">Goal</h2>
+<p>Build a tool that takes a failover-group status plus a clock and prints the decision the operator
+would take — the action, the alert, the <code>Reason</code> string, and whether cooldown will let it run. Check
+your own mental model against the real table now, on your terms, instead of at 3am while an incident
+checks it for you.</p>
+<p><strong>Learning goals</strong></p>
+<ul>
+<li>Implement the cross-site evaluation table in evaluation order, fence-first return included.</li>
+<li>Separate the decision from its execution gate by applying <code>failoverCooldown</code> only where the
+operator does.</li>
+</ul>
+<h2 id="how-this-works">How this works</h2>
+<p>You have run the cross-site table in your head. Now write it down, where a machine can check it.</p>
+<p><code>brdecide</code> reads a <code>MysqlFailoverGroup</code> object — the same JSON <code>kubectl get mysqlfailovergroup playground -o json</code> gives you — plus a clock reading, and prints what the operator would do with it. Nothing
+talks to a cluster. Every input is a fixture in <code>tests/fixtures/</code>, so the answers are reproducible and
+you can check yours against a known one.</p>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="plaintext"><code><span class="line"><span>python starter/brdecide.py --status tests/fixtures/playground-iad-down.json --now 2026-08-12T12:04:16Z</span></span>
+<span class="line"><span>python starter/brdecide.py --status tests/fixtures/playground-iad-down-cooldown.json --now 2026-08-12T12:04:16Z --json</span></span></code></pre>
+<p>The starter runs as given. It prints <code>Reason (unset)</code> and <code>coreCount 0</code>, because the four functions
+that matter are empty.</p>
+<p>The running example is <code>playground</code>: <code>iad</code> and <code>pdx</code> as <code>primary-candidate</code>, <code>reader</code> as
+<code>role: read-only</code>. Some fixtures add a fourth site to make a point.</p>
+<h2 id="your-tasks">Your tasks</h2>
+<p><strong>TODO A — the pre-pass.</strong> In <code>tally()</code>, walk the observations once. Increment <code>coreCount</code> for every
+site whose role is not <code>read-only</code> — a <code>dr-only</code> site counts, an <code>unknown</code> state counts. Route any
+site that is <code>writable</code> while its role is not <code>primary-candidate</code> into <code>fenceSites</code> and skip it, so it
+never reaches a tally. Skip <code>role: read-only</code> sites entirely. Everything left lands in the tally for
+its state; <code>unknown</code> lands in none of them.</p>
+<p><strong>TODO B — the rows.</strong> In <code>evaluate_cross_site()</code>, evaluate the rows in the order the code does and
+return at the first one that fires: fence-first, TotalLoss, SplitBrain, Failover, NoPrimary, Degraded,
+Healthy. Exact conditions, alert strings and <code>Reason</code> values are in the docstring. Two of them are
+easy to get wrong: the failover row needs three conjuncts at once — zero writable <strong>and</strong> at least one
+unreachable <strong>and</strong> at least one read-only — and it is the only acting row that sets no alert.</p>
+<p><strong>TODO C — the history.</strong> In <code>rehydrate_last_failover()</code>, choose between the two durable copies of
+<code>lastFailover</code>: the status subresource and the <code>bloodraven.shipstream.io/last-failover</code> annotation.
+Discard either one stamped more than 5 minutes ahead of <code>now</code>, install the later of what survives, and
+give ties to status.</p>
+<p><strong>TODO D — the gate.</strong> In <code>apply_gate()</code>, build <code>willRun</code>. Fencing a writable non-promotable site runs
+every poll. A promotion is the one thing <code>failoverCooldown</code> gates. Report <code>cooldownRemaining</code> whenever
+there is a record to measure against, even when nothing is waiting on it.</p>
+<p>Then run <code>python3 tests/harness.py</code> until it prints <code>PASS</code>.</p>
+<h2 id="what-the-scaffolding-is-for">What the scaffolding is for</h2>
+<p>Everything peripheral is wired: argument parsing, loading the object, the join of <code>spec.sites[].role</code>
+to <code>status.sites[].state</code> (a site absent from status is <code>unknown</code>, not missing), Go duration parsing,
+reading both history copies, <code>rank_promotion_candidates()</code>, and both output formats. The <code>--json</code>
+output is what the tests read, so keep its keys as <code>new_action()</code> defines them.</p>
+<p><code>status.conditions</code> is in the fixtures because it is in a real object. It is the <strong>previous</strong> poll’s
+verdict — sometimes stale by design. Do not read your answer out of it.</p>
+<h2 id="expected-output">Expected output</h2>
+<pre class="astro-code astro-code-themes github-light github-dark-dimmed" style="background-color:#fff;--shiki-dark-bg:#22272e;color:#24292e;--shiki-dark:#adbac7; overflow-x: auto;" tabindex="0" data-language="plaintext"><code><span class="line"><span>brdecide — bloodraven-playground/playground at 2026-08-12T12:04:16Z</span></span>
+<span class="line"><span></span></span>
+<span class="line"><span>  sites         iad=unreachable(primary-candidate)  pdx=read-only(primary-candidate)  reader=read-only(read-only)</span></span>
+<span class="line"><span>  coreCount     2</span></span>
+<span class="line"><span>  tallies       writable=[] readOnly=['pdx'] unreachable=['iad']</span></span>
+<span class="line"><span>  fenceSites    -</span></span>
+<span class="line"><span></span></span>
+<span class="line"><span>  Reason        Degraded</span></span>
+<span class="line"><span>  Alert         (none)</span></span>
+<span class="line"><span>  SplitBrain    no</span></span>
+<span class="line"><span>  Candidates    pdx  (tiebreak order — GTID freshness picks the winner)</span></span>
+<span class="line"><span></span></span>
+<span class="line"><span>  lastFailover  2026-08-12T12:02:46Z → pdx  (from status)</span></span>
+<span class="line"><span>  cooldown      5m0s configured, 3m30s remaining</span></span>
+<span class="line"><span>  BLOCKED       promotion blocked by cooldown</span></span>
+<span class="line"><span>  willRun       (nothing)</span></span></code></pre>
+<h2 id="rules">Rules</h2>
+<ul>
+<li><code>evaluate_cross_site()</code> stays pure. No clock, no history, no cooldown — the real <code>EvalCrossSite</code>
+never consults any of them, and a test asserts yours does not either.</li>
+<li>Use only the five reason strings the operator actually emits: <code>Healthy</code>, <code>Degraded</code>, <code>SplitBrain</code>,
+<code>NoPrimary</code>, <code>TotalLoss</code>. The docs name a sixth, <code>Failover</code>. It does not exist.</li>
+<li>Alert strings are verbatim, including the comma-space joins.</li>
+<li>Standard library only. Do not edit <code>tests/</code>.</li>
+</ul>
+<h2 id="steps">Steps</h2>
+<ul class="contains-task-list">
+<li class="task-list-item"><input type="checkbox" disabled> <strong>Count the sites the way the matrix counts them</strong> — fill in TODO A. Done when
+<code>playground-healthy.json</code> prints <code>"coreCount": 2</code>, <code>"writable": ["iad"]</code>, <code>"readOnly": ["pdx"]</code>;
+<code>playground-reader-writable.json</code> prints <code>"fenceSites": ["reader"]</code> with <code>reader</code> in no tally; and
+<code>playground-dr-only.json</code> prints <code>"coreCount": 3</code> with <code>"readOnly": ["lhr"]</code>.</li>
+<li class="task-list-item"><input type="checkbox" disabled> <strong>Evaluate the rows in order, fence-first at the top</strong> — done when <code>playground-healthy.json</code>,
+<code>playground-peer-down.json</code>, <code>playground-split-brain.json</code>, <code>playground-total-loss.json</code> and
+<code>playground-reader-writable-split-brain.json</code> print <code>Healthy</code>, <code>Degraded</code>, <code>SplitBrain</code>, <code>TotalLoss</code>
+and <code>Degraded</code>, and the last prints <code>"splitBrain": false</code>.</li>
+<li class="task-list-item"><input type="checkbox" disabled> <strong>Make the failover row demand all three conjuncts</strong> — done when <code>playground-iad-down.json</code> prints
+<code>"promotionCandidates": ["pdx"]</code> with <code>"alert": null</code>, <code>playground-all-read-only.json</code> prints
+<code>NoPrimary</code> with <code>NO PRIMARY: both sites are read-only</code>, and <code>playground-dr-only.json</code> prints
+<code>"promotionCandidates": []</code>.</li>
+<li class="task-list-item"><input type="checkbox" disabled> <strong>Rehydrate the history from whichever copy survived</strong> — done when <code>playground-history-conflict.json</code>
+prints <code>"lastFailoverSource": "annotation"</code>, and <code>playground-history-skewed.json</code> and
+<code>playground-history-tie.json</code> both print <code>"lastFailoverSource": "status"</code>.</li>
+<li class="task-list-item"><input type="checkbox" disabled> <strong>Gate the promotion, and nothing else</strong> — done when <code>playground-iad-down-cooldown.json</code> prints
+<code>"promotionBlockedBy": "cooldown"</code>, <code>"cooldownRemaining": 210.0</code>, <code>"willRun": []</code> and still
+<code>"promotionCandidates": ["pdx"]</code>; and <code>playground-reader-writable-cooldown.json</code> prints
+<code>"willRun": ["fence:reader"]</code> with <code>"promotionBlockedBy": null</code>.</li>
+<li class="task-list-item"><input type="checkbox" disabled> <strong>Run the whole fixture set</strong> — <code>python3 tests/harness.py</code> exits 0 and prints <code>PASS</code>.</li>
+<li class="task-list-item"><input type="checkbox" disabled> <strong>Record the reason string the docs get wrong</strong> — add a <code># NOTE:</code> comment to <code>brdecide.py</code>
+naming both the <code>Failover</code> the docs promise and the <code>Degraded</code> the code emits.</li>
+</ul>
+<h2 id="grading">Grading</h2>
+<p>See <a href="#project-rubric"><code>rubric.md</code></a> for the four weighted criteria and what full marks look like on each.
+The automated checks are the four <code>testCases</code> in <code>project.json</code>; they run the same functions
+<code>tests/harness.py</code> runs.</p></section> <section> <h2>Steps</h2> <ul class="checklist" data-checklist="u2p1"> <li> <input type="checkbox" id="step-u2p1-0"> <label for="step-u2p1-0">  <strong>Count the sites the way the matrix counts them</strong> <p>Fill in TODO A. One pass over the observations produces <code>coreCount</code>, <code>fenceSites</code> and the three tallies. Readers are invisible to the matrix; <code>dr-only</code> sites are not. A writable non-candidate is routed out before it can be tallied.</p> <span class="criteria">Done when: <code>python starter/brdecide.py --status tests/fixtures/playground-healthy.json --now 2026-08-12T12:04:16Z --json</code> prints <code>"coreCount": 2</code>, <code>"writable": ["iad"]</code> and <code>"readOnly": ["pdx"]</code>; the same command on <code>tests/fixtures/playground-reader-writable.json</code> prints <code>"fenceSites": ["reader"]</code> with <code>reader</code> in none of the three tallies; and on <code>tests/fixtures/playground-dr-only.json</code> it prints <code>"coreCount": 3</code> and <code>"readOnly": ["lhr"]</code>.</span> </label> </li><li> <input type="checkbox" id="step-u2p1-1"> <label for="step-u2p1-1">  <strong>Evaluate the rows in order, fence-first at the top</strong> <p>Fill in the first three rows and the last two of TODO B. Order is the behaviour: a writable reader alongside two writable candidates is a fencing job, not a split brain, because the fence-first return happens above the split-brain row.</p> <span class="criteria">Done when: With <code>--now 2026-08-12T12:04:16Z --json</code>, the fixtures <code>playground-healthy.json</code>, <code>playground-peer-down.json</code>, <code>playground-split-brain.json</code>, <code>playground-total-loss.json</code> and <code>playground-reader-writable-split-brain.json</code> print <code>"reason"</code> values <code>Healthy</code>, <code>Degraded</code>, <code>SplitBrain</code>, <code>TotalLoss</code> and <code>Degraded</code> respectively, and <code>playground-reader-writable-split-brain.json</code> prints <code>"splitBrain": false</code> with <code>"alert": "writable non-promotable site requires fencing (reader)"</code>.</span> </label> </li><li> <input type="checkbox" id="step-u2p1-2"> <label for="step-u2p1-2">  <strong>Make the failover row demand all three conjuncts</strong> <p>Finish TODO B with the failover and NoPrimary rows. Zero writable is not enough: without an unreachable peer the operator refuses to auto-elect, because all-read-only is a startup or recovery state that needs human input. And a <code>dr-only</code> replica never ranks as a candidate.</p> <span class="criteria">Done when: <code>playground-iad-down.json</code> prints <code>"promotionCandidates": ["pdx"]</code> with <code>"reason": "Degraded"</code> and <code>"alert": null</code>; <code>playground-all-read-only.json</code> prints <code>"reason": "NoPrimary"</code> and <code>"alert": "NO PRIMARY: both sites are read-only"</code>; <code>playground-dr-only.json</code> prints <code>"promotionCandidates": []</code> and <code>"alert": "NO PRIMARY: no writable site available"</code>.</span> </label> </li><li> <input type="checkbox" id="step-u2p1-3"> <label for="step-u2p1-3">  <strong>Rehydrate the history from whichever copy survived</strong> <p>Fill in TODO C. Two durable copies exist because the status subresource and the object's annotations travel different API paths with different RBAC, so either can be the fresher one. Take the later, discard anything more than five minutes ahead of the clock, give ties to status.</p> <span class="criteria">Done when: <code>playground-history-conflict.json</code> prints <code>"lastFailoverSource": "annotation"</code> and <code>"lastFailoverTarget": "pdx"</code>; <code>playground-history-skewed.json</code> prints <code>"lastFailoverSource": "status"</code> and <code>"lastFailover": "2026-08-12T12:03:16Z"</code>; <code>playground-history-tie.json</code> prints <code>"lastFailoverSource": "status"</code>.</span> </label> </li><li> <input type="checkbox" id="step-u2p1-4"> <label for="step-u2p1-4">  <strong>Gate the promotion, and nothing else</strong> <p>Fill in TODO D. <code>failoverCooldown</code> sits in front of one call. Fencing a writable non-promotable site is not behind it — that runs every poll, unconditionally, so a failed fence is retried without waiting for a transition.</p> <span class="criteria">Done when: <code>playground-iad-down-cooldown.json</code> prints <code>"promotionBlockedBy": "cooldown"</code>, <code>"cooldownRemaining": 210.0</code> and <code>"willRun": []</code> while still printing <code>"promotionCandidates": ["pdx"]</code>; <code>playground-reader-writable-cooldown.json</code> prints <code>"willRun": ["fence:reader"]</code> with <code>"promotionBlockedBy": null</code>.</span> </label> </li><li> <input type="checkbox" id="step-u2p1-5"> <label for="step-u2p1-5">  <strong>Run the whole fixture set</strong> <p>Run the harness over every fixture, including the awkward topologies: a four-site group, an all-unknown startup, a site the operator has not polled yet, and a record stamped two minutes in the future.</p> <span class="criteria">Done when: <code>python3 tests/harness.py</code> exits 0 and prints <code>PASS</code> as its final line.</span> </label> </li><li> <input type="checkbox" id="step-u2p1-6"> <label for="step-u2p1-6">  <strong>Record the reason string the docs get wrong</strong> <p>The published docs table names an outcome <code>Failover</code>. The code emits something else, and an alerting rule matching the docs will never fire — not rarely, never. Write down which string you had to implement, next to the one the docs promise.</p> <span class="criteria">Done when: <code>brdecide.py</code> contains a comment line beginning <code># NOTE:</code> whose text contains both <code>Failover</code> and <code>Degraded</code>.</span> </label> </li> </ul> </section><section id="project-rubric"> <h2>How it is graded</h2> <div class="scroll-x"><table><thead><tr><th scope="col">Criterion</th><th scope="col">What earns it</th><th scope="col">Weight</th></tr></thead><tbody><tr><th scope="row">The rows are evaluated in the operator's order, with the fence-first return above everything</th><td><code>evaluate_cross_site()</code> is a sequence of guarded early returns in the order fence-first, TotalLoss, SplitBrain, Failover, NoPrimary, Degraded, Healthy — not an unordered set of cases or a lookup keyed on a state tuple. Full marks require: the fence-first branch returning before the TotalLoss and SplitBrain rows can be reached; the failover row demanding zero writable, at least one unreachable and at least one read-only simultaneously; the failover row setting <code>PromotionCandidates</code> and <code>Reason</code> but no alert; both <code>NoPrimary</code> messages present with the two-site variant conditioned on exactly two read-only and zero unreachable; and every alert string reproduced verbatim, comma-space joins included. Deduct for any invented reason string outside the five the operator emits.</td><td>35</td></tr><tr><th scope="row">The cooldown gates the promotion and nothing else, and the history it measures against is rehydrated correctly</th><td><code>apply_gate()</code> blocks only <code>promote</code>, and only when a promotion was selected, a record exists, and the elapsed time is under the cooldown; <code>fence:&#x3C;site></code> entries are emitted regardless of the cooldown state. <code>cooldownRemaining</code> is reported whenever a record exists, including when nothing is waiting on it, and negative elapsed time counts as inside the window. <code>rehydrate_last_failover()</code> discards a copy stamped more than five minutes ahead of <code>now</code>, installs the later of what survives, and gives ties to status. The candidate list and <code>Reason</code> survive a blocked promotion unchanged — the table still ran.</td><td>25</td></tr><tr><th scope="row">The pre-pass tallies sites by role the way the matrix does</th><td><code>tally()</code> increments <code>coreCount</code> for every non-<code>read-only</code> role, so a <code>dr-only</code> site counts toward <code>coreCount</code> and lands in a tally while a <code>read-only</code> site does neither. A writable non-<code>primary-candidate</code> site goes to <code>fenceSites</code> and is skipped before any tally sees it. <code>unknown</code> sites count toward <code>coreCount</code> and appear in no tally. Deduct if <code>dr-only</code> is treated as a reader, if a fenced site is double-counted in the writable tally, or if the promotion candidate list can contain a non-<code>primary-candidate</code> site.</td><td>20</td></tr><tr><th scope="row">Craft: the decision is separated from its gate, and the output is readable under pressure</th><td><code>evaluate_cross_site()</code> takes only observations and priorities and touches no clock, history or cooldown, so the table can be reasoned about and tested on its own. The default text report is scannable at 3am: the reason, the alert and what will actually run are each on their own labelled line, and a blocked promotion is visibly distinct from a decision with nothing to do. A malformed or unreadable <code>--status</code> file produces a one-line diagnostic on stderr and a non-zero exit, not a traceback. Comments explain the non-obvious rules — why the failover row sets no alert, why the tie goes to status — rather than restating the code.</td><td>20</td></tr><tr><th scope="row">Total</th><td></td><td><strong>100</strong></td></tr></tbody></table></div> </section><section id="project-test-cases"> <h2>Test cases</h2> <div class="scroll-x"> <table> <thead> <tr> <th scope="col">Test</th> <th scope="col">Checks</th> <th scope="col">Expected</th> <th scope="col">Weight</th> </tr> </thead> <tbody> <tr> <th scope="row">canonical_playground_decisions</th> <td> The eight canonical states of <code>playground</code> — healthy, primary up with a peer down, primary gone with a live replica, a writable reader, a writable reader alongside two writable candidates, split brain, all read-only, and total loss — each produce the right <code>Reason</code>, the verbatim alert string, the right tallies and the right <code>willRun</code>. Includes a fixture whose <code>status.conditions</code> still carries the previous poll's stale <code>Healthy</code> reason, so echoing the condition back fails here. </td> <td> <code>PASS</code> </td> <td>40</td> </tr><tr> <th scope="row">awkward_topologies_and_history</th> <td> Generality on inputs the two-site mental model does not cover: a four-site group with a <code>dr-only</code> replica that counts toward <code>coreCount</code> but can never be promoted, a writable reader that preempts TotalLoss, an all-<code>unknown</code> startup, a <code>sitePriorities</code> list that reorders the tiebreak, a site absent from <code>status.sites</code> entirely, and history records that are skewed, tied, or stamped inside the future-clock grace. </td> <td> <code>PASS</code> </td> <td>20</td> </tr><tr> <th scope="row">cooldown_gates_promotion_only</th> <td> Catches a shortcut: wrapping the whole decision in the cooldown instead of the single call it actually guards. A writable <code>reader</code> ten seconds into a 30 s cooldown must still emit <code>fence:reader</code> — fencing a non-promotable site is not gated. A promotion ninety seconds into a 5 m cooldown must still report its <code>Reason</code> and candidate list while withholding only <code>promote</code>. Also catches reading <code>lastFailover</code> from the status copy alone: one fixture's annotation is an hour newer, and the status copy on its own would let a blocked promotion run. </td> <td> <code>PASS</code> </td> <td>25</td> </tr><tr> <th scope="row">table_stays_pure</th> <td> Structural: <code>evaluate_cross_site(observations, site_priorities)</code> must still exist with exactly that signature, its executable body must reference no clock, cooldown or failover history, and calling it directly must return <code>Degraded</code> with candidates <code>['pdx']</code> and no alert. <code>apply_gate()</code> must be where the cooldown lives. This is the real <code>EvalCrossSite</code> contract — the function is pure, and split-brain resolution and the anti-flap gate are layered on by the caller. </td> <td> <code>PASS</code> </td> <td>15</td> </tr> </tbody> </table> </div>  </section><section id="project-starter"> <h2>Starter files</h2> <details class="filelist card"> <summary>1 files</summary>  <h3>brdecide.py</h3> <pre>                    <code>#!/usr/bin/env python3
+&quot;&quot;&quot;brdecide — predict the cross-site decision the Bloodraven operator would take.
+
+Feed it a MysqlFailoverGroup object (``kubectl get mysqlfailovergroup playground -o json``)
+and a clock. It prints the action, the alert, the ``Reason`` string that reaches
+``status.conditions``, and whether ``spec.failoverCooldown`` will let the promotion run.
+
+    python starter/brdecide.py --status tests/fixtures/playground-healthy.json
+    python starter/brdecide.py --status tests/fixtures/playground-iad-down-cooldown.json \
+        --now 2026-08-12T12:04:16Z --json
+
+Everything peripheral is already wired: argument parsing, loading the object, joining
+spec roles to status states, Go duration parsing, candidate ranking, and both output
+formats. Four gaps are yours — TODO A, TODO B, TODO C, TODO D.
+&quot;&quot;&quot;
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+# --- Grounded constants -----------------------------------------------------
+# Site roles: api/v1alpha1/types.go — enum primary-candidate;dr-only;read-only.
+ROLE_PRIMARY_CANDIDATE = &quot;primary-candidate&quot;
+ROLE_DR_ONLY = &quot;dr-only&quot;
+ROLE_READ_ONLY = &quot;read-only&quot;
+
+# The four per-site states: internal/state/machine.go.
+STATE_UNKNOWN = &quot;unknown&quot;
+STATE_WRITABLE = &quot;writable&quot;
+STATE_READ_ONLY = &quot;read-only&quot;
+STATE_UNREACHABLE = &quot;unreachable&quot;
+
+# spec.failoverCooldown default &quot;5m&quot;; the operator falls back to the same value
+# when the pointer is nil.
+DEFAULT_FAILOVER_COOLDOWN = 300.0
+
+# FailoverClockSkewGrace = 5 * time.Minute.
+FAILOVER_CLOCK_SKEW_GRACE = 300.0
+
+# The two durable annotation keys, written as a pair by JSON merge patch.
+LAST_FAILOVER_ANNOTATION = &quot;bloodraven.shipstream.io/last-failover&quot;
+LAST_FAILOVER_TARGET_ANNOTATION = &quot;bloodraven.shipstream.io/last-failover-target&quot;
+
+
+@dataclass(frozen=True)
+class Observation:
+    &quot;&quot;&quot;One site at one poll cycle: its name, its configured role, its state.&quot;&quot;&quot;
+
+    name: str
+    role: str
+    state: str
+
+
+def new_action() -&gt; dict:
+    &quot;&quot;&quot;The empty CrossSiteAction. Fill these keys in evaluate_cross_site().&quot;&quot;&quot;
+    return {
+        &quot;coreCount&quot;: 0,
+        &quot;writable&quot;: [],
+        &quot;readOnly&quot;: [],
+        &quot;unreachable&quot;: [],
+        &quot;fenceSites&quot;: [],
+        &quot;promotionCandidates&quot;: [],
+        &quot;splitBrain&quot;: False,
+        &quot;alert&quot;: None,
+        &quot;reason&quot;: &quot;&quot;,
+    }
+
+
+# ===========================================================================
+# TODO A — the pre-pass: coreCount, fence routing, the three tallies
+# ===========================================================================
+def tally(observations: list[Observation]) -&gt; dict:
+    &quot;&quot;&quot;Walk the observations once and return the partial action.
+
+    Set ``coreCount``, ``fenceSites``, ``writable``, ``readOnly`` and
+    ``unreachable`` (name lists, in observation order). Leave the rest alone.
+
+    Three rules, in this order, for every observation:
+
+      1. ``coreCount`` increments for every site whose role is **not**
+         ``read-only``. A ``dr-only`` site counts. An ``unknown`` state still
+         counts — the site is part of the topology.
+      2. A site that is ``writable`` while its role is **not**
+         ``primary-candidate`` goes to ``fenceSites`` and is skipped: it never
+         reaches a tally.
+      3. A site whose role is ``read-only`` is skipped entirely.
+
+    Everything that survives lands in the tally for its state. ``unknown``
+    sites land in no tally at all.
+    &quot;&quot;&quot;
+    action = new_action()
+    # TODO A: implement the three rules above.
+    return action
+
+
+# ===========================================================================
+# TODO B — the rows, in evaluation order
+# ===========================================================================
+def evaluate_cross_site(observations: list[Observation], site_priorities: list[str]) -&gt; dict:
+    &quot;&quot;&quot;Return the CrossSiteAction for one poll cycle.
+
+    This function is **pure**: no clock, no failover history, no cooldown. It
+    mirrors EvalCrossSite in internal/state/matrix.go, which never considers
+    history or policy beyond the supplied priorities.
+
+    Evaluate the rows in this order and return at the first one that fires:
+
+      1. fence-first — ``fenceSites`` non-empty:
+         alert ``writable non-promotable site requires fencing (&lt;sites&gt;)``
+         (comma-space joined), reason ``Degraded``.
+      2. TotalLoss — ``len(unreachable) == coreCount``:
+         alert ``TOTAL LOSS: all sites are unreachable``, reason ``TotalLoss``.
+      3. SplitBrain — ``len(writable) &gt; 1``: ``splitBrain`` True,
+         alert ``SPLIT BRAIN: &lt;n&gt; sites are writable (&lt;sites&gt;)``,
+         reason ``SplitBrain``.
+      4. Failover — ``len(writable) == 0`` and ``len(unreachable) &gt; 0`` and
+         ``len(readOnly) &gt; 0`` and ranking yields at least one candidate:
+         set ``promotionCandidates``, reason ``Degraded``, **no alert**.
+      5. NoPrimary — still no writable site: reason ``NoPrimary``, alert
+         ``NO PRIMARY: both sites are read-only`` when exactly two read-only
+         sites and zero unreachable, otherwise
+         ``NO PRIMARY: no writable site available``.
+      6. Degraded — exactly one writable and at least one unreachable:
+         alert ``&lt;unreachable sites&gt; unreachable while &lt;writable site&gt; is primary``,
+         reason ``Degraded``.
+      7. Healthy — reason ``Healthy``, no alert.
+
+    Use rank_promotion_candidates() for row 4; it is already written.
+    &quot;&quot;&quot;
+    action = tally(observations)
+    # TODO B: evaluate the rows above, in order, and return at the first hit.
+    return action
+
+
+# ===========================================================================
+# TODO C — rehydrate the failover history from its two durable copies
+# ===========================================================================
+def rehydrate_last_failover(status_record, annotation_record, now):
+    &quot;&quot;&quot;Pick which durable copy of the failover history the operator believes.
+
+    ``status_record`` and ``annotation_record`` are each ``(timestamp, target)``
+    with ``timestamp`` a timezone-aware datetime or None.
+
+    Return ``(timestamp, target, source)`` where ``source`` is ``&quot;status&quot;``,
+    ``&quot;annotation&quot;`` or None.
+
+      * Discard either copy stamped more than FAILOVER_CLOCK_SKEW_GRACE ahead of
+        ``now``. A future-dated record would wedge promotion indefinitely.
+      * Of what survives, install the **later** one.
+      * Ties go to status: equal timestamps describe the same promotion.
+      * Nothing left → ``(None, None, None)``.
+    &quot;&quot;&quot;
+    # TODO C: implement the skew guard, the later-copy rule and the tie rule.
+    return (None, None, None)
+
+
+# ===========================================================================
+# TODO D — the execution gate
+# ===========================================================================
+def apply_gate(action: dict, last_failover, now: datetime, cooldown: float) -&gt; dict:
+    &quot;&quot;&quot;Decide what actually runs this poll, and report the cooldown timer.
+
+    Return a dict with exactly these three keys:
+
+      ``willRun``            list of strings, in order: one ``fence:&lt;site&gt;``
+                             per entry in ``action[&quot;fenceSites&quot;]``, then
+                             ``promote`` when a promotion is selected and not
+                             blocked.
+      ``promotionBlockedBy`` ``&quot;cooldown&quot;`` or None.
+      ``cooldownRemaining``  seconds left on the timer, as a float.
+
+    The cooldown is enforced in exactly one place: immediately before the
+    promotion call. So it can only ever block ``promote``. Fencing a writable
+    non-promotable site is not gated by it — that runs every poll.
+
+    Blocked when a promotion is selected, ``last_failover`` is set, and
+    ``now - last_failover &lt; cooldown``. Negative elapsed time (a record stamped
+    in the future but inside the skew grace) counts as still active.
+
+    ``cooldownRemaining`` is ``max(0.0, cooldown - elapsed)`` whenever
+    ``last_failover`` is set — report the timer even when nothing is waiting on
+    it — and ``0.0`` when it is not.
+    &quot;&quot;&quot;
+    # TODO D: build willRun, set promotionBlockedBy, compute cooldownRemaining.
+    return {&quot;willRun&quot;: [], &quot;promotionBlockedBy&quot;: None, &quot;cooldownRemaining&quot;: 0.0}
+
+
+# ===========================================================================
+# Scaffolding below this line. You should not need to change any of it.
+# ===========================================================================
+
+_DURATION_RE = re.compile(r&quot;(\d+(?:\.\d+)?)(ms|us|ns|h|m|s)&quot;)
+_DURATION_UNITS = {
+    &quot;ns&quot;: 1e-9,
+    &quot;us&quot;: 1e-6,
+    &quot;ms&quot;: 1e-3,
+    &quot;s&quot;: 1.0,
+    &quot;m&quot;: 60.0,
+    &quot;h&quot;: 3600.0,
+}
+
+
+def parse_go_duration(text: str | None, default: float) -&gt; float:
+    &quot;&quot;&quot;Parse a Go duration string such as &quot;5m&quot;, &quot;30s&quot; or &quot;1m30s&quot; into seconds.&quot;&quot;&quot;
+    if not text:
+        return default
+    parts = _DURATION_RE.findall(text)
+    if not parts:
+        raise ValueError(f&quot;cannot parse duration {text!r}&quot;)
+    return sum(float(value) * _DURATION_UNITS[unit] for value, unit in parts)
+
+
+def parse_rfc3339(text: str | None):
+    &quot;&quot;&quot;Parse an RFC3339 timestamp into a timezone-aware UTC datetime, or None.&quot;&quot;&quot;
+    if not text:
+        return None
+    cleaned = text.strip().replace(&quot;Z&quot;, &quot;+00:00&quot;)
+    parsed = datetime.fromisoformat(cleaned)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def format_rfc3339(moment) -&gt; str | None:
+    if moment is None:
+        return None
+    return moment.astimezone(timezone.utc).strftime(&quot;%Y-%m-%dT%H:%M:%SZ&quot;)
+
+
+def load_group(path: str) -&gt; dict:
+    with open(path, &quot;r&quot;, encoding=&quot;utf-8&quot;) as handle:
+        group = json.load(handle)
+    if group.get(&quot;kind&quot;) != &quot;MysqlFailoverGroup&quot;:
+        raise ValueError(f&quot;{path}: not a MysqlFailoverGroup object&quot;)
+    return group
+
+
+def observations_from(group: dict) -&gt; list[Observation]:
+    &quot;&quot;&quot;Join spec.sites (role) to status.sites (state), in declared site order.
+
+    A site the operator has not reported on yet is `unknown`, not missing.
+    &quot;&quot;&quot;
+    states = {
+        site.get(&quot;name&quot;): site.get(&quot;state&quot;) or STATE_UNKNOWN
+        for site in group.get(&quot;status&quot;, {}).get(&quot;sites&quot;, [])
+    }
+    observations = []
+    for site in group.get(&quot;spec&quot;, {}).get(&quot;sites&quot;, []):
+        name = site.get(&quot;name&quot;)
+        if not name:
+            raise ValueError(&quot;spec.sites[] entry with no name&quot;)
+        observations.append(
+            Observation(
+                name=name,
+                role=site.get(&quot;role&quot;) or ROLE_PRIMARY_CANDIDATE,
+                state=states.get(name, STATE_UNKNOWN),
+            )
+        )
+    if len(observations) &lt; 2:
+        raise ValueError(&quot;spec.sites has fewer than 2 entries&quot;)
+    return observations
+
+
+def read_history(group: dict):
+    &quot;&quot;&quot;Return the two durable copies as ((ts, target), (ts, target)).&quot;&quot;&quot;
+    status = group.get(&quot;status&quot;, {})
+    annotations = group.get(&quot;metadata&quot;, {}).get(&quot;annotations&quot;, {}) or {}
+    status_record = (
+        parse_rfc3339(status.get(&quot;lastFailover&quot;)),
+        status.get(&quot;lastFailoverTarget&quot;) or None,
+    )
+    annotation_record = (
+        parse_rfc3339(annotations.get(LAST_FAILOVER_ANNOTATION)),
+        annotations.get(LAST_FAILOVER_TARGET_ANNOTATION) or None,
+    )
+    return status_record, annotation_record
+
+
+def rank_promotion_candidates(read_only: list[str], observations: list[Observation],
+                              site_priorities: list[str]) -&gt; list[str]:
+    &quot;&quot;&quot;Order the read-only primary-candidates: sitePriorities first, then declared order.
+
+    Mirrors RankPromotionCandidates. Non-primary-candidate sites are dropped, so a
+    `dr-only` replica is never returned. This list is the **tiebreaker** only:
+    the operator ranks it by GTID freshness before promoting anything.
+    &quot;&quot;&quot;
+    roles = {obs.name: obs.role for obs in observations}
+    eligible = [name for name in read_only if roles.get(name) == ROLE_PRIMARY_CANDIDATE]
+    out: list[str] = []
+    for name in site_priorities or []:
+        if name in eligible and name not in out:
+            out.append(name)
+    for name in eligible:
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def decide(group: dict, now: datetime) -&gt; dict:
+    &quot;&quot;&quot;Run the table, rehydrate the history, apply the gate. The whole tool.&quot;&quot;&quot;
+    observations = observations_from(group)
+    spec = group.get(&quot;spec&quot;, {})
+    site_priorities = (spec.get(&quot;splitBrainPolicy&quot;) or {}).get(&quot;sitePriorities&quot;) or []
+    cooldown = parse_go_duration(spec.get(&quot;failoverCooldown&quot;), DEFAULT_FAILOVER_COOLDOWN)
+
+    action = evaluate_cross_site(observations, site_priorities)
+
+    status_record, annotation_record = read_history(group)
+    last_failover, last_target, source = rehydrate_last_failover(
+        status_record, annotation_record, now
+    )
+    gate = apply_gate(action, last_failover, now, cooldown)
+
+    meta = group.get(&quot;metadata&quot;, {})
+    report = {
+        &quot;group&quot;: f&quot;{meta.get(&#39;namespace&#39;, &#39;default&#39;)}/{meta.get(&#39;name&#39;, &#39;?&#39;)}&quot;,
+        &quot;now&quot;: format_rfc3339(now),
+        &quot;sites&quot;: [{&quot;name&quot;: o.name, &quot;role&quot;: o.role, &quot;state&quot;: o.state} for o in observations],
+    }
+    report.update(action)
+    report.update(
+        {
+            &quot;lastFailover&quot;: format_rfc3339(last_failover),
+            &quot;lastFailoverTarget&quot;: last_target,
+            &quot;lastFailoverSource&quot;: source,
+            &quot;cooldown&quot;: cooldown,
+        }
+    )
+    report.update(gate)
+    return report
+
+
+def _human_seconds(seconds: float) -&gt; str:
+    seconds = float(seconds)
+    if seconds &gt;= 60:
+        minutes, rest = divmod(seconds, 60)
+        return f&quot;{int(minutes)}m{rest:g}s&quot;
+    return f&quot;{seconds:g}s&quot;
+
+
+def render_text(report: dict) -&gt; str:
+    lines = [f&quot;brdecide — {report[&#39;group&#39;]} at {report[&#39;now&#39;]}&quot;, &quot;&quot;]
+    sites = &quot;  &quot;.join(f&quot;{s[&#39;name&#39;]}={s[&#39;state&#39;]}({s[&#39;role&#39;]})&quot; for s in report[&quot;sites&quot;])
+    lines.append(f&quot;  sites         {sites}&quot;)
+    lines.append(f&quot;  coreCount     {report[&#39;coreCount&#39;]}&quot;)
+    lines.append(
+        &quot;  tallies       writable={} readOnly={} unreachable={}&quot;.format(
+            report[&quot;writable&quot;] or &quot;[]&quot;, report[&quot;readOnly&quot;] or &quot;[]&quot;,
+            report[&quot;unreachable&quot;] or &quot;[]&quot;,
+        )
+    )
+    lines.append(f&quot;  fenceSites    {report[&#39;fenceSites&#39;] or &#39;-&#39;}&quot;)
+    lines.append(&quot;&quot;)
+    lines.append(f&quot;  Reason        {report[&#39;reason&#39;] or &#39;(unset)&#39;}&quot;)
+    lines.append(f&quot;  Alert         {report[&#39;alert&#39;] or &#39;(none)&#39;}&quot;)
+    lines.append(f&quot;  SplitBrain    {&#39;yes&#39; if report[&#39;splitBrain&#39;] else &#39;no&#39;}&quot;)
+    candidates = report[&quot;promotionCandidates&quot;]
+    if candidates:
+        lines.append(
+            &quot;  Candidates    {}  (tiebreak order — GTID freshness picks the winner)&quot;.format(
+                &quot;, &quot;.join(candidates)
+            )
+        )
+    else:
+        lines.append(&quot;  Candidates    -&quot;)
+    lines.append(&quot;&quot;)
+    if report[&quot;lastFailover&quot;]:
+        lines.append(
+            &quot;  lastFailover  {} → {}  (from {})&quot;.format(
+                report[&quot;lastFailover&quot;], report[&quot;lastFailoverTarget&quot;] or &quot;?&quot;,
+                report[&quot;lastFailoverSource&quot;],
+            )
+        )
+        lines.append(
+            &quot;  cooldown      {} configured, {} remaining&quot;.format(
+                _human_seconds(report[&quot;cooldown&quot;]),
+                _human_seconds(report[&quot;cooldownRemaining&quot;]),
+            )
+        )
+    else:
+        lines.append(&quot;  lastFailover  (none recorded)&quot;)
+        lines.append(f&quot;  cooldown      {_human_seconds(report[&#39;cooldown&#39;])} configured&quot;)
+    if report[&quot;promotionBlockedBy&quot;]:
+        lines.append(f&quot;  BLOCKED       promotion blocked by {report[&#39;promotionBlockedBy&#39;]}&quot;)
+    lines.append(f&quot;  willRun       {&#39;, &#39;.join(report[&#39;willRun&#39;]) or &#39;(nothing)&#39;}&quot;)
+    return &quot;\n&quot;.join(lines)
+
+
+def main(argv: list[str] | None = None) -&gt; int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(&quot;--status&quot;, required=True,
+                        help=&quot;path to a MysqlFailoverGroup JSON object&quot;)
+    parser.add_argument(&quot;--now&quot;, default=None,
+                        help=&quot;RFC3339 clock reading (default: the real clock)&quot;)
+    parser.add_argument(&quot;--json&quot;, action=&quot;store_true&quot;,
+                        help=&quot;emit the decision as JSON instead of a report&quot;)
+    args = parser.parse_args(argv)
+
+    try:
+        group = load_group(args.status)
+        now = parse_rfc3339(args.now) or datetime.now(timezone.utc)
+        report = decide(group, now)
+    except (OSError, ValueError, KeyError) as err:
+        print(f&quot;brdecide: {err}&quot;, file=sys.stderr)
+        return 2
+
+    print(json.dumps(report, indent=2) if args.json else render_text(report))
+    return 0
+
+
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+</code>
+                  </pre>  </details> </section><p class="card">
+Projects are not auto-graded here. The rubric and the test cases above are the grading
+          contract — run them yourself on your own machine.
+</p>   </main> <footer class="site-footer"> <div class="wrap">  <p class="pager"> <a href="../unit-2/test.html">← Predicting the operator</a> <a href="../unit-3/topic-1.html">The nine steps of a promotion →</a> </p>  <p> <a href="../index.html">Syllabus</a> ·
+<a href="../certificate.html">Completion record</a> ·
+<a href="../sources.html">Sources</a> ·
+<button class="btn btn--quiet" type="button" data-reset>Reset progress</button> </p> <p class="site-license" data-license-id="all-rights-reserved"> <span>© 2026 ShipStream, LLC. </span> All rights reserved. </p> </div> </footer> <div aria-live="polite" class="skip" data-live></div> <dialog id="reset-dialog"> <h2>Erase saved progress?</h2> <p>
+This erases all quiz scores, reading progress, project checklists, and your name on the
+        certificate. It cannot be undone, and it affects only this course in this browser.
+</p> <div class="dialog__actions"> <button class="btn" type="button" data-reset-cancel>Cancel</button> <button class="btn btn--primary" type="button" data-reset-confirm>Erase</button> </div> </dialog> <script src="../assets/search-index.js" defer></script> <script src="../assets/site.js" defer></script> </body> </html>

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="960" height="420" role="img">
+  <rect width="960" height="420" fill="#ffffff"/>
+  <text x="480" y="32" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#1a1d23">Same detection. The drain is what changes.</text>
+
+  <text x="40" y="78" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#14532d">Caught up — 12 s</text>
+  <rect x="40" y="90" width="120" height="36" rx="6" fill="#e8f1fa" stroke="#2b6cb0"/>
+  <text x="100" y="113" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#1e3a5f">detect 6 s</text>
+  <rect x="164" y="90" width="80" height="36" rx="6" fill="#e8f6ee" stroke="#1b7f4e"/>
+  <text x="204" y="113" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#14532d">drain ~0</text>
+  <rect x="248" y="90" width="200" height="36" rx="6" fill="#f1f5f9" stroke="#64748b"/>
+  <text x="348" y="113" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#334155">promote + confirm 6 s</text>
+  <text x="470" y="113" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#14532d">= 12 s</text>
+
+  <text x="40" y="178" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#9a3412">Relay logs to apply — 36 s</text>
+  <rect x="40" y="190" width="120" height="36" rx="6" fill="#e8f1fa" stroke="#2b6cb0"/>
+  <text x="100" y="213" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#1e3a5f">detect 6 s</text>
+  <rect x="164" y="190" width="520" height="36" rx="6" fill="#ffedd5" stroke="#c2410c"/>
+  <text x="424" y="213" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#9a3412">drain spends its whole 30 s budget</text>
+  <text x="710" y="213" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="700" fill="#9a3412">= 36 s</text>
+
+  <line x1="40" y1="270" x2="920" y2="270" stroke="#d0d5dc" stroke-width="1"/>
+  <text x="40" y="264" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b">0 s</text>
+  <text x="160" y="264" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b">6 s</text>
+  <text x="268" y="264" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b">12 s</text>
+  <text x="680" y="264" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" fill="#64748b">36 s</text>
+
+  <text x="40" y="310" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="#7f1d1d">Fatal if they fail (promotion aborts)</text>
+  <text x="40" y="334" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="#991b1b">STOP REPLICA  ·  RESET REPLICA ALL  ·  super_read_only=OFF  ·  read_only=OFF</text>
+  <text x="40" y="366" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="#334155">Fence, kill connections, drain, and the GTID read only warn. Promotion continues.</text>
+  <text x="40" y="396" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="#64748b">Playground cooldown is 30 s. Shipped default is 5 m. Timings here are real. The cooldown is not.</text>
+</svg>
