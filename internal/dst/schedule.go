@@ -19,6 +19,8 @@ const (
 	OpHealOpSite      OpKind = "healOperatorSite"
 	OpPartPair        OpKind = "partitionPair"
 	OpHealPair        OpKind = "healPair"
+	OpPartOneWay      OpKind = "partitionOneWay"
+	OpHealOneWay      OpKind = "healOneWay"
 	OpRestartOperator OpKind = "restartOperator"
 	OpAmbiguousMuts   OpKind = "ambiguousMutations"
 	OpFailMuts        OpKind = "failMutations"
@@ -49,7 +51,7 @@ type Op struct {
 	At     int
 	Kind   OpKind
 	Site   string
-	Peer   string // partner for pair partitions
+	Peer   string // destination for one-way cuts; partner for pair partitions
 	N      int    // count for ambiguous/failing mutations, or crash countdown
 	Fenced bool   // crash boot mode: true = sidecar re-fences on boot
 
@@ -168,7 +170,8 @@ type faultWeight struct {
 var faultWeights = []faultWeight{
 	{OpCrash, 16},
 	{OpPartOpSite, 13},
-	{OpPartPair, 9},
+	{OpPartPair, 5},
+	{OpPartOneWay, 4},
 	{OpRestartOperator, 8},
 	{OpCrashOperatorMid, 6},
 	{OpAmbiguousMuts, 9},
@@ -297,6 +300,19 @@ func GenerateTrial(seed uint64) Trial {
 			start := at()
 			ops = append(ops, Op{At: start, Kind: OpPartPair, Site: a, Peer: b})
 			pairedHeal(start, OpHealPair, a, b)
+		case OpPartOneWay:
+			// Identical draw shape to OpPartPair: Site=from, Peer=to, no
+			// extra direction coin. Inserted immediately after the pair
+			// bucket so only rolls that land in this 4-point subrange
+			// change behavior; later kinds keep their pickFaultKind rolls.
+			a := pickSite()
+			b := pickSite()
+			for b == a {
+				b = pickSite()
+			}
+			start := at()
+			ops = append(ops, Op{At: start, Kind: OpPartOneWay, Site: a, Peer: b})
+			pairedHeal(start, OpHealOneWay, a, b)
 		case OpRestartOperator:
 			ops = append(ops, Op{At: at(), Kind: OpRestartOperator})
 		case OpCrashOperatorMid:

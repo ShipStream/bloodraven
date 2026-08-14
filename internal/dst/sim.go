@@ -5,8 +5,9 @@
 // controller, recovery, source convergence, DNS reconcile, and primary
 // re-assert logic — against an in-memory model of a multi-site MySQL
 // cluster. Every trial is driven by a seeded PRNG: the fault schedule
-// (crashes, partitions, ambiguous writes, operator restarts, rogue
-// fencing) is generated up front from the seed, execution consumes no
+// (crashes, operator↔site and directed site↔site partitions, ambiguous
+// writes, operator restarts, rogue fencing) is generated up front from
+// the seed, execution consumes no
 // randomness, and the fake clock advances one poll interval per cycle.
 // A failing trial therefore replays exactly from its seed, and its fault
 // schedule can be shrunk to a minimal reproduction.
@@ -125,6 +126,8 @@ const (
 	EvHealOpSite      EventKind = "fault.healOperatorSite"
 	EvPartPair        EventKind = "fault.partitionPair"
 	EvHealPair        EventKind = "fault.healPair"
+	EvPartOneWay      EventKind = "fault.partitionOneWay"
+	EvHealOneWay      EventKind = "fault.healOneWay"
 	EvOperatorRestart EventKind = "fault.operatorRestart"
 	EvOperatorArm     EventKind = "fault.armOperatorCrash"
 	EvOperatorDie     EventKind = "fault.operatorDied"
@@ -224,7 +227,7 @@ type Cluster struct {
 
 	// Fault state.
 	opLinkDown    map[string]bool
-	pairLinkDown  map[string]bool // key: "a|b" with a < b
+	dirLinkDown   map[string]bool // key: dirKey(from, to) — from cannot reach to
 	ambiguousMuts map[string]int  // site -> next N mutations apply-but-error
 	failMuts      map[string]int  // site -> next N mutations error-without-apply
 	fetchStalled  map[string]bool
@@ -279,7 +282,7 @@ func NewCluster(specs []SiteSpec, baselineTxns int64) *Cluster {
 		byHost:        make(map[string]*siteData),
 		byLBIP:        make(map[string]string),
 		opLinkDown:    make(map[string]bool),
-		pairLinkDown:  make(map[string]bool),
+		dirLinkDown:   make(map[string]bool),
 		ambiguousMuts: make(map[string]int),
 		failMuts:      make(map[string]int),
 		fetchStalled:  make(map[string]bool),
@@ -328,11 +331,10 @@ func canonicalHost(h string) string {
 	return strings.TrimSuffix(h, ".")
 }
 
-func pairKey(a, b string) string {
-	if a > b {
-		a, b = b, a
-	}
-	return a + "|" + b
+// dirKey identifies the directed link from → to. It is ordered: dirKey("a","b")
+// and dirKey("b","a") are distinct, so a one-way cut is representable.
+func dirKey(from, to string) string {
+	return from + ">" + to
 }
 
 // SetCapture enables full event logging (used when reproducing a failure).
@@ -476,7 +478,7 @@ func (c *Cluster) effectiveThreadsLocked(s *siteData) (io, sql bool) {
 	io = s.ioWant && s.ioErr == ""
 	if io {
 		src := c.byHost[canonicalHost(s.sourceHost)]
-		if src == nil || src.crashed || c.pairLinkDown[pairKey(s.name, src.name)] || src == s {
+		if src == nil || src.crashed || c.dirLinkDown[dirKey(s.name, src.name)] || src == s {
 			io = false // "Connecting": link or source down
 		}
 	}
@@ -542,19 +544,61 @@ func (c *Cluster) SetOperatorLink(site string, down bool) {
 	}
 }
 
+// SetDirLink cuts or heals the directed link from → to. "down" means
+// requests initiated at from cannot reach to (replica IO, sidecar peer
+// HTTP). The reverse direction is unchanged.
+func (c *Cluster) SetDirLink(from, to string, down bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.setDirLinkLocked(from, to, down)
+}
+
+// SetPairLink is shape C: both directed cuts. One schedule op, one repro
+// event, two map keys. Implemented as sugar over the directional primitive
+// so there is one mechanism rather than two.
 func (c *Cluster) SetPairLink(a, b string, down bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	k := pairKey(a, b)
-	if c.pairLinkDown[k] == down {
+	changed := c.setDirLinkStateLocked(a, b, down)
+	changed = c.setDirLinkStateLocked(b, a, down) || changed
+	if !changed {
 		return
 	}
-	c.pairLinkDown[k] = down
 	if down {
 		c.event(a, EvPartPair, "peer="+b, "")
 	} else {
 		c.event(a, EvHealPair, "peer="+b, "")
 	}
+}
+
+// setDirLinkLocked updates one directed link and emits the one-way event.
+// Caller holds c.mu.
+func (c *Cluster) setDirLinkLocked(from, to string, down bool) {
+	if !c.setDirLinkStateLocked(from, to, down) {
+		return
+	}
+	if down {
+		c.event(from, EvPartOneWay, "to="+to, "")
+	} else {
+		c.event(from, EvHealOneWay, "to="+to, "")
+	}
+}
+
+// setDirLinkStateLocked writes the map only. Caller holds c.mu.
+func (c *Cluster) setDirLinkStateLocked(from, to string, down bool) bool {
+	k := dirKey(from, to)
+	if c.dirLinkDown[k] == down {
+		return false
+	}
+	c.dirLinkDown[k] = down
+	return true
+}
+
+// linkDown reports whether from cannot reach to. Test helper; same package.
+func (c *Cluster) linkDown(from, to string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dirLinkDown[dirKey(from, to)]
 }
 
 func (c *Cluster) AddAmbiguousMutations(site string, n int) {
@@ -842,7 +886,7 @@ func (c *Cluster) Tick() {
 
 		// IO thread: fetch from source into the relay log.
 		if s.ioWant && s.ioErr == "" && src != nil && src != s && !src.crashed &&
-			!c.pairLinkDown[pairKey(s.name, src.name)] {
+			!c.dirLinkDown[dirKey(s.name, src.name)] {
 			// Errant-transaction check (error 1236): with AUTO_POSITION the
 			// source refuses a replica that has transactions it lacks.
 			if !src.executed.contains(s.executed) {
