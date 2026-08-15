@@ -55,6 +55,20 @@ spec:
               The sidecar cannot get its keyring into escrow, so the operator will not
               seal the site. Check the sidecar's /keyring/status lastError field.
             runbook_url: https://bloodraven.dev/docs/operations/runbooks#keyring-not-sealed
+        - alert: BloodravenLicenseUpdatesExpiring
+          # Renewal reminder only. The operator does not gate or change
+          # behavior when the timestamp is in the past.
+          expr: (bloodraven_license_updates_expiry_timestamp_seconds - time()) / 86400 < 30
+          for: 1h
+          labels:
+            severity: info
+          annotations:
+            summary: Bloodraven license update period for {{ $labels.group }} ends in under 30 days
+            description: >-
+              The paid update period for failover group {{ $labels.namespace }}/{{ $labels.group }}
+              ({{ $labels.organization }}, {{ $labels.edition }}) ends soon. This is a compliance
+              reminder, not an outage. The operator keeps running.
+            runbook_url: https://bloodraven.dev/docs/licensing
         - alert: BloodravenUnencryptedTablespaces
           # Non-zero means part of the data on the PVC is in the clear.
           # Expected on a group adopted with encryption-adopt=confirm until

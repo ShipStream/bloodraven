@@ -583,21 +583,28 @@ func TestEnvtest_ReconcilerMissingSecretRequeues(t *testing.T) {
 }
 
 func TestEnvtest_LicenseFieldPersistsAndDoesNotFailReconcile(t *testing.T) {
-	ns := "envtest-license"
-	ensureNamespace(t, ns)
-	ensureSecret(t, ns)
+	nsInvalid := "envtest-license-invalid"
+	nsNone := "envtest-license-none"
+	ensureNamespace(t, nsInvalid)
+	ensureNamespace(t, nsNone)
+	ensureSecret(t, nsInvalid)
+	ensureSecret(t, nsNone)
 
-	fg := newTestFG(ns)
-	fg.Spec.License = "this-is-not-a-valid-token"
-	if err := k8sClient.Create(ctx, fg); err != nil {
+	invalid := newTestFG(nsInvalid)
+	invalid.Spec.License = "this-is-not-a-valid-token"
+	if err := k8sClient.Create(ctx, invalid); err != nil {
 		t.Fatalf("spec.license must be admitted: %v", err)
+	}
+	none := newTestFG(nsNone)
+	if err := k8sClient.Create(ctx, none); err != nil {
+		t.Fatalf("create control fg: %v", err)
 	}
 
 	var fetched v1alpha1.MysqlFailoverGroup
-	if err := k8sClient.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: ns}, &fetched); err != nil {
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: invalid.Name, Namespace: nsInvalid}, &fetched); err != nil {
 		t.Fatal(err)
 	}
-	if fetched.Spec.License != fg.Spec.License {
+	if fetched.Spec.License != invalid.Spec.License {
 		t.Fatalf("spec.license was pruned: got %q", fetched.Spec.License)
 	}
 
@@ -606,11 +613,31 @@ func TestEnvtest_LicenseFieldPersistsAndDoesNotFailReconcile(t *testing.T) {
 		Scheme:   scheme,
 		Recorder: record.NewFakeRecorder(10),
 	}
-	res, err := r.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: fg.Name, Namespace: ns},
+	invalidRes, err := r.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: invalid.Name, Namespace: nsInvalid},
 	})
 	if err != nil {
 		t.Fatalf("invalid license must not fail reconcile: %v", err)
 	}
-	_ = res
+	noneRes, err := r.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: none.Name, Namespace: nsNone},
+	})
+	if err != nil {
+		t.Fatalf("no-license control reconcile failed: %v", err)
+	}
+	if invalidRes != noneRes {
+		t.Fatalf("invalid license must not change reconcile result: invalid=%+v none=%+v", invalidRes, noneRes)
+	}
+
+	var afterInvalid, afterNone v1alpha1.MysqlFailoverGroup
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: invalid.Name, Namespace: nsInvalid}, &afterInvalid); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: none.Name, Namespace: nsNone}, &afterNone); err != nil {
+		t.Fatal(err)
+	}
+	if afterInvalid.Status.LastFailoverTarget != afterNone.Status.LastFailoverTarget {
+		t.Fatalf("invalid license must not change failover status: invalid=%q none=%q",
+			afterInvalid.Status.LastFailoverTarget, afterNone.Status.LastFailoverTarget)
+	}
 }

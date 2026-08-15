@@ -3,6 +3,7 @@ package controller
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"hash"
 	"log/slog"
 	"strings"
 	"time"
@@ -112,11 +113,19 @@ func observationFromResult(mfgToken, operatorToken string, result license.Result
 	return obs
 }
 
+func hashCappedToken(h hash.Hash, token string) {
+	token = strings.TrimSpace(token)
+	if len(token) > license.MaxTokenBytes {
+		token = token[:license.MaxTokenBytes]
+	}
+	_, _ = h.Write([]byte(token))
+}
+
 func licenseDigest(mfgToken, operatorToken string, result license.Result) string {
 	h := sha256.New()
-	_, _ = h.Write([]byte(mfgToken))
+	hashCappedToken(h, mfgToken)
 	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(operatorToken))
+	hashCappedToken(h, operatorToken)
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(result.Source))
 	_, _ = h.Write([]byte{0})
@@ -148,6 +157,13 @@ func (r *MysqlFailoverGroupReconciler) applyLicenseObservation(nn types.Namespac
 
 	changed := !seen || prev.digest != next.digest
 
+	// Leaving a paid license: drop the old expiry timestamp before writing
+	// the new observation so one scrape cannot still see a past
+	// updatesUntil and fire the renewal reminder.
+	if seen && prev.hasExpiry && !next.hasExpiry {
+		metrics.DeleteLicenseUpdatesExpiry(nn.Namespace, nn.Name, prev.organization, prev.edition)
+	}
+
 	// Write the current series first so a scrape cannot observe a gap,
 	// then drop the previous label set only when it differs.
 	metrics.SetLicenseInfo(nn.Namespace, nn.Name, next.organization, next.edition, next.valid)
@@ -161,7 +177,7 @@ func (r *MysqlFailoverGroupReconciler) applyLicenseObservation(nn types.Namespac
 		}
 		sameExpiry := prev.hasExpiry && next.hasExpiry &&
 			prev.organization == next.organization && prev.edition == next.edition
-		if prev.hasExpiry && !sameExpiry {
+		if prev.hasExpiry && next.hasExpiry && !sameExpiry {
 			metrics.DeleteLicenseUpdatesExpiry(nn.Namespace, nn.Name, prev.organization, prev.edition)
 		}
 	}

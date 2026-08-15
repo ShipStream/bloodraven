@@ -63,18 +63,6 @@ type Result struct {
 	Source         Source
 }
 
-// Claims is the signed payload. exp is deliberately absent.
-type Claims struct {
-	Iss          string `json:"iss"`
-	Sub          string `json:"sub"`
-	Org          string `json:"org"`
-	Edition      string `json:"edition"`
-	IssuedFor    string `json:"issuedFor"`
-	Iat          int64  `json:"iat"`
-	Nbf          int64  `json:"nbf,omitempty"`
-	UpdatesUntil int64  `json:"updatesUntil"`
-}
-
 func invalid(reason string) Result {
 	return invalidKid(reason, "")
 }
@@ -143,11 +131,11 @@ func Verify(token string, keys KeyLookup, now time.Time) Result {
 
 	payloadJSON, err := decodeSegment(parts[1], maxPayloadBytes)
 	if err != nil {
-		return invalid(ReasonMalformed)
+		return invalidKid(ReasonMalformed, kid)
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(payloadJSON, &raw); err != nil {
-		return invalid(ReasonMalformed)
+		return invalidKid(ReasonMalformed, kid)
 	}
 
 	iss, ok := stringClaim(raw, "iss")

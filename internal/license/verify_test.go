@@ -240,6 +240,21 @@ func TestVerifyTable(t *testing.T) {
 			want:  invalid(ReasonMalformed),
 		},
 		{
+			name: "oversized decoded payload",
+			token: func() string {
+				c := validClaims(now)
+				c["pad"] = strings.Repeat("x", maxPayloadBytes+1)
+				return mustEncode(t, priv, kid, c)
+			},
+			keys: keys,
+			now:  now,
+			check: func(t *testing.T, r Result) {
+				if r.Valid || r.Reason != ReasonMalformed || r.Kid != kid {
+					t.Fatalf("oversized payload must be malformed and keep kid: %+v", r)
+				}
+			},
+		},
+		{
 			name: "wrong issuer",
 			token: func() string {
 				c := validClaims(now)

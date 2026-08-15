@@ -180,6 +180,15 @@ func TestObserveLicenseInvalidMFGDoesNotUseOperator(t *testing.T) {
 	}
 }
 
+func TestLicenseDigestCapsOversizedToken(t *testing.T) {
+	huge := strings.Repeat("a", license.MaxTokenBytes+4096)
+	a := licenseDigest(huge, "", license.Result{Reason: "malformed"})
+	b := licenseDigest(huge[:license.MaxTokenBytes], "", license.Result{Reason: "malformed"})
+	if a != b {
+		t.Fatal("digest must cap hashed token bytes at MaxTokenBytes")
+	}
+}
+
 func TestLogOperatorLicenseHasNoFG(t *testing.T) {
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
 	priv, kid, keys := licenseTestAuthority(t)
