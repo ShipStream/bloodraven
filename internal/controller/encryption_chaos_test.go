@@ -815,8 +815,8 @@ func TestEncryptionChaos_StaleKeyringProjectionIsRepaired(t *testing.T) {
 // TestEncryptionChaos_RotationRefusedDuringTopologyOperations covers the
 // direction of EXP-16 the operator already implements: rotation is
 // refused whenever the topology is not settled. The inverse (refusing to
-// promote a site that is mid-rotation) is EXP-01 and is not implemented
-// yet — see the deferred list in the chaos plan.
+// promote a site that is mid-rotation) is EXP-01; #160 implements the
+// gate and scenario 52 is the real-MySQL regression.
 func TestEncryptionChaos_RotationRefusedDuringTopologyOperations(t *testing.T) {
 	cases := []struct {
 		name    string
