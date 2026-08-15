@@ -48,6 +48,8 @@ type mockMySQL struct {
 	gtidExecuted          string
 	killConnectionResults []int
 	killConnectionCalls   int
+	setReadOnlyFalseN     int
+	setSuperROFalseN      int
 
 	// replicaStatus is returned from ShowReplicaStatus. nil (default) means
 	// "never had replication configured", which is the fresh-deploy signature.
@@ -97,6 +99,8 @@ func (m *mockMySQL) SetSuperReadOnly(_ context.Context, on bool) error {
 	m.superReadOnly = on
 	if on {
 		m.readOnly = true
+	} else {
+		m.setSuperROFalseN++
 	}
 	return nil
 }
@@ -134,7 +138,16 @@ func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.readOnly = on
+	if !on {
+		m.setReadOnlyFalseN++
+	}
 	return nil
+}
+
+func (m *mockMySQL) writableGrants() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.setReadOnlyFalseN + m.setSuperROFalseN
 }
 
 // ShowReplicaStatus returns a deep copy of the replica status.

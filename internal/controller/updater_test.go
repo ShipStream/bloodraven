@@ -99,6 +99,60 @@ func TestUpdateController_ExecuteTargetsNeverHandsOffToReader(t *testing.T) {
 	}
 }
 
+func TestUpdateController_ExecuteTargetsSkipsRotationBlockedHandoff(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = time.Millisecond
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	rotating := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	sealed := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	var promoted string
+	_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{
+		Name: "primary", Host: "primary-internal", Checker: active, Drifted: true,
+	}, []UpdateTarget{
+		{Name: "rotating", Host: "rotating-internal", Checker: rotating, Promotable: true, RotationBlocked: true, ExpectedSource: "primary-internal"},
+		{Name: "sealed", Host: "sealed-internal", Checker: sealed, Promotable: true, ExpectedSource: "primary-internal"},
+	}, func(_ context.Context, name string) error {
+		if name == "primary" {
+			active.ReplicaStatusVal = &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "sealed-internal"}
+		}
+		return nil
+	}, func(target, _ string) { promoted = target })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted != "sealed" {
+		t.Fatalf("promoted = %q, want sealed", promoted)
+	}
+	if rotating.ReadOnlyVal == false {
+		t.Fatal("rotating standby must not be handed off")
+	}
+}
+
+func TestUpdateController_ExecuteTargetsRefusesWhenOnlyStandbyRotating(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	rotating := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{
+		Name: "primary", Checker: active, Drifted: true,
+	}, []UpdateTarget{
+		{Name: "rotating", Host: "rotating-internal", Checker: rotating, Promotable: true, RotationBlocked: true, Drifted: true, ExpectedSource: "primary-internal"},
+	}, func(context.Context, string) error { return nil }, nil)
+	if err == nil || !strings.Contains(err.Error(), "UnsealReason=Rotation") {
+		t.Fatalf("err = %v, want rotation reason", err)
+	}
+	if rotating.ReadOnlyVal == false {
+		t.Fatal("rotating standby must not be promoted")
+	}
+}
+
 func TestUpdateController_ExecuteTargetsSkipsUnhealthyReader(t *testing.T) {
 	logger := testutil.TestLogger()
 	uc := NewUpdateController(NewFailoverController(logger), logger)

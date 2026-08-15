@@ -138,6 +138,39 @@ func TestValidatePlannedFailover_ActiveSiteIsNoop(t *testing.T) {
 	}
 }
 
+func TestValidatePlannedFailover_TargetMidRotation(t *testing.T) {
+	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad", nil, nil)
+	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
+		Sites: []v1alpha1.SiteEncryptionStatus{{
+			Name: "pdx", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealReason: v1alpha1.UnsealReasonRotation,
+		}},
+	}
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
+	if result != PlannedFailoverReject || reason != "KeyringRotation" {
+		t.Fatalf("expected KeyringRotation reject, got result=%v reason=%q err=%v", result, reason, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "UnsealReason=Rotation") {
+		t.Errorf("err = %v, want UnsealReason=Rotation", err)
+	}
+}
+
+func TestValidatePlannedFailover_TargetMidRotationBeatsUnhealthy(t *testing.T) {
+	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
+		map[string]string{"pdx": "unreachable"},
+		map[string]bool{"pdx": false})
+	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true}
+	fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{
+		Sites: []v1alpha1.SiteEncryptionStatus{{
+			Name: "pdx", Phase: v1alpha1.KeyringPhaseUnsealed, UnsealReason: v1alpha1.UnsealReasonRotation,
+		}},
+	}
+	result, reason, err := validatePlannedFailoverRequest(fg, PlannedFailoverRequest{Site: "pdx"}, time.Now(), false)
+	if result != PlannedFailoverReject || reason != "KeyringRotation" {
+		t.Fatalf("expected KeyringRotation over TargetUnhealthy, got result=%v reason=%q err=%v", result, reason, err)
+	}
+}
+
 func TestValidatePlannedFailover_UnreachableTarget(t *testing.T) {
 	fg := plannedFG([]string{"iad", "pdx"}, nil, "iad",
 		map[string]string{"pdx": "unreachable"},

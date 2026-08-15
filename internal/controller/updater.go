@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,6 +56,10 @@ type UpdateTarget struct {
 	ReplUser       string
 	ReplPassword   string
 	UseSSL         bool
+	// RotationBlocked is true when the site is mid-keyring-rotation.
+	// It may still receive a Deployment update as a follower, but it
+	// must not be chosen as the handoff target.
+	RotationBlocked bool
 }
 
 // NewUpdateController creates a new UpdateController.
@@ -214,8 +219,13 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		processedFollowers[name] = struct{}{}
 	}
 	var handoff *UpdateTarget
+	var rotatingStandby []string
 	for i := range followers {
 		if !followers[i].Promotable {
+			continue
+		}
+		if followers[i].RotationBlocked {
+			rotatingStandby = append(rotatingStandby, followers[i].Name)
 			continue
 		}
 		if followers[i].Drifted {
@@ -229,6 +239,9 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		}
 	}
 	if handoff == nil {
+		if len(rotatingStandby) > 0 {
+			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted", strings.Join(rotatingStandby, ", "))
+		}
 		return processed, fmt.Errorf("no healthy promotable standby available for active-site update")
 	}
 	if handoff.Host == "" {

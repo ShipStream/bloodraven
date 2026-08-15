@@ -185,6 +185,16 @@ func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req Planned
 		return PlannedFailoverSkip, "", nil
 	}
 
+	// Mid-rotation check sits before transient health checks so a
+	// replica that is rolling for rotation is not mis-labelled
+	// TargetUnhealthy. Reject, do not defer: the documented procedure
+	// waits for Sealed, then re-annotates.
+	if fg.SiteKeyringRotationBlocksPromotion(req.Site) {
+		return PlannedFailoverReject, "KeyringRotation", fmt.Errorf(
+			"planned-failover: site %q is mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted",
+			req.Site)
+	}
+
 	// Target's observed state must be read-only and replicating — a
 	// site that is unreachable or unknown cannot catch up, and one
 	// that is already writable means the cluster has bigger problems
