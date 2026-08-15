@@ -48,10 +48,10 @@ jobs:
     uses: ./.github/workflows/_e2e.yml
     with:
       # Ordered least- to most-destructive: 48 and 50 leave the cluster
-      # healthy, 51 rebuilds the replica datadir. Together they are the
-      # minimum set from .tmp/chaos-plan-v1.0.md that makes "encryption
-      # validated in CI" true rather than rotation-only.
-      scenario: 48-keyring-seal-and-rotation,50-encrypted-pod-replace,51-encrypted-reclone
+      # healthy, 52 holds the primary down mid-rotation, 51 rebuilds the
+      # replica datadir. Together they are the minimum set from
+      # .tmp/chaos-plan-v1.0.md plus the #160 regression.
+      scenario: 48-keyring-seal-and-rotation,50-encrypted-pod-replace,52-rotation-promotion-refused,51-encrypted-reclone
       enable-encryption: true
-      # Three scenarios on one cluster; 51 alone budgets 20m for the clone.
-      timeout-minutes: 150
+      # Four scenarios on one cluster; 51 and 52 each budget 20m.
+      timeout-minutes: 180

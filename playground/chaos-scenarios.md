@@ -1355,6 +1355,53 @@ setup). `Escrowed`/`Clone` is the old livelock and fails the scenario.
 
 ---
 
+## 52. Rotation Promotion Refused
+
+**Automated**: `make chaos-run SCENARIO=52-rotation-promotion-refused`
+
+**Quarantined from every batch profile** — same encryption baseline as
+scenarios 48–51, and it holds the primary down. CI's encryption job
+runs it explicitly.
+
+**Hypothesis**: a replica with `UnsealReason=Rotation` is refused as a
+promotion target on both paths. Planned failover onto that site fails
+immediately with `reason: KeyringRotation` and does not change
+`activeSite`. Scaling the primary to 0 then leaves the group
+`Degraded/NoPrimary` naming `UnsealReason=Rotation` rather than
+promoting the rotating replica; `bloodraven_failovers_total` does not
+increment for that site.
+
+**What it actually proves** (the #160 / EXP-01 + EXP-16 inverse
+regression, against real MySQL):
+
+1. **The planned-failover validator is wired.** Rejection happens
+   before health checks, so a replica that is rolling for rotation is
+   labelled `KeyringRotation`, not `TargetUnhealthy`. The source stays
+   writable.
+2. **Emergency failover will not make a mid-rotation keyring the sole
+   authoritative copy.** The refused counter increments and
+   `bloodraven_failovers_total` does not. `KeyringPromotionRefused` is
+   emitted when the refused set changes (a fresh operator); re-runs
+   against the same process rely on the counter. `Degraded` is not
+   asserted — replication errors overwrite that single condition
+   once the replica notices the source is gone.
+3. **The cluster can leave the window.** Restoring the primary (or,
+   if rotation finished while it was down, promoting the now-sealed
+   replica) returns the group to one writable + healthy replicas, and
+   the rotated site reseals.
+
+Component coverage for the same gate lives in
+`test/component/keyring_promotion_gate_test.go`. This scenario does
+not repeat those cases.
+
+**Expected duration**: ~8-15 minutes (dominated by the rotation pod
+rolls and the ~37s emergency failover drain).
+
+**Cleanup**: scales the primary back if the scenario bailed out while
+it was at 0; clears a leftover `rotate-keyring` annotation.
+
+---
+
 ## Execution Plan
 
 1. **Setup**: `k3d cluster create` + `./playground/setup.sh`
