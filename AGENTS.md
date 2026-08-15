@@ -25,7 +25,7 @@ Use standard Go formatting: run `gofmt` on changed files and keep imports organi
 
 **Test-helper name collisions across files in the same package** are easy to hit because `go test` builds every `*_test.go` file in the package together. If you add a helper like `contains` or `drainEvents` in a new test file, grep the package first — duplicates produce a confusing build error that points only at the redeclaration site, not at the cause.
 
-Structured-log `msg` strings and field names listed in `site/content/docs/8.observability/7.log-schema.md` are a public stability contract — downstream log pipelines filter on them. When you touch a log call site whose `msg` appears in that doc's Event reference, either preserve the `msg` string and the documented field set exactly, or update `site/content/docs/8.observability/7.log-schema.md` in the same PR and call out the break in the PR description. The same applies to field naming: log keys are `camelCase` (per the contract), not `snake_case`.
+Structured-log `msg` strings and field names listed in `site/content/docs/8.observability/7.log-schema.md` are a public stability contract — downstream log pipelines filter on them. When you touch a log call site whose `msg` appears in that doc's Event reference, either preserve the `msg` string and the documented field set exactly, or update `site/content/docs/8.observability/7.log-schema.md` in the same PR, call out the break in the PR description (the immediate record), and record it in the GitHub release notes when the change ships. The same applies to field naming: log keys are `camelCase` (per the contract), not `snake_case`.
 
 ## Testing Guidelines
 Add table-driven unit tests beside the code they cover, using the existing `*_test.go` layout under `internal/`. Put cross-component behavior tests in `test/component`, API-server/controller-runtime tests in `test/envtest`, and real-cluster playground scenarios in `internal/playground/scenarios` through `cmd/playground-chaos`. Some tests create local HTTP listeners with `httptest`, so restricted sandboxes may fail even when local developer runs pass.
@@ -44,6 +44,8 @@ Before pushing a branch that opens or updates a PR, run all of the following fro
 
 ## Commit & Pull Request Guidelines
 Recent history uses short, imperative subjects such as `Upgrade mysql-watcher to Bloodraven MySQL operator`. Keep commit titles concise and action-oriented. PRs should explain the operational impact, note any CRD, failover, or sidecar behavior changes, link the relevant issue, and include logs, manifests, or screenshots when changing observable cluster behavior.
+
+This repo does not keep a `CHANGELOG.md`. Release notes live on GitHub Releases. Do not add the file — concurrent PRs each recreating it is how it kept coming back and causing add/add merge conflicts.
 
 ## Playground
 The `playground/` directory deploys a complete Bloodraven environment into a local multi-node Kubernetes cluster (k3d recommended). It includes a two-site MySQL cluster, real-time dashboard, counter app, and chaos tools for triggering failovers. All scripts auto-detect docker or podman (preferring docker, since k3d's podman support is experimental) and the cluster tool (k3d, kind, or minikube). Set `BLOODRAVEN_CONTAINER_RUNTIME=podman` to force podman if both are installed.

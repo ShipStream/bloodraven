@@ -6154,7 +6154,7 @@ spec:
                     : ''5s'') + duration(has(self.peerCheckInterval) ? self.peerCheckInterval
                     : ''5s'')'
               sidecarImage:
-                default: ghcr.io/shipstream/bloodraven-sidecar:1.0.1
+                default: ghcr.io/shipstream/bloodraven-sidecar:1.1.0
                 description: SidecarImage is the image used for the sidecar/init container.
                 minLength: 1
                 type: string
