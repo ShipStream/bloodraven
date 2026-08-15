@@ -266,6 +266,49 @@ func TestRankPromotionCandidates(t *testing.T) {
 			t.Fatalf("expected [iad pdx], got %v", got)
 		}
 	})
+
+	t.Run("promotion-blocked sites are omitted", func(t *testing.T) {
+		blocked := []SiteObservation{
+			obs("iad", pc, StateReadOnly),
+			{Name: "pdx", Role: pc, State: StateReadOnly, PromotionBlocked: true},
+		}
+		got := RankPromotionCandidates(blocked, []string{"pdx", "iad"})
+		if !equalStrings(got, []string{"iad"}) {
+			t.Fatalf("expected [iad], got %v", got)
+		}
+	})
+}
+
+func TestEvalCrossSite_PromotionBlocked(t *testing.T) {
+	pc := SiteRolePrimaryCandidate
+	t.Run("some remain", func(t *testing.T) {
+		got := EvalCrossSite([]SiteObservation{
+			obs("iad", pc, StateUnreachable),
+			{Name: "pdx", Role: pc, State: StateReadOnly, PromotionBlocked: true},
+			obs("fra", pc, StateReadOnly),
+		}, nil)
+		if got.Reason != "Degraded" {
+			t.Fatalf("reason = %q, want Degraded", got.Reason)
+		}
+		if !equalStrings(got.PromotionCandidates, []string{"fra"}) {
+			t.Fatalf("candidates = %v, want [fra]", got.PromotionCandidates)
+		}
+	})
+	t.Run("none remain", func(t *testing.T) {
+		got := EvalCrossSite([]SiteObservation{
+			obs("iad", pc, StateUnreachable),
+			{Name: "pdx", Role: pc, State: StateReadOnly, PromotionBlocked: true},
+		}, nil)
+		if got.Reason != "NoPrimary" {
+			t.Fatalf("reason = %q, want NoPrimary", got.Reason)
+		}
+		if len(got.PromotionCandidates) != 0 {
+			t.Fatalf("candidates = %v, want empty", got.PromotionCandidates)
+		}
+		if !strings.Contains(got.Alert, "UnsealReason=Rotation") || !strings.Contains(got.Alert, "pdx") {
+			t.Fatalf("alert = %q, want rotation refusal naming pdx", got.Alert)
+		}
+	})
 }
 
 func TestResolveSplitBrain(t *testing.T) {

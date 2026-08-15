@@ -66,6 +66,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 				return 0, err
 			}
 		}
+		if r.Runner != nil {
+			r.Runner.SetKeyringRotationBlocked(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, nil)
+		}
 		return 0, nil
 	}
 
@@ -162,6 +165,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	setEncryptionCondition(fg)
 	if err := r.patchEncryptionStatus(ctx, fg); err != nil {
 		return 0, err
+	}
+	// Push immediately so the topology manager does not wait for the
+	// 30s runner sync before refusing (or unblocking) promotion.
+	if r.Runner != nil {
+		r.Runner.SetKeyringRotationBlocked(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, rotationBlockedSites(fg))
 	}
 	return requeue, nil
 }

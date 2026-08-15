@@ -198,6 +198,40 @@ func TestEffectiveSitePhaseAndSealed(t *testing.T) {
 	})
 }
 
+func TestSiteKeyringRotationBlocksPromotion(t *testing.T) {
+	rotation := func(phase SiteKeyringPhase, reason KeyringUnsealReason) *MysqlFailoverGroup {
+		fg := encFG(&EncryptionAtRestSpec{Enabled: true})
+		fg.Status.EncryptionAtRest = &EncryptionAtRestStatus{
+			Sites: []SiteEncryptionStatus{{Name: "pdx", Phase: phase, UnsealReason: reason}},
+		}
+		return fg
+	}
+
+	cases := []struct {
+		name string
+		fg   *MysqlFailoverGroup
+		site string
+		want bool
+	}{
+		{name: "encryption off", fg: encFG(nil), site: "pdx"},
+		{name: "missing status", fg: encFG(&EncryptionAtRestSpec{Enabled: true}), site: "pdx"},
+		{name: "sealed", fg: rotation(KeyringPhaseSealed, ""), site: "pdx"},
+		{name: "clone unsealed", fg: rotation(KeyringPhaseUnsealed, UnsealReasonClone), site: "pdx"},
+		{name: "bootstrap unsealed", fg: rotation(KeyringPhaseUnsealed, UnsealReasonBootstrap), site: "pdx"},
+		{name: "rotation unsealed", fg: rotation(KeyringPhaseUnsealed, UnsealReasonRotation), site: "pdx", want: true},
+		{name: "rotation escrowed", fg: rotation(KeyringPhaseEscrowed, UnsealReasonRotation), site: "pdx", want: true},
+		{name: "rotation failed", fg: rotation(KeyringPhaseFailed, UnsealReasonRotation), site: "pdx", want: true},
+		{name: "other site", fg: rotation(KeyringPhaseUnsealed, UnsealReasonRotation), site: "iad"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.fg.SiteKeyringRotationBlocksPromotion(tc.site); got != tc.want {
+				t.Fatalf("SiteKeyringRotationBlocksPromotion(%q) = %v, want %v", tc.site, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSiteEncryptionStatusByName(t *testing.T) {
 	var nilStatus *EncryptionAtRestStatus
 	if got := nilStatus.SiteEncryptionStatusByName("iad"); got != nil {

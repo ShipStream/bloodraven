@@ -15,6 +15,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -661,6 +662,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 	promotionGtid, err := r.Runner.PlannedFailoverPromote(promoteCtx, nn, cur.Target, cur.SourcePrimary)
 	cancel()
 	if err != nil {
+		if errors.Is(err, errKeyringRotationBlocked) {
+			return r.plannedFailoverRollback(ctx, fg, nn, "KeyringRotation",
+				fmt.Sprintf("planned-failover: site %q is mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted",
+					cur.Target),
+				"rejected")
+		}
 		return r.plannedFailoverFail(ctx, fg, "ExecuteFailed",
 			fmt.Sprintf("planned-failover: promotion of %q failed: %v; manual recovery required",
 				cur.Target, err),

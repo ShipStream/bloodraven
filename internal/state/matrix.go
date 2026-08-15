@@ -24,6 +24,11 @@ type SiteObservation struct {
 	Name  string
 	Role  SiteRole
 	State SiteState
+	// PromotionBlocked excludes a primary-candidate from auto-promotion
+	// without changing its role. Used for mid-keyring-rotation sites:
+	// they stay in the topology tallies but must not become the sole
+	// authoritative copy. Default false keeps existing fixtures valid.
+	PromotionBlocked bool
 }
 
 // CrossSiteAction describes the cross-site action implied by a poll
@@ -142,6 +147,13 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 				action.Reason = "Degraded"
 				return action
 			}
+			if blocked := rotationBlockedNames(readOnly); len(blocked) > 0 {
+				action.Alert = fmt.Sprintf(
+					"NO PRIMARY: refusing to promote %s (UnsealReason=Rotation); finish the rotation before this site can be promoted",
+					strings.Join(blocked, ", "))
+				action.Reason = "NoPrimary"
+				return action
+			}
 		}
 		// No eligible promotion target: alert only. Use a message that
 		// matches the two-site convention when exactly two read-only
@@ -175,7 +187,7 @@ func RankPromotionCandidates(obs []SiteObservation, sitePriorities []string) []s
 	out := make([]string, 0, len(obs))
 	for _, name := range sitePriorities {
 		for _, c := range obs {
-			if c.Name == name && c.Role == SiteRolePrimaryCandidate {
+			if c.Name == name && c.Role == SiteRolePrimaryCandidate && !c.PromotionBlocked {
 				if _, dup := seen[name]; !dup {
 					out = append(out, name)
 					seen[name] = struct{}{}
@@ -185,7 +197,7 @@ func RankPromotionCandidates(obs []SiteObservation, sitePriorities []string) []s
 		}
 	}
 	for _, c := range obs {
-		if c.Role != SiteRolePrimaryCandidate {
+		if c.Role != SiteRolePrimaryCandidate || c.PromotionBlocked {
 			continue
 		}
 		if _, dup := seen[c.Name]; dup {
@@ -193,6 +205,16 @@ func RankPromotionCandidates(obs []SiteObservation, sitePriorities []string) []s
 		}
 		out = append(out, c.Name)
 		seen[c.Name] = struct{}{}
+	}
+	return out
+}
+
+func rotationBlockedNames(obs []SiteObservation) []string {
+	var out []string
+	for _, c := range obs {
+		if c.Role == SiteRolePrimaryCandidate && c.PromotionBlocked {
+			out = append(out, c.Name)
+		}
 	}
 	return out
 }

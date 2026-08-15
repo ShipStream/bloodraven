@@ -179,3 +179,10 @@ and promoted anyway.
 - Sidecars tick exactly once per operator poll, at a per-trial phase. Real
   monitors run on their own interval, so sub-poll interleavings (two sidecar
   ticks inside one operator action) are unexplored.
+- **Keyring rotation is unmodeled.** Encryption phase, `UnsealReason`, and
+  the rotate-keyring annotation do not exist in the simulator. Adding a
+  random `OpKind` would change `faultWeights` and shift every seed, and
+  would still only test a synthetic gate. The coupling "do not promote a
+  site with `UnsealReason=Rotation`" is pinned by component tests in
+  `test/component/keyring_promotion_gate_test.go`. `PromotionBlocked`
+  defaults false, so existing DST seeds are unaffected.

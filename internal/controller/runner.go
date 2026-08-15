@@ -58,6 +58,12 @@ type managedTopology struct {
 	// Degraded reason so transition events are not confused by replication
 	// reasons that overwrite the shared Degraded condition.
 	lastTopologyDegradedReason string
+
+	// lastKeyringPromotionSkipped / lastKeyringPromotionRefused are the
+	// last Event-emitted sets. In-memory only: one re-fire after process
+	// restart is expected and wanted.
+	lastKeyringPromotionSkipped []string
+	lastKeyringPromotionRefused []string
 }
 
 // DeploymentReconciler is the subset of the reconciler that the runner needs
@@ -312,6 +318,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
 			existing.tm.SetTopologyFrozen(frozen)
 			existing.tm.SetPlannedFailoverActive(plannedActive)
+			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			if existing.dragonfly != nil {
 				existing.dragonfly.SetPaused(plannedActive)
 			}
@@ -342,6 +349,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			mt.tm.SetAutoBootstrapSuppressed(suppress)
 			mt.tm.SetTopologyFrozen(frozen)
 			mt.tm.SetPlannedFailoverActive(plannedActive)
+			mt.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			if mt.dragonfly != nil {
 				mt.dragonfly.SetPaused(plannedActive)
 			}
@@ -604,6 +612,10 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	if gate, ok := r.deployReconciler.(KeyringGate); ok {
 		tm.SetKeyringGate(gate)
 	}
+
+	// Must land before Run: the first Poll otherwise sees an empty
+	// blocked set and can promote a mid-rotation replica.
+	tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 
 	r.restoreFailoverState(tm, fg, nn)
 	for _, site := range fg.Status.Sites {
@@ -1131,8 +1143,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	r.populatePITRStatus(nn, &freshFG)
 
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
+	// Keyring promotion Events compare in-memory last-seen, so they must
+	// still run here: after an operator restart the CR already carries
+	// the overlay Alert and a DeepEqual skip would otherwise stay silent.
 	if equality.Semantic.DeepEqual(existingStatus, &freshFG.Status) {
 		r.logger.Debug("status unchanged, skipping update", "fg", nn)
+		r.emitKeyringPromotionEvents(&freshFG, snap)
 		return nil
 	}
 
@@ -1179,6 +1195,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// Emit Kubernetes Events only after the status update succeeds,
 	// so events are not emitted for transitions that failed to persist.
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
+	r.emitKeyringPromotionEvents(&freshFG, snap)
 	r.emitDegradedTransitionEvents(&freshFG, nn, snap)
 	return nil
 }
@@ -1353,6 +1370,39 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	}
 }
 
+// emitKeyringPromotionEvents fires Warning Events when the promotion
+// path skipped or refused a mid-rotation site. Comparison is against
+// in-memory last-seen on managedTopology so a process restart re-fires
+// once. Metric increments live in applyCrossSiteAction (actual decision),
+// not here (Event reminder).
+func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFailoverGroup, snap TopologySnapshot) {
+	if r.recorder == nil {
+		return
+	}
+	nn := FailoverGroupNamespacedName(fg)
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return
+	}
+	if !stringSlicesEqual(snap.KeyringPromotionSkipped, mt.lastKeyringPromotionSkipped) {
+		for _, site := range snap.KeyringPromotionSkipped {
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringPromotionSkipped",
+				"skipping promotion candidate %s: site is mid-keyring-rotation (UnsealReason=Rotation)", site)
+		}
+		mt.lastKeyringPromotionSkipped = append([]string(nil), snap.KeyringPromotionSkipped...)
+	}
+	if !stringSlicesEqual(snap.KeyringPromotionRefused, mt.lastKeyringPromotionRefused) {
+		if len(snap.KeyringPromotionRefused) > 0 {
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringPromotionRefused",
+				"promotion refused: %s mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted",
+				strings.Join(snap.KeyringPromotionRefused, ", "))
+		}
+		mt.lastKeyringPromotionRefused = append([]string(nil), snap.KeyringPromotionRefused...)
+	}
+}
+
 // emitDegradedTransitionEvents fires Kubernetes Events when the topology-level
 // Degraded reason transitions (e.g. Healthy → SplitBrain, TotalLoss → Healthy).
 // It tracks the last topology reason on the managedTopology struct rather than
@@ -1382,6 +1432,12 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 		r.recorder.Eventf(fg, corev1.EventTypeWarning, "SplitBrainDetected",
 			"Both sites are writable: %s", snap.Alert)
 	case "NoPrimary":
+		if strings.Contains(snap.Alert, "UnsealReason=Rotation") {
+			// KeyringPromotionRefused is the specific Event; the generic
+			// "Both sites are read-only" wording is wrong for this shape
+			// (usually one unreachable primary + one rotating replica).
+			break
+		}
 		r.recorder.Eventf(fg, corev1.EventTypeWarning, "NoPrimaryDetected",
 			"Both sites are read-only: %s", snap.Alert)
 	case "TotalLoss":

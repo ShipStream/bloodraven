@@ -184,3 +184,19 @@ func (fg *MysqlFailoverGroup) SiteKeyringSealed(site string) bool {
 		return false
 	}
 }
+
+// SiteKeyringRotationBlocksPromotion reports whether a site is mid
+// master-key rotation and must not become the sole authoritative copy.
+//
+// Rotation writes a new master key while real data already depends on
+// it. On a replica that window is a re-clone; on a primary it is data
+// loss. UnsealReason is cleared only when the site reaches Sealed, so
+// this is true through Unsealed, Escrowed, and Failed while a rotation
+// is in flight. Bootstrap and Clone unseals are not promotion gates.
+func (fg *MysqlFailoverGroup) SiteKeyringRotationBlocksPromotion(site string) bool {
+	if fg == nil || !fg.Spec.EncryptionEnabled() {
+		return false
+	}
+	s := fg.Status.EncryptionAtRest.SiteEncryptionStatusByName(site)
+	return s != nil && s.UnsealReason == UnsealReasonRotation
+}
