@@ -402,6 +402,16 @@ var KeyringRotationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "InnoDB master key rotations attempted by the sidecar, by outcome.",
 }, []string{"group", "site", "outcome"})
 
+// KeyringPromotionsBlockedTotal counts promotion decisions that skipped
+// or refused a site because it is mid-keyring-rotation. outcome is
+// skipped (another candidate was chosen) or refused (no candidate
+// remained). Incremented once per actual decision, not per Event
+// reminder. namespace/group/site match the operator-side keyring gauges.
+var KeyringPromotionsBlockedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "bloodraven_keyring_promotions_blocked_total",
+	Help: "Promotion decisions that skipped or refused a site mid-keyring-rotation.",
+}, []string{"namespace", "group", "site", "outcome"})
+
 // EncryptionCoverageGaps counts observed coverage shortfalls per site:
 // user tablespaces still reporting ENCRYPTION='N'. Non-zero on a cluster
 // adopted from unencrypted data whose tables were never rebuilt.
@@ -490,6 +500,7 @@ func Register(reg prometheus.Registerer) {
 		BackupEncryptBytesTotal, BackupEncryptFailuresTotal,
 		DragonflySiteUp, DragonflyPromotionsTotal, DragonflyManagerPanicsTotal,
 		KeyringPhase, KeyringEscrowVersion, KeyringEscrowPushesTotal, KeyringRotationsTotal,
+		KeyringPromotionsBlockedTotal,
 		EncryptionCoverageGaps, EncryptionCoverageFlag,
 		LicenseInfo, LicenseUpdatesExpiry)
 }

@@ -185,6 +185,14 @@ type TopologySnapshot struct {
 	RecoveryState     string // "", "RecoveryInProgress", or "RecoveryBlocked"
 	DivergentGtid     string
 	DivergentTxnCount int64
+
+	// KeyringPromotionSkipped / KeyringPromotionRefused name sites the
+	// last applyCrossSiteAction decision skipped or refused because they
+	// were mid-keyring-rotation. Empty when that cycle did not reach a
+	// promotion decision. Used by the runner to emit Events; not persisted
+	// on the CR.
+	KeyringPromotionSkipped []string
+	KeyringPromotionRefused []string
 }
 
 // siteTracker tracks debounce counters and current state for one site.
@@ -425,6 +433,16 @@ type TopologyManager struct {
 	// Succeeded or Failed. Protected by mu. See
 	// planned_failover_reconciler.go.
 	plannedFailoverActive bool
+
+	// keyringRotationBlocked is the set of sites whose UnsealReason is
+	// Rotation. They stay in topology tallies but must not be promoted.
+	// keyringRotationBlockedDirty is set when the set changes so Poll
+	// re-runs applyCrossSiteAction without waiting for a MySQL state
+	// transition. Protected by mu.
+	keyringRotationBlocked      []string
+	keyringRotationBlockedDirty bool
+	keyringPromotionSkipped     []string
+	keyringPromotionRefused     []string
 
 	// specDriftSites lists site names whose Deployment spec-hash differs
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
@@ -1077,10 +1095,13 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	tm.mu.Unlock()
 
 	// Evaluate every poll so all status snapshots carry the current topology
-	// condition. Mutating cross-site actions remain transition-driven.
+	// condition. Mutating cross-site actions remain transition-driven, plus
+	// a keyring-rotation block-set change: otherwise a 2-site refuse never
+	// heals after the replica reaches Sealed (no MySQL state transition).
+	blockedSetChanged := tm.peekKeyringRotationBlockedDirty()
 	action := state.EvalCrossSite(tm.observations(), tm.cfg.SitePriorities)
 	alertMsg := action.Alert
-	if anyTransition {
+	if anyTransition || blockedSetChanged {
 		tm.applyCrossSiteAction(ctx, action)
 	}
 
@@ -1262,7 +1283,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	tm.mu.RLock()
 	statusRetry := tm.statusWriteFailed
 	tm.mu.RUnlock()
-	statusChanged := anyTransition || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted
+	statusChanged := anyTransition || blockedSetChanged || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted
 	if (statusChanged || statusRetry) && tm.StatusCallback != nil {
 		var snapshot TopologySnapshot
 		if statusRetry && !statusChanged {
@@ -1456,9 +1477,15 @@ func (tm *TopologyManager) MarkStatusWriteResult(err error) {
 func (tm *TopologyManager) observations() []state.SiteObservation {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
+	blocked := make(map[string]struct{}, len(tm.keyringRotationBlocked))
+	for _, name := range tm.keyringRotationBlocked {
+		blocked[name] = struct{}{}
+	}
 	out := make([]state.SiteObservation, len(tm.sites))
 	for i := range tm.sites {
-		out[i] = tm.sites[i].observation()
+		obs := tm.sites[i].observation()
+		_, obs.PromotionBlocked = blocked[tm.sites[i].name]
+		out[i] = obs
 	}
 	return out
 }
@@ -1507,16 +1534,18 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 	}
 
 	snap := TopologySnapshot{
-		Sites:                 sites,
-		ActiveSite:            tm.activeSiteLocked(),
-		LastFailover:          tm.lastFailover,
-		LastFailoverTarget:    tm.lastFailoverTarget,
-		Alert:                 alert,
-		DegradedReason:        degradedReason,
-		UpdatePhase:           updatePhase,
-		BootstrapPhase:        string(tm.bootstrapPhase),
-		BootstrapSource:       tm.bootstrapSource,
-		PromotionGtidExecuted: tm.promotionGtidExecuted,
+		Sites:                   sites,
+		ActiveSite:              tm.activeSiteLocked(),
+		LastFailover:            tm.lastFailover,
+		LastFailoverTarget:      tm.lastFailoverTarget,
+		Alert:                   alert,
+		DegradedReason:          degradedReason,
+		UpdatePhase:             updatePhase,
+		BootstrapPhase:          string(tm.bootstrapPhase),
+		BootstrapSource:         tm.bootstrapSource,
+		PromotionGtidExecuted:   tm.promotionGtidExecuted,
+		KeyringPromotionSkipped: append([]string(nil), tm.keyringPromotionSkipped...),
+		KeyringPromotionRefused: append([]string(nil), tm.keyringPromotionRefused...),
 	}
 	// Summarize one recovering site into the top-level fields for condition
 	// messages and event emission. A RecoveryBlocked site wins over a
@@ -1771,6 +1800,17 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		writable := tm.writableObservations()
 		winner, losers := state.ResolveSplitBrain(writable, tm.cfg.SitePriorities)
 		if winner != "" {
+			tm.mu.RLock()
+			winnerBlocked := tm.keyringRotationBlockedLocked(winner)
+			tm.mu.RUnlock()
+			if winnerBlocked {
+				tm.logger.Warn("promotion refused: split-brain winner is mid-keyring-rotation",
+					"site", winner, "unsealReason", "Rotation")
+				tm.recordKeyringPromotionDecision(nil, []string{winner})
+				tm.incrementKeyringPromotionBlocked([]string{winner}, "refused")
+				tm.clearKeyringRotationBlockedDirty()
+				return
+			}
 			for _, loser := range losers {
 				if site := tm.getSite(loser); site != nil && site.state == state.StateWritable {
 					tm.logger.Warn("split-brain auto-resolve: fencing non-preferred site per spec.splitBrainPolicy.sitePriorities",
@@ -1796,12 +1836,25 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 	}
 
+	if promote == "" && (strings.Contains(action.Alert, "UnsealReason=Rotation") || len(tm.rotationBlockedCandidates()) > 0 && action.Reason == "NoPrimary") {
+		refused := tm.rotationBlockedCandidates()
+		if len(refused) > 0 {
+			tm.logger.Warn("promotion refused: every remaining candidate is mid-keyring-rotation",
+				"sites", refused)
+			tm.recordKeyringPromotionDecision(nil, refused)
+			tm.incrementKeyringPromotionBlocked(refused, "refused")
+			tm.clearKeyringRotationBlockedDirty()
+		}
+		return
+	}
+
 	if promote != "" {
 		tm.mu.RLock()
 		promotedSite := tm.promotedSite
 		lastFailover := tm.lastFailover
 		tm.mu.RUnlock()
 		if promotedSite != "" {
+			tm.clearKeyringRotationBlockedDirty()
 			return
 		}
 		if !lastFailover.IsZero() && tm.clock.Since(lastFailover) < tm.failoverCooldown {
@@ -1820,6 +1873,36 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				"site", candidate.name, "role", candidate.role)
 			return
 		}
+		tm.mu.RLock()
+		blocked := tm.keyringRotationBlockedLocked(candidate.name)
+		tm.mu.RUnlock()
+		skipped := tm.rotationBlockedCandidates()
+		filtered := skipped[:0]
+		for _, name := range skipped {
+			if name != candidate.name {
+				filtered = append(filtered, name)
+			}
+		}
+		skipped = filtered
+		if blocked {
+			tm.logger.Warn("promotion refused: candidate is mid-keyring-rotation",
+				"site", candidate.name, "unsealReason", "Rotation")
+			tm.recordKeyringPromotionDecision(nil, []string{candidate.name})
+			tm.incrementKeyringPromotionBlocked([]string{candidate.name}, "refused")
+			tm.clearKeyringRotationBlockedDirty()
+			return
+		}
+		for _, name := range skipped {
+			tm.logger.Warn("skipping promotion candidate: site is mid-keyring-rotation",
+				"site", name, "unsealReason", "Rotation")
+		}
+		if len(skipped) > 0 {
+			tm.recordKeyringPromotionDecision(skipped, nil)
+			tm.incrementKeyringPromotionBlocked(skipped, "skipped")
+		} else {
+			tm.recordKeyringPromotionDecision(nil, nil)
+		}
+		tm.clearKeyringRotationBlockedDirty()
 
 		// Pick an old primary for fencing: prefer the last failover
 		// target if it is still known; otherwise fence any site that
@@ -1873,7 +1956,9 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		if tm.EmergencyFailoverCallback != nil {
 			tm.EmergencyFailoverCallback(ctx, candidate.name, oldPrimaryName)
 		}
+		return
 	}
+	tm.clearKeyringRotationBlockedDirty()
 }
 
 // fenceSitesExcept sets super_read_only=ON on every writable site other than
@@ -1978,6 +2063,12 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 		}
 		winner, losers := state.ResolveSplitBrain(tm.writableObservations(), tm.cfg.SitePriorities)
 		if winner == "" {
+			return false
+		}
+		tm.mu.RLock()
+		winnerBlocked := tm.keyringRotationBlockedLocked(winner)
+		tm.mu.RUnlock()
+		if winnerBlocked {
 			return false
 		}
 		// Poll-driven retry of the policy resolution: same documented log
@@ -2319,6 +2410,12 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	if !targetSite.isPromotable() {
 		return "", fmt.Errorf("planned promote: site %q has role %q; only primary-candidate sites may be promoted", target, targetSite.role)
 	}
+	tm.mu.RLock()
+	blocked := tm.keyringRotationBlockedLocked(target)
+	tm.mu.RUnlock()
+	if blocked {
+		return "", fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
+	}
 
 	var sourceChecker mysql.Checker
 	if source != "" {
@@ -2523,9 +2620,13 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 		if site.name == activeName {
 			continue
 		}
+		tm.mu.RLock()
+		rotationBlocked := tm.keyringRotationBlockedLocked(site.name)
+		tm.mu.RUnlock()
 		followers = append(followers, UpdateTarget{
 			Name: site.name, Host: site.host, Checker: site.mysql, Promotable: site.isPromotable(),
 			Drifted: drifted[site.name], ExpectedSource: activeSite.host,
+			RotationBlocked: rotationBlocked,
 		})
 	}
 	if drifted[activeName] {
@@ -2534,10 +2635,17 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 		}
 		haveStandby := false
 		for i := range tm.sites {
-			if tm.sites[i].name != activeName && tm.sites[i].isPromotable() && tm.sites[i].isHealthyReplica() {
-				haveStandby = true
-				break
+			if tm.sites[i].name == activeName || !tm.sites[i].isPromotable() || !tm.sites[i].isHealthyReplica() {
+				continue
 			}
+			tm.mu.RLock()
+			blocked := tm.keyringRotationBlockedLocked(tm.sites[i].name)
+			tm.mu.RUnlock()
+			if blocked {
+				continue
+			}
+			haveStandby = true
+			break
 		}
 		if !haveStandby {
 			return false
@@ -3394,6 +3502,15 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		}
 	}
 	if targetSite == nil || targetSite.state != state.StateReadOnly || !targetSite.isPromotable() {
+		return false
+	}
+	tm.mu.RLock()
+	targetBlocked := tm.keyringRotationBlockedLocked(target)
+	tm.mu.RUnlock()
+	if targetBlocked {
+		tm.logger.Warn("primary re-assert refused: target is mid-keyring-rotation",
+			"site", target, "unsealReason", "Rotation")
+		tm.incrementKeyringPromotionBlocked([]string{target}, "refused")
 		return false
 	}
 
