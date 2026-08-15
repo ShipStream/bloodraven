@@ -105,6 +105,10 @@ spec:
               value: {{ .Values.auxiliary.service.wsAllowedOrigins | default "*" | quote }}
             - name: BLOODRAVEN_WS_MAX_CLIENTS
               value: {{ .Values.auxiliary.service.wsMaxClients | default 100 | quote }}
+            {{- if .Values.license }}
+            - name: BLOODRAVEN_LICENSE
+              value: {{ .Values.license | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

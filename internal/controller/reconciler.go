@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/state"
 )
@@ -114,6 +116,24 @@ type MysqlFailoverGroupReconciler struct {
 	// defaultKeyringStatusFetcher is used.
 	keyringStatus keyringStatusFetcher
 
+	// Logger is the operational slog stream. Nil is treated as discard
+	// so existing tests that construct the reconciler without a logger
+	// do not panic when license observation runs.
+	Logger *slog.Logger
+
+	// OperatorLicense is the optional operator-level JWT (flag/env).
+	OperatorLicense string
+
+	// LicenseKeys overrides the production trust store. Nil uses
+	// license.ProductionKey.
+	LicenseKeys license.KeyLookup
+
+	// Now overrides time.Now for license verification tests.
+	Now func() time.Time
+
+	licenseMu  sync.Mutex
+	licenseObs map[types.NamespacedName]licenseObservation
+
 	dragonflyRolloutMu      sync.Mutex
 	dragonflyRolloutBackoff map[dragonflyRolloutKey]dragonflyRolloutState
 }
@@ -162,6 +182,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	var fg v1alpha1.MysqlFailoverGroup
 	if err := r.Get(ctx, req.NamespacedName, &fg); err != nil {
 		if errors.IsNotFound(err) {
+			r.forgetLicense(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -169,6 +190,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Handle deletion with finalizer
 	if !fg.DeletionTimestamp.IsZero() {
+		r.forgetLicense(req.NamespacedName)
 		if controllerutil.ContainsFinalizer(&fg, finalizerName) {
 			logger.Info("CR being deleted, running finalizer cleanup", "name", fg.Name)
 
@@ -197,6 +219,10 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	logger.Info("reconciling MysqlFailoverGroup", "name", fg.Name)
+
+	// License observation is advisory only. It never returns an error
+	// and must not change the rest of reconcile.
+	r.observeLicense(&fg)
 
 	image := fg.Spec.Image
 	if image == "" {

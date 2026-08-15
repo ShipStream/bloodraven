@@ -234,6 +234,16 @@ type MysqlFailoverGroupSpec struct {
 	// INSTANCE.
 	// +optional
 	EncryptionAtRest *EncryptionAtRestSpec `json:"encryptionAtRest,omitempty"`
+
+	// License is an optional Ed25519-signed JWT recording this group's
+	// Bloodraven license. It is a public assertion, not a credential —
+	// leaking it does not grant access to anything. The operator verifies
+	// it offline (no network) and exposes organization, edition, and
+	// update-period end as logs and metrics. It never gates functionality
+	// or changes failover behavior. When empty, the operator-level license
+	// is used if set; otherwise the group is observed as Community.
+	// +optional
+	License string `json:"license,omitempty"`
 }
 
 // SplitBrainPolicySpec configures automated split-brain resolution.
