@@ -581,3 +581,36 @@ func TestEnvtest_ReconcilerMissingSecretRequeues(t *testing.T) {
 		t.Errorf("expected requeue after 30s, got %v", result.RequeueAfter)
 	}
 }
+
+func TestEnvtest_LicenseFieldPersistsAndDoesNotFailReconcile(t *testing.T) {
+	ns := "envtest-license"
+	ensureNamespace(t, ns)
+	ensureSecret(t, ns)
+
+	fg := newTestFG(ns)
+	fg.Spec.License = "this-is-not-a-valid-token"
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatalf("spec.license must be admitted: %v", err)
+	}
+
+	var fetched v1alpha1.MysqlFailoverGroup
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: fg.Name, Namespace: ns}, &fetched); err != nil {
+		t.Fatal(err)
+	}
+	if fetched.Spec.License != fg.Spec.License {
+		t.Fatalf("spec.license was pruned: got %q", fetched.Spec.License)
+	}
+
+	r := &controller.MysqlFailoverGroupReconciler{
+		Client:   k8sClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(10),
+	}
+	res, err := r.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: fg.Name, Namespace: ns},
+	})
+	if err != nil {
+		t.Fatalf("invalid license must not fail reconcile: %v", err)
+	}
+	_ = res
+}

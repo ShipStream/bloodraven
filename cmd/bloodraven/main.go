@@ -30,6 +30,7 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/controller"
+	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/platform"
 	"github.com/shipstream/bloodraven/internal/util"
@@ -83,12 +84,14 @@ func main() {
 	// (AUDIT H4).
 	fs := flag.NewFlagSet("bloodraven", flag.ExitOnError)
 	leaderElect := fs.Bool("leader-elect", true, "enable manager leader election")
+	licenseToken := fs.String("license", os.Getenv("BLOODRAVEN_LICENSE"), "optional organization license JWT (public assertion, not a secret)")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "parse flags: %v\n", err)
 		os.Exit(2)
 	}
 
 	logger := util.NewJSONLogger(os.Stdout, slog.LevelInfo)
+	controller.LogOperatorLicense(logger, *licenseToken, license.ProductionKey, time.Now())
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 
 	scheme := k8sruntime.NewScheme()
@@ -138,13 +141,15 @@ func main() {
 	// Create and register the reconciler
 	tainter := platform.NewNodeTainter(clientset, logger)
 	reconciler := &controller.MysqlFailoverGroupReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Scheme:    mgr.GetScheme(),
-		Recorder:  recorder,
-		Runner:    runner,
-		Tainter:   tainter,
-		Clientset: clientset,
+		Client:          mgr.GetClient(),
+		APIReader:       mgr.GetAPIReader(),
+		Scheme:          mgr.GetScheme(),
+		Recorder:        recorder,
+		Runner:          runner,
+		Tainter:         tainter,
+		Clientset:       clientset,
+		Logger:          logger,
+		OperatorLicense: *licenseToken,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Error("unable to create controller", "error", err)

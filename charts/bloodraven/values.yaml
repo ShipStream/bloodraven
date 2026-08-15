@@ -68,6 +68,11 @@ tolerations:
 # -- Affinity rules for the operator pod
 affinity: {}
 
+# -- Organization-edition license JWT. Optional public assertion, not a
+# secret. Injected as BLOODRAVEN_LICENSE when non-empty. Per-group
+# spec.license overrides this. Never gates operator behavior.
+license: ""
+
 # -- Additional environment variables for the operator container
 extraEnv: []
 # - name: LOG_LEVEL

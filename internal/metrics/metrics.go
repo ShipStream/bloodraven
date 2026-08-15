@@ -418,6 +418,24 @@ var EncryptionCoverageFlag = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Help: "Observed data-at-rest encryption coverage per aspect (1 = on).",
 }, []string{"namespace", "group", "site", "aspect"})
 
+// LicenseInfo is a constant-1 info gauge for the license observed on
+// a failover group. valid is the string "true" or "false"; edition is
+// community, production, or organization. Community (no license) is
+// valid=true. An invalid token is valid=false and edition=community.
+// An expired update period stays valid=true.
+var LicenseInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "bloodraven_license_info",
+	Help: "License observation for a failover group. Value is always 1.",
+}, []string{"namespace", "group", "organization", "edition", "valid"})
+
+// LicenseUpdatesExpiry is the unix timestamp when the paid update
+// period ends. Absent for community and invalid licenses. A past
+// value is the supported perpetual state, not an error.
+var LicenseUpdatesExpiry = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "bloodraven_license_updates_expiry_timestamp_seconds",
+	Help: "Unix timestamp when the paid update period ends for a failover group's license.",
+}, []string{"namespace", "group", "organization", "edition"})
+
 // SiteIdentity is the shared identity of a site-scoped gauge series.
 // Extra labels (role, state, thread) are not included so callers can
 // DeletePartialMatch without knowing the last emitted role.
@@ -472,7 +490,41 @@ func Register(reg prometheus.Registerer) {
 		BackupEncryptBytesTotal, BackupEncryptFailuresTotal,
 		DragonflySiteUp, DragonflyPromotionsTotal, DragonflyManagerPanicsTotal,
 		KeyringPhase, KeyringEscrowVersion, KeyringEscrowPushesTotal, KeyringRotationsTotal,
-		EncryptionCoverageGaps, EncryptionCoverageFlag)
+		EncryptionCoverageGaps, EncryptionCoverageFlag,
+		LicenseInfo, LicenseUpdatesExpiry)
+}
+
+// LicenseLabels is the identity of a license series for one group.
+func LicenseLabels(namespace, group string) prometheus.Labels {
+	return prometheus.Labels{"namespace": namespace, "group": group}
+}
+
+// DeleteLicense removes every license series for a failover group.
+func DeleteLicense(namespace, group string) {
+	labels := LicenseLabels(namespace, group)
+	LicenseInfo.DeletePartialMatch(labels)
+	LicenseUpdatesExpiry.DeletePartialMatch(labels)
+}
+
+// SetLicenseInfo writes the constant-1 info series. Callers that are
+// replacing a previous label set must Delete the old labels first.
+func SetLicenseInfo(namespace, group, organization, edition, valid string) {
+	LicenseInfo.WithLabelValues(namespace, group, organization, edition, valid).Set(1)
+}
+
+// SetLicenseUpdatesExpiry writes the absolute update-period end.
+func SetLicenseUpdatesExpiry(namespace, group, organization, edition string, unixSeconds float64) {
+	LicenseUpdatesExpiry.WithLabelValues(namespace, group, organization, edition).Set(unixSeconds)
+}
+
+// DeleteLicenseInfo deletes one info series by exact labels.
+func DeleteLicenseInfo(namespace, group, organization, edition, valid string) {
+	LicenseInfo.DeleteLabelValues(namespace, group, organization, edition, valid)
+}
+
+// DeleteLicenseUpdatesExpiry deletes one expiry series by exact labels.
+func DeleteLicenseUpdatesExpiry(namespace, group, organization, edition string) {
+	LicenseUpdatesExpiry.DeleteLabelValues(namespace, group, organization, edition)
 }
 
 // StatusClass returns "2xx", "3xx", "4xx", "5xx" for an HTTP status
