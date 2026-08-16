@@ -101,6 +101,19 @@ questions:
 ---
 ::
 
+::home-doctor
+---
+kicker: Day-2+ Diagnostic Copilot
+title: Meet Bloodraven Doctor.
+accent: AI diagnostics in the CLI.
+description: >-
+  Give your AI coding assistant deep diagnostic vision over live MySQLFailoverGroup clusters.
+  bloodraven-doctor performs 60-second non-destructive triage, detects GTID divergence,
+  audits keyring status, and crafts safe step-by-step remediation plans.
+command: npx skills add shipstream/bloodraven
+---
+::
+
 ::home-safety
 ---
 # Target of the header's "Features" nav link.

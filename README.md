@@ -10,6 +10,14 @@ Bloodraven is built for site-level failover where applications can accept non-ze
 
 **[Documentation](https://bloodraven.dev)** - installation, operations, custom resource definition (CRD) reference, application integration, and more.
 
+### AI Diagnostic Skill (`bloodraven-doctor`)
+
+Install the `bloodraven-doctor` Day-2+ diagnostic skill into your AI agent (Cursor, Claude Code, Antigravity, Windsurf, Roo, etc.):
+
+```bash
+npx skills add shipstream/bloodraven
+```
+
 ## Choose your path
 
 | Goal | Start here |
@@ -19,6 +27,7 @@ Bloodraven is built for site-level failover where applications can accept non-ze
 | Create a first failover group | [Getting Started](https://bloodraven.dev/docs/get-started/getting-started) |
 | Install for production | [Production Install](https://bloodraven.dev/docs/get-started/install-production) |
 | Connect an application | [App Integration](https://bloodraven.dev/docs/configuration/app-integration) |
+| Troubleshoot with AI Doctor | [Bloodraven Doctor](./skills/bloodraven-doctor/SKILL.md) (`npx skills add shipstream/bloodraven`) |
 | Handle an alert | [Operations Overview](https://bloodraven.dev/docs/operations/operations-overview) |
 | Configure backups | [Backup Overview](https://bloodraven.dev/docs/backup-and-restore/backup-overview) |
 

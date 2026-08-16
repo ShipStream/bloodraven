@@ -103,3 +103,14 @@ The runner stamps an in-progress marker on the MFG (`chaos.playground.bloodraven
 
 ## Architecture & Configuration Notes
 This project is a Go 1.26 Kubernetes operator built around a single custom resource and two binaries. When making material changes to reconciliation, failover, CRD types, sidecar behavior, or deployment model, update the relevant documentation in `site/content/docs/` to keep code and docs aligned.
+
+## Day-2 Diagnostic Agent Skill (`bloodraven-doctor`)
+The repository includes an AI diagnostic copilot skill located at `.agents/skills/bloodraven-doctor/` (symlinked as `skills/bloodraven-doctor/` for `npx skills add shipstream/bloodraven` compatibility).
+
+- **Purpose**: Provides automated Day-2+ diagnosis, non-destructive triage, GTID divergence detection, keyring status probes, Dragonfly cache audits, and actionable remediation workflows for DevOps/SysAdmin agents with `kubectl` access.
+- **Maintenance contract**: When adding new CRD status fields, mutating failure recovery behaviors, updating sidecar endpoints (`/status`, `/keyring/status`, `/fencing`), modifying metrics, or altering runbook procedures, review and update:
+  1. `.agents/skills/bloodraven-doctor/SKILL.md`
+  2. `.agents/skills/bloodraven-doctor/references/alert_runbook_matrix.md`
+  3. `.agents/skills/bloodraven-doctor/references/troubleshooting_playbooks.md`
+  4. Diagnostic helper scripts in `.agents/skills/bloodraven-doctor/scripts/` (`triage.sh`, `gtid-audit.sh`, `sidecar-probe.sh`, `support-bundle.sh`).
+
