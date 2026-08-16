@@ -22,7 +22,8 @@ npx skills add shipstream/bloodraven
 
 | Goal | Start here |
 |---|---|
-| Understand licensing and pricing | [Licensing](https://bloodraven.dev/docs/licensing) |
+| Understand licensing | [Licensing](https://bloodraven.dev/docs/licensing) |
+| See prices and buy a license | [Pricing](https://bloodraven.dev/pricing) |
 | Try the full demo locally | [Playground](https://bloodraven.dev/docs/get-started/playground) |
 | Create a first failover group | [Getting Started](https://bloodraven.dev/docs/get-started/getting-started) |
 | Install for production | [Production Install](https://bloodraven.dev/docs/get-started/install-production) |
@@ -227,7 +228,7 @@ Bloodraven is **source-available**, not open source. It is licensed under the [B
 - All non-production use — dev, test, staging, CI, evaluation, demo — at any scale, forever.
 - Production use by individuals, non-commercial users, non-profits, and companies under $1M annual revenue.
 
-**Requires a one-time commercial license:** production use by companies over $1M annual revenue. $990 per failover group, or $4,900 for unlimited groups across your organization. Perpetual, with 12 months of updates included; renewal is optional and you keep every version published while your update period was active. See [pricing](https://bloodraven.dev/docs/licensing) and [commercial terms](./LICENSE-COMMERCIAL.md).
+**Requires a one-time commercial license:** production use by companies over $1M annual revenue. Priced per failover group, or once for unlimited groups across your organization. Perpetual, with 12 months of updates included; renewal is optional and you keep every version published while your update period was active. Prices and checkout links are on [bloodraven.dev/pricing](https://bloodraven.dev/pricing); the agreement is in [commercial terms](./LICENSE-COMMERCIAL.md).
 
 **Every version converts to Apache 2.0 two years after publication.** That is written into the license as the Change Date and cannot be revoked, so code you depend on cannot be taken away from you.
 
