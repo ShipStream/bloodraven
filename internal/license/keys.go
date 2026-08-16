@@ -26,7 +26,9 @@ import (
 // Then add `"br-YYYY-N": "<64 hex chars>"` below. The matching private
 // key stays in the signer service, not this repository.
 var productionKeyHex = map[string]string{
-	// "br-1": "",
+	// Generated 2026-08-15. Private key is held only by the signer
+	// service; sha256 of this public key begins 2a94018110e06c67.
+	"br-1": "1b3bea77364fff24dad67d2727c3861c1a93dd3f22faccfac4b0fdecd69f6f02",
 }
 
 // ProductionKey looks up a production public key by kid. Unknown kids
