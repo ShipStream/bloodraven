@@ -41,14 +41,20 @@ under `content/docs/`.
 ## License signing
 
 `POST /api/license` and the `/license` page mint an offline-verifiable JWT
-from a Polar order. The route is stateless: no database, no webhook, no
-email. The site still builds and serves docs when these variables are
-unset; minting returns HTTP 503 until they are.
+from a Polar order. The route is stateless: no database and no email. The
+site still builds and serves docs when these variables are unset; minting
+returns HTTP 503 until they are.
+
+`POST /api/polar/webhook` is deliberately inert. It verifies Polar's
+Standard Webhooks signature with `@polar-sh/sdk`, logs event type plus
+order/subscription/product IDs, and returns 202. It does not mint tokens,
+write state, or call Polar back. The license flow does not depend on it.
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `LICENSE_SIGNING_SEED_B64` | to mint | Standard base64 of the raw 32-byte Ed25519 seed. Already set on Railway `bloodraven-site` / `production`. Must derive public key `br-1` (`1b3bea77…6f02`). |
 | `POLAR_API_TOKEN` | to mint | Polar Organization Access Token with `orders:read` only. |
+| `POLAR_WEBHOOK_SECRET` | for `/api/polar/webhook` | Polar webhook signing secret, as Polar shows it. Invalid signatures return 401 and are not logged. Missing secret returns 503. |
 | `POLAR_API_BASE` | no | `https://api.polar.sh` (default) or `https://sandbox-api.polar.sh`. |
 | `LICENSE_SIGNING_KID` | no | Defaults to `br-1`. |
 

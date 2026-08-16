@@ -1,4 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { HTTPClient, Polar } from '@polar-sh/sdk';
+import { ResourceNotFound } from '@polar-sh/sdk/models/errors/resourcenotfound.js';
+import { HTTPValidationError } from '@polar-sh/sdk/models/errors/httpvalidationerror.js';
 
 export const POLAR_PRODUCTION_BASE = 'https://api.polar.sh';
 export const POLAR_SANDBOX_BASE = 'https://sandbox-api.polar.sh';
@@ -57,11 +60,34 @@ function sanitizeOrg(value) {
   return cleaned.length > MAX_ORG_CHARS ? cleaned.slice(0, MAX_ORG_CHARS) : cleaned;
 }
 
+function pick(object, ...keys) {
+  if (!object || typeof object !== 'object') {
+    return undefined;
+  }
+  for (const key of keys) {
+    if (object[key] != null) {
+      return object[key];
+    }
+  }
+  return undefined;
+}
+
+function toUnixMs(value) {
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
 export function orgFromOrder(order) {
   const candidates = [
     order?.customer?.name,
-    order?.billing_name,
-    order?.customer?.billing_name,
+    pick(order, 'billingName', 'billing_name'),
+    pick(order?.customer, 'billingName', 'billing_name'),
   ];
   for (const candidate of candidates) {
     const org = sanitizeOrg(candidate ?? '');
@@ -97,87 +123,89 @@ export function addCalendarMonthsUtc(date, months) {
 }
 
 export function updatesUntilUnix(order) {
-  const periodEnd = order?.subscription?.current_period_end;
+  const periodEnd = pick(order?.subscription, 'currentPeriodEnd', 'current_period_end');
   const status = order?.subscription?.status;
   if (periodEnd && SUBSCRIPTION_PERIOD_STATUSES.has(status)) {
-    const parsed = Date.parse(periodEnd);
+    const parsed = toUnixMs(periodEnd);
     if (Number.isFinite(parsed)) {
       return Math.floor(parsed / 1000);
     }
   }
-  const created = Date.parse(order?.created_at);
-  if (!Number.isFinite(created)) {
-    throw new PolarError('bad-order', 'order.created_at is missing');
+  const created = pick(order, 'createdAt', 'created_at');
+  const createdMs = toUnixMs(created);
+  if (!Number.isFinite(createdMs)) {
+    throw new PolarError('bad-order', 'order created_at is missing');
   }
-  return Math.floor(addCalendarMonthsUtc(new Date(created), 12).getTime() / 1000);
+  return Math.floor(addCalendarMonthsUtc(new Date(createdMs), 12).getTime() / 1000);
 }
 
 export function orderIsPaid(order) {
+  const refunded = pick(order, 'refundedAmount', 'refunded_amount') ?? 0;
   return order?.paid === true
     && order?.status === 'paid'
-    && (order?.refunded_amount ?? 0) === 0;
+    && refunded === 0;
 }
 
-function abortError() {
-  const error = new Error('aborted');
-  error.name = 'AbortError';
-  return error;
-}
-
-export async function fetchOrder({ base, token, orderId, timeoutMs = 8000, fetchImpl = fetch }) {
-  const url = `${base}/v1/orders/${encodeURIComponent(orderId)}`;
-  const controller = new AbortController();
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(abortError());
-    }, timeoutMs);
+export function createPolarClient({ token, base, timeoutMs = 8000, httpClient, fetchImpl } = {}) {
+  const client = httpClient || (fetchImpl
+    ? new HTTPClient({ fetcher: fetchImpl })
+    : undefined);
+  return new Polar({
+    accessToken: token,
+    serverURL: base,
+    timeoutMs,
+    httpClient: client,
   });
-  try {
-    const request = fetchImpl(url, {
-      method: 'GET',
-      headers: {
-        authorization: `Bearer ${token}`,
-        accept: 'application/json',
-      },
-      signal: controller.signal,
-    });
-    request.catch(() => {});
-    const response = await Promise.race([request, timeout]);
-    return response;
-  } catch (error) {
-    if (error?.name === 'AbortError') {
-      throw new PolarError('timeout', 'Polar request timed out');
+}
+
+function statusOf(error) {
+  return error && typeof error.statusCode === 'number' ? error.statusCode : 0;
+}
+
+export async function getOrder(client, orderId, { timeoutMs = 8000 } = {}) {
+  const lookup = (async () => {
+    try {
+      const order = await client.orders.get({ id: orderId });
+      if (!order || typeof order.id !== 'string') {
+        throw new PolarError('unavailable', 'Polar order payload is malformed');
+      }
+      return { kind: 'ok', order };
+    } catch (error) {
+      if (error instanceof PolarError && error.code) {
+        throw error;
+      }
+      if (error instanceof ResourceNotFound || error instanceof HTTPValidationError) {
+        return { kind: 'not-found' };
+      }
+      const status = statusOf(error);
+      if (status === 404 || status === 422) {
+        return { kind: 'not-found' };
+      }
+      if (status === 401 || status === 403) {
+        throw new PolarError('unauthorized', 'Polar API token is unauthorized or expired');
+      }
+      if (status === 429 || status >= 500) {
+        throw new PolarError('unavailable', 'Polar is unavailable');
+      }
+      if (error?.name === 'AbortError') {
+        throw new PolarError('timeout', 'Polar request timed out');
+      }
+      throw new PolarError('unavailable', 'Polar request failed');
     }
-    throw new PolarError('unavailable', 'Polar request failed');
+  })();
+  lookup.catch(() => {});
+
+  let timer;
+  try {
+    return await Promise.race([
+      lookup,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new PolarError('timeout', 'Polar request timed out'));
+        }, timeoutMs);
+      }),
+    ]);
   } finally {
     clearTimeout(timer);
   }
-}
-
-export async function readOrderResponse(response) {
-  const status = response.status;
-  if (status === 404 || status === 422) {
-    return { kind: 'not-found' };
-  }
-  if (status === 401 || status === 403) {
-    throw new PolarError('unauthorized', 'Polar API token is unauthorized or expired');
-  }
-  if (status === 429 || status >= 500) {
-    throw new PolarError('unavailable', 'Polar is unavailable');
-  }
-  if (status !== 200) {
-    throw new PolarError('unavailable', 'Polar returned an unexpected status');
-  }
-  let body;
-  try {
-    body = await response.json();
-  } catch {
-    throw new PolarError('unavailable', 'Polar returned invalid JSON');
-  }
-  if (!body || typeof body !== 'object' || typeof body.id !== 'string') {
-    throw new PolarError('unavailable', 'Polar order payload is malformed');
-  }
-  return { kind: 'ok', order: body };
 }

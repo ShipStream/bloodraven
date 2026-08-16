@@ -2,13 +2,13 @@ import { getRequestIP } from 'h3'
 import { ISSUER, signLicense } from '../license/sign.mjs'
 import {
   PolarError,
+  createPolarClient,
   emailsMatch,
   editionFromProduct,
-  fetchOrder,
+  getOrder,
   looksLikeOrderId,
   orderIsPaid,
   orgFromOrder,
-  readOrderResponse,
   updatesUntilUnix,
 } from '../license/polar.mjs'
 import { createLimiter } from '../license/rate-limit.mjs'
@@ -108,34 +108,23 @@ export default defineEventHandler(async (event) => {
     return paddedDenial(event, started)
   }
 
-  let response
+  let parsed
   try {
-    response = await fetchOrder({
-      base: config.polarBase,
+    const client = createPolarClient({
       token: config.polarToken,
-      orderId,
+      base: config.polarBase,
     })
+    parsed = await getOrder(client, orderId)
   } catch (error) {
     const code = error instanceof PolarError ? error.code : 'unavailable'
     if (code === 'timeout') {
       logOperator('polar request timed out')
-    } else {
-      logOperator('polar request failed', { reason: code })
-    }
-    return jsonError(event, 503, UNAVAILABLE)
-  }
-
-  let parsed
-  try {
-    parsed = await readOrderResponse(response)
-  } catch (error) {
-    const code = error instanceof PolarError ? error.code : 'unavailable'
-    if (code === 'unauthorized') {
+    } else if (code === 'unauthorized') {
       logOperator('polar api unauthorized', {
         hint: 'POLAR_API_TOKEN is missing, expired, or lacks orders:read',
       })
     } else {
-      logOperator('polar response unusable', { reason: code })
+      logOperator('polar request failed', { reason: code })
     }
     return jsonError(event, 503, UNAVAILABLE)
   }
@@ -180,7 +169,7 @@ export default defineEventHandler(async (event) => {
       kid: signer.kid,
       claims: {
         iss: ISSUER,
-        sub: String(order.customer_id || order.customer?.id || ''),
+        sub: String(order.customerId || order.customer_id || order.customer?.id || ''),
         org,
         edition,
         issuedFor: order.id,

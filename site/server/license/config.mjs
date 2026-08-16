@@ -8,6 +8,9 @@ export function readConfig(env = process.env) {
   const polarToken = typeof env.POLAR_API_TOKEN === 'string'
     ? env.POLAR_API_TOKEN.trim()
     : '';
+  const polarWebhookSecret = typeof env.POLAR_WEBHOOK_SECRET === 'string'
+    ? env.POLAR_WEBHOOK_SECRET.trim()
+    : '';
   const kid = (typeof env.LICENSE_SIGNING_KID === 'string' && env.LICENSE_SIGNING_KID.trim())
     ? env.LICENSE_SIGNING_KID.trim()
     : BR1_KID;
@@ -26,6 +29,7 @@ export function readConfig(env = process.env) {
   return {
     seedB64,
     polarToken,
+    polarWebhookSecret,
     polarBase,
     polarBaseError,
     kid,

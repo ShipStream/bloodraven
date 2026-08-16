@@ -2,15 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   addCalendarMonthsUtc,
+  createPolarClient,
   editionFromProduct,
   emailsMatch,
-  fetchOrder,
+  getOrder,
   looksLikeOrderId,
   normalizePolarBase,
   orderIsPaid,
   orgFromOrder,
   PolarError,
-  readOrderResponse,
   updatesUntilUnix,
 } from '../server/license/polar.mjs';
 
@@ -42,33 +42,34 @@ test('edition comes only from product metadata', () => {
 
 test('org falls back to Individual and never uses email', () => {
   assert.equal(orgFromOrder({ customer: { name: 'Acme Corp', email: 'a@b.c' } }), 'Acme Corp');
-  assert.equal(orgFromOrder({ billing_name: 'Billing Co', customer: { email: 'a@b.c' } }), 'Billing Co');
+  assert.equal(orgFromOrder({ billingName: 'Billing Co', customer: { email: 'a@b.c' } }), 'Billing Co');
+  assert.equal(orgFromOrder({ billing_name: 'Legacy Co', customer: { email: 'a@b.c' } }), 'Legacy Co');
   assert.equal(orgFromOrder({ customer: { email: 'a@b.c' } }), 'Individual');
 });
 
 test('paid requires status paid, paid flag, and no refund', () => {
-  assert.equal(orderIsPaid({ paid: true, status: 'paid', refunded_amount: 0 }), true);
+  assert.equal(orderIsPaid({ paid: true, status: 'paid', refundedAmount: 0 }), true);
   assert.equal(orderIsPaid({ paid: true, status: 'refunded', refunded_amount: 0 }), false);
-  assert.equal(orderIsPaid({ paid: true, status: 'paid', refunded_amount: 10 }), false);
+  assert.equal(orderIsPaid({ paid: true, status: 'paid', refundedAmount: 10 }), false);
   assert.equal(orderIsPaid({ paid: false, status: 'paid' }), false);
 });
 
 test('updatesUntil uses subscription period when present, else created_at + 12 months', () => {
   const created = '2025-08-15T00:00:00Z';
   assert.equal(
-    updatesUntilUnix({ created_at: created }),
+    updatesUntilUnix({ createdAt: created }),
     Math.floor(addCalendarMonthsUtc(new Date(created), 12).getTime() / 1000),
   );
   assert.equal(
     updatesUntilUnix({
       created_at: created,
-      subscription: { status: 'active', current_period_end: '2027-01-01T00:00:00Z' },
+      subscription: { status: 'active', currentPeriodEnd: '2027-01-01T00:00:00Z' },
     }),
     Date.parse('2027-01-01T00:00:00Z') / 1000,
   );
   assert.equal(
     updatesUntilUnix({
-      created_at: created,
+      createdAt: new Date(created),
       subscription: { status: 'incomplete', current_period_end: '2027-01-01T00:00:00Z' },
     }),
     Math.floor(addCalendarMonthsUtc(new Date(created), 12).getTime() / 1000),
@@ -80,28 +81,23 @@ test('February 29 plus 12 calendar months lands on February 28', () => {
   assert.equal(end.toISOString(), '2025-02-28T12:00:00.000Z');
 });
 
-test('fetchOrder times out and never includes the token in the thrown error', async () => {
-  const fetchImpl = (_url, init) => new Promise((_resolve, reject) => {
-    const signal = init?.signal;
-    const fail = () => {
-      const error = new Error('aborted');
-      error.name = 'AbortError';
-      reject(error);
-    };
-    if (signal?.aborted) {
-      fail();
-      return;
-    }
-    signal?.addEventListener('abort', fail, { once: true });
+function jsonResponse(status, body) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+test('getOrder times out and never includes the token in the thrown error', async () => {
+  const fetchImpl = () => new Promise(() => {});
+  const client = createPolarClient({
+    token: 'polar_oat_secret',
+    base: 'https://api.polar.sh',
+    timeoutMs: 20,
+    fetchImpl,
   });
   await assert.rejects(
-    () => fetchOrder({
-      base: 'https://api.polar.sh',
-      token: 'polar_oat_secret',
-      orderId: '2c1d0a6a-7c3e-4f1b-9a2d-8e5f0b1c2d3e',
-      timeoutMs: 20,
-      fetchImpl,
-    }),
+    () => getOrder(client, '2c1d0a6a-7c3e-4f1b-9a2d-8e5f0b1c2d3e', { timeoutMs: 20 }),
     (error) => {
       assert.equal(error instanceof PolarError, true);
       assert.equal(error.code, 'timeout');
@@ -111,31 +107,31 @@ test('fetchOrder times out and never includes the token in the thrown error', as
   );
 });
 
-test('successful Polar response is returned and can still be read', async () => {
-  const fetchImpl = async () => ({
-    status: 200,
-    json: async () => ({ id: '2c1d0a6a-7c3e-4f1b-9a2d-8e5f0b1c2d3e', paid: true }),
-  });
-  const response = await fetchOrder({
-    base: 'https://api.polar.sh',
+test('getOrder maps Polar statuses through the SDK', async () => {
+  const missing = createPolarClient({
     token: 'polar_oat_secret',
-    orderId: '2c1d0a6a-7c3e-4f1b-9a2d-8e5f0b1c2d3e',
-    timeoutMs: 200,
-    fetchImpl,
+    base: 'https://api.polar.sh',
+    fetchImpl: async () => jsonResponse(404, { error: 'ResourceNotFound', detail: 'missing' }),
   });
-  const body = await response.json();
-  assert.equal(body.id, '2c1d0a6a-7c3e-4f1b-9a2d-8e5f0b1c2d3e');
-});
+  assert.deepEqual(await getOrder(missing, '2c1d0a6a-7c3e-4f1b-9a2d-8e5f0b1c2d3e'), { kind: 'not-found' });
 
-test('readOrderResponse maps Polar statuses', async () => {
-  const json = (status, body) => ({
-    status,
-    json: async () => body,
+  const unauthorized = createPolarClient({
+    token: 'polar_oat_secret',
+    base: 'https://api.polar.sh',
+    fetchImpl: async () => jsonResponse(401, { error: 'Unauthorized' }),
   });
-  assert.deepEqual(await readOrderResponse(json(404, { error: 'ResourceNotFound' })), { kind: 'not-found' });
-  await assert.rejects(() => readOrderResponse(json(401, {})), (error) => error.code === 'unauthorized');
-  await assert.rejects(() => readOrderResponse(json(503, {})), (error) => error.code === 'unavailable');
-  const order = await readOrderResponse(json(200, { id: 'ord_1' }));
-  assert.equal(order.kind, 'ok');
-  assert.equal(order.order.id, 'ord_1');
+  await assert.rejects(
+    () => getOrder(unauthorized, '2c1d0a6a-7c3e-4f1b-9a2d-8e5f0b1c2d3e'),
+    (error) => error.code === 'unauthorized',
+  );
+
+  const down = createPolarClient({
+    token: 'polar_oat_secret',
+    base: 'https://api.polar.sh',
+    fetchImpl: async () => jsonResponse(503, { error: 'unavailable' }),
+  });
+  await assert.rejects(
+    () => getOrder(down, '2c1d0a6a-7c3e-4f1b-9a2d-8e5f0b1c2d3e'),
+    (error) => error.code === 'unavailable',
+  );
 });
