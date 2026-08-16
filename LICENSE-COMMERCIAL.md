@@ -236,7 +236,7 @@ Licenses are sold through [Polar](https://polar.sh), which acts as the merchant
 of record and handles VAT, sales tax, and invoicing. Polar issues a compliant
 invoice suitable for expense reimbursement and procurement records.
 
-Purchase links are on the [licensing page](https://bloodraven.dev/docs/licensing).
+Purchase links are on the [pricing page](https://bloodraven.dev/pricing).
 
 For volume pricing, multi-year terms, a signed agreement, or purchase-order
 billing, email **licensing@shipstream.io**.

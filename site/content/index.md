@@ -412,6 +412,31 @@ units:
 ---
 ::
 
+::home-pricing
+---
+kicker: Licensing
+title: Free for most people.
+title-two: One-time for everyone else.
+lede: >-
+  Bloodraven is source-available under the Business Source License. Prices, the eligibility
+  table and the checkout links are on one page, so there is exactly one place to read what
+  you owe.
+points:
+  - Free forever for individuals, non-commercial use, non-profits and companies under $1M annual revenue
+  - Free forever for dev, test, staging, CI and evaluation, at any scale
+  - Production at a company over $1M annual revenue is a one-time licence, not a subscription
+  - No activation, no licence server, no feature gating — the software is fully functional without a key
+  - Every version converts to Apache 2.0 two years after it is published
+links:
+  - label: See pricing
+    to: /pricing
+    variant: primary
+  - label: Why source-available
+    to: /docs/licensing
+    variant: outline
+---
+::
+
 ::home-final-cta
 ---
 mark: Bloodraven · ShipStream

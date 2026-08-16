@@ -22,6 +22,7 @@ const links = [
   { label: 'Docs', to: '/docs' },
   { label: 'Playground', to: '/docs/get-started/playground' },
   { label: 'Course', to: '/courses/', target: '_blank' as const },
+  { label: 'Pricing', to: '/pricing' },
 ]
 
 const githubUrl = computed(() => appConfig.github?.url as string | undefined)
