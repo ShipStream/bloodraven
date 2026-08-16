@@ -74,6 +74,13 @@ test('updatesUntil uses subscription period when present, else created_at + 12 m
     }),
     Math.floor(addCalendarMonthsUtc(new Date(created), 12).getTime() / 1000),
   );
+  assert.equal(
+    updatesUntilUnix({
+      createdAt: created,
+      subscription: { status: 'trialing', currentPeriodEnd: '2025-09-15T00:00:00Z' },
+    }),
+    Date.parse('2025-09-15T00:00:00Z') / 1000,
+  );
 });
 
 test('February 29 plus 12 calendar months lands on February 28', () => {

@@ -52,6 +52,9 @@ export function missingSignerReason(config) {
 
 export function signerFromConfig(config) {
   try {
+    if (config.kid !== BR1_KID && !config.expectedPubHex) {
+      return { ok: false, reason: 'LICENSE_EXPECTED_PUB_HEX is required for a custom signing kid' };
+    }
     return {
       ok: true,
       ...loadSigningKey(config.seedB64, {

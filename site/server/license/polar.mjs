@@ -8,7 +8,7 @@ export const POLAR_SANDBOX_BASE = 'https://sandbox-api.polar.sh';
 export const ALLOWED_POLAR_BASES = new Set([POLAR_PRODUCTION_BASE, POLAR_SANDBOX_BASE]);
 
 const EDITIONS = new Set(['production', 'organization']);
-const SUBSCRIPTION_PERIOD_STATUSES = new Set(['active', 'canceled', 'past_due']);
+const SUBSCRIPTION_PERIOD_STATUSES = new Set(['active', 'canceled', 'past_due', 'trialing']);
 const MAX_ORG_CHARS = 200;
 
 export class PolarError extends Error {

@@ -1,5 +1,6 @@
-import { getRequestIP } from 'h3'
 import { ISSUER, signLicense } from '../license/sign.mjs'
+import { trustedClientIp } from '../license/client-ip.mjs'
+import { BodyLimitError, parseJsonObject, readLimitedRaw } from '../license/request-body.mjs'
 import {
   PolarError,
   createPolarClient,
@@ -26,8 +27,8 @@ type JsonBody = {
   email?: unknown
 }
 
-function clientIp(event: Parameters<typeof getRequestIP>[0]) {
-  return getRequestIP(event, { xForwardedFor: true }) || 'unknown'
+function clientIp(event: Parameters<typeof getHeaders>[0]) {
+  return trustedClientIp(getHeaders(event), event.node?.req?.socket?.remoteAddress || '')
 }
 
 function jsonError(event: Parameters<typeof setResponseStatus>[0], status: number, message: string, extra: Record<string, string> = {}) {
@@ -72,15 +73,14 @@ export default defineEventHandler(async (event) => {
     return jsonError(event, 429, 'Too many requests. Try again later.')
   }
 
-  const length = Number(getHeader(event, 'content-length') || 0)
-  if (Number.isFinite(length) && length > MAX_BODY_BYTES) {
-    return jsonError(event, 400, 'orderId and email are required.')
-  }
-
   let body: JsonBody
   try {
-    body = await readBody<JsonBody>(event)
-  } catch {
+    const raw = await readLimitedRaw(event.node?.req, MAX_BODY_BYTES)
+    body = parseJsonObject(raw)
+  } catch (error) {
+    if (error instanceof BodyLimitError) {
+      return jsonError(event, 400, 'orderId and email are required.')
+    }
     return jsonError(event, 400, 'orderId and email are required.')
   }
 

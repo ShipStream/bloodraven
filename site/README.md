@@ -63,7 +63,9 @@ Tag each Bloodraven license product in the Polar dashboard with metadata
 Products without that key cannot mint a token.
 
 Rate limit: 10 requests / 15 minutes / client IP, in memory, per process.
-It resets on deploy and is not shared across instances.
+It resets on deploy and is not shared across instances. The key is Railway's
+`X-Real-IP` when present, otherwise the last `X-Forwarded-For` hop — not the
+leftmost, caller-controlled value.
 
 `npm test` runs the Node unit tests. From the repo root,
 `make test-license-roundtrip` signs a throwaway token in Node and verifies
