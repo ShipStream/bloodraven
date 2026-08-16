@@ -38,6 +38,31 @@ npm run verify:llms
 `verify:llms` checks that `.output/public/llms-full.txt` includes every page
 under `content/docs/`.
 
+## License signing
+
+`POST /api/license` and the `/license` page mint an offline-verifiable JWT
+from a Polar order. The route is stateless: no database, no webhook, no
+email. The site still builds and serves docs when these variables are
+unset; minting returns HTTP 503 until they are.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `LICENSE_SIGNING_SEED_B64` | to mint | Standard base64 of the raw 32-byte Ed25519 seed. Already set on Railway `bloodraven-site` / `production`. Must derive public key `br-1` (`1b3bea77…6f02`). |
+| `POLAR_API_TOKEN` | to mint | Polar Organization Access Token with `orders:read` only. |
+| `POLAR_API_BASE` | no | `https://api.polar.sh` (default) or `https://sandbox-api.polar.sh`. |
+| `LICENSE_SIGNING_KID` | no | Defaults to `br-1`. |
+
+Tag each Bloodraven license product in the Polar dashboard with metadata
+`edition` = `production` or `organization` (including renewal products).
+Products without that key cannot mint a token.
+
+Rate limit: 10 requests / 15 minutes / client IP, in memory, per process.
+It resets on deploy and is not shared across instances.
+
+`npm test` runs the Node unit tests. From the repo root,
+`make test-license-roundtrip` signs a throwaway token in Node and verifies
+it with the Go operator verifier.
+
 `.github/workflows/deploy-site.yml` deploys this directory to Railway on every
 push to `main` that touches `site/`, and on manual dispatch.
 `.github/workflows/docs-link-check.yml` crawls the published site nightly and

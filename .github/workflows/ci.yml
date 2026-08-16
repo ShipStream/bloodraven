@@ -109,6 +109,29 @@ jobs:
             exit 1
           fi
 
+  license-roundtrip:
+    name: License / Roundtrip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Install site dependencies
+        working-directory: site
+        run: npm ci
+      - name: Run Node license tests
+        working-directory: site
+        run: npm test
+      - name: Cross-language license roundtrip
+        run: make test-license-roundtrip
+
   docs-build:
     name: Docs / Build
     runs-on: ubuntu-latest
@@ -176,7 +199,7 @@ jobs:
   all-checks:
     name: All Checks
     runs-on: ubuntu-latest
-    needs: [lint, build, test-unit, test-component, test-envtest, generate-check, docs-build, course-check]
+    needs: [lint, build, test-unit, test-component, test-envtest, generate-check, license-roundtrip, docs-build, course-check]
     if: always()
     steps:
       - name: Check all jobs passed
