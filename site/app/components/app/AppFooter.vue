@@ -13,6 +13,7 @@ const links = computed(() => [
   { label: 'Course', to: '/courses/', target: '_blank' },
   ...(githubUrl.value ? [{ label: 'GitHub', to: githubUrl.value, target: '_blank' }] : []),
   { label: 'Licensing', to: '/docs/licensing' },
+  { label: 'License key', to: '/license' },
   { label: 'llms-full.txt', to: '/llms-full.txt', target: '_blank' },
 ])
 

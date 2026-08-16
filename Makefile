@@ -1,6 +1,6 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration dst dst-repro fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-check course-drift
+.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration test-license-roundtrip dst dst-repro fmt vet lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-check course-drift
 
 ##@ General
 
@@ -76,7 +76,7 @@ manifests: ## Generate CRD and RBAC manifests
 
 ##@ Testing
 
-test: test-unit test-component ## Run fast tests (unit + component) — default PR gate
+test: test-unit test-component test-license-roundtrip ## Run fast tests (unit + component + license roundtrip) — default PR gate
 
 test-all: ## Run all tests including integration (network listeners)
 	go test -tags integration -race ./...
@@ -86,6 +86,9 @@ test-unit: ## Run unit tests only (no network, no listeners, fast)
 
 test-component: ## Run component tests (cross-package with fakes, no real cluster)
 	go test -race ./test/component/
+
+test-license-roundtrip: ## Sign a throwaway token in Node and verify it with the Go verifier
+	go test -race ./test/license-roundtrip/
 
 test-envtest: ## Run envtest controller tests (real API server, no cluster)
 	go test -race -tags envtest ./test/envtest/

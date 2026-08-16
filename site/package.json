@@ -7,10 +7,12 @@
     "build": "nuxt build",
     "generate": "nuxt generate",
     "preview": "nuxt preview",
+    "test": "node --test test/*.test.mjs",
     "verify:llms": "node ./scripts/verify-llms-full.mjs",
     "check:public-links": "node ./scripts/check-public-links.mjs"
   },
   "dependencies": {
+    "@polar-sh/sdk": "^0.49.0",
     "better-sqlite3": "^12.0.0",
     "docus": "^5.12.3",
     "mermaid": "^11.16.1",
