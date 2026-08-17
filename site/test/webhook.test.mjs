@@ -60,6 +60,32 @@ test('invalid signature is 401 and does not log the body', () => {
   assert.equal(logs.joined().includes(body), false);
 });
 
+test('a non-verification error still rejects and logs no identifiers', () => {
+  // validateEvent can throw something other than WebhookVerificationError.
+  // That path used to fall through to a 202 with identifiers parsed from the
+  // unverified body, letting an unauthenticated caller plant attacker-chosen
+  // type/orderId/productId values in operator logs. Any throw must reject.
+  const logs = captureLog();
+  const result = receivePolarWebhook({
+    rawBody: { type: 'order.refunded', data: { id: 'spoofed-order' } },
+    headers: {
+      'webhook-id': 'msg_1',
+      'webhook-timestamp': String(Math.floor(Date.now() / 1000)),
+      'webhook-signature': 'v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+    },
+    secret: SECRET,
+    log: logs.log,
+  });
+  assert.equal(result.status, 401);
+  assert.equal(result.body.error, 'Invalid signature.');
+  assert.equal(logs.lines.length, 1);
+  assert.equal(logs.lines[0].msg, 'polar webhook signature rejected');
+  assert.equal(Object.hasOwn(logs.lines[0], 'orderId'), false);
+  assert.equal(logs.lines[0].type, undefined);
+  assert.equal(logs.joined().includes('spoofed-order'), false);
+  assert.equal(logs.joined().includes('polar webhook notable'), false);
+});
+
 test('missing secret is 503 and does not log the body', () => {
   const logs = captureLog();
   const body = '{"type":"order.created","data":{"customer":{"email":"buyer@example.com"}}}';

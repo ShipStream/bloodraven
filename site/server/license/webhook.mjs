@@ -1,4 +1,5 @@
-import { validateEvent, WebhookVerificationError } from '@polar-sh/sdk/webhooks';
+import { Webhook } from 'standardwebhooks';
+import { validateEvent } from '@polar-sh/sdk/webhooks';
 
 const NOTABLE_TYPES = new Set(['order.refunded', 'subscription.revoked']);
 
@@ -78,14 +79,28 @@ export function receivePolarWebhook({ rawBody, headers, secret, log = defaultLog
     return { status: 401, body: { error: 'Invalid signature.' } };
   }
 
+  const headerMap = webhookHeaderMap(headers);
+
+  // Authenticate first, as its own step. validateEvent both verifies the
+  // signature and parses the event, and it throws a non-verification error
+  // for an authentic delivery whose shape it does not recognise — so its
+  // exception type cannot tell "forged" from "unrecognised". Deciding
+  // authenticity here keeps that distinction explicit: anything that fails
+  // this step is rejected, whatever it threw.
+  try {
+    new Webhook(Buffer.from(secret, 'utf-8').toString('base64')).verify(rawBody, headerMap);
+  } catch {
+    log('polar webhook signature rejected');
+    return { status: 401, body: { error: 'Invalid signature.' } };
+  }
+
+  // Authentic from here. Parsing failures must NOT become 401: Polar retries
+  // non-2xx, so rejecting a genuine delivery we simply cannot parse would
+  // retry forever. Fall back to identifiers read from the raw body.
   let event;
   try {
-    event = validateEvent(rawBody, webhookHeaderMap(headers), secret);
-  } catch (error) {
-    if (error instanceof WebhookVerificationError) {
-      log('polar webhook signature rejected');
-      return { status: 401, body: { error: 'Invalid signature.' } };
-    }
+    event = validateEvent(rawBody, headerMap, secret);
+  } catch {
     const ids = identifiersFromRaw(rawBody);
     const msg = NOTABLE_TYPES.has(ids.type) ? 'polar webhook notable' : 'polar webhook received';
     log(msg, ids);
