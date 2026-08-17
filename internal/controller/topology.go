@@ -2648,7 +2648,31 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 			break
 		}
 		if !haveStandby {
-			return false
+			// A drifted follower that is not a healthy replica (divergent,
+			// unreachable, threads down) will fail requireDirectReplica and
+			// must not keep restarting the plan every poll. Only a replica
+			// that can actually be rolled unblocks this path.
+			updatableFollower := false
+			for i := range tm.sites {
+				if tm.sites[i].name == activeName || !drifted[tm.sites[i].name] {
+					continue
+				}
+				// Match requireDirectReplica: threads up and pointed at
+				// the current primary. A wrong-source replica is "healthy"
+				// in the debounce sense but will be retained as unsafe.
+				if tm.sites[i].isHealthyReplica() &&
+					canonicalSourceHost(tm.sites[i].sourceHost) == canonicalSourceHost(activeSite.host) {
+					updatableFollower = true
+					break
+				}
+			}
+			if !updatableFollower {
+				tm.logger.Info("ordered update: deferring active-site update; no healthy promotable standby",
+					"active", activeName, "driftSites", driftSites)
+				return false
+			}
+			tm.logger.Info("ordered update: updating drifted followers; active site has no healthy promotable standby",
+				"active", activeName, "driftSites", driftSites)
 		}
 	}
 

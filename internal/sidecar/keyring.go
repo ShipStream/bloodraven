@@ -61,6 +61,12 @@ type KeyringAgent struct {
 	// restart re-running it is harmless — this flag just avoids doing it
 	// on every poll tick.
 	rotated bool
+
+	// topology is the operator-authoritative active-site cache shared
+	// with the fencing monitor. Replicated DDL (system tablespace
+	// encryption) and empty-keyring master-key bootstrap must run only
+	// on that site. Nil means "unknown" and fail-closes those writes.
+	topology *TopologyCache
 }
 
 // KeyringConfig is the operator-supplied keyring wiring, parsed from
@@ -202,6 +208,27 @@ func NewKeyringAgent(cfg *KeyringConfig, sidecarCfg *Config, mysql keyringQuerie
 			RotateRequested: cfg.Rotate,
 		},
 	}, nil
+}
+
+// WithTopology attaches the shared operator-authoritative active-site
+// cache. Call once after construction and before Run. Returns the
+// receiver so it can be chained. A nil cache leaves replicated keyring
+// writes fail-closed.
+func (a *KeyringAgent) WithTopology(cache *TopologyCache) *KeyringAgent {
+	a.topology = cache
+	return a
+}
+
+// isAuthoritativePrimary reports whether the operator currently names
+// this site as the active primary. Unknown (nil cache or empty
+// ActiveSite) is not authority — MySQL coming up writable after a pod
+// roll is not enough to issue replicated DDL.
+func (a *KeyringAgent) isAuthoritativePrimary() bool {
+	if a.topology == nil {
+		return false
+	}
+	snap := a.topology.Snapshot()
+	return snap.ActiveSite != "" && snap.ActiveSite == a.site
 }
 
 func newEscrowHTTPClient(rawURL, caFile string) (*http.Client, error) {
@@ -391,8 +418,15 @@ func (a *KeyringAgent) refreshMySQLView(ctx context.Context) error {
 		return viewErr
 	}
 
-	// Only the writable primary may create keys or rewrite tablespaces.
-	// Replicas wait for the primary's binlog (or for promotion).
+	// Only the operator-authoritative primary may create keys or
+	// rewrite tablespaces. Replicas wait for the primary's binlog (or
+	// for promotion). IsReadOnly() alone is not enough: MySQL does not
+	// persist read_only across a pod replacement, so a just-rolled
+	// replica is writable until fencing finishes. Issuing ALTER
+	// TABLESPACE there plants a GTID the real primary does not have.
+	if !a.isAuthoritativePrimary() {
+		return viewErr
+	}
 	readOnly, roErr := a.mysql.IsReadOnly(qCtx)
 	if roErr != nil {
 		return errors.Join(viewErr, fmt.Errorf("query read_only: %w", roErr))
