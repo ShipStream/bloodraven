@@ -189,6 +189,9 @@ func newAgentFixture(t *testing.T, mutate func(*KeyringConfig)) *agentFixture {
 	if err != nil {
 		t.Fatalf("new keyring agent: %v", err)
 	}
+	cache := &TopologyCache{}
+	cache.Set("dc1", time.Now())
+	agent.WithTopology(cache)
 
 	return &agentFixture{agent: agent, dir: dir, keyring: keyring, escrow: es, mysql: my}
 }
@@ -662,6 +665,63 @@ func TestKeyringAgent_SkipsSystemTablespaceOnReplica(t *testing.T) {
 
 	if got := f.mysql.encryptCalls.Load(); got != 0 {
 		t.Errorf("encrypt calls = %d, want 0 on a replica", got)
+	}
+}
+
+func TestKeyringAgent_SkipsSystemTablespaceWhenNotAuthoritativePrimary(t *testing.T) {
+	// The v1.1.0 encryption E2E gate stall: a just-rolled replica comes
+	// up writable (MySQL does not persist read_only) and the sidecar
+	// already knows /active-site names someone else. Issuing ALTER
+	// TABLESPACE there plants a GTID the real primary does not have.
+	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.readOnly = false
+	f.agent.topology.Set("pdx", time.Now())
+	if err := os.WriteFile(f.keyring, []byte("k"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f.agent.tick(context.Background())
+
+	if got := f.mysql.encryptCalls.Load(); got != 0 {
+		t.Errorf("encrypt calls = %d, want 0 when topology names another site", got)
+	}
+	if got := f.mysql.rotateCalls.Load(); got != 0 {
+		t.Errorf("rotate calls = %d, want 0", got)
+	}
+}
+
+func TestKeyringAgent_SkipsMasterKeyBootstrapWhenNotAuthoritativePrimary(t *testing.T) {
+	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
+	f.mysql.component = &KeyringComponentStatus{Name: "component_keyring_file", Status: "Active"}
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.readOnly = false
+	f.agent.topology.Set("pdx", time.Now())
+	empty := []byte("{\"version\":\"1.0\",\"elements\":[]}\n")
+	if err := os.WriteFile(f.keyring, empty, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f.agent.tick(context.Background())
+
+	if got := f.mysql.rotateCalls.Load(); got != 0 {
+		t.Errorf("rotate calls = %d, want 0 when topology names another site", got)
+	}
+	if got := f.mysql.encryptCalls.Load(); got != 0 {
+		t.Errorf("encrypt calls = %d, want 0", got)
+	}
+}
+
+func TestKeyringAgent_SkipsSystemTablespaceWithoutTopology(t *testing.T) {
+	f := newAgentFixture(t, func(c *KeyringConfig) { c.EncryptSystemTablespace = true })
+	f.mysql.coverage = &KeyringCoverage{SystemTablespaceEncrypted: false}
+	f.mysql.readOnly = false
+	f.agent.topology = nil
+	if err := os.WriteFile(f.keyring, []byte("k"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	f.agent.tick(context.Background())
+
+	if got := f.mysql.encryptCalls.Load(); got != 0 {
+		t.Errorf("encrypt calls = %d, want 0 when topology is unknown", got)
 	}
 }
 

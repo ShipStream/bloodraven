@@ -108,6 +108,7 @@ func main() {
 			logger.Error("unable to configure keyring agent", "error", err)
 			os.Exit(1)
 		}
+		keyringAgent.WithTopology(topology)
 		logger.Info("keyring agent enabled",
 			"path", cfg.Keyring.Path,
 			"escrowArmed", cfg.Keyring.EscrowArmed,

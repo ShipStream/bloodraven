@@ -2575,6 +2575,151 @@ func TestCheckUpdate_ProcessesHealthyCandidateBeforeUnhealthyReader(t *testing.T
 	}
 }
 
+// TestCheckUpdate_UpdatesHealthyReaderWhenActiveHasNoStandby pins the
+// v1.1.0 encryption-adoption stall: after the unsealed roll, the new
+// primary is drifted onto the sealed hash, the only promotable standby
+// is divergent, and the reader is a healthy direct replica. The plan
+// must still update the reader instead of returning before ExecuteTargets.
+func TestCheckUpdate_UpdatesHealthyReaderWhenActiveHasNoStandby(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	divergent := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{}}
+	reader := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "mysql-primary-internal.ns.svc.cluster.local",
+	}}
+	tm := newConvergenceManager(t, []state.SiteRole{
+		state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly,
+	}, primary, divergent, reader)
+	tm.sites[2].replicating = true
+	tm.sites[2].sourceHost = "mysql-primary-internal.ns.svc.cluster.local"
+	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	var mu sync.Mutex
+	var applied []string
+	tm.ApplyUpdate = func(_ context.Context, site string) error {
+		mu.Lock()
+		applied = append(applied, site)
+		mu.Unlock()
+		return nil
+	}
+	tm.SetSpecDriftSites([]string{"primary", "follower-a", "follower-b"})
+	done := make(chan struct{})
+	tm.StatusCallback = func(TopologySnapshot) { close(done) }
+
+	if !tm.checkUpdate(context.Background()) {
+		t.Fatal("checkUpdate must start so the healthy reader can be sealed")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ordered plan did not finish")
+	}
+	mu.Lock()
+	got := strings.Join(applied, ",")
+	mu.Unlock()
+	if got != "follower-b" {
+		t.Fatalf("applied = %q, want reader only", got)
+	}
+	tm.mu.RLock()
+	drift := append([]string(nil), tm.specDriftSites...)
+	tm.mu.RUnlock()
+	if len(drift) != 2 {
+		t.Fatalf("remaining drift = %v, want active + divergent standby", drift)
+	}
+	remaining := map[string]bool{}
+	for _, name := range drift {
+		remaining[name] = true
+	}
+	if !remaining["primary"] || !remaining["follower-a"] || remaining["follower-b"] {
+		t.Fatalf("remaining drift = %v, want primary and follower-a", drift)
+	}
+}
+
+func TestCheckUpdate_DefersWhenRemainingDriftIsUnsafeFollowers(t *testing.T) {
+	// After the reader has already been sealed, leftover drift is the
+	// active site plus a divergent standby. Starting the plan every
+	// poll would only fail requireDirectReplica and log "ordered update
+	// failed" forever.
+	primary := &mockMySQL{readOnly: false}
+	divergent := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{}}
+	reader := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "mysql-primary-internal.ns.svc.cluster.local",
+	}}
+	tm := newConvergenceManager(t, []state.SiteRole{
+		state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly,
+	}, primary, divergent, reader)
+	tm.sites[2].replicating = true
+	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	tm.ApplyUpdate = func(_ context.Context, site string) error {
+		t.Fatalf("unexpected apply of %s", site)
+		return nil
+	}
+	tm.SetSpecDriftSites([]string{"primary", "follower-a"})
+	if tm.checkUpdate(context.Background()) {
+		t.Fatal("checkUpdate must not restart for a drifted-but-unhealthy follower")
+	}
+}
+
+func TestCheckUpdate_WrongSourcePromotableIsNotAStandby(t *testing.T) {
+	// A promotable replica with threads up but pointed at the wrong
+	// source must not count as haveStandby. Otherwise checkUpdate starts
+	// a handoff that requireDirectReplica immediately refuses.
+	primary := &mockMySQL{readOnly: false}
+	wrongSource := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "mysql-stale-internal.ns.svc.cluster.local",
+	}}
+	tm := newConvergenceManager(t, []state.SiteRole{
+		state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate,
+	}, primary, wrongSource)
+	tm.sites[1].replicating = true
+	tm.sites[1].sourceHost = "mysql-stale-internal.ns.svc.cluster.local"
+	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	tm.ApplyUpdate = func(_ context.Context, site string) error {
+		t.Fatalf("unexpected apply of %s", site)
+		return nil
+	}
+	tm.SetSpecDriftSites([]string{"primary"})
+	if tm.checkUpdate(context.Background()) {
+		t.Fatal("wrong-source promotable standby must not unlock an active-site update")
+	}
+}
+
+func TestCheckUpdate_DefersWhenDriftedFollowerHasWrongSource(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	wrongSource := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "mysql-stale-internal.ns.svc.cluster.local",
+	}}
+	tm := newConvergenceManager(t, []state.SiteRole{
+		state.SiteRolePrimaryCandidate, state.SiteRoleReadOnly,
+	}, primary, wrongSource)
+	tm.sites[1].replicating = true
+	tm.sites[1].sourceHost = "mysql-stale-internal.ns.svc.cluster.local"
+	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	tm.ApplyUpdate = func(_ context.Context, site string) error {
+		t.Fatalf("unexpected apply of %s", site)
+		return nil
+	}
+	tm.SetSpecDriftSites([]string{"primary", "follower-a"})
+	if tm.checkUpdate(context.Background()) {
+		t.Fatal("checkUpdate must not restart for a drifted follower replicating from the wrong source")
+	}
+}
+
+func TestCheckUpdate_DefersWhenOnlyActiveDriftedWithoutStandby(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	divergent := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{}}
+	tm := newConvergenceManager(t, []state.SiteRole{
+		state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate,
+	}, primary, divergent)
+	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	tm.ApplyUpdate = func(_ context.Context, site string) error {
+		t.Fatalf("unexpected apply of %s", site)
+		return nil
+	}
+	tm.SetSpecDriftSites([]string{"primary"})
+	if tm.checkUpdate(context.Background()) {
+		t.Fatal("checkUpdate must not start a handoff with no standby and no follower drift")
+	}
+}
+
 // TestPoll_ZerosReplicatingOnStateLeave makes sure a tracker that was a healthy
 // replica does not carry replicating=true into a later writable/unreachable state.
 func TestPoll_ZerosReplicatingOnStateLeave(t *testing.T) {
