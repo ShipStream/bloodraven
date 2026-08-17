@@ -2638,6 +2638,9 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 			if tm.sites[i].name == activeName || !tm.sites[i].isPromotable() || !tm.sites[i].isHealthyReplica() {
 				continue
 			}
+			if canonicalSourceHost(tm.sites[i].sourceHost) != canonicalSourceHost(activeSite.host) {
+				continue
+			}
 			tm.mu.RLock()
 			blocked := tm.keyringRotationBlockedLocked(tm.sites[i].name)
 			tm.mu.RUnlock()

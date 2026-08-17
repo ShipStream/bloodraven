@@ -2658,6 +2658,30 @@ func TestCheckUpdate_DefersWhenRemainingDriftIsUnsafeFollowers(t *testing.T) {
 	}
 }
 
+func TestCheckUpdate_WrongSourcePromotableIsNotAStandby(t *testing.T) {
+	// A promotable replica with threads up but pointed at the wrong
+	// source must not count as haveStandby. Otherwise checkUpdate starts
+	// a handoff that requireDirectReplica immediately refuses.
+	primary := &mockMySQL{readOnly: false}
+	wrongSource := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "mysql-stale-internal.ns.svc.cluster.local",
+	}}
+	tm := newConvergenceManager(t, []state.SiteRole{
+		state.SiteRolePrimaryCandidate, state.SiteRolePrimaryCandidate,
+	}, primary, wrongSource)
+	tm.sites[1].replicating = true
+	tm.sites[1].sourceHost = "mysql-stale-internal.ns.svc.cluster.local"
+	tm.updater = NewUpdateController(NewFailoverController(testLogger()), testLogger())
+	tm.ApplyUpdate = func(_ context.Context, site string) error {
+		t.Fatalf("unexpected apply of %s", site)
+		return nil
+	}
+	tm.SetSpecDriftSites([]string{"primary"})
+	if tm.checkUpdate(context.Background()) {
+		t.Fatal("wrong-source promotable standby must not unlock an active-site update")
+	}
+}
+
 func TestCheckUpdate_DefersWhenDriftedFollowerHasWrongSource(t *testing.T) {
 	primary := &mockMySQL{readOnly: false}
 	wrongSource := &mockMySQL{readOnly: true, replicaStatusVal: &mysql.ReplicaStatus{
