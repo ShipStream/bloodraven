@@ -1036,3 +1036,30 @@ func TestUpdateCRStatus_EmitsFailoverEvent(t *testing.T) {
 		t.Errorf("want FailoverExecuted event from updateCRStatus, got %v", events)
 	}
 }
+
+func TestSetDNSRecordSpec_ForwardsToManager(t *testing.T) {
+	dns := &fakeDNSSpec{hostname: "old.example.com", ttl: 60, generation: 1}
+	tm := newDNSHealTM(dns, &mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
+	runner := &TopologyManagerRunner{
+		logger:   slog.New(slog.NewJSONHandler(os.Stderr, nil)),
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+	nn := types.NamespacedName{Namespace: "default", Name: "main"}
+	if runner.SetDNSRecordSpec(nn, "new.example.com", 15, 2) {
+		t.Fatal("SetDNSRecordSpec with no manager must return false")
+	}
+	runner.SetManagerForTest(nn, tm)
+	if !runner.SetDNSRecordSpec(nn, "new.example.com", 15, 2) {
+		t.Fatal("SetDNSRecordSpec with a manager must return true")
+	}
+	host, ttl := dns.RecordSpec()
+	if host != "new.example.com" || ttl != 15 {
+		t.Fatalf("forwarded spec = (%q, %d), want (new.example.com, 15)", host, ttl)
+	}
+	if runner.SetDNSRecordSpec(nn, "stale.example.com", 99, 1) {
+		host, ttl = dns.RecordSpec()
+		if host != "new.example.com" || ttl != 15 {
+			t.Fatalf("older generation overwrote spec: (%q, %d)", host, ttl)
+		}
+	}
+}

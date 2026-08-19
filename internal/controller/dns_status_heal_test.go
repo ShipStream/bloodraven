@@ -228,6 +228,88 @@ func (f *fakeDNSEndpoint) current() (string, int) {
 	return f.record, f.writes
 }
 
+// fakeDNSSpec is a DNSUpdater that implements DNSSpecController so
+// reconcileDNS can see hostname/TTL divergence independently of the
+// target IP. Used to pin issue #166: a rename must rewrite the record
+// without incrementing bloodraven_dns_flips_total.
+type fakeDNSSpec struct {
+	mu         sync.Mutex
+	hostname   string
+	ttl        int64
+	generation int64
+	recordHost string
+	recordTTL  int64
+	record     string
+	writes     int
+	denied     error
+	readErr    error
+}
+
+var (
+	_ platform.DNSUpdater        = (*fakeDNSSpec)(nil)
+	_ platform.DNSSpecController = (*fakeDNSSpec)(nil)
+)
+
+func (f *fakeDNSSpec) SetRecordSpec(hostname string, ttl int64, generation int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if generation < f.generation {
+		return
+	}
+	f.generation = generation
+	f.hostname = hostname
+	f.ttl = ttl
+}
+
+func (f *fakeDNSSpec) RecordSpec() (string, int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hostname, f.ttl
+}
+
+func (f *fakeDNSSpec) SpecNeedsApply() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.recordHost != f.hostname || f.recordTTL != f.ttl
+}
+
+func (f *fakeDNSSpec) CurrentDNSEndpoint(_ context.Context) (string, string, int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.readErr != nil {
+		return "", "", 0, false, f.readErr
+	}
+	if f.record == "" && f.recordHost == "" {
+		return "", "", 0, false, nil
+	}
+	return f.recordHost, f.record, f.recordTTL, true, nil
+}
+
+func (f *fakeDNSSpec) UpdateDNSRecord(_ context.Context, ip string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.denied != nil {
+		return f.denied
+	}
+	f.record = ip
+	f.recordHost = f.hostname
+	f.recordTTL = f.ttl
+	f.writes++
+	return nil
+}
+
+func (f *fakeDNSSpec) snapshot() (host, ip string, ttl int64, writes int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.recordHost, f.record, f.recordTTL, f.writes
+}
+
+func (f *fakeDNSSpec) setReadErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readErr = err
+}
+
 // newDNSHealTM builds a TopologyManager over the two-site test topology
 // (dc1=1.1.1.1, dc2=2.2.2.2) with a caller-supplied DNS updater.
 func newDNSHealTM(dns platform.DNSUpdater, site0, site1 *mockMySQL) *TopologyManager {
@@ -455,5 +537,132 @@ func TestReconcileDNS_HealsWithoutRecordReadCapability(t *testing.T) {
 	dns.mu.Unlock()
 	if calls != 1 {
 		t.Errorf("DNS applied %d times, want 1 (idempotent once converged)", calls)
+	}
+}
+
+// TestReconcileDNS_HostnameChangeRewritesWithoutFlipMetric is issue #166:
+// changing spec.dns.hostname must rewrite dnsName even when the target IP
+// still matches the active site, and must not count as a DNS flip.
+func TestReconcileDNS_HostnameChangeRewritesWithoutFlipMetric(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	dns := &fakeDNSSpec{
+		hostname:   "old.example.com",
+		ttl:        60,
+		generation: 1,
+		recordHost: "old.example.com",
+		recordTTL:  60,
+		record:     "1.1.1.1",
+	}
+	tm := newDNSHealTM(dns, site0, site1)
+
+	before := dnsFlips("dc1")
+	pollN(tm, 2)
+	if _, _, _, writes := dns.snapshot(); writes != 0 {
+		t.Fatalf("converged record rewritten before rename: writes=%d", writes)
+	}
+
+	tm.SetDNSRecordSpec("new.example.com", 60, 2)
+	pollN(tm, 1)
+
+	host, ip, ttl, writes := dns.snapshot()
+	if host != "new.example.com" || ip != "1.1.1.1" || ttl != 60 {
+		t.Fatalf("after rename: host=%q ip=%q ttl=%d, want (new.example.com, 1.1.1.1, 60)", host, ip, ttl)
+	}
+	if writes != 1 {
+		t.Fatalf("rename writes=%d, want 1", writes)
+	}
+	if delta := dnsFlips("dc1") - before; delta != 0 {
+		t.Errorf("bloodraven_dns_flips_total{dc1} delta=%g, want 0 (hostname-only rewrite is not an IP flip)", delta)
+	}
+
+	pollN(tm, 3)
+	if _, _, _, writes := dns.snapshot(); writes != 1 {
+		t.Errorf("converged renamed record re-written: writes=%d, want 1", writes)
+	}
+}
+
+func TestReconcileDNS_TTLChangeRewritesWithoutFlipMetric(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	dns := &fakeDNSSpec{
+		hostname:   "lion.az.example.com",
+		ttl:        60,
+		generation: 1,
+		recordHost: "lion.az.example.com",
+		recordTTL:  60,
+		record:     "1.1.1.1",
+	}
+	tm := newDNSHealTM(dns, site0, site1)
+	before := dnsFlips("dc1")
+	pollN(tm, 1)
+
+	tm.SetDNSRecordSpec("lion.az.example.com", 15, 2)
+	pollN(tm, 1)
+
+	host, ip, ttl, writes := dns.snapshot()
+	if host != "lion.az.example.com" || ip != "1.1.1.1" || ttl != 15 {
+		t.Fatalf("after TTL edit: host=%q ip=%q ttl=%d", host, ip, ttl)
+	}
+	if writes != 1 {
+		t.Fatalf("TTL rewrite writes=%d, want 1", writes)
+	}
+	if delta := dnsFlips("dc1") - before; delta != 0 {
+		t.Errorf("bloodraven_dns_flips_total{dc1} delta=%g, want 0", delta)
+	}
+}
+
+func TestReconcileDNS_SpecControllerStillCountsTargetFlip(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true}
+	site1 := &mockMySQL{readOnly: false}
+	dns := &fakeDNSSpec{
+		hostname:   "lion.az.example.com",
+		ttl:        60,
+		generation: 1,
+		recordHost: "lion.az.example.com",
+		recordTTL:  60,
+		record:     "1.1.1.1", // stale: still points at dc1
+	}
+	tm := newDNSHealTM(dns, site0, site1)
+	before := dnsFlips("dc2")
+	pollN(tm, 2)
+
+	_, ip, _, writes := dns.snapshot()
+	if ip != "2.2.2.2" || writes != 1 {
+		t.Fatalf("target heal: ip=%q writes=%d, want (2.2.2.2, 1)", ip, writes)
+	}
+	if delta := dnsFlips("dc2") - before; delta != 1 {
+		t.Errorf("bloodraven_dns_flips_total{dc2} delta=%g, want 1", delta)
+	}
+}
+
+func TestReconcileDNS_SpecChangeAppliesWhenRecordUnreadable(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	dns := &fakeDNSSpec{
+		hostname:   "old.example.com",
+		ttl:        60,
+		generation: 1,
+		recordHost: "old.example.com",
+		recordTTL:  60,
+		record:     "1.1.1.1",
+	}
+	tm := newDNSHealTM(dns, site0, site1)
+	pollN(tm, 2)
+	if _, _, _, writes := dns.snapshot(); writes != 0 {
+		t.Fatalf("converged record rewritten before rename: writes=%d", writes)
+	}
+
+	dns.setReadErr(errors.New("get dnsendpoints is forbidden"))
+	tm.SetDNSRecordSpec("new.example.com", 60, 2)
+	before := dnsFlips("dc1")
+	pollN(tm, 1)
+
+	host, ip, _, writes := dns.snapshot()
+	if host != "new.example.com" || ip != "1.1.1.1" || writes != 1 {
+		t.Fatalf("unreadable live record must still apply a rename: host=%q ip=%q writes=%d", host, ip, writes)
+	}
+	if delta := dnsFlips("dc1") - before; delta != 0 {
+		t.Errorf("bloodraven_dns_flips_total{dc1} delta=%g, want 0", delta)
 	}
 }

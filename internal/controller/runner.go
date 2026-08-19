@@ -162,6 +162,21 @@ func (r *TopologyManagerRunner) SetPlannedFailoverActive(nn types.NamespacedName
 	return true
 }
 
+// SetDNSRecordSpec pushes spec.dns.hostname and spec.dns.ttl onto the
+// running topology manager's DNS updater. Returns true when a manager
+// is running for nn. A false return is safe — the next startManager
+// constructs the updater from the live spec.
+func (r *TopologyManagerRunner) SetDNSRecordSpec(nn types.NamespacedName, hostname string, ttl int64, generation int64) bool {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	mt.tm.SetDNSRecordSpec(hostname, ttl, generation)
+	return true
+}
+
 // plannedFailoverManager returns the managed TopologyManager for the
 // given CR, or an error when no manager is running. The caller must not
 // cache the returned pointer; a reconfiguration can replace the manager
@@ -319,6 +334,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			existing.tm.SetTopologyFrozen(frozen)
 			existing.tm.SetPlannedFailoverActive(plannedActive)
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
+			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
 			if existing.dragonfly != nil {
 				existing.dragonfly.SetPaused(plannedActive)
 			}
@@ -556,6 +572,9 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	tainter := platform.NewNodeTainter(r.clientset, r.logger.With("fg", nn.String()))
 
 	dns := platform.NewDNSEndpointUpdater(r.client, fg.Name, string(fg.UID), fg.Namespace, fg.Name, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL)
+	if spec, ok := dns.(platform.DNSSpecController); ok {
+		spec.SetRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
+	}
 
 	// Build bootstrap configuration. In credentials mode, use operator
 	// username/password as replication credentials unless overridden.

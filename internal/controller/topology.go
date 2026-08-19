@@ -1374,6 +1374,10 @@ func (tm *TopologyManager) applyDNS(ctx context.Context, site, target string) er
 // this process's own knowledge: it re-applies only when a write is known to
 // have failed, or when the last target it applied is no longer the desired
 // one. It never writes speculatively.
+//
+// When the updater implements platform.DNSSpecController the compare is the
+// full owned record (dnsName, recordTTL, target). A hostname or TTL edit
+// therefore rewrites the DNSEndpoint without counting as an IP flip.
 func (tm *TopologyManager) reconcileDNS(ctx context.Context) {
 	if tm.dns == nil {
 		return
@@ -1401,17 +1405,49 @@ func (tm *TopologyManager) reconcileDNS(ctx context.Context) {
 		return
 	}
 
+	hostname := tm.dnsHostname()
+	specNeedsApply := false
+	if spec, ok := tm.dns.(platform.DNSSpecController); ok {
+		specNeedsApply = spec.SpecNeedsApply()
+	}
+
 	// Prefer the live record when the updater can read it back: it is the
 	// only source of truth that survives an operator restart.
 	live, liveKnown := "", false
-	if reader, ok := tm.dns.(platform.DNSRecordReader); ok {
+	if spec, ok := tm.dns.(platform.DNSSpecController); ok {
+		desiredHost, desiredTTL := spec.RecordSpec()
+		hostname = desiredHost
+		liveHost, liveTarget, liveTTL, found, err := spec.CurrentDNSEndpoint(ctx)
+		switch {
+		case err != nil:
+			tm.logger.Debug("DNS record read failed; falling back to in-process state",
+				"site", site, "hostname", hostname, "error", err)
+		case !found:
+			live, liveKnown = "", true
+		case liveHost == desiredHost && liveTTL == desiredTTL && liveTarget == target:
+			tm.mu.Lock()
+			tm.dnsAppliedTarget = target
+			tm.dnsWriteFailed = false
+			tm.mu.Unlock()
+			return
+		default:
+			// Live object diverges in name, TTL, and/or target. Seed the
+			// applied target with the live IP so a hostname/TTL-only
+			// rewrite does not increment bloodraven_dns_flips_total.
+			tm.mu.Lock()
+			tm.dnsAppliedTarget = liveTarget
+			tm.mu.Unlock()
+			tm.applyReconciledDNS(ctx, site, target, hostname, writeFailed)
+			return
+		}
+	} else if reader, ok := tm.dns.(platform.DNSRecordReader); ok {
 		cur, found, err := reader.CurrentDNSRecord(ctx)
 		switch {
 		case err != nil:
 			// Unreadable (e.g. get is denied too) — fall through to the
 			// in-process state below rather than guessing.
 			tm.logger.Debug("DNS record read failed; falling back to in-process state",
-				"site", site, "error", err)
+				"site", site, "hostname", hostname, "error", err)
 		case !found:
 			// No record yet: an absent record diverges from every target.
 			live, liveKnown = "", true
@@ -1438,6 +1474,10 @@ func (tm *TopologyManager) reconcileDNS(ctx context.Context) {
 		tm.mu.Unlock()
 	case writeFailed:
 		// Cannot read the record, but we know our last write did not land.
+	case specNeedsApply:
+		// Cannot read the record, but hostname/TTL changed since the last
+		// successful apply. Write anyway so a rename does not stall on a
+		// GET failure while PATCH is still permitted.
 	case applied != "" && applied != target:
 		// Cannot read the record; the last target we applied is no longer
 		// the primary (superseded promotion), so re-point it.
@@ -1446,19 +1486,39 @@ func (tm *TopologyManager) reconcileDNS(ctx context.Context) {
 		return
 	}
 
+	tm.applyReconciledDNS(ctx, site, target, hostname, writeFailed)
+}
+
+func (tm *TopologyManager) applyReconciledDNS(ctx context.Context, site, target, hostname string, writeFailed bool) {
 	if err := tm.applyDNS(ctx, site, target); err != nil {
 		if writeFailed {
 			// Already known to be failing: the first failure was logged (here,
 			// or as "DNS flip failed after successful promotion"). Do not
 			// repeat it every poll — a persistent DNS-provider or RBAC problem
 			// would otherwise fill the log at poll frequency.
-			tm.logger.Debug("DNS reconcile still failing", "site", site, "target", target, "error", err)
+			tm.logger.Debug("DNS reconcile still failing", "site", site, "target", target, "hostname", hostname, "error", err)
 		} else {
-			tm.logger.Warn("DNS reconcile failed", "site", site, "target", target, "error", err)
+			tm.logger.Warn("DNS reconcile failed", "site", site, "target", target, "hostname", hostname, "error", err)
 		}
 		return
 	}
-	tm.logger.Info("DNS reconciled to active site", "site", site, "target", target)
+	tm.logger.Info("DNS reconciled to active site", "site", site, "target", target, "hostname", hostname)
+}
+
+func (tm *TopologyManager) dnsHostname() string {
+	if spec, ok := tm.dns.(platform.DNSSpecController); ok {
+		host, _ := spec.RecordSpec()
+		return host
+	}
+	return ""
+}
+
+// SetDNSRecordSpec pushes a live spec.dns.hostname / spec.dns.ttl into the
+// updater. No-op when the updater does not implement DNSSpecController.
+func (tm *TopologyManager) SetDNSRecordSpec(hostname string, ttl int64, generation int64) {
+	if spec, ok := tm.dns.(platform.DNSSpecController); ok {
+		spec.SetRecordSpec(hostname, ttl, generation)
+	}
 }
 
 // MarkStatusWriteResult records whether the most recent CR /status write

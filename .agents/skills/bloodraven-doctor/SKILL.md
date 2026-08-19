@@ -137,12 +137,14 @@ Consult [references/troubleshooting_playbooks.md](./references/troubleshooting_p
   ```
 
 ### 6. DNS & Application Traffic
-- **Symptom**: App writes hitting wrong site, DNS records not updating after failover.
+- **Symptom**: App writes hitting wrong site, DNS records not updating after failover, or a hostname rename that never reached DNS.
 - **Probe**:
   ```bash
-  kubectl get dnsendpoint -n <namespace>
+  kubectl get mysqlfailovergroup <group> -n <namespace> -o jsonpath='{.spec.dns}{"\n"}'
+  kubectl get dnsendpoint -n <namespace> -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.endpoints[0].dnsName}{" -> "}{.spec.endpoints[0].targets[0]}{" ttl="}{.spec.endpoints[0].recordTTL}{"\n"}{end}'
   kubectl logs -n external-dns deploy/external-dns --tail=100
   ```
+- **Hostname mismatch**: if `DNSEndpoint.spec.endpoints[0].dnsName` != `spec.dns.hostname`, the operator is not applying the live spec (RBAC/apply failure, or an unpatched operator that cached the name at start). Check operator logs for `DNS reconcile failed` / `DNS reconciled to active site` (`hostname` field). Restarting the operator is only a workaround on versions before the live-spec fix.
 
 ---
 
