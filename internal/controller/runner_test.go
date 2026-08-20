@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -1061,5 +1062,82 @@ func TestSetDNSRecordSpec_ForwardsToManager(t *testing.T) {
 		if host != "new.example.com" || ttl != 15 {
 			t.Fatalf("older generation overwrote spec: (%q, %d)", host, ttl)
 		}
+	}
+}
+
+func TestSetCloneTimeout_ForwardsToManager(t *testing.T) {
+	tm := newDNSHealTM(&fakeDNSSpec{}, &mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
+	runner := &TopologyManagerRunner{
+		logger:   slog.New(slog.NewJSONHandler(os.Stderr, nil)),
+		managers: make(map[types.NamespacedName]*managedTopology),
+	}
+	nn := types.NamespacedName{Namespace: "default", Name: "main"}
+	if runner.SetCloneTimeout(nn, 2*time.Hour) {
+		t.Fatal("SetCloneTimeout with no manager must return false")
+	}
+	runner.SetManagerForTest(nn, tm)
+	if !runner.SetCloneTimeout(nn, 2*time.Hour) {
+		t.Fatal("SetCloneTimeout with a manager must return true")
+	}
+	if got := tm.cloneTimeout(); got != 2*time.Hour {
+		t.Fatalf("cloneTimeout = %s, want 2h", got)
+	}
+}
+
+func TestConnectionMaterialHash_TLSAdoptionAndRotationRestart(t *testing.T) {
+	fg := newTestFG()
+	opSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: fg.Spec.SecretName, Namespace: fg.Namespace},
+		Data:       map[string][]byte{"username": []byte("op"), "password": []byte("p")},
+	}
+	tlsSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "mysql-tls", Namespace: fg.Namespace},
+		Data:       map[string][]byte{"ca.crt": []byte("old-ca")},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(opSecret, tlsSecret).Build()
+	ctx := context.Background()
+
+	plain := connectionMaterialHash(ctx, c, fg)
+	if plain == "" {
+		t.Fatal("plaintext group with operator secret must have a connection hash")
+	}
+
+	fg.Spec.CloneTimeout = 120
+	if connectionMaterialHash(ctx, c, fg) != plain {
+		t.Fatal("cloneTimeout must not change the connection hash (it is live-updated)")
+	}
+
+	fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
+	withTLS := connectionMaterialHash(ctx, c, fg)
+	if withTLS == "" || withTLS == plain {
+		t.Fatalf("adopting TLS must change the connection hash: plain=%q tls=%q", plain, withTLS)
+	}
+
+	tlsSecret.Data["ca.crt"] = []byte("new-ca")
+	if err := c.Update(ctx, tlsSecret); err != nil {
+		t.Fatalf("rotate TLS secret: %v", err)
+	}
+	rotated := connectionMaterialHash(ctx, c, fg)
+	if rotated == withTLS {
+		t.Fatal("rotating the TLS secret must change the connection hash")
+	}
+
+	fg.Spec.TLS.SecretName = "other-tls"
+	if connectionMaterialHash(ctx, c, fg) == rotated {
+		t.Fatal("changing spec.tls.secretName must change the connection hash")
+	}
+}
+
+func TestCloneTimeoutFromSpec(t *testing.T) {
+	if cloneTimeoutFromSpec(nil) != 0 {
+		t.Fatal("nil fg")
+	}
+	fg := newTestFG()
+	if cloneTimeoutFromSpec(fg) != 0 {
+		t.Fatal("unset cloneTimeout should be 0 (bootstrap default)")
+	}
+	fg.Spec.CloneTimeout = 7200
+	if got := cloneTimeoutFromSpec(fg); got != 2*time.Hour {
+		t.Fatalf("got %s, want 2h", got)
 	}
 }

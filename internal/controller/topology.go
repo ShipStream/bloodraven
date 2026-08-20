@@ -67,8 +67,10 @@ type TopologyConfig struct {
 	// resolution (alert only).
 	SitePriorities []string
 
-	// CredentialHash is a hash of the operator secret data. A change
-	// triggers a topology manager restart with new MySQL connections.
+	// CredentialHash is a hash of the material the operator's MySQL
+	// checkers are built from: operator secret data, and when TLS is
+	// configured the TLS secret name + bytes. A change triggers a
+	// topology manager restart with new connections.
 	CredentialHash string
 
 	// DragonflyEnabled mirrors spec.dragonfly.enabled at the time the
@@ -1519,6 +1521,20 @@ func (tm *TopologyManager) SetDNSRecordSpec(hostname string, ttl int64, generati
 	if spec, ok := tm.dns.(platform.DNSSpecController); ok {
 		spec.SetRecordSpec(hostname, ttl, generation)
 	}
+}
+
+// SetCloneTimeout pushes spec.cloneTimeout into the running manager so a
+// later clone/reclone uses the new budget without restarting checkers.
+func (tm *TopologyManager) SetCloneTimeout(d time.Duration) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.bootstrapCfg.CloneTimeout = d
+}
+
+func (tm *TopologyManager) cloneTimeout() time.Duration {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.bootstrapCfg.CloneTimeout
 }
 
 // MarkStatusWriteResult records whether the most recent CR /status write
@@ -3294,7 +3310,7 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 		ReplUser:     tm.bootstrapCfg.ReplUser,
 		ReplPassword: tm.bootstrapCfg.ReplPassword,
 		UseSSL:       tm.bootstrapCfg.UseSSL,
-		CloneTimeout: tm.bootstrapCfg.CloneTimeout,
+		CloneTimeout: tm.cloneTimeout(),
 	})
 	if err != nil && !isCloneConnectionDrop(err) {
 		return fmt.Errorf("clone: %w", err)

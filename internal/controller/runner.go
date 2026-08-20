@@ -177,6 +177,19 @@ func (r *TopologyManagerRunner) SetDNSRecordSpec(nn types.NamespacedName, hostna
 	return true
 }
 
+// SetCloneTimeout pushes spec.cloneTimeout onto the running manager.
+// Returns true when a manager is running for nn.
+func (r *TopologyManagerRunner) SetCloneTimeout(nn types.NamespacedName, d time.Duration) bool {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	mt.tm.SetCloneTimeout(d)
+	return true
+}
+
 // plannedFailoverManager returns the managed TopologyManager for the
 // given CR, or an error when no manager is running. The caller must not
 // cache the returned pointer; a reconfiguration can replace the manager
@@ -285,6 +298,64 @@ func (r *TopologyManagerRunner) Start(ctx context.Context) error {
 	}
 }
 
+// cloneTimeoutFromSpec returns the clone budget from spec.cloneTimeout.
+// Zero means the bootstrap path applies its own default.
+func cloneTimeoutFromSpec(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
+	if fg == nil || fg.Spec.CloneTimeout <= 0 {
+		return 0
+	}
+	return time.Duration(fg.Spec.CloneTimeout) * time.Second
+}
+
+// connectionMaterialHash fingerprints the secrets the operator's MySQL
+// checkers are built from. TLS-off groups hash only the operator secret
+// (same bytes as before this helper existed) so an upgrade does not
+// bounce every manager. TLS-on groups also mix the TLS secret name and
+// bytes so adoption, secretName edits, and cert rotation restart the
+// manager with new connections.
+func connectionMaterialHash(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup) string {
+	if fg == nil || c == nil {
+		return ""
+	}
+	h := sha256.New()
+	wrote := false
+
+	if name := fg.Spec.EffectiveOperatorSecretName(); name != "" {
+		var secret corev1.Secret
+		if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &secret); err == nil {
+			writeSecretDataHash(h, secret.Data)
+			wrote = true
+		}
+	}
+
+	if fg.Spec.TLS != nil && fg.Spec.TLS.SecretName != "" {
+		fmt.Fprintf(h, "tls.secret=%s\n", fg.Spec.TLS.SecretName)
+		var secret corev1.Secret
+		if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.TLS.SecretName}, &secret); err == nil {
+			writeSecretDataHash(h, secret.Data)
+		} else {
+			fmt.Fprintf(h, "tls.missing=1\n")
+		}
+		wrote = true
+	}
+
+	if !wrote {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+func writeSecretDataHash(h interface{ Write([]byte) (int, error) }, data map[string][]byte) {
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(h, "%s=%x\n", k, sha256.Sum256(data[k]))
+	}
+}
+
 // sync lists all MysqlFailoverGroup resources and ensures a topology manager
 // is running for each one. Stale managers are stopped.
 func (r *TopologyManagerRunner) sync(ctx context.Context) error {
@@ -302,24 +373,11 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 
 		cfg := CRConfigToTopologyConfig(fg)
 
-		// Include operator secret data hash so credential changes
-		// trigger a topology manager restart with new connections.
-		operatorSecretName := fg.Spec.EffectiveOperatorSecretName()
-		if operatorSecretName != "" {
-			var secret corev1.Secret
-			if err := r.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: operatorSecretName}, &secret); err == nil {
-				h := sha256.New()
-				keys := make([]string, 0, len(secret.Data))
-				for k := range secret.Data {
-					keys = append(keys, k)
-				}
-				sort.Strings(keys)
-				for _, k := range keys {
-					fmt.Fprintf(h, "%s=%x\n", k, sha256.Sum256(secret.Data[k]))
-				}
-				cfg.CredentialHash = hex.EncodeToString(h.Sum(nil))[:16]
-			}
-		}
+		// Include operator secret + TLS material so credential or
+		// cert rotation (or TLS adoption) restarts the manager with
+		// new MySQL connections. cloneTimeout is live-updated below
+		// and must not be part of this hash.
+		cfg.CredentialHash = connectionMaterialHash(ctx, r.client, fg)
 
 		r.mu.RLock()
 		existing, ok := r.managers[nn]
@@ -335,6 +393,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			existing.tm.SetPlannedFailoverActive(plannedActive)
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
+			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
 			if existing.dragonfly != nil {
 				existing.dragonfly.SetPaused(plannedActive)
 			}
@@ -608,9 +667,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 			ReplPassword: replPassword,
 			UseSSL:       fg.Spec.TLS != nil,
 		}
-		if fg.Spec.CloneTimeout > 0 {
-			bootstrapCfg.CloneTimeout = time.Duration(fg.Spec.CloneTimeout) * time.Second
-		}
+		bootstrapCfg.CloneTimeout = cloneTimeoutFromSpec(fg)
 	}
 
 	updateCtl := NewUpdateController(failoverCtl, r.logger.With("fg", nn.String()))

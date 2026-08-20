@@ -215,6 +215,7 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// restore, planned failover, or another subsystem.
 	if r.Runner != nil {
 		r.Runner.SetDNSRecordSpec(req.NamespacedName, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
+		r.Runner.SetCloneTimeout(req.NamespacedName, cloneTimeoutFromSpec(&fg))
 	}
 
 	// Ensure finalizer is present.
