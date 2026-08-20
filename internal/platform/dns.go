@@ -116,28 +116,34 @@ func (d *dnsEndpointUpdater) SpecNeedsApply() bool {
 	return d.needsApply
 }
 
-func (d *dnsEndpointUpdater) snapshotSpec() (hostname string, ttl int64, generation int64) {
+func (d *dnsEndpointUpdater) snapshotSpec() (hostname string, ttl int64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.hostname, d.ttl, d.generation
+	return d.hostname, d.ttl
 }
 
 func (d *dnsEndpointUpdater) UpdateDNSRecord(ctx context.Context, ip string) error {
-	// Re-apply until the generation we wrote is still current. A
-	// SetRecordSpec that races in a newer generation while this write
-	// is in flight must not be allowed to leave a stale name on the
-	// object. There is no attempt cap: ctx is the only stop condition
-	// besides a successful catch-up or an apply error.
-	for {
+	// Re-apply while the hostname/TTL we wrote are no longer the desired
+	// ones, so a SetRecordSpec that races in while this write is in
+	// flight cannot leave a stale name on the object. The comparison is
+	// on values, not the generation counter: the counter bumps on any
+	// MysqlFailoverGroup spec edit (and SetRecordSpec accepts
+	// equal-generation changes), so it would both re-patch identical
+	// content and miss a same-generation rename. The attempt cap keeps
+	// the caller bounded — Poll runs this inline with no deadline; a
+	// spec that outruns the cap leaves needsApply set, so reconcileDNS
+	// re-applies on the next poll through its specNeedsApply branch.
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		hostname, ttl, gen := d.snapshotSpec()
+		hostname, ttl := d.snapshotSpec()
 		if err := d.applyEndpoint(ctx, hostname, ttl, ip); err != nil {
 			return err
 		}
 		d.mu.Lock()
-		caughtUp := d.generation == gen
+		caughtUp := d.hostname == hostname && d.ttl == ttl
 		if caughtUp {
 			d.needsApply = false
 		}
@@ -146,6 +152,7 @@ func (d *dnsEndpointUpdater) UpdateDNSRecord(ctx context.Context, ip string) err
 			return nil
 		}
 	}
+	return nil
 }
 
 func (d *dnsEndpointUpdater) applyEndpoint(ctx context.Context, hostname string, ttl int64, ip string) error {
@@ -189,7 +196,7 @@ func (d *dnsEndpointUpdater) applyEndpoint(ctx context.Context, hostname string,
 // are returned so the caller can fall back to its in-process state instead
 // of mistaking an unreadable record for an absent one.
 func (d *dnsEndpointUpdater) CurrentDNSRecord(ctx context.Context) (string, bool, error) {
-	want, _, _ := d.snapshotSpec()
+	want, _ := d.snapshotSpec()
 	endpoints, found, err := d.readEndpoints(ctx)
 	if err != nil || !found {
 		return "", found, err

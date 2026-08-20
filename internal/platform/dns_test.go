@@ -222,26 +222,18 @@ func TestDNSEndpointUpdater_SetRecordSpecIgnoresOlderGeneration(t *testing.T) {
 }
 
 func TestDNSEndpointUpdater_UpdateRetriesIfSpecChangesDuringApply(t *testing.T) {
-	scheme := runtime.NewScheme()
-	gvk := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpoint"}
-	listGVK := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpointList"}
-	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
-	scheme.AddKnownTypeWithName(listGVK, &unstructured.UnstructuredList{})
-
 	var spec DNSSpecController
 	var once sync.Once
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, underlying client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				once.Do(func() {
-					if spec != nil {
-						spec.SetRecordSpec("new.example.com", 15, 2)
-					}
-				})
-				return underlying.Patch(ctx, obj, patch, opts...)
-			},
-		}).
-		Build()
+	c, gvk := newDNSInterceptedFakeClient(t, interceptor.Funcs{
+		Patch: func(ctx context.Context, underlying client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			once.Do(func() {
+				if spec != nil {
+					spec.SetRecordSpec("new.example.com", 15, 2)
+				}
+			})
+			return underlying.Patch(ctx, obj, patch, opts...)
+		},
+	})
 
 	dns := NewDNSEndpointUpdater(c, "main", "uid", "default", "main", "old.example.com", 60)
 	spec = dns.(DNSSpecController)
@@ -262,77 +254,150 @@ func TestDNSEndpointUpdater_UpdateRetriesIfSpecChangesDuringApply(t *testing.T) 
 	}
 }
 
-func TestDNSEndpointUpdater_UpdateKeepsApplyingPastThreeSpecChanges(t *testing.T) {
-	scheme := runtime.NewScheme()
-	gvk := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpoint"}
-	listGVK := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpointList"}
-	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
-	scheme.AddKnownTypeWithName(listGVK, &unstructured.UnstructuredList{})
-
+// A spec that changes on every single apply must not spin the caller
+// forever: UpdateDNSRecord runs inline on the topology poll goroutine
+// with no deadline. The contract is bounded attempts, with needsApply
+// left set on exhaustion so reconcileDNS re-applies on the next poll.
+func TestDNSEndpointUpdater_UpdateBoundsRetriesAndLeavesSpecNeedsApply(t *testing.T) {
 	var spec DNSSpecController
 	var patches int
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, underlying client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				patches++
-				// Bump the spec on the first four applies so a 3-attempt
-				// cap would return success while generation is still stale.
-				if spec != nil && patches <= 4 {
-					spec.SetRecordSpec(
-						fmt.Sprintf("gen%d.example.com", patches+1),
-						int64(10+patches),
-						int64(patches+1),
-					)
-				}
-				return underlying.Patch(ctx, obj, patch, opts...)
-			},
-		}).
-		Build()
+	churn := true
+	c, gvk := newDNSInterceptedFakeClient(t, interceptor.Funcs{
+		Patch: func(ctx context.Context, underlying client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patches++
+			// Bump the spec on every apply so the loop can never catch
+			// up: an uncapped loop would spin here forever.
+			if spec != nil && churn {
+				spec.SetRecordSpec(
+					fmt.Sprintf("gen%d.example.com", patches+1),
+					int64(10+patches),
+					int64(patches+1),
+				)
+			}
+			return underlying.Patch(ctx, obj, patch, opts...)
+		},
+	})
 
 	dns := NewDNSEndpointUpdater(c, "main", "uid", "default", "main", "gen1.example.com", 10)
 	spec = dns.(DNSSpecController)
 	spec.SetRecordSpec("gen1.example.com", 10, 1)
 	if err := dns.UpdateDNSRecord(context.Background(), "10.0.1.100"); err != nil {
-		t.Fatalf("UpdateDNSRecord: %v", err)
+		t.Fatalf("UpdateDNSRecord under churn: %v", err)
 	}
-	if patches < 5 {
-		t.Fatalf("patches=%d, want at least 5 (four stale applies plus a catch-up)", patches)
+	if patches != 3 {
+		t.Fatalf("patches=%d, want exactly 3 (the attempt cap) under perpetual spec churn", patches)
+	}
+	if !spec.SpecNeedsApply() {
+		t.Fatal("exhausting the attempt cap must leave SpecNeedsApply set so the poll loop heals the record")
+	}
+
+	// The next poll-driven apply converges once the spec stops moving.
+	churn = false
+	if err := dns.UpdateDNSRecord(context.Background(), "10.0.1.100"); err != nil {
+		t.Fatalf("UpdateDNSRecord after churn: %v", err)
 	}
 	obj := getDNSEndpoint(t, c, gvk)
 	ep := firstEndpoint(t, obj)
-	if ep["dnsName"] != "gen5.example.com" {
-		t.Fatalf("dnsName=%v, want gen5.example.com after more than three in-flight spec changes", ep["dnsName"])
+	if ep["dnsName"] != "gen4.example.com" {
+		t.Fatalf("dnsName=%v, want gen4.example.com after the healing apply", ep["dnsName"])
 	}
-	if got := recordTTLOf(t, ep); got != 14 {
-		t.Fatalf("ttl=%d, want 14", got)
+	if got := recordTTLOf(t, ep); got != 13 {
+		t.Fatalf("ttl=%d, want 13", got)
 	}
 	if spec.SpecNeedsApply() {
 		t.Fatal("successful catch-up apply should clear SpecNeedsApply")
 	}
 }
 
-func TestDNSEndpointUpdater_UpdateStopsWhenContextCanceled(t *testing.T) {
-	scheme := runtime.NewScheme()
-	gvk := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpoint"}
-	listGVK := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpointList"}
-	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
-	scheme.AddKnownTypeWithName(listGVK, &unstructured.UnstructuredList{})
+// SetRecordSpec accepts equal-generation updates (see
+// TestDNSEndpointUpdater_SetRecordSpecIgnoresOlderGeneration), so a
+// same-generation rename landing mid-apply must be re-applied, not
+// mistaken for a catch-up.
+func TestDNSEndpointUpdater_UpdateReappliesEqualGenerationSpecChange(t *testing.T) {
+	var spec DNSSpecController
+	var once sync.Once
+	var patches int
+	c, gvk := newDNSInterceptedFakeClient(t, interceptor.Funcs{
+		Patch: func(ctx context.Context, underlying client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patches++
+			once.Do(func() {
+				if spec != nil {
+					spec.SetRecordSpec("new.example.com", 15, 1)
+				}
+			})
+			return underlying.Patch(ctx, obj, patch, opts...)
+		},
+	})
 
+	dns := NewDNSEndpointUpdater(c, "main", "uid", "default", "main", "old.example.com", 60)
+	spec = dns.(DNSSpecController)
+	spec.SetRecordSpec("old.example.com", 60, 1)
+	if err := dns.UpdateDNSRecord(context.Background(), "10.0.1.100"); err != nil {
+		t.Fatalf("UpdateDNSRecord: %v", err)
+	}
+	if patches != 2 {
+		t.Fatalf("patches=%d, want 2 (stale apply plus the equal-generation catch-up)", patches)
+	}
+	obj := getDNSEndpoint(t, c, gvk)
+	ep := firstEndpoint(t, obj)
+	if ep["dnsName"] != "new.example.com" {
+		t.Fatalf("equal-generation rename lost: dnsName=%v, want new.example.com", ep["dnsName"])
+	}
+	if got := recordTTLOf(t, ep); got != 15 {
+		t.Fatalf("ttl=%d, want 15", got)
+	}
+	if spec.SpecNeedsApply() {
+		t.Fatal("successful catch-up apply should clear SpecNeedsApply")
+	}
+}
+
+// A generation bump without a hostname/TTL change — any edit to an
+// unrelated MysqlFailoverGroup spec field — must not force a second,
+// byte-identical patch.
+func TestDNSEndpointUpdater_UpdateSkipsRepatchOnUnrelatedGenerationBump(t *testing.T) {
+	var spec DNSSpecController
+	var once sync.Once
+	var patches int
+	c, _ := newDNSInterceptedFakeClient(t, interceptor.Funcs{
+		Patch: func(ctx context.Context, underlying client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patches++
+			once.Do(func() {
+				if spec != nil {
+					spec.SetRecordSpec("old.example.com", 60, 2)
+				}
+			})
+			return underlying.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	dns := NewDNSEndpointUpdater(c, "main", "uid", "default", "main", "old.example.com", 60)
+	spec = dns.(DNSSpecController)
+	spec.SetRecordSpec("old.example.com", 60, 1)
+	if err := dns.UpdateDNSRecord(context.Background(), "10.0.1.100"); err != nil {
+		t.Fatalf("UpdateDNSRecord: %v", err)
+	}
+	if patches != 1 {
+		t.Fatalf("patches=%d, want 1 — identical values need no re-apply", patches)
+	}
+	if spec.SpecNeedsApply() {
+		t.Fatal("an unrelated generation bump must not leave SpecNeedsApply set")
+	}
+}
+
+func TestDNSEndpointUpdater_UpdateStopsWhenContextCanceled(t *testing.T) {
 	var spec DNSSpecController
 	var gen int64 = 1
 	ctx, cancel := context.WithCancel(context.Background())
-	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, underlying client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				if spec != nil {
-					gen++
-					spec.SetRecordSpec("next.example.com", 15, gen)
-				}
-				cancel()
-				return underlying.Patch(ctx, obj, patch, opts...)
-			},
-		}).
-		Build()
+	c, _ := newDNSInterceptedFakeClient(t, interceptor.Funcs{
+		Patch: func(ctx context.Context, underlying client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if spec != nil {
+				gen++
+				spec.SetRecordSpec("next.example.com", 15, gen)
+			}
+			cancel()
+			return underlying.Patch(ctx, obj, patch, opts...)
+		},
+	})
 
 	dns := NewDNSEndpointUpdater(c, "main", "uid", "default", "main", "old.example.com", 60)
 	spec = dns.(DNSSpecController)
@@ -404,12 +469,17 @@ func TestDNSEndpointUpdater_CurrentDNSRecordRejectsMalformedFields(t *testing.T)
 
 func newDNSFakeClient(t *testing.T) (client.Client, schema.GroupVersionKind) {
 	t.Helper()
+	return newDNSInterceptedFakeClient(t, interceptor.Funcs{})
+}
+
+func newDNSInterceptedFakeClient(t *testing.T, funcs interceptor.Funcs) (client.Client, schema.GroupVersionKind) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	gvk := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpoint"}
 	listGVK := schema.GroupVersionKind{Group: "externaldns.k8s.io", Version: "v1alpha1", Kind: "DNSEndpointList"}
 	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(listGVK, &unstructured.UnstructuredList{})
-	return fake.NewClientBuilder().WithScheme(scheme).Build(), gvk
+	return fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(funcs).Build(), gvk
 }
 
 func getDNSEndpoint(t *testing.T, c client.Client, gvk schema.GroupVersionKind) *unstructured.Unstructured {
