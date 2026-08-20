@@ -123,10 +123,15 @@ func (d *dnsEndpointUpdater) snapshotSpec() (hostname string, ttl int64, generat
 }
 
 func (d *dnsEndpointUpdater) UpdateDNSRecord(ctx context.Context, ip string) error {
-	// Re-apply if SetRecordSpec races in a newer generation while this
-	// write is in flight, so a delayed SSA cannot restore a stale name.
-	const maxAttempts = 3
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	// Re-apply until the generation we wrote is still current. A
+	// SetRecordSpec that races in a newer generation while this write
+	// is in flight must not be allowed to leave a stale name on the
+	// object. There is no attempt cap: ctx is the only stop condition
+	// besides a successful catch-up or an apply error.
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		hostname, ttl, gen := d.snapshotSpec()
 		if err := d.applyEndpoint(ctx, hostname, ttl, ip); err != nil {
 			return err
@@ -141,7 +146,6 @@ func (d *dnsEndpointUpdater) UpdateDNSRecord(ctx context.Context, ip string) err
 			return nil
 		}
 	}
-	return nil
 }
 
 func (d *dnsEndpointUpdater) applyEndpoint(ctx context.Context, hostname string, ttl int64, ip string) error {
