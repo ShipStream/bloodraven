@@ -101,6 +101,35 @@ func renderOwnerUserStatements(username, password string) ([]string, error) {
 	}, nil
 }
 
+// renderTenantUserStatements is renderOwnerUserStatements for a spec.users[]
+// entry: the same CREATE USER IF NOT EXISTS + ALTER USER pair, with the
+// entry's resource limits appended to the ALTER. The WITH clause is rendered
+// on every apply, with omitted limits as 0 (MySQL's "unlimited"): removing a
+// limit from the spec must clear it in MySQL, or resourceLimits would be
+// desired state on the way in but not on the way out. The limit values are
+// int32s formatted with %d — no caller-controlled text reaches the format
+// string.
+func renderTenantUserStatements(kind, username, password string, limits *v1alpha1.MysqlUserResourceLimits) ([]string, error) {
+	account, err := quoteAccount(kind, username)
+	if err != nil {
+		return nil, err
+	}
+	if password == "" {
+		return nil, fmt.Errorf("%s password must not be empty", kind)
+	}
+	var maxConns, maxQueries int32
+	if limits != nil {
+		maxConns = limits.MaxUserConnections
+		maxQueries = limits.MaxQueriesPerHour
+	}
+	escaped := escapeSingleQuotes(password)
+	return []string{
+		fmt.Sprintf("CREATE USER IF NOT EXISTS %s IDENTIFIED BY '%s'", account, escaped),
+		fmt.Sprintf("ALTER USER %s IDENTIFIED BY '%s' WITH MAX_USER_CONNECTIONS %d MAX_QUERIES_PER_HOUR %d",
+			account, escaped, maxConns, maxQueries),
+	}, nil
+}
+
 // renderGrant builds GRANT <privileges> ON `db`.* TO 'user'@'%'.
 //
 // It never emits WITH GRANT OPTION, and there is no code path that can:
@@ -204,11 +233,12 @@ func renderDropDatabase(database string) (string, error) {
 	return "DROP DATABASE IF EXISTS " + dbIdent, nil
 }
 
-// renderDropUser builds the DROP USER statement for the owner. It is never
+// renderDropUser builds the DROP USER statement for the owner or a
+// spec.users[] principal — the accounts this CRD created. It is never
 // rendered for a spec.grants[] entry: those principals are shared, and this
 // CRD did not create them.
-func renderDropUser(username string) (string, error) {
-	account, err := quoteAccount("spec.owner secret username", username)
+func renderDropUser(kind, username string) (string, error) {
+	account, err := quoteAccount(kind, username)
 	if err != nil {
 		return "", err
 	}

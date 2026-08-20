@@ -31,7 +31,11 @@ import (
 //   - spec.grants[] is grant-only. It never runs CREATE USER. Without that
 //     split, "create a database" would imply "create arbitrary MySQL users",
 //     and this CRD would be a privilege-escalation primitive rather than a
-//     narrowing of one.
+//     narrowing of one. spec.users[] does mint principals, but only under
+//     the owner's trust shape — each exists because the caller supplied its
+//     credential in a Secret first — so the split survives: no entry of
+//     grants[] ever creates a user, and no user is ever created without a
+//     caller-held Secret.
 //   - Privileges come from a fixed allowlist (see MysqlPrivilege), enforced
 //     by the API server and re-checked in Go before any SQL is rendered.
 //   - WITH GRANT OPTION is never emitted. An owner that can grant is an
@@ -123,9 +127,11 @@ const (
 	// dropping a live tenant database because a CR was garbage-collected
 	// by a GitOps prune or a namespace delete — is unrecoverable.
 	MysqlDatabaseRetain MysqlDatabaseDeletionPolicy = "Retain"
-	// MysqlDatabaseDelete drops the database and the owner user, and
-	// revokes the spec.grants[] entries on that database. It never drops
-	// a spec.grants[] user; those are shared principals.
+	// MysqlDatabaseDelete drops the database, the owner user and the
+	// spec.users[] principals this CR created (per the status.appliedUsers
+	// ledger), and revokes the spec.grants[] entries on that database. It
+	// never drops a spec.grants[] user; those are shared principals this
+	// CRD did not create.
 	MysqlDatabaseDelete MysqlDatabaseDeletionPolicy = "Delete"
 )
 
@@ -144,6 +150,8 @@ const (
 //
 // +kubebuilder:validation:XValidation:rule="!has(self.owner.privileges) || self.owner.privileges.size() < 2 || !('ALL PRIVILEGES' in self.owner.privileges)",message="spec.owner.privileges must not combine 'ALL PRIVILEGES' with other privileges"
 // +kubebuilder:validation:XValidation:rule="!has(self.grants) || self.grants.all(g, g.privileges.size() < 2 || !('ALL PRIVILEGES' in g.privileges))",message="spec.grants[].privileges must not combine 'ALL PRIVILEGES' with other privileges"
+// +kubebuilder:validation:XValidation:rule="!has(self.users) || self.users.all(u, !('ALL PRIVILEGES' in u.privileges))",message="spec.users[].privileges must not include 'ALL PRIVILEGES'; an all-privileges principal is the owner's shape, declare it via spec.owner"
+// +kubebuilder:validation:XValidation:rule="!has(self.users) || self.users.all(u, u.secretName != self.owner.secretName)",message="spec.users[].secretName must not reuse spec.owner.secretName; the owner already manages that principal"
 type MysqlDatabaseSpec struct {
 	// GroupRef identifies the MysqlFailoverGroup in the same namespace
 	// that owns the MySQL instance this database lives on. Cross-namespace
@@ -214,6 +222,25 @@ type MysqlDatabaseSpec struct {
 	// +kubebuilder:validation:MaxItems=64
 	Grants []MysqlDatabaseGrant `json:"grants,omitempty"`
 
+	// Users are additional Secret-backed principals this database brings
+	// into existence — the same trust shape as the owner, not a loosening
+	// of grants[]: each user exists only because the caller supplied its
+	// username and password in a same-namespace Secret first. The created
+	// account is '%'-hosted, granted ON <databaseName>.* only from the
+	// allowlist, and never receives GRANT OPTION or ALL PRIVILEGES. The
+	// "grants[] never runs CREATE USER" escalation argument is preserved:
+	// users[] is Secret-gated, so it does not reopen it.
+	//
+	// First consumer: the per-tenant support_ro reader.
+	//
+	// Keyed by secretName: one entry per Secret, duplicates rejected by
+	// the API server.
+	// +optional
+	// +listType=map
+	// +listMapKey=secretName
+	// +kubebuilder:validation:MaxItems=8
+	Users []MysqlDatabaseUser `json:"users,omitempty"`
+
 	// DeletionPolicy controls what happens in MySQL when this CR is
 	// deleted. Defaults to Retain.
 	// +kubebuilder:default=Retain
@@ -252,6 +279,55 @@ type MysqlDatabaseOwner struct {
 	Privileges []MysqlPrivilege `json:"privileges,omitempty"`
 }
 
+// MysqlDatabaseUser declares one additional Secret-backed principal on this
+// database. See MysqlDatabaseSpec.Users for the trust shape.
+type MysqlDatabaseUser struct {
+	// SecretName references a Secret in the same namespace with keys
+	// `username` and `password` — the identical contract to
+	// spec.owner.secretName. The Secret is desired state for the MySQL
+	// account: Bloodraven runs CREATE USER IF NOT EXISTS followed by ALTER
+	// USER, so rotating the password is a Secret write and nothing else.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	SecretName string `json:"secretName"`
+
+	// Privileges granted to this user ON <databaseName>.*. Required, no
+	// default, and ALL PRIVILEGES is rejected (by CEL and again in Go): a
+	// second all-privileges principal is a shadow owner, and the first
+	// consumer of users[] is a SELECT-only reader. Widening the allowlist
+	// later is compatible; narrowing it would not be.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=15
+	// +listType=atomic
+	Privileges []MysqlPrivilege `json:"privileges"`
+
+	// ResourceLimits caps this account's server-side resource usage.
+	// Omitted limits render as 0 — MySQL's "unlimited" — on every apply,
+	// so removing a limit from the spec actually clears it in MySQL.
+	// +optional
+	ResourceLimits *MysqlUserResourceLimits `json:"resourceLimits,omitempty"`
+}
+
+// MysqlUserResourceLimits are per-account MySQL resource limits, applied via
+// ALTER USER ... WITH. Typed integers on purpose (prior art considered and
+// rejected: bitpoke's corev1.ResourceList, an unconstrained string-quantity
+// map whose keys are escaped into SQL): the API server validates the range,
+// and rendering never interpolates caller-controlled text.
+type MysqlUserResourceLimits struct {
+	// MaxUserConnections is MAX_USER_CONNECTIONS: the number of
+	// simultaneous connections the account may hold. 0 (or omitted) means
+	// unlimited.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxUserConnections int32 `json:"maxUserConnections,omitempty"`
+
+	// MaxQueriesPerHour is MAX_QUERIES_PER_HOUR. 0 (or omitted) means
+	// unlimited.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxQueriesPerHour int32 `json:"maxQueriesPerHour,omitempty"`
+}
+
 // MysqlDatabaseGrant grants an already-existing MySQL user on this database.
 type MysqlDatabaseGrant struct {
 	// Username of an existing MySQL user, matched at host '%' only —
@@ -270,6 +346,33 @@ type MysqlDatabaseGrant struct {
 	// +kubebuilder:validation:MaxItems=15
 	// +listType=atomic
 	Privileges []MysqlPrivilege `json:"privileges"`
+}
+
+// MysqlDatabaseUserState is one spec.users[] ledger entry — the users[]
+// generalization of status.ownerUser plus status.pendingOwnerUser, keyed by
+// the Secret that carries the credential.
+type MysqlDatabaseUserState struct {
+	// SecretName is the spec.users[] entry this record belongs to. It
+	// outlives the spec entry: removal-driven cleanup runs off this
+	// record, then deletes it.
+	SecretName string `json:"secretName"`
+
+	// Username is the account name echoed from the Secret, recorded
+	// before the entry's first CREATE USER executes. During a username
+	// rotation it keeps the previous name until the old account has
+	// actually been dropped, exactly like status.ownerUser.
+	// +optional
+	Username string `json:"username,omitempty"`
+
+	// PendingUsername is the write-ahead record of an in-flight username
+	// rotation for this entry, committed before any rotation SQL runs and
+	// cleared by the successful Ready stamp — the per-entry analog of
+	// status.pendingOwnerUser, and required for the same reason: a
+	// rotation that creates the new account and then fails to persist
+	// status must not wedge the next reconcile's adoption gate on an
+	// account this CR itself created.
+	// +optional
+	PendingUsername string `json:"pendingUsername,omitempty"`
 }
 
 // MysqlDatabasePhase is the lifecycle phase of a MysqlDatabase.
@@ -345,10 +448,26 @@ type MysqlDatabaseStatus struct {
 	// the most recent successful apply, owner first. It is the input to
 	// revocation: an entry removed from spec.grants is revoked on the
 	// next apply, and deletion revokes the union of the current list and
-	// this record.
+	// this record. spec.users[] principals are tracked separately in
+	// AppliedUsers, which pairs each username with its Secret.
 	// +optional
 	// +listType=atomic
 	AppliedGrants []string `json:"appliedGrants,omitempty"`
+
+	// AppliedUsers is the write-ahead ledger for spec.users[]: one entry
+	// per Secret this CR has committed to managing a principal for,
+	// stamped before the first CREATE USER runs. The ledger — not the
+	// Secret — is what authorizes later revocation and drop: a users[]
+	// entry can be removed after its Secret is already gone (ESO
+	// de-render, offboarding ordering), and the pairing of secretName to
+	// username is the only durable record of which account that entry
+	// created. Entries whose secretName has left the spec are dropped from
+	// MySQL and then removed here. Usernames only; never any credential
+	// material.
+	// +optional
+	// +listType=map
+	// +listMapKey=secretName
+	AppliedUsers []MysqlDatabaseUserState `json:"appliedUsers,omitempty"`
 
 	// ActiveSite is the site whose MySQL received the most recent
 	// successful apply. Grants replicate, but a MysqlDatabase must not be

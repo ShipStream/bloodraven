@@ -97,8 +97,13 @@ func newMdbReconciler(t *testing.T, objs ...client.Object) (*MysqlDatabaseReconc
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha1.MysqlDatabase{}, &v1alpha1.MysqlFailoverGroup{}).
-		WithIndex(&v1alpha1.MysqlDatabase{}, mdbOwnerSecretIndex, func(o client.Object) []string {
-			return []string{o.(*v1alpha1.MysqlDatabase).Spec.Owner.SecretName}
+		WithIndex(&v1alpha1.MysqlDatabase{}, mdbSecretNamesIndex, func(o client.Object) []string {
+			mdb := o.(*v1alpha1.MysqlDatabase)
+			names := []string{mdb.Spec.Owner.SecretName}
+			for _, u := range mdb.Spec.Users {
+				names = append(names, u.SecretName)
+			}
+			return names
 		}).
 		WithIndex(&v1alpha1.MysqlDatabase{}, mdbGroupRefIndex, func(o client.Object) []string {
 			return []string{o.(*v1alpha1.MysqlDatabase).Spec.GroupRef.Name}
@@ -219,6 +224,36 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 			},
 			wantReason: "OwnerSecretIncomplete",
 		},
+		{
+			name: "users secret not rendered yet",
+			objects: func() []client.Object {
+				cr := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+					m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{
+						SecretName: "support-ro-mysql",
+						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+					}}
+				})
+				return []client.Object{cr, mdbTestGroup(), mdbTestOwnerSecret()}
+			},
+			wantReason: "UserSecretMissing",
+		},
+		{
+			name: "users secret missing the password key",
+			objects: func() []client.Object {
+				cr := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+					m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{
+						SecretName: "support-ro-mysql",
+						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+					}}
+				})
+				s := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "support-ro-mysql", Namespace: mdbTestNamespace},
+					Data:       map[string][]byte{"username": []byte("acme_support")},
+				}
+				return []client.Object{cr, mdbTestGroup(), mdbTestOwnerSecret(), s}
+			},
+			wantReason: "UserSecretIncomplete",
+		},
 	}
 
 	for _, tc := range cases {
@@ -307,7 +342,7 @@ func TestMysqlDatabaseSkipsWhenNothingChanged(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: mdbTestNamespace, Name: "main"}, &storedFG); err != nil {
 		t.Fatalf("get stored failover group: %v", err)
 	}
-	hash, err := computeDatabaseHash(getMdb(t, c), &storedSecret, &storedFG)
+	hash, err := computeDatabaseHash(getMdb(t, c), &storedSecret, nil, &storedFG)
 	if err != nil {
 		t.Fatalf("computeDatabaseHash() error = %v", err)
 	}
@@ -363,7 +398,7 @@ func TestMysqlDatabaseFailoverInvalidatesTheSkip(t *testing.T) {
 	}
 	staleFG := storedFG.DeepCopy()
 	staleFG.Status.ActiveSite = "dc1" // the site the CR last applied on
-	staleHash, err := computeDatabaseHash(getMdb(t, c), &storedSecret, staleFG)
+	staleHash, err := computeDatabaseHash(getMdb(t, c), &storedSecret, nil, staleFG)
 	if err != nil {
 		t.Fatalf("computeDatabaseHash() error = %v", err)
 	}

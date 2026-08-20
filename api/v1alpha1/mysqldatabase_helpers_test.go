@@ -195,16 +195,92 @@ func TestSpecValidate(t *testing.T) {
 	}
 
 	base := valid()
-	if err := base.Validate("acme_app"); err != nil {
+	if err := base.Validate("acme_app", nil); err != nil {
 		t.Fatalf("Validate() on a valid spec = %v", err)
 	}
 
 	cases := []struct {
-		name      string
-		mutate    func(*MysqlDatabaseSpec)
-		ownerUser string
-		wantField string
+		name          string
+		mutate        func(*MysqlDatabaseSpec)
+		ownerUser     string
+		userUsernames map[string]string
+		wantField     string
 	}{
+		{
+			// The users[] username arrives from a Secret, like the owner's.
+			name: "bad users username from secret",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}}}
+			},
+			ownerUser:     "acme_app",
+			userUsernames: map[string]string{"support-ro-mysql": "evil'@'%"},
+			wantField:     "spec.users[0] secret username",
+		},
+		{
+			name: "users username equals owner username",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}}}
+			},
+			ownerUser:     "acme_app",
+			userUsernames: map[string]string{"support-ro-mysql": "acme_app"},
+			wantField:     "spec.users[0] secret username",
+		},
+		{
+			name: "two users entries resolve to one username",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}},
+					{SecretName: "reporting-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}},
+				}
+			},
+			ownerUser: "acme_app",
+			userUsernames: map[string]string{
+				"support-ro-mysql": "acme_support",
+				"reporting-mysql":  "acme_support",
+			},
+			wantField: "spec.users[1] secret username",
+		},
+		{
+			// ALL PRIVILEGES is rejected in Go even though CEL also rejects
+			// it: objects constructed in Go never met the API server.
+			name: "users privileges include ALL PRIVILEGES",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeAllPrivileges}}}
+			},
+			ownerUser:     "acme_app",
+			userUsernames: map[string]string{"support-ro-mysql": "acme_support"},
+			wantField:     "spec.users[0].privileges",
+		},
+		{
+			name: "users privilege outside allowlist",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{"SUPER"}}}
+			},
+			ownerUser:     "acme_app",
+			userUsernames: map[string]string{"support-ro-mysql": "acme_support"},
+			wantField:     "spec.users[0].privileges",
+		},
+		{
+			name: "users entry with no resolved username",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}}}
+			},
+			ownerUser:     "acme_app",
+			userUsernames: nil,
+			wantField:     "no resolved username",
+		},
+		{
+			// A grants[] entry naming a users[] principal would make two
+			// spec lists manage one account's privileges.
+			name: "grant username is a users username",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}}}
+				s.Grants[0].Username = "acme_support"
+			},
+			ownerUser:     "acme_app",
+			userUsernames: map[string]string{"support-ro-mysql": "acme_support"},
+			wantField:     "spec.grants[0].username",
+		},
 		{
 			name:      "bad database name",
 			mutate:    func(s *MysqlDatabaseSpec) { s.DatabaseName = "acme`; DROP DATABASE x" },
@@ -286,7 +362,7 @@ func TestSpecValidate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := valid()
 			tc.mutate(&spec)
-			err := spec.Validate(tc.ownerUser)
+			err := spec.Validate(tc.ownerUser, tc.userUsernames)
 			if err == nil {
 				t.Fatalf("Validate() = nil, want rejection")
 			}

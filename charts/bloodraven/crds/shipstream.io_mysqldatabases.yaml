@@ -63,7 +63,11 @@ spec:
             - spec.grants[] is grant-only. It never runs CREATE USER. Without that
               split, "create a database" would imply "create arbitrary MySQL users",
               and this CRD would be a privilege-escalation primitive rather than a
-              narrowing of one.
+              narrowing of one. spec.users[] does mint principals, but only under
+              the owner's trust shape — each exists because the caller supplied its
+              credential in a Secret first — so the split survives: no entry of
+              grants[] ever creates a user, and no user is ever created without a
+              caller-held Secret.
             - Privileges come from a fixed allowlist (see MysqlPrivilege), enforced
               by the API server and re-checked in Go before any SQL is rendered.
             - WITH GRANT OPTION is never emitted. An owner that can grant is an
@@ -331,6 +335,112 @@ spec:
                 required:
                 - secretName
                 type: object
+              users:
+                description: |-
+                  Users are additional Secret-backed principals this database brings
+                  into existence — the same trust shape as the owner, not a loosening
+                  of grants[]: each user exists only because the caller supplied its
+                  username and password in a same-namespace Secret first. The created
+                  account is '%'-hosted, granted ON <databaseName>.* only from the
+                  allowlist, and never receives GRANT OPTION or ALL PRIVILEGES. The
+                  "grants[] never runs CREATE USER" escalation argument is preserved:
+                  users[] is Secret-gated, so it does not reopen it.
+
+                  First consumer: the per-tenant support_ro reader.
+
+                  Keyed by secretName: one entry per Secret, duplicates rejected by
+                  the API server.
+                items:
+                  description: |-
+                    MysqlDatabaseUser declares one additional Secret-backed principal on this
+                    database. See MysqlDatabaseSpec.Users for the trust shape.
+                  properties:
+                    privileges:
+                      description: |-
+                        Privileges granted to this user ON <databaseName>.*. Required, no
+                        default, and ALL PRIVILEGES is rejected (by CEL and again in Go): a
+                        second all-privileges principal is a shadow owner, and the first
+                        consumer of users[] is a SELECT-only reader. Widening the allowlist
+                        later is compatible; narrowing it would not be.
+                      items:
+                        description: |-
+                          MysqlPrivilege is a single MySQL privilege that a MysqlDatabase may grant
+                          ON <databaseName>.*. The enum is the allowlist: anything outside it is
+                          rejected by the API server before it can reach the reconciler, and
+                          rejected again in Go before it can reach SQL rendering.
+
+                          The set is deliberately schema/DML-scoped. Notably absent: GRANT OPTION
+                          (see the MysqlDatabase doc comment), and every *_ADMIN dynamic privilege,
+                          which are instance-scoped and cannot be granted ON a single schema anyway.
+
+                          The Enum marker below is the allowlist enforcement at the API server: it
+                          is checked structurally, costs nothing against the CRD validation budget,
+                          and produces a better error message than an equivalent CEL rule. The CEL
+                          rules on MysqlDatabaseSpec cover only what an enum cannot — composition
+                          constraints between entries.
+                        enum:
+                        - ALL PRIVILEGES
+                        - SELECT
+                        - INSERT
+                        - UPDATE
+                        - DELETE
+                        - CREATE
+                        - DROP
+                        - ALTER
+                        - INDEX
+                        - REFERENCES
+                        - LOCK TABLES
+                        - SHOW VIEW
+                        - TRIGGER
+                        - EVENT
+                        - EXECUTE
+                        maxLength: 32
+                        type: string
+                      maxItems: 15
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    resourceLimits:
+                      description: |-
+                        ResourceLimits caps this account's server-side resource usage.
+                        Omitted limits render as 0 — MySQL's "unlimited" — on every apply,
+                        so removing a limit from the spec actually clears it in MySQL.
+                      properties:
+                        maxQueriesPerHour:
+                          description: |-
+                            MaxQueriesPerHour is MAX_QUERIES_PER_HOUR. 0 (or omitted) means
+                            unlimited.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                        maxUserConnections:
+                          description: |-
+                            MaxUserConnections is MAX_USER_CONNECTIONS: the number of
+                            simultaneous connections the account may hold. 0 (or omitted) means
+                            unlimited.
+                          format: int32
+                          minimum: 0
+                          type: integer
+                      type: object
+                    secretName:
+                      description: |-
+                        SecretName references a Secret in the same namespace with keys
+                        `username` and `password` — the identical contract to
+                        spec.owner.secretName. The Secret is desired state for the MySQL
+                        account: Bloodraven runs CREATE USER IF NOT EXISTS followed by ALTER
+                        USER, so rotating the password is a Secret write and nothing else.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - privileges
+                  - secretName
+                  type: object
+                maxItems: 8
+                type: array
+                x-kubernetes-list-map-keys:
+                - secretName
+                x-kubernetes-list-type: map
             required:
             - databaseName
             - groupRef
@@ -345,6 +455,13 @@ spec:
                 with other privileges
               rule: '!has(self.grants) || self.grants.all(g, g.privileges.size() <
                 2 || !(''ALL PRIVILEGES'' in g.privileges))'
+            - message: spec.users[].privileges must not include 'ALL PRIVILEGES';
+                an all-privileges principal is the owner's shape, declare it via spec.owner
+              rule: '!has(self.users) || self.users.all(u, !(''ALL PRIVILEGES'' in
+                u.privileges))'
+            - message: spec.users[].secretName must not reuse spec.owner.secretName;
+                the owner already manages that principal
+              rule: '!has(self.users) || self.users.all(u, u.secretName != self.owner.secretName)'
           status:
             description: |-
               MysqlDatabaseStatus is the observed state of a MysqlDatabase.
@@ -364,11 +481,60 @@ spec:
                   the most recent successful apply, owner first. It is the input to
                   revocation: an entry removed from spec.grants is revoked on the
                   next apply, and deletion revokes the union of the current list and
-                  this record.
+                  this record. spec.users[] principals are tracked separately in
+                  AppliedUsers, which pairs each username with its Secret.
                 items:
                   type: string
                 type: array
                 x-kubernetes-list-type: atomic
+              appliedUsers:
+                description: |-
+                  AppliedUsers is the write-ahead ledger for spec.users[]: one entry
+                  per Secret this CR has committed to managing a principal for,
+                  stamped before the first CREATE USER runs. The ledger — not the
+                  Secret — is what authorizes later revocation and drop: a users[]
+                  entry can be removed after its Secret is already gone (ESO
+                  de-render, offboarding ordering), and the pairing of secretName to
+                  username is the only durable record of which account that entry
+                  created. Entries whose secretName has left the spec are dropped from
+                  MySQL and then removed here. Usernames only; never any credential
+                  material.
+                items:
+                  description: |-
+                    MysqlDatabaseUserState is one spec.users[] ledger entry — the users[]
+                    generalization of status.ownerUser plus status.pendingOwnerUser, keyed by
+                    the Secret that carries the credential.
+                  properties:
+                    pendingUsername:
+                      description: |-
+                        PendingUsername is the write-ahead record of an in-flight username
+                        rotation for this entry, committed before any rotation SQL runs and
+                        cleared by the successful Ready stamp — the per-entry analog of
+                        status.pendingOwnerUser, and required for the same reason: a
+                        rotation that creates the new account and then fails to persist
+                        status must not wedge the next reconcile's adoption gate on an
+                        account this CR itself created.
+                      type: string
+                    secretName:
+                      description: |-
+                        SecretName is the spec.users[] entry this record belongs to. It
+                        outlives the spec entry: removal-driven cleanup runs off this
+                        record, then deletes it.
+                      type: string
+                    username:
+                      description: |-
+                        Username is the account name echoed from the Secret, recorded
+                        before the entry's first CREATE USER executes. During a username
+                        rotation it keeps the previous name until the old account has
+                        actually been dropped, exactly like status.ownerUser.
+                      type: string
+                  required:
+                  - secretName
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - secretName
+                x-kubernetes-list-type: map
               conditions:
                 description: |-
                   Conditions represent the latest available observations. The Ready

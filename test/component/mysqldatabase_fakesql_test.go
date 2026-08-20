@@ -40,6 +40,9 @@ type fakeSQLServer struct {
 	databases map[string]string
 	// grants maps schema name to username to the granted privilege list.
 	grants map[string]map[string][]string
+	// resourceLimits maps username to "maxUserConnections/maxQueriesPerHour"
+	// as last applied via ALTER USER ... WITH.
+	resourceLimits map[string]string
 
 	// statements records every statement executed, in order, across all
 	// connections. This is how "zero MySQL statements when nothing
@@ -101,6 +104,13 @@ func (s *fakeSQLServer) database(name string) (string, bool) {
 	defer s.mu.Unlock()
 	spec, ok := s.databases[name]
 	return spec, ok
+}
+
+func (s *fakeSQLServer) resourceLimitsFor(username string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	limits, ok := s.resourceLimits[username]
+	return limits, ok
 }
 
 func (s *fakeSQLServer) grantsFor(database, username string) ([]string, bool) {
@@ -281,6 +291,7 @@ var (
 	reAlterDatabase  = regexp.MustCompile("^ALTER DATABASE `([^`]+)` CHARACTER SET (\\S+) COLLATE (\\S+)$")
 	reCreateUser     = regexp.MustCompile(`^CREATE USER IF NOT EXISTS '(.*)'@'%' IDENTIFIED BY '(.*)'$`)
 	reAlterUser      = regexp.MustCompile(`^ALTER USER '(.*)'@'%' IDENTIFIED BY '(.*)'$`)
+	reAlterUserWith  = regexp.MustCompile(`^ALTER USER '(.*)'@'%' IDENTIFIED BY '(.*)' WITH MAX_USER_CONNECTIONS (\d+) MAX_QUERIES_PER_HOUR (\d+)$`)
 	reGrant          = regexp.MustCompile("^GRANT (.+) ON `([^`]+)`\\.\\* TO '(.*)'@'%'$")
 	reRevoke         = regexp.MustCompile("^REVOKE IF EXISTS ALL PRIVILEGES ON `([^`]+)`\\.\\* FROM '(.*)'@'%'( IGNORE UNKNOWN USER)?$")
 	reRevokePartial  = regexp.MustCompile("^REVOKE IF EXISTS (.+) ON `([^`]+)`\\.\\* FROM '(.*)'@'%'( IGNORE UNKNOWN USER)?$")
@@ -326,6 +337,18 @@ func (s *fakeSQLServer) apply(stmt string) error {
 		if _, exists := s.users[m[1]]; !exists {
 			s.users[m[1]] = fakeSQLUnescape(m[2])
 		}
+		return nil
+
+	case reAlterUserWith.MatchString(stmt):
+		m := reAlterUserWith.FindStringSubmatch(stmt)
+		if _, exists := s.users[m[1]]; !exists {
+			return fmt.Errorf("fake mysql: ALTER USER on nonexistent user %q", m[1])
+		}
+		s.users[m[1]] = fakeSQLUnescape(m[2])
+		if s.resourceLimits == nil {
+			s.resourceLimits = map[string]string{}
+		}
+		s.resourceLimits[m[1]] = m[3] + "/" + m[4]
 		return nil
 
 	case reAlterUser.MatchString(stmt):
@@ -417,6 +440,7 @@ func (s *fakeSQLServer) apply(stmt string) error {
 	case reDropUser.MatchString(stmt):
 		m := reDropUser.FindStringSubmatch(stmt)
 		delete(s.users, m[1])
+		delete(s.resourceLimits, m[1])
 		return nil
 	}
 

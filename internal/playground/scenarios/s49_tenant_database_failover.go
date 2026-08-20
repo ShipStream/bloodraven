@@ -30,6 +30,11 @@ const (
 	// a user that exists independently of this CRD — using an existing one
 	// is the point, not a shortcut.
 	s49GrantUser = "replicator"
+	// The spec.users[] entry, shaped like the per-tenant support reader it
+	// exists for: Secret-backed, SELECT-only, resource-limited.
+	s49UserSecretName = "chaos-tenant-support"
+	s49SupportUser    = "chaos_tenant_support"
+	s49SupportPass    = "chaos-support-pw"
 )
 
 // scenario49TenantDatabaseFailover creates a MysqlDatabase, waits for Ready,
@@ -48,7 +53,8 @@ func scenario49TenantDatabaseFailover() runner.Scenario {
 		Title: "MysqlDatabase survives a planned switchover",
 		Hypothesis: "A MysqlDatabase reaches Ready on the active primary, and after a planned switchover " +
 			"the operator re-applies it against the new primary (status.activeSite follows the group) with " +
-			"the database, the owner grant and the grants[] entry present there.",
+			"the database, the owner grant, the grants[] entry and the SELECT-only spec.users[] principal " +
+			"(schema-scoped, resource-limited, no global privilege) present there.",
 		Risk:     "low",
 		DocLink:  "site/content/docs/4.configuration/7.tenant-databases.md",
 		Timeout:  8 * time.Minute,
@@ -109,12 +115,31 @@ func s49CreateTenantDatabase() runner.Step {
 				return fmt.Errorf("create owner secret: %w", err)
 			}
 
+			userSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: s49UserSecretName, Namespace: env.Namespace},
+				Data: map[string][]byte{
+					"username": []byte(s49SupportUser),
+					"password": []byte(s49SupportPass),
+				},
+			}
+			if err := env.Kube.Controller.Create(ctx, userSecret); err != nil && !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("create users[] secret: %w", err)
+			}
+
 			mdb := &v1alpha1.MysqlDatabase{
 				ObjectMeta: metav1.ObjectMeta{Name: s49CRName, Namespace: env.Namespace},
 				Spec: v1alpha1.MysqlDatabaseSpec{
 					GroupRef:     v1alpha1.LocalGroupRef{Name: env.FG},
 					DatabaseName: s49DatabaseName,
 					Owner:        v1alpha1.MysqlDatabaseOwner{SecretName: s49SecretName},
+					Users: []v1alpha1.MysqlDatabaseUser{{
+						SecretName: s49UserSecretName,
+						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+						ResourceLimits: &v1alpha1.MysqlUserResourceLimits{
+							MaxUserConnections: 5,
+							MaxQueriesPerHour:  3600,
+						},
+					}},
 					Grants: []v1alpha1.MysqlDatabaseGrant{{
 						Username:   s49GrantUser,
 						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeDelete},
@@ -235,9 +260,13 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 		}
 	}
 
+	if err := s49AssertSupportUser(ctx, client, site); err != nil {
+		return err
+	}
+
 	// The privilege this CRD must never confer. Grant_priv on a schema-level
 	// row is how WITH GRANT OPTION would show up.
-	for _, user := range []string{s49OwnerUser, s49GrantUser} {
+	for _, user := range []string{s49OwnerUser, s49GrantUser, s49SupportUser} {
 		granted, err := client.ScalarString(ctx,
 			"SELECT Grant_priv FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", s49DatabaseName, user)
 		if err != nil {
@@ -246,6 +275,72 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 		if granted != "N" {
 			return fmt.Errorf("user %q has Grant_priv=%q on %q at %s; a MysqlDatabase must never confer GRANT OPTION",
 				user, granted, s49DatabaseName, site)
+		}
+	}
+	return nil
+}
+
+// s49AssertSupportUser proves the spec.users[] principal is what the support
+// -access story requires: it exists, it is SELECT-only on this tenant's
+// schema, it carries the configured resource limits, and — the cross-tenant
+// property the whole initiative exists for — it holds no global privilege and
+// no grant on any other schema on this shared group.
+func s49AssertSupportUser(ctx context.Context, client *pgmysql.SiteClient, site string) error {
+	n, err := client.ScalarInt(ctx,
+		"SELECT COUNT(*) FROM mysql.user WHERE user = ? AND host = '%'", s49SupportUser)
+	if err != nil {
+		return fmt.Errorf("query mysql.user for the users[] principal on %s: %w", site, err)
+	}
+	if n != 1 {
+		return fmt.Errorf("spec.users[] principal %q missing on %s", s49SupportUser, site)
+	}
+
+	// SELECT-only on this schema: the granted privilege is present and a
+	// write privilege is not. Read-only comes from the grant, never from a
+	// proxy, so this is the assertion that actually enforces it.
+	for col, want := range map[string]string{"Select_priv": "Y", "Insert_priv": "N", "Update_priv": "N", "Delete_priv": "N"} {
+		v, err := client.ScalarString(ctx,
+			"SELECT "+col+" FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", s49DatabaseName, s49SupportUser)
+		if err != nil {
+			return fmt.Errorf("query %s for the users[] principal on %s: %w", col, site, err)
+		}
+		if v != want {
+			return fmt.Errorf("users[] principal %q has %s=%q on %q at %s, want %q",
+				s49SupportUser, col, v, s49DatabaseName, site, want)
+		}
+	}
+
+	// Cross-tenant isolation, asserted rather than assumed: no global SELECT
+	// (which would read every tenant on this shared group) and no schema
+	// grant anywhere but this tenant's own database.
+	global, err := client.ScalarString(ctx,
+		"SELECT Select_priv FROM mysql.user WHERE user = ? AND host = '%'", s49SupportUser)
+	if err != nil {
+		return fmt.Errorf("query global Select_priv on %s: %w", site, err)
+	}
+	if global != "N" {
+		return fmt.Errorf("users[] principal %q has global Select_priv=%q at %s; it would read every tenant on this group",
+			s49SupportUser, global, site)
+	}
+	n, err = client.ScalarInt(ctx,
+		"SELECT COUNT(*) FROM mysql.db WHERE user = ? AND host = '%' AND db <> ?", s49SupportUser, s49DatabaseName)
+	if err != nil {
+		return fmt.Errorf("query foreign schema grants on %s: %w", site, err)
+	}
+	if n != 0 {
+		return fmt.Errorf("users[] principal %q holds %d grant row(s) on schemas other than %q at %s",
+			s49SupportUser, n, s49DatabaseName, site)
+	}
+
+	// The resource limits the CR declared.
+	for col, want := range map[string]int64{"max_user_connections": 5, "max_questions": 3600} {
+		got, err := client.ScalarInt(ctx,
+			"SELECT "+col+" FROM mysql.user WHERE user = ? AND host = '%'", s49SupportUser)
+		if err != nil {
+			return fmt.Errorf("query %s on %s: %w", col, site, err)
+		}
+		if got != want {
+			return fmt.Errorf("users[] principal %q has %s=%d at %s, want %d", s49SupportUser, col, got, site, want)
 		}
 	}
 	return nil
@@ -333,9 +428,11 @@ func s49DeleteLeftovers(ctx context.Context, env *runner.Env) error {
 		return fmt.Errorf("MysqlDatabase %s still terminating after 2m (%s); finalizer never released", s49CRName, state)
 	}
 
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: s49SecretName, Namespace: env.Namespace}}
-	if err := env.Kube.Controller.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete owner secret: %w", err)
+	for name, kind := range map[string]string{s49SecretName: "owner", s49UserSecretName: "users[]"} {
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: env.Namespace}}
+		if err := env.Kube.Controller.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete %s secret: %w", kind, err)
+		}
 	}
 	return nil
 }

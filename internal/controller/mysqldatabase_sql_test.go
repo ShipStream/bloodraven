@@ -185,7 +185,7 @@ func TestRenderDestructiveStatements(t *testing.T) {
 		t.Fatalf("renderDropDatabase() = %q, want %q", drop, want)
 	}
 
-	dropUser, err := renderDropUser("acme_app")
+	dropUser, err := renderDropUser("spec.owner secret username", "acme_app")
 	if err != nil {
 		t.Fatalf("renderDropUser() error = %v", err)
 	}
@@ -204,7 +204,7 @@ func TestRenderDestructiveStatements(t *testing.T) {
 	if _, err := renderDropDatabase("acme`; DROP DATABASE other"); err == nil {
 		t.Fatal("renderDropDatabase() accepted an invalid identifier")
 	}
-	if _, err := renderDropUser("evil'@'%"); err == nil {
+	if _, err := renderDropUser("spec.owner secret username", "evil'@'%"); err == nil {
 		t.Fatal("renderDropUser() accepted an invalid username")
 	}
 }
@@ -230,7 +230,7 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 	}
 	fg.Status.ActiveSite = "dc1"
 
-	base, err := computeDatabaseHash(mdb, secret, fg)
+	base, err := computeDatabaseHash(mdb, secret, nil, fg)
 	if err != nil {
 		t.Fatalf("computeDatabaseHash() error = %v", err)
 	}
@@ -238,7 +238,7 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 		t.Fatalf("computeDatabaseHash() = %q, want a 16-character digest", base)
 	}
 
-	again, err := computeDatabaseHash(mdb, secret, fg)
+	again, err := computeDatabaseHash(mdb, secret, nil, fg)
 	if err != nil {
 		t.Fatalf("computeDatabaseHash() error = %v", err)
 	}
@@ -252,7 +252,7 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 	rotated := secret.DeepCopy()
 	rotated.Data["password"] = []byte("pw2")
 	rotated.ResourceVersion = "2"
-	if h, err := computeDatabaseHash(mdb, rotated, fg); err != nil || h == base {
+	if h, err := computeDatabaseHash(mdb, rotated, nil, fg); err != nil || h == base {
 		t.Fatalf("computeDatabaseHash() after rotation = %q (err %v), want a different digest", h, err)
 	}
 
@@ -260,7 +260,7 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 	// every CR only for the skip check to swallow the re-apply.
 	failedOver := fg.DeepCopy()
 	failedOver.Status.ActiveSite = "dc2"
-	if h, err := computeDatabaseHash(mdb, secret, failedOver); err != nil || h == base {
+	if h, err := computeDatabaseHash(mdb, secret, nil, failedOver); err != nil || h == base {
 		t.Fatalf("computeDatabaseHash() after failover = %q (err %v), want a different digest", h, err)
 	}
 
@@ -269,7 +269,7 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 	// to its MySQL.
 	recreated := fg.DeepCopy()
 	recreated.UID = "uid-group-2"
-	if h, err := computeDatabaseHash(mdb, secret, recreated); err != nil || h == base {
+	if h, err := computeDatabaseHash(mdb, secret, nil, recreated); err != nil || h == base {
 		t.Fatalf("computeDatabaseHash() after group re-creation = %q (err %v), want a different digest", h, err)
 	}
 
@@ -281,7 +281,7 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 		Phase:            v1alpha1.RestoreInPlaceSucceeded,
 		ConfirmTokenUsed: "2026-08-10T00:00:00Z",
 	}
-	if h, err := computeDatabaseHash(mdb, secret, restored); err != nil || h == base {
+	if h, err := computeDatabaseHash(mdb, secret, nil, restored); err != nil || h == base {
 		t.Fatalf("computeDatabaseHash() after in-place restore = %q (err %v), want a different digest", h, err)
 	}
 
@@ -290,7 +290,7 @@ func TestComputeDatabaseHashStability(t *testing.T) {
 	edited.Spec.Grants = append(edited.Spec.Grants, v1alpha1.MysqlDatabaseGrant{
 		Username: "reporting", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
 	})
-	if h, err := computeDatabaseHash(edited, secret, fg); err != nil || h == base {
+	if h, err := computeDatabaseHash(edited, secret, nil, fg); err != nil || h == base {
 		t.Fatalf("computeDatabaseHash() after a spec edit = %q (err %v), want a different digest", h, err)
 	}
 }
@@ -307,7 +307,7 @@ func TestComputeDatabaseHashNeverContainsSecretBytes(t *testing.T) {
 
 	fg := &v1alpha1.MysqlFailoverGroup{ObjectMeta: metav1.ObjectMeta{Name: "main"}}
 	fg.Status.ActiveSite = "dc1"
-	hash, err := computeDatabaseHash(mdb, secret, fg)
+	hash, err := computeDatabaseHash(mdb, secret, nil, fg)
 	if err != nil {
 		t.Fatalf("computeDatabaseHash() error = %v", err)
 	}

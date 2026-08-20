@@ -194,6 +194,59 @@ func TestMysqlDatabase_EnvtestSchemaRejections(t *testing.T) {
 			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = "Destroy" },
 		},
 		{
+			// users[] must never express an all-privileges principal; that
+			// shape is the owner's.
+			name: "users ALL PRIVILEGES",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAllPrivileges}},
+				}
+			},
+		},
+		{
+			name: "users GRANT OPTION",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{"GRANT OPTION"}},
+				}
+			},
+		},
+		{
+			name: "users entry with no privileges",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{SecretName: "support-ro-mysql"}}
+			},
+		},
+		{
+			name: "users entry reusing the owner secret",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+					{SecretName: m.Spec.Owner.SecretName, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+				}
+			},
+		},
+		{
+			name: "duplicate users secret names",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeDelete}},
+				}
+			},
+		},
+		{
+			name: "negative users resource limit",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+					{
+						SecretName:     "support-ro-mysql",
+						Privileges:     []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+						ResourceLimits: &v1alpha1.MysqlUserResourceLimits{MaxUserConnections: -1},
+					},
+				}
+			},
+		},
+		{
 			name:   "empty owner secret name",
 			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.SecretName = "" },
 		},

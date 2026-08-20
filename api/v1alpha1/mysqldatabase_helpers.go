@@ -194,12 +194,15 @@ func (s *MysqlDatabaseSpec) EffectiveDeletionPolicy() MysqlDatabaseDeletionPolic
 // Validate checks every field that ends up in SQL, before any of it reaches
 // a format string. The API server enforces the same constraints through the
 // CRD schema; this is the second of the two independent checks, and the one
-// that also covers the owner username, which arrives from a Secret and so
-// cannot be validated by the API server at admission time.
+// that also covers the usernames, which arrive from Secrets and so cannot be
+// validated by the API server at admission time. userUsernames maps each
+// spec.users[] entry's secretName to the username its Secret currently
+// carries; entries whose Secret has not resolved yet must not reach this
+// function (the reconciler parks them Pending first).
 //
 // It returns the first problem found; callers surface it as a Failed phase
 // rather than retrying, because none of these resolve on their own.
-func (s *MysqlDatabaseSpec) Validate(ownerUsername string) error {
+func (s *MysqlDatabaseSpec) Validate(ownerUsername string, userUsernames map[string]string) error {
 	if err := ValidateMysqlIdentifier("spec.databaseName", s.DatabaseName); err != nil {
 		return err
 	}
@@ -219,6 +222,40 @@ func (s *MysqlDatabaseSpec) Validate(ownerUsername string) error {
 		return err
 	}
 
+	// users[] usernames are collected first so that grants[] can be checked
+	// against them: a grants[] entry naming a users[] principal would make
+	// two spec lists manage one account's privileges, with the last apply
+	// winning silently.
+	userSeen := make(map[string]string, len(s.Users))
+	for i, u := range s.Users {
+		field := fmt.Sprintf("spec.users[%d] secret username", i)
+		username, ok := userUsernames[u.SecretName]
+		if !ok {
+			return fmt.Errorf("spec.users[%d] (secret %q) has no resolved username; this is a reconciler bug — unresolved Secrets must stay Pending", i, u.SecretName)
+		}
+		if err := ValidateMysqlUsername(field, username); err != nil {
+			return err
+		}
+		if username == ownerUsername {
+			return fmt.Errorf("%s %q is the owner username; the owner is declared via spec.owner", field, username)
+		}
+		if prior, dup := userSeen[username]; dup {
+			return fmt.Errorf("%s %q is already the username of the entry for secret %q; each users[] entry must manage a distinct account", field, username, prior)
+		}
+		userSeen[username] = u.SecretName
+		// The Go-side re-check of the CEL rule: ALL PRIVILEGES is the
+		// owner's shape, not a users[] privilege — and CEL never sees
+		// objects constructed in Go or stored before the rule existed.
+		for _, p := range u.Privileges {
+			if p == PrivilegeAllPrivileges {
+				return fmt.Errorf("spec.users[%d].privileges must not include %q; an all-privileges principal is the owner's shape", i, PrivilegeAllPrivileges)
+			}
+		}
+		if _, err := CanonicalPrivileges(fmt.Sprintf("spec.users[%d].privileges", i), u.Privileges); err != nil {
+			return err
+		}
+	}
+
 	seen := make(map[string]bool, len(s.Grants))
 	for i, g := range s.Grants {
 		field := fmt.Sprintf("spec.grants[%d].username", i)
@@ -227,6 +264,9 @@ func (s *MysqlDatabaseSpec) Validate(ownerUsername string) error {
 		}
 		if g.Username == ownerUsername {
 			return fmt.Errorf("%s %q is the owner username; declare owner privileges via spec.owner.privileges", field, g.Username)
+		}
+		if secretName, isUser := userSeen[g.Username]; isUser {
+			return fmt.Errorf("%s %q is the username of spec.users[] entry %q; declare its privileges on that entry instead", field, g.Username, secretName)
 		}
 		if seen[g.Username] {
 			return fmt.Errorf("%s %q is listed more than once", field, g.Username)
