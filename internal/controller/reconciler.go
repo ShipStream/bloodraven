@@ -210,6 +210,14 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, nil
 	}
 
+	// Push hostname/TTL before any later early return so a DNS rename is
+	// visible to the next topology poll even if this reconcile bails on
+	// restore, planned failover, or another subsystem.
+	if r.Runner != nil {
+		r.Runner.SetDNSRecordSpec(req.NamespacedName, fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
+		r.Runner.SetCloneTimeout(req.NamespacedName, cloneTimeoutFromSpec(&fg))
+	}
+
 	// Ensure finalizer is present.
 	if !controllerutil.ContainsFinalizer(&fg, finalizerName) {
 		controllerutil.AddFinalizer(&fg, finalizerName)

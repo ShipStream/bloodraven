@@ -17,9 +17,10 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
    kubectl get mfg <group> -n <ns> -o jsonpath='{range .status.sites[*]}{.name}{": readOnly="}{.readOnly}{", reachable="}{.reachable}{"\n"}{end}'
    ```
 2. Determine which site has the latest authoritative writes and highest GTID.
-3. Check DNS routing:
+3. Check DNS routing and that the published name matches the spec:
    ```bash
-   kubectl get dnsendpoint -n <ns>
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.spec.dns.hostname}{"\n"}'
+   kubectl get dnsendpoint -n <ns> -o jsonpath='{range .items[*]}{.spec.endpoints[0].dnsName}{" -> "}{.spec.endpoints[0].targets[0]}{"\n"}{end}'
    ```
 
 ### Safe Remediation Steps
