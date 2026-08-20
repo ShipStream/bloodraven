@@ -580,35 +580,45 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// still claims it, exactly like the owner path.
 	for _, u := range users {
 		prevState := findAppliedUserIn(prior.appliedUsers, u.entry.SecretName)
-		if prevState == nil || prevState.Username == "" || prevState.Username == u.username {
+		if prevState == nil {
 			continue
 		}
-		prev := prevState.Username
-		ok, verr := r.vetTenantUserDrop(ctx, &mdb, reserved, prev,
-			fmt.Sprintf("during rotation of spec.users[] entry %q to %q", u.entry.SecretName, u.username))
-		if verr != nil {
-			return ctrl.Result{}, verr
-		}
-		if !ok {
-			continue
-		}
-		dropStmt, derr := renderDropUser("spec.users[] ledger username", prev)
-		if derr != nil {
-			logger.Error(derr, "cannot render drop for previous users[] principal; skipping",
-				"secretName", u.entry.SecretName, "previousUsername", prev)
-			continue
-		}
-		if _, xerr := db.ExecContext(sqlCtx, dropStmt); xerr != nil {
-			if transientSQLError(xerr) {
-				return r.pending(ctx, &mdb, "PrimaryUnavailable",
-					fmt.Sprintf("transient MySQL error dropping rotated users[] principal on group %q: %v", fg.Name, xerr))
+		// Every name the ledger records for this entry, not just the
+		// current one: a rotation whose drop failed transiently and whose
+		// Secret then reverted leaves the abandoned target in
+		// pendingUsername, and the Ready stamp below replaces the ledger
+		// wholesale — so this is the last reconcile that still knows the
+		// account's name.
+		for _, prev := range ledgerUsernames(*prevState) {
+			if prev == u.username {
+				continue
 			}
-			return r.fail(ctx, &mdb, "MySQLError",
-				fmt.Sprintf("drop previous users[] principal %q: %v", prev, xerr))
+			ok, verr := r.vetTenantUserDrop(ctx, &mdb, reserved, prev,
+				fmt.Sprintf("during rotation of spec.users[] entry %q to %q", u.entry.SecretName, u.username))
+			if verr != nil {
+				return ctrl.Result{}, verr
+			}
+			if !ok {
+				continue
+			}
+			dropStmt, derr := renderDropUser("spec.users[] ledger username", prev)
+			if derr != nil {
+				logger.Error(derr, "cannot render drop for previous users[] principal; skipping",
+					"secretName", u.entry.SecretName, "previousUsername", prev)
+				continue
+			}
+			if _, xerr := db.ExecContext(sqlCtx, dropStmt); xerr != nil {
+				if transientSQLError(xerr) {
+					return r.pending(ctx, &mdb, "PrimaryUnavailable",
+						fmt.Sprintf("transient MySQL error dropping rotated users[] principal on group %q: %v", fg.Name, xerr))
+				}
+				return r.fail(ctx, &mdb, "MySQLError",
+					fmt.Sprintf("drop previous users[] principal %q: %v", prev, xerr))
+			}
+			r.Recorder.Eventf(&mdb, corev1.EventTypeNormal, "UserRotated",
+				"created and granted users[] principal %q (secret %q), then dropped previous principal %q",
+				u.username, u.entry.SecretName, prev)
 		}
-		r.Recorder.Eventf(&mdb, corev1.EventTypeNormal, "UserRotated",
-			"created and granted users[] principal %q (secret %q), then dropped previous principal %q",
-			u.username, u.entry.SecretName, prev)
 	}
 
 	// Ledger entries whose secretName has left spec.users[] are removed
@@ -1795,6 +1805,20 @@ func (r *MysqlDatabaseReconciler) removeFinalizer(ctx context.Context, mdb *v1al
 	return nil
 }
 
+// mdbSecretNames is the mdbSecretNamesIndex extractor: every Secret a CR
+// references — the owner's and each users[] entry's. Shared with the tests'
+// fake-client index so a change here cannot leave the fake indexing a stale
+// field set while the mapping tests still pass.
+func mdbSecretNames(o client.Object) []string {
+	mdb := o.(*v1alpha1.MysqlDatabase)
+	names := make([]string, 0, len(mdb.Spec.Users)+1)
+	names = append(names, mdb.Spec.Owner.SecretName)
+	for _, u := range mdb.Spec.Users {
+		names = append(names, u.SecretName)
+	}
+	return names
+}
+
 // SetupWithManager registers the reconciler with the manager.
 //
 // The three Watches are not conveniences:
@@ -1819,15 +1843,7 @@ func (r *MysqlDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// index is also what makes users[] rotation a Secret write and nothing
 	// else.
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1alpha1.MysqlDatabase{},
-		mdbSecretNamesIndex, func(o client.Object) []string {
-			mdb := o.(*v1alpha1.MysqlDatabase)
-			names := make([]string, 0, len(mdb.Spec.Users)+1)
-			names = append(names, mdb.Spec.Owner.SecretName)
-			for _, u := range mdb.Spec.Users {
-				names = append(names, u.SecretName)
-			}
-			return names
-		}); err != nil {
+		mdbSecretNamesIndex, mdbSecretNames); err != nil {
 		return fmt.Errorf("index mysqldatabase secret names: %w", err)
 	}
 	// Index CRs by groupRef.name so the group watch and the peer watch map

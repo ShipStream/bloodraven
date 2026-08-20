@@ -97,14 +97,7 @@ func newMdbReconciler(t *testing.T, objs ...client.Object) (*MysqlDatabaseReconc
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha1.MysqlDatabase{}, &v1alpha1.MysqlFailoverGroup{}).
-		WithIndex(&v1alpha1.MysqlDatabase{}, mdbSecretNamesIndex, func(o client.Object) []string {
-			mdb := o.(*v1alpha1.MysqlDatabase)
-			names := []string{mdb.Spec.Owner.SecretName}
-			for _, u := range mdb.Spec.Users {
-				names = append(names, u.SecretName)
-			}
-			return names
-		}).
+		WithIndex(&v1alpha1.MysqlDatabase{}, mdbSecretNamesIndex, mdbSecretNames).
 		WithIndex(&v1alpha1.MysqlDatabase{}, mdbGroupRefIndex, func(o client.Object) []string {
 			return []string{o.(*v1alpha1.MysqlDatabase).Spec.GroupRef.Name}
 		}).
@@ -1237,6 +1230,37 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 			t.Fatalf("dropOwners = %v, want none — a sibling still grants acme_app", dropOwners)
 		}
 		assertEventContains(t, rec, "OwnerUserDropSkipped")
+	})
+
+	t.Run("sibling users ledger claim survives deletion", func(t *testing.T) {
+		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
+			m.Status.OwnerUser = "acme_app"
+			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+				{SecretName: "acme-support", Username: "acme_support"},
+			}
+		})
+		// The sibling's own ledger claims the same account — a shared
+		// support credential. Deleting this CR must leave it in MySQL.
+		sibling := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+			m.Name = "tenant-sibling"
+			m.Spec.DatabaseName = "sibling_wms"
+			m.Spec.Owner.SecretName = "sibling-owner"
+			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+				{SecretName: "sibling-support", Username: "acme_support"},
+			}
+		})
+		r, _, rec := newMdbReconciler(t, mdb, sibling, mdbTestGroup())
+
+		_, dropOwners, err := r.deleteScope(context.Background(), mdb, map[string]bool{})
+		if err != nil {
+			t.Fatalf("deleteScope() error = %v", err)
+		}
+		for _, got := range dropOwners {
+			if got == "acme_support" {
+				t.Fatalf("dropOwners = %v, want no acme_support — a sibling's ledger still claims it", dropOwners)
+			}
+		}
+		assertEventContains(t, rec, "UserDropSkipped")
 	})
 
 	t.Run("crashed rotation cleans up both usernames", func(t *testing.T) {

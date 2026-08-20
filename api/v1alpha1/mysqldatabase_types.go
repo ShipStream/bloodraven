@@ -302,8 +302,9 @@ type MysqlDatabaseUser struct {
 	Privileges []MysqlPrivilege `json:"privileges"`
 
 	// ResourceLimits caps this account's server-side resource usage.
-	// Omitted limits render as 0 — MySQL's "unlimited" — on every apply,
-	// so removing a limit from the spec actually clears it in MySQL.
+	// Omitted limits render as 0 — MySQL's "no account-level cap" — on
+	// every apply, so removing a limit from the spec actually clears it in
+	// MySQL.
 	// +optional
 	ResourceLimits *MysqlUserResourceLimits `json:"resourceLimits,omitempty"`
 }
@@ -315,8 +316,10 @@ type MysqlDatabaseUser struct {
 // and rendering never interpolates caller-controlled text.
 type MysqlUserResourceLimits struct {
 	// MaxUserConnections is MAX_USER_CONNECTIONS: the number of
-	// simultaneous connections the account may hold. 0 (or omitted) means
-	// unlimited.
+	// simultaneous connections the account may hold. 0 (or omitted) sets no
+	// account-level cap, which defers to the server's global
+	// max_user_connections; the account is only truly unlimited when that
+	// global is also 0.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	MaxUserConnections int32 `json:"maxUserConnections,omitempty"`

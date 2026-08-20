@@ -104,8 +104,8 @@ func renderOwnerUserStatements(username, password string) ([]string, error) {
 // renderTenantUserStatements is renderOwnerUserStatements for a spec.users[]
 // entry: the same CREATE USER IF NOT EXISTS + ALTER USER pair, with the
 // entry's resource limits appended to the ALTER. The WITH clause is rendered
-// on every apply, with omitted limits as 0 (MySQL's "unlimited"): removing a
-// limit from the spec must clear it in MySQL, or resourceLimits would be
+// on every apply, with omitted limits as 0 (MySQL's "no account-level cap"):
+// removing a limit from the spec must clear it in MySQL, or resourceLimits would be
 // desired state on the way in but not on the way out. The limit values are
 // int32s formatted with %d — no caller-controlled text reaches the format
 // string.

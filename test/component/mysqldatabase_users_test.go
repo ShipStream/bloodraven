@@ -358,7 +358,7 @@ func TestMysqlDatabaseDeleteRetainLeavesUsersPrincipals(t *testing.T) {
 
 // TestMysqlDatabaseUsersLimitRemovalResetsToZero: resourceLimits are desired
 // state on the way out too — omitting a previously-set limit must render 0
-// (MySQL's unlimited), not silently leave the old cap enforced.
+// (no account-level cap), not silently leave the old cap enforced.
 func TestMysqlDatabaseUsersLimitRemovalResetsToZero(t *testing.T) {
 	h := newMdbHarness(t, mdbCR(withSupportUser), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
 
@@ -374,5 +374,48 @@ func TestMysqlDatabaseUsersLimitRemovalResetsToZero(t *testing.T) {
 
 	if limits, ok := h.server.resourceLimitsFor(mdbSupportUser); !ok || limits != "0/0" {
 		t.Fatalf("resource limits after removal = %q (present=%v), want 0/0", limits, ok)
+	}
+}
+
+// TestMysqlDatabaseUsersDropsAbandonedRotationTarget: a rotation whose drop
+// of the previous account failed transiently leaves the ledger recording
+// both names. If the Secret is then reverted to the previous account, the
+// rotation target is no longer desired state and no longer nameable after
+// the Ready stamp rewrites the ledger — so this reconcile is the last one
+// that can drop it. Missing that is a lingering credential on the tenant
+// schema, exactly what users[] exists to prevent.
+func TestMysqlDatabaseUsersDropsAbandonedRotationTarget(t *testing.T) {
+	const abandoned = "acme_support_v2"
+
+	// The ledger a crashed/failed rotation leaves behind: settled on
+	// mdbSupportUser (which the Secret still names), with the rotation
+	// target it created recorded as pending.
+	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) {
+		m.Status.DatabaseCreated = true
+		m.Status.OwnerUser = mdbOwnerUser
+		m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{
+			SecretName:      mdbSupportSecretName,
+			Username:        mdbSupportUser,
+			PendingUsername: abandoned,
+		}}
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.server.addUser(mdbOwnerUser, mdbOwnerPass)
+	h.server.addUser(mdbSupportUser, mdbSupportPass)
+	h.server.addUser(abandoned, "rotated-pw")
+
+	h.reconcile()
+	h.requireReady()
+
+	if h.server.hasUser(abandoned) {
+		t.Fatalf("abandoned rotation target %q survived the reconcile that last knew its name", abandoned)
+	}
+	if !h.server.hasUser(mdbSupportUser) {
+		t.Fatalf("the settled users[] principal %q was dropped", mdbSupportUser)
+	}
+	for _, state := range h.get().Status.AppliedUsers {
+		if state.PendingUsername != "" {
+			t.Fatalf("Ready ledger still carries a pending username: %+v", state)
+		}
 	}
 }
