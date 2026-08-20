@@ -2,9 +2,11 @@ package scenarios
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,10 +65,12 @@ func scenario49TenantDatabaseFailover() runner.Scenario {
 			s49CreateTenantDatabase(),
 			s49ObserveReady(),
 			s49VerifyOnPrimary("initial apply"),
+			s49VerifySupportDenied("initial apply"),
 			injectPlannedFailoverAnnotation(),
 			observePlannedFailoverSucceeded(),
 			s49ObserveReappliedOnNewPrimary(),
 			s49VerifyOnPrimary("after switchover"),
+			s49VerifySupportDenied("after switchover"),
 		},
 		Cleanup: s49DeleteLeftovers,
 	}
@@ -342,6 +346,83 @@ func s49AssertSupportUser(ctx context.Context, client *pgmysql.SiteClient, site 
 		if got != want {
 			return fmt.Errorf("users[] principal %q has %s=%d at %s, want %d", s49SupportUser, col, got, site, want)
 		}
+	}
+	return nil
+}
+
+// s49OtherDatabase stands in for a sibling tenant's schema on the same
+// shared group: the one thing the support principal must not be able to read.
+const s49OtherDatabase = "chaos_tenant_other"
+
+// s49VerifySupportDenied is the behavioral half of the cross-tenant
+// assertion. s49AssertSupportUser proves the grant tables are right; this
+// step connects AS the users[] principal and proves MySQL actually enforces
+// them: a SELECT against a sibling schema on the same group is denied, and a
+// write (CREATE TABLE) on its own schema is denied. The sibling schema is
+// created by root for the duration of the step and dropped afterwards.
+func s49VerifySupportDenied(stage string) runner.Step {
+	return runner.Step{
+		Phase: runner.PhaseVerify,
+		Name:  "users[] principal is denied on a sibling schema and cannot write its own (" + stage + ")",
+		Do: func(ctx context.Context, env *runner.Env) error {
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return err
+			}
+			site := mfg.Status.ActiveSite
+			if site == "" {
+				return fmt.Errorf("group has no active site")
+			}
+			root, err := env.MySQL(site)
+			if err != nil {
+				return fmt.Errorf("open primary %s as root: %w", site, err)
+			}
+			if _, err := root.Exec(ctx, "CREATE DATABASE IF NOT EXISTS "+s49OtherDatabase); err != nil {
+				return fmt.Errorf("create sibling schema: %w", err)
+			}
+			defer func() {
+				_, _ = root.Exec(context.WithoutCancel(ctx), "DROP DATABASE IF EXISTS "+s49OtherDatabase)
+			}()
+			if _, err := root.Exec(ctx, "CREATE TABLE IF NOT EXISTS "+s49OtherDatabase+".secrets (id INT PRIMARY KEY)"); err != nil {
+				return fmt.Errorf("create sibling table: %w", err)
+			}
+
+			support, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site,
+				pgmysql.Credentials{RootUser: s49SupportUser, RootPassword: s49SupportPass})
+			if err != nil {
+				return fmt.Errorf("connect to %s as users[] principal %q: %w", site, s49SupportUser, err)
+			}
+			defer support.Close()
+
+			if err := s49ExpectDenied(ctx, support, "SELECT COUNT(*) FROM "+s49OtherDatabase+".secrets"); err != nil {
+				return fmt.Errorf("cross-tenant read: %w", err)
+			}
+			if err := s49ExpectDenied(ctx, support, "CREATE TABLE "+s49DatabaseName+".should_not_exist (id INT)"); err != nil {
+				return fmt.Errorf("write on own schema: %w", err)
+			}
+			// And the positive control: its own schema is readable, so the
+			// denials above are privilege verdicts, not a broken connection.
+			if _, err := support.ScalarInt(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?", s49DatabaseName); err != nil {
+				return fmt.Errorf("users[] principal cannot read its own schema metadata: %w", err)
+			}
+			env.Capture.Note(fmt.Sprintf("users[] principal %q denied on %s and denied CREATE TABLE on %s at %s", s49SupportUser, s49OtherDatabase, s49DatabaseName, site))
+			return nil
+		},
+	}
+}
+
+// s49ExpectDenied runs stmt as the given client and requires MySQL to refuse
+// it with an access-denied verdict (ER_TABLEACCESS_DENIED_ERROR 1142 or
+// ER_DBACCESS_DENIED_ERROR 1044), not to succeed and not to fail some other
+// way.
+func s49ExpectDenied(ctx context.Context, c *pgmysql.SiteClient, stmt string) error {
+	_, err := c.DB.ExecContext(ctx, stmt)
+	if err == nil {
+		return fmt.Errorf("%q succeeded for %q; it must be denied", stmt, s49SupportUser)
+	}
+	var me *mysqldriver.MySQLError
+	if !errors.As(err, &me) || (me.Number != 1142 && me.Number != 1044) {
+		return fmt.Errorf("%q failed for %q, but not with an access-denied verdict: %w", stmt, s49SupportUser, err)
 	}
 	return nil
 }

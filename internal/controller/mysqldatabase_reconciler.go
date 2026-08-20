@@ -578,6 +578,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// so the previous one recorded in the ledger is now obsolete desired
 	// state and is dropped here — unless it became reserved or a sibling
 	// still claims it, exactly like the owner path.
+	claims := currentUserClaims(users)
 	for _, u := range users {
 		prevState := findAppliedUserIn(prior.appliedUsers, u.entry.SecretName)
 		if prevState == nil {
@@ -591,6 +592,15 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// account's name.
 		for _, prev := range ledgerUsernames(*prevState) {
 			if prev == u.username {
+				continue
+			}
+			if by, claimed := claims[prev]; claimed {
+				// Another current entry took the name this one rotated
+				// away from; applyDatabase just re-applied it as that
+				// entry's account. Dropping it here would destroy live
+				// desired state.
+				logger.V(1).Info("previous users[] principal is now claimed by another entry; not dropping",
+					"previousUsername", prev, "fromSecret", u.entry.SecretName, "toSecret", by)
 				continue
 			}
 			ok, verr := r.vetTenantUserDrop(ctx, &mdb, reserved, prev,
@@ -635,6 +645,19 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			continue
 		}
 		for _, name := range ledgerUsernames(state) {
+			if by, claimed := claims[name]; claimed {
+				// The entry left spec but its account did not: a current
+				// entry under a different secretName resolves to the same
+				// username (a Secret rename). applyDatabase adopted it via
+				// the ledger-wide attribution and re-applied its grants, so
+				// neither the revoke nor the drop may run — the Ready stamp
+				// below re-keys the record. Surface the handover so an
+				// operator can see why no UserRemoved fired.
+				r.Recorder.Eventf(&mdb, corev1.EventTypeNormal, "UserTransferred",
+					"spec.users[] entry %q was removed but principal %q is now declared by entry %q; kept the account and its ledger record",
+					state.SecretName, name, by)
+				continue
+			}
 			revokeStmt, rerr := renderRevokeAll("status.appliedUsers entry", mdb.Spec.DatabaseName, name)
 			if rerr != nil {
 				logger.Error(rerr, "cannot render revoke for removed users[] principal; skipping",
@@ -1229,14 +1252,41 @@ func rollbackUserWriteAhead(st *v1alpha1.MysqlDatabaseStatus, prior priorApplySt
 }
 
 // userAttributed reports whether the pre-stamp ledger attributes username to
-// the entry keyed by secretName — as its recorded account or as the target
-// of an in-flight rotation. This is the users[] adoption gate's memory.
+// this CR — as any entry's recorded account or as the target of any entry's
+// in-flight rotation. This is the users[] adoption gate's memory.
+//
+// Attribution is ledger-wide rather than per-secretName on purpose: the
+// ledger answers "did this CR create that account", and which spec entry
+// created it is bookkeeping. Keying on the entry would turn a secretName
+// rename (an ESO target renamed, a chart refactor) with an unchanged
+// username into a permanent PreExistingUser wedge — the account exists, the
+// new entry has no record, and the old record is only retired after a
+// successful apply. Validate guarantees no two live entries resolve to one
+// username, so a name another entry's record holds is either being
+// transferred (that entry left spec) or freed (that entry rotated away);
+// both are this CR's account. The secretName parameter is kept for the
+// call-site reading and error attribution.
 func userAttributed(prior priorApplyState, secretName, username string) bool {
-	e := findAppliedUserIn(prior.appliedUsers, secretName)
-	if e == nil {
-		return false
+	_ = secretName
+	for _, e := range prior.appliedUsers {
+		if e.Username == username || e.PendingUsername == username {
+			return true
+		}
 	}
-	return e.Username == username || e.PendingUsername == username
+	return false
+}
+
+// currentUserClaims maps every username the current spec.users[] resolves to
+// back to its secretName. The drop paths consult it so that a name which has
+// moved between entries — a secretName rename, or a new entry taking a name a
+// rotating sibling entry just freed — is never dropped as "previous" or
+// "removed" state: it is current desired state under a different key.
+func currentUserClaims(users []tenantUserInput) map[string]string {
+	out := make(map[string]string, len(users))
+	for _, u := range users {
+		out[u.username] = u.entry.SecretName
+	}
+	return out
 }
 
 // specHasUserSecret reports whether spec.users[] still declares secretName.

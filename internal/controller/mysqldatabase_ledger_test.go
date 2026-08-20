@@ -149,7 +149,9 @@ func TestRollbackUserWriteAhead(t *testing.T) {
 }
 
 // TestUserAttributed pins the adoption gate's memory: an account is adoptable
-// only when the pre-stamp ledger already names it for that same entry.
+// only when the pre-stamp ledger already names it — under any entry, because
+// the ledger records what this CR created and a secretName rename must
+// transfer the record rather than wedge on PreExistingUser.
 func TestUserAttributed(t *testing.T) {
 	prior := priorApplyState{appliedUsers: []v1alpha1.MysqlDatabaseUserState{
 		ledgerState("support", "acme_support", "acme_support_v2"),
@@ -164,8 +166,9 @@ func TestUserAttributed(t *testing.T) {
 		{name: "recorded username", secret: "support", username: "acme_support", want: true},
 		{name: "in-flight rotation target", secret: "support", username: "acme_support_v2", want: true},
 		{name: "unknown account", secret: "support", username: "someone_else", want: false},
-		{name: "unknown secret", secret: "nope", username: "acme_support", want: false},
-		{name: "another entry's account is not attributed", secret: "bi", username: "acme_support", want: false},
+		{name: "another entry's recorded account transfers", secret: "bi", username: "acme_support", want: true},
+		{name: "another entry's pending rotation target transfers", secret: "bi", username: "acme_support_v2", want: true},
+		{name: "a secretName the ledger never saw still transfers by username", secret: "support-renamed", username: "acme_support", want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

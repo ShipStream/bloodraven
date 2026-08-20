@@ -419,3 +419,111 @@ func TestMysqlDatabaseUsersDropsAbandonedRotationTarget(t *testing.T) {
 		}
 	}
 }
+
+// TestMysqlDatabaseUsersSecretRenameTransfersAccount: renaming the Secret an
+// entry points at (an ESO target renamed, a chart refactor) while the
+// username inside stays the same is a re-key of the ledger record, not a
+// PreExistingUser refusal and not a drop-and-recreate. The account is this
+// CR's — the ledger says so under the old key — so the new entry adopts it,
+// the old entry's removal pass leaves it alone, and the credential never
+// goes away.
+func TestMysqlDatabaseUsersSecretRenameTransfersAccount(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(withSupportUser), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+
+	h.reconcile()
+	h.requireReady()
+
+	const renamed = "support-ro-mysql-v2"
+	renamedSecret := mdbSupportSecret()
+	renamedSecret.Name = renamed
+	if err := h.client.Create(context.Background(), renamedSecret); err != nil {
+		t.Fatalf("create renamed support secret: %v", err)
+	}
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users[0].SecretName = renamed })
+
+	before := h.server.statementCount()
+	h.reconcile()
+	mdb := h.requireReady() // not Failed/PreExistingUser
+
+	// The ordinary apply (GRANT + surplus REVOKE of undeclared privileges)
+	// is expected; the removal pass's REVOKE ALL and DROP USER are not.
+	for _, stmt := range h.server.statementsSince(before) {
+		if strings.HasPrefix(stmt, "DROP USER") ||
+			(strings.HasPrefix(stmt, "REVOKE") && strings.Contains(stmt, "ALL PRIVILEGES ON")) {
+			t.Fatalf("secretName rename ran %q; the account is current desired state under the new key", stmt)
+		}
+	}
+	if !h.server.hasUser(mdbSupportUser) {
+		t.Fatal("secretName rename lost the principal")
+	}
+	if len(mdb.Status.AppliedUsers) != 1 ||
+		mdb.Status.AppliedUsers[0].SecretName != renamed ||
+		mdb.Status.AppliedUsers[0].Username != mdbSupportUser ||
+		mdb.Status.AppliedUsers[0].PendingUsername != "" {
+		t.Fatalf("status.appliedUsers = %+v, want the record re-keyed to %q", mdb.Status.AppliedUsers, renamed)
+	}
+	if !h.sawEvent("UserTransferred") {
+		t.Fatal("no UserTransferred event; operators need to see why the removal pass did not fire UserRemoved")
+	}
+}
+
+// TestMysqlDatabaseUsersNewEntryTakesRotatedName: entry A rotates from
+// acme_support to acme_support_v2 in the same reconcile that a new entry B
+// declares acme_support. A's rotation drop must not take B's account with
+// it — the name is current desired state under B.
+func TestMysqlDatabaseUsersNewEntryTakesRotatedName(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(withSupportUser), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+
+	h.reconcile()
+	h.requireReady()
+
+	const biSecret = "bi-mysql"
+	bi := mdbSupportSecret()
+	bi.Name = biSecret
+	bi.Data["password"] = []byte("bi-pw") // same username as the support entry's old name
+	if err := h.client.Create(context.Background(), bi); err != nil {
+		t.Fatalf("create bi secret: %v", err)
+	}
+	h.updateSupportSecret(func(s *corev1.Secret) {
+		s.Data["username"] = []byte("acme_support_v2")
+		s.Data["password"] = []byte("support-pw-2")
+	})
+	h.update(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Users = append(m.Spec.Users, v1alpha1.MysqlDatabaseUser{
+			SecretName: biSecret,
+			Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+		})
+	})
+
+	h.reconcile()
+	mdb := h.requireReady()
+
+	if !h.server.hasUser(mdbSupportUser) {
+		t.Fatal("rotation of the support entry dropped the account the new bi entry now declares")
+	}
+	if !h.server.hasUser("acme_support_v2") {
+		t.Fatal("rotated support principal missing")
+	}
+	if pw, _ := h.server.password(mdbSupportUser); pw != "bi-pw" {
+		t.Fatalf("transferred account password = %q, want the bi Secret's value", pw)
+	}
+	if len(mdb.Status.AppliedUsers) != 2 {
+		t.Fatalf("status.appliedUsers = %+v, want both entries settled", mdb.Status.AppliedUsers)
+	}
+}
+
+// sawEvent drains the fake recorder and reports whether an event with the
+// given reason was emitted so far.
+func (h *mdbHarness) sawEvent(reason string) bool {
+	h.t.Helper()
+	for {
+		select {
+		case e := <-h.rec.Events:
+			if strings.Contains(e, " "+reason+" ") {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+}
