@@ -268,6 +268,28 @@ spec:
                   a MysqlDatabase may bring into existence, and only because the
                   caller supplied its password in a Secret first.
                 properties:
+                  hosts:
+                    description: |-
+                      Hosts restricts where the owner may connect from: the MySQL host
+                      part of the account. Defaults to ["%"] (anywhere). Each entry is an
+                      IP address, a CIDR (`203.0.113.0/24`), an IP/netmask pair, or a
+                      %-wildcarded IPv4 pattern (`10.0.%`); hostnames are rejected, because
+                      they would put DNS on the authentication path. With more than one
+                      host the owner is one principal — one Secret, one grant set — backed
+                      by one MySQL account per host, all created, rotated, granted and
+                      dropped together (a platform with several static egress IPs is the
+                      motivating case). Removing a host drops that account. MySQL only sees
+                      the client's real address when the Service preserves it
+                      (externalTrafficPolicy: Local); behind a SNAT-ing load balancer a
+                      host list other than ["%"] locks the tenant out.
+                    items:
+                      maxLength: 255
+                      minLength: 1
+                      pattern: ^[0-9A-Fa-f.:%_/]+$
+                      type: string
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-type: set
                   privileges:
                     default:
                     - ALL PRIVILEGES
@@ -341,7 +363,7 @@ spec:
                   into existence — the same trust shape as the owner, not a loosening
                   of grants[]: each user exists only because the caller supplied its
                   username and password in a same-namespace Secret first. The created
-                  account is '%'-hosted, granted ON <databaseName>.* only from the
+                  account is hosts-scoped (default '%'), granted ON <databaseName>.* only from the
                   allowlist, and never receives GRANT OPTION or ALL PRIVILEGES. The
                   "grants[] never runs CREATE USER" escalation argument is preserved:
                   users[] is Secret-gated, so it does not reopen it.
@@ -355,6 +377,21 @@ spec:
                     MysqlDatabaseUser declares one additional Secret-backed principal on this
                     database. See MysqlDatabaseSpec.Users for the trust shape.
                   properties:
+                    hosts:
+                      description: |-
+                        Hosts restricts where this principal may connect from. Same contract
+                        as spec.owner.hosts: defaults to ["%"], IP/CIDR/netmask/%-pattern
+                        entries only, one MySQL account per host managed as one principal.
+                        Note that resourceLimits are enforced per account by MySQL, so a
+                        limit applies per host, not across the list.
+                      items:
+                        maxLength: 255
+                        minLength: 1
+                        pattern: ^[0-9A-Fa-f.:%_/]+$
+                        type: string
+                      maxItems: 8
+                      type: array
+                      x-kubernetes-list-type: set
                     privileges:
                       description: |-
                         Privileges granted to this user ON <databaseName>.*. Required, no
@@ -508,6 +545,17 @@ spec:
                     generalization of status.ownerUser plus status.pendingOwnerUser, keyed by
                     the Secret that carries the credential.
                   properties:
+                    hosts:
+                      description: |-
+                        Hosts is every host this entry's account(s) may exist on: the union
+                        of the hosts declared since the last successful apply, recorded
+                        before any CREATE USER for them runs and settled to the current list
+                        by the Ready stamp. Host removal and entry removal drop off this
+                        record. Empty means the pre-hosts default, ["%"].
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
                     pendingUsername:
                       description: |-
                         PendingUsername is the write-ahead record of an in-flight username
@@ -633,6 +681,17 @@ spec:
                   a MySQL connection.
                 format: int64
                 type: integer
+              ownerHosts:
+                description: |-
+                  OwnerHosts is every host the owner account(s) may exist on: the
+                  union of spec.owner.hosts values declared since the last successful
+                  apply, written ahead of the first statement and settled to the
+                  current list by the Ready stamp. Host removal and deletion drop off
+                  this record. Empty means the pre-hosts default, ["%"].
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: atomic
               ownerUser:
                 description: |-
                   OwnerUser is the username echoed from the referenced Secret,

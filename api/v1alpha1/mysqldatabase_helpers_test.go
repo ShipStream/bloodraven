@@ -385,3 +385,48 @@ func TestIsSystemSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateMysqlHost(t *testing.T) {
+	accept := []string{"%", "10.0.0.1", "203.0.113.0/24", "10.0.0.0/255.255.255.0", "10.0.%", "192.168.1._", "2001:db8::1", "2001:db8::/32", "::1"}
+	for _, h := range accept {
+		if err := ValidateMysqlHost("spec.owner.hosts[0]", h); err != nil {
+			t.Errorf("ValidateMysqlHost(%q) = %v, want accept", h, err)
+		}
+	}
+	reject := []string{"", "db.example.com", "localhost", "evil'@'%", "10.0.0.1; DROP", "10.0.0.0/33", "10.0.0.0/255.255.0", "%%%%.%", "1.2.3.4.5", "cafe", "10.0.0.1 "}
+	for _, h := range reject {
+		if err := ValidateMysqlHost("spec.owner.hosts[0]", h); err == nil {
+			t.Errorf("ValidateMysqlHost(%q) = nil, want rejection", h)
+		}
+	}
+}
+
+func TestValidateRejectsDuplicateAndInvalidHosts(t *testing.T) {
+	base := func() MysqlDatabaseSpec {
+		return MysqlDatabaseSpec{
+			DatabaseName: "acme_wms",
+			Owner:        MysqlDatabaseOwner{SecretName: "owner"},
+		}
+	}
+	spec := base()
+	spec.Owner.Hosts = []string{"10.0.0.1", "10.0.0.1"}
+	if err := spec.Validate("acme_app", nil); err == nil {
+		t.Fatal("Validate accepted duplicate owner hosts")
+	}
+	spec = base()
+	spec.Users = []MysqlDatabaseUser{{SecretName: "support", Privileges: []MysqlPrivilege{PrivilegeSelect}, Hosts: []string{"support.example.com"}}}
+	if err := spec.Validate("acme_app", map[string]string{"support": "acme_support"}); err == nil {
+		t.Fatal("Validate accepted a hostname in users[].hosts")
+	}
+	spec = base()
+	spec.Owner.Hosts = []string{"35.1.2.3", "35.4.5.6", "35.7.8.9"}
+	if err := spec.Validate("acme_app", nil); err != nil {
+		t.Fatalf("Validate rejected a valid multi-IP owner: %v", err)
+	}
+	if got := spec.Owner.EffectiveHosts(); len(got) != 3 {
+		t.Fatalf("EffectiveHosts = %v", got)
+	}
+	if got := (&MysqlDatabaseOwner{}).EffectiveHosts(); len(got) != 1 || got[0] != "%" {
+		t.Fatalf("EffectiveHosts(default) = %v, want [%%]", got)
+	}
+}

@@ -226,7 +226,7 @@ type MysqlDatabaseSpec struct {
 	// into existence — the same trust shape as the owner, not a loosening
 	// of grants[]: each user exists only because the caller supplied its
 	// username and password in a same-namespace Secret first. The created
-	// account is '%'-hosted, granted ON <databaseName>.* only from the
+	// account is hosts-scoped (default '%'), granted ON <databaseName>.* only from the
 	// allowlist, and never receives GRANT OPTION or ALL PRIVILEGES. The
 	// "grants[] never runs CREATE USER" escalation argument is preserved:
 	// users[] is Secret-gated, so it does not reopen it.
@@ -277,6 +277,26 @@ type MysqlDatabaseOwner struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=15
 	Privileges []MysqlPrivilege `json:"privileges,omitempty"`
+
+	// Hosts restricts where the owner may connect from: the MySQL host
+	// part of the account. Defaults to ["%"] (anywhere). Each entry is an
+	// IP address, a CIDR (`203.0.113.0/24`), an IP/netmask pair, or a
+	// %-wildcarded IPv4 pattern (`10.0.%`); hostnames are rejected, because
+	// they would put DNS on the authentication path. With more than one
+	// host the owner is one principal — one Secret, one grant set — backed
+	// by one MySQL account per host, all created, rotated, granted and
+	// dropped together (a platform with several static egress IPs is the
+	// motivating case). Removing a host drops that account. MySQL only sees
+	// the client's real address when the Service preserves it
+	// (externalTrafficPolicy: Local); behind a SNAT-ing load balancer a
+	// host list other than ["%"] locks the tenant out.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=255
+	// +kubebuilder:validation:items:Pattern=`^[0-9A-Fa-f.:%_/]+$`
+	Hosts []string `json:"hosts,omitempty"`
 }
 
 // MysqlDatabaseUser declares one additional Secret-backed principal on this
@@ -307,6 +327,19 @@ type MysqlDatabaseUser struct {
 	// MySQL.
 	// +optional
 	ResourceLimits *MysqlUserResourceLimits `json:"resourceLimits,omitempty"`
+
+	// Hosts restricts where this principal may connect from. Same contract
+	// as spec.owner.hosts: defaults to ["%"], IP/CIDR/netmask/%-pattern
+	// entries only, one MySQL account per host managed as one principal.
+	// Note that resourceLimits are enforced per account by MySQL, so a
+	// limit applies per host, not across the list.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=255
+	// +kubebuilder:validation:items:Pattern=`^[0-9A-Fa-f.:%_/]+$`
+	Hosts []string `json:"hosts,omitempty"`
 }
 
 // MysqlUserResourceLimits are per-account MySQL resource limits, applied via
@@ -376,6 +409,15 @@ type MysqlDatabaseUserState struct {
 	// account this CR itself created.
 	// +optional
 	PendingUsername string `json:"pendingUsername,omitempty"`
+
+	// Hosts is every host this entry's account(s) may exist on: the union
+	// of the hosts declared since the last successful apply, recorded
+	// before any CREATE USER for them runs and settled to the current list
+	// by the Ready stamp. Host removal and entry removal drop off this
+	// record. Empty means the pre-hosts default, ["%"].
+	// +optional
+	// +listType=atomic
+	Hosts []string `json:"hosts,omitempty"`
 }
 
 // MysqlDatabasePhase is the lifecycle phase of a MysqlDatabase.
@@ -446,6 +488,15 @@ type MysqlDatabaseStatus struct {
 	// it as an owner candidate for the same reason.
 	// +optional
 	PendingOwnerUser string `json:"pendingOwnerUser,omitempty"`
+
+	// OwnerHosts is every host the owner account(s) may exist on: the
+	// union of spec.owner.hosts values declared since the last successful
+	// apply, written ahead of the first statement and settled to the
+	// current list by the Ready stamp. Host removal and deletion drop off
+	// this record. Empty means the pre-hosts default, ["%"].
+	// +optional
+	// +listType=atomic
+	OwnerHosts []string `json:"ownerHosts,omitempty"`
 
 	// AppliedGrants lists the usernames granted on this database during
 	// the most recent successful apply, owner first. It is the input to

@@ -17,6 +17,13 @@ import (
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
 
+// s49SupportHosts scopes the users[] principal to the hosts the scenario's
+// own connection arrives from — a port-forward lands on the pod's loopback,
+// IPv4 or IPv6 — plus one address nothing here ever uses. No '%': if host
+// matching were not real, the support connection below would still work
+// from anywhere and the assertion would prove nothing.
+var s49SupportHosts = []string{"127.0.0.1", "::1", "203.0.113.7"}
+
 func init() {
 	runner.Register(scenario49TenantDatabaseFailover())
 }
@@ -35,8 +42,9 @@ const (
 	// The spec.users[] entry, shaped like the per-tenant support reader it
 	// exists for: Secret-backed, SELECT-only, resource-limited.
 	s49UserSecretName = "chaos-tenant-support"
-	s49SupportUser    = "chaos_tenant_support"
-	s49SupportPass    = "chaos-support-pw"
+
+	s49SupportUser = "chaos_tenant_support"
+	s49SupportPass = "chaos-support-pw"
 )
 
 // scenario49TenantDatabaseFailover creates a MysqlDatabase, waits for Ready,
@@ -139,6 +147,7 @@ func s49CreateTenantDatabase() runner.Step {
 					Users: []v1alpha1.MysqlDatabaseUser{{
 						SecretName: s49UserSecretName,
 						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+						Hosts:      s49SupportHosts,
 						ResourceLimits: &v1alpha1.MysqlUserResourceLimits{
 							MaxUserConnections: 5,
 							MaxQueriesPerHour:  3600,
@@ -290,61 +299,75 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 // property the whole initiative exists for — it holds no global privilege and
 // no grant on any other schema on this shared group.
 func s49AssertSupportUser(ctx context.Context, client *pgmysql.SiteClient, site string) error {
+	// One account per declared host, and no '%' account: the host list is
+	// the whole principal.
 	n, err := client.ScalarInt(ctx,
-		"SELECT COUNT(*) FROM mysql.user WHERE user = ? AND host = '%'", s49SupportUser)
+		"SELECT COUNT(*) FROM mysql.user WHERE user = ?", s49SupportUser)
 	if err != nil {
 		return fmt.Errorf("query mysql.user for the users[] principal on %s: %w", site, err)
 	}
-	if n != 1 {
-		return fmt.Errorf("spec.users[] principal %q missing on %s", s49SupportUser, site)
+	if n != int64(len(s49SupportHosts)) {
+		return fmt.Errorf("spec.users[] principal %q has %d account(s) on %s, want one per host (%d)", s49SupportUser, n, site, len(s49SupportHosts))
 	}
-
-	// SELECT-only on this schema: the granted privilege is present and a
-	// write privilege is not. Read-only comes from the grant, never from a
-	// proxy, so this is the assertion that actually enforces it.
-	for col, want := range map[string]string{"Select_priv": "Y", "Insert_priv": "N", "Update_priv": "N", "Delete_priv": "N"} {
-		v, err := client.ScalarString(ctx,
-			"SELECT "+col+" FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", s49DatabaseName, s49SupportUser)
+	for _, host := range s49SupportHosts {
+		n, err := client.ScalarInt(ctx,
+			"SELECT COUNT(*) FROM mysql.user WHERE user = ? AND host = ?", s49SupportUser, host)
 		if err != nil {
-			return fmt.Errorf("query %s for the users[] principal on %s: %w", col, site, err)
+			return fmt.Errorf("query mysql.user for %s@%s on %s: %w", s49SupportUser, host, site, err)
 		}
-		if v != want {
-			return fmt.Errorf("users[] principal %q has %s=%q on %q at %s, want %q",
-				s49SupportUser, col, v, s49DatabaseName, site, want)
+		if n != 1 {
+			return fmt.Errorf("spec.users[] principal %q missing on host %s at %s", s49SupportUser, host, site)
 		}
-	}
 
-	// Cross-tenant isolation, asserted rather than assumed: no global SELECT
-	// (which would read every tenant on this shared group) and no schema
-	// grant anywhere but this tenant's own database.
-	global, err := client.ScalarString(ctx,
-		"SELECT Select_priv FROM mysql.user WHERE user = ? AND host = '%'", s49SupportUser)
-	if err != nil {
-		return fmt.Errorf("query global Select_priv on %s: %w", site, err)
-	}
-	if global != "N" {
-		return fmt.Errorf("users[] principal %q has global Select_priv=%q at %s; it would read every tenant on this group",
-			s49SupportUser, global, site)
-	}
-	n, err = client.ScalarInt(ctx,
-		"SELECT COUNT(*) FROM mysql.db WHERE user = ? AND host = '%' AND db <> ?", s49SupportUser, s49DatabaseName)
-	if err != nil {
-		return fmt.Errorf("query foreign schema grants on %s: %w", site, err)
-	}
-	if n != 0 {
-		return fmt.Errorf("users[] principal %q holds %d grant row(s) on schemas other than %q at %s",
-			s49SupportUser, n, s49DatabaseName, site)
-	}
+		// SELECT-only on this schema, per account: the granted privilege
+		// is present and a write privilege is not. Read-only comes from
+		// the grant, never from a proxy, so this is the assertion that
+		// actually enforces it.
+		for col, want := range map[string]string{"Select_priv": "Y", "Insert_priv": "N", "Update_priv": "N", "Delete_priv": "N"} {
+			v, err := client.ScalarString(ctx,
+				"SELECT "+col+" FROM mysql.db WHERE db = ? AND user = ? AND host = ?", s49DatabaseName, s49SupportUser, host)
+			if err != nil {
+				return fmt.Errorf("query %s for %s@%s on %s: %w", col, s49SupportUser, host, site, err)
+			}
+			if v != want {
+				return fmt.Errorf("users[] principal %q@%s has %s=%q on %q at %s, want %q",
+					s49SupportUser, host, col, v, s49DatabaseName, site, want)
+			}
+		}
 
-	// The resource limits the CR declared.
-	for col, want := range map[string]int64{"max_user_connections": 5, "max_questions": 3600} {
-		got, err := client.ScalarInt(ctx,
-			"SELECT "+col+" FROM mysql.user WHERE user = ? AND host = '%'", s49SupportUser)
+		// Cross-tenant isolation, asserted rather than assumed: no global
+		// SELECT (which would read every tenant on this shared group) and
+		// no schema grant anywhere but this tenant's own database.
+		global, err := client.ScalarString(ctx,
+			"SELECT Select_priv FROM mysql.user WHERE user = ? AND host = ?", s49SupportUser, host)
 		if err != nil {
-			return fmt.Errorf("query %s on %s: %w", col, site, err)
+			return fmt.Errorf("query global Select_priv on %s: %w", site, err)
 		}
-		if got != want {
-			return fmt.Errorf("users[] principal %q has %s=%d at %s, want %d", s49SupportUser, col, got, site, want)
+		if global != "N" {
+			return fmt.Errorf("users[] principal %q@%s has global Select_priv=%q at %s; it would read every tenant on this group",
+				s49SupportUser, host, global, site)
+		}
+		n, err = client.ScalarInt(ctx,
+			"SELECT COUNT(*) FROM mysql.db WHERE user = ? AND host = ? AND db <> ?", s49SupportUser, host, s49DatabaseName)
+		if err != nil {
+			return fmt.Errorf("query foreign schema grants on %s: %w", site, err)
+		}
+		if n != 0 {
+			return fmt.Errorf("users[] principal %q@%s holds %d grant row(s) on schemas other than %q at %s",
+				s49SupportUser, host, n, s49DatabaseName, site)
+		}
+
+		// The resource limits the CR declared — per account, which is how
+		// MySQL enforces them.
+		for col, want := range map[string]int64{"max_user_connections": 5, "max_questions": 3600} {
+			got, err := client.ScalarInt(ctx,
+				"SELECT "+col+" FROM mysql.user WHERE user = ? AND host = ?", s49SupportUser, host)
+			if err != nil {
+				return fmt.Errorf("query %s on %s: %w", col, site, err)
+			}
+			if got != want {
+				return fmt.Errorf("users[] principal %q@%s has %s=%d at %s, want %d", s49SupportUser, host, col, got, site, want)
+			}
 		}
 	}
 	return nil
@@ -387,10 +410,13 @@ func s49VerifySupportDenied(stage string) runner.Step {
 				return fmt.Errorf("create sibling table: %w", err)
 			}
 
+			// The principal has no '%' account, so this connection succeeding
+			// is itself the proof that host scoping matched the real source
+			// address (the port-forward's loopback) rather than a wildcard.
 			support, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, site,
 				pgmysql.Credentials{RootUser: s49SupportUser, RootPassword: s49SupportPass})
 			if err != nil {
-				return fmt.Errorf("connect to %s as users[] principal %q: %w", site, s49SupportUser, err)
+				return fmt.Errorf("connect to %s as users[] principal %q (hosts %v): %w", site, s49SupportUser, s49SupportHosts, err)
 			}
 			defer support.Close()
 

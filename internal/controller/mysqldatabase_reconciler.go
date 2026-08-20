@@ -130,7 +130,23 @@ type tenantUserInput struct {
 	entry    v1alpha1.MysqlDatabaseUser
 	username string
 	password string
+	hosts    []string
 	secret   *corev1.Secret
+}
+
+// managedPrincipal is a username over the hosts its accounts may exist on —
+// the unit the delete path drops.
+type managedPrincipal struct {
+	username string
+	hosts    []string
+}
+
+func principalNames(ps []managedPrincipal) []string {
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.username)
+	}
+	return out
 }
 
 // transientSQLError distinguishes connectivity weather from a MySQL verdict.
@@ -259,6 +275,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	ownerUser := string(ownerSecret.Data["username"])
 	ownerPass := string(ownerSecret.Data["password"])
+	ownerHosts := mdb.Spec.Owner.EffectiveHosts()
 	if ownerUser == "" || ownerPass == "" {
 		return r.pending(ctx, &mdb, "OwnerSecretIncomplete",
 			fmt.Sprintf("Secret %q must carry non-empty username and password keys", secretKey.Name))
@@ -287,7 +304,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return r.pending(ctx, &mdb, "UserSecretIncomplete",
 				fmt.Sprintf("spec.users[] Secret %q must carry non-empty username and password keys", entry.SecretName))
 		}
-		users = append(users, tenantUserInput{entry: entry, username: username, password: password, secret: &userSecret})
+		users = append(users, tenantUserInput{entry: entry, username: username, password: password, hosts: entry.EffectiveHosts(), secret: &userSecret})
 		userUsernames[entry.SecretName] = username
 	}
 
@@ -377,6 +394,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		databaseCreated:  mdb.Status.DatabaseCreated,
 		recordedOwner:    mdb.Status.OwnerUser,
 		pendingOwnerUser: mdb.Status.PendingOwnerUser,
+		ownerHosts:       recordedOwnerHosts(&mdb.Status),
 		appliedGrants:    mdb.Status.AppliedGrants,
 		appliedUsers:     copyAppliedUsers(mdb.Status.AppliedUsers),
 	}
@@ -461,13 +479,17 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// what was recorded before this run, so a pre-existing foreign account
 	// is still refused on the entry's first apply and on the first attempt
 	// of a rotation into it.
+	// The owner's hosts ride the same write-ahead: the record must cover
+	// every host an account is about to be created on, or a crash before
+	// the Ready stamp would leave an account on a host nothing remembers.
 	if err := r.stampStatus(ctx, &mdb, func(st *v1alpha1.MysqlDatabaseStatus) {
+		st.OwnerHosts = unionHosts(recordedOwnerHosts(st), ownerHosts)
 		stampUsersWriteAhead(st, users)
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	appliedGrants, err := applyDatabase(sqlCtx, db, &mdb, ownerUser, ownerPass, users, prior)
+	appliedGrants, err := applyDatabase(sqlCtx, db, &mdb, ownerUser, ownerPass, ownerHosts, users, prior)
 	if err != nil {
 		var preExists *errDatabasePreExists
 		if errors.As(err, &preExists) {
@@ -552,7 +574,10 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					prev, referrer, ownerUser)
 				break
 			}
-			dropStmt, derr := renderDropUser("spec.owner secret username", prev)
+			// Every host the old name may exist on: the hosts recorded
+			// for it plus the current list (a rotation that also changed
+			// hosts mid-flight could have created it on either).
+			dropStmt, derr := renderDropUser("spec.owner secret username", prev, unionHosts(prior.ownerHosts, ownerHosts))
 			if derr != nil {
 				// A status value that no longer renders is unreachable via
 				// any input we accept; log and move on rather than wedging
@@ -570,6 +595,28 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				r.Recorder.Eventf(&mdb, corev1.EventTypeNormal, "OwnerUserRotated",
 					"created and granted new owner user %q, then dropped previous owner user %q", ownerUser, prev)
 			}
+		}
+	}
+
+	// Hosts removed from spec.owner.hosts: the same username's accounts on
+	// hosts the ledger recorded but the spec no longer declares are
+	// obsolete desired state. Only the current name is handled here — a
+	// rotated-away name was dropped on every host above.
+	if removed := diffHosts(prior.ownerHosts, ownerHosts); len(removed) > 0 && prior.recordedOwner == ownerUser {
+		dropStmt, derr := renderDropUser("spec.owner secret username", ownerUser, removed)
+		if derr != nil {
+			logger.Error(derr, "cannot render drop for removed owner hosts; skipping", "hosts", removed)
+		} else {
+			if _, xerr := db.ExecContext(sqlCtx, dropStmt); xerr != nil {
+				if transientSQLError(xerr) {
+					return r.pending(ctx, &mdb, "PrimaryUnavailable",
+						fmt.Sprintf("transient MySQL error dropping removed owner hosts on group %q: %v", fg.Name, xerr))
+				}
+				return r.fail(ctx, &mdb, "MySQLError",
+					fmt.Sprintf("drop owner user %q on removed hosts %v: %v", ownerUser, removed, xerr))
+			}
+			r.Recorder.Eventf(&mdb, corev1.EventTypeNormal, "OwnerHostsRemoved",
+				"dropped owner user %q on hosts no longer declared: %s", ownerUser, strings.Join(removed, ", "))
 		}
 	}
 
@@ -611,7 +658,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if !ok {
 				continue
 			}
-			dropStmt, derr := renderDropUser("spec.users[] ledger username", prev)
+			dropStmt, derr := renderDropUser("spec.users[] ledger username", prev, unionHosts(ledgerHosts(*prevState), u.hosts))
 			if derr != nil {
 				logger.Error(derr, "cannot render drop for previous users[] principal; skipping",
 					"secretName", u.entry.SecretName, "previousUsername", prev)
@@ -628,6 +675,26 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			r.Recorder.Eventf(&mdb, corev1.EventTypeNormal, "UserRotated",
 				"created and granted users[] principal %q (secret %q), then dropped previous principal %q",
 				u.username, u.entry.SecretName, prev)
+		}
+		// Hosts removed from this entry's list, for the name it keeps.
+		if removed := diffHosts(ledgerHosts(*prevState), u.hosts); len(removed) > 0 && prevState.Username == u.username {
+			dropStmt, derr := renderDropUser("spec.users[] ledger username", u.username, removed)
+			if derr != nil {
+				logger.Error(derr, "cannot render drop for removed users[] hosts; skipping",
+					"secretName", u.entry.SecretName, "hosts", removed)
+				continue
+			}
+			if _, xerr := db.ExecContext(sqlCtx, dropStmt); xerr != nil {
+				if transientSQLError(xerr) {
+					return r.pending(ctx, &mdb, "PrimaryUnavailable",
+						fmt.Sprintf("transient MySQL error dropping removed users[] hosts on group %q: %v", fg.Name, xerr))
+				}
+				return r.fail(ctx, &mdb, "MySQLError",
+					fmt.Sprintf("drop users[] principal %q on removed hosts %v: %v", u.username, removed, xerr))
+			}
+			r.Recorder.Eventf(&mdb, corev1.EventTypeNormal, "UserHostsRemoved",
+				"dropped users[] principal %q (secret %q) on hosts no longer declared: %s",
+				u.username, u.entry.SecretName, strings.Join(removed, ", "))
 		}
 	}
 
@@ -658,7 +725,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 					state.SecretName, name, by)
 				continue
 			}
-			revokeStmt, rerr := renderRevokeAll("status.appliedUsers entry", mdb.Spec.DatabaseName, name)
+			revokeStmt, rerr := renderRevokeAll("status.appliedUsers entry", mdb.Spec.DatabaseName, name, ledgerHosts(state))
 			if rerr != nil {
 				logger.Error(rerr, "cannot render revoke for removed users[] principal; skipping",
 					"secretName", state.SecretName, "username", name)
@@ -680,7 +747,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			if !ok {
 				continue
 			}
-			dropStmt, derr := renderDropUser("spec.users[] ledger username", name)
+			dropStmt, derr := renderDropUser("spec.users[] ledger username", name, ledgerHosts(state))
 			if derr != nil {
 				logger.Error(derr, "cannot render drop for removed users[] principal; skipping",
 					"secretName", state.SecretName, "username", name)
@@ -706,6 +773,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		st.DatabaseCreated = true
 		st.OwnerUser = ownerUser
 		st.PendingOwnerUser = ""
+		st.OwnerHosts = ownerHosts
 		st.AppliedGrants = appliedGrants
 		st.AppliedUsers = readyAppliedUsers(users)
 		st.ActiveSite = fg.Status.ActiveSite
@@ -897,7 +965,7 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 	case dropDB && len(dropOwners) > 0:
 		r.Recorder.Eventf(mdb, corev1.EventTypeNormal, "DatabaseDropped",
 			"deletionPolicy=Delete: dropped database %q and user(s) %q on site %s",
-			mdb.Spec.DatabaseName, strings.Join(dropOwners, ", "), fg.Status.ActiveSite)
+			mdb.Spec.DatabaseName, strings.Join(principalNames(dropOwners), ", "), fg.Status.ActiveSite)
 	case dropDB:
 		r.Recorder.Eventf(mdb, corev1.EventTypeNormal, "DatabaseDropped",
 			"deletionPolicy=Delete: dropped database %q on site %s (owner user left untouched)",
@@ -905,7 +973,7 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 	default:
 		r.Recorder.Eventf(mdb, corev1.EventTypeNormal, "DatabaseDropped",
 			"deletionPolicy=Delete: dropped user(s) %q on site %s (database left untouched)",
-			strings.Join(dropOwners, ", "), fg.Status.ActiveSite)
+			strings.Join(principalNames(dropOwners), ", "), fg.Status.ActiveSite)
 	}
 	logger.Info("dropped tenant database", "database", mdb.Spec.DatabaseName, "group", fg.Name)
 
@@ -924,7 +992,12 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 // CRs that are themselves being deleted don't count as claims — of two CRs
 // deleted together, the first to reconcile drops, and the second's
 // statements are IF EXISTS no-ops.
-func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1.MysqlDatabase, reserved map[string]bool) (dropDB bool, dropOwners []string, err error) {
+func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1.MysqlDatabase, reserved map[string]bool) (dropDB bool, dropOwners []managedPrincipal, err error) {
+	// Owner accounts may exist on every host the ledger recorded plus the
+	// ones the spec currently declares (a host added by an apply that never
+	// reached Ready is covered by the write-ahead; the spec covers a CR
+	// deleted before its first apply of a new list).
+	ownerHosts := unionHosts(recordedOwnerHosts(&mdb.Status), mdb.Spec.Owner.EffectiveHosts())
 	dropDB = true
 
 	// Candidate owner usernames: the recorded one, plus — only when this CR
@@ -987,7 +1060,7 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 				"owner user %q is still claimed by MysqlDatabase %q (%s); not dropping it", candidate, referrer, how)
 			continue
 		}
-		dropOwners = append(dropOwners, candidate)
+		dropOwners = append(dropOwners, managedPrincipal{username: candidate, hosts: ownerHosts})
 	}
 
 	// users[] ledger candidates: every account a users[] entry recorded —
@@ -996,7 +1069,7 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 	// is the authority; the entries' Secrets may be long gone.
 	dropped := make(map[string]bool, len(dropOwners))
 	for _, c := range dropOwners {
-		dropped[c] = true
+		dropped[c.username] = true
 	}
 	for _, state := range mdb.Status.AppliedUsers {
 		for _, name := range ledgerUsernames(state) {
@@ -1014,7 +1087,7 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 				continue
 			}
 			dropped[name] = true
-			dropOwners = append(dropOwners, name)
+			dropOwners = append(dropOwners, managedPrincipal{username: name, hosts: ledgerHosts(state)})
 		}
 	}
 	return dropDB, dropOwners, nil
@@ -1169,6 +1242,7 @@ type priorApplyState struct {
 	databaseCreated  bool
 	recordedOwner    string
 	pendingOwnerUser string
+	ownerHosts       []string
 	appliedGrants    []string
 	appliedUsers     []v1alpha1.MysqlDatabaseUserState
 }
@@ -1219,9 +1293,13 @@ func stampUsersWriteAhead(st *v1alpha1.MysqlDatabaseStatus, users []tenantUserIn
 			st.AppliedUsers = append(st.AppliedUsers, v1alpha1.MysqlDatabaseUserState{
 				SecretName: u.entry.SecretName,
 				Username:   u.username,
+				Hosts:      unionHosts(nil, u.hosts),
 			})
 			continue
 		}
+		// Hosts accumulate until Ready: every host any of this entry's
+		// names may be created on must be on record before the SQL runs.
+		e.Hosts = unionHosts(ledgerHosts(*e), u.hosts)
 		if e.Username == "" {
 			e.Username = u.username
 			continue
@@ -1321,7 +1399,7 @@ func readyAppliedUsers(users []tenantUserInput) []v1alpha1.MysqlDatabaseUserStat
 	}
 	out := make([]v1alpha1.MysqlDatabaseUserState, len(users))
 	for i, u := range users {
-		out[i] = v1alpha1.MysqlDatabaseUserState{SecretName: u.entry.SecretName, Username: u.username}
+		out[i] = v1alpha1.MysqlDatabaseUserState{SecretName: u.entry.SecretName, Username: u.username, Hosts: unionHosts(nil, u.hosts)}
 	}
 	return out
 }
@@ -1392,7 +1470,7 @@ func siblingPrincipalClaimIn(list *v1alpha1.MysqlDatabaseList, selfName, groupNa
 // first and only the surplus revoked afterwards, so a failure mid-sequence
 // leaves the principal over-granted for one requeue interval rather than
 // with zero privileges on its own live database.
-func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, ownerUser, ownerPass string, users []tenantUserInput, prior priorApplyState) ([]string, error) {
+func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, ownerUser, ownerPass string, ownerHosts []string, users []tenantUserInput, prior priorApplyState) ([]string, error) {
 	spec := &mdb.Spec
 
 	createDB, err := renderCreateDatabase(spec.DatabaseName, spec.EffectiveCharacterSet(), spec.EffectiveCollation())
@@ -1403,16 +1481,16 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	if err != nil {
 		return nil, err
 	}
-	ownerStmts, err := renderOwnerUserStatements(ownerUser, ownerPass)
+	ownerStmts, err := renderOwnerUserStatements(ownerUser, ownerPass, ownerHosts)
 	if err != nil {
 		return nil, err
 	}
 	ownerPrivs := spec.EffectiveOwnerPrivileges()
-	ownerGrant, err := renderGrant("spec.owner.privileges", ownerPrivs, spec.DatabaseName, ownerUser)
+	ownerGrant, err := renderGrant("spec.owner.privileges", ownerPrivs, spec.DatabaseName, ownerUser, ownerHosts)
 	if err != nil {
 		return nil, err
 	}
-	ownerSurplus, err := renderRevokeSurplus("spec.owner secret username", ownerPrivs, spec.DatabaseName, ownerUser)
+	ownerSurplus, err := renderRevokeSurplus("spec.owner secret username", ownerPrivs, spec.DatabaseName, ownerUser, ownerHosts)
 	if err != nil {
 		return nil, err
 	}
@@ -1424,15 +1502,15 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	renderedUsers := make([]renderedTenantUser, len(users))
 	for i, u := range users {
 		kind := fmt.Sprintf("spec.users[%d] secret username", i)
-		stmts, err := renderTenantUserStatements(kind, u.username, u.password, u.entry.ResourceLimits)
+		stmts, err := renderTenantUserStatements(kind, u.username, u.password, u.hosts, u.entry.ResourceLimits)
 		if err != nil {
 			return nil, err
 		}
-		grant, err := renderGrant(fmt.Sprintf("spec.users[%d].privileges", i), u.entry.Privileges, spec.DatabaseName, u.username)
+		grant, err := renderGrant(fmt.Sprintf("spec.users[%d].privileges", i), u.entry.Privileges, spec.DatabaseName, u.username, u.hosts)
 		if err != nil {
 			return nil, err
 		}
-		surplus, err := renderRevokeSurplus(kind, u.entry.Privileges, spec.DatabaseName, u.username)
+		surplus, err := renderRevokeSurplus(kind, u.entry.Privileges, spec.DatabaseName, u.username, u.hosts)
 		if err != nil {
 			return nil, err
 		}
@@ -1441,12 +1519,12 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	grantStmts := make([]string, len(spec.Grants))
 	grantSurplus := make([]string, len(spec.Grants))
 	for i, g := range spec.Grants {
-		stmt, err := renderGrant(fmt.Sprintf("spec.grants[%d].privileges", i), g.Privileges, spec.DatabaseName, g.Username)
+		stmt, err := renderGrant(fmt.Sprintf("spec.grants[%d].privileges", i), g.Privileges, spec.DatabaseName, g.Username, defaultHosts)
 		if err != nil {
 			return nil, err
 		}
 		grantStmts[i] = stmt
-		surplus, err := renderRevokeSurplus(fmt.Sprintf("spec.grants[%d].username", i), g.Privileges, spec.DatabaseName, g.Username)
+		surplus, err := renderRevokeSurplus(fmt.Sprintf("spec.grants[%d].username", i), g.Privileges, spec.DatabaseName, g.Username, defaultHosts)
 		if err != nil {
 			return nil, err
 		}
@@ -1472,7 +1550,7 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 		if current[user] {
 			continue
 		}
-		stmt, err := renderRevokeAll("status.appliedGrants entry", spec.DatabaseName, user)
+		stmt, err := renderRevokeAll("status.appliedGrants entry", spec.DatabaseName, user, defaultHosts)
 		if err != nil {
 			return nil, err
 		}
@@ -1517,7 +1595,7 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	// rotation whose Ready stamp failed proves to the next reconcile that
 	// the already-created new account belongs to this CR instead of
 	// wedging on PreExistingOwnerUser.
-	ownerExists, err := mysqlUserExists(ctx, db, ownerUser)
+	ownerExists, err := mysqlUserExists(ctx, db, ownerUser, ownerHosts)
 	if err != nil {
 		return nil, fmt.Errorf("check owner user existence: %w", err)
 	}
@@ -1543,7 +1621,7 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	// per-entry — the refusal aborts before this entry's first statement,
 	// so earlier entries' applied SQL stands and their records survive.
 	for i, u := range users {
-		exists, err := mysqlUserExists(ctx, db, u.username)
+		exists, err := mysqlUserExists(ctx, db, u.username, u.hosts)
 		if err != nil {
 			return nil, fmt.Errorf("check spec.users[%d] user: %w", i, err)
 		}
@@ -1567,7 +1645,7 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 
 	applied := []string{ownerUser}
 	for i, g := range spec.Grants {
-		exists, err := mysqlUserExists(ctx, db, g.Username)
+		exists, err := mysqlAccountExists(ctx, db, g.Username, tenantUserHost)
 		if err != nil {
 			return nil, fmt.Errorf("check spec.grants[%d] user: %w", i, err)
 		}
@@ -1600,7 +1678,7 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 // shared and this CRD did not create them. dropDB and dropOwners come from
 // deleteScope — the schema drop is suppressed when another live CR still
 // declares the database, and each owner username is individually vetted.
-func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, dropDB bool, dropOwners []string) error {
+func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, dropDB bool, dropOwners []managedPrincipal) error {
 	spec := &mdb.Spec
 
 	stmts := make([]string, 0, len(spec.Grants)+len(mdb.Status.AppliedGrants)+len(dropOwners)+2)
@@ -1609,13 +1687,21 @@ func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, 
 		// recorded by earlier applies: an entry removed from spec.grants[]
 		// must not survive the delete as a lingering mysql.db row that
 		// reactivates if the schema name is ever recreated.
-		revoked := make(map[string]bool)
-		revokeFor := func(kind, username string) error {
-			if revoked[username] {
+		revoked := make(map[mysqlAccount]bool)
+		revokeFor := func(kind, username string, hosts []string) error {
+			var pending []string
+			for _, h := range hosts {
+				a := mysqlAccount{user: username, host: h}
+				if revoked[a] {
+					continue
+				}
+				revoked[a] = true
+				pending = append(pending, h)
+			}
+			if len(pending) == 0 {
 				return nil
 			}
-			revoked[username] = true
-			stmt, err := renderRevokeAll(kind, spec.DatabaseName, username)
+			stmt, err := renderRevokeAll(kind, spec.DatabaseName, username, pending)
 			if err != nil {
 				return err
 			}
@@ -1623,12 +1709,18 @@ func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, 
 			return nil
 		}
 		for i, g := range spec.Grants {
-			if err := revokeFor(fmt.Sprintf("spec.grants[%d].username", i), g.Username); err != nil {
+			if err := revokeFor(fmt.Sprintf("spec.grants[%d].username", i), g.Username, defaultHosts); err != nil {
 				return err
 			}
 		}
+		// appliedGrants is owner-first; the owner's accounts live on its
+		// recorded hosts, grants[] principals on '%'.
 		for _, username := range mdb.Status.AppliedGrants {
-			if err := revokeFor("status.appliedGrants entry", username); err != nil {
+			hosts := defaultHosts
+			if username == mdb.Status.OwnerUser {
+				hosts = unionHosts(recordedOwnerHosts(&mdb.Status), spec.Owner.EffectiveHosts())
+			}
+			if err := revokeFor("status.appliedGrants entry", username, hosts); err != nil {
 				return err
 			}
 		}
@@ -1638,7 +1730,7 @@ func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, 
 		// linger past the DROP and reactivate on a recreated name.
 		for _, state := range mdb.Status.AppliedUsers {
 			for _, username := range ledgerUsernames(state) {
-				if err := revokeFor("status.appliedUsers entry", username); err != nil {
+				if err := revokeFor("status.appliedUsers entry", username, ledgerHosts(state)); err != nil {
 					return err
 				}
 			}
@@ -1654,8 +1746,8 @@ func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, 
 	// apply path records status.ownerUser before the first statement runs,
 	// so even a partially-applied owner is covered, and the Secret-derived
 	// candidate covers a rotation that crashed mid-handover.
-	for _, username := range dropOwners {
-		dropUser, err := renderDropUser("managed principal username", username)
+	for _, p := range dropOwners {
+		dropUser, err := renderDropUser("managed principal username", p.username, p.hosts)
 		if err != nil {
 			return err
 		}
@@ -1670,11 +1762,11 @@ func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, 
 	return nil
 }
 
-// mysqlUserExists answers the spec.grants[] precondition with a
-// parameterized query — the username is compared, never rendered.
-func mysqlUserExists(ctx context.Context, db *sql.DB, username string) (bool, error) {
+// mysqlAccountExists answers the existence checks with a parameterized
+// query — user and host are compared, never rendered.
+func mysqlAccountExists(ctx context.Context, db *sql.DB, username, host string) (bool, error) {
 	var one int
-	err := db.QueryRowContext(ctx, grantUserExistsQuery, username, tenantUserHost).Scan(&one)
+	err := db.QueryRowContext(ctx, grantUserExistsQuery, username, host).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -1682,6 +1774,70 @@ func mysqlUserExists(ctx context.Context, db *sql.DB, username string) (bool, er
 		return false, err
 	}
 	return true, nil
+}
+
+// mysqlUserExists reports whether the username exists on any of hosts.
+func mysqlUserExists(ctx context.Context, db *sql.DB, username string, hosts []string) (bool, error) {
+	for _, h := range hosts {
+		ok, err := mysqlAccountExists(ctx, db, username, h)
+		if err != nil || ok {
+			return ok, err
+		}
+	}
+	return false, nil
+}
+
+// unionHosts returns a ∪ b preserving first-seen order.
+func unionHosts(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	var out []string
+	for _, list := range [][]string{a, b} {
+		for _, h := range list {
+			if h == "" || seen[h] {
+				continue
+			}
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// diffHosts returns the hosts in prior that are not in current.
+func diffHosts(prior, current []string) []string {
+	keep := make(map[string]bool, len(current))
+	for _, h := range current {
+		keep[h] = true
+	}
+	var out []string
+	for _, h := range prior {
+		if !keep[h] {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// recordedOwnerHosts is status.ownerHosts with the pre-hosts default
+// applied: a CR that recorded an owner before the field existed created it
+// on '%'. A CR with no recorded owner has no hosts.
+func recordedOwnerHosts(st *v1alpha1.MysqlDatabaseStatus) []string {
+	if len(st.OwnerHosts) > 0 {
+		return st.OwnerHosts
+	}
+	if st.OwnerUser != "" || st.PendingOwnerUser != "" {
+		return defaultHosts
+	}
+	return nil
+}
+
+// ledgerHosts is a users[] ledger entry's hosts with the pre-hosts default
+// applied.
+func ledgerHosts(state v1alpha1.MysqlDatabaseUserState) []string {
+	if len(state.Hosts) > 0 {
+		return state.Hosts
+	}
+	return defaultHosts
 }
 
 // schemaExists answers the adoption gate with a parameterized query — the

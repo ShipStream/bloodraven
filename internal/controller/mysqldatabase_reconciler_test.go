@@ -1255,7 +1255,7 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 		if err != nil {
 			t.Fatalf("deleteScope() error = %v", err)
 		}
-		for _, got := range dropOwners {
+		for _, got := range principalNames(dropOwners) {
 			if got == "acme_support" {
 				t.Fatalf("dropOwners = %v, want no acme_support — a sibling's ledger still claims it", dropOwners)
 			}
@@ -1280,7 +1280,7 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 			t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
 		}
 		for i := range want {
-			if dropOwners[i] != want[i] {
+			if dropOwners[i].username != want[i] {
 				t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
 			}
 		}
@@ -1304,7 +1304,7 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 			t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
 		}
 		for i := range want {
-			if dropOwners[i] != want[i] {
+			if dropOwners[i].username != want[i] {
 				t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
 			}
 		}

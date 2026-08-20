@@ -208,13 +208,14 @@ cards:
       Declare a schema, its owner and any extra principals — a per-tenant
       SELECT-only support reader, say — as a MysqlDatabase, and the operator runs the
       SQL on whichever site is primary. Every account is Secret-backed, scoped to its own
-      schema and never adopted from someone else; rotation is a Secret write, and removing
-      an entry revokes and drops it. Nothing but Bloodraven holds the admin credential.
+      schema and, if you like, to a list of source IPs; rotation is a Secret write, and
+      removing an entry revokes and drops it. Nothing but Bloodraven holds the admin credential.
     to: /docs/configuration/tenant-databases
     code: |-
       users:
         - secretName: support-ro-mysql
           privileges: [SELECT]
+          hosts: [35.1.2.3, 35.4.5.6]
           resourceLimits:
             maxUserConnections: 5
 backup-title: Backup and restore.

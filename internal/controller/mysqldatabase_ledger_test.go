@@ -15,6 +15,7 @@ func ledgerTestUser(secretName, username string) tenantUserInput {
 	return tenantUserInput{
 		entry:    v1alpha1.MysqlDatabaseUser{SecretName: secretName},
 		username: username,
+		hosts:    []string{"%"},
 	}
 }
 
@@ -23,6 +24,7 @@ func ledgerState(secretName, username, pending string) v1alpha1.MysqlDatabaseUse
 		SecretName:      secretName,
 		Username:        username,
 		PendingUsername: pending,
+		Hosts:           []string{"%"},
 	}
 }
 
@@ -75,6 +77,22 @@ func TestStampUsersWriteAhead(t *testing.T) {
 			start: []v1alpha1.MysqlDatabaseUserState{ledgerState("support", "acme_support", "acme_support_v2")},
 			users: []tenantUserInput{ledgerTestUser("support", "acme_support_v3")},
 			want:  []v1alpha1.MysqlDatabaseUserState{ledgerState("support", "acme_support", "acme_support_v3")},
+		},
+		{
+			name:  "hosts accumulate until Ready",
+			start: []v1alpha1.MysqlDatabaseUserState{ledgerState("support", "acme_support", "")},
+			users: []tenantUserInput{{entry: v1alpha1.MysqlDatabaseUser{SecretName: "support"}, username: "acme_support", hosts: []string{"10.0.0.1"}}},
+			want: []v1alpha1.MysqlDatabaseUserState{{
+				SecretName: "support", Username: "acme_support", Hosts: []string{"%", "10.0.0.1"},
+			}},
+		},
+		{
+			name:  "a pre-hosts record unions with the default",
+			start: []v1alpha1.MysqlDatabaseUserState{{SecretName: "support", Username: "acme_support"}},
+			users: []tenantUserInput{{entry: v1alpha1.MysqlDatabaseUser{SecretName: "support"}, username: "acme_support", hosts: []string{"10.0.0.1"}}},
+			want: []v1alpha1.MysqlDatabaseUserState{{
+				SecretName: "support", Username: "acme_support", Hosts: []string{"%", "10.0.0.1"},
+			}},
 		},
 		{
 			name:  "a new entry is appended alongside an existing one",
@@ -140,7 +158,7 @@ func TestRollbackUserWriteAhead(t *testing.T) {
 				t.Fatalf("appliedUsers = %+v, want %+v", st.AppliedUsers, tc.want)
 			}
 			for i := range tc.want {
-				if st.AppliedUsers[i] != tc.want[i] {
+				if !reflect.DeepEqual(st.AppliedUsers[i], tc.want[i]) {
 					t.Fatalf("appliedUsers = %+v, want %+v", st.AppliedUsers, tc.want)
 				}
 			}

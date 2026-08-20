@@ -2,6 +2,7 @@ package component
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -525,5 +526,221 @@ func (h *mdbHarness) sawEvent(reason string) bool {
 		default:
 			return false
 		}
+	}
+}
+
+// --- hosts ---------------------------------------------------------------
+//
+// A principal with several hosts is one record in the CR and one MySQL
+// account per host underneath: created, rotated, granted and dropped by a
+// single statement each. The motivating shape is a platform with a few
+// static egress IPs.
+
+var threeHosts = []string{"35.1.2.3", "35.4.5.6", "35.7.8.9"}
+
+func withOwnerHosts(hosts ...string) func(*v1alpha1.MysqlDatabase) {
+	return func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.Hosts = hosts }
+}
+
+func withSupportHosts(hosts ...string) func(*v1alpha1.MysqlDatabase) {
+	return func(m *v1alpha1.MysqlDatabase) { m.Spec.Users[0].Hosts = hosts }
+}
+
+func TestMysqlDatabaseHostsCreateOneAccountPerHostInOneStatement(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(withOwnerHosts(threeHosts...), withSupportUser, withSupportHosts("10.0.0.0/24", "10.0.1.%")),
+		mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+
+	h.reconcile()
+	mdb := h.requireReady()
+
+	if got := h.server.hostsOf(mdbOwnerUser); !reflect.DeepEqual(got, []string{"35.1.2.3", "35.4.5.6", "35.7.8.9"}) {
+		t.Fatalf("owner accounts = %v, want one per host", got)
+	}
+	if h.server.hasAccount(mdbOwnerUser, "%") {
+		t.Fatal("owner got a '%' account although hosts were declared")
+	}
+	if got := h.server.hostsOf(mdbSupportUser); !reflect.DeepEqual(got, []string{"10.0.0.0/24", "10.0.1.%"}) {
+		t.Fatalf("support accounts = %v", got)
+	}
+	for _, host := range threeHosts {
+		if privs, ok := h.server.grantsForAccount(mdbDatabase, mdbOwnerUser, host); !ok || privs[0] != "ALL PRIVILEGES" {
+			t.Fatalf("owner@%s grants = %v (present=%v)", host, privs, ok)
+		}
+	}
+	// One CREATE USER and one ALTER USER for the owner, naming all three.
+	creates := 0
+	for _, stmt := range h.server.statementsSince(0) {
+		if strings.HasPrefix(stmt, "CREATE USER IF NOT EXISTS '"+mdbOwnerUser+"'") {
+			creates++
+			for _, host := range threeHosts {
+				if !strings.Contains(stmt, "'"+mdbOwnerUser+"'@'"+host+"'") {
+					t.Fatalf("owner CREATE USER %q does not name host %s", stmt, host)
+				}
+			}
+		}
+	}
+	if creates != 1 {
+		t.Fatalf("owner CREATE USER statements = %d, want exactly 1 multi-account statement", creates)
+	}
+	if !reflect.DeepEqual(mdb.Status.OwnerHosts, threeHosts) {
+		t.Fatalf("status.ownerHosts = %v, want %v", mdb.Status.OwnerHosts, threeHosts)
+	}
+	if len(mdb.Status.AppliedUsers) != 1 || !reflect.DeepEqual(mdb.Status.AppliedUsers[0].Hosts, []string{"10.0.0.0/24", "10.0.1.%"}) {
+		t.Fatalf("status.appliedUsers = %+v, want the hosts recorded", mdb.Status.AppliedUsers)
+	}
+}
+
+func TestMysqlDatabaseHostsRemovalDropsOnlyThatHost(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(withOwnerHosts(threeHosts...), withSupportUser, withSupportHosts(threeHosts...)),
+		mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.reconcile()
+	h.requireReady()
+
+	h.update(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Owner.Hosts = threeHosts[:2]
+		m.Spec.Users[0].Hosts = threeHosts[1:]
+	})
+	before := h.server.statementCount()
+	h.reconcile()
+	mdb := h.requireReady()
+
+	if got := h.server.hostsOf(mdbOwnerUser); !reflect.DeepEqual(got, threeHosts[:2]) {
+		t.Fatalf("owner accounts after host removal = %v, want %v", got, threeHosts[:2])
+	}
+	if got := h.server.hostsOf(mdbSupportUser); !reflect.DeepEqual(got, threeHosts[1:]) {
+		t.Fatalf("support accounts after host removal = %v, want %v", got, threeHosts[1:])
+	}
+	for _, stmt := range h.server.statementsSince(before) {
+		if strings.HasPrefix(stmt, "DROP USER") {
+			if strings.Contains(stmt, "'35.4.5.6'") {
+				t.Fatalf("%q dropped a host both principals still declare", stmt)
+			}
+		}
+	}
+	if !reflect.DeepEqual(mdb.Status.OwnerHosts, threeHosts[:2]) {
+		t.Fatalf("status.ownerHosts = %v, want settled to %v", mdb.Status.OwnerHosts, threeHosts[:2])
+	}
+	if !h.sawEvent("OwnerHostsRemoved") {
+		t.Fatal("no OwnerHostsRemoved event")
+	}
+}
+
+func TestMysqlDatabaseHostsAdditionAndPasswordRotationTouchEveryAccount(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(withSupportUser, withSupportHosts(threeHosts[0])),
+		mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.reconcile()
+	h.requireReady()
+
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users[0].Hosts = threeHosts })
+	h.updateSupportSecret(func(s *corev1.Secret) { s.Data["password"] = []byte("support-pw-2") })
+	before := h.server.statementCount()
+	h.reconcile()
+	h.requireReady()
+
+	if got := h.server.hostsOf(mdbSupportUser); !reflect.DeepEqual(got, threeHosts) {
+		t.Fatalf("support accounts = %v, want %v", got, threeHosts)
+	}
+	alters := 0
+	for _, stmt := range h.server.statementsSince(before) {
+		if strings.HasPrefix(stmt, "ALTER USER '"+mdbSupportUser+"'") {
+			alters++
+		}
+	}
+	if alters != 1 {
+		t.Fatalf("ALTER USER statements for the support principal = %d, want 1 covering all hosts", alters)
+	}
+	for _, host := range threeHosts {
+		if !h.server.hasAccount(mdbSupportUser, host) {
+			t.Fatalf("missing %s@%s", mdbSupportUser, host)
+		}
+		if limits, ok := h.server.resourceLimits[accountKey(mdbSupportUser, host)]; !ok || limits != "5/3600" {
+			t.Fatalf("%s@%s limits = %q, want 5/3600 (limits are per account)", mdbSupportUser, host, limits)
+		}
+	}
+	if pw, _ := h.server.password(mdbSupportUser); pw != "support-pw-2" {
+		t.Fatalf("rotated password = %q", pw)
+	}
+}
+
+func TestMysqlDatabaseHostsUsernameRotationDropsOldNameOnEveryHost(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(withOwnerHosts(threeHosts...)), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.reconcile()
+	h.requireReady()
+
+	var s corev1.Secret
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: mdbNamespace, Name: mdbOwnerSecret().Name}, &s); err != nil {
+		t.Fatalf("get owner secret: %v", err)
+	}
+	s.Data["username"] = []byte("acme_app_v2")
+	if err := h.client.Update(context.Background(), &s); err != nil {
+		t.Fatalf("update owner secret: %v", err)
+	}
+	h.reconcile()
+	mdb := h.requireReady()
+
+	if h.server.hasUser(mdbOwnerUser) {
+		t.Fatalf("old owner survived on hosts %v", h.server.hostsOf(mdbOwnerUser))
+	}
+	if got := h.server.hostsOf("acme_app_v2"); !reflect.DeepEqual(got, threeHosts) {
+		t.Fatalf("new owner accounts = %v, want %v", got, threeHosts)
+	}
+	if mdb.Status.OwnerUser != "acme_app_v2" || !reflect.DeepEqual(mdb.Status.OwnerHosts, threeHosts) {
+		t.Fatalf("status owner = %q hosts %v", mdb.Status.OwnerUser, mdb.Status.OwnerHosts)
+	}
+}
+
+func TestMysqlDatabaseHostsDeletePolicyDropsEveryAccount(t *testing.T) {
+	cr := mdbCR(withOwnerHosts(threeHosts...), withSupportUser, withSupportHosts(threeHosts...), func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.reconcile()
+	h.requireReady()
+
+	h.delete()
+	h.reconcile()
+	if h.server.hasUser(mdbOwnerUser) || h.server.hasUser(mdbSupportUser) {
+		t.Fatalf("Delete left accounts behind: owner %v support %v", h.server.hostsOf(mdbOwnerUser), h.server.hostsOf(mdbSupportUser))
+	}
+}
+
+// TestMysqlDatabaseHostsUpgradeFromPreHostsStatus: a CR reconciled before
+// the hosts field existed has status.ownerUser but no status.ownerHosts, and
+// its account lives on '%'. Declaring hosts must move it — create the new
+// accounts and drop the '%' one — off the implied ["%"] record, not wedge or
+// leak the '%' account.
+func TestMysqlDatabaseHostsUpgradeFromPreHostsStatus(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(withSupportUser), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.reconcile()
+	h.requireReady()
+
+	// Strip the hosts records, as a status written by the previous
+	// operator version would be.
+	mdb := h.get()
+	mdb.Status.OwnerHosts = nil
+	for i := range mdb.Status.AppliedUsers {
+		mdb.Status.AppliedUsers[i].Hosts = nil
+	}
+	if err := h.client.Status().Update(context.Background(), mdb); err != nil {
+		t.Fatalf("strip hosts from status: %v", err)
+	}
+
+	h.update(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Owner.Hosts = threeHosts[:1]
+		m.Spec.Users[0].Hosts = threeHosts[:1]
+	})
+	h.reconcile()
+	mdb = h.requireReady()
+
+	for _, user := range []string{mdbOwnerUser, mdbSupportUser} {
+		if h.server.hasAccount(user, "%") {
+			t.Fatalf("%s@%% survived; the pre-hosts record implies '%%' and must be dropped", user)
+		}
+		if !h.server.hasAccount(user, threeHosts[0]) {
+			t.Fatalf("%s@%s missing", user, threeHosts[0])
+		}
+	}
+	if !reflect.DeepEqual(mdb.Status.OwnerHosts, threeHosts[:1]) {
+		t.Fatalf("status.ownerHosts = %v", mdb.Status.OwnerHosts)
 	}
 }

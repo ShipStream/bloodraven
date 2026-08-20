@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -55,20 +56,20 @@ func TestRenderCreateDatabaseRejectsBeforeFormatting(t *testing.T) {
 }
 
 func TestRenderOwnerUserStatementsMatchesReconcileRolePattern(t *testing.T) {
-	got, err := renderOwnerUserStatements("acme_app", "s3cr3t")
+	got, err := renderOwnerUserStatements("acme_app", "s3cr3t", defaultHosts)
 	if err != nil {
-		t.Fatalf("renderOwnerUserStatements() error = %v", err)
+		t.Fatalf("renderOwnerUserStatements(, defaultHosts) error = %v", err)
 	}
 	want := []string{
 		"CREATE USER IF NOT EXISTS 'acme_app'@'%' IDENTIFIED BY 's3cr3t'",
 		"ALTER USER 'acme_app'@'%' IDENTIFIED BY 's3cr3t'",
 	}
 	if len(got) != len(want) {
-		t.Fatalf("renderOwnerUserStatements() = %v, want %v", got, want)
+		t.Fatalf("renderOwnerUserStatements(, defaultHosts) = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("renderOwnerUserStatements()[%d] = %q, want %q", i, got[i], want[i])
+			t.Fatalf("renderOwnerUserStatements(, defaultHosts)[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
 }
@@ -77,9 +78,9 @@ func TestRenderOwnerUserStatementsEscapesPassword(t *testing.T) {
 	// The password is not validated (it is opaque caller-chosen material),
 	// so it is the one value that relies on escaping — the same
 	// escapeSingleQuotes discipline reconcileRole uses.
-	got, err := renderOwnerUserStatements("acme_app", `p'; DROP DATABASE x; --`)
+	got, err := renderOwnerUserStatements("acme_app", `p'; DROP DATABASE x; --`, defaultHosts)
 	if err != nil {
-		t.Fatalf("renderOwnerUserStatements() error = %v", err)
+		t.Fatalf("renderOwnerUserStatements(, defaultHosts) error = %v", err)
 	}
 	for _, stmt := range got {
 		if !strings.Contains(stmt, `p''; DROP DATABASE x; --`) {
@@ -92,9 +93,9 @@ func TestRenderOwnerUserStatementsEscapesPassword(t *testing.T) {
 	// escapeSingleQuotes doubles backslashes before quotes, so the rendered
 	// literal must end \\' — pinned here so the escaping order never quietly
 	// regresses to quotes-only.
-	got, err = renderOwnerUserStatements("acme_app", `p\`)
+	got, err = renderOwnerUserStatements("acme_app", `p\`, defaultHosts)
 	if err != nil {
-		t.Fatalf("renderOwnerUserStatements() error = %v", err)
+		t.Fatalf("renderOwnerUserStatements(, defaultHosts) error = %v", err)
 	}
 	for _, stmt := range got {
 		if !strings.HasSuffix(stmt, `IDENTIFIED BY 'p\\'`) {
@@ -104,24 +105,24 @@ func TestRenderOwnerUserStatementsEscapesPassword(t *testing.T) {
 }
 
 func TestRenderOwnerUserStatementsRejectsBadUsername(t *testing.T) {
-	if _, err := renderOwnerUserStatements(`evil'@'%' IDENTIFIED BY 'x'; GRANT ALL ON *.* TO 'evil'@'%`, "pw"); err == nil {
-		t.Fatal("renderOwnerUserStatements() = nil error, want rejection of the username")
+	if _, err := renderOwnerUserStatements(`evil'@'%' IDENTIFIED BY 'x'; GRANT ALL ON *.* TO 'evil'@'%`, "pw", defaultHosts); err == nil {
+		t.Fatal("renderOwnerUserStatements(, defaultHosts) = nil error, want rejection of the username")
 	}
-	if _, err := renderOwnerUserStatements("acme_app", ""); err == nil {
-		t.Fatal("renderOwnerUserStatements() with an empty password = nil error, want rejection")
+	if _, err := renderOwnerUserStatements("acme_app", "", defaultHosts); err == nil {
+		t.Fatal("renderOwnerUserStatements(, defaultHosts) with an empty password = nil error, want rejection")
 	}
 }
 
 func TestRenderGrant(t *testing.T) {
 	got, err := renderGrant("spec.grants[0].privileges",
 		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeDelete, v1alpha1.PrivilegeSelect},
-		"acme_wms", "maester")
+		"acme_wms", "maester", defaultHosts)
 	if err != nil {
-		t.Fatalf("renderGrant() error = %v", err)
+		t.Fatalf("renderGrant(, defaultHosts) error = %v", err)
 	}
 	want := "GRANT SELECT, DELETE ON `acme_wms`.* TO 'maester'@'%'"
 	if got != want {
-		t.Fatalf("renderGrant() = %q, want %q", got, want)
+		t.Fatalf("renderGrant(, defaultHosts) = %q, want %q", got, want)
 	}
 }
 
@@ -139,12 +140,12 @@ func TestRenderGrantNeverEmitsGrantOption(t *testing.T) {
 	}
 
 	for _, privs := range [][]v1alpha1.MysqlPrivilege{all, {v1alpha1.PrivilegeAllPrivileges}} {
-		stmt, err := renderGrant("spec.owner.privileges", privs, "acme_wms", "acme_app")
+		stmt, err := renderGrant("spec.owner.privileges", privs, "acme_wms", "acme_app", defaultHosts)
 		if err != nil {
-			t.Fatalf("renderGrant() error = %v", err)
+			t.Fatalf("renderGrant(, defaultHosts) error = %v", err)
 		}
 		if strings.Contains(strings.ToUpper(stmt), "GRANT OPTION") {
-			t.Fatalf("renderGrant() = %q, must never carry GRANT OPTION", stmt)
+			t.Fatalf("renderGrant(, defaultHosts) = %q, must never carry GRANT OPTION", stmt)
 		}
 	}
 }
@@ -165,12 +166,12 @@ func TestRenderGrantRejectsBadInput(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := renderGrant("spec.grants[0].privileges", tc.privs, tc.database, tc.username)
+			got, err := renderGrant("spec.grants[0].privileges", tc.privs, tc.database, tc.username, defaultHosts)
 			if err == nil {
-				t.Fatalf("renderGrant() = %q, want rejection", got)
+				t.Fatalf("renderGrant(, defaultHosts) = %q, want rejection", got)
 			}
 			if got != "" {
-				t.Fatalf("renderGrant() rendered %q alongside an error", got)
+				t.Fatalf("renderGrant(, defaultHosts) rendered %q alongside an error", got)
 			}
 		})
 	}
@@ -185,7 +186,7 @@ func TestRenderDestructiveStatements(t *testing.T) {
 		t.Fatalf("renderDropDatabase() = %q, want %q", drop, want)
 	}
 
-	dropUser, err := renderDropUser("spec.owner secret username", "acme_app")
+	dropUser, err := renderDropUser("spec.owner secret username", "acme_app", defaultHosts)
 	if err != nil {
 		t.Fatalf("renderDropUser() error = %v", err)
 	}
@@ -193,7 +194,7 @@ func TestRenderDestructiveStatements(t *testing.T) {
 		t.Fatalf("renderDropUser() = %q, want %q", dropUser, want)
 	}
 
-	revoke, err := renderRevokeAll("spec.grants[0].username", "acme_wms", "maester")
+	revoke, err := renderRevokeAll("spec.grants[0].username", "acme_wms", "maester", defaultHosts)
 	if err != nil {
 		t.Fatalf("renderRevokeAll() error = %v", err)
 	}
@@ -204,7 +205,7 @@ func TestRenderDestructiveStatements(t *testing.T) {
 	if _, err := renderDropDatabase("acme`; DROP DATABASE other"); err == nil {
 		t.Fatal("renderDropDatabase() accepted an invalid identifier")
 	}
-	if _, err := renderDropUser("spec.owner secret username", "evil'@'%"); err == nil {
+	if _, err := renderDropUser("spec.owner secret username", "evil'@'%", defaultHosts); err == nil {
 		t.Fatal("renderDropUser() accepted an invalid username")
 	}
 }
@@ -336,25 +337,25 @@ func TestRenderAlterDatabase(t *testing.T) {
 func TestRenderRevokeSurplus(t *testing.T) {
 	// ALL PRIVILEGES is the whole allowlist: nothing can be surplus.
 	got, err := renderRevokeSurplus("spec.owner secret username",
-		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAllPrivileges}, "acme_wms", "acme_app")
+		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAllPrivileges}, "acme_wms", "acme_app", defaultHosts)
 	if err != nil {
-		t.Fatalf("renderRevokeSurplus() error = %v", err)
+		t.Fatalf("renderRevokeSurplus(, defaultHosts) error = %v", err)
 	}
 	if got != "" {
-		t.Fatalf("renderRevokeSurplus(ALL PRIVILEGES) = %q, want no statement", got)
+		t.Fatalf("renderRevokeSurplus(ALL PRIVILEGES, defaultHosts) = %q, want no statement", got)
 	}
 
 	// A narrow desired set revokes every other allowlist privilege, in
 	// canonical order, with the idempotence clauses.
 	got, err = renderRevokeSurplus("spec.owner secret username",
-		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme_wms", "acme_app")
+		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme_wms", "acme_app", defaultHosts)
 	if err != nil {
-		t.Fatalf("renderRevokeSurplus() error = %v", err)
+		t.Fatalf("renderRevokeSurplus(, defaultHosts) error = %v", err)
 	}
 	want := "REVOKE IF EXISTS INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, " +
 		"LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, EXECUTE ON `acme_wms`.* FROM 'acme_app'@'%' IGNORE UNKNOWN USER"
 	if got != want {
-		t.Fatalf("renderRevokeSurplus() = %q, want %q", got, want)
+		t.Fatalf("renderRevokeSurplus(, defaultHosts) = %q, want %q", got, want)
 	}
 
 	// Every concrete privilege desired: nothing left to revoke.
@@ -364,17 +365,17 @@ func TestRenderRevokeSurplus(t *testing.T) {
 			full = append(full, v1alpha1.MysqlPrivilege(name))
 		}
 	}
-	got, err = renderRevokeSurplus("spec.owner secret username", full, "acme_wms", "acme_app")
+	got, err = renderRevokeSurplus("spec.owner secret username", full, "acme_wms", "acme_app", defaultHosts)
 	if err != nil {
-		t.Fatalf("renderRevokeSurplus() error = %v", err)
+		t.Fatalf("renderRevokeSurplus(, defaultHosts) error = %v", err)
 	}
 	if got != "" {
-		t.Fatalf("renderRevokeSurplus(full set) = %q, want no statement", got)
+		t.Fatalf("renderRevokeSurplus(full set, defaultHosts) = %q, want no statement", got)
 	}
 
 	if _, err := renderRevokeSurplus("spec.owner secret username",
-		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme`; DROP DATABASE other", "acme_app"); err == nil {
-		t.Fatal("renderRevokeSurplus() accepted an invalid identifier")
+		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme`; DROP DATABASE other", "acme_app", defaultHosts); err == nil {
+		t.Fatal("renderRevokeSurplus(, defaultHosts) accepted an invalid identifier")
 	}
 }
 
@@ -472,5 +473,66 @@ func TestGroupFenced(t *testing.T) {
 				t.Fatalf("groupFenced() reason = %q, want %q", reason, tc.wantReason)
 			}
 		})
+	}
+}
+
+// TestRenderMultiHostPrincipal: a principal with several hosts is one
+// statement per operation, naming every account — the per-account auth
+// clause for CREATE/ALTER USER, a plain account list for GRANT/REVOKE/DROP.
+func TestRenderMultiHostPrincipal(t *testing.T) {
+	hosts := []string{"35.1.2.3", "35.4.5.6", "2001:db8::/32"}
+	got, err := renderTenantUserStatements("spec.users[0] secret username", "acme_support", "pw", hosts,
+		&v1alpha1.MysqlUserResourceLimits{MaxUserConnections: 5})
+	if err != nil {
+		t.Fatalf("renderTenantUserStatements() error = %v", err)
+	}
+	want := []string{
+		"CREATE USER IF NOT EXISTS 'acme_support'@'35.1.2.3' IDENTIFIED BY 'pw', 'acme_support'@'35.4.5.6' IDENTIFIED BY 'pw', 'acme_support'@'2001:db8::/32' IDENTIFIED BY 'pw'",
+		"ALTER USER 'acme_support'@'35.1.2.3' IDENTIFIED BY 'pw', 'acme_support'@'35.4.5.6' IDENTIFIED BY 'pw', 'acme_support'@'2001:db8::/32' IDENTIFIED BY 'pw' WITH MAX_USER_CONNECTIONS 5 MAX_QUERIES_PER_HOUR 0",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("renderTenantUserStatements() =\n%q\nwant\n%q", got, want)
+	}
+
+	grant, err := renderGrant("spec.users[0].privileges", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme_wms", "acme_support", hosts)
+	if err != nil {
+		t.Fatalf("renderGrant() error = %v", err)
+	}
+	if want := "GRANT SELECT ON `acme_wms`.* TO 'acme_support'@'35.1.2.3', 'acme_support'@'35.4.5.6', 'acme_support'@'2001:db8::/32'"; grant != want {
+		t.Fatalf("renderGrant() = %q, want %q", grant, want)
+	}
+	drop, err := renderDropUser("spec.users[] ledger username", "acme_support", hosts[:2])
+	if err != nil {
+		t.Fatalf("renderDropUser() error = %v", err)
+	}
+	if want := "DROP USER IF EXISTS 'acme_support'@'35.1.2.3', 'acme_support'@'35.4.5.6'"; drop != want {
+		t.Fatalf("renderDropUser() = %q, want %q", drop, want)
+	}
+
+	// A host that fails validation never reaches a format string.
+	if _, err := renderDropUser("spec.users[] ledger username", "acme_support", []string{"35.1.2.3", "evil'@'%"}); err == nil {
+		t.Fatal("renderDropUser() accepted an invalid host")
+	}
+	if _, err := renderGrant("spec.owner.privileges", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme_wms", "acme_app", nil); err == nil {
+		t.Fatal("renderGrant() accepted an empty hosts list; defaults are the caller's job")
+	}
+}
+
+func TestHostSetHelpers(t *testing.T) {
+	if got := unionHosts([]string{"a", "b"}, []string{"b", "c", ""}); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Fatalf("unionHosts = %v", got)
+	}
+	if got := diffHosts([]string{"a", "b", "c"}, []string{"b"}); !reflect.DeepEqual(got, []string{"a", "c"}) {
+		t.Fatalf("diffHosts = %v", got)
+	}
+	// Pre-hosts records mean '%'.
+	if got := recordedOwnerHosts(&v1alpha1.MysqlDatabaseStatus{OwnerUser: "acme_app"}); !reflect.DeepEqual(got, []string{"%"}) {
+		t.Fatalf("recordedOwnerHosts(legacy) = %v", got)
+	}
+	if got := recordedOwnerHosts(&v1alpha1.MysqlDatabaseStatus{}); got != nil {
+		t.Fatalf("recordedOwnerHosts(no owner) = %v, want nil", got)
+	}
+	if got := ledgerHosts(v1alpha1.MysqlDatabaseUserState{Username: "x"}); !reflect.DeepEqual(got, []string{"%"}) {
+		t.Fatalf("ledgerHosts(legacy) = %v", got)
 	}
 }
