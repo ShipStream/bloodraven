@@ -47,7 +47,7 @@ type MysqlFailoverGroupSpec struct {
 	Image string `json:"image,omitempty"`
 
 	// SidecarImage is the image used for the sidecar/init container.
-	// +kubebuilder:default="ghcr.io/shipstream/bloodraven-sidecar:1.1.0"
+	// +kubebuilder:default="ghcr.io/shipstream/bloodraven-sidecar:1.2.0"
 	// +kubebuilder:validation:MinLength=1
 	SidecarImage string `json:"sidecarImage,omitempty"`
 

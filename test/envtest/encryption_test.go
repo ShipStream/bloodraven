@@ -21,7 +21,7 @@ func newEncryptionFG(namespace, name string) *v1alpha1.MysqlFailoverGroup {
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: v1alpha1.MysqlFailoverGroupSpec{
 			Image:        "mysql:9.7",
-			SidecarImage: "ghcr.io/shipstream/bloodraven-sidecar:1.1.0",
+			SidecarImage: "ghcr.io/shipstream/bloodraven-sidecar:1.2.0",
 			SecretName:   "mysql-credentials",
 			Sites: []v1alpha1.SiteSpec{
 				{
