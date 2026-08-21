@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 )
@@ -184,6 +185,97 @@ func (s *MysqlDatabaseSpec) EffectiveOwnerPrivileges() []MysqlPrivilege {
 // The zero value resolving to Retain is intentional and load-bearing: a CR
 // stored before the field existed, or one deserialized by a client that
 // dropped it, must never be interpreted as permission to DROP DATABASE.
+// DefaultMysqlHost is the account host used when spec.owner.hosts or a
+// spec.users[].hosts list is omitted: anywhere, which is also what every
+// account in credentials.go uses.
+const DefaultMysqlHost = "%"
+
+// EffectiveHosts returns the owner's host list, defaulting to ["%"].
+func (o *MysqlDatabaseOwner) EffectiveHosts() []string {
+	return effectiveHosts(o.Hosts)
+}
+
+// EffectiveHosts returns the entry's host list, defaulting to ["%"].
+func (u *MysqlDatabaseUser) EffectiveHosts() []string {
+	return effectiveHosts(u.Hosts)
+}
+
+func effectiveHosts(hosts []string) []string {
+	if len(hosts) == 0 {
+		return []string{DefaultMysqlHost}
+	}
+	out := make([]string, len(hosts))
+	copy(out, hosts)
+	return out
+}
+
+// ipv4WildcardPattern is MySQL's classic %-wildcarded dotted form
+// (`10.0.%`, `192.168.1._`): four dot-separated groups of digits or
+// wildcards.
+var ipv4WildcardPattern = regexp.MustCompile(`^[0-9%_]{1,3}(\.[0-9%_]{1,3}){0,3}$`)
+
+// ValidateMysqlHost accepts the host forms a MysqlDatabase will render into
+// an account name: "%" alone, an IPv4/IPv6 literal, an IPv4 CIDR prefix
+// (`203.0.113.0/24`, accepted by MySQL 8.0.23+ — MySQL has no IPv6 CIDR
+// form, so `2001:db8::/32` is rejected rather than rendered into an account
+// that matches nothing), an IPv4/netmask pair (`10.0.0.0/255.255.255.0`),
+// or a wildcarded IPv4 pattern (`%` any run, `_` one character). Hostnames
+// are rejected deliberately: MySQL would resolve them at every authentication
+// (reverse DNS, unless skip_name_resolve), which makes "who is this" a
+// time-varying answer and puts DNS on the auth path. The accepted character
+// set cannot contain a quote or a backslash, so validation — not escaping —
+// is what keeps the rendered literal inert.
+func ValidateMysqlHost(kind, value string) error {
+	if value == "" {
+		return fmt.Errorf("%s must not be empty", kind)
+	}
+	if len(value) > 255 {
+		return fmt.Errorf("%s %q exceeds 255 characters", kind, value)
+	}
+	if value == DefaultMysqlHost {
+		return nil
+	}
+	if net.ParseIP(value) != nil {
+		return nil
+	}
+	if strings.Contains(value, "/") {
+		if ip, _, err := net.ParseCIDR(value); err == nil {
+			if ip.To4() != nil {
+				return nil
+			}
+			return fmt.Errorf("%s %q: MySQL supports CIDR notation for IPv4 hosts only; use an IPv6 literal", kind, value)
+		}
+		ip, mask, ok := strings.Cut(value, "/")
+		if ok && net.ParseIP(ip) != nil && net.ParseIP(ip).To4() != nil &&
+			net.ParseIP(mask) != nil && net.ParseIP(mask).To4() != nil {
+			return nil
+		}
+		return fmt.Errorf("%s %q is not a valid CIDR or IPv4/netmask host", kind, value)
+	}
+	if ipv4WildcardPattern.MatchString(value) && strings.ContainsAny(value, "%_") {
+		return nil
+	}
+	return fmt.Errorf("%s %q must be an IP address, an IPv4 CIDR, an IPv4/netmask pair, or a %%/_-wildcarded IPv4 pattern; hostnames are not accepted", kind, value)
+}
+
+// validateHostList applies ValidateMysqlHost to each entry and rejects
+// duplicates — the API server enforces set semantics, but objects built in
+// Go or stored before the field existed never met CEL.
+func validateHostList(kind string, hosts []string) error {
+	seen := make(map[string]bool, len(hosts))
+	for i, h := range hosts {
+		field := fmt.Sprintf("%s[%d]", kind, i)
+		if err := ValidateMysqlHost(field, h); err != nil {
+			return err
+		}
+		if seen[h] {
+			return fmt.Errorf("%s %q is listed twice", field, h)
+		}
+		seen[h] = true
+	}
+	return nil
+}
+
 func (s *MysqlDatabaseSpec) EffectiveDeletionPolicy() MysqlDatabaseDeletionPolicy {
 	if s.DeletionPolicy == MysqlDatabaseDelete {
 		return MysqlDatabaseDelete
@@ -194,12 +286,15 @@ func (s *MysqlDatabaseSpec) EffectiveDeletionPolicy() MysqlDatabaseDeletionPolic
 // Validate checks every field that ends up in SQL, before any of it reaches
 // a format string. The API server enforces the same constraints through the
 // CRD schema; this is the second of the two independent checks, and the one
-// that also covers the owner username, which arrives from a Secret and so
-// cannot be validated by the API server at admission time.
+// that also covers the usernames, which arrive from Secrets and so cannot be
+// validated by the API server at admission time. userUsernames maps each
+// spec.users[] entry's secretName to the username its Secret currently
+// carries; entries whose Secret has not resolved yet must not reach this
+// function (the reconciler parks them Pending first).
 //
 // It returns the first problem found; callers surface it as a Failed phase
 // rather than retrying, because none of these resolve on their own.
-func (s *MysqlDatabaseSpec) Validate(ownerUsername string) error {
+func (s *MysqlDatabaseSpec) Validate(ownerUsername string, userUsernames map[string]string) error {
 	if err := ValidateMysqlIdentifier("spec.databaseName", s.DatabaseName); err != nil {
 		return err
 	}
@@ -218,6 +313,46 @@ func (s *MysqlDatabaseSpec) Validate(ownerUsername string) error {
 	if _, err := CanonicalPrivileges("spec.owner.privileges", s.EffectiveOwnerPrivileges()); err != nil {
 		return err
 	}
+	if err := validateHostList("spec.owner.hosts", s.Owner.Hosts); err != nil {
+		return err
+	}
+
+	// users[] usernames are collected first so that grants[] can be checked
+	// against them: a grants[] entry naming a users[] principal would make
+	// two spec lists manage one account's privileges, with the last apply
+	// winning silently.
+	userSeen := make(map[string]string, len(s.Users))
+	for i, u := range s.Users {
+		field := fmt.Sprintf("spec.users[%d] secret username", i)
+		username, ok := userUsernames[u.SecretName]
+		if !ok {
+			return fmt.Errorf("spec.users[%d] (secret %q) has no resolved username; this is a reconciler bug — unresolved Secrets must stay Pending", i, u.SecretName)
+		}
+		if err := ValidateMysqlUsername(field, username); err != nil {
+			return err
+		}
+		if username == ownerUsername {
+			return fmt.Errorf("%s %q is the owner username; the owner is declared via spec.owner", field, username)
+		}
+		if prior, dup := userSeen[username]; dup {
+			return fmt.Errorf("%s %q is already the username of the entry for secret %q; each users[] entry must manage a distinct account", field, username, prior)
+		}
+		userSeen[username] = u.SecretName
+		// The Go-side re-check of the CEL rule: ALL PRIVILEGES is the
+		// owner's shape, not a users[] privilege — and CEL never sees
+		// objects constructed in Go or stored before the rule existed.
+		for _, p := range u.Privileges {
+			if p == PrivilegeAllPrivileges {
+				return fmt.Errorf("spec.users[%d].privileges must not include %q; an all-privileges principal is the owner's shape", i, PrivilegeAllPrivileges)
+			}
+		}
+		if _, err := CanonicalPrivileges(fmt.Sprintf("spec.users[%d].privileges", i), u.Privileges); err != nil {
+			return err
+		}
+		if err := validateHostList(fmt.Sprintf("spec.users[%d].hosts", i), u.Hosts); err != nil {
+			return err
+		}
+	}
 
 	seen := make(map[string]bool, len(s.Grants))
 	for i, g := range s.Grants {
@@ -227,6 +362,9 @@ func (s *MysqlDatabaseSpec) Validate(ownerUsername string) error {
 		}
 		if g.Username == ownerUsername {
 			return fmt.Errorf("%s %q is the owner username; declare owner privileges via spec.owner.privileges", field, g.Username)
+		}
+		if secretName, isUser := userSeen[g.Username]; isUser {
+			return fmt.Errorf("%s %q is the username of spec.users[] entry %q; declare its privileges on that entry instead", field, g.Username, secretName)
 		}
 		if seen[g.Username] {
 			return fmt.Errorf("%s %q is listed more than once", field, g.Username)

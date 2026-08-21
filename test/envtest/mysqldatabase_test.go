@@ -194,6 +194,83 @@ func TestMysqlDatabase_EnvtestSchemaRejections(t *testing.T) {
 			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = "Destroy" },
 		},
 		{
+			// users[] must never express an all-privileges principal; that
+			// shape is the owner's.
+			name: "users ALL PRIVILEGES",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAllPrivileges}},
+				}
+			},
+		},
+		{
+			name: "users GRANT OPTION",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{"GRANT OPTION"}},
+				}
+			},
+		},
+		{
+			name: "users entry with no privileges",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{SecretName: "support-ro-mysql"}}
+			},
+		},
+		{
+			name: "users entry reusing the owner secret",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+					{SecretName: m.Spec.Owner.SecretName, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+				}
+			},
+		},
+		{
+			name: "duplicate users secret names",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+					{SecretName: "support-ro-mysql", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeDelete}},
+				}
+			},
+		},
+		{
+			name: "negative users resource limit",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{
+					{
+						SecretName:     "support-ro-mysql",
+						Privileges:     []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+						ResourceLimits: &v1alpha1.MysqlUserResourceLimits{MaxUserConnections: -1},
+					},
+				}
+			},
+		},
+		{
+			// The items pattern admits only IP/CIDR/wildcard characters;
+			// hostnames never reach the Go-side validator.
+			name: "owner host that is a hostname",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Owner.Hosts = []string{"db.example.com"}
+			},
+		},
+		{
+			name: "duplicate owner hosts",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Owner.Hosts = []string{"10.0.0.1", "10.0.0.1"}
+			},
+		},
+		{
+			name: "more than eight users hosts",
+			mutate: func(m *v1alpha1.MysqlDatabase) {
+				m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{
+					SecretName: "support-ro-mysql",
+					Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+					Hosts:      []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.7", "10.0.0.8", "10.0.0.9"},
+				}}
+			},
+		},
+		{
 			name:   "empty owner secret name",
 			mutate: func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.SecretName = "" },
 		},

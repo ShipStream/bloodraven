@@ -33,13 +33,17 @@ import (
 type fakeSQLServer struct {
 	mu sync.Mutex
 
-	// users maps username to password. Host is always '%', matching
-	// tenantUserHost.
+	// users maps "user@host" to password — one entry per MySQL account,
+	// exactly as mysql.user does. Statements that name several accounts
+	// touch each of them.
 	users map[string]string
 	// databases maps schema name to "charset/collation".
 	databases map[string]string
-	// grants maps schema name to username to the granted privilege list.
+	// grants maps schema name to "user@host" to the granted privilege list.
 	grants map[string]map[string][]string
+	// resourceLimits maps "user@host" to "maxUserConnections/maxQueriesPerHour"
+	// as last applied via ALTER USER ... WITH.
+	resourceLimits map[string]string
 
 	// statements records every statement executed, in order, across all
 	// connections. This is how "zero MySQL statements when nothing
@@ -60,10 +64,18 @@ func newFakeSQLServer() *fakeSQLServer {
 	}
 }
 
+// accountKey is how the model keys one 'user'@'host' account.
+func accountKey(username, host string) string { return username + "@" + host }
+
+// addUser pre-seeds an account on '%', the host every pre-hosts test means.
 func (s *fakeSQLServer) addUser(username, password string) {
+	s.addAccount(username, "%", password)
+}
+
+func (s *fakeSQLServer) addAccount(username, host, password string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.users[username] = password
+	s.users[accountKey(username, host)] = password
 }
 
 // addDatabase pre-seeds a schema the model did not create through the
@@ -79,20 +91,62 @@ func (s *fakeSQLServer) addDatabase(name, charset, collation string) {
 func (s *fakeSQLServer) removeUser(username string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.users, username)
+	for key := range s.users {
+		if u, _, _ := strings.Cut(key, "@"); u == username {
+			delete(s.users, key)
+		}
+	}
 }
 
+// hasUser reports whether username exists on any host.
 func (s *fakeSQLServer) hasUser(username string) bool {
+	return len(s.hostsOf(username)) > 0
+}
+
+// hasAccount reports whether the exact 'user'@'host' account exists.
+func (s *fakeSQLServer) hasAccount(username, host string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, ok := s.users[username]
+	_, ok := s.users[accountKey(username, host)]
 	return ok
 }
 
+// hostsOf lists the hosts username exists on, sorted.
+func (s *fakeSQLServer) hostsOf(username string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for key := range s.users {
+		if u, h, _ := strings.Cut(key, "@"); u == username {
+			out = append(out, h)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// password returns the password of username's '%' account, or — when it has
+// no '%' account — of its single other account. Multi-host accounts share a
+// password by construction (one statement sets all of them).
 func (s *fakeSQLServer) password(username string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	pw, ok := s.users[username]
+	if pw, ok := s.users[accountKey(username, "%")]; ok {
+		return pw, true
+	}
+	for key, pw := range s.users {
+		if u, _, _ := strings.Cut(key, "@"); u == username {
+			return pw, true
+		}
+	}
+	return "", false
+}
+
+// passwordOf returns the password of the exact 'username'@'host' account.
+func (s *fakeSQLServer) passwordOf(username, host string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pw, ok := s.users[accountKey(username, host)]
 	return pw, ok
 }
 
@@ -103,15 +157,58 @@ func (s *fakeSQLServer) database(name string) (string, bool) {
 	return spec, ok
 }
 
+// resourceLimitsFor returns the limits of username's '%' account or, failing
+// that, of any of its accounts.
+func (s *fakeSQLServer) resourceLimitsFor(username string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limits, ok := s.resourceLimits[accountKey(username, "%")]; ok {
+		return limits, true
+	}
+	for key, limits := range s.resourceLimits {
+		if u, _, _ := strings.Cut(key, "@"); u == username {
+			return limits, true
+		}
+	}
+	return "", false
+}
+
+// resourceLimitsForAccount returns the limits of the exact account.
+func (s *fakeSQLServer) resourceLimitsForAccount(username, host string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	limits, ok := s.resourceLimits[accountKey(username, host)]
+	return limits, ok
+}
+
+// grantsFor returns the grants of username's '%' account on database or,
+// failing that, of any of its accounts.
 func (s *fakeSQLServer) grantsFor(database, username string) ([]string, bool) {
+	return s.grantsForAccount(database, username, "")
+}
+
+// grantsForAccount returns the grants of one account; host "" means "the '%'
+// account, else any".
+func (s *fakeSQLServer) grantsForAccount(database, username, host string) ([]string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	byUser, ok := s.grants[database]
 	if !ok {
 		return nil, false
 	}
-	privs, ok := byUser[username]
-	return privs, ok
+	if host != "" {
+		privs, ok := byUser[accountKey(username, host)]
+		return privs, ok
+	}
+	if privs, ok := byUser[accountKey(username, "%")]; ok {
+		return privs, true
+	}
+	for key, privs := range byUser {
+		if u, _, _ := strings.Cut(key, "@"); u == username {
+			return privs, true
+		}
+	}
+	return nil, false
 }
 
 func (s *fakeSQLServer) statementCount() int {
@@ -192,7 +289,15 @@ func (fakeSQLDriver) Open(dsn string) (driver.Conn, error) {
 
 	server.mu.Lock()
 	server.dialedAddrs = append(server.dialedAddrs, addr)
-	want, exists := server.users[user]
+	want, exists := server.users[accountKey(user, "%")]
+	if !exists {
+		for key, pw := range server.users {
+			if u, _, _ := strings.Cut(key, "@"); u == user {
+				want, exists = pw, true
+				break
+			}
+		}
+	}
 	server.mu.Unlock()
 
 	if !exists || want != password {
@@ -234,11 +339,8 @@ func (c *fakeSQLConn) QueryContext(_ context.Context, query string, args []drive
 		}
 		username, _ := args[0].Value.(string)
 		host, _ := args[1].Value.(string)
-		if host != "%" {
-			return nil, fmt.Errorf("fake mysql: unexpected host %q", host)
-		}
 		rows := &fakeSQLRows{}
-		if c.server.hasUser(username) {
+		if c.server.hasAccount(username, host) {
 			rows.remaining = 1
 		}
 		return rows, nil
@@ -279,14 +381,51 @@ func (r *fakeSQLRows) Next(dest []driver.Value) error {
 var (
 	reCreateDatabase = regexp.MustCompile("^CREATE DATABASE IF NOT EXISTS `([^`]+)` CHARACTER SET (\\S+) COLLATE (\\S+)$")
 	reAlterDatabase  = regexp.MustCompile("^ALTER DATABASE `([^`]+)` CHARACTER SET (\\S+) COLLATE (\\S+)$")
-	reCreateUser     = regexp.MustCompile(`^CREATE USER IF NOT EXISTS '(.*)'@'%' IDENTIFIED BY '(.*)'$`)
-	reAlterUser      = regexp.MustCompile(`^ALTER USER '(.*)'@'%' IDENTIFIED BY '(.*)'$`)
-	reGrant          = regexp.MustCompile("^GRANT (.+) ON `([^`]+)`\\.\\* TO '(.*)'@'%'$")
-	reRevoke         = regexp.MustCompile("^REVOKE IF EXISTS ALL PRIVILEGES ON `([^`]+)`\\.\\* FROM '(.*)'@'%'( IGNORE UNKNOWN USER)?$")
-	reRevokePartial  = regexp.MustCompile("^REVOKE IF EXISTS (.+) ON `([^`]+)`\\.\\* FROM '(.*)'@'%'( IGNORE UNKNOWN USER)?$")
+	reCreateUser     = regexp.MustCompile(`^CREATE USER IF NOT EXISTS (.+)$`)
+	reAlterUserWith  = regexp.MustCompile(`^ALTER USER (.+?) WITH MAX_USER_CONNECTIONS (\d+) MAX_QUERIES_PER_HOUR (\d+)$`)
+	reAlterUser      = regexp.MustCompile(`^ALTER USER (.+)$`)
+	reGrant          = regexp.MustCompile("^GRANT (.+) ON `([^`]+)`\\.\\* TO (.+)$")
+	reRevoke         = regexp.MustCompile("^REVOKE IF EXISTS ALL PRIVILEGES ON `([^`]+)`\\.\\* FROM (.+?)( IGNORE UNKNOWN USER)?$")
+	reRevokePartial  = regexp.MustCompile("^REVOKE IF EXISTS (.+) ON `([^`]+)`\\.\\* FROM (.+?)( IGNORE UNKNOWN USER)?$")
 	reDropDatabase   = regexp.MustCompile("^DROP DATABASE IF EXISTS `([^`]+)`$")
-	reDropUser       = regexp.MustCompile(`^DROP USER IF EXISTS '(.*)'@'%'$`)
+	reDropUser       = regexp.MustCompile(`^DROP USER IF EXISTS (.+)$`)
+
+	// reAccountAuth matches one `'user'@'host' IDENTIFIED BY 'password'`
+	// element of a CREATE USER / ALTER USER account list; reAccount one
+	// bare `'user'@'host'` of a GRANT / REVOKE / DROP USER list. Passwords
+	// may contain the escaped forms escapeSingleQuotes produces.
+	reAccountAuth = regexp.MustCompile(`'([^']*)'@'([^']*)' IDENTIFIED BY '((?:[^'\\]|\\.|'')*)'`)
+	reAccount     = regexp.MustCompile(`'([^']*)'@'([^']*)'`)
 )
+
+type fakeAccount struct{ user, host, password string }
+
+// parseAccountAuthList splits a CREATE/ALTER USER account list. It errors
+// on an element without an auth clause: the reconciler always renders one
+// per account, and a statement that drifted from that must fail loudly.
+func parseAccountAuthList(list string) ([]fakeAccount, error) {
+	matches := reAccountAuth.FindAllStringSubmatch(list, -1)
+	if len(matches) == 0 || len(matches) != len(reAccount.FindAllString(list, -1)) {
+		return nil, fmt.Errorf("fake mysql: account list %q is not 'user'@'host' IDENTIFIED BY '...' per account", list)
+	}
+	out := make([]fakeAccount, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, fakeAccount{user: m[1], host: m[2], password: fakeSQLUnescape(m[3])})
+	}
+	return out, nil
+}
+
+func parseAccountList(list string) ([]fakeAccount, error) {
+	matches := reAccount.FindAllStringSubmatch(list, -1)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("fake mysql: empty account list %q", list)
+	}
+	out := make([]fakeAccount, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, fakeAccount{user: m[1], host: m[2]})
+	}
+	return out, nil
+}
 
 // fakeSQLAllPrivileges is what ALL PRIVILEGES expands to on a schema: the
 // concrete privilege list the reconciler's allowlist permits. Revoking a
@@ -323,88 +462,143 @@ func (s *fakeSQLServer) apply(stmt string) error {
 
 	case reCreateUser.MatchString(stmt):
 		m := reCreateUser.FindStringSubmatch(stmt)
-		if _, exists := s.users[m[1]]; !exists {
-			s.users[m[1]] = fakeSQLUnescape(m[2])
+		accounts, err := parseAccountAuthList(m[1])
+		if err != nil {
+			return err
+		}
+		for _, a := range accounts {
+			key := accountKey(a.user, a.host)
+			if _, exists := s.users[key]; !exists {
+				s.users[key] = a.password
+			}
+		}
+		return nil
+
+	case reAlterUserWith.MatchString(stmt):
+		m := reAlterUserWith.FindStringSubmatch(stmt)
+		accounts, err := parseAccountAuthList(m[1])
+		if err != nil {
+			return err
+		}
+		for _, a := range accounts {
+			key := accountKey(a.user, a.host)
+			if _, exists := s.users[key]; !exists {
+				return fmt.Errorf("fake mysql: ALTER USER on nonexistent account %q", key)
+			}
+			s.users[key] = a.password
+			if s.resourceLimits == nil {
+				s.resourceLimits = map[string]string{}
+			}
+			s.resourceLimits[key] = m[2] + "/" + m[3]
 		}
 		return nil
 
 	case reAlterUser.MatchString(stmt):
 		m := reAlterUser.FindStringSubmatch(stmt)
-		if _, exists := s.users[m[1]]; !exists {
-			return fmt.Errorf("fake mysql: ALTER USER on nonexistent user %q", m[1])
+		accounts, err := parseAccountAuthList(m[1])
+		if err != nil {
+			return err
 		}
-		s.users[m[1]] = fakeSQLUnescape(m[2])
+		for _, a := range accounts {
+			key := accountKey(a.user, a.host)
+			if _, exists := s.users[key]; !exists {
+				return fmt.Errorf("fake mysql: ALTER USER on nonexistent account %q", key)
+			}
+			s.users[key] = a.password
+		}
 		return nil
 
 	case reGrant.MatchString(stmt):
 		m := reGrant.FindStringSubmatch(stmt)
-		privs, database, username := m[1], m[2], m[3]
+		privs, database := m[1], m[2]
+		accounts, err := parseAccountList(m[3])
+		if err != nil {
+			return err
+		}
 		if _, exists := s.databases[database]; !exists {
 			return fmt.Errorf("fake mysql: GRANT on nonexistent database %q", database)
 		}
-		if _, exists := s.users[username]; !exists {
-			return fmt.Errorf("fake mysql: GRANT to nonexistent user %q", username)
-		}
-		if s.grants[database] == nil {
-			s.grants[database] = map[string][]string{}
-		}
-		// Real MySQL GRANT is additive: it unions the new privileges with
-		// whatever the account already holds, so narrowing requires an
-		// explicit REVOKE. Modelling GRANT as replacement would let a
-		// narrowing test pass without the reconciler ever revoking — the
-		// model must not be more forgiving than the server.
-		existing := s.grants[database][username]
-		for _, p := range strings.Split(privs, ", ") {
-			if !slices.Contains(existing, p) {
-				existing = append(existing, p)
+		for _, a := range accounts {
+			key := accountKey(a.user, a.host)
+			if _, exists := s.users[key]; !exists {
+				return fmt.Errorf("fake mysql: GRANT to nonexistent account %q", key)
 			}
+			if s.grants[database] == nil {
+				s.grants[database] = map[string][]string{}
+			}
+			// Real MySQL GRANT is additive: it unions the new privileges
+			// with whatever the account already holds, so narrowing
+			// requires an explicit REVOKE. Modelling GRANT as replacement
+			// would let a narrowing test pass without the reconciler ever
+			// revoking — the model must not be more forgiving than the
+			// server.
+			existing := s.grants[database][key]
+			for _, p := range strings.Split(privs, ", ") {
+				if !slices.Contains(existing, p) {
+					existing = append(existing, p)
+				}
+			}
+			if slices.Contains(existing, "ALL PRIVILEGES") {
+				existing = []string{"ALL PRIVILEGES"}
+			}
+			s.grants[database][key] = existing
 		}
-		if slices.Contains(existing, "ALL PRIVILEGES") {
-			existing = []string{"ALL PRIVILEGES"}
-		}
-		s.grants[database][username] = existing
 		return nil
 
 	case reRevoke.MatchString(stmt):
 		m := reRevoke.FindStringSubmatch(stmt)
-		database, username, ignoreUnknown := m[1], m[2], m[3] != ""
-		if _, exists := s.users[username]; !exists && !ignoreUnknown {
-			// Mirrors real MySQL (ERROR 1141, verified on 9.7): IF EXISTS
-			// only tolerates a missing grant; a missing *account* errors
-			// unless IGNORE UNKNOWN USER is present. This is the exact
-			// wedge the delete path had, so the model must not be more
-			// forgiving than the server.
-			return fmt.Errorf("fake mysql: REVOKE from nonexistent user %q without IGNORE UNKNOWN USER", username)
+		database, ignoreUnknown := m[1], m[3] != ""
+		accounts, err := parseAccountList(m[2])
+		if err != nil {
+			return err
 		}
-		if byUser, ok := s.grants[database]; ok {
-			delete(byUser, username)
+		for _, a := range accounts {
+			key := accountKey(a.user, a.host)
+			if _, exists := s.users[key]; !exists && !ignoreUnknown {
+				// Mirrors real MySQL (ERROR 1141, verified on 9.7): IF
+				// EXISTS only tolerates a missing grant; a missing
+				// *account* errors unless IGNORE UNKNOWN USER is present.
+				// This is the exact wedge the delete path had, so the
+				// model must not be more forgiving than the server.
+				return fmt.Errorf("fake mysql: REVOKE from nonexistent account %q without IGNORE UNKNOWN USER", key)
+			}
+			if byUser, ok := s.grants[database]; ok {
+				delete(byUser, key)
+			}
 		}
 		return nil
 
 	case reRevokePartial.MatchString(stmt):
 		m := reRevokePartial.FindStringSubmatch(stmt)
-		privs, database, username, ignoreUnknown := m[1], m[2], m[3], m[4] != ""
-		if _, exists := s.users[username]; !exists && !ignoreUnknown {
-			return fmt.Errorf("fake mysql: REVOKE from nonexistent user %q without IGNORE UNKNOWN USER", username)
+		privs, database, ignoreUnknown := m[1], m[2], m[4] != ""
+		accounts, err := parseAccountList(m[3])
+		if err != nil {
+			return err
 		}
-		byUser, ok := s.grants[database]
-		if !ok {
-			return nil
-		}
-		current, ok := byUser[username]
-		if !ok {
-			return nil
-		}
-		if len(current) == 1 && current[0] == "ALL PRIVILEGES" {
-			current = append([]string(nil), fakeSQLAllPrivileges...)
-		}
-		for _, p := range strings.Split(privs, ", ") {
-			current = slices.DeleteFunc(current, func(x string) bool { return x == p })
-		}
-		if len(current) == 0 {
-			delete(byUser, username)
-		} else {
-			byUser[username] = current
+		for _, a := range accounts {
+			key := accountKey(a.user, a.host)
+			if _, exists := s.users[key]; !exists && !ignoreUnknown {
+				return fmt.Errorf("fake mysql: REVOKE from nonexistent account %q without IGNORE UNKNOWN USER", key)
+			}
+			byUser, ok := s.grants[database]
+			if !ok {
+				continue
+			}
+			current, ok := byUser[key]
+			if !ok {
+				continue
+			}
+			if len(current) == 1 && current[0] == "ALL PRIVILEGES" {
+				current = append([]string(nil), fakeSQLAllPrivileges...)
+			}
+			for _, p := range strings.Split(privs, ", ") {
+				current = slices.DeleteFunc(current, func(x string) bool { return x == p })
+			}
+			if len(current) == 0 {
+				delete(byUser, key)
+			} else {
+				byUser[key] = current
+			}
 		}
 		return nil
 
@@ -416,7 +610,18 @@ func (s *fakeSQLServer) apply(stmt string) error {
 
 	case reDropUser.MatchString(stmt):
 		m := reDropUser.FindStringSubmatch(stmt)
-		delete(s.users, m[1])
+		accounts, err := parseAccountList(m[1])
+		if err != nil {
+			return err
+		}
+		for _, a := range accounts {
+			key := accountKey(a.user, a.host)
+			delete(s.users, key)
+			delete(s.resourceLimits, key)
+			for _, byUser := range s.grants {
+				delete(byUser, key)
+			}
+		}
 		return nil
 	}
 

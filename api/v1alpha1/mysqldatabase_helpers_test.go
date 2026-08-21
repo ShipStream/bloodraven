@@ -195,16 +195,92 @@ func TestSpecValidate(t *testing.T) {
 	}
 
 	base := valid()
-	if err := base.Validate("acme_app"); err != nil {
+	if err := base.Validate("acme_app", nil); err != nil {
 		t.Fatalf("Validate() on a valid spec = %v", err)
 	}
 
 	cases := []struct {
-		name      string
-		mutate    func(*MysqlDatabaseSpec)
-		ownerUser string
-		wantField string
+		name          string
+		mutate        func(*MysqlDatabaseSpec)
+		ownerUser     string
+		userUsernames map[string]string
+		wantField     string
 	}{
+		{
+			// The users[] username arrives from a Secret, like the owner's.
+			name: "bad users username from secret",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}}}
+			},
+			ownerUser:     "acme_app",
+			userUsernames: map[string]string{"support-ro-mysql": "evil'@'%"},
+			wantField:     "spec.users[0] secret username",
+		},
+		{
+			name: "users username equals owner username",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}}}
+			},
+			ownerUser:     "acme_app",
+			userUsernames: map[string]string{"support-ro-mysql": "acme_app"},
+			wantField:     "spec.users[0] secret username",
+		},
+		{
+			name: "two users entries resolve to one username",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{
+					{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}},
+					{SecretName: "reporting-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}},
+				}
+			},
+			ownerUser: "acme_app",
+			userUsernames: map[string]string{
+				"support-ro-mysql": "acme_support",
+				"reporting-mysql":  "acme_support",
+			},
+			wantField: "spec.users[1] secret username",
+		},
+		{
+			// ALL PRIVILEGES is rejected in Go even though CEL also rejects
+			// it: objects constructed in Go never met the API server.
+			name: "users privileges include ALL PRIVILEGES",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeAllPrivileges}}}
+			},
+			ownerUser:     "acme_app",
+			userUsernames: map[string]string{"support-ro-mysql": "acme_support"},
+			wantField:     "spec.users[0].privileges",
+		},
+		{
+			name: "users privilege outside allowlist",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{"SUPER"}}}
+			},
+			ownerUser:     "acme_app",
+			userUsernames: map[string]string{"support-ro-mysql": "acme_support"},
+			wantField:     "spec.users[0].privileges",
+		},
+		{
+			name: "users entry with no resolved username",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}}}
+			},
+			ownerUser:     "acme_app",
+			userUsernames: nil,
+			wantField:     "no resolved username",
+		},
+		{
+			// A grants[] entry naming a users[] principal would make two
+			// spec lists manage one account's privileges.
+			name: "grant username is a users username",
+			mutate: func(s *MysqlDatabaseSpec) {
+				s.Users = []MysqlDatabaseUser{{SecretName: "support-ro-mysql", Privileges: []MysqlPrivilege{PrivilegeSelect}}}
+				s.Grants[0].Username = "acme_support"
+			},
+			ownerUser:     "acme_app",
+			userUsernames: map[string]string{"support-ro-mysql": "acme_support"},
+			wantField:     "spec.grants[0].username",
+		},
 		{
 			name:      "bad database name",
 			mutate:    func(s *MysqlDatabaseSpec) { s.DatabaseName = "acme`; DROP DATABASE x" },
@@ -286,7 +362,7 @@ func TestSpecValidate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := valid()
 			tc.mutate(&spec)
-			err := spec.Validate(tc.ownerUser)
+			err := spec.Validate(tc.ownerUser, tc.userUsernames)
 			if err == nil {
 				t.Fatalf("Validate() = nil, want rejection")
 			}
@@ -307,5 +383,52 @@ func TestIsSystemSchema(t *testing.T) {
 		if IsSystemSchema(name) {
 			t.Fatalf("IsSystemSchema(%q) = true, want false", name)
 		}
+	}
+}
+
+func TestValidateMysqlHost(t *testing.T) {
+	accept := []string{"%", "10.0.0.1", "203.0.113.0/24", "10.0.0.0/255.255.255.0", "10.0.%", "192.168.1._", "2001:db8::1", "::1"}
+	for _, h := range accept {
+		if err := ValidateMysqlHost("spec.owner.hosts[0]", h); err != nil {
+			t.Errorf("ValidateMysqlHost(%q) = %v, want accept", h, err)
+		}
+	}
+	// MySQL accepts CIDR and netmask notation for IPv4 only; an IPv6 prefix
+	// would render into an account host that matches no client.
+	reject := []string{"", "db.example.com", "localhost", "evil'@'%", "10.0.0.1; DROP", "10.0.0.0/33", "10.0.0.0/255.255.0", "%%%%.%", "1.2.3.4.5", "cafe", "10.0.0.1 ", "2001:db8::/32", "::/0", "2001:db8::/ffff::"}
+	for _, h := range reject {
+		if err := ValidateMysqlHost("spec.owner.hosts[0]", h); err == nil {
+			t.Errorf("ValidateMysqlHost(%q) = nil, want rejection", h)
+		}
+	}
+}
+
+func TestValidateRejectsDuplicateAndInvalidHosts(t *testing.T) {
+	base := func() MysqlDatabaseSpec {
+		return MysqlDatabaseSpec{
+			DatabaseName: "acme_wms",
+			Owner:        MysqlDatabaseOwner{SecretName: "owner"},
+		}
+	}
+	spec := base()
+	spec.Owner.Hosts = []string{"10.0.0.1", "10.0.0.1"}
+	if err := spec.Validate("acme_app", nil); err == nil {
+		t.Fatal("Validate accepted duplicate owner hosts")
+	}
+	spec = base()
+	spec.Users = []MysqlDatabaseUser{{SecretName: "support", Privileges: []MysqlPrivilege{PrivilegeSelect}, Hosts: []string{"support.example.com"}}}
+	if err := spec.Validate("acme_app", map[string]string{"support": "acme_support"}); err == nil {
+		t.Fatal("Validate accepted a hostname in users[].hosts")
+	}
+	spec = base()
+	spec.Owner.Hosts = []string{"35.1.2.3", "35.4.5.6", "35.7.8.9"}
+	if err := spec.Validate("acme_app", nil); err != nil {
+		t.Fatalf("Validate rejected a valid multi-IP owner: %v", err)
+	}
+	if got := spec.Owner.EffectiveHosts(); len(got) != 3 {
+		t.Fatalf("EffectiveHosts = %v", got)
+	}
+	if got := (&MysqlDatabaseOwner{}).EffectiveHosts(); len(got) != 1 || got[0] != "%" {
+		t.Fatalf("EffectiveHosts(default) = %v, want [%%]", got)
 	}
 }

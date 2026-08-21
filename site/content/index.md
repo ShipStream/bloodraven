@@ -157,12 +157,12 @@ cards:
 
 ::home-data
 ---
-kicker: Bootstrap, scale out, encrypt, back up
+kicker: Bootstrap, scale out, encrypt, provision, back up
 title: Data that looks
 title-two: after itself.
 lede: >-
-  Bootstrap, read scale-out, encryption and backup are part of the operator, not four more
-  systems you have to wire together.
+  Bootstrap, read scale-out, encryption, tenant provisioning and backup are part of the
+  operator, not five more systems you have to wire together.
 cards:
   - token: CLONE
     title: Clone-based bootstrap
@@ -202,6 +202,22 @@ cards:
       - name: reader
         role: read-only
         zone: us-east-1b
+  - token: CRD
+    title: Tenant databases as resources
+    description: >-
+      Declare a schema, its owner and any extra principals — a per-tenant
+      SELECT-only support reader, say — as a MysqlDatabase, and the operator runs the
+      SQL on whichever site is primary. Every account is Secret-backed, scoped to its own
+      schema and, if you like, to a list of source IPs; rotation is a Secret write, and
+      removing an entry revokes and drops it. Nothing but Bloodraven holds the admin credential.
+    to: /docs/configuration/tenant-databases
+    code: |-
+      users:
+        - secretName: support-ro-mysql
+          privileges: [SELECT]
+          hosts: [35.1.2.3, 35.4.5.6]
+          resourceLimits:
+            maxUserConnections: 5
 backup-title: Backup and restore.
 backup-title-two: The whole nine yards.
 backup-to: /docs/backup-and-restore/backup-overview

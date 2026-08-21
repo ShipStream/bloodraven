@@ -7,14 +7,30 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// tenantUserHost is the host part of every account a MysqlDatabase touches.
-//
-// Everything in credentials.go hardcodes '%' (see buildRoles), and tenant
-// owners are not the place to unilaterally diverge: a MysqlDatabase owner
-// scoped to a pod CIDR while the app/readonly/monitor roles stay on '%'
-// would be an inconsistency that looks like a bug. Host scoping is worth
-// doing, but as one change across both paths.
-const tenantUserHost = "%"
+// tenantUserHost is the host part of every account a MysqlDatabase touches
+// that carries no explicit hosts list: spec.grants[] principals (created
+// elsewhere, by contract on '%'), and the owner and users[] entries when
+// their hosts list is omitted. It matches every account in credentials.go.
+const tenantUserHost = v1alpha1.DefaultMysqlHost
+
+// mysqlAccount is one 'user'@'host' pair. A MysqlDatabase principal (owner
+// or users[] entry) is one username over a hosts list, so every statement
+// that touches a principal is rendered over all of its accounts at once —
+// MySQL's account-management statements take account lists and are atomic,
+// which keeps a multi-host rotation a single statement.
+type mysqlAccount struct {
+	user string
+	host string
+}
+
+// String renders the account as 'user'@'host'; callers must have validated
+// both parts (quoteAccount does).
+func (a mysqlAccount) String() string {
+	return fmt.Sprintf("'%s'@'%s'", escapeSingleQuotes(a.user), escapeSingleQuotes(a.host))
+}
+
+// defaultHosts is the hosts list for principals that have none: ["%"].
+var defaultHosts = []string{tenantUserHost}
 
 // The rendering helpers below all validate before they format. That order is
 // the contract: a database name or username that fails validation must never
@@ -33,12 +49,51 @@ func quoteIdentifier(kind, name string) (string, error) {
 	return "`" + name + "`", nil
 }
 
-// quoteAccount renders a validated username as 'user'@'%'.
-func quoteAccount(kind, username string) (string, error) {
+// quoteAccount renders a validated username and host as 'user'@'host'.
+func quoteAccount(kind, username, host string) (string, error) {
 	if err := v1alpha1.ValidateMysqlUsername(kind, username); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("'%s'@'%s'", escapeSingleQuotes(username), tenantUserHost), nil
+	if err := v1alpha1.ValidateMysqlHost(kind+" host", host); err != nil {
+		return "", err
+	}
+	return mysqlAccount{user: username, host: host}.String(), nil
+}
+
+// quoteAccountList renders a username over its hosts as a comma-separated
+// account list, validating every part first. An empty hosts list is a
+// programming error, not a default: callers resolve defaults explicitly.
+func quoteAccountList(kind, username string, hosts []string) (string, error) {
+	if len(hosts) == 0 {
+		return "", fmt.Errorf("%s: no hosts to render", kind)
+	}
+	parts := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		acct, err := quoteAccount(kind, username, h)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, acct)
+	}
+	return strings.Join(parts, ", "), nil
+}
+
+// quoteAccountsIdentifiedBy renders `'u'@'h1' IDENTIFIED BY 'p', 'u'@'h2'
+// IDENTIFIED BY 'p', …` — the per-account auth clause CREATE USER and ALTER
+// USER require when more than one account is named.
+func quoteAccountsIdentifiedBy(kind, username string, hosts []string, escapedPassword string) (string, error) {
+	if len(hosts) == 0 {
+		return "", fmt.Errorf("%s: no hosts to render", kind)
+	}
+	parts := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		acct, err := quoteAccount(kind, username, h)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, fmt.Sprintf("%s IDENTIFIED BY '%s'", acct, escapedPassword))
+	}
+	return strings.Join(parts, ", "), nil
 }
 
 // renderCreateDatabase builds the idempotent CREATE DATABASE statement.
@@ -86,18 +141,50 @@ func renderAlterDatabase(database, characterSet, collation string) (string, erro
 // pair, which is the reconcileRole pattern verbatim. Applying both every time
 // is what makes password rotation a Secret write and nothing else: ALTER USER
 // is a no-op when the password already matches, and the fix when it does not.
-func renderOwnerUserStatements(username, password string) ([]string, error) {
-	account, err := quoteAccount("spec.owner secret username", username)
-	if err != nil {
-		return nil, err
-	}
+func renderOwnerUserStatements(username, password string, hosts []string) ([]string, error) {
 	if password == "" {
 		return nil, fmt.Errorf("spec.owner secret password must not be empty")
 	}
 	escaped := escapeSingleQuotes(password)
+	accounts, err := quoteAccountsIdentifiedBy("spec.owner secret username", username, hosts, escaped)
+	if err != nil {
+		return nil, err
+	}
 	return []string{
-		fmt.Sprintf("CREATE USER IF NOT EXISTS %s IDENTIFIED BY '%s'", account, escaped),
-		fmt.Sprintf("ALTER USER %s IDENTIFIED BY '%s'", account, escaped),
+		"CREATE USER IF NOT EXISTS " + accounts,
+		"ALTER USER " + accounts,
+	}, nil
+}
+
+// renderTenantUserStatements is renderOwnerUserStatements for a spec.users[]
+// entry: the same CREATE USER IF NOT EXISTS + ALTER USER pair, with the
+// entry's resource limits appended to the ALTER. The WITH clause is rendered
+// on every apply, with omitted limits as 0 (MySQL's "no account-level cap"):
+// removing a limit from the spec must clear it in MySQL, or resourceLimits would be
+// desired state on the way in but not on the way out. The limit values are
+// int32s formatted with %d — no caller-controlled text reaches the format
+// string.
+//
+// The WITH clause is statement-wide in ALTER USER, so one statement sets the
+// same limits on every host's account; MySQL enforces them per account.
+func renderTenantUserStatements(kind, username, password string, hosts []string, limits *v1alpha1.MysqlUserResourceLimits) ([]string, error) {
+	if password == "" {
+		return nil, fmt.Errorf("%s password must not be empty", kind)
+	}
+	var maxConns, maxQueries int32
+	if limits != nil {
+		maxConns = limits.MaxUserConnections
+		maxQueries = limits.MaxQueriesPerHour
+	}
+	escaped := escapeSingleQuotes(password)
+	accounts, err := quoteAccountsIdentifiedBy(kind, username, hosts, escaped)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"CREATE USER IF NOT EXISTS " + accounts,
+		fmt.Sprintf("ALTER USER %s WITH MAX_USER_CONNECTIONS %d MAX_QUERIES_PER_HOUR %d",
+			accounts, maxConns, maxQueries),
 	}, nil
 }
 
@@ -106,7 +193,7 @@ func renderOwnerUserStatements(username, password string) ([]string, error) {
 // It never emits WITH GRANT OPTION, and there is no code path that can:
 // the suffix does not exist anywhere in this file, and the privilege text
 // comes from the fixed table in the API package rather than from the CR.
-func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, username string) (string, error) {
+func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, username string, hosts []string) (string, error) {
 	privSQL, err := v1alpha1.CanonicalPrivileges(kind, privileges)
 	if err != nil {
 		return "", err
@@ -115,11 +202,11 @@ func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, us
 	if err != nil {
 		return "", err
 	}
-	account, err := quoteAccount(kind, username)
+	accounts, err := quoteAccountList(kind, username, hosts)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("GRANT %s ON %s.* TO %s", strings.Join(privSQL, ", "), dbIdent, account), nil
+	return fmt.Sprintf("GRANT %s ON %s.* TO %s", strings.Join(privSQL, ", "), dbIdent, accounts), nil
 }
 
 // renderRevokeSurplus builds the REVOKE that removes every allowlist
@@ -133,7 +220,7 @@ func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, us
 // IF EXISTS tolerates a surplus entry the account does not actually hold;
 // IGNORE UNKNOWN USER tolerates a missing account, exactly as the
 // revoke-all path does.
-func renderRevokeSurplus(kind string, desired []v1alpha1.MysqlPrivilege, database, username string) (string, error) {
+func renderRevokeSurplus(kind string, desired []v1alpha1.MysqlPrivilege, database, username string, hosts []string) (string, error) {
 	desiredSet := make(map[v1alpha1.MysqlPrivilege]bool, len(desired))
 	for _, p := range desired {
 		desiredSet[p] = true
@@ -165,12 +252,12 @@ func renderRevokeSurplus(kind string, desired []v1alpha1.MysqlPrivilege, databas
 	if err != nil {
 		return "", err
 	}
-	account, err := quoteAccount(kind, username)
+	accounts, err := quoteAccountList(kind, username, hosts)
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("REVOKE IF EXISTS %s ON %s.* FROM %s IGNORE UNKNOWN USER",
-		strings.Join(surplus, ", "), dbIdent, account), nil
+		strings.Join(surplus, ", "), dbIdent, accounts), nil
 }
 
 // renderRevokeAll builds REVOKE ALL PRIVILEGES ... ON `db`.* FROM 'user'@'%'.
@@ -182,16 +269,16 @@ func renderRevokeSurplus(kind string, desired []v1alpha1.MysqlPrivilege, databas
 // finalizer would never release, and the CR would wedge in Deleting forever.
 // Verified against MySQL 9.7: IF EXISTS alone does not cover a missing
 // account, only a missing grant.
-func renderRevokeAll(kind, database, username string) (string, error) {
+func renderRevokeAll(kind, database, username string, hosts []string) (string, error) {
 	dbIdent, err := quoteIdentifier("spec.databaseName", database)
 	if err != nil {
 		return "", err
 	}
-	account, err := quoteAccount(kind, username)
+	accounts, err := quoteAccountList(kind, username, hosts)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("REVOKE IF EXISTS ALL PRIVILEGES ON %s.* FROM %s IGNORE UNKNOWN USER", dbIdent, account), nil
+	return fmt.Sprintf("REVOKE IF EXISTS ALL PRIVILEGES ON %s.* FROM %s IGNORE UNKNOWN USER", dbIdent, accounts), nil
 }
 
 // renderDropDatabase builds the DROP DATABASE statement. Only ever reached
@@ -204,19 +291,21 @@ func renderDropDatabase(database string) (string, error) {
 	return "DROP DATABASE IF EXISTS " + dbIdent, nil
 }
 
-// renderDropUser builds the DROP USER statement for the owner. It is never
+// renderDropUser builds the DROP USER statement for the owner or a
+// spec.users[] principal — the accounts this CRD created. It is never
 // rendered for a spec.grants[] entry: those principals are shared, and this
 // CRD did not create them.
-func renderDropUser(username string) (string, error) {
-	account, err := quoteAccount("spec.owner secret username", username)
+func renderDropUser(kind, username string, hosts []string) (string, error) {
+	accounts, err := quoteAccountList(kind, username, hosts)
 	if err != nil {
 		return "", err
 	}
-	return "DROP USER IF EXISTS " + account, nil
+	return "DROP USER IF EXISTS " + accounts, nil
 }
 
-// grantUserExistsQuery is the parameterized existence check for a
-// spec.grants[] principal. Parameterized on purpose: this is the one place a
+// grantUserExistsQuery is the parameterized existence check for one
+// 'user'@'host' account — the spec.grants[] precondition and the owner and
+// users[] adoption gates. Parameterized on purpose: this is the one place a
 // username is compared rather than rendered, so there is no reason for it to
 // go anywhere near a format string.
 const grantUserExistsQuery = "SELECT 1 FROM mysql.user WHERE user = ? AND host = ?"

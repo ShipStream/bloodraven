@@ -41,6 +41,8 @@ type mdbHarness struct {
 	server *fakeSQLServer
 	rec    *record.FakeRecorder
 	r      *controller.MysqlDatabaseReconciler
+	// seenEvents retains every event sawEvent drained from rec.
+	seenEvents []string
 }
 
 func newMdbHarness(t *testing.T, objs ...client.Object) *mdbHarness {
@@ -938,5 +940,53 @@ func TestMysqlDatabaseRotationSurvivesFailedReadyStamp(t *testing.T) {
 	}
 	if pw, ok := h.server.password("acme_app_v2"); !ok || pw != "owner-pw-2" {
 		t.Fatalf("new owner password = %q (present=%v), want the rotated Secret value", pw, ok)
+	}
+}
+
+// TestMysqlDatabaseOwnerSecondRotationDropsUnresolvedTargetFirst: status
+// reads {ownerUser: A, pendingOwnerUser: B} — a rotation whose drop of A
+// failed transiently — and the Secret now names C. The rotation write-ahead
+// for C replaces pendingOwnerUser, so B must be dropped before that stamp
+// or nothing (not even Delete) will ever name it again.
+func TestMysqlDatabaseOwnerSecondRotationDropsUnresolvedTargetFirst(t *testing.T) {
+	const (
+		staleTarget = "acme_app_v2"
+		next        = "acme_app_v3"
+	)
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+		m.Status.DatabaseCreated = true
+		m.Status.OwnerUser = mdbOwnerUser
+		m.Status.PendingOwnerUser = staleTarget
+	})
+	secret := mdbOwnerSecret()
+	secret.Data["username"] = []byte(next)
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), secret)
+	h.server.addUser(mdbOwnerUser, mdbOwnerPass)
+	h.server.addUser(staleTarget, "rotated-pw")
+
+	h.reconcile()
+	mdb := h.requireReady()
+
+	if h.server.hasUser(staleTarget) || h.server.hasUser(mdbOwnerUser) {
+		t.Fatalf("previous owner accounts survived: %v / %v", h.server.hasUser(mdbOwnerUser), h.server.hasUser(staleTarget))
+	}
+	if !h.server.hasUser(next) {
+		t.Fatalf("rotation target %q missing", next)
+	}
+	dropIdx, createIdx := -1, -1
+	for i, stmt := range h.server.statementsSince(0) {
+		if strings.HasPrefix(stmt, "DROP USER") && strings.Contains(stmt, "'"+staleTarget+"'") {
+			dropIdx = i
+		}
+		if strings.HasPrefix(stmt, "CREATE USER") && strings.Contains(stmt, "'"+next+"'") {
+			createIdx = i
+		}
+	}
+	if dropIdx < 0 || createIdx < 0 || dropIdx > createIdx {
+		t.Fatalf("DROP of %q at statement %d, CREATE of %q at %d; the stale target must go before the write-ahead advances",
+			staleTarget, dropIdx, next, createIdx)
+	}
+	if mdb.Status.OwnerUser != next || mdb.Status.PendingOwnerUser != "" {
+		t.Fatalf("owner record = %q/%q, want %q settled", mdb.Status.OwnerUser, mdb.Status.PendingOwnerUser, next)
 	}
 }

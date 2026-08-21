@@ -106,10 +106,25 @@ func (r *MysqlFailoverGroupReconciler) tenantClaimedUsernames(ctx context.Contex
 	claimed := make(map[string]string)
 	for i := range list.Items {
 		mdb := &list.Items[i]
-		if mdb.Spec.GroupRef.Name != fg.Name || mdb.Status.OwnerUser == "" {
+		if mdb.Spec.GroupRef.Name != fg.Name {
 			continue
 		}
-		claimed[mdb.Status.OwnerUser] = mdb.Name
+		if mdb.Status.OwnerUser != "" {
+			claimed[mdb.Status.OwnerUser] = mdb.Name
+		}
+		// spec.users[] principals are tenant claims too: their write-ahead
+		// ledger (status.appliedUsers) is stamped before their first
+		// statement runs, so — like the owner — any account the users[]
+		// path has touched or will retry is claimed, including an
+		// in-flight rotation target.
+		for _, state := range mdb.Status.AppliedUsers {
+			if state.Username != "" {
+				claimed[state.Username] = mdb.Name
+			}
+			if state.PendingUsername != "" {
+				claimed[state.PendingUsername] = mdb.Name
+			}
+		}
 	}
 	return claimed, nil
 }

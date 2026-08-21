@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -97,9 +98,7 @@ func newMdbReconciler(t *testing.T, objs ...client.Object) (*MysqlDatabaseReconc
 	c := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha1.MysqlDatabase{}, &v1alpha1.MysqlFailoverGroup{}).
-		WithIndex(&v1alpha1.MysqlDatabase{}, mdbOwnerSecretIndex, func(o client.Object) []string {
-			return []string{o.(*v1alpha1.MysqlDatabase).Spec.Owner.SecretName}
-		}).
+		WithIndex(&v1alpha1.MysqlDatabase{}, mdbSecretNamesIndex, mdbSecretNames).
 		WithIndex(&v1alpha1.MysqlDatabase{}, mdbGroupRefIndex, func(o client.Object) []string {
 			return []string{o.(*v1alpha1.MysqlDatabase).Spec.GroupRef.Name}
 		}).
@@ -219,6 +218,36 @@ func TestMysqlDatabasePendingPaths(t *testing.T) {
 			},
 			wantReason: "OwnerSecretIncomplete",
 		},
+		{
+			name: "users secret not rendered yet",
+			objects: func() []client.Object {
+				cr := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+					m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{
+						SecretName: "support-ro-mysql",
+						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+					}}
+				})
+				return []client.Object{cr, mdbTestGroup(), mdbTestOwnerSecret()}
+			},
+			wantReason: "UserSecretMissing",
+		},
+		{
+			name: "users secret missing the password key",
+			objects: func() []client.Object {
+				cr := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+					m.Spec.Users = []v1alpha1.MysqlDatabaseUser{{
+						SecretName: "support-ro-mysql",
+						Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect},
+					}}
+				})
+				s := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "support-ro-mysql", Namespace: mdbTestNamespace},
+					Data:       map[string][]byte{"username": []byte("acme_support")},
+				}
+				return []client.Object{cr, mdbTestGroup(), mdbTestOwnerSecret(), s}
+			},
+			wantReason: "UserSecretIncomplete",
+		},
 	}
 
 	for _, tc := range cases {
@@ -307,7 +336,7 @@ func TestMysqlDatabaseSkipsWhenNothingChanged(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: mdbTestNamespace, Name: "main"}, &storedFG); err != nil {
 		t.Fatalf("get stored failover group: %v", err)
 	}
-	hash, err := computeDatabaseHash(getMdb(t, c), &storedSecret, &storedFG)
+	hash, err := computeDatabaseHash(getMdb(t, c), &storedSecret, nil, &storedFG)
 	if err != nil {
 		t.Fatalf("computeDatabaseHash() error = %v", err)
 	}
@@ -363,7 +392,7 @@ func TestMysqlDatabaseFailoverInvalidatesTheSkip(t *testing.T) {
 	}
 	staleFG := storedFG.DeepCopy()
 	staleFG.Status.ActiveSite = "dc1" // the site the CR last applied on
-	staleHash, err := computeDatabaseHash(getMdb(t, c), &storedSecret, staleFG)
+	staleHash, err := computeDatabaseHash(getMdb(t, c), &storedSecret, nil, staleFG)
 	if err != nil {
 		t.Fatalf("computeDatabaseHash() error = %v", err)
 	}
@@ -1204,26 +1233,80 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 		assertEventContains(t, rec, "OwnerUserDropSkipped")
 	})
 
-	t.Run("crashed rotation cleans up both usernames", func(t *testing.T) {
+	t.Run("sibling users ledger claim survives deletion", func(t *testing.T) {
 		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
-			m.Status.OwnerUser = "old_app" // rotation crashed before status caught up
+			m.Status.OwnerUser = "acme_app"
+			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+				{SecretName: "acme-support", Username: "acme_support"},
+			}
 		})
-		// The owner Secret names the new account — deleteScope must pick it
-		// up or the privileged user leaks.
+		// The sibling's own ledger claims the same account — a shared
+		// support credential. Deleting this CR must leave it in MySQL.
+		sibling := mdbTestCR(func(m *v1alpha1.MysqlDatabase) {
+			m.Name = "tenant-sibling"
+			m.Spec.DatabaseName = "sibling_wms"
+			m.Spec.Owner.SecretName = "sibling-owner"
+			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+				{SecretName: "sibling-support", Username: "acme_support"},
+			}
+		})
+		r, _, rec := newMdbReconciler(t, mdb, sibling, mdbTestGroup())
+
+		_, dropOwners, err := r.deleteScope(context.Background(), mdb, map[string]bool{})
+		if err != nil {
+			t.Fatalf("deleteScope() error = %v", err)
+		}
+		for _, got := range principalNames(dropOwners) {
+			if got == "acme_support" {
+				t.Fatalf("dropOwners = %v, want no acme_support — a sibling's ledger still claims it", dropOwners)
+			}
+		}
+		assertEventContains(t, rec, "UserDropSkipped")
+	})
+
+	t.Run("the owner Secret is not a drop candidate", func(t *testing.T) {
+		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
+			m.Status.OwnerUser = "old_app"
+		})
+		// The owner Secret names acme_app, which status never recorded —
+		// the shape a refused rotation (PreExistingOwnerUser) leaves
+		// behind, where acme_app is somebody else's account. The pending
+		// write-ahead record, stamped before any rotation SQL, is what
+		// covers a crashed rotation; the Secret must never be consulted.
 		r, _, _ := newMdbReconciler(t, mdb, mdbTestGroup(), mdbTestOwnerSecret())
 
 		_, dropOwners, err := r.deleteScope(context.Background(), mdb, map[string]bool{})
 		if err != nil {
 			t.Fatalf("deleteScope() error = %v", err)
 		}
-		want := []string{"old_app", "acme_app"}
-		if len(dropOwners) != len(want) {
-			t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
+		if got := principalNames(dropOwners); !reflect.DeepEqual(got, []string{"old_app"}) {
+			t.Fatalf("dropOwners = %v, want only the recorded owner", got)
 		}
-		for i := range want {
-			if dropOwners[i] != want[i] {
-				t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
+	})
+
+	t.Run("ledger record sharing the owner's name merges its hosts", func(t *testing.T) {
+		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
+			m.Spec.Owner.Hosts = []string{"10.0.0.1"}
+			m.Status.OwnerUser = "acme_app"
+			m.Status.OwnerHosts = []string{"10.0.0.1"}
+			// A users[] record that (after a transfer or rename) carries
+			// the owner's name on different hosts: both accounts are this
+			// CR's and both must go.
+			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+				{SecretName: "acme-support", Username: "acme_app", Hosts: []string{"10.0.0.2", "10.0.0.3"}},
 			}
+		})
+		r, _, _ := newMdbReconciler(t, mdb, mdbTestGroup())
+
+		_, dropOwners, err := r.deleteScope(context.Background(), mdb, map[string]bool{})
+		if err != nil {
+			t.Fatalf("deleteScope() error = %v", err)
+		}
+		if len(dropOwners) != 1 || dropOwners[0].username != "acme_app" {
+			t.Fatalf("dropOwners = %v, want one merged acme_app principal", dropOwners)
+		}
+		if got := dropOwners[0].hosts; !reflect.DeepEqual(got, []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}) {
+			t.Fatalf("merged hosts = %v, want the owner's and the ledger record's", got)
 		}
 	})
 
@@ -1245,7 +1328,7 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 			t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
 		}
 		for i := range want {
-			if dropOwners[i] != want[i] {
+			if dropOwners[i].username != want[i] {
 				t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
 			}
 		}
