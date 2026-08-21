@@ -513,20 +513,26 @@ func TestMysqlDatabaseUsersNewEntryTakesRotatedName(t *testing.T) {
 	}
 }
 
-// sawEvent drains the fake recorder and reports whether an event with the
-// given reason was emitted so far.
+// sawEvent reports whether an event with the given reason has been emitted
+// so far. The recorder's channel is drained into h.seenEvents, so a second
+// call in the same test still sees everything the first one read.
 func (h *mdbHarness) sawEvent(reason string) bool {
 	h.t.Helper()
 	for {
 		select {
 		case e := <-h.rec.Events:
-			if strings.Contains(e, " "+reason+" ") {
-				return true
-			}
+			h.seenEvents = append(h.seenEvents, e)
+			continue
 		default:
-			return false
+		}
+		break
+	}
+	for _, e := range h.seenEvents {
+		if strings.Contains(e, " "+reason+" ") {
+			return true
 		}
 	}
+	return false
 }
 
 // --- hosts ---------------------------------------------------------------
@@ -653,12 +659,14 @@ func TestMysqlDatabaseHostsAdditionAndPasswordRotationTouchEveryAccount(t *testi
 		if !h.server.hasAccount(mdbSupportUser, host) {
 			t.Fatalf("missing %s@%s", mdbSupportUser, host)
 		}
-		if limits, ok := h.server.resourceLimits[accountKey(mdbSupportUser, host)]; !ok || limits != "5/3600" {
+		if limits, ok := h.server.resourceLimitsForAccount(mdbSupportUser, host); !ok || limits != "5/3600" {
 			t.Fatalf("%s@%s limits = %q, want 5/3600 (limits are per account)", mdbSupportUser, host, limits)
 		}
-	}
-	if pw, _ := h.server.password(mdbSupportUser); pw != "support-pw-2" {
-		t.Fatalf("rotated password = %q", pw)
+		// Every account, not "some account": a rendering that rotated one
+		// host's password would still pass a username-level lookup.
+		if pw, _ := h.server.passwordOf(mdbSupportUser, host); pw != "support-pw-2" {
+			t.Fatalf("%s@%s password = %q, want the rotated value on every host", mdbSupportUser, host, pw)
+		}
 	}
 }
 
@@ -742,5 +750,228 @@ func TestMysqlDatabaseHostsUpgradeFromPreHostsStatus(t *testing.T) {
 	}
 	if !reflect.DeepEqual(mdb.Status.OwnerHosts, threeHosts[:1]) {
 		t.Fatalf("status.ownerHosts = %v", mdb.Status.OwnerHosts)
+	}
+}
+
+// --- write-ahead rollback on refusal --------------------------------------
+//
+// Every adoption refusal runs before the SQL its write-ahead stamp was
+// written for, so the stamp must be rolled back in full: a record that
+// survives a refusal is a drop candidate for an account this CR never
+// created.
+
+// TestMysqlDatabaseRefusedOwnerRotationRestoresPendingRecord: rotating the
+// owner Secret into a username somebody else owns is refused, and the
+// refusal must not leave the foreign name in status.pendingOwnerUser — that
+// record is a deletion drop candidate.
+func TestMysqlDatabaseRefusedOwnerRotationRestoresPendingRecord(t *testing.T) {
+	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.reconcile()
+	h.requireReady()
+
+	const foreign = "someone_elses_app"
+	h.server.addUser(foreign, "foreign-password")
+	var s corev1.Secret
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: mdbNamespace, Name: mdbOwnerSecret().Name}, &s); err != nil {
+		t.Fatalf("get owner secret: %v", err)
+	}
+	s.Data["username"] = []byte(foreign)
+	if err := h.client.Update(context.Background(), &s); err != nil {
+		t.Fatalf("update owner secret: %v", err)
+	}
+
+	h.reconcile()
+	mdb := h.get()
+	requireFailed(t, mdb, "PreExistingOwnerUser")
+	if pw, _ := h.server.password(foreign); pw != "foreign-password" {
+		t.Fatalf("foreign account password was reset to %q", pw)
+	}
+	if mdb.Status.PendingOwnerUser != "" {
+		t.Fatalf("status.pendingOwnerUser = %q after a refused rotation; Delete would drop a foreign account", mdb.Status.PendingOwnerUser)
+	}
+	if mdb.Status.OwnerUser != mdbOwnerUser {
+		t.Fatalf("status.ownerUser = %q, want %q — the previous owner is ours and must stay on record", mdb.Status.OwnerUser, mdbOwnerUser)
+	}
+	if len(mdb.Status.AppliedUsers) != 1 || mdb.Status.AppliedUsers[0].PendingUsername != "" {
+		t.Fatalf("status.appliedUsers = %+v, want the settled pre-rotation ledger", mdb.Status.AppliedUsers)
+	}
+
+	h.delete()
+	h.reconcile()
+	if !h.server.hasUser(foreign) {
+		t.Fatal("deletion dropped the foreign account the rotation refused to adopt")
+	}
+	if h.server.hasUser(mdbOwnerUser) || h.server.hasUser(mdbSupportUser) {
+		t.Fatal("the CR's own principals survived deletionPolicy=Delete")
+	}
+}
+
+// TestMysqlDatabaseRefusedFirstApplyRestoresUsersLedger: a first apply
+// refused on the owner ran no users[] SQL either, so the users[] write-ahead
+// and the owner hosts roll back with it. Once the foreign account is gone,
+// the retry converges from a clean record.
+func TestMysqlDatabaseRefusedFirstApplyRestoresUsersLedger(t *testing.T) {
+	cr := mdbCR(withSupportUser, withOwnerHosts(threeHosts[:2]...), withSupportHosts(threeHosts...))
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.server.addAccount(mdbOwnerUser, threeHosts[0], "foreign-password")
+
+	h.reconcile()
+	mdb := h.get()
+	requireFailed(t, mdb, "PreExistingOwnerUser")
+	if h.server.hasUser(mdbSupportUser) {
+		t.Fatal("users[] principal created despite the owner refusal")
+	}
+	if len(mdb.Status.AppliedUsers) != 0 {
+		t.Fatalf("status.appliedUsers = %+v after a refused first apply; nothing was created", mdb.Status.AppliedUsers)
+	}
+	if mdb.Status.OwnerUser != "" || len(mdb.Status.OwnerHosts) != 0 || mdb.Status.PendingOwnerUser != "" {
+		t.Fatalf("owner record = %q/%v/%q after a refused first apply, want empty",
+			mdb.Status.OwnerUser, mdb.Status.OwnerHosts, mdb.Status.PendingOwnerUser)
+	}
+
+	h.server.removeUser(mdbOwnerUser)
+	h.reconcile()
+	mdb = h.requireReady()
+	if got := h.server.hostsOf(mdbSupportUser); !reflect.DeepEqual(got, threeHosts) {
+		t.Fatalf("support accounts after retry = %v, want %v", got, threeHosts)
+	}
+	if len(mdb.Status.AppliedUsers) != 1 || !reflect.DeepEqual(mdb.Status.AppliedUsers[0].Hosts, threeHosts) {
+		t.Fatalf("status.appliedUsers = %+v, want the settled entry on every host", mdb.Status.AppliedUsers)
+	}
+}
+
+// TestMysqlDatabaseRefusedSchemaRestoresEveryWriteAhead: the schema refusal
+// is the earliest gate — no SQL at all — so owner, pending owner, hosts and
+// the users[] ledger all roll back.
+func TestMysqlDatabaseRefusedSchemaRestoresEveryWriteAhead(t *testing.T) {
+	cr := mdbCR(withSupportUser, withOwnerHosts(threeHosts[:2]...))
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.server.addDatabase(mdbDatabase, "latin1", "latin1_swedish_ci")
+
+	h.reconcile()
+	mdb := h.get()
+	requireFailed(t, mdb, "DatabasePreExists")
+	if mdb.Status.DatabaseCreated || mdb.Status.OwnerUser != "" || mdb.Status.PendingOwnerUser != "" ||
+		len(mdb.Status.OwnerHosts) != 0 || len(mdb.Status.AppliedUsers) != 0 {
+		t.Fatalf("write-ahead survived a schema refusal: created=%v owner=%q pending=%q hosts=%v users=%+v",
+			mdb.Status.DatabaseCreated, mdb.Status.OwnerUser, mdb.Status.PendingOwnerUser, mdb.Status.OwnerHosts, mdb.Status.AppliedUsers)
+	}
+	if h.server.hasUser(mdbOwnerUser) || h.server.hasUser(mdbSupportUser) {
+		t.Fatal("accounts created despite refusing the schema")
+	}
+}
+
+// --- unresolved rotation targets -------------------------------------------
+
+// TestMysqlDatabaseUsersSecondRotationDropsUnresolvedTargetFirst: the ledger
+// reads {username: A, pending: B} — a rotation whose drop of A failed
+// transiently — and the Secret now names C. The write-ahead for C replaces
+// pendingUsername, so B must be dropped BEFORE that stamp or nothing will
+// ever name it again. The order in the statement log is the proof.
+func TestMysqlDatabaseUsersSecondRotationDropsUnresolvedTargetFirst(t *testing.T) {
+	const (
+		staleTarget = "acme_support_v2"
+		next        = "acme_support_v3"
+	)
+	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) {
+		m.Status.DatabaseCreated = true
+		m.Status.OwnerUser = mdbOwnerUser
+		m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{
+			SecretName:      mdbSupportSecretName,
+			Username:        mdbSupportUser,
+			PendingUsername: staleTarget,
+		}}
+	})
+	secret := mdbSupportSecret()
+	secret.Data["username"] = []byte(next)
+	secret.Data["password"] = []byte("support-pw-3")
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), secret)
+	h.server.addUser(mdbOwnerUser, mdbOwnerPass)
+	h.server.addUser(mdbSupportUser, mdbSupportPass)
+	h.server.addUser(staleTarget, "rotated-pw")
+
+	h.reconcile()
+	mdb := h.requireReady()
+
+	if h.server.hasUser(staleTarget) {
+		t.Fatalf("unresolved rotation target %q survived a second rotation", staleTarget)
+	}
+	if h.server.hasUser(mdbSupportUser) {
+		t.Fatalf("previous principal %q survived the rotation", mdbSupportUser)
+	}
+	if !h.server.hasUser(next) {
+		t.Fatalf("rotation target %q missing", next)
+	}
+	dropIdx, createIdx := -1, -1
+	for i, stmt := range h.server.statementsSince(0) {
+		if strings.HasPrefix(stmt, "DROP USER") && strings.Contains(stmt, "'"+staleTarget+"'") {
+			dropIdx = i
+		}
+		if strings.HasPrefix(stmt, "CREATE USER") && strings.Contains(stmt, "'"+next+"'") {
+			createIdx = i
+		}
+	}
+	if dropIdx < 0 || createIdx < 0 || dropIdx > createIdx {
+		t.Fatalf("DROP of %q at statement %d, CREATE of %q at %d; the stale target must go before the write-ahead advances",
+			staleTarget, dropIdx, next, createIdx)
+	}
+	if len(mdb.Status.AppliedUsers) != 1 ||
+		mdb.Status.AppliedUsers[0].Username != next ||
+		mdb.Status.AppliedUsers[0].PendingUsername != "" {
+		t.Fatalf("status.appliedUsers = %+v, want the settled entry on %q", mdb.Status.AppliedUsers, next)
+	}
+	if !h.sawEvent("UserRotated") {
+		t.Fatal("no UserRotated event for the abandoned target")
+	}
+}
+
+// --- ownership arbitration ------------------------------------------------
+
+// TestMysqlDatabaseUsersRefusesSiblingClaimedName: a sibling CR's ledger
+// claims the username this CR's users[] Secret resolves to, but the account
+// does not exist yet — the sibling stamped its write-ahead and has not run
+// its SQL (a crash, or a reconcile in flight). The existence check cannot
+// see that; the sibling's persisted claim must, before this CR stamps or
+// creates anything. Once the claim is gone the CR converges.
+func TestMysqlDatabaseUsersRefusesSiblingClaimedName(t *testing.T) {
+	sibling := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+		m.Name = "tenant-sibling"
+		m.Spec.DatabaseName = "sibling_wms"
+		m.Spec.Owner.SecretName = "sibling-owner"
+		m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+			{SecretName: "sibling-support", Username: mdbSupportUser},
+		}
+	})
+	h := newMdbHarness(t, mdbCR(withSupportUser), sibling, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+
+	h.reconcile()
+	mdb := h.get()
+	requireFailed(t, mdb, "UserClaimedBySibling")
+	if n := h.server.statementCount(); n != 0 {
+		t.Fatalf("%d statements ran for a CR that lost the claim; want none", n)
+	}
+	if len(mdb.Status.AppliedUsers) != 0 || mdb.Status.DatabaseCreated {
+		t.Fatalf("write-ahead stamped for a refused claim: created=%v users=%+v", mdb.Status.DatabaseCreated, mdb.Status.AppliedUsers)
+	}
+	if !strings.Contains(mdb.Status.Message, "tenant-sibling") {
+		t.Fatalf("message %q does not name the claiming sibling", mdb.Status.Message)
+	}
+
+	// The sibling releases the name: its ledger no longer records it.
+	var other v1alpha1.MysqlDatabase
+	if err := h.client.Get(context.Background(), types.NamespacedName{Namespace: mdbNamespace, Name: "tenant-sibling"}, &other); err != nil {
+		t.Fatalf("get sibling: %v", err)
+	}
+	other.Status.AppliedUsers = nil
+	if err := h.client.Status().Update(context.Background(), &other); err != nil {
+		t.Fatalf("release sibling claim: %v", err)
+	}
+	h.reconcile()
+	h.requireReady()
+	if !h.server.hasUser(mdbSupportUser) {
+		t.Fatal("principal not created once the sibling's claim was released")
 	}
 }

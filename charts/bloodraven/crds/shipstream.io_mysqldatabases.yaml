@@ -272,9 +272,13 @@ spec:
                     description: |-
                       Hosts restricts where the owner may connect from: the MySQL host
                       part of the account. Defaults to ["%"] (anywhere). Each entry is an
-                      IP address, a CIDR (`203.0.113.0/24`), an IP/netmask pair, or a
-                      %-wildcarded IPv4 pattern (`10.0.%`); hostnames are rejected, because
-                      they would put DNS on the authentication path. With more than one
+                      IPv4 or IPv6 address, an IPv4 CIDR (`203.0.113.0/24`; MySQL has no
+                      IPv6 CIDR form), an IPv4/netmask pair (`10.0.0.0/255.255.255.0`), or
+                      a wildcarded IPv4 pattern where `%` matches any run and `_` one
+                      character (`10.0.%`, `10.0.0._`). Hostnames are rejected, because
+                      they would put DNS on the authentication path. The pattern below is
+                      a character-class guard; the exact grammar is enforced in Go
+                      (ValidateMysqlHost). With more than one
                       host the owner is one principal — one Secret, one grant set — backed
                       by one MySQL account per host, all created, rotated, granted and
                       dropped together (a platform with several static egress IPs is the
@@ -380,8 +384,9 @@ spec:
                     hosts:
                       description: |-
                         Hosts restricts where this principal may connect from. Same contract
-                        as spec.owner.hosts: defaults to ["%"], IP/CIDR/netmask/%-pattern
-                        entries only, one MySQL account per host managed as one principal.
+                        as spec.owner.hosts: defaults to ["%"]; IP literal, IPv4 CIDR,
+                        IPv4/netmask or `%`/`_`-wildcarded IPv4 entries only (no hostnames,
+                        no IPv6 CIDR); one MySQL account per host managed as one principal.
                         Note that resourceLimits are enforced per account by MySQL, so a
                         limit applies per host, not across the list.
                       items:

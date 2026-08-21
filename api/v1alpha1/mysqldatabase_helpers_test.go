@@ -387,13 +387,15 @@ func TestIsSystemSchema(t *testing.T) {
 }
 
 func TestValidateMysqlHost(t *testing.T) {
-	accept := []string{"%", "10.0.0.1", "203.0.113.0/24", "10.0.0.0/255.255.255.0", "10.0.%", "192.168.1._", "2001:db8::1", "2001:db8::/32", "::1"}
+	accept := []string{"%", "10.0.0.1", "203.0.113.0/24", "10.0.0.0/255.255.255.0", "10.0.%", "192.168.1._", "2001:db8::1", "::1"}
 	for _, h := range accept {
 		if err := ValidateMysqlHost("spec.owner.hosts[0]", h); err != nil {
 			t.Errorf("ValidateMysqlHost(%q) = %v, want accept", h, err)
 		}
 	}
-	reject := []string{"", "db.example.com", "localhost", "evil'@'%", "10.0.0.1; DROP", "10.0.0.0/33", "10.0.0.0/255.255.0", "%%%%.%", "1.2.3.4.5", "cafe", "10.0.0.1 "}
+	// MySQL accepts CIDR and netmask notation for IPv4 only; an IPv6 prefix
+	// would render into an account host that matches no client.
+	reject := []string{"", "db.example.com", "localhost", "evil'@'%", "10.0.0.1; DROP", "10.0.0.0/33", "10.0.0.0/255.255.0", "%%%%.%", "1.2.3.4.5", "cafe", "10.0.0.1 ", "2001:db8::/32", "::/0", "2001:db8::/ffff::"}
 	for _, h := range reject {
 		if err := ValidateMysqlHost("spec.owner.hosts[0]", h); err == nil {
 			t.Errorf("ValidateMysqlHost(%q) = nil, want rejection", h)

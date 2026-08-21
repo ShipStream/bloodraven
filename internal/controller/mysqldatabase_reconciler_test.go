@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1263,26 +1264,49 @@ func TestMysqlDatabaseDeleteScope(t *testing.T) {
 		assertEventContains(t, rec, "UserDropSkipped")
 	})
 
-	t.Run("crashed rotation cleans up both usernames", func(t *testing.T) {
+	t.Run("the owner Secret is not a drop candidate", func(t *testing.T) {
 		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
-			m.Status.OwnerUser = "old_app" // rotation crashed before status caught up
+			m.Status.OwnerUser = "old_app"
 		})
-		// The owner Secret names the new account — deleteScope must pick it
-		// up or the privileged user leaks.
+		// The owner Secret names acme_app, which status never recorded —
+		// the shape a refused rotation (PreExistingOwnerUser) leaves
+		// behind, where acme_app is somebody else's account. The pending
+		// write-ahead record, stamped before any rotation SQL, is what
+		// covers a crashed rotation; the Secret must never be consulted.
 		r, _, _ := newMdbReconciler(t, mdb, mdbTestGroup(), mdbTestOwnerSecret())
 
 		_, dropOwners, err := r.deleteScope(context.Background(), mdb, map[string]bool{})
 		if err != nil {
 			t.Fatalf("deleteScope() error = %v", err)
 		}
-		want := []string{"old_app", "acme_app"}
-		if len(dropOwners) != len(want) {
-			t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
+		if got := principalNames(dropOwners); !reflect.DeepEqual(got, []string{"old_app"}) {
+			t.Fatalf("dropOwners = %v, want only the recorded owner", got)
 		}
-		for i := range want {
-			if dropOwners[i].username != want[i] {
-				t.Fatalf("dropOwners = %v, want %v", dropOwners, want)
+	})
+
+	t.Run("ledger record sharing the owner's name merges its hosts", func(t *testing.T) {
+		mdb := deleting(func(m *v1alpha1.MysqlDatabase) {
+			m.Spec.Owner.Hosts = []string{"10.0.0.1"}
+			m.Status.OwnerUser = "acme_app"
+			m.Status.OwnerHosts = []string{"10.0.0.1"}
+			// A users[] record that (after a transfer or rename) carries
+			// the owner's name on different hosts: both accounts are this
+			// CR's and both must go.
+			m.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{
+				{SecretName: "acme-support", Username: "acme_app", Hosts: []string{"10.0.0.2", "10.0.0.3"}},
 			}
+		})
+		r, _, _ := newMdbReconciler(t, mdb, mdbTestGroup())
+
+		_, dropOwners, err := r.deleteScope(context.Background(), mdb, map[string]bool{})
+		if err != nil {
+			t.Fatalf("deleteScope() error = %v", err)
+		}
+		if len(dropOwners) != 1 || dropOwners[0].username != "acme_app" {
+			t.Fatalf("dropOwners = %v, want one merged acme_app principal", dropOwners)
+		}
+		if got := dropOwners[0].hosts; !reflect.DeepEqual(got, []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}) {
+			t.Fatalf("merged hosts = %v, want the owner's and the ledger record's", got)
 		}
 	})
 

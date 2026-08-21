@@ -39,7 +39,7 @@ type fakeSQLServer struct {
 	users map[string]string
 	// databases maps schema name to "charset/collation".
 	databases map[string]string
-	// grants maps schema name to username to the granted privilege list.
+	// grants maps schema name to "user@host" to the granted privilege list.
 	grants map[string]map[string][]string
 	// resourceLimits maps "user@host" to "maxUserConnections/maxQueriesPerHour"
 	// as last applied via ALTER USER ... WITH.
@@ -142,6 +142,14 @@ func (s *fakeSQLServer) password(username string) (string, bool) {
 	return "", false
 }
 
+// passwordOf returns the password of the exact 'username'@'host' account.
+func (s *fakeSQLServer) passwordOf(username, host string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pw, ok := s.users[accountKey(username, host)]
+	return pw, ok
+}
+
 func (s *fakeSQLServer) database(name string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -163,6 +171,14 @@ func (s *fakeSQLServer) resourceLimitsFor(username string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// resourceLimitsForAccount returns the limits of the exact account.
+func (s *fakeSQLServer) resourceLimitsForAccount(username, host string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	limits, ok := s.resourceLimits[accountKey(username, host)]
+	return limits, ok
 }
 
 // grantsFor returns the grants of username's '%' account on database or,

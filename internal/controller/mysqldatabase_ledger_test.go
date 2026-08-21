@@ -190,8 +190,8 @@ func TestUserAttributed(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := userAttributed(prior, tc.secret, tc.username); got != tc.want {
-				t.Fatalf("userAttributed(%q, %q) = %v, want %v", tc.secret, tc.username, got, tc.want)
+			if got := userAttributed(prior, tc.username); got != tc.want {
+				t.Fatalf("userAttributed(%q) = %v, want %v (entry %q)", tc.username, got, tc.want, tc.secret)
 			}
 		})
 	}

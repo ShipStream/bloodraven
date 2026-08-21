@@ -480,15 +480,15 @@ func TestGroupFenced(t *testing.T) {
 // statement per operation, naming every account — the per-account auth
 // clause for CREATE/ALTER USER, a plain account list for GRANT/REVOKE/DROP.
 func TestRenderMultiHostPrincipal(t *testing.T) {
-	hosts := []string{"35.1.2.3", "35.4.5.6", "2001:db8::/32"}
+	hosts := []string{"35.1.2.3", "35.4.5.6", "2001:db8::1"}
 	got, err := renderTenantUserStatements("spec.users[0] secret username", "acme_support", "pw", hosts,
 		&v1alpha1.MysqlUserResourceLimits{MaxUserConnections: 5})
 	if err != nil {
 		t.Fatalf("renderTenantUserStatements() error = %v", err)
 	}
 	want := []string{
-		"CREATE USER IF NOT EXISTS 'acme_support'@'35.1.2.3' IDENTIFIED BY 'pw', 'acme_support'@'35.4.5.6' IDENTIFIED BY 'pw', 'acme_support'@'2001:db8::/32' IDENTIFIED BY 'pw'",
-		"ALTER USER 'acme_support'@'35.1.2.3' IDENTIFIED BY 'pw', 'acme_support'@'35.4.5.6' IDENTIFIED BY 'pw', 'acme_support'@'2001:db8::/32' IDENTIFIED BY 'pw' WITH MAX_USER_CONNECTIONS 5 MAX_QUERIES_PER_HOUR 0",
+		"CREATE USER IF NOT EXISTS 'acme_support'@'35.1.2.3' IDENTIFIED BY 'pw', 'acme_support'@'35.4.5.6' IDENTIFIED BY 'pw', 'acme_support'@'2001:db8::1' IDENTIFIED BY 'pw'",
+		"ALTER USER 'acme_support'@'35.1.2.3' IDENTIFIED BY 'pw', 'acme_support'@'35.4.5.6' IDENTIFIED BY 'pw', 'acme_support'@'2001:db8::1' IDENTIFIED BY 'pw' WITH MAX_USER_CONNECTIONS 5 MAX_QUERIES_PER_HOUR 0",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("renderTenantUserStatements() =\n%q\nwant\n%q", got, want)
@@ -498,7 +498,7 @@ func TestRenderMultiHostPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderGrant() error = %v", err)
 	}
-	if want := "GRANT SELECT ON `acme_wms`.* TO 'acme_support'@'35.1.2.3', 'acme_support'@'35.4.5.6', 'acme_support'@'2001:db8::/32'"; grant != want {
+	if want := "GRANT SELECT ON `acme_wms`.* TO 'acme_support'@'35.1.2.3', 'acme_support'@'35.4.5.6', 'acme_support'@'2001:db8::1'"; grant != want {
 		t.Fatalf("renderGrant() = %q, want %q", grant, want)
 	}
 	drop, err := renderDropUser("spec.users[] ledger username", "acme_support", hosts[:2])

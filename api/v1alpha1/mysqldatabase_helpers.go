@@ -215,10 +215,12 @@ func effectiveHosts(hosts []string) []string {
 var ipv4WildcardPattern = regexp.MustCompile(`^[0-9%_]{1,3}(\.[0-9%_]{1,3}){0,3}$`)
 
 // ValidateMysqlHost accepts the host forms a MysqlDatabase will render into
-// an account name: "%" alone, an IPv4/IPv6 literal, a CIDR prefix
-// (`203.0.113.0/24`, accepted by MySQL 8.0.23+), an IPv4/netmask pair
-// (`10.0.0.0/255.255.255.0`), or a %-wildcarded IPv4 pattern. Hostnames are
-// rejected deliberately: MySQL would resolve them at every authentication
+// an account name: "%" alone, an IPv4/IPv6 literal, an IPv4 CIDR prefix
+// (`203.0.113.0/24`, accepted by MySQL 8.0.23+ — MySQL has no IPv6 CIDR
+// form, so `2001:db8::/32` is rejected rather than rendered into an account
+// that matches nothing), an IPv4/netmask pair (`10.0.0.0/255.255.255.0`),
+// or a wildcarded IPv4 pattern (`%` any run, `_` one character). Hostnames
+// are rejected deliberately: MySQL would resolve them at every authentication
 // (reverse DNS, unless skip_name_resolve), which makes "who is this" a
 // time-varying answer and puts DNS on the auth path. The accepted character
 // set cannot contain a quote or a backslash, so validation — not escaping —
@@ -237,8 +239,11 @@ func ValidateMysqlHost(kind, value string) error {
 		return nil
 	}
 	if strings.Contains(value, "/") {
-		if _, _, err := net.ParseCIDR(value); err == nil {
-			return nil
+		if ip, _, err := net.ParseCIDR(value); err == nil {
+			if ip.To4() != nil {
+				return nil
+			}
+			return fmt.Errorf("%s %q: MySQL supports CIDR notation for IPv4 hosts only; use an IPv6 literal", kind, value)
 		}
 		ip, mask, ok := strings.Cut(value, "/")
 		if ok && net.ParseIP(ip) != nil && net.ParseIP(ip).To4() != nil &&
@@ -250,7 +255,7 @@ func ValidateMysqlHost(kind, value string) error {
 	if ipv4WildcardPattern.MatchString(value) && strings.ContainsAny(value, "%_") {
 		return nil
 	}
-	return fmt.Errorf("%s %q must be an IP address, a CIDR, an IPv4/netmask pair, or a %%-wildcarded IPv4 pattern; hostnames are not accepted", kind, value)
+	return fmt.Errorf("%s %q must be an IP address, an IPv4 CIDR, an IPv4/netmask pair, or a %%/_-wildcarded IPv4 pattern; hostnames are not accepted", kind, value)
 }
 
 // validateHostList applies ValidateMysqlHost to each entry and rejects
