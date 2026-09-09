@@ -3,7 +3,7 @@
 <!-- Rendered from course.json by course-template/tools/render-views.mjs.
      Edit course.json, then re-render. Edits here are overwritten. -->
 
-**Assesses:** Quick check: can you say why a pooled connection keeps serving stale reads after a correct promotion, name the one path that actually drains connections, and read a `sessionsPreserved` of nil without guessing?
+**Assesses:** Quick check: can you say why a pooled connection keeps serving stale reads after a correct promotion, name the one path that actually drains connections, and read a `sessionsPreserved` of nil without guessing, and say what a deployment hold defers and what it never touches?
 
 **Passing score:** 70%
 
@@ -168,3 +168,32 @@ While Bloodraven moves the Dragonfly master, both the old and the new instance b
 **Explanation:**
 
 False — and the mechanism that prevents it is deliberate. The active Service AND-gates two labels the operator stamps on Dragonfly pods, `shipstream.io/dragonfly-role=master` and `shipstream.io/dragonfly-traffic=enabled`, and a pod is an endpoint only when both match. To shed an endpoint the operator *deletes* the traffic key rather than stamping some disabled value, because the selector is an exists-and-equals check on `enabled` and an absent key cannot match. The takeover strips the source's traffic key before it promotes the target and stamps the target's key only afterwards, so there is no instant at which both carry it; the steady-state label sweep honours the same window by skipping the source mid-takeover, since re-stamping it would re-attach the old master to the active Service — exactly the bug the strip prevents. Had the operator written `dragonfly-traffic=disabled` instead, correctness would depend on the selector and the writer agreeing about a magic string. Deletion needs no agreement. (objective 12)
+
+## Question 11
+
+**Type:** MULTIPLE_CHOICE
+
+A pipeline holds a live `failover-hold` on `playground`. Which of these does the hold defer?
+
+- Emergency failover after `iad` becomes unreachable, until the hold expires.
+- A planned failover triggered by the annotation, which lands in `Deferred` with reason `DeploymentHold`.
+- Returning-old-primary fencing when `iad` comes back writable.
+- Primary reassertion inside the anti-flap cooldown window.
+
+**Correct option index:** 1
+
+**Explanation:**
+
+A hold defers planned disruption only — planned failover, ordered update and restore-in-place. Emergency failover, returning-primary fencing and primary reassertion never consult deployment leases. (objective 14)
+
+## Question 12
+
+**Type:** TRUE_FALSE
+
+The deployment API's `migration` lease is one per group, and a second pipeline that asks while it is held receives `409 held` naming the current holder.
+
+**Correct answer:** true
+
+**Explanation:**
+
+The migration lease is a group-wide mutex. A conflicting `POST` returns `409 held` with the holder's `operationId`, `instance` and `expiresAt`, so the second pipeline can wait for the right thing. (objective 13)

@@ -447,9 +447,9 @@ note: >-
 stats:
   - value: "7"
     label: units
-  - value: "27"
+  - value: "28"
     label: topics
-  - value: "34"
+  - value: "35"
     label: quizzes and tests
 units:
   - n: "1"

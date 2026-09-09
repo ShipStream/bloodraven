@@ -2571,7 +2571,7 @@
     },
     {
       "title": "Where failover meets your application",
-      "description": "Bloodraven's job ends at a label selector and a DNS record; your application's job starts there. This unit closes the gap Unit 3 opened — the promotion that worked perfectly while the counter app went on serving stale reads from the demoted site and failing every write against it, with nothing paging for either. You will fix a connection pool, move a primary on purpose at an RPO of zero, and decide what your cache and sessions owe you. Everything so far has assumed somebody can see the truth about `playground`; Unit 5 removes that assumption.",
+      "description": "Bloodraven's job ends at a label selector and a DNS record; your application's job starts there. This unit closes the gap Unit 3 opened — the promotion that worked perfectly while the counter app went on serving stale reads from the demoted site and failing every write against it, with nothing paging for either. You will fix a connection pool, move a primary on purpose at an RPO of zero, decide what your cache and sessions owe you, and give the deploy pipeline a lease instead of the cluster. Everything so far has assumed somebody can see the truth about `playground`; Unit 5 removes that assumption.",
       "orderIndex": 3,
       "hero": null,
       "topics": [
@@ -3214,11 +3214,171 @@
               }
             ]
           }
+        },
+        {
+          "title": "Deployments that ask first: the lease API",
+          "description": "The deploy pipeline is the other thing that touches your primary on a schedule. A migration mutex, a hold that defers planned disruption and nothing else, and a generation counter that fences any migration the topology moved underneath.",
+          "orderIndex": 4,
+          "instructions": "# Deployments that ask first: the lease API\n\n**Unit:** 4 — Where failover meets your application\n**Objectives (unit-numbered):**\n13. Authorize a deploy pipeline through `MysqlDatabase.spec.deploymentClients` and take the `migration` mutex and a `failover-hold` in the required order   [obj 13]\n14. Say exactly which operations a live hold defers, and which paths never consult a lease   [obj 14]\n15. Answer a `409 revoked`, `404` or `403 token_mismatch` renewal correctly: stop the heartbeat, decide by the DDL boundary, never reconnect to the new primary   [obj 15]\n\n## Topic generation prompt\n\nOpen on the scheduling collision the rest of the unit has been building toward: the deploy pipeline is the other thing that touches `playground`'s primary on a calendar, and it is not on call. Two runners retrying the same migration, and a planned failover booked for the same window. Then state the API's scope in one breath and hold it for the whole topic — a group-wide migration mutex and a renewable hold on planned disruption; it does not run migrations, does not grant MySQL credentials, and never delays emergency failover. Every design choice follows from those three refusals.\n\nTeach access first, because the security posture is the selling point. Off by default; `auxiliary.deployAPI.enabled` on the chart, requiring the shared TLS listener on `:8443` — no plaintext fallback, `8082` never serves it, followers answer `503 not_leader`. Identity is a projected ServiceAccount token with audience `bloodraven-deploy`, checked by TokenReview; authorization is `MysqlDatabase.spec.deploymentClients[]` (one `namespace`/`serviceAccount` pair per namespace) on a database whose `groupRef` names the group. The `instance` is the `MysqlDatabase` resource name, not the schema. Spell out what the caller does **not** need: no patch on the `MysqlFailoverGroup`, no Secrets, no MySQL account from Bloodraven.\n\nThen the two leases and their order. `GET` is an observation: `stable`/`unstableReason` semantics (false during any operation phase including `Deferred`, Degraded/SplitBrain/NoPrimary, recovery pending, replication not running; lag alone never makes it false). `migration` is the mutex — one per group, `409 held` with the holder's `operationId`, `instance`, `expiresAt`. `failover-hold` is granted only to the current migration holder with the same `operationId`/`instance`, `403` otherwise. TTL clamped `[5, 120]`, renew at `ttl/3`, compare `topologyGeneration` on every renewal. `423 unstable` on renewal is not a renewal and never extends the last confirmed deadline. Same-operation `POST` re-grant returns `200` and rotates the token. Durable `coordination.k8s.io/Lease` objects; operator restart releases nothing; expiry on the operator clock.\n\nThen the hold, and be exact about its authority. It defers planned failover into `Deferred`/`DeploymentHold` — the phase the learner met in topic 3 — with `retryAfter` equal to the earliest hold expiry, moving with each renewal; ordered update and restore-in-place defer the same way; a `migration` lease alone defers nothing. Emergency failover, returning-primary fencing and primary reassertion never consult leases. Make the argument that the never-consults column is the reason the API is safe to expose at all: a hold that could pause emergency promotion would let a stuck pipeline keep a dead primary in charge.\n\nThen the fence, which is the sharpest fact in the topic: `status.topologyGeneration` increments on every authoritative active-site change (planned, emergency, ordered-update failover, restore-in-place promotion, bootstrap completion); it is neither `metadata.generation` nor a restart counter. A bump revokes every lease with `topology_changed` and raises `DeploymentLeaseRevoked`. Teach the client contract as a rule: `409 revoked`, `404`, `403 token_mismatch` all mean lost authority — stop the heartbeat, do not reconnect to the new primary; before DDL run the fenced abort, at or after DDL stop writes and require manual schema verification; release the hold on every failure path and the mutex only after the deploy's terminal state is recorded. \"A TTL is not an exactly-once DDL guarantee.\" Tombstones per revoked operation until group deletion, holding hashes not tokens.\n\nClose with the manual lever — `bloodraven.shipstream.io/revoke-deployment-leases` → `operator_revoked` — and the two things never to do (delete the leader-election Lease, edit `topologyGeneration`), plus the two metrics and the `msg=\"deploy api\"` log line.\n\nDo NOT re-teach the planned-failover phase machine; reference `Deferred`. Do NOT teach the NetworkPolicy template or the chart's escrow TLS plumbing beyond naming the values. Do NOT teach ordered updates or restore-in-place mechanics (Units 6 and 7); name them as things a hold defers.\n\n## Requested activities\n\n- READ: 1000-1200 words. The collision, the three refusals, access (TLS, token audience, `deploymentClients`, what the caller does not need), the two leases and their order with the status codes, TTL/renew/generation-compare, the hold's exact authority as a two-column contrast, the generation fence and the client's stop rule, the manual revoke and the two never-dos. One `terminal` widget showing GET then the two POSTs against `playground`. One `compare` widget with \"defers until the hold is gone\" against \"never consults a lease\".\n- FLASHCARDS: chart value and port; audience string; where authorization lives and what `instance` means; the three refusals; migration is one per group and what `409 held` carries; hold only to the migration holder; TTL clamp and renew cadence; what `stable=false` covers and what it excludes; `Deferred`/`DeploymentHold`/`retryAfter`; what never consults a lease; what bumps `topologyGeneration`; the revoke annotation and the two never-dos. 10-12 cards.\n- QUIZ: 5 questions on discriminations — why a hold cannot stop an emergency promotion and what the client sees instead; which lease to take first and why the hold was refused; what a `423 unstable` on renewal does to the deadline; the correct action on `409 revoked` after DDL has started; and whether an operator restart clears a hold.\n\n## Handoff\n\n**Inherits:** The learner can trigger a planned failover, read `Deferred`, and knows the emergency path promotes on its own detection budget.\n**Leaves:** The learner can authorize a pipeline for `playground` without cluster-level RBAC, take both leases in order, explain what a hold does and does not defer, and stop correctly on a revoked lease.\n**Do not cover:** Ordered updates (Unit 7), restore-in-place (Unit 6), the escrow TLS certificate lifecycle (Unit 7), alerting on deploy metrics (Unit 6).",
+          "learningGoals": [
+            {
+              "title": "Authorize a deploy pipeline through `MysqlDatabase.spec.deploymentClients` and take the `migration` mutex and a `failover-hold` in the required order",
+              "description": null,
+              "orderIndex": 0,
+              "unitObjectiveNumber": 13
+            },
+            {
+              "title": "Say exactly which operations a live hold defers, and which paths never consult a lease",
+              "description": null,
+              "orderIndex": 1,
+              "unitObjectiveNumber": 14
+            },
+            {
+              "title": "Answer a `409 revoked`, `404` or `403 token_mismatch` renewal correctly: stop the heartbeat, decide by the DDL boundary, never reconnect to the new primary",
+              "description": null,
+              "orderIndex": 2,
+              "unitObjectiveNumber": 15
+            }
+          ],
+          "activities": [
+            {
+              "type": "READ",
+              "path": "unit-4-meets-your-application/topic-28-deployment-coordination/read.md"
+            },
+            {
+              "type": "FLASHCARDS",
+              "path": "unit-4-meets-your-application/topic-28-deployment-coordination/flashcards.md"
+            },
+            {
+              "type": "QUIZ",
+              "path": "unit-4-meets-your-application/topic-28-deployment-coordination/quiz.md"
+            }
+          ],
+          "flashcards": [
+            {
+              "front": "Which chart value turns on the deployment API, and what must already be on for it to work?",
+              "back": "`auxiliary.deployAPI.enabled`. It requires `auxiliary.escrowTLS.enabled` with a certificate Secret, because `/deploy/v1` is served only on the shared TLS listener on `:8443` — never on plain HTTP `8082`.",
+              "orderIndex": 0
+            },
+            {
+              "front": "What audience must a deployment client's projected ServiceAccount token carry?",
+              "back": "`bloodraven-deploy`. The operator validates the token with a TokenReview against that audience; the Kubernetes API's default audience is not accepted.",
+              "orderIndex": 1
+            },
+            {
+              "front": "Where does authorization for the deployment API live, and what is the lease's `instance`?",
+              "back": "On the `MysqlDatabase`: `spec.deploymentClients[]` lists one `namespace` + `serviceAccount` pair per namespace, and `spec.groupRef.name` names the group. `instance` is the `MysqlDatabase` resource name, not the SQL schema.",
+              "orderIndex": 2
+            },
+            {
+              "front": "Name the three things the deployment API refuses to do.",
+              "back": "It does not run migrations, it does not grant MySQL credentials, and it never delays emergency failover.",
+              "orderIndex": 3
+            },
+            {
+              "front": "A second pipeline POSTs a `migration` lease while one is held. What comes back?",
+              "back": "`409 held`, with the holder's `operationId`, `instance` and `expiresAt` — one migration lease per group, no exceptions.",
+              "orderIndex": 4
+            },
+            {
+              "front": "Who can be granted a `failover-hold`?",
+              "back": "Only the current `migration` holder, using the same `operationId` and `instance`. Anyone else gets `403`. Take `migration` first, then `failover-hold`.",
+              "orderIndex": 5
+            },
+            {
+              "front": "What is the TTL clamp, and how often should a client renew?",
+              "back": "`ttlSeconds` is clamped to `[5, 120]`. Renew each lease with `PUT` every `ttl/3`, and compare the returned `topologyGeneration` with the grant generation every time.",
+              "orderIndex": 6
+            },
+            {
+              "front": "What makes `stable=false` in a `GET` — and what does not?",
+              "back": "Any operation phase (including a planned failover in `Deferred`), Degraded, SplitBrain or NoPrimary, recovery pending, or replication not running. Replication lag alone does not; the lag threshold is the caller's policy.",
+              "orderIndex": 7
+            },
+            {
+              "front": "A planned failover is requested while a `failover-hold` is live. What does status show?",
+              "back": "`plannedFailover.phase: Deferred`, `reason: DeploymentHold`, `retryAfter` equal to the earliest hold expiry, and a message naming the blocking `operationId` and instance. The `retryAfter` moves with every hold renewal.",
+              "orderIndex": 8
+            },
+            {
+              "front": "Which paths never consult a deployment lease?",
+              "back": "Emergency failover, returning-old-primary fencing, and primary reassertion. A hold defers only planned failover, ordered update and restore-in-place; a `migration` lease alone defers nothing.",
+              "orderIndex": 9
+            },
+            {
+              "front": "What increments `status.topologyGeneration`, and what does a bump do to leases?",
+              "back": "Every authoritative active-site change — planned promotion, emergency failover, ordered-update failover, restore-in-place promotion, bootstrap completion. A bump revokes every lease in the group with `topology_changed` and raises a `DeploymentLeaseRevoked` event.",
+              "orderIndex": 10
+            },
+            {
+              "front": "How do you revoke every deployment lease by hand, and what must you never do instead?",
+              "back": "Annotate the group with `bloodraven.shipstream.io/revoke-deployment-leases`; renewals then report `operator_revoked`. Never delete the leader-election Lease or edit `topologyGeneration` to clear a hold.",
+              "orderIndex": 11
+            }
+          ],
+          "quiz": {
+            "questions": [
+              {
+                "question": "A migration is running under a live `failover-hold` when `iad`'s node dies. Three polls later the operator promotes `pdx`. What happened to the hold, and what does the pipeline see on its next `PUT`?",
+                "type": "MULTIPLE_CHOICE",
+                "orderIndex": 0,
+                "options": [
+                  "The hold deferred the promotion; the pipeline keeps renewing with `200` until it releases the hold, then `pdx` is promoted.",
+                  "The hold was not consulted; the promotion bumped `topologyGeneration` and revoked both leases, so the `PUT` returns `409 revoked` with reason `topology_changed`.",
+                  "The hold was honoured for its remaining TTL; when it expired the promotion ran and the `PUT` returns `404` because the lease had lapsed.",
+                  "The operator waited for `retryAfter`, then promoted; the `PUT` returns `423 unstable` until the pipeline re-POSTs the migration lease."
+                ],
+                "correctOptionIndex": 1,
+                "explanation": "Emergency failover never reads deployment leases — a hold that could pause it would let a stuck pipeline keep a dead primary in charge. The promotion increments `status.topologyGeneration`, which revokes every lease in the group with `topology_changed`, and the client learns it on the next heartbeat as `409 revoked`. (objectives 14, 15)"
+              },
+              {
+                "question": "A pipeline POSTs `failover-hold` first, then `migration`. The hold is refused with `403` and the migration is granted `201`. It POSTs the hold again and now gets `201`. This is the intended ordering: the hold can only be granted to the current migration holder.",
+                "type": "TRUE_FALSE",
+                "orderIndex": 1,
+                "correctAnswer": true,
+                "explanation": "A `failover-hold` is granted only to the operation that currently holds the `migration` mutex, with the same `operationId` and `instance`; any other caller is refused with `403`. The documented order is migration first, then hold. (objective 13)"
+              },
+              {
+                "question": "Your renewal loop gets `423 unstable` with `retryAfterSeconds` on a `PUT`, while the last confirmed `expiresAt` is 9 seconds away. What may the client do?",
+                "type": "MULTIPLE_CHOICE",
+                "orderIndex": 2,
+                "options": [
+                  "Treat it as a successful renewal and extend its local deadline by the requested TTL, since the lease was not revoked.",
+                  "Re-POST the migration lease for the same `operationId` to get a fresh 30-second grant and continue.",
+                  "Keep observing within the 9 seconds it already had confirmed, and stop if no `200` arrives before that deadline — the `423` never extends the deadline.",
+                  "Ignore it: `423` is advisory, and DDL already in progress can run to completion under the old token."
+                ],
+                "correctOptionIndex": 2,
+                "explanation": "A `423 unstable` on renewal is a transient refusal, not a renewal. It never permits work beyond the last confirmed deadline, so the client may only continue observing inside that window. Re-POSTing to bypass an uncertain state is exactly what the docs forbid. (objectives 13, 15)"
+              },
+              {
+                "question": "The pipeline's `PUT` returns `409 revoked` with `topologyGeneration: 18`. The migration's second `ALTER TABLE` of three had already run against `iad`. `pdx` is now writable and healthy. Argue what the pipeline does next.",
+                "type": "SHORT_ANSWER",
+                "orderIndex": 3,
+                "sampleAnswer": "Stop the heartbeat and do not reconnect to `pdx` to finish the remaining DDL — `pdx` being healthy says nothing about whether the partially applied change replicated intact or is safe to continue. Because DDL had started, stop all database writes from the deploy and require a human to verify the schema before any retry. Release the `failover-hold` now; release the `migration` mutex only after the deploy's failure state is recorded. A TTL is not an exactly-once DDL guarantee, and the tombstone means this `operationId` will be refused with `409` if it tries again.",
+                "graderNotes": "A strong answer covers: (1) `409 revoked` means lost authority — stop the heartbeat, never continue on the new primary; (2) the decision turns on the DDL boundary, and here DDL had started, so stop writes and require manual schema verification rather than the fenced abort; (3) a healthy new primary does not prove a half-applied migration is safe; (4) release the hold on the failure path and the mutex after the terminal state is recorded; (5) optionally, the revocation tombstone refuses a retry of the same operation.",
+                "explanation": "The fence is the generation, and losing it is terminal for that operation. Before DDL the client runs its fenced abort; at or after DDL it stops writing and hands the schema to a human. Reconnecting to the new primary to 'finish up' is the failure the API exists to prevent. (objective 15)"
+              },
+              {
+                "question": "During a deploy the operator pod is restarted. When the new leader comes up, is the pipeline's `failover-hold` still deferring the planned failover that was queued behind it?",
+                "type": "MULTIPLE_CHOICE",
+                "orderIndex": 4,
+                "options": [
+                  "No — leases live in operator memory, so the restart cleared them and the planned failover proceeds on the next reconcile.",
+                  "Yes, until its unrenewed TTL expires — leases are `coordination.k8s.io/Lease` objects in the API server, and an operator restart neither releases nor resets them.",
+                  "No — a restart increments `topologyGeneration`, which revokes every lease with `topology_changed`.",
+                  "Yes, but only if the pipeline re-POSTs the hold within `retryAfterSeconds`, because the new leader has no record of it."
+                ],
+                "correctOptionIndex": 1,
+                "explanation": "Deployment leases are durable Lease objects, separate from leader election; restarting the operator does not release or reset them, and `topologyGeneration` is a persisted count of active-site changes, not a restart counter. The hold keeps deferring until it expires on the operator's clock or is released. (objectives 13, 14)"
+              }
+            ]
+          }
         }
       ],
       "test": {
         "title": "The application's half of failover",
-        "description": "Quick check: can you say why a pooled connection keeps serving stale reads after a correct promotion, name the one path that actually drains connections, and read a `sessionsPreserved` of nil without guessing?",
+        "description": "Quick check: can you say why a pooled connection keeps serving stale reads after a correct promotion, name the one path that actually drains connections, and read a `sessionsPreserved` of nil without guessing, and say what a deployment hold defers and what it never touches?",
         "passingScore": 70,
         "questions": [
           {
@@ -3328,6 +3488,26 @@
             "orderIndex": 9,
             "correctAnswer": false,
             "explanation": "False — and the mechanism that prevents it is deliberate. The active Service AND-gates two labels the operator stamps on Dragonfly pods, `shipstream.io/dragonfly-role=master` and `shipstream.io/dragonfly-traffic=enabled`, and a pod is an endpoint only when both match. To shed an endpoint the operator *deletes* the traffic key rather than stamping some disabled value, because the selector is an exists-and-equals check on `enabled` and an absent key cannot match. The takeover strips the source's traffic key before it promotes the target and stamps the target's key only afterwards, so there is no instant at which both carry it; the steady-state label sweep honours the same window by skipping the source mid-takeover, since re-stamping it would re-attach the old master to the active Service — exactly the bug the strip prevents. Had the operator written `dragonfly-traffic=disabled` instead, correctness would depend on the selector and the writer agreeing about a magic string. Deletion needs no agreement. (objective 12)"
+          },
+          {
+            "question": "A pipeline holds a live `failover-hold` on `playground`. Which of these does the hold defer?",
+            "type": "MULTIPLE_CHOICE",
+            "orderIndex": 10,
+            "options": [
+              "Emergency failover after `iad` becomes unreachable, until the hold expires.",
+              "A planned failover triggered by the annotation, which lands in `Deferred` with reason `DeploymentHold`.",
+              "Returning-old-primary fencing when `iad` comes back writable.",
+              "Primary reassertion inside the anti-flap cooldown window."
+            ],
+            "correctOptionIndex": 1,
+            "explanation": "A hold defers planned disruption only — planned failover, ordered update and restore-in-place. Emergency failover, returning-primary fencing and primary reassertion never consult deployment leases. (objective 14)"
+          },
+          {
+            "question": "The deployment API's `migration` lease is one per group, and a second pipeline that asks while it is held receives `409 held` naming the current holder.",
+            "type": "TRUE_FALSE",
+            "orderIndex": 11,
+            "correctAnswer": true,
+            "explanation": "The migration lease is a group-wide mutex. A conflicting `POST` returns `409 held` with the holder's `operationId`, `instance` and `expiresAt`, so the second pipeline can wait for the right thing. (objective 13)"
           }
         ]
       },
