@@ -179,6 +179,16 @@ func (r *MysqlFailoverGroupReconciler) acceptPlannedFailoverAnnotation(ctx conte
 	}
 
 	now := time.Now()
+	if m := r.deploymentLeaseManager(); m != nil {
+		hold, leaseErr := m.BeginPlanned(ctx, fg, "PlannedFailover")
+		if leaseErr != nil {
+			return 0, leaseErr
+		}
+		if hold != nil {
+			return r.stampDeploymentHold(ctx, fg, req, hold)
+		}
+		defer m.EndPlanned(fg)
+	}
 	result, reason, err := validatePlannedFailoverRequest(fg, req, now, false)
 	switch result {
 	case PlannedFailoverSkip:
@@ -325,6 +335,16 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDeferredReconcile(ctx cont
 	}
 
 	now := time.Now()
+	if m := r.deploymentLeaseManager(); m != nil {
+		hold, leaseErr := m.BeginPlanned(ctx, fg, "PlannedFailover")
+		if leaseErr != nil {
+			return 0, leaseErr
+		}
+		if hold != nil {
+			return r.stampDeploymentHold(ctx, fg, req, hold)
+		}
+		defer m.EndPlanned(fg)
+	}
 	result, reason, err := validatePlannedFailoverRequest(fg, req, now, false)
 	switch result {
 	case PlannedFailoverAccept:
@@ -397,6 +417,16 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverValidating(ctx context.Con
 		req.MaxLagWait = cur.MaxLagWait.Duration
 	}
 
+	if m := r.deploymentLeaseManager(); m != nil {
+		hold, leaseErr := m.BeginPlanned(ctx, fg, "PlannedFailover")
+		if leaseErr != nil {
+			return 0, leaseErr
+		}
+		if hold != nil {
+			return r.stampDeploymentHold(ctx, fg, req, hold)
+		}
+		defer m.EndPlanned(fg)
+	}
 	result, reason, err := validatePlannedFailoverRequest(fg, req, time.Now(), true)
 	if result == PlannedFailoverSkip {
 		return r.plannedFailoverFail(ctx, fg, "AlreadyActive",
@@ -874,15 +904,23 @@ func (r *MysqlFailoverGroupReconciler) patchFailoverTrackingFields(ctx context.C
 		if err := r.Get(ctx, nn, &fresh); err != nil {
 			return err
 		}
-		patch := client.MergeFrom(fresh.DeepCopy())
 		t := now
 		fresh.Status.LastFailover = &t
 		fresh.Status.LastFailoverTarget = target
+		if fresh.Status.ActiveSite != target {
+			fresh.Status.TopologyGeneration++
+		}
 		fresh.Status.ActiveSite = target
 		if promotionGtid != "" {
 			fresh.Status.PromotionGtidExecuted = promotionGtid
 		}
-		return r.Status().Patch(ctx, &fresh, patch)
+		if err := r.Status().Update(ctx, &fresh); err != nil {
+			return err
+		}
+		if r.Runner != nil {
+			r.Runner.hydrateDeploymentGeneration(&fresh)
+		}
+		return nil
 	})
 }
 

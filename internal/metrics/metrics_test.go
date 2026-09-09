@@ -1,11 +1,59 @@
 package metrics
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
+
+func TestDeploymentMetricsContract(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	Register(reg)
+	groupKind := map[string]string{"group": "deploy-test", "kind": "migration"}
+	tests := []struct {
+		name    string
+		gauge   *prometheus.GaugeVec
+		counter *prometheus.CounterVec
+		labels  map[string]string
+	}{
+		{"bloodraven_deploy_leases_active", DeployLeasesActive, nil, groupKind},
+		{"bloodraven_deploy_lease_grants_total", nil, DeployLeaseGrantsTotal, map[string]string{"group": "deploy-test", "kind": "migration", "result": "granted"}},
+		{"bloodraven_deploy_lease_expirations_total", nil, DeployLeaseExpirationsTotal, groupKind},
+		{"bloodraven_deploy_lease_revocations_total", nil, DeployLeaseRevocationsTotal, map[string]string{"group": "deploy-test", "kind": "migration", "reason": "topology_changed"}},
+		{"bloodraven_deploy_lease_age_seconds", DeployLeaseAgeSeconds, nil, groupKind},
+		{"bloodraven_planned_failovers_deferred_total", nil, PlannedFailoversDeferredTotal, map[string]string{"group": "deploy-test", "reason": "DeploymentHold"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wantType := dto.MetricType_COUNTER
+			if tt.gauge != nil {
+				wantType = dto.MetricType_GAUGE
+				tt.gauge.With(tt.labels).Set(7)
+				t.Cleanup(func() { tt.gauge.Delete(tt.labels) })
+			} else {
+				tt.counter.With(tt.labels).Add(7)
+				t.Cleanup(func() { tt.counter.Delete(tt.labels) })
+			}
+			family := gatherOne(t, reg, tt.name)
+			if family.GetType() != wantType || len(family.Metric) != 1 {
+				t.Fatalf("family = %v, want one %s series", family, wantType)
+			}
+			m := family.Metric[0]
+			if got := labelMap(m); !reflect.DeepEqual(got, tt.labels) {
+				t.Fatalf("labels = %v, want %v", got, tt.labels)
+			}
+			value := m.GetCounter().GetValue()
+			if tt.gauge != nil {
+				value = m.GetGauge().GetValue()
+			}
+			if value != 7 {
+				t.Fatalf("value = %v, want 7", value)
+			}
+		})
+	}
+}
 
 func TestReplicationSourceStateSeparatesFailoverGroups(t *testing.T) {
 	reg := prometheus.NewRegistry()

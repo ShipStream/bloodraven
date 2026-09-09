@@ -151,7 +151,12 @@ const (
 // event when something is wrong. The reason string is a short machine-
 // readable tag ("UnknownSite", "CooldownActive", ...) that the state
 // machine stamps into status.plannedFailover.reason.
-func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, now time.Time, allowCurrentRun bool) (PlannedFailoverValidationResult, string, error) {
+func validatePlannedFailoverRequest(fg *v1alpha1.MysqlFailoverGroup, req PlannedFailoverRequest, now time.Time, allowCurrentRun bool, holds ...*DeploymentLeaseView) (PlannedFailoverValidationResult, string, error) {
+	for _, hold := range holds {
+		if hold != nil && !now.After(hold.ExpiresAt) {
+			return PlannedFailoverReject, "DeploymentHold", fmt.Errorf("planned-failover held by operation %s instance %s until %s", hold.OperationID, hold.Instance, hold.ExpiresAt.UTC().Format(time.RFC3339))
+		}
+	}
 	if req.Site == "" {
 		return PlannedFailoverReject, "InvalidAnnotation", fmt.Errorf(
 			"planned-failover annotation is empty; expected <site>[:maxLagWait=<duration>]")

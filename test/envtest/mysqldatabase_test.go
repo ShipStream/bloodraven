@@ -401,8 +401,9 @@ func TestMysqlDatabase_EnvtestAcceptsFullAllowlist(t *testing.T) {
 
 	cr := newMysqlDatabaseCR(ns, "tenant-allowlist")
 	cr.Spec.Owner.Privileges = privs
+	cr.Spec.Users = []v1alpha1.MysqlDatabaseUser{{SecretName: "app-mysql", Privileges: privs}}
 	cr.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
-		{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect, v1alpha1.PrivilegeDelete}},
+		{Username: "maester", Privileges: privs},
 		{Username: "reporting", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAllPrivileges}},
 	}
 

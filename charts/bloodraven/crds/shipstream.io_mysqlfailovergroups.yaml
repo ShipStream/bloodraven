@@ -7483,6 +7483,13 @@ spec:
                       type: string
                   type: object
                 type: array
+              topologyGeneration:
+                description: |-
+                  TopologyGeneration increments whenever the authoritative active site changes
+                  and persists across operator restarts to fence deployment leases.
+                format: int64
+                minimum: 0
+                type: integer
               updatePhase:
                 description: UpdatePhase indicates the current phase of an ordered
                   update, empty if not updating.

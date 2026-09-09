@@ -169,6 +169,7 @@ type dragonflyRolloutState struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=shipstream.io,resources=mysqlbackups,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
 // Leader-election lease. The operator runs a single-replica deployment
 // today but still uses leader election so a fresh pod doesn't step on
 // a not-yet-drained predecessor. Without this marker,
@@ -208,6 +209,12 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 		}
 		return ctrl.Result{}, nil
+	}
+
+	if m := r.deploymentLeaseManager(); m != nil {
+		if err := m.reconcileRevocation(ctx, &fg); err != nil {
+			return ctrl.Result{}, fmt.Errorf("revoke deployment leases: %w", err)
+		}
 	}
 
 	// Push hostname/TTL before any later early return so a DNS rename is

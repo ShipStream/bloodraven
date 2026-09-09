@@ -69,6 +69,8 @@ var canonicalPrivileges = []struct {
 	{PrivilegeUpdate, "UPDATE"},
 	{PrivilegeDelete, "DELETE"},
 	{PrivilegeCreate, "CREATE"},
+	{PrivilegeCreateTemporaryTables, "CREATE TEMPORARY TABLES"},
+	{PrivilegeCreateView, "CREATE VIEW"},
 	{PrivilegeDrop, "DROP"},
 	{PrivilegeAlter, "ALTER"},
 	{PrivilegeIndex, "INDEX"},

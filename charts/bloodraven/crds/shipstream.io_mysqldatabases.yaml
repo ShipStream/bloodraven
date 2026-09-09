@@ -164,6 +164,36 @@ spec:
                 - Retain
                 - Delete
                 type: string
+              deploymentClients:
+                description: |-
+                  DeploymentClients authorizes ServiceAccounts to use the deployment
+                  companion API for this database. Each namespace has one client.
+                items:
+                  description: DeploymentClient identifies a ServiceAccount allowed
+                    to deploy this database.
+                  properties:
+                    namespace:
+                      description: Namespace is the ServiceAccount's Kubernetes namespace
+                        (a DNS label).
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    serviceAccount:
+                      description: ServiceAccount is a Kubernetes ServiceAccount name
+                        (a DNS subdomain).
+                      maxLength: 253
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                  required:
+                  - namespace
+                  - serviceAccount
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - namespace
+                x-kubernetes-list-type: map
               grants:
                 description: |-
                   Grants are additional, already-existing principals to grant on this
@@ -203,6 +233,8 @@ spec:
                         - UPDATE
                         - DELETE
                         - CREATE
+                        - CREATE TEMPORARY TABLES
+                        - CREATE VIEW
                         - DROP
                         - ALTER
                         - INDEX
@@ -214,7 +246,7 @@ spec:
                         - EXECUTE
                         maxLength: 32
                         type: string
-                      maxItems: 15
+                      maxItems: 17
                       minItems: 1
                       type: array
                       x-kubernetes-list-type: atomic
@@ -329,6 +361,8 @@ spec:
                       - UPDATE
                       - DELETE
                       - CREATE
+                      - CREATE TEMPORARY TABLES
+                      - CREATE VIEW
                       - DROP
                       - ALTER
                       - INDEX
@@ -340,7 +374,7 @@ spec:
                       - EXECUTE
                       maxLength: 32
                       type: string
-                    maxItems: 15
+                    maxItems: 17
                     minItems: 1
                     type: array
                     x-kubernetes-list-type: atomic
@@ -427,6 +461,8 @@ spec:
                         - UPDATE
                         - DELETE
                         - CREATE
+                        - CREATE TEMPORARY TABLES
+                        - CREATE VIEW
                         - DROP
                         - ALTER
                         - INDEX
@@ -438,7 +474,7 @@ spec:
                         - EXECUTE
                         maxLength: 32
                         type: string
-                      maxItems: 15
+                      maxItems: 17
                       minItems: 1
                       type: array
                       x-kubernetes-list-type: atomic

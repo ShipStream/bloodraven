@@ -77,7 +77,7 @@ type MysqlDatabaseList struct {
 // and produces a better error message than an equivalent CEL rule. The CEL
 // rules on MysqlDatabaseSpec cover only what an enum cannot — composition
 // constraints between entries.
-// +kubebuilder:validation:Enum="ALL PRIVILEGES";SELECT;INSERT;UPDATE;DELETE;CREATE;DROP;ALTER;INDEX;REFERENCES;"LOCK TABLES";"SHOW VIEW";TRIGGER;EVENT;EXECUTE
+// +kubebuilder:validation:Enum="ALL PRIVILEGES";SELECT;INSERT;UPDATE;DELETE;CREATE;"CREATE TEMPORARY TABLES";"CREATE VIEW";DROP;ALTER;INDEX;REFERENCES;"LOCK TABLES";"SHOW VIEW";TRIGGER;EVENT;EXECUTE
 // +kubebuilder:validation:MaxLength=32
 type MysqlPrivilege string
 
@@ -96,6 +96,10 @@ const (
 	PrivilegeDelete MysqlPrivilege = "DELETE"
 	// PrivilegeCreate is CREATE.
 	PrivilegeCreate MysqlPrivilege = "CREATE"
+	// PrivilegeCreateTemporaryTables is CREATE TEMPORARY TABLES.
+	PrivilegeCreateTemporaryTables MysqlPrivilege = "CREATE TEMPORARY TABLES"
+	// PrivilegeCreateView is CREATE VIEW.
+	PrivilegeCreateView MysqlPrivilege = "CREATE VIEW"
 	// PrivilegeDrop is DROP.
 	PrivilegeDrop MysqlPrivilege = "DROP"
 	// PrivilegeAlter is ALTER.
@@ -115,6 +119,21 @@ const (
 	// PrivilegeExecute is EXECUTE.
 	PrivilegeExecute MysqlPrivilege = "EXECUTE"
 )
+
+// DeploymentClient identifies a ServiceAccount allowed to deploy this database.
+type DeploymentClient struct {
+	// Namespace is the ServiceAccount's Kubernetes namespace (a DNS label).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Namespace string `json:"namespace"`
+
+	// ServiceAccount is a Kubernetes ServiceAccount name (a DNS subdomain).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	ServiceAccount string `json:"serviceAccount"`
+}
 
 // MysqlDatabaseDeletionPolicy controls what happens in MySQL when the CR is
 // deleted.
@@ -164,6 +183,13 @@ type MysqlDatabaseSpec struct {
 	// wrong MySQL. Changing groups is a migration, not a spec edit.
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.groupRef is immutable; moving a database between groups is a migration, not a spec edit"
 	GroupRef LocalGroupRef `json:"groupRef"`
+
+	// DeploymentClients authorizes ServiceAccounts to use the deployment
+	// companion API for this database. Each namespace has one client.
+	// +optional
+	// +listType=map
+	// +listMapKey=namespace
+	DeploymentClients []DeploymentClient `json:"deploymentClients,omitempty"`
 
 	// DatabaseName is the MySQL schema name to create.
 	//
@@ -275,7 +301,7 @@ type MysqlDatabaseOwner struct {
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=15
+	// +kubebuilder:validation:MaxItems=17
 	Privileges []MysqlPrivilege `json:"privileges,omitempty"`
 
 	// Hosts restricts where the owner may connect from: the MySQL host
@@ -321,7 +347,7 @@ type MysqlDatabaseUser struct {
 	// consumer of users[] is a SELECT-only reader. Widening the allowlist
 	// later is compatible; narrowing it would not be.
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=15
+	// +kubebuilder:validation:MaxItems=17
 	// +listType=atomic
 	Privileges []MysqlPrivilege `json:"privileges"`
 
@@ -384,7 +410,7 @@ type MysqlDatabaseGrant struct {
 
 	// Privileges granted to this user ON <databaseName>.*.
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=15
+	// +kubebuilder:validation:MaxItems=17
 	// +listType=atomic
 	Privileges []MysqlPrivilege `json:"privileges"`
 }

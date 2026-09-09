@@ -160,6 +160,9 @@ const (
 // It is passed to the StatusCallback after each poll cycle that
 // produces a state change.
 type TopologySnapshot struct {
+	TopologyGeneration   int64
+	DeploymentEpoch      uint64
+	DeploymentActiveSite string
 	// Sites is the per-site snapshot, parallel to cfg.Sites.
 	Sites []SiteSnapshot
 
@@ -261,13 +264,21 @@ func (tm *TopologyManager) siteMetricsHalted() bool {
 
 // TopologyManager is the main control loop.
 type TopologyManager struct {
-	cfg     TopologyConfig
-	sites   []siteTracker
-	tainter platform.NodeTainter
-	hub     *platform.Hub
-	dns     platform.DNSUpdater
-	logger  *slog.Logger
-	clock   clock.Clock
+	deploymentLeases              *DeploymentLeaseManager
+	topologyGeneration            int64
+	deploymentActiveSite          string
+	deploymentEpoch               uint64
+	deploymentChanging            int
+	deploymentUpdatePending       bool
+	deploymentUpdateRunning       bool
+	deploymentAwaitingObservation bool
+	cfg                           TopologyConfig
+	sites                         []siteTracker
+	tainter                       platform.NodeTainter
+	hub                           *platform.Hub
+	dns                           platform.DNSUpdater
+	logger                        *slog.Logger
+	clock                         clock.Clock
 
 	// Failover orchestration.
 	failover           *FailoverController
@@ -637,6 +648,7 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 
 	tm.mu.Lock()
 	tm.authorityEpoch++
+	tm.deploymentAuthorityLocked(target)
 	tm.promotionGtidExecuted = promotionGtid
 	tm.promotedSite = target
 	tm.promotedAt = now
@@ -1051,6 +1063,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		tm.mu.Unlock()
 		return
 	}
+	if tm.deploymentChanging == 0 {
+		tm.deploymentAwaitingObservation = false
+	}
 	prevStates := make([]state.SiteState, len(tm.sites))
 	for i := range tm.sites {
 		if results[i].err == nil {
@@ -1288,13 +1303,40 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	statusChanged := anyTransition || blockedSetChanged || fencedNonPromotable || fencedOldPrimary || replicationChanged || convergenceChanged || recoveryChanged || recloneStarted || autoCloneStarted || updateStarted || reasserted
 	if (statusChanged || statusRetry) && tm.StatusCallback != nil {
 		var snapshot TopologySnapshot
+		haveSnapshot := false
 		if statusRetry && !statusChanged {
 			tm.mu.RLock()
 			if tm.statusRetrySnapshot != nil {
 				snapshot = *tm.statusRetrySnapshot
+				haveSnapshot = true
+				if tm.topologyGeneration > snapshot.TopologyGeneration && tm.deploymentActiveSite != "" {
+					snapshot.ActiveSite = tm.deploymentActiveSite
+					snapshot.LastFailover = tm.lastFailover
+					snapshot.LastFailoverTarget = tm.lastFailoverTarget
+					snapshot.PromotionGtidExecuted = tm.promotionGtidExecuted
+				}
+				snapshot.TopologyGeneration = tm.topologyGeneration
+				snapshot.DeploymentEpoch = tm.deploymentEpoch
+				if tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation {
+					snapshot.DeploymentEpoch = 0
+				}
+				snapshot.DeploymentActiveSite = tm.deploymentActiveSite
+				// Keep topology evidence for retries, but never replay a phase
+				// superseded by an asynchronous operation-completion callback.
+				snapshot.UpdatePhase = ""
+				if tm.updater != nil {
+					snapshot.UpdatePhase = string(tm.updater.Phase())
+				}
+				snapshot.BootstrapPhase = string(tm.bootstrapPhase)
+				snapshot.BootstrapSource = tm.bootstrapSource
+				snapshot.BootstrapError = ""
+				if tm.bootstrapErr != nil {
+					snapshot.BootstrapError = tm.bootstrapErr.Error()
+				}
 			}
 			tm.mu.RUnlock()
-		} else {
+		}
+		if !haveSnapshot {
 			snapshot = tm.buildSnapshot(siteRepl)
 		}
 		tm.mu.Lock()
@@ -1574,8 +1616,11 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 	// trackers every time so those callbacks cannot clear persistent alerts.
 	action := state.EvalCrossSite(tm.observations(), tm.cfg.SitePriorities)
 	alert, degradedReason := action.Alert, action.Reason
-	tm.mu.RLock()
-	defer tm.mu.RUnlock()
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tm.deploymentChanging == 0 && !tm.deploymentAwaitingObservation {
+		tm.deploymentAuthorityLocked(tm.desiredDNSSiteLocked())
+	}
 
 	sites := make([]SiteSnapshot, len(tm.sites))
 	for i := range tm.sites {
@@ -1610,6 +1655,9 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 	}
 
 	snap := TopologySnapshot{
+		TopologyGeneration:      tm.topologyGeneration,
+		DeploymentEpoch:         tm.deploymentEpoch,
+		DeploymentActiveSite:    tm.deploymentActiveSite,
 		Sites:                   sites,
 		ActiveSite:              tm.activeSiteLocked(),
 		LastFailover:            tm.lastFailover,
@@ -1622,6 +1670,9 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		PromotionGtidExecuted:   tm.promotionGtidExecuted,
 		KeyringPromotionSkipped: append([]string(nil), tm.keyringPromotionSkipped...),
 		KeyringPromotionRefused: append([]string(nil), tm.keyringPromotionRefused...),
+	}
+	if tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation {
+		snap.DeploymentEpoch = 0
 	}
 	// Summarize one recovering site into the top-level fields for condition
 	// messages and event emission. A RecoveryBlocked site wins over a
@@ -1994,12 +2045,17 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 
 		tm.logger.Info("initiating failover", "candidate", candidate.name, "oldPrimary", oldPrimaryName)
+		if !tm.beginDeploymentTopologyChange() {
+			return
+		}
+		defer tm.finishDeploymentTopologyChange()
 
 		promotionGtid, err := tm.failover.Execute(ctx, candidate.mysql, oldPrimaryChecker, candidate.name)
 		if err != nil {
 			tm.logger.Error("failover failed", "error", err)
 			return
 		}
+		tm.deploymentPromotionExecuted(candidate.name)
 		if err := tm.confirmWritable(ctx, candidate); err != nil {
 			tm.logger.Error("promotion succeeded but writable confirmation failed; DNS not flipped",
 				"site", candidate.name, "error", err)
@@ -2500,10 +2556,15 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 		}
 	}
 
+	if !tm.beginDeploymentTopologyChange() {
+		return "", fmt.Errorf("topology change already in progress")
+	}
+	defer tm.finishDeploymentTopologyChange()
 	promotionGtid, err := tm.failover.Execute(ctx, targetSite.mysql, sourceChecker, target)
 	if err != nil {
 		return "", err
 	}
+	tm.deploymentPromotionExecuted(target)
 	if err := tm.confirmWritable(ctx, targetSite); err != nil {
 		return "", fmt.Errorf("promotion succeeded but writable confirmation failed: %w", err)
 	}
@@ -2654,7 +2715,10 @@ func (tm *TopologyManager) cloningReaderSite() string {
 
 // isUpdating reports whether an ordered update is currently running.
 func (tm *TopologyManager) isUpdating() bool {
-	return tm.updater != nil && tm.updater.IsUpdating()
+	tm.mu.RLock()
+	running := tm.deploymentUpdateRunning
+	tm.mu.RUnlock()
+	return running || tm.updater != nil && tm.updater.IsUpdating()
 }
 
 // checkUpdate detects spec drift and triggers an ordered rolling
@@ -2673,6 +2737,7 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 
 	tm.mu.RLock()
 	activeName := tm.activeSiteLocked()
+	updateAuthorityEpoch := tm.authorityEpoch
 	driftSites := append([]string(nil), tm.specDriftSites...)
 	tm.mu.RUnlock()
 	if activeName == "" {
@@ -2757,9 +2822,46 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 
 	tm.logger.Info("ordered update: spec drift detected, starting ordered update",
 		"driftSites", driftSites, "active", activeName)
+	tm.mu.Lock()
+	if tm.deploymentUpdatePending {
+		tm.mu.Unlock()
+		return false
+	}
+	tm.deploymentUpdatePending = true
+	tm.mu.Unlock()
 
 	applyUpdate := tm.ApplyUpdate
 	go func() {
+		defer func() {
+			tm.mu.Lock()
+			tm.deploymentUpdatePending = false
+			tm.mu.Unlock()
+		}()
+		// Lease admission may wait for the API server, but the emergency poll
+		// loop must remain free to observe a primary failure in the meantime.
+		endDeploymentUpdate, allowed := tm.beginDeploymentUpdate(ctx)
+		if !allowed {
+			return
+		}
+		defer endDeploymentUpdate()
+		tm.mu.Lock()
+		if ctx.Err() != nil || tm.authorityEpoch != updateAuthorityEpoch || tm.activeSiteLocked() != activeName || tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation || tm.topologyFrozen || tm.plannedFailoverActive || !bootstrapIdlePhase(tm.bootstrapPhase) {
+			tm.mu.Unlock()
+			return
+		}
+		// Claim the MySQL mutation window only after slow lease admission. An
+		// emergency that ran while admission waited invalidates this plan.
+		tm.deploymentUpdateRunning = true
+		tm.deploymentChanging++
+		tm.authorityEpoch++
+		tm.deploymentTopologyPendingLocked()
+		tm.mu.Unlock()
+		defer func() {
+			tm.finishDeploymentTopologyChange()
+			tm.mu.Lock()
+			tm.deploymentUpdateRunning = false
+			tm.mu.Unlock()
+		}()
 		processed, err := tm.updater.ExecuteTargets(ctx, active, followers, applyUpdate, func(target, promotionGTID string) {
 			targetSite := tm.getSite(target)
 			tm.recordFailover(ctx, tm.clock.Now(), target, promotionGTID)
@@ -3679,6 +3781,10 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	tm.logger.Warn("re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability",
 		"site", target)
 
+	if !tm.beginDeploymentTopologyChange() {
+		return false
+	}
+	defer tm.finishDeploymentTopologyChange()
 	if err := targetSite.mysql.SetSuperReadOnly(ctx, false); err != nil {
 		tm.logger.Error("primary re-assert: failed to clear super_read_only", "site", target, "error", err)
 		return true
@@ -3687,6 +3793,7 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		tm.logger.Error("primary re-assert: failed to clear read_only", "site", target, "error", err)
 		return true
 	}
+	tm.deploymentPromotionExecuted(target)
 	if err := tm.confirmWritable(ctx, targetSite); err != nil {
 		tm.logger.Error("primary re-assert: writable confirmation failed", "site", target, "error", err)
 		return true

@@ -75,18 +75,20 @@ type DeploymentReconciler interface {
 // TopologyManagerRunner manages TopologyManager instances for all MysqlFailoverGroup resources.
 // It implements manager.Runnable and runs only on the leader-elected instance.
 type TopologyManagerRunner struct {
-	client    client.Client
-	clientset kubernetes.Interface
-	hub       *platform.Hub
-	recorder  record.EventRecorder
-	logger    *slog.Logger
+	deploymentLeases *DeploymentLeaseManager
+	client           client.Client
+	clientset        kubernetes.Interface
+	hub              *platform.Hub
+	recorder         record.EventRecorder
+	logger           *slog.Logger
 
 	// deployReconciler is set after the reconciler is created (circular dependency).
 	// Used by the ordered update callback to reconcile a single site's Deployment.
 	deployReconciler DeploymentReconciler
 
-	mu       sync.RWMutex
-	managers map[types.NamespacedName]*managedTopology
+	mu            sync.RWMutex
+	leaderContext context.Context
+	managers      map[types.NamespacedName]*managedTopology
 }
 
 // NewTopologyManagerRunner creates a new runner.
@@ -274,7 +276,13 @@ func (r *TopologyManagerRunner) NeedLeaderElection() bool {
 // Start implements manager.Runnable. It discovers MysqlFailoverGroup resources,
 // starts a TopologyManager per group, and re-syncs periodically.
 func (r *TopologyManagerRunner) Start(ctx context.Context) error {
+	r.mu.Lock()
+	r.leaderContext = ctx
+	r.mu.Unlock()
 	r.logger.Info("topology manager runner starting")
+	if r.deploymentLeases != nil {
+		go r.deploymentLeases.run(ctx, r.logger)
+	}
 
 	// Initial sync.
 	if err := r.sync(ctx); err != nil {
@@ -384,7 +392,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		r.mu.RUnlock()
 
 		suppress := restoreInFlight(fg)
-		frozen := inPlaceRestoreInFlight(fg)
+		frozen := inPlaceRestoreFreezesTopology(fg)
 		plannedActive := plannedFailoverInFlight(fg.Status.PlannedFailover)
 
 		if ok && existing.cfg.Equal(cfg) {
@@ -715,13 +723,22 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 			"fg", nn, "site", site.Name, "divergentGtid", site.DivergentGtid, "divergentTransactionCount", count)
 	}
 
+	tmCtx, cancel := context.WithCancel(ctx)
 	// Set the status callback to update the CR status subresource on state
 	// changes. Feed the write result back to the manager so a rejected
 	// /status write (e.g. RBAC-denied mid-failover) arms a per-poll retry
 	// that self-heals once the write is permitted again.
 	tm.StatusCallback = func(snap TopologySnapshot) {
-		err := r.updateCRStatus(ctx, nn, snap)
-		tm.MarkStatusWriteResult(err)
+		r.mu.RLock()
+		current := r.managers[nn]
+		r.mu.RUnlock()
+		if current == nil || current.tm != tm {
+			return
+		}
+		err := r.updateCRStatus(tmCtx, nn, snap)
+		tm.mu.Lock()
+		tm.statusWriteFailed = err != nil || tm.deploymentEpoch != snap.DeploymentEpoch || tm.topologyGeneration != snap.TopologyGeneration
+		tm.mu.Unlock()
 	}
 	// BootstrapStatusCallback updates only the Bootstrapping condition so that
 	// unrelated conditions set by the most recent Poll cycle (Degraded,
@@ -764,8 +781,6 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 			dfMgrLocal.TryEmergencyPromote(emCtx, target, oldPrimary)
 		}
 	}
-
-	tmCtx, cancel := context.WithCancel(ctx)
 
 	siteNames := make([]string, len(fg.Spec.Sites))
 	for i, s := range fg.Spec.Sites {
@@ -823,6 +838,12 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 // status is exactly the CooldownViolated(restart) window the simulator
 // reproduces.
 func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) {
+	tm.deploymentLeases = r.deploymentLeases
+	tm.topologyGeneration = fg.Status.TopologyGeneration
+	tm.deploymentActiveSite = fg.Status.ActiveSite
+	if tm.deploymentLeases != nil {
+		tm.deploymentTopologyPending()
+	}
 	// Wire the store before anything can promote. The annotations it writes
 	// are the second durable copy of the record below, on an API path that
 	// fails independently of the status subresource.
@@ -873,6 +894,12 @@ func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1
 		} else {
 			r.logger.Info("restored lastFailover from CR status", "fg", nn.String(), "lastFailover", failoverRecord.LastFailover)
 		}
+	}
+	if fromAnnotations && failoverRecord != statusRecord {
+		// A promotion survived in annotations but its generation did not reach
+		// /status. Invalidate old leases even if authority returned to the same site.
+		tm.topologyGeneration++
+		tm.deploymentActiveSite = failoverRecord.LastFailoverTarget
 	}
 }
 
@@ -979,6 +1006,7 @@ func stopManagedTopologyWait(mt *managedTopology, wait time.Duration) {
 		return
 	}
 	if mt.tm != nil {
+		mt.tm.deploymentTopologyPending()
 		mt.tm.HaltSiteMetrics()
 	}
 	if mt.cancel != nil {
@@ -1018,8 +1046,16 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	// Save existing status before modification for comparison.
 	existingStatus := freshFG.Status.DeepCopy()
+	if snap.TopologyGeneration < freshFG.Status.TopologyGeneration {
+		r.hydrateDeploymentGeneration(&freshFG)
+		return nil
+	}
 
 	freshFG.Status.ActiveSite = snap.ActiveSite
+	if snap.TopologyGeneration > freshFG.Status.TopologyGeneration && snap.DeploymentActiveSite != "" {
+		freshFG.Status.ActiveSite = snap.DeploymentActiveSite
+	}
+	freshFG.Status.TopologyGeneration = snap.TopologyGeneration
 	// Ensure the Sites slice is allocated to match the number of sites.
 	if len(freshFG.Status.Sites) != len(snap.Sites) {
 		freshFG.Status.Sites = make([]v1alpha1.SiteStatus, len(snap.Sites))
@@ -1135,7 +1171,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				Message:            fmt.Sprintf("Replication IO/SQL thread not running on %s", siteName),
 			})
 		}
-		if repl.SecondsBehindSource != nil && *repl.SecondsBehindSource > maxLagSeconds {
+		degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, "Degraded")
+		if repl.SecondsBehindSource != nil && *repl.SecondsBehindSource > maxLagSeconds &&
+			(degraded == nil || degraded.Status != metav1.ConditionTrue || degraded.Reason == "ReplicationLagging") {
 			setCondition(&freshFG.Status.Conditions, metav1.Condition{
 				Type:               "Degraded",
 				Status:             metav1.ConditionTrue,
@@ -1225,14 +1263,23 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	if equality.Semantic.DeepEqual(existingStatus, &freshFG.Status) {
 		r.logger.Debug("status unchanged, skipping update", "fg", nn)
 		r.emitKeyringPromotionEvents(&freshFG, snap)
+		if r.deploymentLeases != nil {
+			r.deploymentLeases.confirmTopology(&freshFG, snap.DeploymentEpoch)
+		}
 		return nil
 	}
 
+	superseded := false
 	if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		// Re-fetch the CR to get the latest resource version.
 		var fresh v1alpha1.MysqlFailoverGroup
 		if err := r.client.Get(ctx, nn, &fresh); err != nil {
 			return err
+		}
+		if fresh.Status.TopologyGeneration > snap.TopologyGeneration {
+			superseded = true
+			r.hydrateDeploymentGeneration(&fresh)
+			return nil
 		}
 		// Apply status changes to the freshly-fetched object.
 		//
@@ -1250,7 +1297,13 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		encryption := fresh.Status.EncryptionAtRest
 		encryptionCond := apimeta.FindStatusCondition(fresh.Status.Conditions, conditionEncryptionReady)
 		dragonfly := fresh.Status.Dragonfly
+		planned := fresh.Status.PlannedFailover
+		initialRestore := fresh.Status.Restore
+		restore := fresh.Status.RestoreInPlace
 		fresh.Status = freshFG.Status
+		fresh.Status.PlannedFailover = planned
+		fresh.Status.Restore = initialRestore
+		fresh.Status.RestoreInPlace = restore
 		fresh.Status.EncryptionAtRest = encryption
 		fresh.Status.Dragonfly = dragonfly
 		if encryptionCond != nil {
@@ -1258,7 +1311,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		} else {
 			removeCondition(&fresh.Status.Conditions, conditionEncryptionReady)
 		}
-		return r.client.Status().Update(ctx, &fresh)
+		if err := r.client.Status().Update(ctx, &fresh); err != nil {
+			return err
+		}
+		freshFG = fresh
+		return nil
 	}); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.logger.Warn("CR deleted during status update, skipping", "fg", nn)
@@ -1270,9 +1327,15 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	// Emit Kubernetes Events only after the status update succeeds,
 	// so events are not emitted for transitions that failed to persist.
+	if superseded {
+		return nil
+	}
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
 	r.emitKeyringPromotionEvents(&freshFG, snap)
 	r.emitDegradedTransitionEvents(&freshFG, nn, snap)
+	if r.deploymentLeases != nil {
+		r.deploymentLeases.confirmTopology(&freshFG, snap.DeploymentEpoch)
+	}
 	return nil
 }
 
