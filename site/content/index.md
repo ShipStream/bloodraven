@@ -341,6 +341,47 @@ df-steps:
 ---
 ::
 
+::home-deploy
+---
+id: deploy
+kicker: Deployment API · /deploy/v1
+title: Migrations that know
+title-two: the ground moved.
+lede: >-
+  A deploy pipeline asks Bloodraven for a lease before it touches the schema. The lease
+  serializes migrations across the group, holds planned failovers still while it is
+  renewed, and is revoked the instant the topology generation changes — so a migration
+  can never keep running on a primary it did not start on.
+link-label: Read the deployment API reference
+link-to: /docs/configuration/deployment-api
+points:
+  - token: MUTEX
+    title: One migration per group
+    description: >-
+      A second deploy gets 409 held with the holder's operation ID and expiry. Two
+      pipelines cannot race the same schema, and a crashed one stops blocking when its
+      TTL lapses.
+  - token: HOLD
+    title: Planned disruption waits
+    description: >-
+      A renewed failover-hold defers planned promotion, ordered updates and
+      restore-in-place with phase Deferred and reason DeploymentHold. It never delays
+      emergency failover or primary fencing.
+  - token: FENCE
+    title: Revoked, not reconnected
+    description: >-
+      Every lease is stamped with topologyGeneration. Any authoritative site change bumps
+      it and the next renewal returns 409 revoked, so the client stops instead of
+      continuing DDL against the new primary.
+  - token: RBAC
+    title: No cluster-admin for CI
+    description: >-
+      Callers authenticate with a projected ServiceAccount token and are authorized from
+      MysqlDatabase.spec.deploymentClients. No permission to patch the group, no Secrets,
+      no MySQL credentials, TLS only.
+---
+::
+
 ::home-proof
 ---
 # Target of the header's "Proof" nav link.
