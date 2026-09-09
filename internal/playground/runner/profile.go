@@ -65,6 +65,8 @@ var releaseScenarios = map[string]bool{
 	"41-reader-availability-during-failover": true, // reader keeps serving through unplanned failover, then repoints
 	"43-writable-reader-fence":               true, // writable reader fenced, rejected as target, blocked on divergence
 	"44-reader-source-convergence-invariant": true, // wrong-source reader heals as a poll-loop invariant
+	"53-deployment-hold-expiry":              true, // planned hold deferral and TTL recovery
+	"55-deployment-emergency-revocation":     true, // emergency bypass and live lease revocation
 }
 
 // Profiles returns the list of valid profile names for CLI help and

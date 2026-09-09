@@ -43,6 +43,36 @@ func TestNormalizeFenceDurations(t *testing.T) {
 	}
 }
 
+func TestFencingEffectiveTimeoutBeforeDNSExpiry(t *testing.T) {
+	for _, tt := range []struct {
+		name, lease, peer string
+		wantLease         time.Duration
+		beforeDNS         bool
+	}{
+		{"production defaults", "", "", 20 * time.Second, true},
+		{"minimum clamp", "0s", "0s", 3 * time.Second, true},
+		{"ratio below DNS TTL", "20s", "19s", 57 * time.Second, true},
+		{"ratio reaches DNS TTL", "20s", "20s", 60 * time.Second, false},
+		{"configured reaches DNS TTL", "60s", "5s", 60 * time.Second, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("MYSQL_DSN", "root:pass@tcp(127.0.0.1:3306)/")
+			t.Setenv("LEASE_TIMEOUT", tt.lease)
+			t.Setenv("PEER_CHECK_INTERVAL", tt.peer)
+			cfg, err := ConfigFromEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LeaseTimeout != tt.wantLease {
+				t.Fatalf("effective timeout = %s, want %s", cfg.LeaseTimeout, tt.wantLease)
+			}
+			if beforeDNS := cfg.LeaseTimeout < 60*time.Second; beforeDNS != tt.beforeDNS {
+				t.Fatalf("effective timeout %s < 60s = %t, want %t", cfg.LeaseTimeout, beforeDNS, tt.beforeDNS)
+			}
+		})
+	}
+}
+
 func TestConfigFromEnv_MYSQL_USER_PASSWORD(t *testing.T) {
 	t.Setenv("MYSQL_DSN", "")
 	t.Setenv("MYSQL_USER", "operator")

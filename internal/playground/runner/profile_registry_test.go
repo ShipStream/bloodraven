@@ -21,13 +21,13 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 		t.Error("smoke profile must include 42-reader-stall-no-group-degradation (issue #115 R4)")
 	}
 
-	// The release subset lists 17 members, all of which are now selected:
+	// The release subset lists 19 members, all of which are now selected:
 	// 31-pitr-verification-rustfs is no longer quarantined (#101 fixed — the
 	// verify mysqld runs gtid_mode=ON and server-side dedup handles the PITR
 	// replay), and the issue #115 reader scenarios (40-44) are release-graded.
 	release := runner.SelectForProfile(all, runner.ProfileRelease)
-	if len(release) != 17 {
-		t.Fatalf("release profile selected %d scenarios, want 17", len(release))
+	if len(release) != 19 {
+		t.Fatalf("release profile selected %d scenarios, want 19", len(release))
 	}
 	if !containsScenarioID(release, "09-network-partition-self-fence") {
 		t.Error("release profile must include 09-network-partition-self-fence (no longer quarantined)")
@@ -41,6 +41,8 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 		"42-reader-stall-no-group-degradation",
 		"43-writable-reader-fence",
 		"44-reader-source-convergence-invariant",
+		"53-deployment-hold-expiry",
+		"55-deployment-emergency-revocation",
 	} {
 		if !containsScenarioID(release, id) {
 			t.Errorf("%s must be in the release profile", id)

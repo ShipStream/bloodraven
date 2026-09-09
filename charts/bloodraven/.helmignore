@@ -7,3 +7,4 @@
 *.orig
 .vscode/
 .idea/
+*_test.go

@@ -69,6 +69,10 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `38-dnsendpoint-write-denial-during-failover` (§38; denies the operator write verbs on `dnsendpoints`, forces promotion; the DNSEndpoint target stays stale during denial then heals to the promoted LBIP within 90s after RBAC restore with no re-failover)
 - `39-dragonfly-master-partition` (§39; deny-all NetworkPolicy on only the Dragonfly master pod promotes the surviving replica; MySQL `status.activeSite` and failover counters are unchanged)
 - `40-reader-data-loss-reclone` (§40; release-profile reader PVC replacement, continuous `Ready=True`, auto-clone donor/internal-host log assertion, direct-source/thread/lag/marker recovery, client EndpointSlice shedding, and internal endpoint publication)
+- `53-deployment-hold-expiry` ([deployment coordination](#deployment-coordination); release profile, planned failover stays `Deferred/DeploymentHold` until the hold expires, then succeeds)
+- `54-deployment-hold-owner-kill` ([deployment coordination](#deployment-coordination); full profile, terminate a real renewing client Pod without releasing its hold; expiry unblocks planned failover)
+- `55-deployment-emergency-revocation` ([deployment coordination](#deployment-coordination); release profile, sustained primary outage bypasses live migration and hold leases, both renewals return `409`, and the MFG receives `DeploymentLeaseRevoked`)
+- `56-deployment-live-renewal-fenced` ([deployment coordination](#deployment-coordination); full profile, a migration client renewing every five seconds observes `409 revoked` after a planned topology change and stops)
 
 Scenarios `32`–`39` are **full-profile-only** by allowlist omission — none are in the `smoke` or `release` subsets — until they accumulate broader repeated live-pass history with no destructive leakage. As of 2026-07-11, all eight have passed on the k3d playground; scenarios `34`, `35`, `36`, and `38` also passed post-review reruns with the final code. Scenario `36` needed three diagnosed-and-fixed failed attempts first (see §36's "Actual live result"). All eight remain full-profile-only while this new, high-risk coverage matures. Scenarios `36` and `37` additionally run `ResetBeforeRunAll` because they exercise backup/PITR/restore-in-place state that can leak into later scenarios if cleanup is interrupted.
 
@@ -1401,6 +1405,38 @@ rolls and the ~37s emergency failover drain).
 it was at 0; clears a leftover `rotate-keyring` annotation.
 
 ---
+
+## Deployment coordination
+
+Scenarios 53-56 exercise the real `/deploy/v1` API, not a fake lease store. Each creates a unique `MysqlDatabase` with `spec.groupRef.name` matching the tested group and `spec.deploymentClients` matching its client ServiceAccount and namespace. The database must reach Ready before the client starts.
+
+The client is a `python:3.13-alpine` Pod with a projected ServiceAccount token. Kubernetes obtains the token through TokenRequest with audience `bloodraven-deploy`; the ordinary API-audience token is not automounted. The client verifies the operator's certificate against the playground CA and calls `https://bloodraven.<namespace>.svc.cluster.local:8443/deploy/v1/groups/<group>`. No request uses plaintext or skips certificate verification. The embedded client logs status, expiry, and topology generation, never bearer or lease tokens.
+
+`playground/setup.sh` enables the existing escrow TLS listener and `BLOODRAVEN_DEPLOY_API_ENABLED=true` by default for release-profile coverage. This prepares TLS material without enabling MySQL TLS or encryption at rest. `openssl` and access to pull `python:3.13-alpine` are prerequisites. Set `BLOODRAVEN_SETUP_DEPLOY_API=0` for a playground without these scenarios; their precheck then refuses to run. The installed CRDs and operator image must include the deployment API implementation.
+
+```bash
+BLOODRAVEN_SETUP_DEPLOY_API=1 ./playground/setup.sh
+make chaos-check
+make chaos-run SCENARIO=53-deployment-hold-expiry
+make chaos-run SCENARIO=54-deployment-hold-owner-kill
+make chaos-run SCENARIO=55-deployment-emergency-revocation
+make chaos-run SCENARIO=56-deployment-live-renewal-fenced
+```
+
+| Scenario | Injection | Required evidence | Profile |
+| --- | --- | --- | --- |
+| 53 | Acquire migration then failover-hold, each with `ttlSeconds: 30`; request planned failover and deliberately do not renew | Current planned request has phase `Deferred`, reason `DeploymentHold`, `retryAfter` matching hold expiry, and a message naming operation and instance. The active site and deferred state stay unchanged before expiry; afterward the plan succeeds without a DELETE and loses zero transactions. | release, full |
+| 54 | Renew both leases every five seconds; request planned failover, observe `DeploymentHold`, then force-delete the client Pod without releasing leases | A successful renewal precedes the kill. The hold remains effective until its recorded expiry, then planned failover succeeds with zero transactions lost despite the absent owner. | full |
+| 55 | Keep renewing migration and hold leases with `ttlSeconds: 120` every five seconds; scale the active primary to zero for a sustained outage | Emergency promotion proceeds and its metric increments. Both live leases return `409` with `error: revoked`, an allowed revocation reason, and a higher topology generation. A fresh `DeploymentLeaseRevoked` Event belongs to the MFG. | release, full |
+| 56 | Renew a migration lease every five seconds without a hold; request planned failover | At least one successful renewal precedes the topology change. The client receives `409 revoked` with a higher generation while its last renewal is still unexpired and stops renewing. Planned failover succeeds with zero transactions lost. | full |
+
+Every scenario checks that the MFG's persisted `status.topologyGeneration` increased from the grant generation. A `404`, an unexpected HTTP status, an invalid revocation reason, or a generation mismatch on a successful renewal fails the client; none is accepted as successful fencing.
+
+During promotion, `423 unstable` with reason `TopologyPersistencePending` permits diagnostic polling on the five-second cadence until the last confirmed lease expiry. It is not a successful renewal and never extends that deadline. The emergency client's 120-second TTL keeps both leases unexpired through the relay-drain wait; other scenarios retain 30-second TTLs.
+
+**Safety and cleanup:** The existing runner context allowlist, healthy-baseline check, in-progress marker, deadlines, and forensic capture remain in force. Only scenario 55 stops MySQL, and only the selected group's active Deployment; its registered reverter restores replicas on success or failure. No scenario deletes a MySQL PVC. Cleanup terminates the uniquely named client, waits out the last lease TTL (120 seconds for scenario 55, 30 seconds otherwise), then deletes its `MysqlDatabase` and waits for the database/user deletion finalizer before removing its Secret, CA ConfigMap, and ServiceAccount. Failed finalization preserves the credentials and reports cleanup failure. `--no-cleanup` deliberately preserves fixtures for inspection; the client has a ten-minute active deadline to bound abandoned renewal. Client evidence is copied into `scenario.log` at observation points; while the Pod exists, inspect it with `kubectl -n bloodraven-playground logs <chaos-deploy-pod> -c client`.
+
+**Validation status:** Go helper/profile tests and client protocol tests can run without a cluster. Real scenarios require a prepared playground and are not claimed as live-passing until executed against the completed API.
 
 ## Execution Plan
 

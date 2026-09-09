@@ -13,7 +13,7 @@ Run commands from the repository root:
 - `make test-e2e` runs the release profile of real-cluster E2E tests against the current playground cluster (requires kind/k3d/minikube context prepared with `./playground/setup.sh`; CI creates kind and runs setup first).
 - `make test-e2e-smoke` runs the smoke profile (~3 scenarios, fast feedback).
 - `make vet` runs `go vet ./...`.
-- `make lint` runs `golangci-lint run ./...`. `golangci-lint` is not vendored; install it with `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest` (it lands in `$(go env GOPATH)/bin`). CI installs the same tool with the same command in `.github/workflows/ci.yml`, so local and CI output match when you run this.
+- `make lint` runs `./bin/golangci-lint run ./...`. Install it with `make install-lint`, which builds golangci-lint v2 at the version pinned in `Makefile` into ignored `bin/` using the active Go toolchain (Go 1.26 or 1.27). Re-run installation after upgrading Go. CI and the release gate use the same install and lint targets, so local and CI use the same linter and configuration.
 - `make generate` refreshes API deep-copy code in `api/v1alpha1`.
 - `make manifests` generates CRD and RBAC output under `config/`.
 - `docker build --target bloodraven -t bloodraven .` and `docker build --target sidecar -t bloodraven-sidecar .` build container images. Podman works too (substitute `podman` for `docker`), but docker is preferred because k3d's podman support is experimental.
@@ -26,6 +26,8 @@ Use standard Go formatting: run `gofmt` on changed files and keep imports organi
 **Test-helper name collisions across files in the same package** are easy to hit because `go test` builds every `*_test.go` file in the package together. If you add a helper like `contains` or `drainEvents` in a new test file, grep the package first — duplicates produce a confusing build error that points only at the redeclaration site, not at the cause.
 
 Structured-log `msg` strings and field names listed in `site/content/docs/8.observability/7.log-schema.md` are a public stability contract — downstream log pipelines filter on them. When you touch a log call site whose `msg` appears in that doc's Event reference, either preserve the `msg` string and the documented field set exactly, or update `site/content/docs/8.observability/7.log-schema.md` in the same PR, call out the break in the PR description (the immediate record), and record it in the GitHub release notes when the change ships. The same applies to field naming: log keys are `camelCase` (per the contract), not `snake_case`.
+
+The deployment API request log (`msg="deploy api"`) explicitly uses `duration_ms` as a contract exception to camelCase; preserve that spelling and the documented `handler`, `group`, `instance`, `namespace`, `operationId`, and `status` fields.
 
 ## Testing Guidelines
 Add table-driven unit tests beside the code they cover, using the existing `*_test.go` layout under `internal/`. Put cross-component behavior tests in `test/component`, API-server/controller-runtime tests in `test/envtest`, and real-cluster playground scenarios in `internal/playground/scenarios` through `cmd/playground-chaos`. Some tests create local HTTP listeners with `httptest`, so restricted sandboxes may fail even when local developer runs pass.
@@ -108,9 +110,8 @@ This project is a Go 1.26 Kubernetes operator built around a single custom resou
 The repository includes an AI diagnostic copilot skill located at `.agents/skills/bloodraven-doctor/` (symlinked as `skills/bloodraven-doctor/` for `npx skills add shipstream/bloodraven` compatibility).
 
 - **Purpose**: Provides automated Day-2+ diagnosis, non-destructive triage, GTID divergence detection, keyring status probes, Dragonfly cache audits, and actionable remediation workflows for DevOps/SysAdmin agents with `kubectl` access.
-- **Maintenance contract**: When adding new CRD status fields, mutating failure recovery behaviors, updating sidecar endpoints (`/status`, `/keyring/status`, `/fencing`), modifying metrics, or altering runbook procedures, review and update:
+- **Maintenance contract**: When adding new CRD status fields, mutating failure recovery behaviors, updating sidecar endpoints (`/status` including `self_fenced`, `/keyring/status`, `/peer/active-site`) or the operator deployment API (`/deploy/v1`), modifying metrics, or altering runbook procedures, review and update:
   1. `.agents/skills/bloodraven-doctor/SKILL.md`
   2. `.agents/skills/bloodraven-doctor/references/alert_runbook_matrix.md`
   3. `.agents/skills/bloodraven-doctor/references/troubleshooting_playbooks.md`
-  4. Diagnostic helper scripts in `.agents/skills/bloodraven-doctor/scripts/` (`triage.sh`, `gtid-audit.sh`, `sidecar-probe.sh`, `support-bundle.sh`).
-
+  4. Diagnostic helper scripts in `.agents/skills/bloodraven-doctor/scripts/` (`triage.sh`, `gtid-audit.sh`, `sidecar-probe.sh`, `deployment-probe.sh`, `support-bundle.sh`).

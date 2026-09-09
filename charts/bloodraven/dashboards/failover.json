@@ -192,6 +192,36 @@
       "gridPos": {"h": 6, "w": 24, "x": 0, "y": 45},
       "targets": [{"expr": "bloodraven_websocket_connected_clients", "refId": "A", "legendFormat": "{{instance}}"}],
       "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineWidth": 1, "fillOpacity": 10}}}
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Active deployment leases",
+      "description": "Migration mutex and planned failover holds. Deployment metrics have group/kind labels, not namespace or site; same-named groups across namespaces are not separable here.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 51},
+      "targets": [{"expr": "bloodraven_deploy_leases_active{group=~\"$group\"}", "refId": "A", "legendFormat": "{{group}} / {{kind}}"}],
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}}
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Deployment lease revocations per hour",
+      "description": "Topology changes or explicit operator revocation fence deployment clients. Keep this signal visible during maintenance. Group-only scope, independent of namespace/site filters.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 51},
+      "targets": [{"expr": "sum by (group, kind, reason) (increase(bloodraven_deploy_lease_revocations_total{group=~\"$group\"}[1h]))", "refId": "A", "legendFormat": "{{group}} / {{kind}} / {{reason}}"}],
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "bars", "fillOpacity": 70}}}
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Planned failover deferrals per hour",
+      "description": "DeploymentHold defers planned work, never emergency failover or fencing. Group-only scope, independent of namespace/site filters.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 51},
+      "targets": [{"expr": "sum by (group, reason) (increase(bloodraven_planned_failovers_deferred_total{group=~\"$group\"}[1h]))", "refId": "A", "legendFormat": "{{group}} / {{reason}}"}],
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "bars", "fillOpacity": 70}}}
     }
   ]
 }

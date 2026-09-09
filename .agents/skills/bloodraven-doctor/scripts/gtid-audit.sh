@@ -50,6 +50,8 @@ fi
 echo "======================================================================="
 echo "🧬 Bloodraven Doctor: GTID Consistency Audit"
 echo "Group: $MFG_NAME | Namespace: $NAMESPACE"
+GENERATION_BEFORE=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.topologyGeneration}')
+echo "Topology generation before audit: ${GENERATION_BEFORE:-unavailable}"
 echo "======================================================================="
 
 PODS=$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
@@ -83,7 +85,7 @@ find_mysql_container() {
 for pod in $PODS; do
     echo ""
     echo "📍 Probing Pod: $pod"
-    SITE_LABEL=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/site}' 2>/dev/null || echo "unknown")
+    SITE_LABEL=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.metadata.labels.shipstream\.io/site}' 2>/dev/null || echo "unknown")
     echo "   Site: $SITE_LABEL"
 
     MYSQL_CONTAINER=$(find_mysql_container "$pod" "$NAMESPACE")
@@ -111,6 +113,12 @@ for pod in $PODS; do
         echo "   ⚠️ Unable to retrieve GTID coordinates for pod $pod (pod may be restarting or initializing)"
     fi
 done
+
+GENERATION_AFTER=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.topologyGeneration}')
+echo "Topology generation after audit: ${GENERATION_AFTER:-unavailable}"
+if [[ "$GENERATION_BEFORE" != "$GENERATION_AFTER" ]]; then
+    echo "WARNING: Topology changed during this non-atomic audit. Repeat observations after stabilization; do not resume deployment DDL."
+fi
 
 echo ""
 echo "======================================================================="
