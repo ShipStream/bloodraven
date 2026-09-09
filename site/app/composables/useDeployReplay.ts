@@ -231,7 +231,7 @@ const fence: Scenario = {
     { at: 11.8, actor: 'a', tone: 'danger', text: '409 revoked reason=topology_changed topologyGeneration=18', apply: (_w, c) => { c.a.phase = 'fenced'; c.a.detail = '409 revoked · gen 17 ≠ 18 · heartbeat stopped'; c.a.lastAt = 11.8; c.a.lastStatus = '409' } },
     { at: 12.4, actor: 'a', tone: 'danger', text: 'stop: DDL at 2/3 · not reconnecting to pdx · manual schema verification required', apply: (_w, c) => { c.a.detail = 'fenced at DDL 2/3 · verify schema before retry' } },
     { at: 13.4, actor: 'b', tone: 'req', text: `POST /deploy/v1/groups/orders/leases {kind:migration, operationId:${OP_B}…, instance:orders-app, ttlSeconds:15}`, apply: (_w, c) => { c.b.phase = 'observing'; c.b.detail = 'retry deploy'; c.b.lastAt = 13.4; c.b.lastStatus = 'POST' } },
-    { at: 13.8, actor: 'b', tone: 'warn', text: '423 unstable reason=RecoveryInProgress retryAfterSeconds=5 · old primary iad still being reconfigured', apply: (_w, c) => { c.b.phase = 'blocked'; c.b.detail = '423 unstable · retry in 5s'; c.b.lastAt = 13.8; c.b.lastStatus = '423' } },
+    { at: 13.8, actor: 'b', tone: 'warn', text: '423 unstable reason=RecoveryInProgress retryAfterSeconds=1 · old primary iad still being reconfigured', apply: (_w, c) => { c.b.phase = 'blocked'; c.b.detail = '423 unstable · retry in 1s'; c.b.lastAt = 13.8; c.b.lastStatus = '423' } },
     { at: 14.6, actor: 'operator', tone: 'muted', text: `revocation tombstone kept for ${OP_A}… · a surviving old client can never re-acquire silently` },
   ],
 }
