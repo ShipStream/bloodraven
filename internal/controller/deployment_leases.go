@@ -419,7 +419,11 @@ func (m *DeploymentLeaseManager) Grant(ctx context.Context, fg *v1alpha1.MysqlFa
 				return DeploymentLeaseResult{}, &DeploymentLeaseError{Status: 409, Code: "held", Holder: &old.DeploymentLeaseView}
 			}
 			status, created = 200, old.CreatedAt
-		} else if old.OperationID != operationID {
+		} else if old.OperationID != operationID && old.State == "revoked" {
+			// Only revocations need to outlive the slot. Archiving released or
+			// expired records would leak one Lease per historical operation ID
+			// without gating anything: the tombstone check below rejects
+			// "revoked" only.
 			if err := m.archive(ctx, fg, old); err != nil {
 				return DeploymentLeaseResult{}, err
 			}

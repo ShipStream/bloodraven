@@ -76,12 +76,15 @@ if [[ -z "$CR_JSON" ]]; then
     exit 1
 fi
 
-ACTIVE_SITE=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.activeSite}' 2>/dev/null || echo "Unknown")
-LAST_FAILOVER=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover}' 2>/dev/null || echo "None")
+# kubectl -o jsonpath tolerates missing keys: an unset field yields an empty
+# string with exit 0, so the || fallbacks below never fire on their own.
+ACTIVE_SITE=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.activeSite}' 2>/dev/null || true)
+LAST_FAILOVER=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover}' 2>/dev/null || true)
+TOPOLOGY_GENERATION=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.topologyGeneration}' 2>/dev/null || true)
 
-echo "Active Primary Site: $ACTIVE_SITE"
-echo "Last Failover:       $LAST_FAILOVER"
-kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='Topology generation: {.status.topologyGeneration}{"\n"}'
+echo "Active Primary Site: ${ACTIVE_SITE:-Unknown}"
+echo "Last Failover:       ${LAST_FAILOVER:-None}"
+echo "Topology generation: ${TOPOLOGY_GENERATION:-unavailable}"
 
 echo ""
 echo "--- 2. Sites & Replication Summary ---"

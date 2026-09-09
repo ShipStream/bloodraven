@@ -180,11 +180,12 @@ spec:
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     serviceAccount:
-                      description: ServiceAccount is a Kubernetes ServiceAccount name
-                        (a DNS subdomain).
+                      description: |-
+                        ServiceAccount is a Kubernetes ServiceAccount name (a DNS subdomain).
+                        Each dot-separated label is capped at 63 characters per RFC 1123.
                       maxLength: 253
                       minLength: 1
-                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$
                       type: string
                   required:
                   - namespace

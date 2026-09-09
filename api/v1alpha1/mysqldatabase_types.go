@@ -129,9 +129,10 @@ type DeploymentClient struct {
 	Namespace string `json:"namespace"`
 
 	// ServiceAccount is a Kubernetes ServiceAccount name (a DNS subdomain).
+	// Each dot-separated label is capped at 63 characters per RFC 1123.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$`
 	ServiceAccount string `json:"serviceAccount"`
 }
 

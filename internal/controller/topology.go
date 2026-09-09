@@ -3772,6 +3772,14 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		}
 	}
 
+	// Admission is taken before the cooldown is stamped: a refused topology
+	// change touches no MySQL state, so charging it against the cooldown would
+	// block the next poll for failoverCooldown without an attempt having run.
+	if !tm.beginDeploymentTopologyChange() {
+		return false
+	}
+	defer tm.finishDeploymentTopologyChange()
+
 	// Stamp the attempt before mutating MySQL so failures are also
 	// rate-limited by the cooldown instead of retried at poll frequency.
 	tm.mu.Lock()
@@ -3781,10 +3789,6 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	tm.logger.Warn("re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability",
 		"site", target)
 
-	if !tm.beginDeploymentTopologyChange() {
-		return false
-	}
-	defer tm.finishDeploymentTopologyChange()
 	if err := targetSite.mysql.SetSuperReadOnly(ctx, false); err != nil {
 		tm.logger.Error("primary re-assert: failed to clear super_read_only", "site", target, "error", err)
 		return true

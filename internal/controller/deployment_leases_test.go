@@ -782,6 +782,85 @@ func TestDeploymentLeaseReassertNeverWaitsForAdmission(t *testing.T) {
 	}
 }
 
+// A refused topology change touches no MySQL state, so it must not consume the
+// re-assert cooldown and block the next poll for failoverCooldown.
+func TestDeploymentLeaseReassertRefusalDoesNotConsumeCooldown(t *testing.T) {
+	m, fg, _ := deploymentLeaseFixture(t)
+	primary := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(primary, &mockMySQL{readOnly: true})
+	tm.cfg.Name, tm.cfg.Namespace = fg.Name, fg.Namespace
+	tm.deploymentLeases = m
+	tm.topologyGeneration, tm.deploymentActiveSite = 7, "dc1"
+	tm.failoverCooldown = 30 * time.Second
+	setWedgedTopology(tm, "dc1")
+
+	// Another topology change is already in flight, so admission is refused.
+	tm.mu.Lock()
+	tm.deploymentChanging = 1
+	tm.mu.Unlock()
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("reassert reported an attempt while a topology change was already active")
+	}
+	tm.mu.RLock()
+	stamped, stillReadOnly := tm.lastReassert, primary.readOnly
+	tm.mu.RUnlock()
+	if !stamped.IsZero() {
+		t.Fatal("admission refusal consumed the re-assert cooldown")
+	}
+	if !stillReadOnly {
+		t.Fatal("refused reassert mutated MySQL")
+	}
+
+	tm.mu.Lock()
+	tm.deploymentChanging = 0
+	tm.mu.Unlock()
+	if !tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("reassert stayed blocked by the cooldown after admission was released")
+	}
+	if primary.readOnly {
+		t.Fatal("reassert did not restore writability")
+	}
+}
+
+// Only revocations need to outlive the slot. Archiving released or expired
+// records would leak one Lease per historical operation ID with nothing gating
+// on it, since the tombstone check rejects "revoked" only.
+func TestDeploymentLeaseSupersededNonRevokedRecordsAreNotArchived(t *testing.T) {
+	for _, tc := range []struct{ name, mode string }{{"released", "release"}, {"expired", "expire"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			m, fg, now := deploymentLeaseFixture(t)
+			old := grantDeploymentLease(t, m, fg, "migration", "old-operation", 30)
+			if tc.mode == "release" {
+				if err := m.Release(ctx, fg, "migration", "old-operation", "tenant", "tenant-ns", "deployer", old.Token); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				*now = now.Add(time.Hour)
+			}
+			next := grantDeploymentLease(t, m, fg, "migration", "new-operation", 30)
+
+			archived := deploymentLeaseName(fg.Name, "migration", "old-operation")
+			var leases coordinationv1.LeaseList
+			if err := m.reader.List(ctx, &leases); err != nil {
+				t.Fatal(err)
+			}
+			for i := range leases.Items {
+				if leases.Items[i].Name == archived {
+					t.Fatalf("superseded %s record was archived as %s", tc.name, archived)
+				}
+			}
+			// The operation ID stays reusable: only revocation fences it.
+			if err := m.Release(ctx, fg, "migration", "new-operation", "tenant", "tenant-ns", "deployer", next.Token); err != nil {
+				t.Fatal(err)
+			}
+			if r := grantDeploymentLease(t, m, fg, "migration", "old-operation", 30); r.Status != 201 {
+				t.Fatalf("regrant status = %d, want 201", r.Status)
+			}
+		})
+	}
+}
+
 func TestDeploymentLeaseGrantRechecksStabilityAfterWrite(t *testing.T) {
 	m, fg, _ := deploymentLeaseFixture(t)
 	m.client = interceptor.NewClient(m.client.(client.WithWatch), interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {

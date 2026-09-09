@@ -25,6 +25,10 @@ func TestDeploymentClientsValidation(t *testing.T) {
 	entry := func(namespace, account string) map[string]any {
 		return map[string]any{"namespace": namespace, "serviceAccount": account}
 	}
+	// A 253-character DNS subdomain whose labels each stay within 63 characters.
+	maxServiceAccount := strings.Join([]string{
+		strings.Repeat("b", 63), strings.Repeat("b", 63), strings.Repeat("b", 63), strings.Repeat("b", 61),
+	}, ".")
 	tests := []struct {
 		name    string
 		clients []any
@@ -34,7 +38,8 @@ func TestDeploymentClientsValidation(t *testing.T) {
 		{"empty list", []any{}, true},
 		{"valid", []any{entry("tenant-acme", "acme.deploy")}, true},
 		{"single character", []any{entry("1", "2")}, true},
-		{"maximum lengths", []any{entry(strings.Repeat("a", 63), strings.Repeat("b", 253))}, true},
+		{"maximum lengths", []any{entry(strings.Repeat("a", 63), maxServiceAccount)}, true},
+		{"maximum service account label", []any{entry("tenant", strings.Repeat("b", 63))}, true},
 		{"distinct namespaces", []any{entry("tenant-acme", "deploy"), entry("tenant-beta", "deploy")}, true},
 		{"missing namespace", []any{map[string]any{"serviceAccount": "deploy"}}, false},
 		{"missing service account", []any{map[string]any{"namespace": "tenant"}}, false},
@@ -42,6 +47,9 @@ func TestDeploymentClientsValidation(t *testing.T) {
 		{"empty service account", []any{entry("tenant", "")}, false},
 		{"long namespace", []any{entry(strings.Repeat("a", 64), "deploy")}, false},
 		{"long service account", []any{entry("tenant", strings.Repeat("a", 254))}, false},
+		// Kubernetes caps each DNS-subdomain label at 63 characters.
+		{"long service account label", []any{entry("tenant", strings.Repeat("b", 64))}, false},
+		{"long service account interior label", []any{entry("tenant", "deploy."+strings.Repeat("b", 64)+".sa")}, false},
 		{"namespace subdomain", []any{entry("tenant.acme", "deploy")}, false},
 		{"namespace uppercase", []any{entry("Tenant", "deploy")}, false},
 		{"namespace leading hyphen", []any{entry("-tenant", "deploy")}, false},
