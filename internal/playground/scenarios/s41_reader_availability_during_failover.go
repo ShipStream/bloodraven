@@ -127,7 +127,8 @@ func s41KillPrimaryAndObserveReader(state *s41RunState) runner.Step {
 					if mfg.Status.ActiveSite != state.topo.standby {
 						return false, msg, fmt.Errorf("failover landed on %q, want promotable standby %q", mfg.Status.ActiveSite, state.topo.standby)
 					}
-					return true, msg, nil
+					done, msg := failoverObserved(mfg, state.topo.active)
+					return done, msg, nil
 				})
 			cancelFlip()
 			if err != nil {
@@ -138,18 +139,7 @@ func s41KillPrimaryAndObserveReader(state *s41RunState) runner.Step {
 			repointCtx, cancelRepoint := context.WithTimeout(ctx, 3*time.Minute)
 			_, err = env.Wait.UntilCR(repointCtx, env.Namespace,
 				"reader converges directly onto the new primary",
-				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					if mfg.Status.ActiveSite != state.topo.standby {
-						return false, "", fmt.Errorf("active site changed again during reader repoint: %q", mfg.Status.ActiveSite)
-					}
-					status := statusSiteByName(mfg, state.topo.reader)
-					if status == nil {
-						return false, "reader status missing", nil
-					}
-					err := assertReaderServingStatus(mfg, status, state.newHost)
-					return err == nil, fmt.Sprintf("state=%s replicating=%v source=%q convergence=%s/%s lag=%v",
-						status.State, status.Replicating, status.SourceHost, status.SourceConvergenceState, status.SourceConvergenceReason, formatLag(status.SecondsBehindSource)), nil
-				})
+				state.readerRepointed)
 			cancelRepoint()
 			if err != nil {
 				_ = stopAndCheck()
@@ -178,6 +168,22 @@ func s41KillPrimaryAndObserveReader(state *s41RunState) runner.Step {
 			return nil
 		},
 	}
+}
+
+func (s *s41RunState) readerRepointed(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+	if active := mfg.Status.ActiveSite; active != "" && active != s.topo.standby {
+		return false, "", fmt.Errorf("active site changed again during reader repoint: %q", active)
+	}
+	if done, msg := failoverObserved(mfg, s.topo.active); !done {
+		return false, msg, nil
+	}
+	status := statusSiteByName(mfg, s.topo.reader)
+	if status == nil {
+		return false, "reader status missing", nil
+	}
+	err := assertReaderServingStatus(mfg, status, s.newHost)
+	return err == nil, fmt.Sprintf("state=%s replicating=%v source=%q convergence=%s/%s lag=%v",
+		status.State, status.Replicating, status.SourceHost, status.SourceConvergenceState, status.SourceConvergenceReason, formatLag(status.SecondsBehindSource)), nil
 }
 
 // s41VerifyReaderEndpointRestored asserts the reader's client Service

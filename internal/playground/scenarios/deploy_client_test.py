@@ -28,11 +28,16 @@ class DeploymentClientTest(unittest.TestCase):
 
         def respond(req, context, timeout):
             self.assertIs(context, tls)
-            self.assertEqual(timeout, 4)
+            self.assertEqual(timeout, 45)
             self.assertEqual(req.headers["Authorization"], "Bearer projected-secret")
             self.assertTrue(req.full_url.startswith("https://operator:8443/deploy/v1/groups/group"))
             calls.append((req.method, req.full_url, json.loads(req.data) if req.data else None))
-            status, body = responses.pop(0)
+            reply = responses.pop(0)
+            status, body = reply[:2]
+            if len(reply) == 3:
+                delay = reply[2]
+                self.assertLess(delay, timeout)
+                advance(delay)
             stream = io.BytesIO(json.dumps(body).encode())
             if status >= 400:
                 raise HTTPError(req.full_url, status, "test response", {}, stream)
@@ -116,6 +121,17 @@ class DeploymentClientTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(responses)
         self.assertTrue(calls[-1][1].endswith("/leases/failover-hold/attempt"))
+        self.assertEqual(records[-1]["action"], "stopped")
+
+    def test_slow_emergency_verdict_preserves_expiry_and_stops(self):
+        responses = [self.snapshot(), self.grant(ttl=120), self.grant("failover-hold", ttl=120),
+                     (*self.revoked(), 35), self.revoked()]
+        code, calls, records, _ = self.run_client(responses, mode="emergency")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 5)
+        revoked = [r for r in records if r["action"] == "renew"]
+        self.assertEqual([r["status"] for r in revoked], [409, 409])
+        self.assertEqual(datetime.fromisoformat(revoked[0]["at"]).second, 40)
         self.assertEqual(records[-1]["action"], "stopped")
 
     def test_pending_does_not_extend_confirmed_expiry(self):

@@ -27,7 +27,7 @@ func (r *MysqlFailoverGroupReconciler) stampDeploymentHold(ctx context.Context, 
 	retry := metav1.NewTime(hold.ExpiresAt)
 	next := &v1alpha1.PlannedFailoverStatus{Phase: v1alpha1.PlannedFailoverPhaseDeferred, Reason: reason, Message: validationErr.Error(), Target: req.Site, SourcePrimary: fg.Status.ActiveSite, StartTime: &start, RetryAfter: &retry,
 		MaxLagWait: &metav1.Duration{Duration: effectiveMaxLagWait(fg, req)}, DrainTimeout: &metav1.Duration{Duration: effectiveDrainTimeout(fg)}}
-	if cur := fg.Status.PlannedFailover; cur != nil && cur.StartTime != nil {
+	if cur := fg.Status.PlannedFailover; cur != nil && !plannedFailoverTerminal(cur) && cur.StartTime != nil {
 		next.StartTime = cur.StartTime
 	}
 	// Normally the annotation is still present. Restore it when validation of

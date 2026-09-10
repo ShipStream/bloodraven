@@ -27,7 +27,8 @@ def request(method, path="", body=None):
         headers={"Authorization": "Bearer " + bearer, "Content-Type": "application/json"},
     )
     try:
-        response = urllib.request.urlopen(req, context=tls, timeout=4)
+        # Emergency promotion can spend 30 seconds draining relay logs.
+        response = urllib.request.urlopen(req, context=tls, timeout=45)
     except urllib.error.HTTPError as error:
         response = error
     with response:

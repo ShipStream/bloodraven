@@ -132,7 +132,37 @@ fi
 # ---------------------------------------------------------------------
 if kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" >/dev/null 2>&1 && \
 	kubectl -n "$NAMESPACE" get secret "$ESCROW_TLS_SECRET" >/dev/null 2>&1; then
-	ok "TLS secrets $TLS_SECRET and $ESCROW_TLS_SECRET already exist"
+	command -v openssl >/dev/null 2>&1 || die "openssl is required to validate existing playground TLS material"
+	TMP="$(mktemp -d)"
+	trap 'rm -rf "$TMP"' EXIT
+	tls_invalid="Existing playground TLS material failed validation; no Secrets were changed. For a disposable playground only, recreate an empty playground cluster and rerun BLOODRAVEN_SETUP_TLS=1 ./playground/setup.sh. For a live or encrypted group, preserve its data and keyring Secrets and plan a coordinated TLS migration; do not delete encrypted group keys or blindly rotate its CA."
+	kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" -o jsonpath='{.data.ca\.crt}' \
+		| base64 --decode > "$TMP/ca.crt" || die "$tls_invalid"
+	kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" -o jsonpath='{.data.tls\.crt}' \
+		| base64 --decode > "$TMP/tls.crt" || die "$tls_invalid"
+	kubectl -n "$NAMESPACE" get secret "$ESCROW_TLS_SECRET" -o jsonpath='{.data.tls\.crt}' \
+		| base64 --decode > "$TMP/escrow-tls.crt" || die "$tls_invalid"
+	openssl verify -x509_strict -check_ss_sig -CAfile "$TMP/ca.crt" \
+		"$TMP/ca.crt" >/dev/null || die "$tls_invalid"
+	for hostname in \
+		"mysql-${FG}-iad" "mysql-${FG}-pdx" "mysql-${FG}-reader" \
+		"mysql-${FG}-iad.${NAMESPACE}.svc.cluster.local" \
+		"mysql-${FG}-pdx.${NAMESPACE}.svc.cluster.local" \
+		"mysql-${FG}-reader.${NAMESPACE}.svc.cluster.local" \
+		"mysql-${FG}-iad-internal.${NAMESPACE}.svc.cluster.local" \
+		"mysql-${FG}-pdx-internal.${NAMESPACE}.svc.cluster.local" \
+		"mysql-${FG}-reader-internal.${NAMESPACE}.svc.cluster.local" \
+		"mysql-${FG}-primary.${NAMESPACE}.svc.cluster.local" \
+		"mysql-${FG}-replicas.${NAMESPACE}.svc.cluster.local" localhost; do
+		openssl verify -x509_strict -purpose sslserver -verify_hostname "$hostname" \
+			-CAfile "$TMP/ca.crt" "$TMP/tls.crt" >/dev/null || die "$tls_invalid"
+	done
+	openssl verify -x509_strict -purpose sslserver -verify_ip 127.0.0.1 \
+		-CAfile "$TMP/ca.crt" "$TMP/tls.crt" >/dev/null || die "$tls_invalid"
+	openssl verify -x509_strict -purpose sslserver \
+		-verify_hostname "bloodraven.${NAMESPACE}.svc.cluster.local" \
+		-CAfile "$TMP/ca.crt" "$TMP/escrow-tls.crt" >/dev/null || die "$tls_invalid"
+	ok "existing TLS secrets $TLS_SECRET and $ESCROW_TLS_SECRET passed strict verification"
 else
 	if kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" >/dev/null 2>&1 || \
 		kubectl -n "$NAMESPACE" get secret "$ESCROW_TLS_SECRET" >/dev/null 2>&1; then
@@ -146,6 +176,8 @@ else
 
 	openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
 		-keyout "$TMP/ca.key" -out "$TMP/ca.crt" \
+		-addext 'basicConstraints=critical,CA:TRUE' \
+		-addext 'keyUsage=critical,keyCertSign,cRLSign' \
 		-subj "/CN=bloodraven-playground-ca" >/dev/null
 
 	# SANs cover every name MySQL is dialled by: the per-site internal

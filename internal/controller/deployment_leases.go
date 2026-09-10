@@ -156,7 +156,9 @@ func (m *DeploymentLeaseManager) write(ctx context.Context, fg *v1alpha1.MysqlFa
 	l.Spec.HolderIdentity = &r.OperationID
 	now := metav1.NewMicroTime(m.now())
 	l.Spec.RenewTime = &now
-	ttl := int32(max(0, r.ExpiresAt.Sub(m.now()).Seconds()))
+	// Kubernetes requires a positive duration. The record's state and exact
+	// ExpiresAt, not this rounded projection, govern admission and fencing.
+	ttl := int32(max(1, r.ExpiresAt.Sub(now.Time).Seconds()))
 	l.Spec.LeaseDurationSeconds = &ttl
 	if create {
 		return m.client.Create(ctx, l)

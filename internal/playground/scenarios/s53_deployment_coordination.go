@@ -247,7 +247,7 @@ func decodeDeployClientRecords(data []byte) ([]deployClientRecord, error) {
 		}
 		var record deployClientRecord
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			return nil, fmt.Errorf("invalid deploy client log (inspect client Pod logs): %w", err)
+			return nil, fmt.Errorf("invalid deploy client log: %w\nclient stdout/stderr:\n%s", err, data)
 		}
 		records = append(records, record)
 	}
@@ -255,7 +255,8 @@ func decodeDeployClientRecords(data []byte) ([]deployClientRecord, error) {
 }
 
 func (s *deployScenarioState) waitClient(ctx context.Context, env *runner.Env, predicate func([]deployClientRecord) bool) error {
-	return deployPoll(ctx, 2*time.Minute, func() (bool, error) {
+	var lastLog []byte
+	err := deployPoll(ctx, 2*time.Minute, func() (bool, error) {
 		pod, err := env.Kube.Kubernetes.CoreV1().Pods(env.Namespace).Get(ctx, s.name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -267,22 +268,27 @@ func (s *deployScenarioState) waitClient(ctx context.Context, env *runner.Env, p
 		if err != nil {
 			return false, err
 		}
+		lastLog = data
 		records, err := decodeDeployClientRecords(data)
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("deploy client Pod %s: %w", s.name, err)
 		}
 		if pod.Status.Phase == corev1.PodFailed {
-			return false, fmt.Errorf("deploy client Pod %s failed; records=%+v", s.name, records)
+			return false, fmt.Errorf("deploy client Pod %s failed; client stdout/stderr:\n%s", s.name, data)
 		}
 		if predicate(records) {
 			env.Capture.Note(fmt.Sprintf("deploy client %s: %s", s.name, data))
 			return true, nil
 		}
 		if pod.Status.Phase == corev1.PodSucceeded {
-			return false, fmt.Errorf("deploy client exited without required evidence; records=%+v", records)
+			return false, fmt.Errorf("deploy client Pod %s exited without required evidence; client stdout/stderr:\n%s", s.name, data)
 		}
 		return false, nil
 	})
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("deploy client Pod %s: %w\nlast client stdout/stderr:\n%s", s.name, err, lastLog)
+	}
+	return err
 }
 
 func (s *deployScenarioState) observeHold(ctx context.Context, env *runner.Env, kill bool) error {
