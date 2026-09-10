@@ -141,9 +141,23 @@ grafanaDashboards:
   extraAnnotations: {}
 
 auxiliary:
+  deployAPI:
+    # -- Enable /deploy/v1 on the existing escrow TLS listener only.
+    # Requires auxiliary.escrowTLS.enabled and its existingSecret.
+    enabled: false
+    # -- Audience required on projected ServiceAccount tokens (TokenReview).
+    audience: bloodraven-deploy
+    networkPolicy:
+      # -- Restrict TLS ingress to labelled deployment clients and managed MySQL
+      # pods (escrow). Requires deployAPI.enabled. Other listeners stay reachable.
+      enabled: false
+      # -- Additional Kubernetes NetworkPolicy ingress rules. Use for trusted
+      # escrow clients with custom pod labels or other operator listeners.
+      # Rules are additive; an unrestricted rule can undo TLS isolation.
+      additionalIngress: []
   escrowTLS:
-    # -- Serve the keyring escrow endpoint on a dedicated TLS listener.
-    # Required before enabling spec.encryptionAtRest on any failover group.
+    # -- Serve keyring escrow and the optional deployment API on a TLS listener.
+    # Required for deployAPI and spec.encryptionAtRest on any failover group.
     enabled: false
     # -- TLS service/listener port.
     port: 8443

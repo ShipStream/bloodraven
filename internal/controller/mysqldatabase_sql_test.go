@@ -150,6 +150,23 @@ func TestRenderGrantNeverEmitsGrantOption(t *testing.T) {
 	}
 }
 
+func TestRenderGrantDeploymentPrivileges(t *testing.T) {
+	for _, field := range []string{"spec.owner.privileges", "spec.users[0].privileges", "spec.grants[0].privileges"} {
+		t.Run(field, func(t *testing.T) {
+			got, err := renderGrant(field,
+				[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeCreateView, v1alpha1.PrivilegeCreateTemporaryTables, v1alpha1.PrivilegeSelect},
+				"acme_wms", "acme_app", defaultHosts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "GRANT SELECT, CREATE TEMPORARY TABLES, CREATE VIEW ON `acme_wms`.* TO 'acme_app'@'%'"
+			if got != want {
+				t.Fatalf("renderGrant = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestRenderGrantRejectsBadInput(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -159,6 +176,8 @@ func TestRenderGrantRejectsBadInput(t *testing.T) {
 	}{
 		{"privilege outside allowlist", []v1alpha1.MysqlPrivilege{"SUPER"}, "acme_wms", "maester"},
 		{"grant option", []v1alpha1.MysqlPrivilege{"GRANT OPTION"}, "acme_wms", "maester"},
+		{"temporary tables injection", []v1alpha1.MysqlPrivilege{"CREATE TEMPORARY TABLES WITH GRANT OPTION"}, "acme_wms", "maester"},
+		{"view injection", []v1alpha1.MysqlPrivilege{"CREATE VIEW; GRANT ALL"}, "acme_wms", "maester"},
 		{"no privileges", nil, "acme_wms", "maester"},
 		{"bad database", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme`x", "maester"},
 		{"bad username", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme_wms", "maester'@'%"},
@@ -352,7 +371,7 @@ func TestRenderRevokeSurplus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderRevokeSurplus(, defaultHosts) error = %v", err)
 	}
-	want := "REVOKE IF EXISTS INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, " +
+	want := "REVOKE IF EXISTS INSERT, UPDATE, DELETE, CREATE, CREATE TEMPORARY TABLES, CREATE VIEW, DROP, ALTER, INDEX, REFERENCES, " +
 		"LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, EXECUTE ON `acme_wms`.* FROM 'acme_app'@'%' IGNORE UNKNOWN USER"
 	if got != want {
 		t.Fatalf("renderRevokeSurplus(, defaultHosts) = %q, want %q", got, want)

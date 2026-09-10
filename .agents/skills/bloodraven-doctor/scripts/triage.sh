@@ -76,11 +76,15 @@ if [[ -z "$CR_JSON" ]]; then
     exit 1
 fi
 
-ACTIVE_SITE=$(echo "$CR_JSON" | grep -o '"activeSite":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "Unknown")
-LAST_FAILOVER=$(echo "$CR_JSON" | grep -o '"lastFailover":"[^"]*"' | head -1 | cut -d'"' -f4 || echo "None")
+# kubectl -o jsonpath tolerates missing keys: an unset field yields an empty
+# string with exit 0, so the || fallbacks below never fire on their own.
+ACTIVE_SITE=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.activeSite}' 2>/dev/null || true)
+LAST_FAILOVER=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover}' 2>/dev/null || true)
+TOPOLOGY_GENERATION=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.topologyGeneration}' 2>/dev/null || true)
 
-echo "Active Primary Site: $ACTIVE_SITE"
-echo "Last Failover:       $LAST_FAILOVER"
+echo "Active Primary Site: ${ACTIVE_SITE:-Unknown}"
+echo "Last Failover:       ${LAST_FAILOVER:-None}"
+echo "Topology generation: ${TOPOLOGY_GENERATION:-unavailable}"
 
 echo ""
 echo "--- 2. Sites & Replication Summary ---"
@@ -103,6 +107,10 @@ kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME" -o wi
 echo ""
 echo "--- 6. Recent Anomalous Events (Last 10) ---"
 kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp 2>/dev/null | tail -n 10 || echo "No events found."
+
+echo ""
+echo "--- 7. Deployment Coordination ---"
+bash "$(dirname "${BASH_SOURCE[0]}")/deployment-probe.sh" "$NAMESPACE" "$MFG_NAME" || echo "Deployment evidence unavailable (check jq and read permissions for databases/leases)."
 
 echo ""
 echo "======================================================================="

@@ -137,6 +137,8 @@ func main() {
 	// This is leader-election-aware: polling and failover only run on the leader.
 	recorder := mgr.GetEventRecorderFor("bloodraven")
 	runner := controller.NewTopologyManagerRunner(mgr.GetClient(), clientset, hub, recorder, logger)
+	deploymentLeases := controller.NewDeploymentLeaseManager(mgr.GetClient(), mgr.GetAPIReader(), recorder)
+	runner.SetDeploymentLeases(deploymentLeases)
 
 	// Create and register the reconciler
 	tainter := platform.NewNodeTainter(clientset, logger)
@@ -282,6 +284,11 @@ func main() {
 
 	escrowCertFile := strings.TrimSpace(os.Getenv("BLOODRAVEN_ESCROW_TLS_CERT_FILE"))
 	escrowKeyFile := strings.TrimSpace(os.Getenv("BLOODRAVEN_ESCROW_TLS_KEY_FILE"))
+	deployEnabled := strings.EqualFold(strings.TrimSpace(os.Getenv("BLOODRAVEN_DEPLOY_API_ENABLED")), "true")
+	if deployEnabled && (escrowCertFile == "" || escrowKeyFile == "" || !*leaderElect) {
+		logger.Error("deployment API requires escrow TLS and leader election")
+		os.Exit(1)
+	}
 	if escrowCertFile != "" || escrowKeyFile != "" {
 		if escrowCertFile == "" || escrowKeyFile == "" {
 			logger.Error("escrow TLS requires both certificate and key files")
@@ -296,9 +303,16 @@ func main() {
 		if escrowAddr == "" {
 			escrowAddr = ":8443"
 		}
+		escrowMux := newEscrowMux(mgr.GetClient(), logger)
+		if deployEnabled {
+			deployHandler := newDeployAPI(mgr.GetAPIReader(), clientset.AuthenticationV1().TokenReviews(), deploymentLeases, runner.IsLeader, logger, strings.TrimSpace(os.Getenv("BLOODRAVEN_DEPLOY_API_AUDIENCE")))
+			escrowMux.Handle("/deploy/v1/", deployHandler)
+			escrowMux.Handle("/deploy/v1", deployHandler)
+		}
 		escrowSrv := &http.Server{
 			Addr:              escrowAddr,
-			Handler:           newEscrowMux(mgr.GetClient(), logger),
+			Handler:           escrowMux,
+			ReadTimeout:       15 * time.Second,
 			ReadHeaderTimeout: 5 * time.Second,
 			WriteTimeout:      15 * time.Second,
 			IdleTimeout:       60 * time.Second,
@@ -350,6 +364,8 @@ type runnableFunc func(ctx context.Context) error
 func (f runnableFunc) Start(ctx context.Context) error {
 	return f(ctx)
 }
+
+func (f runnableFunc) NeedLeaderElection() bool { return false }
 
 // auxLoggingMiddleware emits one structured log line per request
 // against the aux server (method, path, status, duration, remote IP)

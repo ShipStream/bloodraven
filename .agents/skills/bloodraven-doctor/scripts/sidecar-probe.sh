@@ -7,10 +7,10 @@ set -euo pipefail
 
 NAMESPACE=""
 MFG_NAME=""
-ENDPOINT="status" # status, keyring, fencing, healthz, readyz, metrics
+ENDPOINT="status" # fencing is the shipped alias for /status (self_fenced)
 
 usage() {
-    echo "Usage: $0 [-n <namespace>] [<mysql-failover-group>] [status|keyring|fencing|healthz|readyz|metrics]"
+    echo "Usage: $0 [-n <namespace>] [<mysql-failover-group>] [status|keyring|fencing|health|peer|archiver]"
     echo "Probes sidecar HTTP endpoints on Bloodraven MySQL pods."
     exit 0
 }
@@ -24,7 +24,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             ;;
-        status|keyring|fencing|healthz|readyz|metrics)
+        status|keyring|fencing|health|peer|archiver)
             ENDPOINT="$1"
             shift
             ;;
@@ -58,16 +58,16 @@ case "$ENDPOINT" in
         TARGET_PATH="/keyring/status"
         ;;
     fencing)
-        TARGET_PATH="/fencing"
+        TARGET_PATH="/status"
         ;;
-    healthz)
-        TARGET_PATH="/healthz"
+    health)
+        TARGET_PATH="/health"
         ;;
-    readyz)
-        TARGET_PATH="/readyz"
+    peer)
+        TARGET_PATH="/peer/active-site"
         ;;
-    metrics)
-        TARGET_PATH="/metrics"
+    archiver)
+        TARGET_PATH="/archiver/status"
         ;;
     status)
         TARGET_PATH="/status"
@@ -132,18 +132,11 @@ for pod in $PODS; do
     SUCCESSFUL_CONTAINER=""
 
     for container in $CANDIDATES; do
-        # Try wget on 8080 then 8081
-        RESULT=$(kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- wget -qO- "http://127.0.0.1:8080${TARGET_PATH}" 2>/dev/null || true)
-        if [[ -z "$RESULT" ]]; then
-            RESULT=$(kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- wget -qO- "http://127.0.0.1:8081${TARGET_PATH}" 2>/dev/null || true)
-        fi
+        RESULT=$(kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- wget -T 5 -qO- "http://127.0.0.1:8080${TARGET_PATH}" 2>/dev/null || true)
 
         # If wget was missing, try curl
         if [[ -z "$RESULT" ]]; then
-            RESULT=$(kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- curl -s "http://127.0.0.1:8080${TARGET_PATH}" 2>/dev/null || true)
-        fi
-        if [[ -z "$RESULT" ]]; then
-            RESULT=$(kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- curl -s "http://127.0.0.1:8081${TARGET_PATH}" 2>/dev/null || true)
+            RESULT=$(kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- curl -fsS --max-time 5 "http://127.0.0.1:8080${TARGET_PATH}" 2>/dev/null || true)
         fi
 
         if [[ -n "$RESULT" ]]; then

@@ -167,9 +167,10 @@ condition of a pin nobody is forced to update.
 
 You can state the guarantee and its limits: best-effort cache continuity, never at the expense of MySQL,
 with a shed-then-promote label sequence that has no dual-master window. You can read `sessionsPreserved`
-without misreading nil, and say which path may trade sessions for availability. The application half of
-failover is complete — services, DNS, taints, pools, planned moves, cache.
+without misreading nil, and say which path may trade sessions for availability. Services, DNS, taints,
+pools, planned moves, cache: the operator's side of the application boundary is covered.
 
-What you cannot yet do is see any of it from outside. Everything in this unit was checked by reading
-status and logs by hand. The next unit asks what the operator exports on its own, where it goes blind,
-and what you should be alerting on before an incident makes you look.
+One thing on your side of that boundary is still unaccounted for. The deploy pipeline changes the schema
+on the same primary the operator moves, on its own calendar, with no idea a switchover is booked. The
+last topic in this unit gives it a way to ask first — and a fence for when the answer changes underneath
+it.

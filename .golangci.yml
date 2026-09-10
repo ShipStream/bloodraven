@@ -1,35 +1,54 @@
+version: "2"
 run:
   timeout: 5m
 
 linters:
-  enable-all: false
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - govet
     - ineffassign
-    - staticcheck
+    - staticcheck # Includes gosimple in v2.
     - unused
-    - gosimple
-
-issues:
-  exclude-rules:
-    # Ignore unchecked w.Write / json.Encoder.Encode errors in HTTP handlers —
-    # these are fire-and-forget writes where the connection may already be broken.
-    - path: 'internal/sidecar/server\.go'
-      linters: [errcheck]
-    - path: 'cmd/bloodraven/main\.go'
-      linters: [errcheck]
-    # Ignore unchecked writes in test helpers (httptest servers, etc.)
-    - path: '.*_test\.go'
-      linters: [errcheck]
-    # Ignore unused helpers in test files (may be used by upcoming tests).
-    - path: '.*_test\.go'
-      linters: [unused]
-    # Ignore deprecation warnings — we track these separately.
-    - linters: [staticcheck]
-      text: "SA1019:"
-    # Ignore empty branch in replication.go fallback comment block.
-    - path: 'internal/mysql/replication\.go'
-      linters: [staticcheck]
-      text: "SA9003:"
+  settings:
+    staticcheck:
+      # Preserve v1 staticcheck + gosimple without adding style/quick-fix checks.
+      checks: ["SA*", "S*"]
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Ignore unchecked HTTP response writes; the connection may already be broken.
+      - linters:
+          - errcheck
+        path: internal/sidecar/server\.go
+      - linters:
+          - errcheck
+        path: cmd/bloodraven/main\.go
+      # Ignore unchecked writes and unused helpers in tests.
+      - linters:
+          - errcheck
+        path: .*_test\.go
+      - linters:
+          - unused
+        path: .*_test\.go
+      # Deprecations are tracked separately.
+      - linters:
+          - staticcheck
+        text: 'SA1019:'
+      # Empty branch in replication.go's fallback comment block.
+      - linters:
+          - staticcheck
+        path: internal/mysql/replication\.go
+        text: 'SA9003:'
+    # Regular expressions matched against source file paths. The scaffolded
+    # `third_party$` form only matches a path ending at the directory name, so
+    # it never excludes the files inside it.
+    paths:
+      - (^|/)third_party/
+      - (^|/)builtin/
+      - (^|/)examples/

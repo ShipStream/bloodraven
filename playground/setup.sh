@@ -76,13 +76,18 @@ SETUP_TLS=false
 case "${BLOODRAVEN_SETUP_TLS:-}" in
   1|true|TRUE|yes|YES) SETUP_TLS=true ;;
 esac
+SETUP_DEPLOY_API=false
+case "${BLOODRAVEN_SETUP_DEPLOY_API:-1}" in
+  1|true|TRUE|yes|YES) SETUP_DEPLOY_API=true ;;
+esac
 ESCROW_TLS_HELM_ARGS=()
-if [[ "$SETUP_TLS" == "true" ]]; then
+if [[ "$SETUP_TLS" == "true" || "$SETUP_DEPLOY_API" == "true" ]]; then
   ESCROW_TLS_HELM_ARGS=(
     --set auxiliary.escrowTLS.enabled=true
     --set auxiliary.escrowTLS.existingSecret=bloodraven-escrow-tls
   )
 fi
+ESCROW_TLS_HELM_ARGS+=(--set auxiliary.deployAPI.enabled="$SETUP_DEPLOY_API")
 if [[ "$HELM_INSTALL_CRDS" == "true" ]] && helm status bloodraven -n "$NAMESPACE" >/dev/null 2>&1; then
   fail "BLOODRAVEN_SETUP_HELM_INSTALL_CRDS=1 requires a fresh Helm release. Helm installs CRDs from charts/bloodraven/crds only on first install and will not upgrade or repair them on helm upgrade; unset BLOODRAVEN_SETUP_HELM_INSTALL_CRDS to apply CRDs explicitly before upgrading."
 fi
@@ -274,7 +279,7 @@ fi
 info "Creating namespace and deploying manifests..."
 kubectl apply -f "$SCRIPT_DIR/manifests/namespace.yaml"
 kubectl apply -f "$SCRIPT_DIR/manifests/mysql-secret.yaml"
-if [[ "$SETUP_TLS" == "true" ]]; then
+if [[ "$SETUP_TLS" == "true" || "$SETUP_DEPLOY_API" == "true" ]]; then
   info "Preparing TLS before the operator and failover group are created..."
   "$SCRIPT_DIR/enable-encryption.sh" --prepare-tls
 fi

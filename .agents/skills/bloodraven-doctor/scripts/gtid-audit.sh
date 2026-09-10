@@ -50,6 +50,8 @@ fi
 echo "======================================================================="
 echo "🧬 Bloodraven Doctor: GTID Consistency Audit"
 echo "Group: $MFG_NAME | Namespace: $NAMESPACE"
+GENERATION_BEFORE=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.topologyGeneration}' 2>/dev/null || true)
+echo "Topology generation before audit: ${GENERATION_BEFORE:-unavailable}"
 echo "======================================================================="
 
 PODS=$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=$MFG_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
@@ -83,7 +85,10 @@ find_mysql_container() {
 for pod in $PODS; do
     echo ""
     echo "📍 Probing Pod: $pod"
-    SITE_LABEL=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/site}' 2>/dev/null || echo "unknown")
+    # kubectl -o jsonpath tolerates missing keys: an unlabelled pod yields an
+    # empty string with exit 0, so the || fallback never fires.
+    SITE_LABEL=$(kubectl get pod "$pod" -n "$NAMESPACE" -o jsonpath='{.metadata.labels.shipstream\.io/site}' 2>/dev/null || echo "")
+    [[ -z "$SITE_LABEL" ]] && SITE_LABEL="unknown"
     echo "   Site: $SITE_LABEL"
 
     MYSQL_CONTAINER=$(find_mysql_container "$pod" "$NAMESPACE")
@@ -96,7 +101,7 @@ for pod in $PODS; do
     READ_ONLY=$(kubectl exec -n "$NAMESPACE" "$pod" -c "$MYSQL_CONTAINER" -- mysql -N -B -e "SELECT @@GLOBAL.read_only;" 2>/dev/null || true)
 
     # 2. If direct mysql failed (e.g. auth required), query from CR status for this site
-    if [[ -z "$GTID_EXECUTED" && -n "$SITE_LABEL" ]]; then
+    if [[ -z "$GTID_EXECUTED" && "$SITE_LABEL" != "unknown" ]]; then
         GTID_EXECUTED=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{.status.sites[?(@.name=='$SITE_LABEL')].gtidExecuted}" 2>/dev/null || true)
         READ_ONLY=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{.status.sites[?(@.name=='$SITE_LABEL')].readOnly}" 2>/dev/null || true)
         if [[ -n "$GTID_EXECUTED" ]]; then
@@ -111,6 +116,14 @@ for pod in $PODS; do
         echo "   ⚠️ Unable to retrieve GTID coordinates for pod $pod (pod may be restarting or initializing)"
     fi
 done
+
+GENERATION_AFTER=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.topologyGeneration}' 2>/dev/null || true)
+echo "Topology generation after audit: ${GENERATION_AFTER:-unavailable}"
+if [[ -z "$GENERATION_BEFORE" || -z "$GENERATION_AFTER" ]]; then
+    echo "WARNING: Topology stability could not be confirmed (status.topologyGeneration unavailable). Repeat observations after stabilization; do not resume deployment DDL."
+elif [[ "$GENERATION_BEFORE" != "$GENERATION_AFTER" ]]; then
+    echo "WARNING: Topology changed during this non-atomic audit. Repeat observations after stabilization; do not resume deployment DDL."
+fi
 
 echo ""
 echo "======================================================================="

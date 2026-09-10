@@ -67,12 +67,16 @@ kubectl get pods,pvc,endpoints,services -n "$NAMESPACE" -l "app.kubernetes.io/in
 # 3. Capture Events
 kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp > "$OUTPUT_DIR/events.txt" 2>/dev/null || true
 
+# Project known public fields; raw Lease annotations contain ownership hashes.
+bash "$(dirname "${BASH_SOURCE[0]}")/deployment-probe.sh" "$NAMESPACE" "$MFG_NAME" > "$OUTPUT_DIR/deployment.txt" 2> "$OUTPUT_DIR/deployment-errors.txt" || true
+
 # 4. Capture Operator Logs (last 500 lines)
 OPERATOR_POD=$(kubectl get pods -A -l app.kubernetes.io/name=bloodraven -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 OPERATOR_NS=$(kubectl get pods -A -l app.kubernetes.io/name=bloodraven -o jsonpath='{.items[0].metadata.namespace}' 2>/dev/null || echo "bloodraven")
 
 if [[ -n "$OPERATOR_POD" ]]; then
     kubectl logs -n "$OPERATOR_NS" "$OPERATOR_POD" --tail=500 > "$OUTPUT_DIR/operator.log" 2>/dev/null || true
+    kubectl get networkpolicies -n "$OPERATOR_NS" -o yaml > "$OUTPUT_DIR/operator-networkpolicies.yaml" 2>/dev/null || true
 fi
 
 # 5. Capture logs for ALL containers in each MySQL pod dynamically

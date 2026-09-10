@@ -1,3 +1,9 @@
+{{- if and .Values.auxiliary.deployAPI.enabled (not .Values.auxiliary.escrowTLS.enabled) }}
+{{- fail "auxiliary.deployAPI.enabled requires auxiliary.escrowTLS.enabled=true" }}
+{{- end }}
+{{- if and .Values.auxiliary.deployAPI.enabled (not .Values.leaderElection.enabled) }}
+{{- fail "auxiliary.deployAPI.enabled requires leaderElection.enabled=true" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -99,6 +105,12 @@ spec:
               value: /etc/bloodraven/escrow-tls/tls.crt
             - name: BLOODRAVEN_ESCROW_TLS_KEY_FILE
               value: /etc/bloodraven/escrow-tls/tls.key
+            {{- end }}
+            {{- if .Values.auxiliary.deployAPI.enabled }}
+            - name: BLOODRAVEN_DEPLOY_API_ENABLED
+              value: "true"
+            - name: BLOODRAVEN_DEPLOY_API_AUDIENCE
+              value: {{ required "auxiliary.deployAPI.audience must not be empty" .Values.auxiliary.deployAPI.audience | quote }}
             {{- end }}
             # WebSocket hardening (AUDIT H2): Origin allowlist + client cap.
             - name: BLOODRAVEN_WS_ALLOWED_ORIGINS

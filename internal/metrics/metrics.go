@@ -34,6 +34,36 @@ var (
 		Help: "Total number of failovers executed. Incremented after successful MySQL promotion.",
 	}, []string{"target_site"})
 
+	DeployLeasesActive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_deploy_leases_active",
+		Help: "Number of active deployment leases per group and kind.",
+	}, []string{"group", "kind"})
+
+	DeployLeaseGrantsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_deploy_lease_grants_total",
+		Help: "Deployment lease grant requests by result: granted, conflict, unstable, or unauthorized.",
+	}, []string{"group", "kind", "result"})
+
+	DeployLeaseExpirationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_deploy_lease_expirations_total",
+		Help: "Total deployment lease expirations per group and kind.",
+	}, []string{"group", "kind"})
+
+	DeployLeaseRevocationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_deploy_lease_revocations_total",
+		Help: "Total deployment lease revocations by reason.",
+	}, []string{"group", "kind", "reason"})
+
+	DeployLeaseAgeSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "bloodraven_deploy_lease_age_seconds",
+		Help: "Age in seconds of the oldest active deployment lease per group and kind.",
+	}, []string{"group", "kind"})
+
+	PlannedFailoversDeferredTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "bloodraven_planned_failovers_deferred_total",
+		Help: "Total planned failover deferrals by reason.",
+	}, []string{"group", "reason"})
+
 	// PlannedFailoversTotal counts admin-triggered (graceful)
 	// switchovers separately from the automatic failover counter above,
 	// so existing dashboards and alerts keyed on bloodraven_failovers_total
@@ -486,6 +516,8 @@ func DeleteKeyringSiteMetrics(namespace, group, site string) {
 func Register(reg prometheus.Registerer) {
 	reg.MustRegister(PollLatency, StateTransitions, TaintOperations, WSClientCount, DNSFlipCount, FailoversTotal,
 		PlannedFailoversTotal, PlannedFailoverDurationSeconds, PlannedFailoverLagWaitSeconds,
+		DeployLeasesActive, DeployLeaseGrantsTotal, DeployLeaseExpirationsTotal,
+		DeployLeaseRevocationsTotal, DeployLeaseAgeSeconds, PlannedFailoversDeferredTotal,
 		SplitBrainAutoResolveTotal, PrimaryReassertTotal,
 		ReplicationLag, ReplicationRunning, ReplicationSourceState, SiteState, DivergentTransactions, RecloneOperations,
 		BackupRunsTotal, BackupDurationSeconds,

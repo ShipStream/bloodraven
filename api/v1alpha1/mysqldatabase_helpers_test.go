@@ -93,6 +93,8 @@ func TestCanonicalPrivilegesRejectsOutsideAllowlist(t *testing.T) {
 		{"super", []MysqlPrivilege{"SUPER"}},
 		{"file", []MysqlPrivilege{"FILE"}},
 		{"create user", []MysqlPrivilege{"CREATE USER"}},
+		{"temporary tables injection", []MysqlPrivilege{"CREATE TEMPORARY TABLES WITH GRANT OPTION"}},
+		{"view injection", []MysqlPrivilege{"CREATE VIEW; GRANT ALL"}},
 		{"replication slave", []MysqlPrivilege{"REPLICATION SLAVE"}},
 		{"lowercase", []MysqlPrivilege{"select"}},
 		{"trailing sql", []MysqlPrivilege{"SELECT, INSERT"}},
@@ -134,6 +136,42 @@ func TestCanonicalPrivilegesNormalizesOrderAndDuplicates(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("CanonicalPrivileges() = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestDeploymentPrivileges(t *testing.T) {
+	privs := []MysqlPrivilege{PrivilegeCreateView, PrivilegeSelect, PrivilegeCreateTemporaryTables, PrivilegeCreateView}
+	got, err := CanonicalPrivileges("privileges", privs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "SELECT, CREATE TEMPORARY TABLES, CREATE VIEW"; strings.Join(got, ", ") != want {
+		t.Fatalf("canonical privileges = %v, want %s", got, want)
+	}
+	spec := MysqlDatabaseSpec{
+		DatabaseName: "acme_wms",
+		Owner:        MysqlDatabaseOwner{SecretName: "owner", Privileges: privs},
+		Users:        []MysqlDatabaseUser{{SecretName: "app", Privileges: privs}},
+		Grants:       []MysqlDatabaseGrant{{Username: "reporting", Privileges: privs}},
+	}
+	if err := spec.Validate("owner", map[string]string{"app": "app_user"}); err != nil {
+		t.Fatalf("deployment privileges rejected: %v", err)
+	}
+	for _, p := range []MysqlPrivilege{PrivilegeCreateTemporaryTables, PrivilegeCreateView} {
+		if _, err := CanonicalPrivileges("privileges", []MysqlPrivilege{PrivilegeAllPrivileges, p}); err == nil {
+			t.Fatalf("ALL PRIVILEGES combined with %s was accepted", p)
+		}
+	}
+}
+
+func TestDeploymentClientsDeepCopy(t *testing.T) {
+	original := &MysqlDatabase{Spec: MysqlDatabaseSpec{
+		DeploymentClients: []DeploymentClient{{Namespace: "tenant", ServiceAccount: "deploy"}},
+	}}
+	copied := original.DeepCopy()
+	copied.Spec.DeploymentClients[0].ServiceAccount = "other"
+	if original.Spec.DeploymentClients[0].ServiceAccount != "deploy" {
+		t.Fatal("DeepCopy aliases deployment clients")
 	}
 }
 

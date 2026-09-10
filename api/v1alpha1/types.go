@@ -551,6 +551,12 @@ type MysqlFailoverGroupStatus struct {
 	// ActiveSite is the name of the site currently acting as primary (writable).
 	ActiveSite string `json:"activeSite,omitempty"`
 
+	// TopologyGeneration increments whenever the authoritative active site changes
+	// and persists across operator restarts to fence deployment leases.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	TopologyGeneration int64 `json:"topologyGeneration,omitempty"`
+
 	// Sites is the observed state of each site, parallel to spec.sites.
 	Sites []SiteStatus `json:"sites,omitempty"`
 

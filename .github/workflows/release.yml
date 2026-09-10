@@ -42,9 +42,9 @@ jobs:
           cache: npm
           cache-dependency-path: site/package-lock.json
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+        run: make install-lint
       - name: Run golangci-lint
-        run: golangci-lint run ./...
+        run: make lint
       - name: Build bloodraven
         run: go build ./cmd/bloodraven
       - name: Build sidecar

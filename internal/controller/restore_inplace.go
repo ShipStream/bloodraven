@@ -64,6 +64,12 @@ func inPlaceRestoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
 	return true
 }
 
+func inPlaceRestoreFreezesTopology(fg *v1alpha1.MysqlFailoverGroup) bool {
+	// Preflight may wait indefinitely on a renewed deployment hold. No MySQL
+	// mutation has started, so emergency failover must remain available.
+	return inPlaceRestoreInFlight(fg) && fg.Status.RestoreInPlace != nil && fg.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlacePreflight
+}
+
 // inPlaceRestoreFencesPrimaryService reports whether the current
 // in-place restore phase should cause syncPodLabels to strip the
 // primary role label on the active site (and thus drain the -primary
@@ -354,6 +360,19 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	spec := fg.Spec.RestoreInPlace
 	cur := fg.Status.RestoreInPlace
+	if m := r.deploymentLeaseManager(); m != nil {
+		hold, err := m.BeginPlanned(ctx, fg, "RestoreInPlace")
+		if err != nil {
+			return 0, err
+		}
+		if hold != nil {
+			next := cur.DeepCopy()
+			next.Message = fmt.Sprintf("DeploymentHold: operation %s instance %s until %s", hold.OperationID, hold.Instance, hold.ExpiresAt.UTC().Format(time.RFC3339))
+			r.setInPlaceRestoreStatus(ctx, fg, next)
+			return max(time.Second, hold.ExpiresAt.Sub(m.now())+time.Nanosecond), nil
+		}
+		defer m.EndPlanned(fg)
+	}
 
 	if fg.Status.ActiveSite == "" {
 		next := &v1alpha1.RestoreInPlaceStatus{
@@ -703,9 +722,29 @@ func (r *MysqlFailoverGroupReconciler) inPlaceResuming(ctx context.Context, fg *
 
 // setInPlaceRestoreStatus patches fg.status.restoreInPlace.
 func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, s *v1alpha1.RestoreInPlaceStatus) bool {
-	patch := client.MergeFrom(fg.DeepCopy())
-	fg.Status.RestoreInPlace = s
-	if err := r.Status().Patch(ctx, fg, patch); err != nil && !apierrors.IsNotFound(err) {
+	err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
+		fresh := &v1alpha1.MysqlFailoverGroup{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(fg), fresh); err != nil {
+			return err
+		}
+		// Invalidate even a same-site or ultimately failed restore before any
+		// destructive work. The phase and generation commit atomically.
+		if s != nil && s.Phase == v1alpha1.RestoreInPlaceFencing && (fresh.Status.RestoreInPlace == nil || fresh.Status.RestoreInPlace.Phase != v1alpha1.RestoreInPlaceFencing) {
+			fresh.Status.TopologyGeneration++
+		}
+		fresh.Status.RestoreInPlace = s
+		if err := r.Status().Update(ctx, fresh); err != nil {
+			return err
+		}
+		if fresh.Status.TopologyGeneration != fg.Status.TopologyGeneration {
+			if m := r.deploymentLeaseManager(); m != nil {
+				m.TopologyPending(client.ObjectKeyFromObject(fg))
+			}
+		}
+		*fg = *fresh
+		return nil
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "update in-place restore status", "fg", fg.Name)
 		return false
 	} else if apierrors.IsNotFound(err) {
@@ -722,9 +761,10 @@ func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Conte
 	// startManager path reads status.restoreInPlace and applies the
 	// correct flag when it starts the manager.
 	if r.Runner != nil {
+		r.Runner.hydrateDeploymentGeneration(fg)
 		r.Runner.SetTopologyFrozen(
 			types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name},
-			inPlaceRestoreInFlight(fg),
+			inPlaceRestoreFreezesTopology(fg),
 		)
 	}
 	return true

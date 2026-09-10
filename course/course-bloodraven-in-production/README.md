@@ -106,7 +106,7 @@ You hold a site down and watch the whole sequence run — fence, kill, drain, pr
 
 ### Unit 4 — Where failover meets your application
 
-Bloodraven's job ends at a label selector and a DNS record; your application's job starts there. This unit closes the gap Unit 3 opened — the promotion that worked perfectly while the counter app went on serving stale reads from the demoted site and failing every write against it, with nothing paging for either. You will fix a connection pool, move a primary on purpose at an RPO of zero, and decide what your cache and sessions owe you. Everything so far has assumed somebody can see the truth about `playground`; Unit 5 removes that assumption.
+Bloodraven's job ends at a label selector and a DNS record; your application's job starts there. This unit closes the gap Unit 3 opened — the promotion that worked perfectly while the counter app went on serving stale reads from the demoted site and failing every write against it, with nothing paging for either. You will fix a connection pool, move a primary on purpose at an RPO of zero, decide what your cache and sessions owe you, and give the deploy pipeline a lease instead of the cluster. Everything so far has assumed somebody can see the truth about `playground`; Unit 5 removes that assumption.
 
 **Services, DNS steering, and taints** — The three surfaces Bloodraven actually moves when it promotes: a label selector, an A record, and a node taint. What each one reaches, and where each one stops.
 
@@ -132,7 +132,13 @@ Bloodraven's job ends at a label selector and a DNS record; your application's j
   11. Trace a Dragonfly promotion through `REPLTAKEOVER` and its fallback, and read `sessionsPreserved`
   12. Explain how the active Dragonfly Service sheds an endpoint atomically during a takeover
 
-*Unit test — The application's half of failover* (10 questions, pass at 70%). Quick check: can you say why a pooled connection keeps serving stale reads after a correct promotion, name the one path that actually drains connections, and read a `sessionsPreserved` of nil without guessing?
+**Deployments that ask first: the lease API** — The deploy pipeline is the other thing that touches your primary on a schedule. A migration mutex, a hold that defers planned disruption and nothing else, and a generation counter that fences any migration the topology moved underneath.
+
+  13. Authorize a deploy pipeline through `MysqlDatabase.spec.deploymentClients` and take the `migration` mutex and a `failover-hold` in the required order
+  14. Say exactly which operations a live hold defers, and which paths never consult a lease
+  15. Answer a `409 revoked`, `404` or `403 token_mismatch` renewal correctly: stop the heartbeat, decide by the DDL boundary, never reconnect to the new primary
+
+*Unit test — The application's half of failover* (12 questions, pass at 70%). Quick check: can you say why a pooled connection keeps serving stale reads after a correct promotion, name the one path that actually drains connections, and read a `sessionsPreserved` of nil without guessing, and say what a deployment hold defers and what it never touches?
 
 *Project — Make the writer survive.* Instrument a writer against `playground`, run both a planned and an emergency failover underneath it, and produce a drill record with the measured write-gap for each — so the recovery time you claim for your application is one you observed rather than one you assumed.
 

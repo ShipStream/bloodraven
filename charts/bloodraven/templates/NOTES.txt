@@ -37,6 +37,26 @@ retention. Set spec.sidecar.bloodravenAddress on every MysqlFailoverGroup to a
 reachable endpoint before creating or restarting MySQL pods.
 {{- end }}
 
+{{- if .Values.auxiliary.deployAPI.enabled }}
+
+Deployment API (TLS only, never served on auxiliary HTTP):
+{{- if .Values.auxiliary.service.enabled }}
+  https://{{ include "bloodraven.auxiliaryServiceName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.auxiliary.escrowTLS.port }}/deploy/v1/groups/{group}
+{{- else }}
+  No Service is rendered; provide a trusted route to the TLS listener on port {{ .Values.auxiliary.escrowTLS.port }}.
+{{- end }}
+  Projected ServiceAccount token audience: {{ .Values.auxiliary.deployAPI.audience }}
+  Declare callers in MysqlDatabase.spec.deploymentClients; instance is the CR name.
+  NetworkPolicy enabled: {{ .Values.auxiliary.deployAPI.networkPolicy.enabled }}
+{{- if .Values.auxiliary.deployAPI.networkPolicy.enabled }}
+  TLS allows deploy-client=true pods in mysql-client=true namespaces and managed
+  MySQL pods for escrow. Metrics 8080, probes 8081, and auxiliary 8082 remain open.
+  Review auxiliary.deployAPI.networkPolicy.additionalIngress for custom peers.
+  NetworkPolicies are additive; other allow rules can widen this access.
+{{- end }}
+  Reference: https://bloodraven.dev/docs/configuration/deployment-api
+{{- end }}
+
 {{- if .Values.grafanaDashboards.enabled }}
 
 Grafana dashboards shipped as ConfigMaps (label {{ .Values.grafanaDashboards.label | default "grafana_dashboard" }}={{ .Values.grafanaDashboards.labelValue | default "1" | quote }}):
