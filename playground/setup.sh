@@ -88,6 +88,13 @@ if [[ "$SETUP_TLS" == "true" || "$SETUP_DEPLOY_API" == "true" ]]; then
   )
 fi
 ESCROW_TLS_HELM_ARGS+=(--set auxiliary.deployAPI.enabled="$SETUP_DEPLOY_API")
+# The deployment API serves leader-owned lease state, so the chart refuses
+# deployAPI without leader election. The playground runs one replica; leader
+# election is harmless there and required whenever the API is on.
+LEADER_ELECTION_ENABLED=false
+if [[ "$SETUP_DEPLOY_API" == "true" ]]; then
+  LEADER_ELECTION_ENABLED=true
+fi
 if [[ "$HELM_INSTALL_CRDS" == "true" ]] && helm status bloodraven -n "$NAMESPACE" >/dev/null 2>&1; then
   fail "BLOODRAVEN_SETUP_HELM_INSTALL_CRDS=1 requires a fresh Helm release. Helm installs CRDs from charts/bloodraven/crds only on first install and will not upgrade or repair them on helm upgrade; unset BLOODRAVEN_SETUP_HELM_INSTALL_CRDS to apply CRDs explicitly before upgrading."
 fi
@@ -327,7 +334,7 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set 'tolerations[4].key=shipstream.io/db-readonly' \
   --set 'tolerations[4].operator=Exists' \
   --set 'tolerations[4].effect=NoExecute' \
-  --set leaderElection.enabled=false \
+  --set leaderElection.enabled="$LEADER_ELECTION_ENABLED" \
   "${ESCROW_TLS_HELM_ARGS[@]}" \
   --timeout=180s
 # Don't use --wait; the operator may take a moment to pass readiness after
