@@ -144,6 +144,19 @@ class DeploymentClientTest(unittest.TestCase):
         self.assertNotIn("stopped", [r["action"] for r in records])
         self.assertNotIn(200, [r["status"] for r in records if r["action"] == "renew"])
 
+    def test_delayed_successful_renewal_must_still_be_unexpired(self):
+        for delay, valid in [(29, True), (30, False), (35, False)]:
+            with self.subTest(delay=delay):
+                responses = [self.snapshot(), self.grant(),
+                             (200, {"expiresAt": "2026-09-09T12:00:35Z", "topologyGeneration": 7}, delay)]
+                if valid:
+                    responses.append(self.revoked())
+                code, calls, records, _ = self.run_client(responses)
+                self.assertEqual(code, 0 if valid else 1)
+                self.assertEqual(len(calls), 4 if valid else 3)
+                self.assertEqual(records[-1]["action"] == "stopped", valid)
+                self.assertFalse(responses)
+
     def test_expiry_never_renews_or_releases(self):
         code, calls, _, sleep = self.run_client([self.snapshot(), self.grant(), self.grant("failover-hold")], mode="expiry")
         self.assertEqual(code, 0)

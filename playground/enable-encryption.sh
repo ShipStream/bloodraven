@@ -135,6 +135,7 @@ if kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" >/dev/null 2>&1 && \
 	command -v openssl >/dev/null 2>&1 || die "openssl is required to validate existing playground TLS material"
 	TMP="$(mktemp -d)"
 	trap 'rm -rf "$TMP"' EXIT
+	umask 077
 	tls_invalid="Existing playground TLS material failed validation; no Secrets were changed. For a disposable playground only, recreate an empty playground cluster and rerun BLOODRAVEN_SETUP_TLS=1 ./playground/setup.sh. For a live or encrypted group, preserve its data and keyring Secrets and plan a coordinated TLS migration; do not delete encrypted group keys or blindly rotate its CA."
 	kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" -o jsonpath='{.data.ca\.crt}' \
 		| base64 --decode > "$TMP/ca.crt" || die "$tls_invalid"
@@ -142,6 +143,10 @@ if kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" >/dev/null 2>&1 && \
 		| base64 --decode > "$TMP/tls.crt" || die "$tls_invalid"
 	kubectl -n "$NAMESPACE" get secret "$ESCROW_TLS_SECRET" -o jsonpath='{.data.tls\.crt}' \
 		| base64 --decode > "$TMP/escrow-tls.crt" || die "$tls_invalid"
+	kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" -o jsonpath='{.data.tls\.key}' \
+		| base64 --decode > "$TMP/tls.key" || die "$tls_invalid"
+	kubectl -n "$NAMESPACE" get secret "$ESCROW_TLS_SECRET" -o jsonpath='{.data.tls\.key}' \
+		| base64 --decode > "$TMP/escrow-tls.key" || die "$tls_invalid"
 	openssl verify -x509_strict -check_ss_sig -CAfile "$TMP/ca.crt" \
 		"$TMP/ca.crt" >/dev/null || die "$tls_invalid"
 	for hostname in \
@@ -162,6 +167,13 @@ if kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" >/dev/null 2>&1 && \
 	openssl verify -x509_strict -purpose sslserver \
 		-verify_hostname "bloodraven.${NAMESPACE}.svc.cluster.local" \
 		-CAfile "$TMP/ca.crt" "$TMP/escrow-tls.crt" >/dev/null || die "$tls_invalid"
+	for pair in tls escrow-tls; do
+		openssl x509 -in "$TMP/$pair.crt" -pubkey -noout > "$TMP/cert.pub" || die "$tls_invalid"
+		openssl pkey -in "$TMP/$pair.key" -passin pass: -check -noout >/dev/null || die "$tls_invalid"
+		openssl pkey -in "$TMP/$pair.key" -passin pass: -pubout \
+			-out "$TMP/key.pub" >/dev/null || die "$tls_invalid"
+		cmp -s "$TMP/cert.pub" "$TMP/key.pub" || die "$tls_invalid"
+	done
 	ok "existing TLS secrets $TLS_SECRET and $ESCROW_TLS_SECRET passed strict verification"
 else
 	if kubectl -n "$NAMESPACE" get secret "$TLS_SECRET" >/dev/null 2>&1 || \

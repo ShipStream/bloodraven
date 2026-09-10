@@ -29,6 +29,8 @@ kubectl() {
         'get secret mysql-playground-tls -o jsonpath={.data.ca\.crt}') base64 "$TLS_TEST_DIR/ca.crt" ;;
         'get secret mysql-playground-tls -o jsonpath={.data.tls\.crt}') base64 "$TLS_TEST_DIR/mysql.crt" ;;
         'get secret bloodraven-escrow-tls -o jsonpath={.data.tls\.crt}') base64 "$TLS_TEST_DIR/escrow.crt" ;;
+        'get secret mysql-playground-tls -o jsonpath={.data.tls\.key}') base64 "$TLS_TEST_DIR/mysql.key" ;;
+        'get secret bloodraven-escrow-tls -o jsonpath={.data.tls\.key}') base64 "$TLS_TEST_DIR/escrow.key" ;;
         *) printf 'unexpected kubectl call: %s\n' "$*" >> "$TLS_TEST_DIR/unexpected"; return 1 ;;
         esac ;;
     create)
@@ -42,7 +44,9 @@ kubectl() {
                 cp "${arg#--from-file=ca.crt=}" "$TLS_TEST_DIR/ca.crt"
                 cp "$(dirname "${arg#--from-file=ca.crt=}")/ca.key" "$TLS_TEST_DIR/ca.key" ;;
             --from-file=tls.crt=*) cp "${arg#--from-file=tls.crt=}" "$TLS_TEST_DIR/mysql.crt" ;;
+            --from-file=tls.key=*) cp "${arg#--from-file=tls.key=}" "$TLS_TEST_DIR/mysql.key" ;;
             --cert=*) cp "${arg#--cert=}" "$TLS_TEST_DIR/escrow.crt" ;;
+            --key=*) cp "${arg#--key=}" "$TLS_TEST_DIR/escrow.key" ;;
             esac
         done ;;
     *) printf 'unexpected kubectl call: %s\n' "$*" >> "$TLS_TEST_DIR/unexpected"; return 1 ;;
@@ -77,6 +81,42 @@ bash ../../../playground/enable-encryption.sh --prepare-tls
 		}
 	})
 	for _, cert := range []string{"mysql", "escrow"} {
+		for _, defect := range []string{"missing", "malformed", "mismatched"} {
+			t.Run(cert+" "+defect+" key", func(t *testing.T) {
+				path := filepath.Join(dir, cert+".key")
+				original, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := os.WriteFile(path, original, 0600); err != nil {
+						t.Fatal(err)
+					}
+				})
+				var replacement []byte
+				switch defect {
+				case "malformed":
+					replacement = []byte("not a private key")
+				case "mismatched":
+					replacement, err = os.ReadFile(filepath.Join(dir, "ca.key"))
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(path, replacement, 0600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command("bash", "-c", script)
+				cmd.Env = append(os.Environ(), "TLS_TEST_DIR="+dir, "TLS_TEST_REUSE=1")
+				out, err := cmd.CombinedOutput()
+				if err == nil || !strings.Contains(string(out), "Existing playground TLS material failed validation; no Secrets were changed") {
+					t.Fatalf("reuse with %s key: %v\n%s", defect, err, out)
+				}
+				if strings.Contains(string(out), "PRIVATE KEY") || strings.Contains(string(out), "passed strict verification") {
+					t.Fatalf("invalid key leaked or was accepted: %s", out)
+				}
+			})
+		}
 		t.Run(cert+" wrong SAN", func(t *testing.T) {
 			path := filepath.Join(dir, cert+".crt")
 			original, err := os.ReadFile(path)

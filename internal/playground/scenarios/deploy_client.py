@@ -93,6 +93,9 @@ else:
                 raise SystemExit(1)
             else:
                 expires[kind] = datetime.fromisoformat(body["expiresAt"])
+                # A delayed 200 is not authority if its renewed lease already expired.
+                if datetime.now(timezone.utc) >= expires[kind]:
+                    raise SystemExit(1)
         if len(fenced) == len(leases):
             print(json.dumps({"action": "stopped", "status": 409}), flush=True)
             break
