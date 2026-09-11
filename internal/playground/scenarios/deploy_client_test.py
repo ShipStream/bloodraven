@@ -28,11 +28,16 @@ class DeploymentClientTest(unittest.TestCase):
 
         def respond(req, context, timeout):
             self.assertIs(context, tls)
-            self.assertEqual(timeout, 4)
+            self.assertEqual(timeout, 45)
             self.assertEqual(req.headers["Authorization"], "Bearer projected-secret")
             self.assertTrue(req.full_url.startswith("https://operator:8443/deploy/v1/groups/group"))
             calls.append((req.method, req.full_url, json.loads(req.data) if req.data else None))
-            status, body = responses.pop(0)
+            reply = responses.pop(0)
+            status, body = reply[:2]
+            if len(reply) == 3:
+                delay = reply[2]
+                self.assertLess(delay, timeout)
+                advance(delay)
             stream = io.BytesIO(json.dumps(body).encode())
             if status >= 400:
                 raise HTTPError(req.full_url, status, "test response", {}, stream)
@@ -118,6 +123,17 @@ class DeploymentClientTest(unittest.TestCase):
         self.assertTrue(calls[-1][1].endswith("/leases/failover-hold/attempt"))
         self.assertEqual(records[-1]["action"], "stopped")
 
+    def test_slow_emergency_verdict_preserves_expiry_and_stops(self):
+        responses = [self.snapshot(), self.grant(ttl=120), self.grant("failover-hold", ttl=120),
+                     (*self.revoked(), 35), self.revoked()]
+        code, calls, records, _ = self.run_client(responses, mode="emergency")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 5)
+        revoked = [r for r in records if r["action"] == "renew"]
+        self.assertEqual([r["status"] for r in revoked], [409, 409])
+        self.assertEqual(datetime.fromisoformat(revoked[0]["at"]).second, 40)
+        self.assertEqual(records[-1]["action"], "stopped")
+
     def test_pending_does_not_extend_confirmed_expiry(self):
         pending = (423, {"error": "unstable", "reason": "TopologyPersistencePending"})
         responses = [self.snapshot(), self.grant(ttl=120), self.grant("failover-hold", ttl=120)]
@@ -127,6 +143,19 @@ class DeploymentClientTest(unittest.TestCase):
         self.assertEqual(sum(call.args[0] for call in sleep.call_args_list), 120)
         self.assertNotIn("stopped", [r["action"] for r in records])
         self.assertNotIn(200, [r["status"] for r in records if r["action"] == "renew"])
+
+    def test_delayed_successful_renewal_must_still_be_unexpired(self):
+        for delay, valid in [(29, True), (30, False), (35, False)]:
+            with self.subTest(delay=delay):
+                responses = [self.snapshot(), self.grant(),
+                             (200, {"expiresAt": "2026-09-09T12:00:35Z", "topologyGeneration": 7}, delay)]
+                if valid:
+                    responses.append(self.revoked())
+                code, calls, records, _ = self.run_client(responses)
+                self.assertEqual(code, 0 if valid else 1)
+                self.assertEqual(len(calls), 4 if valid else 3)
+                self.assertEqual(records[-1]["action"] == "stopped", valid)
+                self.assertFalse(responses)
 
     def test_expiry_never_renews_or_releases(self):
         code, calls, _, sleep = self.run_client([self.snapshot(), self.grant(), self.grant("failover-hold")], mode="expiry")

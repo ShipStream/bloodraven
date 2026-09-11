@@ -93,6 +93,52 @@ func TestDeploymentLeaseGrantRotationAndHashOnly(t *testing.T) {
 	}
 }
 
+func TestDeploymentLeaseWriteValidDuration(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		state     string
+		remaining time.Duration
+		want      int32
+	}{
+		{"active", "active", 30 * time.Second, 30},
+		{"active subsecond", "active", time.Nanosecond, 1},
+		{"active at expiry", "active", 0, 1},
+		{"expired", "expired", -time.Nanosecond, 1},
+		{"released subsecond", "released", time.Nanosecond, 1},
+		{"revoked subsecond", "revoked", time.Nanosecond, 1},
+		{"old revocation tombstone", "revoked", -24 * time.Hour, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, fg, now := deploymentLeaseFixture(t)
+			r := &deploymentLeaseRecord{
+				DeploymentLeaseView: DeploymentLeaseView{Kind: "migration", OperationID: "op1", ExpiresAt: now.Add(tc.remaining), TopologyGeneration: fg.Status.TopologyGeneration},
+				State:               tc.state,
+			}
+			var l *coordinationv1.Lease
+			for _, operation := range []string{"create", "update"} {
+				if err := m.write(context.Background(), fg, l, r, ""); err != nil {
+					t.Fatalf("%s: %v", operation, err)
+				}
+				var stored *deploymentLeaseRecord
+				var err error
+				l, stored, err = m.read(context.Background(), fg, "migration", "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if l.Spec.LeaseDurationSeconds == nil {
+					t.Fatalf("%s: missing duration", operation)
+				}
+				if *l.Spec.LeaseDurationSeconds != tc.want {
+					t.Fatalf("%s: duration = %d, want %d", operation, *l.Spec.LeaseDurationSeconds, tc.want)
+				}
+				if stored.State != tc.state || !stored.ExpiresAt.Equal(r.ExpiresAt) || stored.TopologyGeneration != r.TopologyGeneration {
+					t.Fatalf("%s changed authoritative lease record", operation)
+				}
+			}
+		})
+	}
+}
+
 func TestDeploymentLeaseExpiryBoundaryAndRestart(t *testing.T) {
 	m, fg, now := deploymentLeaseFixture(t)
 	r := grantDeploymentLease(t, m, fg, "migration", "op1", 5)

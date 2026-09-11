@@ -84,18 +84,28 @@ func observeFailover() runner.Step {
 			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
-				fmt.Sprintf("activeSite changes from %s", original),
+				fmt.Sprintf("activeSite changes from %s and is observed writable", original),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q", mfg.Status.ActiveSite, mfg.Status.LastFailoverTarget)
-					if mfg.Status.ActiveSite != "" && mfg.Status.ActiveSite != original {
-						return true, msg, nil
-					}
-					return false, msg, nil
+					done, msg := failoverObserved(mfg, original)
+					return done, msg, nil
 				},
 			)
 			return err
 		},
 	}
+}
+
+func failoverObserved(mfg *v1alpha1.MysqlFailoverGroup, original string) (bool, string) {
+	var writable []string
+	for _, site := range mfg.Status.Sites {
+		if site.State == "writable" {
+			writable = append(writable, site.Name)
+		}
+	}
+	active := mfg.Status.ActiveSite
+	msg := fmt.Sprintf("activeSite=%q lastFailoverTarget=%q writable=%v", active, mfg.Status.LastFailoverTarget, writable)
+	// Promotion authority can be published before the polled site state catches up.
+	return active != "" && active != original && len(writable) == 1 && writable[0] == active, msg
 }
 
 func verifyFailoverMetric() runner.Step {
