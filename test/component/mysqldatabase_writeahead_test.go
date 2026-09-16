@@ -2,15 +2,20 @@ package component
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
@@ -686,5 +691,257 @@ func TestMysqlDatabaseRemovedUserMovedToGrantsKept(t *testing.T) {
 	}
 	if !h.sawEvent("UserTransferred") {
 		t.Fatal("no UserTransferred event")
+	}
+}
+
+// --- review round 1 ----------------------------------------------------------
+
+// TestMysqlDatabaseLegacyPendingHostsSurviveSharedHostEdit: a legacy owner
+// rotation target (pendingOwnerUser set, pendingOwnerHosts empty) borrows
+// ownerHosts. A write-ahead that grows ownerHosts must pin the target's hosts
+// first, or the target silently inherits the new host: here a later cleanup
+// dropped a foreign B@H2 the CR never created.
+func TestMysqlDatabaseLegacyPendingHostsSurviveSharedHostEdit(t *testing.T) {
+	const moved = "acme_moved"
+	cr := mdbCR(withOwnerHosts(hostA, hostB), func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Users = []v1alpha1.MysqlDatabaseUser{selectUserEntry("moved-mysql", hostA)}
+		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: "ghost", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+		m.Status.DatabaseCreated = true
+		m.Status.Phase = v1alpha1.MysqlDatabasePhaseCreating
+		m.Status.OwnerUser, m.Status.OwnerHosts = mdbOwnerUser, []string{hostA}
+		m.Status.PendingOwnerUser = moved // legacy: no pendingOwnerHosts
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), userSecretFor("moved-mysql", moved, "moved-pw"))
+	h.server.addAccount(mdbOwnerUser, hostA, mdbOwnerPass)
+	h.server.addAccount(moved, hostA, "rotated-pw")
+	h.server.addAccount(moved, hostB, "foreign-password")
+
+	// The apply runs the owner and users[] SQL, then fails on the missing
+	// grants[] user: the write-ahead stamp stands.
+	h.reconcile()
+	mdb := h.get()
+	requireFailed(t, mdb, "GrantUserMissing")
+	if mdb.Status.PendingOwnerUser == moved && slices.Contains(pendingHostsOf(&mdb.Status), hostB) {
+		t.Fatalf("legacy pending target now attributed on %s: ownerHosts=%v pendingOwnerHosts=%v",
+			hostB, mdb.Status.OwnerHosts, mdb.Status.PendingOwnerHosts)
+	}
+
+	h.server.addUser("ghost", "ghost-pw")
+	h.reconcile()
+	h.requireReady()
+	h.requirePasswordOf(moved, hostB, "foreign-password")
+	h.requirePasswordOf(moved, hostA, "moved-pw")
+}
+
+// pendingHostsOf mirrors the reconciler's legacy fallback for the owner
+// rotation target's hosts.
+func pendingHostsOf(st *v1alpha1.MysqlDatabaseStatus) []string {
+	if len(st.PendingOwnerHosts) > 0 {
+		return st.PendingOwnerHosts
+	}
+	return st.OwnerHosts
+}
+
+// TestMysqlDatabaseGrantMovedToUsersOnOtherHostRevokesPercentAccount:
+// grants[] manages G@'%'; a users[] entry naming G on another host manages
+// a different account. Moving the name between them must still revoke the
+// removed grant on G@'%'.
+func TestMysqlDatabaseGrantMovedToUsersOnOtherHostRevokesPercentAccount(t *testing.T) {
+	const shared = "maester"
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{{Username: shared, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}}}
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), userSecretFor("maester-mysql", shared, "maester-tenant-pw"))
+	h.server.addUser(shared, "maester-pw")
+	h.reconcile()
+	h.requireReady()
+	if _, ok := h.server.grantsForAccount(mdbDatabase, shared, "%"); !ok {
+		t.Fatal("test premise broken: maester@% not granted")
+	}
+
+	h.update(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Grants = nil
+		m.Spec.Users = []v1alpha1.MysqlDatabaseUser{selectUserEntry("maester-mysql", hostA)}
+	})
+	h.reconcile()
+	h.requireReady()
+
+	if privs, ok := h.server.grantsForAccount(mdbDatabase, shared, "%"); ok {
+		t.Fatalf("maester@%% still holds %v after its grants[] entry was removed", privs)
+	}
+	h.requirePasswordOf(shared, "%", "maester-pw")
+	h.requirePasswordOf(shared, hostA, "maester-tenant-pw")
+}
+
+// TestMysqlDatabaseWithdrawalPatchFailureDoesNotAdopt: the Pending patch that
+// carries the withdrawal fails, so the speculative records stay persisted
+// and the reconcile errors (requeue). The retry re-verifies before trusting
+// them — the accounts are still absent, the server still refuses, and this
+// time the withdrawal lands — so a foreign account created afterwards is
+// refused, not adopted, and never dropped.
+func TestMysqlDatabaseWithdrawalPatchFailureDoesNotAdopt(t *testing.T) {
+	var failNextPending atomic.Bool
+	failNextPending.Store(true)
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if mdb, ok := obj.(*v1alpha1.MysqlDatabase); ok && mdb.Status.Phase == v1alpha1.MysqlDatabasePhasePending && failNextPending.CompareAndSwap(true, false) {
+				return errors.New("injected status patch failure")
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	}
+	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	h := newMdbHarnessWithInterceptor(t, funcs, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.server.failStatements("CREATE USER IF NOT EXISTS '"+mdbOwnerUser+"'",
+		&mysqldriver.MySQLError{Number: 1290, Message: "The MySQL server is running with the --super-read-only option"}, false)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mdbNamespace, Name: mdbName}}
+
+	if _, err := h.r.Reconcile(context.Background(), req); err == nil {
+		t.Fatal("Reconcile() = nil error, want the failed withdrawal patch surfaced for requeue")
+	}
+	if mdb := h.get(); len(mdb.Status.AppliedUsers) == 0 {
+		t.Fatalf("test premise broken: the write-ahead records are not persisted (%+v)", mdb.Status)
+	}
+
+	h.reconcile()
+	mdb := h.get()
+	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+		t.Fatalf("phase = %q (message %q), want Pending", mdb.Status.Phase, mdb.Status.Message)
+	}
+	if mdb.Status.OwnerUser != "" || len(mdb.Status.AppliedUsers) != 0 {
+		t.Fatalf("records survived the retried withdrawal: owner=%q users=%+v", mdb.Status.OwnerUser, mdb.Status.AppliedUsers)
+	}
+
+	h.server.clearFaults()
+	h.server.addUser(mdbSupportUser, "foreign-password")
+	h.reconcile()
+	requireFailed(t, h.get(), "PreExistingUser")
+	h.requirePasswordOf(mdbSupportUser, "%", "foreign-password")
+
+	h.delete()
+	h.reconcile()
+	h.requirePasswordOf(mdbSupportUser, "%", "foreign-password")
+}
+
+// TestMysqlDatabaseOwnerUsersSwapConverges: the owner and a users[] entry
+// swap usernames in one edit. Both accounts are this CR's and both stay
+// desired, so nothing is dropped and each password follows its new Secret.
+func TestMysqlDatabaseOwnerUsersSwapConverges(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(withSupportUser), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.reconcile()
+	h.requireReady()
+
+	h.setOwnerUsername(mdbSupportUser, "owner-pw-swapped")
+	h.updateSupportSecret(func(s *corev1.Secret) {
+		s.Data["username"] = []byte(mdbOwnerUser)
+		s.Data["password"] = []byte("support-pw-swapped")
+	})
+	before := h.server.statementCount()
+	h.reconcile()
+	mdb := h.requireReady()
+
+	h.requireNoStatementNaming(before, "DROP USER", mdbOwnerUser)
+	h.requireNoStatementNaming(before, "DROP USER", mdbSupportUser)
+	h.requirePasswordOf(mdbSupportUser, "%", "owner-pw-swapped")
+	h.requirePasswordOf(mdbOwnerUser, "%", "support-pw-swapped")
+	if privs, _ := h.server.grantsFor(mdbDatabase, mdbSupportUser); strings.Join(privs, ",") != "ALL PRIVILEGES" {
+		t.Fatalf("new owner grants = %v, want [ALL PRIVILEGES]", privs)
+	}
+	if privs, _ := h.server.grantsFor(mdbDatabase, mdbOwnerUser); strings.Join(privs, ",") != "SELECT" {
+		t.Fatalf("new users[] principal grants = %v, want [SELECT]", privs)
+	}
+	if mdb.Status.OwnerUser != mdbSupportUser || mdb.Status.PendingOwnerUser != "" ||
+		len(mdb.Status.AppliedUsers) != 1 || mdb.Status.AppliedUsers[0].Username != mdbOwnerUser || mdb.Status.AppliedUsers[0].PendingUsername != "" {
+		t.Fatalf("records = owner %q pending %q users %+v", mdb.Status.OwnerUser, mdb.Status.PendingOwnerUser, mdb.Status.AppliedUsers)
+	}
+}
+
+// siblingClaiming creates a live sibling CR on the group whose status claims
+// username through its users[] ledger.
+func (h *mdbHarness) siblingClaiming(username string) {
+	h.t.Helper()
+	sibling := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+		m.Name = "tenant-sibling"
+		m.Spec.DatabaseName = "sibling_wms"
+		m.Spec.Owner.SecretName = "sibling-owner"
+	})
+	if err := h.client.Create(context.Background(), sibling); err != nil {
+		h.t.Fatalf("create sibling: %v", err)
+	}
+	sibling.Status.AppliedUsers = []v1alpha1.MysqlDatabaseUserState{{SecretName: "sibling-support", Username: username}}
+	if err := h.client.Status().Update(context.Background(), sibling); err != nil {
+		h.t.Fatalf("stamp sibling claim: %v", err)
+	}
+}
+
+// TestMysqlDatabaseVetoedRotationDropStillRevokes: a rotated-away users[]
+// name whose drop a sibling vetoes survives as an account but loses its
+// rights on this CR's database.
+func TestMysqlDatabaseVetoedRotationDropStillRevokes(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(withSupportUser), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.reconcile()
+	h.requireReady()
+
+	h.siblingClaiming(mdbSupportUser)
+	h.updateSupportSecret(func(s *corev1.Secret) { s.Data["username"] = []byte("acme_support_v2") })
+	h.reconcile()
+	h.requireReady()
+
+	h.requirePasswordOf(mdbSupportUser, "%", mdbSupportPass)
+	if privs, ok := h.server.grantsFor(mdbDatabase, mdbSupportUser); ok {
+		t.Fatalf("vetoed rotated-away principal still holds %v on this database", privs)
+	}
+	if !h.sawEvent("UserDropSkipped") {
+		t.Fatal("no UserDropSkipped event")
+	}
+}
+
+// TestMysqlDatabaseUndeclaredHostDropIsVetted: removing a host of the owner
+// does not drop the same-named account on that host while a sibling claims
+// the name; it only loses its rights on this database.
+func TestMysqlDatabaseUndeclaredHostDropIsVetted(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(withOwnerHosts(hostA, hostB)), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.reconcile()
+	h.requireReady()
+
+	h.siblingClaiming(mdbOwnerUser)
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Owner.Hosts = []string{hostA} })
+	h.reconcile()
+	mdb := h.requireReady()
+
+	h.requirePasswordOf(mdbOwnerUser, hostB, mdbOwnerPass)
+	if privs, ok := h.server.grantsForAccount(mdbDatabase, mdbOwnerUser, hostB); ok {
+		t.Fatalf("%s@%s still holds %v on this database", mdbOwnerUser, hostB, privs)
+	}
+	if !h.sawEvent("OwnerUserDropSkipped") {
+		t.Fatal("no OwnerUserDropSkipped event")
+	}
+	if !reflect.DeepEqual(mdb.Status.OwnerHosts, []string{hostA}) {
+		t.Fatalf("status.ownerHosts = %v", mdb.Status.OwnerHosts)
+	}
+}
+
+// TestMysqlDatabaseFailedApplyWithdrawsInThePhasePatch: the withdrawal rides
+// the Pending/Failed status patch — a failed apply costs the write-ahead
+// stamp plus one patch, not an extra write per requeue.
+func TestMysqlDatabaseFailedApplyWithdrawsInThePhasePatch(t *testing.T) {
+	var patches atomic.Int32
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			patches.Add(1)
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	}
+	h := newMdbHarnessWithInterceptor(t, funcs, mdbCR(withSupportUser), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.server.failStatements("CREATE USER IF NOT EXISTS '"+mdbOwnerUser+"'",
+		&mysqldriver.MySQLError{Number: 1290, Message: "The MySQL server is running with the --super-read-only option"}, false)
+
+	h.reconcile()
+	mdb := h.get()
+	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending || mdb.Status.OwnerUser != "" || len(mdb.Status.AppliedUsers) != 0 {
+		t.Fatalf("phase %q owner %q users %+v, want Pending with records withdrawn", mdb.Status.Phase, mdb.Status.OwnerUser, mdb.Status.AppliedUsers)
+	}
+	if n := patches.Load(); n != 2 {
+		t.Fatalf("status patches = %d, want 2 (write-ahead stamp, then Pending with the withdrawal)", n)
 	}
 }

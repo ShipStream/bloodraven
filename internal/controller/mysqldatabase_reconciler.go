@@ -444,7 +444,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Every username this CR's current spec declares, and on which surface.
 	// Every drop below consults it: a name that is still desired — even on
 	// a different surface than the record being retired — is never dropped.
-	claims := currentPrincipalClaims(ownerUser, ownerHosts, mdb.Spec.Grants, users)
+	claims := currentPrincipalClaims(ownerUser, mdb.Spec.Grants, users)
 
 	// Rotation targets the ledger still records as pending but the Secrets
 	// no longer name are dropped now, before this reconcile's write-ahead
@@ -458,7 +458,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// here or was already attributed to this CR — so a refusal, or a query
 	// that fails, leaves no speculative record behind for a later reconcile
 	// to trust.
-	dbExists, err := preflightAdoption(sqlCtx, db, &mdb, ownerUser, ownerHosts, users, prior)
+	verified, err := preflightAdoption(sqlCtx, db, &mdb, ownerUser, ownerHosts, users, prior)
 	if err != nil {
 		return r.applyFailed(ctx, &mdb, &fg, err)
 	}
@@ -474,6 +474,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		st.Phase = v1alpha1.MysqlDatabasePhaseCreating
 		st.ObservedGeneration = mdb.Generation
 		st.DatabaseCreated = true
+		materializeLegacyPendingHosts(st)
 		carried := replacedPendingHosts(st, ownerUser, users)
 		stampOwnerWriteAhead(st, ownerUser, ownerHosts, carried)
 		stampUsersWriteAhead(st, users, carried)
@@ -490,18 +491,18 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	appliedGrants, progress, err := applyDatabase(sqlCtx, db, &mdb, ownerUser, ownerPass, ownerHosts, users, prior, dbExists)
+	appliedGrants, progress, err := applyDatabase(sqlCtx, db, &mdb, ownerUser, ownerPass, ownerHosts, users, prior, verified.dbExists)
 	if err != nil {
 		// Records written ahead for a principal none of whose statements
 		// executed describe nothing this CR touched: withdraw them, or the
 		// next reconcile would trust them to adopt (or Delete to drop) an
-		// account created in the meantime by someone else.
-		if werr := r.stampStatus(ctx, &mdb, func(st *v1alpha1.MysqlDatabaseStatus) {
-			withdrawUnexecuted(st, prior, progress, users)
-		}); werr != nil {
-			return ctrl.Result{}, werr
-		}
-		return r.applyFailed(ctx, &mdb, &fg, err)
+		// account created in the meantime by someone else. The withdrawal
+		// rides the same status patch as the Pending/Failed phase; if that
+		// patch fails the error requeues the reconcile, which re-verifies
+		// before trusting anything (see the known gaps for the window).
+		return r.applyFailed(ctx, &mdb, &fg, err, func(st *v1alpha1.MysqlDatabaseStatus) {
+			withdrawUnexecuted(st, prior, progress, verified, users)
+		})
 	}
 
 	// A rotated owner username means the previously-recorded account is
@@ -560,6 +561,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				kind:     principalKindUser,
 				username: prev,
 				hosts:    ledgerHostsForName(*prevState, prev),
+				revoke:   true,
 				why:      fmt.Sprintf("during rotation of spec.users[] entry %q to %q", secretName, current),
 				what:     "previous users[] principal",
 				dropped: func() {
@@ -631,14 +633,14 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// a record transferred from another surface) but the spec no longer
 	// lists is obsolete desired state, dropped on exactly those hosts —
 	// otherwise the Ready stamp would settle the record and orphan them.
-	if res, done, err := r.dropUndeclaredHosts(ctx, sqlCtx, db, &mdb, &fg, "spec.owner secret username", ownerUser, ownerHosts, prior, func(removed []string) {
+	if res, done, err := r.dropUndeclaredHosts(ctx, sqlCtx, db, &mdb, &fg, reserved, principalKindOwner, ownerUser, ownerHosts, prior, func(removed []string) {
 		r.Recorder.Eventf(&mdb, corev1.EventTypeNormal, "OwnerHostsRemoved",
 			"dropped owner user %q on hosts no longer declared: %s", ownerUser, strings.Join(removed, ", "))
 	}); done {
 		return res, err
 	}
 	for _, u := range users {
-		if res, done, err := r.dropUndeclaredHosts(ctx, sqlCtx, db, &mdb, &fg, "spec.users[] ledger username", u.username, u.hosts, prior, func(removed []string) {
+		if res, done, err := r.dropUndeclaredHosts(ctx, sqlCtx, db, &mdb, &fg, reserved, principalKindUser, u.username, u.hosts, prior, func(removed []string) {
 			r.Recorder.Eventf(&mdb, corev1.EventTypeNormal, "UserHostsRemoved",
 				"dropped users[] principal %q (secret %q) on hosts no longer declared: %s",
 				u.username, u.entry.SecretName, strings.Join(removed, ", "))
@@ -681,30 +683,31 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // applyFailed maps an adoption refusal or apply error to the CR's phase:
 // the refusals and GrantUserMissing are verdicts about the CR, connectivity
 // and read-only errors are weather (Pending), anything else is a MySQL
-// verdict about the CR's own statements.
-func (r *MysqlDatabaseReconciler) applyFailed(ctx context.Context, mdb *v1alpha1.MysqlDatabase, fg *v1alpha1.MysqlFailoverGroup, err error) (ctrl.Result, error) {
+// verdict about the CR's own statements. also mutates status in the same
+// patch that records the phase.
+func (r *MysqlDatabaseReconciler) applyFailed(ctx context.Context, mdb *v1alpha1.MysqlDatabase, fg *v1alpha1.MysqlFailoverGroup, err error, also ...func(*v1alpha1.MysqlDatabaseStatus)) (ctrl.Result, error) {
 	var preExists *errDatabasePreExists
 	if errors.As(err, &preExists) {
-		return r.fail(ctx, mdb, "DatabasePreExists", err.Error())
+		return r.fail(ctx, mdb, "DatabasePreExists", err.Error(), also...)
 	}
 	var preUser *errPreExistingOwnerUser
 	if errors.As(err, &preUser) {
-		return r.fail(ctx, mdb, "PreExistingOwnerUser", err.Error())
+		return r.fail(ctx, mdb, "PreExistingOwnerUser", err.Error(), also...)
 	}
 	var preTenantUser *errPreExistingUser
 	if errors.As(err, &preTenantUser) {
-		return r.fail(ctx, mdb, "PreExistingUser", err.Error())
+		return r.fail(ctx, mdb, "PreExistingUser", err.Error(), also...)
 	}
 	var missing *errGrantUserMissing
 	if errors.As(err, &missing) {
-		return r.fail(ctx, mdb, "GrantUserMissing", err.Error())
+		return r.fail(ctx, mdb, "GrantUserMissing", err.Error(), also...)
 	}
 	if transientSQLError(err) {
 		log.FromContext(ctx).WithValues("mysqldatabase", client.ObjectKeyFromObject(mdb)).V(1).Info("transient MySQL error, staying pending", "error", err)
 		return r.pending(ctx, mdb, "PrimaryUnavailable",
-			fmt.Sprintf("transient MySQL error on group %q: %v", fg.Name, err))
+			fmt.Sprintf("transient MySQL error on group %q: %v", fg.Name, err), also...)
 	}
-	return r.fail(ctx, mdb, "MySQLError", err.Error())
+	return r.fail(ctx, mdb, "MySQLError", err.Error(), also...)
 }
 
 // reconcileDelete releases the finalizer, dropping MySQL state only under an
@@ -725,11 +728,12 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 	}
 
 	// DatabaseCreated is the write-ahead record from the apply path: it is
-	// stamped once the admin connection is open, before the first statement
-	// executes. A CR without it (invalid spec, reserved owner, ownership
-	// conflict, unreachable primary — all fail before SQL) has nothing of
-	// its own in MySQL, and must not drop a database that some other CR or
-	// system created under the same name.
+	// stamped once the adoption preflight passed, before the first statement
+	// executes, and withdrawn again when MySQL refused every schema
+	// statement. A CR without it (invalid spec, reserved owner, ownership
+	// conflict, unreachable primary, a refused adoption — all fail before
+	// SQL) has nothing of its own in MySQL, and must not drop a database
+	// that some other CR or system created under the same name.
 	if !mdb.Status.DatabaseCreated {
 		r.Recorder.Eventf(mdb, corev1.EventTypeNormal, "DatabaseDropSkipped",
 			"deletionPolicy=Delete: this CR never applied any DDL for database %q; nothing to drop", mdb.Spec.DatabaseName)
@@ -1181,6 +1185,25 @@ func replacedPendingHosts(st *v1alpha1.MysqlDatabaseStatus, ownerUser string, us
 	return out
 }
 
+// materializeLegacyPendingHosts pins the hosts of a legacy rotation target —
+// a pending name an older operator recorded without pending hosts, which
+// borrows the shared ownerHosts/hosts list — to their current value. It must
+// run before any mutation of a shared list: growing ownerHosts would
+// otherwise silently attribute the new host to the pending name too, and a
+// later cleanup would drop a same-named account on that host that this CR
+// never created.
+func materializeLegacyPendingHosts(st *v1alpha1.MysqlDatabaseStatus) {
+	if st.PendingOwnerUser != "" && len(st.PendingOwnerHosts) == 0 {
+		st.PendingOwnerHosts = unionHosts(nil, pendingOwnerHosts(st))
+	}
+	for i := range st.AppliedUsers {
+		e := &st.AppliedUsers[i]
+		if e.PendingUsername != "" && len(e.PendingHosts) == 0 {
+			e.PendingHosts = unionHosts(nil, ledgerPendingHosts(*e))
+		}
+	}
+}
+
 // stampOwnerWriteAhead records the owner account(s) this reconcile is about
 // to create or re-apply. Hosts are tracked per recorded name: a first apply
 // or a re-apply of the recorded owner grows OwnerHosts; a rotation records
@@ -1256,24 +1279,35 @@ func statementExecuted(err error) bool {
 }
 
 // withdrawUnexecuted narrows the write-ahead records of every principal none
-// of whose statements executed to the accounts the pre-reconcile snapshot
-// already attributed to this CR. What remains after the narrowing is exactly
-// the prior record plus any record carried over from another surface of this
-// CR; every user@host that was only verified absent — and never created — is
-// withdrawn, so an account someone else creates later is refused rather than
+// of whose statements executed. A user@host survives only if the
+// pre-reconcile snapshot already attributed it to this CR AND this
+// reconcile's preflight did not find it absent: what remains is the part of
+// the prior record (plus any record carried over from another surface) that
+// may name a live account. Every account that was only verified absent — and
+// never created — is withdrawn, including one a previous reconcile recorded
+// but never created (its withdrawal patch failed, or it crashed after the
+// stamp), so an account someone else creates later is refused rather than
 // adopted. Principals that did execute keep their stamp: their accounts may
-// exist.
-func withdrawUnexecuted(st *v1alpha1.MysqlDatabaseStatus, prior *v1alpha1.MysqlDatabaseStatus, progress applyProgress, users []tenantUserInput) {
-	if !progress.schema {
-		st.DatabaseCreated = prior.DatabaseCreated
+// exist. The schema record follows the same rule, but only once no account
+// record is left for deletion to cover.
+func withdrawUnexecuted(st *v1alpha1.MysqlDatabaseStatus, prior *v1alpha1.MysqlDatabaseStatus, progress applyProgress, verified preflightResult, users []tenantUserInput) {
+	materializeLegacyPendingHosts(st)
+	keep := func(username string, hosts []string) []string {
+		var out []string
+		for _, h := range attributedHosts(prior, username, hosts) {
+			if !verified.absent[mysqlAccount{user: username, host: h}] {
+				out = append(out, h)
+			}
+		}
+		return out
 	}
 	if !progress.owner {
-		if hosts := attributedHosts(prior, st.OwnerUser, recordedOwnerHosts(st)); len(hosts) > 0 {
+		if hosts := keep(st.OwnerUser, recordedOwnerHosts(st)); len(hosts) > 0 {
 			st.OwnerHosts = hosts
 		} else {
 			st.OwnerUser, st.OwnerHosts = "", nil
 		}
-		if hosts := attributedHosts(prior, st.PendingOwnerUser, pendingOwnerHosts(st)); len(hosts) > 0 {
+		if hosts := keep(st.PendingOwnerUser, pendingOwnerHosts(st)); len(hosts) > 0 {
 			st.PendingOwnerHosts = hosts
 		} else {
 			st.PendingOwnerUser, st.PendingOwnerHosts = "", nil
@@ -1287,12 +1321,12 @@ func withdrawUnexecuted(st *v1alpha1.MysqlDatabaseStatus, prior *v1alpha1.MysqlD
 		if e == nil {
 			continue
 		}
-		if hosts := attributedHosts(prior, e.Username, ledgerHosts(*e)); len(hosts) > 0 {
+		if hosts := keep(e.Username, ledgerHosts(*e)); len(hosts) > 0 {
 			e.Hosts = hosts
 		} else {
 			e.Username, e.Hosts = "", nil
 		}
-		if hosts := attributedHosts(prior, e.PendingUsername, ledgerPendingHosts(*e)); len(hosts) > 0 {
+		if hosts := keep(e.PendingUsername, ledgerPendingHosts(*e)); len(hosts) > 0 {
 			e.PendingHosts = hosts
 		} else {
 			e.PendingUsername, e.PendingHosts = "", nil
@@ -1305,6 +1339,15 @@ func withdrawUnexecuted(st *v1alpha1.MysqlDatabaseStatus, prior *v1alpha1.MysqlD
 				}
 			}
 			st.AppliedUsers = kept
+		}
+	}
+	if !progress.schema {
+		st.DatabaseCreated = prior.DatabaseCreated
+		// DatabaseCreated also gates every drop on deletion, so it is only
+		// withdrawn for a schema verified absent when no account record is
+		// left that deletion would still have to clean up.
+		if !verified.dbExists && st.OwnerUser == "" && st.PendingOwnerUser == "" && len(st.AppliedUsers) == 0 {
+			st.DatabaseCreated = false
 		}
 	}
 }
@@ -1372,10 +1415,9 @@ type principalClaim struct {
 	// surface names the declaring surface for events and logs.
 	surface string
 	// managed is true for the owner and users[] entries, whose accounts
-	// this CR creates on hosts; false for grants[], which only grants onto
-	// a '%' account created elsewhere.
+	// this CR creates on their declared hosts; false for grants[], which
+	// only grants onto a '%' account created elsewhere.
 	managed bool
-	hosts   []string
 }
 
 // currentPrincipalClaims maps every username the current spec declares —
@@ -1383,14 +1425,14 @@ type principalClaim struct {
 // the surfaces do not overlap. Every drop path consults it, so a name that
 // has moved between surfaces or entries is never dropped as "previous",
 // "stale" or "removed" state: it is current desired state elsewhere.
-func currentPrincipalClaims(ownerUser string, ownerHosts []string, grants []v1alpha1.MysqlDatabaseGrant, users []tenantUserInput) map[string]principalClaim {
+func currentPrincipalClaims(ownerUser string, grants []v1alpha1.MysqlDatabaseGrant, users []tenantUserInput) map[string]principalClaim {
 	out := make(map[string]principalClaim, len(grants)+len(users)+1)
-	out[ownerUser] = principalClaim{surface: "spec.owner", managed: true, hosts: ownerHosts}
+	out[ownerUser] = principalClaim{surface: "spec.owner", managed: true}
 	for _, g := range grants {
-		out[g.Username] = principalClaim{surface: "spec.grants[]", hosts: defaultHosts}
+		out[g.Username] = principalClaim{surface: "spec.grants[]"}
 	}
 	for _, u := range users {
-		out[u.username] = principalClaim{surface: fmt.Sprintf("spec.users[] entry %q", u.entry.SecretName), managed: true, hosts: u.hosts}
+		out[u.username] = principalClaim{surface: fmt.Sprintf("spec.users[] entry %q", u.entry.SecretName), managed: true}
 	}
 	return out
 }
@@ -1460,6 +1502,7 @@ func (r *MysqlDatabaseReconciler) dropStaleRotationTargets(ctx, sqlCtx context.C
 				kind:     principalKindOwner,
 				username: stale,
 				hosts:    pendingOwnerHosts(prior),
+				revoke:   true,
 				why:      fmt.Sprintf("as the abandoned owner rotation target before rotating to %q", ownerUser),
 				what:     "abandoned owner rotation target",
 				dropped: func() {
@@ -1497,6 +1540,7 @@ func (r *MysqlDatabaseReconciler) dropStaleRotationTargets(ctx, sqlCtx context.C
 			kind:     principalKindUser,
 			username: stale,
 			hosts:    ledgerPendingHosts(*prev),
+			revoke:   true,
 			why:      fmt.Sprintf("as the abandoned rotation target of spec.users[] entry %q", secretName),
 			what:     "abandoned users[] rotation target",
 			dropped: func() {
@@ -1626,26 +1670,65 @@ func (r *MysqlDatabaseReconciler) retirePrincipal(ctx, sqlCtx context.Context, d
 
 // dropUndeclaredHosts drops a current owner or users[] username on every host
 // the pre-reconcile records attribute to it but the spec no longer declares.
+// The accounts lose their rights on this database first; the drop itself is
+// vetted like every other drop, because a sibling may have created and
+// recorded a same-named account on that host since this CR's record was
+// written (a Ready stamp that failed after an earlier host removal, say).
 func (r *MysqlDatabaseReconciler) dropUndeclaredHosts(ctx, sqlCtx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, fg *v1alpha1.MysqlFailoverGroup,
-	kind, username string, desired []string, prior *v1alpha1.MysqlDatabaseStatus, dropped func(removed []string)) (ctrl.Result, bool, error) {
+	reserved map[string]bool, kind principalKind, username string, desired []string, prior *v1alpha1.MysqlDatabaseStatus, dropped func(removed []string)) (ctrl.Result, bool, error) {
 	removed := diffHosts(ownHostsFor(prior, username), desired)
 	if len(removed) == 0 {
 		return ctrl.Result{}, false, nil
 	}
-	dropStmt, derr := renderDropUser(kind, username, removed)
+	noun, skipReason, reservedReason := "owner user", "OwnerUserDropSkipped", "OwnerUserReservedSkipped"
+	if kind == principalKindUser {
+		noun, skipReason, reservedReason = "users[] principal", "UserDropSkipped", "UserReservedSkipped"
+	}
+	logger := log.FromContext(ctx)
+	end := func(res ctrl.Result, err error) (ctrl.Result, bool, error) { return res, true, err }
+
+	revokeStmt, rerr := renderRevokeAll("status record username", mdb.Spec.DatabaseName, username, removed)
+	if rerr != nil {
+		logger.Error(rerr, "cannot render revoke for removed hosts; skipping", "username", username, "hosts", removed)
+		return ctrl.Result{}, false, nil
+	}
+	if _, xerr := db.ExecContext(sqlCtx, revokeStmt); xerr != nil {
+		if transientSQLError(xerr) {
+			return end(r.pending(ctx, mdb, "PrimaryUnavailable",
+				fmt.Sprintf("transient MySQL error revoking removed hosts of %q on group %q: %v", username, fg.Name, xerr)))
+		}
+		return end(r.fail(ctx, mdb, "MySQLError",
+			fmt.Sprintf("revoke %q on removed hosts %v: %v", username, removed, xerr)))
+	}
+
+	why := fmt.Sprintf("on hosts no longer declared (%s)", strings.Join(removed, ", "))
+	if reserved[username] {
+		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, reservedReason,
+			"%s %q is a group-level principal of %q; not dropping it %s", noun, username, fg.Name, why)
+		return ctrl.Result{}, false, nil
+	}
+	var list v1alpha1.MysqlDatabaseList
+	if err := r.List(ctx, &list, client.InNamespace(mdb.Namespace)); err != nil {
+		return end(ctrl.Result{}, fmt.Errorf("list mysqldatabases for drop guard: %w", err))
+	}
+	if referrer, how, claimed := siblingPrincipalClaimIn(&list, mdb.Name, mdb.Spec.GroupRef.Name, username); claimed {
+		r.Recorder.Eventf(mdb, corev1.EventTypeWarning, skipReason,
+			"%s %q is still claimed by MysqlDatabase %q (%s); not dropping it %s", noun, username, referrer, how, why)
+		return ctrl.Result{}, false, nil
+	}
+
+	dropStmt, derr := renderDropUser("status record username", username, removed)
 	if derr != nil {
-		log.FromContext(ctx).Error(derr, "cannot render drop for removed hosts; skipping", "username", username, "hosts", removed)
+		logger.Error(derr, "cannot render drop for removed hosts; skipping", "username", username, "hosts", removed)
 		return ctrl.Result{}, false, nil
 	}
 	if _, xerr := db.ExecContext(sqlCtx, dropStmt); xerr != nil {
 		if transientSQLError(xerr) {
-			res, err := r.pending(ctx, mdb, "PrimaryUnavailable",
-				fmt.Sprintf("transient MySQL error dropping removed hosts of %q on group %q: %v", username, fg.Name, xerr))
-			return res, true, err
+			return end(r.pending(ctx, mdb, "PrimaryUnavailable",
+				fmt.Sprintf("transient MySQL error dropping removed hosts of %q on group %q: %v", username, fg.Name, xerr)))
 		}
-		res, err := r.fail(ctx, mdb, "MySQLError",
-			fmt.Sprintf("drop %q on removed hosts %v: %v", username, removed, xerr))
-		return res, true, err
+		return end(r.fail(ctx, mdb, "MySQLError",
+			fmt.Sprintf("drop %q on removed hosts %v: %v", username, removed, xerr)))
 	}
 	dropped(removed)
 	return ctrl.Result{}, false, nil
@@ -1680,42 +1763,57 @@ func siblingPrincipalClaimIn(list *v1alpha1.MysqlDatabaseList, selfName, groupNa
 	return "", "", false
 }
 
+// preflightResult is what the adoption preflight observed.
+type preflightResult struct {
+	dbExists bool
+	// absent holds every owner and users[] account the preflight found not
+	// to exist.
+	absent map[mysqlAccount]bool
+}
+
 // preflightAdoption runs every adoption gate — read-only queries only —
 // before anything is written ahead: the schema, and every owner and users[]
 // user@host. An existing object is this CR's to manage only when the
 // pre-reconcile records attribute it: status.databaseCreated for the schema,
 // and a record naming that exact user on that exact host for an account.
 // Stopping at the first refusal is safe because nothing has been stamped.
-// It returns whether the schema exists, so the apply does not re-query.
-func preflightAdoption(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, ownerUser string, ownerHosts []string, users []tenantUserInput, prior *v1alpha1.MysqlDatabaseStatus) (bool, error) {
+// The result tells the apply whether the schema exists, and the withdrawal
+// which accounts were verified absent.
+func preflightAdoption(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, ownerUser string, ownerHosts []string, users []tenantUserInput, prior *v1alpha1.MysqlDatabaseStatus) (preflightResult, error) {
+	res := preflightResult{absent: map[mysqlAccount]bool{}}
 	dbExists, err := schemaExists(ctx, db, mdb.Spec.DatabaseName)
 	if err != nil {
-		return false, fmt.Errorf("check schema existence: %w", err)
+		return res, fmt.Errorf("check schema existence: %w", err)
 	}
 	if dbExists && !prior.DatabaseCreated {
-		return false, &errDatabasePreExists{database: mdb.Spec.DatabaseName}
+		return res, &errDatabasePreExists{database: mdb.Spec.DatabaseName}
 	}
+	res.dbExists = dbExists
 	for _, h := range ownerHosts {
 		exists, err := mysqlAccountExists(ctx, db, ownerUser, h)
 		if err != nil {
-			return false, fmt.Errorf("check owner user existence: %w", err)
+			return res, fmt.Errorf("check owner user existence: %w", err)
 		}
-		if exists && !ownAccountAttributed(prior, ownerUser, h) {
-			return false, &errPreExistingOwnerUser{username: ownerUser, host: h}
+		if !exists {
+			res.absent[mysqlAccount{user: ownerUser, host: h}] = true
+		} else if !ownAccountAttributed(prior, ownerUser, h) {
+			return res, &errPreExistingOwnerUser{username: ownerUser, host: h}
 		}
 	}
 	for i, u := range users {
 		for _, h := range u.hosts {
 			exists, err := mysqlAccountExists(ctx, db, u.username, h)
 			if err != nil {
-				return false, fmt.Errorf("check spec.users[%d] user: %w", i, err)
+				return res, fmt.Errorf("check spec.users[%d] user: %w", i, err)
 			}
-			if exists && !ownAccountAttributed(prior, u.username, h) {
-				return false, &errPreExistingUser{secretName: u.entry.SecretName, username: u.username, host: h}
+			if !exists {
+				res.absent[mysqlAccount{user: u.username, host: h}] = true
+			} else if !ownAccountAttributed(prior, u.username, h) {
+				return res, &errPreExistingUser{secretName: u.entry.SecretName, username: u.username, host: h}
 			}
 		}
 	}
-	return dbExists, nil
+	return res, nil
 }
 
 // applyDatabase runs the idempotent apply sequence on an open admin
@@ -1797,25 +1895,32 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	// Entries removed from spec.grants[] since the last successful apply
 	// get revoked: grants[] is desired state on the way out as well as on
 	// the way in. The usernames come from status.appliedGrants, which is
-	// exactly why that field exists.
-	current := make(map[string]bool, len(spec.Grants)+len(users)+1)
-	current[ownerUser] = true
+	// exactly why that field exists. A grants[] entry manages exactly
+	// user@'%', so the revoke is skipped only when something else still
+	// manages that same account: a current grants[] entry, a current owner
+	// or users[] principal declared on '%', or a record of this CR on '%'
+	// (whose retirement or host-removal path revokes or drops it). A name
+	// that moved to users[] or the owner on other hosts is a different
+	// account and does not keep the '%' account's grant alive.
+	percentCovered := make(map[string]bool, len(spec.Grants)+len(users)+1)
 	for _, g := range spec.Grants {
-		current[g.Username] = true
+		percentCovered[g.Username] = true
 	}
-	// users[] usernames count as current too: a principal that moved from
-	// grants[] to users[] between applies keeps its (users[]-managed)
-	// privileges instead of being revoked as a removed grant.
+	if slices.Contains(ownerHosts, tenantUserHost) {
+		percentCovered[ownerUser] = true
+	}
 	for _, u := range users {
-		current[u.username] = true
+		if slices.Contains(u.hosts, tenantUserHost) {
+			percentCovered[u.username] = true
+		}
 	}
 	var removedRevokes []string
 	for _, user := range prior.AppliedGrants {
-		// A name this CR's own owner or users[] records hold (the owner
-		// rotated away, say) is not a removed grant: its retirement path
-		// revokes it on its recorded hosts, after the same vetting as its
-		// drop.
-		if current[user] || ownNameRecorded(prior, user) {
+		// The previously recorded owner is appliedGrants[0], not a grants[]
+		// entry: its accounts live on its recorded hosts, and the owner
+		// rotation retires it there — never on a '%' account it may not
+		// own.
+		if user == prior.OwnerUser || percentCovered[user] || ownAccountAttributed(prior, user, tenantUserHost) {
 			continue
 		}
 		stmt, err := renderRevokeAll("status.appliedGrants entry", spec.DatabaseName, user, defaultHosts)
@@ -2221,9 +2326,14 @@ func (r *MysqlDatabaseReconciler) dialer() openMySQLFunc {
 }
 
 // pending records a dependency that is not ready yet and requeues. Pending is
-// never an error: the CR is fine, the world is not ready.
-func (r *MysqlDatabaseReconciler) pending(ctx context.Context, mdb *v1alpha1.MysqlDatabase, reason, message string) (ctrl.Result, error) {
+// never an error: the CR is fine, the world is not ready. also runs inside the
+// same status patch, so a caller's record changes land atomically with the
+// phase.
+func (r *MysqlDatabaseReconciler) pending(ctx context.Context, mdb *v1alpha1.MysqlDatabase, reason, message string, also ...func(*v1alpha1.MysqlDatabaseStatus)) (ctrl.Result, error) {
 	if err := r.stampStatus(ctx, mdb, func(st *v1alpha1.MysqlDatabaseStatus) {
+		for _, f := range also {
+			f(st)
+		}
 		st.Phase = v1alpha1.MysqlDatabasePhasePending
 		st.ObservedGeneration = mdb.Generation
 		st.Message = message
@@ -2256,10 +2366,14 @@ func pendingRequeueDelay() time.Duration {
 // reads the message; the slow requeue still lets it self-heal if the fix
 // happened outside Kubernetes (a missing grant user being created, say).
 // Every failure reason emits a Warning event, so `kubectl describe` tells
-// the same story for all of them rather than only the hand-picked few.
-func (r *MysqlDatabaseReconciler) fail(ctx context.Context, mdb *v1alpha1.MysqlDatabase, reason, message string) (ctrl.Result, error) {
+// the same story for all of them rather than only the hand-picked few. also
+// runs inside the same status patch, as for pending.
+func (r *MysqlDatabaseReconciler) fail(ctx context.Context, mdb *v1alpha1.MysqlDatabase, reason, message string, also ...func(*v1alpha1.MysqlDatabaseStatus)) (ctrl.Result, error) {
 	r.Recorder.Event(mdb, corev1.EventTypeWarning, reason, message)
 	if err := r.stampStatus(ctx, mdb, func(st *v1alpha1.MysqlDatabaseStatus) {
+		for _, f := range also {
+			f(st)
+		}
 		st.Phase = v1alpha1.MysqlDatabasePhaseFailed
 		st.ObservedGeneration = mdb.Generation
 		st.Message = message

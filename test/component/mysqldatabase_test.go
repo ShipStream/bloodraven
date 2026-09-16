@@ -15,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/controller"
@@ -47,6 +48,13 @@ type mdbHarness struct {
 
 func newMdbHarness(t *testing.T, objs ...client.Object) *mdbHarness {
 	t.Helper()
+	return newMdbHarnessWithInterceptor(t, interceptor.Funcs{}, objs...)
+}
+
+// newMdbHarnessWithInterceptor is newMdbHarness with API-call interception,
+// for injecting status-patch failures.
+func newMdbHarnessWithInterceptor(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) *mdbHarness {
+	t.Helper()
 
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -65,6 +73,7 @@ func newMdbHarness(t *testing.T, objs ...client.Object) *mdbHarness {
 		WithScheme(scheme).
 		WithStatusSubresource(&v1alpha1.MysqlDatabase{}, &v1alpha1.MysqlFailoverGroup{}).
 		WithObjects(objs...).
+		WithInterceptorFuncs(funcs).
 		Build()
 
 	rec := record.NewFakeRecorder(50)

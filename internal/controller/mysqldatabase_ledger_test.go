@@ -280,6 +280,7 @@ func TestWithdrawUnexecuted(t *testing.T) {
 		prior    v1alpha1.MysqlDatabaseStatus
 		stamped  v1alpha1.MysqlDatabaseStatus
 		progress applyProgress
+		verified preflightResult
 		users    []tenantUserInput
 		want     v1alpha1.MysqlDatabaseStatus
 	}{
@@ -334,11 +335,44 @@ func TestWithdrawUnexecuted(t *testing.T) {
 			users:    []tenantUserInput{support("b")},
 			want:     v1alpha1.MysqlDatabaseStatus{OwnerUser: "a", OwnerHosts: []string{"h1"}, PendingOwnerUser: "c", PendingOwnerHosts: []string{"h3"}, AppliedUsers: []v1alpha1.MysqlDatabaseUserState{{SecretName: "support", Username: "b", Hosts: []string{"h2"}}}},
 		},
+		{
+			// A previous reconcile stamped these records, then its
+			// withdrawal patch failed: they attribute themselves, but this
+			// preflight saw the accounts absent, so they still go.
+			name:     "a prior-attributed account verified absent is withdrawn",
+			prior:    v1alpha1.MysqlDatabaseStatus{DatabaseCreated: true, OwnerUser: "a", OwnerHosts: []string{"h1"}, AppliedUsers: []v1alpha1.MysqlDatabaseUserState{{SecretName: "support", Username: "s", Hosts: []string{"h1"}}}},
+			stamped:  v1alpha1.MysqlDatabaseStatus{DatabaseCreated: true, OwnerUser: "a", OwnerHosts: []string{"h1"}, AppliedUsers: []v1alpha1.MysqlDatabaseUserState{{SecretName: "support", Username: "s", Hosts: []string{"h1"}}}},
+			verified: preflightResult{absent: map[mysqlAccount]bool{{user: "a", host: "h1"}: true, {user: "s", host: "h1"}: true}},
+			users:    []tenantUserInput{support("s")},
+			want:     v1alpha1.MysqlDatabaseStatus{AppliedUsers: []v1alpha1.MysqlDatabaseUserState{}},
+		},
+		{
+			name:     "a prior-attributed account that exists is kept",
+			prior:    v1alpha1.MysqlDatabaseStatus{DatabaseCreated: true, OwnerUser: "a", OwnerHosts: []string{"h1"}},
+			stamped:  v1alpha1.MysqlDatabaseStatus{DatabaseCreated: true, OwnerUser: "a", OwnerHosts: []string{"h1", "h2"}},
+			verified: preflightResult{dbExists: true, absent: map[mysqlAccount]bool{{user: "a", host: "h2"}: true}},
+			want:     v1alpha1.MysqlDatabaseStatus{DatabaseCreated: true, OwnerUser: "a", OwnerHosts: []string{"h1"}},
+		},
+		{
+			name:     "the schema record stays while an account record remains",
+			prior:    v1alpha1.MysqlDatabaseStatus{DatabaseCreated: true, OwnerUser: "a", OwnerHosts: []string{"h1"}},
+			stamped:  v1alpha1.MysqlDatabaseStatus{DatabaseCreated: true, OwnerUser: "a", OwnerHosts: []string{"h1"}},
+			verified: preflightResult{},
+			want:     v1alpha1.MysqlDatabaseStatus{DatabaseCreated: true, OwnerUser: "a", OwnerHosts: []string{"h1"}},
+		},
+		{
+			name:     "a legacy pending target's hosts are pinned before the shared list narrows",
+			prior:    v1alpha1.MysqlDatabaseStatus{OwnerUser: "a", OwnerHosts: []string{"h1"}, PendingOwnerUser: "b"},
+			stamped:  v1alpha1.MysqlDatabaseStatus{OwnerUser: "a", OwnerHosts: []string{"h1", "h2"}, PendingOwnerUser: "b"},
+			verified: preflightResult{dbExists: true},
+			progress: applyProgress{schema: true},
+			want:     v1alpha1.MysqlDatabaseStatus{OwnerUser: "a", OwnerHosts: []string{"h1"}, PendingOwnerUser: "b", PendingOwnerHosts: []string{"h1"}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			st := tc.stamped.DeepCopy()
-			withdrawUnexecuted(st, &tc.prior, tc.progress, tc.users)
+			withdrawUnexecuted(st, &tc.prior, tc.progress, tc.verified, tc.users)
 			if !reflect.DeepEqual(*st, tc.want) {
 				t.Fatalf("status = %+v, want %+v", *st, tc.want)
 			}
@@ -384,6 +418,37 @@ func TestOwnAccountAttributed(t *testing.T) {
 	}
 }
 
+// TestMaterializeLegacyPendingHosts: a legacy pending name gets its borrowed
+// hosts pinned; a settled record and a pending record with hosts are left
+// alone.
+func TestMaterializeLegacyPendingHosts(t *testing.T) {
+	st := &v1alpha1.MysqlDatabaseStatus{
+		OwnerUser: "a", OwnerHosts: []string{"h1"}, PendingOwnerUser: "b",
+		AppliedUsers: []v1alpha1.MysqlDatabaseUserState{
+			{SecretName: "legacy", Username: "u", PendingUsername: "v"},
+			{SecretName: "new", Username: "x", Hosts: []string{"h1"}, PendingUsername: "y", PendingHosts: []string{"h2"}},
+			{SecretName: "settled", Username: "z", Hosts: []string{"h3"}},
+		},
+	}
+	materializeLegacyPendingHosts(st)
+	want := &v1alpha1.MysqlDatabaseStatus{
+		OwnerUser: "a", OwnerHosts: []string{"h1"}, PendingOwnerUser: "b", PendingOwnerHosts: []string{"h1"},
+		AppliedUsers: []v1alpha1.MysqlDatabaseUserState{
+			{SecretName: "legacy", Username: "u", PendingUsername: "v", PendingHosts: []string{"%"}},
+			{SecretName: "new", Username: "x", Hosts: []string{"h1"}, PendingUsername: "y", PendingHosts: []string{"h2"}},
+			{SecretName: "settled", Username: "z", Hosts: []string{"h3"}},
+		},
+	}
+	if !reflect.DeepEqual(st, want) {
+		t.Fatalf("status = %+v, want %+v", *st, *want)
+	}
+	// Growing the shared list afterwards no longer moves the pending name.
+	stampOwnerWriteAhead(st, "a", []string{"h2"}, nil)
+	if got := pendingOwnerHosts(st); !reflect.DeepEqual(got, []string{"h1"}) {
+		t.Fatalf("pendingOwnerHosts after growing ownerHosts = %v, want [h1]", got)
+	}
+}
+
 // TestPendingHostHelpers pins the legacy fallbacks and the pending-hosts
 // invariant: pending hosts mean nothing without a pending name.
 func TestPendingHostHelpers(t *testing.T) {
@@ -414,7 +479,7 @@ func TestPendingHostHelpers(t *testing.T) {
 // TestCurrentPrincipalClaims: every surface is a claim; only the owner and
 // users[] are managed.
 func TestCurrentPrincipalClaims(t *testing.T) {
-	claims := currentPrincipalClaims("owner", []string{"h1"},
+	claims := currentPrincipalClaims("owner",
 		[]v1alpha1.MysqlDatabaseGrant{{Username: "maester"}},
 		[]tenantUserInput{{entry: v1alpha1.MysqlDatabaseUser{SecretName: "support"}, username: "acme_support", hosts: []string{"h2"}}})
 	if c := claims["owner"]; !c.managed || c.surface != "spec.owner" {
@@ -423,7 +488,7 @@ func TestCurrentPrincipalClaims(t *testing.T) {
 	if c := claims["maester"]; c.managed || c.surface != "spec.grants[]" {
 		t.Fatalf("grants claim = %+v", c)
 	}
-	if c := claims["acme_support"]; !c.managed || !reflect.DeepEqual(c.hosts, []string{"h2"}) {
+	if c := claims["acme_support"]; !c.managed || c.surface != `spec.users[] entry "support"` {
 		t.Fatalf("users claim = %+v", c)
 	}
 }

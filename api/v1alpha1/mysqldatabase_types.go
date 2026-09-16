@@ -445,8 +445,9 @@ type MysqlDatabaseUserState struct {
 	// Hosts is every host the recorded Username (not PendingUsername) may
 	// exist on: the union of the hosts declared since the last successful
 	// apply, recorded before any CREATE USER for them runs — only after
-	// each new username@host was verified absent in MySQL — and settled to
-	// the current list by the Ready stamp. Host removal and entry removal
+	// each new username@host was verified absent in MySQL or found already
+	// attributed to this CR by another of its records — and settled to the
+	// current list by the Ready stamp. Host removal and entry removal
 	// drop Username off exactly these hosts. Empty means the pre-hosts
 	// default, ["%"].
 	// +optional
@@ -539,7 +540,9 @@ type MysqlDatabaseStatus struct {
 	// PendingOwnerUser) may exist on: the union of spec.owner.hosts values
 	// declared since the last successful apply, written ahead of the first
 	// statement — only after each new owner@host was verified absent in
-	// MySQL — and settled to the current list by the Ready stamp. Host
+	// MySQL or found already attributed to this CR by another of its
+	// records (a name moving between the owner and a users[] entry carries
+	// its hosts) — and settled to the current list by the Ready stamp. Host
 	// removal and deletion drop OwnerUser off exactly these hosts. Empty
 	// means the pre-hosts default, ["%"].
 	// +optional
