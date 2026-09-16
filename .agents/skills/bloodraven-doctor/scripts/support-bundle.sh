@@ -7,11 +7,15 @@ set -euo pipefail
 
 NAMESPACE=""
 MFG_NAME=""
-OUTPUT_DIR="bloodraven-bundle-$(date +%Y%m%d-%H%M%S)"
+BUNDLE_NAME="bloodraven-bundle-$(date +%Y%m%d-%H%M%S)"
+OUTPUT_FILE=""
 
 usage() {
-    echo "Usage: $0 [-n <namespace>] [-o <output-dir>] [<mysql-failover-group>]"
+    echo "Usage: $0 [-n <namespace>] [-o <output.tar.gz>] [<mysql-failover-group>]"
     echo "Gathers a sanitized diagnostic bundle for Bloodraven clusters."
+    echo ""
+    echo "  -o, --output  Path of the tarball to write. '.tar.gz' is appended if missing."
+    echo "                Default: ./${BUNDLE_NAME}.tar.gz. Refuses to overwrite an existing path."
     exit 0
 }
 
@@ -22,7 +26,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -o|--output)
-            OUTPUT_DIR="$2"
+            OUTPUT_FILE="$2"
             shift 2
             ;;
         -h|--help)
@@ -52,10 +56,29 @@ if [[ -z "$MFG_NAME" ]]; then
     fi
 fi
 
-mkdir -p "$OUTPUT_DIR"
+if [[ -z "$OUTPUT_FILE" ]]; then
+    OUTPUT_FILE="${BUNDLE_NAME}.tar.gz"
+elif [[ "$OUTPUT_FILE" != *.tar.gz ]]; then
+    OUTPUT_FILE="${OUTPUT_FILE%/}.tar.gz"
+fi
+if [[ -e "$OUTPUT_FILE" || -L "$OUTPUT_FILE" ]]; then
+    echo "❌ Output path already exists: $OUTPUT_FILE (refusing to overwrite)"
+    exit 1
+fi
+OUTPUT_PARENT=$(dirname "$OUTPUT_FILE")
+if [[ ! -d "$OUTPUT_PARENT" ]]; then
+    echo "❌ Output directory does not exist: $OUTPUT_PARENT"
+    exit 1
+fi
+
+# Collect into a script-owned staging directory; only this directory is ever removed.
+STAGING_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/bloodraven-bundle.XXXXXX")
+trap 'rm -rf -- "$STAGING_ROOT"' EXIT
+OUTPUT_DIR="$STAGING_ROOT/$BUNDLE_NAME"
+mkdir "$OUTPUT_DIR"
 
 echo "📦 Collecting Bloodraven Support Bundle..."
-echo "Group: $MFG_NAME | Namespace: $NAMESPACE | Destination: $OUTPUT_DIR"
+echo "Group: $MFG_NAME | Namespace: $NAMESPACE | Destination: $OUTPUT_FILE"
 
 # 1. Capture CR specification & status (redacting obvious passwords/secrets if any)
 kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o yaml 2>/dev/null | \
@@ -88,8 +111,7 @@ for pod in $PODS; do
     done
 done
 
-# Create tarball
-tar -czf "${OUTPUT_DIR}.tar.gz" "$OUTPUT_DIR"
-rm -rf "$OUTPUT_DIR"
+# Create tarball (staging directory is removed by the EXIT trap)
+tar -czf "$OUTPUT_FILE" -C "$STAGING_ROOT" "$BUNDLE_NAME"
 
-echo "✅ Support bundle saved: ${OUTPUT_DIR}.tar.gz"
+echo "✅ Support bundle saved: $OUTPUT_FILE"

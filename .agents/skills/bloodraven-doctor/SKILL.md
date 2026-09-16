@@ -198,7 +198,9 @@ When reporting findings to the operator, structure your analysis as follows:
 If the issue requires escalation or post-incident analysis, generate a sanitized support bundle:
 
 ```bash
-./.agents/skills/bloodraven-doctor/scripts/support-bundle.sh -n <namespace> <group-name>
+./.agents/skills/bloodraven-doctor/scripts/support-bundle.sh -n <namespace> [-o <bundle.tar.gz>] <group-name>
 ```
+
+`-o` is the path of the tarball to write (`.tar.gz` is appended if missing); it defaults to `./bloodraven-bundle-<timestamp>.tar.gz`. The script collects into a private `mktemp -d` staging directory, removes only that directory, and refuses to overwrite an existing output path.
 
 This captures redacted CR specs, status snapshots, sidecar metrics, and operator logs without leaking sensitive credentials or table data.
