@@ -442,14 +442,25 @@ type MysqlDatabaseUserState struct {
 	// +optional
 	PendingUsername string `json:"pendingUsername,omitempty"`
 
-	// Hosts is every host this entry's account(s) may exist on: the union
-	// of the hosts declared since the last successful apply, recorded
-	// before any CREATE USER for them runs and settled to the current list
-	// by the Ready stamp. Host removal and entry removal drop off this
-	// record. Empty means the pre-hosts default, ["%"].
+	// Hosts is every host the recorded Username (not PendingUsername) may
+	// exist on: the union of the hosts declared since the last successful
+	// apply, recorded before any CREATE USER for them runs — only after
+	// each new username@host was verified absent in MySQL or found already
+	// attributed to this CR by another of its records — and settled to the
+	// current list by the Ready stamp. Host removal and entry removal
+	// drop Username off exactly these hosts. Empty means the pre-hosts
+	// default, ["%"].
 	// +optional
 	// +listType=atomic
 	Hosts []string `json:"hosts,omitempty"`
+
+	// PendingHosts is Hosts for PendingUsername, tracked separately for the
+	// same reason as status.pendingOwnerHosts. Non-empty only while
+	// PendingUsername is set; empty with PendingUsername set is the shape
+	// an older operator wrote, and falls back to Hosts.
+	// +optional
+	// +listType=atomic
+	PendingHosts []string `json:"pendingHosts,omitempty"`
 }
 
 // MysqlDatabasePhase is the lifecycle phase of a MysqlDatabase.
@@ -493,8 +504,10 @@ type MysqlDatabaseStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// DatabaseCreated is the write-ahead record for cleanup: it is stamped
-	// once the admin connection is open and the reconciler commits to
-	// executing DDL for this CR, before the first statement runs.
+	// once the admin connection is open, the schema has been verified
+	// absent (or was already recorded here), and the reconciler commits to
+	// executing DDL for this CR, before the first statement runs. It is
+	// withdrawn again when MySQL refused every schema statement.
 	// deletionPolicy: Delete drops MySQL objects only when it is set — a
 	// CR that failed before any SQL (invalid spec, reserved owner,
 	// ownership conflict, unreachable primary) must not drop a database
@@ -512,7 +525,9 @@ type MysqlDatabaseStatus struct {
 
 	// PendingOwnerUser is the write-ahead record of an in-flight username
 	// rotation: the new owner's name, committed before any rotation SQL
-	// runs and cleared by the successful Ready stamp. It exists because a
+	// runs (after the new name's accounts were verified absent or already
+	// attributed to this CR) and cleared by the successful Ready stamp, or
+	// withdrawn when MySQL refused every owner statement. It exists because a
 	// rotation can create the new account, drop the old one, and then fail
 	// to persist status: without the record, the next reconcile's adoption
 	// gate would see an account it cannot attribute and wedge the CR on
@@ -521,14 +536,29 @@ type MysqlDatabaseStatus struct {
 	// +optional
 	PendingOwnerUser string `json:"pendingOwnerUser,omitempty"`
 
-	// OwnerHosts is every host the owner account(s) may exist on: the
-	// union of spec.owner.hosts values declared since the last successful
-	// apply, written ahead of the first statement and settled to the
-	// current list by the Ready stamp. Host removal and deletion drop off
-	// this record. Empty means the pre-hosts default, ["%"].
+	// OwnerHosts is every host the recorded owner (OwnerUser, not
+	// PendingOwnerUser) may exist on: the union of spec.owner.hosts values
+	// declared since the last successful apply, written ahead of the first
+	// statement — only after each new owner@host was verified absent in
+	// MySQL or found already attributed to this CR by another of its
+	// records (a name moving between the owner and a users[] entry carries
+	// its hosts) — and settled to the current list by the Ready stamp. Host
+	// removal and deletion drop OwnerUser off exactly these hosts. Empty
+	// means the pre-hosts default, ["%"].
 	// +optional
 	// +listType=atomic
 	OwnerHosts []string `json:"ownerHosts,omitempty"`
+
+	// PendingOwnerHosts is OwnerHosts for PendingOwnerUser: the hosts the
+	// in-flight rotation target may exist on. Hosts are tracked per
+	// recorded username because two usernames' host lists can differ
+	// across a rotation, and dropping one name on the other's hosts would
+	// drop an unrelated same-named account. Non-empty only while
+	// PendingOwnerUser is set; empty with PendingOwnerUser set is the
+	// shape an older operator wrote, and falls back to OwnerHosts.
+	// +optional
+	// +listType=atomic
+	PendingOwnerHosts []string `json:"pendingOwnerHosts,omitempty"`
 
 	// AppliedGrants lists the usernames granted on this database during
 	// the most recent successful apply, owner first. It is the input to
