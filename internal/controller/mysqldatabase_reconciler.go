@@ -393,8 +393,10 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Snapshot the write-ahead record as it stood before this reconcile.
 	// Attribution judges "did this CR create that account" by what was
 	// recorded before this run, so prior stays the untouched pre-reconcile
-	// snapshot — the only exception is dropStaleRotationTargets forgetting
-	// records whose accounts it dropped or vetoed.
+	// snapshot — the only exceptions are dropStaleRotationTargets forgetting
+	// records whose accounts it dropped or vetoed, and
+	// withdrawRemovedLedgerEntries forgetting records the preflight proved
+	// name no account at all.
 	prior := mdb.Status.DeepCopy()
 
 	// users[] ownership arbitration: a username this CR has not yet
@@ -475,6 +477,7 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		st.ObservedGeneration = mdb.Generation
 		st.DatabaseCreated = true
 		materializeLegacyPendingHosts(st)
+		withdrawRemovedLedgerEntries(st, &mdb.Spec, verified)
 		carried := replacedPendingHosts(st, ownerUser, users)
 		stampOwnerWriteAhead(st, ownerUser, ownerHosts, carried)
 		stampUsersWriteAhead(st, users, carried)
@@ -490,6 +493,10 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
+	// Mirror the stamp's withdrawal into the snapshot: the removal path
+	// below drops what prior.appliedUsers names, and a record the stamp
+	// just retracted must not be one of them.
+	withdrawRemovedLedgerEntries(prior, &mdb.Spec, verified)
 
 	appliedGrants, progress, err := applyDatabase(sqlCtx, db, &mdb, ownerUser, ownerPass, ownerHosts, users, prior, verified.dbExists)
 	if err != nil {
@@ -898,9 +905,9 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 // deleteScope decides which MySQL objects the deleting CR may remove: the
 // database (unless another live CR on the same group still declares it), the
 // owner user(s), and the spec.users[] principals recorded in the
-// status.appliedUsers ledger — each unless the username is reserved, another
-// live CR shares the Secret or the username, or a sibling CR still lists the
-// user in spec.grants[]. It returns the usernames that may be dropped; the
+// status.appliedUsers ledger — each unless the username is reserved, this or
+// another live CR lists the user in spec.grants[], or another live CR shares
+// the Secret or the username. It returns the usernames that may be dropped; the
 // owner is plural on purpose: a rotation that crashed after creating the new
 // account but before status caught up leaves the new username in the
 // status.pendingOwnerUser write-ahead record, and Delete must clean up both
@@ -953,8 +960,34 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 			"another MysqlDatabase still declares database %q; not dropping it", mdb.Spec.DatabaseName)
 	}
 
+	// The deleting CR's own spec.grants[] is a claim too. A grants[] entry
+	// declares a shared principal this CRD did not create and manages
+	// exactly username@'%', so a recorded name that has since moved onto
+	// this CR's grants[] keeps that account — the same vetting
+	// retirePrincipal applies on the apply path, and what dropDatabase's
+	// never-drop-a-grants[]-user contract means. Hosts other than '%' are
+	// still this CR's to drop: grants[] never touches them.
+	ownGrants := make(map[string]bool, len(mdb.Spec.Grants))
+	for _, g := range mdb.Spec.Grants {
+		ownGrants[g.Username] = true
+	}
+	keepOwnGrantAccount := func(username string, hosts []string) ([]string, bool) {
+		if !ownGrants[username] {
+			return hosts, true
+		}
+		hosts = withoutHost(hosts, tenantUserHost)
+		return hosts, len(hosts) > 0
+	}
+
 	for _, c := range candidates {
 		candidate := c.username
+		hosts, keep := keepOwnGrantAccount(candidate, c.hosts)
+		if !keep {
+			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, "OwnerUserDropSkipped",
+				"owner user %q is declared in this MysqlDatabase's spec.grants[]; not dropping it", candidate)
+			continue
+		}
+		c.hosts = hosts
 		if reserved[candidate] {
 			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, "OwnerUserReservedSkipped",
 				"owner user %q is a group-level principal of %q; not dropping it", candidate, mdb.Spec.GroupRef.Name)
@@ -992,8 +1025,14 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 	}
 	for _, state := range mdb.Status.AppliedUsers {
 		for _, name := range ledgerUsernames(state) {
+			hosts, keep := keepOwnGrantAccount(name, ledgerHostsForName(state, name))
+			if !keep {
+				r.Recorder.Eventf(mdb, corev1.EventTypeWarning, "UserDropSkipped",
+					"users[] principal %q is declared in this MysqlDatabase's spec.grants[]; not dropping it", name)
+				continue
+			}
 			if i, ok := dropped[name]; ok {
-				dropOwners[i].hosts = unionHosts(dropOwners[i].hosts, ledgerHostsForName(state, name))
+				dropOwners[i].hosts = unionHosts(dropOwners[i].hosts, hosts)
 				continue
 			}
 			if reserved[name] {
@@ -1007,7 +1046,7 @@ func (r *MysqlDatabaseReconciler) deleteScope(ctx context.Context, mdb *v1alpha1
 				continue
 			}
 			dropped[name] = len(dropOwners)
-			dropOwners = append(dropOwners, managedPrincipal{username: name, hosts: ledgerHostsForName(state, name)})
+			dropOwners = append(dropOwners, managedPrincipal{username: name, hosts: hosts})
 		}
 	}
 	return dropDB, dropOwners, nil
@@ -1813,7 +1852,78 @@ func preflightAdoption(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatab
 			}
 		}
 	}
+	// Ledger entries whose Secret has left spec.users[] are not part of
+	// this apply, but the removal path still drops the accounts they name,
+	// and so does deletionPolicy: Delete. Nothing else re-checks them:
+	// withdrawUnexecuted walks the current users[] slice, so a write-ahead
+	// record whose withdrawal patch failed would otherwise stay trusted
+	// forever. Probe them here so the write-ahead stamp can withdraw the
+	// ones that were never created. There is no refusal to make — the
+	// record already attributes the name — only an absence to learn.
+	for _, state := range prior.AppliedUsers {
+		if specHasUserSecret(&mdb.Spec, state.SecretName) {
+			continue
+		}
+		for _, name := range ledgerUsernames(state) {
+			for _, h := range ledgerHostsForName(state, name) {
+				exists, err := mysqlAccountExists(ctx, db, name, h)
+				if err != nil {
+					return res, fmt.Errorf("check removed spec.users[] entry %q user: %w", state.SecretName, err)
+				}
+				if !exists {
+					res.absent[mysqlAccount{user: name, host: h}] = true
+				}
+			}
+		}
+	}
 	return res, nil
+}
+
+// withdrawRemovedLedgerEntries narrows the records of ledger entries whose
+// Secret has left spec.users[] down to the accounts that actually exist.
+// Such an entry gets no write-ahead stamp of its own, so a record naming an
+// account the preflight has just found absent describes nothing: either the
+// account was written ahead and never created (its withdrawal patch failed,
+// or the reconcile crashed after the stamp), or it was already dropped and
+// the Ready stamp failed. Keeping it would let the removal path — and a
+// later deletionPolicy: Delete — DROP USER an account someone else creates
+// under that name. Records of accounts that do exist stay: dropping those is
+// exactly what removing a users[] entry means.
+func withdrawRemovedLedgerEntries(st *v1alpha1.MysqlDatabaseStatus, spec *v1alpha1.MysqlDatabaseSpec, verified preflightResult) {
+	keep := func(username string, hosts []string) []string {
+		if username == "" {
+			return nil
+		}
+		var out []string
+		for _, h := range hosts {
+			if !verified.absent[mysqlAccount{user: username, host: h}] {
+				out = append(out, h)
+			}
+		}
+		return out
+	}
+	kept := st.AppliedUsers[:0]
+	for _, state := range st.AppliedUsers {
+		if specHasUserSecret(spec, state.SecretName) {
+			kept = append(kept, state)
+			continue
+		}
+		if hosts := keep(state.Username, ledgerHosts(state)); len(hosts) > 0 {
+			state.Hosts = hosts
+		} else {
+			state.Username, state.Hosts = "", nil
+		}
+		if hosts := keep(state.PendingUsername, ledgerPendingHosts(state)); len(hosts) > 0 {
+			state.PendingHosts = hosts
+		} else {
+			state.PendingUsername, state.PendingHosts = "", nil
+		}
+		if state.Username == "" && state.PendingUsername == "" {
+			continue
+		}
+		kept = append(kept, state)
+	}
+	st.AppliedUsers = kept
 }
 
 // applyDatabase runs the idempotent apply sequence on an open admin

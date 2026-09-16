@@ -945,3 +945,102 @@ func TestMysqlDatabaseFailedApplyWithdrawsInThePhasePatch(t *testing.T) {
 		t.Fatalf("status patches = %d, want 2 (write-ahead stamp, then Pending with the withdrawal)", n)
 	}
 }
+
+// --- review round 2 ----------------------------------------------------------
+
+// TestMysqlDatabaseDeleteKeepsPrincipalMovedToOwnGrants: the recorded owner
+// has since moved into this CR's own spec.grants[] — a shared principal the
+// CRD does not create and never drops. deletionPolicy: Delete must revoke it
+// on this database and leave the account alone, the same vetting the apply
+// path's retirePrincipal applies. The pre-fix delete path only checked
+// sibling CRs' grants[] and dropped its own.
+func TestMysqlDatabaseDeleteKeepsPrincipalMovedToOwnGrants(t *testing.T) {
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.reconcile()
+	h.requireReady()
+
+	// One edit hands the owner account over to grants[] and points the
+	// owner Secret at a new name; the CR is deleted before it reconciles.
+	h.setOwnerUsername("acme_app_v2", "owner-pw-2")
+	h.update(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
+			{Username: mdbOwnerUser, Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+		}
+	})
+
+	before := h.server.statementCount()
+	h.delete()
+	h.reconcile()
+
+	h.requireNoStatementNaming(before, "DROP USER", mdbOwnerUser)
+	h.requirePasswordOf(mdbOwnerUser, "%", mdbOwnerPass)
+	if !h.sawEvent("OwnerUserDropSkipped") {
+		t.Fatal("no OwnerUserDropSkipped event")
+	}
+	// The rest of the delete still ran: the schema is gone and the kept
+	// principal holds no rights on it.
+	if _, ok := h.server.database(mdbDatabase); ok {
+		t.Fatalf("database %q survived deletionPolicy: Delete", mdbDatabase)
+	}
+	if privs, ok := h.server.grantsFor(mdbDatabase, mdbOwnerUser); ok {
+		t.Fatalf("kept principal still holds %v on the dropped database", privs)
+	}
+}
+
+// TestMysqlDatabaseRemovedEntryWithdrawsStaleLedgerRecord: a users[] entry's
+// write-ahead record survives because its withdrawal patch failed, and the
+// entry is then removed from the spec before the retry. The record names an
+// account that was never created, so the retry must re-verify and withdraw
+// it — otherwise the removal path trusts it and drops whatever account
+// someone else later creates under that name.
+func TestMysqlDatabaseRemovedEntryWithdrawsStaleLedgerRecord(t *testing.T) {
+	var failNextPending atomic.Bool
+	failNextPending.Store(true)
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if mdb, ok := obj.(*v1alpha1.MysqlDatabase); ok && mdb.Status.Phase == v1alpha1.MysqlDatabasePhasePending && failNextPending.CompareAndSwap(true, false) {
+				return errors.New("injected status patch failure")
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	}
+	cr := mdbCR(withSupportUser, func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
+	h := newMdbHarnessWithInterceptor(t, funcs, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.server.failStatements("CREATE USER IF NOT EXISTS '"+mdbOwnerUser+"'",
+		&mysqldriver.MySQLError{Number: 1290, Message: "The MySQL server is running with the --super-read-only option"}, false)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: mdbNamespace, Name: mdbName}}
+
+	if _, err := h.r.Reconcile(context.Background(), req); err == nil {
+		t.Fatal("Reconcile() = nil error, want the failed withdrawal patch surfaced for requeue")
+	}
+	if mdb := h.get(); len(mdb.Status.AppliedUsers) == 0 {
+		t.Fatalf("test premise broken: the write-ahead records are not persisted (%+v)", mdb.Status)
+	}
+
+	// The entry leaves the spec before the retry, so the current users[]
+	// slice no longer mentions the record at all.
+	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.Users = nil })
+	before := h.server.statementCount()
+	h.reconcile()
+	mdb := h.get()
+	if mdb.Status.Phase != v1alpha1.MysqlDatabasePhasePending {
+		t.Fatalf("phase = %q (message %q), want Pending", mdb.Status.Phase, mdb.Status.Message)
+	}
+	if len(mdb.Status.AppliedUsers) != 0 {
+		t.Fatalf("stale ledger record survived the retry: %+v", mdb.Status.AppliedUsers)
+	}
+	h.requireNoStatementNaming(before, "DROP USER", mdbSupportUser)
+
+	// Someone else creates the account the withdrawn record named. It is
+	// not this CR's, so neither the removal path nor Delete may touch it.
+	h.server.clearFaults()
+	h.server.addUser(mdbSupportUser, "foreign-password")
+	h.reconcile()
+	h.requireReady()
+	h.requirePasswordOf(mdbSupportUser, "%", "foreign-password")
+
+	h.delete()
+	h.reconcile()
+	h.requirePasswordOf(mdbSupportUser, "%", "foreign-password")
+}

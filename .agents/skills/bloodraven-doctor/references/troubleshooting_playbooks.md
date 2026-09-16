@@ -165,3 +165,32 @@ kubectl annotate mysqlfailovergroup <group> -n <namespace> \
 Verify `DeploymentLeaseRevoked` and renewals reporting `operator_revoked`. Revocation does not roll back DDL, kill the client, or itself change topology generation. Planned failover, ordered update, and restore-in-place can proceed after holds end and normal preflight passes. Emergency failover, returning-primary fencing, and primary reassertion never wait on a hold. Never delete the leader-election Lease.
 
 For an isolated writable site, probe `/status` (`self_fenced`) and `/peer/active-site`, not `/fencing`. Keep the effective timeout `max(configured leaseTimeout, 3s, 3 * max(peerCheckInterval, 1s)) < 60s` for a 60s DNS TTL and allow additional margin for monitor ticks, network timeouts, and SQL fence completion. A reachable peer can prevent lease-expiry fencing, but a fresh conflicting authoritative topology triggers immediate fencing without waiting for expiry.
+
+---
+
+## 7. Tenant database adoption refused (`MysqlDatabase`)
+
+### Symptoms
+- `status.phase=Failed` with `reason` `DatabasePreExists`, `PreExistingOwnerUser`, `PreExistingUser`, or `UserClaimedBySibling`.
+- A `deletionPolicy: Delete` teardown left an account behind, with `OwnerUserDropSkipped`, `UserDropSkipped`, `OwnerUserReservedSkipped`, `UserReservedSkipped`, or `UserTransferred` in Events.
+- `status.pendingOwnerUser` or an `appliedUsers[].pendingUsername` has been set for longer than one reconcile interval.
+
+### Diagnostic steps
+1. Read the phase, the `Ready` condition's reason, and the message — the message names the first refused `user@host`, which is the whole diagnosis:
+   ```bash
+   kubectl get mysqldatabase <name> -n <ns> -o jsonpath='{.status.phase}{" "}{.status.message}{"\n"}'
+   ```
+2. Dump the write-ahead records and compare them **per `user@host`** with what exists in MySQL:
+   ```bash
+   kubectl get mysqldatabase <name> -n <ns> -o jsonpath='{.status.databaseCreated}{" owner="}{.status.ownerUser}{.status.ownerHosts}{" pendingOwner="}{.status.pendingOwnerUser}{.status.pendingOwnerHosts}{"\n"}{range .status.appliedUsers[*]}{"  entry "}{.secretName}{" user="}{.username}{.hosts}{" pending="}{.pendingUsername}{.pendingHosts}{"\n"}{end}'
+   ```
+   `pendingOwnerHosts` / `appliedUsers[].pendingHosts` belong to the rotation *target*; `ownerHosts` / `hosts` belong to the settled name. An empty pending host list with a pending username set is an older operator's shape and falls back to the settled list. A record naming `user@H1` is not a claim on `user@H2`.
+3. Identify the other claimant. `UserClaimedBySibling`, `DatabaseNameConflict` and `OwnerConflict` name the peer CR in the message; `PreExisting*` means the account exists in MySQL and **no** record of this CR names it on that host — usually a schema or account created out of band, or a `databaseName` / Secret username collision.
+4. For a skipped drop, read the event text: it says which claim vetoed it (a sibling's owner, `grants[]` or ledger; a group-level principal; or this CR's own `grants[]`).
+
+### Safe remediation
+1. **Never hand-edit `status`.** These fields are the operator's record of which accounts it created. Clearing `ownerUser`, `pendingOwnerUser`, `ownerHosts`, `appliedUsers[]` or their `pending*` counterparts strands a live privileged account that no later reconcile or delete can find; inventing an entry authorizes a `DROP USER` on an account Bloodraven did not create. There is no supported `kubectl patch` remedy here.
+2. Resolve the collision in the *spec* instead: pick an unused `databaseName`, point the owner or `users[]` Secret at a tenant-unique username, or remove the duplicate CR. One refused `user@host` parks the whole CR, so the fix is one edit, not a per-entry cleanup.
+3. To adopt an existing schema or account deliberately, drop and recreate it under a name this CR creates — adoption is refused by design and cannot be granted after the fact.
+4. A skipped drop is correct behaviour, not a leak: the account is still claimed by something. It has already lost its rights on the deleted database. If it genuinely should not outlive the CR, remove the remaining claim (the sibling's `grants[]`/`users[]` entry, or this CR's own `grants[]`) and drop the account by hand with the group's operator credential.
+5. A stuck `pending*` record almost always means the apply keeps failing earlier. Look at the `Ready` condition reason first (`PrimaryUnavailable` is transient and self-heals; `MySQLError`, `GrantUserMissing` and `InvalidSpec` are verdicts about the CR).
