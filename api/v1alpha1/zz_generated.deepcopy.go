@@ -1172,6 +1172,11 @@ func (in *MysqlDatabaseStatus) DeepCopyInto(out *MysqlDatabaseStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.PendingOwnerHosts != nil {
+		in, out := &in.PendingOwnerHosts, &out.PendingOwnerHosts
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.AppliedGrants != nil {
 		in, out := &in.AppliedGrants, &out.AppliedGrants
 		*out = make([]string, len(*in))
@@ -1238,6 +1243,11 @@ func (in *MysqlDatabaseUserState) DeepCopyInto(out *MysqlDatabaseUserState) {
 	*out = *in
 	if in.Hosts != nil {
 		in, out := &in.Hosts, &out.Hosts
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.PendingHosts != nil {
+		in, out := &in.PendingHosts, &out.PendingHosts
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}

@@ -816,16 +816,21 @@ func TestMysqlDatabaseRefusesPreExistingOwnerUser(t *testing.T) {
 		t.Fatalf("status.ownerUser = %q, want empty — the account is not this CR's", mdb.Status.OwnerUser)
 	}
 
-	// Deletion under Delete drops the database this CR did create, but
-	// never the foreign account.
+	// The refusal runs before anything is written ahead or executed, so
+	// the CR created nothing — not even the database.
+	if mdb.Status.DatabaseCreated {
+		t.Fatal("status.databaseCreated stamped ahead of a refused apply")
+	}
+	if n := h.server.statementCount(); n != 0 {
+		t.Fatalf("a refused apply executed %d statements: %v", n, h.server.statementsSince(0))
+	}
+
+	// Deletion under Delete never drops the foreign account.
 	h.update(func(m *v1alpha1.MysqlDatabase) { m.Spec.DeletionPolicy = v1alpha1.MysqlDatabaseDelete })
 	h.delete()
 	h.reconcile()
 	if !h.server.hasUser(mdbOwnerUser) {
 		t.Fatal("deletion dropped a pre-existing account the CR refused to adopt")
-	}
-	if _, ok := h.server.database(mdbDatabase); ok {
-		t.Fatal("database this CR created survived deletionPolicy=Delete")
 	}
 }
 
