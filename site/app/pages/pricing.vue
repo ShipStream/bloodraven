@@ -11,6 +11,10 @@
  * Priority Triage deliberately has no link: it is a support agreement, it
  * carries no `edition` metadata in Polar, and the license endpoint refuses to
  * mint a token for it.
+ *
+ * Renewal links stay public: the license endpoint only mints a token for a
+ * renewal order when the same Polar customer already holds a paid base order
+ * of that edition, so buying a renewal first does not yield a license.
  */
 useSeoMeta({
   title: 'Pricing',
@@ -207,6 +211,11 @@ const renewals = [
         while your update period was active, and you stop receiving new ones
         until you renew. Nothing in the cluster changes when an update period
         ends — the operator logs it and carries on.
+      </p>
+      <p class="aside aside-top">
+        A renewal extends an existing license. Check out with the same email
+        you used for the original Production or Organization purchase; a
+        renewal without one does not issue a license token.
       </p>
 
       <ul class="renewals">

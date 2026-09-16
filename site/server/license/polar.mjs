@@ -8,6 +8,9 @@ export const POLAR_SANDBOX_BASE = 'https://sandbox-api.polar.sh';
 export const ALLOWED_POLAR_BASES = new Set([POLAR_PRODUCTION_BASE, POLAR_SANDBOX_BASE]);
 
 const EDITIONS = new Set(['production', 'organization']);
+export const LICENSE_KINDS = new Set(['base', 'renewal']);
+const ORDER_PAGE_LIMIT = 100;
+const MAX_ORDER_PAGES = 10;
 const SUBSCRIPTION_PERIOD_STATUSES = new Set(['active', 'canceled', 'past_due', 'trialing']);
 const MAX_ORG_CHARS = 200;
 
@@ -107,6 +110,46 @@ export function editionFromProduct(product) {
   return EDITIONS.has(edition) ? edition : null;
 }
 
+/**
+ * `kind` separates a base license purchase from a discounted renewal of one.
+ * A product with no `kind`, or an unknown one, is not treated as either:
+ * guessing `base` would let a renewal SKU mint a full license.
+ */
+export function kindFromProduct(product) {
+  const raw = product?.metadata?.kind;
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  const kind = raw.trim();
+  return LICENSE_KINDS.has(kind) ? kind : null;
+}
+
+export function customerIdFromOrder(order) {
+  const id = pick(order, 'customerId', 'customer_id') ?? order?.customer?.id;
+  return typeof id === 'string' && id ? id : '';
+}
+
+/**
+ * True when `candidate` is a paid, unrefunded base purchase of `edition`,
+ * made by the same customer no later than the renewal order.
+ */
+export function qualifiesAsPriorBase(candidate, { customerId, edition, renewalOrderId, renewalCreatedMs }) {
+  if (!candidate || candidate.id === renewalOrderId) {
+    return false;
+  }
+  if (customerIdFromOrder(candidate) !== customerId) {
+    return false;
+  }
+  if (!orderIsPaid(candidate)) {
+    return false;
+  }
+  if (kindFromProduct(candidate.product) !== 'base' || editionFromProduct(candidate.product) !== edition) {
+    return false;
+  }
+  const createdMs = toUnixMs(pick(candidate, 'createdAt', 'created_at'));
+  return Number.isFinite(createdMs) && Number.isFinite(renewalCreatedMs) && createdMs <= renewalCreatedMs;
+}
+
 export function addCalendarMonthsUtc(date, months) {
   const year = date.getUTCFullYear();
   const month = date.getUTCMonth();
@@ -162,39 +205,25 @@ function statusOf(error) {
   return error && typeof error.statusCode === 'number' ? error.statusCode : 0;
 }
 
-export async function getOrder(client, orderId, { timeoutMs = 8000 } = {}) {
-  const lookup = (async () => {
-    try {
-      const order = await client.orders.get({ id: orderId });
-      if (!order || typeof order.id !== 'string') {
-        throw new PolarError('unavailable', 'Polar order payload is malformed');
-      }
-      return { kind: 'ok', order };
-    } catch (error) {
-      if (error instanceof PolarError && error.code) {
-        throw error;
-      }
-      if (error instanceof ResourceNotFound || error instanceof HTTPValidationError) {
-        return { kind: 'not-found' };
-      }
-      const status = statusOf(error);
-      if (status === 404 || status === 422) {
-        return { kind: 'not-found' };
-      }
-      if (status === 401 || status === 403) {
-        throw new PolarError('unauthorized', 'Polar API token is unauthorized or expired');
-      }
-      if (status === 429 || status >= 500) {
-        throw new PolarError('unavailable', 'Polar is unavailable');
-      }
-      if (error?.name === 'AbortError') {
-        throw new PolarError('timeout', 'Polar request timed out');
-      }
-      throw new PolarError('unavailable', 'Polar request failed');
-    }
-  })();
-  lookup.catch(() => {});
+function mapPolarError(error) {
+  if (error instanceof PolarError && error.code) {
+    return error;
+  }
+  const status = statusOf(error);
+  if (status === 401 || status === 403) {
+    return new PolarError('unauthorized', 'Polar API token is unauthorized or expired');
+  }
+  if (status === 429 || status >= 500) {
+    return new PolarError('unavailable', 'Polar is unavailable');
+  }
+  if (error?.name === 'AbortError') {
+    return new PolarError('timeout', 'Polar request timed out');
+  }
+  return new PolarError('unavailable', 'Polar request failed');
+}
 
+async function withTimeout(lookup, timeoutMs) {
+  lookup.catch(() => {});
   let timer;
   try {
     return await Promise.race([
@@ -208,4 +237,72 @@ export async function getOrder(client, orderId, { timeoutMs = 8000 } = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function getOrder(client, orderId, { timeoutMs = 8000 } = {}) {
+  const lookup = (async () => {
+    try {
+      const order = await client.orders.get({ id: orderId });
+      if (!order || typeof order.id !== 'string') {
+        throw new PolarError('unavailable', 'Polar order payload is malformed');
+      }
+      return { kind: 'ok', order };
+    } catch (error) {
+      if (error instanceof ResourceNotFound || error instanceof HTTPValidationError) {
+        return { kind: 'not-found' };
+      }
+      const status = statusOf(error);
+      if (status === 404 || status === 422) {
+        return { kind: 'not-found' };
+      }
+      throw mapPolarError(error);
+    }
+  })();
+  return withTimeout(lookup, timeoutMs);
+}
+
+/**
+ * Looks through the renewal customer's Polar orders for a qualifying base
+ * purchase of the same edition. Renewal orders must not mint a token without
+ * one. Requires only `orders:read`.
+ */
+export async function hasPriorBaseOrder(client, renewalOrder, edition, { timeoutMs = 8000 } = {}) {
+  const customerId = customerIdFromOrder(renewalOrder);
+  if (!customerId) {
+    return false;
+  }
+  const criteria = {
+    customerId,
+    edition,
+    renewalOrderId: renewalOrder.id,
+    renewalCreatedMs: toUnixMs(pick(renewalOrder, 'createdAt', 'created_at')),
+  };
+  const lookup = (async () => {
+    try {
+      for (let page = 1; page <= MAX_ORDER_PAGES; page += 1) {
+        const response = await client.orders.list({
+          customerId,
+          page,
+          limit: ORDER_PAGE_LIMIT,
+          sorting: ['created_at'],
+        });
+        const result = response?.result;
+        const items = Array.isArray(result?.items) ? result.items : null;
+        if (!items) {
+          throw new PolarError('unavailable', 'Polar order list payload is malformed');
+        }
+        if (items.some((candidate) => qualifiesAsPriorBase(candidate, criteria))) {
+          return true;
+        }
+        const maxPage = Number(pick(result.pagination, 'maxPage', 'max_page')) || 1;
+        if (page >= maxPage || items.length === 0) {
+          return false;
+        }
+      }
+      return false;
+    } catch (error) {
+      throw mapPolarError(error);
+    }
+  })();
+  return withTimeout(lookup, timeoutMs);
 }

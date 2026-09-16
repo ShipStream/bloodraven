@@ -6,6 +6,8 @@ import {
   editionFromProduct,
   emailsMatch,
   getOrder,
+  hasPriorBaseOrder,
+  kindFromProduct,
   looksLikeOrderId,
   normalizePolarBase,
   orderIsPaid,
@@ -140,5 +142,97 @@ test('getOrder maps Polar statuses through the SDK', async () => {
   await assert.rejects(
     () => getOrder(down, '2c1d0a6a-7c3e-4f1b-9a2d-8e5f0b1c2d3e'),
     (error) => error.code === 'unavailable',
+  );
+});
+
+test('kind comes only from product metadata and unknown kinds are refused', () => {
+  assert.equal(kindFromProduct({ metadata: { kind: 'base' } }), 'base');
+  assert.equal(kindFromProduct({ metadata: { kind: ' renewal ' } }), 'renewal');
+  assert.equal(kindFromProduct({ metadata: { kind: 'upgrade' } }), null);
+  assert.equal(kindFromProduct({ metadata: { edition: 'production' } }), null);
+  assert.equal(kindFromProduct(null), null);
+});
+
+const CUSTOMER = 'cus_1';
+
+function polarOrder(id, { kind, edition = 'production', createdAt = '2025-01-01T00:00:00Z', customerId = CUSTOMER, ...rest } = {}) {
+  return {
+    id,
+    customerId,
+    createdAt: new Date(createdAt),
+    paid: true,
+    status: 'paid',
+    refundedAmount: 0,
+    product: { metadata: { edition, kind } },
+    ...rest,
+  };
+}
+
+function fakeClient(pages) {
+  const calls = [];
+  return {
+    calls,
+    orders: {
+      list: async (request) => {
+        calls.push(request);
+        const items = pages[request.page - 1] ?? [];
+        return { result: { items, pagination: { totalCount: items.length, maxPage: pages.length } } };
+      },
+    },
+  };
+}
+
+const renewal = polarOrder('renewal-1', { kind: 'renewal', createdAt: '2026-01-01T00:00:00Z' });
+
+test('renewal qualifies with a prior paid base order of the same edition for the same customer', async () => {
+  const client = fakeClient([[renewal, polarOrder('base-1', { kind: 'base' })]]);
+  assert.equal(await hasPriorBaseOrder(client, renewal, 'production'), true);
+  assert.equal(client.calls[0].customerId, CUSTOMER);
+});
+
+test('renewal is refused without a qualifying base order', async () => {
+  const cases = {
+    'no other orders': [renewal],
+    'only other renewals': [renewal, polarOrder('renewal-0', { kind: 'renewal' })],
+    'base for a different edition': [renewal, polarOrder('base-org', { kind: 'base', edition: 'organization' })],
+    'base with no kind': [renewal, polarOrder('base-nokind', {})],
+    'refunded base': [renewal, polarOrder('base-refunded', { kind: 'base', refundedAmount: 99000 })],
+    'unpaid base': [renewal, polarOrder('base-pending', { kind: 'base', paid: false, status: 'pending' })],
+    'base bought after the renewal': [renewal, polarOrder('base-later', { kind: 'base', createdAt: '2026-02-01T00:00:00Z' })],
+    'base from another customer': [renewal, polarOrder('base-other', { kind: 'base', customerId: 'cus_2' })],
+  };
+  for (const [name, items] of Object.entries(cases)) {
+    assert.equal(await hasPriorBaseOrder(fakeClient([items]), renewal, 'production'), false, name);
+  }
+});
+
+test('renewal check follows pagination', async () => {
+  const client = fakeClient([[renewal], [polarOrder('base-page-2', { kind: 'base' })]]);
+  assert.equal(await hasPriorBaseOrder(client, renewal, 'production'), true);
+  assert.deepEqual(client.calls.map((call) => call.page), [1, 2]);
+});
+
+test('renewal check refuses orders with no customer id without calling Polar', async () => {
+  const client = fakeClient([[polarOrder('base-1', { kind: 'base' })]]);
+  const orphan = { ...renewal, customerId: undefined, customer: {} };
+  assert.equal(await hasPriorBaseOrder(client, orphan, 'production'), false);
+  assert.equal(client.calls.length, 0);
+});
+
+test('renewal check maps Polar failures to PolarError codes', async () => {
+  const unauthorized = createPolarClient({
+    token: 'polar_oat_secret',
+    base: 'https://api.polar.sh',
+    fetchImpl: async () => jsonResponse(401, { error: 'Unauthorized' }),
+  });
+  await assert.rejects(
+    () => hasPriorBaseOrder(unauthorized, renewal, 'production'),
+    (error) => error instanceof PolarError && error.code === 'unauthorized',
+  );
+
+  const malformed = { orders: { list: async () => ({ result: {} }) } };
+  await assert.rejects(
+    () => hasPriorBaseOrder(malformed, renewal, 'production'),
+    (error) => error instanceof PolarError && error.code === 'unavailable',
   );
 });
