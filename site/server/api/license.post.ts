@@ -7,6 +7,8 @@ import {
   emailsMatch,
   editionFromProduct,
   getOrder,
+  hasPriorBaseOrder,
+  kindFromProduct,
   looksLikeOrderId,
   orderIsPaid,
   orgFromOrder,
@@ -63,6 +65,19 @@ function logOperator(msg: string, fields: Record<string, unknown> = {}) {
   console.error(JSON.stringify(safe))
 }
 
+function logPolarFailure(error: unknown) {
+  const code = error instanceof PolarError ? error.code : 'unavailable'
+  if (code === 'timeout') {
+    logOperator('polar request timed out')
+  } else if (code === 'unauthorized') {
+    logOperator('polar api unauthorized', {
+      hint: 'POLAR_API_TOKEN is missing, expired, or lacks orders:read',
+    })
+  } else {
+    logOperator('polar request failed', { reason: code })
+  }
+}
+
 export default defineEventHandler(async (event) => {
   setHeader(event, 'cache-control', 'no-store')
   const started = Date.now()
@@ -108,24 +123,16 @@ export default defineEventHandler(async (event) => {
     return paddedDenial(event, started)
   }
 
+  let client: ReturnType<typeof createPolarClient>
   let parsed
   try {
-    const client = createPolarClient({
+    client = createPolarClient({
       token: config.polarToken,
       base: config.polarBase,
     })
     parsed = await getOrder(client, orderId)
   } catch (error) {
-    const code = error instanceof PolarError ? error.code : 'unavailable'
-    if (code === 'timeout') {
-      logOperator('polar request timed out')
-    } else if (code === 'unauthorized') {
-      logOperator('polar api unauthorized', {
-        hint: 'POLAR_API_TOKEN is missing, expired, or lacks orders:read',
-      })
-    } else {
-      logOperator('polar request failed', { reason: code })
-    }
+    logPolarFailure(error)
     return jsonError(event, 503, UNAVAILABLE)
   }
 
@@ -150,6 +157,36 @@ export default defineEventHandler(async (event) => {
       issuedFor: order.id,
     })
     return paddedStatus(event, started, 422, 'This order is not a Bloodraven license product.')
+  }
+
+  const kind = kindFromProduct(order.product)
+  if (!kind) {
+    logOperator('order product has no license kind metadata', {
+      issuedFor: order.id,
+    })
+    return paddedStatus(event, started, 422, 'This order is not a Bloodraven license product.')
+  }
+
+  if (kind === 'renewal') {
+    let hasBase: boolean
+    try {
+      hasBase = await hasPriorBaseOrder(client, order, edition)
+    } catch (error) {
+      logPolarFailure(error)
+      return jsonError(event, 503, UNAVAILABLE)
+    }
+    if (!hasBase) {
+      logOperator('renewal order has no prior base license order', {
+        issuedFor: order.id,
+        edition,
+      })
+      return paddedStatus(
+        event,
+        started,
+        422,
+        'This renewal has no matching original license purchase. Use the email from your original purchase, or contact licensing@shipstream.io.',
+      )
+    }
   }
 
   let updatesUntil: number
@@ -190,6 +227,7 @@ export default defineEventHandler(async (event) => {
   logOperator('license issued', {
     issuedFor: order.id,
     edition,
+    kind,
     kid: signer.kid,
   })
 

@@ -58,9 +58,22 @@ write state, or call Polar back. The license flow does not depend on it.
 | `POLAR_API_BASE` | no | `https://api.polar.sh` (default) or `https://sandbox-api.polar.sh`. |
 | `LICENSE_SIGNING_KID` | no | Defaults to `br-1`. |
 
-Tag each Bloodraven license product in the Polar dashboard with metadata
-`edition` = `production` or `organization` (including renewal products).
-Products without that key cannot mint a token.
+Tag each Bloodraven license product in the Polar dashboard with two
+metadata keys:
+
+| Product | `edition` | `kind` |
+|---|---|---|
+| Production | `production` | `base` |
+| Organization | `organization` | `base` |
+| Production renewal | `production` | `renewal` |
+| Organization renewal | `organization` | `renewal` |
+
+Products missing either key, or with an unknown value, cannot mint a token.
+A `renewal` order mints only if the same Polar customer has an earlier paid,
+unrefunded `base` order for the same edition; otherwise a cheaper renewal
+SKU would mint a full license. The check lists that customer's orders, which
+`orders:read` already covers. Set this metadata in Polar **before** deploying
+a site build that enforces `kind`, or every purchase is refused until it is.
 
 Rate limit: 10 requests / 15 minutes / client IP, in memory, per process.
 It resets on deploy and is not shared across instances. The key is Railway's
