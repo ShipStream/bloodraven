@@ -10,11 +10,11 @@ package runner
 //     behaviours (emergency failover, planned switchover, operator restart,
 //     data integrity, operator kill during failover, self-fencing,
 //     network partition, PVC loss/re-bootstrap, old-primary recovery,
-//     failover state durability, backup verification, PITR verification)
-//     plus the issue #115 reader-site behaviours (reader PVC loss and
-//     direct-source auto-clone, reader availability through unplanned
-//     failover, reader stall isolation, writable-reader fencing, and the
-//     source-convergence invariant).
+//     failover state durability, plain and encrypted backup verification,
+//     PITR verification) plus the issue #115 reader-site behaviours
+//     (reader PVC loss and direct-source auto-clone, reader availability
+//     through unplanned failover, reader stall isolation, writable-reader
+//     fencing, and the source-convergence invariant).
 //   - full:   every registered scenario (existing run-all behaviour).
 type Profile string
 
@@ -52,21 +52,22 @@ var releaseScenarios = map[string]bool{
 	"02-operator-kill-restart":             true,
 	"42-reader-stall-no-group-degradation": true,
 	// additional release scenarios
-	"04-data-integrity-on-failover":          true, // data plane correctness
-	"05-operator-kill-during-failover":       true, // operator resilience mid-failover
-	"06-self-fence-isolated-primary":         true, // taint/DNS self-fencing
-	"09-network-partition-self-fence":        true, // NetworkPolicy/partition
-	"10-full-bootstrap-after-data-wipe":      true, // PVC loss → re-bootstrap
-	"12-old-primary-recovery-no-divergence":  true, // old-primary recovery
-	"23-failover-state-durability":           true, // state survives operator restart
-	"30-backup-verification-rustfs":          true, // RustFS backup restore verification
-	"31-pitr-verification-rustfs":            true, // RustFS PITR replay verification
-	"40-reader-data-loss-reclone":            true, // reader PVC loss, endpoint shedding, and direct-source auto-clone
-	"41-reader-availability-during-failover": true, // reader keeps serving through unplanned failover, then repoints
-	"43-writable-reader-fence":               true, // writable reader fenced, rejected as target, blocked on divergence
-	"44-reader-source-convergence-invariant": true, // wrong-source reader heals as a poll-loop invariant
-	"53-deployment-hold-expiry":              true, // planned hold deferral and TTL recovery
-	"55-deployment-emergency-revocation":     true, // emergency bypass and live lease revocation
+	"04-data-integrity-on-failover":           true, // data plane correctness
+	"05-operator-kill-during-failover":        true, // operator resilience mid-failover
+	"06-self-fence-isolated-primary":          true, // taint/DNS self-fencing
+	"09-network-partition-self-fence":         true, // NetworkPolicy/partition
+	"10-full-bootstrap-after-data-wipe":       true, // PVC loss → re-bootstrap
+	"12-old-primary-recovery-no-divergence":   true, // old-primary recovery
+	"23-failover-state-durability":            true, // state survives operator restart
+	"30-backup-verification-rustfs":           true, // RustFS backup restore verification
+	"30-encrypted-backup-verification-rustfs": true, // encrypt-upload / decrypt-download operator-image containers
+	"31-pitr-verification-rustfs":             true, // RustFS PITR replay verification
+	"40-reader-data-loss-reclone":             true, // reader PVC loss, endpoint shedding, and direct-source auto-clone
+	"41-reader-availability-during-failover":  true, // reader keeps serving through unplanned failover, then repoints
+	"43-writable-reader-fence":                true, // writable reader fenced, rejected as target, blocked on divergence
+	"44-reader-source-convergence-invariant":  true, // wrong-source reader heals as a poll-loop invariant
+	"53-deployment-hold-expiry":               true, // planned hold deferral and TTL recovery
+	"55-deployment-emergency-revocation":      true, // emergency bypass and live lease revocation
 }
 
 // Profiles returns the list of valid profile names for CLI help and

@@ -439,7 +439,7 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 		mainContainer = corev1.Container{
 			Name:            backupEncryptUploadContainerName,
 			Image:           operatorImageFromEnv,
-			Command:         []string{"bloodraven", "encrypt-upload"},
+			Command:         operatorCommand("encrypt-upload"),
 			Env:             uploadEnv,
 			Resources:       bspec.Resources,
 			VolumeMounts:    uploadMounts,
@@ -467,9 +467,14 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 					// auto-mounted ServiceAccount token to shrink the
 					// blast radius of a container compromise.
 					AutomountServiceAccountToken: boolPtr(false),
-					InitContainers:               initContainers,
-					Containers:                   []corev1.Container{mainContainer},
-					Volumes:                      volumes,
+					// The dump reads the (usually replica) source site over
+					// its Service and may mount a node-pinned backup PVC, so
+					// it must be schedulable on, and not evicted from, the
+					// read-only side by a failover.
+					Tolerations:    groupReadOnlyTolerations(fg.Name),
+					InitContainers: initContainers,
+					Containers:     []corev1.Container{mainContainer},
+					Volumes:        volumes,
 				},
 			},
 		},

@@ -362,18 +362,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 					Spec: corev1.PodSpec{
 						RestartPolicy:      corev1.RestartPolicyOnFailure,
 						ServiceAccountName: sa,
+						Tolerations:        groupReadOnlyTolerations(fg.Name),
 						Containers: []corev1.Container{
 							{
 								Name:  "trigger",
 								Image: image,
-								Command: []string{
-									"/bloodraven",
+								Command: operatorCommand(
 									"trigger-backup",
-									"--group=" + fg.Name,
-									"--profile=" + sched.ProfileName,
-									"--schedule=" + sched.Name,
-									"--namespace=" + fg.Namespace,
-								},
+									"--group="+fg.Name,
+									"--profile="+sched.ProfileName,
+									"--schedule="+sched.Name,
+									"--namespace="+fg.Namespace,
+								),
 							},
 						},
 					},

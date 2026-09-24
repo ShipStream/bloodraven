@@ -131,17 +131,17 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneVerificationSchedule(ctx cont
 					Spec: corev1.PodSpec{
 						RestartPolicy:      corev1.RestartPolicyOnFailure,
 						ServiceAccountName: sa,
+						Tolerations:        groupReadOnlyTolerations(fg.Name),
 						Containers: []corev1.Container{
 							{
 								Name:  "trigger",
 								Image: image,
-								Command: []string{
-									"/bloodraven",
+								Command: operatorCommand(
 									"trigger-verification",
-									"--group=" + fg.Name,
-									"--profile=" + profile.Name,
-									"--namespace=" + fg.Namespace,
-								},
+									"--group="+fg.Name,
+									"--profile="+profile.Name,
+									"--namespace="+fg.Namespace,
+								),
 							},
 						},
 					},

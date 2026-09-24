@@ -369,10 +369,13 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 
 		switch backup.Status.StorageType {
 		case v1alpha1.BackupStorageS3:
-			prefix := strings.TrimSuffix(backup.Status.Location, "/")
+			bucket, prefix := splitS3Location(backup.Status.Location)
+			if bucket == "" {
+				bucket = in.Profile.Storage.S3.Bucket
+			}
 			decEnv = append(decEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: prefix},
-				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: in.Profile.Storage.S3.Bucket},
+				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: bucket},
 			)
 			if in.Profile.Storage.S3.EndpointURL != "" {
 				decEnv = append(decEnv, corev1.EnvVar{
@@ -472,7 +475,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		initContainers = append(initContainers, corev1.Container{
 			Name:            "decrypt-download",
 			Image:           operatorImageFromEnv,
-			Command:         []string{"bloodraven", "decrypt-download"},
+			Command:         operatorCommand("decrypt-download"),
 			Env:             decEnv,
 			Resources:       initResources,
 			VolumeMounts:    decMounts,
@@ -516,7 +519,12 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 					// both run against storage and never call the
 					// Kubernetes API.
 					AutomountServiceAccountToken: boolPtr(false),
-					InitContainers:               initContainers,
+					// Verification restores into a throwaway mysqld inside
+					// this pod and never touches the group's MySQL, so the
+					// read-only side is a fine place for it and a failover
+					// must not evict a long-running run.
+					Tolerations:    groupReadOnlyTolerations(fg.Name),
+					InitContainers: initContainers,
 					Containers: []corev1.Container{
 						{
 							Name:  backupJobContainerName,

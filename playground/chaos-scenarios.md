@@ -59,6 +59,7 @@ Currently automated (every `runner.Register` entry in `internal/playground/scena
 - `27-dragonfly-rolling-image-update` (§D6b; ordinary `spec.dragonfly.image` patch rolls one pod at a time and promotes the updated replica before rolling the old active pod)
 - `29-dragonfly-snapshot-upgrade` (§29; D6a snapshot-restore upgrade using the playground RustFS bucket)
 - `30-backup-verification-rustfs` (§30; configures a RustFS backup profile, creates a real `MysqlBackup`, pins `MysqlBackupVerification.spec.backupRef`, and asserts marker rows restore)
+- `30-encrypted-backup-verification-rustfs` (§30; same round trip with `encryption.algorithm=AES-256-GCM`, so the backup Job runs the operator-image `encrypt-upload` container and verification runs the `decrypt-download` init container; asserts `status.encrypted=true`)
 - `31-pitr-verification-rustfs` (§31; enables RustFS PITR, archives sealed binlogs, verifies timestamp replay includes pre-target rows and excludes post-target rows)
 - `32-mfg-status-write-denial-emergency-promotion` (§32; denies the operator patch/update on `mysqlfailovergroups/status`, scales the active primary to 0, asserts MySQL promotes at the data layer while the CR status is frozen, then self-heals to the promoted site within 90s after RBAC restore)
 - `33-scoped-dns-outage` (§33; NetworkPolicy blocking only kube-dns egress from the active MySQL pod — proven with a DNS canary first — asserts the outage is DNS-scoped, not a pod partition and not the DNSEndpoint-API denial of §38)
@@ -827,6 +828,8 @@ The scenario creates/ensures bucket `bloodraven-backup-e2e`, patches only `Mysql
 **Verify**: The backup reaches `Succeeded` with `status.storageType=S3`, `status.location=<prefix>/<backup>`, and a Job name. The verification reaches `Succeeded`, reports `status.backupRef.name` for the created backup, runs the sanity query, returns marker count `2`, and has `Verified=True`.
 
 **Timing**: Scenario timeout is 18 minutes; backup and verification waits each have a 12-minute sub-budget. Cleanup deletes verification then backup CRs, drops `chaos_s30_backup`, restores the original `spec.backup`, and waits for a healthy baseline.
+
+**Encrypted variant** (`make chaos-run SCENARIO=30-encrypted-backup-verification-rustfs`): creates a per-run passphrase Secret `bloodraven-backup-e2e-passphrase-<run-stamp>` with a random passphrase (it refuses to reuse an existing one), sets `encryption.algorithm=AES-256-GCM` on the `rustfs-e2e` profile, and uses objects under `e2e/30-encrypted-backup-verification-rustfs/<run-stamp>/` and schema `chaos_s30_encrypted_backup`. The backup must also report `status.encrypted=true`, and `status.location` is `s3://bloodraven-backup-e2e/<prefix>/<backup>/`, the URL form `encrypt-upload` writes. This is the only scenario that renders the operator-image `encrypt-upload` and `decrypt-download` containers. Before it existed, every scenario ran unencrypted backups, so two encrypted-path bugs shipped without an E2E failure, both fixed in 1.3.2. The first was a bare `bloodraven` command (`exec: "bloodraven": executable file not found in $PATH`). The second passed the `s3://` location to `decrypt-download` as the object-key prefix, which RustFS rejects with `InvalidArgument`. Cleanup deletes that Secret by UID, and only if this run created it.
 
 ---
 

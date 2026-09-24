@@ -246,6 +246,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 					// Cleanup runs cleanup.py against storage; it never
 					// talks to the Kubernetes API.
 					AutomountServiceAccountToken: boolPtr(false),
+					Tolerations:                  groupReadOnlyTolerations(fg.Name),
 					Containers: []corev1.Container{
 						{
 							Name:            backupJobContainerName,
