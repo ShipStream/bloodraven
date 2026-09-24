@@ -2,6 +2,8 @@ package scenarios
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,9 +33,18 @@ const (
 	backupOriginalHadKey  = "backupOriginalHadSpec"
 )
 
-// backupE2EPassphraseSecret holds the throwaway AES-256-GCM passphrase
-// for the encrypted backup scenario.
-const backupE2EPassphraseSecret = "bloodraven-backup-e2e-passphrase"
+// backupE2EPassphraseSecretPrefix names the throwaway AES-256-GCM
+// passphrase Secret for the encrypted backup scenario. Each run appends
+// its run stamp so it never reuses (or later deletes) a Secret it did not
+// create.
+const backupE2EPassphraseSecretPrefix = "bloodraven-backup-e2e-passphrase-"
+
+// Stash keys recording the passphrase Secret this run created, so cleanup
+// deletes exactly that object and nothing else.
+const (
+	backupPassphraseSecretKey    = "backupPassphraseSecret"
+	backupPassphraseSecretUIDKey = "backupPassphraseSecretUID"
+)
 
 func backupRunStamp(env *runner.Env) string {
 	start := env.StartTime.UTC()
@@ -87,40 +98,61 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 	return spec
 }
 
-func backupE2EEncryption() *v1alpha1.BackupEncryptionSpec {
+func backupE2EEncryption(secretName string) *v1alpha1.BackupEncryptionSpec {
 	return &v1alpha1.BackupEncryptionSpec{
 		Algorithm:        "AES-256-GCM",
-		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: backupE2EPassphraseSecret},
+		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: secretName},
 	}
 }
 
-func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) error {
-	secrets := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace)
+// ensureBackupPassphraseSecret creates this run's passphrase Secret and
+// stashes its name and UID. It refuses to adopt an existing Secret: the
+// name is unique per run, so a collision means another run or a user owns
+// it, and its passphrase is unknown to this one.
+func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) (string, error) {
+	name := backupE2EPassphraseSecretPrefix + backupRunStamp(env)
+	passphrase := make([]byte, 32)
+	if _, err := rand.Read(passphrase); err != nil {
+		return "", fmt.Errorf("generate backup passphrase: %w", err)
+	}
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   backupE2EPassphraseSecret,
+			Name:   name,
 			Labels: map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
 		},
 		StringData: map[string]string{
-			backupE2EEncryption().PassphraseSecret.PassphraseSecretKeyOrDefault(): "playground-e2e-backup-passphrase-" + backupRunStamp(env),
+			backupE2EEncryption(name).PassphraseSecret.PassphraseSecretKeyOrDefault(): hex.EncodeToString(passphrase),
 		},
 	}
-	if _, err := secrets.Create(ctx, sec, metav1.CreateOptions{}); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("create backup passphrase secret: %w", err)
-		}
-		env.Capture.Note("backup passphrase secret already exists; reusing " + backupE2EPassphraseSecret)
-		return nil
+	created, err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Create(ctx, sec, metav1.CreateOptions{})
+	if err != nil {
+		return "", fmt.Errorf("create backup passphrase secret %s: %w", name, err)
 	}
-	env.Capture.Note("created backup passphrase secret " + backupE2EPassphraseSecret)
-	return nil
+	if err := ctxStash(ctx, env, backupPassphraseSecretKey, name); err != nil {
+		return "", err
+	}
+	if err := ctxStash(ctx, env, backupPassphraseSecretUIDKey, string(created.UID)); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
+// deleteBackupPassphraseSecret deletes the Secret this run created, and
+// only that object (UID precondition). A no-op when the run never
+// created one.
 func deleteBackupPassphraseSecret(ctx context.Context, env *runner.Env) error {
-	err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Delete(ctx, backupE2EPassphraseSecret, metav1.DeleteOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete backup passphrase secret: %w", err)
+	name := ctxFetch(env, backupPassphraseSecretKey)
+	if name == "" {
+		return nil
 	}
+	uid := types.UID(ctxFetch(env, backupPassphraseSecretUIDKey))
+	err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Delete(ctx, name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete backup passphrase secret %s: %w", name, err)
+	}
+	env.Capture.Note("deleted backup passphrase secret " + name)
 	return nil
 }
 

@@ -86,7 +86,8 @@ func s30EnsureBucket(v s30Variant) runner.Step {
 				return err
 			}
 			if v.encrypted {
-				return ensureBackupPassphraseSecret(ctx, env)
+				_, err := ensureBackupPassphraseSecret(ctx, env)
+				return err
 			}
 			return nil
 		},
@@ -108,7 +109,11 @@ func s30ConfigureProfile(v s30Variant) runner.Step {
 			}
 			spec := backupProfileSpec(prefix, false)
 			if v.encrypted {
-				spec.Profiles[0].Encryption = backupE2EEncryption()
+				secretName := ctxFetch(env, backupPassphraseSecretKey)
+				if secretName == "" {
+					return fmt.Errorf("encrypted profile: passphrase secret was not created")
+				}
+				spec.Profiles[0].Encryption = backupE2EEncryption(secretName)
 			}
 			if err := patchBackupSpec(ctx, env, spec); err != nil {
 				return err
