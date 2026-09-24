@@ -1476,12 +1476,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				},
 				// MySQL pods must tolerate the db-readonly taint since they
 				// run on both primary and replica nodes.
-				Tolerations: []corev1.Toleration{
-					{
-						Key:      platform.TaintKeyForGroup(fg.Name),
-						Operator: corev1.TolerationOpExists,
-					},
-				},
+				Tolerations: groupReadOnlyTolerations(fg.Name),
 				// Order: keyring-init first — the keyring must exist
 				// before mysqld starts, and it is cheaper to fail the
 				// pod there than to have InnoDB abort startup with

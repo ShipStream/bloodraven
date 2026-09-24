@@ -95,6 +95,22 @@ func isS3Location(loc string) bool {
 	return true
 }
 
+// splitS3Location turns an S3 MysqlBackup.status.location into the
+// bucket it names and the object-key prefix inside that bucket, without
+// surrounding slashes. mysqlsh dumps record a bare key prefix
+// ("lion/nightly-abc"), for which bucket is "". The encrypt-upload
+// container records a URL ("s3://bucket/lion/nightly-abc/"), which must
+// not be passed through as a key prefix: S3-compatible stores reject it
+// with InvalidArgument.
+func splitS3Location(loc string) (bucket, key string) {
+	if rest, ok := strings.CutPrefix(loc, "s3://"); ok {
+		bucket, key, _ = strings.Cut(rest, "/")
+	} else {
+		key = loc
+	}
+	return bucket, strings.Trim(key, "/")
+}
+
 // restoreInFlight reports whether spec.initFromBackup is set and the
 // one-shot restore has not yet reached Succeeded. Callers use it to gate
 // side effects that would race the restore Job (notably the topology
@@ -801,7 +817,11 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 				decryptS3Bucket = s3.Bucket
 				decryptS3EndpointOverride = s3.EndpointURL
 				decryptS3Region = s3.Region
-				decryptS3Prefix = strings.TrimSuffix(inputURL, "/")
+				var locBucket string
+				locBucket, decryptS3Prefix = splitS3Location(ref.Status.Location)
+				if locBucket != "" {
+					decryptS3Bucket = locBucket
+				}
 				decryptAWSCredsSecret = s3.CredentialsSecret
 			} else if wantsPVC {
 				pvc := profile.Storage.PVC
@@ -1175,7 +1195,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		initContainers = append(initContainers, corev1.Container{
 			Name:            "decrypt-download",
 			Image:           operatorImageFromEnv,
-			Command:         []string{"bloodraven", "decrypt-download"},
+			Command:         operatorCommand("decrypt-download"),
 			Env:             decEnv,
 			Resources:       initResources,
 			VolumeMounts:    decMounts,
@@ -1255,7 +1275,12 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 					// init containers; none of them talk to the
 					// Kubernetes API.
 					AutomountServiceAccountToken: boolPtr(false),
-					InitContainers:               initContainers,
+					// A restore loads into the target site over its Service.
+					// Evicting it mid-load because a failover tainted its
+					// node would leave a half-dropped or half-loaded schema;
+					// let it finish or fail on its own instead.
+					Tolerations:    groupReadOnlyTolerations(fg.Name),
+					InitContainers: initContainers,
 					Containers: []corev1.Container{
 						{
 							Name:            backupJobContainerName,

@@ -516,7 +516,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	init := corev1.Container{
 		Name:            restorePITRInitContainerName,
 		Image:           image,
-		Command:         []string{"/bloodraven", "pitr-download"},
+		Command:         operatorCommand("pitr-download"),
 		Env:             initEnv,
 		Resources:       initResources,
 		VolumeMounts:    initMounts,

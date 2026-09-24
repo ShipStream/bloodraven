@@ -12,62 +12,105 @@ import (
 )
 
 func init() {
-	runner.Register(scenario30BackupVerificationRustFS())
+	runner.Register(scenario30BackupVerificationRustFS(s30Plain))
+	runner.Register(scenario30BackupVerificationRustFS(s30Encrypted))
 }
 
-const (
-	s30ID     = "30-backup-verification-rustfs"
-	s30DBName = "chaos_s30_backup"
+// s30Variant parameterizes scenario 30. The encrypted variant runs the
+// same dump -> verify round trip through the operator-image
+// `encrypt-upload` / `decrypt-download` containers, which the plain
+// variant never renders.
+type s30Variant struct {
+	id        string
+	short     string // CR name / run-stem prefix
+	dbName    string
+	title     string
+	docLink   string
+	encrypted bool
+}
+
+var (
+	s30Plain = s30Variant{
+		id:      "30-backup-verification-rustfs",
+		short:   "s30",
+		dbName:  "chaos_s30_backup",
+		title:   "Backup verification restores RustFS backup",
+		docLink: "playground/chaos-scenarios.md#30-backup-verification-against-rustfs",
+	}
+	s30Encrypted = s30Variant{
+		id:        "30-encrypted-backup-verification-rustfs",
+		short:     "s30e",
+		dbName:    "chaos_s30_encrypted_backup",
+		title:     "Encrypted backup verification restores RustFS backup",
+		docLink:   "playground/chaos-scenarios.md#30-backup-verification-against-rustfs",
+		encrypted: true,
+	}
 )
 
-func scenario30BackupVerificationRustFS() runner.Scenario {
+func scenario30BackupVerificationRustFS(v s30Variant) runner.Scenario {
+	hypothesis := "A real MysqlBackup written to the playground RustFS bucket can be restored by a pinned " +
+		"MysqlBackupVerification and the restored MySQL contains marker rows from the dump."
+	if v.encrypted {
+		hypothesis = "An AES-256-GCM encrypted MysqlBackup (operator-image encrypt-upload container) written to the " +
+			"playground RustFS bucket can be decrypted (decrypt-download init container) and restored by a pinned " +
+			"MysqlBackupVerification, and the restored MySQL contains marker rows from the dump."
+	}
 	return runner.Scenario{
-		ID:    s30ID,
-		Title: "Backup verification restores RustFS backup",
-		Hypothesis: "A real MysqlBackup written to the playground RustFS bucket can be restored by a pinned " +
-			"MysqlBackupVerification and the restored MySQL contains marker rows from the dump.",
-		Risk:     "medium",
-		DocLink:  "playground/chaos-scenarios.md#30-backup-verification-against-rustfs",
-		Timeout:  18 * time.Minute,
-		Precheck: assertReplicationRunningPrecheck,
+		ID:         v.id,
+		Title:      v.title,
+		Hypothesis: hypothesis,
+		Risk:       "medium",
+		DocLink:    v.docLink,
+		Timeout:    18 * time.Minute,
+		Precheck:   assertReplicationRunningPrecheck,
 		Steps: []runner.Step{
-			s30EnsureBucket(),
-			s30ConfigureProfile(),
-			s30SeedMarkers(),
-			s30CreateBackup(),
-			s30WaitBackupSucceeded(),
-			s30CreateVerification(),
-			s30WaitVerificationSucceeded(),
+			s30EnsureBucket(v),
+			s30ConfigureProfile(v),
+			s30SeedMarkers(v),
+			s30CreateBackup(v),
+			s30WaitBackupSucceeded(v),
+			s30CreateVerification(v),
+			s30WaitVerificationSucceeded(v),
 		},
-		Cleanup: s30Cleanup,
+		Cleanup: func(ctx context.Context, env *runner.Env) error { return s30Cleanup(ctx, env, v) },
 	}
 }
 
-func s30EnsureBucket() runner.Step {
+func s30EnsureBucket(v s30Variant) runner.Step {
 	return runner.Step{
 		Phase: runner.PhasePrecheck,
 		Name:  "ensure RustFS backup bucket exists",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			env.Capture.Note(fmt.Sprintf("RustFS endpoint=%s bucket=%s credentialsSecret=%s", backupE2EEndpoint, backupE2EBucket, backupE2ECredsSecret))
-			return env.Chaos.EnsureRustFSBucket(ctx, backupE2EBucket)
+			if err := env.Chaos.EnsureRustFSBucket(ctx, backupE2EBucket); err != nil {
+				return err
+			}
+			if v.encrypted {
+				return ensureBackupPassphraseSecret(ctx, env)
+			}
+			return nil
 		},
 	}
 }
 
-func s30ConfigureProfile() runner.Step {
+func s30ConfigureProfile(v s30Variant) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
 		Name:  "configure RustFS backup profile",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			runStem := "s30-" + backupRunStamp(env)
-			prefix := "e2e/" + s30ID + "/" + runStem
+			runStem := v.short + "-" + backupRunStamp(env)
+			prefix := "e2e/" + v.id + "/" + runStem
 			if err := ctxStash(ctx, env, "backupRunStem", runStem); err != nil {
 				return err
 			}
 			if err := ctxStash(ctx, env, "backupPrefix", prefix); err != nil {
 				return err
 			}
-			if err := patchBackupSpec(ctx, env, backupProfileSpec(prefix, false)); err != nil {
+			spec := backupProfileSpec(prefix, false)
+			if v.encrypted {
+				spec.Profiles[0].Encryption = backupE2EEncryption()
+			}
+			if err := patchBackupSpec(ctx, env, spec); err != nil {
 				return err
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -77,7 +120,7 @@ func s30ConfigureProfile() runner.Step {
 	}
 }
 
-func s30SeedMarkers() runner.Step {
+func s30SeedMarkers(v s30Variant) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
 		Name:  "seed backup marker rows",
@@ -92,16 +135,16 @@ func s30SeedMarkers() runner.Step {
 				return fmt.Errorf("open active mysql %s: %w", active, err)
 			}
 			stmts := []string{
-				"CREATE DATABASE IF NOT EXISTS " + s30DBName,
-				"DROP TABLE IF EXISTS " + s30DBName + ".marker",
-				"CREATE TABLE " + s30DBName + ".marker (id INT PRIMARY KEY, run_id VARCHAR(64), phase VARCHAR(32), payload VARCHAR(128), created_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6))",
+				"CREATE DATABASE IF NOT EXISTS " + v.dbName,
+				"DROP TABLE IF EXISTS " + v.dbName + ".marker",
+				"CREATE TABLE " + v.dbName + ".marker (id INT PRIMARY KEY, run_id VARCHAR(64), phase VARCHAR(32), payload VARCHAR(128), created_at TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6))",
 			}
 			for _, q := range stmts {
 				if _, err := primary.Exec(ctx, q); err != nil {
 					return fmt.Errorf("marker schema %q: %w", q, err)
 				}
 			}
-			insert := "INSERT INTO " + s30DBName + ".marker (id, run_id, phase, payload) VALUES (?, ?, ?, ?)"
+			insert := "INSERT INTO " + v.dbName + ".marker (id, run_id, phase, payload) VALUES (?, ?, ?, ?)"
 			if _, err := primary.Exec(ctx, insert, 1, runStem, "baseline", "present-in-full-backup"); err != nil {
 				return fmt.Errorf("insert baseline row 1: %w", err)
 			}
@@ -111,27 +154,27 @@ func s30SeedMarkers() runner.Step {
 			if err := waitForReplicaGTID(ctx, env, active, replica); err != nil {
 				return err
 			}
-			env.Capture.Note(fmt.Sprintf("seeded %s.marker on active=%s replica=%s runStem=%s", s30DBName, active, replica, runStem))
+			env.Capture.Note(fmt.Sprintf("seeded %s.marker on active=%s replica=%s runStem=%s", v.dbName, active, replica, runStem))
 			return nil
 		},
 	}
 }
 
-func s30CreateBackup() runner.Step {
+func s30CreateBackup(v s30Variant) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
 		Name:  "create MysqlBackup",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			name := "s30-backup-" + backupRunStamp(env)
+			name := v.short + "-backup-" + backupRunStamp(env)
 			if err := ctxStash(ctx, env, "backupName", name); err != nil {
 				return err
 			}
-			return createMysqlBackup(ctx, env, name, s30ID)
+			return createMysqlBackup(ctx, env, name, v.id)
 		},
 	}
 }
 
-func s30WaitBackupSucceeded() runner.Step {
+func s30WaitBackupSucceeded(v s30Variant) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
 		Name:  "wait MysqlBackup Succeeded",
@@ -145,6 +188,11 @@ func s30WaitBackupSucceeded() runner.Step {
 				return err
 			}
 			wantLocation := prefix + "/" + name
+			if v.encrypted {
+				// encrypt-upload reports the ciphertext prefix as a
+				// full s3:// URL (cmd/bloodraven storageConfigFromEnv).
+				wantLocation = "s3://" + backupE2EBucket + "/" + prefix + "/" + name + "/"
+			}
 			if b.Status.Location != wantLocation {
 				return fmt.Errorf("backup location %q, want %q", b.Status.Location, wantLocation)
 			}
@@ -153,6 +201,9 @@ func s30WaitBackupSucceeded() runner.Step {
 			}
 			if b.Status.JobName == "" {
 				return fmt.Errorf("backup status.jobName is empty")
+			}
+			if b.Status.Encrypted != v.encrypted {
+				return fmt.Errorf("backup status.encrypted=%v, want %v", b.Status.Encrypted, v.encrypted)
 			}
 			if err := ctxStash(ctx, env, "backupUID", string(b.UID)); err != nil {
 				return err
@@ -163,23 +214,23 @@ func s30WaitBackupSucceeded() runner.Step {
 	}
 }
 
-func s30CreateVerification() runner.Step {
+func s30CreateVerification(v s30Variant) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
 		Name:  "create pinned MysqlBackupVerification",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			name := "s30-verify-" + backupRunStamp(env)
+			name := v.short + "-verify-" + backupRunStamp(env)
 			if err := ctxStash(ctx, env, "verificationName", name); err != nil {
 				return err
 			}
 			runStem := ctxFetch(env, "backupRunStem")
-			query := "SELECT COUNT(*) FROM " + s30DBName + ".marker WHERE run_id=" + quoteSQLString(runStem) + " AND phase='baseline'"
-			return createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backupName"), s30ID, nil, query, 2)
+			query := "SELECT COUNT(*) FROM " + v.dbName + ".marker WHERE run_id=" + quoteSQLString(runStem) + " AND phase='baseline'"
+			return createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backupName"), v.id, nil, query, 2)
 		},
 	}
 }
 
-func s30WaitVerificationSucceeded() runner.Step {
+func s30WaitVerificationSucceeded(v s30Variant) runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
 		Name:  "wait MysqlBackupVerification Succeeded",
@@ -189,38 +240,43 @@ func s30WaitVerificationSucceeded() runner.Step {
 			backupUID := ctxFetch(env, "backupUID")
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			v, err := waitForVerificationPhase(waitCtx, env, name, v1alpha1.VerificationPhaseSucceeded)
+			vr, err := waitForVerificationPhase(waitCtx, env, name, v1alpha1.VerificationPhaseSucceeded)
 			if err != nil {
 				return err
 			}
-			if v.Status.BackupRef == nil || v.Status.BackupRef.Name != backupName {
-				return fmt.Errorf("verification backupRef=%v, want name=%s", v.Status.BackupRef, backupName)
+			if vr.Status.BackupRef == nil || vr.Status.BackupRef.Name != backupName {
+				return fmt.Errorf("verification backupRef=%v, want name=%s", vr.Status.BackupRef, backupName)
 			}
-			if backupUID != "" && v.Status.BackupRef.UID != "" && v.Status.BackupRef.UID != backupUID {
-				return fmt.Errorf("verification backupRef UID=%q, want %q", v.Status.BackupRef.UID, backupUID)
+			if backupUID != "" && vr.Status.BackupRef.UID != "" && vr.Status.BackupRef.UID != backupUID {
+				return fmt.Errorf("verification backupRef UID=%q, want %q", vr.Status.BackupRef.UID, backupUID)
 			}
-			if v.Status.SanityCheck == nil || !v.Status.SanityCheck.Ran || v.Status.SanityCheck.ResultRow != "2" {
-				return fmt.Errorf("verification sanity=%v, want ran=true resultRow=2", v.Status.SanityCheck)
+			if vr.Status.SanityCheck == nil || !vr.Status.SanityCheck.Ran || vr.Status.SanityCheck.ResultRow != "2" {
+				return fmt.Errorf("verification sanity=%v, want ran=true resultRow=2", vr.Status.SanityCheck)
 			}
-			if !conditionTrue(v.Status.Conditions, "Verified") {
-				return fmt.Errorf("verification missing Verified=True condition: %s", conditionsSummary(v.Status.Conditions))
+			if !conditionTrue(vr.Status.Conditions, "Verified") {
+				return fmt.Errorf("verification missing Verified=True condition: %s", conditionsSummary(vr.Status.Conditions))
 			}
-			env.Capture.Note("verification succeeded: " + verificationStatusSummary(v))
+			env.Capture.Note("verification succeeded: " + verificationStatusSummary(vr))
 			return nil
 		},
 	}
 }
 
-func s30Cleanup(ctx context.Context, env *runner.Env) error {
+func s30Cleanup(ctx context.Context, env *runner.Env, v s30Variant) error {
 	var errs []error
 	if err := deleteBackupCRs(ctx, env, ctxFetch(env, "backupName"), ctxFetch(env, "verificationName")); err != nil {
 		errs = append(errs, err)
 	}
-	if err := dropMarkerSchemaAndReplicate(ctx, env, s30DBName); err != nil {
+	if err := dropMarkerSchemaAndReplicate(ctx, env, v.dbName); err != nil {
 		errs = append(errs, err)
 	}
 	if err := restoreOriginalBackupSpec(ctx, env); err != nil {
 		errs = append(errs, err)
+	}
+	if v.encrypted {
+		if err := deleteBackupPassphraseSecret(ctx, env); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if _, err := env.Wait.UntilCR(ctx, env.Namespace, "s30 cleanup healthy baseline", func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
 		ready := false

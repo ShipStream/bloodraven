@@ -22,7 +22,6 @@ import (
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/dragonfly"
-	"github.com/shipstream/bloodraven/internal/platform"
 )
 
 // Dragonfly-specific labels and constants.
@@ -233,13 +232,8 @@ func (r *MysqlFailoverGroupReconciler) applyDragonflyStatefulSetSpec(fg *v1alpha
 			NodeSelector: map[string]string{
 				"topology.kubernetes.io/zone": site.Zone,
 			},
-			Tolerations: []corev1.Toleration{
-				{
-					Key:      platform.TaintKeyForGroup(fg.Name),
-					Operator: corev1.TolerationOpExists,
-				},
-			},
-			Containers: []corev1.Container{container},
+			Tolerations: groupReadOnlyTolerations(fg.Name),
+			Containers:  []corev1.Container{container},
 			Volumes: []corev1.Volume{
 				{
 					Name: "data",

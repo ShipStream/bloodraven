@@ -31,6 +31,10 @@ const (
 	backupOriginalHadKey  = "backupOriginalHadSpec"
 )
 
+// backupE2EPassphraseSecret holds the throwaway AES-256-GCM passphrase
+// for the encrypted backup scenario.
+const backupE2EPassphraseSecret = "bloodraven-backup-e2e-passphrase"
+
 func backupRunStamp(env *runner.Env) string {
 	start := env.StartTime.UTC()
 	if start.IsZero() {
@@ -81,6 +85,43 @@ func backupProfileSpec(prefix string, pitr bool) v1alpha1.BackupSpec {
 		}
 	}
 	return spec
+}
+
+func backupE2EEncryption() *v1alpha1.BackupEncryptionSpec {
+	return &v1alpha1.BackupEncryptionSpec{
+		Algorithm:        "AES-256-GCM",
+		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: backupE2EPassphraseSecret},
+	}
+}
+
+func ensureBackupPassphraseSecret(ctx context.Context, env *runner.Env) error {
+	secrets := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace)
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   backupE2EPassphraseSecret,
+			Labels: map[string]string{"chaos.playground.bloodraven.io/created-by-e2e": "true"},
+		},
+		StringData: map[string]string{
+			backupE2EEncryption().PassphraseSecret.PassphraseSecretKeyOrDefault(): "playground-e2e-backup-passphrase-" + backupRunStamp(env),
+		},
+	}
+	if _, err := secrets.Create(ctx, sec, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create backup passphrase secret: %w", err)
+		}
+		env.Capture.Note("backup passphrase secret already exists; reusing " + backupE2EPassphraseSecret)
+		return nil
+	}
+	env.Capture.Note("created backup passphrase secret " + backupE2EPassphraseSecret)
+	return nil
+}
+
+func deleteBackupPassphraseSecret(ctx context.Context, env *runner.Env) error {
+	err := env.Kube.Kubernetes.CoreV1().Secrets(env.Namespace).Delete(ctx, backupE2EPassphraseSecret, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete backup passphrase secret: %w", err)
+	}
+	return nil
 }
 
 func patchBackupSpec(ctx context.Context, env *runner.Env, spec v1alpha1.BackupSpec) error {

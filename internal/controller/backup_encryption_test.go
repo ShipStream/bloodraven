@@ -89,7 +89,7 @@ func TestBuildBackupJob_EncryptedS3_ShapeChanges(t *testing.T) {
 	if main.Image != "bloodraven:test" {
 		t.Errorf("main image: got %q want bloodraven:test", main.Image)
 	}
-	if got := main.Command; len(got) < 2 || got[0] != "bloodraven" || got[1] != "encrypt-upload" {
+	if got := main.Command; len(got) < 2 || got[0] != operatorBinaryPath || got[1] != "encrypt-upload" {
 		t.Errorf("main command: got %v", got)
 	}
 
@@ -393,5 +393,91 @@ func TestBuildRestoreJob_EncryptedSource_NoPassphraseSecretErrors(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "passphrase") {
 		t.Errorf("error should mention passphrase, got %v", err)
+	}
+}
+
+func TestSplitS3Location(t *testing.T) {
+	cases := []struct{ loc, bucket, key string }{
+		{"lion/seed/", "", "lion/seed"},
+		{"lion/seed", "", "lion/seed"},
+		{"s3://bkt/lion/seed/", "bkt", "lion/seed"},
+		{"s3://bkt/lion/seed", "bkt", "lion/seed"},
+		{"s3://bkt/", "bkt", ""},
+		{"s3://bkt", "bkt", ""},
+	}
+	for _, tc := range cases {
+		bucket, key := splitS3Location(tc.loc)
+		if bucket != tc.bucket || key != tc.key {
+			t.Errorf("splitS3Location(%q) = (%q, %q), want (%q, %q)", tc.loc, bucket, key, tc.bucket, tc.key)
+		}
+	}
+}
+
+// TestEncryptedS3Location_DecryptSourceIsObjectKey covers the
+// verification and restore halves of the encrypted S3 round trip.
+// encrypt-upload records status.location as "s3://<bucket>/<prefix>/",
+// and decrypt-download must get the bare object-key prefix plus that
+// bucket. Passing the URL through made RustFS reject the listing with
+// InvalidArgument (found by the 30-encrypted-backup-verification-rustfs
+// playground scenario).
+func TestEncryptedS3Location_DecryptSourceIsObjectKey(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+
+	for _, tc := range []struct {
+		name, location, wantBucket string
+	}{
+		{"url in profile bucket", "s3://bloodraven-backups/lion/seed/", "bloodraven-backups"},
+		{"url in a bucket the profile no longer names", "s3://old-bucket/lion/seed/", "old-bucket"},
+		{"bare prefix", "lion/seed/", "bloodraven-backups"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := fgWithEncryptedBackup()
+			seed := successfulBackup("seed", fg.Name, "nightly-s3")
+			seed.Status.Location = tc.location
+			seed.Status.Encrypted = true
+			seed.Status.EncryptionAlgorithm = "AES-256-GCM"
+
+			verify := &v1alpha1.MysqlBackupVerification{
+				ObjectMeta: metav1.ObjectMeta{Name: "verify", Namespace: "ns"},
+				Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: "nightly-s3"},
+			}
+			vjob, err := buildVerificationJob(verificationJobInputs{
+				FailoverGroup: fg, Profile: fg.Spec.Backup.Profiles[0], Verification: verify, Backup: seed,
+				CredsSecretName: "creds", ScriptsConfigMapName: "scripts",
+			})
+			if err != nil {
+				t.Fatalf("buildVerificationJob: %v", err)
+			}
+
+			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
+				Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: seed.Name}},
+			}
+			r, _ := newReconciler(fg, seed)
+			rjob, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+			if err != nil {
+				t.Fatalf("buildRestoreJob: %v", err)
+			}
+
+			for kind, spec := range map[string]corev1.PodSpec{"verification": vjob.Spec.Template.Spec, "restore": rjob.Spec.Template.Spec} {
+				var saw bool
+				for _, c := range spec.InitContainers {
+					if c.Name != "decrypt-download" {
+						continue
+					}
+					saw = true
+					env := envMap(c.Env)
+					if got := env["BLOODRAVEN_SOURCE_PREFIX"]; got != "lion/seed" {
+						t.Errorf("%s: BLOODRAVEN_SOURCE_PREFIX = %q, want %q", kind, got, "lion/seed")
+					}
+					if got := env["BLOODRAVEN_S3_BUCKET"]; got != tc.wantBucket {
+						t.Errorf("%s: BLOODRAVEN_S3_BUCKET = %q, want %q", kind, got, tc.wantBucket)
+					}
+				}
+				if !saw {
+					t.Errorf("%s: decrypt-download init container missing", kind)
+				}
+			}
+		})
 	}
 }
