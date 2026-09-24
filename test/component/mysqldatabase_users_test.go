@@ -300,8 +300,8 @@ func TestMysqlDatabaseUsersRefusesPreExistingAccount(t *testing.T) {
 	if pw, _ := h.server.password(mdbSupportUser); pw != "foreign-password" {
 		t.Fatalf("foreign account password was reset to %q", pw)
 	}
-	// The write-ahead was rolled back: the ledger must not claim the
-	// refused account, or deletion would drop it.
+	// Nothing was written ahead of the refusal: the ledger must not claim
+	// the refused account, or deletion would drop it.
 	for _, state := range mdb.Status.AppliedUsers {
 		if state.SecretName == mdbSupportSecretName {
 			t.Fatalf("status.appliedUsers still claims the refused entry: %+v", state)
@@ -753,12 +753,13 @@ func TestMysqlDatabaseHostsUpgradeFromPreHostsStatus(t *testing.T) {
 	}
 }
 
-// --- write-ahead rollback on refusal --------------------------------------
+// --- no write-ahead survives a refusal --------------------------------------
 //
-// Every adoption refusal runs before the SQL its write-ahead stamp was
-// written for, so the stamp must be rolled back in full: a record that
-// survives a refusal is a drop candidate for an account this CR never
-// created.
+// Every adoption check runs before the write-ahead stamp, so a refusal must
+// leave the records exactly as they were: a record that survives a refusal
+// is an adoption and drop candidate for an account this CR never created.
+// (These tests predate the preflight, when the same outcome depended on a
+// compensating rollback patch; their assertions are unchanged.)
 
 // TestMysqlDatabaseRefusedOwnerRotationRestoresPendingRecord: rotating the
 // owner Secret into a username somebody else owns is refused, and the
@@ -810,8 +811,8 @@ func TestMysqlDatabaseRefusedOwnerRotationRestoresPendingRecord(t *testing.T) {
 }
 
 // TestMysqlDatabaseRefusedFirstApplyRestoresUsersLedger: a first apply
-// refused on the owner ran no users[] SQL either, so the users[] write-ahead
-// and the owner hosts roll back with it. Once the foreign account is gone,
+// refused on the owner ran no users[] SQL either, so neither the users[]
+// ledger nor the owner hosts may be recorded. Once the foreign account is gone,
 // the retry converges from a clean record.
 func TestMysqlDatabaseRefusedFirstApplyRestoresUsersLedger(t *testing.T) {
 	cr := mdbCR(withSupportUser, withOwnerHosts(threeHosts[:2]...), withSupportHosts(threeHosts...))
@@ -845,7 +846,7 @@ func TestMysqlDatabaseRefusedFirstApplyRestoresUsersLedger(t *testing.T) {
 
 // TestMysqlDatabaseRefusedSchemaRestoresEveryWriteAhead: the schema refusal
 // is the earliest gate — no SQL at all — so owner, pending owner, hosts and
-// the users[] ledger all roll back.
+// the users[] ledger must all stay unrecorded.
 func TestMysqlDatabaseRefusedSchemaRestoresEveryWriteAhead(t *testing.T) {
 	cr := mdbCR(withSupportUser, withOwnerHosts(threeHosts[:2]...))
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())

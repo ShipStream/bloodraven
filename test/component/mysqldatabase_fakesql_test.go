@@ -54,6 +54,50 @@ type fakeSQLServer struct {
 	dialedAddrs []string
 	// authFailures counts connection attempts rejected for a bad password.
 	authFailures int
+
+	// statementFault, when set, is consulted for every statement: a
+	// non-nil err is returned to the reconciler, after applying the
+	// statement when applied is true (a connection lost after the server
+	// executed it) and without any effect otherwise (a server refusal).
+	statementFault func(stmt string) (applied bool, err error)
+	// queryFault is statementFault for the existence queries; a faulted
+	// query never answers.
+	queryFault func(query string, args []driver.NamedValue) error
+}
+
+// failStatements injects err for every statement with the given prefix.
+// A *mysql.MySQLError models the server refusing the statement (it did not
+// run); any other error models an ambiguous connection failure, which
+// applied controls.
+func (s *fakeSQLServer) failStatements(prefix string, err error, applied bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statementFault = func(stmt string) (bool, error) {
+		if strings.HasPrefix(stmt, prefix) {
+			return applied, err
+		}
+		return false, nil
+	}
+}
+
+// failQueries injects err for every existence query whose first argument is
+// arg.
+func (s *fakeSQLServer) failQueries(arg string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queryFault = func(_ string, args []driver.NamedValue) error {
+		if len(args) > 0 && args[0].Value == arg {
+			return err
+		}
+		return nil
+	}
+}
+
+// clearFaults removes every injected failure.
+func (s *fakeSQLServer) clearFaults() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statementFault, s.queryFault = nil, nil
 }
 
 func newFakeSQLServer() *fakeSQLServer {
@@ -332,6 +376,14 @@ func (c *fakeSQLConn) ExecContext(_ context.Context, query string, args []driver
 }
 
 func (c *fakeSQLConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.server.mu.Lock()
+	fault := c.server.queryFault
+	c.server.mu.Unlock()
+	if fault != nil {
+		if err := fault(query, args); err != nil {
+			return nil, err
+		}
+	}
 	switch query {
 	case "SELECT 1 FROM mysql.user WHERE user = ? AND host = ?":
 		if len(args) != 2 {
@@ -437,6 +489,23 @@ var fakeSQLAllPrivileges = []string{
 }
 
 func (s *fakeSQLServer) apply(stmt string) error {
+	s.mu.Lock()
+	fault := s.statementFault
+	s.mu.Unlock()
+	if fault != nil {
+		if applied, err := fault(stmt); err != nil {
+			if applied {
+				if aerr := s.applyStatement(stmt); aerr != nil {
+					return aerr
+				}
+			}
+			return err
+		}
+	}
+	return s.applyStatement(stmt)
+}
+
+func (s *fakeSQLServer) applyStatement(stmt string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.statements = append(s.statements, stmt)
