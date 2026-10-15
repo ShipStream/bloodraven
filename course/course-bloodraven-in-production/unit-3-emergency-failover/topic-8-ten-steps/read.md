@@ -107,33 +107,45 @@ failed repoint retries on the next poll rather than aborting a promotion.
 
 ## Inside the 30-second drain
 
-The drain lets the candidate apply the relay logs it already fetched before it takes writes. It exits
-early the moment the SQL thread is running and `Seconds_Behind_Source` reads 0. Internally it waits
-500 ms, doubling to a 4 s ceiling; if the SQL thread is stopped with unapplied relay logs it restarts
-the thread once and retries. A timed-out drain logs `relay log drain did not complete cleanly,
-proceeding with promotion` and promotes with whatever the candidate had applied.
+The drain lets the candidate apply the relay log it has already received before it takes writes. Its
+finish line is a GTID set, not a lag figure: at its first poll it reads `Retrieved_Gtid_Set`, and it
+returns as soon as `Executed_Gtid_Set` contains that set. A caught-up candidate passes on the first
+poll. Fixing the target at the first poll keeps the drain finite even when the IO thread is still
+connected and receiving. `Seconds_Behind_Source` plays no part, which is just as well: it is NULL
+whenever the IO thread is down, and that is exactly the state of a candidate whose primary has just
+died.
+
+Only an applier error ends the drain early. An SQL-thread error (`Last_SQL_Error`) aborts it; the IO
+thread's connect error from the dead primary does not, because the relay log the IO thread already
+wrote is still applicable. Between polls it waits 500 ms, doubling to a 4 s ceiling; if the SQL thread
+is stopped without an error and relay log is pending, it restarts the thread once. A drain that runs
+out its 30 s logs `relay log drain did not complete cleanly, proceeding with promotion` and promotes
+with whatever the candidate had applied, and `RESET REPLICA ALL`, two steps later, discards the rest.
 
 ## Twelve seconds, and thirty-six
 
 ```figure
 {
   "src": "assets/img/g4-failover-timeline.svg",
-  "alt": "Two stacked timelines on the same 40-second axis. The caught-up case is 6 seconds of detection plus an instant drain, 12 seconds total. The relay-log case is the same 6 seconds plus a 30-second drain, 36 seconds total. Four fatal steps are marked in red.",
-  "caption": "Same detection. The only difference is whether the drain has work to do.",
+  "alt": "Two stacked timelines on the same 40-second axis. The caught-up case is 6 seconds of detection plus an instant drain, 12 seconds total. The worst case is the same 6 seconds plus a drain that spends its whole 30-second budget, 36 seconds total. Four fatal steps are marked in red.",
+  "caption": "Same detection. The only difference is how long the drain takes to apply what the candidate already received.",
   "width": 960,
   "height": 420
 }
 ```
 
 A clean primary kill flips `activeSite` in **12.0 s**, reproducible across nine-plus independent runs
-(12.004 s to 12.02 s, one outlier at 13.008 s). Scenario 14 pauses the replica's SQL applier, seeds
-five seconds of writes, kills the primary, and measures **36.005 s**.
+(12.004 s to 12.02 s, one outlier at 13.008 s). The other end of the range is arithmetic: 6 s of
+detection plus a drain that spends its whole 30 s budget is **36 s**.
 
-The difference is entirely the drain. Both runs pay the same 6 s of detection — `pollInterval` 2 s ×
-`failureThreshold` 3. In the 12 s case the candidate is already caught up and the drain returns at once
-on its early-exit condition. In the 36 s case it has relay logs to apply and spends its whole budget:
-36.005 s − 12.0 s = 24.0 s of extra wall clock. Learn 12 s typical and roughly 37 s worst case (6 s
-detect + 30 s drain), and be able to say which you are looking at. Published wall-clock figures for
+The difference is entirely the drain. Both pay the same 6 s of detection — `pollInterval` 2 s ×
+`failureThreshold` 3. In the 12 s case the candidate is already caught up and the drain returns on its
+first poll. A candidate holding relay log it has received but not applied takes as long as applying
+that backlog takes, and the drain spends its whole budget only when the applier cannot finish inside
+30 s: a deep backlog, a slow applier, or a deliberate `SOURCE_DELAY`. Scenario 14 builds the backlog
+case on purpose: it sets `SOURCE_DELAY` on the replica, seeds five seconds of writes, kills the
+primary, and asserts that the new primary holds every seeded row. Learn 12 s typical and roughly 37 s
+worst case (6 s detect + 30 s drain), and be able to say which you are looking at. Published wall-clock figures for
 failover — anyone's, including Bloodraven's own pages — are estimates; the run recorded under
 `playground/chaos-results/` is the measurement, and it is the one you can produce yourself. One caveat before you trust your own stopwatch: the
 playground overrides `failoverCooldown` to 30 s against a shipped default of 5 m. The timings here are
@@ -179,7 +191,7 @@ real. The cooldown is not.
 ## Where this leaves you
 
 You have driven a real emergency failover on `playground`, you can recite the nine steps with fatality per
-step, and you can look at a 36 s run and name the 24 s the drain spent. You have also seen something
+step, and you can look at a 36 s run and say why the drain spent its whole budget. You have also seen something
 that should bother you. Before you fix it you need the other half of the story: not how long the
 failover took, but which transactions did not make it. That count is in the group's status right now,
 and the next topic reads it.

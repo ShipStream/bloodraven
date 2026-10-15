@@ -58,13 +58,21 @@ names and every one of them verifies.
 A `Certificate` that covers the group endpoints and misses the per-site names looks fine until you
 watch the pods:
 
-> the sidecar cannot query MySQL at all — `/health` returns 503 and the liveness probe restarts the
-> container, which also stops the self-fencing monitor and the `super_read_only` safety net.
+> the sidecar cannot query MySQL at all: `/health` returns 503, so the pod never becomes ready, and
+> the self-fencing monitor and the `super_read_only` safety net keep running but cannot fence
+> anything.
 
-Read that consequence against Unit 5. A missing SAN does not merely break a health check: it puts the
-sidecar into a crash loop, and a crash-looping sidecar is a site with **no self-fencing and no startup
-safety net**. You have removed the layer that protects correctness when the operator cannot be
-reached, by getting a DNS name wrong in a certificate.
+Nothing restarts, which is what makes it easy to misread. The sidecar's liveness probe is
+`/peer/ping`, which answers without touching MySQL, so the container stays up; only its readiness
+probe, `/health`, follows MySQL. What you see is every MySQL pod at `1/2` READY with no restarts, the
+pods missing from every Service's endpoints except the `-internal` ones, and a sidecar log that opens
+with `safety net: could not set initial super_read_only; the fencing monitor will retry` and then
+repeats `fencing: could not check read_only status` on every tick.
+
+Read that consequence against Unit 5. The fencing processes are alive and blind: a sidecar that
+cannot query its own MySQL cannot set `super_read_only` on it, so every site is effectively **without
+self-fencing and without the startup safety net**. You have removed the layer that protects
+correctness when the operator cannot be reached, by getting a DNS name wrong in a certificate.
 
 So enumerate the names, all of them, per site:
 
@@ -105,8 +113,8 @@ Four things, and the third is the one that surprises people.
 `/etc/mysql/tls` and appends `--ssl-ca`, `--ssl-cert`, `--ssl-key` and — this is the important one —
 `--require-secure-transport=ON`. Plaintext connections are refused server-side. There is no partial
 mode and no fallback to mysqld's auto-generated `server-cert.pem`; the fallback is deliberately
-prevented, because a sidecar verifying a self-signed auto-cert would fail its first health check and
-crash-loop.
+prevented, because a sidecar verifying against its site's Service name would reject the self-signed
+auto-cert on every query, leaving the pod unready and the sidecar unable to fence.
 
 **Two: the sidecar is handed the client half.** The same Secret is mounted into the sidecar container,
 and four environment variables tell it where to look and what name to verify:
@@ -183,14 +191,14 @@ Which makes the ordering for a new group explicit, and it is not the order most 
     "1. cert-manager Issuer or ClusterIssuer — exists before anything references it.",
     "2. Certificate with every SAN — group endpoints, per-site Services, per-site internal Services. Wait for the Secret to appear.",
     "3. MysqlFailoverGroup with spec.tls — admitted now; the pods come up with require_secure_transport=ON and the sidecars verify against their own site Service names.",
-    "4. Confirm all three sites Ready and one writable — a TLS mistake shows up here as a crash-looping sidecar, and you want to meet it before encryption is in the picture.",
+    "4. Confirm all three sites Ready and one writable — a TLS mistake shows up here as a sidecar that runs but never turns ready (pods stuck at 1/2), and you want to meet it before encryption is in the picture.",
     "5. spec.encryptionAtRest.enabled: true — the CEL rule now passes, and each site walks Pending -> Unsealed -> Escrowed -> Sealed."
   ]
 }
 ```
 
 Step 4 is the one people skip. Turning on TLS and encryption in the same `kubectl apply` means a
-crash-looping sidecar and a keyring stuck in `Unsealed` arrive together, and you get to guess which
+never-ready sidecar and a keyring stuck in `Unsealed` arrive together, and you get to guess which
 caused which.
 
 ## Where this leaves you

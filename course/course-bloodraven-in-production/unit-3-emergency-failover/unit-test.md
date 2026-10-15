@@ -57,10 +57,10 @@ Ordering is not membership, and this is the inference the timing invites. Taints
 
 **Type:** MULTIPLE_CHOICE
 
-Scenario 14 pauses `pdx`'s SQL applier, seeds five seconds of writes on `iad`, then kills `iad`; `activeSite` flips at 36.0 s. You re-run the same kill with the applier running normally. What do you expect on the stopwatch, and why?
+`pdx` replicates with a `SOURCE_DELAY` of several minutes, so when `iad` is killed `pdx` holds relay log it has received but not applied; `activeSite` flips at 36 s. You re-run the same kill with no delay and the applier running normally. What do you expect on the stopwatch, and why?
 
 - About 6 s — with no relay backlog there is no detection debounce left to pay
-- About 12 s — the drain hits its early-exit condition and returns almost at once
+- About 12 s — the drain finds the candidate caught up on its first poll and returns almost at once
 - About 36 s — the drain always spends its full 30 s budget before promoting
 - About 30 s — the drain is skipped, leaving only the fixed 30 s promotion budget
 
@@ -68,7 +68,7 @@ Scenario 14 pauses `pdx`'s SQL applier, seeds five seconds of writes on `iad`, t
 
 **Explanation:**
 
-A clean primary kill measures 12.0 s to the `activeSite` flip, reproducible across nine-plus independent runs. The whole difference from 36.005 s is the drain: 36.005 - 12.0 = 24.0 s of extra wall clock spent applying relay logs. Both runs pay the same 6 s of detection (`pollInterval` 2 s x `failureThreshold` 3), so 6 s is not the answer — detection is unaffected by how caught-up the candidate is. The drain is not a fixed cost: it exits the moment the SQL thread is running and `Seconds_Behind_Source` reads 0, which is what makes the clean case fast. And 30 s is the drain's ceiling, not a promotion budget — there is no such fixed budget, and the drain is non-fatal when it expires. (Ignore the docs' 30-45 s figure; it is unsourced and contradicted by the recorded runs.) (objective 3)
+A clean primary kill measures 12.0 s to the `activeSite` flip, reproducible across nine-plus independent runs. The whole difference from 36 s is the drain: the delayed applier could not apply the received backlog inside the 30 s budget, so the drain timed out, 36 - 12 = 24 s of extra wall clock. Both runs pay the same 6 s of detection (`pollInterval` 2 s x `failureThreshold` 3), so 6 s is not the answer — detection is unaffected by how caught-up the candidate is. The drain is not a fixed cost: it returns as soon as `Executed_Gtid_Set` contains the `Retrieved_Gtid_Set` it read at its first poll, which a caught-up candidate satisfies immediately — that is what makes the clean case fast. And 30 s is the drain's ceiling, not a promotion budget — there is no such fixed budget, and the drain is non-fatal when it expires. (The flat 30-45 s figure an older docs page quoted is contradicted by the recorded runs; see the version appendix, row B5.) (objective 3)
 
 ## Question 5
 
@@ -119,7 +119,7 @@ The shared `f4d07a53...:1-15` range is what both sites hold and is not loss; the
 
 **Type:** MULTIPLE_CHOICE
 
-`pdx`'s SQL applier was paused with roughly five seconds of writes behind it when `iad` was killed; the failover measured 36.0 s. The review wants the RPO. Which row do you quote?
+`pdx` replicates with a `SOURCE_DELAY` of several minutes, so it held received but unapplied writes when `iad` was killed; the failover measured 36 s. The review wants the RPO. Which row do you quote?
 
 - RPO 0 — no failover happened at all; the primary came back writable and was kept
 - Near zero, not guaranteed zero — the candidate was caught up, so only in-flight work is at risk
@@ -130,7 +130,7 @@ The shared `f4d07a53...:1-15` range is what both sites hold and is not loss; the
 
 **Explanation:**
 
-The 36.0 s is the tell: 24.0 s more than the measured 12.0 s clean kill, which is the drain spending its budget on relay logs that had to be applied. That is the "primary kill with unapplied relay logs" row — the 30 s drain applies what it can reach and everything beyond it is gone. RPO 0 with no failover is the pod-crash-with-PVC-intact row, and a failover demonstrably happened here. "Near zero" is the clean-kill row and is exactly what the 36 s run rules out: a caught-up candidate is the case that returns on the drain's early exit at about 12 s. The worst row requires the PVC to be destroyed with the primary; the pod was killed, the PVC survived, so PITR's material is not the issue. Note also what does *not* bound this: `spec.replication.maxLagSeconds` drives only the `ReplicationLagging` Degraded condition and is not a promotion gate. (objectives 3, 6)
+The 36 s is the tell: 6 s of detection plus a drain that spent its whole 30 s budget because the delayed applier could not finish the backlog it had received. That is the "primary kill with unapplied relay logs" row — the drain applies what it can within 30 s, and whatever is still unapplied is discarded at `RESET REPLICA ALL`. RPO 0 with no failover is the pod-crash-with-PVC-intact row, and a failover demonstrably happened here. "Near zero" is the clean-kill row and is exactly what the 36 s run rules out: a caught-up candidate is the case whose drain finishes on its first poll, at about 12 s. The worst row requires the PVC to be destroyed with the primary; the pod was killed, the PVC survived, so PITR's material is not the issue. Note also what does *not* bound this: `spec.replication.maxLagSeconds` drives only the `ReplicationLagging` Degraded condition and is not a promotion gate. (objectives 3, 6)
 
 ## Question 8
 

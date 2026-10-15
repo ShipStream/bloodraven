@@ -59,7 +59,7 @@
 
 **Front:** Helm and CRDs
 
-**Back:** Helm installs CRDs from a chart's `crds/` directory on first install and **never upgrades them**. `helm upgrade` moves the operator binary and silently leaves the CRD schema behind, so new fields are pruned by the API server with no error anywhere. Apply CRDs explicitly, first.
+**Back:** Helm installs CRDs from a chart's `crds/` directory on first install and **never upgrades them**. `helm upgrade` moves the operator binary and silently leaves the CRD schema behind, so new fields are pruned by the API server with no error anywhere. Apply CRDs explicitly, first, with `kubectl apply --server-side --force-conflicts` — the `MysqlFailoverGroup` CRD is too large for client-side apply.
 
 ---
 

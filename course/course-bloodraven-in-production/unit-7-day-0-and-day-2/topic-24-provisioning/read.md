@@ -274,6 +274,15 @@ half-succeeded, so `isFreshDeploy` refuses forever after. The way out is to remo
 deliberately — `STOP REPLICA; RESET REPLICA ALL;` on the stuck site, then restart the operator — and
 the reason to do it consciously is that you are overriding a safety check, not clearing a glitch.
 
+What a failed clone no longer does is pass for a successful one. A dropped connection is how
+`CLONE INSTANCE` ends either way: the recipient restarts when the clone succeeds, and the session dies
+when it is killed after MySQL has already dropped the recipient's data. So before it configures
+replication the operator reads the recipient's `performance_schema.clone_status` and requires a new
+`Completed` row and a non-empty `GTID_EXECUTED`. Anything else fails the bootstrap — the
+`Bootstrapping` condition goes to reason `Failed` and the operator logs `bootstrap failed` — and the
+recipient is fenced again. Throughout the clone the recipient keeps `read_only=ON`; only
+`super_read_only` is cleared, because `CLONE INSTANCE` refuses to run under it.
+
 ## Where this leaves you
 
 You can write a `MysqlFailoverGroup` into an empty namespace and say, for every line, which earlier

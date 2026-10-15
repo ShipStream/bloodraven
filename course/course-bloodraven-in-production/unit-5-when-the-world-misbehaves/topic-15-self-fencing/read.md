@@ -33,6 +33,12 @@ instance never self-fences, because there is nothing left to fence. That single 
 replica's monitor is a permanent no-op, and why "the sidecar fenced it" is never the explanation for
 a site that was already read-only.
 
+Two more early exits sit in front of the rules. If MySQL does not answer that read, the tick ends
+there: a sidecar that cannot reach its own MySQL cannot fence it either. And if a `CLONE INSTANCE` is
+running on this site, the monitor skips both rules and never kills the clone session, logging
+`fencing: clone in progress on this site; not fencing`. The operator also keeps a clone recipient at
+`read_only=ON`, clearing only `super_read_only`, so the read-only exit normally catches it first.
+
 ```figure
 {
   "src": "assets/img/g8-self-fence.svg",
@@ -48,7 +54,7 @@ a site that was already read-only.
   "type": "order",
   "title": "One FencingMonitor tick",
   "items": [
-    "1. Read @@read_only — Already read-only? Return. A read-only instance has nothing left to fence, so the rest of the tick is skipped entirely.",
+    "1. Read @@read_only — Already read-only, or MySQL not answering? Return. A read-only instance has nothing left to fence, and one the sidecar cannot reach cannot be fenced, so the rest of the tick is skipped entirely.",
     "2. Rule #1 — topology mismatch — Cached authoritative activeSite is non-empty and != mySite? Fence and return. The lease is never consulted.",
     "3. Rule #2 — lease expiry — Operator silent beyond leaseTimeout AND every peer silent beyond leaseTimeout? Fence. Either one answering suppresses it.",
     "4. Otherwise, nothing — No third rule exists. The monitor takes no action and waits for the next peerCheckInterval tick."
@@ -58,15 +64,22 @@ a site that was already read-only.
 
 ## The thing that is not a rule
 
-`Server.RunSafetyNet` (`internal/sidecar/server.go`) is a separate one-shot, called from
-`cmd/sidecar/main.go`. It completes **before** the `FencingMonitor` is constructed, so it is not a
-third rule and never runs again. Anything that presents it beside the two rules is describing the
-sidecar's startup, not its steady state.
+`Server.RunSafetyNet` (`internal/sidecar/server.go`) is a separate startup step, called from
+`cmd/sidecar/main.go` after the HTTP server is up and **before** the `FencingMonitor` starts ticking.
+It is not a third rule. Anything that presents it beside the two rules is describing what happens when
+the sidecar or its MySQL starts, not the steady state.
+
+It is also bounded. Each of its MySQL writes gives up after 3 s, so a hung `mysqld` cannot hold the
+sidecar's startup hostage. If the fence (or, on the active site, the clear) does not land in time, the
+safety net is handed to the monitor, which finishes the same rule on the first tick where MySQL
+answers. The monitor also re-arms it after MySQL has been unreachable for 30 s or more, because a
+`mysqld` gone that long may have restarted, and a restarted `mysqld` comes up writable. Those deferred
+runs log under the same `safety net:` prefix, with their own `msg` strings.
 
 It fences first and asks afterwards. On boot it sets `super_read_only=ON`, then queries the operator
 for the active site, and only clears the fence if the answer names this site. So it fails closed by
-*staying* fenced rather than by actively fencing — and it has three distinct exits, each with its own
-log line:
+*staying* fenced rather than by actively fencing — and when the startup fence lands it has three
+distinct fenced exits, each with its own log line:
 
 | Log line (verbatim) | What actually happened |
 |---|---|
@@ -75,7 +88,7 @@ log line:
 | `safety net: confirmed standby site, staying fenced` | The operator answered with a *different* site. This pod is a standby and stays that way. |
 
 Learn the prefixes, because in a log bundle they mean different things. A `safety net:` line is a pod
-that has **never been allowed to write** since it started. A `SELF-FENCING:` / `SELF-FENCED:` line
+that has **never been allowed to write** since it, or its `mysqld`, started. A `SELF-FENCING:` / `SELF-FENCED:` line
 from the monitor is a pod that **was writing and lost the argument**. Same read-only outcome, opposite
 incident.
 

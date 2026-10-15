@@ -59,7 +59,7 @@ The anti-flap cooldown (`spec.failoverCooldown`, default `5m`, `30s` in the play
 
 The rarer one is that the cooldown *is not there when it should be*. It is persisted twice on every promotion — in `status` and in out-of-band annotations — so losing it across a restart takes both paths rejecting writes at once. Then a restarted operator can promote earlier than you configured. The deterministic simulator names this `CooldownViolated(restart+stateLost)` and classifies it as an *inherent* finding class, not a bug queued for a fix: understood, bounded by the GTID gates, accepted.
 
-The direction you meet on call is the opposite. The cooldown **blocks a second failover you genuinely need**, and it does not care that you believe this one is justified. Your judgement is not an input.
+The direction you meet on call is the opposite. The cooldown **blocks a second failover you genuinely need**, and it does not care that you believe this one is justified. Your judgement is not an input. What it does not do is cancel the failover: the blocked promotion is retried at cooldown expiry, and the log line says when (`retryAt`), so with a live operator the extra outage is bounded by what is left of the window.
 
 ## Wait, or promote by hand
 
@@ -67,7 +67,7 @@ Objective 12 turns on one fact about the break-glass tool. `kubectl bloodraven p
 
 The rule that falls out:
 
-- **Operator returning inside the cooldown, no writable site?** Wait. It promotes within roughly 6 s of detection plus the drain once it is back, and the hand-driven path cannot start sooner.
+- **Operator returning inside the cooldown, no writable site?** Wait. Once it is back it detects the dead primary in roughly 6 s, logs `failover blocked by anti-flap cooldown` with `retryAt`, and promotes at expiry on its own, after the drain. The hand-driven path cannot start sooner.
 - **Operator not coming back — crashlooping image, broken RBAC, deleted namespace?** Fix the operator first. That *is* the promotion path; annotating a group nobody is watching only queues an intent.
 - **Editing MySQL directly?** Know what you are taking on. Clear `read_only` on `pdx` while the operator is down and the sidecar's topology-mismatch rule sees a writable site disagreeing with the last `activeSite` it cached — and fences it straight back.
 

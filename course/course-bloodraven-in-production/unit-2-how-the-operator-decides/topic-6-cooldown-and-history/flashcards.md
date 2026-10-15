@@ -17,7 +17,7 @@
 
 **Front:** The log line the operator emits when the cooldown blocks a promotion
 
-**Back:** `failover blocked by anti-flap cooldown`, at INFO, with fields `lastFailover` and `cooldown`.
+**Back:** `failover blocked by anti-flap cooldown`, at INFO, with fields `lastFailover`, `cooldown` and `retryAt` — the instant the cooldown expires, when the operator re-evaluates and promotes if the topology still calls for it.
 
 ---
 

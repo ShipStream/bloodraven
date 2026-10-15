@@ -183,7 +183,7 @@ test, which is why a planned switchover is RPO 0 by construction; that path is U
 | --- | --- | --- |
 | Container/pod crash, PVC intact | 0 — no failover at all | The primary returns writable and the operator keeps it |
 | Clean primary kill, replica caught up | Near zero, not guaranteed zero | The contract still applies to anything in flight |
-| Primary kill with unapplied relay logs | Whatever was in flight | The 30 s drain applies what it can reach; the rest is gone |
+| Primary kill with unapplied relay logs | Whatever was in flight | The drain applies what it can within 30 s; `RESET REPLICA ALL` discards the rest |
 | PVC destroyed with the primary | Worst row | The previously-active binlog lived on the destroyed PVC — PITR cannot replay a tail that was never shipped |
 
 Given an outage, find the row before you quote a number.

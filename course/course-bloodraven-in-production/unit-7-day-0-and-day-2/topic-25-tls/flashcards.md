@@ -17,7 +17,7 @@
 
 **Front:** What a missing per-site SAN costs you
 
-**Back:** The sidecar connects over loopback and verifies against its own site's Service name, so without that SAN it cannot query MySQL at all: `/health` returns 503, the liveness probe restarts the container, and the site loses self-fencing *and* the startup safety net.
+**Back:** The sidecar connects over loopback and verifies against its own site's Service name, so without that SAN it cannot query MySQL at all: `/health` returns 503, so the pod is never ready (liveness is `/peer/ping`, so nothing restarts), and the self-fencing monitor and the startup safety net keep running but cannot fence anything.
 
 ---
 

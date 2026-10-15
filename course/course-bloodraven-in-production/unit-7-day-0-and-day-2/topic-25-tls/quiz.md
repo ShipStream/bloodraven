@@ -7,18 +7,18 @@
 
 **Type:** MULTIPLE_CHOICE
 
-You enable `spec.tls` with a cert-manager `Certificate` whose `dnsNames` cover the group hostname, `mysql-ledger-primary` and `mysql-ledger-replicas`. The MySQL containers start. Within a minute every sidecar container is in `CrashLoopBackOff`. What happened, and what have you lost?
+You enable `spec.tls` with a cert-manager `Certificate` whose `dnsNames` cover the group hostname, `mysql-ledger-primary` and `mysql-ledger-replicas`. The MySQL containers start. Within a minute every MySQL pod reads `1/2` READY: the sidecar container is running, has not restarted, and never turns ready. What happened, and what have you lost?
 
-- The per-site Service SANs are missing, so each sidecar cannot verify its own MySQL over loopback; `/health` returns 503, the liveness probe restarts it, and every site is now without self-fencing and without the startup safety net
+- The per-site Service SANs are missing, so each sidecar cannot verify its own MySQL over loopback; `/health` returns 503 so it never turns ready, and its self-fencing monitor and startup safety net keep running but cannot reach MySQL, so every site is effectively without both
 - `--require-secure-transport=ON` blocks the sidecar because sidecars connect over the unix socket, so TLS has to be disabled for the sidecar container specifically
-- The sidecars are waiting for the operator to distribute client certificates, which it does on its next poll; the crash loop resolves itself
+- The sidecars are waiting for the operator to distribute client certificates, which it does on its next poll; the sidecars turn ready on their own
 - The `Certificate` is missing `ca.crt`, which the operator reports as `TLS secret missing required ca.crt` and the sidecars inherit
 
 **Correct option index:** 0
 
 **Explanation:**
 
-The sidecar connects to its MySQL over loopback, and `127.0.0.1` appears in no certificate, so it verifies against its own site's Service name instead — which is why `mysql-<group>-<site>` must be in the SAN list even though no human ever dials it. The consequence is the part to carry: a crash-looping sidecar is a site with no self-fencing rule and no startup safety net, so a certificate mistake has quietly removed the layer that protects correctness when the operator cannot be reached. Option 2 is wrong on the mechanism — the sidecar uses TCP to loopback, not the socket — and there is no per-container TLS opt-out. Option 3 invents a distribution step; the Secret is mounted, nothing is distributed later. Option 4 is a real failure mode with a different symptom: a missing `ca.crt` fails the operator's own client path with that exact message. (objectives 4, 6)
+The sidecar connects to its MySQL over loopback, and `127.0.0.1` appears in no certificate, so it verifies against its own site's Service name instead — which is why `mysql-<group>-<site>` must be in the SAN list even though no human ever dials it. The consequence is the part to carry. Nothing crash-loops — liveness is `/peer/ping`, which never touches MySQL — so the sidecar stays up, blind: its fencing monitor and startup safety net run but cannot set `super_read_only` on a MySQL they cannot query. A certificate mistake has quietly removed the layer that protects correctness when the operator cannot be reached, and the only loud symptom is readiness. Option 2 is wrong on the mechanism — the sidecar uses TCP to loopback, not the socket — and there is no per-container TLS opt-out. Option 3 invents a distribution step; the Secret is mounted, nothing is distributed later. Option 4 is a real failure mode with a different symptom: a missing `ca.crt` fails the operator's own client path with that exact message. (objectives 4, 6)
 
 ## Question 2
 
@@ -55,7 +55,7 @@ It gains `GET_SOURCE_PUBLIC_KEY=1` instead. MySQL's default `caching_sha2_passwo
 
 You are bringing up a new encrypted group. In which order do you apply things, and why does the order matter?
 
-- Issuer, then `Certificate` (waiting for the Secret), then the group with `spec.tls`, then confirm all sites Ready with one writable, and only then `encryptionAtRest.enabled: true` — so a TLS mistake surfaces as a crash-looping sidecar before encryption is in the picture
+- Issuer, then `Certificate` (waiting for the Secret), then the group with `spec.tls`, then confirm all sites Ready with one writable, and only then `encryptionAtRest.enabled: true` — so a TLS mistake surfaces as a sidecar that never turns ready before encryption is in the picture
 - The group with both `spec.tls` and `encryptionAtRest.enabled` in one apply, then the Issuer and `Certificate` — the operator waits for the Secret and rolls the pods when it appears
 - `encryptionAtRest.enabled` first, so the keyring is sealed before any certificate exists to be stolen, then TLS
 - Issuer and `Certificate` only; `spec.tls` is inferred from the presence of a cert-manager `Certificate` in the namespace
@@ -64,7 +64,7 @@ You are bringing up a new encrypted group. In which order do you apply things, a
 
 **Explanation:**
 
-Step four is the one people skip and the reason the order is worth stating. Turning on TLS and encryption in the same apply means a crash-looping sidecar and a keyring stuck in `Unsealed` arrive together, and you get to guess which caused which. Option 2 gets the dependency backwards and leaves pods in `ContainerCreating` mounting a Secret that does not exist. Option 3 is impossible — the CEL rule refuses `encryptionAtRest.enabled` without `spec.tls`. Option 4 invents inference the operator does not do: `spec.tls.secretName` is read literally. (objectives 4, 6)
+Step four is the one people skip and the reason the order is worth stating. Turning on TLS and encryption in the same apply means a never-ready sidecar and a keyring stuck in `Unsealed` arrive together, and you get to guess which caused which. Option 2 gets the dependency backwards and leaves pods in `ContainerCreating` mounting a Secret that does not exist. Option 3 is impossible — the CEL rule refuses `encryptionAtRest.enabled` without `spec.tls`. Option 4 invents inference the operator does not do: `spec.tls.secretName` is read literally. (objectives 4, 6)
 
 ## Question 5
 

@@ -151,7 +151,11 @@ version wants are pruned by the API server exactly as `preferSite` was in Unit 5
 no error anywhere — and you get an operator behaving as though you never configured the thing you
 configured.
 
-Apply the CRDs explicitly, and do it first:
+Apply the CRDs explicitly, do it first, and do it server-side. The `MysqlFailoverGroup` CRD is larger
+than the 256 KiB `kubectl.kubernetes.io/last-applied-configuration` annotation that a plain
+`kubectl apply -f` writes, so client-side apply fails with `metadata.annotations: Too long`.
+`kubectl apply --server-side --force-conflicts` keeps no such annotation. If Argo CD owns your CRDs,
+the same thing is its `ServerSideApply=true` sync option.
 
 ```widget
 {
@@ -159,7 +163,7 @@ Apply the CRDs explicitly, and do it first:
   "title": "Upgrading Bloodraven, in order",
   "items": [
     "1. Read the release notes for CRD changes and for the sidecar image tag. These are the only two things that can require action.",
-    "2. kubectl apply -f the CRDs from config/crd/bases/ (or the chart's crds/ directory) — Helm will not do this for you, on upgrade or on rollback.",
+    "2. kubectl apply --server-side --force-conflicts -f the CRDs from config/crd/bases/ (or the chart's crds/ directory) — Helm will not do this for you, on upgrade or on rollback, and client-side apply cannot carry a CRD this large.",
     "3. helm upgrade the operator chart. One Deployment, one replica; leader election means the new pod takes the lease when the old one releases it.",
     "4. Bump spec.sidecarImage to the matching release and apply. This is an ordered update: it restarts pods, moves your primary, and increments the failover counter.",
     "5. Run a backup verification against the new version, because a restore path you have not exercised since the upgrade is an assumption again."

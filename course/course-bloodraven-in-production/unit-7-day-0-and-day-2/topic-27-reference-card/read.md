@@ -17,14 +17,14 @@ quote a version, an issue number or a documentation defect.
 | `failureThreshold` | `3` | same | Consecutive failed polls before `unreachable`. **Detection = `pollInterval` × `failureThreshold` = 6 s.** |
 | `recoveryThreshold` | `2` | same | Consecutive writable polls before `writable`. **Not a term in the detection sum.** |
 | — | adaptive | same | Undocumented backoff: past `failureThreshold` the whole loop's interval doubles per extra failure, exponent capped at 4, hard cap 30 s. One site down ⇒ a second fault takes 30 × 3 = 90 s to detect. |
-| `failoverCooldown` | `5m` | `30s` | Gates **automatic promotion only**, at one call site, immediately before the promotion call. |
+| `failoverCooldown` | `5m` | `30s` | Gates **automatic promotion only**, at one call site, immediately before the promotion call. A blocked promotion is retried at expiry (`retryAt`). |
 | `connectionDrainTimeout` | `30s` | same | Bounds the post-promotion retry window for evicting sessions from a fenced former primary — only while it is reachable. |
 | `replication.maxLagSeconds` | `300` | `30` | The `ReplicationLagging` Degraded reason. **Never a promotion gate.** Skipped entirely for `role: read-only` sites. |
 | `replication.readOnlyMaxLagSeconds` | *(nil — inherits `maxLagSeconds`)* | `10` | Reader-endpoint membership only. An explicit `0` means zero reported lag, and is not the same as unset. |
 | `dns.ttl` | `60` | `10` | `recordTTL` on the `DNSEndpoint`. The floor on how long a stale answer survives. |
 | `sidecar.leaseTimeout` | `20s` | same | Rule #2 self-fence window. CEL: ≥ 3 s, and ≥ 3 × `peerCheckInterval`. |
 | `sidecar.peerCheckInterval` | `5s` | same | Sidecar tick. CEL: ≥ 1 s. 20 / 5 = **4 ticks** of silence before a lease fence. |
-| relay-log drain | `30s` | same | Step 3 of the promotion. Non-fatal on timeout. |
+| relay-log drain | `30s` | same | Step 3 of the promotion. Done when `Executed_Gtid_Set` contains the `Retrieved_Gtid_Set` read at its first poll; only an SQL-thread error ends it early. Non-fatal on timeout. |
 | source convergence | `20s` | same | A separate poll stage, not a failover step. |
 | `plannedFailover.maxLagWait` | `5m` | same | The GTID-superset gate. Rollback lives here. |
 | `plannedFailover.drainTimeout` | `30s` | same | Connection drain before the write endpoint moves. Exhaustion proceeds anyway. |
@@ -36,7 +36,7 @@ quote a version, an issue number or a documentation defect.
 | `backup.pitr.maxBinlogSize` | `100M` | — | Written *before* `spec.mysqlConf`, so your override wins. |
 | `backup.retention` | `7` | — | Backups kept per profile. |
 | Measured failover, clean | **12.0 s** | — | Nine-plus recorded runs, 12.004–12.02 s, one outlier at 13.008 s. |
-| Measured failover, full drain | **36.0 s** | — | 6 s detection + a 30 s drain that spent its whole budget. |
+| Failover worst case, full drain | **36 s** | — | 6 s detection + a drain that spent its whole 30 s budget, because the candidate could not apply its received backlog in time. |
 
 ## The five condition reasons
 
@@ -139,7 +139,7 @@ Written **by the operator**, never by you: `bloodraven.shipstream.io/last-failov
 **Active site** — the one site `status.activeSite` names as the writable authority. One name, or
 empty; empty means authority is ambiguous, and every endpoint is shed.
 
-**Anti-flap cooldown** — `failoverCooldown`. Suppresses automatic promotion and nothing else.
+**Anti-flap cooldown** — `failoverCooldown`. Delays automatic promotion until it expires, then retries it; touches nothing else.
 
 **Core site** — any site whose role is not `read-only`. What the matrix counts.
 
@@ -167,10 +167,11 @@ goes to RTO.
 Rule #1: the known authoritative active site is somebody else. Rule #2: the operator *and every peer*
 have been silent past `leaseTimeout`.
 
-**Safety net** — a *different* thing from self-fencing: a one-shot at sidecar startup that fences
-first and asks afterwards, and completes before the fencing monitor exists. `safety net:` in a log
-means a pod that has never been allowed to write; `SELF-FENCED:` means one that was writing and lost
-the argument.
+**Safety net** — a *different* thing from self-fencing: the startup rule that fences first and asks
+afterwards. It runs before the fencing monitor starts ticking; if a hung `mysqld` keeps it from
+finishing within its 3 s write bound, the monitor finishes it once MySQL answers, and re-arms it after
+30 s of MySQL silence. `safety net:` in a log means a pod (or a restarted `mysqld`) that has never been
+allowed to write; `SELF-FENCED:` means one that was writing and lost the argument.
 
 **Sealed** — the steady-state keyring phase: the keyring file is projected read-only from the escrow
 Secret, so mysqld physically cannot add a key. `Unsealed` is mid-flight, and rotation re-enters it

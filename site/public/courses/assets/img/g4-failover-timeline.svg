@@ -11,7 +11,7 @@
   <text x="348" y="113" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" fill="#334155">promote + confirm 6 s</text>
   <text x="470" y="113" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700" fill="#14532d">= 12 s</text>
 
-  <text x="40" y="178" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#9a3412">Relay logs to apply — 36 s</text>
+  <text x="40" y="178" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="#9a3412">Backlog outlasts the drain — 36 s</text>
   <rect x="40" y="190" width="120" height="36" rx="6" fill="#e8f1fa" stroke="#2b6cb0"/>
   <text x="100" y="213" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="15" fill="#1e3a5f">detect 6 s</text>
   <rect x="164" y="190" width="520" height="36" rx="6" fill="#ffedd5" stroke="#c2410c"/>

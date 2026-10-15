@@ -14,15 +14,23 @@ already chosen a candidate.
 
 ```go
 if !lastFailover.IsZero() && tm.clock.Since(lastFailover) < tm.failoverCooldown {
+    retryAt := lastFailover.Add(tm.failoverCooldown)
     tm.logger.Info("failover blocked by anti-flap cooldown",
-        "lastFailover", lastFailover, "cooldown", tm.failoverCooldown)
+        "lastFailover", lastFailover, "cooldown", tm.failoverCooldown, "retryAt", retryAt)
+    tm.armCrossSiteRetryAfter(retryAt)
     return
 }
 ```
 
-One `if`, one `return`, one `msg` with two fields. That is the entire mechanism. The table still
-evaluated, the candidate was still ranked, the status condition still says `Degraded` — the operator
-simply declined to promote.
+One `if`, one `msg` with three fields, one retry armed, one `return`. That is the entire mechanism.
+The table still evaluated, the candidate was still ranked, the status condition still says
+`Degraded` — the operator simply declined to promote *yet*.
+
+The armed retry is what makes it a delay rather than a veto. Cross-site actions fire on state
+transitions, and a dead primary that stays dead produces no new transition, so without the retry a
+blocked failover would wait for the dead site to come back. With it, the operator re-evaluates the
+topology at `retryAt`, the instant the cooldown expires, and promotes then if the picture still calls
+for it.
 
 ## What it does not suppress
 
@@ -165,8 +173,8 @@ the same moment.
 
 ## Where that leaves you
 
-You can now look at a decision the table selected and say whether it will actually execute right now:
-promotion is gated, everything else is not, and the ordered-update handoff sidesteps the gate while
+You can now look at a decision the table selected and say whether it will actually execute right now,
+and when a blocked one will: promotion is gated until `retryAt`, everything else is not, and the ordered-update handoff sidesteps the gate while
 still moving the counter. You can find the failover history in both durable places and say which one
 a restarted operator believed. What you cannot yet do is watch it happen — the next topic follows one
 poll cycle through the structured log, using the `msg` strings the operator promises not to change.

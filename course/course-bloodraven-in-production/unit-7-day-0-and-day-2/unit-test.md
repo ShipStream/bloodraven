@@ -57,9 +57,9 @@ Nothing validates a manifest against the cluster it refers to. CEL rules check t
 
 **Type:** MULTIPLE_CHOICE
 
-Your cert-manager `Certificate` covers the group hostname and both shared Services. Sidecars crash-loop. Beyond the immediate outage, what have you actually lost?
+Your cert-manager `Certificate` covers the group hostname and both shared Services. Every MySQL pod sits at `1/2` READY: the sidecars run but never turn ready. Beyond the immediate outage, what have you actually lost?
 
-- Self-fencing and the startup safety net on every site — the two mechanisms that hold correctness when the operator cannot be reached
+- Working self-fencing and a working startup safety net on every site — both still run but cannot reach MySQL, and they are the two mechanisms that hold correctness when the operator cannot be reached
 - Only observability: the sidecar exports the archiver metrics, so alerting degrades but no safety property changes
 - Replication, because the sidecar relays replication traffic between sites
 - Nothing structural — the operator fences sites directly, and the sidecar is an optimisation for faster detection
@@ -68,7 +68,7 @@ Your cert-manager `Certificate` covers the group hostname and both shared Servic
 
 **Explanation:**
 
-The sidecar verifies its own MySQL against its site's Service name because it dials loopback, which appears in no certificate. Without that SAN it cannot query MySQL, `/health` returns 503, and the liveness probe restarts the container — taking the `FencingMonitor` and the startup safety net with it. Unit 5's whole argument was that an operator which cannot reach a site cannot fence it, and the sites you most need fenced are exactly the ones you cannot reach; a certificate mistake has just removed the answer to that. Option 3 is wrong on the data path — replication is MySQL to MySQL. Option 4 inverts the division of labour. (objectives 4, 6)
+The sidecar verifies its own MySQL against its site's Service name because it dials loopback, which appears in no certificate. Without that SAN it cannot query MySQL and `/health` returns 503, so the pod is never ready and drops out of the Service endpoints — that is the immediate outage. Nothing restarts, because liveness is `/peer/ping`; the `FencingMonitor` and the startup safety net keep running, but neither can set `super_read_only` on a MySQL it cannot query. Unit 5's whole argument was that an operator which cannot reach a site cannot fence it, and the sites you most need fenced are exactly the ones you cannot reach; a certificate mistake has just removed the answer to that. Option 3 is wrong on the data path — replication is MySQL to MySQL. Option 4 inverts the division of labour. (objectives 4, 6)
 
 ## Question 5
 
@@ -122,7 +122,7 @@ It is a fail-fast abort, not a timeout — the outer deadline is five minutes an
 
 Which upgrade order is correct, and why?
 
-- CRDs by `kubectl apply` first, then `helm upgrade` the operator, then bump `spec.sidecarImage` — because Helm never upgrades CRDs from `crds/`, and a new operator against an old schema has its new fields silently pruned
+- CRDs by `kubectl apply --server-side` first, then `helm upgrade` the operator, then bump `spec.sidecarImage` — because Helm never upgrades CRDs from `crds/`, and a new operator against an old schema has its new fields silently pruned
 - `helm upgrade` first, then CRDs — the chart's post-upgrade hook applies them once the new operator is running
 - `helm upgrade` alone; the chart's `crds/` directory is applied on every upgrade, which is why it exists as a separate directory
 - Bump `spec.sidecarImage` first so the sidecars are ready for the new operator, then CRDs, then the chart

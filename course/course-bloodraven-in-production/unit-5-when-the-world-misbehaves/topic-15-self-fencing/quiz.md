@@ -18,7 +18,7 @@ The `pdx` sidecar in `playground` logs `SELF-FENCING: ... setting super_read_onl
 
 **Explanation:**
 
-Rule #2 needs the operator AND every peer silent beyond leaseTimeout; here both were answering, so it cannot have fired — that rules out both rule #2 options. The second option also misdescribes the lease: it tracks reachability of `/healthz` and `/peer/ping`, not any per-site role confirmation. The third option confuses two endpoints — a failed `/active-site` read leaves the topology cache to age silently and is not a lease signal at all. The safety net is out because its lines are prefixed `safety net:` and it runs once at boot, before the monitor exists; a `SELF-FENCING:` line can only come from the monitor. That leaves rule #1: the monitor learned, from the operator or relayed by a peer, that the active site is somebody else, and fenced immediately without consulting the lease. (objective 1)
+Rule #2 needs the operator AND every peer silent beyond leaseTimeout; here both were answering, so it cannot have fired — that rules out both rule #2 options. The second option also misdescribes the lease: it tracks reachability of `/healthz` and `/peer/ping`, not any per-site role confirmation. The third option confuses two endpoints — a failed `/active-site` read leaves the topology cache to age silently and is not a lease signal at all. The safety net is out because every line it writes is prefixed `safety net:`, whether it runs at startup or the monitor finishes it later; a `SELF-FENCING:` line can only come from the monitor's two rules. That leaves rule #1: the monitor learned, from the operator or relayed by a peer, that the active site is somebody else, and fenced immediately without consulting the lease. (objective 1)
 
 ## Question 2
 
@@ -35,7 +35,7 @@ A site is read-only and its sidecar log contains exactly one relevant line: `saf
 
 **Explanation:**
 
-The `safety net:` prefix places this before the monitor was even constructed, so no rule fired and the pod never held writes — that eliminates the rule #1 and rule #2 options, both of which describe a pod that was writing and lost the argument (and both of which would log `SELF-FENCING:`). The 'could not reach the operator' option names a real safety-net exit, but a different one: that path logs `safety net: could not query active site, staying fenced`. `confirmed standby site` means the operator answered, and named a site other than this one. The distinction matters in triage: a safety-net line is a pod that never got permission, a monitor line is a demotion. (objective 3)
+This exact line comes only from the startup safety net, which runs before the monitor starts evaluating rules, so no rule fired and the pod never held writes — that eliminates the rule #1 and rule #2 options, both of which describe a pod that was writing and lost the argument (and both of which would log `SELF-FENCING:`). The 'could not reach the operator' option names a real safety-net exit, but a different one: that path logs `safety net: could not query active site, staying fenced`. `confirmed standby site` means the operator answered, and named a site other than this one. The distinction matters in triage: a safety-net line is a pod that never got permission, a monitor line is a demotion. (objective 3)
 
 ## Question 3
 

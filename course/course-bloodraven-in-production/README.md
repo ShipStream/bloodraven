@@ -222,7 +222,7 @@ Six units started from a group somebody else's script created. This one builds o
   2. Choose between `secretName` and `credentials` and name the users and grants each one produces
   3. Separate the mistakes admission rejects from the ones you discover during an incident
 
-**TLS, and what it unlocks** — The field the CRD demanded in Unit 6 and nobody taught. A SAN list that keeps the sidecar alive, a renewal that moves your primary, and the door it opens to encryption at rest.
+**TLS, and what it unlocks** — The field the CRD demanded in Unit 6 and nobody taught. A SAN list that keeps the sidecar able to fence, a renewal that moves your primary, and the door it opens to encryption at rest.
 
   4. Wire `spec.tls` to a cert-manager issuer and design a SAN list every client can verify against
   5. Explain why a certificate renewal rolls your pods and moves your primary

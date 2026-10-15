@@ -106,9 +106,11 @@ Take the habit rather than the grievance. The CRD is the contract, the code is t
 
 `EvalCrossSite` is **pure**. The source comment is explicit: *"The function is pure: it never considers history or policy beyond the supplied priorities."* It has no clock, no memory of prior promotions, and no access to MySQL. That is why split-brain auto-resolution, which needs history, is layered on top by the caller rather than living in the matrix.
 
-The matrix is evaluated on **every** poll, not only on a state transition — *"Evaluate every poll so all status snapshots carry the current topology condition. Mutating cross-site actions remain transition-driven."* So `status.conditions` always reflects the current topology, while the actions that change MySQL fire on transitions.
+The matrix is evaluated on **every** poll, not only on a state transition — *"Evaluate every poll so all status snapshots carry the current topology condition. Mutating cross-site actions remain transition-driven."* So `status.conditions` always reflects the current topology, while the actions that change MySQL fire on transitions — or on a retry the operator arms when it had to defer one: at cooldown expiry, or 10 s after a promotion attempt that failed or found no eligible candidate. A dead primary is a stable state that produces no further transition, so without the retry a deferred failover would wait for the dead site to return.
 
 And when the table does select a failover, the matrix does not choose the winner. It hands `PromotionCandidates` to the caller, ordered by `sitePriorities` then declared order, and `pickFreshestCandidate` reads `GTID_EXECUTED` from each one. **GTID freshness is the primary selector — it minimises data loss on promotion.** `sitePriorities` only breaks ties or incomparable sets. A site listed first in `sitePriorities` will lose to a fresher peer.
+
+Before ranking, the picker drops any candidate whose data has gone backwards: an empty `GTID_EXECUTED` in a group that has held data (a wiped datadir, for example after a failed clone), or a set that does not contain `promotionGtidExecuted`, the GTID set recorded at the last promotion. It logs `failover picker: refusing candidate whose data regressed` at ERROR. If nobody is left, nothing is promoted and the decision is re-evaluated every 10 s. Promoting such a site would silently replace the group's history; the cure is a reclone.
 
 ## Handoff
 

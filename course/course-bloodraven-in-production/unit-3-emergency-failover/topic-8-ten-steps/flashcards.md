@@ -27,9 +27,9 @@
 
 ---
 
-**Front:** The relay-log drain's early-exit condition
+**Front:** The relay-log drain's completion condition
 
-**Back:** The SQL thread is running and Seconds_Behind_Source reads 0 — the drain returns immediately.
+**Back:** Executed_Gtid_Set contains the Retrieved_Gtid_Set read at the drain's first poll — a caught-up candidate passes on that first poll. Seconds_Behind_Source is not consulted, and only an SQL-thread error ends the drain early; the IO thread's error from a dead primary does not.
 
 ---
 
@@ -47,7 +47,7 @@
 
 **Front:** What scenario 14 does to the replica before it kills the primary
 
-**Back:** Pauses the replica's SQL applier and seeds five seconds of writes, so the candidate has unapplied relay logs when the drain starts.
+**Back:** Sets SOURCE_DELAY on the replica and seeds five seconds of writes, so the candidate holds received but unapplied relay log when the drain starts — then asserts that the new primary has every seeded row.
 
 ---
 

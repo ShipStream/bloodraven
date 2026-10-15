@@ -205,6 +205,14 @@ destroying every post-failover write. A site with data is never part of a fresh 
 half-succeeded, so <code>isFreshDeploy</code> refuses forever after. The way out is to remove the evidence
 deliberately — <code>STOP REPLICA; RESET REPLICA ALL;</code> on the stuck site, then restart the operator — and
 the reason to do it consciously is that you are overriding a safety check, not clearing a glitch.</p>
+<p>What a failed clone no longer does is pass for a successful one. A dropped connection is how
+<code>CLONE INSTANCE</code> ends either way: the recipient restarts when the clone succeeds, and the session dies
+when it is killed after MySQL has already dropped the recipient’s data. So before it configures
+replication the operator reads the recipient’s <code>performance_schema.clone_status</code> and requires a new
+<code>Completed</code> row and a non-empty <code>GTID_EXECUTED</code>. Anything else fails the bootstrap — the
+<code>Bootstrapping</code> condition goes to reason <code>Failed</code> and the operator logs <code>bootstrap failed</code> — and the
+recipient is fenced again. Throughout the clone the recipient keeps <code>read_only=ON</code>; only
+<code>super_read_only</code> is cleared, because <code>CLONE INSTANCE</code> refuses to run under it.</p>
 <h2 id="where-this-leaves-you">Where this leaves you</h2>
 <p>You can write a <code>MysqlFailoverGroup</code> into an empty namespace and say, for every line, which earlier
 unit decided it. You can pick a credentials mode and recite the grants each user gets. You can say
