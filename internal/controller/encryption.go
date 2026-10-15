@@ -392,6 +392,11 @@ func buildEncryptionFragments(
 // including the "mysqld" binary name). They become $1..$n after a $0 of
 // "mysqld" so the entrypoint sees the same argv shape as a normal
 // `docker run mysql:… --flag` invocation.
+//
+// The backup verification Job has its own, simpler launcher for a
+// throwaway keyring in verify_script.sh. It works around the same
+// MySQL/AppArmor quirks (private mysqld copy, component manifest, private
+// plugin directory); apply a change to one in the other.
 func encryptionMysqlLauncher(fg *v1alpha1.MysqlFailoverGroup, mysqlArgs []string) (command, args []string) {
 	kr := fg.Spec.EffectiveKeyring()
 	mysqlImageBasedir := path.Dir(kr.MysqldDir)

@@ -37,14 +37,17 @@
 set -euo pipefail
 
 # MOUNT_DIR is /var/lib/mysql and RUN_DIR is /run/mysqld — not arbitrary.
-# Where the stock mysqld AppArmor profile is loaded on the node it is
-# attached to our containerized mysqld by binary path, confining the datadir
-# to /var/lib/mysql/** and the unix socket to /run/mysqld/. mysqld
-# --initialize also refuses to initialize into a pre-existing directory
-# (errno 17 EEXIST), so the real datadir is a subdirectory mysqld creates
-# itself under MOUNT_DIR. The errlog stays under MOUNT_DIR (allowed); the
-# socket/pid go under RUN_DIR (the only socket path the profile permits, and
-# the image's /run/mysqld is read-only without this emptyDir).
+# Where the stock mysqld AppArmor profile is loaded on the node it attaches
+# to a containerized mysqld by binary path (/usr/sbin/mysqld), confining the
+# datadir to /var/lib/mysql/** and the unix socket to /run/mysqld/. With the
+# verification keyring (the normal path, see below) mysqld runs from a copy
+# under RUN_DIR, which that profile does not match; the stock-binary fallback
+# still runs /usr/sbin/mysqld in place, so the paths stay profile-compliant
+# for both. mysqld --initialize also refuses to initialize into a
+# pre-existing directory (errno 17 EEXIST), so the real datadir is a
+# subdirectory mysqld creates itself under MOUNT_DIR. The errlog stays under
+# MOUNT_DIR (allowed); the socket/pid go under RUN_DIR (the image's
+# /run/mysqld is read-only without this emptyDir).
 MOUNT_DIR="${BLOODRAVEN_DATA_DIR:-/var/lib/mysql}"
 RUN_DIR="${BLOODRAVEN_RUN_DIR:-/run/mysqld}"
 DATA_DIR="${MOUNT_DIR}/data"
@@ -65,23 +68,65 @@ trap cleanup_mysqld EXIT
 
 mkdir -p "$MOUNT_DIR"
 
-# Logical dumps retain ENCRYPTION='Y' DDL. Use a fresh verification keyring,
-# never the source server's escrow keyring, to create those tables.
-MYSQLD_ORIGINAL="$(command -v mysqld)"
-MYSQLD_HELP="$(mysqld --no-defaults --verbose --help 2>/dev/null)"
-PLUGIN_DIR="$(awk '$1 == "plugin-dir" {print $2; exit}' <<<"$MYSQLD_HELP")"
-BASEDIR="$(awk '$1 == "basedir" {print $2; exit}' <<<"$MYSQLD_HELP")"
-test -n "$PLUGIN_DIR" && test -n "$BASEDIR"
-test -r "$PLUGIN_DIR/component_keyring_file.so"
-mkdir -p "$RUN_DIR/plugins"
-for plugin in "$PLUGIN_DIR"/*; do
-    ln -sf "$plugin" "$RUN_DIR/plugins/$(basename "$plugin")"
-done
-cp "$MYSQLD_ORIGINAL" "$RUN_DIR/mysqld-verify"
-printf '%s\n' '{"components":"file://component_keyring_file"}' > "$RUN_DIR/mysqld-verify.my"
-rm -f "$RUN_DIR/plugins/component_keyring_file.cnf"
-printf '{"path":"%s/verification-keyring","read_only":false}\n' "$MOUNT_DIR" > "$RUN_DIR/plugins/component_keyring_file.cnf"
-MYSQLD=("$RUN_DIR/mysqld-verify" "--basedir=$BASEDIR" "--plugin-dir=$RUN_DIR/plugins")
+# Logical dumps retain ENCRYPTION='Y' DDL. When the image ships
+# component_keyring_file, run mysqld with a fresh verification keyring (never
+# the source server's escrow keyring) so those tables can be created. The
+# same MySQL/AppArmor quirks are handled by the production launcher in
+# internal/controller/encryption.go (encryptionMysqlLauncher); keep the two in
+# step when a MySQL or profile workaround changes.
+#
+# The component is not mandatory: a custom spec.backup.image without it keeps
+# verifying unencrypted dumps exactly as before, with a warning here and
+# MySQL's own error if the dump does contain encrypted tables.
+KEYRING_REASON=""
+HELP_ERR="$MOUNT_DIR/mysqld-help.err"
+
+prepare_verification_keyring() {
+    local help plugin_dir basedir original plugin
+    original="$(command -v mysqld)" || { KEYRING_REASON="mysqld not found in PATH"; return 1; }
+    if ! help="$("$original" --no-defaults --verbose --help 2>"$HELP_ERR")"; then
+        KEYRING_REASON="mysqld --verbose --help failed: $(tail -n 5 "$HELP_ERR" 2>/dev/null)"
+        return 1
+    fi
+    plugin_dir="$(awk '$1 == "plugin-dir" {print $2; exit}' <<<"$help")"
+    basedir="$(awk '$1 == "basedir" {print $2; exit}' <<<"$help")"
+    if [[ -z "$plugin_dir" || -z "$basedir" ]]; then
+        KEYRING_REASON="could not parse plugin-dir/basedir from mysqld --verbose --help: $(tail -n 5 "$HELP_ERR" 2>/dev/null)"
+        return 1
+    fi
+    if [[ ! -r "$plugin_dir/component_keyring_file.so" ]]; then
+        KEYRING_REASON="component_keyring_file.so not found in $plugin_dir"
+        return 1
+    fi
+    mkdir -p "$RUN_DIR/plugins" || { KEYRING_REASON="cannot create $RUN_DIR/plugins"; return 1; }
+    for plugin in "$plugin_dir"/*; do
+        ln -sf "$plugin" "$RUN_DIR/plugins/$(basename "$plugin")" \
+            || { KEYRING_REASON="cannot link $plugin into $RUN_DIR/plugins"; return 1; }
+    done
+    cp "$original" "$RUN_DIR/mysqld-verify" \
+        || { KEYRING_REASON="cannot copy $original to $RUN_DIR"; return 1; }
+    printf '%s\n' '{"components":"file://component_keyring_file"}' > "$RUN_DIR/mysqld-verify.my" \
+        || { KEYRING_REASON="cannot write $RUN_DIR/mysqld-verify.my"; return 1; }
+    rm -f "$RUN_DIR/plugins/component_keyring_file.cnf"
+    printf '{"path":"%s/verification-keyring","read_only":false}\n' "$MOUNT_DIR" \
+        > "$RUN_DIR/plugins/component_keyring_file.cnf" \
+        || { KEYRING_REASON="cannot write the verification keyring configuration"; return 1; }
+    # A noexec $RUN_DIR (hardened nodes) would make the copy unrunnable.
+    if ! "$RUN_DIR/mysqld-verify" --version >/dev/null 2>"$HELP_ERR"; then
+        KEYRING_REASON="cannot execute $RUN_DIR/mysqld-verify (noexec volume?): $(tail -n 5 "$HELP_ERR" 2>/dev/null)"
+        return 1
+    fi
+    MYSQLD=("$RUN_DIR/mysqld-verify" "--basedir=$basedir" "--plugin-dir=$RUN_DIR/plugins")
+}
+
+MYSQLD=(mysqld)
+if prepare_verification_keyring; then
+    log "using ephemeral verification keyring (component_keyring_file)"
+else
+    MYSQLD=(mysqld)
+    log "WARNING: verification keyring unavailable: $KEYRING_REASON"
+    log "WARNING: starting stock mysqld; dumps containing ENCRYPTION='Y' tables will fail to restore"
+fi
 
 if [[ ! -d "${DATA_DIR}/mysql" ]]; then
     # Remove any partial datadir left by a prior Job attempt so mysqld can

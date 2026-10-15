@@ -22,19 +22,23 @@ const (
 	//
 	// It MUST be /var/lib/mysql. On hosts with the stock mysqld AppArmor
 	// profile loaded (e.g. GitHub-hosted Ubuntu runners), the kernel
-	// attaches that profile to our containerized mysqld by binary path
-	// (/usr/sbin/mysqld) — even though the pod is otherwise unconfined —
+	// attaches that profile to a containerized mysqld started from
+	// /usr/sbin/mysqld — even though the pod is otherwise unconfined —
 	// and the profile only permits the datadir under /var/lib/mysql/**.
 	// A datadir anywhere else (the old /var/lib/mysql-verify) is denied
-	// with errno 13 before mysqld can even create it.
+	// with errno 13 before mysqld can even create it. verify.sh runs a
+	// copy of mysqld from the run volume when the keyring component is
+	// available, which that profile does not match; the stock-binary
+	// fallback still runs in place, so the path stays fixed.
 	verificationDataMountPath = "/var/lib/mysql"
 
 	// verificationRunMountPath is where the verification Job mounts an
 	// emptyDir for mysqld's unix socket and pid file. The stock mysqld
 	// AppArmor profile permits the socket only under /run/mysqld/, and the
 	// image's /run/mysqld is not writable under readOnlyRootFilesystem, so
-	// we mount a fresh emptyDir there. verify.sh reads it from
-	// BLOODRAVEN_RUN_DIR.
+	// we mount a fresh emptyDir there. verify.sh also stages the private
+	// mysqld copy and keyring component configuration here, and reads the
+	// path from BLOODRAVEN_RUN_DIR.
 	verificationRunMountPath = "/run/mysqld"
 
 	// verificationDefaultActiveDeadline is the fallback Job
@@ -195,9 +199,10 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	// PVCs (kind's local-path PVCs are left root-owned, so a non-root
 	// mysqld can't use them; emptyDir honors the pod's fsGroup). The
 	// datadir and socket paths are NOT arbitrary: where the stock mysqld
-	// AppArmor profile is loaded on the node, the kernel confines our
-	// containerized mysqld to /var/lib/mysql/** (datadir) and /run/mysqld/
-	// (socket) by binary path, so those mounts must land exactly there.
+	// AppArmor profile is loaded on the node, the kernel confines a
+	// containerized /usr/sbin/mysqld (the stock-binary fallback in
+	// verify.sh) to /var/lib/mysql/** (datadir) and /run/mysqld/ (socket),
+	// so those mounts must land exactly there.
 	// /tmp must also be a writable emptyDir — InnoDB writes a temp file
 	// there during --initialize, which fails with EROFS otherwise.
 	//
