@@ -82,9 +82,10 @@ type MysqlFailoverGroupSpec struct {
 	// DNS configures the external DNS record managed via the external-dns DNSEndpoint CRD.
 	DNS DNSSpec `json:"dns"`
 
-	// PollInterval is the base interval for polling MySQL instances. After a
-	// site reaches FailureThreshold and continues failing, the effective
-	// interval backs off exponentially to a 30s cap. Default: 2s.
+	// PollInterval is the interval for polling MySQL instances. After a site
+	// reaches FailureThreshold and continues failing, that site's probes back
+	// off exponentially to a 30s cap; other sites keep this interval.
+	// Default: 2s.
 	// +kubebuilder:default="2s"
 	PollInterval *metav1.Duration `json:"pollInterval,omitempty"`
 

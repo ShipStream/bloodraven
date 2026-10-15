@@ -1255,54 +1255,92 @@ func TestReplicationNotCheckedOnWritableSite(t *testing.T) {
 	}
 }
 
-func TestAdaptivePollInterval(t *testing.T) {
-	site0 := &mockMySQL{readOnly: false}
-	site1 := &mockMySQL{readOnly: true}
-	tm, _, _ := newTestTopologyManager(site0, site1)
-
+func TestSiteProbeInterval(t *testing.T) {
+	tm, _, _ := newTestTopologyManager(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
 	base := tm.cfg.PollIntervalDuration() // 50ms in test config
+	threshold := tm.cfg.FailureThreshold
 
-	// No failures → base interval.
-	if got := tm.adaptivePollInterval(base); got != base {
-		t.Errorf("healthy: expected %v, got %v", base, got)
+	for _, tc := range []struct {
+		failCount int
+		want      time.Duration
+	}{
+		{0, base},
+		{threshold - 1, base},
+		{threshold, base}, // backoff starts only past the threshold
+		{threshold + 1, 2 * base},
+		{threshold + 2, 4 * base},
+		{threshold + 100, base * time.Duration(1<<maxPollBackoffExponent)},
+	} {
+		if got := tm.siteProbeInterval(base, tc.failCount); got != tc.want {
+			t.Errorf("failCount=%d: got %v, want %v", tc.failCount, got, tc.want)
+		}
+	}
+	if got := tm.siteProbeInterval(2*time.Second, threshold+100); got != 30*time.Second {
+		t.Errorf("2s base: got %v, want the 30s cap", got)
+	}
+}
+
+// TestPollBacksOffOnlyTheFailingSite pins the per-site probe backoff: a
+// site that stays down is probed less often, the healthy site is probed
+// on every poll, and the down site is still noticed when it returns.
+func TestPollBacksOffOnlyTheFailingSite(t *testing.T) {
+	clk := clock.NewFakeClock(time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC))
+	primary := &mockMySQL{readOnly: false}
+	down := &mockMySQL{readOnly: true, err: fmt.Errorf("connection refused")}
+	cfg := testTopologyConfig()
+	tm := NewTopologyManagerWithClock(cfg, []mysql.Checker{primary, down}, NewFailoverController(testLogger()),
+		nil, nil, BootstrapConfig{}, newMockTainter(), platform.NewHub(testLogger()), &mockDNS{}, testLogger(), clk)
+	base := cfg.PollIntervalDuration()
+
+	const polls = 40
+	for i := 0; i < polls; i++ {
+		tm.poll(context.Background(), true)
+		clk.Advance(base)
+	}
+	// Follow-up checks re-read the active primary, so it can be more.
+	if primary.checkReadOnlyCalls < polls {
+		t.Fatalf("healthy site probed %d times in %d polls; it must be probed every poll", primary.checkReadOnlyCalls, polls)
+	}
+	if down.checkReadOnlyCalls >= polls/2 {
+		t.Fatalf("down site probed %d times in %d polls; expected backoff", down.checkReadOnlyCalls, polls)
+	}
+	if tm.sites[1].state != state.StateUnreachable {
+		t.Fatalf("down site state = %v, want unreachable", tm.sites[1].state)
 	}
 
-	// Failures below threshold → still base interval.
-	tm.sites[0].failCount = tm.cfg.FailureThreshold - 1
-	if got := tm.adaptivePollInterval(base); got != base {
-		t.Errorf("below threshold: expected %v, got %v", base, got)
+	// The site returns. It is seen again within one maximum backoff.
+	down.setError(nil)
+	maxPolls := 1<<maxPollBackoffExponent + 1
+	for i := 0; i < maxPolls && tm.sites[1].state != state.StateReadOnly; i++ {
+		tm.poll(context.Background(), true)
+		clk.Advance(base)
 	}
-
-	// At threshold → still base (backoff starts after threshold).
-	tm.sites[0].failCount = tm.cfg.FailureThreshold
-	if got := tm.adaptivePollInterval(base); got != base {
-		t.Errorf("at threshold: expected %v, got %v", base, got)
+	if tm.sites[1].state != state.StateReadOnly {
+		t.Fatalf("returning site not observed within %d polls; state=%v", maxPolls, tm.sites[1].state)
 	}
+}
 
-	// One failure past threshold → 2x base.
-	tm.sites[0].failCount = tm.cfg.FailureThreshold + 1
-	if got := tm.adaptivePollInterval(base); got != 2*base {
-		t.Errorf("threshold+1: expected %v, got %v", 2*base, got)
-	}
+// TestRunKeepsBaseCadenceWhileASiteIsDown is the regression for a shared
+// poll backoff: one site that stayed down stretched the whole loop to the
+// 30s cap, so the primary's loss then took ~90s instead of ~6s to detect
+// (chaos round 2026-10-15, F13).
+func TestRunKeepsBaseCadenceWhileASiteIsDown(t *testing.T) {
+	primary := &mockMySQL{readOnly: false}
+	down := &mockMySQL{readOnly: true, err: fmt.Errorf("connection refused")}
+	tm, _, _ := newTestTopologyManager(primary, down)
+	base := tm.cfg.PollIntervalDuration()
 
-	// Two past threshold → 4x base.
-	tm.sites[0].failCount = tm.cfg.FailureThreshold + 2
-	if got := tm.adaptivePollInterval(base); got != 4*base {
-		t.Errorf("threshold+2: expected %v, got %v", 4*base, got)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*base)
+	defer cancel()
+	tm.Run(ctx)
 
-	// Capped at 2^maxPollBackoffExponent * base.
-	tm.sites[0].failCount = tm.cfg.FailureThreshold + 100
-	got := tm.adaptivePollInterval(base)
-	maxInterval := base * time.Duration(1<<maxPollBackoffExponent)
-	if got != maxInterval {
-		t.Errorf("cap: expected %v, got %v", maxInterval, got)
-	}
-
-	// Recovery resets interval: clear failures.
-	tm.sites[0].failCount = 0
-	if got := tm.adaptivePollInterval(base); got != base {
-		t.Errorf("after recovery: expected %v, got %v", base, got)
+	primary.mu.Lock()
+	calls := primary.checkReadOnlyCalls
+	primary.mu.Unlock()
+	// 40 base intervals. The shared backoff managed about 8 polls here
+	// (3 at base, then 2x, 4x, 8x, 16x); the base cadence gives ~40.
+	if calls < 25 {
+		t.Fatalf("healthy site probed %d times in %v; the loop is backing off for a site that is down", calls, 40*base)
 	}
 }
 

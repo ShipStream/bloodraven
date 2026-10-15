@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -213,6 +214,10 @@ type siteTracker struct {
 	failCount     int
 	recoveryCount int
 	lastSeen      time.Time // last successful poll
+	// nextProbe is when an unreachable site is next probed. Backoff is
+	// per site: a site that stays down is probed less often, and the
+	// other sites keep the base cadence. Zero means probe every poll.
+	nextProbe time.Time
 
 	// replicating is true only when the site is a read-only replica with IO+SQL
 	// threads running and a configured source host, observed for replicatingStreak
@@ -973,10 +978,15 @@ func (tm *TopologyManager) Ready() bool {
 }
 
 // Run starts the polling loop. Blocks until ctx is cancelled.
+// errProbeDeferred stands in for the probe result of a site in probe
+// backoff. Later steps of the poll treat the site as unprobed, the same as
+// a failed probe, without probing it again.
+var errProbeDeferred = errors.New("probe deferred: site in probe backoff")
+
 // maxPollBackoffExponent caps the exponential backoff at 2^4 = 16x the base
-// interval, subject to the 30s hard cap in adaptivePollInterval (e.g. 2s base
-// → 30s effective cap). This keeps detection latency reasonable while still
-// reducing waste when a DC is down for extended periods.
+// interval, subject to the 30s hard cap in siteProbeInterval (e.g. 2s base
+// → 30s effective cap). This keeps detection of a returning site reasonable
+// while still reducing waste when a DC is down for extended periods.
 const maxPollBackoffExponent = 4
 
 func (tm *TopologyManager) Run(ctx context.Context) {
@@ -990,36 +1000,31 @@ func (tm *TopologyManager) Run(ctx context.Context) {
 	base := tm.cfg.PollIntervalDuration()
 
 	// Do an initial poll immediately.
-	tm.Poll(ctx)
+	tm.poll(ctx, true)
 
+	// The loop always ticks at the base interval. Backoff for a site that
+	// stays down is per site (see siteProbeInterval): a shared backoff
+	// let one dead reader or DR site slow detection of the primary's loss
+	// from ~6s to ~90s.
 	for {
-		interval := tm.adaptivePollInterval(base)
-		timer := tm.clock.NewTimer(interval)
+		timer := tm.clock.NewTimer(base)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
 		case <-timer.C():
-			tm.Poll(ctx)
+			tm.poll(ctx, true)
 		}
 	}
 }
 
-// adaptivePollInterval returns the next poll interval based on the
-// worst-case failure count across all sites. When every site is healthy
-// the base interval is used; when any site is failing, the interval
-// increases exponentially up to base * 2^maxPollBackoffExponent (capped
-// at 30s).
-func (tm *TopologyManager) adaptivePollInterval(base time.Duration) time.Duration {
-	maxFail := 0
-	for i := range tm.sites {
-		if fc := tm.sites[i].failCount; fc > maxFail {
-			maxFail = fc
-		}
-	}
-	// Only start backing off after the failure threshold is reached (DC is
-	// confirmed unreachable, not just experiencing transient errors).
-	backoffFails := maxFail - tm.cfg.FailureThreshold
+// siteProbeInterval returns how long to wait before probing a site again,
+// from its consecutive failure count. Below and at the failure threshold
+// the site is probed every poll, so detection is not delayed. Past it, the
+// interval doubles per further failure up to base * 2^maxPollBackoffExponent,
+// capped at 30s.
+func (tm *TopologyManager) siteProbeInterval(base time.Duration, failCount int) time.Duration {
+	backoffFails := failCount - tm.cfg.FailureThreshold
 	if backoffFails <= 0 {
 		return base
 	}
@@ -1033,13 +1038,35 @@ func (tm *TopologyManager) adaptivePollInterval(base time.Duration) time.Duratio
 	return interval
 }
 
+// scheduleNextProbe records when site is next probed after a probe at now.
+// Polls tick at the base interval, so the deadline is pulled in by half a
+// tick: otherwise timer jitter can push a due probe to the following poll.
+func (tm *TopologyManager) scheduleNextProbe(site *siteTracker, now time.Time, base time.Duration) {
+	interval := tm.siteProbeInterval(base, site.failCount)
+	if interval <= base {
+		site.nextProbe = time.Time{}
+		return
+	}
+	site.nextProbe = now.Add(interval - base/2)
+}
+
 // Poll executes a single poll cycle: checks every site, applies
 // debounce, evaluates transitions, and triggers any necessary actions.
+// It probes every site; only Run's loop applies per-site probe backoff.
 func (tm *TopologyManager) Poll(ctx context.Context) {
+	tm.poll(ctx, false)
+}
+
+// poll is Poll, optionally skipping sites whose probe backoff has not
+// elapsed (see siteProbeInterval).
+func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	type pollResult struct {
 		readOnly bool
 		err      error
 		duration time.Duration
+		// deferred is true when the site is in probe backoff and was not
+		// probed this poll. Its state and counters stay as they were.
+		deferred bool
 	}
 
 	tm.mu.RLock()
@@ -1054,12 +1081,20 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		return pollResult{readOnly: ro, err: err, duration: tm.clock.Since(start)}
 	}
 
-	// Poll every site in parallel.
+	// Poll every site that is due, in parallel. A site in probe backoff
+	// is skipped: it is already unreachable, and probing it every poll
+	// would cost a full timeout per poll if it hangs rather than refuses.
+	base := tm.cfg.PollIntervalDuration()
+	probeStart := tm.clock.Now()
 	results := make([]pollResult, len(tm.sites))
 	var wg sync.WaitGroup
-	wg.Add(len(tm.sites))
 	for i := range tm.sites {
+		if next := tm.sites[i].nextProbe; backoff && !next.IsZero() && probeStart.Before(next) {
+			results[i] = pollResult{deferred: true, err: errProbeDeferred}
+			continue
+		}
 		i := i
+		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			results[i] = pollSite(&tm.sites[i])
@@ -1068,6 +1103,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	wg.Wait()
 
 	for i := range tm.sites {
+		if results[i].deferred {
+			continue
+		}
 		metrics.PollLatency.WithLabelValues(tm.sites[i].name).Observe(results[i].duration.Seconds())
 	}
 
@@ -1076,7 +1114,12 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// Compute new debounced states.
 	newStates := make([]state.SiteState, len(tm.sites))
 	for i := range tm.sites {
+		if results[i].deferred {
+			newStates[i] = tm.sites[i].state
+			continue
+		}
 		newStates[i] = tm.computeState(&tm.sites[i], results[i].readOnly, results[i].err)
+		tm.scheduleNextProbe(&tm.sites[i], probeStart, base)
 		// A successful writable observation on a non-promotable site is an
 		// immediate safety fact. Do not debounce authority invalidation or
 		// fencing behind the normal recovery threshold.
