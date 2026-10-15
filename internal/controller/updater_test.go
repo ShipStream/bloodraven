@@ -905,6 +905,10 @@ func (f *flappingChecker) EnsureClonePlugin(_ context.Context) error           {
 func (f *flappingChecker) SetCloneDonorList(_ context.Context, _ string) error { return nil }
 func (f *flappingChecker) GetGtidExecuted(_ context.Context) (string, error)   { return "", nil }
 func (f *flappingChecker) KillAppConnections(_ context.Context) (int, error)   { return 0, nil }
+func (f *flappingChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
+	return nil, nil
+}
+
 func (f *flappingChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return nil
 }
@@ -955,6 +959,10 @@ func (s *startableReplicaChecker) EnsureClonePlugin(_ context.Context) error    
 func (s *startableReplicaChecker) SetCloneDonorList(_ context.Context, _ string) error { return nil }
 func (s *startableReplicaChecker) GetGtidExecuted(_ context.Context) (string, error)   { return "", nil }
 func (s *startableReplicaChecker) KillAppConnections(_ context.Context) (int, error)   { return 0, nil }
+func (s *startableReplicaChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
+	return nil, nil
+}
+
 func (s *startableReplicaChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return nil
 }
@@ -994,6 +1002,10 @@ func (r *replicaStatusErrorChecker) GetGtidExecuted(_ context.Context) (string, 
 	return "", nil
 }
 func (r *replicaStatusErrorChecker) KillAppConnections(_ context.Context) (int, error) { return 0, nil }
+func (r *replicaStatusErrorChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
+	return nil, nil
+}
+
 func (r *replicaStatusErrorChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return nil
 }

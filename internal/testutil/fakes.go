@@ -222,6 +222,10 @@ func (m *FakeMySQL) KillAppConnections(_ context.Context) (int, error) {
 	return 0, nil
 }
 
+func (m *FakeMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
+	return nil, nil
+}
+
 func (m *FakeMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

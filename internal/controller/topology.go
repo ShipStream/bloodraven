@@ -224,6 +224,12 @@ type siteTracker struct {
 	sourceConvergenceState  SourceConvergenceState
 	sourceConvergenceReason string
 	servingHealthy          bool
+	// probeFailed is true when this poll's liveness probe of the site
+	// failed. Later steps of the same poll skip the site instead of
+	// spending another statusNetTimeout each on a hung server, which
+	// would stretch every poll and multiply detection time. Protected by
+	// TopologyManager.mu.
+	probeFailed bool
 }
 
 // isHealthyReplica reports whether the site is a read-only replica with debounced
@@ -321,6 +327,10 @@ type TopologyManager struct {
 	promotedSite          string // empty = no pending promotion
 	promotedAt            time.Time
 	promotionGtidExecuted string // GTID set at last promotion
+	// groupHasData is sticky once any site is seen with a non-empty GTID
+	// set. It lets the failover picker refuse a wiped (empty) candidate
+	// even when the group has never failed over. Protected by mu.
+	groupHasData bool
 
 	// authorityEpoch advances whenever a promotion completes outside or
 	// inside the poll goroutine. Poll captures it before probing MySQL and
@@ -457,11 +467,14 @@ type TopologyManager struct {
 
 	// crossSiteRetry is armed when applyCrossSiteAction deferred a decision
 	// because an update, bootstrap, planned failover or in-place restore
-	// held the cross-site path. Cross-site actions are otherwise driven by
-	// state transitions, and the transition that was swallowed does not
-	// repeat once the holder lets go, so Poll re-evaluates the current
-	// topology once the guards are released. Protected by mu.
+	// held the cross-site path, the anti-flap cooldown refused a promotion,
+	// or a promotion attempt failed. Cross-site actions are otherwise driven
+	// by state transitions, and the transition that was swallowed does not
+	// repeat (a dead primary stays Unreachable), so Poll re-evaluates the
+	// current topology once the guards are released and
+	// crossSiteRetryNotBefore has passed. Protected by mu.
 	crossSiteRetry          bool
+	crossSiteRetryNotBefore time.Time
 	keyringPromotionSkipped []string
 	keyringPromotionRefused []string
 
@@ -550,6 +563,10 @@ const (
 	// During this window the operator waits for replication to report healthy
 	// instead of immediately resetting replica metadata again on the next poll.
 	recoveryRetryDelay = 30 * time.Second
+	// failoverRetryBackoff spaces out retries of a promotion whose Execute
+	// failed, so a persistently failing candidate is not re-fenced and
+	// re-drained on every poll.
+	failoverRetryBackoff = 10 * time.Second
 )
 
 // siteRecovery tracks one site's old-primary recovery lifecycle.
@@ -658,6 +675,9 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 	tm.authorityEpoch++
 	tm.deploymentAuthorityLocked(target)
 	tm.promotionGtidExecuted = promotionGtid
+	if strings.TrimSpace(promotionGtid) != "" {
+		tm.groupHasData = true
+	}
 	tm.promotedSite = target
 	tm.promotedAt = now
 	// A promotion observed by this process supersedes restored state even if
@@ -1079,6 +1099,7 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		if results[i].err == nil {
 			tm.sites[i].lastSeen = now
 		}
+		tm.sites[i].probeFailed = results[i].err != nil
 		prevStates[i] = tm.sites[i].state
 		if newStates[i] != prevStates[i] {
 			tm.sites[i].state = newStates[i]
@@ -1185,6 +1206,15 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		if tm.sites[i].state != state.StateReadOnly {
 			continue
 		}
+		tm.mu.RLock()
+		probeFailed := tm.sites[i].probeFailed
+		tm.mu.RUnlock()
+		if probeFailed {
+			// Leave the replication bookkeeping as last observed; the
+			// liveness debounce owns this site's fate this poll.
+			replicaProbeFailed[tm.sites[i].name] = struct{}{}
+			continue
+		}
 		replCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		rs, err := tm.sites[i].mysql.ShowReplicaStatus(replCtx)
 		cancel()
@@ -1205,6 +1235,9 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 		siteRepl[i] = rs
 		healthy := rs != nil && rs.IORunning && rs.SQLRunning && rs.SourceHost != ""
 		tm.mu.Lock()
+		if rs != nil && strings.TrimSpace(rs.ExecutedGtidSet) != "" {
+			tm.groupHasData = true
+		}
 		wasReplicating := tm.sites[i].replicating
 		if healthy {
 			tm.sites[i].replicatingStreak++
@@ -1976,6 +2009,9 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		if promote == "" {
 			tm.logger.Warn("promotion candidates present but GTID picker returned no winner — no reachable candidate?",
 				"candidates", action.PromotionCandidates)
+			// A candidate whose GTID read timed out, or that is refused until
+			// it is recloned, produces no further transition. Re-evaluate.
+			tm.armCrossSiteRetryAfter(tm.clock.Now().Add(failoverRetryBackoff))
 		}
 	}
 
@@ -1998,11 +2034,16 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		tm.mu.RUnlock()
 		if promotedSite != "" {
 			tm.clearKeyringRotationBlockedDirty()
+			tm.armCrossSiteRetry()
 			return
 		}
 		if !lastFailover.IsZero() && tm.clock.Since(lastFailover) < tm.failoverCooldown {
+			// The cooldown only delays the decision. A primary that stays
+			// down produces no further transition, so retry at expiry.
+			retryAt := lastFailover.Add(tm.failoverCooldown)
 			tm.logger.Info("failover blocked by anti-flap cooldown",
-				"lastFailover", lastFailover, "cooldown", tm.failoverCooldown)
+				"lastFailover", lastFailover, "cooldown", tm.failoverCooldown, "retryAt", retryAt)
+			tm.armCrossSiteRetryAfter(retryAt)
 			return
 		}
 
@@ -2068,7 +2109,9 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 
 		promotionGtid, err := tm.failover.Execute(ctx, candidate.mysql, oldPrimaryChecker, candidate.name)
 		if err != nil {
-			tm.logger.Error("failover failed", "error", err)
+			retryAt := tm.clock.Now().Add(failoverRetryBackoff)
+			tm.logger.Error("failover failed", "error", err, "retryAt", retryAt)
+			tm.armCrossSiteRetryAfter(retryAt)
 			return
 		}
 		tm.deploymentPromotionExecuted(candidate.name)
@@ -2358,6 +2401,22 @@ func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates
 		}()
 	}
 	wg.Wait()
+
+	tm.mu.RLock()
+	lastPromotionRaw := tm.promotionGtidExecuted
+	groupHasData := tm.groupHasData
+	tm.mu.RUnlock()
+	for i := range infos {
+		if !infos[i].ok {
+			continue
+		}
+		if reason := promotionDataRegression(infos[i].gtid, lastPromotionRaw, groupHasData); reason != "" {
+			tm.logger.Error("failover picker: refusing candidate whose data regressed",
+				"site", infos[i].name, "gtid", infos[i].gtid.String(),
+				"promotionGtid", lastPromotionRaw, "reason", reason)
+			infos[i].ok = false
+		}
+	}
 
 	best := -1
 	for i := range infos {
@@ -2738,14 +2797,24 @@ func (tm *TopologyManager) isUpdating() bool {
 }
 
 func (tm *TopologyManager) armCrossSiteRetry() {
+	tm.armCrossSiteRetryAfter(time.Time{})
+}
+
+// armCrossSiteRetryAfter arms the deferred-decision retry no earlier than
+// notBefore. Arming twice keeps the later bound so a cooldown is not cut short.
+func (tm *TopologyManager) armCrossSiteRetryAfter(notBefore time.Time) {
 	tm.mu.Lock()
 	tm.crossSiteRetry = true
+	if notBefore.After(tm.crossSiteRetryNotBefore) {
+		tm.crossSiteRetryNotBefore = notBefore
+	}
 	tm.mu.Unlock()
 }
 
 func (tm *TopologyManager) clearCrossSiteRetry() {
 	tm.mu.Lock()
 	tm.crossSiteRetry = false
+	tm.crossSiteRetryNotBefore = time.Time{}
 	tm.mu.Unlock()
 }
 
@@ -2756,8 +2825,9 @@ func (tm *TopologyManager) clearCrossSiteRetry() {
 func (tm *TopologyManager) crossSiteRetryReady() bool {
 	tm.mu.RLock()
 	armed := tm.crossSiteRetry
+	notBefore := tm.crossSiteRetryNotBefore
 	tm.mu.RUnlock()
-	if !armed {
+	if !armed || tm.clock.Now().Before(notBefore) {
 		return false
 	}
 	return !tm.isTopologyFrozen() && !tm.isPlannedFailoverActive() &&
@@ -3095,8 +3165,9 @@ func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty st
 			tm.mu.RLock()
 			rec := tm.recovery[site.name]
 			inRecovery := rec != nil && (rec.state == recoveryStateBlocked || rec.state == recoveryStateInProgress)
+			probeFailed := site.probeFailed
 			tm.mu.RUnlock()
-			if inRecovery {
+			if inRecovery || probeFailed {
 				continue
 			}
 			var rs *mysql.ReplicaStatus
@@ -3153,6 +3224,12 @@ func (tm *TopologyManager) detectAndFenceEmptyWritableSite(ctx context.Context) 
 		site := &tm.sites[i]
 		if site.state != state.StateWritable || site.role == state.SiteRoleReadOnly {
 			continue
+		}
+		tm.mu.RLock()
+		probeFailed := site.probeFailed
+		tm.mu.RUnlock()
+		if probeFailed {
+			return "", ""
 		}
 		var rs *mysql.ReplicaStatus
 		var hasSchemas bool
@@ -3446,6 +3523,13 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 		return tm.setupReplicationForBootstrap(ctx, replica, primaryHost)
 	}
 
+	// The clone_status row from before this attempt, so the outcome check
+	// below cannot mistake an earlier clone's result for this one's.
+	prevClone, prevErr := replica.CloneStatus(ctx)
+	if prevErr != nil {
+		tm.logger.Warn("could not read clone status before clone", "error", prevErr)
+	}
+
 	// Phase 1: Clone from primary.
 	err := tm.bootstrap.BootstrapReplica(ctx, BootstrapOpts{
 		Primary:      primary,
@@ -3480,6 +3564,16 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 		return fmt.Errorf("wait for replica restart: %w", waitErr)
 	}
 
+	if verifyErr := tm.verifyCloneOutcome(ctx, primary, replica, prevClone); verifyErr != nil {
+		fenceErr := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+			return replica.SetSuperReadOnly(probeCtx, true)
+		})
+		if fenceErr != nil {
+			tm.logger.Warn("failed to re-fence clone recipient after failed clone", "error", fenceErr)
+		}
+		return fmt.Errorf("clone: %w", verifyErr)
+	}
+
 	// Phase 3: Configure and start replication.
 	tm.mu.Lock()
 	tm.bootstrapPhase = BootstrapPhaseSetupRepl
@@ -3495,6 +3589,78 @@ func (tm *TopologyManager) runBootstrap(ctx context.Context, primary, replica my
 		return fmt.Errorf("setup replication: %w", err)
 	}
 
+	return nil
+}
+
+// cloneOutcomePollInterval is how often verifyCloneOutcome re-reads the
+// recipient's clone_status while waiting for a terminal state.
+const cloneOutcomePollInterval = 2 * time.Second
+
+// verifyCloneOutcome confirms that the CLONE INSTANCE just issued against
+// recipient completed. A dropped client connection is ambiguous: it is how a
+// successful clone ends (the recipient restarts) and also how a killed or
+// aborted clone ends, after MySQL has already dropped all user data.
+// performance_schema.clone_status survives the restart and records the
+// outcome, so wait for a row newer than prev in a terminal state. As an
+// independent check, a recipient left with an empty GTID set while the donor
+// has history was wiped, not cloned.
+func (tm *TopologyManager) verifyCloneOutcome(ctx context.Context, donor, recipient mysql.Checker, prev *mysql.CloneStatus) error {
+	deadline := time.Now().Add(tm.cloneTimeout())
+	for {
+		var st *mysql.CloneStatus
+		readErr := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+			var err error
+			st, err = recipient.CloneStatus(probeCtx)
+			return err
+		})
+		switch {
+		case readErr != nil:
+			// The recipient may still be restarting.
+		case st == nil:
+			tm.logger.Warn("clone status unavailable on recipient; verifying by GTID only")
+		case prev != nil && st.BeginTime == prev.BeginTime:
+			// Still the previous clone's row: this attempt has not been recorded yet.
+		case st.State == mysql.CloneStateFailed:
+			return fmt.Errorf("clone failed on recipient (error %d: %s)", st.ErrorNo, st.ErrorMessage)
+		case st.State == mysql.CloneStateCompleted:
+		default:
+			readErr = fmt.Errorf("clone state %q", st.State)
+		}
+		if readErr == nil && (st == nil || st.State == mysql.CloneStateCompleted) {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("clone outcome not confirmed before timeout (last: %v)", readErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(cloneOutcomePollInterval):
+		}
+	}
+
+	var donorRaw, recipientRaw string
+	if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+		var err error
+		if donorRaw, err = donor.GetGtidExecuted(probeCtx); err != nil {
+			return err
+		}
+		recipientRaw, err = recipient.GetGtidExecuted(probeCtx)
+		return err
+	}); err != nil {
+		return fmt.Errorf("read GTID sets after clone: %w", err)
+	}
+	donorGtid, err := mysql.ParseGTIDSet(donorRaw)
+	if err != nil {
+		return fmt.Errorf("parse donor GTID after clone: %w", err)
+	}
+	recipientGtid, err := mysql.ParseGTIDSet(recipientRaw)
+	if err != nil {
+		return fmt.Errorf("parse recipient GTID after clone: %w", err)
+	}
+	if !donorGtid.IsEmpty() && recipientGtid.IsEmpty() {
+		return fmt.Errorf("recipient has no data after clone (empty gtid_executed; donor has %s)", donorGtid.String())
+	}
 	return nil
 }
 
@@ -3533,6 +3699,34 @@ func (tm *TopologyManager) setupReplicationForBootstrap(ctx context.Context, rep
 		return fmt.Errorf("setup replication: %w", err)
 	}
 	return nil
+}
+
+// promotionDataRegression returns why promoting a candidate with GTID set
+// candidate would discard committed history, or "" when it would not. An
+// empty set in a group known to hold data means the datadir was wiped (a
+// failed CLONE drops all user data before copying); a set that does not
+// contain the GTID recorded at the last promotion means the candidate never
+// caught up with history the group has already acknowledged. Either way the
+// candidate must be recloned, not promoted: promoting it silently replaces
+// the data set.
+func promotionDataRegression(candidate mysql.GTIDSet, lastPromotionRaw string, groupHasData bool) string {
+	if candidate.IsEmpty() {
+		if groupHasData || strings.TrimSpace(lastPromotionRaw) != "" {
+			return "empty gtid_executed in a group that holds data"
+		}
+		return ""
+	}
+	if lastPromotionRaw == "" {
+		return ""
+	}
+	last, err := mysql.ParseGTIDSet(lastPromotionRaw)
+	if err != nil || last.IsEmpty() {
+		return ""
+	}
+	if !candidate.Contains(last) {
+		return "gtid_executed does not contain the last promotion GTID"
+	}
+	return ""
 }
 
 // isCloneConnectionDrop reports whether an error from CLONE INSTANCE looks

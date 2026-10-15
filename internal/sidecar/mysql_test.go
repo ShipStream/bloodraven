@@ -48,7 +48,7 @@ func TestKillableConnectionSparesReplicationThreads(t *testing.T) {
 		{"replicator", "Binlog Dump"},
 	}
 	for _, c := range spared {
-		if killableConnection(c.user, c.command) {
+		if killableConnection(c.user, c.command, "") {
 			t.Errorf("killableConnection(%q, %q) = true, want false", c.user, c.command)
 		}
 	}
@@ -60,7 +60,7 @@ func TestKillableConnectionSparesReplicationThreads(t *testing.T) {
 		{"replicator", "Query"}, // an ordinary session, not a binlog feed
 	}
 	for _, c := range killed {
-		if !killableConnection(c.user, c.command) {
+		if !killableConnection(c.user, c.command, "") {
 			t.Errorf("killableConnection(%q, %q) = false, want true", c.user, c.command)
 		}
 	}

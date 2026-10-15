@@ -29,6 +29,7 @@ type killFakeRow struct {
 	id      driver.Value
 	user    string
 	command string
+	info    string
 }
 
 // killFakeConn serves the processlist query and the KILLs that follow.
@@ -77,7 +78,7 @@ type killFakeRows struct {
 	next int
 }
 
-func (r *killFakeRows) Columns() []string { return []string{"id", "user", "command"} }
+func (r *killFakeRows) Columns() []string { return []string{"id", "user", "command", "info"} }
 func (r *killFakeRows) Close() error      { return nil }
 
 func (r *killFakeRows) Next(dest []driver.Value) error {
@@ -92,6 +93,7 @@ func (r *killFakeRows) Next(dest []driver.Value) error {
 	dest[0] = row.id
 	dest[1] = row.user
 	dest[2] = row.command
+	dest[3] = row.info
 	return nil
 }
 
@@ -122,6 +124,7 @@ func TestKillConnectionsEvictsOnlyApplicationSessions(t *testing.T) {
 		{id: int64(8), user: "system user", command: "Connect"},    // replica I/O
 		{id: int64(9), user: "replicator", command: "Binlog Dump"}, // outbound feed
 		{id: int64(10), user: "root", command: "Sleep"},
+		{id: int64(11), user: "root", command: "Query", info: "CLONE INSTANCE FROM 'repl'@'mysql-iad':3306 IDENTIFIED BY 'x'"},
 	}}
 	m := newKillFakeMysql(t, conn)
 

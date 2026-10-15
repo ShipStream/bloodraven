@@ -119,8 +119,10 @@ Faithful where correctness depends on it: `super_read_only=ON` forces
 `read_only=ON` and `read_only=OFF` clears `super_read_only`; `RESET REPLICA
 ALL` / `CHANGE REPLICATION SOURCE` require stopped threads (error 3081) and
 purge relay logs; a replica whose GTID set exceeds its source breaks the IO
-thread like error 1236; relay drain applies local backlog even when the
-source is unreachable; crashed sites keep durable state and can boot fenced
+thread like error 1236; a receiver whose source is unreachable reports a
+connect error in `LastIOError`; relay drain aborts only on an applier
+(`LastSQLError`) error and applies local backlog even when the source is
+unreachable or the receiver has errored; crashed sites keep durable state and can boot fenced
 or writable (both happen in production).
 
 Operator death is modeled as "the process stops interacting", not as a

@@ -132,6 +132,10 @@ func (t *trackingMock) GetGtidExecuted(_ context.Context) (string, error) {
 	return t.gtidExecuted, nil
 }
 
+func (t *trackingMock) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
+	return nil, nil
+}
+
 func (t *trackingMock) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	t.record("CloneInstance")
 	return nil

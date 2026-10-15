@@ -32,6 +32,12 @@ func (tm *TopologyManager) confirmedActivePrimary(ctx context.Context) (*siteTra
 	if site == nil || !site.isPromotable() || site.host == "" {
 		return nil, fmt.Errorf("active site %q is not a valid donor", name)
 	}
+	tm.mu.RLock()
+	probeFailed := site.probeFailed
+	tm.mu.RUnlock()
+	if probeFailed {
+		return nil, fmt.Errorf("active site %q failed its liveness probe this poll", name)
+	}
 	if err := tm.confirmWritable(ctx, site); err != nil {
 		return nil, err
 	}

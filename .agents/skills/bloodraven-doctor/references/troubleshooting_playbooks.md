@@ -194,3 +194,35 @@ For an isolated writable site, probe `/status` (`self_fenced`) and `/peer/active
 3. To adopt an existing schema or account deliberately, drop and recreate it under a name this CR creates — adoption is refused by design and cannot be granted after the fact.
 4. A skipped drop is correct behaviour, not a leak: the account is still claimed by something. It has already lost its rights on the deleted database. If it genuinely should not outlive the CR, remove the remaining claim (the sibling's `grants[]`/`users[]` entry, or this CR's own `grants[]`) and drop the account by hand with the group's operator credential.
 5. A stuck `pending*` record almost always means the apply keeps failing earlier. Look at the `Ready` condition reason first (`PrimaryUnavailable` is transient and self-heals; `MySQLError`, `GrantUserMissing` and `InvalidSpec` are verdicts about the CR).
+
+---
+
+## 8. Sidecar restarting, unready, or not fencing during a MySQL stall
+
+### Symptoms
+- The `sidecar` container restarts or sits in `CrashLoopBackOff` while `mysqld` is hung, in crash recovery, or restarting after CLONE.
+- Pods go unready during a MySQL stall.
+- After a stall or a sidecar restart, a site that is not the active one is still `super_read_only=OFF`.
+
+### Diagnostic steps
+1. Check which paths the probes hit. Liveness must be `/peer/ping` and readiness `/health`:
+   ```bash
+   kubectl get deploy -n <ns> -l app.kubernetes.io/instance=<group> \
+     -o jsonpath='{range .items[*]}{.metadata.name}{" live="}{.spec.template.spec.containers[?(@.name=="sidecar")].livenessProbe.httpGet.path}{" ready="}{.spec.template.spec.containers[?(@.name=="sidecar")].readinessProbe.httpGet.path}{"\n"}{end}'
+   ```
+   A liveness path of `/health` means the operator predates the fix, so any MySQL stall longer than about 30s restarts the fencing agent. Upgrading the operator rolls the new probe out through the ordered update. That fixes liveness even for a pinned older `spec.sidecarImage`, since every sidecar serves `/peer/ping`.
+2. Unready with liveness passing is the intended state while MySQL is down. Confirm the process is alive and the fencing loop is making progress:
+   ```bash
+   ./.agents/skills/bloodraven-doctor/scripts/sidecar-probe.sh -n <ns> <group> livez
+   ```
+   `secondsSinceProgress` should stay well under `stallThresholdSeconds`. A 503 here means the loop is wedged on a call that ignored its timeout. Capture `support-bundle.sh` output before anyone restarts the container. A sidecar older than this endpoint returns 404 for it.
+3. Read the sidecar's `safety net:` log lines (see `site/content/docs/8.observability/7.log-schema.md`):
+   - `could not set initial super_read_only; the fencing monitor will retry` and `MySQL was unreachable long enough to have restarted; re-arming` mean a fence is still owed. On the first tick where MySQL answers, the monitor fences it unless the operator confirms this site on that tick.
+   - `set super_read_only=ON after MySQL became reachable`, `super_read_only=ON confirmed; staying fenced`, and `operator confirms this is the active site; ...` mean the check completed.
+   - `could not set super_read_only; will retry` repeating means MySQL answers reads but rejects the fence write. Check the operator user's grants and MySQL's error log.
+4. Compare `@@super_read_only` with the operator's `activeSite` (`/peer/active-site`, or `status.activeSite` on the CR). The topology-mismatch rule fences a writable non-active site within one `peerCheckInterval` whenever an authoritative view exists.
+
+### Safe remediation
+1. Do not restart the sidecar to "re-run the safety net". The monitor applies the same rule on its own once MySQL answers, and a restart only adds a window with no fencing agent.
+2. If a non-active site is writable and the sidecar logs show no pending `safety net:` work and no topology view, fence it by hand (playbook 1, step 1) and investigate why neither the operator nor a peer reported an active site.
+3. A short stall (under 30s) does not re-arm the safety net, by design: a slow query on the active primary must not fence it. A `mysqld` that restarts that quickly comes up writable and is fenced only by the topology-mismatch rule or the operator.

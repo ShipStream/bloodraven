@@ -133,6 +133,10 @@ func (b *bootstrapMock) GetGtidExecuted(_ context.Context) (string, error) {
 	return "", nil
 }
 
+func (b *bootstrapMock) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
+	return nil, nil
+}
+
 func (b *bootstrapMock) CloneInstance(_ context.Context, _, _, _ string, _ bool, cloneTimeoutSec int) error {
 	b.record("CloneInstance")
 	b.mu.Lock()
@@ -170,7 +174,7 @@ func TestBootstrapReplica_HappyPath(t *testing.T) {
 
 	// Replica should be thawed before clone, then cloned.
 	rCalls := replica.getCalls()
-	expected := []string{"EnsureClonePlugin", "SetSuperReadOnly(OFF)", "SetReadOnly", "SetCloneDonorList", "KillAppConnections", "CloneInstance"}
+	expected := []string{"EnsureClonePlugin", "SetSuperReadOnly(OFF)", "SetCloneDonorList", "KillAppConnections", "CloneInstance"}
 	if len(rCalls) != len(expected) {
 		t.Fatalf("replica calls: got %v, want %v", rCalls, expected)
 	}

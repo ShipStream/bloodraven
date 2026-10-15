@@ -995,3 +995,47 @@ func TestFencingResolvesAnAmbiguousFenceWrite(t *testing.T) {
 		}
 	})
 }
+
+// cloningFencer is a writable non-active recipient while the operator's
+// CLONE INSTANCE runs on it.
+type cloningFencer struct {
+	*mockFencer
+	cloning bool
+}
+
+func (c *cloningFencer) CloneInProgress(context.Context) (bool, error) { return c.cloning, nil }
+
+// The operator clears read_only on a clone recipient because CLONE requires
+// it. Rule #1 used to see a writable non-active site, fence it and kill the
+// CLONE session, which aborts the clone after MySQL has already dropped the
+// recipient's data (observed live twice). While a clone runs the monitor must
+// leave the site alone; once it finishes the normal rules apply again.
+func TestEvaluate_DoesNotFenceDuringClone(t *testing.T) {
+	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	f := &cloningFencer{mockFencer: newMockFencer(false), cloning: true}
+	cache := &TopologyCache{}
+	cache.Set("pdx", clk.Now())
+	fm := newTopologyFencingMonitor(f, clk, cache, nil)
+	fm.lastBloodravenOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
+
+	fm.evaluate(context.Background())
+	if fm.fenced.Load() || f.superReadOnly {
+		t.Fatal("fenced a clone recipient while its CLONE INSTANCE was running")
+	}
+
+	f.cloning = false
+	fm.evaluate(context.Background())
+	if !fm.fenced.Load() {
+		t.Fatal("did not fence a writable non-active site once the clone finished")
+	}
+}
+
+func TestKillableConnectionSparesClone(t *testing.T) {
+	if killableConnection("root", "Query", "CLONE INSTANCE FROM 'repl'@'mysql-iad':3306 IDENTIFIED BY 'x'") {
+		t.Fatal("CLONE INSTANCE session would be killed by a fence")
+	}
+	if !killableConnection("root", "Query", "SELECT 1") {
+		t.Fatal("ordinary root session must still be killable")
+	}
+}

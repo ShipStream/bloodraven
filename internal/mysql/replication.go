@@ -3,7 +3,9 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -13,10 +15,26 @@ type ReplicaStatus struct {
 	IORunning           bool
 	SQLRunning          bool
 	SecondsBehindSource *int64
-	LastError           string
-	SourceHost          string
-	ExecutedGtidSet     string
-	RetrievedGtidSet    string
+	// LastError is the first non-empty of Last_Error, Last_IO_Error and
+	// Last_SQL_Error. Last_Error is MySQL's alias for Last_SQL_Error, so this
+	// is the applier error when there is one and the receiver error otherwise.
+	// It is a summary for status reporting; code that must tell the threads
+	// apart reads LastSQLError or LastIOError.
+	LastError string
+	// LastIOErrno and LastIOError are the receiver (IO) thread's last error.
+	// A replica whose source is down reports a connection error here while
+	// the relay log it already wrote is intact and still applicable.
+	LastIOErrno int
+	LastIOError string
+	// LastSQLErrno and LastSQLError are the applier's last error: the SQL
+	// thread, or on a multithreaded replica the coordinator, which also
+	// reports worker failures. A non-empty value means the applier stopped
+	// and cannot apply the relay log without intervention.
+	LastSQLErrno     int
+	LastSQLError     string
+	SourceHost       string
+	ExecutedGtidSet  string
+	RetrievedGtidSet string
 }
 
 // ReplicationSourceOpts configures CHANGE REPLICATION SOURCE TO.
@@ -163,8 +181,22 @@ func (m *checker) ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error)
 	if v, ok := colMap["Last_SQL_Error"]; ok && v.Valid && rs.LastError == "" {
 		rs.LastError = v.String
 	}
-	if v, ok := colMap["Last_Errno"]; ok && v.Valid && rs.LastError == "" {
-		// fallback
+
+	rs.LastIOErrno = parseErrno(colMap["Last_IO_Errno"])
+	if v, ok := colMap["Last_IO_Error"]; ok && v.Valid {
+		rs.LastIOError = v.String
+	}
+	// Last_Errno/Last_Error alias the applier columns; they are the fallback
+	// for a server that does not report Last_SQL_* separately.
+	rs.LastSQLErrno = parseErrno(colMap["Last_SQL_Errno"])
+	if rs.LastSQLErrno == 0 {
+		rs.LastSQLErrno = parseErrno(colMap["Last_Errno"])
+	}
+	if v, ok := colMap["Last_SQL_Error"]; ok && v.Valid {
+		rs.LastSQLError = v.String
+	}
+	if v, ok := colMap["Last_Error"]; ok && v.Valid && rs.LastSQLError == "" {
+		rs.LastSQLError = v.String
 	}
 
 	if v, ok := colMap["Source_Host"]; ok && v.Valid {
@@ -246,11 +278,30 @@ func (m *checker) StartReplicaSQLThread(ctx context.Context) error {
 	return nil
 }
 
+// WaitForRelayLogDrain waits, up to timeout, until the replica has applied
+// every transaction its receiver had already written to the relay log when
+// the drain began, so a following STOP REPLICA / RESET REPLICA ALL discards
+// nothing that reached this replica.
+//
+// Completion is GTID-based: the Retrieved_Gtid_Set seen on the first poll is
+// the target, and the drain is complete once Executed_Gtid_Set contains it
+// (or contains the current Retrieved_Gtid_Set). Seconds_Behind_Source is not
+// used: it has one-second granularity, measures the age of the event being
+// applied rather than the queue depth, and is NULL whenever the IO thread is
+// down. Fixing the target at the first poll keeps the drain finite when the
+// IO thread is still connected and receiving (an operator-only partition).
+//
+// Only an applier error aborts the drain. A receiver (IO thread) error is the
+// normal state of a candidate whose primary has just died, and the relay log
+// it already wrote is still applicable. A stopped, error-free SQL thread with
+// pending relay log is restarted once.
 func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	interval := 500 * time.Millisecond
 	const maxInterval = 4 * time.Second
 	sqlThreadRestarted := false
+	var target GTIDSet
+	haveTarget := false
 
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
@@ -264,42 +315,46 @@ func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duratio
 			return nil
 		}
 
-		if rs.LastError != "" {
-			return fmt.Errorf("relay log drain aborted: SQL thread error: %s", rs.LastError)
+		if rs.LastSQLError != "" {
+			return fmt.Errorf("relay log drain aborted: SQL thread error: %s",
+				formatReplicationError(rs.LastSQLErrno, rs.LastSQLError))
 		}
 
-		if rs.SQLRunning {
-			if rs.SecondsBehindSource != nil && *rs.SecondsBehindSource == 0 {
-				return nil
-			}
-		} else {
-			// SQL thread is stopped. Check for unapplied relay logs by comparing
-			// Retrieved_Gtid_Set (fetched by IO thread) with Executed_Gtid_Set.
-			hasPending, parseErr := hasUnappliedRelayLogs(rs.RetrievedGtidSet, rs.ExecutedGtidSet)
-			if parseErr != nil {
-				return fmt.Errorf("relay log drain: check pending relay logs: %w", parseErr)
-			}
-			if !hasPending {
-				return nil
-			}
-			// Pending relay logs exist — restart the SQL thread to apply them.
-			if !sqlThreadRestarted {
-				if startErr := m.StartReplicaSQLThread(ctx); startErr != nil {
-					// Connection may be stale after failover turbulence.
-					// Force a reconnect via Ping and retry once.
-					if pingErr := m.db.PingContext(ctx); pingErr != nil {
-						return fmt.Errorf("relay log drain: restart SQL thread: %w (ping also failed: %v)", startErr, pingErr)
-					}
-					if retryErr := m.StartReplicaSQLThread(ctx); retryErr != nil {
-						return fmt.Errorf("relay log drain: restart SQL thread after reconnect: %w", retryErr)
-					}
+		retrieved, executed, err := parseRelayLogSets(rs)
+		if err != nil {
+			return fmt.Errorf("relay log drain: check pending relay logs: %w", err)
+		}
+		if !haveTarget {
+			target, haveTarget = retrieved, true
+		}
+		pending := unappliedRelayLog(target, retrieved, executed)
+		if pending.IsEmpty() {
+			return nil
+		}
+
+		if !rs.SQLRunning && !sqlThreadRestarted {
+			// Pending relay logs and a stopped, error-free SQL thread:
+			// restart it to apply them.
+			if startErr := m.StartReplicaSQLThread(ctx); startErr != nil {
+				// Connection may be stale after failover turbulence.
+				// Force a reconnect via Ping and retry once.
+				if pingErr := m.db.PingContext(ctx); pingErr != nil {
+					return fmt.Errorf("relay log drain: restart SQL thread: %w (ping also failed: %v)", startErr, pingErr)
 				}
-				sqlThreadRestarted = true
+				if retryErr := m.StartReplicaSQLThread(ctx); retryErr != nil {
+					return fmt.Errorf("relay log drain: restart SQL thread after reconnect: %w", retryErr)
+				}
 			}
+			sqlThreadRestarted = true
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("relay log drain timed out after %s", timeout)
+			msg := fmt.Sprintf("relay log drain timed out after %s with %d relay log transactions unapplied (%s)",
+				timeout, pending.TransactionCount(), pending)
+			if rs.LastIOError != "" {
+				msg += "; IO thread error: " + formatReplicationError(rs.LastIOErrno, rs.LastIOError)
+			}
+			return errors.New(msg)
 		}
 
 		select {
@@ -315,20 +370,43 @@ func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duratio
 	}
 }
 
-func hasUnappliedRelayLogs(retrievedRaw, executedRaw string) (bool, error) {
-	if strings.TrimSpace(retrievedRaw) == "" {
-		return false, nil
-	}
-	retrieved, err := ParseGTIDSet(retrievedRaw)
+func parseRelayLogSets(rs *ReplicaStatus) (retrieved, executed GTIDSet, err error) {
+	retrieved, err = ParseGTIDSet(rs.RetrievedGtidSet)
 	if err != nil {
-		return false, fmt.Errorf("parse retrieved GTID set: %w", err)
+		return nil, nil, fmt.Errorf("parse retrieved GTID set: %w", err)
 	}
-	if retrieved.IsEmpty() {
-		return false, nil
-	}
-	executed, err := ParseGTIDSet(executedRaw)
+	executed, err = ParseGTIDSet(rs.ExecutedGtidSet)
 	if err != nil {
-		return false, fmt.Errorf("parse executed GTID set: %w", err)
+		return nil, nil, fmt.Errorf("parse executed GTID set: %w", err)
 	}
-	return !executed.Contains(retrieved), nil
+	return retrieved, executed, nil
+}
+
+// unappliedRelayLog returns the transactions of the drain target the replica
+// has not executed yet. It is empty once the target is executed, and also
+// once everything currently retrieved is executed, which covers a retrieved
+// set that shrank under the drain (a relay log reset).
+func unappliedRelayLog(target, retrieved, executed GTIDSet) GTIDSet {
+	if executed.Contains(retrieved) {
+		return GTIDSet{}
+	}
+	return target.Subtract(executed)
+}
+
+func formatReplicationError(errno int, msg string) string {
+	if errno == 0 {
+		return msg
+	}
+	return fmt.Sprintf("%d: %s", errno, msg)
+}
+
+func parseErrno(v sql.NullString) int {
+	if !v.Valid {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v.String))
+	if err != nil {
+		return 0
+	}
+	return n
 }

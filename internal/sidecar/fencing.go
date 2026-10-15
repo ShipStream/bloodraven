@@ -15,6 +15,12 @@ import (
 )
 
 // Fencer abstracts MySQL operations needed by the fencing monitor.
+// cloneDetector is implemented by Fencers that can tell whether a CLONE
+// statement is executing on the server.
+type cloneDetector interface {
+	CloneInProgress(ctx context.Context) (bool, error)
+}
+
 type Fencer interface {
 	IsReadOnly(ctx context.Context) (bool, error)
 	IsSuperReadOnly(ctx context.Context) (bool, error)
@@ -45,6 +51,12 @@ type Fencer interface {
 // attached. Otherwise the monitor degrades to lease-only behavior,
 // which matches historical behavior and keeps single-site test
 // harnesses simple.
+//
+// With WithSafetyNet, the monitor also finishes the startup safety net
+// when startup could not, and re-applies it after a long MySQL outage
+// (see resolveSafetyNet). Every MySQL call and every HTTP request in a
+// tick is bounded, so a hung mysqld costs the loop a few seconds per tick
+// and never stops it.
 type FencingMonitor struct {
 	mysql            Fencer
 	bloodravenAddr   string
@@ -74,7 +86,64 @@ type FencingMonitor struct {
 	namespace string
 	group     string
 	topology  *TopologyCache
+
+	// operatorAnswered and operatorActiveSite record what the operator
+	// itself, not a peer relay, said on this tick's /active-site poll. Check
+	// resets them each tick. The deferred safety net trusts only this
+	// direct answer, as RunSafetyNet does at startup.
+	operatorAnswered   bool
+	operatorActiveSite string
+
+	// Deferred safety net, populated by WithSafetyNet and owned by the
+	// monitor goroutine. safetyNetPending means the startup guarantee
+	// (super-fenced unless the operator confirms this site is active) is
+	// not established yet: RunSafetyNet could not reach MySQL, or MySQL
+	// has since been unreachable long enough to have restarted.
+	// mysqlDownSince is when the current run of failed MySQL probes began,
+	// and is zero while MySQL answers.
+	safetyNetClearer SuperReadOnlyClearer
+	safetyNetPending bool
+	mysqlDownSince   time.Time
+
+	// heartbeat is the f.clock reading, in Unix nanoseconds, of the loop's
+	// latest progress: Run's start and the start and end of every Check.
+	// It is zero until the loop starts, and atomic because /livez reads it.
+	heartbeat atomic.Int64
 }
+
+// SuperReadOnlyClearer is the one write the deferred safety net needs
+// beyond Fencer: restoring writability when the operator confirms this
+// site is active, as RunSafetyNet's last step does.
+type SuperReadOnlyClearer interface {
+	ClearSuperReadOnly(ctx context.Context) error
+}
+
+const (
+	// mysqlProbeTimeout bounds each read the monitor issues against local
+	// MySQL. A hung mysqld (SIGSTOP, long crash recovery, a CLONE restart)
+	// costs one bounded probe per tick, never the loop.
+	mysqlProbeTimeout = 5 * time.Second
+
+	// httpRequestTimeout bounds each operator and peer request on the
+	// monitor goroutine, whatever http.Client was injected.
+	httpRequestTimeout = 2 * time.Second
+
+	// evaluateTimeout caps all MySQL work in one tick: the read_only
+	// probe, one super_read_only probe, and one fence or clear with its
+	// confirming read. Each step has its own shorter bound too; the cap
+	// keeps a tick bounded if a later change adds a step.
+	evaluateTimeout = 2*mysqlProbeTimeout + fenceTimeout + fenceProbeTimeout
+
+	// safetyNetOutageRearm is how long MySQL must stay unreachable before
+	// the monitor re-arms the startup safety net. A mysqld gone this long
+	// may have restarted, and a restarted mysqld comes up writable
+	// whatever its role was. While sidecar liveness probed MySQL, an
+	// outage this long (three failed 10s probes) restarted the sidecar and
+	// re-ran the safety net as a side effect. The re-arm keeps that
+	// protection without the restart, and without the gap in which no
+	// fencing agent runs.
+	safetyNetOutageRearm = 30 * time.Second
+)
 
 // NewFencingMonitor creates a new FencingMonitor.
 func NewFencingMonitor(
@@ -161,6 +230,79 @@ func (f *FencingMonitor) topologyEnabled() bool {
 	return f.topology != nil && f.mySite != "" && f.namespace != "" && f.group != ""
 }
 
+// topologyMismatch reports whether the cached authoritative view names an
+// active site other than this one (rule #1).
+func (f *FencingMonitor) topologyMismatch() (TopologySnapshot, bool) {
+	if !f.topologyEnabled() {
+		return TopologySnapshot{}, false
+	}
+	snap := f.topology.Snapshot()
+	return snap, snap.ActiveSite != "" && snap.ActiveSite != f.mySite
+}
+
+// WithSafetyNet enables the deferred startup safety net. Call once after
+// WithTopology and before Run. Returns the receiver for chaining.
+//
+// With it enabled, the monitor keeps RunSafetyNet's guarantee past the
+// point where startup could establish it: MySQL stays super-fenced unless
+// the operator confirms this site is active. ArmSafetyNet hands over a
+// startup check that did not settle, and an outage of
+// safetyNetOutageRearm or longer re-arms the check. It needs the same
+// identity and operator address RunSafetyNet does, and stays disabled
+// without them.
+func (f *FencingMonitor) WithSafetyNet(clearer SuperReadOnlyClearer) *FencingMonitor {
+	f.safetyNetClearer = clearer
+	return f
+}
+
+func (f *FencingMonitor) safetyNetEnabled() bool {
+	return f.safetyNetClearer != nil && f.bloodravenAddr != "" && f.topologyEnabled()
+}
+
+// ArmSafetyNet records that the startup safety net did not settle (the
+// initial fence or the active-site clear was not confirmed), so the monitor
+// finishes it once MySQL answers. Call before Run, from the goroutine that
+// starts Run. It is a no-op while the safety net is disabled.
+func (f *FencingMonitor) ArmSafetyNet() {
+	if f.safetyNetEnabled() {
+		f.safetyNetPending = true
+	}
+}
+
+// SafetyNetPending reports whether the deferred safety net is armed. It is
+// not safe to call concurrently with Run.
+func (f *FencingMonitor) SafetyNetPending() bool { return f.safetyNetPending }
+
+func (f *FencingMonitor) beat() { f.heartbeat.Store(f.clock.Now().UnixNano()) }
+
+// StallThreshold is how long the loop may go without progress before
+// /livez reports it wedged. Every request and every MySQL call in a tick
+// has its own timeout, so a healthy loop makes progress well inside this
+// window even against a hung mysqld and unreachable peers. Exceeding it
+// means a call ignored its context, and only a restart recovers from that.
+func (f *FencingMonitor) StallThreshold() time.Duration {
+	requests := 2 + 2*len(f.peerAddrs)
+	maxCheck := time.Duration(requests)*httpRequestTimeout + evaluateTimeout
+	return 2 * (f.checkInterval + maxCheck)
+}
+
+// LoopHealth reports how long ago the loop last made progress, and whether
+// it has started. Safe to call from any goroutine.
+func (f *FencingMonitor) LoopHealth() (sinceProgress time.Duration, started bool) {
+	ns := f.heartbeat.Load()
+	if ns == 0 {
+		return 0, false
+	}
+	return f.clock.Now().Sub(time.Unix(0, ns)), true
+}
+
+// Stalled reports whether the loop started and then went longer than
+// StallThreshold without progress. Safe to call from any goroutine.
+func (f *FencingMonitor) Stalled() bool {
+	since, started := f.LoopHealth()
+	return started && since > f.StallThreshold()
+}
+
 // SeedStartupGrace stamps every reachability signal as seen right now, so
 // rule #2 cannot fire until a full lease has elapsed since this call.
 //
@@ -186,6 +328,7 @@ func (f *FencingMonitor) SeedStartupGrace(now time.Time) {
 // Run starts the fencing monitor loop. Blocks until ctx is cancelled.
 func (f *FencingMonitor) Run(ctx context.Context) {
 	f.SeedStartupGrace(f.clock.Now())
+	f.beat()
 
 	ticker := f.clock.NewTicker(f.checkInterval)
 	defer ticker.Stop()
@@ -201,6 +344,11 @@ func (f *FencingMonitor) Run(ctx context.Context) {
 
 // Check performs a single fencing check cycle. Exported for deterministic testing.
 func (f *FencingMonitor) Check(ctx context.Context) {
+	f.beat()
+	defer f.beat()
+
+	f.operatorAnswered = false
+	f.operatorActiveSite = ""
 	f.checkBloodraven(ctx)
 	if f.topologyEnabled() {
 		f.checkActiveSite(ctx)
@@ -219,6 +367,8 @@ func (f *FencingMonitor) checkBloodraven(ctx context.Context) {
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, httpRequestTimeout)
+	defer cancel()
 	url := fmt.Sprintf("http://%s/healthz", f.bloodravenAddr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -243,6 +393,8 @@ func (f *FencingMonitor) checkPeer(ctx context.Context, addr string) {
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, httpRequestTimeout)
+	defer cancel()
 	url := fmt.Sprintf("http://%s/peer/ping", addr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -272,6 +424,8 @@ func (f *FencingMonitor) checkActiveSite(ctx context.Context) {
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, httpRequestTimeout)
+	defer cancel()
 	endpoint := fmt.Sprintf("http://%s/active-site?namespace=%s&group=%s",
 		f.bloodravenAddr, url.QueryEscape(f.namespace), url.QueryEscape(f.group))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -305,6 +459,8 @@ func (f *FencingMonitor) checkActiveSite(ctx context.Context) {
 		f.logger.Warn("fencing: decode /active-site response", "error", err)
 		return
 	}
+	f.operatorAnswered = true
+	f.operatorActiveSite = body.ActiveSite
 	if body.ActiveSite == "" {
 		// Operator admits it has no active site (e.g. quorum not yet
 		// established). Clear any older active-site view so a stale
@@ -327,6 +483,8 @@ func (f *FencingMonitor) checkPeerTopology(ctx context.Context, addr string) {
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, httpRequestTimeout)
+	defer cancel()
 	endpoint := fmt.Sprintf("http://%s/peer/active-site", addr)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -377,14 +535,22 @@ func (f *FencingMonitor) latestPeerSeen() time.Time {
 }
 
 func (f *FencingMonitor) evaluate(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, evaluateTimeout)
+	defer cancel()
+
 	// Only the primary should self-fence. If MySQL is already read-only, skip.
-	readOnly, err := f.mysql.IsReadOnly(ctx)
+	readOnly, err := f.probeReadOnly(ctx)
 	if err != nil {
+		f.noteMySQLUnreachable()
 		f.logger.Warn("fencing: could not check read_only status", "error", err)
 		return
 	}
+	f.noteMySQLReachable()
+	if f.safetyNetPending && f.resolveSafetyNet(ctx, readOnly) {
+		return
+	}
 	if f.fencePending {
-		superReadOnly, probeErr := f.mysql.IsSuperReadOnly(ctx)
+		superReadOnly, probeErr := f.probeSuperReadOnly(ctx)
 		if probeErr != nil {
 			f.logger.Warn("fencing: could not resolve pending super_read_only write", "error", probeErr)
 			return
@@ -427,23 +593,30 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		return
 	}
 
+	// A running CLONE means the operator made this recipient writable to
+	// replace its data; the site restarts afterwards and the safety net
+	// fences it then. Fencing now would kill or break the clone.
+	if cd, ok := f.mysql.(cloneDetector); ok {
+		if cloning, err := cd.CloneInProgress(ctx); err == nil && cloning {
+			f.logger.Info("fencing: clone in progress on this site; not fencing")
+			return
+		}
+	}
+
 	// Rule #1 — topology mismatch. If the cached authoritative
 	// active site is known and disagrees with our site, fence
 	// immediately. This catches the "stale primary returns from a
 	// partition to find the operator has failed over to the peer"
 	// scenario even when the peer is reachable (peer reachability
 	// alone would otherwise keep rule #2 quiet).
-	if f.topologyEnabled() {
-		snap := f.topology.Snapshot()
-		if snap.ActiveSite != "" && snap.ActiveSite != f.mySite {
-			f.logger.Error("SELF-FENCING: topology mismatch — operator-authoritative active site disagrees with our site, setting super_read_only=ON",
-				"site", f.mySite,
-				"authoritativeActiveSite", snap.ActiveSite,
-				"observedAt", snap.ObservedAt,
-			)
-			f.doFence(ctx)
-			return
-		}
+	if snap, mismatch := f.topologyMismatch(); mismatch {
+		f.logger.Error("SELF-FENCING: topology mismatch — operator-authoritative active site disagrees with our site, setting super_read_only=ON",
+			"site", f.mySite,
+			"authoritativeActiveSite", snap.ActiveSite,
+			"observedAt", snap.ObservedAt,
+		)
+		f.doFence(ctx)
+		return
 	}
 
 	// Rule #2 — lease expiry on every reachability signal.
@@ -471,6 +644,126 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 	)
 
 	f.doFence(ctx)
+}
+
+// probeReadOnly reads @@read_only within mysqlProbeTimeout.
+func (f *FencingMonitor) probeReadOnly(ctx context.Context) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, mysqlProbeTimeout)
+	defer cancel()
+	return f.mysql.IsReadOnly(ctx)
+}
+
+// probeSuperReadOnly reads @@super_read_only within mysqlProbeTimeout.
+func (f *FencingMonitor) probeSuperReadOnly(ctx context.Context) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, mysqlProbeTimeout)
+	defer cancel()
+	return f.mysql.IsSuperReadOnly(ctx)
+}
+
+// noteMySQLUnreachable records the start of a run of failed MySQL probes.
+func (f *FencingMonitor) noteMySQLUnreachable() {
+	if f.mysqlDownSince.IsZero() {
+		f.mysqlDownSince = f.clock.Now()
+	}
+}
+
+// noteMySQLReachable ends a run of failed MySQL probes. If the run lasted
+// safetyNetOutageRearm or longer, it re-arms the safety net, because the
+// mysqld now answering may be a restarted one that came up writable.
+//
+// A pending ambiguous fence write is left to its own resolution path: it
+// already decides whether this monitor's fence holds.
+func (f *FencingMonitor) noteMySQLReachable() {
+	if f.mysqlDownSince.IsZero() {
+		return
+	}
+	down := f.clock.Now().Sub(f.mysqlDownSince)
+	f.mysqlDownSince = time.Time{}
+	if down < safetyNetOutageRearm || !f.safetyNetEnabled() || f.safetyNetPending || f.fencePending {
+		return
+	}
+	f.safetyNetPending = true
+	f.logger.Warn("safety net: MySQL was unreachable long enough to have restarted; re-arming",
+		"unreachableFor", down, "threshold", safetyNetOutageRearm)
+}
+
+// resolveSafetyNet finishes an armed safety net on a tick where MySQL
+// answered. It applies RunSafetyNet's rule to the state MySQL is in now:
+// super-fenced, unless the operator itself confirms on this tick that this
+// site is active. A peer-relayed view is not enough, the same as at
+// startup. It returns true when it handled the tick and false to hand the
+// tick to the normal rules.
+//
+// While armed, the safety net takes precedence over the lease rule, since
+// it fences in every case the lease rule would. The exception is a
+// writable instance whose authoritative view names another active site:
+// that is rule #1, which also evicts sessions and records the self-fence.
+// The tick goes to rule #1 rather than fencing twice.
+//
+// The fence here does not evict sessions or set self_fenced, the same as
+// RunSafetyNet. Eviction on a site the operator has not ruled on could kill
+// an in-flight promotion session (see doFence).
+//
+// The safety net never clears a fence this monitor set itself. Once a
+// self-fence is in place, only the operator lifts it.
+func (f *FencingMonitor) resolveSafetyNet(ctx context.Context, readOnly bool) bool {
+	superReadOnly, err := f.probeSuperReadOnly(ctx)
+	if err != nil {
+		f.logger.Warn("safety net: could not read super_read_only; will retry", "error", err)
+		return true
+	}
+
+	if f.operatorAnswered && f.operatorActiveSite == f.mySite {
+		switch {
+		case !readOnly && !superReadOnly:
+			f.logger.Info("safety net: operator confirms this is the active site; MySQL is already writable",
+				"site", f.mySite)
+		case f.fenced.Load():
+			f.logger.Info("safety net: operator confirms this is the active site; leaving the self-fence for the operator to clear",
+				"site", f.mySite)
+		default:
+			f.logger.Info("safety net: this is the active site, clearing super_read_only", "site", f.mySite)
+			clearCtx, cancel := context.WithTimeout(ctx, fenceTimeout)
+			defer cancel()
+			if err := f.safetyNetClearer.ClearSuperReadOnly(clearCtx); err != nil {
+				f.logger.Error("safety net: failed to clear super_read_only on active site", "error", err)
+				return true
+			}
+		}
+		f.safetyNetPending = false
+		return true
+	}
+
+	if superReadOnly {
+		f.safetyNetPending = false
+		f.logger.Info("safety net: super_read_only=ON confirmed; staying fenced",
+			"site", f.mySite, "activeSite", f.operatorActiveSite, "operatorAnswered", f.operatorAnswered)
+		return true
+	}
+
+	if !readOnly && !f.fenced.Load() {
+		if _, mismatch := f.topologyMismatch(); mismatch {
+			f.safetyNetPending = false
+			return false
+		}
+	}
+
+	fenceCtx, cancel := context.WithTimeout(ctx, fenceTimeout)
+	defer cancel()
+	if err := f.mysql.SetSuperReadOnly(fenceCtx); err != nil {
+		// As in doFence, an error means the outcome is unknown, so ask the
+		// server. Anything short of a confirmed fence stays armed and is
+		// retried on the next tick.
+		landed, probeErr := f.fenceLanded(ctx)
+		if probeErr != nil || !landed {
+			f.logger.Error("safety net: could not set super_read_only; will retry", "error", err, "probeError", probeErr)
+			return true
+		}
+	}
+	f.safetyNetPending = false
+	f.logger.Info("safety net: set super_read_only=ON after MySQL became reachable",
+		"site", f.mySite, "activeSite", f.operatorActiveSite, "operatorAnswered", f.operatorAnswered)
+	return true
 }
 
 // fenceTimeout bounds the whole fence sequence — the super_read_only

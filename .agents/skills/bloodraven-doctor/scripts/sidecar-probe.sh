@@ -10,8 +10,10 @@ MFG_NAME=""
 ENDPOINT="status" # fencing is the shipped alias for /status (self_fenced)
 
 usage() {
-    echo "Usage: $0 [-n <namespace>] [<mysql-failover-group>] [status|keyring|fencing|health|peer|archiver]"
+    echo "Usage: $0 [-n <namespace>] [<mysql-failover-group>] [status|keyring|fencing|health|livez|peer|archiver]"
     echo "Probes sidecar HTTP endpoints on Bloodraven MySQL pods."
+    echo "  health  readiness: MySQL accepts a connection within 2s (503 when not)"
+    echo "  livez   liveness: process up and fencing loop making progress (never touches MySQL)"
     exit 0
 }
 
@@ -24,7 +26,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             usage
             ;;
-        status|keyring|fencing|health|peer|archiver)
+        status|keyring|fencing|health|livez|peer|archiver)
             ENDPOINT="$1"
             shift
             ;;
@@ -62,6 +64,9 @@ case "$ENDPOINT" in
         ;;
     health)
         TARGET_PATH="/health"
+        ;;
+    livez)
+        TARGET_PATH="/livez"
         ;;
     peer)
         TARGET_PATH="/peer/active-site"
@@ -134,9 +139,12 @@ for pod in $PODS; do
     for container in $CANDIDATES; do
         RESULT=$(kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- wget -T 5 -qO- "http://127.0.0.1:8080${TARGET_PATH}" 2>/dev/null || true)
 
-        # If wget was missing, try curl
+        # If wget was missing or the endpoint answered non-2xx (wget
+        # prints no body then), try curl. curl keeps the body and status
+        # of a 503: for /health and /livez that is the answer, not a
+        # failure to fetch.
         if [[ -z "$RESULT" ]]; then
-            RESULT=$(kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- curl -fsS --max-time 5 "http://127.0.0.1:8080${TARGET_PATH}" 2>/dev/null || true)
+            RESULT=$(kubectl exec -n "$NAMESPACE" "$pod" -c "$container" -- curl -sS --max-time 5 -w '\n(HTTP %{http_code})' "http://127.0.0.1:8080${TARGET_PATH}" 2>/dev/null || true)
         fi
 
         if [[ -n "$RESULT" ]]; then

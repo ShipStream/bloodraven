@@ -95,7 +95,7 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 
 - **`kill-site` vs `scale --replicas=0`**: `kill-site` deletes the pod but Deployment recreates it in <5s. Use `scale --replicas=0` when you need a site to stay down (self-fencing, anti-flap, sustained outage tests).
 - **Network partition**: `chaos.sh network-partition` uses a NetworkPolicy deny-all. This blocks at the pod network level (not host netns). Cleanup: `chaos.sh recover`.
-- **Relay log drain**: Failover takes ~37s total when primary is dead (30s drain timeout + detection + promotion). Plan wait times accordingly.
+- **Relay log drain**: Failover takes up to ~37s when the primary is dead (detection + a drain of at most 30s + promotion). The drain ends as soon as the replica has applied what it already received, so without a backlog it is much shorter. Plan wait times for the bound.
 - **Replication user**: Survives pod restarts but not PVC wipes. After `reset-mysql.sh` the init-users script recreates it on MySQL first boot.
 - **Verify replication between scenarios**: After any failover, always verify replication is actually working (`SELECT SERVICE_STATE FROM performance_schema.replication_connection_status` should show `ON`) before proceeding. GTID divergence from the respawn race (see scenario 1 note) can silently break replication, causing false results in subsequent scenarios.
 - **db-readonly taint blocks PVC provisioning**: The operator applies `shipstream.io/db-readonly-playground:NoExecute` to non-writable nodes. The local-path-provisioner's helper pod does not tolerate this taint and gets evicted, blocking PVC creation. `reset-mysql.sh` now scales the operator to 0 before stripping taints (single-shot, no race), so a manual taint clear after a reset is no longer needed. If you wipe state by hand, mirror the same order: scale operator → 0, scale MySQL → 0, delete PVCs, strip taints, scale MySQL → 1, clear stale `status.lastFailover{,Target}`/`promotionGtidExecuted`/`plannedFailover`, scale operator → 1.
@@ -116,7 +116,7 @@ Key playground config: `pollInterval=2s`, `failureThreshold=3` (~6s detection), 
 
 **Verify**: activeSite flips, new primary read_only=0, DNS updated, old primary auto-recovers as replica (IO=Yes, SQL=Yes). Counter data preserved.
 
-**Timing**: ~37s to failover complete (30s relay drain timeout on dead primary). Recovery adds ~5s after old primary pod respawns.
+**Timing**: up to ~37s to failover complete (the relay drain waits at most 30s for received backlog to apply). Recovery adds ~5s after old primary pod respawns.
 
 **Caution — GTID divergence race**: When the old primary pod respawns, MySQL commits 1-3 internal transactions (system table updates, auto-increment counters) before the operator can fence it. This may create GTID divergence that blocks auto-recovery, requiring `reset-mysql.sh`. Whether divergence occurs is timing-dependent — it doesn't happen every time. If recovery logs "GTID divergence detected" instead of "no GTID divergence, auto-recovering", the scenario was affected.
 

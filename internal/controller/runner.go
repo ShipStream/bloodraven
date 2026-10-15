@@ -841,6 +841,15 @@ func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1
 	tm.deploymentLeases = r.deploymentLeases
 	tm.topologyGeneration = fg.Status.TopologyGeneration
 	tm.deploymentActiveSite = fg.Status.ActiveSite
+	// The promotion GTID gates which candidates are safe to promote and how
+	// a returning old primary is judged, so it must survive a restart.
+	tm.promotionGtidExecuted = fg.Status.PromotionGtidExecuted
+	tm.groupHasData = strings.TrimSpace(fg.Status.PromotionGtidExecuted) != ""
+	for _, site := range fg.Status.Sites {
+		if strings.TrimSpace(site.GtidExecuted) != "" {
+			tm.groupHasData = true
+		}
+	}
 	if tm.deploymentLeases != nil {
 		tm.deploymentTopologyPending()
 	}

@@ -203,9 +203,9 @@ func TestEncryption_SidecarMySQLDSNUsesTLS(t *testing.T) {
 			dsn := sidecarDSNFromRenderedEnv(t, sc)
 			if !strings.Contains(dsn, "tls=") {
 				t.Fatalf("sidecar MySQL DSN has no TLS parameter, so every query fails "+
-					"with Error 3159 against require_secure_transport=ON and the "+
-					"liveness probe crash-loops the container (self-fencing and the "+
-					"super_read_only safety net go down with it): %s", redactDSN(dsn))
+					"with Error 3159 against require_secure_transport=ON: the pod never "+
+					"becomes ready and self-fencing and the super_read_only safety net "+
+					"cannot reach MySQL: %s", redactDSN(dsn))
 			}
 		})
 	}

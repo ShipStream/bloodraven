@@ -50,9 +50,14 @@ type mockMySQL struct {
 	superReadOnlyErr         error
 	superReadOnlyHadDeadline bool
 	clonePrimaryHost         string
+	cloneCalls               int
+	cloneErr                 error
+	cloneStatusVal           *mysql.CloneStatus
 	killConnectionResults    []int
 	killConnectionErrs       []error
 	killConnectionCalls      int
+	checkReadOnlyCalls       int
+	replicaStatusCalls       int
 }
 
 func testBoolPtr(v bool) *bool {
@@ -62,6 +67,7 @@ func testBoolPtr(v bool) *bool {
 func (m *mockMySQL) CheckReadOnly(_ context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.checkReadOnlyCalls++
 	return m.readOnly, m.err
 }
 
@@ -256,6 +262,7 @@ func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
 func (m *mockMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.replicaStatusCalls++
 	return m.replicaStatusVal, m.replicaStatusErr
 }
 func (m *mockMySQL) ChangeReplicationSource(_ context.Context, opts mysql.ReplicationSourceOpts) error {
@@ -324,7 +331,23 @@ func (m *mockMySQL) CloneInstance(_ context.Context, _, primaryHost, _ string, _
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.clonePrimaryHost = primaryHost
-	return nil
+	m.cloneCalls++
+	return m.cloneErr
+}
+
+// CloneStatus reports no row before the first CloneInstance call, then
+// cloneStatusVal when a test pins it, else a fresh Completed row per call.
+func (m *mockMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cloneCalls == 0 {
+		return nil, nil
+	}
+	if m.cloneStatusVal != nil {
+		st := *m.cloneStatusVal
+		return &st, nil
+	}
+	return &mysql.CloneStatus{State: mysql.CloneStateCompleted, BeginTime: fmt.Sprintf("clone-%d", m.cloneCalls)}, nil
 }
 
 type failingPromoteMySQL struct {
@@ -3020,5 +3043,103 @@ func TestCrossSiteRetryNotArmedWithoutSuppression(t *testing.T) {
 	pollN(tm, 3)
 	if tm.crossSiteRetryReady() {
 		t.Fatal("retry armed without any suppressed decision")
+	}
+}
+
+// A CLONE whose session is killed (the recipient's own sidecar fencing it,
+// a network drop, an operator KILL) returns "invalid connection" after MySQL
+// has already dropped the recipient's user data. That is indistinguishable
+// on the client side from the drop that ends a successful clone, so the
+// outcome must come from clone_status: a Failed row is a failed bootstrap,
+// the recipient stays fenced, and replication is never configured on top of
+// the wiped datadir.
+func TestRunBootstrap_KilledCloneIsNotReportedAsSuccess(t *testing.T) {
+	const history = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-500"
+	primary := &mockMySQL{readOnly: false, gtidExecuted: history}
+	replica := &mockMySQL{readOnly: true,
+		cloneErr:       errors.New("clone instance: invalid connection"),
+		cloneStatusVal: &mysql.CloneStatus{State: mysql.CloneStateFailed, ErrorNo: 1317, ErrorMessage: "Query execution was interrupted", BeginTime: "t1"},
+	}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(primary, replica)
+
+	err := tm.runBootstrap(context.Background(), primary, replica, "mysql-dc1", "dc2", false)
+	if err == nil {
+		t.Fatal("runBootstrap reported success for a clone that clone_status records as Failed")
+	}
+	if !strings.Contains(err.Error(), "1317") {
+		t.Fatalf("error %q does not carry the clone failure", err)
+	}
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	if replica.changeSourceCalls != 0 {
+		t.Fatal("replication was configured on a recipient whose clone failed")
+	}
+	if !replica.readOnly {
+		t.Fatal("recipient was left unfenced after a failed clone")
+	}
+}
+
+// The same ambiguous drop followed by a Completed row is the normal end of a
+// clone (Error 3707 / restart): bootstrap proceeds to replication setup.
+func TestRunBootstrap_CompletedCloneAfterDropProceeds(t *testing.T) {
+	const history = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-500"
+	primary := &mockMySQL{readOnly: false, gtidExecuted: history}
+	replica := &mockMySQL{readOnly: true, gtidExecuted: history,
+		cloneErr: errors.New("clone instance: Error 3707 (HY000): Restart server failed (mysqld is not managed by supervisor process)."),
+	}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(primary, replica)
+
+	if err := tm.runBootstrap(context.Background(), primary, replica, "mysql-dc1", "dc2", false); err != nil {
+		t.Fatalf("runBootstrap: %v", err)
+	}
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	if replica.changeSourceCalls == 0 {
+		t.Fatal("replication was not configured after a completed clone")
+	}
+}
+
+// Independent of clone_status, a recipient left without any GTID history
+// while the donor has some was wiped, not cloned.
+func TestRunBootstrap_EmptyRecipientAfterCloneFails(t *testing.T) {
+	primary := &mockMySQL{readOnly: false, gtidExecuted: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-500"}
+	replica := &mockMySQL{readOnly: true, cloneErr: errors.New("clone instance: invalid connection")}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(primary, replica)
+
+	if err := tm.runBootstrap(context.Background(), primary, replica, "mysql-dc1", "dc2", false); err == nil {
+		t.Fatal("runBootstrap reported success although the recipient has no data after the clone")
+	}
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	if replica.changeSourceCalls != 0 {
+		t.Fatal("replication was configured on an empty recipient")
+	}
+}
+
+// A hung primary costs statusNetTimeout per call. Once this poll's liveness
+// probe of the primary has failed, the rest of the poll (source convergence,
+// old-primary recovery, empty-site detection) must not probe it again, or a
+// single poll takes several timeouts and the failure threshold is reached
+// several times slower than designed (observed live: 48s instead of ~10s).
+func TestPollDoesNotReprobeSiteWhoseProbeFailed(t *testing.T) {
+	const history = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-500"
+	primary := &mockMySQL{readOnly: false, gtidExecuted: history}
+	replica := &mockMySQL{readOnly: true, gtidExecuted: history,
+		replicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1", ExecutedGtidSet: history}}
+	tm, _, _ := newTestTopologyManagerWithBootstrap(primary, replica)
+	pollN(tm, 3)
+
+	primary.setError(errors.New("read tcp: i/o timeout"))
+	primary.mu.Lock()
+	primary.checkReadOnlyCalls = 0
+	primary.replicaStatusCalls = 0
+	primary.mu.Unlock()
+	tm.Poll(context.Background())
+
+	primary.mu.Lock()
+	calls, statusCalls := primary.checkReadOnlyCalls, primary.replicaStatusCalls
+	primary.mu.Unlock()
+	if calls != 1 || statusCalls != 0 {
+		t.Fatalf("failing primary probed again in the same poll: CheckReadOnly=%d (want 1), ShowReplicaStatus=%d (want 0)", calls, statusCalls)
 	}
 }

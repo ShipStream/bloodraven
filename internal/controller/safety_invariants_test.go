@@ -173,6 +173,104 @@ func TestInvariant_NeverPromoteDuringCooldown(t *testing.T) {
 	}
 }
 
+// The cooldown delays a promotion; it must not cancel it. site1 stays dead,
+// so after the transition swallowed by the cooldown nothing changes state.
+// Once the cooldown expires the healthy candidate must be promoted without
+// waiting for an unrelated transition (or for the dead primary to return).
+func TestCooldownBlockedFailoverRetriedAfterExpiry(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+
+	cfg := testTopologyConfig()
+	cfg.FailoverCooldown = int64(1 * time.Hour)
+	tainter := newMockTainter()
+	hub := platform.NewHub(testLogger())
+	dns := &mockDNS{}
+	fc := NewFailoverController(testLogger())
+	clk := clock.NewFakeClock(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	tm := NewTopologyManagerWithClock(cfg, []internalmysql.Checker{site0, site1}, fc, nil, nil, BootstrapConfig{}, tainter, hub, dns, testLogger(), clk)
+
+	pollN(tm, 2)
+	site0.setError(errors.New("down"))
+	pollN(tm, 3)
+	site1.mu.Lock()
+	promoted1 := !site1.readOnly
+	site1.mu.Unlock()
+	if !promoted1 {
+		t.Fatal("site1 should have been promoted by the first failover")
+	}
+
+	clk.Advance(30 * time.Minute)
+	site0.setError(nil)
+	site0.setReadOnly(true)
+	pollN(tm, 3) // site0 returns as a read-only candidate
+	site1.setError(errors.New("down"))
+	pollN(tm, 5) // threshold reached inside the cooldown: refused
+
+	site0.mu.Lock()
+	early := !site0.readOnly
+	site0.mu.Unlock()
+	if early {
+		t.Fatal("SAFETY VIOLATION: site0 promoted during anti-flap cooldown")
+	}
+
+	clk.Advance(31 * time.Minute)
+	pollN(tm, 2)
+
+	site0.mu.Lock()
+	promoted0 := !site0.readOnly
+	site0.mu.Unlock()
+	if !promoted0 {
+		t.Fatal("site0 was not promoted after the cooldown expired; the refused failover was never retried")
+	}
+	if dns.getLastIP() != "1.1.1.1" {
+		t.Fatalf("DNS = %q after the retried failover, want 1.1.1.1", dns.getLastIP())
+	}
+}
+
+// A promotion whose Execute fails must be retried after failoverRetryBackoff
+// even though the dead primary produces no further transition.
+func TestFailedFailoverRetriedWithoutNewTransition(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, dns, clk := newSafetyTestTM(site0, site1)
+
+	pollN(tm, 2)
+	site1.mu.Lock()
+	site1.stopReplicaErr = errors.New("stop replica: invalid connection")
+	site1.mu.Unlock()
+	site0.setError(errors.New("down"))
+	pollN(tm, 4)
+
+	site1.mu.Lock()
+	early := !site1.readOnly
+	site1.stopReplicaErr = nil
+	site1.mu.Unlock()
+	if early {
+		t.Fatal("site1 promoted although Execute failed")
+	}
+
+	pollN(tm, 2)
+	site1.mu.Lock()
+	beforeBackoff := !site1.readOnly
+	site1.mu.Unlock()
+	if beforeBackoff {
+		t.Fatal("failed failover retried before failoverRetryBackoff elapsed")
+	}
+
+	clk.Advance(failoverRetryBackoff)
+	pollN(tm, 2)
+	site1.mu.Lock()
+	promoted := !site1.readOnly
+	site1.mu.Unlock()
+	if !promoted {
+		t.Fatal("failed failover was never retried; the group stays without a primary")
+	}
+	if dns.getLastIP() != "2.2.2.2" {
+		t.Fatalf("DNS = %q after retried failover, want 2.2.2.2", dns.getLastIP())
+	}
+}
+
 // INVARIANT 4b: Anti-flap cooldown survives operator restart.
 //
 // After a process restart, a fresh TopologyManager starts with
@@ -508,5 +606,100 @@ func TestInvariant_FailoverSequence(t *testing.T) {
 		if candCalls[i] != want {
 			t.Errorf("SAFETY VIOLATION: candidate call[%d]: got %q, want %q", i, candCalls[i], want)
 		}
+	}
+}
+
+// A failed CLONE wipes the recipient (gtid_executed becomes empty) while the
+// bootstrap is reported successful. If the primary then dies, promoting the
+// wiped candidate replaces the whole data set with nothing. The picker must
+// refuse it, and must promote once the candidate holds the data again.
+func TestFailoverRefusesWipedCandidate(t *testing.T) {
+	const history = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-500"
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: history}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: history,
+		replicaStatusVal: &internalmysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "mysql-dc1", ExecutedGtidSet: history}}
+	tm, _, dns, clk := newSafetyTestTM(site0, site1)
+	pollN(tm, 3)
+
+	site1.mu.Lock()
+	site1.gtidExecuted = ""
+	site1.replicaStatusVal = &internalmysql.ReplicaStatus{SourceHost: "mysql-dc1"}
+	site1.mu.Unlock()
+	site0.setError(errors.New("down"))
+	pollN(tm, 5)
+
+	site1.mu.Lock()
+	wipedPromoted := !site1.readOnly
+	site1.mu.Unlock()
+	if wipedPromoted {
+		t.Fatal("DATA LOSS: promoted a candidate with an empty gtid_executed in a group that holds data")
+	}
+	if dns.getLastIP() == "2.2.2.2" {
+		t.Fatal("DNS flipped to the wiped candidate")
+	}
+
+	site1.mu.Lock()
+	site1.gtidExecuted = history
+	site1.mu.Unlock()
+	clk.Advance(failoverRetryBackoff)
+	pollN(tm, 2)
+
+	site1.mu.Lock()
+	promoted := !site1.readOnly
+	site1.mu.Unlock()
+	if !promoted {
+		t.Fatal("candidate restored to the group's history was never promoted; the refused decision was not retried")
+	}
+}
+
+// A candidate that does not contain the GTID set recorded at the last
+// promotion has lost acknowledged history and must not be promoted.
+func TestFailoverRefusesCandidateMissingPromotionGtid(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false, gtidExecuted: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-900"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-100"}
+	tm, _, _, _ := newSafetyTestTM(site0, site1)
+	tm.mu.Lock()
+	tm.promotionGtidExecuted = "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-400"
+	tm.mu.Unlock()
+	pollN(tm, 2)
+
+	site0.setError(errors.New("down"))
+	pollN(tm, 5)
+
+	site1.mu.Lock()
+	promoted := !site1.readOnly
+	site1.mu.Unlock()
+	if promoted {
+		t.Fatal("DATA LOSS: promoted a candidate missing history acknowledged before the last promotion")
+	}
+}
+
+func TestPromotionDataRegression(t *testing.T) {
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	parse := func(s string) internalmysql.GTIDSet {
+		g, err := internalmysql.ParseGTIDSet(s)
+		if err != nil {
+			t.Fatalf("parse %q: %v", s, err)
+		}
+		return g
+	}
+	cases := []struct {
+		name, candidate, last string
+		hasData, refuse       bool
+	}{
+		{"fresh empty group", "", "", false, false},
+		{"empty candidate, group has data", "", "", true, true},
+		{"empty candidate, promotion recorded", "", u + ":1-5", false, true},
+		{"contains last promotion", u + ":1-50", u + ":1-40", true, false},
+		{"missing last promotion", u + ":1-30", u + ":1-40", true, true},
+		{"no promotion recorded", u + ":1-30", "", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := promotionDataRegression(parse(tc.candidate), tc.last, tc.hasData)
+			if (got != "") != tc.refuse {
+				t.Fatalf("promotionDataRegression = %q, want refuse=%v", got, tc.refuse)
+			}
+		})
 	}
 }

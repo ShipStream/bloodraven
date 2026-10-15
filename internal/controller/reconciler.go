@@ -36,6 +36,7 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/platform"
+	"github.com/shipstream/bloodraven/internal/sidecar"
 	"github.com/shipstream/bloodraven/internal/state"
 )
 
@@ -60,7 +61,25 @@ const (
 	// Bump when the rendered MySQL Deployment pod spec changes without a
 	// corresponding user-facing spec field change, so existing pods roll
 	// forward to the new safe defaults.
-	deploymentPodRenderVersion = "deployment-pod-render-v3-site-config-internal-service"
+	deploymentPodRenderVersion = "deployment-pod-render-v4-sidecar-liveness-without-mysql"
+
+	// sidecarLivenessPath is the sidecar's liveness probe target. It must
+	// not depend on MySQL: the sidecar fences MySQL when MySQL misbehaves,
+	// and a liveness probe that follows MySQL (as /health once did)
+	// restarts the fencing agent during the stalls it exists to handle.
+	//
+	// /peer/ping answers unconditionally from the HTTP server and is served
+	// by every sidecar release. The sidecar's /livez also covers a wedged
+	// fencing loop, but an older sidecar answers 404 to it, and
+	// spec.sidecarImage is routinely older than the operator (CRs persist
+	// the CRD default they were created with, and the upgrade policy
+	// allows a one-minor skew). A /livez probe would crash-loop every such
+	// sidecar. Switch to /livez once every supported sidecar serves it.
+	sidecarLivenessPath = "/peer/ping"
+
+	// sidecarReadinessPath reports local MySQL connectivity. Readiness is
+	// meant to follow MySQL; liveness is not.
+	sidecarReadinessPath = "/health"
 
 	// RecloneAnnotation is set by an admin to trigger a reclone of a
 	// specific site from the current primary via CLONE INSTANCE.
@@ -1114,8 +1133,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			// Keep the server-side TLS contract on the mysqld command line as
 			// well as in bloodraven.cnf. The sidecar verifies the per-site
 			// Service SAN from its first connection; allowing mysqld to fall
-			// back to its auto-generated server-cert.pem makes that first
-			// health check fail and the sidecar liveness probe crash-loop.
+			// back to its auto-generated server-cert.pem fails every sidecar
+			// query, leaving the pod unready and the sidecar unable to fence.
 			mysqlArgs = append(mysqlArgs,
 				"--ssl-ca=/etc/mysql/tls/ca.crt",
 				"--ssl-cert=/etc/mysql/tls/tls.crt",
@@ -1302,10 +1321,10 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		// and the backup/restore jobs), which negotiates TLS on its own
 		// under the default ssl-mode=PREFERRED, go-sql-driver/mysql sends
 		// plaintext unless the DSN names a registered TLS config. Without
-		// this wiring every sidecar query fails with Error 3159, /health
-		// returns 503, and the liveness probe crash-loops the container —
-		// taking the self-fencing monitor and the super_read_only safety
-		// net down with it while the group still reports only Degraded.
+		// this wiring every sidecar query fails with Error 3159: /health
+		// returns 503, so the pod is never ready, and the self-fencing
+		// monitor and the super_read_only safety net cannot reach MySQL,
+		// while the group still reports only Degraded.
 		sidecarEnv = append(sidecarEnv, mysqlTLSSidecarEnv(fg, site)...)
 		sidecarVolumeMounts = append(sidecarVolumeMounts, pitrFrags.SidecarVolumeMounts...)
 		sidecarSecurityContext := fg.Spec.ContainerSecurityContext.DeepCopy()
@@ -1343,22 +1362,27 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			LivenessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
 					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/health",
+						Path: sidecarLivenessPath,
 						Port: intstr.FromInt32(sidecarPort),
 					},
 				},
 				InitialDelaySeconds: 5,
 				PeriodSeconds:       10,
+				TimeoutSeconds:      2,
 			},
 			ReadinessProbe: &corev1.Probe{
 				ProbeHandler: corev1.ProbeHandler{
 					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/health",
+						Path: sidecarReadinessPath,
 						Port: intstr.FromInt32(sidecarPort),
 					},
 				},
 				InitialDelaySeconds: 3,
 				PeriodSeconds:       5,
+				// One second more than /health's own MySQL bound, so
+				// a slow MySQL reads as a 503 rather than a probe
+				// timeout.
+				TimeoutSeconds: int32(sidecar.HealthMySQLTimeout/time.Second) + 1,
 			},
 			// Apply the same user-supplied container security context
 			// to the sidecar so the pod meets the same Restricted PSS

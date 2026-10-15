@@ -21,9 +21,9 @@ import (
 // require_secure_transport=ON and configure the sidecar's MySQL client
 // through BLOODRAVEN_MYSQL_TLS_* env vars. A sidecar too old to read
 // them connects in plaintext, is rejected by mysqld with Error 3159,
-// fails its health check, and is restarted by the liveness probe — which
-// also stops the self-fencing monitor and the super_read_only safety
-// net. The group reports Degraded while its split-brain guard is off.
+// and fails its readiness check. Its self-fencing monitor and
+// super_read_only safety net keep running but cannot reach MySQL. The
+// group reports Degraded while its split-brain guard is off.
 //
 // This is a warning, never a block: refusing to reconcile on a version
 // string would turn a cosmetic mismatch (a re-tagged image, a local
@@ -45,9 +45,9 @@ func (r *MysqlFailoverGroupReconciler) warnOnSidecarVersionSkew(ctx context.Cont
 	detail := ""
 	if fg.Spec.TLS != nil {
 		detail = " Because this group sets spec.tls, a sidecar that predates the " +
-			"BLOODRAVEN_MYSQL_TLS_* contract cannot reach MySQL at all: it will fail its " +
-			"health check, restart continuously, and leave self-fencing and the " +
-			"super_read_only safety net inactive."
+			"BLOODRAVEN_MYSQL_TLS_* contract cannot reach MySQL at all: the pod will " +
+			"never become ready, and self-fencing and the super_read_only safety net " +
+			"cannot act."
 	}
 
 	log.FromContext(ctx).Info("sidecar image version differs from the operator",

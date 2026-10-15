@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -92,4 +93,42 @@ func (m *checker) EnsureClonePlugin(ctx context.Context) error {
 		return fmt.Errorf("install clone plugin: %w", err)
 	}
 	return nil
+}
+
+// Clone states reported by performance_schema.clone_status.
+const (
+	CloneStateCompleted = "Completed"
+	CloneStateFailed    = "Failed"
+)
+
+// CloneStatus is the row of performance_schema.clone_status on a clone
+// recipient. MySQL keeps a single row describing the most recent clone and
+// persists it across the post-clone restart, so it is the authoritative
+// outcome when the client connection running CLONE INSTANCE drops.
+type CloneStatus struct {
+	State        string
+	ErrorNo      int
+	ErrorMessage string
+	BeginTime    string
+}
+
+func (m *checker) CloneStatus(ctx context.Context) (*CloneStatus, error) {
+	var st CloneStatus
+	err := m.db.QueryRowContext(ctx,
+		`SELECT COALESCE(STATE, ''), COALESCE(ERROR_NO, 0), COALESCE(ERROR_MESSAGE, ''),
+		        COALESCE(CAST(BEGIN_TIME AS CHAR), '')
+		   FROM performance_schema.clone_status LIMIT 1`).
+		Scan(&st.State, &st.ErrorNo, &st.ErrorMessage, &st.BeginTime)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		var mysqlErr *mysqldriver.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1146 {
+			// No clone plugin tables: nothing to report.
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read clone status: %w", err)
+	}
+	return &st, nil
 }

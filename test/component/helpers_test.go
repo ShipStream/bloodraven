@@ -219,6 +219,10 @@ func (m *mockMySQL) GetGtidExecuted(_ context.Context) (string, error) {
 	return m.gtidExecuted, nil
 }
 
+func (m *mockMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
+	return nil, nil
+}
+
 func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

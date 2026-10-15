@@ -35,6 +35,9 @@ type Checker interface {
 	EnsureClonePlugin(ctx context.Context) error
 	SetCloneDonorList(ctx context.Context, donor string) error
 	CloneInstance(ctx context.Context, user, host, password string, useSSL bool, cloneTimeoutSec int) error
+	// CloneStatus returns the recipient's most recent clone outcome, or nil
+	// when the server has none (or no clone plugin tables).
+	CloneStatus(ctx context.Context) (*CloneStatus, error)
 }
 
 type checker struct {
@@ -100,6 +103,15 @@ func NewChecker(dsn string) (Checker, error) {
 		return nil, err
 	}
 	return &checker{db: db, cloneDB: cloneDB}, nil
+}
+
+// NewCheckerFromPools returns a Checker over pools the caller opened, such as
+// pools on a fake database/sql driver in tests. The checker takes ownership
+// and closes both in Close. NewChecker is the production constructor: it is
+// what applies the primary pool's I/O deadlines and pins the clone pool to
+// one connection, and callers of this one are responsible for equivalents.
+func NewCheckerFromPools(db, cloneDB *sql.DB) Checker {
+	return &checker{db: db, cloneDB: cloneDB}
 }
 
 // primaryDSN derives the primary pool's DSN from the operational DSN by

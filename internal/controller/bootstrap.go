@@ -52,14 +52,11 @@ func (b *BootstrapController) BootstrapReplica(ctx context.Context, opts Bootstr
 
 	// Step 3: CLONE INSTANCE is a destructive administrative operation, but
 	// MySQL rejects it while the recipient has super_read_only enabled.
+	// read_only stays ON: CLONE does not need it cleared, and a recipient
+	// that reports read_only=0 looks like a stale writable primary to its
+	// own sidecar, which then fences it and kills the CLONE session.
 	if err := opts.Replica.SetSuperReadOnly(ctx, false); err != nil {
 		return fmt.Errorf("disable replica super_read_only for clone: %w", err)
-	}
-	if err := opts.Replica.SetReadOnly(ctx, false); err != nil {
-		if fenceErr := opts.Replica.SetSuperReadOnly(ctx, true); fenceErr != nil {
-			b.logger.Warn("failed to re-enable super_read_only after read_only disable failed", "error", fenceErr)
-		}
-		return fmt.Errorf("disable replica read_only for clone: %w", err)
 	}
 
 	// Step 3: Set clone donor list

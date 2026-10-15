@@ -26,8 +26,9 @@ type StatusInfo struct {
 	Uptime              int64  `json:"uptime"`
 	// SelfFenced reports whether *this sidecar process* self-fenced and
 	// has not rearmed. It is deliberately process-scoped: a container
-	// restart clears it, and RunSafetyNet's startup fence is not counted
-	// either, so a site can be fenced with self_fenced=false. Read
+	// restart clears it, and the safety net's fences (RunSafetyNet's, or
+	// the monitor's deferred one) are not counted either, so a site can be
+	// fenced with self_fenced=false. Read
 	// super_read_only for whether the instance is fenced; read this for
 	// whether this monitor is the one that fenced it.
 	SelfFenced bool `json:"self_fenced"`
@@ -204,7 +205,7 @@ func (m *LiveMysql) ClearSuperReadOnly(ctx context.Context) error {
 // share this filter. Its call sites want the applier gone: the bootstrap
 // path kills connections so CLONE's DROP DATA phase is not blocked on
 // open table handles. Do not "unify" the two.
-func killableConnection(user, command string) bool {
+func killableConnection(user, command, info string) bool {
 	switch user {
 	case "", "system user", "event_scheduler":
 		return false
@@ -213,12 +214,37 @@ func killableConnection(user, command string) bool {
 	case "Binlog Dump", "Binlog Dump GTID", "Daemon":
 		return false
 	}
+	// The operator's CLONE INSTANCE is not an application session. Killing
+	// it aborts the clone after MySQL has already dropped the recipient's
+	// user data, leaving an empty datadir.
+	if isCloneStatement(info) {
+		return false
+	}
 	return true
+}
+
+func isCloneStatement(info string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(info)), "CLONE ")
+}
+
+// CloneInProgress reports whether a CLONE statement is currently executing
+// on this server. Only the operator issues CLONE (it needs CLONE_ADMIN), and
+// it makes the recipient writable to do so; the fencing monitor must not
+// treat that as a stale primary.
+func (m *LiveMysql) CloneInProgress(ctx context.Context) (bool, error) {
+	var n int
+	err := m.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM information_schema.processlist
+		  WHERE id != CONNECTION_ID() AND UPPER(TRIM(COALESCE(info, ''))) LIKE 'CLONE %'`).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("check clone in progress: %w", err)
+	}
+	return n > 0, nil
 }
 
 func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, COALESCE(user, ''), COALESCE(command, '')
+		`SELECT id, COALESCE(user, ''), COALESCE(command, ''), COALESCE(info, '')
 		 FROM information_schema.processlist
 		 WHERE id != CONNECTION_ID()`)
 	if err != nil {
@@ -230,15 +256,15 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 	var unreadable int
 	for rows.Next() {
 		var id int64
-		var user, command string
-		if err := rows.Scan(&id, &user, &command); err != nil {
+		var user, command, info string
+		if err := rows.Scan(&id, &user, &command, &info); err != nil {
 			// A row we cannot read is a session we cannot kill. Count it
 			// so a partial fence is reported rather than silently passing
 			// for a complete one.
 			unreadable++
 			continue
 		}
-		if killableConnection(user, command) {
+		if killableConnection(user, command, info) {
 			targets = append(targets, id)
 		}
 	}

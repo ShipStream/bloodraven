@@ -126,10 +126,9 @@ func main() {
 		srv.SetKeyring(keyringAgent)
 	}
 
-	// Run startup safety net (also seeds the topology cache).
-	srv.RunSafetyNet(ctx, cfg)
-
-	// Create the fencing monitor
+	// Create the fencing monitor. Construction touches nothing external;
+	// it is attached to the server before the server starts because
+	// /status and /livez read it.
 	fm := sidecar.NewFencingMonitor(
 		mysql,
 		cfg.BloodravenAddress,
@@ -137,7 +136,8 @@ func main() {
 		cfg.PeerCheckInterval,
 		cfg.LeaseTimeout,
 		logger,
-	).WithTopology(cfg.MySite, cfg.PodNamespace, cfg.FailoverGroup, topology)
+	).WithTopology(cfg.MySite, cfg.PodNamespace, cfg.FailoverGroup, topology).
+		WithSafetyNet(mysql)
 	srv.SetFencing(fm)
 
 	// Run the HTTP server, fencing monitor, and (optionally) the
@@ -145,6 +145,9 @@ func main() {
 	// context, bringing the others down cleanly.
 	var wg sync.WaitGroup
 
+	// The HTTP server starts before anything that talks to MySQL, so
+	// the liveness probe and peers get answers while MySQL is down or
+	// hung. Nothing it serves depends on the safety net having run.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -153,6 +156,13 @@ func main() {
 			cancel()
 		}
 	}()
+
+	// Run the startup safety net (it also seeds the topology cache). It
+	// is bounded, so a hung mysqld cannot hold startup here. If it could
+	// not settle, the monitor finishes it once MySQL answers.
+	if !srv.RunSafetyNet(ctx, cfg) {
+		fm.ArmSafetyNet()
+	}
 
 	wg.Add(1)
 	go func() {

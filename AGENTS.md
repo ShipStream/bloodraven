@@ -84,7 +84,7 @@ Lessons from running chaos scenarios against a live k3d cluster:
 ### Running chaos scenarios
 - **`kill-site` vs `scale --replicas=0`**: `chaos.sh kill-site` deletes the pod, but the Deployment controller recreates it in <5s. To truly hold a site down (e.g. for self-fencing or anti-flap tests), use `kubectl scale deployment --replicas=0`. The pod kill simulates a crash; the scale-down simulates a sustained outage.
 - **Network partition doesn't work via iptables on host netns**: `chaos.sh network-partition` blocks port 3306 on the k3d node's host network, but kube-proxy DNAT operates in different iptables chains. The operator still reaches MySQL via ClusterIP. True partition testing needs pod-level network manipulation or NetworkPolicy.
-- **Relay log drain takes 30s on dead primary**: Failover won't complete until the 30s relay log drain timeout expires when the old primary is unreachable. Plan for ~37s total failover time in tests, not ~6s.
+- **Relay log drain is bounded by 30s**: The drain returns once the candidate has applied the relay log it had already received (`Retrieved_Gtid_Set` ⊆ `Executed_Gtid_Set`); the IO thread's connect error from a dead primary does not end it early. With no backlog, failover is roughly detection (~6s) plus promotion; a replica with a delayed or stalled applier can hold it for the full 30s. Plan for up to ~37s total failover time in tests.
 - **Sandbox blocks kubectl**: If running inside a sandboxed environment (e.g. Claude Code), kubectl needs network access to the k3d API server port. Use `dangerouslyDisableSandbox` or whitelist the port.
 
 ### Known operator behaviors during testing

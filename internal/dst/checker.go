@@ -208,10 +208,18 @@ func (m *simChecker) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus,
 		return nil, nil
 	}
 	io, sql := m.c.effectiveThreadsLocked(m.s)
+	ioErr := m.s.ioErr
+	if ioErr == "" && m.s.ioWant && !io {
+		// A receiver retrying an unreachable source reports a connect
+		// error, as real MySQL does, while its relay log stays applicable.
+		ioErr = "error connecting to source '" + m.s.sourceHost + "'"
+	}
 	rs := &mysql.ReplicaStatus{
 		IORunning:        io,
 		SQLRunning:       sql,
-		LastError:        firstNonEmpty(m.s.sqlErr, m.s.ioErr),
+		LastError:        firstNonEmpty(m.s.sqlErr, ioErr),
+		LastIOError:      ioErr,
+		LastSQLError:     m.s.sqlErr,
 		SourceHost:       m.s.sourceHost,
 		ExecutedGtidSet:  m.s.executed.String(),
 		RetrievedGtidSet: m.s.retrieved.String(),
@@ -280,8 +288,9 @@ func (m *simChecker) StartReplicaSQLThread(_ context.Context) error {
 }
 
 // WaitForRelayLogDrain resolves instantly against the model, mirroring the
-// real implementation's decision tree: abort on a replica error, otherwise
-// apply the local relay backlog (restarting the SQL thread if needed).
+// real implementation's decision tree: abort on an applier error, otherwise
+// apply the local relay backlog (restarting the SQL thread if needed). A
+// receiver error does not abort: the relay log already fetched is applicable.
 func (m *simChecker) WaitForRelayLogDrain(_ context.Context, timeout time.Duration) error {
 	m.c.mu.Lock()
 	defer m.c.mu.Unlock()
@@ -301,9 +310,9 @@ func (m *simChecker) WaitForRelayLogDrain(_ context.Context, timeout time.Durati
 		m.c.event(m.s.name, EvDrain, "no channel", "")
 		return nil
 	}
-	if lastErr := firstNonEmpty(m.s.sqlErr, m.s.ioErr); lastErr != "" {
+	if m.s.sqlErr != "" {
 		m.c.event(m.s.name, EvDrain, "", "aborted")
-		return fmt.Errorf("relay log drain aborted: SQL thread error: %s", lastErr)
+		return fmt.Errorf("relay log drain aborted: SQL thread error: %s", m.s.sqlErr)
 	}
 	if !m.s.sqlWant {
 		// SQL thread stopped: pending relay logs restart it, else done.
@@ -364,6 +373,10 @@ func (m *simChecker) EnsureClonePlugin(_ context.Context) error {
 
 func (m *simChecker) SetCloneDonorList(_ context.Context, _ string) error {
 	return errors.New("dst: CLONE not modeled (bootstrap must stay disabled in trials)")
+}
+
+func (m *simChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
+	return nil, nil
 }
 
 func (m *simChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {

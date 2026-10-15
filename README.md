@@ -145,7 +145,7 @@ graph TB
 
         subgraph "Site A (for example, iad)"
             D1["Deployment<br/>mysql-main-iad"]
-            S1["Sidecar :8080<br/>/health /status /peer/ping"]
+            S1["Sidecar :8080<br/>/livez /health /status /peer/ping"]
             M1[("MySQL Primary<br/>read_only=0")]
             PVC1["PVC<br/>mysql-main-iad-data"]
             SVC1["Service<br/>mysql-main-iad:3306"]
@@ -156,7 +156,7 @@ graph TB
 
         subgraph "Site B (for example, pdx)"
             D2["Deployment<br/>mysql-main-pdx"]
-            S2["Sidecar :8080<br/>/health /status /peer/ping"]
+            S2["Sidecar :8080<br/>/livez /health /status /peer/ping"]
             M2[("MySQL Replica<br/>read_only=1")]
             PVC2["PVC<br/>mysql-main-pdx-data"]
             SVC2["Service<br/>mysql-main-pdx:3306"]
