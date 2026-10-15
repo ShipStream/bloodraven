@@ -1112,3 +1112,25 @@ func TestWaitForReplicaReadyWatchingNilPrimaryKeepsOldBehavior(t *testing.T) {
 		t.Fatalf("error = %v, want plain timeout", err)
 	}
 }
+
+// The first failed probe opens the loss window; it must not be counted as
+// part of it. With a 10 tick window the abort needs 11 consecutive failures
+// (10 intervals between the first and the last), not 10.
+func TestWaitForReplicaReadyWatchingLossWindowSpansConfiguredInterval(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = time.Millisecond
+	uc.primaryLossWindow = 10 * time.Millisecond
+	primary := &flakyReadOnlyChecker{FakeMySQL: &testutil.FakeMySQL{ReadOnlyVal: false}, failFor: -1}
+	follower := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{SourceHost: "primary-internal"}}
+	err := uc.waitForReplicaReadyWatching(context.Background(), follower, "primary-internal", primary, 30*time.Second)
+	if !errors.Is(err, errActivePrimaryLost) {
+		t.Fatalf("error = %v, want errActivePrimaryLost", err)
+	}
+	primary.mu.Lock()
+	calls := primary.calls
+	primary.mu.Unlock()
+	if calls != 11 {
+		t.Fatalf("primary probed %d times before aborting, want 11 (window of 10 intervals plus the opening failure)", calls)
+	}
+}

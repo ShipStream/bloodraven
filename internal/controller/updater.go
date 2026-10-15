@@ -328,9 +328,12 @@ func (u *UpdateController) waitForReplicaReadyExpected(ctx context.Context, chec
 // rotation-blocked standby, not even refused) until the 5 minute timeout.
 // A nil primary disables the probe.
 func (u *UpdateController) waitForReplicaReadyWatching(ctx context.Context, checker mysql.Checker, expected string, primary mysql.Checker, timeout time.Duration) error {
+	// N consecutive failed probes, one per tick, span (N-1) ticks between
+	// the first and last: the first failure opens the window rather than
+	// consuming part of it.
 	lossThreshold := 2
 	if u.tickInterval > 0 {
-		if n := int((u.primaryLossWindow + u.tickInterval - 1) / u.tickInterval); n > lossThreshold {
+		if n := int((u.primaryLossWindow+u.tickInterval-1)/u.tickInterval) + 1; n > lossThreshold {
 			lossThreshold = n
 		}
 	}
