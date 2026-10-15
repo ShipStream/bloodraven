@@ -29,7 +29,6 @@ type killFakeRow struct {
 	id      driver.Value
 	user    string
 	command string
-	info    string
 }
 
 // killFakeConn serves the processlist query and the KILLs that follow.
@@ -43,6 +42,9 @@ type killFakeConn struct {
 	killErrs map[int64]error
 	// listErr, when set, fails the processlist query outright.
 	listErr error
+	// cloneID, when non-zero, is the PID that performance_schema.
+	// clone_status reports for a running CLONE INSTANCE.
+	cloneID int64
 
 	killed []int64
 }
@@ -52,6 +54,9 @@ func (c *killFakeConn) Close() error                        { return nil }
 func (c *killFakeConn) Begin() (driver.Tx, error)           { return nil, errors.New("unused") }
 
 func (c *killFakeConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if strings.Contains(query, "clone_status") {
+		return &cloneStatusRows{pid: c.cloneID}, nil
+	}
 	if !strings.Contains(query, "processlist") {
 		return nil, fmt.Errorf("unexpected query: %s", query)
 	}
@@ -78,7 +83,7 @@ type killFakeRows struct {
 	next int
 }
 
-func (r *killFakeRows) Columns() []string { return []string{"id", "user", "command", "info"} }
+func (r *killFakeRows) Columns() []string { return []string{"id", "user", "command"} }
 func (r *killFakeRows) Close() error      { return nil }
 
 func (r *killFakeRows) Next(dest []driver.Value) error {
@@ -93,7 +98,24 @@ func (r *killFakeRows) Next(dest []driver.Value) error {
 	dest[0] = row.id
 	dest[1] = row.user
 	dest[2] = row.command
-	dest[3] = row.info
+	return nil
+}
+
+// cloneStatusRows serves the clone_status query: one PID row, or none.
+type cloneStatusRows struct {
+	pid  int64
+	done bool
+}
+
+func (r *cloneStatusRows) Columns() []string { return []string{"PID"} }
+func (r *cloneStatusRows) Close() error      { return nil }
+
+func (r *cloneStatusRows) Next(dest []driver.Value) error {
+	if r.pid == 0 || r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = r.pid
 	return nil
 }
 
@@ -124,8 +146,10 @@ func TestKillConnectionsEvictsOnlyApplicationSessions(t *testing.T) {
 		{id: int64(8), user: "system user", command: "Connect"},    // replica I/O
 		{id: int64(9), user: "replicator", command: "Binlog Dump"}, // outbound feed
 		{id: int64(10), user: "root", command: "Sleep"},
-		{id: int64(11), user: "root", command: "Query", info: "CLONE INSTANCE FROM 'repl'@'mysql-iad':3306 IDENTIFIED BY 'x'"},
-	}}
+		// The operator's CLONE INSTANCE. MySQL shows its info as NULL, so
+		// only clone_status identifies it.
+		{id: int64(11), user: "root", command: "Query"},
+	}, cloneID: 11}
 	m := newKillFakeMysql(t, conn)
 
 	killed, err := m.KillConnections(context.Background())
@@ -218,5 +242,24 @@ func TestKillConnectionsReportsListingFailures(t *testing.T) {
 	}
 	if !errors.Is(err, listFail) {
 		t.Errorf("listing failure did not survive into the report: %v", err)
+	}
+}
+
+// CLONE INSTANCE ... IDENTIFIED BY shows a NULL info in the processlist, so
+// a processlist match never sees it (verified on the playground). Clone
+// detection must come from performance_schema.clone_status.
+func TestCloneInProgressReadsCloneStatus(t *testing.T) {
+	for _, tc := range []struct {
+		cloneID int64
+		want    bool
+	}{{0, false}, {53, true}} {
+		m := newKillFakeMysql(t, &killFakeConn{cloneID: tc.cloneID})
+		got, err := m.CloneInProgress(context.Background())
+		if err != nil {
+			t.Fatalf("cloneID=%d: %v", tc.cloneID, err)
+		}
+		if got != tc.want {
+			t.Errorf("cloneID=%d: CloneInProgress = %v, want %v", tc.cloneID, got, tc.want)
+		}
 	}
 }

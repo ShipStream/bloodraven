@@ -593,9 +593,9 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		return
 	}
 
-	// A running CLONE means the operator made this recipient writable to
-	// replace its data; the site restarts afterwards and the safety net
-	// fences it then. Fencing now would kill or break the clone.
+	// A running CLONE is the operator replacing this site's data; the site
+	// restarts afterwards and the safety net fences it then. Fencing now
+	// would kill the clone after it has dropped the data.
 	if cd, ok := f.mysql.(cloneDetector); ok {
 		if cloning, err := cd.CloneInProgress(ctx); err == nil && cloning {
 			f.logger.Info("fencing: clone in progress on this site; not fencing")

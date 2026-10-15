@@ -205,7 +205,7 @@ func (m *LiveMysql) ClearSuperReadOnly(ctx context.Context) error {
 // share this filter. Its call sites want the applier gone: the bootstrap
 // path kills connections so CLONE's DROP DATA phase is not blocked on
 // open table handles. Do not "unify" the two.
-func killableConnection(user, command, info string) bool {
+func killableConnection(user, command string) bool {
 	switch user {
 	case "", "system user", "event_scheduler":
 		return false
@@ -214,37 +214,52 @@ func killableConnection(user, command, info string) bool {
 	case "Binlog Dump", "Binlog Dump GTID", "Daemon":
 		return false
 	}
-	// The operator's CLONE INSTANCE is not an application session. Killing
-	// it aborts the clone after MySQL has already dropped the recipient's
-	// user data, leaving an empty datadir.
-	if isCloneStatement(info) {
-		return false
-	}
 	return true
 }
 
-func isCloneStatement(info string) bool {
-	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(info)), "CLONE ")
+// cloneSessionID returns the processlist id of the session running a
+// CLONE INSTANCE on this server, if one is running. The processlist cannot
+// identify it: MySQL shows a NULL info for a statement that carries a
+// password, which CLONE INSTANCE ... IDENTIFIED BY always does.
+// performance_schema.clone_status names the session in its PID column.
+// A server without the clone plugin has no such table, and no clone.
+func (m *LiveMysql) cloneSessionID(ctx context.Context) (int64, bool, error) {
+	var pid int64
+	err := m.db.QueryRowContext(ctx,
+		`SELECT PID FROM performance_schema.clone_status WHERE STATE = 'In Progress' LIMIT 1`).Scan(&pid)
+	if errors.Is(err, sql.ErrNoRows) || isNoSuchTable(err) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("read clone status: %w", err)
+	}
+	return pid, true, nil
 }
 
-// CloneInProgress reports whether a CLONE statement is currently executing
-// on this server. Only the operator issues CLONE (it needs CLONE_ADMIN), and
-// it makes the recipient writable to do so; the fencing monitor must not
-// treat that as a stale primary.
+// CloneInProgress reports whether a CLONE INSTANCE is running on this
+// server. Only the operator issues CLONE (it needs CLONE_ADMIN), and the
+// fencing monitor must neither fence nor evict sessions while one runs:
+// killing the clone after it has dropped the recipient's data leaves an
+// empty datadir.
 func (m *LiveMysql) CloneInProgress(ctx context.Context) (bool, error) {
-	var n int
-	err := m.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM information_schema.processlist
-		  WHERE id != CONNECTION_ID() AND UPPER(TRIM(COALESCE(info, ''))) LIKE 'CLONE %'`).Scan(&n)
-	if err != nil {
-		return false, fmt.Errorf("check clone in progress: %w", err)
-	}
-	return n > 0, nil
+	_, running, err := m.cloneSessionID(ctx)
+	return running, err
+}
+
+func isNoSuchTable(err error) bool {
+	const erNoSuchTable = 1146
+	var mysqlErr *mysqldriver.MySQLError
+	return errors.As(err, &mysqlErr) && mysqlErr.Number == erNoSuchTable
 }
 
 func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
+	// The operator's CLONE INSTANCE is not an application session; spare
+	// it. If clone status cannot be read, evict as before rather than
+	// leave the fence incomplete.
+	cloneID, cloning, _ := m.cloneSessionID(ctx)
+
 	rows, err := m.db.QueryContext(ctx,
-		`SELECT id, COALESCE(user, ''), COALESCE(command, ''), COALESCE(info, '')
+		`SELECT id, COALESCE(user, ''), COALESCE(command, '')
 		 FROM information_schema.processlist
 		 WHERE id != CONNECTION_ID()`)
 	if err != nil {
@@ -256,15 +271,18 @@ func (m *LiveMysql) KillConnections(ctx context.Context) (int, error) {
 	var unreadable int
 	for rows.Next() {
 		var id int64
-		var user, command, info string
-		if err := rows.Scan(&id, &user, &command, &info); err != nil {
+		var user, command string
+		if err := rows.Scan(&id, &user, &command); err != nil {
 			// A row we cannot read is a session we cannot kill. Count it
 			// so a partial fence is reported rather than silently passing
 			// for a complete one.
 			unreadable++
 			continue
 		}
-		if killableConnection(user, command, info) {
+		if cloning && id == cloneID {
+			continue
+		}
+		if killableConnection(user, command) {
 			targets = append(targets, id)
 		}
 	}
