@@ -1,0 +1,50 @@
+# Chaos-testing workload: uniquely keyed writes with per-ack host attribution.
+# Audit with:
+#   kubectl -n bloodraven-playground exec deploy/ledger -- /ledger audit http://localhost:8095 \
+#     iad=mysql-playground-iad-internal:3306 pdx=mysql-playground-pdx-internal:3306 \
+#     reader=mysql-playground-reader-internal:3306
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger
+  namespace: bloodraven-playground
+  labels: {app: ledger}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: ledger}
+  template:
+    metadata:
+      labels: {app: ledger}
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: "true"
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: ledger
+          image: bloodraven-ledger:playground
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MYSQL_DSN
+              value: "root:playground-root-pw@tcp(mysql-playground-primary.bloodraven-playground.svc.cluster.local:3306)/"
+            - name: WORKERS
+              value: "4"
+            - name: INTERVAL
+              value: "50ms"
+          ports:
+            - containerPort: 8095
+              name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger
+  namespace: bloodraven-playground
+spec:
+  selector: {app: ledger}
+  ports:
+    - port: 8095
+      targetPort: http
+      name: http
