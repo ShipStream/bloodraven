@@ -277,7 +277,10 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		return processed, fmt.Errorf("configure old active %s as replica of %s: %w", active.Name, handoff.Name, err)
 	}
 	u.setPhase(UpdatePhaseWaitOldPrimary)
-	if err := u.waitForReplicaReadyExpected(ctx, active.Checker, handoff.Host, 5*time.Minute); err != nil {
+	// The new primary is the source now. If it dies while the old active
+	// catches up, end the update so emergency failover is not held off for
+	// the full wait.
+	if err := u.waitForReplicaReadyWatching(ctx, active.Checker, handoff.Host, handoff.Checker, 5*time.Minute); err != nil {
 		return processed, fmt.Errorf("wait for old active %s to replicate from %s: %w", active.Name, handoff.Name, err)
 	}
 	processed = append(processed, active.Name)
@@ -303,7 +306,7 @@ func (u *UpdateController) requireDirectReplica(ctx context.Context, target Upda
 }
 
 // errActivePrimaryLost is returned by waitForReplicaReadyWatching when the
-// active primary stopped answering while a rolled follower was waiting to
+// replication source stopped answering while a rolled site was waiting to
 // catch up. The ordered update must end so cross-site failover, which is
 // suppressed for as long as an update runs, can act on the lost primary.
 var errActivePrimaryLost = errors.New("active primary became unreachable during ordered update")
@@ -361,16 +364,22 @@ func (u *UpdateController) waitForReplicaReadyWatching(ctx context.Context, chec
 			}
 		}
 		if primary != nil {
-			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			_, perr := primary.CheckReadOnly(probeCtx)
-			cancel()
-			if perr != nil {
+			perr := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+				_, err := primary.CheckReadOnly(probeCtx)
+				return err
+			})
+			switch {
+			case perr == nil:
+				lost = 0
+			case ctx.Err() != nil:
+				// A cancelled update (shutdown, lost leadership) is not
+				// evidence about the primary; do not report it as lost.
+				return ctx.Err()
+			default:
 				lost++
 				if lost >= lossThreshold {
 					return fmt.Errorf("%w: %v", errActivePrimaryLost, perr)
 				}
-			} else {
-				lost = 0
 			}
 		}
 		if time.Now().After(deadline) {

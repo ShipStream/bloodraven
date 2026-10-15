@@ -1134,3 +1134,80 @@ func TestWaitForReplicaReadyWatchingLossWindowSpansConfiguredInterval(t *testing
 		t.Fatalf("primary probed %d times before aborting, want 11 (window of 10 intervals plus the opening failure)", calls)
 	}
 }
+
+func TestExecuteTargetsAbortsOldActiveWaitWhenNewPrimaryIsLost(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = time.Millisecond
+	uc.primaryLossWindow = 10 * time.Millisecond
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	sealed := &flakyReadOnlyChecker{FakeMySQL: &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}}
+	applyUpdate := func(_ context.Context, name string) error {
+		if name == "primary" {
+			// The old active restarts with its threads down while the
+			// primary it was just handed to stops answering.
+			active.ReplicaStatusVal = &mysql.ReplicaStatus{SourceHost: "sealed-internal"}
+			sealed.mu.Lock()
+			sealed.failFor = -1
+			sealed.mu.Unlock()
+		}
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := uc.ExecuteTargets(context.Background(),
+			UpdateTarget{Name: "primary", Host: "primary-internal", Checker: active, Drifted: true},
+			[]UpdateTarget{{Name: "sealed", Host: "sealed-internal", Checker: sealed, Promotable: true, ExpectedSource: "primary-internal"}},
+			applyUpdate, nil)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errActivePrimaryLost) {
+			t.Fatalf("ExecuteTargets() error = %v, want errActivePrimaryLost", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("old-active wait did not abort after the new primary was lost; failover stays suppressed for the 5m timeout")
+	}
+	if uc.IsUpdating() {
+		t.Fatal("update lock still held after abort")
+	}
+}
+
+// cancelOnCallChecker cancels the context during its at-th CheckReadOnly call
+// and fails every call, like a primary probe racing a shutdown.
+type cancelOnCallChecker struct {
+	*testutil.FakeMySQL
+	cancel context.CancelFunc
+	at     int
+	calls  int
+}
+
+func (c *cancelOnCallChecker) CheckReadOnly(context.Context) (bool, error) {
+	c.calls++
+	if c.calls == c.at {
+		c.cancel()
+	}
+	return false, errors.New("dial tcp: connection refused")
+}
+
+func TestWaitForReplicaReadyWatchingReportsCancellationNotPrimaryLoss(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = time.Millisecond
+	uc.primaryLossWindow = 10 * time.Millisecond // 11 consecutive failures
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The cancellation lands on the probe that would otherwise be the one
+	// that trips the loss threshold.
+	primary := &cancelOnCallChecker{FakeMySQL: &testutil.FakeMySQL{}, cancel: cancel, at: 11}
+	follower := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{SourceHost: "primary-internal"}}
+	err := uc.waitForReplicaReadyWatching(ctx, follower, "primary-internal", primary, 5*time.Second)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, errActivePrimaryLost) {
+		t.Fatalf("error = %v, want context.Canceled and not errActivePrimaryLost", err)
+	}
+}
