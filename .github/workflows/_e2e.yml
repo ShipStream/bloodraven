@@ -71,6 +71,14 @@ jobs:
       - name: Create kind cluster
         uses: helm/kind-action@v1.14.0
         with:
+          # kind, node image and kubectl are pinned explicitly: the action's
+          # defaults move with every release, which silently changed the
+          # cluster's Kubernetes version under the e2e suite (kind-action
+          # 1.15.0 jumped v1.35 -> v1.37). Raise these deliberately, as a
+          # tested change.
+          version: v0.31.0
+          node_image: kindest/node:v1.35.0
+          kubectl_version: v1.35.0
           cluster_name: bloodraven-e2e
           config: .github/kind/e2e-calico.yaml
           # CNI is disabled in this kind config, so nodes cannot become
