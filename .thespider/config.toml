@@ -15,3 +15,9 @@ code = "anthropic/claude-sonnet-5-5"
 agent = "claude"
 command = "env -u CLAUDECODE claude --model claude-sonnet-5-5 --effort xhigh --safe-mode --restricted --strict-mcp-config --tools \"Read,Grep,Glob,Bash\" --allowedTools \"Bash(git log:*) Bash(git show:*) Bash(git diff:*) Bash(git blame:*) Bash(git ls-files:*) Bash(git rev-parse:*)\" --permission-mode dontAsk --no-session-persistence --print < {prompt_path}"
 timeout_seconds = 1800
+
+[[model]]
+code = "openai/gpt-daybreak-blue-latest"
+agent = "codex"
+command = "mkdir -p \"$HOME/.cache/thespider/codex-homes\" && src=\"${CODEX_HOME:-$HOME/.codex}\" && h=\"$HOME/.cache/thespider/codex-homes/$(printf %s \"$src\" | cksum | cut -d' ' -f1)\" && mkdir -p \"$h\" && { [ -L \"$h/auth.json\" ] || ln -s \"$src/auth.json\" \"$h/auth.json\" 2>/dev/null || [ -L \"$h/auth.json\" ]; } && env -u CODEX_SANDBOX CODEX_HOME=\"$h\" HOME=\"$h\" codex exec --model gpt-daybreak-blue-latest -c model_reasoning_effort=high -c web_search=disabled --ignore-rules --sandbox read-only --ephemeral --color never --disable hooks --disable plugins --disable apps --disable memories --disable multi_agent --disable goals --disable browser_use --disable computer_use --disable in_app_browser --disable image_generation - < {prompt_path}"
+timeout_seconds = 1800
