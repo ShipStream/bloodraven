@@ -65,6 +65,24 @@ trap cleanup_mysqld EXIT
 
 mkdir -p "$MOUNT_DIR"
 
+# Logical dumps retain ENCRYPTION='Y' DDL. Use a fresh verification keyring,
+# never the source server's escrow keyring, to create those tables.
+MYSQLD_ORIGINAL="$(command -v mysqld)"
+MYSQLD_HELP="$(mysqld --no-defaults --verbose --help 2>/dev/null)"
+PLUGIN_DIR="$(awk '$1 == "plugin-dir" {print $2; exit}' <<<"$MYSQLD_HELP")"
+BASEDIR="$(awk '$1 == "basedir" {print $2; exit}' <<<"$MYSQLD_HELP")"
+test -n "$PLUGIN_DIR" && test -n "$BASEDIR"
+test -r "$PLUGIN_DIR/component_keyring_file.so"
+mkdir -p "$RUN_DIR/plugins"
+for plugin in "$PLUGIN_DIR"/*; do
+    ln -sf "$plugin" "$RUN_DIR/plugins/$(basename "$plugin")"
+done
+cp "$MYSQLD_ORIGINAL" "$RUN_DIR/mysqld-verify"
+printf '%s\n' '{"components":"file://component_keyring_file"}' > "$RUN_DIR/mysqld-verify.my"
+rm -f "$RUN_DIR/plugins/component_keyring_file.cnf"
+printf '{"path":"%s/verification-keyring","read_only":false}\n' "$MOUNT_DIR" > "$RUN_DIR/plugins/component_keyring_file.cnf"
+MYSQLD=("$RUN_DIR/mysqld-verify" "--basedir=$BASEDIR" "--plugin-dir=$RUN_DIR/plugins")
+
 if [[ ! -d "${DATA_DIR}/mysql" ]]; then
     # Remove any partial datadir left by a prior Job attempt so mysqld can
     # create $DATA_DIR fresh — it refuses a pre-existing directory.
@@ -75,7 +93,7 @@ if [[ ! -d "${DATA_DIR}/mysql" ]]; then
     # switch users as a non-root process anyway. Running as the container
     # identity is correct. (InnoDB also writes a temp file under /tmp during
     # --initialize, which is why /tmp is a writable emptyDir.)
-    mysqld --initialize-insecure \
+    "${MYSQLD[@]}" --initialize-insecure \
         --datadir="$DATA_DIR" \
         --log-error="$ERRLOG"
 fi
@@ -99,7 +117,7 @@ log "starting ephemeral mysqld"
 # cross-site duplicate transactions. MySQL 8.0 starts gtid_mode=ON with
 # binary logging disabled, so --skip-log-bin is retained alongside the
 # GTID flags.
-mysqld \
+"${MYSQLD[@]}" \
     --datadir="$DATA_DIR" \
     --bind-address=127.0.0.1 \
     --socket="$SOCKET" \
