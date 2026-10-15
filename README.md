@@ -128,7 +128,7 @@ locations, and verification results.
 
 ### Dependencies
 
-- Go 1.26
+- Go 1.27
 - controller-runtime v0.23.3
 - k8s.io/api v0.35.3
 - MySQL 9.7 LTS with clone plugin

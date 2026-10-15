@@ -13,7 +13,7 @@ Run commands from the repository root:
 - `make test-e2e` runs the release profile of real-cluster E2E tests against the current playground cluster (requires kind/k3d/minikube context prepared with `./playground/setup.sh`; CI creates kind and runs setup first).
 - `make test-e2e-smoke` runs the smoke profile (~3 scenarios, fast feedback).
 - `make vet` runs `go vet ./...`.
-- `make lint` runs `./bin/golangci-lint run ./...`. Install it with `make install-lint`, which builds golangci-lint v2 at the version pinned in `Makefile` into ignored `bin/` using the active Go toolchain (Go 1.26 or 1.27). Re-run installation after upgrading Go. CI and the release gate use the same install and lint targets, so local and CI use the same linter and configuration.
+- `make lint` runs `./bin/golangci-lint run ./...`. Install it with `make install-lint`, which builds golangci-lint v2 at the version pinned in `Makefile` into ignored `bin/` using the active Go toolchain (Go 1.27). Re-run installation after upgrading Go. CI and the release gate use the same install and lint targets, so local and CI use the same linter and configuration.
 - `make generate` refreshes API deep-copy code in `api/v1alpha1`.
 - `make manifests` generates CRD and RBAC output under `config/`.
 - `docker build --target bloodraven -t bloodraven .` and `docker build --target sidecar -t bloodraven-sidecar .` build container images. Podman works too (substitute `podman` for `docker`), but docker is preferred because k3d's podman support is experimental.
@@ -104,7 +104,7 @@ The runner stamps an in-progress marker on the MFG (`chaos.playground.bloodraven
 `./playground/reset-mysql.sh` now scales the operator to 0 before stripping taints (no taint/operator race), restarts `local-path-provisioner` to reset its 15-failure threshold, JSON-patches `/status` to clear `lastFailover{,Target}`/`promotionGtidExecuted`/`plannedFailover` (otherwise `isFreshDeploy` skips bootstrap and the cluster stalls on the matrix.go `NoPrimary` guard), and on wait-loop timeout dumps full forensics to `playground/chaos-results/reset-<timestamp>/` and exits non-zero.
 
 ## Architecture & Configuration Notes
-This project is a Go 1.26 Kubernetes operator built around a single custom resource and two binaries. When making material changes to reconciliation, failover, CRD types, sidecar behavior, or deployment model, update the relevant documentation in `site/content/docs/` to keep code and docs aligned.
+This project is a Go 1.27 Kubernetes operator built around a single custom resource and two binaries. When making material changes to reconciliation, failover, CRD types, sidecar behavior, or deployment model, update the relevant documentation in `site/content/docs/` to keep code and docs aligned.
 
 ## Day-2 Diagnostic Agent Skill (`bloodraven-doctor`)
 The repository includes an AI diagnostic copilot skill located at `.agents/skills/bloodraven-doctor/` (symlinked as `skills/bloodraven-doctor/` for `npx skills add shipstream/bloodraven` compatibility).
