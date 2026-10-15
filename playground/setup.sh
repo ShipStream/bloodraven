@@ -278,7 +278,7 @@ if [[ "$HELM_INSTALL_CRDS" == "true" ]]; then
   info "Skipping manual Bloodraven CRD install; fresh Helm install will install chart CRDs from charts/bloodraven/crds"
 else
   info "Installing Bloodraven CRDs..."
-  kubectl apply -f "$PROJECT_ROOT/charts/bloodraven/crds/"
+  kubectl apply --server-side --force-conflicts -f "$PROJECT_ROOT/charts/bloodraven/crds/"
   ok "Bloodraven CRDs installed"
 fi
 
