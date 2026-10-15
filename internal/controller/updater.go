@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -40,6 +41,10 @@ type UpdateController struct {
 	// tickInterval so the threshold scales with the polling cadence.
 	failFastDuration time.Duration
 
+	// primaryLossWindow is how long the active primary may stay unreachable
+	// during a follower wait before the ordered update aborts.
+	primaryLossWindow time.Duration
+
 	mu       sync.Mutex
 	phase    UpdatePhase
 	updating bool
@@ -65,10 +70,11 @@ type UpdateTarget struct {
 // NewUpdateController creates a new UpdateController.
 func NewUpdateController(failover *FailoverController, logger *slog.Logger) *UpdateController {
 	return &UpdateController{
-		failover:         failover,
-		logger:           logger,
-		tickInterval:     5 * time.Second,
-		failFastDuration: 30 * time.Second,
+		failover:          failover,
+		logger:            logger,
+		tickInterval:      5 * time.Second,
+		failFastDuration:  30 * time.Second,
+		primaryLossWindow: defaultActivePrimaryLossWindow,
 	}
 }
 
@@ -203,7 +209,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 			return processed, fmt.Errorf("update follower %s: %w", follower.Name, err)
 		}
 		u.setPhase(UpdatePhaseWaitReplica)
-		if err := u.waitForReplicaReadyExpected(ctx, follower.Checker, follower.ExpectedSource, 5*time.Minute); err != nil {
+		if err := u.waitForReplicaReadyWatching(ctx, follower.Checker, follower.ExpectedSource, active.Checker, 5*time.Minute); err != nil {
 			return processed, fmt.Errorf("wait for follower %s: %w", follower.Name, err)
 		}
 		processed = append(processed, follower.Name)
@@ -296,7 +302,39 @@ func (u *UpdateController) requireDirectReplica(ctx context.Context, target Upda
 	return nil
 }
 
+// errActivePrimaryLost is returned by waitForReplicaReadyWatching when the
+// active primary stopped answering while a rolled follower was waiting to
+// catch up. The ordered update must end so cross-site failover, which is
+// suppressed for as long as an update runs, can act on the lost primary.
+var errActivePrimaryLost = errors.New("active primary became unreachable during ordered update")
+
+// defaultActivePrimaryLossWindow is how long the active primary must stay
+// unreachable, across consecutive ticks, before an in-flight follower wait
+// gives up. It only has to ride out a probe blip: an aborted update is
+// retried from the remaining spec drift, whereas a held update blocks
+// failover for up to the follower wait timeout.
+const defaultActivePrimaryLossWindow = 10 * time.Second
+
 func (u *UpdateController) waitForReplicaReadyExpected(ctx context.Context, checker mysql.Checker, expected string, timeout time.Duration) error {
+	return u.waitForReplicaReadyWatching(ctx, checker, expected, nil, timeout)
+}
+
+// waitForReplicaReadyWatching is waitForReplicaReadyExpected plus a probe of
+// the active primary the follower is expected to replicate from. A follower
+// that is waiting on a dead source can never become ready, and while this
+// wait runs the topology manager suppresses cross-site actions to avoid
+// failing over because the rolled standby looks unreachable. Without the
+// probe a primary that dies mid-update is not failed over (or, for a
+// rotation-blocked standby, not even refused) until the 5 minute timeout.
+// A nil primary disables the probe.
+func (u *UpdateController) waitForReplicaReadyWatching(ctx context.Context, checker mysql.Checker, expected string, primary mysql.Checker, timeout time.Duration) error {
+	lossThreshold := 2
+	if u.tickInterval > 0 {
+		if n := int((u.primaryLossWindow + u.tickInterval - 1) / u.tickInterval); n > lossThreshold {
+			lossThreshold = n
+		}
+	}
+	lost := 0
 	deadline := time.Now().Add(timeout)
 	for {
 		readOnly, roleErr := checker.CheckReadOnly(ctx)
@@ -317,6 +355,19 @@ func (u *UpdateController) waitForReplicaReadyExpected(ctx context.Context, chec
 			}
 			if rs.IORunning && rs.SQLRunning && canonicalSourceHost(rs.SourceHost) == canonicalSourceHost(expected) {
 				return nil
+			}
+		}
+		if primary != nil {
+			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			_, perr := primary.CheckReadOnly(probeCtx)
+			cancel()
+			if perr != nil {
+				lost++
+				if lost >= lossThreshold {
+					return fmt.Errorf("%w: %v", errActivePrimaryLost, perr)
+				}
+			} else {
+				lost = 0
 			}
 		}
 		if time.Now().After(deadline) {
