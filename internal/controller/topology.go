@@ -454,8 +454,16 @@ type TopologyManager struct {
 	// transition. Protected by mu.
 	keyringRotationBlocked      []string
 	keyringRotationBlockedDirty bool
-	keyringPromotionSkipped     []string
-	keyringPromotionRefused     []string
+
+	// crossSiteRetry is armed when applyCrossSiteAction deferred a decision
+	// because an update, bootstrap, planned failover or in-place restore
+	// held the cross-site path. Cross-site actions are otherwise driven by
+	// state transitions, and the transition that was swallowed does not
+	// repeat once the holder lets go, so Poll re-evaluates the current
+	// topology once the guards are released. Protected by mu.
+	crossSiteRetry          bool
+	keyringPromotionSkipped []string
+	keyringPromotionRefused []string
 
 	// specDriftSites lists site names whose Deployment spec-hash differs
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
@@ -1116,9 +1124,14 @@ func (tm *TopologyManager) Poll(ctx context.Context) {
 	// a keyring-rotation block-set change: otherwise a 2-site refuse never
 	// heals after the replica reaches Sealed (no MySQL state transition).
 	blockedSetChanged := tm.peekKeyringRotationBlockedDirty()
+	// A decision swallowed while an update/bootstrap/planned failover held
+	// the cross-site path is retried once the holder has let go; without
+	// this an unchanged unreachable primary supplies no further transition.
+	retryDeferred := tm.crossSiteRetryReady()
 	action := state.EvalCrossSite(tm.observations(), tm.cfg.SitePriorities)
 	alertMsg := action.Alert
-	if anyTransition || blockedSetChanged {
+	if anyTransition || blockedSetChanged || retryDeferred {
+		tm.clearCrossSiteRetry()
 		tm.applyCrossSiteAction(ctx, action)
 	}
 
@@ -1839,6 +1852,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	// auto-cloning an empty peer) would actively fight the restore.
 	// Defer until the in-place restore reconciler clears the flag.
 	if tm.isTopologyFrozen() {
+		tm.armCrossSiteRetry()
 		tm.logger.Info("cross-site action deferred: in-place restore in progress")
 		return
 	}
@@ -1849,6 +1863,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	// or resolving the transient split-brain window as if it were a
 	// real one.
 	if tm.isPlannedFailoverActive() {
+		tm.armCrossSiteRetry()
 		tm.logger.Info("cross-site action deferred: planned failover in progress")
 		return
 	}
@@ -1859,6 +1874,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 	// a spurious failover. A clone into a non-promotable reader is excluded —
 	// see bootstrapBlocksCrossSite.
 	if tm.bootstrapBlocksCrossSite() || tm.isUpdating() {
+		tm.armCrossSiteRetry()
 		tm.mu.RLock()
 		phase := tm.bootstrapPhase
 		tm.mu.RUnlock()
@@ -2719,6 +2735,33 @@ func (tm *TopologyManager) isUpdating() bool {
 	running := tm.deploymentUpdateRunning
 	tm.mu.RUnlock()
 	return running || tm.updater != nil && tm.updater.IsUpdating()
+}
+
+func (tm *TopologyManager) armCrossSiteRetry() {
+	tm.mu.Lock()
+	tm.crossSiteRetry = true
+	tm.mu.Unlock()
+}
+
+func (tm *TopologyManager) clearCrossSiteRetry() {
+	tm.mu.Lock()
+	tm.crossSiteRetry = false
+	tm.mu.Unlock()
+}
+
+// crossSiteRetryReady reports whether a deferred cross-site decision is
+// waiting and every guard that deferred it has been released. While a guard
+// is still held the flag stays armed and nothing is re-evaluated, so a long
+// update does not log a suppression on every poll.
+func (tm *TopologyManager) crossSiteRetryReady() bool {
+	tm.mu.RLock()
+	armed := tm.crossSiteRetry
+	tm.mu.RUnlock()
+	if !armed {
+		return false
+	}
+	return !tm.isTopologyFrozen() && !tm.isPlannedFailoverActive() &&
+		!tm.bootstrapBlocksCrossSite() && !tm.isUpdating()
 }
 
 // checkUpdate detects spec drift and triggers an ordered rolling

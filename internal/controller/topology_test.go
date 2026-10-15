@@ -2968,3 +2968,57 @@ func TestActiveSiteLocked_WritableReaderDoesNotClearActiveSite(t *testing.T) {
 		})
 	}
 }
+
+// A primary that fails while an ordered update holds the cross-site path
+// produces its Unreachable transition during the suppression window. The
+// update then aborts (errActivePrimaryLost) and releases the guard, but the
+// topology is unchanged, so no further transition arrives. Poll must retry
+// the deferred decision once the guard is released, otherwise the group
+// stays without a writable primary until something else flaps.
+func TestDeferredFailoverRetriedAfterUpdateGuardReleased(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, dns := newTestTopologyManager(site0, site1)
+	pollN(tm, 2)
+
+	tm.mu.Lock()
+	tm.deploymentUpdateRunning = true
+	tm.mu.Unlock()
+
+	site0.setError(errors.New("connection refused"))
+	pollN(tm, 5)
+
+	site1.mu.Lock()
+	promotedDuringUpdate := !site1.readOnly
+	site1.mu.Unlock()
+	if promotedDuringUpdate {
+		t.Fatal("standby promoted while the update held the cross-site path")
+	}
+	if dns.getLastIP() == "2.2.2.2" {
+		t.Fatal("DNS flipped while the update held the cross-site path")
+	}
+
+	tm.mu.Lock()
+	tm.deploymentUpdateRunning = false
+	tm.mu.Unlock()
+	pollN(tm, 2)
+
+	site1.mu.Lock()
+	promoted := !site1.readOnly
+	site1.mu.Unlock()
+	if !promoted {
+		t.Fatal("standby was not promoted after the update released the cross-site path; the deferred failover was never retried")
+	}
+	if dns.getLastIP() != "2.2.2.2" {
+		t.Fatalf("DNS = %q after deferred failover, want 2.2.2.2", dns.getLastIP())
+	}
+}
+
+// With nothing deferred, releasing a guard must not cause extra evaluations.
+func TestCrossSiteRetryNotArmedWithoutSuppression(t *testing.T) {
+	tm, _, _ := newTestTopologyManager(&mockMySQL{readOnly: false}, &mockMySQL{readOnly: true})
+	pollN(tm, 3)
+	if tm.crossSiteRetryReady() {
+		t.Fatal("retry armed without any suppressed decision")
+	}
+}
