@@ -866,6 +866,10 @@ func (a *Actions) GlobalRecover(ctx context.Context) error {
 	if err := a.K.RemoveAllChaosNetworkPolicies(ctx, a.Namespace); err != nil {
 		errs = append(errs, fmt.Errorf("remove chaos NetworkPolicies: %w", err))
 	}
+	// Deleting a freezer pod thaws the mysqld it holds in SIGSTOP.
+	if err := a.K.DeletePodsByLabel(ctx, a.Namespace, "app="+FreezerLabelValue); err != nil {
+		errs = append(errs, fmt.Errorf("delete mysqld freezer pods: %w", err))
+	}
 	// Object storage: a scenario that scaled RustFS to 0 and never ran its
 	// reverter would otherwise break every backup/restore scenario after it.
 	if err := a.RecoverRustFS(ctx); err != nil {

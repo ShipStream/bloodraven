@@ -113,4 +113,12 @@ type Scenario struct {
 	Precheck   func(ctx context.Context, env *Env) error
 	Steps      []Step
 	Cleanup    func(ctx context.Context, env *Env) error
+	// CleanupTimeout bounds revert, Cleanup, global recover and the
+	// reconverge wait together. Zero means DefaultCleanupTimeout. Raise it
+	// for scenarios whose Cleanup may have to reclone sites.
+	CleanupTimeout time.Duration
 }
+
+// DefaultCleanupTimeout is the cleanup budget of a scenario that does not
+// set CleanupTimeout.
+const DefaultCleanupTimeout = 4 * time.Minute

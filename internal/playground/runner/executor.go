@@ -206,7 +206,11 @@ func (e *Executor) runWithLog(ctx context.Context, env *Env, phase Phase, name s
 }
 
 func (e *Executor) cleanup(env *Env, s Scenario) error {
-	cleanCtx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	budget := s.CleanupTimeout
+	if budget <= 0 {
+		budget = DefaultCleanupTimeout
+	}
+	cleanCtx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	var errs []error
 	if err := env.Chaos.Revert(cleanCtx); err != nil {

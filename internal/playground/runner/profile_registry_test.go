@@ -25,9 +25,28 @@ func TestProfilesSelectRegisteredScenarios(t *testing.T) {
 	// 31-pitr-verification-rustfs is no longer quarantined (#101 fixed — the
 	// verify mysqld runs gtid_mode=ON and server-side dedup handles the PITR
 	// replay), and the issue #115 reader scenarios (40-44) are release-graded.
+	// The four chaos-round 2026-10-15 regressions bring it to 24.
 	release := runner.SelectForProfile(all, runner.ProfileRelease)
-	if len(release) != 20 {
-		t.Fatalf("release profile selected %d scenarios, want 20", len(release))
+	if len(release) != 24 {
+		t.Fatalf("release profile selected %d scenarios, want 24", len(release))
+	}
+	for _, id := range []string{
+		"09-anti-flap-cooldown",
+		"57-hung-primary-detected-and-fenced",
+		"58-hung-reader-does-not-slow-failover",
+		"59-killed-clone-never-promoted",
+	} {
+		if !containsScenarioID(release, id) {
+			t.Errorf("release profile must include %s", id)
+		}
+	}
+	for _, id := range []string{
+		"60-operator-only-partition-no-acked-loss",
+		"61-reader-ahead-of-new-primary-recovers",
+	} {
+		if containsScenarioID(release, id) || containsScenarioID(runner.SelectForProfile(all, runner.ProfileFull), id) {
+			t.Errorf("%s is quarantined and must not be selected by any profile", id)
+		}
 	}
 	if !containsScenarioID(release, "09-network-partition-self-fence") {
 		t.Error("release profile must include 09-network-partition-self-fence (no longer quarantined)")

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	pgkube "github.com/shipstream/bloodraven/internal/playground/kube"
 	pglogs "github.com/shipstream/bloodraven/internal/playground/logs"
 	"github.com/shipstream/bloodraven/internal/playground/runner"
 )
@@ -14,80 +15,161 @@ func init() {
 	runner.Register(scenario09AntiFlapCooldown())
 }
 
-// scenario09AntiFlapCooldown verifies the anti-flap cooldown contract:
-// after one emergency failover, a second failover candidate inside the
-// cooldown window MUST NOT produce a ping-pong promotion, and the
-// operator's "failover blocked by anti-flap cooldown" log line at
-// internal/controller/topology.go:946-950 SHOULD fire as triage
-// evidence that the cooldown branch evaluated.
+// s09bCooldown is the failoverCooldown the scenario runs under. The
+// playground default (30s) is shorter than the time it takes to finish
+// the first failover, confirm the old primary is back and detect the
+// second outage, so the second detection could land after the cooldown
+// had already expired and the cooldown branch would never evaluate. 90s
+// leaves the second detection well inside the window and still keeps
+// the retry inside the scenario timeout.
+const s09bCooldown = 90 * time.Second
+
+// scenario09AntiFlapCooldown verifies both halves of the anti-flap
+// contract: a second primary loss inside failoverCooldown is NOT
+// promoted while the cooldown runs, and IS promoted once it expires.
 //
-// Why this scenario was previously listed as "INCONCLUSIVE" in
-// chaos-scenarios.md §9: the obvious shape (kill primary, wait for
-// failover, kill new primary inside cooldown) is timing-fragile.
-// Three failure modes were observed:
+// The second half is the regression this scenario was rewritten for
+// (chaos round 2026-10-15, F10). Cross-site actions run on state
+// transitions, and a dead primary is a stable state, so a failover
+// refused by the cooldown was never evaluated again: the group stayed
+// without a primary until the dead site came back, 4m40s past cooldown
+// expiry in the original reproduction. The previous version of this
+// scenario asserted "no second failover within 90s" against a 30s
+// cooldown, which was asserting that bug.
 //
-//   - Scale-to-0 of the FIRST kill held the original primary
-//     unreachable, so when the second kill landed the operator saw
-//     TOTAL LOSS instead of a promotion candidate and the cooldown
-//     branch never evaluated.
-//   - NetworkPolicy on both sites hit the same TOTAL LOSS dead end.
-//   - Sequential partition raced the recovery flow on the original
-//     primary; both sites could end up self-fenced in NO PRIMARY.
+// Timing:
 //
-// This implementation pins down the timing as follows:
-//
-//  1. Force-DELETE the primary pod (not scale-to-0). The Deployment
-//     respawns the pod within ~5s, so by the time the failover
-//     completes the original primary's MySQL is back up and the
-//     postStart hook has set super_read_only=ON. It is therefore a
-//     valid read-only promotion candidate the moment the second kill
+//  1. Raise spec.failoverCooldown to s09bCooldown (restored in cleanup).
+//     The operator restarts its topology manager on the config change
+//     and rehydrates lastFailover from status, which is harmless here.
+//  2. Scale the primary to 0 and wait for the first failover.
+//  3. Scale the old primary back up and wait for it to be seen as
+//     reachable, so it is a read-only candidate when the second fault
 //     lands.
-//  2. Wait for the *first* failover to finish (activeSite flips and
-//     status.lastFailover stamps), then poll briefly for the
-//     ORIGINAL primary to register as `read-only` in CR status.
-//     Without this, the operator's first observation post-failover
-//     can race to TOTAL LOSS instead of the cooldown branch.
-//  3. Scale-to-0 the new primary (held by chaos reverter) so the
-//     operator sees it as unreachable for the full cooldown window.
-//  4. Sleep through 90s of observation — long enough that a
-//     hypothetical second failover would have completed (operator
-//     detect ~6s + relay log drain ~30s + promotion = ~40s, with
-//     margin).
-//  5. Assert the safety property as a HARD failure: failovers_total
-//     across all sites incremented by AT MOST 1 since the snapshot.
-//     A delta of 2 means the cooldown was bypassed.
-//  6. Best-effort log scan for "failover blocked by anti-flap
-//     cooldown" — if the line fired we know the branch evaluated; if
-//     it did not, the safety property still has to hold via the
-//     metric, but the absence is recorded so triage knows to look at
-//     why the cluster reached a state that suppressed promotion (e.g.
-//     TOTAL LOSS, planned-failover in flight, bootstrap suppression).
-//
-// The metric assertion is what actually exercises anti-flap. The log
-// is supporting evidence, not the gating signal — that resolves the
-// timing fragility chaos-scenarios.md §9 documented.
+//  4. Scale the new primary to 0 (held until cleanup).
+//  5. Hard: the operator logs "failover blocked by anti-flap cooldown",
+//     and status.lastFailover does not move before the cooldown ends.
+//  6. Hard: a second failover to the original primary completes after
+//     the cooldown ends and within 45s of it.
 func scenario09AntiFlapCooldown() runner.Scenario {
 	return runner.Scenario{
 		ID:    "09-anti-flap-cooldown",
-		Title: "Anti-flap cooldown blocks second failover within window",
-		Hypothesis: "After one emergency failover, scaling the newly-promoted primary to 0 inside the " +
-			"failoverCooldown window must NOT produce a second failover. failovers_total across all " +
-			"sites increments by exactly 1 (the original promotion); the operator log should also emit " +
-			"'failover blocked by anti-flap cooldown' as triage evidence.",
+		Title: "Anti-flap cooldown defers a second failover, then retries it at expiry",
+		Hypothesis: "After one emergency failover, scaling the new primary to 0 inside failoverCooldown logs " +
+			"'failover blocked by anti-flap cooldown' and promotes nothing while the cooldown runs. When the " +
+			"cooldown expires the operator retries without any new state transition and promotes the original " +
+			"primary within 45s.",
 		Risk:     "high",
 		DocLink:  "playground/chaos-scenarios.md#9-rapid-successive-failures-anti-flap",
-		Timeout:  6 * time.Minute,
+		Timeout:  8 * time.Minute,
 		Precheck: AssertHealthyBaseline,
 		Steps: []runner.Step{
+			s09bRaiseCooldown(),
 			s09bSnapshotFailoverCounts(),
 			s09bInjectKillPrimary(),
 			s09bObserveFirstFailover(),
 			s09bObserveOriginalPrimaryReadOnly(),
 			s09bInjectScaleNewPrimaryDown(),
-			s09bSettleObservationWindow(),
-			s09bVerifyNoPingPongAndCaptureLog(),
+			s09bVerifyBlockedDuringCooldown(),
+			s09bVerifyRetriedAtExpiry(),
+		},
+		Cleanup:        s09bCleanup,
+		CleanupTimeout: 15 * time.Minute,
+	}
+}
+
+func s09bRaiseCooldown() runner.Step {
+	return runner.Step{
+		Phase: runner.PhasePrecheck,
+		Name:  fmt.Sprintf("raise spec.failoverCooldown to %s", s09bCooldown),
+		Do: func(ctx context.Context, env *runner.Env) error {
+			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+			if err != nil {
+				return err
+			}
+			original := ""
+			if mfg.Spec.FailoverCooldown != nil {
+				original = mfg.Spec.FailoverCooldown.Duration.String()
+			}
+			if err := ctxStash(ctx, env, "originalCooldown", original); err != nil {
+				return err
+			}
+			tail, err := env.Logs("operator")
+			if err != nil {
+				return fmt.Errorf("open operator tailer: %w", err)
+			}
+			patchedAt := time.Now()
+			if err := env.Kube.PatchMFGNamed(ctx, env.Namespace, env.FG, []pgkube.JSONPatchOp{{
+				Op: "add", Path: "/spec/failoverCooldown", Value: s09bCooldown.String(),
+			}}); err != nil {
+				return fmt.Errorf("patch failoverCooldown: %w", err)
+			}
+			// The config change restarts the topology manager. A fault
+			// injected before the new manager has observed every site is
+			// judged by a manager with no history (a primary pod that
+			// respawns in that window is simply re-asserted), so wait for
+			// the restart before anything else.
+			restartCtx, cancelRestart := context.WithTimeout(ctx, 2*time.Minute)
+			_, err = env.Wait.UntilLog(restartCtx, tail, patchedAt, "topology manager restarted with the new cooldown",
+				pglogs.Substring("starting topology manager"))
+			cancelRestart()
+			if err != nil {
+				return err
+			}
+			// The longer cooldown also stretches any cooldown left from an
+			// earlier scenario's failover; wait that out with the rest of
+			// the baseline. The restarted manager publishes status from
+			// scratch, so require the baseline to hold for a while rather
+			// than accept one read of the old manager's status.
+			const stable = 10 * time.Second
+			deadline := time.Now().Add(s09bCooldown + 30*time.Second)
+			var healthySince time.Time
+			for {
+				err := AssertHealthyBaseline(ctx, env)
+				if err != nil {
+					healthySince = time.Time{}
+				} else if healthySince.IsZero() {
+					healthySince = time.Now()
+				} else if time.Since(healthySince) >= stable {
+					return nil
+				}
+				if time.Now().After(deadline) {
+					if err == nil {
+						err = fmt.Errorf("baseline did not stay healthy for %s", stable)
+					}
+					return err
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(3 * time.Second):
+				}
+			}
 		},
 	}
+}
+
+// s09bCleanup restores the cooldown and repairs any divergence. Writes
+// the new primary took after the rejoining site caught up for the last
+// time are lost by design when it is scaled down (asynchronous RPO), so it
+// can return RecoveryBlocked, and a reader that received them is Blocked.
+func s09bCleanup(ctx context.Context, env *runner.Env) error {
+	if err := s09bRestoreCooldown(ctx, env); err != nil {
+		return err
+	}
+	return repairDivergentSites(ctx, env, 12*time.Minute)
+}
+
+func s09bRestoreCooldown(ctx context.Context, env *runner.Env) error {
+	original := ctxFetch(env, "originalCooldown")
+	op := pgkube.JSONPatchOp{Op: "remove", Path: "/spec/failoverCooldown"}
+	if original != "" {
+		op = pgkube.JSONPatchOp{Op: "add", Path: "/spec/failoverCooldown", Value: original}
+	}
+	if err := env.Kube.PatchMFGNamed(ctx, env.Namespace, env.FG, []pgkube.JSONPatchOp{op}); err != nil {
+		return fmt.Errorf("restore failoverCooldown %q: %w", original, err)
+	}
+	return nil
 }
 
 func s09bSnapshotFailoverCounts() runner.Step {
@@ -95,6 +177,8 @@ func s09bSnapshotFailoverCounts() runner.Step {
 		Phase: runner.PhasePrecheck,
 		Name:  "snapshot per-site failovers_total counters",
 		Do: func(ctx context.Context, env *runner.Env) error {
+			// The cooldown patch restarted the topology manager, not the
+			// operator process, so the metrics endpoint is unchanged.
 			snap, err := env.Metrics.Scrape(ctx)
 			if err != nil {
 				return fmt.Errorf("scrape metrics: %w", err)
@@ -120,7 +204,7 @@ func s09bSnapshotFailoverCounts() runner.Step {
 func s09bInjectKillPrimary() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
-		Name:  "force-delete active primary pod (Deployment respawns it within ~5s)",
+		Name:  "scale the active primary to 0",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
 			if err != nil {
@@ -137,11 +221,12 @@ func s09bInjectKillPrimary() runner.Step {
 			if err := ctxStash(ctx, env, "expectedNewPrimary", peer); err != nil {
 				return err
 			}
-			env.Capture.Note(fmt.Sprintf("active=%s expected-new-primary=%s; deleting pod", active, peer))
-			if _, err := env.Logs("operator"); err != nil {
-				return fmt.Errorf("open operator tailer: %w", err)
-			}
-			return env.Chaos.DeleteSitePod(ctx, active)
+			env.Capture.Note(fmt.Sprintf("active=%s expected-new-primary=%s; scaling it to 0", active, peer))
+			// Scale-to-0, not a pod delete: a deleted pod respawns in
+			// ~8s, and while its stale endpoint black-holes probes the
+			// operator can collect fewer than failureThreshold failures
+			// before it is back, so no failover happens at all.
+			return env.Chaos.ScaleSiteToZero(ctx, active)
 		},
 	}
 }
@@ -167,56 +252,48 @@ func s09bObserveFirstFailover() runner.Step {
 			if err != nil {
 				return err
 			}
+			first := mfg.Status.LastFailover.Time
 			env.Capture.Note(fmt.Sprintf("first failover complete at %s, new primary=%s",
-				mfg.Status.LastFailover.Time.Format(time.RFC3339), mfg.Status.ActiveSite))
+				first.Format(time.RFC3339), mfg.Status.ActiveSite))
+			if err := ctxStash(ctx, env, "firstFailoverAt", first.UTC().Format(time.RFC3339Nano)); err != nil {
+				return err
+			}
 			return ctxStash(ctx, env, "newPrimary", mfg.Status.ActiveSite)
 		},
 	}
 }
 
-// s09bObserveOriginalPrimaryReadOnly waits for the original primary to
-// be observable as `read-only` in CR status. This is the bridge step
-// between the failover completing and the second kill: without it the
-// operator can race to TOTAL LOSS the moment we kill the new primary
-// (because it last saw the original as `unreachable` during the
-// failover and hasn't re-polled it yet).
-//
-// Timeout: 20s. The original pod was respawned by the Deployment
-// controller during the failover (~32s of warm-up by the time we
-// reach this step), so the operator's next 2s poll cycle should
-// observe it as read-only. We allow 20s to absorb operator-busy
-// jitter.
-//
-// Tolerance: we accept either `read-only` or any state that means the
-// operator has SEEN this site post-respawn — specifically, we only
-// fail on `unreachable`, `unknown`, or empty. A transient state like
-// `recovery` is fine because it still means EvalCrossSite will not
-// classify the site as unreachable.
+// s09bObserveOriginalPrimaryReadOnly brings the original primary back
+// and waits for it to be observable as reachable in CR status. Without it the operator can
+// still have the original primary marked unreachable from the first
+// failover when the second fault lands, and it would see TOTAL LOSS
+// instead of a promotable candidate.
 func s09bObserveOriginalPrimaryReadOnly() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseObserve,
-		Name:  "original primary observed as reachable (not unreachable/unknown)",
+		Name:  "original primary scaled back up and caught up as a replica",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			original := ctxFetch(env, "originalPrimary")
-			waitCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			if err := env.Chaos.ScaleSiteToOne(ctx, original); err != nil {
+				return err
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			defer cancel()
 			_, err := env.Wait.UntilCR(waitCtx, env.Namespace,
 				fmt.Sprintf("site %s reachable post-failover", original),
 				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
-					var seen string
-					for _, s := range mfg.Status.Sites {
-						if s.Name == original {
-							seen = s.State
-							break
-						}
+					// Caught up, not just reachable: the second fault loses
+					// whatever this site has not received yet.
+					s := statusSiteByName(mfg, original)
+					if s == nil {
+						return false, "site missing from status", nil
 					}
-					msg := fmt.Sprintf("site %s state=%q", original, seen)
-					switch seen {
-					case "", "unreachable", "unknown":
-						return false, msg, nil
-					default:
-						return true, msg, nil
-					}
+					caughtUp := s.State == "read-only" && s.Replicating && s.RecoveryState == "" &&
+						s.SourceConvergenceState == v1alpha1.SourceConvergenceConverged &&
+						s.SecondsBehindSource != nil && *s.SecondsBehindSource == 0
+					return caughtUp, fmt.Sprintf("site %s state=%q replicating=%v recovery=%q convergence=%q lag=%s",
+						original, s.State, s.Replicating, s.RecoveryState, s.SourceConvergenceState,
+						formatLag(s.SecondsBehindSource)), nil
 				},
 			)
 			return err
@@ -224,70 +301,119 @@ func s09bObserveOriginalPrimaryReadOnly() runner.Step {
 	}
 }
 
-// s09bInjectScaleNewPrimaryDown scales the newly-promoted primary's
-// deployment to 0 immediately after we've confirmed the original
-// primary is reachable. The chaos reverter holds the new primary down
-// past any deployment reconcile cycle so the operator sees a
-// sustained outage on it while the original primary is a valid
-// read-only promotion candidate. The cooldown should now block the
-// second promotion that EvalCrossSite would otherwise approve.
+// s09bInjectScaleNewPrimaryDown holds the new primary down (scale to 0)
+// so the operator sees a sustained outage while the original primary is
+// a valid read-only candidate.
 func s09bInjectScaleNewPrimaryDown() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
 		Name:  "scale newly-promoted primary to 0 inside cooldown window",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			newPrimary := ctxFetch(env, "newPrimary")
+			firstAt, err := time.Parse(time.RFC3339Nano, ctxFetch(env, "firstFailoverAt"))
+			if err != nil {
+				return fmt.Errorf("parse firstFailoverAt: %w", err)
+			}
+			if remaining := time.Until(firstAt.Add(s09bCooldown)); remaining < 30*time.Second {
+				return fmt.Errorf("only %s of the cooldown left before the second fault; the cooldown branch "+
+					"could not be exercised reliably", remaining.Round(time.Second))
+			}
 			env.Capture.Note(fmt.Sprintf("scaling new primary %s to 0 to provoke second-failover evaluation", newPrimary))
 			return env.Chaos.ScaleSiteToZero(ctx, newPrimary)
 		},
 	}
 }
 
-// s09bSettleObservationWindow sleeps through 90s of cluster time so
-// that:
-//   - the operator detects the second site unreachable (~6s)
-//   - the cooldown branch evaluates and either logs OR is bypassed
-//   - if bypassed, a hypothetical failover would have completed
-//     (relay log drain ~30s + promotion = ~40s)
-//
-// 90s is conservative — empirically anti-flap fires within ~10–15s
-// of the second injection — but this gives any latent ping-pong
-// promotion time to surface so the metric verifier can catch it.
-//
-// We do not wait on the log here; the verify step handles the log
-// scan (best-effort) and the metric assertion (hard) as a single
-// pass over post-settle state.
-func s09bSettleObservationWindow() runner.Step {
+// s09bVerifyBlockedDuringCooldown asserts the cooldown branch evaluated
+// and held: the anti-flap line is logged, and status.lastFailover does
+// not move until the cooldown is about to end.
+func s09bVerifyBlockedDuringCooldown() runner.Step {
 	return runner.Step{
-		Phase: runner.PhaseSettle,
-		Name:  "settle 90s for cooldown evaluation + hypothetical failover",
+		Phase: runner.PhaseVerify,
+		Name:  "anti-flap cooldown logged; no failover before expiry",
 		Do: func(ctx context.Context, env *runner.Env) error {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(90 * time.Second):
-				return nil
+			firstAt, err := time.Parse(time.RFC3339Nano, ctxFetch(env, "firstFailoverAt"))
+			if err != nil {
+				return fmt.Errorf("parse firstFailoverAt: %w", err)
+			}
+			expiry := firstAt.Add(s09bCooldown)
+			tail, err := env.Logs("operator")
+			if err != nil {
+				return fmt.Errorf("open operator tailer: %w", err)
+			}
+			logCtx, cancelLog := context.WithDeadline(ctx, expiry)
+			m, err := env.Wait.UntilLog(logCtx, tail, firstAt, "anti-flap cooldown blocks the second failover",
+				pglogs.Substring("failover blocked by anti-flap cooldown"))
+			cancelLog()
+			if err != nil {
+				return fmt.Errorf("the second primary loss was never refused by the cooldown branch: %w", err)
+			}
+			env.Capture.Note("anti-flap log observed: " + m.Line)
+
+			// Hold until 3s before expiry, checking that nothing promoted.
+			holdCtx, cancelHold := context.WithDeadline(ctx, expiry.Add(-3*time.Second))
+			defer cancelHold()
+			for {
+				mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
+				if err != nil {
+					return err
+				}
+				if lf := mfg.Status.LastFailover; lf != nil && lf.Time.After(firstAt.Add(time.Second)) {
+					return fmt.Errorf("anti-flap bypassed: a second failover to %q completed at %s, %s before the cooldown expired",
+						mfg.Status.LastFailoverTarget, lf.Time.Format(time.RFC3339), expiry.Sub(lf.Time).Round(time.Second))
+				}
+				select {
+				case <-holdCtx.Done():
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					env.Capture.Note(fmt.Sprintf("no failover through %s (cooldown expiry %s)",
+						time.Now().Format(time.RFC3339), expiry.Format(time.RFC3339)))
+					return nil
+				case <-time.After(2 * time.Second):
+				}
 			}
 		},
 	}
 }
 
-// s09bVerifyNoPingPongAndCaptureLog is the actual assertion. It
-// computes the per-site failovers_total delta since snapshot and
-// rejects any total > 1. The original failover legitimately bumped
-// one site's counter by 1; any further increment means the cooldown
-// was bypassed and a ping-pong promotion landed.
-//
-// The "failover blocked by anti-flap cooldown" log scan runs after
-// the metric pass and is purely informational — its absence does not
-// fail the scenario, but the result is recorded in Capture.Note so
-// triage can distinguish "cooldown branch evaluated and logged" from
-// "cluster never reached a state that triggered the cooldown branch".
-func s09bVerifyNoPingPongAndCaptureLog() runner.Step {
+// s09bVerifyRetriedAtExpiry asserts the operator promotes the original
+// primary once the cooldown expires, with no new transition to prompt
+// it: the new primary stays scaled to 0 throughout.
+func s09bVerifyRetriedAtExpiry() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "failovers_total delta == 1 across all sites; log scan for cooldown line",
+		Name:  "second failover to the original primary within 45s of cooldown expiry",
 		Do: func(ctx context.Context, env *runner.Env) error {
+			original := ctxFetch(env, "originalPrimary")
+			firstAt, err := time.Parse(time.RFC3339Nano, ctxFetch(env, "firstFailoverAt"))
+			if err != nil {
+				return fmt.Errorf("parse firstFailoverAt: %w", err)
+			}
+			expiry := firstAt.Add(s09bCooldown)
+			waitCtx, cancel := context.WithDeadline(ctx, expiry.Add(45*time.Second))
+			defer cancel()
+			mfg, err := env.Wait.UntilCR(waitCtx, env.Namespace,
+				fmt.Sprintf("second failover back to %s after cooldown expiry", original),
+				func(mfg *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+					lf := mfg.Status.LastFailover
+					second := lf != nil && lf.Time.After(firstAt.Add(time.Second))
+					msg := fmt.Sprintf("activeSite=%q lastFailover=%v target=%q", mfg.Status.ActiveSite, lf, mfg.Status.LastFailoverTarget)
+					return second && mfg.Status.ActiveSite == original, msg, nil
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("no failover after cooldown expiry at %s; the refused failover was never retried: %w",
+					expiry.Format(time.RFC3339), err)
+			}
+			second := mfg.Status.LastFailover.Time
+			env.Capture.Note(fmt.Sprintf("second failover at %s, %s after cooldown expiry",
+				second.Format(time.RFC3339), second.Sub(expiry).Round(time.Second)))
+			// status.lastFailover is second-granular; allow that much.
+			if second.Before(expiry.Add(-time.Second)) {
+				return fmt.Errorf("second failover at %s preceded cooldown expiry %s", second, expiry)
+			}
+
 			before, err := stashFetchMap(env, "failoversBefore")
 			if err != nil {
 				return err
@@ -296,14 +422,8 @@ func s09bVerifyNoPingPongAndCaptureLog() runner.Step {
 			if err != nil {
 				return fmt.Errorf("scrape metrics: %w", err)
 			}
-			mfg, err := env.Kube.GetMFGNamed(ctx, env.Namespace, env.FG)
-			if err != nil {
-				return err
-			}
-			candidates := PrimaryCandidates(mfg)
-			deltas := map[string]float64{}
-			var totalDelta float64
-			for _, name := range candidates {
+			var total float64
+			for _, name := range PrimaryCandidates(mfg) {
 				now, _ := snap.Counter("bloodraven_failovers_total", map[string]string{"target_site": name})
 				var prior float64
 				if v := before[name]; v != "" {
@@ -311,28 +431,10 @@ func s09bVerifyNoPingPongAndCaptureLog() runner.Step {
 						return fmt.Errorf("parse prior failovers_total[%s]=%q: %w", name, v, err)
 					}
 				}
-				deltas[name] = now - prior
-				totalDelta += now - prior
+				total += now - prior
 			}
-			env.Capture.Note(fmt.Sprintf("failovers_total deltas: %v (total=%g)", deltas, totalDelta))
-
-			// Best-effort log scan. Records whether the cooldown branch
-			// fired but does NOT fail the scenario on absence.
-			if tail, err := env.Logs("operator"); err == nil {
-				if hit, line := firstMatchSince(tail, env.StartTime,
-					pglogs.Substring("failover blocked by anti-flap cooldown")); hit {
-					env.Capture.Note(fmt.Sprintf("anti-flap log observed: %s", line))
-				} else {
-					env.Capture.Note("anti-flap log NOT observed in this window — " +
-						"verify via the metric delta whether the safety property still held " +
-						"(it may have via TOTAL LOSS / NO PRIMARY suppressing promotion)")
-				}
-			}
-
-			if totalDelta != 1 {
-				return fmt.Errorf("anti-flap assertion failed: failovers_total incremented by %g across sites %v "+
-					"(expected exactly 1 from the initial failover and 0 from the blocked second failure)",
-					totalDelta, deltas)
+			if total != 2 {
+				return fmt.Errorf("failovers_total incremented by %g, want exactly 2 (one per fault)", total)
 			}
 			return nil
 		},

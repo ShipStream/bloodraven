@@ -234,3 +234,18 @@ func BuildStandbyIngressHoldPolicy(fg, site string) *networkingv1.NetworkPolicy 
 		},
 	}
 }
+
+// ServiceClusterIP returns a Service's ClusterIP.
+func (c *Client) ServiceClusterIP(ctx context.Context, namespace, name string) (string, error) {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	svc, err := c.Kubernetes.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("get service %s/%s: %w", namespace, name, err)
+	}
+	if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == corev1.ClusterIPNone {
+		return "", fmt.Errorf("service %s/%s has no ClusterIP", namespace, name)
+	}
+	return svc.Spec.ClusterIP, nil
+}

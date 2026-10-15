@@ -233,26 +233,23 @@ kubectl exec ... -e "SET GLOBAL read_only=OFF; INSERT INTO divergence_test.rogue
 ### 9. Rapid Successive Failures (Anti-Flap)
 **Category**: Flap detection | **Risk**: High
 
-**Hypothesis**: Failover to pdx, then immediately make pdx unreachable within 30s cooldown. Operator logs "failover blocked by anti-flap cooldown" and does NOT ping-pong back.
+Automated as `09-anti-flap-cooldown`.
 
-**Injection**:
-```bash
-./playground/chaos.sh kill-site iad
-# Wait for "failover complete" in operator logs (~37s)
-kubectl -n bloodraven-playground scale deployment mysql-playground-pdx --replicas=0
-# Wait 15s
-```
+**Hypothesis**: After one emergency failover, a second primary loss inside `failoverCooldown` is not promoted while the cooldown runs, and is promoted once it expires, with no new state transition to prompt it.
 
-**Verify**: Operator logs "anti-flap cooldown". No second failover during cooldown window. System has no writable MySQL until cooldown expires.
+**Injection**: `make chaos-run SCENARIO=09-anti-flap-cooldown`. The scenario raises `spec.failoverCooldown` to 90s (restored in cleanup) and waits for the topology manager restart that the config change causes. It scales the primary to 0, waits for the first failover, scales the old primary back up, and waits until it is a caught-up replica. Then it scales the new primary to 0 and holds it there.
 
-**Important**: Use `scale --replicas=0` for the second kill, not `kill-site`. The pod must stay down longer than failureThreshold (6s) for the operator to even consider a second failover.
+**Verify**:
+- The operator logs `failover blocked by anti-flap cooldown` with `retryAt` = `lastFailover + failoverCooldown`.
+- `status.lastFailover` does not move before the cooldown expires.
+- A second failover back to the original primary completes within 45s of expiry, and `bloodraven_failovers_total` rises by exactly 2 across sites.
 
-**Known difficulty**: This scenario has been INCONCLUSIVE across 3 rounds of testing. Three approaches fail:
-1. `scale --replicas=0` — the operator reconciler immediately scales back to 1
-2. NetworkPolicy on both sites — results in TOTAL LOSS (both unreachable), not a failover candidate, so the anti-flap check is never evaluated
-3. Sequential partition (partition primary → failover → recover → partition new primary) — after recovering from the first partition, both sites can end up self-fenced in "NO PRIMARY" state
+**History**: Until 2026-10-15 a failover refused by the cooldown was never retried. Cross-site actions ran only on state transitions, and a dead primary is a stable state, so the group stayed without a primary until the dead site came back (4m40s past expiry in the reproduction). The old version of this scenario asserted "no second failover within 90s" against a 30s cooldown, which was asserting that bug.
 
-The anti-flap code (topology.go) is unit-tested but requires a scenario where one site is unreachable and the other is a valid promotion candidate within the cooldown window — difficult to achieve in the playground.
+**Pitfalls the scenario works around**:
+- A pod delete is not a reliable first fault. The pod respawns in ~8s, and while its stale endpoint black-holes probes the operator can collect fewer than `failureThreshold` failures, so no failover happens.
+- A cooldown change restarts the topology manager. A fault injected before the new manager has observed every site is judged without history.
+- The second fault loses whatever the rejoined site had not yet received (asynchronous RPO). The scenario waits for it to catch up, and cleanup reclones any site left diverged.
 
 ---
 
@@ -1440,6 +1437,62 @@ During promotion, `423 unstable` with reason `TopologyPersistencePending` permit
 **Safety and cleanup:** The existing runner context allowlist, healthy-baseline check, in-progress marker, deadlines, and forensic capture remain in force. Only scenario 55 stops MySQL, and only the selected group's active Deployment; its registered reverter restores replicas on success or failure. No scenario deletes a MySQL PVC. Cleanup terminates the uniquely named client, waits out the last lease TTL (120 seconds for scenario 55, 30 seconds otherwise), then deletes its `MysqlDatabase` and waits for the database/user deletion finalizer before removing its Secret, CA ConfigMap, and ServiceAccount. Failed finalization preserves the credentials and reports cleanup failure. `--no-cleanup` deliberately preserves fixtures for inspection; the client has a ten-minute active deadline to bound abandoned renewal. Client evidence is copied into `scenario.log` at observation points; while the Pod exists, inspect it with `kubectl -n bloodraven-playground logs <chaos-deploy-pod> -c client`.
 
 **Validation status:** Go helper/profile tests and client protocol tests can run without a cluster. Real scenarios require a prepared playground and are not claimed as live-passing until executed against the completed API.
+
+## Scenarios 57-61: Chaos round 2026-10-15 {#chaos-round-2026-10-15}
+
+Found on a k3d playground with the `playground/ledger` workload, which records every write MySQL acknowledged and audits each site against that record (`ledger audit`). 57-59 and the rewritten 09 pin fixed bugs. 60 and 61 are quarantined: they assert the behaviour a fix must provide for two open design decisions and fail today. Two more findings are recorded at the end without automation, because the expected signal is not designed yet.
+
+### 57. Hung Primary {#57-hung-primary}
+**Category**: Gray failure | **Risk**: High | **Automated**: `57-hung-primary-detected-and-fenced`
+
+**Hypothesis**: With the primary's mysqld frozen by SIGSTOP for 50s, the operator promotes the peer within 35s, the frozen site's sidecar is not restarted, and the old primary is `super_read_only` within 10s of resuming.
+
+**Injection**: `FreezeSiteMysqld` runs a privileged hostPID pod on the site's node. The pod SIGSTOPs the mysqld whose cgroup carries the target pod's UID, then thaws it after the hold or on SIGTERM. SIGSTOP cannot be sent from inside the pod, because mysqld is the container's PID 1. A frozen server accepts TCP connections and blocks every query until the client's read timeout. No pod-kill or scale-to-0 scenario exercises that.
+
+**History**: Before the fixes, every poll re-probed the hung site in several follow-up checks, and promotion took ~48s (now ~25s). The sidecar's liveness probe followed MySQL, and its startup safety net blocked unbounded before the HTTP server started. The sidecar crash-looped during the hang, and the old primary stayed writable for 21-43s after resuming (now 0.5s).
+
+### 58. Hung Reader {#58-hung-reader}
+**Category**: Gray failure / RTO | **Risk**: Medium | **Automated**: `58-hung-reader-does-not-slow-failover`
+
+**Hypothesis**: With the reader's mysqld frozen and already declared unreachable for 30s, scaling the primary to 0 promotes the candidate within 15s. The healthy-reader baseline is ~7s.
+
+**History**: The poll loop's backoff used to be shared, sized by the worst site's failure count. A reader or DR site that stayed down slowed probing of every site to a 30s cap. Measured: 24s to promote with a hung reader, and 65.6s with the reader scaled to 0 for 90s. Backoff is now per site; the same measurements are 11s and 6.0s.
+
+**Still open**: During a hung site's first `failureThreshold` polls, before it is declared unreachable, every poll still waits for its probe timeout. A primary lost in that window is detected more slowly (~15s instead of ~6s). Fixing that means decoupling poll completion from the slowest probe.
+
+### 59. Killed Clone {#59-killed-clone}
+**Category**: Data safety | **Risk**: High | **Automated**: `59-killed-clone-never-promoted`
+
+**Hypothesis**: Killing a candidate reclone's CLONE INSTANCE session after it has dropped the recipient's data fails the bootstrap: the operator logs `bootstrap failed`, never `bootstrap completed successfully`, and the recipient stays `super_read_only`. With the primary then scaled to 0, the operator logs `failover picker: refusing candidate whose data regressed` and promotes nothing for 45s. When the primary returns it is active again with its data, and the candidate is recloned.
+
+**Injection**: 120 MiB of incompressible filler, `clone_max_data_bandwidth=1` on the recipient, a `reclone-site=<candidate>:confirm=<fg>` request, then `KILL` of the CLONE session once `performance_schema.clone_progress` shows FILE COPY in progress. The session is found through `performance_schema.clone_status.PID`. Its processlist `info` is NULL, because MySQL hides statements that carry a password.
+
+**History (total data loss)**: The operator cleared `read_only` on the recipient for CLONE. The recipient's own sidecar then saw a writable non-active site, fenced it and killed the CLONE session. The operator treated the dropped connection as the expected post-clone restart and reported success on an empty site. This happened unprompted in 2 of about 8 reclones. When the primary later died, the picker promoted the empty site. The sidecar's first fix matched CLONE by processlist `info`, which MySQL hides. It now uses `clone_status`.
+
+**Still open**: the operator does not retry a failed reclone. The recipient keeps the replication metadata it had before the clone, so empty-site auto-bootstrap skips it, and the group runs without that replica (`Bootstrapping=True/Failed`, `Ready=False`) until someone sets `reclone-site` again. The scenario's settle step does exactly that.
+
+### 60. Operator-Only Partition {#60-operator-only-partition}
+**Category**: Partition / data safety | **Risk**: High | **Automated (quarantined)**: `60-operator-only-partition-no-acked-loss`
+
+**Hypothesis (what a fix must provide)**: With only operator-to-primary traffic blocked for 60s, while clients, replication and peer sidecars still reach the primary, every write the primary acknowledged is on the active site after the partition heals, and no site is left blocked.
+
+**Today (F5, open)**: The operator promotes the candidate although the candidate's IO thread is still streaming from that primary, which proves the primary is alive. Writes the old primary acknowledged between the promotion GTID and its sidecar's fence are lost: 66 in the original run. The reader, still replicating from the old primary, holds them as errant transactions, and both need a reclone. Clients that reconnect through the write Service then get `super_read_only` errors for 2+ minutes (F7). The emergency path does not strip the old primary's role label at failover, and the sidecar's eviction runs once. The leading fix is a replica-witness check before declaring the primary dead.
+
+### 61. Reader Ahead of the New Primary {#61-reader-ahead-of-new-primary}
+**Category**: Reader recovery | **Risk**: Medium | **Automated (quarantined)**: `61-reader-ahead-of-new-primary-recovers`
+
+**Hypothesis (what a fix must provide)**: When the reader has applied transactions the promoted candidate never received, the reader converges on the new primary and serves again within 3 minutes, without a manual reclone.
+
+**Injection**: An egress NetworkPolicy cuts only the candidate's replication link for 10s while the primary keeps committing. The policy excludes the active site's Service ClusterIPs as well as its pod, and the candidate's IO thread is restarted, because a NetworkPolicy does not cut an established connection. Then the primary is scaled to 0. The scenario fails fast unless the reader really holds transactions the new primary lacks. Losing those 10s of writes is the documented asynchronous RPO and is not asserted.
+
+**Today (F6, open)**: The reader keeps the transactions as errant GTIDs, its source convergence stays `Blocked`, and its Service has no endpoints until someone reclones it. Rewriting scenario 09 hit the same thing unprompted: a reader that received writes the newly promoted site lacked was left `Blocked`.
+
+### Recorded, not automated
+
+- **Write stall is invisible (F9)**: `FLUSH TABLES WITH READ LOCK` held on the primary for 75s stalled every write for 75s, with no state change, condition, event or alert. Health is `SELECT @@read_only`, and nothing measures whether a write can commit. A write-heartbeat probe, metric and condition is the proposal.
+- **mysqld starts writable**: a restarted primary pod accepts writes from the moment mysqld listens until the sidecar's safety net or the operator fences it. Observed while rewriting scenario 09: iad came back writable next to the active pdx, and the operator fenced it at the first observation (`SPLIT BRAIN: 2 sites are writable`) about 4s after the pod started. The proposal is to start mysqld with `super_read_only=ON` and let only the operator clear it on the active site.
+
+---
 
 ## Execution Plan
 

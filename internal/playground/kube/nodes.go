@@ -125,6 +125,16 @@ func (c *Client) CreatePod(ctx context.Context, namespace string, pod *corev1.Po
 	return err
 }
 
+// DeletePodsByLabel deletes every pod matching labelSelector, with the
+// pods' own grace period.
+func (c *Client) DeletePodsByLabel(ctx context.Context, namespace, labelSelector string) error {
+	if namespace == "" {
+		namespace = PlaygroundNamespace
+	}
+	return c.Kubernetes.CoreV1().Pods(namespace).DeleteCollection(ctx, metav1.DeleteOptions{},
+		metav1.ListOptions{LabelSelector: labelSelector})
+}
+
 // DeletePodByName deletes a pod by name. Returns nil if the pod is
 // already gone (idempotent).
 func (c *Client) DeletePodByName(ctx context.Context, namespace, name string) error {
