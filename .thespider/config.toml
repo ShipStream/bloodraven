@@ -1,0 +1,17 @@
+server = "https://thespider.xyz"
+project = "shipstream/bloodraven"
+profile = "security"
+
+# Audit commands skip the operator's own agent config (rules, skills, plugins, MCP) and allow only read-only git.
+
+[[model]]
+code = "openai/gpt-6.1-sol"
+agent = "opencode"
+command = '''env -u OPENCODE -u OPENCODE_PID -u OPENCODE_CONFIG -u OPENCODE_CONFIG_DIR XDG_CONFIG_HOME="$HOME/.cache/thespider/opencode-config" OPENCODE_DISABLE_CLAUDE_CODE=1 OPENCODE_CONFIG_CONTENT='{"permission":{"skill":{"*":"deny"},"task":"deny","edit":"deny","webfetch":"deny","bash":{"*":"deny","git\u0020log*":"allow","git\u0020show*":"allow","git\u0020diff*":"allow","git\u0020blame*":"allow","git\u0020ls-files*":"allow","git\u0020rev-parse*":"allow"}},"agent":{"plan":{"permission":{"skill":{"*":"deny"},"task":"deny","edit":"deny","webfetch":"deny","bash":{"*":"deny","git\u0020log*":"allow","git\u0020show*":"allow","git\u0020diff*":"allow","git\u0020blame*":"allow","git\u0020ls-files*":"allow","git\u0020rev-parse*":"allow"}}}}}' opencode run --pure --model openai/gpt-6.1-sol --agent plan --format default 'Follow the attached instructions file exactly and emit only the output it specifies.' -f {prompt_path}'''
+timeout_seconds = 1800
+
+[[model]]
+code = "anthropic/claude-sonnet-5-5"
+agent = "claude"
+command = "env -u CLAUDECODE claude --model claude-sonnet-5-5 --effort xhigh --safe-mode --restricted --strict-mcp-config --tools \"Read,Grep,Glob,Bash\" --allowedTools \"Bash(git log:*) Bash(git show:*) Bash(git diff:*) Bash(git blame:*) Bash(git ls-files:*) Bash(git rev-parse:*)\" --permission-mode dontAsk --no-session-persistence --print < {prompt_path}"
+timeout_seconds = 1800
