@@ -58,18 +58,18 @@ Below the threshold, `computeState` increments `failCount` and returns `site.sta
 
 **Type:** MULTIPLE_CHOICE
 
-`pdx` has been down for five minutes, so the poll loop has settled at its cap. `iad` now fails too. At defaults, how long until the operator records `iad` as `unreachable`?
+`pdx` has been down for five minutes, so its probes have backed off to the 30 s cap. `iad` now fails too. At defaults, how long until the operator records `iad` as `unreachable`?
 
 - 90 s
 - 6 s
 - 30 s
 - 12 s
 
-**Correct option index:** 0
+**Correct option index:** 1
 
 **Explanation:**
 
-The adaptive backoff is driven by the worst `failCount` across all sites, so `pdx`'s sustained outage has pushed the single loop to its 30 s hard cap. `iad` still needs `failureThreshold` = 3 consecutive failures, and they now arrive 30 s apart: 30 s × 3 = 90 s. 6 s is the healthy-cluster answer (2 s × 3) and assumes the interval is still the base — the trap the backoff sets, because it is undocumented and cluster-wide rather than per-site. 30 s is the interval itself, mistaken for the detection delay; the threshold still needs three of them. 12 s reads the 30 s cap as if only the failing site backed off while `iad` kept some faster cadence — there is one loop, not one per site. (objective 2)
+The backoff is per site. `pdx`'s sustained outage has backed off only `pdx`'s probes, to the 30 s cap; the loop still ticks every 2 s and probes `iad` on every tick. `iad` needs `failureThreshold` = 3 consecutive failures, 2 s apart: 2 s × 3 = 6 s, the same as in a healthy group. 90 s is 30 s × 3, the answer for a shared backoff that slows every site's probes; the operator does not work that way. 30 s is `pdx`'s probe interval, mistaken for `iad`'s detection delay. 12 s adds a backoff step to `iad`, which has no failures yet and so no backoff. (objective 2)
 
 ## Question 5
 

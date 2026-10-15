@@ -45,18 +45,18 @@
 
 ---
 
-**Front:** When does the adaptive poll backoff start, and what is the doubling rule?
+**Front:** When does a site's probe backoff start, and what is the doubling rule?
 
-**Back:** Once a site's `failCount` goes past `failureThreshold`; the interval then doubles per extra failure via `interval := base * time.Duration(1<<uint(backoffFails))`.
+**Back:** Once that site's `failCount` goes past `failureThreshold`; the wait before its next probe then doubles per extra failure via `interval := base * time.Duration(1<<uint(backoffFails))`. The loop and every other site keep `pollInterval`.
 
 ---
 
-**Front:** The two ceilings on the adaptive poll backoff
+**Front:** The two ceilings on a site's probe backoff
 
 **Back:** `maxPollBackoffExponent = 4` on the exponent, and a 30 s hard cap on the resulting interval.
 
 ---
 
-**Front:** Whose `failCount` sets the poll interval — the failing site's, or the whole group's?
+**Front:** Whose `failCount` sets the probe interval — the failing site's, or the whole group's?
 
-**Back:** There is one loop, and its interval comes from the worst `failCount` across all sites, so one site's outage slows the probing of every healthy site too.
+**Back:** The failing site's own. The loop ticks every `pollInterval`, and a site's `failCount` backs off only that site's probes, so every healthy site is still probed every 2 s and a second fault is still detected in 6 s.

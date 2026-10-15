@@ -16,7 +16,7 @@ quote a version, an issue number or a documentation defect.
 | `pollInterval` | `2s` | same | The poll tick. One `SELECT @@read_only` per site, in parallel, each under a 5 s ceiling. |
 | `failureThreshold` | `3` | same | Consecutive failed polls before `unreachable`. **Detection = `pollInterval` × `failureThreshold` = 6 s.** |
 | `recoveryThreshold` | `2` | same | Consecutive writable polls before `writable`. **Not a term in the detection sum.** |
-| — | adaptive | same | Undocumented backoff: past `failureThreshold` the whole loop's interval doubles per extra failure, exponent capped at 4, hard cap 30 s. One site down ⇒ a second fault takes 30 × 3 = 90 s to detect. |
+| — | per site | same | Probe backoff: past `failureThreshold` a failing site's probe interval doubles per extra failure, exponent capped at 4, hard cap 30 s. Other sites keep `pollInterval`, so a second fault still takes 6 s; a long-down site can take up to 30 s to be noticed coming back. |
 | `failoverCooldown` | `5m` | `30s` | Gates **automatic promotion only**, at one call site, immediately before the promotion call. A blocked promotion is retried at expiry (`retryAt`). |
 | `connectionDrainTimeout` | `30s` | same | Bounds the post-promotion retry window for evicting sessions from a fenced former primary — only while it is reachable. |
 | `replication.maxLagSeconds` | `300` | `30` | The `ReplicationLagging` Degraded reason. **Never a promotion gate.** Skipped entirely for `role: read-only` sites. |

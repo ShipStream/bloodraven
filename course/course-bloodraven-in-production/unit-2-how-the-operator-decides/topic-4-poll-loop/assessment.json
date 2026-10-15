@@ -36,18 +36,18 @@
       "orderIndex": 6
     },
     {
-      "front": "When does the adaptive poll backoff start, and what is the doubling rule?",
-      "back": "Once a site's `failCount` goes past `failureThreshold`; the interval then doubles per extra failure via `interval := base * time.Duration(1<<uint(backoffFails))`.",
+      "front": "When does a site's probe backoff start, and what is the doubling rule?",
+      "back": "Once that site's `failCount` goes past `failureThreshold`; the wait before its next probe then doubles per extra failure via `interval := base * time.Duration(1<<uint(backoffFails))`. The loop and every other site keep `pollInterval`.",
       "orderIndex": 7
     },
     {
-      "front": "The two ceilings on the adaptive poll backoff",
+      "front": "The two ceilings on a site's probe backoff",
       "back": "`maxPollBackoffExponent = 4` on the exponent, and a 30 s hard cap on the resulting interval.",
       "orderIndex": 8
     },
     {
-      "front": "Whose `failCount` sets the poll interval — the failing site's, or the whole group's?",
-      "back": "There is one loop, and its interval comes from the worst `failCount` across all sites, so one site's outage slows the probing of every healthy site too.",
+      "front": "Whose `failCount` sets the probe interval — the failing site's, or the whole group's?",
+      "back": "The failing site's own. The loop ticks every `pollInterval`, and a site's `failCount` backs off only that site's probes, so every healthy site is still probed every 2 s and a second fault is still detected in 6 s.",
       "orderIndex": 9
     }
   ],
@@ -92,7 +92,7 @@
       "explanation": "Below the threshold, `computeState` increments `failCount` and returns `site.state` unchanged — so `pdx` is still `writable`, and a third consecutive failure is what flips it. Option 2 is the debounce misread: the threshold decides the state, it is not a reporting filter. Option 3 is wrong because `unknown` means no usable answer has ever been obtained, not that the last one failed; the operator holds its previous belief instead. Option 4 confuses two different facts — `read-only` is only ever recorded from a *successful* probe returning `read_only=1`, and a failed probe carries no `@@read_only` value at all. Note the third probe would also reset `recoveryCount`, which each failure has already been doing. (objective 1)"
     },
     {
-      "question": "`pdx` has been down for five minutes, so the poll loop has settled at its cap. `iad` now fails too. At defaults, how long until the operator records `iad` as `unreachable`?",
+      "question": "`pdx` has been down for five minutes, so its probes have backed off to the 30 s cap. `iad` now fails too. At defaults, how long until the operator records `iad` as `unreachable`?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 3,
       "options": [
@@ -101,8 +101,8 @@
         "30 s",
         "12 s"
       ],
-      "correctOptionIndex": 0,
-      "explanation": "The adaptive backoff is driven by the worst `failCount` across all sites, so `pdx`'s sustained outage has pushed the single loop to its 30 s hard cap. `iad` still needs `failureThreshold` = 3 consecutive failures, and they now arrive 30 s apart: 30 s × 3 = 90 s. 6 s is the healthy-cluster answer (2 s × 3) and assumes the interval is still the base — the trap the backoff sets, because it is undocumented and cluster-wide rather than per-site. 30 s is the interval itself, mistaken for the detection delay; the threshold still needs three of them. 12 s reads the 30 s cap as if only the failing site backed off while `iad` kept some faster cadence — there is one loop, not one per site. (objective 2)"
+      "correctOptionIndex": 1,
+      "explanation": "The backoff is per site. `pdx`'s sustained outage has backed off only `pdx`'s probes, to the 30 s cap; the loop still ticks every 2 s and probes `iad` on every tick. `iad` needs `failureThreshold` = 3 consecutive failures, 2 s apart: 2 s × 3 = 6 s, the same as in a healthy group. 90 s is 30 s × 3, the answer for a shared backoff that slows every site's probes; the operator does not work that way. 30 s is `pdx`'s probe interval, mistaken for `iad`'s detection delay. 12 s adds a backoff step to `iad`, which has no failures yet and so no backoff. (objective 2)"
     },
     {
       "question": "`reader` in `playground` has `role: read-only`. It answers `read_only=0` on one probe. The operator waits for `recoveryThreshold` consecutive writable answers before recording it as `writable`, exactly as it would for a `primary-candidate` site.",

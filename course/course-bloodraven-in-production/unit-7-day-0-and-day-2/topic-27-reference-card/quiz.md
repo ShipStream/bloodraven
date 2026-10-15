@@ -18,7 +18,7 @@ Your on-call runbook says 'the operator detects a dead site in about 10 seconds 
 
 **Explanation:**
 
-Adding `recoveryThreshold` to the detection sum is the single most common wrong answer about this operator. The two counters gate opposite transitions: `failureThreshold` guards the way to `unreachable`, `recoveryThreshold` guards the way back to `writable`. Option 2 adds the per-probe ceiling, which bounds one probe and does not pace the loop. Option 4 overstates the backoff: it engages only once a site's `failCount` climbs *past* `failureThreshold`, so the first detection is always 6 s — but it is a real caveat worth adding to the runbook for the second fault during an existing outage, where the answer becomes 30 s × 3 = 90 s. (objectives 10, 11)
+Adding `recoveryThreshold` to the detection sum is the single most common wrong answer about this operator. The two counters gate opposite transitions: `failureThreshold` guards the way to `unreachable`, `recoveryThreshold` guards the way back to `writable`. Option 2 adds the per-probe ceiling, which bounds one probe and does not pace the loop. Option 4 overstates the backoff: it is per site and engages only once that site's `failCount` climbs *past* `failureThreshold`, so detecting any site's failure takes 6 s, a second fault during an existing outage included. The caveat worth adding to the runbook is the other direction: a long-down site can take up to 30 s to be noticed coming back. (objectives 10, 11)
 
 ## Question 2
 

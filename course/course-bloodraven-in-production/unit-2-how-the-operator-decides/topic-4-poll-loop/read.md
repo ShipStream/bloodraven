@@ -56,7 +56,7 @@ state machine. There are four states, and they are exactly these:
 ```figure
 {
   "src": "assets/img/g3-state-machine.svg",
-  "alt": "Site state machine: unknown branches to writable, read-only, or unreachable. Read-only takes one poll, unreachable takes three, writable takes two. A callout says a second fault while the first is down takes 90 seconds, not 6.",
+  "alt": "Site state machine: unknown branches to writable, read-only, or unreachable. Read-only takes one poll, unreachable takes three, writable takes two. A callout says a second fault while the first is still down is still detected in 6 seconds, because backoff is per site.",
   "caption": "One probe, four states. The arrows are not symmetric on purpose.",
   "width": 960,
   "height": 420
@@ -168,28 +168,34 @@ never was. It gates the opposite transition — the way back to `writable` — a
 is the single most common wrong answer about this operator. The 5 s probe ceiling is not a term
 either; it bounds one probe, it does not pace the loop.
 
-## The backoff that changes your detection budget
+## The backoff, and what it costs
 
-Here is the part that surprises people at 3 a.m., because the 6 s figure everyone memorises is only
-the *first* fault's. The poll interval is adaptive. Once any site's `failCount` climbs past `failureThreshold`, the interval doubles per
-extra failure — `interval := base * time.Duration(1<<uint(backoffFails))` — with the exponent capped
-at `maxPollBackoffExponent = 4` and a 30 s hard cap on top.
+A site that stays down is not probed at full rate forever. Once its `failCount` climbs past
+`failureThreshold`, the wait before *its* next probe doubles per extra failure —
+`interval := base * time.Duration(1<<uint(backoffFails))` — with the exponent capped at
+`maxPollBackoffExponent = 4` and a 30 s hard cap on top.
 
 Walk it at defaults. `failCount` 3 gives no backoff; 4 → 2 s × 2 = 4 s; 5 → 8 s; 6 → 16 s; 7 → 2 s ×
-2⁴ = 32 s, which the 30 s cap clips to 30 s. So roughly half a minute into a site being down, the
-loop has settled at 30 s.
+2⁴ = 32 s, which the 30 s cap clips to 30 s. So roughly half a minute into a site being down, it is
+probed every 30 s. On the polls in between it is skipped, and it keeps the state it had.
 
-And it is **one loop**, driven by the worst `failCount` across all sites. That is the operational
-consequence you came for. `pdx` has been down for five minutes, so the loop is polling every 30 s —
-including its probes of `iad`, which is fine. Now `iad` dies. Detection needs three consecutive
-failures, and they now arrive 30 s apart: **30 s × 3 = 90 s**, not 6 s. Fifteen times slower, on the
-site that matters, at exactly the moment you have no spare site left. The backoff is trading
-detection latency for polling waste, and one existing outage spends that trade on every other site.
+The backoff is **per site**, and that is the fact to carry. The loop itself still ticks every
+`pollInterval` and probes every other site on every tick. `pdx` has been down for five minutes and is
+probed every 30 s; `iad` is still probed every 2 s. Now `iad` dies. Detection needs three consecutive
+failures, 2 s apart: **6 s**, exactly as if nothing else were wrong. A second fault, at the moment you
+have no spare site left, is detected as fast as the first.
 
-This is design rather than defect, and worth putting in your runbook beside the 6 s figure — the
-`failover.mdx` page states the same bound and tells you to use it for alerting and compound-failure
-recovery estimates. Take the pair: **6 s for the first fault, up to 90 s for a second one while the
-first is still down.** A single number is the wrong shape for this answer.
+What the backoff costs is the way back. When `pdx` returns, its next probe can be up to 30 s away, so
+the operator can take that long to notice — to rejoin it, or to see that it came back writable. The
+sidecar's fencing rules cover a returning old primary in that window, not the operator's poll. The
+skip also saves the loop real time: every poll waits for its slowest probe, so a site that hangs
+rather than refusing costs each poll its full 5 s ceiling — but only until it has been declared
+`unreachable` and its probes start backing off.
+
+Put the pair in your runbook: **6 s to detect any site's failure, up to 30 s to notice a long-down site
+has come back.** A single number is the wrong shape for this answer. If an older runbook says a
+second fault takes up to 90 s, it describes a shared backoff the operator no longer uses — see the
+[version appendix](../sources.html#version-appendix), row A2.
 
 ## One bypass
 
