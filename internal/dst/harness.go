@@ -464,7 +464,7 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 	case OpCrash:
 		r.cluster.Crash(op.Site)
 	case OpRecover:
-		r.cluster.Recover(op.Site, op.Fenced)
+		r.cluster.Recover(op.Site, op.Fenced, op.BootWritable)
 	case OpPartOpSite:
 		r.cluster.SetOperatorLink(op.Site, true)
 	case OpHealOpSite:
@@ -529,14 +529,14 @@ func (r *trialRunner) applyOp(op Op, poll int) {
 // crash op's boot mode), links heal, stalls and outages end, and pending
 // injected call errors are discarded.
 func (r *trialRunner) healAll() {
-	fenced := make(map[string]bool)
+	boot := make(map[string]Op)
 	for _, op := range r.trial.ActiveOps() {
 		if op.Kind == OpCrash {
-			fenced[op.Site] = op.Fenced
+			boot[op.Site] = op
 		}
 	}
 	for _, s := range r.trial.SiteNames {
-		r.cluster.Recover(s, fenced[s])
+		r.cluster.Recover(s, boot[s].Fenced, boot[s].BootWritable)
 		r.cluster.SetOperatorLink(s, false)
 		r.cluster.SetApplyStalled(s, false)
 		r.cluster.SetFetchStalled(s, false)

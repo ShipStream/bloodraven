@@ -46,6 +46,7 @@ type mockMySQL struct {
 	gtidSequence             []string
 	gtidCalls                int
 	changeDoesNotUpdate      bool
+	superReadOnly            bool
 	superReadOnlyCalls       int
 	superReadOnlyErr         error
 	superReadOnlyHadDeadline bool
@@ -89,10 +90,17 @@ func (m *mockMySQL) SetSuperReadOnly(ctx context.Context, on bool) error {
 	if m.superReadOnlyErr != nil {
 		return m.superReadOnlyErr
 	}
+	m.superReadOnly = on
 	if on {
 		m.readOnly = true
 	}
 	return nil
+}
+
+func (m *mockMySQL) CheckSuperReadOnly(_ context.Context) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.superReadOnly, m.err
 }
 
 func TestReadOnlyRoleSafety(t *testing.T) {
@@ -257,6 +265,10 @@ func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.readOnly = on
+	if !on {
+		// As in MySQL: clearing read_only clears super_read_only too.
+		m.superReadOnly = false
+	}
 	return nil
 }
 func (m *mockMySQL) ShowReplicaStatus(_ context.Context) (*mysql.ReplicaStatus, error) {
@@ -2163,6 +2175,107 @@ func TestPrimaryReassert_RefusesWhenPeerWritable(t *testing.T) {
 	}
 	if ro, _ := site0.CheckReadOnly(context.Background()); !ro {
 		t.Error("target must stay read-only while a peer is writable")
+	}
+}
+
+// TestPrimaryReassert_RefusesWhenPeerLiveWritableButDebounced: the tracker
+// debounces a peer's ReadOnly->Writable transition, so a peer that just
+// turned writable still reads ReadOnly. Re-asserting the target from that
+// stale state would create a second writable site.
+func TestPrimaryReassert_RefusesWhenPeerLiveWritableButDebounced(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: false, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc1")
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must not fire while a peer is live-writable")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); !ro {
+		t.Error("target must stay read-only while a peer is live-writable")
+	}
+}
+
+// TestPrimaryReassert_LastActiveSiteWithoutFailoverHistory: a group that has
+// never failed over re-asserts the last site seen as its active primary
+// (a primary that restarted read-only, or a fenced fresh-deploy seed),
+// under the same guards.
+func TestPrimaryReassert_LastActiveSiteWithoutFailoverHistory(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "")
+	tm.mu.Lock()
+	tm.lastActiveSite = "dc1"
+	tm.mu.Unlock()
+
+	if !tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("expected re-assert of the last active site")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); ro {
+		t.Error("last active site should be writable after re-assert")
+	}
+}
+
+// TestPrimaryReassert_ObservedSiteNotLiftedFromFence: a last active site the
+// operator only observed is lifted from the boot read_only, never from a
+// fence. Without failover history a self-fenced primary stays fenced.
+func TestPrimaryReassert_ObservedSiteNotLiftedFromFence(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "")
+	tm.mu.Lock()
+	tm.lastActiveSite = "dc1"
+	tm.mu.Unlock()
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert must not lift a fence on a site the operator only observed")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); !ro {
+		t.Error("fenced site made writable")
+	}
+}
+
+// TestPrimaryReassert_NamedSiteLiftedFromFence: a site the operator made
+// primary itself (a fresh-deploy seed) is re-asserted from a fence, as a
+// failover target is.
+func TestPrimaryReassert_NamedSiteLiftedFromFence(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "")
+	tm.mu.Lock()
+	tm.lastActiveSite, tm.lastActiveSiteNamed = "dc1", true
+	tm.mu.Unlock()
+
+	if !tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("expected re-assert of the named site")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); ro {
+		t.Error("named site should be writable after re-assert")
+	}
+}
+
+// TestPrimaryReassert_FailoverTargetOutranksLastActiveSite: a recorded
+// failover target is the authority whatever lastActiveSite holds.
+func TestPrimaryReassert_FailoverTargetOutranksLastActiveSite(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc2")
+	tm.mu.Lock()
+	tm.lastActiveSite = "dc1"
+	tm.mu.Unlock()
+
+	if !tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("expected re-assert of the failover target")
+	}
+	if ro, _ := site0.CheckReadOnly(context.Background()); !ro {
+		t.Error("lastActiveSite must not be made writable when a failover target is recorded")
+	}
+	if ro, _ := site1.CheckReadOnly(context.Background()); ro {
+		t.Error("the failover target should be writable after re-assert")
 	}
 }
 

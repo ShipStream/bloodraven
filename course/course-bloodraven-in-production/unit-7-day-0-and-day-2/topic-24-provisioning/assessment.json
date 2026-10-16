@@ -57,28 +57,28 @@
     },
     {
       "front": "`isFreshDeploy` — the three conditions, all required",
-      "back": "Every site is `writable`, no site has ever had replication configured (`SHOW REPLICA STATUS` returns nothing), and no site holds data (empty `GTID_EXECUTED`, cross-checked against user schemas). Only then does the operator seed and clone.",
+      "back": "Every site is reachable (`read-only` or `writable`), no site has ever had replication configured (`SHOW REPLICA STATUS` returns nothing), and no site holds data (empty `GTID_EXECUTED`, cross-checked against user schemas). Only then does the operator seed and clone.",
       "orderIndex": 11
     },
     {
       "front": "Why emptiness is load-bearing in the fresh-deploy check",
-      "back": "A populated cluster can reach the all-writable, no-metadata state by restart amnesia — the promoted primary's own `RESET REPLICA ALL` erased its channel metadata. Treating that as fresh would seed by priority order and clone the newer side from the stale one, destroying every post-failover write.",
+      "back": "A populated cluster can reach the no-history, no-metadata state by restart amnesia — the promoted primary's own `RESET REPLICA ALL` erased its channel metadata. Treating that as fresh would seed by priority order and clone the newer side from the stale one, destroying every post-failover write.",
       "orderIndex": 12
     }
   ],
   "quiz": [
     {
-      "question": "You apply a brand-new three-site `MysqlFailoverGroup` into an empty namespace. All three MySQL pods come up, and every one of them reports `read_only=0`. From Unit 2 you know the matrix flags `SPLIT BRAIN` the moment more than one core site is writable. What does the operator actually do?",
+      "question": "You apply a brand-new three-site `MysqlFailoverGroup` into an empty namespace. All three MySQL pods come up, and every one of them reports `read_only=1`. From Unit 2 you know the matrix answers `NoPrimary` and refuses to elect when every core site is read-only and none is unreachable. What does the operator actually do?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [
-        "Nothing alarming: `isFreshDeploy` finds every site writable, replication never configured and no data anywhere, so it seeds a primary by `sitePriorities` and clones the others from it",
-        "It reports `SPLIT BRAIN` and waits for a human, which is why a new group must be applied one site at a time",
+        "Nothing alarming: `isFreshDeploy` finds every site reachable, replication never configured and no data anywhere, so it seeds a primary by `sitePriorities`, lifts its fence and clones the others from it",
+        "It reports `NoPrimary` and waits for a human, which is why a new group needs a manual first promotion",
         "It promotes the first site in `spec.sites` and fences the rest, because declaration order breaks the tie on a fresh cluster",
-        "It reports `NoPrimary`, because a site that has never replicated cannot be treated as an authority"
+        "It waits for one sidecar's safety net to clear its own fence, because only the sidecars may lift `super_read_only` at startup"
       ],
       "correctOptionIndex": 0,
-      "explanation": "The split-brain path is real, and a *separate*, deliberately conservative check runs ahead of it. `isFreshDeploy` demands three things of every site at once — writable, no replication metadata, and no data — and only then seeds the group. Option 2 describes what would happen without that check and would make every new group a manual procedure. Option 3 is the dangerous misreading: priority order does decide the seed, but only *after* emptiness has been proved, and skipping that proof is exactly how a restart-amnesia cluster gets cloned backwards. Option 4 confuses `NoPrimary`, which needs every core site read-only, with an all-writable topology. (objective 1)"
+      "explanation": "The `NoPrimary` refusal is real, and a *separate*, deliberately conservative check runs ahead of it. `isFreshDeploy` demands three things of every site at once — reachable, no replication metadata, and no data — and only then seeds the group; read-only or writable is no part of the test, because `mysqld` boots `read_only=ON`. Option 2 describes what would happen without that check and would make every new group a manual procedure. Option 3 is the dangerous misreading: priority order does decide the seed, but only *after* emptiness has been proved, and skipping that proof is exactly how a restart-amnesia cluster gets cloned backwards. Option 4 has it backwards: a sidecar clears its fence only when the operator names its site, and no site is named until the operator seeds one — the operator lifts the seed's fence itself. (objective 1)"
     },
     {
       "question": "Your platform team hands you three PVCs that already contain a working MySQL dataset, and asks you to put a `MysqlFailoverGroup` in front of them. What do you have to do that a green-field install would have done for you?",

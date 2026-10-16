@@ -37,7 +37,7 @@
     },
     {
       "front": "The verbatim `msg` the operator logs when it restores writability on a fenced promoted primary",
-      "back": "`re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability`, at WARN, with field `site`.",
+      "back": "`re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability`, at WARN, with fields `site` and `authority` (`lastFailoverTarget`, or `lastActiveSite` in a group that has never failed over).",
       "orderIndex": 7
     },
     {

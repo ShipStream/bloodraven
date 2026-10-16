@@ -63,7 +63,7 @@
   ],
   "quiz": [
     {
-      "question": "In `playground`, `iad` (primary-candidate) is writable and `reader` (role: read-only) comes up writable after a pod restart. `pdx` is read-only. What does EvalCrossSite return?",
+      "question": "In `playground`, `iad` (primary-candidate) is writable and someone runs `SET GLOBAL read_only=OFF` on `reader` (role: read-only), so it reads writable. `pdx` is read-only. What does EvalCrossSite return?",
       "type": "MULTIPLE_CHOICE",
       "orderIndex": 0,
       "options": [

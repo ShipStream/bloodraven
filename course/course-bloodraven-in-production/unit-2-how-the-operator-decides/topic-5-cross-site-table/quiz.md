@@ -7,7 +7,7 @@
 
 **Type:** MULTIPLE_CHOICE
 
-In `playground`, `iad` (primary-candidate) is writable and `reader` (role: read-only) comes up writable after a pod restart. `pdx` is read-only. What does EvalCrossSite return?
+In `playground`, `iad` (primary-candidate) is writable and someone runs `SET GLOBAL read_only=OFF` on `reader` (role: read-only), so it reads writable. `pdx` is read-only. What does EvalCrossSite return?
 
 - Reason "SplitBrain" with alert `SPLIT BRAIN: 2 sites are writable (iad, reader)`
 - Reason "Degraded" with alert `writable non-promotable site requires fencing (reader)`, returning before any other row is evaluated

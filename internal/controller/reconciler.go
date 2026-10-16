@@ -61,7 +61,7 @@ const (
 	// Bump when the rendered MySQL Deployment pod spec changes without a
 	// corresponding user-facing spec field change, so existing pods roll
 	// forward to the new safe defaults.
-	deploymentPodRenderVersion = "deployment-pod-render-v4-sidecar-liveness-without-mysql"
+	deploymentPodRenderVersion = "deployment-pod-render-v5-mysqld-boots-read-only"
 
 	// sidecarLivenessPath is the sidecar's liveness probe target. It must
 	// not depend on MySQL: the sidecar fences MySQL when MySQL misbehaves,
@@ -1127,6 +1127,17 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			"--log-replica-updates=ON",
 			"--skip-replica-start=ON",
 			"--plugin-load-add=mysql_clone.so",
+			// Fail-closed boot: mysqld never accepts application writes
+			// before the operator (or the sidecar, when the operator names
+			// this site active) lifts the fence. Without it, a restarted
+			// MySQL is writable until the sidecar's next tick: an old
+			// primary next to the active one, or a reader whose datadir was
+			// replaced, reads as a second writable site. read_only, not
+			// super_read_only: the image's first-boot init runs its SQL as
+			// root through a server started with these same flags, and
+			// super_read_only fails it with ERROR 1290. A command-line flag
+			// also outranks a spec.mysqlConf override.
+			"--read-only=ON",
 		}
 
 		if fg.Spec.TLS != nil {

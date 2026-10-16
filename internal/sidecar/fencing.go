@@ -105,6 +105,15 @@ type FencingMonitor struct {
 	safetyNetPending bool
 	mysqlDownSince   time.Time
 
+	// sawReadOnly is true when the latest MySQL probe answered read_only=ON
+	// and no probe has failed since. A writable answer after it is an
+	// operator promotion (only an actor with SUPER clears read_only), which
+	// evaluate treats like the restore after a self-fence. A failed probe
+	// clears it: mysqld may have restarted, and a restart is not a
+	// promotion, even when it comes back writable (a pod that predates the
+	// read_only=ON boot flag). Monitor goroutine only.
+	sawReadOnly bool
+
 	// heartbeat is the f.clock reading, in Unix nanoseconds, of the loop's
 	// latest progress: Run's start and the start and end of every Check.
 	// It is zero until the loop starts, and atomic because /livez reads it.
@@ -136,8 +145,10 @@ const (
 
 	// safetyNetOutageRearm is how long MySQL must stay unreachable before
 	// the monitor re-arms the startup safety net. A mysqld gone this long
-	// may have restarted, and a restarted mysqld comes up writable
-	// whatever its role was. While sidecar liveness probed MySQL, an
+	// may have restarted. It boots read_only=ON, which stops application
+	// users but not SUPER clients, and a pod that predates that flag boots
+	// writable; the safety net adds super_read_only unless the operator
+	// confirms this site is active. While sidecar liveness probed MySQL, an
 	// outage this long (three failed 10s probes) restarted the sidecar and
 	// re-ran the safety net as a side effect. The re-arm keeps that
 	// protection without the restart, and without the gap in which no
@@ -546,6 +557,8 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		return
 	}
 	f.noteMySQLReachable()
+	promoted := f.sawReadOnly && !readOnly
+	f.sawReadOnly = readOnly
 	if f.safetyNetPending && f.resolveSafetyNet(ctx, readOnly) {
 		return
 	}
@@ -580,14 +593,19 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 		// the group in a no-writable-site state.
 		f.logger.Info("fencing: MySQL is writable after prior self-fence; rearming monitor")
 		f.fenced.Store(false)
-		now := f.clock.Now()
-		f.lastBloodravenOK = now
-		for addr := range f.lastPeerOK {
-			f.lastPeerOK[addr] = now
-		}
-		if f.topologyEnabled() {
-			f.topology.Set("", now)
-		}
+		f.rearm()
+	} else if promoted {
+		// The same reasoning holds for a promotion this monitor did not
+		// fence before. Every active-site view it holds predates the
+		// promotion and may still name the old primary: the operator
+		// answered that until it promoted this site. If the operator then
+		// becomes unreachable before the next tick (a restart right after
+		// a failover), rule #1 would fence the new primary on that view,
+		// and with the old primary down nothing promotes it again. A live
+		// operator's next answer is newer than the reset, so a mistaken
+		// manual unfence is still fenced on the next tick.
+		f.logger.Info("fencing: MySQL turned writable; discarding active-site view from before the promotion")
+		f.rearm()
 	}
 	if readOnly {
 		return
@@ -646,6 +664,22 @@ func (f *FencingMonitor) evaluate(ctx context.Context) {
 	f.doFence(ctx)
 }
 
+// rearm grants a full lease window and drops the cached active-site view,
+// as at process startup. Called when an actor with SUPER made MySQL
+// writable: that is fresh evidence of operator intervention, and every
+// view held from before it is stale. Peer views older than the reset are
+// not adopted afterwards (TopologyCache.Adopt needs a newer observation).
+func (f *FencingMonitor) rearm() {
+	now := f.clock.Now()
+	f.lastBloodravenOK = now
+	for addr := range f.lastPeerOK {
+		f.lastPeerOK[addr] = now
+	}
+	if f.topologyEnabled() {
+		f.topology.Set("", now)
+	}
+}
+
 // probeReadOnly reads @@read_only within mysqlProbeTimeout.
 func (f *FencingMonitor) probeReadOnly(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, mysqlProbeTimeout)
@@ -662,6 +696,7 @@ func (f *FencingMonitor) probeSuperReadOnly(ctx context.Context) (bool, error) {
 
 // noteMySQLUnreachable records the start of a run of failed MySQL probes.
 func (f *FencingMonitor) noteMySQLUnreachable() {
+	f.sawReadOnly = false
 	if f.mysqlDownSince.IsZero() {
 		f.mysqlDownSince = f.clock.Now()
 	}

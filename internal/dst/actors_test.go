@@ -163,10 +163,11 @@ func TestSidecarFencesStalePrimary(t *testing.T) {
 		SidecarTopology:   true,
 		Ops: []Op{
 			// alpha is cut off from the operator and comes back writable —
-			// the documented "old primary respawned writable" shape.
+			// the "old primary respawned writable" shape, which now needs a
+			// pod not yet rolled to the read_only=ON mysqld flag.
 			{At: 10, Kind: OpPartOpSite, Site: "alpha"},
-			{At: 12, Kind: OpCrash, Site: "alpha", Fenced: false},
-			{At: 20, Kind: OpRecover, Site: "alpha", Fenced: false},
+			{At: 12, Kind: OpCrash, Site: "alpha", BootWritable: true},
+			{At: 20, Kind: OpRecover, Site: "alpha", BootWritable: true},
 			{At: 30, Kind: OpHealOpSite, Site: "alpha"},
 		},
 	}

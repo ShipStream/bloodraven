@@ -74,11 +74,11 @@ The node hosting the active primary iad suffers a disk failure: the pod and its 
 
 **Sample answer:**
 
-This is the worst row — PVC destruction, not a pod crash. It is not the RPO-0 row, because that one requires the PVC to survive so the same primary comes back writable and no failover happens at all. Here the loss is everything iad committed but had not replicated to pdx: those transactions were only ever in the binlog on the destroyed PVC, they were never shipped, so they are not in the replica's binlog stream and therefore not in PITR's replay material. Backups plus PITR get you back to the last archived event, not to the tail. The exact count is read from divergentGtid — except that here the site holding it is gone, so quote the replication window, not a measured number.
+This is the worst row — PVC destruction, not a pod crash. It is not the RPO-0 row, because that one requires the PVC to survive so the same primary comes back, is re-asserted, and no failover happens at all. Here the loss is everything iad committed but had not replicated to pdx: those transactions were only ever in the binlog on the destroyed PVC, they were never shipped, so they are not in the replica's binlog stream and therefore not in PITR's replay material. Backups plus PITR get you back to the last archived event, not to the tail. The exact count is read from divergentGtid — except that here the site holding it is gone, so quote the replication window, not a measured number.
 
 **A full-credit answer shows:**
 
-A strong answer covers: (1) identifying the PVC-destruction row rather than the pod-crash row, and saying why the pod-crash row is RPO 0 (PVC intact, primary returns writable, no failover); (2) naming the previously-active binlog on the destroyed PVC as the thing that is gone; (3) the reason PITR cannot cover it — unshipped transactions are not in the replica's binlog stream and so are not in the replay material; (4) bonus credit for noticing that the usual divergentGtid measurement is unavailable because the diverged site no longer exists.
+A strong answer covers: (1) identifying the PVC-destruction row rather than the pod-crash row, and saying why the pod-crash row is RPO 0 (PVC intact, the same primary returns and is re-asserted, no failover); (2) naming the previously-active binlog on the destroyed PVC as the thing that is gone; (3) the reason PITR cannot cover it — unshipped transactions are not in the replica's binlog stream and so are not in the replay material; (4) bonus credit for noticing that the usual divergentGtid measurement is unavailable because the diverged site no longer exists.
 
 **Explanation:**
 

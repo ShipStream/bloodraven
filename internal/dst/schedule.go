@@ -54,6 +54,10 @@ type Op struct {
 	Peer   string // destination for one-way cuts; partner for pair partitions
 	N      int    // count for ambiguous/failing mutations, or crash countdown
 	Fenced bool   // crash boot mode: true = sidecar re-fences on boot
+	// BootWritable (crash boot mode, with Fenced false) boots read_only=OFF:
+	// a pod not yet rolled to the read_only=ON mysqld flag, mid-upgrade.
+	// Otherwise an unfenced boot is read_only=ON with super_read_only OFF.
+	BootWritable bool
 
 	// PreApply (OpCrashOperatorMid) kills the operator BEFORE the fatal
 	// statement reaches the server rather than after it applied.
@@ -76,6 +80,9 @@ func (o Op) String() string {
 	}
 	if o.Kind == OpCrash {
 		s += fmt.Sprintf(" bootFenced=%v", o.Fenced)
+		if o.BootWritable {
+			s += " bootWritable=true"
+		}
 	}
 	if o.Kind == OpCrashOperatorMid {
 		s += fmt.Sprintf(" preApply=%v down=%d", o.PreApply, o.Down)
@@ -278,12 +285,16 @@ func GenerateTrial(seed uint64) Trial {
 		case OpCrash:
 			site := pickSite()
 			start := at()
-			op := Op{At: start, Kind: OpCrash, Site: site, Fenced: rng.IntN(100) < 45}
+			// One draw, as before the read-only boot mode existed, so the
+			// rest of every schedule is unchanged: 45% fenced, 45% the
+			// read_only=ON boot, 10% a legacy writable boot.
+			boot := rng.IntN(100)
+			op := Op{At: start, Kind: OpCrash, Site: site, Fenced: boot < 45, BootWritable: boot >= 90}
 			ops = append(ops, op)
 			if rng.IntN(100) < 70 {
 				h := start + 2 + rng.IntN(faultWindow)
 				if h < healAt {
-					ops = append(ops, Op{At: h, Kind: OpRecover, Site: site, Fenced: op.Fenced})
+					ops = append(ops, Op{At: h, Kind: OpRecover, Site: site, Fenced: op.Fenced, BootWritable: op.BootWritable})
 				}
 			}
 		case OpPartOpSite:

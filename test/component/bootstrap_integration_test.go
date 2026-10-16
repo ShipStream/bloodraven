@@ -1,6 +1,7 @@
 package component
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -219,5 +220,265 @@ func TestBootstrap_ConnectionDropTreatedAsSuccess(t *testing.T) {
 	dc2.mu.Unlock()
 	if !replStarted {
 		t.Error("expected SetupReplication to run after connection-drop clone error")
+	}
+}
+
+// TestFreshDeploy_AllReadOnlyTriggersBootstrap: the sidecar fences MySQL on
+// startup until the operator names an active site, so a fresh deploy can
+// show every site read-only instead of writable. The operator must still
+// bootstrap it, lifting the seed's fence itself, rather than wait on the
+// all-read-only NoPrimary guard forever.
+func TestFreshDeploy_AllReadOnlyTriggersBootstrap(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	// More polls than the transition needs: the all-read-only state is
+	// stable, so a bootstrap that only ran on the transition poll and
+	// missed it would never run.
+	h.pollN(6)
+	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+
+	dc1.mu.Lock()
+	seedReadOnly, seedSuper, seedCloned := dc1.readOnly, dc1.superReadOnly, dc1.cloneInstanceCalled
+	dc1.mu.Unlock()
+	if seedReadOnly || seedSuper {
+		t.Errorf("seed dc1 not made writable: read_only=%v super_read_only=%v", seedReadOnly, seedSuper)
+	}
+	if seedCloned {
+		t.Error("CloneInstance must not run on the seed")
+	}
+	dc2.mu.Lock()
+	cloned, replStarted := dc2.cloneInstanceCalled, dc2.replicaStarted
+	dc2.mu.Unlock()
+	if !cloned || !replStarted {
+		t.Errorf("dc2 not bootstrapped: cloned=%v replicaStarted=%v", cloned, replStarted)
+	}
+}
+
+// TestFreshDeploy_AllReadOnlyPopulatedNoBootstrap: every site read-only with
+// no replication metadata but holding data is restart amnesia, not a fresh
+// deploy. It must stay NoPrimary for a human, never seed and clone.
+func TestFreshDeploy_AllReadOnlyPopulatedNoBootstrap(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "uuid1:1-100"}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "uuid1:1-100,uuid2:1-50"}
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	h.pollN(6)
+	time.Sleep(50 * time.Millisecond)
+
+	if phase := h.tm.BootstrapPhase(); phase != controller.BootstrapPhaseNone {
+		t.Fatalf("fresh-deploy bootstrap fired on a populated all-read-only group (phase %q)", phase)
+	}
+	for name, m := range map[string]*mockMySQL{"dc1": dc1, "dc2": dc2} {
+		m.mu.Lock()
+		cloned, writable := m.cloneInstanceCalled, !m.readOnly
+		m.mu.Unlock()
+		if cloned || writable {
+			t.Errorf("%s touched: cloned=%v writable=%v", name, cloned, writable)
+		}
+	}
+}
+
+// seedFenced reports whether the fresh-deploy seed is read-only.
+func seedFenced(m *mockMySQL) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.readOnly || m.superReadOnly
+}
+
+// expirePendingPromotion moves the fake clock past the window in which the
+// bootstrap's pending promotion reports the seed as active. While it is
+// pending, checkPrimaryReassert defers to it, as it does after a failover.
+func expirePendingPromotion(h *testHarness) {
+	h.clock.Advance(31 * time.Second)
+}
+
+// TestFreshDeploy_SeedPublishedBeforeObserved: the bootstrap reports the
+// seed as the active site as soon as it lifts the seed's fence. A seed
+// sidecar whose startup safety net is still pending asks /active-site and
+// fences on "", so waiting for RecoveryThreshold polls to observe the seed
+// writable is the window the sidecar fences in.
+func TestFreshDeploy_SeedPublishedBeforeObserved(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	h.pollN(1)
+	if got := h.tm.Status().ActiveSite; got != "dc1" {
+		t.Fatalf("active site right after the bootstrap made the seed writable = %q, want dc1", got)
+	}
+	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+}
+
+// TestFreshDeploy_SeedFencedDuringBootstrapIsRestored: the seed's sidecar
+// can fence it after the operator lifted the fence, before the operator
+// reports the seed as active. The bootstrap must not end with every site
+// read-only and no failover history to resolve it.
+func TestFreshDeploy_SeedFencedDuringBootstrapIsRestored(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2.onClone = func() { _ = dc1.SetSuperReadOnly(context.Background(), true) }
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	h.pollN(1)
+	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+	h.pollN(3)
+	expirePendingPromotion(h)
+	h.pollN(2)
+
+	if seedFenced(dc1) {
+		t.Error("seed dc1 left fenced after the bootstrap")
+	}
+}
+
+// TestFreshDeploy_SeedFencedAfterBootstrapIsRestored: a fence that lands
+// after the bootstrap completed, before any poll observed the seed
+// writable. The recipient now has replication metadata, so the fresh-deploy
+// check no longer applies and lastFailoverTarget is empty; the retained
+// seed authority is what restores the seed.
+func TestFreshDeploy_SeedFencedAfterBootstrapIsRestored(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	h.pollN(1)
+	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+	_ = dc1.SetSuperReadOnly(context.Background(), true)
+
+	h.pollN(3)
+	if !seedFenced(dc1) {
+		t.Fatal("seed restored while the bootstrap's pending promotion was still unexpired; the test no longer exercises the retained authority")
+	}
+	expirePendingPromotion(h)
+	h.pollN(2)
+	if seedFenced(dc1) {
+		t.Fatal("seed dc1 left fenced: retained fresh-deploy seed authority did not restore it")
+	}
+	h.pollN(2)
+	if got := h.tm.Status().ActiveSite; got != "dc1" {
+		t.Errorf("active site after the restore = %q, want dc1", got)
+	}
+}
+
+// TestFreshDeploy_SeedFencedAfterConfirmationIsRestored: the authority
+// outlives the poll that confirmed the seed writable, so a seed fenced
+// later (the same stale-sidecar fence checkPrimaryReassert heals after a
+// failover) is restored too.
+func TestFreshDeploy_SeedFencedAfterConfirmationIsRestored(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	h.pollN(1)
+	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+	h.pollN(3)
+	if got := h.tm.Status().ActiveSite; got != "dc1" {
+		t.Fatalf("active site after the bootstrap = %q, want dc1", got)
+	}
+
+	_ = dc1.SetSuperReadOnly(context.Background(), true)
+	h.pollN(2)
+	if seedFenced(dc1) {
+		t.Fatal("seed dc1 left fenced after polls observed the fence")
+	}
+}
+
+// TestFreshDeploy_SeedRestoreRetriesTransientFailure: a restore whose SET
+// fails leaves the seed fenced for that poll only. The authority is kept
+// and the next attempt (rate-limited by failoverCooldown, as every
+// re-assert is) restores it.
+func TestFreshDeploy_SeedRestoreRetriesTransientFailure(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	h.pollN(1)
+	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+	h.pollN(3)
+
+	_ = dc1.SetSuperReadOnly(context.Background(), true)
+	dc1.mu.Lock()
+	dc1.superROFailN = 1
+	dc1.mu.Unlock()
+	h.pollN(2)
+	if !seedFenced(dc1) {
+		t.Fatal("seed restored despite the injected SET failure; the test no longer exercises the retry")
+	}
+
+	h.clock.Advance(5*time.Minute + time.Second)
+	h.pollN(1)
+	if seedFenced(dc1) {
+		t.Fatal("seed dc1 left fenced after the cooldown: the restore was not retried")
+	}
+}
+
+// TestFreshDeploy_SeedAuthoritySupersededByNewPrimary: once a different
+// site is the unique writable primary, the seed no longer names the
+// primary, and the new site was only observed, not made primary by the
+// operator. If that site is then fenced, the operator restores neither: a
+// fence without failover history waits on the NoPrimary guard for a human.
+func TestFreshDeploy_SeedAuthoritySupersededByNewPrimary(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	h.pollN(1)
+	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+	h.pollN(3)
+
+	// A human moves the primary to dc2 outside the operator.
+	_ = dc1.SetSuperReadOnly(context.Background(), true)
+	dc2.mu.Lock()
+	dc2.readOnly, dc2.superReadOnly = false, false
+	dc2.mu.Unlock()
+	h.pollN(3)
+	if got := h.tm.Status().ActiveSite; got != "dc2" {
+		t.Fatalf("active site = %q, want dc2", got)
+	}
+
+	_ = dc2.SetSuperReadOnly(context.Background(), true)
+	expirePendingPromotion(h)
+	h.pollN(3)
+	if !seedFenced(dc1) {
+		t.Error("superseded seed dc1 was made writable again")
+	}
+	if !seedFenced(dc2) {
+		t.Error("observed primary dc2 lifted from a fence without failover history")
+	}
+}
+
+// TestPrimaryRestart_BootReadOnlyIsRestored: mysqld boots read_only=ON, so
+// a primary whose MySQL restarts comes back read-only (super_read_only
+// OFF). In a group that has never failed over, the operator restores the
+// last active site from that boot state on the next poll instead of
+// leaving NoPrimary for a human.
+func TestPrimaryRestart_BootReadOnlyIsRestored(t *testing.T) {
+	gtid := "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-100"
+	dc1 := &mockMySQL{readOnly: false, gtidExecuted: gtid}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: gtid,
+		replicaStatus: &mysql.ReplicaStatus{SourceHost: "mysql-lion-dc1.default.svc.cluster.local", IORunning: true, SQLRunning: true}}
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	h.pollN(3)
+	if got := h.tm.Status().ActiveSite; got != "dc1" {
+		t.Fatalf("active site = %q, want dc1", got)
+	}
+
+	// dc1's MySQL restarts: one failed probe, then it answers read-only.
+	dc1.mu.Lock()
+	dc1.err = errDown
+	dc1.mu.Unlock()
+	h.pollN(1)
+	dc1.mu.Lock()
+	dc1.err, dc1.readOnly, dc1.superReadOnly = nil, true, false
+	dc1.mu.Unlock()
+	h.pollN(2)
+
+	if seedFenced(dc1) {
+		t.Fatal("primary left read-only after a MySQL restart")
+	}
+	if h.tm.BootstrapPhase() != controller.BootstrapPhaseNone {
+		t.Errorf("bootstrap phase = %q; a populated group must not be bootstrapped", h.tm.BootstrapPhase())
 	}
 }

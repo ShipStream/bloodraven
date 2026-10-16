@@ -841,6 +841,8 @@ func (r *TopologyManagerRunner) restoreFailoverState(tm *TopologyManager, fg *v1
 	tm.deploymentLeases = r.deploymentLeases
 	tm.topologyGeneration = fg.Status.TopologyGeneration
 	tm.deploymentActiveSite = fg.Status.ActiveSite
+	// Observed, not named: this process did not make that site primary.
+	tm.lastActiveSite = fg.Status.ActiveSite
 	// The promotion GTID gates which candidates are safe to promote and how
 	// a returning old primary is judged, so it must survive a restart.
 	tm.promotionGtidExecuted = fg.Status.PromotionGtidExecuted

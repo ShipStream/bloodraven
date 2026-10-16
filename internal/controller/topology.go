@@ -303,6 +303,23 @@ type TopologyManager struct {
 	lastFailoverLocal bool
 	failoverCooldown  time.Duration
 
+	// lastActiveSite is the last site this process saw or made the group's
+	// unique writable primary-candidate, restored from status.activeSite at
+	// startup. checkPrimaryReassert uses it while lastFailoverTarget is
+	// empty, so a group that has never failed over is not left with every
+	// site read-only and nothing to resolve it.
+	//
+	// lastActiveSiteNamed records whether the operator made that site
+	// primary itself (a fresh-deploy seed or a promotion) rather than only
+	// observing it. A named site is re-asserted from any fence, as
+	// lastFailoverTarget is: a seed's sidecar can fence it before the
+	// operator reports it active. An observed site is only lifted from the
+	// read_only=ON every mysqld boots with (a primary whose MySQL
+	// restarted), never from super_read_only: that is a fence, and without
+	// operator history a fence stays for a human. Both protected by mu.
+	lastActiveSite      string
+	lastActiveSiteNamed bool
+
 	// failoverState persists lastFailover/lastFailoverTarget out of band
 	// from the CR status subresource, so a status-write outage that spans
 	// an operator restart cannot reset the anti-flap cooldown. Nil in tests
@@ -678,6 +695,7 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 
 	tm.mu.Lock()
 	tm.authorityEpoch++
+	tm.lastActiveSite, tm.lastActiveSiteNamed = target, true
 	tm.deploymentAuthorityLocked(target)
 	tm.promotionGtidExecuted = promotionGtid
 	if strings.TrimSpace(promotionGtid) != "" {
@@ -977,7 +995,6 @@ func (tm *TopologyManager) Ready() bool {
 	return tm.ready
 }
 
-// Run starts the polling loop. Blocks until ctx is cancelled.
 // errProbeDeferred stands in for the probe result of a site in probe
 // backoff. Later steps of the poll treat the site as unprobed, the same as
 // a failed probe, without probing it again.
@@ -989,6 +1006,7 @@ var errProbeDeferred = errors.New("probe deferred: site in probe backoff")
 // while still reducing waste when a DC is down for extended periods.
 const maxPollBackoffExponent = 4
 
+// Run starts the polling loop. Blocks until ctx is cancelled.
 func (tm *TopologyManager) Run(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1181,6 +1199,9 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	if tm.promotedSite != "" {
 		tm.reconcilePendingPromotionLocked()
 	}
+	if active := tm.activeSiteLocked(); active != "" && active != tm.lastActiveSite {
+		tm.lastActiveSite, tm.lastActiveSiteNamed = active, false
+	}
 	tm.mu.Unlock()
 
 	// Evaluate every poll so all status snapshots carry the current topology
@@ -1212,6 +1233,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	fencedOldPrimary := false
 	if !anyTransition {
 		fencedOldPrimary = tm.fenceReturningOldPrimary(ctx, action)
+		tm.retryFreshDeployBootstrap(ctx, action)
 	}
 
 	// Update status.
@@ -1984,6 +2006,14 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 				return
 			}
 		}
+	}
+
+	// The sidecar fences MySQL on startup until the operator names an
+	// active site, so a fresh deploy can also show every site read-only.
+	// Same bootstrap, same guards. retryFreshDeployBootstrap repeats this
+	// check between transitions.
+	if action.Reason == "NoPrimary" && tm.maybeStartFreshDeployBootstrap(ctx, lastFailoverTarget) {
+		return
 	}
 
 	// If any site is writable after a prior failover and this is not a
@@ -3081,10 +3111,51 @@ func (tm *TopologyManager) SetSpecDriftSites(sites []string) {
 	tm.specDriftSites = sites
 }
 
-// isFreshDeploy reports whether every site is writable, none has ever had
+// maybeStartFreshDeployBootstrap starts the fresh-deploy bootstrap when no
+// failover has happened in this cluster's lifetime, auto-bootstrap is
+// enabled and idle, and isFreshDeploy holds. It reports whether it started.
+func (tm *TopologyManager) maybeStartFreshDeployBootstrap(ctx context.Context, lastFailoverTarget string) bool {
+	if lastFailoverTarget != "" || tm.bootstrap == nil || tm.bootstrapCfg.ReplUser == "" {
+		return false
+	}
+	tm.mu.RLock()
+	phase := tm.bootstrapPhase
+	suppressed := tm.autoBootstrapSuppressed
+	tm.mu.RUnlock()
+	if suppressed || !bootstrapIdlePhase(phase) || !tm.isFreshDeploy(ctx) {
+		return false
+	}
+	tm.startBootstrap(ctx)
+	return true
+}
+
+// retryFreshDeployBootstrap repeats applyCrossSiteAction's all-read-only
+// fresh-deploy check on polls without a transition. Every site read-only is
+// a stable state, so a check that failed on the transition poll (a site
+// that answered read_only but not yet SHOW REPLICA STATUS, a seed whose
+// fence could not be lifted) would otherwise never run again, and the
+// group would wait for a primary forever.
+func (tm *TopologyManager) retryFreshDeployBootstrap(ctx context.Context, action state.CrossSiteAction) {
+	if action.Reason != "NoPrimary" || tm.isTopologyFrozen() || tm.isPlannedFailoverActive() ||
+		tm.bootstrapBlocksCrossSite() || tm.isUpdating() {
+		return
+	}
+	tm.mu.RLock()
+	lastFailoverTarget := tm.lastFailoverTarget
+	tm.mu.RUnlock()
+	tm.maybeStartFreshDeployBootstrap(ctx, lastFailoverTarget)
+}
+
+// isFreshDeploy reports whether every site is reachable, none has ever had
 // replication configured, AND none holds data. This is the signature of a
 // fresh deployment — as opposed to a "true" split-brain where at least one
 // site previously had replication set up and may now hold diverged writes.
+//
+// A fresh site is normally read-only: mysqld boots read_only=ON, and the
+// sidecar's startup safety net adds super_read_only until the operator
+// names an active site. It can be writable when its pod predates the
+// read_only=ON flag (mid-upgrade) or someone cleared read_only by hand.
+// Both are fresh.
 //
 // The emptiness requirement is load-bearing, not cosmetic: a populated
 // cluster can reach the all-writable, no-metadata state through restart
@@ -3098,7 +3169,7 @@ func (tm *TopologyManager) SetSpecDriftSites(sites []string) {
 // set when the schema check is unavailable) is never part of a fresh deploy.
 func (tm *TopologyManager) isFreshDeploy(ctx context.Context) bool {
 	for i := range tm.sites {
-		if tm.sites[i].state != state.StateWritable {
+		if st := tm.sites[i].state; st != state.StateWritable && st != state.StateReadOnly {
 			return false
 		}
 	}
@@ -3176,8 +3247,9 @@ type userSchemaChecker interface {
 func (tm *TopologyManager) detectEmptySite(ctx context.Context) (donor, empty string) {
 	active, err := tm.confirmedActivePrimary(ctx)
 	if err != nil {
-		// A freshly recreated empty candidate starts writable. Identify and
-		// fence that empty recipient before establishing unique donor authority.
+		// A freshly recreated empty candidate can be writable (a pod that
+		// predates the read_only=ON boot flag). Identify and fence that empty
+		// recipient before establishing unique donor authority.
 		return tm.detectAndFenceEmptyWritableSite(ctx)
 	}
 
@@ -3387,10 +3459,38 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 			return
 		}
 	}
-	if seedSite == nil || !seedSite.isPromotable() || seedSite.host == "" || tm.confirmWritable(ctx, seedSite) != nil {
+	if seedSite == nil || !seedSite.isPromotable() || seedSite.host == "" {
 		tm.logger.Error("fresh-deploy bootstrap: seed authority could not be confirmed", "site", seed)
 		return
 	}
+	// The seed's sidecar may have fenced it on startup. The operator is the
+	// authority that lifts that fence, as it does for a promoted candidate.
+	if err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+		if err := seedSite.mysql.SetSuperReadOnly(probeCtx, false); err != nil {
+			return err
+		}
+		return seedSite.mysql.SetReadOnly(probeCtx, false)
+	}); err != nil {
+		tm.logger.Error("fresh-deploy bootstrap: could not make the seed writable", "site", seed, "error", err)
+		return
+	}
+	if err := tm.confirmWritable(ctx, seedSite); err != nil {
+		tm.logger.Error("fresh-deploy bootstrap: seed authority could not be confirmed", "site", seed, "error", err)
+		return
+	}
+	// Publish the seed as the active site now, not after RecoveryThreshold
+	// polls observe it writable. Until then /active-site would answer "",
+	// and a seed sidecar whose startup safety net is still pending fences
+	// on that answer. The pending promotion reports the seed in the
+	// meantime, the same as after a failover; lastActiveSite lets
+	// checkPrimaryReassert restore the seed if a fence lands anyway.
+	tm.mu.Lock()
+	tm.authorityEpoch++
+	tm.lastActiveSite, tm.lastActiveSiteNamed = seed, true
+	tm.deploymentAuthorityLocked(seed)
+	tm.promotedSite = seed
+	tm.promotedAt = tm.clock.Now()
+	tm.mu.Unlock()
 
 	// Pick any non-seed site as the first clone recipient. We prefer
 	// primary-candidate sites first so that post-fresh-deploy there is
@@ -3921,7 +4021,13 @@ func (tm *TopologyManager) checkRecoveryWithConvergence(ctx context.Context, sit
 //
 // The topology manager, however, has the history the pure state matrix
 // refuses to assume: lastFailoverTarget names the site this operator
-// (or a predecessor, via status rehydration) made authoritative. When
+// (or a predecessor, via status rehydration) made authoritative. A group
+// that has never failed over uses the last site seen as its unique active
+// primary instead (see lastActiveSite): mysqld boots read_only=ON, so that
+// primary comes back read-only from any restart, and a fresh-deploy seed's
+// sidecar can fence it before the operator reports it active. A site the
+// operator only observed is lifted from that boot read_only, never from a
+// fence (super_read_only). When
 // that site is reachable, read-only, and promotable, every other site
 // is also reachable and read-only, and the target is GTID-complete (it
 // contains every peer's GTID_EXECUTED and the recorded promotion GTID
@@ -3943,7 +4049,11 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	}
 
 	tm.mu.RLock()
-	target := tm.lastFailoverTarget
+	target, authority := tm.lastFailoverTarget, "lastFailoverTarget"
+	named := true
+	if target == "" {
+		target, authority, named = tm.lastActiveSite, "lastActiveSite", tm.lastActiveSiteNamed
+	}
 	promotedSite := tm.promotedSite
 	lastReassert := tm.lastReassert
 	promotionGtidStr := tm.promotionGtidExecuted
@@ -3999,6 +4109,10 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		return false
 	}
 
+	if !named && !tm.bootReadOnlyOnly(ctx, targetSite) {
+		return false
+	}
+
 	gtidCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	targetGtidStr, err := targetSite.mysql.GetGtidExecuted(gtidCtx)
 	cancel()
@@ -4033,7 +4147,19 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		if s.name == target || s.name == skipCloningReader {
 			continue
 		}
+		// The tracker state above is debounced: a peer that turned writable
+		// still reads ReadOnly until RecoveryThreshold polls observe it.
+		// Re-asserting the target then would make a second writable site,
+		// so check the peer's live state too.
 		peerCtx, peerCancel := context.WithTimeout(ctx, 5*time.Second)
+		peerReadOnly, rerr := s.mysql.CheckReadOnly(peerCtx)
+		peerCancel()
+		if rerr != nil || !peerReadOnly {
+			tm.logger.Debug("primary re-assert deferred: peer is not confirmed read-only",
+				"site", s.name, "error", rerr)
+			return false
+		}
+		peerCtx, peerCancel = context.WithTimeout(ctx, 5*time.Second)
 		peerGtidStr, gerr := s.mysql.GetGtidExecuted(peerCtx)
 		peerCancel()
 		if gerr != nil {
@@ -4067,7 +4193,7 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	tm.mu.Unlock()
 
 	tm.logger.Warn("re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability",
-		"site", target)
+		"site", target, "authority", authority)
 
 	if err := targetSite.mysql.SetSuperReadOnly(ctx, false); err != nil {
 		tm.logger.Error("primary re-assert: failed to clear super_read_only", "site", target, "error", err)
@@ -4095,6 +4221,34 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 			"site", target, "error", err)
 	}
 	return true
+}
+
+// superReadOnlyChecker is implemented by checkers that can read
+// super_read_only, which CheckReadOnly folds into read_only.
+type superReadOnlyChecker interface {
+	CheckSuperReadOnly(context.Context) (bool, error)
+}
+
+// bootReadOnlyOnly reports whether site is read-only only through the
+// read_only=ON mysqld boots with: super_read_only is OFF, so no sidecar or
+// operator fence is in place. It fails safe (false) when the checker cannot
+// read super_read_only or the read fails.
+func (tm *TopologyManager) bootReadOnlyOnly(ctx context.Context, site *siteTracker) bool {
+	checker, ok := site.mysql.(superReadOnlyChecker)
+	if !ok {
+		return false
+	}
+	var superReadOnly bool
+	err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+		var probeErr error
+		superReadOnly, probeErr = checker.CheckSuperReadOnly(probeCtx)
+		return probeErr
+	})
+	if err != nil {
+		tm.logger.Warn("primary re-assert: failed to read target super_read_only", "site", site.name, "error", err)
+		return false
+	}
+	return !superReadOnly
 }
 
 // clearHealthyRecoverySites clears recovery markers whose site is now

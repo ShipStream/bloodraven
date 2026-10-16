@@ -22,7 +22,7 @@ You need a completed emergency failover on `playground` that stays completed: `i
 
 **Explanation:**
 
-Scale-to-0 removes the pod and keeps the site down, which is exactly why scenario 01 uses it — for determinism, not because the other injections fail. Force-delete *does* trigger a failover (scenario 09b hard-waits for `activeSite` to flip and `lastFailover` to stamp after a `--grace-period=0 --force` delete, and passes), so the widespread "a pod delete does not fail over" superstition is wrong; but it races the sub-five-second Deployment respawn, and that race can restore the original topology through split-brain recovery instead of completing the failover — useless for a demonstration. SQL `SHUTDOWN` restarts the container in place with pod, PVC and IP surviving; scenario 16 explicitly accepts either outcome, because the kubelet's restart speed may beat the ~6 s detection window (`pollInterval` 2 s x `failureThreshold` 3). A pod crash with the PVC intact is the genuine no-failover case: RPO 0, the primary comes back writable and the operator keeps it. (objective 1)
+Scale-to-0 removes the pod and keeps the site down, which is exactly why scenario 01 uses it — for determinism, not because the other injections fail. Force-delete *does* trigger a failover (scenario 09b hard-waits for `activeSite` to flip and `lastFailover` to stamp after a `--grace-period=0 --force` delete, and passes), so the widespread "a pod delete does not fail over" superstition is wrong; but it races the sub-five-second Deployment respawn, and a respawn that beats detection comes back `read_only=ON` and is simply re-asserted instead of failed over — useless for a demonstration. SQL `SHUTDOWN` restarts the container in place with pod, PVC and IP surviving; scenario 16 explicitly accepts either outcome, because the kubelet's restart speed may beat the ~6 s detection window (`pollInterval` 2 s x `failureThreshold` 3). A pod crash with the PVC intact is the genuine no-failover case: RPO 0, the primary comes back with the `read_only=ON` every `mysqld` boots with and the operator re-asserts it. (objective 1)
 
 ## Question 2
 
@@ -121,7 +121,7 @@ The shared `f4d07a53...:1-15` range is what both sites hold and is not loss; the
 
 `pdx` replicates with a `SOURCE_DELAY` of several minutes, so it held received but unapplied writes when `iad` was killed; the failover measured 36 s. The review wants the RPO. Which row do you quote?
 
-- RPO 0 — no failover happened at all; the primary came back writable and was kept
+- RPO 0 — no failover happened at all; the primary came back and was re-asserted
 - Near zero, not guaranteed zero — the candidate was caught up, so only in-flight work is at risk
 - Whatever was in flight — the drain applies what it can reach, the rest is gone
 - The worst row — the previously-active binlog died with the PVC and PITR cannot replay the tail

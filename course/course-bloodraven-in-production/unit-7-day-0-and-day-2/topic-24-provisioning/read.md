@@ -129,7 +129,7 @@ connections** — and never again.
     },
     {
       "label": "MySQL opens for business",
-      "detail": "The operator's first poll finds a writable, empty site. Nothing in this list ever runs again on this PVC."
+      "detail": "mysqld restarts with the read_only=ON it is always started with, and the operator's first poll finds a read-only, empty site. Nothing in this list ever runs again on this PVC."
     }
   ]
 }
@@ -250,21 +250,26 @@ Every item in that second list is on the Unit 6 go-live gate for a reason.
 
 ## Bootstrap: the first poll on an empty cluster
 
-Apply the manifest and every site comes up **writable and empty**, because a freshly initialised MySQL
-is writable and nothing has fenced it yet. From Unit 2 you know what the matrix does with more than
-one writable core site: `SPLIT BRAIN`. That is not what happens, and the reason is a separate,
-deliberately conservative check.
+Apply the manifest and every site comes up **read-only and empty**: the operator starts every
+`mysqld` with `--read-only=ON`, and each sidecar's startup safety net adds `super_read_only` because
+no active site has been named yet. From Unit 2 you know what the matrix does with every core site
+read-only and none unreachable: `NoPrimary`, and it refuses to elect. That is not what happens, and
+the reason is a separate, deliberately conservative check.
 
-`isFreshDeploy` requires **three** things of *every* site at once: it is `writable`, it has never had
-replication configured (`SHOW REPLICA STATUS` returns nothing), and it holds no data — an empty
-`GTID_EXECUTED`, cross-checked against user schemas where the probe is available. Only then does the
-operator seed the group: pick a site by `sitePriorities`, make it the primary, and `CLONE INSTANCE`
-the others from it.
+`isFreshDeploy` requires **three** things of *every* site at once: it is reachable (`read-only`, or
+`writable` if its pod predates the boot flag), it has never had replication configured
+(`SHOW REPLICA STATUS` returns nothing), and it holds no data — an empty `GTID_EXECUTED`,
+cross-checked against user schemas where the probe is available. Only then does the operator seed
+the group: pick a site by `sitePriorities`, lift its fence, report it as the active site at once,
+and `CLONE INSTANCE` the others from it. Because an all-read-only group produces no further state
+transitions, the check also runs on every quiet poll while the group sits at `NoPrimary`. And if the
+seed's own sidecar fences it again before the operator's answer reaches it, the operator re-asserts
+the seed: it made that site primary itself.
 
 The emptiness requirement is the load-bearing part, and Unit 3 already showed you the failure it
-prevents. A populated cluster can reach the all-writable, no-metadata state by accident: a failover
+prevents. A populated cluster can reach the no-history, no-metadata state by accident: a failover
 whose status write was rejected, an operator restart that rehydrated a CR with no `lastFailoverTarget`,
-and an old primary that respawned writable. The promoted primary's own `RESET REPLICA ALL` erased its
+and an old primary that respawned (writable on a pod that predates the boot flag, read-only after). The promoted primary's own `RESET REPLICA ALL` erased its
 channel metadata, so *metadata absence alone cannot tell that cluster from a fresh one*. Treat it as
 fresh and the operator would seed by priority order and clone the newer side from the stale one,
 destroying every post-failover write. A site with data is never part of a fresh deploy — full stop.
@@ -288,7 +293,7 @@ recipient is fenced again. Throughout the clone the recipient keeps `read_only=O
 You can write a `MysqlFailoverGroup` into an empty namespace and say, for every line, which earlier
 unit decided it. You can pick a credentials mode and recite the grants each user gets. You can say
 which of your mistakes the API server will catch and which will wait for an incident, and you can
-explain why a group of freshly created, all-writable sites is not a split brain.
+explain why a group of freshly created, all read-only sites is not stuck at `NoPrimary`.
 
 One line in that manifest has been quietly deferred since Unit 6, where the CRD refused to enable
 encryption without it. `spec.tls` is next.

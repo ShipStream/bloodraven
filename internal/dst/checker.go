@@ -109,6 +109,17 @@ func (m *simChecker) CheckReadOnly(_ context.Context) (bool, error) {
 	return m.s.readOnly, nil
 }
 
+// CheckSuperReadOnly lets the operator tell a fence from the read_only=ON
+// boot, as the real checker does.
+func (m *simChecker) CheckSuperReadOnly(_ context.Context) (bool, error) {
+	m.c.mu.Lock()
+	defer m.c.mu.Unlock()
+	if err := m.reachableLocked(); err != nil {
+		return false, err
+	}
+	return m.s.superReadOnly, nil
+}
+
 func (m *simChecker) Promote(_ context.Context) error {
 	// STOP REPLICA; RESET REPLICA ALL; SET GLOBAL read_only = 0.
 	return m.mutate(EvPromote, "", func() error {
