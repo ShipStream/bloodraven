@@ -1031,3 +1031,113 @@ func TestEvaluate_DoesNotFenceDuringClone(t *testing.T) {
 		t.Fatal("did not fence a writable non-active site once the clone finished")
 	}
 }
+
+// TestEvaluate_PromotionDiscardsPrePromotionView: a replica's cached view
+// names the old primary, because the operator answered that until it
+// promoted this site. If the operator is unreachable on the first tick
+// after the promotion (killed right after a failover), rule #1 must not
+// fence the new primary on that view.
+func TestEvaluate_PromotionDiscardsPrePromotionView(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(true) // replica
+	cache := &TopologyCache{}
+	cache.Set("pdx", clk.Now())
+	fm := newTopologyFencingMonitor(f, clk, cache, nil)
+	fm.lastBloodravenOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
+
+	fm.evaluate(context.Background())
+
+	// The operator promotes this site, then dies before the next tick.
+	f.readOnly = false
+	clk.Advance(5 * time.Second)
+	fm.evaluate(context.Background())
+
+	if fm.fenced.Load() || f.superReadOnly {
+		t.Fatal("new primary fenced on an active-site view from before its promotion")
+	}
+	if snap := cache.Snapshot(); snap.ActiveSite != "" {
+		t.Fatalf("cached activeSite = %q, want cleared at the promotion", snap.ActiveSite)
+	}
+}
+
+// TestEvaluate_PromotionStillFencesOnNewerMismatch: the reset only discards
+// views older than the promotion. An operator answer after it that names
+// another site (a manual unfence of a replica) still fences.
+func TestEvaluate_PromotionStillFencesOnNewerMismatch(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(true)
+	cache := &TopologyCache{}
+	cache.Set("pdx", clk.Now())
+	fm := newTopologyFencingMonitor(f, clk, cache, nil)
+	fm.lastBloodravenOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
+
+	fm.evaluate(context.Background())
+	f.readOnly = false
+	clk.Advance(5 * time.Second)
+	fm.evaluate(context.Background())
+
+	clk.Advance(5 * time.Second)
+	cache.Set("pdx", clk.Now())
+	fm.evaluate(context.Background())
+
+	if !fm.fenced.Load() || !f.superReadOnly {
+		t.Fatal("writable replica not fenced on a fresh operator view naming another site")
+	}
+}
+
+// TestEvaluate_PromotionGrantsLease: a promoted primary whose operator and
+// peers are all unreachable when the promotion lands gets a full lease, the
+// same as after a restore from a self-fence.
+func TestEvaluate_PromotionGrantsLease(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(true)
+	fm := newTestFencingMonitor(f, clk)
+	fm.lastBloodravenOK = clk.Now().Add(-30 * time.Second)
+	setPeerLastOK(fm, clk.Now().Add(-30*time.Second))
+
+	fm.evaluate(context.Background())
+	f.readOnly = false
+	fm.evaluate(context.Background())
+	if fm.fenced.Load() {
+		t.Fatal("promoted primary fenced by rule #2 on stale pre-promotion lease timestamps")
+	}
+
+	clk.Advance(21 * time.Second)
+	fm.evaluate(context.Background())
+	if !fm.fenced.Load() {
+		t.Fatal("rule #2 must fire once a full lease passes with everything unreachable")
+	}
+}
+
+// TestEvaluate_RestartBootingWritableIsNotAPromotion: a failed probe between
+// the read-only and writable answers means mysqld may have restarted, and a
+// restarted mysqld boots writable whatever its role. That is not a
+// promotion, so rule #1 still fences on the cached view.
+func TestEvaluate_RestartBootingWritableIsNotAPromotion(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(true)
+	cache := &TopologyCache{}
+	cache.Set("pdx", clk.Now())
+	fm := newTopologyFencingMonitor(f, clk, cache, nil)
+	fm.lastBloodravenOK = clk.Now()
+	setPeerLastOK(fm, clk.Now())
+
+	fm.evaluate(context.Background())
+	f.readOnlyErr = fmt.Errorf("connection refused")
+	clk.Advance(5 * time.Second)
+	fm.evaluate(context.Background())
+	f.readOnlyErr = nil
+	f.readOnly = false
+	clk.Advance(5 * time.Second)
+	fm.evaluate(context.Background())
+
+	if !fm.fenced.Load() || !f.superReadOnly {
+		t.Fatal("a mysqld that came back writable after a failed probe must be fenced on the cached view")
+	}
+}
