@@ -194,6 +194,16 @@ func (m *checker) CheckReadOnly(ctx context.Context) (bool, error) {
 	return readOnly == 1, nil
 }
 
+// CheckSuperReadOnly reads @@super_read_only. It distinguishes a fence
+// (super_read_only=ON) from the read_only=ON mysqld boots with.
+func (m *checker) CheckSuperReadOnly(ctx context.Context) (bool, error) {
+	var superReadOnly int
+	if err := m.db.QueryRowContext(ctx, "SELECT @@super_read_only").Scan(&superReadOnly); err != nil {
+		return false, fmt.Errorf("query super_read_only: %w", err)
+	}
+	return superReadOnly == 1, nil
+}
+
 func (m *checker) Promote(ctx context.Context) error {
 	stmts := []string{
 		"STOP REPLICA",

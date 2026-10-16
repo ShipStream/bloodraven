@@ -502,11 +502,12 @@ func (c *Cluster) Crash(site string) {
 }
 
 // Recover restarts a crashed site. fenced=true models the sidecar winning the
-// boot race (comes back super_read_only); fenced=false models the documented
-// "old primary respawned writable" case (read_only=0 in server config, no
-// sidecar fence yet). Replica threads auto-start when channel metadata exists
-// (MySQL default, no skip_replica_start).
-func (c *Cluster) Recover(site string, fenced bool) {
+// boot race (comes back super_read_only). Otherwise mysqld comes back with
+// the read_only=ON it is started with and super_read_only OFF, or, with
+// bootWritable, writable: a pod not yet rolled to that flag mid-upgrade,
+// the "old primary respawned writable" case. Replica threads auto-start
+// when channel metadata exists (MySQL default, no skip_replica_start).
+func (c *Cluster) Recover(site string, fenced, bootWritable bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := c.byName[site]
@@ -514,11 +515,15 @@ func (c *Cluster) Recover(site string, fenced bool) {
 		return
 	}
 	s.crashed = false
-	if fenced {
+	switch {
+	case fenced:
 		s.readOnly = true
 		s.superReadOnly = true
-	} else {
+	case bootWritable:
 		s.readOnly = false
+		s.superReadOnly = false
+	default:
+		s.readOnly = true
 		s.superReadOnly = false
 	}
 	if s.replConfigured {
@@ -527,7 +532,7 @@ func (c *Cluster) Recover(site string, fenced bool) {
 		s.ioErr = ""
 		s.sqlErr = ""
 	}
-	c.event(site, EvRecoverSite, fmt.Sprintf("fenced=%v", fenced), "")
+	c.event(site, EvRecoverSite, fmt.Sprintf("fenced=%v bootWritable=%v", fenced, bootWritable), "")
 }
 
 func (c *Cluster) SetOperatorLink(site string, down bool) {

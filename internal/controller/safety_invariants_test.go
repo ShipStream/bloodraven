@@ -108,6 +108,7 @@ func TestInvariant_NeverAutoUnfenceSelfFencedPrimary(t *testing.T) {
 	// Simulate site0 being fenced by the sidecar (super_read_only=ON)
 	site0.mu.Lock()
 	site0.readOnly = true
+	site0.superReadOnly = true
 	site0.mu.Unlock()
 
 	// Poll many times — the topology manager should never promote site0 back

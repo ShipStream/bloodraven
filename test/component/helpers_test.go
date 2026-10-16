@@ -143,9 +143,19 @@ func (m *mockMySQL) SetReadOnly(_ context.Context, on bool) error {
 	defer m.mu.Unlock()
 	m.readOnly = on
 	if !on {
+		// As in MySQL: clearing read_only clears super_read_only too.
+		m.superReadOnly = false
 		m.setReadOnlyFalseN++
 	}
 	return nil
+}
+
+// CheckSuperReadOnly lets the operator tell a fence (super_read_only=ON)
+// from the read_only=ON mysqld boots with.
+func (m *mockMySQL) CheckSuperReadOnly(_ context.Context) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.superReadOnly, m.err
 }
 
 func (m *mockMySQL) writableGrants() int {
