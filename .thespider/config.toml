@@ -3,21 +3,16 @@ project = "shipstream/bloodraven"
 profile = "security"
 
 # Audit commands skip the operator's own agent config (rules, skills, plugins, MCP) and allow only read-only git.
+# Opus 5.5 and GPT-6.1 Sol, both at max effort, won a blind comparison of six model setups on campaign #21.
+
+[[model]]
+code = "anthropic/claude-opus-5-5"
+agent = "claude"
+command = "env -u CLAUDECODE claude --model claude-opus-5-5 --effort max --safe-mode --restricted --strict-mcp-config --tools \"Read,Grep,Glob,Bash\" --allowedTools \"Bash(git log:*) Bash(git show:*) Bash(git diff:*) Bash(git blame:*) Bash(git ls-files:*) Bash(git rev-parse:*)\" --permission-mode dontAsk --no-session-persistence --print < {prompt_path}"
+timeout_seconds = 3600
 
 [[model]]
 code = "openai/gpt-6.1-sol"
-agent = "opencode"
-command = '''env -u OPENCODE -u OPENCODE_PID -u OPENCODE_CONFIG -u OPENCODE_CONFIG_DIR XDG_CONFIG_HOME="$HOME/.cache/thespider/opencode-config" OPENCODE_DISABLE_CLAUDE_CODE=1 OPENCODE_CONFIG_CONTENT='{"permission":{"skill":{"*":"deny"},"task":"deny","edit":"deny","webfetch":"deny","bash":{"*":"deny","git\u0020log*":"allow","git\u0020show*":"allow","git\u0020diff*":"allow","git\u0020blame*":"allow","git\u0020ls-files*":"allow","git\u0020rev-parse*":"allow"}},"agent":{"plan":{"permission":{"skill":{"*":"deny"},"task":"deny","edit":"deny","webfetch":"deny","bash":{"*":"deny","git\u0020log*":"allow","git\u0020show*":"allow","git\u0020diff*":"allow","git\u0020blame*":"allow","git\u0020ls-files*":"allow","git\u0020rev-parse*":"allow"}}}}}' opencode run --pure --model openai/gpt-6.1-sol --agent plan --format default 'Follow the attached instructions file exactly and emit only the output it specifies.' -f {prompt_path}'''
-timeout_seconds = 1800
-
-[[model]]
-code = "anthropic/claude-sonnet-5-5"
-agent = "claude"
-command = "env -u CLAUDECODE claude --model claude-sonnet-5-5 --effort xhigh --safe-mode --restricted --strict-mcp-config --tools \"Read,Grep,Glob,Bash\" --allowedTools \"Bash(git log:*) Bash(git show:*) Bash(git diff:*) Bash(git blame:*) Bash(git ls-files:*) Bash(git rev-parse:*)\" --permission-mode dontAsk --no-session-persistence --print < {prompt_path}"
-timeout_seconds = 1800
-
-[[model]]
-code = "openai/gpt-daybreak-blue-latest"
 agent = "codex"
-command = "mkdir -p \"$HOME/.cache/thespider/codex-homes\" && src=\"${CODEX_HOME:-$HOME/.codex}\" && h=\"$HOME/.cache/thespider/codex-homes/$(printf %s \"$src\" | cksum | cut -d' ' -f1)\" && mkdir -p \"$h\" && { [ -L \"$h/auth.json\" ] || ln -s \"$src/auth.json\" \"$h/auth.json\" 2>/dev/null || [ -L \"$h/auth.json\" ]; } && env -u CODEX_SANDBOX CODEX_HOME=\"$h\" HOME=\"$h\" codex exec --model gpt-daybreak-blue-latest -c model_reasoning_effort=high -c web_search=disabled --ignore-rules --sandbox read-only --ephemeral --color never --disable hooks --disable plugins --disable apps --disable memories --disable multi_agent --disable goals --disable browser_use --disable computer_use --disable in_app_browser --disable image_generation - < {prompt_path}"
-timeout_seconds = 1800
+command = "mkdir -p \"$HOME/.cache/thespider/codex-homes\" && src=\"${CODEX_HOME:-$HOME/.codex}\" && h=\"$HOME/.cache/thespider/codex-homes/$(printf %s \"$src\" | cksum | cut -d' ' -f1)\" && mkdir -p \"$h\" && { [ -L \"$h/auth.json\" ] || ln -s \"$src/auth.json\" \"$h/auth.json\" 2>/dev/null || [ -L \"$h/auth.json\" ]; } && env -u CODEX_SANDBOX CODEX_HOME=\"$h\" HOME=\"$h\" codex exec --model gpt-6.1-sol -c model_reasoning_effort=max -c web_search=disabled --ignore-rules --sandbox read-only --ephemeral --color never --disable hooks --disable plugins --disable apps --disable memories --disable multi_agent --disable goals --disable browser_use --disable computer_use --disable in_app_browser --disable image_generation - < {prompt_path}"
+timeout_seconds = 3600
