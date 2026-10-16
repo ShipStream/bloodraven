@@ -33,6 +33,17 @@ instance never self-fences, because there is nothing left to fence. That single 
 replica's monitor is a permanent no-op, and why "the sidecar fenced it" is never the explanation for
 a site that was already read-only.
 
+The replica's cache is not idle, though: it keeps the operator's answer, and until the moment of a
+failover that answer names the *old* primary. So when the monitor sees its own `@@read_only` go from
+1 to 0 with no failed probe in between — only an actor with `SUPER` does that, which means a
+promotion — it drops every view it held from before, and grants itself a fresh lease, exactly as it
+does when the operator lifts a self-fence. It logs `fencing: MySQL turned writable; discarding
+active-site view from before the promotion`. Without it, an operator that died right after promoting
+this site would leave the new primary to fence itself on rule #1, with the old primary down and
+nobody left to promote it again. A failed probe in between breaks the chain on purpose: that writable
+answer may come from a restarted `mysqld`, which is not a promotion. A live operator's next answer is
+still newer than the reset, so a replica someone unfences by hand is fenced on the following tick.
+
 Two more early exits sit in front of the rules. If MySQL does not answer that read, the tick ends
 there: a sidecar that cannot reach its own MySQL cannot fence it either. And if a `CLONE INSTANCE` is
 running on this site, the monitor skips both rules and never kills the clone session, logging
@@ -73,8 +84,10 @@ It is also bounded. Each of its MySQL writes gives up after 3 s, so a hung `mysq
 sidecar's startup hostage. If the fence (or, on the active site, the clear) does not land in time, the
 safety net is handed to the monitor, which finishes the same rule on the first tick where MySQL
 answers. The monitor also re-arms it after MySQL has been unreachable for 30 s or more, because a
-`mysqld` gone that long may have restarted, and a restarted `mysqld` comes up writable. Those deferred
-runs log under the same `safety net:` prefix, with their own `msg` strings.
+`mysqld` gone that long may have restarted. A restarted `mysqld` comes back with the `read_only=ON` it
+is started with, which stops application users but not a `SUPER` session; the re-armed check turns
+that into the real fence, `super_read_only=ON`, unless the operator names this site active. Those
+deferred runs log under the same `safety net:` prefix, with their own `msg` strings.
 
 It fences first and asks afterwards. On boot it sets `super_read_only=ON`, then queries the operator
 for the active site, and only clears the fence if the answer names this site. So it fails closed by

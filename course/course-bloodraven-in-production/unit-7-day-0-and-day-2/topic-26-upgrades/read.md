@@ -82,11 +82,13 @@ a specific shape and aborts on it:
 
 > `standby is writable but replication is not running; aborting ordered update`
 
-That is the restart hazard made explicit. A MySQL pod that restarts comes up writable for a few seconds
-before anything fences it — you met that in Unit 5 as the ordinary source of split brains — and during
-an ordered update, cross-site recovery is suppressed, so **nothing is going to start replication for
-you**. A standby that comes back writable with no working replication is not a slow standby; it is a
-stuck one, and waiting the full five minutes before saying so would leave the group in the rollout for
+That is the restart hazard made explicit. A MySQL pod that restarted used to come up writable for a
+few seconds before anything fenced it — you met that in Unit 5 as the old source of split brains. Every
+`mysqld` now starts with `--read-only=ON`, so a standby restarting onto the new spec comes back
+read-only and does not trip this; the check stays as the backstop for a standby that is writable
+anyway, because something cleared that flag. During an ordered update cross-site recovery is
+suppressed, so **nothing is going to start replication for you**. A standby that comes back writable
+with no working replication is not a slow standby; it is a stuck one, and waiting the full five minutes before saying so would leave the group in the rollout for
 no reason. So the updater counts writable observations and gives up early.
 
 The counter is deliberately not a strict streak — a probe error leaves it alone rather than resetting

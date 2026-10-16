@@ -31,7 +31,7 @@ completing the failover. The genuine no-failover cases are different in kind:
 | `scale deployment --replicas=0` | nothing | Yes, and the site stays down |
 | `delete pod --grace-period=0 --force` | PVC, Service, node | Yes, but it races the ~5 s respawn |
 | SQL `SHUTDOWN`, restart in place (scenario 16) | pod, PVC, IP | Maybe — 16 accepts either outcome, depending on the kubelet's restart speed against the ~6 s window |
-| Pod crash, PVC intact | data | No — RPO 0; the primary returns writable and is kept |
+| Pod crash, PVC intact | data | No — RPO 0; the primary returns `read_only=ON` and the operator re-asserts it |
 
 ## The sequence the code actually runs
 

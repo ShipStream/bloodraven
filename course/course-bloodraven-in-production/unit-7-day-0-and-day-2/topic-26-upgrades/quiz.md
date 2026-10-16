@@ -26,7 +26,7 @@ An ordered update's `Failover` phase runs the ordinary nine-step promotion and i
 
 You bump `spec.image` on a two-site group. Ninety seconds in, the rollout stops with `standby is writable but replication is not running; aborting ordered update`. What has happened?
 
-- The standby's pod restarted onto the new image and came back writable with no working replication, and because cross-site recovery is suppressed during an update nothing is going to start it — so the updater gives up early rather than burning its five-minute deadline
+- The standby came back from its restart writable — something cleared the `read_only=ON` every `mysqld` boots with — with no working replication, and because cross-site recovery is suppressed during an update nothing is going to start it — so the updater gives up early rather than burning its five-minute deadline
 - The image tag is wrong and MySQL failed to start, so the checker read a stale writable value from before the restart
 - The primary was promoted twice, leaving both sites writable, and the updater refuses to continue into a split brain
 - `recoveryThreshold` was not reached before the deadline, so the standby never debounced to `writable` and the updater timed out
@@ -35,7 +35,7 @@ You bump `spec.image` on a two-site group. Ninety seconds in, the rollout stops 
 
 **Explanation:**
 
-This is the restart hazard from Unit 5 met inside a procedure you started. A MySQL pod comes up writable for a few seconds before anything fences it, and an ordered update deliberately suppresses cross-site recovery — so a standby that stays writable with no replication is stuck, not slow. The updater counts writable observations and aborts early, and it deliberately does not reset that counter on a probe error, because alternating dial errors and 'writable, no source' reads are exactly what a stale connection pool produces. Option 2 describes a different failure with a different message. Option 3 misreads the abort as a split-brain guard. Option 4 confuses the poll loop's debounce with the updater's own wait, which reads MySQL directly. (objective 8)
+This is the restart hazard from Unit 5 met inside a procedure you started. `mysqld` now boots `read_only=ON`, so a restart alone no longer produces it, but a standby that is writable anyway is the same hazard, and an ordered update deliberately suppresses cross-site recovery — so a standby that stays writable with no replication is stuck, not slow. The updater counts writable observations and aborts early, and it deliberately does not reset that counter on a probe error, because alternating dial errors and 'writable, no source' reads are exactly what a stale connection pool produces. Option 2 describes a different failure with a different message. Option 3 misreads the abort as a split-brain guard. Option 4 confuses the poll loop's debounce with the updater's own wait, which reads MySQL directly. (objective 8)
 
 ## Question 3
 

@@ -121,12 +121,23 @@ table refuses to elect and raises `NoPrimary`. But the operator holds history th
 consult: `lastFailoverTarget` names the site it already made authoritative. If that site is still
 GTID-complete, restoring its writability cannot lose a transaction or create a second primary.
 
+A group that has never failed over has no `lastFailoverTarget`, so the operator falls back to
+`lastActiveSite`: the last site it saw as the group's unique writable primary, restored from
+`status.activeSite` after an operator restart. How far it trusts that site depends on how it got
+there. A site the operator made primary itself — a fresh-deploy seed — is re-asserted from any
+fence, exactly like a failover target. A site it only *observed* as primary is lifted only from the
+`read_only=ON` every `mysqld` boots with (`super_read_only` still OFF), which is what a primary
+whose MySQL container restarted looks like. It is never lifted from a fence: without history of its
+own, a self-fenced primary still waits for a human.
+
 Every one of these must hold:
 
 - No subsystem gate active — bootstrap blocking cross-site, ordered update, topology frozen, planned
   failover in flight.
 - The re-assert rate limit is satisfied, and no promotion is still pending confirmation.
-- Every non-target peer is `read-only` — not writable, not unreachable, not unknown.
+- Every non-target peer is `read-only` — not writable, not unreachable, not unknown — both in the
+  operator's debounced state and on a live `@@read_only` read just before the re-assert, so a peer
+  that has only just turned writable cannot become a second primary.
 - The target is `read-only` **and** promotable (`role: primary-candidate`).
 - The target's `GTID_EXECUTED` contains the recorded promotion GTID set **and** every peer's
   `GTID_EXECUTED`.
@@ -147,7 +158,8 @@ On success, verbatim, at `WARN`:
 re-asserting fenced promoted primary: no site is writable and the last failover target is GTID-complete; restoring writability
 ```
 
-with field `site`, followed by `bloodraven_primary_reassert_total{site}`. A steadily climbing counter
+with fields `site` and `authority` (`lastFailoverTarget` or `lastActiveSite`), followed by
+`bloodraven_primary_reassert_total{site}`. A steadily climbing counter
 means something keeps fencing your primary — look at sidecar connectivity, not at the operator.
 
 ## The timing that surprises people

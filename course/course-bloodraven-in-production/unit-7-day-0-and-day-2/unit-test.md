@@ -114,7 +114,7 @@ A rollout that stops with `standby is writable but replication is not running; a
 
 **Explanation:**
 
-It is a fail-fast abort, not a timeout — the outer deadline is five minutes and this fires long before it. A restarted MySQL pod comes up writable for a few seconds before anything fences it, and an ordered update deliberately suppresses cross-site recovery, so nothing is going to start replication for that standby. A site in that shape is stuck rather than slow, and continuing to wait would tell you nothing you do not already know. The counter behind it is deliberately not a strict streak: a probe error leaves it alone, because alternating dial errors and 'writable, no source' reads are exactly what a stale connection pool produces and a strict streak would let that mask the fault. (objective 8)
+It is a fail-fast abort, not a timeout — the outer deadline is five minutes and this fires long before it. `mysqld` boots `read_only=ON`, so a plain restart no longer produces this; a standby that is writable anyway, with cross-site recovery deliberately suppressed during an ordered update, has nothing going to start replication for it. A site in that shape is stuck rather than slow, and continuing to wait would tell you nothing you do not already know. The counter behind it is deliberately not a strict streak: a probe error leaves it alone, because alternating dial errors and 'writable, no source' reads are exactly what a stale connection pool produces and a strict streak would let that mask the fault. (objective 8)
 
 ## Question 8
 

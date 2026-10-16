@@ -71,10 +71,10 @@
 
 **Front:** `isFreshDeploy` — the three conditions, all required
 
-**Back:** Every site is `writable`, no site has ever had replication configured (`SHOW REPLICA STATUS` returns nothing), and no site holds data (empty `GTID_EXECUTED`, cross-checked against user schemas). Only then does the operator seed and clone.
+**Back:** Every site is reachable (`read-only` or `writable`), no site has ever had replication configured (`SHOW REPLICA STATUS` returns nothing), and no site holds data (empty `GTID_EXECUTED`, cross-checked against user schemas). Only then does the operator seed and clone.
 
 ---
 
 **Front:** Why emptiness is load-bearing in the fresh-deploy check
 
-**Back:** A populated cluster can reach the all-writable, no-metadata state by restart amnesia — the promoted primary's own `RESET REPLICA ALL` erased its channel metadata. Treating that as fresh would seed by priority order and clone the newer side from the stale one, destroying every post-failover write.
+**Back:** A populated cluster can reach the no-history, no-metadata state by restart amnesia — the promoted primary's own `RESET REPLICA ALL` erased its channel metadata. Treating that as fresh would seed by priority order and clone the newer side from the stale one, destroying every post-failover write.

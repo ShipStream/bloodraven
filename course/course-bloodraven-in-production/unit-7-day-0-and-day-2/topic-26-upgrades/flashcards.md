@@ -29,7 +29,7 @@
 
 **Front:** The mid-rollout abort
 
-**Back:** `standby is writable but replication is not running; aborting ordered update`. A restarted pod comes up writable for a few seconds and cross-site recovery is suppressed during an update, so nothing will start replication for it — waiting the full five minutes would tell you nothing.
+**Back:** `standby is writable but replication is not running; aborting ordered update`. A standby that is writable after its restart (it boots `read_only=ON`, so something cleared that) with cross-site recovery suppressed during the update has nothing to start replication for it — waiting the full five minutes would tell you nothing.
 
 ---
 
