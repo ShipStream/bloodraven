@@ -59,6 +59,10 @@ type mockMySQL struct {
 	// derives from gtidExecuted so existing fixtures keep their meaning
 	// (data implies schemas, empty implies none).
 	hasUserSchemas *bool
+
+	// onClone, when set, runs inside CloneInstance (without m.mu held), so a
+	// test can change another site's state while a clone is running.
+	onClone func()
 }
 
 // HasUserSchemas satisfies the operator's userSchemaChecker assertion so the
@@ -225,9 +229,13 @@ func (m *mockMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
 
 func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.cloneInstanceCalled = true
-	return m.cloneInstanceErr
+	err, onClone := m.cloneInstanceErr, m.onClone
+	m.mu.Unlock()
+	if onClone != nil {
+		onClone()
+	}
+	return err
 }
 
 // setReadOnly sets read-only state and clears any error.

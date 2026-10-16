@@ -1,6 +1,7 @@
 package component
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -219,5 +220,83 @@ func TestBootstrap_ConnectionDropTreatedAsSuccess(t *testing.T) {
 	dc2.mu.Unlock()
 	if !replStarted {
 		t.Error("expected SetupReplication to run after connection-drop clone error")
+	}
+}
+
+// TestFreshDeploy_AllReadOnlyTriggersBootstrap: the sidecar fences MySQL on
+// startup until the operator names an active site, so a fresh deploy can
+// show every site read-only instead of writable. The operator must still
+// bootstrap it, lifting the seed's fence itself, rather than wait on the
+// all-read-only NoPrimary guard forever.
+func TestFreshDeploy_AllReadOnlyTriggersBootstrap(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	// More polls than the transition needs: the all-read-only state is
+	// stable, so a bootstrap that only ran on the transition poll and
+	// missed it would never run.
+	h.pollN(6)
+	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+
+	dc1.mu.Lock()
+	seedReadOnly, seedSuper, seedCloned := dc1.readOnly, dc1.superReadOnly, dc1.cloneInstanceCalled
+	dc1.mu.Unlock()
+	if seedReadOnly || seedSuper {
+		t.Errorf("seed dc1 not made writable: read_only=%v super_read_only=%v", seedReadOnly, seedSuper)
+	}
+	if seedCloned {
+		t.Error("CloneInstance must not run on the seed")
+	}
+	dc2.mu.Lock()
+	cloned, replStarted := dc2.cloneInstanceCalled, dc2.replicaStarted
+	dc2.mu.Unlock()
+	if !cloned || !replStarted {
+		t.Errorf("dc2 not bootstrapped: cloned=%v replicaStarted=%v", cloned, replStarted)
+	}
+}
+
+// TestFreshDeploy_AllReadOnlyPopulatedNoBootstrap: every site read-only with
+// no replication metadata but holding data is restart amnesia, not a fresh
+// deploy. It must stay NoPrimary for a human, never seed and clone.
+func TestFreshDeploy_AllReadOnlyPopulatedNoBootstrap(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "uuid1:1-100"}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "uuid1:1-100,uuid2:1-50"}
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	h.pollN(6)
+	time.Sleep(50 * time.Millisecond)
+
+	if phase := h.tm.BootstrapPhase(); phase != controller.BootstrapPhaseNone {
+		t.Fatalf("fresh-deploy bootstrap fired on a populated all-read-only group (phase %q)", phase)
+	}
+	for name, m := range map[string]*mockMySQL{"dc1": dc1, "dc2": dc2} {
+		m.mu.Lock()
+		cloned, writable := m.cloneInstanceCalled, !m.readOnly
+		m.mu.Unlock()
+		if cloned || writable {
+			t.Errorf("%s touched: cloned=%v writable=%v", name, cloned, writable)
+		}
+	}
+}
+
+// TestFreshDeploy_SeedFencedDuringBootstrapIsRestored: the seed's sidecar
+// can fence it after the operator lifted the fence, before the operator
+// reports the seed as active. The bootstrap must not end with every site
+// read-only and no failover history to resolve it.
+func TestFreshDeploy_SeedFencedDuringBootstrapIsRestored(t *testing.T) {
+	dc1 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2 := &mockMySQL{readOnly: true, superReadOnly: true}
+	dc2.onClone = func() { _ = dc1.SetSuperReadOnly(context.Background(), true) }
+	h := newBootstrapHarness(t, dc1, dc2)
+
+	h.pollN(6)
+	waitForPhase(t, h.tm, controller.BootstrapPhaseDone, 2*time.Second)
+
+	dc1.mu.Lock()
+	seedReadOnly, seedSuper := dc1.readOnly, dc1.superReadOnly
+	dc1.mu.Unlock()
+	if seedReadOnly || seedSuper {
+		t.Errorf("seed dc1 left fenced after the bootstrap: read_only=%v super_read_only=%v", seedReadOnly, seedSuper)
 	}
 }
