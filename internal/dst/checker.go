@@ -287,17 +287,6 @@ func (m *simChecker) StartReplica(_ context.Context) error {
 	})
 }
 
-func (m *simChecker) StartReplicaSQLThread(_ context.Context) error {
-	return m.mutate(EvStartSQL, "", func() error {
-		if !m.s.replConfigured {
-			return errors.New("Error 1200: the server is not configured as a replica")
-		}
-		m.s.sqlWant = true
-		m.s.sqlErr = ""
-		return nil
-	})
-}
-
 // WaitForRelayLogDrain resolves instantly against the model, mirroring the
 // real implementation's decision tree: abort on an applier error, otherwise
 // apply the local relay backlog (restarting the SQL thread if needed). A

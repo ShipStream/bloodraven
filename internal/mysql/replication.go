@@ -270,7 +270,7 @@ func (m *checker) StartReplica(ctx context.Context) error {
 	return nil
 }
 
-func (m *checker) StartReplicaSQLThread(ctx context.Context) error {
+func (m *checker) startReplicaSQLThread(ctx context.Context) error {
 	_, err := m.db.ExecContext(ctx, "START REPLICA SQL_THREAD")
 	if err != nil {
 		return fmt.Errorf("start replica sql_thread: %w", err)
@@ -335,13 +335,13 @@ func (m *checker) WaitForRelayLogDrain(ctx context.Context, timeout time.Duratio
 		if !rs.SQLRunning && !sqlThreadRestarted {
 			// Pending relay logs and a stopped, error-free SQL thread:
 			// restart it to apply them.
-			if startErr := m.StartReplicaSQLThread(ctx); startErr != nil {
+			if startErr := m.startReplicaSQLThread(ctx); startErr != nil {
 				// Connection may be stale after failover turbulence.
 				// Force a reconnect via Ping and retry once.
 				if pingErr := m.db.PingContext(ctx); pingErr != nil {
 					return fmt.Errorf("relay log drain: restart SQL thread: %w (ping also failed: %v)", startErr, pingErr)
 				}
-				if retryErr := m.StartReplicaSQLThread(ctx); retryErr != nil {
+				if retryErr := m.startReplicaSQLThread(ctx); retryErr != nil {
 					return fmt.Errorf("relay log drain: restart SQL thread after reconnect: %w", retryErr)
 				}
 			}
