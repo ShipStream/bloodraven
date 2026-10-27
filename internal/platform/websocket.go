@@ -58,6 +58,9 @@ const (
 	wsWriteWait  = 5 * time.Second
 	wsPongWait   = 60 * time.Second
 	wsPingPeriod = 54 * time.Second
+	// wsMaxReadBytes bounds inbound frames. The server ignores client
+	// messages, so this only needs to fit control frames.
+	wsMaxReadBytes = 512
 )
 
 type wsClient struct {
@@ -177,6 +180,7 @@ func (c *wsClient) enqueue(data []byte) bool {
 
 func (c *wsClient) readPump() {
 	defer c.close()
+	c.conn.SetReadLimit(wsMaxReadBytes)
 	_ = c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
 	c.conn.SetPongHandler(func(string) error {
 		return c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
