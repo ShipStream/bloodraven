@@ -29,7 +29,7 @@
 
 **Front:** Grants the `app` user receives in credentials mode
 
-**Back:** `ALL PRIVILEGES ON *.*` — **without** `GRANT OPTION` and without `SUPER`. It cannot grant privileges to anyone. The grant sets are fixed and not configurable, which is what makes them an answer you can give a security review.
+**Back:** DML and DDL on `*.*` — **without** `GRANT OPTION`, `SUPER` or any other administrative privilege. It cannot grant privileges to anyone. The grant sets are fixed and not configurable, which is what makes them an answer you can give a security review.
 
 ---
 

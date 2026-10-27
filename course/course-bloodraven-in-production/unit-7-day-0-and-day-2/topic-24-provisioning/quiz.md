@@ -43,7 +43,7 @@ The init-users ConfigMap is mounted at `/docker-entrypoint-initdb.d`, which the 
 
 A security review asks which MySQL user your application connects as, and what it could do if the credentials leaked. You are in credentials mode with `appSecret` set. What is the honest answer?
 
-- It holds `ALL PRIVILEGES ON *.*` but without `GRANT OPTION` and without `SUPER`, so it can read and write everything and cannot create users, grant privileges or bypass `super_read_only`
+- It holds DML and DDL on `*.*` but no `GRANT OPTION`, `SUPER` or other admin privileges, so it can read and write everything and cannot create users, grant privileges or bypass `super_read_only`
 - It holds only the grants you listed in `spec.credentials`, so the answer depends on your manifest
 - It holds `SELECT, SHOW VIEW, SHOW DATABASES, PROCESS` — the application user is read-only by default
 - It is the same account the operator uses, so it holds `ALL PRIVILEGES` with `GRANT OPTION`

@@ -1672,7 +1672,11 @@ spec:
                             description: |-
                               AppSecret references the Secret for application read-write connections.
                               Required keys: username, password.
-                              Grants: ALL PRIVILEGES (no GRANT OPTION, no SUPER).
+                              Grants on *.*: data and schema privileges (SELECT, INSERT, UPDATE,
+                              DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, CREATE TEMPORARY
+                              TABLES, LOCK TABLES, EXECUTE, CREATE/SHOW VIEW, CREATE/ALTER ROUTINE,
+                              EVENT, TRIGGER, SHOW DATABASES). No GRANT OPTION, SUPER, CREATE USER,
+                              or other administrative privileges.
                             type: string
                           backupSecret:
                             description: |-

@@ -177,7 +177,7 @@ create_user_with_grants operator "GRANT ALL PRIVILEGES ON *.* TO '__USER__'@'%' 
 `
 
 	if fg.Spec.Credentials.AppSecret != "" {
-		script += `create_user_with_grants app "GRANT ALL PRIVILEGES ON *.* TO '__USER__'@'%';"
+		script += `create_user_with_grants app "GRANT ` + appGlobalPrivileges + ` ON *.* TO '__USER__'@'%';"
 `
 	}
 

@@ -3,7 +3,9 @@ package controller
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -247,5 +249,113 @@ func TestComputeCredentialHashTracksRevisionNotContent(t *testing.T) {
 	}
 	if rotated == hashB {
 		t.Fatal("hash did not change after the Secret was updated")
+	}
+}
+
+// credGrantDB is a database/sql connector that records executed
+// statements and answers the app admin-privilege probe with adminPrivs.
+type credGrantDB struct {
+	adminPrivs int64
+	stmts      []string
+}
+
+func (d *credGrantDB) Connect(context.Context) (driver.Conn, error) { return credGrantConn{d}, nil }
+func (d *credGrantDB) Driver() driver.Driver                        { return nil }
+
+type credGrantConn struct{ d *credGrantDB }
+
+func (c credGrantConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("prepare not supported")
+}
+func (c credGrantConn) Close() error              { return nil }
+func (c credGrantConn) Begin() (driver.Tx, error) { return nil, errors.New("tx not supported") }
+func (c credGrantConn) ExecContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Result, error) {
+	c.d.stmts = append(c.d.stmts, q)
+	return driver.RowsAffected(0), nil
+}
+func (c credGrantConn) QueryContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
+	if q != appAdminPrivilegeQuery {
+		return nil, errors.New("unexpected query: " + q)
+	}
+	return &credGrantRows{v: c.d.adminPrivs}, nil
+}
+
+type credGrantRows struct {
+	v    int64
+	done bool
+}
+
+func (r *credGrantRows) Columns() []string { return []string{"n"} }
+func (r *credGrantRows) Close() error      { return nil }
+func (r *credGrantRows) Next(dest []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	dest[0] = r.v
+	return nil
+}
+
+// TestReconcileAppRoleNarrowsGrant pins the app grant: no GRANT ALL,
+// and an account still holding administrative privileges from an older
+// release has its global privileges reset before the narrowed grant.
+func TestReconcileAppRoleNarrowsGrant(t *testing.T) {
+	role := credentialRole{
+		name:                 "app",
+		secretName:           "app\x00pw",
+		grants:               []string{"GRANT " + appGlobalPrivileges + " ON *.* TO '%s'@'%%'"},
+		resetAdminPrivileges: true,
+	}
+	for _, tc := range []struct {
+		name       string
+		adminPrivs int64
+		wantRevoke bool
+	}{
+		{name: "already narrow", adminPrivs: 0},
+		{name: "legacy grant all", adminPrivs: 3, wantRevoke: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &credGrantDB{adminPrivs: tc.adminPrivs}
+			db := sql.OpenDB(fake)
+			defer db.Close()
+			if err := reconcileRole(context.Background(), db, role); err != nil {
+				t.Fatalf("reconcileRole: %v", err)
+			}
+			revokeAt, grantAt := -1, -1
+			for i, stmt := range fake.stmts {
+				if strings.Contains(stmt, "ALL PRIVILEGES") && strings.HasPrefix(stmt, "GRANT") {
+					t.Fatalf("app role must not be granted ALL PRIVILEGES: %q", stmt)
+				}
+				if stmt == "REVOKE ALL PRIVILEGES ON *.* FROM 'app'@'%'" {
+					revokeAt = i
+				}
+				if strings.HasPrefix(stmt, "GRANT ") {
+					grantAt = i
+				}
+			}
+			if (revokeAt >= 0) != tc.wantRevoke {
+				t.Fatalf("revoke present=%v, want %v; stmts=%q", revokeAt >= 0, tc.wantRevoke, fake.stmts)
+			}
+			if tc.wantRevoke && revokeAt > grantAt {
+				t.Fatalf("revoke must precede the grant; stmts=%q", fake.stmts)
+			}
+		})
+	}
+}
+
+func TestAppGrantExcludesAdminPrivileges(t *testing.T) {
+	for _, priv := range []string{"ALL", "SUPER", "CREATE USER", "SHUTDOWN", "FILE", "PROCESS", "RELOAD", "REPLICATION", "GRANT OPTION"} {
+		for _, p := range strings.Split(appGlobalPrivileges, ", ") {
+			if p == priv || strings.HasPrefix(p, priv+" ") {
+				t.Errorf("appGlobalPrivileges includes %q", p)
+			}
+		}
+	}
+	script := generateCredentialsModeInitScript(credentialsModeGroup())
+	if strings.Contains(script, "create_user_with_grants app \"GRANT ALL") {
+		t.Fatal("init script still grants ALL to the app user")
+	}
+	if !strings.Contains(script, appGlobalPrivileges) {
+		t.Fatal("init script does not grant the app privilege list")
 	}
 }

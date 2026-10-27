@@ -22,11 +22,41 @@ import (
 
 const credentialHashAnnotation = "shipstream.io/credential-hash"
 
+// credentialGrantsVersion is mixed into the credential hash so a change to
+// the role grant sets re-runs credential reconciliation once on upgrade,
+// even when no Secret changed. Bump it whenever a role's grants change.
+const credentialGrantsVersion = "2"
+
+// appGlobalPrivileges is the app role's grant: data and schema
+// privileges on every database, without the administrative privileges
+// (SUPER, CONNECTION_ADMIN, CREATE USER, SHUTDOWN, FILE, replication,
+// ...) that GRANT ALL would include. Holding SUPER or CONNECTION_ADMIN
+// would let app sessions write through read_only.
+const appGlobalPrivileges = "SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, REFERENCES, INDEX, ALTER, " +
+	"CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, " +
+	"CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER, SHOW DATABASES"
+
+// appAdminPrivilegeQuery counts the administrative global privileges an
+// account holds: any dynamic privilege, or a static one outside
+// appGlobalPrivileges. App accounts created before the grant was narrowed
+// hold GRANT ALL and need their global privileges reset.
+const appAdminPrivilegeQuery = `SELECT
+	(SELECT COUNT(*) FROM mysql.global_grants WHERE USER = ? AND HOST = '%') +
+	(SELECT COUNT(*) FROM mysql.user WHERE User = ? AND Host = '%' AND (
+		Super_priv = 'Y' OR Create_user_priv = 'Y' OR Shutdown_priv = 'Y' OR
+		File_priv = 'Y' OR Process_priv = 'Y' OR Reload_priv = 'Y' OR
+		Repl_slave_priv = 'Y' OR Repl_client_priv = 'Y' OR
+		Create_tablespace_priv = 'Y' OR Create_role_priv = 'Y' OR Drop_role_priv = 'Y'))`
+
 // credentialRole defines a MySQL user role with its expected privileges.
 type credentialRole struct {
 	name       string
 	secretName string
 	grants     []string
+	// resetAdminPrivileges revokes every global privilege before the
+	// grants run when the account holds administrative ones, so an
+	// account provisioned with a broader grant converges to grants.
+	resetAdminPrivileges bool
 }
 
 // reconcileCredentials ensures MySQL users exist on the primary with
@@ -151,7 +181,9 @@ func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1alp
 		roles = append(roles, credentialRole{
 			name:       "app",
 			secretName: fg.Spec.Credentials.AppSecret,
-			grants:     []string{"GRANT ALL PRIVILEGES ON *.* TO '%s'@'%%'"},
+			grants:     []string{"GRANT " + appGlobalPrivileges + " ON *.* TO '%s'@'%%'"},
+
+			resetAdminPrivileges: true,
 		})
 	}
 
@@ -214,6 +246,18 @@ func reconcileRole(ctx context.Context, db *sql.DB, role credentialRole) error {
 			escapeSingleQuotes(username), escapeSingleQuotes(password)),
 	}
 
+	if role.resetAdminPrivileges {
+		var adminPrivs int
+		if err := db.QueryRowContext(ctx, appAdminPrivilegeQuery, username, username).Scan(&adminPrivs); err != nil {
+			return fmt.Errorf("check %s admin privileges: %w", role.name, err)
+		}
+		if adminPrivs > 0 {
+			// REVOKE ALL ON *.* also drops dynamic privileges; the grants
+			// below restore the role's set straight after.
+			stmts = append(stmts, fmt.Sprintf("REVOKE ALL PRIVILEGES ON *.* FROM '%s'@'%%'", escapeSingleQuotes(username)))
+		}
+	}
+
 	for _, grant := range role.grants {
 		stmts = append(stmts, fmt.Sprintf(grant, escapeSingleQuotes(username)))
 	}
@@ -243,6 +287,7 @@ func credentialStatementErrorLabel(roleName, stmt string) string {
 // A metadata-only Secret edit costs one idempotent re-run of the grants.
 func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
 	h := sha256.New()
+	fmt.Fprintf(h, "grants=%s\n", credentialGrantsVersion)
 	names := fg.Spec.AllReferencedSecretNames()
 	sort.Strings(names)
 	for _, name := range names {
