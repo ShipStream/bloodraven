@@ -146,14 +146,16 @@ func ConfigFromEnv() (*Config, error) {
 		// password}) over env-var credentials so the hottest secret in
 		// the system doesn't end up in /proc/<pid>/environ or crash
 		// dumps (AUDIT L2). Falls through to MYSQL_USER / MYSQL_PASSWORD
-		// for backward compatibility.
+		// for backward compatibility. The files are read verbatim, not
+		// trimmed: the operator sets the MySQL account password to the
+		// Secret's exact bytes, as the env vars used to carry them.
 		credsDir := os.Getenv("MYSQL_CREDS_DIR")
 		if credsDir != "" {
-			user, err := readTrimFile(credsDir + "/username")
+			user, err := readCredentialFile(credsDir + "/username")
 			if err != nil {
 				return nil, fmt.Errorf("read MYSQL_CREDS_DIR/username: %w", err)
 			}
-			password, err := readTrimFile(credsDir + "/password")
+			password, err := readCredentialFile(credsDir + "/password")
 			if err != nil {
 				return nil, fmt.Errorf("read MYSQL_CREDS_DIR/password: %w", err)
 			}

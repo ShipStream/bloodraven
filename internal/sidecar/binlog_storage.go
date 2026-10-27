@@ -527,6 +527,16 @@ func readTrimFile(path string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
+// readCredentialFile returns a mounted Secret key's bytes unmodified, for
+// values that must match exactly what the operator wrote into MySQL.
+func readCredentialFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 // readOptionalTrimFile is like readTrimFile but treats a missing file
 // as empty string without error. Other errors (permission denied,
 // truncated mount, EIO) are still surfaced so an operator mistake
