@@ -280,41 +280,6 @@ func (m *FakeTainter) IsTainted(selector string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// FakeDNS — consolidated mock for platform.DNSUpdater
-// ---------------------------------------------------------------------------
-
-// FakeDNS implements platform.DNSUpdater with call tracking.
-type FakeDNS struct {
-	mu       sync.Mutex
-	LastIP   string
-	NumCalls int
-	Err      error
-}
-
-func (m *FakeDNS) UpdateDNSRecord(_ context.Context, ip string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.Err != nil {
-		return m.Err
-	}
-	m.LastIP = ip
-	m.NumCalls++
-	return nil
-}
-
-func (m *FakeDNS) GetLastIP() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.LastIP
-}
-
-func (m *FakeDNS) GetCalls() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.NumCalls
-}
-
-// ---------------------------------------------------------------------------
 // FakeFencer — consolidated mock for sidecar.Fencer
 // ---------------------------------------------------------------------------
 
