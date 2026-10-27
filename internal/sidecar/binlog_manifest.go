@@ -151,10 +151,13 @@ func appendManifestEntry(ctx context.Context, store archiveStore, prefix, site s
 	return saveManifest(ctx, store, prefix, m)
 }
 
-// pruneManifest removes entries whose Name is in drop. Returns the set
-// of remote object keys that were referenced by the removed entries so
-// the caller can issue Delete calls. The manifest is only rewritten if
-// at least one entry was removed.
+// pruneManifest removes entries whose Name is in drop. Returns the
+// remote object keys of the removed entries so the caller can issue
+// Delete calls. Keys are rebuilt from prefix/site/Name rather than
+// taken from the manifest's RemotePath, so a tampered manifest cannot
+// steer deletes outside this site's archive; entries whose Name is not
+// a plain file name are dropped from the manifest but not deleted. The
+// manifest is only rewritten if at least one entry was removed.
 func pruneManifest(ctx context.Context, store archiveStore, prefix, site string, drop map[string]struct{}) ([]string, error) {
 	m, err := loadManifest(ctx, store, prefix, site)
 	if err != nil {
@@ -164,15 +167,19 @@ func pruneManifest(ctx context.Context, store archiveStore, prefix, site string,
 		return nil, nil
 	}
 	var removed []string
+	pruned := 0
 	kept := m.Files[:0]
 	for _, f := range m.Files {
 		if _, d := drop[f.Name]; d {
-			removed = append(removed, f.RemotePath)
+			pruned++
+			if isPlainFileName(f.Name) {
+				removed = append(removed, binlogObjectKey(prefix, site, f.Name))
+			}
 			continue
 		}
 		kept = append(kept, f)
 	}
-	if len(removed) == 0 {
+	if pruned == 0 {
 		return nil, nil
 	}
 	m.Files = kept
@@ -180,4 +187,11 @@ func pruneManifest(ctx context.Context, store archiveStore, prefix, site string,
 		return nil, err
 	}
 	return removed, nil
+}
+
+// isPlainFileName reports whether name is a single path element that
+// cannot escape the directory it is joined onto.
+func isPlainFileName(name string) bool {
+	return name != "" && name != "." && name != ".." &&
+		!strings.ContainsAny(name, "/\\")
 }
