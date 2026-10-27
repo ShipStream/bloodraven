@@ -929,8 +929,8 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) 
 		"collation-server":                "utf8mb4_unicode_ci",
 	}
 
-	// clone_ddl_timeout was removed in MySQL 9.x; only set it for older versions.
-	// TODO: detect MySQL version and conditionally apply clone settings.
+	// clone_ddl_timeout is not written here; CloneInstance applies it at clone
+	// time (internal/mysql/clone.go).
 
 	// Apply TLS settings if configured
 	if fg.Spec.TLS != nil {

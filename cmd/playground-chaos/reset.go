@@ -35,7 +35,6 @@ const (
 	mysqlSelector               = "app.kubernetes.io/name=mysql"
 	operatorSelector            = "app.kubernetes.io/name=bloodraven"
 	readonlyTaintKey            = "shipstream.io/db-readonly-playground"
-	legacyTaintKey              = "shipstream.io/db-readonly"
 	resetBaselineStableDuration = 20 * time.Second
 )
 
@@ -726,10 +725,8 @@ func (r *resetter) clearReadOnlyTaints(ctx context.Context) error {
 	}
 	var errs []error
 	for _, node := range nodes.Items {
-		for _, key := range []string{readonlyTaintKey, legacyTaintKey} {
-			if err := r.k.RemoveNodeTaint(ctx, node.Name, key); err != nil {
-				errs = append(errs, fmt.Errorf("remove taint %s from %s: %w", key, node.Name, err))
-			}
+		if err := r.k.RemoveNodeTaint(ctx, node.Name, readonlyTaintKey); err != nil {
+			errs = append(errs, fmt.Errorf("remove taint %s from %s: %w", readonlyTaintKey, node.Name, err))
 		}
 	}
 	return errors.Join(errs...)

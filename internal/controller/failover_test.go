@@ -102,11 +102,6 @@ func (t *trackingMock) StartReplica(_ context.Context) error {
 	return nil
 }
 
-func (t *trackingMock) StartReplicaSQLThread(_ context.Context) error {
-	t.record("StartReplicaSQLThread")
-	return nil
-}
-
 func (t *trackingMock) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	t.record("WaitForRelayLogDrain")
 	t.mu.Lock()

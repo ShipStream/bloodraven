@@ -48,10 +48,10 @@ const (
 	// ceiling matches the backup default.
 	verificationDefaultActiveDeadline = int64(7200)
 
-	// verificationMinPVCSize is the floor for the auto-sized ephemeral
-	// datadir PVC. MySQL's initial datadir plus a small dump is already
-	// a few hundred MB; 10Gi keeps us comfortable for tiny backups and
-	// avoids churning StorageClass minimums.
+	// verificationMinPVCSize is the floor autoSizeVerificationPVC returns.
+	// MySQL's initial datadir plus a small dump is already a few hundred
+	// MB; 10Gi keeps us comfortable for tiny backups. Nothing applies the
+	// result yet (see the datadir volume TODO in buildVerificationJob).
 	verificationMinPVCSize = int64(10 * 1024 * 1024 * 1024) // 10 GiB
 )
 
@@ -66,10 +66,11 @@ type verificationJobInputs struct {
 	ScriptsConfigMapName string
 }
 
-// autoSizeVerificationPVC returns the requested capacity for the
-// verification run's ephemeral datadir. The result is used as the
-// emptyDir SizeLimit so node-disk usage stays bounded (~1.5x the backup
-// size). Explicit spec.storage.size wins; otherwise we use
+// autoSizeVerificationPVC returns the intended capacity for the
+// verification run's ephemeral datadir (~1.5x the backup size). It is not
+// applied to the Job today: the datadir emptyDir carries no SizeLimit, and
+// the helper is kept for the planned container ephemeral-storage limit (see
+// the TODO in buildVerificationJob). Explicit spec.storage.size wins; otherwise we use
 // max(verificationMinPVCSize, ceil(1.5 * backup.status.sizeBytes / 10 GiB) * 10 GiB).
 func autoSizeVerificationPVC(v *v1alpha1.MysqlBackupVerification, backup *v1alpha1.MysqlBackup) resource.Quantity {
 	if v.Spec.Storage != nil && !v.Spec.Storage.Size.IsZero() {

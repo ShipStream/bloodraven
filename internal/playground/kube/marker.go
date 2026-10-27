@@ -32,17 +32,10 @@ type ChaosMarker struct {
 	CaptureDir string    `json:"captureDir,omitempty"`
 }
 
-// ErrChaosMarkerConflict is returned by SetChaosMarker when the MFG was
+// ErrChaosMarkerConflict is returned by SetChaosMarkerNamed when the MFG was
 // modified between the read and the patch. Callers can retry or surface
 // the conflict to the user.
 var ErrChaosMarkerConflict = errors.New("chaos marker: resourceVersion conflict (concurrent modification)")
-
-// ReadChaosMarker returns the parsed marker on the MFG, or (nil, nil)
-// if no marker is present. Returns an error only on API failure or a
-// malformed payload.
-func (c *Client) ReadChaosMarker(ctx context.Context, namespace string) (*ChaosMarker, error) {
-	return c.ReadChaosMarkerNamed(ctx, namespace, FailoverGroupName)
-}
 
 // ReadChaosMarkerNamed returns the parsed marker on the named MFG, or
 // (nil, nil) if no marker is present.
@@ -60,19 +53,6 @@ func (c *Client) ReadChaosMarkerNamed(ctx context.Context, namespace, name strin
 		return nil, fmt.Errorf("parse chaos marker: %w", err)
 	}
 	return &m, nil
-}
-
-// SetChaosMarker installs the in-progress marker on the MFG. The patch
-// is guarded by a JSON-Patch `test` op against metadata.resourceVersion
-// so two concurrent chaos runners cannot both think they own the MFG.
-//
-// Returns ErrChaosMarkerConflict if the MFG was mutated between the
-// read and the patch. The caller is expected to bail with a clear
-// message rather than retry blindly — a conflict here usually means a
-// second chaos process is racing us, which is exactly the case the
-// marker is meant to detect.
-func (c *Client) SetChaosMarker(ctx context.Context, namespace string, m ChaosMarker) error {
-	return c.SetChaosMarkerNamed(ctx, namespace, FailoverGroupName, m)
 }
 
 // SetChaosMarkerNamed installs the in-progress marker on the named MFG.
@@ -116,13 +96,6 @@ func (c *Client) SetChaosMarkerNamed(ctx context.Context, namespace, name string
 		return err
 	}
 	return nil
-}
-
-// ClearChaosMarker removes the marker. Best-effort: missing-marker is
-// not an error (idempotent); a "remove" op against a non-existent path
-// is swallowed. Returns the underlying API error otherwise.
-func (c *Client) ClearChaosMarker(ctx context.Context, namespace string) error {
-	return c.ClearChaosMarkerNamed(ctx, namespace, FailoverGroupName)
 }
 
 // ClearChaosMarkerNamed removes the marker from the named MFG.

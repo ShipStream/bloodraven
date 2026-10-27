@@ -28,11 +28,6 @@ type Action struct {
 	Taint *bool // nil=no change, true=apply, false=remove
 }
 
-// ShouldTaint returns true if the site's MySQL is not writable (readonly or unreachable).
-func ShouldTaint(state SiteState) bool {
-	return state != StateWritable
-}
-
 // EvalPerSiteTransition returns the action for a single site's state transition.
 func EvalPerSiteTransition(prev, curr SiteState) Action {
 	if prev == curr {

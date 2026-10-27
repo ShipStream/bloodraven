@@ -182,35 +182,3 @@ func (p *Probe) ArchiverStatus(ctx context.Context) (*ArchiverStatusResponse, er
 	}
 	return &s, nil
 }
-
-// PeerActiveSiteResponse mirrors internal/sidecar.TopologySnapshot.
-type PeerActiveSiteResponse struct {
-	ActiveSite string    `json:"activeSite"`
-	ObservedAt time.Time `json:"observedAt"`
-}
-
-// PeerActiveSite calls GET /peer/active-site. Returns
-// (nil, nil) on 204 No Content (sidecar has no view yet).
-func (p *Probe) PeerActiveSite(ctx context.Context) (*PeerActiveSiteResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+"/peer/active-site", nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := p.cli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNoContent {
-		return nil, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("sidecar /peer/active-site returned %d: %s", resp.StatusCode, body)
-	}
-	var r PeerActiveSiteResponse
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return nil, fmt.Errorf("decode peer/active-site: %w", err)
-	}
-	return &r, nil
-}

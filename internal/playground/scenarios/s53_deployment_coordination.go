@@ -226,7 +226,7 @@ func deploymentClientPod(meta metav1.ObjectMeta, operation, group, mode string) 
 	return &corev1.Pod{ObjectMeta: meta, Spec: corev1.PodSpec{
 		ServiceAccountName: meta.Name, AutomountServiceAccountToken: &no, RestartPolicy: corev1.RestartPolicyNever,
 		ActiveDeadlineSeconds: &deadline,
-		Tolerations:           []corev1.Toleration{{Key: "shipstream.io/db-readonly-" + group, Operator: corev1.TolerationOpExists}, {Key: "shipstream.io/db-readonly", Operator: corev1.TolerationOpExists}},
+		Tolerations:           []corev1.Toleration{{Key: "shipstream.io/db-readonly-" + group, Operator: corev1.TolerationOpExists}},
 		Containers: []corev1.Container{{Name: "client", Image: "python:3.13-alpine", Command: []string{"python", "-u", "-c", deployClientScript},
 			Env: []corev1.EnvVar{{Name: "DEPLOY_URL", Value: "https://bloodraven." + meta.Namespace + ".svc.cluster.local:8443/deploy/v1/groups/" + group},
 				{Name: "OPERATION_ID", Value: operation}, {Name: "INSTANCE", Value: meta.Name}, {Name: "MODE", Value: mode}},

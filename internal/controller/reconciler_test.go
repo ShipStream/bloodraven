@@ -1610,7 +1610,7 @@ func TestReconcile_DefersDeploymentUpdateWhenManagerRunning(t *testing.T) {
 		t.Fatal("expected initial spec hash on Deployment annotations")
 	}
 
-	// Wire a runner with a registered manager so HasManager returns true.
+	// Wire a runner with a registered manager.
 	discardLog := slog.New(slog.NewTextHandler(io.Discard, nil))
 	runner := &TopologyManagerRunner{
 		client:   c,

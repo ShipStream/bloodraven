@@ -165,20 +165,7 @@ func NewFencingMonitor(
 	leaseTimeout time.Duration,
 	logger *slog.Logger,
 ) *FencingMonitor {
-	return NewFencingMonitorWithClock(mysql, bloodravenAddr, peerAddrs, checkInterval, leaseTimeout, logger, clock.RealClock{})
-}
-
-// NewFencingMonitorWithClock creates a FencingMonitor with an injectable clock for testing.
-func NewFencingMonitorWithClock(
-	mysql Fencer,
-	bloodravenAddr string,
-	peerAddrs []string,
-	checkInterval time.Duration,
-	leaseTimeout time.Duration,
-	logger *slog.Logger,
-	clk clock.Clock,
-) *FencingMonitor {
-	return NewFencingMonitorFull(mysql, bloodravenAddr, peerAddrs, checkInterval, leaseTimeout, logger, clk, nil)
+	return NewFencingMonitorFull(mysql, bloodravenAddr, peerAddrs, checkInterval, leaseTimeout, logger, clock.RealClock{}, nil)
 }
 
 // NewFencingMonitorFull creates a FencingMonitor with all injectable dependencies.

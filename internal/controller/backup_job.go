@@ -154,7 +154,6 @@ func BuildBackupJob(in BackupJobInputs) (*batchv1.Job, error) {
 
 	baseEnv := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_MYSQL_HOST", Value: backupMySQLHost(fg, in.SourceSite)},
-		{Name: "BLOODRAVEN_BACKUP_NAME", Value: backup.Name},
 		{Name: "BLOODRAVEN_MYSQL_CREDS_DIR", Value: backupCredsMountPath},
 		{Name: "BLOODRAVEN_STORAGE_TYPE", Value: string(in.Profile.Storage.Type)},
 	}

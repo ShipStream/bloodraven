@@ -35,9 +35,6 @@ func TestMySQLServiceHosts(t *testing.T) {
 	if got, want := internalSiteServiceHost("orders", "iad", "shop"), "mysql-orders-iad-internal.shop.svc.cluster.local"; got != want {
 		t.Fatalf("internalSiteServiceHost() = %q, want %q", got, want)
 	}
-	if got, want := primaryServiceHost("orders", "shop"), "mysql-orders-primary.shop.svc.cluster.local"; got != want {
-		t.Fatalf("primaryServiceHost() = %q, want %q", got, want)
-	}
 }
 
 // Replication channels name the CA by its path inside the replica's mysql
