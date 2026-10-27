@@ -1,0 +1,23 @@
+# The root Dockerfile only needs the Go module (go.mod, go.sum, api/, cmd/,
+# internal/). Keep local scratch, caches, credentials-adjacent files and
+# unrelated trees out of the build context. Playground images build from
+# their own directories and are not affected by this file.
+.git
+.github
+.tmp
+.claude
+.agents
+.thespider
+.gocache
+.gomodcache
+.golangci-cache
+bin
+k3d-default.yaml
+site
+course
+proposals
+skills
+playground/chaos-results
+**/__pycache__
+**/*.py[cod]
+*.log
