@@ -611,6 +611,40 @@ func TestReconcile_DeletionWithNilTainter(t *testing.T) {
 	}
 }
 
+func TestReconcile_MySQLPodServiceAccountToken(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra bool
+		want  *bool
+	}{
+		{name: "no extra containers", want: boolPtr(false)},
+		{name: "extra containers keep the default", extra: true, want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := newTestFG()
+			if tc.extra {
+				fg.Spec.ExtraContainers = []corev1.Container{{Name: "shipper", Image: "fluent-bit"}}
+			}
+			r, c := newReconciler(fg)
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"},
+			}); err != nil {
+				t.Fatalf("reconcile failed: %v", err)
+			}
+			var deploy appsv1.Deployment
+			if err := c.Get(context.Background(), types.NamespacedName{
+				Name: "mysql-lion-dc1", Namespace: "shared-lion",
+			}, &deploy); err != nil {
+				t.Fatalf("deployment not found: %v", err)
+			}
+			got := deploy.Spec.Template.Spec.AutomountServiceAccountToken
+			if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+				t.Errorf("AutomountServiceAccountToken = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestReconcile_TerminationGracePeriod(t *testing.T) {
 	fg := newTestFG()
 	gracePeriod := int64(60)

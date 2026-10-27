@@ -1533,9 +1533,22 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		if fg.Spec.TerminationGracePeriodSeconds != nil {
 			deploy.Spec.Template.Spec.TerminationGracePeriodSeconds = fg.Spec.TerminationGracePeriodSeconds
 		}
+		deploy.Spec.Template.Spec.AutomountServiceAccountToken = mysqlPodAutomountToken(fg)
 		return nil
 	})
 	return err
+}
+
+// mysqlPodAutomountToken keeps the namespace's default ServiceAccount
+// token out of MySQL pods: neither mysqld nor the sidecar talks to the
+// Kubernetes API. User-supplied extra containers may (a log shipper
+// enriching with pod metadata), so pods that carry any keep the
+// Kubernetes default.
+func mysqlPodAutomountToken(fg *v1alpha1.MysqlFailoverGroup) *bool {
+	if len(fg.Spec.ExtraContainers) > 0 || len(fg.Spec.ExtraInitContainers) > 0 {
+		return nil
+	}
+	return boolPtr(false)
 }
 
 func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
