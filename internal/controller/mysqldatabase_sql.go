@@ -83,11 +83,20 @@ func grantDatabaseFormsFor(name string, partialRevokes bool) []string {
 	return []string{escaped, name}
 }
 
+// maxGrantDatabaseLen is MySQL's identifier length limit, which GRANT and
+// REVOKE apply to the schema name as written, escapes included.
+const maxGrantDatabaseLen = 64
+
 // quoteGrantDatabase is quoteIdentifier for a grantDatabaseFormsFor
 // spelling: the schema name with `_` optionally escaped as `\_`.
 func quoteGrantDatabase(name string) (string, error) {
 	if err := v1alpha1.ValidateMysqlIdentifier("spec.databaseName", strings.ReplaceAll(name, `\_`, `_`)); err != nil {
 		return "", err
+	}
+	if len(name) > maxGrantDatabaseLen {
+		return "", fmt.Errorf("spec.databaseName: the grant spelling %q is %d characters, over MySQL's %d-character limit; "+
+			"with partial_revokes OFF each '_' is escaped as '\\_', so shorten the name or use fewer underscores",
+			name, len(name), maxGrantDatabaseLen)
 	}
 	return "`" + name + "`", nil
 }

@@ -588,3 +588,19 @@ func TestGrantDatabaseForms(t *testing.T) {
 		}
 	}
 }
+
+// MySQL rejects a GRANT whose escaped schema name exceeds 64 characters
+// (ERROR 1059), even though the unescaped name is valid.
+func TestQuoteGrantDatabaseRejectsOverlongEscapedName(t *testing.T) {
+	name := strings.Repeat("a_", 5) + strings.Repeat("b", 54)
+	forms := grantDatabaseFormsFor(name, false)
+	if _, err := quoteGrantDatabase(forms[0]); err == nil || !strings.Contains(err.Error(), "64-character") {
+		t.Fatalf("quoteGrantDatabase(%q) error = %v, want the length limit", forms[0], err)
+	}
+	if _, err := quoteGrantDatabase(forms[1]); err != nil {
+		t.Fatalf("quoteGrantDatabase(%q) error = %v, want the unescaped legacy form accepted", forms[1], err)
+	}
+	if _, err := quoteGrantDatabase(grantDatabaseFormsFor(name, true)[0]); err != nil {
+		t.Fatalf("quoteGrantDatabase with partial_revokes ON error = %v", err)
+	}
+}
