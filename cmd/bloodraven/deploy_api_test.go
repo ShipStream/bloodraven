@@ -285,15 +285,22 @@ func TestDeployAPIMultipleInstancesAndAmbiguousNamespaces(t *testing.T) {
 	f.request(t, "PUT", deployTestPath+"/leases/migration/op1", fmt.Sprintf(`{"token":%q,"ttlSeconds":30}`, token), "", 200)
 	f.request(t, "DELETE", deployTestPath+"/leases/migration/op1", "", token, 204)
 	f.grant(t, "migration", "op2", "not-authorized", 30, 403)
+	// A database in a namespace without the group cannot make the
+	// caller's real group ambiguous (anyone who can create a
+	// MysqlDatabase could otherwise block another team's leases).
 	other = f.db.DeepCopy()
 	other.Namespace, other.ResourceVersion = "ambiguous-ns", ""
 	if err := f.client.Create(context.Background(), other); err != nil {
 		t.Fatal(err)
 	}
-	f.api.reader = interceptor.NewClient(f.client, interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-		t.Fatal("ambiguous authorization looked up a group")
-		return nil
-	}})
+	f.request(t, "GET", deployTestPath, "", "", 200)
+	token = f.grant(t, "migration", "op1", "tenant", 30, 201)["token"].(string)
+	// Two namespaces that both hold the group stay ambiguous.
+	otherGroup := f.group.DeepCopy()
+	otherGroup.Namespace, otherGroup.ResourceVersion = "ambiguous-ns", ""
+	if err := f.client.Create(context.Background(), otherGroup); err != nil {
+		t.Fatal(err)
+	}
 	f.request(t, "GET", deployTestPath, "", "", 403)
 	f.grant(t, "migration", "op3", "tenant", 30, 403)
 	f.request(t, "PUT", deployTestPath+"/leases/migration/op1", fmt.Sprintf(`{"token":%q}`, token), "", 403)
