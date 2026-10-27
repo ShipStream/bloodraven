@@ -645,6 +645,68 @@ func TestCheckPeerTopology_IgnoresOlderSnapshot(t *testing.T) {
 	}
 }
 
+// TestCheckPeerTopology_FutureObservedAtDoesNotPin verifies that a peer
+// view stamped in our future counts as observed now, so it cannot
+// outrank the views that follow it.
+func TestCheckPeerTopology_FutureObservedAtDoesNotPin(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false)
+	cache := &TopologyCache{}
+	cache.Set("iad", start.Add(-30*time.Second))
+
+	peerSnap := TopologySnapshot{ActiveSite: "pdx", ObservedAt: start.Add(24 * time.Hour)}
+	routes := []routingRoute{
+		{pathPrefix: "/peer/active-site", handler: func(r *http.Request) (*http.Response, error) {
+			return jsonResponse(200, peerSnap)(r)
+		}},
+	}
+	fm := newTopologyFencingMonitor(f, clk, cache, routes)
+
+	fm.checkPeerTopology(context.Background(), testPeerAddr)
+	snap := cache.Snapshot()
+	if snap.ActiveSite != "pdx" || !snap.ObservedAt.Equal(start) {
+		t.Fatalf("cache = %+v, want pdx observed at %v", snap, start)
+	}
+
+	clk.Advance(5 * time.Second)
+	peerSnap = TopologySnapshot{ActiveSite: "iad", ObservedAt: clk.Now()}
+	fm.checkPeerTopology(context.Background(), testPeerAddr)
+	if got := cache.Snapshot().ActiveSite; got != "iad" {
+		t.Errorf("later peer view was not adopted, cache still names %q", got)
+	}
+}
+
+// TestCheck_OperatorAnswerOutranksPeerView verifies that when the
+// operator answers in a tick, a peer view cannot override it in the
+// same tick, however new its observedAt claims to be.
+func TestCheck_OperatorAnswerOutranksPeerView(t *testing.T) {
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := clock.NewFakeClock(start)
+	f := newMockFencer(false) // primary
+	cache := &TopologyCache{}
+
+	routes := []routingRoute{
+		{pathPrefix: "/healthz", handler: jsonResponse(200, "ok")},
+		{pathPrefix: "/active-site", handler: jsonResponse(200, map[string]string{"activeSite": "iad"})},
+		{pathPrefix: "/peer/ping", handler: jsonResponse(200, "pong")},
+		{pathPrefix: "/peer/active-site", handler: jsonResponse(200, TopologySnapshot{
+			ActiveSite: "pdx", ObservedAt: start.Add(time.Hour),
+		})},
+	}
+	fm := newTopologyFencingMonitor(f, clk, cache, routes)
+	fm.SeedStartupGrace(clk.Now())
+
+	fm.Check(context.Background())
+
+	if fm.fenced.Load() {
+		t.Fatal("peer view overrode the operator's answer and fenced the active site")
+	}
+	if got := cache.Snapshot().ActiveSite; got != "iad" {
+		t.Errorf("cache = %q, want the operator's iad", got)
+	}
+}
+
 // TestCheckPeerTopology_OldSidecarReturns404 verifies the
 // rolling-upgrade compatibility path: an older peer that does not
 // yet serve /peer/active-site returns 404, which we silently

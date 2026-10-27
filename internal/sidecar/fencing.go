@@ -366,7 +366,9 @@ func (f *FencingMonitor) Check(ctx context.Context) {
 	}
 	for _, addr := range f.peerAddrs {
 		f.checkPeer(ctx, addr)
-		if f.topologyEnabled() {
+		// A peer's view is a relay of the operator's, so it only fills in
+		// when the operator did not answer this tick.
+		if f.topologyEnabled() && !f.operatorAnswered {
 			f.checkPeerTopology(ctx, addr)
 		}
 	}
@@ -488,7 +490,8 @@ func (f *FencingMonitor) checkActiveSite(ctx context.Context) {
 // this sidecar's link to the operator is broken but a peer's link
 // still works, the peer's cache stays fresh and we can adopt it.
 // Adoption only happens when the peer's observedAt is strictly newer
-// than our own, so a stale peer never drags us backwards.
+// than our own, so a stale peer never drags us backwards. Check skips
+// it in ticks where the operator answered.
 func (f *FencingMonitor) checkPeerTopology(ctx context.Context, addr string) {
 	if addr == "" {
 		return
@@ -526,6 +529,12 @@ func (f *FencingMonitor) checkPeerTopology(ctx context.Context, addr string) {
 	}
 	if snap.ActiveSite == "" || snap.ObservedAt.IsZero() {
 		return
+	}
+	// observedAt is the peer's clock. A view from our future (clock skew
+	// or a forged response) would otherwise outrank every later view and
+	// pin the cache, so it counts as observed now.
+	if now := f.clock.Now(); snap.ObservedAt.After(now) {
+		snap.ObservedAt = now
 	}
 	if f.topology.Adopt(snap.ActiveSite, snap.ObservedAt) {
 		f.logger.Info("fencing: adopted active-site view from peer",
