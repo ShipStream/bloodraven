@@ -2404,8 +2404,14 @@ func groupFenced(fg *v1alpha1.MysqlFailoverGroup) (reason, message string, fence
 // Including the active site is what makes "re-run after failover" and
 // "skip if unchanged" coexist: without it, the skip check would swallow the
 // very re-apply the failover watch exists to trigger.
+// databaseRenderVersion is mixed into computeDatabaseHash so a change to
+// the rendered grant/revoke SQL re-applies every Ready MysqlDatabase once
+// after an operator upgrade. Bump it whenever that SQL changes.
+const databaseRenderVersion = "2"
+
 func computeDatabaseHash(mdb *v1alpha1.MysqlDatabase, ownerSecret *corev1.Secret, users []tenantUserInput, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
 	h := sha256.New()
+	fmt.Fprintf(h, "render=%s\n", databaseRenderVersion)
 
 	specJSON, err := json.Marshal(mdb.Spec)
 	if err != nil {

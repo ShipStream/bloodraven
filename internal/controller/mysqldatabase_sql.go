@@ -209,9 +209,16 @@ func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, us
 	return fmt.Sprintf("GRANT %s ON %s.* TO %s", strings.Join(privSQL, ", "), dbIdent, accounts), nil
 }
 
+// allPrivilegesOutsideAllowlist are the database-level privileges a
+// schema-level ALL PRIVILEGES grant confers that the allowlist cannot
+// name. They are always surplus, so moving a principal off ALL PRIVILEGES
+// revokes them too instead of leaving routine DDL behind.
+var allPrivilegesOutsideAllowlist = []string{"CREATE ROUTINE", "ALTER ROUTINE"}
+
 // renderRevokeSurplus builds the REVOKE that removes every allowlist
 // privilege a principal holds on this database but the spec no longer
-// declares — or "" when there is no surplus to revoke.
+// declares, plus allPrivilegesOutsideAllowlist — or "" when there is no
+// surplus to revoke.
 //
 // It is the second half of grant-then-revoke: the desired set is GRANTed
 // first, so a failure between the two statements leaves the principal with
@@ -244,6 +251,7 @@ func renderRevokeSurplus(kind string, desired []v1alpha1.MysqlPrivilege, databas
 			surplus = append(surplus, name)
 		}
 	}
+	surplus = append(surplus, allPrivilegesOutsideAllowlist...)
 	if len(surplus) == 0 {
 		return "", nil
 	}
