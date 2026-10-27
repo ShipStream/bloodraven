@@ -114,7 +114,7 @@ spec:
             {{- end }}
             # WebSocket hardening (AUDIT H2): Origin allowlist + client cap.
             - name: BLOODRAVEN_WS_ALLOWED_ORIGINS
-              value: {{ .Values.auxiliary.service.wsAllowedOrigins | default "*" | quote }}
+              value: {{ .Values.auxiliary.service.wsAllowedOrigins | default "" | quote }}
             - name: BLOODRAVEN_WS_MAX_CLIENTS
               value: {{ .Values.auxiliary.service.wsMaxClients | default 100 | quote }}
             {{- if .Values.license }}

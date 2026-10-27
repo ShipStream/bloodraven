@@ -49,7 +49,7 @@ type Hub struct {
 	clients        map[*wsClient]struct{}
 	logger         *slog.Logger
 	upgrader       websocket.Upgrader
-	allowedOrigins map[string]struct{} // nil == allow all (legacy)
+	allowedOrigins map[string]struct{} // nil unless an explicit allowlist is set
 	maxClients     int                 // 0 == unlimited
 }
 
@@ -75,9 +75,10 @@ type wsClient struct {
 
 // NewHub builds a Hub and applies the AUDIT H2 hardening:
 //
-//   - BLOODRAVEN_WS_ALLOWED_ORIGINS (comma-separated) narrows the
-//     Origin header allowlist; default "*" preserves the pre-hardening
-//     behavior so dashboards that don't send Origin keep working.
+//   - BLOODRAVEN_WS_ALLOWED_ORIGINS (comma-separated) is the Origin
+//     header allowlist. Unset means gorilla's same-origin check, which
+//     still admits non-browser clients that send no Origin. "*" accepts
+//     any origin and must be opted into explicitly.
 //   - BLOODRAVEN_WS_MAX_CLIENTS caps the concurrent connection count;
 //     extra upgrades are rejected with 429. Default 100.
 func NewHub(logger *slog.Logger) *Hub {
@@ -86,7 +87,12 @@ func NewHub(logger *slog.Logger) *Hub {
 		logger:     logger,
 		maxClients: envInt("BLOODRAVEN_WS_MAX_CLIENTS", 100),
 	}
-	if v := strings.TrimSpace(os.Getenv("BLOODRAVEN_WS_ALLOWED_ORIGINS")); v != "" && v != "*" {
+	switch v := strings.TrimSpace(os.Getenv("BLOODRAVEN_WS_ALLOWED_ORIGINS")); v {
+	case "":
+		// nil CheckOrigin: gorilla's same-origin default.
+	case "*":
+		h.upgrader.CheckOrigin = func(*http.Request) bool { return true }
+	default:
 		h.allowedOrigins = make(map[string]struct{})
 		for _, o := range strings.Split(v, ",") {
 			o = strings.TrimSpace(o)
@@ -94,15 +100,12 @@ func NewHub(logger *slog.Logger) *Hub {
 				h.allowedOrigins[o] = struct{}{}
 			}
 		}
+		h.upgrader.CheckOrigin = h.checkOrigin
 	}
-	h.upgrader = websocket.Upgrader{CheckOrigin: h.checkOrigin}
 	return h
 }
 
 func (h *Hub) checkOrigin(r *http.Request) bool {
-	if h.allowedOrigins == nil {
-		return true
-	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		// Non-browser clients typically omit Origin. Accept only when
