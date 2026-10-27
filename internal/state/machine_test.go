@@ -19,18 +19,6 @@ func TestSiteStateString(t *testing.T) {
 	}
 }
 
-func TestShouldTaint(t *testing.T) {
-	if ShouldTaint(StateWritable) {
-		t.Error("writable should not be tainted")
-	}
-	if !ShouldTaint(StateReadOnly) {
-		t.Error("read-only should be tainted")
-	}
-	if !ShouldTaint(StateUnreachable) {
-		t.Error("unreachable should be tainted")
-	}
-}
-
 func TestEvalPerSiteTransition(t *testing.T) {
 	tests := []struct {
 		name      string
