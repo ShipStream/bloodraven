@@ -219,16 +219,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Tell the schedule reconciler which operator image and ServiceAccount
-	// to embed into the CronJob pods it creates. These can be overridden
-	// via env vars to support kind/k3d playground runs where the operator
-	// image tag is something like "bloodraven:playground".
+	// Tell the schedule reconciler which operator image to embed into the
+	// CronJob pods it creates. This can be overridden via env var to
+	// support kind/k3d playground runs where the operator image tag is
+	// something like "bloodraven:playground".
 	operatorImage := os.Getenv("BLOODRAVEN_OPERATOR_IMAGE")
 	if operatorImage == "" {
 		operatorImage = "bloodraven:latest"
 	}
-	operatorSA := os.Getenv("BLOODRAVEN_OPERATOR_SA")
-	controller.SetOperatorImageDefaults(operatorImage, operatorSA)
+	controller.SetOperatorImageDefaults(operatorImage, "")
 
 	if err := mgr.Add(runner); err != nil {
 		logger.Error("unable to add topology manager runner", "error", err)

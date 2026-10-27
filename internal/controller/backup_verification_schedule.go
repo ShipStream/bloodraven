@@ -64,21 +64,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileVerificationSchedules(ctx contex
 
 // reconcileOneVerificationSchedule creates or updates a single CronJob
 // for a profile's verification block. The CronJob pod invokes
-// `bloodraven trigger-verification` under the operator's ServiceAccount
-// so it inherits the RBAC to create MysqlBackupVerification CRs.
+// `bloodraven trigger-verification` under the group's schedule trigger
+// ServiceAccount (see reconcileScheduleTriggerRBAC), which may read the
+// group and create MysqlBackupVerification CRs.
 func (r *MysqlFailoverGroupReconciler) reconcileOneVerificationSchedule(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.BackupProfile) error {
 	v := profile.Verification
 
 	image := operatorImageFromEnv
 	if image == "" {
 		image = "bloodraven:latest"
-	}
-	sa := operatorServiceAccountFromEnv
-	if sa == "" {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "VerificationScheduleServiceAccountMissing",
-			"operator ServiceAccount not configured (set BLOODRAVEN_OPERATOR_SA env var on the operator deployment); falling back to %q for verification schedule %q",
-			"bloodraven", profile.Name)
-		sa = "bloodraven"
 	}
 
 	tz := v.TimeZone
@@ -130,7 +124,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneVerificationSchedule(ctx cont
 					ObjectMeta: metav1.ObjectMeta{Labels: labels},
 					Spec: corev1.PodSpec{
 						RestartPolicy:      corev1.RestartPolicyOnFailure,
-						ServiceAccountName: sa,
+						ServiceAccountName: scheduleTriggerName(fg.Name),
 						Tolerations:        groupReadOnlyTolerations(fg.Name),
 						Containers: []corev1.Container{
 							{

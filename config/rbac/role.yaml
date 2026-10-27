@@ -54,6 +54,15 @@ rules:
   verbs:
   - get
 - apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
+  - get
+  - patch
+  - update
+- apiGroups:
   - apps
   resources:
   - deployments
@@ -121,6 +130,16 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
+  verbs:
+  - create
+  - get
+  - patch
+  - update
 - apiGroups:
   - shipstream.io
   resources:

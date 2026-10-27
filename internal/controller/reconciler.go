@@ -449,6 +449,10 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: pfRequeue}, nil
 	}
 
+	if err := r.reconcileScheduleTriggerRBAC(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile schedule trigger rbac: %w", err)
+	}
+
 	// Reconcile scheduled backups (one CronJob per schedule entry).
 	if err := r.reconcileBackupSchedules(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile backup schedules: %w", err)

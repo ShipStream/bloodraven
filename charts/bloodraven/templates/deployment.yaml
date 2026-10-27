@@ -84,14 +84,12 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           env:
-            # Image and ServiceAccount used when the controller creates
-            # CronJobs for scheduled backups (spec.backup.schedules[]).
-            # Kept in sync with the operator's own Deployment so that
-            # trigger-backup pods run the same binary under the same SA.
+            # Image used when the controller creates CronJobs for scheduled
+            # backups (spec.backup.schedules[]). Kept in sync with the
+            # operator's own Deployment so that trigger-backup pods run the
+            # same binary.
             - name: BLOODRAVEN_OPERATOR_IMAGE
               value: {{ include "bloodraven.image" . | quote }}
-            - name: BLOODRAVEN_OPERATOR_SA
-              value: {{ include "bloodraven.serviceAccountName" . | quote }}
             # Default operator auxiliary address injected into MySQL sidecars
             # when spec.sidecar.bloodravenAddress is not set.
             - name: BLOODRAVEN_DEFAULT_AUXILIARY_ADDRESS

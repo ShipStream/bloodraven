@@ -2,10 +2,13 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -149,29 +152,72 @@ func TestReconcileBackupAssets_CreatesScriptsWhenOnlyInitFromBackup(t *testing.T
 	}
 }
 
-func TestReconcileBackupSchedules_DefaultsServiceAccountWhenMissing(t *testing.T) {
-	// Regression test for Copilot review: without an explicit operator
-	// SA, schedule CronJobs fall back to the conventional "bloodraven"
-	// name and emit a warning event.
-	SetOperatorImageDefaults("bloodraven:test", "")
+func TestReconcileBackupSchedules_RunsUnderGroupTriggerServiceAccount(t *testing.T) {
+	// Schedule pods run under a per-group ServiceAccount whose Role can
+	// only create backups and verifications and read this group, never
+	// under the operator's own ServiceAccount.
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
 	defer SetOperatorImageDefaults("", "")
 
 	fg := fgWithBackup()
 	r, c := newReconciler(fg)
+	ctx := context.Background()
 
-	if err := r.reconcileBackupSchedules(context.Background(), fg); err != nil {
+	if err := r.reconcileScheduleTriggerRBAC(ctx, fg); err != nil {
+		t.Fatalf("reconcileScheduleTriggerRBAC: %v", err)
+	}
+	if err := r.reconcileBackupSchedules(ctx, fg); err != nil {
 		t.Fatalf("reconcileBackupSchedules: %v", err)
 	}
 
+	name := scheduleTriggerName("lion")
 	var cj batchv1.CronJob
-	if err := c.Get(context.Background(), types.NamespacedName{
+	if err := c.Get(ctx, types.NamespacedName{
 		Name: scheduleCronJobName("lion", "nightly"), Namespace: "ns",
 	}, &cj); err != nil {
 		t.Fatalf("cronjob not created: %v", err)
 	}
-	sa := cj.Spec.JobTemplate.Spec.Template.Spec.ServiceAccountName
-	if sa != "bloodraven" {
-		t.Errorf("want default SA 'bloodraven', got %q", sa)
+	if sa := cj.Spec.JobTemplate.Spec.Template.Spec.ServiceAccountName; sa != name {
+		t.Errorf("CronJob ServiceAccountName = %q, want %q", sa, name)
+	}
+
+	key := types.NamespacedName{Name: name, Namespace: "ns"}
+	var sa corev1.ServiceAccount
+	if err := c.Get(ctx, key, &sa); err != nil {
+		t.Fatalf("trigger ServiceAccount not created: %v", err)
+	}
+	var role rbacv1.Role
+	if err := c.Get(ctx, key, &role); err != nil {
+		t.Fatalf("trigger Role not created: %v", err)
+	}
+	if !reflect.DeepEqual(role.Rules, scheduleTriggerRules("lion")) {
+		t.Errorf("Role rules = %+v", role.Rules)
+	}
+	var binding rbacv1.RoleBinding
+	if err := c.Get(ctx, key, &binding); err != nil {
+		t.Fatalf("trigger RoleBinding not created: %v", err)
+	}
+	if binding.RoleRef.Kind != "Role" || binding.RoleRef.Name != name ||
+		len(binding.Subjects) != 1 || binding.Subjects[0].Name != name || binding.Subjects[0].Namespace != "ns" {
+		t.Errorf("RoleBinding = %+v / %+v", binding.RoleRef, binding.Subjects)
+	}
+	for _, obj := range []metav1.Object{&sa, &role, &binding} {
+		if refs := obj.GetOwnerReferences(); len(refs) != 1 || refs[0].Name != "lion" {
+			t.Errorf("%s owner references = %+v, want the group", obj.GetName(), refs)
+		}
+	}
+}
+
+func TestReconcileScheduleTriggerRBAC_SkipsGroupsWithoutSchedules(t *testing.T) {
+	fg := newTestFG()
+	r, c := newReconciler(fg)
+	if err := r.reconcileScheduleTriggerRBAC(context.Background(), fg); err != nil {
+		t.Fatalf("reconcileScheduleTriggerRBAC: %v", err)
+	}
+	var sa corev1.ServiceAccount
+	err := c.Get(context.Background(), types.NamespacedName{Name: scheduleTriggerName(fg.Name), Namespace: fg.Namespace}, &sa)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("trigger ServiceAccount for a group without schedules: err = %v, want NotFound", err)
 	}
 }
 
