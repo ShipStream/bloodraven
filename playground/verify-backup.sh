@@ -14,10 +14,10 @@
 # operator-managed CronJob as a one-off Job:
 #
 #   kubectl -n bloodraven-playground create job verify-now \
-#     --from=cronjob/mysql-playground-verify-minio
+#     --from=cronjob/mysql-playground-verify-rustfs
 #
 # Usage:
-#   ./playground/verify-backup.sh run [profile]        Create a bare verification and wait for a terminal phase (default profile: minio)
+#   ./playground/verify-backup.sh run [profile]        Create a bare verification and wait for a terminal phase (default profile: rustfs)
 #   ./playground/verify-backup.sh status               List verifications with phase + age
 #   ./playground/verify-backup.sh logs [name]          Tail the Job pod log for the latest (or named) verification
 #   ./playground/verify-backup.sh cleanup [--failed]   Delete Succeeded (or Failed with --failed) verifications
@@ -26,7 +26,7 @@ set -euo pipefail
 
 NAMESPACE="bloodraven-playground"
 GROUP="playground"
-DEFAULT_PROFILE="minio"
+DEFAULT_PROFILE="rustfs"
 
 info()  { echo -e "\033[1;34m==>\033[0m $*"; }
 ok()    { echo -e "\033[1;32m OK\033[0m $*"; }

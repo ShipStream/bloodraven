@@ -150,26 +150,6 @@ func newConfirmToken(base time.Time, offset time.Duration) string {
 	return base.Add(offset).UTC().Format(time.RFC3339)
 }
 
-// confirmTokenAdvances mirrors the operator's confirmAdvances gate: a spec
-// confirm advances when it parses as RFC3339 and is strictly after the
-// last-used token (an empty or unparseable last-used token always advances).
-// Kept as a pure helper so scenario 36 can construct a deliberately-stale
-// token and unit tests can lock the monotonicity contract.
-func confirmTokenAdvances(specConfirm, lastUsed string) (bool, error) {
-	specT, err := time.Parse(time.RFC3339, specConfirm)
-	if err != nil {
-		return false, fmt.Errorf("confirm %q is not RFC3339: %w", specConfirm, err)
-	}
-	if lastUsed == "" {
-		return true, nil
-	}
-	lastT, err := time.Parse(time.RFC3339, lastUsed)
-	if err != nil {
-		return true, nil
-	}
-	return specT.After(lastT), nil
-}
-
 // patchRestoreInPlace sets spec.restoreInPlace on the MFG (add or replace).
 // Removal is handled in the scenario Cleanup via removeRestoreInPlaceSpec so
 // a failed restore leaves the spec observable for forensics until cleanup.

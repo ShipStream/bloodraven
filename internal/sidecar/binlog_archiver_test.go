@@ -37,7 +37,7 @@ func (s *stubRoleChecker) isConnectable(_ context.Context) bool {
 	return s.connectableVal
 }
 
-// memStore is an in-memory archiveStore used by the archiver tests. It
+// memStore is an in-memory ArchiveStore used by the archiver tests. It
 // is intentionally small — only Put / Get / PutFile / Delete / List are
 // exercised by the archive path.
 type memStore struct {

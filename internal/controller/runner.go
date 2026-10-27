@@ -109,17 +109,6 @@ func (r *TopologyManagerRunner) SetDeploymentReconciler(dr DeploymentReconciler)
 	r.deployReconciler = dr
 }
 
-// HasManager reports whether a topology manager is currently running for the
-// given CR. The reconciler uses this to decide whether Deployment updates can
-// be safely deferred to the ordered update path; when no manager exists (fresh
-// deploy, or operator just started), the reconciler must apply updates itself.
-func (r *TopologyManagerRunner) HasManager(nn types.NamespacedName) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	_, ok := r.managers[nn]
-	return ok
-}
-
 // SetTopologyFrozen flips the topology-freeze flag on the managed
 // TopologyManager for the given CR, immediately (without waiting for
 // the runner's 30-second re-sync tick). The reconciler calls this at

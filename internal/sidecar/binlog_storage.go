@@ -57,28 +57,15 @@ type ArchiveStore interface {
 	List(ctx context.Context, prefix string) ([]string, error)
 }
 
-// archiveStore is the historical unexported alias; kept for the
-// sidecar-internal call sites that already reference it to avoid a
-// mass rename in this commit. New external call sites should use
-// the exported ArchiveStore name directly.
-type archiveStore = ArchiveStore
-
-// NewArchiveStore is the exported constructor used by cmd/sidecar/main.go.
-// Delegates to newArchiveStore; keeping the lowercase version around
-// for internal tests that want to stub it.
-func NewArchiveStore(ctx context.Context, cfg *PITRConfig) (archiveStore, error) {
-	return newArchiveStore(ctx, cfg)
-}
-
-// newArchiveStore constructs the backend matching cfg. It is called
+// NewArchiveStore constructs the backend matching cfg. It is called
 // once at sidecar startup; the returned store is safe for concurrent
 // use from the archiver goroutine and any future retention worker.
 //
 // When cfg.PassphraseFile is set the concrete backend is wrapped with
 // an encryptedStore so every Put/Get/PutFile/GetFile transparently
 // runs through backupcrypto. List/Delete pass through unchanged.
-func newArchiveStore(ctx context.Context, cfg *PITRConfig) (archiveStore, error) {
-	var base archiveStore
+func NewArchiveStore(ctx context.Context, cfg *PITRConfig) (ArchiveStore, error) {
+	var base ArchiveStore
 	switch cfg.StorageType {
 	case "S3":
 		if cfg.S3 == nil {

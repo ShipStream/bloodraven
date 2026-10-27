@@ -11,13 +11,6 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// MFGKey returns the controller-runtime key for the default playground
-// MFG in the given namespace. Pass an empty namespace to default to the
-// playground namespace.
-func MFGKey(namespace string) client.ObjectKey {
-	return MFGKeyForName(namespace, FailoverGroupName)
-}
-
 // MFGKeyForName returns the controller-runtime key for a named
 // MysqlFailoverGroup. Empty namespace/name values default to the
 // playground namespace and failover group name.

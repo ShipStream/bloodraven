@@ -64,10 +64,9 @@ type MysqlBackupVerificationSpec struct {
 	// +optional
 	BackupRef *corev1.LocalObjectReference `json:"backupRef,omitempty"`
 
-	// Storage configures the ephemeral PVC the verification MySQL pod
-	// mounts as its datadir. The PVC is always dedicated per
-	// verification run and deleted during cleanup; its lifecycle is
-	// NOT shared with the backup PVC.
+	// Storage is accepted for compatibility but is not applied: the
+	// verification Job keeps its datadir on an emptyDir and no longer
+	// creates a PersistentVolumeClaim.
 	// +optional
 	Storage *VerificationStorage `json:"storage,omitempty"`
 
@@ -181,19 +180,18 @@ type SanityCheckExpectation struct {
 	MaxDurationSeconds int32 `json:"maxDurationSeconds,omitempty"`
 }
 
-// VerificationStorage sizes and parameterizes the ephemeral PVC used as
-// MySQL datadir for a single verification run. All fields optional; the
-// reconciler auto-sizes from the referenced backup's status.sizeBytes
-// when Size is empty.
+// VerificationStorage once sized the ephemeral PVC used as MySQL datadir
+// for a single verification run. The fields are accepted by the API but
+// not applied: the verification Job uses an emptyDir datadir. All fields
+// optional.
 type VerificationStorage struct {
-	// StorageClassName names the StorageClass used for the ephemeral
-	// PVC. When empty the cluster default StorageClass is used.
+	// StorageClassName is accepted but not applied; the verification Job
+	// creates no PersistentVolumeClaim.
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
 
-	// Size is the requested PVC capacity. When empty the reconciler
-	// defaults to max(10Gi, 1.5 * backup.status.sizeBytes rounded up
-	// to the nearest 10Gi).
+	// Size is accepted but not applied; the verification Job creates no
+	// PersistentVolumeClaim.
 	// +optional
 	Size resource.Quantity `json:"size,omitempty"`
 }

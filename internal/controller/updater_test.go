@@ -896,8 +896,7 @@ func (f *flappingChecker) ResetReplicaAll(_ context.Context) error          { re
 func (f *flappingChecker) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
 	return nil
 }
-func (f *flappingChecker) StartReplica(_ context.Context) error          { return nil }
-func (f *flappingChecker) StartReplicaSQLThread(_ context.Context) error { return nil }
+func (f *flappingChecker) StartReplica(_ context.Context) error { return nil }
 func (f *flappingChecker) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
@@ -951,7 +950,6 @@ func (s *startableReplicaChecker) ResetReplicaAll(_ context.Context) error      
 func (s *startableReplicaChecker) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
 	return nil
 }
-func (s *startableReplicaChecker) StartReplicaSQLThread(_ context.Context) error { return nil }
 func (s *startableReplicaChecker) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
@@ -991,8 +989,7 @@ func (r *replicaStatusErrorChecker) ResetReplicaAll(_ context.Context) error    
 func (r *replicaStatusErrorChecker) ChangeReplicationSource(_ context.Context, _ mysql.ReplicationSourceOpts) error {
 	return nil
 }
-func (r *replicaStatusErrorChecker) StartReplica(_ context.Context) error          { return nil }
-func (r *replicaStatusErrorChecker) StartReplicaSQLThread(_ context.Context) error { return nil }
+func (r *replicaStatusErrorChecker) StartReplica(_ context.Context) error { return nil }
 func (r *replicaStatusErrorChecker) WaitForRelayLogDrain(_ context.Context, _ time.Duration) error {
 	return nil
 }
