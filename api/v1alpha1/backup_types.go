@@ -427,8 +427,8 @@ type S3Storage struct {
 
 	// EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
 	// Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
-	// or https:// URL without a query or fragment.
-	// +kubebuilder:validation:Pattern=`^https?://[^\s/?#]+(/[^\s?#]*)?$`
+	// or https:// URL without credentials, a query or a fragment.
+	// +kubebuilder:validation:Pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`
 	EndpointURL string `json:"endpointURL,omitempty"`
 
 	// CredentialsSecret references a Secret whose keys provide AWS

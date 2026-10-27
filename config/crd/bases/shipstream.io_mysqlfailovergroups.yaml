@@ -792,8 +792,8 @@ spec:
                                   description: |-
                                     EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
                                     Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
-                                    or https:// URL without a query or fragment.
-                                  pattern: ^https?://[^\s/?#]+(/[^\s?#]*)?$
+                                    or https:// URL without credentials, a query or a fragment.
+                                  pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                                   type: string
                                 prefix:
                                   description: |-
@@ -5619,8 +5619,8 @@ spec:
                             description: |-
                               EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
                               Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
-                              or https:// URL without a query or fragment.
-                            pattern: ^https?://[^\s/?#]+(/[^\s?#]*)?$
+                              or https:// URL without credentials, a query or a fragment.
+                            pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                             type: string
                           prefix:
                             description: |-
@@ -6181,8 +6181,8 @@ spec:
                             description: |-
                               EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
                               Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
-                              or https:// URL without a query or fragment.
-                            pattern: ^https?://[^\s/?#]+(/[^\s?#]*)?$
+                              or https:// URL without credentials, a query or a fragment.
+                            pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                             type: string
                           prefix:
                             description: |-

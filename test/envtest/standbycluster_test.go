@@ -402,7 +402,7 @@ func TestMysqlStandbyCluster_EnvtestCreate_RejectsNonHTTPEndpoint(t *testing.T) 
 	ns := "default"
 	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
 
-	for i, bad := range []string{"minio:9000", "file:///etc/passwd", "http://host/?x=1"} {
+	for i, bad := range []string{"minio:9000", "file:///etc/passwd", "http://host/?x=1", "https://user:pw@minio:9000"} {
 		cr := minimalEnvtestStandby("envtest-standby-endpoint-"+string(rune('a'+i)), ns)
 		cr.Spec.Source.Storage.S3.EndpointURL = bad
 		err := k8sClient.Create(ctx, cr)
