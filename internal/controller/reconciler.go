@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -795,6 +796,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Conte
 				"site %s: ignoring mysqlConf keys %s: keys must match [A-Za-z0-9_.-]+ and values must not contain line breaks",
 				site.Name, strings.Join(keys, ", "))
 		}
+		if keys := shadowedMySQLConfKeys(fg, site); len(keys) > 0 && r.Recorder != nil {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "MysqlConfIgnored",
+				"site %s: ignoring mysqlConf keys %s: they override an operator-owned setting",
+				site.Name, strings.Join(keys, ", "))
+		}
 		if err := r.reconcileSiteConfigMap(ctx, fg, site); err != nil {
 			return err
 		}
@@ -882,8 +888,15 @@ var mysqlOptionPrefixes = []string{"loose-", "skip-", "disable-", "enable-", "ma
 // operator-owned option (loose-gtid-mode, skip-log-bin, ...). The rendered
 // my.cnf is sorted and MySQL honours the last occurrence, so such a key
 // could override the owned value.
+//
+// loose-plugin-load-add is exempt: plugin-load-add appends to the plugin
+// list rather than replacing it, so it cannot remove mysql_clone.so, and the
+// loose- spelling is how a group loads extra plugins next to the owned one.
 func shadowsOwnedSetting(key string, owned map[string]string) bool {
 	if _, ok := owned[key]; ok {
+		return false
+	}
+	if key == "loose-plugin-load-add" {
 		return false
 	}
 	for k := key; ; {
@@ -902,6 +915,43 @@ func shadowsOwnedSetting(key string, owned map[string]string) bool {
 		}
 		k = trimmed
 	}
+}
+
+// ownedMySQLSettings returns the my.cnf settings that group and site
+// mysqlConf overrides cannot change.
+func ownedMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
+	// These settings are operator-owned safety invariants and cannot be
+	// weakened by group or site overrides.
+	owned := map[string]string{
+		"gtid-mode": "ON", "enforce-gtid-consistency": "ON",
+		"log-bin": "/var/lib/mysql/mysql-bin", "log-replica-updates": "ON",
+		"skip-replica-start": "ON", "plugin-load-add": "mysql_clone.so",
+	}
+
+	// Encryption coverage is likewise operator-owned: the security claim
+	// depends on these settings being exactly what spec.encryptionAtRest
+	// asked for, so a spec.mysqlConf override for the same keys must not
+	// be able to silently downgrade a site to plaintext redo logs.
+	for k, v := range encryptionMySQLSettings(fg) {
+		owned[k] = v
+	}
+	return owned
+}
+
+// shadowedMySQLConfKeys lists the spec.mysqlConf keys, group-level then the
+// site's, that generateMyCnf drops as prefixed spellings of an owned option.
+func shadowedMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) []string {
+	owned := ownedMySQLSettings(fg)
+	var out []string
+	for _, raw := range []map[string]string{fg.Spec.MysqlConf, site.MysqlConf} {
+		for k := range normalizedMySQLSettings(raw) {
+			if shadowsOwnedSetting(k, owned) {
+				out = append(out, strconv.Quote(k))
+			}
+		}
+	}
+	sort.Strings(out)
+	return slices.Compact(out)
 }
 
 func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) string {
@@ -962,21 +1012,7 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) 
 		}
 	}
 
-	// These settings are operator-owned safety invariants and cannot be
-	// weakened by group or site overrides.
-	owned := map[string]string{
-		"gtid-mode": "ON", "enforce-gtid-consistency": "ON",
-		"log-bin": "/var/lib/mysql/mysql-bin", "log-replica-updates": "ON",
-		"skip-replica-start": "ON", "plugin-load-add": "mysql_clone.so",
-	}
-
-	// Encryption coverage is likewise operator-owned: the security claim
-	// depends on these settings being exactly what spec.encryptionAtRest
-	// asked for, so a spec.mysqlConf override for the same keys must not
-	// be able to silently downgrade a site to plaintext redo logs.
-	for k, v := range encryptionMySQLSettings(fg) {
-		owned[k] = v
-	}
+	owned := ownedMySQLSettings(fg)
 
 	// Prefixed spellings of an owned option (skip-log-bin, disable-log-bin,
 	// loose-innodb-redo-log-encrypt, ...; underscore spellings are already

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -125,10 +126,33 @@ func TestEncryptionSettingsResistPrefixedAndInjectedOverrides(t *testing.T) {
 	if got := unsafeMySQLConfKeys(fg, fg.Spec.Sites[0]); len(got) != 2 {
 		t.Errorf("unsafeMySQLConfKeys = %v, want the two line-break entries", got)
 	}
+	wantShadowed := []string{
+		`"disable-default-table-encryption"`, `"loose-innodb-redo-log-encrypt"`,
+		`"loose-skip-binlog-encryption"`, `"skip-binlog-encryption"`,
+	}
+	if got := shadowedMySQLConfKeys(fg, fg.Spec.Sites[0]); !slices.Equal(got, wantShadowed) {
+		t.Errorf("shadowedMySQLConfKeys = %v, want %v", got, wantShadowed)
+	}
+}
+
+// plugin-load-add appends rather than replaces, so the loose- spelling a
+// group uses to load extra plugins must survive next to mysql_clone.so.
+func TestGenerateMyCnf_KeepsLoosePluginLoadAdd(t *testing.T) {
+	fg := encTestFG()
+	fg.Spec.MysqlConf = map[string]string{"loose_plugin_load_add": "auth_socket.so"}
+	cnf := generateMyCnf(fg, fg.Spec.Sites[0])
+	for _, want := range []string{"loose-plugin-load-add=auth_socket.so\n", "plugin-load-add=mysql_clone.so\n"} {
+		if !strings.Contains(cnf, want) {
+			t.Errorf("generated my.cnf must contain %q:\n%s", want, cnf)
+		}
+	}
+	if got := shadowedMySQLConfKeys(fg, fg.Spec.Sites[0]); len(got) != 0 {
+		t.Errorf("shadowedMySQLConfKeys = %v, want none", got)
+	}
 }
 
 func TestShadowsOwnedSetting(t *testing.T) {
-	owned := map[string]string{"log-bin": "x", "skip-replica-start": "ON", "gtid-mode": "ON"}
+	owned := map[string]string{"log-bin": "x", "skip-replica-start": "ON", "gtid-mode": "ON", "plugin-load-add": "mysql_clone.so"}
 	for key, want := range map[string]bool{
 		"log-bin":                         false,
 		"skip-log-bin":                    true,
@@ -140,6 +164,8 @@ func TestShadowsOwnedSetting(t *testing.T) {
 		"log-bin-trust-function-creators": false,
 		"loose-log-bin-index":             false,
 		"max-connections":                 false,
+		"loose-plugin-load-add":           false,
+		"skip-plugin-load-add":            true,
 	} {
 		if got := shadowsOwnedSetting(key, owned); got != want {
 			t.Errorf("shadowsOwnedSetting(%q) = %v, want %v", key, got, want)
