@@ -2,7 +2,6 @@ package util
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -10,18 +9,9 @@ import (
 	k8sretry "k8s.io/client-go/util/retry"
 )
 
-// PermanentError wraps an error to indicate it should not be retried.
-type PermanentError struct {
-	Err error
-}
-
-func (e *PermanentError) Error() string { return e.Err.Error() }
-func (e *PermanentError) Unwrap() error { return e.Err }
-
 // RetryWithBackoff retries fn with exponential backoff until it succeeds,
 // maxRetries is exhausted, or the context is cancelled.
 // Delays are: baseDelay, baseDelay*2, baseDelay*4, etc.
-// If fn returns a *PermanentError, retries stop immediately.
 func RetryWithBackoff(ctx context.Context, logger *slog.Logger, maxRetries int, baseDelay time.Duration, fn func() error) error {
 	if logger == nil {
 		logger = slog.Default()
@@ -39,12 +29,6 @@ func RetryWithBackoff(ctx context.Context, logger *slog.Logger, maxRetries int, 
 		lastErr = fn()
 		if lastErr == nil {
 			return nil
-		}
-
-		// Stop immediately on permanent errors.
-		var permanent *PermanentError
-		if errors.As(lastErr, &permanent) {
-			return permanent.Err
 		}
 
 		if attempt < maxRetries {
