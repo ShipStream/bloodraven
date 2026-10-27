@@ -2,9 +2,12 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -206,49 +209,60 @@ func TestReconcileCredentialsRefusesTenantClaimedUsername(t *testing.T) {
 	}
 }
 
-func TestComputeCredentialHashTracksRevisionNotContent(t *testing.T) {
+func TestComputeCredentialHashIsKeyedOnContent(t *testing.T) {
 	ctx := context.Background()
 	fg := newTestFG()
+	sec := newTestSecret()
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(sec, fg.DeepCopy()).Build()
+	r := &MysqlFailoverGroupReconciler{Client: c, Scheme: testScheme()}
 
-	// Two groups whose Secret differs only in content must publish the
-	// same hash: the annotation is readable without Secret access and
-	// must not act as an offline password verifier.
-	build := func(dsn string) (*MysqlFailoverGroupReconciler, client.Client) {
-		sec := newTestSecret()
-		sec.Data["dsn"] = []byte(dsn)
-		c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(sec, fg.DeepCopy()).Build()
-		return &MysqlFailoverGroupReconciler{Client: c, Scheme: testScheme()}, c
+	hash := func() string {
+		t.Helper()
+		h, err := r.computeCredentialHash(ctx, fg)
+		if err != nil {
+			t.Fatalf("compute credential hash: %v", err)
+		}
+		return h
 	}
-	rA, _ := build("root:password@tcp(localhost:3306)/mysql")
-	rB, cB := build("root:hunter2@tcp(localhost:3306)/mysql")
-	var sec corev1.Secret
-	if err := cB.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: fg.Spec.SecretName}, &sec); err != nil {
-		t.Fatalf("get secret: %v", err)
-	}
-	hashA, err := rA.computeCredentialHash(ctx, fg)
-	if err != nil {
-		t.Fatalf("hash A: %v", err)
-	}
-	hashB, err := rB.computeCredentialHash(ctx, fg)
-	if err != nil {
-		t.Fatalf("hash B: %v", err)
-	}
-	if hashA != hashB {
-		t.Fatalf("hash depends on Secret content: %s vs %s", hashA, hashB)
+	getSecret := func() *corev1.Secret {
+		t.Helper()
+		var s corev1.Secret
+		if err := c.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: fg.Spec.SecretName}, &s); err != nil {
+			t.Fatalf("get secret: %v", err)
+		}
+		return &s
 	}
 
-	// A rotation bumps resourceVersion and must change the hash so the
-	// grants are re-applied.
-	sec.Data["dsn"] = []byte("root:rotated@tcp(localhost:3306)/mysql")
-	if err := cB.Update(ctx, &sec); err != nil {
-		t.Fatalf("update secret: %v", err)
+	base := hash()
+
+	// The published hash must not be reproducible from the Secret
+	// contents alone: that is exactly an offline password verifier.
+	unkeyed := sha256.New()
+	fmt.Fprintf(unkeyed, "grants=%s\n", credentialGrantsVersion)
+	fmt.Fprintf(unkeyed, "secrets=%s\n", secretContentDigest(make([]byte, digestKeyBytes),
+		map[string]map[string][]byte{fg.Spec.SecretName: getSecret().Data}))
+	if hex.EncodeToString(unkeyed.Sum(nil))[:16] == base {
+		t.Fatal("credential hash is reproducible without the group's digest key")
 	}
-	rotated, err := rB.computeCredentialHash(ctx, fg)
-	if err != nil {
-		t.Fatalf("hash after rotation: %v", err)
+
+	// Metadata-only edits must not re-run the grants.
+	meta := getSecret()
+	meta.Labels = map[string]string{"touched": "yes"}
+	if err := c.Update(ctx, meta); err != nil {
+		t.Fatalf("update secret labels: %v", err)
 	}
-	if rotated == hashB {
-		t.Fatal("hash did not change after the Secret was updated")
+	if got := hash(); got != base {
+		t.Fatalf("label-only Secret edit changed the hash: %s -> %s", base, got)
+	}
+
+	// A password rotation must re-run the grants.
+	rotated := getSecret()
+	rotated.Data["dsn"] = []byte("root:rotated@tcp(localhost:3306)/mysql")
+	if err := c.Update(ctx, rotated); err != nil {
+		t.Fatalf("rotate secret: %v", err)
+	}
+	if got := hash(); got == base {
+		t.Fatal("hash did not change after the password was rotated")
 	}
 }
 

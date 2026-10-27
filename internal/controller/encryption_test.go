@@ -533,11 +533,11 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 	// running a writable keyring.
 	base := encTestFG()
 	setSitePhase(base, "dc1", v1alpha1.KeyringPhaseUnsealed, "")
-	unsealed := ComputeSpecHash(base, base.Spec.Sites[0], nil, nil)
+	unsealed := ComputeSpecHash(base, base.Spec.Sites[0], "")
 
 	sealed := encTestFG()
 	setSitePhase(sealed, "dc1", v1alpha1.KeyringPhaseSealed, "mysql-lion-dc1-keyring-v1")
-	sealedHash := ComputeSpecHash(sealed, sealed.Spec.Sites[0], nil, nil)
+	sealedHash := ComputeSpecHash(sealed, sealed.Spec.Sites[0], "")
 
 	if unsealed == sealedHash {
 		t.Fatal("spec hash must change when a site is sealed")
@@ -547,7 +547,7 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 	// the pod keeps projecting the old Secret.
 	v2 := encTestFG()
 	setSitePhase(v2, "dc1", v1alpha1.KeyringPhaseSealed, "mysql-lion-dc1-keyring-v2")
-	if ComputeSpecHash(v2, v2.Spec.Sites[0], nil, nil) == sealedHash {
+	if ComputeSpecHash(v2, v2.Spec.Sites[0], "") == sealedHash {
 		t.Fatal("spec hash must change when the escrow version changes")
 	}
 }
@@ -555,8 +555,8 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 func TestComputeSpecHash_UnchangedWhenEncryptionDisabled(t *testing.T) {
 	// Existing unencrypted clusters must not roll just because the
 	// operator learned about encryption.
-	a := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], nil, nil)
-	b := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], nil, nil)
+	a := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], "")
+	b := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], "")
 	if a != b {
 		t.Fatal("hash must be stable")
 	}
@@ -568,9 +568,9 @@ func TestComputeSpecHash_UnchangedWhenEncryptionDisabled(t *testing.T) {
 func TestComputeSpecHash_EscrowURLChangeRollsEncryptedPods(t *testing.T) {
 	fg := encTestFG()
 	t.Setenv("BLOODRAVEN_DEFAULT_ESCROW_URL", "https://old.example/keyring/escrow")
-	oldHash := ComputeSpecHash(fg, fg.Spec.Sites[0], nil, nil)
+	oldHash := ComputeSpecHash(fg, fg.Spec.Sites[0], "")
 	t.Setenv("BLOODRAVEN_DEFAULT_ESCROW_URL", "https://new.example/keyring/escrow")
-	if newHash := ComputeSpecHash(fg, fg.Spec.Sites[0], nil, nil); newHash == oldHash {
+	if newHash := ComputeSpecHash(fg, fg.Spec.Sites[0], ""); newHash == oldHash {
 		t.Fatal("changing the escrow endpoint must roll encrypted sidecars")
 	}
 }

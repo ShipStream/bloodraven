@@ -876,14 +876,15 @@ func TestReconcile_TLSSecretHashTriggersRollout(t *testing.T) {
 func TestComputeSpecHash_StableWithoutTLS(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
-	h1 := ComputeSpecHash(fg, site, nil, nil)
-	h2 := ComputeSpecHash(fg, site, nil, nil)
+	h1 := ComputeSpecHash(fg, site, "")
+	h2 := ComputeSpecHash(fg, site, "")
 	if h1 != h2 {
 		t.Errorf("hash should be stable: got %s and %s", h1, h2)
 	}
 
 	// Adding TLS data should change the hash.
-	h3 := ComputeSpecHash(fg, site, map[string][]byte{"tls.crt": []byte("cert")}, nil)
+	key := make([]byte, digestKeyBytes)
+	h3 := ComputeSpecHash(fg, site, secretContentDigest(key, map[string]map[string][]byte{"tls": {"tls.crt": []byte("cert")}}))
 	if h3 == h1 {
 		t.Error("hash should differ when TLS data is provided")
 	}
@@ -892,11 +893,11 @@ func TestComputeSpecHash_StableWithoutTLS(t *testing.T) {
 func TestComputeSpecHash_IncludesAllPeerAddresses(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
-	twoSiteHash := ComputeSpecHash(fg, site, nil, nil)
+	twoSiteHash := ComputeSpecHash(fg, site, "")
 
 	reader := v1alpha1.SiteSpec{Name: "reader", Role: v1alpha1.SiteRoleReadOnly}
 	fg.Spec.Sites = append(fg.Spec.Sites, reader)
-	threeSiteHash := ComputeSpecHash(fg, site, nil, nil)
+	threeSiteHash := ComputeSpecHash(fg, site, "")
 	if threeSiteHash == twoSiteHash {
 		t.Fatal("adding a reader did not change an existing site's pod hash")
 	}
@@ -928,7 +929,7 @@ func TestComputeSpecHash_IncludesAllPeerAddresses(t *testing.T) {
 	}
 
 	fg.Spec.Sites = fg.Spec.Sites[:2]
-	if got := ComputeSpecHash(fg, site, nil, nil); got != twoSiteHash {
+	if got := ComputeSpecHash(fg, site, ""); got != twoSiteHash {
 		t.Fatalf("removing reader did not restore deterministic surviving-site hash: got %s want %s", got, twoSiteHash)
 	}
 }
@@ -1040,7 +1041,7 @@ func TestGenerateMyCnfSitePrecedenceAndProtectedSettings(t *testing.T) {
 	}
 	fg2 := fg.DeepCopy()
 	fg2.Spec.MysqlConf = map[string]string{"max-connections": "600", "sync_binlog": "0", "gtid-mode": "OFF"}
-	if ComputeSpecHash(fg, site, nil, nil) != ComputeSpecHash(fg2, site, nil, nil) {
+	if ComputeSpecHash(fg, site, "") != ComputeSpecHash(fg2, site, "") {
 		t.Fatal("normalized equivalent MySQL settings must hash identically")
 	}
 }
@@ -1237,12 +1238,13 @@ func TestSyncPodLabelsFailsSafeAndRecovers(t *testing.T) {
 func TestComputeSpecHash_IncludesCredentialData(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
-	h1 := ComputeSpecHash(fg, site, nil, nil)
+	h1 := ComputeSpecHash(fg, site, "")
 
 	credData := map[string]map[string][]byte{
 		"op-secret": {"username": []byte("admin"), "password": []byte("pass1")},
 	}
-	h2 := ComputeSpecHash(fg, site, nil, credData)
+	key := make([]byte, digestKeyBytes)
+	h2 := ComputeSpecHash(fg, site, secretContentDigest(key, credData))
 	if h2 == h1 {
 		t.Error("hash should differ when credential data is provided")
 	}
@@ -1250,7 +1252,7 @@ func TestComputeSpecHash_IncludesCredentialData(t *testing.T) {
 	credData2 := map[string]map[string][]byte{
 		"op-secret": {"username": []byte("admin"), "password": []byte("pass2")},
 	}
-	h3 := ComputeSpecHash(fg, site, nil, credData2)
+	h3 := ComputeSpecHash(fg, site, secretContentDigest(key, credData2))
 	if h3 == h2 {
 		t.Error("hash should differ when password changes")
 	}
@@ -1299,18 +1301,18 @@ func TestComputeSpecHash_IncludesPITRProfileStorage(t *testing.T) {
 		}},
 	}
 	site := fg.Spec.Sites[0]
-	h1 := ComputeSpecHash(fg, site, nil, nil)
+	h1 := ComputeSpecHash(fg, site, "")
 
 	fg2 := fg.DeepCopy()
 	fg2.Spec.Backup.Profiles[0].Storage.S3.Prefix = "pitr/b"
-	h2 := ComputeSpecHash(fg2, site, nil, nil)
+	h2 := ComputeSpecHash(fg2, site, "")
 	if h2 == h1 {
 		t.Error("hash should differ when the PITR profile storage prefix changes")
 	}
 
 	fg3 := fg.DeepCopy()
 	fg3.Spec.Backup.Profiles[0].Storage.S3.CredentialsSecret = "aws-creds-v2"
-	h3 := ComputeSpecHash(fg3, site, nil, nil)
+	h3 := ComputeSpecHash(fg3, site, "")
 	if h3 == h1 {
 		t.Error("hash should differ when the PITR profile credentials secret changes")
 	}

@@ -532,29 +532,25 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 		return
 	}
 
-	// Fetch TLS/credential secret data for spec hash computation.
-	var tlsSecretData map[string][]byte
-	if fg.Spec.TLS != nil {
-		var tlsSecret corev1.Secret
-		tlsSecretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.TLS.SecretName}
-		if err := r.client.Get(ctx, tlsSecretKey, &tlsSecret); err == nil {
-			tlsSecretData = tlsSecret.Data
+	// The reconciler creates the digest key before the first Deployment;
+	// until it exists no live hash can match, so keep the current set.
+	digestKey, err := readDigestKey(ctx, r.client, fg)
+	if err != nil {
+		if err != errDigestKeyMissing {
+			r.logger.Warn("failed to read secret digest key; preserving current drift set", "error", err)
 		}
+		return
 	}
-	var credSecretData map[string]map[string][]byte
-	if fg.Spec.UsesCredentials() {
-		credSecretData = make(map[string]map[string][]byte)
-		for _, name := range fg.Spec.AllReferencedSecretNames() {
-			var s corev1.Secret
-			if err := r.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err == nil {
-				credSecretData[name] = s.Data
-			}
-		}
+	secretInputs, err := specSecretInputs(ctx, r.client, fg)
+	if err != nil {
+		r.logger.Warn("failed to read spec secrets; preserving current drift set", "error", err)
+		return
 	}
+	secretDigest := secretContentDigest(digestKey, secretInputs)
 
 	var driftSites []string
 	for _, site := range fg.Spec.Sites {
-		desiredHash := ComputeSpecHash(fg, site, tlsSecretData, credSecretData)
+		desiredHash := ComputeSpecHash(fg, site, secretDigest)
 
 		var deploy appsv1.Deployment
 		deployNN := types.NamespacedName{

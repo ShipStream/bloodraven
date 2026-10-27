@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -280,23 +279,26 @@ func credentialStatementErrorLabel(roleName, stmt string) string {
 	return fmt.Sprintf("%s statement %q", roleName, truncateSQL(stmt))
 }
 
-// computeCredentialHash fingerprints the referenced Secrets by revision
-// (UID/resourceVersion), never by content: the result is published in an
-// annotation on the group, readable by principals denied Secret access,
-// and a content digest would let them verify password guesses offline.
-// A metadata-only Secret edit costs one idempotent re-run of the grants.
+// computeCredentialHash fingerprints the referenced Secrets' contents with
+// the group's digest key (see secret_digest.go): the result is published in
+// an annotation on the group, readable by principals denied Secret access,
+// so an unkeyed digest would let them verify password guesses offline.
 func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
-	h := sha256.New()
-	fmt.Fprintf(h, "grants=%s\n", credentialGrantsVersion)
-	names := fg.Spec.AllReferencedSecretNames()
-	sort.Strings(names)
-	for _, name := range names {
+	key, err := ensureDigestKey(ctx, r.Client, r.APIReader, r.Scheme, fg)
+	if err != nil {
+		return "", err
+	}
+	secrets := make(map[string]map[string][]byte)
+	for _, name := range fg.Spec.AllReferencedSecretNames() {
 		var s corev1.Secret
 		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err != nil {
 			return "", fmt.Errorf("get secret %s: %w", name, err)
 		}
-		fmt.Fprintf(h, "%s=%s/%s\n", name, s.UID, s.ResourceVersion)
+		secrets[name] = s.Data
 	}
+	h := sha256.New()
+	fmt.Fprintf(h, "grants=%s\n", credentialGrantsVersion)
+	fmt.Fprintf(h, "secrets=%s\n", secretContentDigest(key, secrets))
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 

@@ -272,6 +272,12 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	r.warnOnSidecarVersionSkew(ctx, &fg)
 
+	// The runner's drift check only reads the digest key, so it must exist
+	// even when every Deployment is deferred to the ordered update.
+	if _, err := ensureDigestKey(ctx, r.Client, r.APIReader, r.Scheme, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensure secret digest key: %w", err)
+	}
+
 	// Encryption-at-rest must settle before anything renders: both the
 	// per-site ConfigMap (which carries "read_only" for the keyring
 	// component) and the Deployment (which picks a Secret projection or
@@ -1046,31 +1052,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		},
 	}
 
-	// Fetch TLS Secret data so certificate changes are reflected in the spec hash.
-	var tlsSecretData map[string][]byte
-	if fg.Spec.TLS != nil {
-		var tlsSecret corev1.Secret
-		tlsSecretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.TLS.SecretName}
-		if err := r.Get(ctx, tlsSecretKey, &tlsSecret); err != nil {
-			if !errors.IsNotFound(err) {
-				return fmt.Errorf("get TLS secret %s: %w", fg.Spec.TLS.SecretName, err)
-			}
-			log.FromContext(ctx).Info("TLS secret not found yet, skipping TLS hash", "secret", fg.Spec.TLS.SecretName)
-		} else {
-			tlsSecretData = tlsSecret.Data
-		}
+	// Secret contents enter the spec hash as a keyed digest so password
+	// and certificate changes roll the pods (see secret_digest.go).
+	digestKey, err := ensureDigestKey(ctx, r.Client, r.APIReader, r.Scheme, fg)
+	if err != nil {
+		return err
 	}
-
-	// Fetch credential secret data so password changes trigger rolling restart.
-	var credSecretData map[string]map[string][]byte
-	if fg.Spec.UsesCredentials() {
-		credSecretData = make(map[string]map[string][]byte)
-		for _, name := range fg.Spec.AllReferencedSecretNames() {
-			var s corev1.Secret
-			if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err == nil {
-				credSecretData[name] = s.Data
-			}
-		}
+	secretInputs, err := specSecretInputs(ctx, r.Client, fg)
+	if err != nil {
+		return err
 	}
 	// Encryption-at-rest rendering is driven by the site's observed
 	// keyring phase, not by the spec alone: a site is only rendered
@@ -1084,9 +1074,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		siteKeyringRotating(fg, site.Name),
 	)
 
-	specHash := ComputeSpecHash(fg, site, tlsSecretData, credSecretData)
+	specHash := ComputeSpecHash(fg, site, secretContentDigest(digestKey, secretInputs))
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		if err := controllerutil.SetControllerReference(fg, deploy, r.Scheme); err != nil {
 			return err
 		}
@@ -2084,9 +2074,8 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 }
 
 // ComputeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
-// tlsSecretData is the raw data from the TLS Secret (nil when TLS is not configured).
-// credSecretData is a map of secret-name→data for credential secrets (nil in legacy mode).
-func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsSecretData map[string][]byte, credSecretData map[string]map[string][]byte) string {
+// secretDigest is secretContentDigest over specSecretInputs ("" when no Secret is referenced).
+func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, secretDigest string) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "deploymentPodRenderVersion=%s\n", deploymentPodRenderVersion)
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
@@ -2169,36 +2158,11 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 			keyringComponentConfigJSON(fg.Spec.KeyringDataFilePath(), sealed))
 	}
 
-	// Include TLS certificate data so cert rotation triggers a rolling update.
-	if len(tlsSecretData) > 0 {
-		tlsKeys := make([]string, 0, len(tlsSecretData))
-		for k := range tlsSecretData {
-			tlsKeys = append(tlsKeys, k)
-		}
-		sort.Strings(tlsKeys)
-		for _, k := range tlsKeys {
-			fmt.Fprintf(h, "tls.%s=%x\n", k, sha256.Sum256(tlsSecretData[k]))
-		}
-	}
-	// Include credential secret data so password rotation triggers pod rolling restart.
-	if len(credSecretData) > 0 {
-		credNames := make([]string, 0, len(credSecretData))
-		for name := range credSecretData {
-			credNames = append(credNames, name)
-		}
-		sort.Strings(credNames)
-		for _, name := range credNames {
-			data := credSecretData[name]
-			dataKeys := make([]string, 0, len(data))
-			for k := range data {
-				dataKeys = append(dataKeys, k)
-			}
-			sort.Strings(dataKeys)
-			for _, k := range dataKeys {
-				fmt.Fprintf(h, "cred.%s.%s=%x\n", name, k, sha256.Sum256(data[k]))
-			}
-		}
-	}
+	// Secret contents (TLS material and, in credentials mode, every
+	// referenced credential Secret) enter only as a keyed digest, so
+	// rotating a password or certificate rolls the pods while the
+	// published hash cannot be used to check password guesses.
+	fmt.Fprintf(h, "secrets=%s\n", secretDigest)
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
