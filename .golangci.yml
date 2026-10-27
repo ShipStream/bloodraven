@@ -40,11 +40,6 @@ linters:
       - linters:
           - staticcheck
         text: 'SA1019:'
-      # Empty branch in replication.go's fallback comment block.
-      - linters:
-          - staticcheck
-        path: internal/mysql/replication\.go
-        text: 'SA9003:'
     # Regular expressions matched against source file paths. The scaffolded
     # `third_party$` form only matches a path ending at the directory name, so
     # it never excludes the files inside it.
