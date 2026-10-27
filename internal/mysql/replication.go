@@ -242,13 +242,32 @@ func (m *checker) HasUserSchemas(ctx context.Context) (bool, error) {
 	return exists == 1, nil
 }
 
+// ReplicationSourceCAFile is the CA bundle a replica's mysqld uses to verify
+// its source's server certificate on TLS replication channels. It is the
+// path where the operator mounts spec.tls.secretName into every mysql
+// container (the controller's mysqlTLSMountPath), so it exists on the
+// replica whenever UseSSL is set.
+const ReplicationSourceCAFile = "/etc/mysql/tls/ca.crt"
+
 func (m *checker) ChangeReplicationSource(ctx context.Context, opts ReplicationSourceOpts) error {
+	if _, err := m.db.ExecContext(ctx, changeReplicationSourceSQL(opts)); err != nil {
+		return fmt.Errorf("change replication source: %w", err)
+	}
+	return nil
+}
+
+func changeReplicationSourceSQL(opts ReplicationSourceOpts) string {
 	q := fmt.Sprintf(
 		"CHANGE REPLICATION SOURCE TO SOURCE_HOST='%s', SOURCE_USER='%s', SOURCE_PASSWORD='%s', SOURCE_AUTO_POSITION=1",
 		escapeSingleQuotes(opts.Host), escapeSingleQuotes(opts.User), escapeSingleQuotes(opts.Password),
 	)
 	if opts.UseSSL {
-		q += ", SOURCE_SSL=1"
+		// SOURCE_SSL_CA makes the channel VERIFY_CA: the source's
+		// certificate must chain to the group's CA. Host name verification
+		// (SOURCE_SSL_VERIFY_SERVER_CERT) is not enabled because replicas
+		// dial the -internal per-site Service, which the documented
+		// certificate SANs do not include.
+		q += ", SOURCE_SSL=1, SOURCE_SSL_CA='" + ReplicationSourceCAFile + "'"
 	} else {
 		// MySQL 8's default caching_sha2_password authentication needs
 		// the source's RSA public key for non-TLS replication channels.
@@ -256,10 +275,7 @@ func (m *checker) ChangeReplicationSource(ctx context.Context, opts ReplicationS
 		// asynchronously, leaving the site permanently not-replicating.
 		q += ", GET_SOURCE_PUBLIC_KEY=1"
 	}
-	if _, err := m.db.ExecContext(ctx, q); err != nil {
-		return fmt.Errorf("change replication source: %w", err)
-	}
-	return nil
+	return q
 }
 
 func (m *checker) StartReplica(ctx context.Context) error {
