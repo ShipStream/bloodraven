@@ -257,25 +257,23 @@ spec:
                 type: object
               storage:
                 description: |-
-                  Storage configures the ephemeral PVC the verification MySQL pod
-                  mounts as its datadir. The PVC is always dedicated per
-                  verification run and deleted during cleanup; its lifecycle is
-                  NOT shared with the backup PVC.
+                  Storage is accepted for compatibility but is not applied: the
+                  verification Job keeps its datadir on an emptyDir and no longer
+                  creates a PersistentVolumeClaim.
                 properties:
                   size:
                     anyOf:
                     - type: integer
                     - type: string
                     description: |-
-                      Size is the requested PVC capacity. When empty the reconciler
-                      defaults to max(10Gi, 1.5 * backup.status.sizeBytes rounded up
-                      to the nearest 10Gi).
+                      Size is accepted but not applied; the verification Job creates no
+                      PersistentVolumeClaim.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   storageClassName:
                     description: |-
-                      StorageClassName names the StorageClass used for the ephemeral
-                      PVC. When empty the cluster default StorageClass is used.
+                      StorageClassName is accepted but not applied; the verification Job
+                      creates no PersistentVolumeClaim.
                     type: string
                 type: object
               triggeredBy:
