@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -228,6 +229,21 @@ func s49VerifyOnPrimary(stage string) runner.Step {
 	}
 }
 
+// s49GrantDatabaseName is the schema name as mysql.db stores it for the
+// operator's grants. With partial_revokes OFF (the MySQL default) the
+// operator escapes `_` so it is not a wildcard, and the row keeps the
+// escaped spelling.
+func s49GrantDatabaseName(ctx context.Context, client *pgmysql.SiteClient) (string, error) {
+	partialRevokes, err := client.ScalarInt(ctx, "SELECT @@GLOBAL.partial_revokes")
+	if err != nil {
+		return "", err
+	}
+	if partialRevokes != 0 {
+		return s49DatabaseName, nil
+	}
+	return strings.ReplaceAll(s49DatabaseName, "_", `\_`), nil
+}
+
 func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site string) error {
 	n, err := client.ScalarInt(ctx,
 		"SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?", s49DatabaseName)
@@ -236,6 +252,11 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 	}
 	if n != 1 {
 		return fmt.Errorf("database %q missing on %s", s49DatabaseName, site)
+	}
+
+	grantDB, err := s49GrantDatabaseName(ctx, client)
+	if err != nil {
+		return fmt.Errorf("read partial_revokes on %s: %w", site, err)
 	}
 
 	n, err = client.ScalarInt(ctx,
@@ -249,7 +270,7 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 
 	for _, user := range []string{s49OwnerUser, s49GrantUser} {
 		n, err = client.ScalarInt(ctx,
-			"SELECT COUNT(*) FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", s49DatabaseName, user)
+			"SELECT COUNT(*) FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", grantDB, user)
 		if err != nil {
 			return fmt.Errorf("query mysql.db on %s: %w", site, err)
 		}
@@ -264,7 +285,7 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 	// reconciler silently under-granted.
 	for _, col := range []string{"Select_priv", "Delete_priv"} {
 		v, err := client.ScalarString(ctx,
-			"SELECT "+col+" FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", s49DatabaseName, s49GrantUser)
+			"SELECT "+col+" FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", grantDB, s49GrantUser)
 		if err != nil {
 			return fmt.Errorf("query %s on %s: %w", col, site, err)
 		}
@@ -273,7 +294,7 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 		}
 	}
 
-	if err := s49AssertSupportUser(ctx, client, site); err != nil {
+	if err := s49AssertSupportUser(ctx, client, site, grantDB); err != nil {
 		return err
 	}
 
@@ -281,7 +302,7 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 	// row is how WITH GRANT OPTION would show up.
 	for _, user := range []string{s49OwnerUser, s49GrantUser, s49SupportUser} {
 		granted, err := client.ScalarString(ctx,
-			"SELECT Grant_priv FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", s49DatabaseName, user)
+			"SELECT Grant_priv FROM mysql.db WHERE db = ? AND user = ? AND host = '%'", grantDB, user)
 		if err != nil {
 			return fmt.Errorf("query Grant_priv on %s: %w", site, err)
 		}
@@ -298,7 +319,7 @@ func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site s
 // schema, it carries the configured resource limits, and — the cross-tenant
 // property the whole initiative exists for — it holds no global privilege and
 // no grant on any other schema on this shared group.
-func s49AssertSupportUser(ctx context.Context, client *pgmysql.SiteClient, site string) error {
+func s49AssertSupportUser(ctx context.Context, client *pgmysql.SiteClient, site, grantDB string) error {
 	// One account per declared host, and no '%' account: the host list is
 	// the whole principal.
 	n, err := client.ScalarInt(ctx,
@@ -325,7 +346,7 @@ func s49AssertSupportUser(ctx context.Context, client *pgmysql.SiteClient, site 
 		// actually enforces it.
 		for col, want := range map[string]string{"Select_priv": "Y", "Insert_priv": "N", "Update_priv": "N", "Delete_priv": "N"} {
 			v, err := client.ScalarString(ctx,
-				"SELECT "+col+" FROM mysql.db WHERE db = ? AND user = ? AND host = ?", s49DatabaseName, s49SupportUser, host)
+				"SELECT "+col+" FROM mysql.db WHERE db = ? AND user = ? AND host = ?", grantDB, s49SupportUser, host)
 			if err != nil {
 				return fmt.Errorf("query %s for %s@%s on %s: %w", col, s49SupportUser, host, site, err)
 			}
@@ -348,7 +369,7 @@ func s49AssertSupportUser(ctx context.Context, client *pgmysql.SiteClient, site 
 				s49SupportUser, host, global, site)
 		}
 		n, err = client.ScalarInt(ctx,
-			"SELECT COUNT(*) FROM mysql.db WHERE user = ? AND host = ? AND db <> ?", s49SupportUser, host, s49DatabaseName)
+			"SELECT COUNT(*) FROM mysql.db WHERE user = ? AND host = ? AND db <> ?", s49SupportUser, host, grantDB)
 		if err != nil {
 			return fmt.Errorf("query foreign schema grants on %s: %w", site, err)
 		}
