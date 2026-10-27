@@ -557,3 +557,34 @@ func TestHostSetHelpers(t *testing.T) {
 		t.Fatalf("ledgerHosts(legacy) = %v", got)
 	}
 }
+
+func TestGrantDatabaseForms(t *testing.T) {
+	cases := []struct {
+		name           string
+		partialRevokes bool
+		want           []string
+	}{
+		{name: "acme_wms", want: []string{`acme\_wms`, "acme_wms"}},
+		{name: "acmewms", want: []string{"acmewms"}},
+		{name: "acme_wms", partialRevokes: true, want: []string{"acme_wms"}},
+	}
+	for _, tc := range cases {
+		got := grantDatabaseFormsFor(tc.name, tc.partialRevokes)
+		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+			t.Errorf("grantDatabaseFormsFor(%q, %v) = %q, want %q", tc.name, tc.partialRevokes, got, tc.want)
+		}
+	}
+
+	grant, err := renderGrant("spec.owner.privileges", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, `my\_ql`, "acme_app", defaultHosts)
+	if err != nil {
+		t.Fatalf("renderGrant(escaped) error = %v", err)
+	}
+	if want := "GRANT SELECT ON `my\\_ql`.* TO 'acme_app'@'%'"; grant != want {
+		t.Fatalf("renderGrant(escaped) = %q, want %q", grant, want)
+	}
+	for _, bad := range []string{`acme\wms`, `acme\\_wms`, "acme%wms", "acme`wms"} {
+		if _, err := renderGrant("spec.owner.privileges", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, bad, "acme_app", defaultHosts); err == nil {
+			t.Errorf("renderGrant(%q) accepted a malformed grant database", bad)
+		}
+	}
+}

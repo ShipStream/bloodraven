@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -44,6 +46,47 @@ var defaultHosts = []string{tenantUserHost}
 // here so that no path can reach the format string unvalidated.
 func quoteIdentifier(kind, name string) (string, error) {
 	if err := v1alpha1.ValidateMysqlIdentifier(kind, name); err != nil {
+		return "", err
+	}
+	return "`" + name + "`", nil
+}
+
+// partialRevokesQuery reads how the server interprets `_` and `%` in a
+// database-level GRANT: as wildcards when partial_revokes is OFF (the
+// default), literally when it is ON. An escaped `\_` matches literally
+// only when it is OFF, so the grant spelling has to follow the setting.
+const partialRevokesQuery = "SELECT @@GLOBAL.partial_revokes"
+
+// grantDatabaseForms returns the spellings of schema name that GRANT and
+// REVOKE use on this server; see grantDatabaseFormsFor.
+func grantDatabaseForms(ctx context.Context, db *sql.DB, name string) ([]string, error) {
+	var partialRevokes int
+	if err := db.QueryRowContext(ctx, partialRevokesQuery).Scan(&partialRevokes); err != nil {
+		return nil, fmt.Errorf("read partial_revokes: %w", err)
+	}
+	return grantDatabaseFormsFor(name, partialRevokes != 0), nil
+}
+
+// grantDatabaseFormsFor returns the database-level grant spellings of a
+// schema name. forms[0] matches only that schema and is what GRANT uses.
+// With partial_revokes OFF, an unescaped `_` would be a wildcard (`my_ql`
+// matches `mysql`), so forms[0] escapes it and forms[1] is the unescaped
+// wildcard spelling earlier releases granted, which is only ever revoked.
+func grantDatabaseFormsFor(name string, partialRevokes bool) []string {
+	if partialRevokes {
+		return []string{name}
+	}
+	escaped := strings.NewReplacer(`_`, `\_`, `%`, `\%`).Replace(name)
+	if escaped == name {
+		return []string{name}
+	}
+	return []string{escaped, name}
+}
+
+// quoteGrantDatabase is quoteIdentifier for a grantDatabaseFormsFor
+// spelling: the schema name with `_` optionally escaped as `\_`.
+func quoteGrantDatabase(name string) (string, error) {
+	if err := v1alpha1.ValidateMysqlIdentifier("spec.databaseName", strings.ReplaceAll(name, `\_`, `_`)); err != nil {
 		return "", err
 	}
 	return "`" + name + "`", nil
@@ -198,7 +241,7 @@ func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, us
 	if err != nil {
 		return "", err
 	}
-	dbIdent, err := quoteIdentifier("spec.databaseName", database)
+	dbIdent, err := quoteGrantDatabase(database)
 	if err != nil {
 		return "", err
 	}
@@ -256,7 +299,7 @@ func renderRevokeSurplus(kind string, desired []v1alpha1.MysqlPrivilege, databas
 		return "", nil
 	}
 
-	dbIdent, err := quoteIdentifier("spec.databaseName", database)
+	dbIdent, err := quoteGrantDatabase(database)
 	if err != nil {
 		return "", err
 	}
@@ -278,7 +321,7 @@ func renderRevokeSurplus(kind string, desired []v1alpha1.MysqlPrivilege, databas
 // Verified against MySQL 9.7: IF EXISTS alone does not cover a missing
 // account, only a missing grant.
 func renderRevokeAll(kind, database, username string, hosts []string) (string, error) {
-	dbIdent, err := quoteIdentifier("spec.databaseName", database)
+	dbIdent, err := quoteGrantDatabase(database)
 	if err != nil {
 		return "", err
 	}
@@ -287,6 +330,20 @@ func renderRevokeAll(kind, database, username string, hosts []string) (string, e
 		return "", err
 	}
 	return fmt.Sprintf("REVOKE IF EXISTS ALL PRIVILEGES ON %s.* FROM %s IGNORE UNKNOWN USER", dbIdent, accounts), nil
+}
+
+// renderRevokeAllForms is renderRevokeAll over every grantDatabaseForms
+// spelling, so a revoke also removes a legacy wildcard grant row.
+func renderRevokeAllForms(kind string, forms []string, username string, hosts []string) ([]string, error) {
+	stmts := make([]string, 0, len(forms))
+	for _, form := range forms {
+		stmt, err := renderRevokeAll(kind, form, username, hosts)
+		if err != nil {
+			return nil, err
+		}
+		stmts = append(stmts, stmt)
+	}
+	return stmts, nil
 }
 
 // renderDropDatabase builds the DROP DATABASE statement. Only ever reached

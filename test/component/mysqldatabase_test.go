@@ -1004,3 +1004,52 @@ func TestMysqlDatabaseOwnerSecondRotationDropsUnresolvedTargetFirst(t *testing.T
 		t.Fatalf("owner record = %q/%q, want %q settled", mdb.Status.OwnerUser, mdb.Status.PendingOwnerUser, next)
 	}
 }
+
+// TestMysqlDatabaseGrantRowIsLiteral: with partial_revokes OFF (the MySQL
+// default) an unescaped `_` in a database-level grant is a wildcard, so
+// `acme_wms` would also grant on `acmeXwms` — or `my_ql` on `mysql`. The
+// grant must name the schema as `acme\_wms`, and the apply must revoke the
+// unescaped wildcard row earlier releases granted.
+func TestMysqlDatabaseGrantRowIsLiteral(t *testing.T) {
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+		}
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.server.addUser("maester", "maester-pw")
+	h.server.seedGrantRow(mdbDatabase, mdbOwnerUser, "%", "ALL PRIVILEGES")
+	h.server.seedGrantRow(mdbDatabase, "maester", "%", "SELECT", "DELETE")
+
+	h.reconcile()
+	h.requireReady()
+
+	if privs, ok := h.server.grantRow(`acme\_wms`, mdbOwnerUser, "%"); !ok || strings.Join(privs, ",") != "ALL PRIVILEGES" {
+		t.Fatalf("owner grants on `acme\\_wms` = %v (present=%v), want [ALL PRIVILEGES]", privs, ok)
+	}
+	for _, user := range []string{mdbOwnerUser, "maester"} {
+		if privs, ok := h.server.grantRow(mdbDatabase, user, "%"); ok {
+			t.Fatalf("%s still holds the wildcard grant row `acme_wms`: %v", user, privs)
+		}
+	}
+}
+
+// TestMysqlDatabaseGrantRowPartialRevokes: with partial_revokes ON, `_` is
+// already literal and an escaped `\_` would match nothing, so the grant
+// names the schema unescaped.
+func TestMysqlDatabaseGrantRowPartialRevokes(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.server.partialRevokes = true
+
+	h.reconcile()
+	h.requireReady()
+
+	if privs, ok := h.server.grantRow(mdbDatabase, mdbOwnerUser, "%"); !ok || strings.Join(privs, ",") != "ALL PRIVILEGES" {
+		t.Fatalf("owner grants on `acme_wms` = %v (present=%v), want [ALL PRIVILEGES]", privs, ok)
+	}
+	for _, stmt := range h.server.statementsSince(0) {
+		if strings.Contains(stmt, `\_`) {
+			t.Fatalf("partial_revokes ON but the reconciler escaped the schema name: %q", stmt)
+		}
+	}
+}
