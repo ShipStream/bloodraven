@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupcrypto"
 )
 
 // operatorImageFromEnv is overridden by the main reconciler constructor
@@ -153,6 +154,12 @@ func (r *MysqlFailoverGroupReconciler) validateEncryptionSecret(ctx context.Cont
 	}
 	if len(data) == 0 {
 		return fmt.Errorf("Secret %q key %q is empty", ref.Name, key)
+	}
+	// Warn-only: backups still run, so existing groups with a short
+	// passphrase keep their backups and PITR archive.
+	if len(data) < backupcrypto.MinPassphraseLength {
+		return fmt.Errorf("Secret %q key %q holds a %d-byte passphrase; use at least %d random bytes, since the backup key is derived without key stretching",
+			ref.Name, key, len(data), backupcrypto.MinPassphraseLength)
 	}
 	return nil
 }

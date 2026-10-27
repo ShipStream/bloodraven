@@ -234,10 +234,24 @@ func TestValidateEncryptionSecret(t *testing.T) {
 		t.Errorf("empty value: want 'empty' error, got %v", err)
 	}
 
+	// Scenario: Secret value shorter than the minimum passphrase length.
+	short := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "backup-passphrase", Namespace: "ns"},
+		Data:       map[string][]byte{"passphrase": []byte("correct-horse\n")},
+	}
+	r = &MysqlFailoverGroupReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(short).Build(),
+		Scheme: scheme,
+	}
+	err = r.validateEncryptionSecret(context.Background(), fg, &fg.Spec.Backup.Profiles[0])
+	if err == nil || !strings.Contains(err.Error(), "13-byte passphrase") {
+		t.Errorf("short value: want passphrase length error, got %v", err)
+	}
+
 	// Happy path.
 	good := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "backup-passphrase", Namespace: "ns"},
-		Data:       map[string][]byte{"passphrase": []byte("correct-horse\n")},
+		Data:       map[string][]byte{"passphrase": []byte(strings.Repeat("k", 32) + "\n")},
 	}
 	r = &MysqlFailoverGroupReconciler{
 		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(good).Build(),
