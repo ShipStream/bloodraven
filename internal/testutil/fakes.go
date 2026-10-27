@@ -280,53 +280,6 @@ func (m *FakeTainter) IsTainted(selector string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// FakeFencer — consolidated mock for sidecar.Fencer
-// ---------------------------------------------------------------------------
-
-// FakeFencer implements sidecar.Fencer with state tracking.
-type FakeFencer struct {
-	mu            sync.Mutex
-	ReadOnlyVal   bool
-	ReadOnlyErr   error
-	SuperReadOnly bool
-	SetCh         chan struct{} // signaled on SetSuperReadOnly call
-}
-
-func NewFakeFencer(readOnly bool) *FakeFencer {
-	return &FakeFencer{
-		ReadOnlyVal: readOnly,
-		SetCh:       make(chan struct{}, 1),
-	}
-}
-
-func (m *FakeFencer) IsReadOnly(_ context.Context) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.ReadOnlyVal, m.ReadOnlyErr
-}
-
-func (m *FakeFencer) SetSuperReadOnly(_ context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.SuperReadOnly = true
-	select {
-	case m.SetCh <- struct{}{}:
-	default:
-	}
-	return nil
-}
-
-func (m *FakeFencer) KillConnections(_ context.Context) (int, error) {
-	return 0, nil
-}
-
-func (m *FakeFencer) IsSuperReadOnly() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.SuperReadOnly
-}
-
-// ---------------------------------------------------------------------------
 // TestLogger — shared quiet logger for tests
 // ---------------------------------------------------------------------------
 
