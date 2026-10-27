@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-
-	k8sretry "k8s.io/client-go/util/retry"
 )
 
 // RetryWithBackoff retries fn with exponential backoff until it succeeds,
@@ -43,10 +41,4 @@ func RetryWithBackoff(ctx context.Context, logger *slog.Logger, maxRetries int, 
 		}
 	}
 	return fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
-}
-
-// RetryOnConflict retries fn using the default Kubernetes conflict retry backoff.
-// This is a convenience wrapper around k8s.io/client-go/util/retry.RetryOnConflict.
-func RetryOnConflict(fn func() error) error {
-	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, fn)
 }
