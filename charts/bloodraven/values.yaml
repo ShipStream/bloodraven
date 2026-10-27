@@ -22,7 +22,9 @@ serviceAccount:
   create: true
   # -- Annotations to add to the ServiceAccount
   annotations: {}
-  # -- Override the ServiceAccount name (defaults to fullname)
+  # -- Override the ServiceAccount name (defaults to fullname). Required when
+  # create is false: the chart binds the operator ClusterRole to this account
+  # and refuses to fall back to the namespace's default ServiceAccount.
   name: ""
 
 # -- Pod-level annotations

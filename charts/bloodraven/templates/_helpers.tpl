@@ -55,8 +55,10 @@ Create the name of the service account to use.
 {{- define "bloodraven.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}
 {{- default (include "bloodraven.fullname" .) .Values.serviceAccount.name }}
+{{- else if .Values.serviceAccount.name }}
+{{- .Values.serviceAccount.name }}
 {{- else }}
-{{- default "default" .Values.serviceAccount.name }}
+{{- fail "serviceAccount.name is required when serviceAccount.create=false; the chart binds the operator ClusterRole to it, so it must not fall back to the namespace's default ServiceAccount" }}
 {{- end }}
 {{- end }}
 
