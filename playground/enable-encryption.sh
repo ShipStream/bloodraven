@@ -289,10 +289,22 @@ wait_for_stable_baseline "before enabling encryption"
 # JSON Patch, not merge patch: merge and strategic-merge patches drop
 # required fields on this CRD (the documented mfg patch trap).
 info "enabling spec.encryptionAtRest"
+UNCONFINED_PATCH=""
+# Opt-in for runners whose default AppArmor/seccomp profiles stopped
+# encrypted mysqld from loading its keyring component (GHA kind). The
+# operator no longer unconfines encrypted MySQL on its own.
+if [[ "${BLOODRAVEN_PLAYGROUND_MYSQL_UNCONFINED:-0}" == "1" ]]; then
+	warn "BLOODRAVEN_PLAYGROUND_MYSQL_UNCONFINED=1: running mysql and sidecar with AppArmor/seccomp Unconfined"
+	UNCONFINED_PATCH=',
+  {"op": "add", "path": "/spec/containerSecurityContext", "value": {
+     "appArmorProfile": {"type": "Unconfined"},
+     "seccompProfile": {"type": "Unconfined"}
+  }}'
+fi
 kubectl -n "$NAMESPACE" patch mysqlfailovergroup "$FG" --type=json -p '[
   {"op": "add", "path": "/spec/encryptionAtRest", "value": {
      "enabled": true
-  }}
+  }}'"$UNCONFINED_PATCH"'
 ]'
 
 # The operator refuses encryption on any group with an ActiveSite unless

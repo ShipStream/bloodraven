@@ -700,32 +700,13 @@ func siteConfigMapName(group, site string) string {
 	return fmt.Sprintf("mysql-%s-%s-config", group, site)
 }
 
-// mysqlSecurityContext returns the mysql container security context.
-// When encryption is enabled, AppArmor and seccomp are set Unconfined:
-// GHA kind runners otherwise surface "Can't find error-message file"
-// for a path that exists and fail to load component_keyring_file
-// (MY-013712) despite valid global and local manifests. User-supplied
-// containerSecurityContext is still honored and only these two fields
-// are filled in when unset.
+// mysqlSecurityContext returns the mysql container security context:
+// spec.containerSecurityContext as given. Encryption used to default
+// AppArmor and seccomp to Unconfined for GHA kind runners; the private
+// mysqld copy (see mysqlRuntimeBinDir) is what avoids the host AppArmor
+// profile, so a cluster that still needs Unconfined sets it explicitly.
 func mysqlSecurityContext(fg *v1alpha1.MysqlFailoverGroup) *corev1.SecurityContext {
-	sc := fg.Spec.ContainerSecurityContext.DeepCopy()
-	if !fg.Spec.EncryptionEnabled() {
-		return sc
-	}
-	if sc == nil {
-		sc = &corev1.SecurityContext{}
-	}
-	if sc.AppArmorProfile == nil {
-		sc.AppArmorProfile = &corev1.AppArmorProfile{
-			Type: corev1.AppArmorProfileTypeUnconfined,
-		}
-	}
-	if sc.SeccompProfile == nil {
-		sc.SeccompProfile = &corev1.SeccompProfile{
-			Type: corev1.SeccompProfileTypeUnconfined,
-		}
-	}
-	return sc
+	return fg.Spec.ContainerSecurityContext.DeepCopy()
 }
 
 // configInitScript copies the operator-managed my.cnf fragments into the
@@ -1193,9 +1174,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			// DeepCopy so each container has an independent pointer
 			// (the cached spec pointer must not be shared across
 			// containers in the rendered PodSpec).
-			// Encryption additionally unconfines AppArmor/seccomp so the
-			// keyring component can load on hosts whose runtime defaults
-			// block mysqld from reading errmsg.sys / loading components.
 			SecurityContext: mysqlSecurityContext(fg),
 		}
 		// Encryption: copy component files onto image-owned paths, then

@@ -112,6 +112,8 @@ jobs:
 
       - name: Enable encryption on existing group
         if: inputs.enable-encryption
+        env:
+          BLOODRAVEN_PLAYGROUND_MYSQL_UNCONFINED: '1'
         run: |
           set -o pipefail
           ./playground/enable-encryption.sh 2>&1 | tee playground/enable-encryption.log
