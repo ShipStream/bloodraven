@@ -375,6 +375,11 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 		// No retained backups for this profile yet; nothing to prune.
 		return
 	}
+	var ok bool
+	if cutoff, ok = boundRetentionCutoff(cutoff, time.Now()); !ok {
+		a.logger.Warn("retention: ignoring cutoff in the future", "cutoff", cutoff.Format(time.RFC3339))
+		return
+	}
 
 	manifest, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
 	if err != nil {
@@ -409,6 +414,26 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 			"deleted", deleted,
 			"manifest_pruned", len(removed))
 	}
+}
+
+// minRetainedBinlogAge is the newest data a retention sweep may delete:
+// binlogs whose last event is within this window are always kept. The
+// cutoff comes over the operator's unauthenticated aux endpoint, so this
+// bounds what a spoofed reply can destroy. A legitimate cutoff is the
+// oldest retained backup's completion time, which is normally older.
+const minRetainedBinlogAge = 24 * time.Hour
+
+// boundRetentionCutoff clamps cutoff so a sweep never deletes binlogs
+// newer than minRetainedBinlogAge. It returns false for a cutoff in the
+// future, which no retained backup can produce.
+func boundRetentionCutoff(cutoff, now time.Time) (time.Time, bool) {
+	if cutoff.After(now) {
+		return cutoff, false
+	}
+	if floor := now.Add(-minRetainedBinlogAge); cutoff.After(floor) {
+		return floor, true
+	}
+	return cutoff, true
 }
 
 type pitrCutoffResponse struct {

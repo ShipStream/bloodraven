@@ -7,6 +7,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -333,5 +335,55 @@ func TestSnapshotExposesSeededManifestAggregates(t *testing.T) {
 	}
 	if snap.BacklogFiles != 0 {
 		t.Errorf("BacklogFiles = %d, want 0 (all sealed files in manifest)", snap.BacklogFiles)
+	}
+}
+
+// TestRetentionCutoffIsBounded pins that a spoofed /pitr-cutoff reply
+// can neither delete recent binlogs nor, with a future cutoff, the
+// whole archive.
+func TestRetentionCutoffIsBounded(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name     string
+		cutoff   time.Time
+		wantKept []string
+	}{
+		{"future cutoff ignored", now.Add(24 * 365 * time.Hour), []string{"mysql-bin.000001", "mysql-bin.000002", "mysql-bin.000003"}},
+		{"recent cutoff clamped", now, []string{"mysql-bin.000002", "mysql-bin.000003"}},
+		{"old cutoff honored", now.Add(-24 * 365 * time.Hour), []string{"mysql-bin.000001", "mysql-bin.000002", "mysql-bin.000003"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(rw).Encode(pitrCutoffResponse{CutoffTime: tc.cutoff.Format(time.RFC3339)})
+			}))
+			defer srv.Close()
+
+			ctx := context.Background()
+			store := newMemStore()
+			cfg := &PITRConfig{ManifestPrefix: "binlogs"}
+			a := NewBinlogArchiver(cfg, "dc1", &stubRoleChecker{}, store, slog.Default())
+			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
+			for _, e := range []ManifestEntry{
+				{Name: "mysql-bin.000001", LastEventTime: now.Add(-48 * time.Hour)},
+				{Name: "mysql-bin.000002", LastEventTime: now.Add(-2 * time.Hour)},
+				{Name: "mysql-bin.000003", LastEventTime: now.Add(-time.Minute)},
+			} {
+				if err := appendManifestEntry(ctx, store, "binlogs", "dc1", e); err != nil {
+					t.Fatalf("append: %v", err)
+				}
+			}
+			a.maybeRunRetention(ctx)
+			m, err := loadManifest(ctx, store, "binlogs", "dc1")
+			if err != nil {
+				t.Fatalf("loadManifest: %v", err)
+			}
+			var got []string
+			for _, f := range m.Files {
+				got = append(got, f.Name)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.wantKept, ",") {
+				t.Errorf("kept %v, want %v", got, tc.wantKept)
+			}
+		})
 	}
 }
