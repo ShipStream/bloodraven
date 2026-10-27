@@ -2472,7 +2472,7 @@ spec:
                                   path is NOT inside the data directory. Admission rejects the
                                   default /var/lib/mysql datadir and its descendants; custom-image
                                   datadirs must be checked manually.
-                                pattern: ^/[^\0]*[^/]$
+                                pattern: ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$
                                 type: string
                               escrowTimeoutSeconds:
                                 default: 600
@@ -2491,7 +2491,7 @@ spec:
                                   MysqldDir is the directory containing the mysqld binary. MySQL
                                   only reads its global component manifest from there, so the
                                   operator mounts `mysqld.my` into this directory.
-                                pattern: ^/[^\0]*[^/]$
+                                pattern: ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$
                                 type: string
                               pluginDir:
                                 default: /usr/lib64/mysql/plugin
@@ -2499,7 +2499,7 @@ spec:
                                   PluginDir is MySQL's plugin_dir. MySQL only reads the global
                                   `component_keyring_file.cnf` from there, so the operator mounts
                                   the generated config into this directory.
-                                pattern: ^/[^\0]*[^/]$
+                                pattern: ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$
                                 type: string
                               retainVersions:
                                 default: 5
