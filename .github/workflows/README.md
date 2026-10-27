@@ -64,7 +64,7 @@ repository secrets.
 
 **Triggers:** Push of a semver tag matching `v*.*.*`
 
-**Required permissions:** `contents: write`, `packages: write`, `id-token: write` (for cosign OIDC signing)
+**Permissions:** `contents: read` by default. Write scopes are granted per job: `contents: write` for the draft/publish release jobs and the Helm job (`gh-pages` push), `packages: write` for the image and Helm OCI pushes, and `id-token: write` only for the image job (cosign OIDC signing).
 
 Steps:
 
