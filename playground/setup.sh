@@ -324,16 +324,7 @@ helm upgrade --install bloodraven "$PROJECT_ROOT/charts/bloodraven" \
   --set 'tolerations[0].effect=NoSchedule' \
   --set 'tolerations[1].key=shipstream.io/db-readonly-playground' \
   --set 'tolerations[1].operator=Exists' \
-  --set 'tolerations[1].effect=NoSchedule' \
-  --set 'tolerations[2].key=shipstream.io/db-readonly' \
-  --set 'tolerations[2].operator=Exists' \
-  --set 'tolerations[2].effect=NoSchedule' \
-  --set 'tolerations[3].key=shipstream.io/db-readonly-playground' \
-  --set 'tolerations[3].operator=Exists' \
-  --set 'tolerations[3].effect=NoExecute' \
-  --set 'tolerations[4].key=shipstream.io/db-readonly' \
-  --set 'tolerations[4].operator=Exists' \
-  --set 'tolerations[4].effect=NoExecute' \
+  --set 'tolerations[1].effect=NoExecute' \
   --set leaderElection.enabled="$LEADER_ELECTION_ENABLED" \
   "${ESCROW_TLS_HELM_ARGS[@]}" \
   --timeout=180s
@@ -380,7 +371,6 @@ for i in $(seq 1 180); do
   # operator's readonly taint, and one eviction can stall provisioning.
   for node in $(kubectl get nodes -o name 2>/dev/null); do
     kubectl taint "$node" shipstream.io/db-readonly-playground- 2>/dev/null || true
-    kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
   done
   PVCS_BOUND=$(kubectl -n "$NAMESPACE" get pvc -l app.kubernetes.io/name=mysql \
     -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null \
@@ -404,7 +394,6 @@ for i in $(seq 1 36); do
   # Clear taints each iteration — operator may apply them before pods are ready
   for node in $(kubectl get nodes -o name 2>/dev/null); do
     kubectl taint "$node" shipstream.io/db-readonly-playground- 2>/dev/null || true
-    kubectl taint "$node" shipstream.io/db-readonly- 2>/dev/null || true
   done
   READY=$(kubectl -n "$NAMESPACE" get pods -l app.kubernetes.io/name=mysql \
     -o jsonpath='{range .items[*]}{.status.containerStatuses[*].ready}{"\n"}{end}' 2>/dev/null \
