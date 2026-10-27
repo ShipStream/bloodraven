@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
-# bloodraven-doctor: Sanitized Support & Incident Bundle Collector
-# Automatically captures all pod containers and redacts sensitive data.
+# bloodraven-doctor: Support & Incident Bundle Collector
+# Captures the MFG (with obvious password/secret/key/token fields redacted),
+# resources, events, and operator and pod container logs. Events and logs are
+# collected raw: review the bundle before sharing it outside your team.
 #
 set -euo pipefail
 
@@ -12,7 +14,8 @@ OUTPUT_FILE=""
 
 usage() {
     echo "Usage: $0 [-n <namespace>] [-o <output.tar.gz>] [<mysql-failover-group>]"
-    echo "Gathers a sanitized diagnostic bundle for Bloodraven clusters."
+    echo "Gathers a diagnostic bundle for Bloodraven clusters."
+    echo "Only the MFG YAML is redacted; events and logs are raw, so review before sharing."
     echo ""
     echo "  -o, --output  Path of the tarball to write. '.tar.gz' is appended if missing."
     echo "                Default: ./${BUNDLE_NAME}.tar.gz. Refuses to overwrite an existing path."
@@ -115,3 +118,4 @@ done
 tar -czf "$OUTPUT_FILE" -C "$STAGING_ROOT" "$BUNDLE_NAME"
 
 echo "✅ Support bundle saved: $OUTPUT_FILE"
+echo "⚠️  Events and container logs are not redacted. Review the bundle before sharing it."
