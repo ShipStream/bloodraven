@@ -43,8 +43,8 @@ type KeyringEscrowResponse struct {
 // must present the per-site bearer token the operator minted into a
 // Secret that is mounted only into that site's pod, and only while that
 // site is deliberately unsealed. A sealed site carries no token at all,
-// so a compromised workload elsewhere in the namespace has nothing to
-// replay.
+// and the handler rejects pushes for a sealed site, so a token copied
+// during an earlier unseal window cannot be replayed later.
 //
 // Defence in depth beyond the token:
 //
@@ -155,6 +155,17 @@ func NewKeyringEscrowHandler(c client.Client, logger *slog.Logger) http.Handler 
 		}
 		if fg.Spec.SiteByName(req.Site) == nil {
 			writeKeyringError(rw, http.StatusNotFound, "site not found in failover group")
+			return
+		}
+		// The token Secret outlives every unseal window, so a copy taken
+		// while the site was unsealed must stop working once it seals.
+		// This is the same predicate that decides whether the pod gets
+		// the token mount at all.
+		if fg.SiteKeyringSealed(req.Site) {
+			logger.Warn("keyring escrow rejected",
+				"namespace", req.Namespace, "group", req.Group, "site", req.Site,
+				"reason", "site keyring is sealed")
+			writeKeyringError(rw, http.StatusForbidden, "escrow token rejected")
 			return
 		}
 
