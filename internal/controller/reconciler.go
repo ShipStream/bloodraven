@@ -61,7 +61,7 @@ const (
 	// Bump when the rendered MySQL Deployment pod spec changes without a
 	// corresponding user-facing spec field change, so existing pods roll
 	// forward to the new safe defaults.
-	deploymentPodRenderVersion = "deployment-pod-render-v5-mysqld-boots-read-only"
+	deploymentPodRenderVersion = "deployment-pod-render-v6-sidecar-creds-files"
 
 	// sidecarLivenessPath is the sidecar's liveness probe target. It must
 	// not depend on MySQL: the sidecar fences MySQL when MySQL misbehaves,
@@ -1265,20 +1265,16 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				appendCredVolume("backup")
 			}
 
+			// Files rather than MYSQL_USER/MYSQL_PASSWORD env so the
+			// operator password stays out of the pod spec's env and
+			// /proc/<pid>/environ. Rotation still rolls the pod through
+			// the spec hash, and the sidecar re-reads the files on start.
 			sidecarEnv = append([]corev1.EnvVar{
-				{Name: "MYSQL_USER", ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-						Key:                  "username",
-					},
-				}},
-				{Name: "MYSQL_PASSWORD", ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-						Key:                  "password",
-					},
-				}},
+				{Name: "MYSQL_CREDS_DIR", Value: "/etc/mysql/creds/operator"},
 			}, sidecarEnv...)
+			sidecarVolumeMounts = append(sidecarVolumeMounts, corev1.VolumeMount{
+				Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true,
+			})
 		} else {
 			mysqlContainer.EnvFrom = []corev1.EnvFromSource{
 				{

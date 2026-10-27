@@ -1377,22 +1377,32 @@ func TestReconcile_CredentialsMode_CreatesDeployment(t *testing.T) {
 		t.Error("expected MYSQL_ROOT_PASSWORD env var in credentials mode")
 	}
 
-	// Verify sidecar uses MYSQL_USER/MYSQL_PASSWORD.
+	// Verify the sidecar reads the operator credentials from the mounted
+	// Secret files, never from env.
 	sidecar := deploy.Spec.Template.Spec.Containers[1]
 	if sidecar.Name != "sidecar" {
 		t.Fatalf("expected sidecar container, got %s", sidecar.Name)
 	}
-	foundUser := false
+	foundCredsDir := false
 	for _, e := range sidecar.Env {
-		if e.Name == "MYSQL_USER" {
-			foundUser = true
-		}
-		if e.Name == "MYSQL_DSN" {
-			t.Error("sidecar should not have MYSQL_DSN in credentials mode")
+		switch e.Name {
+		case "MYSQL_CREDS_DIR":
+			foundCredsDir = e.Value == "/etc/mysql/creds/operator"
+		case "MYSQL_DSN", "MYSQL_USER", "MYSQL_PASSWORD":
+			t.Errorf("sidecar should not have %s in credentials mode", e.Name)
 		}
 	}
-	if !foundUser {
-		t.Error("expected MYSQL_USER env var in sidecar")
+	if !foundCredsDir {
+		t.Error("expected MYSQL_CREDS_DIR=/etc/mysql/creds/operator in sidecar")
+	}
+	foundSidecarCredsMount := false
+	for _, m := range sidecar.VolumeMounts {
+		if m.Name == "creds-operator" && m.MountPath == "/etc/mysql/creds/operator" && m.ReadOnly {
+			foundSidecarCredsMount = true
+		}
+	}
+	if !foundSidecarCredsMount {
+		t.Error("expected creds-operator mounted read-only into the sidecar")
 	}
 
 	// Verify credential volumes exist.
