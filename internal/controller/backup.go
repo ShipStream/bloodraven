@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -93,6 +94,18 @@ func scheduleCronJobName(fgName, scheduleName string) string {
 // profile when the user does not set claimName.
 func ownedBackupPVCName(fgName, profileName string) string {
 	return truncateDNS1123(fmt.Sprintf("mysql-%s-backup-%s", fgName, profileName))
+}
+
+// checkPVCSubPath rejects a PVC subPath with a ".." segment, which would
+// put a dump, or read a restore source, outside the mounted PVC. The CRD
+// rejects such values too; this covers objects stored before it did.
+func checkPVCSubPath(sub string) error {
+	for _, seg := range strings.Split(sub, "/") {
+		if seg == ".." {
+			return fmt.Errorf("subPath %q must not contain '..' segments", sub)
+		}
+	}
+	return nil
 }
 
 // truncateDNS1123 truncates a name to 63 characters to fit the DNS-1123

@@ -459,6 +459,8 @@ type PVCStorage struct {
 
 	// SubPath inside the PVC to use. Each backup lands under
 	// "<subPath>/<mysqlbackup-name>/".
+	// A ".." segment is rejected so the path cannot leave the PVC.
+	// +kubebuilder:validation:Pattern=`^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$`
 	SubPath string `json:"subPath,omitempty"`
 }
 
@@ -611,7 +613,9 @@ type InitFromBackupPVCSource struct {
 	ClaimName string `json:"claimName"`
 
 	// SubPath inside the PVC where the dump is located. Optional.
+	// A ".." segment is rejected so the path cannot leave the PVC.
 	// +optional
+	// +kubebuilder:validation:Pattern=`^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$`
 	SubPath string `json:"subPath,omitempty"`
 }
 

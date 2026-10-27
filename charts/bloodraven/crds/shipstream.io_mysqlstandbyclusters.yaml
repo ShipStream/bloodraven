@@ -206,6 +206,8 @@ spec:
                             description: |-
                               SubPath inside the PVC to use. Each backup lands under
                               "<subPath>/<mysqlbackup-name>/".
+                              A ".." segment is rejected so the path cannot leave the PVC.
+                            pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                             type: string
                         type: object
                       s3:
@@ -1007,6 +1009,8 @@ spec:
                                           description: |-
                                             SubPath inside the PVC to use. Each backup lands under
                                             "<subPath>/<mysqlbackup-name>/".
+                                            A ".." segment is rejected so the path cannot leave the PVC.
+                                          pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                                           type: string
                                       type: object
                                     s3:
@@ -5865,8 +5869,10 @@ spec:
                                     minLength: 1
                                     type: string
                                   subPath:
-                                    description: SubPath inside the PVC where the
-                                      dump is located. Optional.
+                                    description: |-
+                                      SubPath inside the PVC where the dump is located. Optional.
+                                      A ".." segment is rejected so the path cannot leave the PVC.
+                                    pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                                     type: string
                                 required:
                                 - claimName
@@ -6427,8 +6433,10 @@ spec:
                                     minLength: 1
                                     type: string
                                   subPath:
-                                    description: SubPath inside the PVC where the
-                                      dump is located. Optional.
+                                    description: |-
+                                      SubPath inside the PVC where the dump is located. Optional.
+                                      A ".." segment is rejected so the path cannot leave the PVC.
+                                    pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                                     type: string
                                 required:
                                 - claimName
