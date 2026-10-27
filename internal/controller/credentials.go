@@ -236,6 +236,11 @@ func credentialStatementErrorLabel(roleName, stmt string) string {
 	return fmt.Sprintf("%s statement %q", roleName, truncateSQL(stmt))
 }
 
+// computeCredentialHash fingerprints the referenced Secrets by revision
+// (UID/resourceVersion), never by content: the result is published in an
+// annotation on the group, readable by principals denied Secret access,
+// and a content digest would let them verify password guesses offline.
+// A metadata-only Secret edit costs one idempotent re-run of the grants.
 func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
 	h := sha256.New()
 	names := fg.Spec.AllReferencedSecretNames()
@@ -245,14 +250,7 @@ func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context
 		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err != nil {
 			return "", fmt.Errorf("get secret %s: %w", name, err)
 		}
-		keys := make([]string, 0, len(s.Data))
-		for k := range s.Data {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(h, "%s/%s=%x\n", name, k, sha256.Sum256(s.Data[k]))
-		}
+		fmt.Fprintf(h, "%s=%s/%s\n", name, s.UID, s.ResourceVersion)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }

@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -200,5 +201,51 @@ func TestReconcileCredentialsRefusesTenantClaimedUsername(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tenant_app") || !strings.Contains(err.Error(), "tenant-acme") {
 		t.Fatalf("error = %q, want it to name the username and the claiming MysqlDatabase", err)
+	}
+}
+
+func TestComputeCredentialHashTracksRevisionNotContent(t *testing.T) {
+	ctx := context.Background()
+	fg := newTestFG()
+
+	// Two groups whose Secret differs only in content must publish the
+	// same hash: the annotation is readable without Secret access and
+	// must not act as an offline password verifier.
+	build := func(dsn string) (*MysqlFailoverGroupReconciler, client.Client) {
+		sec := newTestSecret()
+		sec.Data["dsn"] = []byte(dsn)
+		c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(sec, fg.DeepCopy()).Build()
+		return &MysqlFailoverGroupReconciler{Client: c, Scheme: testScheme()}, c
+	}
+	rA, _ := build("root:password@tcp(localhost:3306)/mysql")
+	rB, cB := build("root:hunter2@tcp(localhost:3306)/mysql")
+	var sec corev1.Secret
+	if err := cB.Get(ctx, client.ObjectKey{Namespace: fg.Namespace, Name: fg.Spec.SecretName}, &sec); err != nil {
+		t.Fatalf("get secret: %v", err)
+	}
+	hashA, err := rA.computeCredentialHash(ctx, fg)
+	if err != nil {
+		t.Fatalf("hash A: %v", err)
+	}
+	hashB, err := rB.computeCredentialHash(ctx, fg)
+	if err != nil {
+		t.Fatalf("hash B: %v", err)
+	}
+	if hashA != hashB {
+		t.Fatalf("hash depends on Secret content: %s vs %s", hashA, hashB)
+	}
+
+	// A rotation bumps resourceVersion and must change the hash so the
+	// grants are re-applied.
+	sec.Data["dsn"] = []byte("root:rotated@tcp(localhost:3306)/mysql")
+	if err := cB.Update(ctx, &sec); err != nil {
+		t.Fatalf("update secret: %v", err)
+	}
+	rotated, err := rB.computeCredentialHash(ctx, fg)
+	if err != nil {
+		t.Fatalf("hash after rotation: %v", err)
+	}
+	if rotated == hashB {
+		t.Fatal("hash did not change after the Secret was updated")
 	}
 }
