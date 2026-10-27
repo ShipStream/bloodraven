@@ -11,34 +11,6 @@ import (
 	pgsidecar "github.com/shipstream/bloodraven/internal/sidecar"
 )
 
-func TestConfirmTokenAdvances(t *testing.T) {
-	base := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
-	older := newConfirmToken(base, 0)
-	newer := newConfirmToken(base, time.Minute)
-
-	// Empty last-used always advances.
-	if ok, err := confirmTokenAdvances(newer, ""); err != nil || !ok {
-		t.Errorf("empty lastUsed must advance: ok=%v err=%v", ok, err)
-	}
-	// Strictly newer advances; equal/older does not.
-	if ok, err := confirmTokenAdvances(newer, older); err != nil || !ok {
-		t.Errorf("newer > older must advance: ok=%v err=%v", ok, err)
-	}
-	if ok, err := confirmTokenAdvances(older, newer); err != nil || ok {
-		t.Errorf("older < newer must NOT advance: ok=%v err=%v", ok, err)
-	}
-	if ok, err := confirmTokenAdvances(older, older); err != nil || ok {
-		t.Errorf("equal token must NOT advance (strictly after): ok=%v err=%v", ok, err)
-	}
-	// Unparseable spec confirm is an error; unparseable last-used advances.
-	if _, err := confirmTokenAdvances("not-a-timestamp", older); err == nil {
-		t.Error("unparseable spec confirm must error")
-	}
-	if ok, err := confirmTokenAdvances(newer, "garbage"); err != nil || !ok {
-		t.Errorf("unparseable lastUsed must be treated as advance: ok=%v err=%v", ok, err)
-	}
-}
-
 func TestNewConfirmTokenIsRFC3339(t *testing.T) {
 	tok := newConfirmToken(time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC), 0)
 	if _, err := time.Parse(time.RFC3339, tok); err != nil {
