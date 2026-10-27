@@ -96,6 +96,57 @@ func TestEncryptionSettingsOverrideUserConf(t *testing.T) {
 	}
 }
 
+// TestEncryptionSettingsResistPrefixedAndInjectedOverrides covers the
+// spellings an exact-key override misses: MySQL option prefixes, which
+// sort after the owned key and win as the last occurrence, and a line
+// break in a value, which would write a directive of its own.
+func TestEncryptionSettingsResistPrefixedAndInjectedOverrides(t *testing.T) {
+	fg := encTestFG()
+	fg.Spec.MysqlConf = map[string]string{
+		"loose_innodb_redo_log_encrypt":        "OFF",
+		"skip-binlog-encryption":               "",
+		"disable-default-table-encryption":     "",
+		"max_connections":                      "777\ninnodb-undo-log-encrypt=OFF",
+		"x\n[mysqld]\ninnodb-undo-log-encrypt": "OFF",
+	}
+	fg.Spec.Sites[0].MysqlConf = map[string]string{"loose-skip-binlog-encryption": ""}
+	cnf := generateMyCnf(fg, fg.Spec.Sites[0])
+	for _, forbidden := range []string{
+		"loose-innodb-redo-log-encrypt", "skip-binlog-encryption", "disable-default-table-encryption",
+		"innodb-undo-log-encrypt=OFF", "max-connections=777",
+	} {
+		if strings.Contains(cnf, forbidden) {
+			t.Errorf("generated my.cnf must not contain %q:\n%s", forbidden, cnf)
+		}
+	}
+	if strings.Count(cnf, "[mysqld]") != 1 {
+		t.Errorf("generated my.cnf must have exactly one section header:\n%s", cnf)
+	}
+	if got := unsafeMySQLConfKeys(fg, fg.Spec.Sites[0]); len(got) != 2 {
+		t.Errorf("unsafeMySQLConfKeys = %v, want the two line-break entries", got)
+	}
+}
+
+func TestShadowsOwnedSetting(t *testing.T) {
+	owned := map[string]string{"log-bin": "x", "skip-replica-start": "ON", "gtid-mode": "ON"}
+	for key, want := range map[string]bool{
+		"log-bin":                         false,
+		"skip-log-bin":                    true,
+		"disable-log-bin":                 true,
+		"loose-skip-log-bin":              true,
+		"loose-gtid-mode":                 true,
+		"skip-replica-start":              false,
+		"skip-skip-replica-start":         true,
+		"log-bin-trust-function-creators": false,
+		"loose-log-bin-index":             false,
+		"max-connections":                 false,
+	} {
+		if got := shadowsOwnedSetting(key, owned); got != want {
+			t.Errorf("shadowsOwnedSetting(%q) = %v, want %v", key, got, want)
+		}
+	}
+}
+
 func TestGenerateMyCnf_NoEncryptionKeysWhenDisabled(t *testing.T) {
 	cnf := generateMyCnf(newTestFG(), newTestFG().Spec.Sites[0])
 	for _, forbidden := range []string{"default-table-encryption", "binlog-encryption", "innodb-redo-log-encrypt"} {

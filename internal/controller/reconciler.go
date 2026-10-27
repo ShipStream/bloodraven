@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -782,6 +784,11 @@ func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.Sit
 
 func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	for _, site := range fg.Spec.Sites {
+		if keys := unsafeMySQLConfKeys(fg, site); len(keys) > 0 && r.Recorder != nil {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "MysqlConfIgnored",
+				"site %s: ignoring mysqlConf keys %s: keys must match [A-Za-z0-9_.-]+ and values must not contain line breaks",
+				site.Name, strings.Join(keys, ", "))
+		}
 		if err := r.reconcileSiteConfigMap(ctx, fg, site); err != nil {
 			return err
 		}
@@ -819,6 +826,31 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Contex
 	return err
 }
 
+// mysqlOptionKeyPattern is the shape of a my.cnf option name.
+var mysqlOptionKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// unsafeMySQLSetting reports a spec.mysqlConf entry that cannot be written
+// as one my.cnf line: a line break in the key or value would inject further
+// directives or [section] headers, overriding operator-owned settings.
+func unsafeMySQLSetting(key, value string) bool {
+	return !mysqlOptionKeyPattern.MatchString(key) || strings.ContainsAny(value, "\r\n\x00")
+}
+
+// unsafeMySQLConfKeys lists the spec.mysqlConf keys, group-level then the
+// site's, that generateMyCnf drops as unsafe.
+func unsafeMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) []string {
+	var out []string
+	for _, raw := range []map[string]string{fg.Spec.MysqlConf, site.MysqlConf} {
+		for k, v := range raw {
+			if unsafeMySQLSetting(k, v) {
+				out = append(out, strconv.Quote(k))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func normalizedMySQLSettings(raw map[string]string) map[string]string {
 	keys := make([]string, 0, len(raw))
 	for key := range raw {
@@ -827,9 +859,43 @@ func normalizedMySQLSettings(raw map[string]string) map[string]string {
 	sort.Strings(keys)
 	out := make(map[string]string, len(raw))
 	for _, key := range keys {
+		if unsafeMySQLSetting(key, raw[key]) {
+			continue
+		}
 		out[strings.ReplaceAll(key, "_", "-")] = raw[key]
 	}
 	return out
+}
+
+// mysqlOptionPrefixes are the modifiers MySQL accepts in front of an option
+// name: loose- ignores an unknown option, skip-/disable-/enable- set a
+// boolean, maximum- caps a variable.
+var mysqlOptionPrefixes = []string{"loose-", "skip-", "disable-", "enable-", "maximum-"}
+
+// shadowsOwnedSetting reports whether key is a prefixed spelling of an
+// operator-owned option (loose-gtid-mode, skip-log-bin, ...). The rendered
+// my.cnf is sorted and MySQL honours the last occurrence, so such a key
+// could override the owned value.
+func shadowsOwnedSetting(key string, owned map[string]string) bool {
+	if _, ok := owned[key]; ok {
+		return false
+	}
+	for k := key; ; {
+		trimmed := k
+		for _, p := range mysqlOptionPrefixes {
+			trimmed = strings.TrimPrefix(trimmed, p)
+			if trimmed != k {
+				break
+			}
+		}
+		if trimmed == k {
+			return false
+		}
+		if _, ok := owned[trimmed]; ok {
+			return true
+		}
+		k = trimmed
+	}
 }
 
 func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) string {
@@ -892,12 +958,10 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) 
 
 	// These settings are operator-owned safety invariants and cannot be
 	// weakened by group or site overrides.
-	for k, v := range map[string]string{
+	owned := map[string]string{
 		"gtid-mode": "ON", "enforce-gtid-consistency": "ON",
 		"log-bin": "/var/lib/mysql/mysql-bin", "log-replica-updates": "ON",
 		"skip-replica-start": "ON", "plugin-load-add": "mysql_clone.so",
-	} {
-		settings[k] = v
 	}
 
 	// Encryption coverage is likewise operator-owned: the security claim
@@ -905,16 +969,22 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) 
 	// asked for, so a spec.mysqlConf override for the same keys must not
 	// be able to silently downgrade a site to plaintext redo logs.
 	for k, v := range encryptionMySQLSettings(fg) {
-		settings[k] = v
+		owned[k] = v
 	}
 
-	// skip-log-bin / disable-log-bin (underscore spellings are normalized to
-	// hyphens by normalizedMySQLSettings) would silently defeat the enforced
-	// log-bin invariant: the sorted render places them after log-bin and
-	// MySQL honors the last occurrence. Strip both aliases outright so group
-	// or site overrides cannot reintroduce them.
-	delete(settings, "skip-log-bin")
-	delete(settings, "disable-log-bin")
+	// Prefixed spellings of an owned option (skip-log-bin, disable-log-bin,
+	// loose-innodb-redo-log-encrypt, ...; underscore spellings are already
+	// normalized to hyphens) would sort after the owned key, and MySQL
+	// honors the last occurrence. Strip them so group or site overrides
+	// cannot reintroduce them.
+	for k := range settings {
+		if shadowsOwnedSetting(k, owned) {
+			delete(settings, k)
+		}
+	}
+	for k, v := range owned {
+		settings[k] = v
+	}
 
 	// Build sorted output for deterministic ConfigMap content
 	keys := make([]string, 0, len(settings))
