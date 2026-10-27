@@ -17,6 +17,11 @@ updates:
       interval: quarterly
 
   - package-ecosystem: docker
-    directory: /
+    directories:
+      - /
+      - /playground/counter-app
+      - /playground/dashboard
+      - /playground/dns-webhook
+      - /playground/ledger
     schedule:
       interval: quarterly
