@@ -86,8 +86,12 @@ jobs:
           wait: 0s
 
       - name: Install Calico CNI
+        # The manifest is checksum-pinned so a moved tag cannot change what
+        # gets applied. Recompute the sha256 when bumping the version.
         run: |
-          kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+          curl -fsSL -o /tmp/calico.yaml https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+          echo "93e7f39c3f93f9dc67ee2386aa7240d8d13ff62e54535a2f5f6432e8c6c0f24f  /tmp/calico.yaml" | sha256sum -c -
+          kubectl apply -f /tmp/calico.yaml
           kubectl -n kube-system rollout status daemonset/calico-node --timeout=180s
           kubectl wait nodes --all --for=condition=Ready --timeout=180s
 
