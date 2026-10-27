@@ -337,9 +337,12 @@ const (
 type SiteSpec struct {
 	// Name is the site identifier (e.g. "iad", "pdx", "lhr").
 	// Must be unique within spec.sites. MaxLength caps the CEL cost
-	// of the spec-level uniqueness and priority-membership rules.
+	// of the spec-level uniqueness and priority-membership rules. The
+	// pattern matches what the per-site Service names already require,
+	// and keeps the name safe to use in object-storage keys.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+$`
 	Name string `json:"name"`
 
 	// Role governs whether this site can be auto-promoted on failover.

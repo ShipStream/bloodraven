@@ -236,6 +236,9 @@ func downloadSiteBinlogs(
 	outDir string,
 	logger *slog.Logger,
 ) (int, error) {
+	if !isSafeBasename(site) {
+		return 0, fmt.Errorf("reject unsafe site name %q", site)
+	}
 	m, err := sidecar.LoadManifest(ctx, store, prefix, site)
 	if err != nil {
 		return 0, err

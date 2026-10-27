@@ -129,6 +129,37 @@ func TestPruneManifestIgnoresRemotePath(t *testing.T) {
 	}
 }
 
+// TestLoadManifestForcesSite pins that a stored "site" field cannot
+// redirect the next manifest write to another key.
+func TestLoadManifestForcesSite(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := newPVCStore(&PITRPVCConfig{MountPath: tmp})
+	if err != nil {
+		t.Fatalf("newPVCStore: %v", err)
+	}
+	ctx := context.Background()
+	if err := os.MkdirAll(tmp+"/binlogs", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	forged := `{"version":1,"site":"x/../../victim","files":[]}`
+	if err := os.WriteFile(tmp+"/binlogs/manifest-iad.json", []byte(forged), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := loadManifest(ctx, store, "binlogs", "iad")
+	if err != nil {
+		t.Fatalf("loadManifest: %v", err)
+	}
+	if m.Site != "iad" {
+		t.Fatalf("want site iad, got %q", m.Site)
+	}
+	if err := appendManifestEntry(ctx, store, "binlogs", "iad", ManifestEntry{Name: "mysql-bin.000001"}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, err := os.Stat(tmp + "/victim.json"); !os.IsNotExist(err) {
+		t.Errorf("manifest write escaped to forged site key: %v", err)
+	}
+}
+
 // TestReadBinlogIndex covers the "drop last entry is active, sort the
 // rest" behavior of readBinlogIndex against a synthetic index file.
 func TestReadBinlogIndex(t *testing.T) {

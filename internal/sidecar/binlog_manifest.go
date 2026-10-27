@@ -74,8 +74,8 @@ func SiteFromManifestKey(key string) string {
 }
 
 // manifestKey returns the storage-relative key for a site's manifest.
-// Site names are a-z0-9 plus dashes (enforced by the CRD), so no
-// escaping is needed.
+// Site names are a-z0-9 plus dashes (enforced by the CRD pattern on
+// spec.sites[].name), so no escaping is needed.
 func manifestKey(prefix, site string) string {
 	return path.Join(prefix, fmt.Sprintf("manifest-%s.json", site))
 }
@@ -103,13 +103,14 @@ func loadManifest(ctx context.Context, store archiveStore, prefix, site string) 
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("decode manifest %s: %w", manifestKey(prefix, site), err)
 	}
-	// Enforce Version/Site invariants even on legacy writes.
+	// Enforce the Version invariant even on legacy writes.
 	if m.Version == 0 {
 		m.Version = ManifestVersion
 	}
-	if m.Site == "" {
-		m.Site = site
-	}
+	// The site always comes from the caller, never the stored document:
+	// saveManifest writes back to manifestKey(prefix, m.Site), so a
+	// tampered "site" field could otherwise redirect that write.
+	m.Site = site
 	return &m, nil
 }
 
