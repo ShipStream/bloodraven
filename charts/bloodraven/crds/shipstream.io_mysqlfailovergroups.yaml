@@ -791,7 +791,9 @@ spec:
                                 endpointURL:
                                   description: |-
                                     EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
-                                    Passed to mysqlsh as s3EndpointOverride.
+                                    Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
+                                    or https:// URL without a query or fragment.
+                                  pattern: ^https?://[^\s/?#]+(/[^\s?#]*)?$
                                   type: string
                                 prefix:
                                   description: |-
@@ -5614,7 +5616,9 @@ spec:
                           endpointURL:
                             description: |-
                               EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
-                              Passed to mysqlsh as s3EndpointOverride.
+                              Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
+                              or https:// URL without a query or fragment.
+                            pattern: ^https?://[^\s/?#]+(/[^\s?#]*)?$
                             type: string
                           prefix:
                             description: |-
@@ -6174,7 +6178,9 @@ spec:
                           endpointURL:
                             description: |-
                               EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
-                              Passed to mysqlsh as s3EndpointOverride.
+                              Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
+                              or https:// URL without a query or fragment.
+                            pattern: ^https?://[^\s/?#]+(/[^\s?#]*)?$
                             type: string
                           prefix:
                             description: |-

@@ -394,3 +394,25 @@ func TestMysqlStandbyCluster_EnvtestCreate_RejectsEmptyPrefix(t *testing.T) {
 		t.Errorf("want non-empty-prefix CEL rule violation, got: %v", err)
 	}
 }
+
+// TestMysqlStandbyCluster_EnvtestCreate_RejectsNonHTTPEndpoint verifies the
+// endpointURL pattern: the operator pod dials this URL itself, so only
+// absolute http(s) URLs are admitted.
+func TestMysqlStandbyCluster_EnvtestCreate_RejectsNonHTTPEndpoint(t *testing.T) {
+	ns := "default"
+	ensureEnvtestS3CredsSecret(t, ns, "envtest-s3-creds")
+
+	for i, bad := range []string{"minio:9000", "file:///etc/passwd", "http://host/?x=1"} {
+		cr := minimalEnvtestStandby("envtest-standby-endpoint-"+string(rune('a'+i)), ns)
+		cr.Spec.Source.Storage.S3.EndpointURL = bad
+		err := k8sClient.Create(ctx, cr)
+		if err == nil {
+			_ = k8sClient.Delete(ctx, cr)
+			t.Errorf("expected admission to reject endpointURL %q, but Create succeeded", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "endpointURL") {
+			t.Errorf("endpointURL %q rejected for the wrong reason: %v", bad, err)
+		}
+	}
+}
