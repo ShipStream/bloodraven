@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -575,8 +576,21 @@ func validateSanityQuery(q string) (string, error) {
 	if strings.Contains(trimmed, ";") {
 		return "", fmt.Errorf("sanityCheck.query must be a single statement (contains `;`)")
 	}
+	// The query runs through `mysql -e`, whose client parses `\x`
+	// commands anywhere and long-form commands (`system`, `source`, ...)
+	// at the start of the input. `\!` / `system` run shell commands in a
+	// pod that has the backup store credentials mounted, so reject every
+	// backslash and require the statement to open as a query.
+	if strings.Contains(trimmed, `\`) {
+		return "", fmt.Errorf("sanityCheck.query must not contain a backslash (mysql client commands are not allowed)")
+	}
+	if !sanityQueryStartRE.MatchString(trimmed) {
+		return "", fmt.Errorf("sanityCheck.query must start with SELECT, WITH, or `(`")
+	}
 	return trimmed, nil
 }
+
+var sanityQueryStartRE = regexp.MustCompile(`(?i)^(\(|(select|with)\b)`)
 
 // verificationPITRSpec translates a verification's
 // PointInTimeVerificationSpec into the PITR shape that the shared
