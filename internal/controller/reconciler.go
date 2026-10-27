@@ -61,7 +61,7 @@ const (
 	// Bump when the rendered MySQL Deployment pod spec changes without a
 	// corresponding user-facing spec field change, so existing pods roll
 	// forward to the new safe defaults.
-	deploymentPodRenderVersion = "deployment-pod-render-v6-sidecar-creds-files"
+	deploymentPodRenderVersion = "deployment-pod-render-v7-prestop-mysql-pwd"
 
 	// sidecarLivenessPath is the sidecar's liveness probe target. It must
 	// not depend on MySQL: the sidecar fences MySQL when MySQL misbehaves,
@@ -1237,9 +1237,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			mysqlContainer.Lifecycle = &corev1.Lifecycle{
 				PreStop: &corev1.LifecycleHandler{
 					Exec: &corev1.ExecAction{
+						// MYSQL_PWD keeps the password off argv, as in
+						// the legacy branch below.
 						Command: []string{
 							"sh", "-c",
-							`mysql -u "$(cat /etc/mysql/creds/operator/username)" -p"$(cat /etc/mysql/creds/operator/password)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
+							`MYSQL_PWD="$(cat /etc/mysql/creds/operator/password)" mysql -u "$(cat /etc/mysql/creds/operator/username)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
 						},
 					},
 				},

@@ -135,37 +135,37 @@ func TestReconcileDragonflyStatefulSet_AuthEnvWiredFromSecret(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "lion-dragonfly-dc1", Namespace: "shared-lion"}, &sts); err != nil {
 		t.Fatalf("statefulset not created: %v", err)
 	}
+	// --requirepass and --masterauth are set through Dragonfly's DFLY_
+	// env flags so the password never lands in argv. masterauth is
+	// required so REPLICAOF can AUTH against a password-protected active
+	// master (otherwise PING → NOAUTH → "replication cancelled").
 	env := sts.Spec.Template.Spec.Containers[0].Env
-	var found *corev1.EnvVar
-	for i, e := range env {
-		if e.Name == DragonflyAuthEnvVar {
-			found = &env[i]
-			break
+	for _, name := range []string{DragonflyAuthEnvVar, DragonflyMasterAuthEnvVar} {
+		var found *corev1.EnvVar
+		for i, e := range env {
+			if e.Name == name {
+				found = &env[i]
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("env var %s not wired", name)
+			return
+		}
+		if found.ValueFrom == nil || found.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("env var %s missing SecretKeyRef", name)
+		}
+		if found.ValueFrom.SecretKeyRef.LocalObjectReference.Name != "lion-dragonfly-auth" {
+			t.Errorf("%s secretRef = %q, want lion-dragonfly-auth", name, found.ValueFrom.SecretKeyRef.Name)
+		}
+		if found.ValueFrom.SecretKeyRef.Key != "password" {
+			t.Errorf("%s secretKey = %q, want password", name, found.ValueFrom.SecretKeyRef.Key)
 		}
 	}
-	if found == nil {
-		t.Fatalf("env var %s not wired", DragonflyAuthEnvVar)
-		return
-	}
-	if found.ValueFrom == nil || found.ValueFrom.SecretKeyRef == nil {
-		t.Fatalf("env var %s missing SecretKeyRef", DragonflyAuthEnvVar)
-	}
-	if found.ValueFrom.SecretKeyRef.LocalObjectReference.Name != "lion-dragonfly-auth" {
-		t.Errorf("env secretRef = %q, want lion-dragonfly-auth", found.ValueFrom.SecretKeyRef.Name)
-	}
-	if found.ValueFrom.SecretKeyRef.Key != "password" {
-		t.Errorf("env secretKey = %q, want password", found.ValueFrom.SecretKeyRef.Key)
-	}
-	// --requirepass and --masterauth are wired to expand the env var.
-	// masterauth is required so REPLICAOF can AUTH against a password-
-	// protected active master (otherwise PING → NOAUTH → "replication cancelled").
 	args := sts.Spec.Template.Spec.Containers[0].Args
 	joined := joinArgs(args)
-	if !contains(joined, "--requirepass=$("+DragonflyAuthEnvVar+")") {
-		t.Errorf("args missing requirepass wiring (got %v)", args)
-	}
-	if !contains(joined, "--masterauth=$("+DragonflyAuthEnvVar+")") {
-		t.Errorf("args missing masterauth wiring (got %v)", args)
+	if contains(joined, "--requirepass") || contains(joined, "--masterauth") {
+		t.Errorf("auth must not be passed on argv (got %v)", args)
 	}
 }
 

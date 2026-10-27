@@ -1424,6 +1424,33 @@ func TestReconcile_CredentialsMode_CreatesDeployment(t *testing.T) {
 	}
 }
 
+func TestReconcile_CredentialsMode_PreStopKeepsPasswordOffArgv(t *testing.T) {
+	fg := newTestFGWithCredentials()
+	objs := []client.Object{fg}
+	for _, s := range newTestCredentialSecrets() {
+		objs = append(objs, s)
+	}
+	r, c := newReconciler(objs...)
+	nn := types.NamespacedName{Name: "lion", Namespace: "shared-lion"}
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nn}); err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+	}
+	var deploy appsv1.Deployment
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "mysql-lion-dc1", Namespace: "shared-lion"}, &deploy); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	mysqlContainer := deploy.Spec.Template.Spec.Containers[0]
+	if mysqlContainer.Lifecycle == nil || mysqlContainer.Lifecycle.PreStop == nil || mysqlContainer.Lifecycle.PreStop.Exec == nil {
+		t.Fatal("expected credentials-mode preStop exec hook")
+	}
+	preStop := strings.Join(mysqlContainer.Lifecycle.PreStop.Exec.Command, " ")
+	if strings.Contains(preStop, " -p") || !strings.Contains(preStop, "MYSQL_PWD=") {
+		t.Errorf("preStop must pass the password via MYSQL_PWD, not argv: %s", preStop)
+	}
+}
+
 func TestReconcile_CredentialsMode_CreatesInitUsersConfigMap(t *testing.T) {
 	fg := newTestFGWithCredentials()
 	objs := []client.Object{fg}
