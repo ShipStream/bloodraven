@@ -166,7 +166,7 @@ func TestWrapWithEncryption_EmptyPassphraseReturnsInner(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := WrapWithEncryption(inner, nil)
-	if got != archiveStore(inner) {
+	if got != ArchiveStore(inner) {
 		t.Fatalf("empty passphrase should return the inner store unchanged")
 	}
 }

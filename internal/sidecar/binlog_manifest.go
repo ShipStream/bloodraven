@@ -91,7 +91,7 @@ func binlogObjectKey(prefix, site, filename string) string {
 // returns an empty Manifest{} if none exists yet. A decode error on an
 // existing object is propagated — the caller should surface it loudly
 // rather than silently reset the manifest.
-func loadManifest(ctx context.Context, store archiveStore, prefix, site string) (*Manifest, error) {
+func loadManifest(ctx context.Context, store ArchiveStore, prefix, site string) (*Manifest, error) {
 	data, ok, err := store.Get(ctx, manifestKey(prefix, site))
 	if err != nil {
 		return nil, err
@@ -117,7 +117,7 @@ func loadManifest(ctx context.Context, store archiveStore, prefix, site string) 
 // manifest key. The Files slice is sorted lexicographically by Name so
 // the output is deterministic and diff-friendly in object storage
 // browsers.
-func saveManifest(ctx context.Context, store archiveStore, prefix string, m *Manifest) error {
+func saveManifest(ctx context.Context, store ArchiveStore, prefix string, m *Manifest) error {
 	sort.Slice(m.Files, func(i, j int) bool {
 		return m.Files[i].Name < m.Files[j].Name
 	})
@@ -132,7 +132,7 @@ func saveManifest(ctx context.Context, store archiveStore, prefix string, m *Man
 // appendManifestEntry is a convenience wrapper that loads, upserts by
 // Name, and saves. Idempotent: re-appending the same file just
 // overwrites its row (archivedAt is bumped to match).
-func appendManifestEntry(ctx context.Context, store archiveStore, prefix, site string, entry ManifestEntry) error {
+func appendManifestEntry(ctx context.Context, store ArchiveStore, prefix, site string, entry ManifestEntry) error {
 	m, err := loadManifest(ctx, store, prefix, site)
 	if err != nil {
 		return err
@@ -155,7 +155,7 @@ func appendManifestEntry(ctx context.Context, store archiveStore, prefix, site s
 // of remote object keys that were referenced by the removed entries so
 // the caller can issue Delete calls. The manifest is only rewritten if
 // at least one entry was removed.
-func pruneManifest(ctx context.Context, store archiveStore, prefix, site string, drop map[string]struct{}) ([]string, error) {
+func pruneManifest(ctx context.Context, store ArchiveStore, prefix, site string, drop map[string]struct{}) ([]string, error) {
 	m, err := loadManifest(ctx, store, prefix, site)
 	if err != nil {
 		return nil, err

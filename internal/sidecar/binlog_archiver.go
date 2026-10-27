@@ -50,7 +50,7 @@ type BinlogArchiver struct {
 	retentionCfg *retentionClientConfig
 	site         string
 	mysql        roleChecker
-	store        archiveStore
+	store        ArchiveStore
 	logger       *slog.Logger
 
 	// mu guards lastError, lastScanAt, filesArchiv, lastRetentionRun,
@@ -108,7 +108,7 @@ type roleChecker interface {
 // goroutines — call Run for that. site identifies the MySQL site this
 // archiver belongs to and is written into every manifest entry; the
 // restore Job groups manifests by site.
-func NewBinlogArchiver(cfg *PITRConfig, site string, mysql roleChecker, store archiveStore, logger *slog.Logger) *BinlogArchiver {
+func NewBinlogArchiver(cfg *PITRConfig, site string, mysql roleChecker, store ArchiveStore, logger *slog.Logger) *BinlogArchiver {
 	return &BinlogArchiver{
 		cfg:    cfg,
 		site:   site,

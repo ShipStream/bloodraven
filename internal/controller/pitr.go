@@ -215,7 +215,7 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 	// mount the passphrase Secret onto the sidecar container and
 	// point the archiver at the file; everything else (wrapper
 	// selection, re-upload / prune semantics) falls out naturally
-	// from the encryptedStore that sidecar.newArchiveStore chooses.
+	// from the encryptedStore that sidecar.NewArchiveStore chooses.
 	if profile.EncryptionEnabled() {
 		ref := profile.Encryption.PassphraseSecret
 		out.PodVolumes = append(out.PodVolumes, corev1.Volume{
