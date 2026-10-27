@@ -4,7 +4,10 @@
 #   kubectl patch mysqlfailovergroup playground -n bloodraven-playground \
 #     --type merge --patch-file playground/manifests/backup-profile.yaml
 #
-# The S3 profile targets a MinIO sidecar expected at minio.bloodraven-playground:9000.
+# The S3 profile targets the RustFS service that playground/setup.sh deploys
+# (rustfs.bloodraven-playground:9000) and reuses its dragonfly-s3-credentials
+# Secret. setup.sh does not create the `bloodraven` bucket; create it before
+# the first backup runs.
 # The PVC profile provisions a local RWO volume.
 #
 # To trigger a one-off backup:
@@ -30,7 +33,7 @@ spec:
       initialBackoffSeconds: 60
       maxBackoffSeconds: 900
     profiles:
-      - name: minio
+      - name: rustfs
         retentionPolicy:
           count: 5
           maxAgeDays: 7
@@ -41,8 +44,9 @@ spec:
           s3:
             bucket: bloodraven
             prefix: playground
-            endpointURL: http://minio.bloodraven-playground:9000
-            credentialsSecret: minio-backup-creds
+            endpointURL: http://rustfs.bloodraven-playground.svc.cluster.local:9000
+            credentialsSecret: dragonfly-s3-credentials
+            region: us-east-1
         dump:
           threads: 2
           bytesPerChunk: "64M"
@@ -52,7 +56,7 @@ spec:
         # fires `bloodraven trigger-verification` on this schedule,
         # which creates a MysqlBackupVerification CR against the
         # latest Succeeded MysqlBackup for this profile. The manual
-        # path is `./playground/verify-backup.sh run minio`.
+        # path is `./playground/verify-backup.sh run rustfs`.
         verification:
           enabled: true
           schedule: "*/30 * * * *"
@@ -78,7 +82,7 @@ spec:
           compression: zstd
     schedules:
       - name: every-10min
-        profileName: minio
+        profileName: rustfs
         schedule: "*/10 * * * *"
         timeZone: "Etc/UTC"
         concurrencyPolicy: Forbid
