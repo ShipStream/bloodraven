@@ -20,6 +20,19 @@ export default defineNuxtConfig({
     },
   },
 
+  // Baseline security headers. No CSP yet: Docus and the Ask AI assistant
+  // load inline scripts and styles, so one needs testing before it ships.
+  routeRules: {
+    '/**': {
+      headers: {
+        'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'strict-origin-when-cross-origin',
+        'X-Frame-Options': 'DENY',
+        'Strict-Transport-Security': 'max-age=31536000',
+      },
+    },
+  },
+
   // Docus enables the Ask AI assistant when AI_GATEWAY_API_KEY is set
   // (Vercel AI Gateway). Without it the site builds and serves normally,
   // just without the assistant.
