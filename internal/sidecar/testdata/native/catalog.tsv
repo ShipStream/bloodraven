@@ -1,0 +1,10 @@
+fresh-empty	mysql-bin.000001	
+initial	mysql-bin.000002	
+flush-empty	mysql-bin.000003	
+xa-prepare	mysql-bin.000004	
+xa	mysql-bin.000005	
+load-data	mysql-bin.000006	
+compressed	mysql-bin.000007	
+checksum-off	mysql-bin.000009	
+restart-empty	mysql-bin.000011	
+recloned	mysql-bin.000001	3acfc321-d30a-11f1-9ef3-7dd2a8d22646:1-9

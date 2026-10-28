@@ -20,6 +20,12 @@ const ManifestVersion = 1
 // ManifestEntry is a single row in a per-site manifest — one archived
 // binlog file.
 type ManifestEntry struct {
+	GTIDCoverage *BinlogGTIDCoverage `json:"gtidCoverage,omitempty"`
+	// ID identifies sealed bytes (keyed for encrypted stores); empty for legacy keys.
+	ID        string `json:"id,omitempty"`
+	ContentID string `json:"contentId,omitempty"`
+	// BaseGTIDs bridges a physical clone's empty Previous_gtids to its donor history.
+	BaseGTIDs      string    `json:"baseGtids,omitempty"`
 	Name           string    `json:"name"`
 	RemotePath     string    `json:"remotePath"`
 	Size           int64     `json:"size"`
@@ -29,11 +35,51 @@ type ManifestEntry struct {
 	ArchivedAt     time.Time `json:"archivedAt"`
 }
 
-// Manifest is the JSON document written to storage at
-// <prefix>/manifest-<site>.json. One per site so primary and
-// post-failover primary don't race on the same object — the restore
-// Job merges across all manifests in the prefix.
+// PrunedEntry records durable retirement and its object-deletion acknowledgement.
+// ID keeps the original archive key layout; legacy rows use ContentID for byte identity.
+type ArchiveQuarantine struct {
+	Divergent   *ArchiveDivergence     `json:"divergent,omitempty"`
+	Reuse       []ArchiveReuseEvidence `json:"reuse,omitempty"`
+	Entry       ManifestEntry          `json:"entry"`
+	Reason      string                 `json:"reason"`
+	ResumeGTIDs string                 `json:"resumeGtids"`
+	At          time.Time              `json:"at"`
+}
+type ArchiveReuseEvidence struct {
+	First  ManifestEntry `json:"first"`
+	Second ManifestEntry `json:"second"`
+	GTIDs  string        `json:"gtids"`
+	Proof  string        `json:"proof"`
+}
+type ArchiveDivergence struct {
+	ContentID    string `json:"contentId,omitempty"`
+	Name         string `json:"name"`
+	ID           string `json:"id,omitempty"`
+	MissingGTIDs string `json:"missingGtids"`
+}
+type ArchiveHistoryAcknowledgement struct {
+	Reason           string    `json:"reason"`
+	ResumeGTIDs      string    `json:"resumeGtids"`
+	PriorResetReason string    `json:"priorResetReason,omitempty"`
+	At               time.Time `json:"at"`
+}
+type ArchiveEpoch struct {
+	Reuse []ArchiveReuseEvidence `json:"reuse,omitempty"`
+	// Legacy diagnostics are readable for recovery; none authorizes a guard.
+	ServerUUID  string `json:"serverUuid"`
+	LastName    string `json:"lastName"`
+	Executed    string `json:"executed"`
+	ResetReason string `json:"resetReason,omitempty"`
+}
+
+// Manifest is the JSON document at <prefix>/manifest-<site>.json. Each site's
+// sidecar owns its manifest; the restore Job combines their replay streams.
 type Manifest struct {
+	Divergent    []ArchiveDivergence             `json:"divergent,omitempty"`
+	Acknowledged []ArchiveHistoryAcknowledgement `json:"acknowledged,omitempty"`
+	Quarantined  []ArchiveQuarantine             `json:"quarantined,omitempty"`
+	Epoch        *ArchiveEpoch                   `json:"epoch,omitempty"`
+
 	Version int             `json:"version"`
 	Site    string          `json:"site"`
 	Files   []ManifestEntry `json:"files"`
@@ -111,16 +157,22 @@ func loadManifest(ctx context.Context, store ArchiveStore, prefix, site string) 
 	// saveManifest writes back to manifestKey(prefix, m.Site), so a
 	// tampered "site" field could otherwise redirect that write.
 	m.Site = site
+	for i := range m.Files {
+		m.Files[i] = normalizeArchiveEntry(prefix, site, m.Files[i])
+	}
 	return &m, nil
 }
 
 // saveManifest serializes m and writes it to storage under the site's
-// manifest key. The Files slice is sorted lexicographically by Name so
+// manifest key. The Files slice is sorted lexicographically by Name and ID so
 // the output is deterministic and diff-friendly in object storage
 // browsers.
 func saveManifest(ctx context.Context, store ArchiveStore, prefix string, m *Manifest) error {
 	sort.Slice(m.Files, func(i, j int) bool {
-		return m.Files[i].Name < m.Files[j].Name
+		if m.Files[i].Name != m.Files[j].Name {
+			return m.Files[i].Name < m.Files[j].Name
+		}
+		return m.Files[i].ID < m.Files[j].ID
 	})
 	m.Version = ManifestVersion
 	buf, err := json.MarshalIndent(m, "", "  ")
@@ -131,7 +183,7 @@ func saveManifest(ctx context.Context, store ArchiveStore, prefix string, m *Man
 }
 
 // appendManifestEntry is a convenience wrapper that loads, upserts by
-// Name, and saves. Idempotent: re-appending the same file just
+// (Name, ID), and saves. Idempotent: re-appending the same file just
 // overwrites its row (archivedAt is bumped to match).
 func appendManifestEntry(ctx context.Context, store ArchiveStore, prefix, site string, entry ManifestEntry) error {
 	m, err := loadManifest(ctx, store, prefix, site)
@@ -140,7 +192,7 @@ func appendManifestEntry(ctx context.Context, store ArchiveStore, prefix, site s
 	}
 	found := false
 	for i := range m.Files {
-		if m.Files[i].Name == entry.Name {
+		if m.Files[i].identity() == entry.identity() {
 			m.Files[i] = entry
 			found = true
 			break
@@ -152,14 +204,15 @@ func appendManifestEntry(ctx context.Context, store ArchiveStore, prefix, site s
 	return saveManifest(ctx, store, prefix, m)
 }
 
-// pruneManifest removes entries whose Name is in drop. Returns the
-// remote object keys of the removed entries so the caller can issue
-// Delete calls. Keys are rebuilt from prefix/site/Name rather than
+// pruneManifest removes entries whose (Name, ID) identity is in drop. Returns the
+// remote object keys of retired entries, persisted in Pruned before the caller issues
+// Delete calls. Keys are rebuilt from prefix/site/Name/ID rather than
 // taken from the manifest's RemotePath, so a tampered manifest cannot
 // steer deletes outside this site's archive; entries whose Name is not
-// a plain file name are dropped from the manifest but not deleted. The
-// manifest is only rewritten if at least one entry was removed.
-func pruneManifest(ctx context.Context, store ArchiveStore, prefix, site string, drop map[string]struct{}) ([]string, error) {
+// a plain file name, or whose ID is invalid, are dropped but not deleted. The
+// manifest is only rewritten if at least one entry was removed. Drop values
+// must contain the verified content ID (keyed for encrypted stores) for each selected identity.
+func pruneManifest(ctx context.Context, store ArchiveStore, prefix, site string, drop map[binlogIdentity]string) ([]string, error) {
 	m, err := loadManifest(ctx, store, prefix, site)
 	if err != nil {
 		return nil, err
@@ -171,10 +224,10 @@ func pruneManifest(ctx context.Context, store ArchiveStore, prefix, site string,
 	pruned := 0
 	kept := m.Files[:0]
 	for _, f := range m.Files {
-		if _, d := drop[f.Name]; d {
+		if _, d := drop[f.identity()]; d {
 			pruned++
-			if isPlainFileName(f.Name) {
-				removed = append(removed, binlogObjectKey(prefix, site, f.Name))
+			if key, err := ArchiveEntryKey(prefix, site, f); err == nil {
+				removed = append(removed, key)
 			}
 			continue
 		}

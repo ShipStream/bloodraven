@@ -668,3 +668,40 @@ The sidecar loads its passphrase at startup. The deployment fingerprint includes
 
 ### Safe remediation
 Preserve the archive and its original passphrase. Restore access to the original settings and key before attempting to use that recovery history. Do not delete the manifest, overwrite old objects, or enable plaintext fallback as a drift repair. Automatic archive migration and multiple key generations are unsupported; plan any encryption transition separately. For a stale rendered configuration, use the operator with encryption-aware drift detection and verify the normal ordered rollout completes.
+
+## 27. PITR history after a site reclone or data rebuild
+
+### Symptoms
+- A former primary is rebuilt, becomes primary again, and reuses `mysql-bin.000001` or other retained binlog names.
+- Older archivers may report `backlogFiles=0` while missing the new files, because they recognized only the basename.
+
+### Diagnostic steps
+1. Record sidecar, operator, and backup/restore image versions. Confirm all archive readers and writers understand the additive manifest `id` field before using new archives with older images.
+2. Inspect `/archiver/status`, upload logs, and the relevant site manifest through the configured archive reader. New rows use `(name, id)` where `id` is a SHA-256 of sealed plaintext bytes for plaintext stores, or a passphrase-keyed HMAC-SHA256 digest for encrypted stores, and new keys end in `<name>.<id>`. Two rows may share a name. Legacy rows without IDs retain plain keys and persist a verified `contentId` after archive inspection. A surviving rollback-stripped row recovers its ID only from an exact confined `remotePath` key.
+3. Check that sealed files created after rebuild have corresponding objects and rows. New/changed rotations preempt historical work, including known names. A newest-first cursor yields after 64 MiB/two seconds, including mid-file. Verified legacy IDs survive restart; local fingerprints do not persist. Inspection/encryption/upload need no full-file scratch space. Inspect `archive binlog` errors, backlog and actual storage throughput if it cannot catch up.
+4. Verify an isolated restore with application markers written before and after rebuild. A successful upload count or zero backlog cannot prove history that an older writer already omitted.
+
+### Safe remediation
+Preserve old manifests, objects, and encryption material. Do not delete a site manifest, purge local binlogs, or overwrite retained objects to make names appear new. Use compatible ID-aware readers and writers. If an older archiver already missed files, preserve any surviving local binlogs and investigate the recovery gap before declaring PITR coverage restored. Older writers discard IDs, coverage, purged bases, quarantine/reset guards and pending deletes on rewrite; their pruning can drop every same-name row. Re-upgrade repairs surviving stripped IDs but cannot recover lost rows or pending records. Stop the older writer and restore preserved manifests with compatible recovery images, then verify coverage. All rows use GTID predecessor order, including unique-name numbering resets. Empty frontiers/rotations are valid; XA, LOAD DATA and checksum-off logs use observed ordering GTIDs independently of strict retention coverage. Clone `baseGtids` bridges donor GTIDs missing from the first log header. Divergent boundaries fail before SQL. For missing objects with unknown digests or abandoned tails, follow [Repair PITR history safely](../../../../site/content/docs/7.backup-and-restore/7.pitr-history-repair.md): pause writers, preserve objects/manifests, verify a canonical full backup, quarantine the exact row with a reason/resume bound, then verify replay. Quarantine never deletes data and can be undone. Divergence is evaluated only with established server history: empty execution, running clone and read-only/no-channel bootstrap cannot flag the archive. Eligible audits clear recovered foreign-source flags. Known loss from the current server UUID remains unresolved on numeric return; verify recovery or explicitly acknowledge a canonical backup, or quarantine the abandoned row. Surviving flags block affected transactions, including last rows and discovered aliases. Legacy overlap verification runs even without retention; unresolved issuance blocks unsafe compatibility and retirement. A true reuse guard compares conflicting issuance of the same GTIDs; names, retries and publication order are not evidence. Verified reuse still requires a new generation even after quarantine. For an obsolete upload-order guard, `pitr-quarantine --acknowledge-history` verifies every active stream is covered by a canonical full-backup bound, compares overlapping issuance and records prior evidence; it removes no rows and adds no global backup cutoff. Quarantine bounds restrict only windows needing excluded rows; earlier windows with a proven stop before them remain available. Prefer a new unused selected profile `storage.s3.prefix`/`storage.pvc.subPath` and full backup after RESET. Follow the repair guide for the exact procedure.
+
+### Known limitations
+
+- PITR can refuse ambiguous forks/empty stop frontiers, missing or corrupt
+  objects, and unknown issuance provenance. Preserve evidence; recover exact
+  bytes or use the canonical acknowledgement/quarantine procedure. Verified
+  reuse requires a new prefix/full backup. Same-UUID numeric return cannot
+  clear known loss before replacement bytes are sealed and verified.
+- Original commit stamps or usable statement Query events are needed for
+  issuance proof; missing observations and unrecorded historical reuse cannot
+  always be reconstructed. Statement rewrites can trigger a conservative
+  guard. Per-site planning does not prove cross-site completeness; verify all
+  required sites rather than dropping a failing site without evidence.
+- Older writers may already have lost rows, clone bases or recovery provenance.
+  Preserve manifests, objects, original passphrases, compatible images and
+  generation/backup pairing. Downgrades can discard those fields again; use
+  the documented compatible recovery images or a new prefix/full backup.
+- Legacy streaming costs storage reads/S3 egress. Restarts rebuild in-memory
+  comparisons and cooldowns, repeating I/O and deferring pruning. Scheduling
+  budgets do not bound network latency; reverse-ordered GTID histories still
+  incur quadratic interval-index insertion. Watch archive capacity while any
+  unresolved issuance blocks site-wide retirement.

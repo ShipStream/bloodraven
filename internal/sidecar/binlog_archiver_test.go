@@ -50,11 +50,16 @@ type memStore struct {
 	putFileErr map[string]error
 }
 
+func (m *memStore) BinlogContentID(digest string) string { return digest }
+
 func newMemStore() *memStore {
 	return &memStore{objects: map[string][]byte{}, putFileErr: map[string]error{}}
 }
 
 func (m *memStore) Put(_ context.Context, key string, r io.Reader, _ int64) error {
+	if err := m.putFileErr[key]; err != nil {
+		return err
+	}
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -75,7 +80,30 @@ func (m *memStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 	return append([]byte(nil), b...), true, nil
 }
 
-func (m *memStore) GetFile(_ context.Context, _, _ string) error { return errors.New("not used") }
+func (m *memStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	data, ok, err := m.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func (m *memStore) GetFile(ctx context.Context, key, dst string) error {
+	data, ok, err := m.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return os.ErrNotExist
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o600)
+}
 
 func (m *memStore) Delete(_ context.Context, key string) error {
 	m.mu.Lock()
@@ -313,9 +341,13 @@ func TestSnapshotExposesSeededManifestAggregates(t *testing.T) {
 	a := NewBinlogArchiver(cfg, "dc1", checker, store, slog.Default())
 
 	t0 := time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC)
+	id, err := fileContentID(filepath.Join(dir, "mysql-bin.000001"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	seedArchiverWithManifest(t, a, []ManifestEntry{
-		{Name: "mysql-bin.000001", Size: 100, FirstEventTime: t0, LastEventTime: t0.Add(time.Minute), ArchivedAt: t0},
-		{Name: "mysql-bin.000002", Size: 200, FirstEventTime: t0.Add(time.Minute), LastEventTime: t0.Add(2 * time.Minute), ArchivedAt: t0},
+		{ID: id, Name: "mysql-bin.000001", Size: 100, FirstEventTime: t0, LastEventTime: t0.Add(time.Minute), ArchivedAt: t0},
+		{ID: id, Name: "mysql-bin.000002", Size: 200, FirstEventTime: t0.Add(time.Minute), LastEventTime: t0.Add(2 * time.Minute), ArchivedAt: t0},
 	})
 
 	a.scanAndArchive(context.Background())

@@ -48,6 +48,12 @@ func main() {
 			// CR. See trigger.go.
 			runTriggerBackup(os.Args[2:])
 			return
+		case "pitr-quarantine":
+			if err := pitrQuarantine(context.Background(), os.Args[2:], os.Stdout, os.Stderr); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		case "pitr-download":
 			// Invoked by restore Job init containers to download
 			// archived binlog files into the shared emptyDir before

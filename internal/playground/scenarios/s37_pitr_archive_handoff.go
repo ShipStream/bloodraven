@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"strings"
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
@@ -37,7 +38,7 @@ func scenario37PITRArchiveHandoff() runner.Scenario {
 			"continuity across an emergency failover.",
 		Risk:              "medium",
 		DocLink:           "playground/chaos-scenarios.md#37-pitr-archive-handoff-across-failover",
-		Timeout:           30 * time.Minute,
+		Timeout:           40 * time.Minute,
 		ResetBeforeRunAll: true,
 		Precheck:          assertReplicationRunningPrecheck,
 		Steps: []runner.Step{
@@ -47,6 +48,7 @@ func scenario37PITRArchiveHandoff() runner.Scenario {
 			s37MarkerABeforeFailover(),
 			s37Failover(),
 			s37MarkerBAfterFailover(),
+			s37RecloneAndReturn(),
 			s37TargetAndMarkerC(),
 			s37VerifyPerSiteManifests(),
 			s37VerifyTimestampReplay(),
@@ -249,6 +251,95 @@ func s37MarkerBAfterFailover() runner.Step {
 	}
 }
 
+func s37RecloneAndReturn() runner.Step {
+	return runner.Step{Phase: runner.PhaseInject, Name: "reclone the former primary, promote it and archive a reused-name marker", Do: func(ctx context.Context, env *runner.Env) error {
+		target := ctxFetch(env, "oldActive")
+		peer := ctxFetch(env, "newActive")
+		if err := ctxStash(ctx, env, "handoffPeer", peer); err != nil {
+			return err
+		}
+		if err := env.Chaos.ScaleSiteToOne(ctx, target); err != nil {
+			return err
+		}
+		readyCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		defer cancel()
+		mfg, err := env.Wait.UntilCR(readyCtx, env.Namespace, "former primary reachable before reclone", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			for _, site := range m.Status.Sites {
+				if site.Name == target {
+					return site.State == "read-only" || site.State == "writable", "state=" + string(site.State), nil
+				}
+			}
+			return false, "site absent", nil
+		})
+		if err != nil {
+			return err
+		}
+		value := target + ":confirm=" + env.FG
+		for _, site := range mfg.Status.Sites {
+			if site.Name == target && len(site.DivergentGtid) >= 8 {
+				value = target + ":" + site.DivergentGtid[:8]
+			}
+		}
+		requested := time.Now()
+		if err := env.Kube.AnnotateMFGNamed(ctx, env.Namespace, env.FG, "bloodraven.shipstream.io/reclone-site", value); err != nil {
+			return err
+		}
+		cloneCtx, cloneCancel := context.WithTimeout(ctx, 6*time.Minute)
+		defer cloneCancel()
+		if _, err := env.Wait.UntilCR(cloneCtx, env.Namespace, "reclone completes", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			boot := findCondition(m.Status.Conditions, "Bootstrapping")
+			if boot == nil {
+				return false, "bootstrap not observed", nil
+			}
+			return boot.Reason == "Done" && boot.LastTransitionTime.Time.After(requested), boot.Reason, nil
+		}); err != nil {
+			return err
+		}
+		if err := env.Chaos.AnnotatePlannedFailover(ctx, target); err != nil {
+			return err
+		}
+		promoteCtx, promoteCancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer promoteCancel()
+		if _, err := env.Wait.UntilCR(promoteCtx, env.Namespace, "recloned site promoted", func(m *v1alpha1.MysqlFailoverGroup) (bool, string, error) {
+			return m.Status.ActiveSite == target, "active=" + m.Status.ActiveSite, nil
+		}); err != nil {
+			return err
+		}
+		if _, err := waitForArchiverReady(promoteCtx, env, target, path.Join(ctxFetch(env, "backupPrefix"), "binlogs")); err != nil {
+			return err
+		}
+		if err := ctxStash(ctx, env, "newActive", target); err != nil {
+			return err
+		}
+		if err := s37InsertMarker(ctx, env, target, 5, ctxFetch(env, "backupRunStem"), "R", target); err != nil {
+			return err
+		}
+		if err := s37FlushAndArchive(ctx, env, target); err != nil {
+			return err
+		}
+		manifest, found, err := readSiteBinlogManifest(ctx, env, backupE2EBucket, path.Join(ctxFetch(env, "backupPrefix"), "binlogs"), target)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("recloned archive absent")
+		}
+		identities := make(map[string]string)
+		reused := false
+		for _, entry := range manifest.Files {
+			if previous, ok := identities[entry.Name]; ok && previous != entry.RemotePath {
+				reused = true
+			}
+			identities[entry.Name] = entry.RemotePath
+		}
+		if !reused {
+			return fmt.Errorf("reclone did not exercise a retained name collision")
+		}
+		env.Capture.Note("recloned primary reused retained binlog names; marker R archived")
+		return nil
+	}}
+}
+
 func s37TargetAndMarkerC() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseInject,
@@ -300,7 +391,7 @@ func s37VerifyPerSiteManifests() runner.Step {
 		Do: func(ctx context.Context, env *runner.Env) error {
 			binlogPrefix := path.Join(ctxFetch(env, "backupPrefix"), "binlogs")
 			oldActive := ctxFetch(env, "oldActive")
-			newActive := ctxFetch(env, "newActive")
+			newActive := ctxFetch(env, "handoffPeer")
 			for _, site := range []string{oldActive, newActive} {
 				m, found, err := readSiteBinlogManifest(ctx, env, backupE2EBucket, binlogPrefix, site)
 				if err != nil {
@@ -320,14 +411,14 @@ func s37VerifyPerSiteManifests() runner.Step {
 func s37VerifyTimestampReplay() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "timestamp PITR verification includes baseline+A+B, excludes C",
+		Name:  "timestamp PITR verification includes baseline+A+B+reclone marker R, excludes C",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			runStem := ctxFetch(env, "backupRunStem")
 			name := "s37-verify-" + backupRunStamp(env)
 			if err := ctxStash(ctx, env, "verificationName", name); err != nil {
 				return err
 			}
-			query := pitrHandoffSanityQuery(s37DBName, runStem)
+			query := strings.Replace(pitrHandoffSanityQuery(s37DBName, runStem), "SUM(phase='C') = 0", "SUM(phase='C') = 0 AND SUM(phase='R') = 1", 1)
 			pit := &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: ctxFetch(env, "pitrTarget")}
 			if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backupName"), s37ID, pit, query, 1); err != nil {
 				return err

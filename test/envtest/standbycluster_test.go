@@ -5,6 +5,7 @@ package envtest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -28,6 +29,19 @@ type envtestFakeStore struct {
 	Objects map[string][]byte
 	ListErr error
 }
+
+func (s *envtestFakeStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	data, ok, err := s.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("missing %s", key)
+	}
+	return io.NopCloser(strings.NewReader(string(data))), nil
+}
+
+func (s *envtestFakeStore) BinlogContentID(digest string) string { return digest }
 
 func (s *envtestFakeStore) Put(_ context.Context, key string, r io.Reader, _ int64) error {
 	data, err := io.ReadAll(r)

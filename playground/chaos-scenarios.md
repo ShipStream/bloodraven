@@ -953,11 +953,13 @@ Three of these (§32, §36, §38) exposed a real operator defect and shipped a m
 
 **Hypothesis**: With PITR enabled, marker A archived on the old active and marker B archived on the new active — each in its own per-site manifest under the same prefix — are both restorable to a timestamp after B and before C. A pinned timestamp verification includes baseline+A+B and excludes C, proving archive continuity across an emergency failover.
 
-**Injection**: Configure PITR under `e2e/37-…/<run-stamp>`; wait for active archiver readiness; seed baseline and take a full `MysqlBackup`; insert marker A on the current active, `FLUSH BINARY LOGS`, wait archive coverage; scale the active to 0 to force failover; wait for the peer to become active and its sidecar archiver `primary=true` on the **same** prefix; insert marker B, flush, wait coverage; capture the PITR target after B; insert marker C after the target, flush, wait coverage.
+**Injection**: Configure PITR under `e2e/37-…/<run-stamp>`; wait for active archiver readiness; seed baseline and take a full `MysqlBackup`; insert marker A on the current active, `FLUSH BINARY LOGS`, wait archive coverage; scale the active to 0 to force failover; wait for the peer to become active and its sidecar archiver `primary=true` on the **same** prefix; insert marker B, flush, wait coverage; bring the former primary back, explicitly reclone it, promote it again, archive marker R under reused names, then capture the PITR target; insert marker C after the target, flush, wait coverage.
 
-**Verify**: Both `manifest-<oldActive>.json` and `manifest-<newActive>.json` exist under `<prefix>/binlogs` with ≥1 file each (read straight from RustFS via `sidecar.ManifestKey`); the pinned `MysqlBackupVerification` (`mode=timestamp`) reports `ResultRow=1` for the sanity query (baseline+A+B present, C absent) and `ReplayedThroughBinlog` set.
+**Verify**: Both `manifest-<oldActive>.json` and `manifest-<newActive>.json` exist under `<prefix>/binlogs` with ≥1 file each (read straight from RustFS via `sidecar.ManifestKey`); the pinned `MysqlBackupVerification` (`mode=timestamp`) reports `ResultRow=1` for the sanity query (baseline+A+B+R present, C absent) and `ReplayedThroughBinlog` set.
 
-**Timing**: 30-minute timeout.
+**Timing**: 40-minute timeout.
+
+The new reclone/name-reuse leg has compile/unit and native-fixture coverage; the historical live result below predates that extension and does not claim it was run.
 
 **Cleanup**: Reverter scales the old active back to 1; delete backup + verification CRs; drop `chaos_s37_pitr` and wait for the drop to replicate; restore the original backup/PITR spec; wait for a healthy baseline, absorbing any anti-flap cooldown from the failover.
 

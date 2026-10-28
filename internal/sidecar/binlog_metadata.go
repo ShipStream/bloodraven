@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"time"
-
-	"github.com/go-mysql-org/go-mysql/replication"
 )
 
 // BinlogMetadata is the summary of a single sealed binlog file. It is
@@ -22,22 +20,21 @@ import (
 //     event headers. The parser walks the file once; this is cheap.
 //   - PreviousGTIDs: GTID set present at the start of the file
 //     (PREVIOUS_GTIDS_LOG_EVENT). This is the complete GTID state that
-//     was already applied BEFORE this file was opened; it's enough for
-//     restore to cheaply prune files whose entire contents predate the
-//     dump's gtid_executed. A full per-file GTID range would require
-//     accumulating GTID events and merging sets, which the MVP restore
-//     path doesn't need — timestamp filtering plus server-side GTID
-//     dedup at replay time is sufficient.
+//     was already applied BEFORE this file was opened, not the file's
+//     own transactions.
+//   - GTIDCoverage: complete transaction coverage for retention, or an
+//     explicit unknown result when parsing cannot establish it.
 //
 // MySQL writes the FDE with the server start time, not the "first real
 // event time". We therefore skip the FDE when computing FirstEventTime
 // and use the timestamp of the first non-FDE event.
 type BinlogMetadata struct {
-	Name           string    `json:"name"`
-	Size           int64     `json:"size"`
-	FirstEventTime time.Time `json:"firstEventTime"`
-	LastEventTime  time.Time `json:"lastEventTime"`
-	PreviousGTIDs  string    `json:"previousGtids,omitempty"`
+	GTIDCoverage   *BinlogGTIDCoverage `json:"gtidCoverage,omitempty"`
+	Name           string              `json:"name"`
+	Size           int64               `json:"size"`
+	FirstEventTime time.Time           `json:"firstEventTime"`
+	LastEventTime  time.Time           `json:"lastEventTime"`
+	PreviousGTIDs  string              `json:"previousGtids,omitempty"`
 }
 
 // parseBinlogMetadata scans the given binlog file once and returns a
@@ -59,35 +56,15 @@ func parseBinlogMetadata(path string) (BinlogMetadata, error) {
 		Size: fi.Size(),
 	}
 
-	parser := replication.NewBinlogParser()
-	var gotFirstTimestamp bool
-
-	err = parser.ParseFile(path, 0, func(e *replication.BinlogEvent) error {
-		ts := time.Unix(int64(e.Header.Timestamp), 0).UTC()
-
-		if pg, ok := e.Event.(*replication.PreviousGTIDsEvent); ok {
-			meta.PreviousGTIDs = pg.GTIDSets
-			return nil
-		}
-		// FDE timestamp is server-start-time, not a real event time;
-		// skip it so FirstEventTime tracks the first actual event.
-		if e.Header.EventType == replication.FORMAT_DESCRIPTION_EVENT {
-			return nil
-		}
-		if e.Header.Timestamp > 0 {
-			if !gotFirstTimestamp {
-				meta.FirstEventTime = ts
-				gotFirstTimestamp = true
-			}
-			meta.LastEventTime = ts
-		}
-		return nil
-	})
-	// Ignore EOF-style errors from ParseFile (truncated tail events).
-	// If we got at least a PreviousGTIDs or a first timestamp we return
-	// success; the upstream caller decides whether to archive or defer.
-	if err != nil && !gotFirstTimestamp && meta.PreviousGTIDs == "" {
-		return meta, fmt.Errorf("parse %s: %w", path, err)
+	f, err := os.Open(path)
+	if err != nil {
+		return meta, err
 	}
-	return meta, nil
+	defer f.Close()
+	evidence, parseErr := InspectBinlog(f, time.Time{})
+	evidence.Metadata.Name = fi.Name()
+	if parseErr != nil && evidence.Metadata.FirstEventTime.IsZero() && evidence.Metadata.PreviousGTIDs == "" {
+		return evidence.Metadata, parseErr
+	}
+	return evidence.Metadata, nil
 }

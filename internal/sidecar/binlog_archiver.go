@@ -33,16 +33,28 @@ import (
 //     + historical binlog basenames, one per line.
 //  2. Subtracts the last line (the currently-open file) — that one
 //     isn't sealed yet.
-//  3. Subtracts files already present in the site manifest.
+//  3. Subtracts content identities already archived or durably retired.
 //  4. For each remaining file: parse metadata, upload to storage,
 //     append to manifest.
 //
-// The archiver is intentionally idempotent. Re-archiving a file that is
-// already in the manifest is allowed and treated as a no-op (except
-// for refreshing archivedAt if the file is re-uploaded). This makes
-// restarts and process crashes safe.
+// The archiver deduplicates by basename and sealed plaintext content,
+// preserving older files when a rebuilt site's binlog numbering restarts.
 type BinlogArchiver struct {
-	cfg *PITRConfig
+	// Identity work and cursors belong to the scan goroutine, not the status mutex.
+	historyTask       *binlogHistoryTask
+	historyNext       int
+	historyNextAudit  int
+	historyAuditError string
+	historyScanBusy   bool
+	reuseWork         *archiveReuseWork
+	reuseNext         int
+	reuseFailed       map[archiveReuseKey]time.Time
+	reuseErrors       map[archiveReuseKey]error
+	reuseCompared     map[archiveReuseKey]bool
+	sealedSnapshot    map[string]os.FileInfo
+	legacyChecked     map[string]time.Time
+	localIDs          map[string]cachedBinlogIdentity
+	cfg               *PITRConfig
 	// retentionCfg holds the fields the archiver needs to call the
 	// operator's /pitr-cutoff endpoint for retention decisions. Nil
 	// when those fields weren't passed via env (tests, or a
@@ -141,6 +153,16 @@ func (a *BinlogArchiver) SetRetentionClient(bloodravenAddr, namespace, group, pr
 // transient S3 upload failure retries on the next inotify event or
 // poll tick).
 func (a *BinlogArchiver) Run(ctx context.Context) {
+	defer func() {
+		if a.reuseWork != nil {
+			a.reuseWork.close()
+			a.reuseWork = nil
+		}
+		if a.historyTask != nil {
+			a.historyTask.close()
+			a.historyTask = nil
+		}
+	}()
 	a.logger.Info("binlog archiver starting",
 		"storageType", a.cfg.StorageType,
 		"binlogDir", a.cfg.BinlogDir,
@@ -200,6 +222,9 @@ func (a *BinlogArchiver) Run(ctx context.Context) {
 			}
 			a.logger.Warn("fsnotify error", "error", err)
 
+		case <-a.reuseReady():
+			a.reuseWork.notified = true
+			a.scanAndArchive(ctx)
 		case <-ticker.C:
 			a.scanAndArchive(ctx)
 		}
@@ -217,6 +242,9 @@ func (a *BinlogArchiver) runPollOnly(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-a.reuseReady():
+			a.reuseWork.notified = true
+			a.scanAndArchive(ctx)
 		case <-ticker.C:
 			a.scanAndArchive(ctx)
 		}
@@ -230,10 +258,11 @@ func (a *BinlogArchiver) runPollOnly(ctx context.Context) {
 // is serialized by the single goroutine that owns this archiver.
 func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	a.setScan(time.Now())
+	a.historyScanBusy = false
+	defer a.maintainArchive(ctx)
 
-	// Role gate: only the primary archives. Replica's archiver stays
-	// idle, which means on failover the (former) replica starts
-	// archiving its own binlogs the next time the role check passes.
+	// Only the primary uploads; every site maintains its own archive.
+	// On failover the former replica starts uploading on its next scan.
 	// A brief re-check race after failover is fine — at worst the new
 	// primary's first archive cycle fires a couple of seconds later.
 	ro, err := a.mysql.IsReadOnly(ctx)
@@ -244,7 +273,7 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		return
 	}
 	if ro {
-		// Standby: nothing to do. Clear any stale error so a former
+		// No uploads on a standby. Clear stale errors so a former
 		// primary that failed over cleanly stops reporting noise.
 		a.setError("")
 		a.setBacklog(0)
@@ -277,42 +306,8 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 		a.logger.Warn("load manifest", "error", err)
 		return
 	}
-	archivedNames := make(map[string]struct{}, len(manifest.Files))
-	for _, f := range manifest.Files {
-		archivedNames[f.Name] = struct{}{}
-	}
-
-	backlog := int64(0)
-	for _, relOrAbs := range sealed {
-		if _, seen := archivedNames[filepath.Base(relOrAbs)]; !seen {
-			backlog++
-		}
-	}
-
-	archivedThisCycle := 0
-	hadFileError := false
-	for _, relOrAbs := range sealed {
-		// index entries may be absolute ("/var/lib/mysql/mysql-bin.000042")
-		// or relative to binlog_basename depending on MySQL version; we
-		// normalize to an absolute path under cfg.BinlogDir using just
-		// the basename.
-		name := filepath.Base(relOrAbs)
-		if _, seen := archivedNames[name]; seen {
-			continue
-		}
-		abs := filepath.Join(a.cfg.BinlogDir, name)
-		if err := a.archiveOne(ctx, abs, name); err != nil {
-			a.incUploadFailures()
-			a.setError(fmt.Sprintf("archive %s: %v", name, err))
-			a.logger.Warn("archive binlog", "file", name, "error", err)
-			hadFileError = true
-			// Don't bail: try remaining files. A single bad file
-			// shouldn't block newer ones.
-			continue
-		}
-		archivedThisCycle++
-		backlog--
-	}
+	retired := a.retiredBinlogIdentities(manifest)
+	archivedThisCycle, backlog, hadFileError := a.scanFiles(ctx, manifest, sealed, retired)
 	a.setBacklog(backlog)
 
 	if archivedThisCycle > 0 {
@@ -330,26 +325,13 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	if !hadFileError {
 		a.setError("")
 	}
-
-	// Recompute manifest aggregates so the operator can populate
-	// status.pitr without re-listing storage. Reload the manifest to
-	// include entries just appended this cycle.
-	if archivedThisCycle > 0 {
-		if m, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site); err == nil {
-			manifest = m
-		}
-	}
-	a.updateManifestAggregates(manifest.Files)
-
-	// Opportunistic retention sweep. Runs at most once per
-	// retentionCfg.Interval; piggybacked on the archive scan so we
-	// don't need a second ticker.
 	a.maybeRunRetention(ctx)
 }
 
-// maybeRunRetention queries the operator's /pitr-cutoff endpoint and,
+// maybeRunRetention resumes durable pending deletes, then queries /pitr-cutoff and,
 // if a cutoff is returned, prunes manifest entries (and their remote
-// objects) whose LastEventTime is strictly before the cutoff. Errors
+// objects) whose transactions are covered by every retained backup and
+// whose LastEventTime is strictly before the bounded cutoff. Errors
 // are logged but not surfaced via setError so a transient 503 from the
 // operator doesn't leak into the archiver status.
 func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
@@ -386,10 +368,13 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 		a.logger.Warn("retention: load manifest", "error", err)
 		return
 	}
-	drop := map[string]struct{}{}
+	if manifest.Epoch != nil && manifest.Epoch.ResetReason != "" {
+		return
+	}
+	drop := map[binlogIdentity]string{}
 	for _, f := range manifest.Files {
 		if !f.LastEventTime.IsZero() && f.LastEventTime.Before(cutoff) {
-			drop[f.Name] = struct{}{}
+			drop[f.identity()] = f.ID
 		}
 	}
 	if len(drop) == 0 {
@@ -420,7 +405,7 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 // binlogs whose last event is within this window are always kept. The
 // cutoff comes over the operator's unauthenticated aux endpoint, so this
 // bounds what a spoofed reply can destroy. A legitimate cutoff is the
-// oldest retained backup's completion time, which is normally older.
+// oldest retained backup's start time; GTID containment is also required.
 const minRetainedBinlogAge = 24 * time.Hour
 
 // boundRetentionCutoff clamps cutoff so a sweep never deletes binlogs
@@ -486,36 +471,6 @@ func (a *BinlogArchiver) fetchRetentionCutoff(ctx context.Context) (time.Time, e
 // and appends the resulting entry to the site manifest. Metadata and
 // manifest updates happen AFTER a successful upload so a partial
 // upload never leaves a dangling manifest row pointing at a 404.
-func (a *BinlogArchiver) archiveOne(ctx context.Context, absPath, name string) error {
-	meta, err := parseBinlogMetadata(absPath)
-	if err != nil {
-		return fmt.Errorf("parse metadata: %w", err)
-	}
-
-	key := binlogObjectKey(a.cfg.ManifestPrefix, a.site, name)
-	if err := a.store.PutFile(ctx, key, absPath); err != nil {
-		return fmt.Errorf("upload: %w", err)
-	}
-
-	entry := ManifestEntry{
-		Name:           meta.Name,
-		RemotePath:     key,
-		Size:           meta.Size,
-		FirstEventTime: meta.FirstEventTime,
-		LastEventTime:  meta.LastEventTime,
-		PreviousGTIDs:  meta.PreviousGTIDs,
-		ArchivedAt:     time.Now().UTC(),
-	}
-	if err := appendManifestEntry(ctx, a.store, a.cfg.ManifestPrefix, a.site, entry); err != nil {
-		// The file is uploaded but the manifest update failed. Next
-		// cycle will try again (archivedNames check will miss, leading
-		// to a re-upload + re-append). We intentionally don't attempt
-		// to roll back the upload here — idempotent re-write is
-		// cheaper than orphan cleanup.
-		return fmt.Errorf("append manifest: %w", err)
-	}
-	return nil
-}
 
 // Status is a snapshot of the archiver's state for the sidecar HTTP
 // surface. Exposed via /archiver/status so kubectl describe / operator

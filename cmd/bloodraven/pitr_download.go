@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -218,16 +216,10 @@ func discoverSites(ctx context.Context, store sidecar.ArchiveStore, prefix strin
 	return sites, nil
 }
 
-// downloadSiteBinlogs reads one site's manifest, filters entries whose
-// FirstEventTime is strictly after stopTime (they can't contribute
-// transactions inside the replay window), and downloads each surviving
-// file into <outDir>/<site>/<name>. Returns the number of files
-// downloaded.
-//
-// Entries with a zero FirstEventTime are conservatively kept: the
-// parser couldn't find a usable first timestamp (truncated file,
-// malformed header), and the cheapest safe default is to replay it
-// and let GTID dedup on the server filter applied transactions.
+// downloadSiteBinlogs validates one site's causal replay window and stages its
+// prefix through a confirmed stop barrier under unique ordinal names. Metadata
+// hints never independently omit a file; START_GTIDS optionally supplies the
+// trusted backup lower bound. Every selected stream is checked before publication.
 func downloadSiteBinlogs(
 	ctx context.Context,
 	store sidecar.ArchiveStore,
@@ -239,59 +231,7 @@ func downloadSiteBinlogs(
 	if !isSafeBasename(site) {
 		return 0, fmt.Errorf("reject unsafe site name %q", site)
 	}
-	m, err := sidecar.LoadManifest(ctx, store, prefix, site)
-	if err != nil {
-		return 0, err
-	}
-	// Reject manifest entries whose Name would escape the site's
-	// staging directory or whose stored RemotePath points outside the
-	// trusted manifest prefix. A compromised bucket could otherwise
-	// have a crafted manifest yank arbitrary objects (e.g. from
-	// another tenant's prefix) or land files in /tmp / /var/run/secrets
-	// via basename traversal (AUDIT H1).
-	siteDir := filepath.Join(outDir, site)
-	if err := os.MkdirAll(siteDir, 0o755); err != nil {
-		return 0, fmt.Errorf("mkdir %s: %w", siteDir, err)
-	}
-	absSiteDir, err := filepath.Abs(siteDir)
-	if err != nil {
-		return 0, fmt.Errorf("abs %s: %w", siteDir, err)
-	}
-	// Reconstruct the expected RemotePath from trusted inputs
-	// (profile prefix + site + basename) rather than trusting the
-	// stored value — the manifest attacker has no way to influence
-	// the prefix + site pair we assemble here.
-	allowedRemotePrefix := path.Join(prefix, site) + "/"
-	downloaded := 0
-	for _, e := range m.Files {
-		if !e.FirstEventTime.IsZero() && e.FirstEventTime.After(stopTime) {
-			continue
-		}
-		if !isSafeBasename(e.Name) {
-			return downloaded, fmt.Errorf("reject manifest entry with unsafe name %q", e.Name)
-		}
-		dst, err := safeJoinUnderRoot(absSiteDir, e.Name)
-		if err != nil {
-			return downloaded, fmt.Errorf("reject unsafe manifest name %q: %w", e.Name, err)
-		}
-		// Accept the stored RemotePath only when it lies under the
-		// expected prefix+site; otherwise rebuild it from trusted
-		// fields.
-		remotePath := e.RemotePath
-		if remotePath == "" || !strings.HasPrefix(remotePath, allowedRemotePrefix) {
-			remotePath = path.Join(prefix, site, e.Name)
-		}
-		if err := store.GetFile(ctx, remotePath, dst); err != nil {
-			return downloaded, fmt.Errorf("download %s: %w", remotePath, err)
-		}
-		logger.Info("archived binlog downloaded",
-			"site", site,
-			"name", e.Name,
-			"size", e.Size,
-			"first_event", e.FirstEventTime.Format(time.RFC3339))
-		downloaded++
-	}
-	return downloaded, nil
+	return downloadPITRWindow(ctx, store, prefix, site, stopTime, outDir, os.Getenv("BLOODRAVEN_PITR_START_GTIDS"), logger)
 }
 
 // isSafeBasename rejects names with path separators, parent references,

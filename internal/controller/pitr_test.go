@@ -292,6 +292,7 @@ func TestBuildRestorePITRFragments_S3BuildsInitContainer(t *testing.T) {
 	// Main container gets RO shared volume + BLOODRAVEN_PITR_LOCAL_DIR.
 	assertEnvEquals(t, frags.MainEnv, "BLOODRAVEN_PITR_LOCAL_DIR", restorePITRLocalDir)
 	assertEnvEquals(t, frags.MainEnv, "BLOODRAVEN_PITR_STOP_DATETIME", "2026-04-15T09:30:00Z")
+	assertEnvEquals(t, frags.MainEnv, "TZ", "UTC")
 	if len(frags.MainMounts) != 1 || !frags.MainMounts[0].ReadOnly {
 		t.Errorf("want 1 RO main mount, got %+v", frags.MainMounts)
 	}

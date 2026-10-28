@@ -1181,6 +1181,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 
 	var initContainers []corev1.Container
 	if pitrFrags.InitContainer != nil {
+		pitrFrags.InitContainer.Env = append(pitrFrags.InitContainer.Env, corev1.EnvVar{Name: "BLOODRAVEN_PITR_START_GTIDS", Value: sourceMeta.SourceGtidExecuted})
 		initContainers = append(initContainers, *pitrFrags.InitContainer)
 	}
 
