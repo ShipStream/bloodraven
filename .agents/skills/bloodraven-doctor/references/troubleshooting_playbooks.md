@@ -625,3 +625,26 @@ A healthy operator pod does not guarantee that every group has a live topology m
 ### Safe remediation
 1. Restore or fix the Secret named in the error. The next sync starts a fresh manager. You do not need to restart the operator.
 2. Do not promote by hand while the group has no manager unless the primary is actually down. Once the manager is back, it re-evaluates topology on its first poll.
+
+## 25. Encrypted PITR sidecar fails to init archive store
+
+### Symptoms
+- The sidecar crash-loops with `failed to init archive store` and `permission denied` for the passphrase file.
+- Sidecar HTTP probes fail, pods are unready, and archival and sidecar fencing are unavailable.
+
+### Cause
+Older operators project `pitr-passphrase` as root-owned mode `0400`, but PITR sidecars default to UID 999 and MySQL pods have no fsGroup by default. The sidecar exits during archive-store initialization, before starting its HTTP server or fencing monitor.
+
+### Diagnostic steps
+1. Read the previous sidecar startup log:
+   ```bash
+   kubectl logs -n <ns> <pod> -c sidecar --previous --tail=100
+   ```
+2. Inspect the pod's Secret mode and security contexts without reading Secret contents:
+   ```bash
+   kubectl get pod -n <ns> <pod> -o jsonpath='{.spec.volumes[?(@.name=="pitr-passphrase")].secret.defaultMode}{"\n"}{.spec.securityContext}{"\n"}{.spec.containers[?(@.name=="sidecar")].securityContext}{"\n"}'
+   ```
+   JSON reports decimal modes: `256` is `0400`; `292` is `0444`. Without fsGroup, a non-root UID cannot read the root-owned `0400` projection. An unavailable `/archiver/status` is expected when initialization fails; use logs to establish the cause.
+
+### Safe remediation
+Upgrade to the operator that projects the live sidecar passphrase as `0444`, matching PITR S3 credentials. Its PITR render-version change triggers ordered updates for existing deployments. Verify the new pod's projection mode, readiness, and `/archiver/status` after the rollout. Backup and restore Job projections keep their separate fsGroup-based permissions. Preserve the existing passphrase; adding fsGroup to an existing MySQL PVC can trigger a recursive ownership change and is unnecessary for this fix.
