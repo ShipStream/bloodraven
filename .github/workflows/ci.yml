@@ -53,11 +53,24 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
+      - id: gocache
+        uses: ./.github/actions/go-cache
+        with:
+          flavor: lint
+          extra-paths: ~/.cache/golangci-lint
       - name: Install golangci-lint
         run: make install-lint
       - name: Run golangci-lint
         run: make lint
+      - name: Save Go build cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gocache.outputs.build-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ steps.gocache.outputs.gocache }}
+            ~/.cache/golangci-lint
+          key: ${{ steps.gocache.outputs.build-key }}
 
   build:
     needs: changes
@@ -69,37 +82,74 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
+      - id: gocache
+        uses: ./.github/actions/go-cache
+        with:
+          flavor: plain
       - name: Build bloodraven
         run: go build ./cmd/bloodraven
       - name: Build sidecar
         run: go build ./cmd/sidecar
+      - name: Save Go build cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gocache.outputs.build-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.gocache.outputs.gocache }}
+          key: ${{ steps.gocache.outputs.build-key }}
+      - name: Download Go modules for cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gocache.outputs.mod-hit != 'true'
+        run: go mod download
+      - name: Save Go module cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gocache.outputs.mod-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.gocache.outputs.gomodcache }}
+          key: ${{ steps.gocache.outputs.mod-key }}
 
   test-unit:
     needs: changes
     if: needs.changes.outputs.go == 'true'
     name: Test / Unit
     runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -count=1
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
+      - id: gocache
+        uses: ./.github/actions/go-cache
+        with:
+          flavor: race
       - name: Run unit tests
         run: make test-unit
+      - name: Save Go build cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gocache.outputs.build-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.gocache.outputs.gocache }}
+          key: ${{ steps.gocache.outputs.build-key }}
 
   test-component:
     needs: changes
     if: needs.changes.outputs.go == 'true'
     name: Test / Component
     runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -count=1
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
+      - id: gocache
+        uses: ./.github/actions/go-cache
+        with:
+          flavor: race
       - name: Run component tests
         run: make test-component
 
@@ -108,12 +158,18 @@ jobs:
     if: needs.changes.outputs.go == 'true'
     name: Test / Envtest
     runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -count=1
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
+      - id: gocache
+        uses: ./.github/actions/go-cache
+        with:
+          flavor: race
       - name: Install setup-envtest
         # Keep in step with sigs.k8s.io/controller-runtime and k8s.io/api in go.mod.
         run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
@@ -133,7 +189,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
+      - id: gocache
+        uses: ./.github/actions/go-cache
+        with:
+          flavor: codegen
       - name: Run code generation
         run: make generate && make manifests
       - name: Check for uncommitted changes
@@ -154,18 +214,30 @@ jobs:
             echo "Copy regenerated files: cp config/crd/bases/*.yaml charts/bloodraven/crds/ && commit."
             exit 1
           fi
+      - name: Save Go build cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gocache.outputs.build-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.gocache.outputs.gocache }}
+          key: ${{ steps.gocache.outputs.build-key }}
 
   license-roundtrip:
     needs: changes
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.site == 'true'
     name: License / Roundtrip
     runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -count=1
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
+      - id: gocache
+        uses: ./.github/actions/go-cache
+        with:
+          flavor: race
       - uses: actions/setup-node@v7
         with:
           node-version: 22

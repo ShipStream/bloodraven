@@ -28,6 +28,8 @@ Pull requests run jobs for the areas they touch: Go jobs for Go-related source a
 | `course-check` | Builds the course once, verifies and tests that build, then checks committed output for drift |
 | `all-checks` | Summary job — accepts skipped jobs and fails on any failure or cancellation, including `changes`; use this as the single branch-protection required status check |
 
+Go jobs restore a shared module cache and separate `race`, `plain`, `codegen`, and `lint` build caches. Only pushes to `main` save caches: test-unit owns `race`, build owns `plain` and modules, generate-check owns `codegen`, and lint owns `lint` (including golangci-lint's analysis cache). Build cache snapshots refresh weekly. Test jobs use `GOFLAGS=-count=1` so restored caches cannot reuse test results. PRs and release calls restore caches without saving them.
+
 **Permissions:** `contents: read` (default)
 
 ---
