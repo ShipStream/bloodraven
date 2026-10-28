@@ -118,12 +118,27 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 
+	var job batchv1.Job
+	jobKey := types.NamespacedName{Namespace: v.Namespace, Name: verificationJobName(v.Name)}
+	if err := r.Get(ctx, jobKey, &job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.launchVerification(ctx, &v)
+		}
+		return ctrl.Result{}, fmt.Errorf("get verification job: %w", err)
+	}
+	if !metav1.IsControlledBy(&job, &v) {
+		return ctrl.Result{}, fmt.Errorf("verification Job is not owned by this verification")
+	}
+	return r.observeVerificationJob(ctx, &v, &job)
+}
+
+func (r *MysqlBackupVerificationReconciler) launchVerification(ctx context.Context, v *v1alpha1.MysqlBackupVerification) (ctrl.Result, error) {
 	// Resolve the referenced failover group.
 	var fg v1alpha1.MysqlFailoverGroup
 	fgKey := types.NamespacedName{Namespace: v.Namespace, Name: v.Spec.FailoverGroupRef.Name}
 	if err := r.Get(ctx, fgKey, &fg); err != nil {
 		if apierrors.IsNotFound(err) {
-			return r.failVerification(ctx, &v, "GroupNotFound",
+			return r.failVerification(ctx, v, "GroupNotFound",
 				fmt.Sprintf("MysqlFailoverGroup %q not found", fgKey.Name))
 		}
 		return ctrl.Result{}, fmt.Errorf("get failover group: %w", err)
@@ -132,16 +147,16 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	// Coalesce owner-ref + label stamp.
 	needsUpdate := false
 	if len(v.OwnerReferences) == 0 {
-		if err := controllerutil.SetControllerReference(&fg, &v, r.Scheme); err != nil {
+		if err := controllerutil.SetControllerReference(&fg, v, r.Scheme); err != nil {
 			return ctrl.Result{}, fmt.Errorf("set owner ref: %w", err)
 		}
 		needsUpdate = true
 	}
-	if ensureVerificationLabels(&v) {
+	if ensureVerificationLabels(v) {
 		needsUpdate = true
 	}
 	if needsUpdate {
-		if err := r.Update(ctx, &v); err != nil {
+		if err := r.Update(ctx, v); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update owner ref / labels: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -150,47 +165,37 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	// Resolve the named profile.
 	profile := findProfile(&fg, v.Spec.ProfileName)
 	if profile == nil {
-		return r.failVerification(ctx, &v, "ProfileNotFound",
+		return r.failVerification(ctx, v, "ProfileNotFound",
 			fmt.Sprintf("profile %q not found on MysqlFailoverGroup %q", v.Spec.ProfileName, fg.Name))
 	}
 
 	// Enforce per-profile single-flight: if another non-terminal
 	// verification for the same (group, profile) exists and was
 	// created earlier than this one, refuse to run concurrently.
-	if blocked, err := r.findBlockingVerification(ctx, &v); err != nil {
+	if blocked, err := r.findBlockingVerification(ctx, v); err != nil {
 		return ctrl.Result{}, fmt.Errorf("check concurrent verifications: %w", err)
 	} else if blocked != "" {
-		return r.failVerification(ctx, &v, "BlockedByActiveVerification",
+		return r.failVerification(ctx, v, "BlockedByActiveVerification",
 			fmt.Sprintf("another verification %q for (group=%s, profile=%s) is still running",
 				blocked, v.Spec.FailoverGroupRef.Name, v.Spec.ProfileName))
 	}
 
-	// Resolve the target MysqlBackup (explicit ref, or the latest
-	// Succeeded for this profile).
-	backup, err := r.resolveBackup(ctx, &v)
+	backup, err := r.resolvePinnedVerificationBackup(ctx, v)
 	if err != nil {
-		return r.failVerification(ctx, &v, "BackupNotAvailable", err.Error())
+		return r.failVerification(ctx, v, "BackupNotAvailable", err.Error())
 	}
-
-	// Stamp the resolved ref onto status the moment we know it so a
-	// later cleanup can still identify the source.
-	if v.Status.BackupRef == nil || v.Status.BackupRef.Name != backup.Name {
+	if v.Status.BackupRef == nil {
 		patch := client.MergeFrom(v.DeepCopy())
-		v.Status.BackupRef = &v1alpha1.VerificationBackupRef{
-			Name:        backup.Name,
-			UID:         string(backup.UID),
-			Location:    backup.Status.Location,
-			StorageType: backup.Status.StorageType,
-		}
-		if err := r.Status().Patch(ctx, &v, patch); err != nil {
-			return ctrl.Result{}, fmt.Errorf("patch backupRef: %w", err)
+		v.Status.BackupRef = verificationBackupSnapshot(backup)
+		if err := r.Status().Patch(ctx, v, patch); err != nil {
+			return ctrl.Result{}, fmt.Errorf("persist pinned backup reference: %w", err)
 		}
 	}
 
 	// Ensure the derived creds Secret (S3 workloads consult it; the
 	// ephemeral mysqld uses an in-pod synthetic root).
 	credsName := verificationCredsSecretName(v.Name)
-	if err := r.ensureVerificationCredsSecret(ctx, &fg, &v, credsName); err != nil {
+	if err := r.ensureVerificationCredsSecret(ctx, &fg, v, credsName); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensure verification creds: %w", err)
 	}
 
@@ -206,53 +211,54 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 		v.Status.StartTime = &now
 		v.Status.Message = "ephemeral resources provisioned"
 		v.Status.ObservedGeneration = v.Generation
-		if err := r.Status().Patch(ctx, &v, patch); err != nil {
+		if err := r.Status().Patch(ctx, v, patch); err != nil {
 			return ctrl.Result{}, fmt.Errorf("patch provisioning status: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Ensure the Job exists.
-	jobName := verificationJobName(v.Name)
-	jobKey := types.NamespacedName{Namespace: v.Namespace, Name: jobName}
-	var job batchv1.Job
-	if err := r.Get(ctx, jobKey, &job); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("get verification job: %w", err)
-		}
-		built, err := buildVerificationJob(verificationJobInputs{
-			FailoverGroup:        &fg,
-			Profile:              *profile,
-			Verification:         &v,
-			Backup:               backup,
-			CredsSecretName:      credsName,
-			ScriptsConfigMapName: backupScriptsConfigMapName(fg.Name),
-		})
-		if err != nil {
-			return r.failVerification(ctx, &v, "BuildJobFailed", err.Error())
-		}
-		if err := controllerutil.SetControllerReference(&v, built, r.Scheme); err != nil {
-			return ctrl.Result{}, fmt.Errorf("set job owner ref: %w", err)
-		}
-		if err := r.Create(ctx, built); err != nil {
-			return ctrl.Result{}, fmt.Errorf("create verification job: %w", err)
-		}
-		r.Recorder.Eventf(&v, corev1.EventTypeNormal, "VerificationStarted",
-			"created verification Job %s (backup=%s, profile=%s)", built.Name, backup.Name, profile.Name)
-
-		patch := client.MergeFrom(v.DeepCopy())
-		v.Status.Phase = v1alpha1.VerificationPhaseRestoring
-		v.Status.JobName = built.Name
-		v.Status.Message = "running restore Job against ephemeral mysqld"
-		v.Status.ObservedGeneration = v.Generation
-		if err := r.Status().Patch(ctx, &v, patch); err != nil {
-			return ctrl.Result{}, fmt.Errorf("patch running status: %w", err)
-		}
-		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+	built, err := buildVerificationJob(verificationJobInputs{
+		FailoverGroup:        &fg,
+		Profile:              *profile,
+		Verification:         v,
+		Backup:               backup,
+		CredsSecretName:      credsName,
+		ScriptsConfigMapName: backupScriptsConfigMapName(fg.Name),
+	})
+	if err != nil {
+		return r.failVerification(ctx, v, "BuildJobFailed", err.Error())
 	}
+	if err := controllerutil.SetControllerReference(v, built, r.Scheme); err != nil {
+		return ctrl.Result{}, fmt.Errorf("set job owner ref: %w", err)
+	}
+	if err := r.Create(ctx, built); err != nil {
+		return ctrl.Result{}, fmt.Errorf("create verification job: %w", err)
+	}
+	r.Recorder.Eventf(v, corev1.EventTypeNormal, "VerificationStarted",
+		"created verification Job %s (backup=%s, profile=%s)", built.Name, backup.Name, profile.Name)
 
+	patch := client.MergeFrom(v.DeepCopy())
+	v.Status.Phase = v1alpha1.VerificationPhaseRestoring
+	v.Status.JobName = built.Name
+	v.Status.Message = "running restore Job against ephemeral mysqld"
+	v.Status.ObservedGeneration = v.Generation
+	if err := r.Status().Patch(ctx, v, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("patch running status: %w", err)
+	}
+	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+}
+
+func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.Context, v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	ref, err := verificationJobSource(v, job)
+	if err != nil {
+		return r.failVerification(ctx, v, "BackupIdentityMismatch", err.Error())
+	}
+	if err := r.pinVerificationJobSource(ctx, v, job, ref); err != nil {
+		return ctrl.Result{}, err
+	}
 	// Observe the Job. Status translation reuses the backup helper.
-	phase, message := jobPhase(&job, "verification")
+	phase, message := jobPhase(job, "verification")
 	if phase == "" {
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
@@ -260,7 +266,7 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	// Terminal — build next status and patch iff different, then emit
 	// metrics exactly once.
 	next := *v.Status.DeepCopy()
-	stable := stableJobCompletionTime(&job)
+	stable := stableJobCompletionTime(job)
 	var completion metav1.Time
 	if stable != nil {
 		completion = *stable
@@ -271,7 +277,7 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	// Parse the verify.sh log sentinels for PITR replay + sanity check
 	// details. Nil sentinels (missing Clientset, older Jobs) leave the
 	// status fields at zero value and do not fail the reconcile.
-	sentinels := r.tailVerificationSentinels(ctx, &v, &job)
+	sentinels := r.tailVerificationSentinels(ctx, v, job)
 	if sentinels.Replay != nil {
 		next.ReplayedThroughBinlog = sentinels.Replay
 	}
@@ -317,13 +323,13 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 	next.ObservedGeneration = v.Generation
 	next.JobName = job.Name
 
-	if v.Status.Phase == next.Phase && equality.Semantic.DeepEqual(&v.Status, &next) {
+	if v.Status.Phase == next.Phase && equality.Semantic.DeepEqual(v.Status, &next) {
 		// Idempotent — just run post-terminal cleanup + retention.
-		requeue, err := r.maybeCleanupAfterTerminal(ctx, &v)
+		requeue, err := r.maybeCleanupAfterTerminal(ctx, v)
 		if err != nil {
 			logger.Error(err, "post-terminal cleanup")
 		}
-		if err := r.pruneRetention(ctx, &v); err != nil {
+		if err := r.pruneRetention(ctx, v); err != nil {
 			logger.Error(err, "retention prune")
 		}
 		return ctrl.Result{RequeueAfter: requeue}, nil
@@ -331,28 +337,35 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 
 	patch := client.MergeFrom(v.DeepCopy())
 	v.Status = next
-	if err := r.Status().Patch(ctx, &v, patch); err != nil {
+	if err := r.Status().Patch(ctx, v, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch final status: %w", err)
 	}
 
-	r.emitTerminalMetrics(&v)
+	execution := v.DeepCopy()
+	if group := job.Spec.Template.Labels[labelFailoverGroup]; group != "" {
+		execution.Spec.FailoverGroupRef.Name = group
+	}
+	if profile := job.Spec.Template.Labels[labelBackupProfile]; profile != "" {
+		execution.Spec.ProfileName = profile
+	}
+	r.emitTerminalMetrics(execution)
 
 	if next.Phase == v1alpha1.VerificationPhaseSucceeded {
-		r.Recorder.Eventf(&v, corev1.EventTypeNormal, "VerificationSucceeded",
+		r.Recorder.Eventf(v, corev1.EventTypeNormal, "VerificationSucceeded",
 			"verification %s succeeded: %s", v.Name, message)
 	} else {
-		r.Recorder.Eventf(&v, corev1.EventTypeWarning, "VerificationFailed",
+		r.Recorder.Eventf(v, corev1.EventTypeWarning, "VerificationFailed",
 			"verification %s failed: %s", v.Name, message)
 	}
 
 	// Cleanup: success → full cleanup; failure with KeepOnFailure=false
 	// → full cleanup; failure with KeepOnFailure=true → keep PVC+Pod
 	// for inspection, retention sweep reclaims later.
-	requeue, err := r.maybeCleanupAfterTerminal(ctx, &v)
+	requeue, err := r.maybeCleanupAfterTerminal(ctx, v)
 	if err != nil {
 		logger.Error(err, "post-terminal cleanup")
 	}
-	if err := r.pruneRetention(ctx, &v); err != nil {
+	if err := r.pruneRetention(ctx, v); err != nil {
 		logger.Error(err, "retention prune")
 	}
 	return ctrl.Result{RequeueAfter: requeue}, nil

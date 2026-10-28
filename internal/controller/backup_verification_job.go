@@ -507,6 +507,11 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	}
 	podSC, containerSC := mergeSecurityContexts(userPod, userCont)
 
+	sourceSnapshot, err := json.Marshal(verificationBackupSnapshot(backup))
+	if err != nil {
+		return nil, fmt.Errorf("encode verification source snapshot: %w", err)
+	}
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      verificationJobName(v.Name),
@@ -517,7 +522,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			ActiveDeadlineSeconds: &activeDeadline,
 			BackoffLimit:          &backoff,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: map[string]string{annotationVerificationBackup: string(sourceSnapshot)}},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,

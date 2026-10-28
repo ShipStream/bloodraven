@@ -398,3 +398,26 @@ The operator partially revokes the `app` user's write and DDL privileges on the 
 1. If running an affected older operator, upgrade to the per-run lineage fix. Do not delete successful or failed history to make retries work; each new run receives its own chain.
 2. If backoff is pending, allow the scheduled wake-up. If a legitimate successor exists, investigate that backup's own phase and Job instead of forcing another retry of its predecessor.
 3. For a conflicting identity, establish the source of the conflicting object or metadata edit before acting. Do not rewrite lineage annotations or attempt counters to bypass `maxAttempts`. If an immediate backup is needed, use `kubectl bloodraven backup <group> -n <ns>` for an explicit new run.
+
+---
+
+## 16. Verification source does not match the expected backup
+
+### Symptoms
+
+- A newer successful backup appears while a verification is still running.
+- `BackupNotAvailable` after a selected source was deleted or recreated before Job launch.
+- `BackupIdentityMismatch` on a running legacy verification, or disagreement between status and the Job's source.
+
+### Diagnostic steps
+
+1. Collect the verification name, phase, Job name and `status.backupRef` name/UID/location/storage type. The triage and support-bundle projections include these public fields. Compare the selected UID rather than relying on a reused backup name or today's latest successful backup.
+2. Inspect the producing Job's pod-template `shipstream.io/verification-backup` JSON annotation. New Jobs pin the same tuple in immutable Job spec; the operator checks it against the source env and restores missing or drifted status from it. Existing Jobs are observed without re-fetching the source CR or current profile/derived credentials.
+3. For plaintext, compare the main container's `BLOODRAVEN_INPUT_URL` with the pinned location using the normal S3/PVC trailing-slash convention. For encrypted sources, inspect `decrypt-download` storage, bucket and `BLOODRAVEN_SOURCE_PREFIX`; its target and the main input are temporary decrypted paths. Do not collect passphrases, Secrets or arbitrary env.
+4. A legacy Job without the snapshot can continue only with a complete status reference matching its source inputs. If the status claims a different location, or its identity is incomplete, the fixed operator fails it with `BackupIdentityMismatch` instead of certifying another backup. Historical terminal records produced by an older operator still require comparison with retained Job evidence.
+
+### Safe remediation
+
+1. For a running Job whose original source is still recorded, allow it to finish. Newer backups or edits to `spec.backupRef` do not change its execution identity. Create another verification to test the newer backup.
+2. If the pinned source disappeared or its UID changed before launch, create a new verification for the intended source. The operator does not silently re-pin the old run, even when its spec requested latest selection.
+3. For identity mismatch, preserve the recorded reference and Job inputs for investigation, then start a new verification with an explicit intended source. Do not patch the audit record to make a different backup appear verified. Pinning identifies the source but does not hold stored artifacts against retention or external deletion.
