@@ -443,6 +443,16 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	defer db.Close()
 
+	if err := requirePartialRevokes(sqlCtx, db); err != nil {
+		if transientSQLError(err) {
+			return r.pending(ctx, &mdb, "PrimaryUnavailable",
+				fmt.Sprintf("transient MySQL error checking partial_revokes on the primary of group %q: %v", fg.Name, err))
+		}
+		message := fmt.Sprintf("cannot confirm partial_revokes=ON on the primary of group %q; tenant changes are deferred: %v", fg.Name, err)
+		r.Recorder.Event(&mdb, corev1.EventTypeWarning, "PartialRevokesOff", message)
+		return r.pending(ctx, &mdb, "PartialRevokesOff", message)
+	}
+
 	// Every username this CR's current spec declares, and on which surface.
 	// Every drop below consults it: a name that is still desired — even on
 	// a different surface than the record being retired — is never dropped.
@@ -1927,13 +1937,10 @@ func withdrawRemovedLedgerEntries(st *v1alpha1.MysqlDatabaseStatus, spec *v1alph
 }
 
 // revokeAllOnDatabase revokes every privilege username holds on database
-// over hosts, in every grantDatabaseForms spelling. renderErr reports a
+// over hosts, in every grantDatabaseSpellings spelling. renderErr reports a
 // value that does not render, before any revoke ran; err a MySQL failure.
 func revokeAllOnDatabase(ctx context.Context, db *sql.DB, kind, database, username string, hosts []string) (renderErr, err error) {
-	forms, err := grantDatabaseForms(ctx, db, database)
-	if err != nil {
-		return nil, err
-	}
+	forms := grantDatabaseSpellings(database)
 	stmts, rerr := renderRevokeAllForms(kind, forms, username, hosts)
 	if rerr != nil {
 		return rerr, nil
@@ -1979,10 +1986,7 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	}
 	// GRANT and the surplus REVOKE name the schema by forms[0]; any
 	// further form is a stale spelling of the grant row, revoked outright.
-	forms, err := grantDatabaseForms(ctx, db, spec.DatabaseName)
-	if err != nil {
-		return nil, progress, err
-	}
+	forms := grantDatabaseSpellings(spec.DatabaseName)
 	grantDB := forms[0]
 	// renderRevokes is the surplus REVOKE (if any) plus the legacy-form
 	// revokes for one principal.
@@ -2191,10 +2195,7 @@ func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, 
 		// recorded by earlier applies: an entry removed from spec.grants[]
 		// must not survive the delete as a lingering mysql.db row that
 		// reactivates if the schema name is ever recreated.
-		forms, err := grantDatabaseForms(ctx, db, spec.DatabaseName)
-		if err != nil {
-			return err
-		}
+		forms := grantDatabaseSpellings(spec.DatabaseName)
 		revoked := make(map[mysqlAccount]bool)
 		revokeFor := func(kind, username string, hosts []string) error {
 			var pending []string
@@ -2455,7 +2456,7 @@ func groupFenced(fg *v1alpha1.MysqlFailoverGroup) (reason, message string, fence
 // databaseRenderVersion is mixed into computeDatabaseHash so a change to
 // the rendered grant/revoke SQL re-applies every Ready MysqlDatabase once
 // after an operator upgrade. Bump it whenever that SQL changes.
-const databaseRenderVersion = "3"
+const databaseRenderVersion = "4"
 
 func computeDatabaseHash(mdb *v1alpha1.MysqlDatabase, ownerSecret *corev1.Secret, users []tenantUserInput, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
 	h := sha256.New()

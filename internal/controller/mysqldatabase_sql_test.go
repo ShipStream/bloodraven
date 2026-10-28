@@ -558,23 +558,20 @@ func TestHostSetHelpers(t *testing.T) {
 	}
 }
 
-func TestGrantDatabaseForms(t *testing.T) {
+func TestGrantDatabaseSpellings(t *testing.T) {
 	cases := []struct {
-		name           string
-		partialRevokes bool
-		want           []string
+		name string
+		want []string
 	}{
-		{name: "acme_wms", want: []string{`acme\_wms`, "acme_wms"}},
+		{name: "acme_wms", want: []string{"acme_wms", `acme\_wms`}},
 		{name: "acmewms", want: []string{"acmewms"}},
-		{name: "acme_wms", partialRevokes: true, want: []string{"acme_wms", `acme\_wms`}},
-		{name: "acmewms", partialRevokes: true, want: []string{"acmewms"}},
 		// No escaped grant over MySQL's limit can exist, so none is revoked.
-		{name: strings.Repeat("a_", 5) + strings.Repeat("b", 54), partialRevokes: true, want: []string{strings.Repeat("a_", 5) + strings.Repeat("b", 54)}},
+		{name: strings.Repeat("a_", 5) + strings.Repeat("b", 54), want: []string{strings.Repeat("a_", 5) + strings.Repeat("b", 54)}},
 	}
 	for _, tc := range cases {
-		got := grantDatabaseFormsFor(tc.name, tc.partialRevokes)
+		got := grantDatabaseSpellings(tc.name)
 		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
-			t.Errorf("grantDatabaseFormsFor(%q, %v) = %q, want %q", tc.name, tc.partialRevokes, got, tc.want)
+			t.Errorf("grantDatabaseSpellings(%q) = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 
@@ -596,14 +593,15 @@ func TestGrantDatabaseForms(t *testing.T) {
 // (ERROR 1059), even though the unescaped name is valid.
 func TestQuoteGrantDatabaseRejectsOverlongEscapedName(t *testing.T) {
 	name := strings.Repeat("a_", 5) + strings.Repeat("b", 54)
-	forms := grantDatabaseFormsFor(name, false)
-	if _, err := quoteGrantDatabase(forms[0]); err == nil || !strings.Contains(err.Error(), "64-character") {
-		t.Fatalf("quoteGrantDatabase(%q) error = %v, want the length limit", forms[0], err)
+	escaped := strings.ReplaceAll(name, "_", `\_`)
+	if _, err := quoteGrantDatabase(escaped); err == nil || !strings.Contains(err.Error(), "64-character") {
+		t.Fatalf("quoteGrantDatabase(%q) error = %v, want the length limit", escaped, err)
 	}
-	if _, err := quoteGrantDatabase(forms[1]); err != nil {
-		t.Fatalf("quoteGrantDatabase(%q) error = %v, want the unescaped legacy form accepted", forms[1], err)
+	forms := grantDatabaseSpellings(name)
+	if len(forms) != 1 || forms[0] != name {
+		t.Fatalf("grantDatabaseSpellings(%q) = %q, want only the literal name", name, forms)
 	}
-	if _, err := quoteGrantDatabase(grantDatabaseFormsFor(name, true)[0]); err != nil {
-		t.Fatalf("quoteGrantDatabase with partial_revokes ON error = %v", err)
+	if _, err := quoteGrantDatabase(forms[0]); err != nil {
+		t.Fatalf("quoteGrantDatabase(literal) error = %v", err)
 	}
 }

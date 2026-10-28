@@ -2,7 +2,6 @@ package component
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"strings"
 	"testing"
@@ -812,6 +811,7 @@ func TestMysqlDatabaseRefusesPreExistingSchema(t *testing.T) {
 // create, and deletion must never drop it.
 func TestMysqlDatabaseRefusesPreExistingOwnerUser(t *testing.T) {
 	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.server.partialRevokes = true
 	// Someone else's account, same name as the owner the Secret declares.
 	h.server.addUser(mdbOwnerUser, "foreign-password")
 
@@ -1068,33 +1068,5 @@ func TestMysqlDatabaseGrantRowPartialRevokes(t *testing.T) {
 		if strings.HasPrefix(stmt, "SET GLOBAL") {
 			t.Fatalf("partial_revokes already ON, but the reconciler ran %q", stmt)
 		}
-	}
-}
-
-// TestMysqlDatabaseGrantRowEscapedWhenPartialRevokesRefused: if the server
-// refuses to turn partial_revokes ON, the grant falls back to the escaped
-// spelling, which is literal while it is OFF, and the wildcard row earlier
-// releases granted is revoked.
-func TestMysqlDatabaseGrantRowEscapedWhenPartialRevokesRefused(t *testing.T) {
-	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
-	h.server.seedGrantRow(mdbDatabase, mdbOwnerUser, "%", "ALL PRIVILEGES")
-	h.server.statementFault = func(stmt string) (bool, error) {
-		if strings.HasPrefix(stmt, "SET GLOBAL partial_revokes") {
-			return false, errors.New("Access denied; you need the SYSTEM_VARIABLES_ADMIN privilege")
-		}
-		return false, nil
-	}
-
-	h.reconcile()
-	h.requireReady()
-
-	if h.server.partialRevokes {
-		t.Fatal("test setup: partial_revokes turned ON despite the refusal")
-	}
-	if privs, ok := h.server.grantRow(`acme\_wms`, mdbOwnerUser, "%"); !ok || strings.Join(privs, ",") != "ALL PRIVILEGES" {
-		t.Fatalf("owner grants on `acme\\_wms` = %v (present=%v), want [ALL PRIVILEGES]", privs, ok)
-	}
-	if privs, ok := h.server.grantRow(mdbDatabase, mdbOwnerUser, "%"); ok {
-		t.Fatalf("owner still holds the wildcard grant row `acme_wms`: %v", privs)
 	}
 }

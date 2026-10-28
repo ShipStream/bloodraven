@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"sigs.k8s.io/controller-runtime/pkg/log"
-
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
@@ -56,69 +54,53 @@ func quoteIdentifier(kind, name string) (string, error) {
 // partialRevokesQuery reads how the server interprets `_` and `%` in a
 // database-level GRANT: literally when partial_revokes is ON, as wildcards
 // when it is OFF. An escaped `\_` matches literally only when it is OFF,
-// so the grant spelling has to follow the setting.
+// so new grants require the setting to be ON.
 const partialRevokesQuery = "SELECT @@GLOBAL.partial_revokes"
 
-// grantDatabaseForms returns the spellings of schema name that GRANT and
-// REVOKE use on this server; see grantDatabaseFormsFor.
-//
-// Bloodraven runs MySQL with partial_revokes=ON, but a server started from
-// an older my.cnf can still have it OFF. It is turned ON here before any
-// grant is written: a grant in the OFF-only escaped spelling stops matching
-// the moment the group's own reconcile turns it ON, and nothing would
-// rewrite it. Replicas follow through that reconcile, and the escaped
-// spellings are only used if the server refuses the change.
-func grantDatabaseForms(ctx context.Context, db *sql.DB, name string) ([]string, error) {
+// requirePartialRevokes enables literal schema grants before any tenant
+// mutation or write-ahead stamp. An OFF-only escaped grant would stop
+// matching when the group's reconcile or a pod restart enables the setting.
+func requirePartialRevokes(ctx context.Context, db *sql.DB) error {
 	var partialRevokes int
 	if err := db.QueryRowContext(ctx, partialRevokesQuery).Scan(&partialRevokes); err != nil {
-		return nil, fmt.Errorf("read partial_revokes: %w", err)
+		return fmt.Errorf("read partial_revokes: %w", err)
 	}
 	if partialRevokes == 0 {
-		if _, err := db.ExecContext(ctx, "SET GLOBAL partial_revokes = ON"); err == nil {
-			partialRevokes = 1
-		} else {
-			log.FromContext(ctx).Info("could not turn partial_revokes ON; escaping wildcards in grant names", "error", err.Error())
+		if _, err := db.ExecContext(ctx, "SET GLOBAL partial_revokes = ON"); err != nil {
+			return fmt.Errorf("enable partial_revokes: %w", err)
 		}
 	}
-	return grantDatabaseFormsFor(name, partialRevokes != 0), nil
+	return nil
 }
 
-// grantDatabaseFormsFor returns the database-level grant spellings of a
-// schema name. forms[0] matches only that schema and is what GRANT uses;
-// any further form is only ever revoked. With partial_revokes ON that is
-// the escaped spelling a server with it OFF was granted, which now matches
-// no schema. With it OFF, an unescaped `_` would be a wildcard (`my_ql`
-// matches `mysql`), so forms[0] escapes it and forms[1] is the unescaped
-// wildcard spelling earlier releases granted.
-func grantDatabaseFormsFor(name string, partialRevokes bool) []string {
+// grantDatabaseSpellings returns the literal schema name followed by any
+// legacy escaped spelling. GRANT always uses the first; cleanup revokes
+// every spelling without depending on the server's current mode.
+func grantDatabaseSpellings(name string) []string {
 	escaped := strings.NewReplacer(`_`, `\_`, `%`, `\%`).Replace(name)
 	if escaped == name {
 		return []string{name}
 	}
-	if partialRevokes {
-		// MySQL refused any escaped spelling over its identifier limit,
-		// so no grant row in that spelling can exist to revoke.
-		if len(escaped) > maxGrantDatabaseLen {
-			return []string{name}
-		}
-		return []string{name, escaped}
+	// MySQL refuses any escaped spelling over its identifier limit,
+	// so no grant row in that spelling can exist to revoke.
+	if len(escaped) > maxGrantDatabaseLen {
+		return []string{name}
 	}
-	return []string{escaped, name}
+	return []string{name, escaped}
 }
 
 // maxGrantDatabaseLen is MySQL's identifier length limit, which GRANT and
 // REVOKE apply to the schema name as written, escapes included.
 const maxGrantDatabaseLen = 64
 
-// quoteGrantDatabase is quoteIdentifier for a grantDatabaseFormsFor
+// quoteGrantDatabase is quoteIdentifier for a grantDatabaseSpellings
 // spelling: the schema name with `_` optionally escaped as `\_`.
 func quoteGrantDatabase(name string) (string, error) {
 	if err := v1alpha1.ValidateMysqlIdentifier("spec.databaseName", strings.ReplaceAll(name, `\_`, `_`)); err != nil {
 		return "", err
 	}
 	if len(name) > maxGrantDatabaseLen {
-		return "", fmt.Errorf("spec.databaseName: the grant spelling %q is %d characters, over MySQL's %d-character limit; "+
-			"partial_revokes is OFF, so each '_' is escaped as '\\_'; set partial_revokes=ON, or shorten the name or use fewer underscores",
+		return "", fmt.Errorf("spec.databaseName: the grant spelling %q is %d characters, over MySQL's %d-character limit",
 			name, len(name), maxGrantDatabaseLen)
 	}
 	return "`" + name + "`", nil
@@ -364,7 +346,7 @@ func renderRevokeAll(kind, database, username string, hosts []string) (string, e
 	return fmt.Sprintf("REVOKE IF EXISTS ALL PRIVILEGES ON %s.* FROM %s IGNORE UNKNOWN USER", dbIdent, accounts), nil
 }
 
-// renderRevokeAllForms is renderRevokeAll over every grantDatabaseForms
+// renderRevokeAllForms is renderRevokeAll over every grantDatabaseSpellings
 // spelling, so a revoke also removes a legacy wildcard grant row.
 func renderRevokeAllForms(kind string, forms []string, username string, hosts []string) ([]string, error) {
 	stmts := make([]string, 0, len(forms))

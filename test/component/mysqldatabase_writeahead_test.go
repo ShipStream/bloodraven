@@ -101,6 +101,7 @@ func TestMysqlDatabaseRefusedUsersThenRemovedNeverAdopts(t *testing.T) {
 	})
 	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(),
 		userSecretFor("a-mysql", "foreign_a", "attacker-a"), userSecretFor("b-mysql", "victim_b", "attacker-b"))
+	h.server.partialRevokes = true
 	h.server.addUser("foreign_a", "fa-pw")
 	h.server.addUser("victim_b", "vb-pw")
 
@@ -139,6 +140,7 @@ func TestMysqlDatabaseRefusedUsersThenRemovedNeverAdopts(t *testing.T) {
 // never answered.
 func TestMysqlDatabasePreflightQueryFailureStampsNothing(t *testing.T) {
 	h := newMdbHarness(t, mdbCR(withSupportUser), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
+	h.server.partialRevokes = true
 	h.server.failQueries(mdbSupportUser, mysqldriver.ErrInvalidConn)
 
 	h.reconcile()
