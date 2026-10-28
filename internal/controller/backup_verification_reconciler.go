@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 )
 
@@ -801,36 +802,23 @@ func parseReplaySentinel(line string) (*v1alpha1.BinlogReplayMark, bool) {
 	return mark, true
 }
 
-// parseSanitySentinel parses a single BLOODRAVEN_VERIFY_SANITY_COMPLETE
-// line into a SanityCheckResult. verify.sh escapes whitespace in
-// string-valued fields (resultRow, error) as underscores so the
-// whitespace-split parser round-trips cleanly.
+// parseSanitySentinel decodes version-2 sanity values and legacy errors.
 func parseSanitySentinel(line string) (*v1alpha1.SanityCheckResult, bool) {
-	const prefix = "BLOODRAVEN_VERIFY_SANITY_COMPLETE"
-	if !strings.HasPrefix(line, prefix) {
+	tokens, ok := backupmeta.ParseTokens(line, "BLOODRAVEN_VERIFY_SANITY_COMPLETE")
+	if !ok {
 		return nil, false
 	}
-	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
 	res := &v1alpha1.SanityCheckResult{}
-	for _, f := range strings.Fields(rest) {
-		eq := strings.IndexByte(f, '=')
-		if eq <= 0 {
-			continue
-		}
-		key := f[:eq]
-		val := strings.ReplaceAll(f[eq+1:], "_", " ")
-		switch key {
-		case "ran":
-			res.Ran = val == "1" || strings.EqualFold(val, "true")
-		case "durationMs":
-			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-				res.DurationMs = n
-			}
-		case "resultRow":
-			res.ResultRow = val
-		case "error":
-			res.Error = val
-		}
+	res.Ran = tokens["ran"] == "1" || strings.EqualFold(tokens["ran"], "true")
+	if n, err := strconv.ParseInt(tokens["durationMs"], 10, 64); err == nil {
+		res.DurationMs = n
+	}
+	res.ResultRow = tokens["resultRow"]
+	res.Error = tokens["error"]
+	if tokens["v"] == "" {
+		// Older scripts encoded spaces in errors as underscores. Their
+		// original scalars contain no whitespace and remain literal.
+		res.Error = strings.ReplaceAll(res.Error, "_", " ")
 	}
 	return res, true
 }

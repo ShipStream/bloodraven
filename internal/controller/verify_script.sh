@@ -57,6 +57,19 @@ ERRLOG="${MOUNT_DIR}/mysqld.err"
 
 log() { printf '[verify] %s\n' "$*"; }
 
+# Match backupmeta.EscapeValue and Python's urllib.parse.quote safe set.
+escape_sentinel_token() {
+    local LC_ALL=C value="$1" out="" c hex i
+    for ((i=0; i<${#value}; i++)); do
+        c="${value:i:1}"
+        case "$c" in
+            [a-zA-Z0-9._~/:,@-]) out+="$c" ;;
+            *) printf -v hex '%%%02X' "'$c"; out+="$hex" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 cleanup_mysqld() {
     if [[ -n "${MYSQLD_PID:-}" ]] && kill -0 "$MYSQLD_PID" 2>/dev/null; then
         log "shutting down mysqld (pid=$MYSQLD_PID)"
@@ -268,8 +281,8 @@ fi
 # When spec.sanityCheck.query is set the controller passes it through as
 # BLOODRAVEN_VERIFY_SANITY_QUERY. Runs against the ephemeral mysqld with
 # a client-side timeout. Emits a sentinel so the reconciler can populate
-# status.sanityCheck even on success. Underscore-escape is applied to
-# preserve whitespace through the reconciler's whitespace-split parser.
+# status.sanityCheck even on success. Version 2 uses escape_sentinel_token
+# to percent-encode values for the reconciler's whitespace-split parser.
 SANITY_Q="${BLOODRAVEN_VERIFY_SANITY_QUERY:-}"
 if [[ -n "$SANITY_Q" ]]; then
     SANITY_MAX="${BLOODRAVEN_VERIFY_SANITY_MAX_SECONDS:-60}"
@@ -290,16 +303,15 @@ if [[ -n "$SANITY_Q" ]]; then
     DURATION_MS=$(( (END_NS - START_NS) / 1000000 ))
 
     if [[ $SANITY_RC -eq 124 ]]; then
-        printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE ran=1 durationMs=%s error=%s\n' \
+        printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE v=2 ran=1 durationMs=%s error=%s\n' \
             "$DURATION_MS" "timeout"
         log "sanity query timed out after ${SANITY_MAX}s"
         exit 1
     fi
     if [[ $SANITY_RC -ne 0 ]]; then
-        # Escape spaces so the reconciler's whitespace-split parser can
-        # round-trip the error text.
-        ERR_ESC="${SANITY_OUT//[[:space:]]/_}"
-        printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE ran=1 durationMs=%s error=%s\n' \
+        # Preserve literal underscores and whitespace in diagnostic text.
+        ERR_ESC=$(escape_sentinel_token "$SANITY_OUT")
+        printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE v=2 ran=1 durationMs=%s error=%s\n' \
             "$DURATION_MS" "${ERR_ESC:-error}"
         log "sanity query failed rc=$SANITY_RC: $SANITY_OUT"
         exit "$SANITY_RC"
@@ -311,10 +323,8 @@ if [[ -n "$SANITY_Q" ]]; then
         SCALAR="0"
     fi
 
-    # Encode whitespace and equals signs in the scalar so it round-trips
-    # through the reconciler's sentinel parser.
-    SCALAR_ESC="${SCALAR// /_}"
-    printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE ran=1 durationMs=%s resultRow=%s\n' \
+    SCALAR_ESC=$(escape_sentinel_token "$SCALAR")
+    printf 'BLOODRAVEN_VERIFY_SANITY_COMPLETE v=2 ran=1 durationMs=%s resultRow=%s\n' \
         "$DURATION_MS" "$SCALAR_ESC"
 
     # Only apply the minRows floor when the scalar parses as an integer.

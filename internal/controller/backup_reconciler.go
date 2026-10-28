@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -26,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 )
 
@@ -771,64 +770,10 @@ func stableJobCompletionTime(job *batchv1.Job) *metav1.Time {
 // dumpCompletionMetadata is the parsed shape of the BLOODRAVEN_DUMP_COMPLETE
 // sentinel line emitted by backup_script.py (unencrypted flow) or
 // `bloodraven encrypt-upload` (encrypted flow) on success.
-type dumpCompletionMetadata struct {
-	Location            string
-	Size                string
-	SizeBytes           int64
-	GtidExecuted        string
-	BinlogFile          string
-	BinlogPos           int64
-	Encrypted           bool
-	EncryptionAlgorithm string
-}
+type dumpCompletionMetadata = backupmeta.DumpComplete
 
-// parseDumpCompleteLine parses a single `BLOODRAVEN_DUMP_COMPLETE k=v ...`
-// sentinel line emitted by backup_script.py. Returns (meta, true) on a
-// well-formed sentinel and (zero, false) on a prefix mismatch. Unknown
-// keys are tolerated (forward-compatible). Malformed numerics leave
-// the corresponding field at zero.
-//
-// Space-bearing values (e.g. "1.4 GiB") are round-tripped through an
-// underscore escape so this whitespace-splitting parser can recover them.
 func parseDumpCompleteLine(line string) (dumpCompletionMetadata, bool) {
-	const prefix = "BLOODRAVEN_DUMP_COMPLETE"
-	if !strings.HasPrefix(line, prefix) {
-		return dumpCompletionMetadata{}, false
-	}
-	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
-	fields := strings.Fields(rest)
-	var meta dumpCompletionMetadata
-	for _, f := range fields {
-		eq := strings.IndexByte(f, '=')
-		if eq <= 0 {
-			continue
-		}
-		key := f[:eq]
-		val := strings.ReplaceAll(f[eq+1:], "_", " ")
-		switch key {
-		case "location":
-			meta.Location = val
-		case "size":
-			meta.Size = val
-		case "sizeBytes":
-			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-				meta.SizeBytes = n
-			}
-		case "gtidExecuted":
-			meta.GtidExecuted = strings.ReplaceAll(val, " ", "")
-		case "binlogFile":
-			meta.BinlogFile = val
-		case "binlogPos":
-			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-				meta.BinlogPos = n
-			}
-		case "encrypted":
-			meta.Encrypted = val == "true" || val == "1"
-		case "algorithm":
-			meta.EncryptionAlgorithm = val
-		}
-	}
-	return meta, true
+	return backupmeta.ParseDumpComplete(line)
 }
 
 // tailJobCompletion tails the Job pod log and parses the trailing
