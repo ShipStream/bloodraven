@@ -797,8 +797,9 @@ type RestoreInPlaceSpec struct {
 type RestoreInPlacePhase string
 
 const (
-	// RestoreInPlaceNone is the zero value (no restore scheduled or
-	// last restore completed and was cleared from status).
+	// RestoreInPlaceNone is the zero value (no in-place restore has been
+	// observed). A terminal status is kept, even after spec.restoreInPlace
+	// is removed, so its confirmTokenUsed keeps blocking replays.
 	RestoreInPlaceNone RestoreInPlacePhase = ""
 
 	// RestoreInPlacePreflight means the operator has accepted the
@@ -943,6 +944,15 @@ type RestoreInPlaceStatus struct {
 	// JobName is the name of the batchv1.Job performing the load.
 	JobName string `json:"jobName,omitempty"`
 
+	// JobCreating is set, with RunConfirm bound, before the restore Job
+	// is created, and the Job is created only once that write succeeded.
+	// From then on the run may have executed even if JobName was never
+	// recorded (a crash or a lost status write right after Create): a
+	// Job that disappears counts as lost (its confirm is consumed), not
+	// as a run that never started. It is kept on the terminal status.
+	// +optional
+	JobCreating bool `json:"jobCreating,omitempty"`
+
 	// TargetSite is the site that received the load (always the active
 	// primary at the moment of preflight).
 	TargetSite string `json:"targetSite,omitempty"`
@@ -954,8 +964,21 @@ type RestoreInPlaceStatus struct {
 	// ConfirmTokenUsed records the spec.restoreInPlace.confirm value of
 	// the most recent executed restore. Subsequent reconciles ignore
 	// any spec.confirm <= this value; a new restore requires a strictly
-	// greater RFC 3339 timestamp.
+	// greater RFC 3339 timestamp. It carries over unchanged while a newer
+	// request is running and when that request is rejected or cancelled,
+	// and it is kept when spec.restoreInPlace is removed. A run whose Job
+	// disappeared after spec.restoreInPlace was removed (JobLost) may
+	// have executed, so it records that run's confirm (RunConfirm).
 	ConfirmTokenUsed string `json:"confirmTokenUsed,omitempty"`
+
+	// RunConfirm is the spec.restoreInPlace.confirm of the run in
+	// flight, recorded when it enters Preflight. A confirm that advances
+	// before the restore Job is created is bound into it first, so it is
+	// always the confirm the Job runs with. It identifies the run after
+	// spec.restoreInPlace is removed. Empty once the run is terminal;
+	// ConfirmTokenUsed then records what executed.
+	// +optional
+	RunConfirm string `json:"runConfirm,omitempty"`
 
 	// StartTime is when the restore entered Preflight.
 	StartTime *metav1.Time `json:"startTime,omitempty"`

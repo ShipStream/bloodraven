@@ -239,6 +239,21 @@ func (r *MysqlFailoverGroupReconciler) armRestoreReclones(ctx context.Context, f
 	return err
 }
 
+// rebindRestoreReclones moves the Armed queue of a run whose confirm was
+// bumped before its restore Job existed (inPlaceRestoring) from the old
+// confirm to the new one.
+func (r *MysqlFailoverGroupReconciler) rebindRestoreReclones(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, from, to string) error {
+	_, err := r.mutateRestoreReclones(ctx, fg, func(fresh *v1alpha1.MysqlFailoverGroup) bool {
+		q := fresh.Status.RestoreReclones
+		if q == nil || q.Phase != v1alpha1.RestoreReclonesArmed || q.ConfirmToken != from {
+			return false
+		}
+		q.ConfirmToken = to
+		return true
+	})
+	return err
+}
+
 // releaseRestoreReclones moves the queue of a successful full-instance
 // restore to Draining. A restore accepted by an operator that predates the
 // queue has none yet; it gets one here so its peers are still recloned.
@@ -603,8 +618,10 @@ func (r *MysqlFailoverGroupReconciler) settleArmedRestoreReclones(ctx context.Co
 		return r.releaseRestoreReclones(ctx, fg, rip.TargetSite, q.ConfirmToken)
 	}
 	if sup := q.Superseded; sup != nil && len(sup.Pending) > 0 {
-		// Without a status the run's Job cannot be ruled out.
-		executed := rip == nil || rip.JobName != ""
+		// Without a status the run's Job cannot be ruled out, and
+		// JobCreating is set before the Job is created, so a Job whose
+		// name was never recorded still counts.
+		executed := rip == nil || rip.JobName != "" || rip.JobCreating
 		phase := v1alpha1.RestoreReclonesDraining
 		if executed || sup.Held {
 			phase = v1alpha1.RestoreReclonesHeld

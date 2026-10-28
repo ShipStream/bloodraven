@@ -709,6 +709,7 @@ func TestReconcileInPlaceRestore_CredsErrorDoesNotFailAnInFlightJob(t *testing.T
 	// executed, so failing the request is correct (and proves the fixture
 	// really does make ensureRestoreCredsSecret fail).
 	noJob := newFG()
+	noJob.Status.RestoreInPlace.JobName = "" // never created: a recorded name with no Job is a lost Job
 	rNoJob, _ := newReconciler(noJob, succeededSeedBackup())
 	if _, err := rNoJob.reconcileInPlaceRestore(context.Background(), noJob); err != nil {
 		t.Fatalf("reconcile (no job): %v", err)

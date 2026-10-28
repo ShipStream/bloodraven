@@ -7456,7 +7456,9 @@ spec:
                   RestoreInPlace tracks an in-flight or completed in-place restore
                   (spec.restoreInPlace). The consumed confirm token is stamped here
                   on success so subsequent reconciles can distinguish "restore
-                  already done" from "new restore requested".
+                  already done" from "new restore requested". Once a run is accepted
+                  this status, not the spec, drives it: removing spec.restoreInPlace
+                  while its Job runs keeps the fence until the Job finishes.
                 properties:
                   completionTime:
                     description: CompletionTime is when the restore reached a terminal
@@ -7468,8 +7470,21 @@ spec:
                       ConfirmTokenUsed records the spec.restoreInPlace.confirm value of
                       the most recent executed restore. Subsequent reconciles ignore
                       any spec.confirm <= this value; a new restore requires a strictly
-                      greater RFC 3339 timestamp.
+                      greater RFC 3339 timestamp. It carries over unchanged while a newer
+                      request is running and when that request is rejected or cancelled,
+                      and it is kept when spec.restoreInPlace is removed. A run whose Job
+                      disappeared after spec.restoreInPlace was removed (JobLost) may
+                      have executed, so it records that run's confirm (RunConfirm).
                     type: string
+                  jobCreating:
+                    description: |-
+                      JobCreating is set, with RunConfirm bound, before the restore Job
+                      is created, and the Job is created only once that write succeeded.
+                      From then on the run may have executed even if JobName was never
+                      recorded (a crash or a lost status write right after Create): a
+                      Job that disappears counts as lost (its confirm is consumed), not
+                      as a run that never started. It is kept on the terminal status.
+                    type: boolean
                   jobName:
                     description: JobName is the name of the batchv1.Job performing
                       the load.
@@ -7500,6 +7515,15 @@ spec:
                   pitrStopDatetime:
                     description: PitrStopDatetime is the normalized mysqlbinlog --stop-datetime
                       used for PITR.
+                    type: string
+                  runConfirm:
+                    description: |-
+                      RunConfirm is the spec.restoreInPlace.confirm of the run in
+                      flight, recorded when it enters Preflight. A confirm that advances
+                      before the restore Job is created is bound into it first, so it is
+                      always the confirm the Job runs with. It identifies the run after
+                      spec.restoreInPlace is removed. Empty once the run is terminal;
+                      ConfirmTokenUsed then records what executed.
                     type: string
                   scope:
                     description: |-

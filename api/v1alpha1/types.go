@@ -592,7 +592,9 @@ type MysqlFailoverGroupStatus struct {
 	// RestoreInPlace tracks an in-flight or completed in-place restore
 	// (spec.restoreInPlace). The consumed confirm token is stamped here
 	// on success so subsequent reconciles can distinguish "restore
-	// already done" from "new restore requested".
+	// already done" from "new restore requested". Once a run is accepted
+	// this status, not the spec, drives it: removing spec.restoreInPlace
+	// while its Job runs keeps the fence until the Job finishes.
 	// +optional
 	RestoreInPlace *RestoreInPlaceStatus `json:"restoreInPlace,omitempty"`
 

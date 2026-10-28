@@ -473,7 +473,7 @@ A PITR replay pipes archived binlogs, with their original GTIDs, into the new pr
 In-place PITR cannot work against a live primary. The replay keeps the archived transactions' original GTIDs, and the primary has already executed every one of them, so MySQL skips them all. Current operators reject `spec.restoreInPlace.pointInTime` in Preflight. Earlier operators ran the replay anyway, logged `BLOODRAVEN_PITR_COMPLETE` and reported `Succeeded`, with the data left at the backup.
 
 ### Symptoms
-- `status.restoreInPlace.phase: Failed`, `confirmTokenUsed` empty, message `restoreInPlace.pointInTime is not supported: ...`, and a `RestoreInPlaceRejected` warning event. No Job exists and nothing was fenced.
+- `status.restoreInPlace.phase: Failed`, `confirmTokenUsed` unchanged (the confirm of the last restore that ran, empty if none), message `restoreInPlace.pointInTime is not supported: ...`, and a `RestoreInPlaceRejected` warning event. No Job exists and nothing was fenced.
 - Or, after an older operator ran in-place PITR: rows written between the backup and `stopDatetime` are missing, although the restore reported success.
 
 ### Diagnostic steps
@@ -514,3 +514,21 @@ A full-instance in-place restore replaces the primary's data. The other sites st
    - With the primary down: clear the queue with `kubectl patch mfg <group> -n <ns> --subresource=status --type=json -p '[{"op":"remove","path":"/status/restoreReclones"}]'`, after which automatic failover proceeds. Then reclone the remaining sites by hand from whichever primary you keep.
 3. `RestoreReclonesDiscarded` after a failed restore is expected: the peers are not recloned from the broken primary. They are not guaranteed to be intact. The restore's `DROP DATABASE` statements are binlogged, so a peer that was replicating may have dropped the same schemas; check its data before promoting it. If the failed restore had replaced an earlier restore's queue, a `RestoreReclonesRestored` event means that queue is draining again (the failed restore never reached its Job).
 4. A `Held` queue (`RestoreReclonesHeld`): the primary may hold the failed restore's dropped or half-loaded data, and the held sites may be the only intact copies. Do not clone from the primary until its data is checked. Then choose one: run a new full-instance restore (it reclones every peer once it succeeds); set the phase back to `Draining` once the primary's data is good (`kubectl patch mfg <group> -n <ns> --subresource=status --type=merge -p '{"status":{"restoreReclones":{"phase":"Draining"}}}'`); or remove `status.restoreReclones` to keep the held sites' data as it is.
+
+## 21. In-place restore stays fenced after `spec.restoreInPlace` was removed, or ends "cancelled"
+
+Once a restore is accepted, `status.restoreInPlace` drives it, not the spec. Removing the field never interrupts a running restore Job. The `-primary` Service fence, the topology freeze (no failover or reclone), and the planned-failover, deployment and `MysqlDatabase` guards stay up until that Job finishes. A run removed before its Job existed is cancelled.
+
+### Symptoms
+- `spec.restoreInPlace` is gone, but `status.restoreInPlace.phase` is still `Restoring` and the message reads `spec.restoreInPlace was removed; holding the fence until restore Job ... finishes`. There is a `RestoreInPlaceSpecRemoved` event.
+- Or `phase: Failed` with `cancelled: spec.restoreInPlace was removed ...` (`RestoreInPlaceCancelled`): nothing was restored.
+- Or `phase: Failed` with `RestoreInPlaceJobLost`: the run's Job vanished before its outcome was seen. `confirmTokenUsed` is that run's confirm, because its Job may have run. This also applies when `jobName` is empty but `jobCreating: true`: the operator had started creating the Job when its status write or the process was lost.
+
+### Diagnostic steps
+1. `kubectl get mfg <group> -n <ns> -o jsonpath='{.status.restoreInPlace}' | jq .` for the phase, `jobName`, `scope`, `confirmTokenUsed` and, while a run is in flight, `runConfirm` (that run's confirm).
+2. `kubectl get job -n <ns> <jobName>` and its pod logs (`BLOODRAVEN_DROP_*`, `BLOODRAVEN_LOAD_*` sentinels) show how far the restore got.
+
+### Safe remediation
+1. A held fence clears by itself when the Job finishes; the run then completes as `Succeeded` or `Failed`. Do not delete the Job to "unstick" it: that kills the loader mid-DROP or mid-load and leaves a partially restored primary.
+2. After `RestoreInPlaceJobLost`, verify the primary's data (the restore may have partly run) before relying on it. Then re-run the restore with a newer `confirm`, or restore from backup.
+3. Do not edit `status.restoreInPlace` to clear it. `confirmTokenUsed` is what stops an old manifest from re-running a restore that already ran.
