@@ -176,6 +176,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GOFLAGS: -count=1
+      # Keep in step with controller-runtime and k8s.io/api in go.mod.
+      SETUP_ENVTEST_VERSION: v0.25.2
+      ENVTEST_K8S: "1.37"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -186,14 +189,31 @@ jobs:
         uses: ./.github/actions/go-cache
         with:
           flavor: race
+      - id: envtest-key
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      - id: envtest-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ runner.temp }}/envtest-bin
+            ${{ runner.temp }}/envtest-tools
+          key: envtest-${{ runner.os }}-${{ runner.arch }}-${{ env.SETUP_ENVTEST_VERSION }}-k${{ env.ENVTEST_K8S }}-${{ steps.envtest-key.outputs.week }}
+          # Exact weekly keys keep old patch directories from accumulating.
       - name: Install setup-envtest
-        # Keep in step with sigs.k8s.io/controller-runtime and k8s.io/api in go.mod.
-        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
+        run: '[ -x "$RUNNER_TEMP/envtest-tools/setup-envtest" ] || GOBIN="$RUNNER_TEMP/envtest-tools" go install sigs.k8s.io/controller-runtime/tools/setup-envtest@"$SETUP_ENVTEST_VERSION"'
       - name: Run envtest tests
         run: |
-          KUBEBUILDER_ASSETS=$(setup-envtest use 1.37.x --bin-dir /tmp/envtest-bin -p path)
+          KUBEBUILDER_ASSETS=$("$RUNNER_TEMP/envtest-tools/setup-envtest" use "${ENVTEST_K8S}.x" --bin-dir "$RUNNER_TEMP/envtest-bin" -p path)
           export KUBEBUILDER_ASSETS
           make test-envtest
+      - name: Save envtest cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.envtest-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ runner.temp }}/envtest-bin
+            ${{ runner.temp }}/envtest-tools
+          key: ${{ steps.envtest-cache.outputs.cache-primary-key }}
 
   generate-check:
     needs: changes
