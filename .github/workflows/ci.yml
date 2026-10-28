@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded PR runs; main pushes and release calls get unique run groups.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Lint

@@ -10,6 +10,8 @@ This directory contains the CI/CD automation for the Bloodraven MySQL operator.
 
 **Triggers:** Push to `main`, pull requests targeting `main`
 
+Superseded PR runs are cancelled. Pushes to `main` and release calls use unique run groups and do not cancel each other.
+
 Runs the full PR gate suite in parallel:
 
 | Job | Description |
