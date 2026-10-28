@@ -111,8 +111,13 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Terminal states: retention pruning only, then stop reconciling.
+	// Repair historical encryption attribution before retention pruning.
 	if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded || backup.Status.Phase == v1alpha1.BackupPhaseFailed {
+		if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded {
+			if err := r.repairTerminalAttribution(ctx, &backup); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if err := r.pruneRetention(ctx, &backup); err != nil {
 			logger.Error(err, "retention prune")
 		}
@@ -162,8 +167,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, fmt.Errorf("get job: %w", jobErr)
 	}
 
-	// The live profile is needed to launch a Job and is useful for
-	// best-effort status backfills after completion. An existing Job remains
+	// The live profile is needed to launch a Job. An existing Job remains
 	// observable even if the profile changes or is removed while it runs.
 	profile := findProfile(&fg, backup.Spec.ProfileName)
 
@@ -227,15 +231,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		backup.Status.StorageType = profile.Storage.Type
 		backup.Status.MysqlImage = mysqlImageFor(&fg)
 		backup.Status.ActiveSiteAtStart = fg.Status.ActiveSite
-		if profile.EncryptionEnabled() {
-			// Stamp encryption attribution at Job-creation time so the
-			// CR is self-describing even before the log-tail metadata
-			// parse lands. The algorithm default drifts forward with
-			// new releases via AlgorithmOrDefault(); keep both
-			// populated for easy compliance auditing.
-			backup.Status.Encrypted = true
-			backup.Status.EncryptionAlgorithm = profile.Encryption.AlgorithmOrDefault()
-		}
+		backup.Status.Encrypted, backup.Status.EncryptionAlgorithm = backupJobEncryption(built)
 		if backup.Status.Attempt == 0 {
 			backup.Status.Attempt = 1
 		}
@@ -330,22 +326,10 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			if meta.BinlogPos > 0 {
 				next.BinlogPos = meta.BinlogPos
 			}
-			if meta.Encrypted {
-				next.Encrypted = true
-			}
-			if meta.EncryptionAlgorithm != "" {
-				next.EncryptionAlgorithm = meta.EncryptionAlgorithm
-			}
 		}
-		// Backfill the encryption fields from the profile spec even when
-		// the log tail couldn't be parsed — this covers fake-client
-		// tests and any transient log-tail failure.
-		if profile != nil && profile.EncryptionEnabled() && !next.Encrypted {
-			next.Encrypted = true
-			if next.EncryptionAlgorithm == "" {
-				next.EncryptionAlgorithm = profile.Encryption.AlgorithmOrDefault()
-			}
-		}
+		// The launch configuration remains authoritative across profile edits,
+		// missing logs, and a failed status patch immediately after Job creation.
+		next.Encrypted, next.EncryptionAlgorithm = backupJobEncryption(&job)
 		// If the dump didn't report bytes but did report a size string
 		// (pure local case), derive a display string from the Go
 		// helper so it's consistent across code paths.
@@ -380,10 +364,15 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
+	correctedEncryption := backup.Status.Encrypted && !next.Encrypted
 	patch := client.MergeFrom(backup.DeepCopy())
 	backup.Status = next
 	if err := r.Status().Patch(ctx, &backup, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch final status: %w", err)
+	}
+	if correctedEncryption {
+		r.Recorder.Event(&backup, corev1.EventTypeWarning, "EncryptionAttributionCorrected",
+			"corrected backup encryption attribution from its producing Job")
 	}
 
 	r.emitTerminalMetrics(&backup, &job)
@@ -401,6 +390,52 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// backupJobEncryption reads the launch-time encryption choice. The label also
+// covers older Jobs; the uploader layout and its env pin the algorithm.
+func backupJobEncryption(job *batchv1.Job) (bool, string) {
+	encrypted := job.Labels[labelBackupEncrypted] == "true"
+	algorithm := ""
+	for _, container := range job.Spec.Template.Spec.Containers {
+		if container.Name != backupEncryptUploadContainerName {
+			continue
+		}
+		encrypted = true
+		for _, env := range container.Env {
+			if env.Name == "BLOODRAVEN_ENCRYPTION_ALGORITHM" {
+				algorithm = env.Value
+			}
+		}
+	}
+	if !encrypted {
+		return false, ""
+	}
+	return true, (&v1alpha1.BackupEncryptionSpec{Algorithm: algorithm}).AlgorithmOrDefault()
+}
+
+func (r *MysqlBackupReconciler) repairTerminalAttribution(ctx context.Context, backup *v1alpha1.MysqlBackup) error {
+	var job batchv1.Job
+	if err := r.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: backupJobName(backup.Name)}, &job); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	// A same-name Job from another backup must never rewrite this record.
+	if !metav1.IsControlledBy(&job, backup) {
+		return nil
+	}
+	encrypted, algorithm := backupJobEncryption(&job)
+	if backup.Status.Encrypted == encrypted && backup.Status.EncryptionAlgorithm == algorithm {
+		return nil
+	}
+	patch := client.MergeFrom(backup.DeepCopy())
+	backup.Status.Encrypted = encrypted
+	backup.Status.EncryptionAlgorithm = algorithm
+	if err := r.Status().Patch(ctx, backup, patch); err != nil {
+		return fmt.Errorf("repair backup encryption attribution: %w", err)
+	}
+	r.Recorder.Event(backup, corev1.EventTypeWarning, "EncryptionAttributionCorrected",
+		"corrected backup encryption attribution from its producing Job")
+	return nil
 }
 
 // SetupWithManager registers the reconciler with the manager.
