@@ -73,6 +73,8 @@ repository secrets.
 
 **Permissions:** `contents: read` by default. Write scopes are granted per job: `contents: write` for the draft/publish release jobs and the Helm job (`gh-pages` push), `packages: write` for the image and Helm OCI pushes, and `id-token: write` only for the image job (cosign OIDC signing).
 
+The CI gate and both E2E gates run in parallel. The draft release waits for all three gates to pass.
+
 Steps:
 
 1. **CI gate** — Runs the full `ci.yml` suite through `workflow_call` against the tagged SHA: lint, build, unit, component, envtest, generate and CRD drift checks, license roundtrip, site build and `llms-full.txt` coverage, and course checks. Nothing publishes until the `CI gate` job confirms success.

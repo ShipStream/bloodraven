@@ -49,9 +49,9 @@ jobs:
   # single broad-scenario flake stalling every release. The full
   # release-profile suite runs as a post-publish stage (e2e-full below)
   # and nightly (.github/workflows/e2e.yml).
+  # Both E2E gates run in parallel with CI; draft-release requires all three gates.
   e2e-gate:
     name: E2E gate (smoke profile)
-    needs: ci-gate
     uses: ./.github/workflows/_e2e.yml
     with:
       profile: smoke
@@ -59,7 +59,6 @@ jobs:
 
   e2e-encryption-gate:
     name: E2E gate (encryption adoption and rotation)
-    needs: ci-gate
     uses: ./.github/workflows/_e2e.yml
     with:
       # Ordered least- to most-destructive: 48 and 50 leave the cluster
