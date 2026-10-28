@@ -473,6 +473,10 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Backup work runs after the label syncs above: those labels route the
 	// primary and replica Services, so a failing backup step must not
 	// leave them stale.
+	if err := r.reconcileS3CredentialsCondition(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("check S3 credentials secrets: %w", err)
+	}
+
 	if err := r.reconcileScheduleTriggerRBAC(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile schedule trigger rbac: %w", err)
 	}

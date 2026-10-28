@@ -132,7 +132,10 @@ Consult [references/troubleshooting_playbooks.md](./references/troubleshooting_p
   ```bash
   kubectl get mysqlbackups.shipstream.io -n <namespace> --sort-by=.metadata.creationTimestamp
   kubectl get mysqlbackupverifications.shipstream.io -n <namespace>
+  kubectl get mysqlfailovergroup <group-name> -n <namespace> \
+    -o jsonpath='{.status.conditions[?(@.type=="S3CredentialsReady")]}'
   ```
+  `S3CredentialsReady=False` means an S3 `credentialsSecret` lacks `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`; Jobs fail instead of using ambient credentials. Fix the Secret before re-running anything.
 - **Action**: Trigger on-demand backup or verification:
   ```bash
   kubectl bloodraven backup <group-name> -n <namespace>

@@ -1291,7 +1291,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// gone. Clobbering Dragonfly status drops capability probes and
 		// lastPromotion* stamps written on the other goroutine.
 		encryption := fresh.Status.EncryptionAtRest
-		encryptionCond := apimeta.FindStatusCondition(fresh.Status.Conditions, conditionEncryptionReady)
+		reconcilerConds := make([]*metav1.Condition, len(reconcilerOwnedConditions))
+		for i, t := range reconcilerOwnedConditions {
+			reconcilerConds[i] = apimeta.FindStatusCondition(fresh.Status.Conditions, t)
+		}
 		dragonfly := fresh.Status.Dragonfly
 		planned := fresh.Status.PlannedFailover
 		initialRestore := fresh.Status.Restore
@@ -1302,10 +1305,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		fresh.Status.RestoreInPlace = restore
 		fresh.Status.EncryptionAtRest = encryption
 		fresh.Status.Dragonfly = dragonfly
-		if encryptionCond != nil {
-			setCondition(&fresh.Status.Conditions, *encryptionCond)
-		} else {
-			removeCondition(&fresh.Status.Conditions, conditionEncryptionReady)
+		for i, c := range reconcilerConds {
+			if c != nil {
+				setCondition(&fresh.Status.Conditions, *c)
+			} else {
+				removeCondition(&fresh.Status.Conditions, reconcilerOwnedConditions[i])
+			}
 		}
 		if err := r.client.Status().Update(ctx, &fresh); err != nil {
 			return err
@@ -1740,6 +1745,11 @@ func conditionBool(v bool) metav1.ConditionStatus {
 
 // setCondition sets or updates a condition in the slice, preserving LastTransitionTime
 // if the status has not changed.
+// reconcilerOwnedConditions are the condition types the group reconciler
+// writes. updateCRStatus re-reads them instead of replaying its snapshot's
+// copy, which would undo a concurrent reconciler write.
+var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady}
+
 func setCondition(conditions *[]metav1.Condition, c metav1.Condition) {
 	for i, existing := range *conditions {
 		if existing.Type == c.Type {
