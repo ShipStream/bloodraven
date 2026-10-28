@@ -28,6 +28,10 @@ jobs:
     name: CI
     uses: ./.github/workflows/ci.yml
 
+  e2e-images:
+    name: E2E images
+    uses: ./.github/workflows/_e2e-images.yml
+
   # Require success explicitly so failed, cancelled, or skipped CI blocks release.
   ci-gate:
     name: CI gate
@@ -52,13 +56,16 @@ jobs:
   # Both E2E gates run in parallel with CI; draft-release requires all three gates.
   e2e-gate:
     name: E2E gate (smoke profile)
+    needs: e2e-images
     uses: ./.github/workflows/_e2e.yml
     with:
       profile: smoke
+      images-artifact: e2e-images
 
 
   e2e-encryption-gate:
     name: E2E gate (encryption adoption and rotation)
+    needs: e2e-images
     uses: ./.github/workflows/_e2e.yml
     with:
       # Ordered least- to most-destructive: 48 and 50 leave the cluster
@@ -69,6 +76,7 @@ jobs:
       enable-encryption: true
       # Four scenarios on one cluster; 51 and 52 each budget 20m.
       timeout-minutes: 180
+      images-artifact: e2e-images
   draft-release:
     name: Create Draft Release
     runs-on: ubuntu-latest
@@ -254,7 +262,8 @@ jobs:
   # speed, without one broad-scenario flake stalling the publish.
   e2e-full:
     name: Post-release E2E (release profile)
-    needs: publish-release
+    needs: [publish-release, e2e-images]
     uses: ./.github/workflows/_e2e.yml
     with:
       profile: release
+      images-artifact: e2e-images

@@ -73,7 +73,7 @@ repository secrets.
 
 **Permissions:** `contents: read` by default. Write scopes are granted per job: `contents: write` for the draft/publish release jobs and the Helm job (`gh-pages` push), `packages: write` for the image and Helm OCI pushes, and `id-token: write` only for the image job (cosign OIDC signing).
 
-The CI gate and both E2E gates run in parallel. The draft release waits for all three gates to pass.
+CI and the shared E2E image build start in parallel. Both E2E gates consume those images, and the draft release waits for all three gates to pass.
 
 Steps:
 
@@ -133,7 +133,7 @@ The chart repo is served directly off the `gh-pages` branch via `raw.githubuserc
 
 ---
 
-### `e2e.yml` / `_e2e.yml` — Real-Cluster E2E
+### `e2e.yml` / `_e2e.yml` / `_e2e-images.yml` — Real-Cluster E2E
 
 **Triggers:**
 
@@ -142,6 +142,8 @@ The chart repo is served directly off the `gh-pages` branch via `raw.githubuserc
 - Pull requests while the `e2e` label is present (smoke profile plus encryption; re-runs on push, adding other labels does not re-trigger)
 
 The reusable workflow (`_e2e.yml`) creates a kind cluster with Calico CNI and deploys the playground. Normal jobs run `playground-chaos run-all` with the selected profile. The dedicated encryption job creates the group with MySQL and escrow TLS from its first generation, adopts encryption with `playground/enable-encryption.sh`, and runs `48-keyring-seal-and-rotation` explicitly. This covers adoption, sealing, key placement, replica rotation, pod replacement, and post-rotation reads against real MySQL without overlapping a separate live TLS rollout. Jobs upload JUnit results where available, chaos forensics, setup logs, and kind logs as artifacts.
+
+The reusable image producer (`_e2e-images.yml`) builds the five playground images once per workflow run and shares an `e2e-images` artifact retained for seven days. Both E2E jobs and all three release E2E jobs load that artifact. If it is unavailable or cannot be loaded, each consumer warns and rebuilds locally with `make e2e-images`; callers that omit `images-artifact` also build locally.
 
 Profiles:
 | Profile | Scenarios | Use case |

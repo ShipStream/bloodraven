@@ -1,7 +1,7 @@
 CONTROLLER_GEN ?= go run sigs.k8s.io/controller-tools/cmd/controller-gen
 GOLANGCI_LINT_VERSION := v2.14.0
 
-.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration test-license-roundtrip dst dst-repro fmt vet install-lint golangci-lint-version lint docker-build chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-verify-only course-check course-drift
+.PHONY: help generate manifests build build-bloodraven build-sidecar build-playground-chaos build-kubectl-plugin install-kubectl-plugin test test-unit test-component test-envtest test-e2e test-e2e-smoke test-integration test-license-roundtrip dst dst-repro fmt vet install-lint golangci-lint-version lint docker-build e2e-images chaos-list chaos-check chaos-run chaos-run-all chaos-run-all-profile course course-build course-verify course-verify-only course-check course-drift
 
 ##@ General
 
@@ -65,6 +65,13 @@ install-kubectl-plugin: build-kubectl-plugin ## Install the kubectl-bloodraven p
 docker-build: ## Build Docker images for both operator and sidecar
 	docker build --target bloodraven -t bloodraven .
 	docker build --target sidecar -t bloodraven-sidecar .
+
+e2e-images: ## Build the five playground images the E2E suite loads into kind
+	docker build --target bloodraven -t bloodraven:playground .
+	docker build --target sidecar -t bloodraven-sidecar:playground .
+	docker build -t bloodraven-counter:playground playground/counter-app
+	docker build -t bloodraven-dashboard:playground playground/dashboard
+	docker build -t bloodraven-dns-webhook:playground playground/dns-webhook
 
 ##@ Code Generation
 

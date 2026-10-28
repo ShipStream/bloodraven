@@ -27,28 +27,34 @@ on:
 permissions:
   contents: read
 
+# Cancel eligible PR runs as a unit; unrelated labels get a unique run group.
+# This group differs from _e2e.yml's inner group to avoid caller/callee deadlock.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e') && (github.event.action != 'labeled' || github.event.label.name == 'e2e') && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e') && (github.event.action != 'labeled' || github.event.label.name == 'e2e') }}
+
 jobs:
-  # Run labelled PRs on code changes or the e2e label event, ignoring other labels.
-  e2e:
+  # Consumers inherit this trigger condition through needs.
+  images:
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
        contains(github.event.pull_request.labels.*.name, 'e2e') &&
        (github.event.action != 'labeled' || github.event.label.name == 'e2e'))
+    uses: ./.github/workflows/_e2e-images.yml
+
+  e2e:
+    needs: images
     uses: ./.github/workflows/_e2e.yml
     with:
       profile: ${{ github.event_name == 'pull_request' && 'smoke' || (github.event.inputs.profile || 'release') }}
+      images-artifact: e2e-images
 
   # Label gating is intentionally PR-only: schedule and manual runs always
   # exercise encryption, while release publication uses release.yml's gate.
   encryption:
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       contains(github.event.pull_request.labels.*.name, 'e2e') &&
-       (github.event.action != 'labeled' || github.event.label.name == 'e2e'))
+    needs: images
     uses: ./.github/workflows/_e2e.yml
     with:
       # Ordered least- to most-destructive: 48 and 50 leave the cluster
@@ -59,3 +65,4 @@ jobs:
       enable-encryption: true
       # Four scenarios on one cluster; 51 and 52 each budget 20m.
       timeout-minutes: 180
+      images-artifact: e2e-images
