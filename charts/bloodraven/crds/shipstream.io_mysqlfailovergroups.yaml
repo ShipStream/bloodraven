@@ -1746,7 +1746,9 @@ spec:
                           MaxSyncWait bounds the time the planned-failover state machine
                           waits in WaitingForDragonflySync for the target replica to catch
                           up to the source's replication offset. The same duration is used
-                          as the REPLTAKEOVER timeout argument during PromotingDragonfly.
+                          as the REPLTAKEOVER timeout argument during PromotingDragonfly;
+                          Dragonfly takes that argument in whole seconds, so it is rounded up
+                          to the next second (minimum 1s).
                           Default: 30s.
                         type: string
                       onSyncTimeout:
