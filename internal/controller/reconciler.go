@@ -458,6 +458,21 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: pfRequeue}, nil
 	}
 
+	// Sync pod labels based on status
+	if err := r.syncPodLabels(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
+	}
+
+	// Mirror the same sweep for Dragonfly pods so the active service
+	// selector follows the active site (or the in-flight planned-
+	// failover target). No-op when spec.dragonfly is disabled.
+	if err := r.syncDragonflyPodLabels(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("sync dragonfly pod labels: %w", err)
+	}
+
+	// Backup work runs after the label syncs above: those labels route the
+	// primary and replica Services, so a failing backup step must not
+	// leave them stale.
 	if err := r.reconcileScheduleTriggerRBAC(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile schedule trigger rbac: %w", err)
 	}
@@ -480,18 +495,6 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	backupRequeue, err := r.updateBackupStatus(ctx, &fg)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("update backup status: %w", err)
-	}
-
-	// Sync pod labels based on status
-	if err := r.syncPodLabels(ctx, &fg); err != nil {
-		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
-	}
-
-	// Mirror the same sweep for Dragonfly pods so the active service
-	// selector follows the active site (or the in-flight planned-
-	// failover target). No-op when spec.dragonfly is disabled.
-	if err := r.syncDragonflyPodLabels(ctx, &fg); err != nil {
-		return ctrl.Result{}, fmt.Errorf("sync dragonfly pod labels: %w", err)
 	}
 
 	deferredRequeue = minPositiveDuration(deferredRequeue, backupRequeue)

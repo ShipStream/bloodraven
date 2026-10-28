@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,6 +21,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
@@ -1964,5 +1966,55 @@ func TestWaitForDeploymentRollout_UpdatedButNotAvailable(t *testing.T) {
 	nn := types.NamespacedName{Namespace: "shared-lion", Name: "mysql-lion-dc1"}
 	if err := r.waitForDeploymentRollout(context.Background(), nn, 100*time.Millisecond); err == nil {
 		t.Fatal("waitForDeploymentRollout must not return nil while AvailableReplicas < desired")
+	}
+}
+
+// Pod role labels route the primary and replica Services, so a failing
+// backup step must not keep them from syncing. The schedule trigger RBAC
+// step fails persistently here; the primary pod must still be relabeled.
+func TestReconcile_SyncsPodLabelsBeforeBackupSchedules(t *testing.T) {
+	fg := newTestFG()
+	fg.Spec.Backup = &v1alpha1.BackupSpec{
+		Profiles: []v1alpha1.BackupProfile{{
+			Name: "nightly",
+			Storage: v1alpha1.BackupStorage{
+				Type: v1alpha1.BackupStoragePVC,
+				PVC:  &v1alpha1.PVCStorage{StorageClassName: "fast", Size: resource.MustParse("50Gi")},
+			},
+		}},
+		Schedules: []v1alpha1.BackupSchedule{{Name: "nightly", ProfileName: "nightly", Schedule: "0 2 * * *"}},
+	}
+	fg.Status.ActiveSite = "dc1"
+	fg.Status.Sites = []v1alpha1.SiteStatus{
+		{Name: "dc1", State: "writable"},
+		{Name: "dc2", State: "read-only", Replicating: true},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dc1-pod", Namespace: fg.Namespace, Labels: map[string]string{
+		labelAppName: "mysql", labelInstance: fg.Name, labelSite: "dc1", labelRole: "replica",
+	}}}
+	scheme := testScheme()
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.MysqlFailoverGroup{}).
+		WithObjects(newTestSecret(), fg, pod).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*rbacv1.Role); ok {
+					return errors.New("injected role create failure")
+				}
+				return cl.Create(ctx, obj, opts...)
+			},
+		}).Build()
+	r := &MysqlFailoverGroupReconciler{Client: c, Scheme: scheme, Recorder: record.NewFakeRecorder(100)}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: fg.Name, Namespace: fg.Namespace}})
+	if err == nil || !strings.Contains(err.Error(), "schedule trigger rbac") {
+		t.Fatalf("Reconcile error = %v, want the injected schedule trigger RBAC failure", err)
+	}
+	var got corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Labels[labelRole] != "primary" {
+		t.Fatalf("active site pod role label = %q, want primary despite the backup step failing", got.Labels[labelRole])
 	}
 }
