@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -446,4 +447,157 @@ func TestBuildRestoreJob_DisablesLoadProgressFile(t *testing.T) {
 			})
 		}
 	}
+}
+
+// jobLoadOptions decodes the main container's BLOODRAVEN_LOAD_OPTIONS.
+func jobLoadOptions(t *testing.T, job *batchv1.Job) map[string]any {
+	t.Helper()
+	for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+		if e.Name != "BLOODRAVEN_LOAD_OPTIONS" {
+			continue
+		}
+		opts := map[string]any{}
+		if err := json.Unmarshal([]byte(e.Value), &opts); err != nil {
+			t.Fatalf("decode BLOODRAVEN_LOAD_OPTIONS %q: %v", e.Value, err)
+		}
+		return opts
+	}
+	t.Fatal("BLOODRAVEN_LOAD_OPTIONS not set")
+	return nil
+}
+
+// TestBuildRestoreJob_PITRLoadsDumpGtidBaseline covers the GTID baseline
+// a bootstrap PITR restore needs. The archive replay keeps original
+// GTIDs and the downloaded binlogs include transactions already in the
+// dump, so the fresh target must have the dump's gtidExecuted in
+// gtid_purged (updateGtidSet:"replace", which mysqlsh requires to run
+// with skipBinlog:true) before replay, or MySQL re-executes them. The
+// baseline is bootstrap-PITR only: without PITR nothing needs it, and a
+// live in-place target already has its own GTID history.
+func TestBuildRestoreJob_PITRLoadsDumpGtidBaseline(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+	f, tr := false, true
+	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
+
+	for _, tc := range []struct {
+		name        string
+		pit         *v1alpha1.PointInTimeSpec
+		loadOptions *v1alpha1.LoadOptions
+		wantGtidSet bool
+		wantSkipBin any // nil = key absent
+		wantThreads any
+		wantErr     string
+	}{
+		{name: "pitr, loadOptions omitted", pit: pit, wantGtidSet: true, wantSkipBin: true},
+		{name: "pitr, skipBinlog unset", pit: pit, loadOptions: &v1alpha1.LoadOptions{Threads: 8}, wantGtidSet: true, wantSkipBin: true, wantThreads: float64(8)},
+		{name: "pitr, skipBinlog true", pit: pit, loadOptions: &v1alpha1.LoadOptions{SkipBinlog: &tr}, wantGtidSet: true, wantSkipBin: true},
+		{name: "pitr, skipBinlog false rejected", pit: pit, loadOptions: &v1alpha1.LoadOptions{SkipBinlog: &f}, wantErr: "initFromBackup.loadOptions.skipBinlog"},
+		{name: "no pitr, loadOptions omitted", wantSkipBin: nil},
+		{name: "no pitr, skipBinlog false kept", loadOptions: &v1alpha1.LoadOptions{SkipBinlog: &f}, wantSkipBin: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := fgInitFromMysqlBackup()
+			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			fg.Spec.InitFromBackup.PointInTime = tc.pit
+			fg.Spec.InitFromBackup.LoadOptions = tc.loadOptions
+			r, _ := newReconciler(fg, succeededSeedBackup())
+
+			job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("want error mentioning %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildRestoreJob: %v", err)
+			}
+			opts := jobLoadOptions(t, job)
+			if got, ok := opts["updateGtidSet"]; tc.wantGtidSet != ok || (ok && got != "replace") {
+				t.Errorf("updateGtidSet = %v (present=%v), want present=%v with \"replace\"", got, ok, tc.wantGtidSet)
+			}
+			if got := opts["skipBinlog"]; got != tc.wantSkipBin {
+				t.Errorf("skipBinlog = %v, want %v", got, tc.wantSkipBin)
+			}
+			if got := opts["threads"]; got != tc.wantThreads {
+				t.Errorf("threads = %v, want %v", got, tc.wantThreads)
+			}
+		})
+	}
+}
+
+// TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline pins that
+// a restore into a live primary (in-place) never gets updateGtidSet, PITR
+// or not: "replace" would collide with the history that primary already
+// executed. It also pins the builder's refusal to combine the fresh-target
+// baseline with the in-place destructive preflight env.
+func TestBuildRestoreJobSpec_LiveTargetNeverLoadsDumpGtidBaseline(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
+
+	newFG := func() *v1alpha1.MysqlFailoverGroup {
+		fg := fgInPlaceRestore("")
+		fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+		return fg
+	}
+
+	for _, tc := range []struct {
+		name     string
+		schema   string
+		fullInst bool
+	}{
+		{name: "full-instance", fullInst: true},
+		{name: "per-schema", schema: "orders"},
+	} {
+		t.Run("in-place "+tc.name, func(t *testing.T) {
+			fg := newFG()
+			if tc.schema != "" {
+				fg.Spec.RestoreInPlace.LoadOptions = &v1alpha1.LoadOptions{IncludeSchemas: []string{tc.schema}}
+			}
+			r, _ := newReconciler(fg, succeededSeedBackup())
+			job, err := r.buildInPlaceRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds", tc.fullInst, tc.schema)
+			if err != nil {
+				t.Fatalf("buildInPlaceRestoreJob: %v", err)
+			}
+			if got, ok := jobLoadOptions(t, job)["updateGtidSet"]; ok {
+				t.Errorf("in-place restore must not set updateGtidSet, got %v", got)
+			}
+		})
+	}
+
+	t.Run("live target with pitr", func(t *testing.T) {
+		fg := newFG()
+		r, _ := newReconciler(fg, succeededSeedBackup())
+		job, err := r.buildRestoreJobSpec(context.Background(), fg, restoreJobInputs{
+			TargetSite:  fg.Spec.Sites[0].Name,
+			CredsName:   "creds",
+			Source:      fg.Spec.RestoreInPlace.Source,
+			PointInTime: pit,
+			FieldPath:   "restoreInPlace",
+		})
+		if err != nil {
+			t.Fatalf("buildRestoreJobSpec: %v", err)
+		}
+		if got, ok := jobLoadOptions(t, job)["updateGtidSet"]; ok {
+			t.Errorf("a non-fresh target must not set updateGtidSet, got %v", got)
+		}
+	})
+
+	t.Run("fresh target with destructive preflight refused", func(t *testing.T) {
+		fg := newFG()
+		r, _ := newReconciler(fg, succeededSeedBackup())
+		_, err := r.buildRestoreJobSpec(context.Background(), fg, restoreJobInputs{
+			TargetSite:  fg.Spec.Sites[0].Name,
+			CredsName:   "creds",
+			Source:      fg.Spec.RestoreInPlace.Source,
+			PointInTime: pit,
+			FreshTarget: true,
+			ExtraEnv:    []corev1.EnvVar{{Name: "BLOODRAVEN_DROP_ALL_USER_SCHEMAS", Value: "1"}},
+		})
+		if err == nil || !strings.Contains(err.Error(), "in-place preflight BLOODRAVEN_DROP_ALL_USER_SCHEMAS") {
+			t.Fatalf("want the fresh-target/in-place-preflight guard error, got %v", err)
+		}
+	})
 }

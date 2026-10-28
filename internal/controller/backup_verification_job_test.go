@@ -72,9 +72,9 @@ func TestBackupVerifyScript_StartsGtidModeOn(t *testing.T) {
 
 // The VERIFICATION load-options JSON must carry updateGtidSet:"replace" (to
 // restore the dump's gtid_purged so the gtid_mode=ON verify server can dedup)
-// while keeping skipBinlog:true. The shared backup/in-place-restore JSON
-// (marshalLoadOptions) must stay free of updateGtidSet so its output is
-// byte-for-byte unchanged.
+// while keeping skipBinlog:true. The generic serializer (marshalLoadOptions)
+// must stay free of updateGtidSet: restores add it only for bootstrap PITR
+// (restoreLoadOptionsJSON), never for in-place.
 func TestMarshalVerificationLoadOptions_InjectsUpdateGtidSet(t *testing.T) {
 	verifyJSON, err := marshalVerificationLoadOptions(verificationLoadOptions())
 	if err != nil {

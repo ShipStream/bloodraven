@@ -648,35 +648,12 @@ func verificationLoadOptions() *v1alpha1.LoadOptions {
 }
 
 // marshalVerificationLoadOptions serializes the verification-run load
-// options exactly like marshalLoadOptions, then injects
-// updateGtidSet:"replace" — an internal-only knob that is deliberately
-// NOT exposed on v1alpha1.LoadOptions (that struct is CRD-facing; adding
-// a field would force CRD regen + Helm mirror and leak an internal knob
-// to users).
-//
-// Why it is needed (#101): the verify mysqld is started gtid_mode=ON (see
-// verify_script.sh) precisely so the raw `mysqlbinlog | mysql` PITR replay
-// can rely on server-side GTID dedup — the same mechanism the production
-// in-place restore path uses. For that dedup to hold on the ephemeral
-// server, util.loadDump() must restore the dump's recorded GTID set into
-// @@GLOBAL.gtid_purged; updateGtidSet:"replace" does exactly that. We keep
-// skipBinlog:true (the verify mysqld runs --skip-log-bin), which loadDump
-// accepts alongside updateGtidSet. This override is scoped to the
-// verification path only, so the backup and in-place-restore load-options
-// JSON (which go through marshalLoadOptions) stay byte-for-byte unchanged.
+// options with the dump's GTID baseline installed (#101). The verify
+// mysqld is started gtid_mode=ON (see verify_script.sh) so the raw
+// `mysqlbinlog | mysql` PITR replay can rely on server-side GTID dedup,
+// exactly like a bootstrap PITR restore into a fresh group; see
+// marshalDumpGtidBaselineLoadOptions for why that needs
+// updateGtidSet:"replace" with skipBinlog:true.
 func marshalVerificationLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
-	base, err := marshalLoadOptions(l)
-	if err != nil {
-		return "", err
-	}
-	opts := map[string]any{}
-	if err := json.Unmarshal([]byte(base), &opts); err != nil {
-		return "", fmt.Errorf("marshal verification load options: %w", err)
-	}
-	opts["updateGtidSet"] = "replace"
-	b, err := json.Marshal(opts)
-	if err != nil {
-		return "", fmt.Errorf("marshal verification load options: %w", err)
-	}
-	return string(b), nil
+	return marshalDumpGtidBaselineLoadOptions(l)
 }

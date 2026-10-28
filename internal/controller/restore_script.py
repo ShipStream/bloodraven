@@ -336,11 +336,20 @@ def _maybe_preflight_drops(session):
 #   └── us-east-1b/
 #       └── mysql-bin.000001
 #
-# All this script has to do is glob them in deterministic order and
-# pipe `mysqlbinlog --stop-datetime=<target>` through `mysql
-# --binary-mode` to the target instance. GTID dedup on the server
-# skips transactions already present from the dump load, so the order
-# across sites doesn't matter for correctness.
+# This script globs them in deterministic order (site, then file) and
+# pipes one `mysqlbinlog --stop-datetime=<target>` run over all of them
+# through `mysql --binary-mode` to the target instance. GTID dedup on the
+# server skips transactions already present from the dump load and copies
+# archived by more than one site. That dedup needs the dump's GTID set in
+# gtid_purged first: the operator passes updateGtidSet:"replace" (with
+# skipBinlog:true) in BLOODRAVEN_LOAD_OPTIONS for bootstrap PITR restores.
+#
+# Known limitation: the order across sites DOES matter. mysqlbinlog stops
+# the whole run at the first event past the stop time, so once one site's
+# files reach past it, later sites' files are not read. If a site was
+# primary again after another site (a failback inside the window), the
+# other site's transactions in between are silently skipped. Fixing it
+# needs chronological per-site replay (tracked as a follow-up).
 
 
 def _parse_pitr_target(s):

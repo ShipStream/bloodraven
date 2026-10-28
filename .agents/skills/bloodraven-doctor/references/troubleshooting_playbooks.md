@@ -442,3 +442,28 @@ Restore Jobs mount the dump read-only: source PVCs at `/restore` or `/backups`, 
 1. Upgrade the operator. `loadOptions.resetProgress` has no effect on restores, and changing it does not help.
 2. Bootstrap: delete the failed restore Job; the reconciler rebuilds it. Restore Jobs no longer resume a partial load. If the failed Job's log shows `BLOODRAVEN_LOAD_START`, empty the target first (delete the new group's MySQL PVCs, or `./playground/reset-mysql.sh`), or the reload stops on objects the first attempt created.
 3. In-place: bump `spec.restoreInPlace.confirm` to a newer RFC 3339 timestamp to re-run the restore. It drops and reloads the same scope, which is what is needed when the earlier attempt dropped the schemas and never loaded them.
+
+## 18. Bootstrap PITR restore fails with duplicate-key or missing-row errors
+
+A PITR replay pipes archived binlogs, with their original GTIDs, into the new primary. The archive includes transactions the dump already contains. MySQL skips them only when the dump's GTID set is in the target's `gtid_purged`. The operator loads bootstrap PITR restores with `updateGtidSet: "replace"` and `skipBinlog: true` to install that set. Operators built before that change did not, so replay re-executed pre-dump transactions.
+
+### Symptoms
+- Restore Job logs `BLOODRAVEN_LOAD_COMPLETE`, then `BLOODRAVEN_PITR_FAILED` with MySQL error 1062 (duplicate entry), 1032 (row not found), 1050 (table exists) or 1396 (user exists).
+- `status.restore.phase` is `Failed`.
+
+### Diagnostic steps
+1. Check the Job's load options:
+   ```bash
+   kubectl get job -n <ns> <restore-job> -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="BLOODRAVEN_LOAD_OPTIONS")].value}'
+   ```
+   A fixed operator shows `"updateGtidSet":"replace"` and `"skipBinlog":true` when `initFromBackup.pointInTime` is set.
+2. On the target, compare `SELECT @@GLOBAL.gtid_purged` with the dump's `gtidExecuted` (`@.json` in the backup, or `status.gtidExecuted` on the MysqlBackup). After a fixed load they match.
+
+### Safe remediation
+1. Upgrade the operator.
+2. The target was fresh, so nothing outside it was changed. Reset it and run the restore again:
+   - Playground: `./playground/reset-mysql.sh`.
+   - Production: scale the new group's MySQL Deployments to 0 (or delete their pods), then delete their PVCs, or recreate the group.
+   - Delete the failed restore Job (`kubectl delete job -n <ns> <restore-job>`). While it exists the reconciler keeps reporting `Failed` instead of rebuilding it.
+3. Error 1146 or 1049 during replay rather than 1062/1032 means the replay touched a schema the dump or load left out (`dumpSchemas`, `loadOptions.includeSchemas`/`excludeSchemas`). Restore from an instance dump, without load-time schema filters.
+4. Do not work around it with `pointInTime.excludeGtids` set to the dump's GTID set. That skips the in-dump transactions but leaves `gtid_purged` without the dump's history.

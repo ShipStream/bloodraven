@@ -882,6 +882,8 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 		}
 	}
 
+	// FreshTarget stays false: the target is the live primary, whose own
+	// GTID history rules out installing the dump's GTID set.
 	job, err := r.buildRestoreJobSpec(ctx, fg, restoreJobInputs{
 		JobName:     inPlaceRestoreJobName(fg.Name, targetSite),
 		TargetSite:  targetSite,

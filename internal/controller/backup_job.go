@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -717,6 +718,48 @@ func marshalDumpOptions(d *v1alpha1.DumpOptions) (string, error) {
 	b, err := json.Marshal(opts)
 	if err != nil {
 		return "", fmt.Errorf("marshal dump options: %w", err)
+	}
+	return string(b), nil
+}
+
+// errDumpGtidBaselineNeedsSkipBinlog reports LoadOptions that ask for a
+// logged load where the dump's GTID baseline must be installed.
+var errDumpGtidBaselineNeedsSkipBinlog = errors.New("installing the dump GTID set requires skipBinlog=true")
+
+// marshalDumpGtidBaselineLoadOptions serializes LoadOptions like
+// marshalLoadOptions and adds updateGtidSet:"replace", which makes
+// util.loadDump() set the target's @@GLOBAL.gtid_purged to the dump's
+// recorded gtidExecuted. It is an internal knob, deliberately not on
+// v1alpha1.LoadOptions.
+//
+// Use it only for a load into a fresh instance that will then replay
+// archived binlogs with their original GTIDs (bootstrap PITR restore,
+// backup verification): with the baseline in place, MySQL skips the
+// replayed transactions the dump already contains. MySQL Shell documents
+// pairing it with skipBinlog:true (it enforces that only on 5.7 targets):
+// a logged load would also write the whole dump to the binlog under new
+// local GTIDs, which the PITR archiver would then upload. skipBinlog is
+// forced on, and an explicit skipBinlog=false is rejected with
+// errDumpGtidBaselineNeedsSkipBinlog. Never use it on a live server:
+// "replace" requires the dump set to be disjoint from what that server
+// already executed.
+func marshalDumpGtidBaselineLoadOptions(l *v1alpha1.LoadOptions) (string, error) {
+	if l != nil && l.SkipBinlog != nil && !*l.SkipBinlog {
+		return "", errDumpGtidBaselineNeedsSkipBinlog
+	}
+	base, err := marshalLoadOptions(l)
+	if err != nil {
+		return "", err
+	}
+	opts := map[string]any{}
+	if err := json.Unmarshal([]byte(base), &opts); err != nil {
+		return "", fmt.Errorf("marshal load options: %w", err)
+	}
+	opts["updateGtidSet"] = "replace"
+	opts["skipBinlog"] = true
+	b, err := json.Marshal(opts)
+	if err != nil {
+		return "", fmt.Errorf("marshal load options: %w", err)
 	}
 	return string(b), nil
 }

@@ -3,9 +3,11 @@ package controller
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -713,6 +715,11 @@ type restoreJobInputs struct {
 	// BLOODRAVEN_DROP_SCHEMAS, BLOODRAVEN_RESET_REPLICATION, and
 	// BLOODRAVEN_PITR_FILTER_DATABASE.
 	ExtraEnv []corev1.EnvVar
+	// FreshTarget marks a restore into an empty instance with no GTID
+	// history of its own (bootstrap). Only then may the load install the
+	// dump's GTID set (see dumpGtidBaselineLoadOptions). In-place restores
+	// target a live primary and must leave it false.
+	FreshTarget bool
 }
 
 // buildRestoreJob resolves the initFromBackup source and constructs the
@@ -731,6 +738,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		LoadOptions: fg.Spec.InitFromBackup.LoadOptions,
 		PointInTime: fg.Spec.InitFromBackup.PointInTime,
 		Decryption:  fg.Spec.InitFromBackup.Decryption,
+		FreshTarget: true,
 	})
 }
 
@@ -763,6 +771,45 @@ func backupRefProfileStorageError(fp string, ref *v1alpha1.MysqlBackup, profile 
 			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, field, want, fp, field)
 	}
 	return nil
+}
+
+// inPlacePreflightEnv lists the destructive restore.py preflight switches
+// only an in-place restore of a live primary sets.
+var inPlacePreflightEnv = []string{
+	"BLOODRAVEN_DROP_SCHEMAS",
+	"BLOODRAVEN_DROP_ALL_USER_SCHEMAS",
+	"BLOODRAVEN_RESET_REPLICATION",
+}
+
+// restoreLoadOptionsJSON returns the util.loadDump() options for a
+// restore Job. A PITR restore into a fresh target installs the dump's
+// GTID set first (marshalDumpGtidBaselineLoadOptions): the archived
+// binlogs replayed afterwards keep their original GTIDs and include
+// transactions the dump already contains, which MySQL skips only when
+// their GTIDs are already in gtid_executed. Every other restore keeps
+// the plain serialization. A live target (in-place) never gets the
+// baseline: its own executed history already holds those GTIDs, and
+// "replace" requires the dump set to be disjoint from it.
+func restoreLoadOptionsJSON(fp string, in restoreJobInputs) (string, error) {
+	if in.FreshTarget {
+		for _, e := range in.ExtraEnv {
+			if slices.Contains(inPlacePreflightEnv, e.Name) {
+				return "", fmt.Errorf("internal error: fresh-target restore Job carries in-place preflight %s", e.Name)
+			}
+		}
+	}
+	if !in.FreshTarget || in.PointInTime == nil {
+		return marshalLoadOptions(in.LoadOptions)
+	}
+	opts, err := marshalDumpGtidBaselineLoadOptions(in.LoadOptions)
+	if errors.Is(err, errDumpGtidBaselineNeedsSkipBinlog) {
+		return "", fmt.Errorf(
+			"%s.loadOptions.skipBinlog=false is incompatible with %s.pointInTime: the binlog replay needs the dump's "+
+				"GTID set installed on the target, and MySQL Shell pairs that with an unlogged load (a logged load would "+
+				"also binlog and archive the whole dump under new local GTIDs); remove skipBinlog or set it to true",
+			fp, fp)
+	}
+	return opts, err
 }
 
 // buildRestoreJobSpec is the shared core of both bootstrap and in-place
@@ -985,7 +1032,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		return nil, fmt.Errorf("%s.source must set mysqlBackupRef, s3, or pvc", fp)
 	}
 
-	loadOptsJSON, err := marshalLoadOptions(in.LoadOptions)
+	loadOptsJSON, err := restoreLoadOptionsJSON(fp, in)
 	if err != nil {
 		return nil, err
 	}
