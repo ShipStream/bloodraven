@@ -28,12 +28,14 @@ permissions:
   contents: read
 
 jobs:
-  # Skip PR-triggered runs unless the "e2e" label is present.
+  # Run labelled PRs on code changes or the e2e label event, ignoring other labels.
   e2e:
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e'))
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'e2e') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'e2e'))
     uses: ./.github/workflows/_e2e.yml
     with:
       profile: ${{ github.event_name == 'pull_request' && 'smoke' || (github.event.inputs.profile || 'release') }}
@@ -44,7 +46,9 @@ jobs:
     if: >-
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e'))
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'e2e') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'e2e'))
     uses: ./.github/workflows/_e2e.yml
     with:
       # Ordered least- to most-destructive: 48 and 50 leave the cluster
