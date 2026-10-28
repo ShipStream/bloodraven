@@ -107,6 +107,15 @@ def _read_cred_file(dirpath, key):
         return None
 
 
+def _read_mysql_cred_file(dirpath, key):
+    """Preserve Secret contents, including whitespace and line endings."""
+    try:
+        with open(os.path.join(dirpath, key), "rb") as f:
+            return f.read().decode("utf-8")
+    except OSError:
+        return None
+
+
 def _resolve_credentials():
     """Read MYSQL_USER / MYSQL_PASSWORD from the mounted creds dir, falling
     back to environment variables for backward compatibility. The file
@@ -115,11 +124,11 @@ def _resolve_credentials():
     user = None
     password = None
     if creds_dir:
-        user = _read_cred_file(creds_dir, "MYSQL_USER")
-        password = _read_cred_file(creds_dir, "MYSQL_PASSWORD")
-    if not user:
+        user = _read_mysql_cred_file(creds_dir, "MYSQL_USER")
+        password = _read_mysql_cred_file(creds_dir, "MYSQL_PASSWORD")
+    if user is None:
         user = os.environ.get("MYSQL_USER")
-    if not password:
+    if password is None:
         password = os.environ.get("MYSQL_PASSWORD")
     if not user:
         print("BLOODRAVEN_DUMP_FAILED: no MYSQL_USER in creds dir or env",
