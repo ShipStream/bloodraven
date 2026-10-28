@@ -683,9 +683,8 @@ func TestMysqlDatabaseRemovedUserMovedToGrantsKept(t *testing.T) {
 	mdb := h.requireReady()
 
 	h.requireNoStatementNaming(before, "DROP USER", mdbSupportUser)
-	// The apply's revoke of the legacy wildcard grant row is expected; a
-	// revoke of the schema's own grant row is not.
-	h.requireNoStatementNaming(before, "REVOKE IF EXISTS ALL PRIVILEGES ON `"+h.server.grantRowKey(mdbDatabase)+"`", mdbSupportUser)
+	// No tenant revoke may name the transferred principal.
+	h.requireNoStatementNaming(before, "REVOKE IF EXISTS ", mdbSupportUser)
 	h.requirePasswordOf(mdbSupportUser, "%", mdbSupportPass)
 	if privs, ok := h.server.grantsFor(mdbDatabase, mdbSupportUser); !ok || strings.Join(privs, ",") != "SELECT" {
 		t.Fatalf("grants = %v (present=%v), want [SELECT]", privs, ok)

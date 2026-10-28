@@ -213,12 +213,12 @@ func TestRenderDestructiveStatements(t *testing.T) {
 		t.Fatalf("renderDropUser() = %q, want %q", dropUser, want)
 	}
 
-	revoke, err := renderRevokeAll("spec.grants[0].username", "acme_wms", "maester", defaultHosts)
+	revoke, err := renderSchemaRevoke("spec.grants[0].username", []string{"SELECT"}, "acme_wms", "maester", defaultHosts)
 	if err != nil {
-		t.Fatalf("renderRevokeAll() error = %v", err)
+		t.Fatalf("renderSchemaRevoke() error = %v", err)
 	}
-	if want := "REVOKE IF EXISTS ALL PRIVILEGES ON `acme_wms`.* FROM 'maester'@'%' IGNORE UNKNOWN USER"; revoke != want {
-		t.Fatalf("renderRevokeAll() = %q, want %q", revoke, want)
+	if want := "REVOKE IF EXISTS SELECT ON `acme_wms`.* FROM 'maester'@'%' IGNORE UNKNOWN USER"; revoke != want {
+		t.Fatalf("renderSchemaRevoke() = %q, want %q", revoke, want)
 	}
 
 	if _, err := renderDropDatabase("acme`; DROP DATABASE other"); err == nil {
@@ -353,50 +353,25 @@ func TestRenderAlterDatabase(t *testing.T) {
 	}
 }
 
-func TestRenderRevokeSurplus(t *testing.T) {
-	// ALL PRIVILEGES is the whole allowlist: nothing can be surplus.
-	got, err := renderRevokeSurplus("spec.owner secret username",
-		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeAllPrivileges}, "acme_wms", "acme_app", defaultHosts)
+func TestRenderSchemaRevoke(t *testing.T) {
+	stmt, err := renderSchemaRevoke("test", []string{"SELECT", "CREATE ROUTINE", "ALTER ROUTINE"}, `acme\_wms`, "reader", []string{"10.0.0.1"})
 	if err != nil {
-		t.Fatalf("renderRevokeSurplus(, defaultHosts) error = %v", err)
+		t.Fatal(err)
 	}
-	if got != "" {
-		t.Fatalf("renderRevokeSurplus(ALL PRIVILEGES, defaultHosts) = %q, want no statement", got)
+	want := "REVOKE IF EXISTS SELECT, CREATE ROUTINE, ALTER ROUTINE ON `acme\\_wms`.* FROM 'reader'@'10.0.0.1' IGNORE UNKNOWN USER"
+	if stmt != want {
+		t.Fatalf("revoke = %q, want %q", stmt, want)
 	}
-
-	// A narrow desired set revokes every other allowlist privilege, in
-	// canonical order, with the idempotence clauses.
-	got, err = renderRevokeSurplus("spec.owner secret username",
-		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme_wms", "acme_app", defaultHosts)
-	if err != nil {
-		t.Fatalf("renderRevokeSurplus(, defaultHosts) error = %v", err)
-	}
-	want := "REVOKE IF EXISTS INSERT, UPDATE, DELETE, CREATE, CREATE TEMPORARY TABLES, CREATE VIEW, DROP, ALTER, INDEX, REFERENCES, " +
-		"LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, EXECUTE, CREATE ROUTINE, ALTER ROUTINE ON `acme_wms`.* FROM 'acme_app'@'%' IGNORE UNKNOWN USER"
-	if got != want {
-		t.Fatalf("renderRevokeSurplus(, defaultHosts) = %q, want %q", got, want)
-	}
-
-	// Every concrete privilege desired: only the routine privileges an
-	// earlier ALL PRIVILEGES grant would have conferred remain to revoke.
-	full := make([]v1alpha1.MysqlPrivilege, 0)
-	for _, name := range v1alpha1.AllowedPrivilegeNames() {
-		if name != string(v1alpha1.PrivilegeAllPrivileges) {
-			full = append(full, v1alpha1.MysqlPrivilege(name))
+	for _, privileges := range [][]string{nil, {"ALL PRIVILEGES"}, {"GRANT OPTION"}, {"SELECT; DROP USER root"}} {
+		if _, err := renderSchemaRevoke("test", privileges, "acme_wms", "reader", defaultHosts); err == nil {
+			t.Fatalf("accepted unsafe privileges %v", privileges)
 		}
 	}
-	got, err = renderRevokeSurplus("spec.owner secret username", full, "acme_wms", "acme_app", defaultHosts)
-	if err != nil {
-		t.Fatalf("renderRevokeSurplus(, defaultHosts) error = %v", err)
+	if _, err := planSchemaRevokes("test", []string{"acme`; DROP DATABASE other"}, "reader", defaultHosts, nil); err == nil {
+		t.Fatal("accepted unsafe database name")
 	}
-	want = "REVOKE IF EXISTS CREATE ROUTINE, ALTER ROUTINE ON `acme_wms`.* FROM 'acme_app'@'%' IGNORE UNKNOWN USER"
-	if got != want {
-		t.Fatalf("renderRevokeSurplus(full set, defaultHosts) = %q, want %q", got, want)
-	}
-
-	if _, err := renderRevokeSurplus("spec.owner secret username",
-		[]v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, "acme`; DROP DATABASE other", "acme_app", defaultHosts); err == nil {
-		t.Fatal("renderRevokeSurplus(, defaultHosts) accepted an invalid identifier")
+	if _, err := planSchemaRevokes("test", []string{"acme_wms"}, "reader'", defaultHosts, nil); err == nil {
+		t.Fatal("accepted unsafe username")
 	}
 }
 
