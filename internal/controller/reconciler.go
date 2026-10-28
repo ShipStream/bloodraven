@@ -112,7 +112,8 @@ type MysqlFailoverGroupReconciler struct {
 	Clientset kubernetes.Interface // optional, for tailing restore Job logs
 
 	// APIReader is an uncached reader for paths that cannot tolerate a stale
-	// cache view — specifically waitForDeploymentRollout, which must observe
+	// cache view — including backup retry conflict transitions and
+	// waitForDeploymentRollout, which must observe
 	// the post-patch Generation before it can meaningfully check rollout
 	// progress. SetupWithManager defaults this to mgr.GetAPIReader() when it
 	// has not been injected explicitly, so manager-backed production wiring

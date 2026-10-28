@@ -112,6 +112,16 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Retry launch metadata is persisted with Create, before any status write.
+	if backup.Annotations[annotationBackupAttempt] != "" && backup.Status.Attempt != effectiveBackupAttempt(&backup) {
+		patch := client.MergeFrom(backup.DeepCopy())
+		backup.Status.Attempt = effectiveBackupAttempt(&backup)
+		if err := r.Status().Patch(ctx, &backup, patch); err != nil {
+			return ctrl.Result{}, fmt.Errorf("restore retry attempt: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	// Recover completion metadata before retention pruning.
 	if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded || backup.Status.Phase == v1alpha1.BackupPhaseFailed {
 		var recovery ctrl.Result
@@ -236,9 +246,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		backup.Status.MysqlImage = mysqlImageFor(&fg)
 		backup.Status.ActiveSiteAtStart = fg.Status.ActiveSite
 		backup.Status.Encrypted, backup.Status.EncryptionAlgorithm = backupJobEncryption(built)
-		if backup.Status.Attempt == 0 {
-			backup.Status.Attempt = 1
-		}
+		backup.Status.Attempt = effectiveBackupAttempt(&backup)
 		backup.Status.Message = fmt.Sprintf("running (source=%s, reason=%s)", sourceSite, reason)
 		backup.Status.ObservedGeneration = backup.Generation
 		setCondition(&backup.Status.Conditions, metav1.Condition{
