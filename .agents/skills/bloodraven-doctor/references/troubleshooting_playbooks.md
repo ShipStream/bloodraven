@@ -648,3 +648,23 @@ Older operators project `pitr-passphrase` as root-owned mode `0400`, but PITR si
 
 ### Safe remediation
 Upgrade to the operator that projects the live sidecar passphrase as `0444`, matching PITR S3 credentials. Its PITR render-version change triggers ordered updates for existing deployments. Verify the new pod's projection mode, readiness, and `/archiver/status` after the rollout. Backup and restore Job projections keep their separate fsGroup-based permissions. Preserve the existing passphrase; adding fsGroup to an existing MySQL PVC can trigger a recursive ownership change and is unnecessary for this fix.
+
+## 26. PITR archival stops after an encryption change
+
+### Symptoms
+- The sidecar still has the previous passphrase reference/key while an ordered rollout is pending, or on an older operator that omitted encryption from drift detection.
+- After rollout, `/archiver/status` and sidecar logs report a manifest-read error, missing BRV1 magic, or authentication failure; archive coverage stops advancing.
+
+### Cause
+The sidecar loads its passphrase at startup. The deployment fingerprint includes the active PITR profile's effective encryption settings and a per-group keyed HMAC of its selected passphrase bytes in both credential modes. Updating projected Secret files alone cannot reload the store. A completed rollout applies the new settings but cannot read an archive encrypted under a different passphrase; strict readers also reject old plaintext manifests after enabling encryption.
+
+### Diagnostic steps
+1. Compare the active PITR profile's Secret name and key with the Deployment's `pitr-passphrase` projection and `BLOODRAVEN_PITR_PASSPHRASE_FILE`. Inspect `shipstream.io/spec-hash` and the group's update status to distinguish pending rollout from archive incompatibility. Never print Secret data or an unkeyed hash of it.
+2. Read sidecar logs and probe the archiver:
+   ```bash
+   ./.agents/skills/bloodraven-doctor/scripts/sidecar-probe.sh -n <ns> <group> archiver
+   ```
+   If HTTP is unavailable, inspect current and previous startup logs as in playbook 25.
+
+### Safe remediation
+Preserve the archive and its original passphrase. Restore access to the original settings and key before attempting to use that recovery history. Do not delete the manifest, overwrite old objects, or enable plaintext fallback as a drift repair. Automatic archive migration and multiple key generations are unsupported; plan any encryption transition separately. For a stale rendered configuration, use the operator with encryption-aware drift detection and verify the normal ordered rollout completes.
