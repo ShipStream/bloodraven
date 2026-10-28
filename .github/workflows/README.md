@@ -12,18 +12,21 @@ This directory contains the CI/CD automation for the Bloodraven MySQL operator.
 
 Superseded PR runs are cancelled. Pushes to `main` and release calls use unique run groups and do not cancel each other.
 
-Runs the full PR gate suite in parallel:
+Pull requests run jobs for the areas they touch: Go jobs for Go-related source and configuration, docs-build for `site/`, course-check for `course/` or `site/public/courses/`, and license-roundtrip for either Go or site changes. Changes to `ci.yml`, shared CI actions or scripts, or `Makefile` select all jobs. Unknown paths, empty diffs, and diff failures also select all jobs. Pushes to `main` and release calls run everything.
 
 | Job | Description |
 |---|---|
+| `changes` | Classifies changed paths and selects the affected jobs |
 | `lint` | Runs `golangci-lint` (installed via `go install`) |
 | `build` | Compiles `cmd/bloodraven` and `cmd/sidecar` |
 | `test-unit` | `make test-unit` — unit tests under `./internal/...` |
 | `test-component` | `make test-component` — component tests under `./test/component/` |
 | `test-envtest` | `make test-envtest` — controller tests using envtest (real API server) |
 | `generate-check` | Runs `make generate && make manifests` and fails if files are stale |
+| `license-roundtrip` | Runs Node license tests and the cross-language license roundtrip |
 | `docs-build` | Builds the bloodraven.dev site under `site/` and verifies `llms-full.txt` includes every docs page |
-| `all-checks` | Summary job — use this as the single branch-protection required status check |
+| `course-check` | Verifies course content, rebuilds the course site, and checks committed output for drift |
+| `all-checks` | Summary job — accepts skipped jobs and fails on any failure or cancellation, including `changes`; use this as the single branch-protection required status check |
 
 **Permissions:** `contents: read` (default)
 
