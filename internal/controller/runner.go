@@ -407,6 +407,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			existing.tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 			existing.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
+			existing.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
 			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
 			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
 			if existing.dragonfly != nil {
@@ -442,6 +443,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			mt.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 			mt.tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 			mt.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
+			mt.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
 			if mt.dragonfly != nil {
 				mt.dragonfly.SetPaused(plannedActive)
 			}
@@ -733,6 +735,7 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
 	tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 	tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
+	tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
 
 	r.restoreFailoverState(tm, fg, nn)
 	for _, site := range fg.Status.Sites {
@@ -1347,7 +1350,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// would undo its phase changes (a succeeded restore's queue
 		// written back as Armed is discarded, a Draining one written over
 		// a newer Armed one clones from the new restore's primary) and
-		// revert an administrator's status patch.
+		// revert an administrator's status patch. Likewise the restore's
+		// offline_mode fence record: a copy without the prior value makes
+		// the release leave offline_mode ON.
 		encryption := fresh.Status.EncryptionAtRest
 		reconcilerConds := make([]*metav1.Condition, len(reconcilerOwnedConditions))
 		for i, t := range reconcilerOwnedConditions {
@@ -1358,11 +1363,13 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		initialRestore := fresh.Status.Restore
 		restore := fresh.Status.RestoreInPlace
 		reclones := fresh.Status.RestoreReclones
+		offlineFence := fresh.Status.RestoreOfflineFence
 		fresh.Status = freshFG.Status
 		fresh.Status.PlannedFailover = planned
 		fresh.Status.Restore = initialRestore
 		fresh.Status.RestoreInPlace = restore
 		fresh.Status.RestoreReclones = reclones
+		fresh.Status.RestoreOfflineFence = offlineFence
 		fresh.Status.EncryptionAtRest = encryption
 		fresh.Status.Dragonfly = dragonfly
 		for i, c := range reconcilerConds {

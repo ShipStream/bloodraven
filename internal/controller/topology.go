@@ -511,6 +511,16 @@ type TopologyManager struct {
 	// asked. Protected by mu.
 	restoreRecloneBlocked []string
 
+	// restoreFenceSite/Owner name the site whose offline_mode fence an
+	// in-place restore (owner = its confirm token) holds; Poll re-asserts
+	// it. restoreFenceReleased is the last owner released, so a stale
+	// runner sync cannot re-arm it. restoreFenceMu (not mu) guards them and
+	// serializes enforce, re-assert and release, which run SQL.
+	restoreFenceMu       sync.Mutex
+	restoreFenceSite     string
+	restoreFenceOwner    string
+	restoreFenceReleased string
+
 	// crossSiteRetry is armed when applyCrossSiteAction deferred a decision
 	// because an update, bootstrap, planned failover or in-place restore
 	// held the cross-site path, the anti-flap cooldown refused a promotion,
@@ -1262,6 +1272,10 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 		fencedOldPrimary = tm.fenceReturningOldPrimary(ctx, action)
 		tm.retryFreshDeployBootstrap(ctx, action)
 	}
+
+	// An in-place restore's offline_mode fence must survive a mysqld
+	// restart (it is never persisted), whatever the frozen topology does.
+	tm.reassertRestoreOfflineFence(ctx)
 
 	// Update status.
 	tm.mu.Lock()

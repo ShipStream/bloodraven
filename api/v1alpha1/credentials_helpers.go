@@ -15,8 +15,9 @@ func (s *MysqlFailoverGroupSpec) EffectiveOperatorSecretName() string {
 	return s.SecretName
 }
 
-// EffectiveBackupSecretName returns the secret name used for backup and
-// restore operations. In credentials mode it prefers the dedicated backup
+// EffectiveBackupSecretName returns the secret name used for backup (and
+// backup verification) Jobs; restore Jobs use EffectiveOperatorSecretName.
+// In credentials mode it prefers the dedicated backup
 // secret, falling back to the operator secret. In legacy mode it returns
 // the single secret name.
 func (s *MysqlFailoverGroupSpec) EffectiveBackupSecretName() string {

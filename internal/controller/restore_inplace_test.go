@@ -397,6 +397,7 @@ func TestReconcileInPlaceRestore_Preflight_TransitionsToFencing(t *testing.T) {
 	}
 	seed := succeededSeedBackup()
 	r, c := newReconciler(fg, seed, dsnSecret())
+	withFenceRunner(r, c, fg)
 
 	if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 		t.Fatalf("reconcile: %v", err)

@@ -717,9 +717,11 @@ type BackupScheduleStatus struct {
 // Two modes are supported, selected by loadOptions.includeSchemas:
 //
 //   - Full-instance restore (includeSchemas empty or unset): drops all
-//     user schemas, re-loads from the dump, and re-clones the replica
-//     via CLONE INSTANCE after the load completes. Both the primary
-//     Service and the sidecar are fenced for the duration.
+//     user schemas, re-loads from the dump, and re-clones the peers
+//     via CLONE INSTANCE after the load completes. The primary Service
+//     is fenced and the primary runs with offline_mode=ON for the
+//     duration, so only CONNECTION_ADMIN/SUPER accounts (the operator,
+//     the sidecar, the restore Job) can connect.
 //
 //   - Per-schema restore (exactly one entry in includeSchemas): drops
 //     the named schema only, re-loads just that schema, and relies on
@@ -808,10 +810,12 @@ const (
 	RestoreInPlacePreflight RestoreInPlacePhase = "Preflight"
 
 	// RestoreInPlaceFencing means the operator is applying the
-	// pre-restore fence: freezing the topology manager and (for
-	// full-instance restores) stripping the primary role label so the
-	// -primary Service sheds client connections for the duration of
-	// the load.
+	// pre-restore fence: freezing the topology manager and, for
+	// full-instance restores, stripping the primary role label (the
+	// -primary Service stops taking new connections) and setting
+	// offline_mode=ON on the primary, which disconnects and refuses every
+	// session without CONNECTION_ADMIN or SUPER. The restore Job is created
+	// only once no client session from before the fence remains.
 	RestoreInPlaceFencing RestoreInPlacePhase = "Fencing"
 
 	// RestoreInPlaceRestoring means the restore Job is running the
@@ -935,6 +939,39 @@ type RestoreReclonesCarryover struct {
 	Held bool `json:"held,omitempty"`
 }
 
+// RestoreOfflineFenceStatus records the database fence a full-instance
+// in-place restore holds on its target primary: @@GLOBAL.offline_mode=ON,
+// which disconnects and refuses every session without CONNECTION_ADMIN or
+// SUPER. The record is written before the operator changes offline_mode,
+// so a restarted operator re-applies the fence while the restore runs and
+// puts the prior value back once the restore has finished.
+type RestoreOfflineFenceStatus struct {
+	// Site is the primary the fence applies to.
+	Site string `json:"site"`
+
+	// ConfirmToken is the spec.restoreInPlace.confirm value of the
+	// restore that owns the fence.
+	ConfirmToken string `json:"confirmToken"`
+
+	// RunID is status.restoreInPlace.runID of the run that owns the
+	// fence. A request re-applied with the same confirm after a
+	// cancellation is a new run, so it does not inherit a fence the
+	// earlier run already released.
+	// +optional
+	RunID string `json:"runID,omitempty"`
+
+	// PriorOfflineMode is @@GLOBAL.offline_mode on Site before the
+	// operator enabled it; it is restored on release. Unset until read.
+	// +optional
+	PriorOfflineMode *bool `json:"priorOfflineMode,omitempty"`
+
+	// SessionsEvicted is true once the operator verified that no client
+	// session from before the fence remains on Site. Destructive work
+	// starts only after that.
+	// +optional
+	SessionsEvicted bool `json:"sessionsEvicted,omitempty"`
+}
+
 // RestoreInPlaceStatus tracks an in-flight or completed in-place
 // restore.
 type RestoreInPlaceStatus struct {
@@ -979,6 +1016,13 @@ type RestoreInPlaceStatus struct {
 	// ConfirmTokenUsed then records what executed.
 	// +optional
 	RunConfirm string `json:"runConfirm,omitempty"`
+
+	// RunID identifies the run in flight, set with RunConfirm. A request
+	// that is cancelled or rejected and then applied again with the same
+	// confirm starts a new run with a new RunID. Empty once the run is
+	// terminal.
+	// +optional
+	RunID string `json:"runID,omitempty"`
 
 	// StartTime is when the restore entered Preflight.
 	StartTime *metav1.Time `json:"startTime,omitempty"`

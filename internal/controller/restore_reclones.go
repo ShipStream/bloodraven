@@ -442,6 +442,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreReclones(ctx context.Cont
 			"fg", fg.Name, "pending", strings.Join(known, ","), "annotation", raw)
 		return restoreRecloneWaitRequeue, nil
 	}
+	if fg.Status.RestoreOfflineFence != nil {
+		// The restore's offline_mode fence is not released yet (the
+		// release is retrying). A replication account without
+		// CONNECTION_ADMIN is refused under it, so a clone would fail.
+		return restoreRecloneWaitRequeue, nil
+	}
 	if plannedFailoverInFlight(fg.Status.PlannedFailover) {
 		// A planned failover may be about to make a queued site the
 		// primary; a clone requested now could copy that site's stale data

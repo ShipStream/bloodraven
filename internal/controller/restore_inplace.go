@@ -37,6 +37,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	k8sretry "k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -355,10 +356,23 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 	if cur == nil {
 		if err := validateInPlaceRestoreSpec(spec); err != nil {
 			// Pure validation rejection: nothing executed, so do not
-			// consume the confirm (empty confirmUsed preserves the
-			// invalid-timestamp behavior and lets the user fix the spec
+			// consume the confirm (keeping the last executed one preserves
+			// the invalid-timestamp behavior and lets the user fix the spec
 			// and retry with the same confirm).
 			r.rejectInPlaceRestore(ctx, fg, prev, lastConsumedConfirm(prev), "", "", err.Error())
+			return 0, nil
+		}
+		// The same privilege rejection inPlacePreflight applies, checked
+		// here too so a repeated rejection is a no-op instead of cycling
+		// through Preflight on every reconcile. The check queries MySQL,
+		// so a standing rejection repeats it at most once a minute.
+		if !r.restorePrivilegeRecheckDue(fg, prev, spec) {
+			return 0, nil
+		}
+		msg, _ := r.inPlaceFencePrivilegeRejection(ctx, fg, spec, fg.Status.ActiveSite)
+		r.noteRestorePrivilegeCheck(fg, spec, msg != "")
+		if msg != "" {
+			r.rejectInPlaceRestore(ctx, fg, prev, lastConsumedConfirm(prev), "", "", msg)
 			return 0, nil
 		}
 		scope, _ := inPlaceRestoreScope(spec)
@@ -371,6 +385,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 			// manifest must still be unable to run its restore again.
 			ConfirmTokenUsed: lastConsumedConfirm(prev),
 			RunConfirm:       spec.Confirm,
+			RunID:            string(uuid.NewUUID()),
 			StartTime:        &now,
 			Message:          "validating preconditions",
 		}
@@ -450,6 +465,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 			Scope:            cur.Scope,
 			ConfirmTokenUsed: cur.ConfirmTokenUsed,
 			RunConfirm:       cur.RunConfirm,
+			RunID:            cur.RunID,
 			StartTime:        cur.StartTime,
 			Message:          "waiting for status.activeSite to be populated",
 		}
@@ -481,6 +497,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 			Scope:            cur.Scope,
 			ConfirmTokenUsed: cur.ConfirmTokenUsed,
 			RunConfirm:       cur.RunConfirm,
+			RunID:            cur.RunID,
 			StartTime:        cur.StartTime,
 			Message: fmt.Sprintf("waiting for active site %q to be writable (observed: %s)",
 				target, observedState),
@@ -490,17 +507,47 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		return 15 * time.Second, nil
 	}
 
-	if err := validateInPlaceRestoreSpec(spec); err != nil {
-		// Validation rejection (see stampTerminalFailure): leave
-		// confirmUsed empty so a fixed spec can retry on the same confirm.
-		r.rejectInPlaceRestore(ctx, fg, cur, cur.ConfirmTokenUsed, target, cur.Scope, err.Error())
-		return 0, nil
+	_, schema := inPlaceRestoreScope(spec)
+	if schema == "" {
+		// A full-instance restore fences application sessions with
+		// offline_mode, which only works if the operator account itself
+		// is exempt. No fallback to the label-only fence.
+		msg, waitErr := r.inPlaceFencePrivilegeRejection(ctx, fg, spec, target)
+		if msg != "" {
+			r.noteRestorePrivilegeCheck(fg, spec, true)
+			r.rejectInPlaceRestore(ctx, fg, cur, cur.ConfirmTokenUsed, target, cur.Scope, msg)
+			return 0, nil
+		}
+		if q := fg.Status.RestoreOfflineFence; q != nil && (q.Site != target || fenceOwner(q) != restoreRunOwner(fg)) {
+			// An earlier restore's fence that has not been released yet
+			// (its run is no longer active, so this releases it now).
+			if _, err := r.reconcileRestoreOfflineFence(ctx, fg); err != nil {
+				return 0, err
+			}
+		}
+		if q := fg.Status.RestoreOfflineFence; q != nil && (q.Site != target || fenceOwner(q) != restoreRunOwner(fg)) && waitErr == nil {
+			waitErr = errPreviousRestoreFence
+		}
+		if waitErr != nil {
+			wait := fmt.Sprintf("waiting to verify the operator account's privileges on %s: %v", target, waitErr)
+			if errors.Is(waitErr, errPreviousRestoreFence) {
+				wait = fmt.Sprintf("waiting for the offline_mode fence of the previous restore on %s to be released",
+					fg.Status.RestoreOfflineFence.Site)
+			}
+			next := cur.DeepCopy()
+			next.TargetSite, next.Message = target, wait
+			if cur.Message != wait {
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+			}
+			return 15 * time.Second, nil
+		}
 	}
 
 	// Accepted. A full-instance restore replaces the primary's data, so
 	// fix the set of peers it must reclone now, before anything is
-	// destroyed: from here on they are not promoted automatically.
-	if _, schema := inPlaceRestoreScope(spec); schema == "" {
+	// destroyed: from here on they are not promoted automatically. Its
+	// offline_mode fence is recorded before anything touches offline_mode.
+	if schema == "" {
 		wait, err := r.restoreReclonesReadyForNewRestore(ctx, fg)
 		if err != nil {
 			return 0, fmt.Errorf("prepare in-place restore reclone queue: %w", err)
@@ -517,6 +564,9 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		if err := r.armRestoreReclones(ctx, fg, target, spec.Confirm); err != nil {
 			return 0, fmt.Errorf("record in-place restore reclone queue: %w", err)
 		}
+		if err := r.recordRestoreOfflineFence(ctx, fg, target, spec.Confirm, cur.RunID); err != nil {
+			return 0, fmt.Errorf("record in-place restore offline_mode fence: %w", err)
+		}
 	}
 
 	next := &v1alpha1.RestoreInPlaceStatus{
@@ -525,6 +575,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		Scope:            cur.Scope,
 		ConfirmTokenUsed: cur.ConfirmTokenUsed,
 		RunConfirm:       cur.RunConfirm,
+		RunID:            cur.RunID,
 		StartTime:        cur.StartTime,
 		Message:          "applying pre-restore fence",
 	}
@@ -553,6 +604,28 @@ func (r *MysqlFailoverGroupReconciler) inPlaceFencing(ctx context.Context, fg *v
 	if isFullInstance && !r.primaryPodLabelFenced(ctx, fg) {
 		return 2 * time.Second, nil
 	}
+	// The label fence only stops new connections through the -primary
+	// Service. Nothing destructive starts until offline_mode is on and no
+	// application session from before it remains.
+	if isFullInstance {
+		wait, err := r.enforceRestoreOfflineFence(ctx, fg)
+		if errors.Is(err, errInPlaceRunEnded) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if wait != "" {
+			cur = fg.Status.RestoreInPlace
+			if cur.Message != wait {
+				next := cur.DeepCopy()
+				next.Message = wait
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+			}
+			return 2 * time.Second, nil
+		}
+		cur = fg.Status.RestoreInPlace
+	}
 
 	next := &v1alpha1.RestoreInPlaceStatus{
 		Phase:            v1alpha1.RestoreInPlaceRestoring,
@@ -560,6 +633,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceFencing(ctx context.Context, fg *v
 		Scope:            cur.Scope,
 		ConfirmTokenUsed: cur.ConfirmTokenUsed,
 		RunConfirm:       cur.RunConfirm,
+		RunID:            cur.RunID,
 		StartTime:        cur.StartTime,
 		Message:          "creating restore Job",
 	}
@@ -697,6 +771,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 			Scope:            cur.Scope,
 			ConfirmTokenUsed: cur.ConfirmTokenUsed,
 			RunConfirm:       cur.RunConfirm,
+			RunID:            cur.RunID,
 			StartTime:        cur.StartTime,
 			Message:          "restore Job created",
 		}
@@ -786,6 +861,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 					Scope:            cur.Scope,
 					ConfirmTokenUsed: cur.ConfirmTokenUsed,
 					RunConfirm:       cur.RunConfirm,
+					RunID:            cur.RunID,
 					StartTime:        cur.StartTime,
 					Message:          waitMsg,
 				}
@@ -827,6 +903,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 			// its own run once this one is terminal.
 			ConfirmTokenUsed: acceptedConfirm,
 			RunConfirm:       cur.RunConfirm,
+			RunID:            cur.RunID,
 			StartTime:        cur.StartTime,
 			Message:          "load complete; lifting fence",
 		}
@@ -1012,6 +1089,95 @@ func (r *MysqlFailoverGroupReconciler) rejectInPlaceRestore(ctx context.Context,
 	r.stampTerminalFailure(ctx, fg, target, scope, keepConfirm, msg, "RestoreInPlaceRejected")
 }
 
+// errPreviousRestoreFence holds Preflight while an earlier restore's
+// offline_mode fence is still recorded (its release keeps retrying).
+var errPreviousRestoreFence = errors.New("an earlier restore's offline_mode fence is not released yet")
+
+// inPlaceFencePrivilegeRejection returns the rejection message for a
+// full-instance restore whose operator account lacks one of
+// mysql.RestoreFencePrivileges on target, or the error that kept the check
+// from completing.
+func (r *MysqlFailoverGroupReconciler) inPlaceFencePrivilegeRejection(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, spec *v1alpha1.RestoreInPlaceSpec, target string) (string, error) {
+	if _, schema := inPlaceRestoreScope(spec); schema != "" || target == "" {
+		return "", nil
+	}
+	err := r.Runner.RestoreFencePrivileges(ctx, client.ObjectKeyFromObject(fg), target)
+	if errors.Is(err, errRestoreFenceNoPrivilege) {
+		return fmt.Sprintf("%s%v on %s. A full-instance restore disconnects application sessions with offline_mode and kills the ones "+
+			"that remain, and the operator account must keep working under it; grant these ON *.* to the operator account (%s). "+
+			"The restore is retried with the same confirm about once a minute",
+			restorePrivilegeRejectionPrefix, strings.TrimPrefix(err.Error(), errRestoreFenceNoPrivilege.Error()+" "), target,
+			fg.Spec.EffectiveOperatorSecretName()), nil
+	}
+	return "", err
+}
+
+// restorePrivilegeRejectionPrefix starts the status message of a
+// full-instance restore rejected for missing operator privileges.
+var restorePrivilegeRejectionPrefix = "restoreInPlace rejected: " + errRestoreFenceNoPrivilege.Error() + " "
+
+// restorePrivilegeRecheck bounds how often a standing privilege rejection
+// re-checks the grants. The rejection does not consume the confirm, so
+// every reconcile would otherwise query MySQL again (and wait out the
+// safety timeout when the primary is unreachable).
+const restorePrivilegeRecheck = time.Minute
+
+type restorePrivilegeCheck struct {
+	confirm    string
+	generation int64
+	at         time.Time
+}
+
+// restorePrivilegeRecheckDue reports whether the privileges must be
+// checked now. They are, unless prev is a privilege rejection that this
+// operator recorded for the same confirm and generation less than
+// restorePrivilegeRecheck ago.
+func (r *MysqlFailoverGroupReconciler) restorePrivilegeRecheckDue(fg *v1alpha1.MysqlFailoverGroup, prev *v1alpha1.RestoreInPlaceStatus, spec *v1alpha1.RestoreInPlaceSpec) bool {
+	if prev == nil || prev.Phase != v1alpha1.RestoreInPlaceFailed || !strings.HasPrefix(prev.Message, restorePrivilegeRejectionPrefix) {
+		return true
+	}
+	r.restorePrivMu.Lock()
+	defer r.restorePrivMu.Unlock()
+	last, ok := r.restorePrivRejected[client.ObjectKeyFromObject(fg)]
+	return !ok || last.confirm != spec.Confirm || last.generation != fg.Generation || time.Since(last.at) >= restorePrivilegeRecheck
+}
+
+// restorePrivilegeRecheckRequeue is when Reconcile must run again to
+// re-check a standing privilege rejection (0 when there is none): the
+// rejection does not consume the confirm, so the restore starts by itself
+// once the grant is in place, but only if a reconcile happens.
+func (r *MysqlFailoverGroupReconciler) restorePrivilegeRecheckRequeue(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
+	spec, rip := fg.Spec.RestoreInPlace, fg.Status.RestoreInPlace
+	if spec == nil || rip == nil || rip.Phase != v1alpha1.RestoreInPlaceFailed || !strings.HasPrefix(rip.Message, restorePrivilegeRejectionPrefix) {
+		return 0
+	}
+	if advances, err := confirmAdvances(spec.Confirm, rip.ConfirmTokenUsed); err != nil || !advances {
+		return 0
+	}
+	r.restorePrivMu.Lock()
+	defer r.restorePrivMu.Unlock()
+	last, ok := r.restorePrivRejected[client.ObjectKeyFromObject(fg)]
+	if !ok || last.confirm != spec.Confirm || last.generation != fg.Generation {
+		return time.Second
+	}
+	return max(time.Second, restorePrivilegeRecheck-time.Since(last.at)+time.Millisecond)
+}
+
+// noteRestorePrivilegeCheck records the outcome of a privilege check.
+func (r *MysqlFailoverGroupReconciler) noteRestorePrivilegeCheck(fg *v1alpha1.MysqlFailoverGroup, spec *v1alpha1.RestoreInPlaceSpec, rejected bool) {
+	r.restorePrivMu.Lock()
+	defer r.restorePrivMu.Unlock()
+	nn := client.ObjectKeyFromObject(fg)
+	if !rejected {
+		delete(r.restorePrivRejected, nn)
+		return
+	}
+	if r.restorePrivRejected == nil {
+		r.restorePrivRejected = map[types.NamespacedName]restorePrivilegeCheck{}
+	}
+	r.restorePrivRejected[nn] = restorePrivilegeCheck{confirm: spec.Confirm, generation: fg.Generation, at: time.Now()}
+}
+
 // lastConsumedConfirm is the confirm of the most recent restore that
 // executed, as recorded on the previous status (nil when there was none).
 func lastConsumedConfirm(prev *v1alpha1.RestoreInPlaceStatus) string {
@@ -1156,7 +1322,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRunJob(ctx context.Context, fg *v1
 // preflight env vars the restore script consumes:
 //
 //   - Full-instance: BLOODRAVEN_DROP_ALL_USER_SCHEMAS=1,
-//     BLOODRAVEN_RESET_REPLICATION=1.
+//     BLOODRAVEN_RESET_REPLICATION=1, BLOODRAVEN_REQUIRE_OFFLINE_MODE=1.
 //   - Per-schema: BLOODRAVEN_DROP_SCHEMAS=<schema>.
 //
 // For per-schema restores it also forces LoadOptions.SkipBinlog=false
@@ -1193,6 +1359,9 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 		extraEnv = append(extraEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_DROP_ALL_USER_SCHEMAS", Value: "1"},
 			corev1.EnvVar{Name: "BLOODRAVEN_RESET_REPLICATION", Value: "1"},
+			// The operator applies the offline_mode fence before it creates
+			// this Job; the script refuses to drop anything without it.
+			corev1.EnvVar{Name: "BLOODRAVEN_REQUIRE_OFFLINE_MODE", Value: "1"},
 		)
 	} else {
 		extraEnv = append(extraEnv,

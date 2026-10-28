@@ -532,3 +532,26 @@ Once a restore is accepted, `status.restoreInPlace` drives it, not the spec. Rem
 1. A held fence clears by itself when the Job finishes; the run then completes as `Succeeded` or `Failed`. Do not delete the Job to "unstick" it: that kills the loader mid-DROP or mid-load and leaves a partially restored primary.
 2. After `RestoreInPlaceJobLost`, verify the primary's data (the restore may have partly run) before relying on it. Then re-run the restore with a newer `confirm`, or restore from backup.
 3. Do not edit `status.restoreInPlace` to clear it. `confirmTokenUsed` is what stops an old manifest from re-running a restore that already ran.
+
+## 22. Full-instance restore stuck in Fencing, or applications locked out after a restore (`offline_mode`)
+
+A full-instance in-place restore fences the primary with `SET GLOBAL offline_mode = ON`. MySQL then disconnects and refuses every session without `CONNECTION_ADMIN`/`SUPER`, with error 3032 `ER_SERVER_OFFLINE_MODE`. The fence is recorded in `status.restoreOfflineFence` (`site`, `confirmToken`, `runID`, `priorOfflineMode`, `sessionsEvicted`). The restore Job starts only after no client session from before the fence remains. The operator puts the prior value back when the restore ends.
+
+### Symptoms
+- `Failed` with `restoreInPlace rejected: the operator MySQL account lacks <privileges>` (any of `CONNECTION_ADMIN`, `SYSTEM_VARIABLES_ADMIN`, `PROCESS`, `REPLICATION_SLAVE_ADMIN`): preflight refused the restore (nothing fenced, confirm not consumed).
+- Stuck in `Fencing` with a message such as `waiting to read offline_mode`, `waiting to apply the offline_mode fence`, or `offline_mode is ON on <site>; waiting for N application session(s) to disconnect`.
+- After the restore, applications get `ERROR 3032 ... offline mode`, with `RestoreOfflineFenceReleaseFailed` events and `status.restoreOfflineFence` still set.
+- During the restore, replicas whose replication user lacks `CONNECTION_ADMIN` (legacy `secretName` installs) show their IO thread failing against the primary, and non-admin monitoring has gaps. Both are expected. With `spec.credentials` the replicator is the exempt operator account and keeps replicating.
+- A `RestoreOfflineFenceSessionsKept` Warning: the operator account lacks `SYSTEM_USER` and left the named accounts' sessions connected.
+
+### Diagnostic steps
+1. `kubectl get mfg <group> -n <ns> -o jsonpath='{.status.restoreOfflineFence}{"\n"}{.status.restoreInPlace.phase} {.status.restoreInPlace.message}'`
+2. On the primary: `SELECT @@GLOBAL.offline_mode;` and `SELECT ID, USER, HOST, COMMAND, TIME FROM information_schema.PROCESSLIST;`. Sessions that keep coming back belong to accounts with `CONNECTION_ADMIN`/`SUPER`; they are not fenced and do not block the wait. A session that will not die (still `Query` after KILL) does block it.
+3. Operator account privileges: `SHOW GRANTS FOR '<operator-user>'@'%';` must include `ALL PRIVILEGES ON *.*`, or `CONNECTION_ADMIN`, `SYSTEM_VARIABLES_ADMIN`, `PROCESS` and `REPLICATION_SLAVE_ADMIN` (`SUPER` stands in for all but `PROCESS`).
+
+### Safe remediation
+1. Missing privilege: grant the ones the message names, e.g. `GRANT CONNECTION_ADMIN, SYSTEM_VARIABLES_ADMIN, PROCESS, REPLICATION_SLAVE_ADMIN ON *.* TO '<operator-user>'@'%';` (the restore also needs DDL and DML). The operator re-checks about once a minute with the same `confirm`; nothing else is needed.
+2. Fencing waits on a stuck session: find it in the processlist and `KILL <id>`. Do not lift `offline_mode` while the restore is in `Fencing`, `Restoring` or `Resuming`; the operator re-asserts it every poll anyway.
+3. Locked out after a terminal restore because the release keeps failing: fix operator reachability to the primary. If applications must come back now, run `SET GLOBAL offline_mode = OFF;` on the primary. If `priorOfflineMode` was `true`, the primary was already in offline mode before the restore; leave it ON. The operator clears the record once its release succeeds.
+4. Applications running as accounts with `CONNECTION_ADMIN`/`SUPER` are not fenced at all. Remove those privileges from application accounts.
+5. After an operator downgrade during a full-instance restore, nothing releases the fence (older operators do not know `status.restoreOfflineFence`). Once the restore is terminal, run `SET GLOBAL offline_mode = OFF;` on the primary unless `priorOfflineMode` was `true`.

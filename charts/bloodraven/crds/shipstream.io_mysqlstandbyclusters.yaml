@@ -1678,7 +1678,9 @@ spec:
                             type: string
                           backupSecret:
                             description: |-
-                              BackupSecret references the Secret for backup and restore connections.
+                              BackupSecret references the Secret for backup connections. Restore
+                              Jobs run as the operator account instead: they need DDL, SET GLOBAL
+                              and CONNECTION_ADMIN, which this role does not have.
                               Required keys: username, password.
                               Grants: SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD,
                               BACKUP_ADMIN, REPLICATION CLIENT.

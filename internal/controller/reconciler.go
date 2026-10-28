@@ -165,6 +165,9 @@ type MysqlFailoverGroupReconciler struct {
 
 	dragonflyRolloutMu      sync.Mutex
 	dragonflyRolloutBackoff map[dragonflyRolloutKey]dragonflyRolloutState
+
+	restorePrivMu       sync.Mutex
+	restorePrivRejected map[types.NamespacedName]restorePrivilegeCheck
 }
 
 type dragonflyRolloutKey struct {
@@ -450,10 +453,22 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		return ctrl.Result{RequeueAfter: inPlaceRequeue}, nil
 	}
+	// A standing privilege rejection is re-checked on a timer: nothing
+	// else wakes a quiet group once the grant is in place.
+	deferredRequeue = minPositiveDuration(deferredRequeue, r.restorePrivilegeRecheckRequeue(&fg))
 
-	// The peer reclone queue of a full-instance in-place restore drains
-	// after that restore has finished, so it runs on every reconcile and
-	// only contributes a requeue; it never holds up the rest of the pass.
+	// The offline_mode fence of a finished full-instance restore is
+	// released (the prior value put back) after the restore ends. It runs
+	// on every reconcile and only contributes a requeue; it never holds up
+	// the rest of the pass.
+	fenceRequeue, err := r.reconcileRestoreOfflineFence(ctx, &fg)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("release restore offline_mode fence: %w", err)
+	}
+	deferredRequeue = minPositiveDuration(deferredRequeue, fenceRequeue)
+	// Likewise the peer reclone queue drains after that restore has
+	// finished. It runs after the release: a replication account without
+	// CONNECTION_ADMIN cannot clone from a primary still under the fence.
 	reclonesRequeue, err := r.reconcileRestoreReclones(ctx, &fg)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile restore reclone queue: %w", err)
@@ -2029,12 +2044,12 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 	}
 
 	// During a full-instance in-place restore we strip the primary role
-	// label so the -primary Service sheds endpoints. Clients connected
-	// to the Service see immediate disconnects, which is the intended
-	// fence (the alternative — letting them read from a half-loaded
-	// datadir — is strictly worse). Per-schema restores skip this:
-	// other tenants continue writing, and app-level maintenance-mode
-	// handles the affected schema.
+	// label so the -primary Service sheds endpoints and stops taking new
+	// connections. That alone does not disconnect established sessions
+	// or clients of the per-site Service and DNS name; the restore's
+	// offline_mode fence (restore_offline_fence.go) does. Per-schema
+	// restores skip this: other tenants continue writing, and app-level
+	// maintenance-mode handles the affected schema.
 	if inPlaceRestoreFencesPrimaryService(fg) {
 		for i := range sites {
 			if sites[i].role == "primary" {

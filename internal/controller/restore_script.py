@@ -28,6 +28,10 @@
 #                                     user data. System schemas (mysql,
 #                                     information_schema, performance_schema,
 #                                     sys) are never dropped.
+#   BLOODRAVEN_REQUIRE_OFFLINE_MODE=1 refuse to run the destructive preflight
+#                                     unless @@GLOBAL.offline_mode is ON. The
+#                                     operator sets it to fence application
+#                                     sessions during a full-instance restore.
 #   BLOODRAVEN_RESET_REPLICATION=1    run STOP REPLICA; RESET REPLICA ALL
 #                                     before loading. Used by in-place
 #                                     full-instance restore on the active
@@ -522,6 +526,27 @@ def _prepare_local_infile(session, state):
     return prev
 
 
+def _require_offline_mode(session):
+    """Exit(2), with nothing dropped, when BLOODRAVEN_REQUIRE_OFFLINE_MODE is
+    set and @@GLOBAL.offline_mode is not ON: the operator's application fence
+    is missing, so connected applications would race the DROP and load."""
+    if not _bool("BLOODRAVEN_REQUIRE_OFFLINE_MODE"):
+        return
+    try:
+        row = session.run_sql("SELECT @@GLOBAL.offline_mode").fetch_one()
+        on = bool(row) and str(row[0]).strip().upper() in ("1", "ON", "TRUE")
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_OFFLINE_FENCE_MISSING: cannot read "
+              "@@GLOBAL.offline_mode: {}".format(e), file=sys.stderr, flush=True)
+        sys.exit(2)
+    if not on:
+        print("BLOODRAVEN_OFFLINE_FENCE_MISSING: @@GLOBAL.offline_mode is OFF; "
+              "refusing to drop schemas while application sessions can connect",
+              file=sys.stderr, flush=True)
+        sys.exit(2)
+    print("BLOODRAVEN_OFFLINE_FENCE_OK", flush=True)
+
+
 def _restore_local_infile(session, prev):
     """Restore @@GLOBAL.local_infile to the value _prepare_local_infile
     captured. No-op when prev is None (unchanged / already ON)."""
@@ -636,6 +661,7 @@ def main():
         # Destructive preflight for in-place restore. The bootstrap restore
         # path does not set any of the triggering env vars, so these are
         # no-ops outside of spec.restoreInPlace.
+        _require_offline_mode(session)
         try:
             _maybe_reset_replication(session)
             _maybe_preflight_drops(session)

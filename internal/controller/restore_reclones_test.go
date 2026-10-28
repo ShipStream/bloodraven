@@ -206,6 +206,7 @@ func TestRestoreReclone_ArmedWhenRestoreIsAccepted(t *testing.T) {
 				Phase: v1alpha1.RestoreInPlacePreflight, Scope: "full", StartTime: ptrTime(time.Now()),
 			}
 			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			withFenceRunner(r, c, fg)
 			if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
 				t.Fatal(err)
 			}

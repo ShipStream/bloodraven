@@ -629,12 +629,15 @@ func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg 
 }
 
 // ensureRestoreCredsSecret creates or updates the derived Secret used by
-// the restore Job. In credentials mode, reads from the effective backup
-// secret. In legacy mode, parses the DSN secret.
+// the restore Job. Restore Jobs run as the operator account, not the
+// backup role: they DROP and CREATE schemas, set global variables
+// (local_infile) and, for a full-instance in-place restore, must keep
+// working under the offline_mode fence, none of which the backup role's
+// grants allow. In legacy mode the DSN secret is parsed.
 func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, secretName string) error {
 	var user, password string
 
-	backupSecretName := fg.Spec.EffectiveBackupSecretName()
+	backupSecretName := fg.Spec.EffectiveOperatorSecretName()
 	var srcSecret corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: backupSecretName}, &srcSecret); err != nil {
 		return fmt.Errorf("get credential secret %s: %w", backupSecretName, err)
@@ -712,7 +715,8 @@ type restoreJobInputs struct {
 	FieldPath string
 	// ExtraEnv is appended to the container env verbatim. Used by
 	// in-place restore to inject BLOODRAVEN_DROP_ALL_USER_SCHEMAS,
-	// BLOODRAVEN_DROP_SCHEMAS and BLOODRAVEN_RESET_REPLICATION.
+	// BLOODRAVEN_DROP_SCHEMAS, BLOODRAVEN_RESET_REPLICATION and
+	// BLOODRAVEN_REQUIRE_OFFLINE_MODE.
 	ExtraEnv []corev1.EnvVar
 	// FreshTarget marks a restore into an empty instance with no GTID
 	// history of its own (bootstrap). Only then may the load install the

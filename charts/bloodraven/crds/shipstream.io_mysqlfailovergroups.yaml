@@ -1429,7 +1429,9 @@ spec:
                     type: string
                   backupSecret:
                     description: |-
-                      BackupSecret references the Secret for backup and restore connections.
+                      BackupSecret references the Secret for backup connections. Restore
+                      Jobs run as the operator account instead: they need DDL, SET GLOBAL
+                      and CONNECTION_ADMIN, which this role does not have.
                       Required keys: username, password.
                       Grants: SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD,
                       BACKUP_ADMIN, REPLICATION CLIENT.
@@ -7525,6 +7527,13 @@ spec:
                       spec.restoreInPlace is removed. Empty once the run is terminal;
                       ConfirmTokenUsed then records what executed.
                     type: string
+                  runID:
+                    description: |-
+                      RunID identifies the run in flight, set with RunConfirm. A request
+                      that is cancelled or rejected and then applied again with the same
+                      confirm starts a new run with a new RunID. Empty once the run is
+                      terminal.
+                    type: string
                   scope:
                     description: |-
                       Scope is a human-readable tag: "full" for a full-instance
@@ -7571,6 +7580,42 @@ spec:
                       TargetSite is the site that received the load (always the active
                       primary at the moment of preflight).
                     type: string
+                type: object
+              restoreOfflineFence:
+                description: |-
+                  RestoreOfflineFence is the offline_mode fence a full-instance
+                  in-place restore holds on its target primary. It is cleared once the
+                  restore has finished and the prior offline_mode is back.
+                properties:
+                  confirmToken:
+                    description: |-
+                      ConfirmToken is the spec.restoreInPlace.confirm value of the
+                      restore that owns the fence.
+                    type: string
+                  priorOfflineMode:
+                    description: |-
+                      PriorOfflineMode is @@GLOBAL.offline_mode on Site before the
+                      operator enabled it; it is restored on release. Unset until read.
+                    type: boolean
+                  runID:
+                    description: |-
+                      RunID is status.restoreInPlace.runID of the run that owns the
+                      fence. A request re-applied with the same confirm after a
+                      cancellation is a new run, so it does not inherit a fence the
+                      earlier run already released.
+                    type: string
+                  sessionsEvicted:
+                    description: |-
+                      SessionsEvicted is true once the operator verified that no client
+                      session from before the fence remains on Site. Destructive work
+                      starts only after that.
+                    type: boolean
+                  site:
+                    description: Site is the primary the fence applies to.
+                    type: string
+                required:
+                - confirmToken
+                - site
                 type: object
               restoreReclones:
                 description: |-

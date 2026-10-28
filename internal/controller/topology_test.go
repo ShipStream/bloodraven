@@ -61,6 +61,51 @@ type mockMySQL struct {
 	killConnectionCalls      int
 	checkReadOnlyCalls       int
 	replicaStatusCalls       int
+	// restore offline_mode fence (mysql.RestoreFencer)
+	offlineMode       bool
+	offlineModeSets   []bool
+	noConnectionAdmin bool
+	missingFencePrivs []string
+	sessionsRemaining int
+	sessionsProtected []string
+	evictCalls        int
+	evictKeepUsers    []string
+	fenceErr          error
+}
+
+func (m *mockMySQL) MissingRestoreFencePrivileges(_ context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	missing := append([]string(nil), m.missingFencePrivs...)
+	if m.noConnectionAdmin {
+		missing = append([]string{"CONNECTION_ADMIN"}, missing...)
+	}
+	return missing, m.fenceErr
+}
+
+func (m *mockMySQL) GetOfflineMode(_ context.Context) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.offlineMode, m.fenceErr
+}
+
+func (m *mockMySQL) SetOfflineMode(_ context.Context, on bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.fenceErr != nil {
+		return m.fenceErr
+	}
+	m.offlineMode = on
+	m.offlineModeSets = append(m.offlineModeSets, on)
+	return nil
+}
+
+func (m *mockMySQL) EvictSessions(_ context.Context, keepUsers []string) (int, []string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.evictCalls++
+	m.evictKeepUsers = keepUsers
+	return m.sessionsRemaining, m.sessionsProtected, m.fenceErr
 }
 
 func testBoolPtr(v bool) *bool {
