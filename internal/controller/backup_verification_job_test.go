@@ -31,6 +31,7 @@ func TestBackupVerifyScript_StartsGtidModeOn(t *testing.T) {
 		"--gtid-mode=ON",
 		"--enforce-gtid-consistency=ON",
 		"--skip-log-bin",
+		"--partial-revokes=ON",
 	} {
 		found := false
 		for _, line := range lines {

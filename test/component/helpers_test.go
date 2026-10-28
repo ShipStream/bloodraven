@@ -233,6 +233,8 @@ func (m *mockMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
 	return nil, nil
 }
 
+func (m *mockMySQL) EnsurePartialRevokes(_ context.Context) error { return nil }
+
 func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	m.mu.Lock()
 	m.cloneInstanceCalled = true

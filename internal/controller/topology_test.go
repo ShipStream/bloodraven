@@ -30,6 +30,8 @@ type mockMySQL struct {
 	replicaStatusErr         error
 	gtidExecuted             string
 	gtidExecutedErr          error
+	partialRevokesErr        error
+	partialRevokesCalls      int
 	gtidExecutedHadDeadline  bool
 	hasUserSchemas           *bool
 	userSchemasErr           error
@@ -359,6 +361,13 @@ func (m *mockMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
 		return &st, nil
 	}
 	return &mysql.CloneStatus{State: mysql.CloneStateCompleted, BeginTime: fmt.Sprintf("clone-%d", m.cloneCalls)}, nil
+}
+
+func (m *mockMySQL) EnsurePartialRevokes(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.partialRevokesCalls++
+	return m.partialRevokesErr
 }
 
 type failingPromoteMySQL struct {
@@ -3291,5 +3300,22 @@ func TestPollDoesNotReprobeSiteWhoseProbeFailed(t *testing.T) {
 	primary.mu.Unlock()
 	if calls != 1 || statusCalls != 0 {
 		t.Fatalf("failing primary probed again in the same poll: CheckReadOnly=%d (want 1), ShowReplicaStatus=%d (want 0)", calls, statusCalls)
+	}
+}
+
+func TestEnsurePartialRevokesCoversEverySite(t *testing.T) {
+	site0, site1 := &mockMySQL{}, &mockMySQL{}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	if err := tm.EnsurePartialRevokes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if site0.partialRevokesCalls != 1 || site1.partialRevokesCalls != 1 {
+		t.Fatalf("calls = %d, %d; want every site checked", site0.partialRevokesCalls, site1.partialRevokesCalls)
+	}
+
+	site1.partialRevokesErr = errors.New("connection refused")
+	err := tm.EnsurePartialRevokes(context.Background())
+	if err == nil || !strings.Contains(err.Error(), tm.sites[1].name) {
+		t.Fatalf("EnsurePartialRevokes error = %v, want it to name site %q", err, tm.sites[1].name)
 	}
 }

@@ -234,6 +234,18 @@ func (r *TopologyManagerRunner) PlannedFailoverGtidExecuted(ctx context.Context,
 	return tm.GetSiteGtidExecuted(ctx, site)
 }
 
+// EnsurePartialRevokes turns partial_revokes ON on every site of the group;
+// see TopologyManager.EnsurePartialRevokes.
+func (r *TopologyManagerRunner) EnsurePartialRevokes(ctx context.Context, nn types.NamespacedName) error {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("no topology manager running for %s", nn)
+	}
+	return mt.tm.EnsurePartialRevokes(ctx)
+}
+
 // PlannedFailoverDrainConnections kills non-replication connections on
 // the named site and returns the count killed. Polled by the Draining
 // state until it returns zero (clean drain) or the drainTimeout budget

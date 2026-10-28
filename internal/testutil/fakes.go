@@ -52,6 +52,8 @@ type FakeMySQL struct {
 	StartReplicaErr error
 	SetDonorErr     error
 	CloneErr        error
+	// PartialRevokesErr is returned by EnsurePartialRevokes.
+	PartialRevokesErr error
 
 	// Call tracking
 	Calls []string
@@ -217,6 +219,13 @@ func (m *FakeMySQL) KillAppConnections(_ context.Context) (int, error) {
 
 func (m *FakeMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
 	return nil, nil
+}
+
+func (m *FakeMySQL) EnsurePartialRevokes(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.record("EnsurePartialRevokes")
+	return m.PartialRevokesErr
 }
 
 func (m *FakeMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {

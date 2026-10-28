@@ -1978,7 +1978,7 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 		return nil, progress, err
 	}
 	// GRANT and the surplus REVOKE name the schema by forms[0]; any
-	// further form is a legacy wildcard grant row, revoked outright.
+	// further form is a stale spelling of the grant row, revoked outright.
 	forms, err := grantDatabaseForms(ctx, db, spec.DatabaseName)
 	if err != nil {
 		return nil, progress, err

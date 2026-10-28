@@ -569,6 +569,10 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 	case stmt == "FLUSH PRIVILEGES":
 		return nil
 
+	case stmt == "SET GLOBAL partial_revokes = ON":
+		s.partialRevokes = true
+		return nil
+
 	case reCreateDatabase.MatchString(stmt):
 		m := reCreateDatabase.FindStringSubmatch(stmt)
 		if _, exists := s.databases[m[1]]; !exists {

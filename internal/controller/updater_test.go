@@ -908,6 +908,8 @@ func (f *flappingChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, er
 	return nil, nil
 }
 
+func (f *flappingChecker) EnsurePartialRevokes(_ context.Context) error { return nil }
+
 func (f *flappingChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return nil
 }
@@ -961,6 +963,8 @@ func (s *startableReplicaChecker) CloneStatus(_ context.Context) (*mysql.CloneSt
 	return nil, nil
 }
 
+func (s *startableReplicaChecker) EnsurePartialRevokes(_ context.Context) error { return nil }
+
 func (s *startableReplicaChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return nil
 }
@@ -1002,6 +1006,8 @@ func (r *replicaStatusErrorChecker) KillAppConnections(_ context.Context) (int, 
 func (r *replicaStatusErrorChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
 	return nil, nil
 }
+
+func (r *replicaStatusErrorChecker) EnsurePartialRevokes(_ context.Context) error { return nil }
 
 func (r *replicaStatusErrorChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return nil

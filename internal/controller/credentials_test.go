@@ -373,3 +373,76 @@ func TestAppGrantExcludesAdminPrivileges(t *testing.T) {
 		t.Fatal("init script does not grant the app privilege list")
 	}
 }
+
+// TestRestrictSystemSchema pins the app role's mysql schema restriction:
+// it runs only once partial_revokes is confirmed on every site (a replica
+// with it OFF stops on the replicated revoke), and only for roles that ask.
+func TestRestrictSystemSchema(t *testing.T) {
+	roles := []credentialRole{
+		{name: "operator", secretName: "op\x00pw"},
+		{name: "app", secretName: "o'app\x00pw", restrictSystemSchema: true},
+		{name: "readonly", secretName: "ro\x00pw"},
+	}
+
+	t.Run("not confirmed", func(t *testing.T) {
+		fake := &credGrantDB{}
+		db := sql.OpenDB(fake)
+		defer db.Close()
+		err := restrictSystemSchema(context.Background(), db, roles, func(context.Context) error {
+			return errors.New(`site "dr": connection refused`)
+		})
+		if err == nil || !strings.Contains(err.Error(), "partial_revokes not confirmed") || !strings.Contains(err.Error(), `site "dr"`) {
+			t.Fatalf("restrictSystemSchema error = %v, want the unconfirmed site", err)
+		}
+		if len(fake.stmts) != 0 {
+			t.Fatalf("statements ran before partial_revokes was confirmed: %q", fake.stmts)
+		}
+	})
+
+	t.Run("confirmed", func(t *testing.T) {
+		fake := &credGrantDB{}
+		db := sql.OpenDB(fake)
+		defer db.Close()
+		if err := restrictSystemSchema(context.Background(), db, roles, func(context.Context) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		want := "REVOKE INSERT, UPDATE, DELETE, CREATE, DROP, REFERENCES, INDEX, ALTER, CREATE TEMPORARY TABLES, " +
+			"LOCK TABLES, EXECUTE, CREATE VIEW, CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON mysql.* FROM 'o''app'@'%'"
+		if len(fake.stmts) != 1 || fake.stmts[0] != want {
+			t.Fatalf("stmts = %q, want only %q", fake.stmts, want)
+		}
+	})
+
+	t.Run("no restricted role skips the site check", func(t *testing.T) {
+		db := sql.OpenDB(&credGrantDB{})
+		defer db.Close()
+		err := restrictSystemSchema(context.Background(), db, roles[:1], func(context.Context) error {
+			t.Fatal("ensure called without a restricted role")
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// Every schema-level write or DDL privilege the app role holds globally
+// must be in the mysql schema revoke; SHOW DATABASES is global-only and
+// SELECT and SHOW VIEW do not write.
+func TestAppSystemSchemaRevokeCoversWritePrivileges(t *testing.T) {
+	revoked := strings.TrimSuffix(strings.TrimPrefix(appSystemSchemaRevoke, "REVOKE "), " ON mysql.* FROM '%s'@'%%'")
+	got := map[string]bool{}
+	for _, p := range strings.Split(revoked, ", ") {
+		got[p] = true
+	}
+	for _, p := range strings.Split(appGlobalPrivileges, ", ") {
+		readOnly := p == "SELECT" || p == "SHOW VIEW" || p == "SHOW DATABASES"
+		if got[p] == readOnly {
+			t.Errorf("privilege %q: revoked on mysql.* = %t, want %t", p, got[p], !readOnly)
+		}
+		delete(got, p)
+	}
+	for p := range got {
+		t.Errorf("revoke lists %q, which appGlobalPrivileges does not grant", p)
+	}
+}

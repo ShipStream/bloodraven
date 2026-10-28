@@ -566,7 +566,10 @@ func TestGrantDatabaseForms(t *testing.T) {
 	}{
 		{name: "acme_wms", want: []string{`acme\_wms`, "acme_wms"}},
 		{name: "acmewms", want: []string{"acmewms"}},
-		{name: "acme_wms", partialRevokes: true, want: []string{"acme_wms"}},
+		{name: "acme_wms", partialRevokes: true, want: []string{"acme_wms", `acme\_wms`}},
+		{name: "acmewms", partialRevokes: true, want: []string{"acmewms"}},
+		// No escaped grant over MySQL's limit can exist, so none is revoked.
+		{name: strings.Repeat("a_", 5) + strings.Repeat("b", 54), partialRevokes: true, want: []string{strings.Repeat("a_", 5) + strings.Repeat("b", 54)}},
 	}
 	for _, tc := range cases {
 		got := grantDatabaseFormsFor(tc.name, tc.partialRevokes)

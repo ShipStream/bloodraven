@@ -2656,6 +2656,20 @@ func (tm *TopologyManager) GetSiteGtidExecuted(ctx context.Context, name string)
 	return gtid, nil
 }
 
+// EnsurePartialRevokes turns partial_revokes ON on every site and returns
+// an error naming the first site where that could not be confirmed. A
+// partial revoke replicated to a site with it OFF stops that site's SQL
+// thread, so callers issue one only after this returns nil.
+func (tm *TopologyManager) EnsurePartialRevokes(ctx context.Context) error {
+	for i := range tm.sites {
+		site := &tm.sites[i]
+		if err := site.mysql.EnsurePartialRevokes(ctx); err != nil {
+			return fmt.Errorf("site %q: %w", site.name, err)
+		}
+	}
+	return nil
+}
+
 // KillSiteAppConnections kills non-replication application connections
 // on the named site and returns the count killed. Used by the
 // planned-failover Draining loop to drain in-flight transactions.

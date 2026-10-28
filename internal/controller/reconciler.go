@@ -403,6 +403,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 			logger.Error(err, "credential reconciliation failed, will retry")
 			r.Recorder.Eventf(&fg, corev1.EventTypeWarning, "CredentialReconcileFailed",
 				"failed to reconcile MySQL users: %v", err)
+			// Nothing else wakes this up: the step can be waiting on a
+			// site that comes back without touching the CR.
+			deferredRequeue = minPositiveDuration(deferredRequeue, credentialRetryInterval)
 		}
 	}
 
@@ -933,6 +936,9 @@ func ownedMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
 		"gtid-mode": "ON", "enforce-gtid-consistency": "ON",
 		"log-bin": "/var/lib/mysql/mysql-bin", "log-replica-updates": "ON",
 		"skip-replica-start": "ON", "plugin-load-add": "mysql_clone.so",
+		// Grant names treat `_` and `%` literally, and the app role's
+		// mysql schema revoke can replicate; see appSystemSchemaRevoke.
+		"partial-revokes": "ON",
 	}
 
 	// Encryption coverage is likewise operator-owned: the security claim

@@ -379,6 +379,8 @@ func (m *simChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) 
 	return nil, nil
 }
 
+func (m *simChecker) EnsurePartialRevokes(_ context.Context) error { return nil }
+
 func (m *simChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
 	return errors.New("dst: CLONE not modeled (bootstrap must stay disabled in trials)")
 }

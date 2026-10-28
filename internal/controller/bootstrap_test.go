@@ -132,6 +132,8 @@ func (b *bootstrapMock) CloneStatus(_ context.Context) (*mysql.CloneStatus, erro
 	return nil, nil
 }
 
+func (b *bootstrapMock) EnsurePartialRevokes(_ context.Context) error { return nil }
+
 func (b *bootstrapMock) CloneInstance(_ context.Context, _, _, _ string, _ bool, cloneTimeoutSec int) error {
 	b.record("CloneInstance")
 	b.mu.Lock()
