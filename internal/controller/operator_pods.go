@@ -7,7 +7,7 @@ import (
 )
 
 // operatorBinaryPath is where the operator image installs the bloodraven
-// binary (Dockerfile: `COPY --from=builder /app/bloodraven /bloodraven`).
+// binary (Dockerfile: `COPY --from=build-bloodraven /app/bloodraven /bloodraven`).
 // The image is distroless with no PATH entry for it, so every container
 // that runs operatorImageFromEnv with an explicit Command must start
 // with this absolute path. TestOperatorBinaryPathMatchesDockerfile pins
