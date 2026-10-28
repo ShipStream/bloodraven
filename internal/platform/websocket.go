@@ -51,6 +51,11 @@ type Hub struct {
 	upgrader       websocket.Upgrader
 	allowedOrigins map[string]struct{} // nil unless an explicit allowlist is set
 	maxClients     int                 // 0 == unlimited
+	// pending counts admitted upgrades that are still in their handshake
+	// and not yet in clients. They hold a slot against maxClients so a
+	// burst of concurrent handshakes cannot all pass the last free slot.
+	// Guarded by mu.
+	pending int
 }
 
 const (
@@ -79,8 +84,9 @@ type wsClient struct {
 //     header allowlist. Unset means gorilla's same-origin check, which
 //     still admits non-browser clients that send no Origin. "*" accepts
 //     any origin and must be opted into explicitly.
-//   - BLOODRAVEN_WS_MAX_CLIENTS caps the concurrent connection count;
-//     extra upgrades are rejected with 429. Default 100.
+//   - BLOODRAVEN_WS_MAX_CLIENTS caps the concurrent connection count,
+//     counting handshakes still in progress; extra upgrades are rejected
+//     with 429. Default 100; 0 means unlimited.
 func NewHub(logger *slog.Logger) *Hub {
 	h := &Hub{
 		clients:    make(map[*wsClient]struct{}),
@@ -117,24 +123,28 @@ func (h *Hub) checkOrigin(r *http.Request) bool {
 }
 
 // HandleWS is the HTTP handler for /ws/status.
+//
+// Admission is a reservation: the slot is taken before the handshake and
+// either becomes the registered client or is released if the upgrade
+// fails. The lock is not held across the handshake, so a slow client
+// cannot stall Broadcast or disconnects.
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
-	if h.maxClients > 0 {
-		h.mu.RLock()
-		n := len(h.clients)
-		h.mu.RUnlock()
-		if n >= h.maxClients {
-			http.Error(w, "too many websocket clients", http.StatusTooManyRequests)
-			return
-		}
+	if !h.reserveSlot() {
+		http.Error(w, "too many websocket clients", http.StatusTooManyRequests)
+		return
 	}
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		h.mu.Lock()
+		h.pending--
+		h.mu.Unlock()
 		h.logger.Error("websocket upgrade failed", "error", err)
 		return
 	}
 
 	client := &wsClient{hub: h, conn: conn, send: make(chan []byte, wsSendBuffer), done: make(chan struct{})}
 	h.mu.Lock()
+	h.pending--
 	h.clients[client] = struct{}{}
 	h.mu.Unlock()
 
@@ -142,6 +152,18 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 
 	go client.readPump()
 	go client.writePump()
+}
+
+// reserveSlot admits one more upgrade if the cap allows it, counting
+// handshakes already in flight against the cap.
+func (h *Hub) reserveSlot() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.maxClients > 0 && len(h.clients)+h.pending >= h.maxClients {
+		return false
+	}
+	h.pending++
+	return true
 }
 
 // Broadcast sends a topology message to all connected clients.
