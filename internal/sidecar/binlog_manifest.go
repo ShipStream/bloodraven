@@ -37,6 +37,16 @@ type ManifestEntry struct {
 
 // PrunedEntry records durable retirement and its object-deletion acknowledgement.
 // ID keeps the original archive key layout; legacy rows use ContentID for byte identity.
+type PrunedEntry struct {
+	Name           string    `json:"name"`
+	ID             string    `json:"id,omitempty"`
+	ContentID      string    `json:"contentId,omitempty"`
+	PreviousGTIDs  string    `json:"previousGtids,omitempty"`
+	FirstEventTime time.Time `json:"firstEventTime,omitempty"`
+	Key            string    `json:"key"`
+	Deleted        bool      `json:"deleted"`
+}
+
 type ArchiveQuarantine struct {
 	Divergent   *ArchiveDivergence     `json:"divergent,omitempty"`
 	Reuse       []ArchiveReuseEvidence `json:"reuse,omitempty"`
@@ -83,6 +93,7 @@ type Manifest struct {
 	Version int             `json:"version"`
 	Site    string          `json:"site"`
 	Files   []ManifestEntry `json:"files"`
+	Pruned  []PrunedEntry   `json:"pruned,omitempty"`
 }
 
 // ManifestKey returns the storage-relative key for a site's manifest.
@@ -174,6 +185,16 @@ func saveManifest(ctx context.Context, store ArchiveStore, prefix string, m *Man
 		}
 		return m.Files[i].ID < m.Files[j].ID
 	})
+	sort.Slice(m.Pruned, func(i, j int) bool {
+		a, b := m.Pruned[i], m.Pruned[j]
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		if a.ID != b.ID {
+			return a.ID < b.ID
+		}
+		return a.ContentID < b.ContentID
+	})
 	m.Version = ManifestVersion
 	buf, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -224,9 +245,31 @@ func pruneManifest(ctx context.Context, store ArchiveStore, prefix, site string,
 	pruned := 0
 	kept := m.Files[:0]
 	for _, f := range m.Files {
-		if _, d := drop[f.identity()]; d {
+		if contentID, d := drop[f.identity()]; d {
 			pruned++
 			if key, err := ArchiveEntryKey(prefix, site, f); err == nil {
+				if f.ID != "" && contentID != f.ID {
+					return nil, fmt.Errorf("retirement content identity differs from archive ID for %s", f.Name)
+				}
+				if _, err := ArchiveEntryKey(prefix, site, ManifestEntry{Name: f.Name, ID: contentID}); err != nil || contentID == "" {
+					return nil, fmt.Errorf("missing valid retirement content identity for %s", f.Name)
+				}
+				retired := PrunedEntry{Name: f.Name, ID: f.ID, Key: key, PreviousGTIDs: f.PreviousGTIDs, FirstEventTime: f.FirstEventTime}
+				if f.ID == "" {
+					retired.ContentID = contentID
+				}
+				found := false
+				for i := range m.Pruned {
+					p := m.Pruned[i]
+					if p.Name == retired.Name && p.ID == retired.ID && p.ContentID == retired.ContentID {
+						m.Pruned[i] = retired
+						found = true
+						break
+					}
+				}
+				if !found {
+					m.Pruned = append(m.Pruned, retired)
+				}
 				removed = append(removed, key)
 			}
 			continue

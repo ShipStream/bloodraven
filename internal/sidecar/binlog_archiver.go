@@ -364,6 +364,12 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 		a.logger.Warn("retention: load manifest", "error", err)
 		return
 	}
+	count, err := a.retryPrunedDeletes(ctx, manifest)
+	deleted += count
+	if err != nil {
+		a.logger.Warn("retention: save delete acknowledgements", "error", err)
+		return
+	}
 	if manifest.Epoch != nil && manifest.Epoch.ResetReason != "" {
 		return
 	}
@@ -441,12 +447,15 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 		return
 	}
 	pruned = len(removed)
-	for _, key := range removed {
-		if err := a.store.Delete(ctx, key); err != nil {
-			a.logger.Warn("retention: delete object", "key", key, "error", err)
-			continue
-		}
-		deleted++
+	manifest, err = loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
+	if err != nil {
+		a.logger.Warn("retention: load manifest", "error", err)
+		return
+	}
+	count, err = a.retryPrunedDeletes(ctx, manifest)
+	deleted += count
+	if err != nil {
+		a.logger.Warn("retention: save delete acknowledgements", "error", err)
 	}
 }
 

@@ -722,3 +722,18 @@ Preserve old manifests, objects, and encryption material. Do not delete a site m
 
 ### Safe remediation
 Preserve files until coverage is proved. Repair missing backup metadata only from the original dump's trustworthy metadata; never invent GTIDs or replace the lower bound with an after-dump sample. Upgrade the operator before sidecars to suppress old time-only retention during rollout. Resolve archive-read failures, then allow the next sweep to retry. Unsupported or incomplete files remain retained; do not delete backups, manifests, or local binlogs to force cleanup.
+
+## 29. Retention object deletion or acknowledgement keeps failing
+
+### Symptoms
+- Repeated `retention: delete object` warnings, or `retention: save delete acknowledgements` after a successful object delete.
+- An object's live `files` row is absent while a `pruned` retirement record has `deleted: false`. The object may still exist, or may already be absent after an acknowledgement failure.
+
+### Diagnostic steps
+1. Read sidecar logs and inspect the site manifest through the configured archive reader. Active `files` rows are used for restore; `pruned` rows are retired and excluded. Pending records retain their name, original archive ID/key, and header metadata. Legacy records also capture a verified `contentId` (keyed on encrypted stores) before deletion.
+2. Check delete permissions/backend errors for `retention: delete object`, and manifest write access for `retention: save delete acknowledgements`. The support bundle already captures sidecar logs. The existing `sidecar-probe.sh ... archiver` reports active archival status, not a pending-delete count.
+3. A pending record retries at the next retention sweep, including after process restart and before querying the operator. A successful retry writes `deleted: true`; deleting a missing object is idempotent. If a live `files` row still references the same key, the sweeper refuses physical deletion until a new proof retires that live reference.
+4. Inspect compatible sidecar versions before a downgrade. Older writers drop retirement records on manifest rewrite. A missing pending record from an older release cannot be recovered by this retry mechanism; preserve evidence before considering any separate orphan audit.
+
+### Safe remediation
+Restore archive delete/write access and let the sweeper retry. Do not clear retirement records, toggle `deleted`, purge local binlogs, or remove live manifest rows to force cleanup. Stored `key` and `RemotePath` fields are not deletion authority: the sidecar derives the target from validated identity fields under its configured prefix/site. An already retired object can be deleted without a fresh backup proof; that does not authorize new retirements while coverage is unknown.

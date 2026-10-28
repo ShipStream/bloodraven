@@ -228,7 +228,7 @@ func TestRereview4RetentionWaitsForBackfilledIssuance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Files) != 2 {
+	if len(m.Files) != 2 || len(m.Pruned) != 0 {
 		t.Fatalf("retirement discarded unverified conflicting issuance: %+v", m)
 	}
 	for _, row := range m.Files {

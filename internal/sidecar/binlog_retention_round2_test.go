@@ -101,7 +101,7 @@ func TestRound2FailedInspectionsCoolDownWithoutAuthorizingRetirement(t *testing.
 				t.Fatalf("permanent %s error caused %d downloads", mode, store.reads[key])
 			}
 			m, err := loadManifest(context.Background(), store, "binlogs", "iad")
-			if err != nil || len(m.Files) != 1 {
+			if err != nil || len(m.Files) != 1 || len(m.Pruned) != 0 {
 				t.Fatalf("failed inspection authorized retirement: %+v %v", m, err)
 			}
 			if next := time.Until(a.lastRetentionRun.Add(a.retentionCfg.Interval)); next < time.Hour-time.Minute {

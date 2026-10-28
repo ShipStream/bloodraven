@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,5 +252,43 @@ func TestDownloadRejectsUnsafeBinlogIdentity(t *testing.T) {
 	n, err := downloadSiteBinlogs(ctx, store, "binlogs", "iad", time.Now(), t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err == nil || n != 0 {
 		t.Fatalf("unsafe identity download returned %d, %v", n, err)
+	}
+}
+
+func TestPITRDownloadIgnoresRetiredRows(t *testing.T) {
+	ctx := context.Background()
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := sidecar.ManifestEntry{Name: "mysql-bin.000002"}
+	key, err := sidecar.ArchiveEntryKey("binlogs", "iad", active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, key, bytes.NewReader(pitrFixture(t, "incarnation-a.bin")), int64(len(pitrFixture(t, "incarnation-a.bin")))); err != nil {
+		t.Fatal(err)
+	}
+	// The retired object is absent, matching delete success before its acknowledgement.
+	body := map[string]any{"version": 1, "site": "iad", "files": []sidecar.ManifestEntry{active}, "pruned": []map[string]any{{"name": "mysql-bin.000001", "id": strings.Repeat("a", 64), "deleted": false, "key": "binlogs/iad/retired"}}}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(ctx, sidecar.ManifestKey("binlogs", "iad"), bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	n, err := downloadSiteBinlogs(ctx, store, "binlogs", "iad", time.Now(), out, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil || n != 1 {
+		t.Fatalf("retired object interfered with replay: %d, %v", n, err)
+	}
+	files, err := filepath.Glob(filepath.Join(out, "iad", "mysql-bin.*"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("staged files: %v, %v", files, err)
+	}
+	got, err := os.ReadFile(files[0])
+	if err != nil || !bytes.Equal(got, pitrFixture(t, "incarnation-a.bin")) {
+		t.Fatalf("staged live bytes = %q, %v", got, err)
 	}
 }
