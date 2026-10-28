@@ -25,7 +25,7 @@ Pull requests run jobs for the areas they touch: Go jobs for Go-related source a
 | `generate-check` | Runs `make generate && make manifests` and fails if files are stale |
 | `license-roundtrip` | Go verifier round-trips a token signed by `site/scripts/sign-license-token.mjs` (no `node_modules` needed) |
 | `docs-build` | Runs the site Node tests (`npm test`), builds the bloodraven.dev site under `site/`, and verifies `llms-full.txt` includes every docs page |
-| `course-check` | Verifies course content, rebuilds the course site, and checks committed output for drift |
+| `course-check` | Builds the course once, verifies and tests that build, then checks committed output for drift |
 | `all-checks` | Summary job — accepts skipped jobs and fails on any failure or cancellation, including `changes`; use this as the single branch-protection required status check |
 
 **Permissions:** `contents: read` (default)

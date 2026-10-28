@@ -219,12 +219,12 @@ jobs:
           # but the Astro-based builder targets Node, so keep a supported Node
           # on PATH for anything that shells out to it.
           node-version: 22
-      - name: Run course content gates and runtime tests
-        run: make course-verify
-      - name: Rebuild the course site
-        # Separate from the drift check below so a build failure is not
-        # reported as drift, and so the artifact step can tell the two apart.
+      - name: Build the course site and sync it into site/public/courses
+        # Keep build failures separate from drift failures for artifact uploads.
         run: make course
+      - name: Run course content gates and runtime tests
+        # Verify after sync so test writes to dist/ cannot affect the drift check.
+        run: make course-verify-only
       - name: Check site/public/courses drift
         # site/public/courses is generated output committed to the repo, the
         # same arrangement as charts/bloodraven/crds. Fail if the committed
