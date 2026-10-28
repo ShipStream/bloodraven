@@ -1085,3 +1085,52 @@ func ptrTime(t time.Time) *metav1.Time {
 // Reference imported types to avoid unused-import complaints if tests
 // are pruned; silences go vet in minimal builds.
 var _ = appsv1.Deployment{}
+
+// An in-place restore whose encrypted mysqlBackupRef profile has been
+// deleted must end in a clean RestoreInPlaceBuildFailed terminal with no
+// Job, so the topology freeze and primary fence are released. Before the
+// fix the builder panicked on the missing profile's storage pointer,
+// leaving the group frozen in Restoring with nothing running.
+func TestReconcileInPlaceRestore_EncryptedRefMissingProfile_BuildFailed(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+	fg := fgInPlaceRestore("orders")
+	site := fg.Spec.Sites[0].Name
+	fg.Spec.Backup.Profiles = fg.Spec.Backup.Profiles[1:] // drop nightly-s3
+	fg.Spec.RestoreInPlace.Decryption = &v1alpha1.BackupDecryptionSpec{
+		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "restore-pass", Key: "passphrase"},
+	}
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
+		Phase:      v1alpha1.RestoreInPlaceRestoring,
+		TargetSite: site,
+		Scope:      "schema:orders",
+		StartTime:  ptrTime(time.Now()),
+	}
+	seed := succeededSeedBackup()
+	seed.Status.StorageType = v1alpha1.BackupStorageS3
+	seed.Status.Encrypted = true
+	r, c := newReconciler(fg, seed, dsnSecret())
+
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("reconcile panicked instead of failing the restore: %v", p)
+			}
+		}()
+		if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}()
+
+	if got := fg.Status.RestoreInPlace.Phase; got != v1alpha1.RestoreInPlaceFailed {
+		t.Fatalf("phase = %s, want Failed", got)
+	}
+	if msg := fg.Status.RestoreInPlace.Message; !strings.Contains(msg, `profile "nightly-s3" is missing`) {
+		t.Errorf("status message should name the missing profile, got %q", msg)
+	}
+	var job batchv1.Job
+	if err := c.Get(context.Background(), types.NamespacedName{
+		Name: inPlaceRestoreJobName(fg.Name, site), Namespace: fg.Namespace}, &job); !apierrors.IsNotFound(err) {
+		t.Errorf("no restore Job may be created for an unresolvable source, got err=%v", err)
+	}
+}

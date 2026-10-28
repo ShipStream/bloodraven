@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -493,5 +494,196 @@ func TestEncryptedS3Location_DecryptSourceIsObjectKey(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// encryptedRefSeed returns a Succeeded, encrypted MysqlBackup written by
+// profileName to the given backend.
+func encryptedRefSeed(profileName string, storage v1alpha1.BackupStorageType) *v1alpha1.MysqlBackup {
+	seed := succeededSeedBackup()
+	seed.Spec.ProfileName = profileName
+	seed.Status.StorageType = storage
+	seed.Status.Encrypted = true
+	seed.Status.EncryptionAlgorithm = "AES-256-GCM"
+	if storage == v1alpha1.BackupStoragePVC {
+		seed.Status.Location = backupPVCMountPath + "/seed/"
+	}
+	return seed
+}
+
+// TestBuildRestoreJob_EncryptedRef_ProfileDrift_ReturnsError covers an
+// encrypted mysqlBackupRef whose profile was deleted or moved to the
+// other storage backend after the backup ran. Both restore builders must
+// return the source-resolution error instead of dereferencing the
+// profile's storage pointer for the backend the backup was written to.
+func TestBuildRestoreJob_EncryptedRef_ProfileDrift_ReturnsError(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+
+	explicit := &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "restore-pass", Key: "passphrase"}}
+	encryption := &v1alpha1.BackupEncryptionSpec{
+		Algorithm:        "AES-256-GCM",
+		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "backup-passphrase", Key: "passphrase"},
+	}
+	s3Storage := v1alpha1.BackupStorage{
+		Type: v1alpha1.BackupStorageS3,
+		S3:   &v1alpha1.S3Storage{Bucket: "moved", Prefix: "lion", CredentialsSecret: "s3-creds"},
+	}
+	pvcStorage := v1alpha1.BackupStorage{
+		Type: v1alpha1.BackupStoragePVC,
+		PVC:  &v1alpha1.PVCStorage{ClaimName: "moved"},
+	}
+
+	type backend struct {
+		name        string
+		profile     string
+		storage     v1alpha1.BackupStorageType
+		other       v1alpha1.BackupStorage
+		otherName   string
+		sourceField string
+	}
+	backends := []backend{
+		{"s3", "nightly-s3", v1alpha1.BackupStorageS3, pvcStorage, "PVC", "source.s3"},
+		{"pvc", "daily-local", v1alpha1.BackupStoragePVC, s3Storage, "S3", "source.pvc"},
+	}
+	setups := []struct {
+		name       string
+		decryption *v1alpha1.BackupDecryptionSpec
+		mutate     func(fg *v1alpha1.MysqlFailoverGroup, b backend)
+		wantMsg    func(b backend) string
+	}{
+		{
+			name:       "profile missing, explicit decryption",
+			decryption: explicit,
+			mutate: func(fg *v1alpha1.MysqlFailoverGroup, b backend) {
+				kept := fg.Spec.Backup.Profiles[:0]
+				for _, p := range fg.Spec.Backup.Profiles {
+					if p.Name != b.profile {
+						kept = append(kept, p)
+					}
+				}
+				fg.Spec.Backup.Profiles = kept
+			},
+			wantMsg: func(b backend) string { return "is missing from spec.backup.profiles" },
+		},
+		{
+			name: "profile moved to other backend, encryption retained",
+			mutate: func(fg *v1alpha1.MysqlFailoverGroup, b backend) {
+				p := findProfile(fg, b.profile)
+				p.Storage = b.other
+				p.Encryption = encryption
+			},
+			wantMsg: func(b backend) string { return "now stores to " + b.otherName },
+		},
+		{
+			name:       "profile moved to other backend, explicit decryption",
+			decryption: explicit,
+			mutate: func(fg *v1alpha1.MysqlFailoverGroup, b backend) {
+				findProfile(fg, b.profile).Storage = b.other
+			},
+			wantMsg: func(b backend) string { return "now stores to " + b.otherName },
+		},
+	}
+	callers := []struct {
+		name      string
+		fieldPath string
+		build     func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) error
+	}{
+		{"bootstrap", "initFromBackup", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) error {
+			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src, Decryption: dec}
+			_, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+			return err
+		}},
+		{"in-place", "restoreInPlace", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) error {
+			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-04-17T14:00:00Z", Source: src, Decryption: dec}
+			_, err := r.buildInPlaceRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds", true, "")
+			return err
+		}},
+	}
+
+	for _, b := range backends {
+		for _, s := range setups {
+			for _, c := range callers {
+				t.Run(b.name+"/"+s.name+"/"+c.name, func(t *testing.T) {
+					fg := fgWithBackup()
+					s.mutate(fg, b)
+					seed := encryptedRefSeed(b.profile, b.storage)
+					r, _ := newReconciler(fg, seed)
+					src := v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: seed.Name}}
+
+					var err error
+					func() {
+						defer func() {
+							if p := recover(); p != nil {
+								t.Fatalf("restore builder panicked instead of returning an error: %v", p)
+							}
+						}()
+						err = c.build(r, fg, src, s.decryption)
+					}()
+					if err == nil {
+						t.Fatal("expected a source-resolution error, got nil")
+					}
+					for _, want := range []string{
+						fmt.Sprintf("%q", b.profile),
+						s.wantMsg(b),
+						c.fieldPath + "." + b.sourceField,
+					} {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("error %q does not mention %q", err, want)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestBuildRestoreJob_EncryptedPVCRef_AddsDecryptInitContainer is the
+// PVC control for the drift test above: an intact encrypted PVC profile
+// still produces a PVC decrypt step reading the profile's claim.
+func TestBuildRestoreJob_EncryptedPVCRef_AddsDecryptInitContainer(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+	fg := fgWithBackup()
+	p := findProfile(fg, "daily-local")
+	p.Encryption = &v1alpha1.BackupEncryptionSpec{
+		Algorithm:        "AES-256-GCM",
+		PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "backup-passphrase", Key: "passphrase"},
+	}
+	seed := encryptedRefSeed("daily-local", v1alpha1.BackupStoragePVC)
+	fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{
+		Source: v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: seed.Name}},
+	}
+	r, _ := newReconciler(fg, seed)
+
+	job, err := r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+	if err != nil {
+		t.Fatalf("buildRestoreJob: %v", err)
+	}
+	var saw bool
+	for _, c := range job.Spec.Template.Spec.InitContainers {
+		if c.Name != "decrypt-download" {
+			continue
+		}
+		saw = true
+		env := envMap(c.Env)
+		if got := env["BLOODRAVEN_STORAGE_TYPE"]; got != "PVC" {
+			t.Errorf("decrypt storage type = %q, want PVC", got)
+		}
+		if got := env["BLOODRAVEN_SOURCE_PREFIX"]; got != "seed" {
+			t.Errorf("decrypt source prefix = %q, want %q", got, "seed")
+		}
+	}
+	if !saw {
+		t.Fatal("decrypt-download init container missing")
+	}
+	var claim string
+	for _, v := range job.Spec.Template.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			claim = v.PersistentVolumeClaim.ClaimName
+		}
+	}
+	if want := ownedBackupPVCName(fg.Name, "daily-local"); claim != want {
+		t.Errorf("decrypt source claim = %q, want %q", claim, want)
 	}
 }

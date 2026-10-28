@@ -734,6 +734,37 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 	})
 }
 
+// backupRefProfileStorageError reports why a mysqlBackupRef's profile can
+// no longer locate the backup's artifact on the backend it was written to
+// (want), or returns nil when profile.Storage carries that backend's
+// configuration. A non-nil profile with a nil error guarantees the
+// matching profile.Storage.S3 / profile.Storage.PVC pointer is non-nil.
+func backupRefProfileStorageError(fp string, ref *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, want v1alpha1.BackupStorageType) error {
+	kind, field := "an S3", "s3"
+	if want == v1alpha1.BackupStoragePVC {
+		kind, field = "a PVC", "pvc"
+	}
+	switch {
+	case profile == nil:
+		return fmt.Errorf(
+			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q is missing from spec.backup.profiles; "+
+				"either restore the profile or set %s.source.%s explicitly",
+			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, fp, field)
+	case profile.Storage.Type != want:
+		return fmt.Errorf(
+			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q now stores to %s; "+
+				"either restore the profile's %s storage or set %s.source.%s explicitly",
+			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, profile.Storage.Type, want, fp, field)
+	case want == v1alpha1.BackupStorageS3 && profile.Storage.S3 == nil,
+		want == v1alpha1.BackupStoragePVC && profile.Storage.PVC == nil:
+		return fmt.Errorf(
+			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q has no storage.%s configuration; "+
+				"either restore the profile's %s storage or set %s.source.%s explicitly",
+			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, field, want, fp, field)
+	}
+	return nil
+}
+
 // buildRestoreJobSpec is the shared core of both bootstrap and in-place
 // restore Job construction. See restoreJobInputs for the per-caller
 // parameters.
@@ -796,7 +827,31 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			inputURL = mysqlShellDumpInput(ref.Status.Location, v1alpha1.BackupStoragePVC)
 		}
 
+		// Resolve the backend the backup was written to from the profile
+		// before anything reads its storage block: the profile may have
+		// been deleted or moved to the other backend since the backup ran,
+		// and an explicit decryption Secret must not bypass that check.
 		profile := findProfile(fg, ref.Spec.ProfileName)
+		var (
+			profileS3       *v1alpha1.S3Storage
+			profilePVCClaim string
+		)
+		switch {
+		case wantsS3:
+			if err := backupRefProfileStorageError(fp, &ref, profile, v1alpha1.BackupStorageS3); err != nil {
+				return nil, err
+			}
+			profileS3 = profile.Storage.S3
+		case wantsPVC:
+			if err := backupRefProfileStorageError(fp, &ref, profile, v1alpha1.BackupStoragePVC); err != nil {
+				return nil, err
+			}
+			profilePVCClaim = profile.Storage.PVC.ClaimName
+			if profilePVCClaim == "" {
+				profilePVCClaim = ownedBackupPVCName(fg.Name, profile.Name)
+			}
+		}
+
 		if ref.Status.Encrypted {
 			switch {
 			case in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "":
@@ -811,26 +866,20 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 						"set %s.decryption.passphraseSecret or restore the profile's encryption.passphraseSecret",
 					fp, ref.Name, fp)
 			}
-			if wantsS3 {
-				s3 := profile.Storage.S3
+			if profileS3 != nil {
 				decryptSourceKind = "S3"
-				decryptS3Bucket = s3.Bucket
-				decryptS3EndpointOverride = s3.EndpointURL
-				decryptS3Region = s3.Region
+				decryptS3Bucket = profileS3.Bucket
+				decryptS3EndpointOverride = profileS3.EndpointURL
+				decryptS3Region = profileS3.Region
 				var locBucket string
 				locBucket, decryptS3Prefix = splitS3Location(ref.Status.Location)
 				if locBucket != "" {
 					decryptS3Bucket = locBucket
 				}
-				decryptAWSCredsSecret = s3.CredentialsSecret
-			} else if wantsPVC {
-				pvc := profile.Storage.PVC
-				claim := pvc.ClaimName
-				if claim == "" {
-					claim = ownedBackupPVCName(fg.Name, profile.Name)
-				}
+				decryptAWSCredsSecret = profileS3.CredentialsSecret
+			} else if profilePVCClaim != "" {
 				decryptSourceKind = "PVC"
-				decryptPVCClaim = claim
+				decryptPVCClaim = profilePVCClaim
 				// inputURL is the in-pod absolute path the backup
 				// wrote to (e.g. "/backups/<backup-name>"). Derive a
 				// storage-relative prefix from the PVC mount path
@@ -838,36 +887,20 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 				decryptPVCPrefix = strings.TrimSuffix(strings.TrimPrefix(inputURL, backupPVCMountPath+"/"), "/")
 			}
 		}
-		if wantsS3 && (profile == nil || profile.Storage.Type != v1alpha1.BackupStorageS3 || profile.Storage.S3 == nil) {
-			return nil, fmt.Errorf(
-				"%s.source.mysqlBackupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles; "+
-					"either restore the profile or set %s.source.s3 explicitly",
-				fp, ref.Name, ref.Status.Location, ref.Spec.ProfileName, fp)
-		}
-		if wantsPVC && (profile == nil || profile.Storage.Type != v1alpha1.BackupStoragePVC || profile.Storage.PVC == nil) {
-			return nil, fmt.Errorf(
-				"%s.source.mysqlBackupRef=%q resolves to a PVC location (%q) but profile %q is missing from spec.backup.profiles; "+
-					"either restore the profile or set %s.source.pvc explicitly",
-				fp, ref.Name, ref.Status.Location, ref.Spec.ProfileName, fp)
-		}
-		if wantsS3 && profile != nil && profile.Storage.Type == v1alpha1.BackupStorageS3 && profile.Storage.S3 != nil {
+		if profileS3 != nil {
 			extraEnv = append(extraEnv,
-				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: profile.Storage.S3.Bucket},
+				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: profileS3.Bucket},
 			)
-			if profile.Storage.S3.EndpointURL != "" {
+			if profileS3.EndpointURL != "" {
 				extraEnv = append(extraEnv, corev1.EnvVar{
-					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: profile.Storage.S3.EndpointURL,
+					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: profileS3.EndpointURL,
 				})
 			}
-			if profile.Storage.S3.Region != "" {
-				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: profile.Storage.S3.Region})
+			if profileS3.Region != "" {
+				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: profileS3.Region})
 			}
-			awsCredsSecret = profile.Storage.S3.CredentialsSecret
-		} else if wantsPVC && profile != nil && profile.Storage.Type == v1alpha1.BackupStoragePVC && profile.Storage.PVC != nil {
-			claim := profile.Storage.PVC.ClaimName
-			if claim == "" {
-				claim = ownedBackupPVCName(fg.Name, profile.Name)
-			}
+			awsCredsSecret = profileS3.CredentialsSecret
+		} else if profilePVCClaim != "" {
 			// MysqlBackup.status.location stores the in-pod dump path that the
 			// backup Job used. For PVC-backed backups that path lives under
 			// /backups, so the restore Job must mount the same claim there.
@@ -875,7 +908,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 				Name: "restore-src",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: claim,
+						ClaimName: profilePVCClaim,
 						ReadOnly:  true,
 					},
 				},
