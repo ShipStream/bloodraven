@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
 // BinlogArchiver uploads sealed binlog files from the local MySQL data
@@ -41,20 +43,22 @@ import (
 // preserving older files when a rebuilt site's binlog numbering restarts.
 type BinlogArchiver struct {
 	// Identity work and cursors belong to the scan goroutine, not the status mutex.
-	historyTask       *binlogHistoryTask
-	historyNext       int
-	historyNextAudit  int
-	historyAuditError string
-	historyScanBusy   bool
-	reuseWork         *archiveReuseWork
-	reuseNext         int
-	reuseFailed       map[archiveReuseKey]time.Time
-	reuseErrors       map[archiveReuseKey]error
-	reuseCompared     map[archiveReuseKey]bool
-	sealedSnapshot    map[string]os.FileInfo
-	legacyChecked     map[string]time.Time
-	localIDs          map[string]cachedBinlogIdentity
-	cfg               *PITRConfig
+	retentionNextInspection     int
+	retentionInspectionFailures map[retentionInspectionIdentity]time.Time
+	historyTask                 *binlogHistoryTask
+	historyNext                 int
+	historyNextAudit            int
+	historyAuditError           string
+	historyScanBusy             bool
+	reuseWork                   *archiveReuseWork
+	reuseNext                   int
+	reuseFailed                 map[archiveReuseKey]time.Time
+	reuseErrors                 map[archiveReuseKey]error
+	reuseCompared               map[archiveReuseKey]bool
+	sealedSnapshot              map[string]os.FileInfo
+	legacyChecked               map[string]time.Time
+	localIDs                    map[string]cachedBinlogIdentity
+	cfg                         *PITRConfig
 	// retentionCfg holds the fields the archiver needs to call the
 	// operator's /pitr-cutoff endpoint for retention decisions. Nil
 	// when those fields weren't passed via env (tests, or a
@@ -345,24 +349,16 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 		return
 	}
 
-	cutoff, err := a.fetchRetentionCutoff(ctx)
-	if err != nil {
-		a.logger.Debug("fetch retention cutoff", "error", err)
-		return
-	}
 	a.mu.Lock()
 	a.lastRetentionRun = time.Now()
 	a.mu.Unlock()
-	if cutoff.IsZero() {
-		// No retained backups for this profile yet; nothing to prune.
-		return
-	}
-	var ok bool
-	if cutoff, ok = boundRetentionCutoff(cutoff, time.Now()); !ok {
-		a.logger.Warn("retention: ignoring cutoff in the future", "cutoff", cutoff.Format(time.RFC3339))
-		return
-	}
-
+	deleted, pruned := 0, 0
+	cutoffText := ""
+	defer func() {
+		if deleted > 0 {
+			a.logger.Info("retention sweep complete", "cutoff", cutoffText, "deleted", deleted, "manifest_pruned", pruned)
+		}
+	}()
 	manifest, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
 	if err != nil {
 		a.logger.Warn("retention: load manifest", "error", err)
@@ -371,10 +367,69 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 	if manifest.Epoch != nil && manifest.Epoch.ResetReason != "" {
 		return
 	}
+	proof, err := a.fetchRetentionCutoff(ctx)
+	if err != nil {
+		a.logger.Warn("fetch retention cutoff", "error", err)
+		if errors.Is(err, errRetentionRateLimited) {
+			a.retryRetentionSoon()
+		}
+		return
+	}
+	if proof.cutoff.IsZero() {
+		if proof.reason == "noRetainedBackups" || proof.reason == "backupInFlight" {
+			a.logger.Info("retention deferred", "reason", proof.reason)
+		} else {
+			a.logger.Warn("retention deferred", "reason", proof.reason)
+		}
+		return
+	}
+	cutoff, ok := boundRetentionCutoff(proof.cutoff, time.Now())
+	if !ok {
+		a.logger.Warn("retention: ignoring cutoff in the future", "cutoff", cutoff.Format(time.RFC3339))
+		return
+	}
+
+	cutoffText = cutoff.Format(time.RFC3339)
+	backfill, err := a.backfillRetentionCoverage(ctx, manifest, cutoff)
+	if err != nil {
+		if backfill.progress {
+			a.retryRetentionSoon()
+		}
+		a.logger.Warn("retention: save coverage", "error", err)
+		return
+	}
+	unknownCoverage := false
+	for _, f := range manifest.Files {
+		if !f.LastEventTime.IsZero() && f.LastEventTime.Before(cutoff) && (!coverageBoundToEntry(f) || !f.GTIDCoverage.Complete) {
+			unknownCoverage = true
+		}
+	}
+	if backfill.pending {
+		a.retryRetentionSoon()
+	}
+	if unknownCoverage {
+		if backfill.pending {
+			a.logger.Info("retention deferred", "reason", "binlogGTIDCoverageUnknown")
+		} else {
+			a.logger.Warn("retention deferred", "reason", "binlogGTIDCoverageUnknown")
+		}
+	}
+	if manifest.Epoch != nil && manifest.Epoch.ResetReason != "" {
+		return
+	}
+	if a.archiveReusePending(manifest) {
+		if err := a.archiveReuseError(); err != nil {
+			a.logger.Warn("retention deferred", "reason", "archiveIssuanceUnverified", "error", err)
+		} else {
+			a.logger.Info("retention deferred", "reason", "archiveIssuanceUnverified")
+		}
+		return
+	}
 	drop := map[binlogIdentity]string{}
 	for _, f := range manifest.Files {
-		if !f.LastEventTime.IsZero() && f.LastEventTime.Before(cutoff) {
-			drop[f.identity()] = f.ID
+		if !f.LastEventTime.IsZero() && f.LastEventTime.Before(cutoff) &&
+			coverageBoundToEntry(f) && fileCoveredByBackups(f.GTIDCoverage, proof.backups) {
+			drop[f.identity()] = f.GTIDCoverage.ContentID
 		}
 	}
 	if len(drop) == 0 {
@@ -385,19 +440,13 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 		a.logger.Warn("retention: prune manifest", "error", err)
 		return
 	}
-	deleted := 0
+	pruned = len(removed)
 	for _, key := range removed {
 		if err := a.store.Delete(ctx, key); err != nil {
 			a.logger.Warn("retention: delete object", "key", key, "error", err)
 			continue
 		}
 		deleted++
-	}
-	if deleted > 0 {
-		a.logger.Info("retention sweep complete",
-			"cutoff", cutoff.Format(time.RFC3339),
-			"deleted", deleted,
-			"manifest_pruned", len(removed))
 	}
 }
 
@@ -407,6 +456,16 @@ func (a *BinlogArchiver) maybeRunRetention(ctx context.Context) {
 // bounds what a spoofed reply can destroy. A legitimate cutoff is the
 // oldest retained backup's start time; GTID containment is also required.
 const minRetainedBinlogAge = 24 * time.Hour
+
+var errRetentionRateLimited = errors.New("PITR cutoff lookup rate limited")
+
+// Retry bounded backfill and throttled lookups without waiting another hour.
+func (a *BinlogArchiver) retryRetentionSoon() {
+	delay := min(30*time.Second, a.retentionCfg.Interval)
+	a.mu.Lock()
+	a.lastRetentionRun = time.Now().Add(-a.retentionCfg.Interval + delay)
+	a.mu.Unlock()
+}
 
 // boundRetentionCutoff clamps cutoff so a sweep never deletes binlogs
 // newer than minRetainedBinlogAge. It returns false for a cutoff in the
@@ -422,55 +481,96 @@ func boundRetentionCutoff(cutoff, now time.Time) (time.Time, bool) {
 }
 
 type pitrCutoffResponse struct {
-	CutoffTime string `json:"cutoffTime,omitempty"`
+	CutoffTime              string   `json:"cutoffTime,omitempty"`
+	Coverage                string   `json:"coverage,omitempty"`
+	RetainedGTIDs           []string `json:"retainedGTIDs,omitempty"`
+	RetentionDeferredReason string   `json:"retentionDeferredReason,omitempty"`
+}
+
+type retentionCoverageProof struct {
+	cutoff  time.Time
+	backups []internalmysql.GTIDSet
+	reason  string
+}
+
+func fileCoveredByBackups(coverage *BinlogGTIDCoverage, backups []internalmysql.GTIDSet) bool {
+	if coverage == nil || !coverage.Complete || len(backups) == 0 {
+		return false
+	}
+	transactions, err := internalmysql.ParseGTIDSet(coverage.GTIDs)
+	if err != nil {
+		return false
+	}
+	for _, backup := range backups {
+		if backup.IsEmpty() || !backup.Contains(transactions) {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchRetentionCutoff calls the operator's aux HTTP endpoint. Returns
-// the zero time.Time when no cutoff is available (no retained backups)
-// or on any error the archiver can tolerate (500, transient network
-// failures). Hard errors — malformed address, missing config — fall
-// through to the Debug log in the caller.
-func (a *BinlogArchiver) fetchRetentionCutoff(ctx context.Context) (time.Time, error) {
+// an empty proof when the peer lacks the coverage protocol or backup bounds.
+// Transport and malformed-metadata errors defer the entire sweep.
+func (a *BinlogArchiver) fetchRetentionCutoff(ctx context.Context) (retentionCoverageProof, error) {
 	if a.retentionCfg.BloodravenAddress == "" {
-		return time.Time{}, fmt.Errorf("no bloodraven address configured")
+		return retentionCoverageProof{}, fmt.Errorf("no bloodraven address configured")
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	url := fmt.Sprintf("http://%s/pitr-cutoff?namespace=%s&group=%s&profile=%s",
+	url := fmt.Sprintf("http://%s/pitr-cutoff?namespace=%s&group=%s&profile=%s&coverage=%s",
 		a.retentionCfg.BloodravenAddress,
 		a.retentionCfg.Namespace,
 		a.retentionCfg.FailoverGroup,
-		a.retentionCfg.ProfileName)
+		a.retentionCfg.ProfileName, PITRGTIDCoverageProtocol)
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return time.Time{}, err
+		return retentionCoverageProof{}, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return time.Time{}, err
+		return retentionCoverageProof{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return retentionCoverageProof{}, errRetentionRateLimited
+	}
 	if resp.StatusCode != http.StatusOK {
-		return time.Time{}, fmt.Errorf("operator status %d", resp.StatusCode)
+		return retentionCoverageProof{}, fmt.Errorf("operator status %d", resp.StatusCode)
 	}
 	var body pitrCutoffResponse
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return time.Time{}, err
+		return retentionCoverageProof{}, err
+	}
+	if body.Coverage != PITRGTIDCoverageProtocol || len(body.RetainedGTIDs) == 0 {
+		reason := body.RetentionDeferredReason
+		switch reason {
+		case "noRetainedBackups", "backupInFlight", "backupMetadataUnknown":
+		default:
+			reason = "backupGTIDCoverageUnknown"
+		}
+		return retentionCoverageProof{reason: reason}, nil
+	}
+	if body.RetentionDeferredReason != "" {
+		return retentionCoverageProof{reason: "backupMetadataUnknown"}, nil
+	}
+	var backups []internalmysql.GTIDSet
+	for _, raw := range body.RetainedGTIDs {
+		set, err := internalmysql.ParseGTIDSet(raw)
+		if err != nil || set.IsEmpty() {
+			return retentionCoverageProof{}, fmt.Errorf("retention backup GTID coverage unknown")
+		}
+		backups = append(backups, set)
 	}
 	if body.CutoffTime == "" {
-		return time.Time{}, nil
+		return retentionCoverageProof{reason: "backupGTIDCoverageUnknown"}, nil
 	}
 	t, err := time.Parse(time.RFC3339, body.CutoffTime)
 	if err != nil {
-		return time.Time{}, err
+		return retentionCoverageProof{}, err
 	}
-	return t, nil
+	return retentionCoverageProof{cutoff: t, backups: backups}, nil
 }
-
-// archiveOne parses metadata for one sealed binlog, uploads the file,
-// and appends the resulting entry to the site manifest. Metadata and
-// manifest updates happen AFTER a successful upload so a partial
-// upload never leaves a dangling manifest row pointing at a 404.
 
 // Status is a snapshot of the archiver's state for the sidecar HTTP
 // surface. Exposed via /archiver/status so kubectl describe / operator

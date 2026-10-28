@@ -3,8 +3,11 @@ package sidecar
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,6 +84,25 @@ func TestRound2NoScratchAcrossEncryptionAndInspection(t *testing.T) {
 			})
 			if err != nil || got != id {
 				t.Fatalf("legacy verification: %s, %v", got, err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(pitrCutoffResponse{Coverage: PITRGTIDCoverageProtocol, CutoffTime: "2026-04-17T00:00:00Z", RetainedGTIDs: []string{coverageTestSID + ":1-10"}})
+			}))
+			defer server.Close()
+			a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", "p", time.Hour)
+			a.maybeRunRetention(ctx)
+			m, err := loadManifest(ctx, store, "binlogs", "iad")
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, entry := range m.Files {
+				if entry.Name == legacy.Name {
+					found = entry.GTIDCoverage != nil && entry.ContentID == id
+				}
+			}
+			if !found {
+				t.Fatal("backfill did not persist verified metadata")
 			}
 			if err := store.GetFile(ctx, key, destination); err != nil {
 				t.Fatal(err)

@@ -98,6 +98,14 @@ kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,ship
 kubectl get mysqlbackupverifications -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,PHASE:.status.phase,JOB:.status.jobName,BACKUP:.status.backupRef.name,BACKUP_UID:.status.backupRef.uid,LOCATION:.status.backupRef.location,STORAGE:.status.backupRef.storageType,VERIFIED:.status.conditions[?(@.type=="Verified")].status,REASON:.status.conditions[?(@.type=="Verified")].reason' > "$OUTPUT_DIR/verification-status.txt" 2>/dev/null || true
 kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup-verification" -o 'custom-columns=NAME:.metadata.name,OWNER_UID:.metadata.ownerReferences[*].uid,SNAPSHOT:.spec.template.metadata.annotations.shipstream\.io/verification-backup,INPUT:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_INPUT_URL")].value,DECRYPT_STORAGE:.spec.template.spec.initContainers[?(@.name=="decrypt-download")].env[?(@.name=="BLOODRAVEN_STORAGE_TYPE")].value,DECRYPT_PREFIX:.spec.template.spec.initContainers[?(@.name=="decrypt-download")].env[?(@.name=="BLOODRAVEN_SOURCE_PREFIX")].value,DECRYPT_BUCKET:.spec.template.spec.initContainers[?(@.name=="decrypt-download")].env[?(@.name=="BLOODRAVEN_S3_BUCKET")].value' > "$OUTPUT_DIR/verification-jobs.txt" 2>/dev/null || true
 
+# Capture only backup coverage fields; annotations and credential material are excluded.
+kubectl get mysqlbackups.shipstream.io -n "$NAMESPACE" -o json 2>/dev/null | \
+    jq --arg group "$MFG_NAME" '[.items[] | select(.spec.failoverGroupRef.name == $group) |
+      {name: .metadata.name, profile: .spec.profileName, phase: .status.phase,
+       deletionTimestamp: .metadata.deletionTimestamp,
+       startTime: .status.startTime, completionTime: .status.completionTime,
+       gtidExecuted: .status.gtidExecuted}]' > "$OUTPUT_DIR/backups.json" 2> "$OUTPUT_DIR/backup-errors.txt" || true
+
 # 3. Capture Events
 kubectl get events -n "$NAMESPACE" --sort-by=.lastTimestamp > "$OUTPUT_DIR/events.txt" 2>/dev/null || true
 

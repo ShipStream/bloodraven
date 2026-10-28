@@ -42,7 +42,7 @@ func (s *identityCountingStore) PutFile(ctx context.Context, key, src string) er
 }
 
 func TestBinlogIdentityFixturesParseCompletely(t *testing.T) {
-	for _, name := range []string{"incarnation-a.bin", "incarnation-b.bin", "same-header.bin"} {
+	for _, name := range []string{"incarnation-a.bin", "incarnation-b.bin", "same-header.bin", "tagged-transaction.bin"} {
 		parser := replication.NewBinlogParser()
 		parser.SetVerifyChecksum(true)
 		var events []replication.EventType

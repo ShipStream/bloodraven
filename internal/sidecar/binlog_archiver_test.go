@@ -386,7 +386,7 @@ func TestRetentionCutoffIsBounded(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-				_ = json.NewEncoder(rw).Encode(pitrCutoffResponse{CutoffTime: tc.cutoff.Format(time.RFC3339)})
+				_ = json.NewEncoder(rw).Encode(pitrCutoffResponse{CutoffTime: tc.cutoff.Format(time.RFC3339), Coverage: PITRGTIDCoverageProtocol, RetainedGTIDs: []string{coverageTestSID + ":1-11"}})
 			}))
 			defer srv.Close()
 
@@ -395,11 +395,26 @@ func TestRetentionCutoffIsBounded(t *testing.T) {
 			cfg := &PITRConfig{ManifestPrefix: "binlogs"}
 			a := NewBinlogArchiver(cfg, "dc1", &stubRoleChecker{}, store, slog.Default())
 			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
+			payload, err := os.ReadFile("testdata/incarnation-a.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := fileContentID("testdata/incarnation-a.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
 			for _, e := range []ManifestEntry{
-				{Name: "mysql-bin.000001", LastEventTime: now.Add(-48 * time.Hour)},
-				{Name: "mysql-bin.000002", LastEventTime: now.Add(-2 * time.Hour)},
-				{Name: "mysql-bin.000003", LastEventTime: now.Add(-time.Minute)},
+				{ID: id, Name: "mysql-bin.000001", LastEventTime: now.Add(-48 * time.Hour), GTIDCoverage: &BinlogGTIDCoverage{Complete: true, GTIDs: coverageTestSID + ":11", ContentID: id}},
+				{ID: id, Name: "mysql-bin.000002", LastEventTime: now.Add(-2 * time.Hour), GTIDCoverage: &BinlogGTIDCoverage{Complete: true, GTIDs: coverageTestSID + ":11", ContentID: id}},
+				{ID: id, Name: "mysql-bin.000003", LastEventTime: now.Add(-time.Minute), GTIDCoverage: &BinlogGTIDCoverage{Complete: true, GTIDs: coverageTestSID + ":11", ContentID: id}},
 			} {
+				key, err := ArchiveEntryKey("binlogs", "dc1", e)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Put(ctx, key, bytes.NewReader(payload), int64(len(payload))); err != nil {
+					t.Fatal(err)
+				}
 				if err := appendManifestEntry(ctx, store, "binlogs", "dc1", e); err != nil {
 					t.Fatalf("append: %v", err)
 				}

@@ -196,6 +196,52 @@ func TestRereview4AcknowledgementChecksUnrecordedReuse(t *testing.T) {
 	}
 }
 
+func TestRereview4RetentionWaitsForBackfilledIssuance(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	m := &Manifest{Site: "iad"}
+	for i, name := range []string{"incarnation-a.bin", "same-header.bin"} {
+		data, err := os.ReadFile("testdata/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, err := InspectBinlog(bytes.NewReader(data), time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := ManifestEntry{Name: []string{"mysql-bin.000001", "mysql-bin.000002"}[i], LastEventTime: e.Metadata.LastEventTime}
+		key, err := ArchiveEntryKey("binlogs", "iad", row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Put(ctx, key, bytes.NewReader(data), int64(len(data))); err != nil {
+			t.Fatal(err)
+		}
+		m.Files = append(m.Files, row)
+	}
+	if err := saveManifest(ctx, store, "binlogs", m); err != nil {
+		t.Fatal(err)
+	}
+	a := retentionReviewArchiver(t, store, slog.Default(), retentionReviewProof())
+	a.maybeRunRetention(ctx)
+	m, err := loadManifest(ctx, store, "binlogs", "iad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Files) != 2 {
+		t.Fatalf("retirement discarded unverified conflicting issuance: %+v", m)
+	}
+	for _, row := range m.Files {
+		if !coverageBoundToEntry(row) {
+			t.Fatal("fixture did not complete legacy backfill")
+		}
+	}
+	_ = a.auditArchive(ctx, m)
+	if m.Epoch == nil || m.Epoch.ResetReason == "" {
+		t.Fatal("completed backfill did not reconcile issuance")
+	}
+}
+
 func TestRereview4FailedIssuanceInspectionCoolsDown(t *testing.T) {
 	ctx := context.Background()
 	store := &retentionRound2Store{ArchiveStore: newMemStore(), reads: make(map[string]int)}
