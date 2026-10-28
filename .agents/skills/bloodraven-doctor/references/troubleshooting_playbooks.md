@@ -421,3 +421,24 @@ The operator partially revokes the `app` user's write and DDL privileges on the 
 1. For a running Job whose original source is still recorded, allow it to finish. Newer backups or edits to `spec.backupRef` do not change its execution identity. Create another verification to test the newer backup.
 2. If the pinned source disappeared or its UID changed before launch, create a new verification for the intended source. The operator does not silently re-pin the old run, even when its spec requested latest selection.
 3. For identity mismatch, preserve the recorded reference and Job inputs for investigation, then start a new verification with an explicit intended source. Do not patch the audit record to make a different backup appear verified. Pinning identifies the source but does not hold stored artifacts against retention or external deletion.
+
+## 17. Restore Job failed on `Read-only file system` / `load-progress`
+
+Restore Jobs mount the dump read-only: source PVCs at `/restore` or `/backups`, and decrypted encrypted backups at `/restore-decrypted`. Operators built before load-progress tracking was disabled for restores let mysqlsh try to write `load-progress.<uuid>.json` next to the dump. Every PVC-sourced or encrypted restore then failed.
+
+### Symptoms
+- Restore Job logs show `BLOODRAVEN_LOAD_FAILED` mentioning `load-progress` and `Read-only file system` (EROFS).
+- For an in-place restore, the Job logs `BLOODRAVEN_DROP_SCHEMA` / `BLOODRAVEN_DROP_ALL_USER_SCHEMAS_DONE` before the load failure, so the target schemas are already gone. `status.restoreInPlace.phase` is `Failed`.
+
+### Diagnostic steps
+1. Confirm the Job's main container disables progress tracking. On a fixed operator the variable is present with an empty value:
+   ```bash
+   kubectl get job -n <ns> <restore-job> -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="BLOODRAVEN_LOAD_PROGRESS_FILE")]}'
+   ```
+   No output means the Job was built by an older operator.
+2. For in-place, list what survived on the primary: `SHOW DATABASES`.
+
+### Safe remediation
+1. Upgrade the operator. `loadOptions.resetProgress` has no effect on restores, and changing it does not help.
+2. Bootstrap: delete the failed restore Job; the reconciler rebuilds it. Restore Jobs no longer resume a partial load. If the failed Job's log shows `BLOODRAVEN_LOAD_START`, empty the target first (delete the new group's MySQL PVCs, or `./playground/reset-mysql.sh`), or the reload stops on objects the first attempt created.
+3. In-place: bump `spec.restoreInPlace.confirm` to a newer RFC 3339 timestamp to re-run the restore. It drops and reloads the same scope, which is what is needed when the earlier attempt dropped the schemas and never loaded them.

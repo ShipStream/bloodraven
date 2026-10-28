@@ -631,9 +631,10 @@ func verificationPITRSpec(in *v1alpha1.PointInTimeVerificationSpec) (*v1alpha1.P
 }
 
 // verificationLoadOptions returns the util.loadDump() options used for
-// a verification run. ResetProgress=true so retries of a failed
-// verification start clean; SkipBinlog=true because the ephemeral
-// mysqld runs with --skip-log-bin anyway; LoadIndexes=true so a
+// a verification run. ResetProgress=true is inert: verification Jobs
+// disable load-progress tracking, so every run starts clean anyway.
+// SkipBinlog=true because the ephemeral mysqld runs with --skip-log-bin
+// anyway; LoadIndexes=true so a
 // "restore loads successfully" result is not weakened by deferred
 // index builds that would only fail later.
 func verificationLoadOptions() *v1alpha1.LoadOptions {

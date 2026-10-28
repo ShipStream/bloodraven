@@ -628,7 +628,11 @@ type LoadOptions struct {
 	// +kubebuilder:validation:Minimum=1
 	Threads int32 `json:"threads,omitempty"`
 
-	// ResetProgress clears previous loadDump progress tracking.
+	// ResetProgress clears previous loadDump progress tracking. Restore
+	// and verification Jobs disable progress tracking (local dump sources
+	// are mounted read-only, and restore state is kept out of backup
+	// storage), so this field currently has no effect and is kept for
+	// compatibility.
 	// +kubebuilder:default=true
 	ResetProgress *bool `json:"resetProgress,omitempty"`
 

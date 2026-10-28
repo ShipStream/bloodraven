@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
@@ -330,5 +331,119 @@ func TestReconcileRestoreJob_JobSucceeded_UpdatesStatus(t *testing.T) {
 
 	if fresh.Status.Restore == nil || fresh.Status.Restore.Phase != v1alpha1.BackupPhaseSucceeded {
 		t.Errorf("want Succeeded, got %+v", fresh.Status.Restore)
+	}
+}
+
+// TestBuildRestoreJob_DisablesLoadProgressFile covers every restore
+// source through both builders. mysqlsh's default progressFile is
+// written beside the dump, but restore sources are read-only (source
+// PVCs and the decrypted staging dir), and for S3 sources a stale
+// progress file in the backup prefix would let a re-run skip the load
+// after an in-place DROP. Restore Jobs run once (RestartPolicyNever,
+// backoffLimit 0), so they must always disable progress tracking.
+func TestBuildRestoreJob_DisablesLoadProgressFile(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+
+	decryption := &v1alpha1.BackupDecryptionSpec{PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "restore-pass", Key: "passphrase"}}
+	encryptProfile := func(fg *v1alpha1.MysqlFailoverGroup, name string) {
+		findProfile(fg, name).Encryption = &v1alpha1.BackupEncryptionSpec{
+			Algorithm:        "AES-256-GCM",
+			PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "backup-passphrase", Key: "passphrase"},
+		}
+	}
+	refSrc := v1alpha1.InitFromBackupSource{MysqlBackupRef: &corev1.LocalObjectReference{Name: "seed"}}
+
+	sources := []struct {
+		name       string
+		src        v1alpha1.InitFromBackupSource
+		decryption *v1alpha1.BackupDecryptionSpec
+		setup      func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup
+		roMount    string // source mount the main container reads; "" for S3
+	}{
+		{name: "direct s3", src: v1alpha1.InitFromBackupSource{S3: &v1alpha1.S3Storage{Bucket: "b", Prefix: "dumps/x", CredentialsSecret: "s3-creds"}}},
+		{name: "direct pvc", src: v1alpha1.InitFromBackupSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dump-pvc", SubPath: "x"}}, roMount: "/restore"},
+		{name: "direct pvc encrypted", src: v1alpha1.InitFromBackupSource{PVC: &v1alpha1.InitFromBackupPVCSource{ClaimName: "dump-pvc", SubPath: "x"}}, decryption: decryption, roMount: "/restore-decrypted"},
+		{name: "ref s3", src: refSrc, setup: func(*v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup { return succeededSeedBackup() }},
+		{name: "ref pvc", src: refSrc, roMount: backupPVCMountPath, setup: func(*v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup {
+			seed := succeededSeedBackup()
+			seed.Spec.ProfileName = "daily-local"
+			seed.Status.StorageType = v1alpha1.BackupStoragePVC
+			seed.Status.Location = backupPVCMountPath + "/seed/"
+			return seed
+		}},
+		{name: "ref s3 encrypted", src: refSrc, roMount: "/restore-decrypted", setup: func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup {
+			encryptProfile(fg, "nightly-s3")
+			return encryptedRefSeed("nightly-s3", v1alpha1.BackupStorageS3)
+		}},
+		{name: "ref pvc encrypted", src: refSrc, roMount: "/restore-decrypted", setup: func(fg *v1alpha1.MysqlFailoverGroup) *v1alpha1.MysqlBackup {
+			encryptProfile(fg, "daily-local")
+			return encryptedRefSeed("daily-local", v1alpha1.BackupStoragePVC)
+		}},
+	}
+	callers := []struct {
+		name  string
+		build func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error)
+	}{
+		{"bootstrap", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
+			fg.Spec.InitFromBackup = &v1alpha1.InitFromBackupSpec{Source: src, Decryption: dec}
+			return r.buildRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds")
+		}},
+		{"in-place full-instance", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
+			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{Confirm: "2026-04-17T14:00:00Z", Source: src, Decryption: dec}
+			return r.buildInPlaceRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds", true, "")
+		}},
+		{"in-place per-schema", func(r *MysqlFailoverGroupReconciler, fg *v1alpha1.MysqlFailoverGroup, src v1alpha1.InitFromBackupSource, dec *v1alpha1.BackupDecryptionSpec) (*batchv1.Job, error) {
+			fg.Spec.RestoreInPlace = &v1alpha1.RestoreInPlaceSpec{
+				Confirm: "2026-04-17T14:00:00Z", Source: src, Decryption: dec,
+				LoadOptions: &v1alpha1.LoadOptions{IncludeSchemas: []string{"orders"}},
+			}
+			return r.buildInPlaceRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds", false, "orders")
+		}},
+	}
+
+	for _, s := range sources {
+		for _, c := range callers {
+			t.Run(s.name+"/"+c.name, func(t *testing.T) {
+				fg := fgWithBackup()
+				var objs []client.Object
+				if s.setup != nil {
+					objs = append(objs, s.setup(fg))
+				}
+				r, _ := newReconciler(append([]client.Object{fg}, objs...)...)
+				job, err := c.build(r, fg, s.src, s.decryption)
+				if err != nil {
+					t.Fatalf("build: %v", err)
+				}
+				main := job.Spec.Template.Spec.Containers[0]
+				var progress *corev1.EnvVar
+				for i := range main.Env {
+					if main.Env[i].Name == "BLOODRAVEN_LOAD_PROGRESS_FILE" {
+						progress = &main.Env[i]
+					}
+				}
+				if progress == nil {
+					t.Fatal("BLOODRAVEN_LOAD_PROGRESS_FILE is not set; mysqlsh would write its progress file beside the read-only dump")
+				}
+				if progress.Value != "" {
+					t.Errorf("BLOODRAVEN_LOAD_PROGRESS_FILE = %q, want \"\" (progress tracking disabled)", progress.Value)
+				}
+				if s.roMount == "" {
+					return
+				}
+				var found bool
+				for _, m := range main.VolumeMounts {
+					if m.MountPath == s.roMount {
+						found = true
+						if !m.ReadOnly {
+							t.Errorf("source mount %s must stay read-only", s.roMount)
+						}
+					}
+				}
+				if !found {
+					t.Errorf("main container has no source mount at %s", s.roMount)
+				}
+			})
+		}
 	}
 }

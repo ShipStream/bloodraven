@@ -586,10 +586,10 @@ def main():
     if endpoint:
         opts["s3EndpointOverride"] = endpoint
 
-    # Verification runs mount the backup source read-only, so mysqlsh
-    # can't write its default `load-progress.<uid>.json` alongside the
-    # dump. When BLOODRAVEN_LOAD_PROGRESS_FILE is set the caller takes
-    # over progressFile selection; an empty value disables tracking.
+    # mysqlsh writes its default `load-progress.<uid>.json` beside the dump:
+    # impossible on the read-only local mounts, and unwanted in an S3 backup
+    # prefix. Both Job builders set BLOODRAVEN_LOAD_PROGRESS_FILE="" to
+    # disable tracking; when the variable is set the caller owns progressFile.
     progress_file = os.environ.get("BLOODRAVEN_LOAD_PROGRESS_FILE")
     if progress_file is not None:
         opts["progressFile"] = progress_file

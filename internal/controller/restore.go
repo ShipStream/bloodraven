@@ -1016,6 +1016,16 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		{Name: "BLOODRAVEN_MYSQL_HOST", Value: backupMySQLHost(fg, targetSite)},
 		{Name: "BLOODRAVEN_INPUT_URL", Value: literalArtifactEnvValue(inputURL)},
 		{Name: "BLOODRAVEN_LOAD_OPTIONS", Value: loadOptsJSON},
+		// Disable mysqlsh load-progress tracking. Its default progressFile
+		// is written beside the dump: that fails on every read-only local
+		// source (source PVCs and the decrypted staging dir), and for an
+		// unencrypted S3 source it puts restore state into the backup
+		// prefix, where a later load of the same dump would resume from
+		// it and skip data an in-place restore has just dropped. Keeping
+		// restore state out of backup storage costs resume: a bootstrap
+		// restore that fails part-way loads the whole dump again, so its
+		// target has to be emptied first (documented on the restore page).
+		{Name: "BLOODRAVEN_LOAD_PROGRESS_FILE", Value: ""},
 		{Name: "BLOODRAVEN_MYSQL_CREDS_DIR", Value: backupCredsMountPath},
 		{Name: "BLOODRAVEN_SOURCE_SIZE_BYTES", Value: strconv.FormatInt(sourceMeta.SourceSizeBytes, 10)},
 		{Name: "BLOODRAVEN_SOURCE_GTID_EXECUTED", Value: sourceMeta.SourceGtidExecuted},

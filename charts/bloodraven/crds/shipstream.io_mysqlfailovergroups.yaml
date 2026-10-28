@@ -5513,8 +5513,12 @@ spec:
                         type: boolean
                       resetProgress:
                         default: true
-                        description: ResetProgress clears previous loadDump progress
-                          tracking.
+                        description: |-
+                          ResetProgress clears previous loadDump progress tracking. Restore
+                          and verification Jobs disable progress tracking (local dump sources
+                          are mounted read-only, and restore state is kept out of backup
+                          storage), so this field currently has no effect and is kept for
+                          compatibility.
                         type: boolean
                       skipBinlog:
                         default: true
@@ -6078,8 +6082,12 @@ spec:
                         type: boolean
                       resetProgress:
                         default: true
-                        description: ResetProgress clears previous loadDump progress
-                          tracking.
+                        description: |-
+                          ResetProgress clears previous loadDump progress tracking. Restore
+                          and verification Jobs disable progress tracking (local dump sources
+                          are mounted read-only, and restore state is kept out of backup
+                          storage), so this field currently has no effect and is kept for
+                          compatibility.
                         type: boolean
                       skipBinlog:
                         default: true
