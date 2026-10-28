@@ -138,6 +138,25 @@ func TestWaitForRelayLogDrain(t *testing.T) {
 			wantPolls: 2,
 		},
 		{
+			// MySQL 8.4+ prints tagged transactions in the compact
+			// uuid:intervals:tag:intervals form. The pending tagged
+			// transaction (app:4-5) must be waited for, not rejected.
+			name: "compact tagged gtid sets wait for the pending tagged backlog",
+			state: testutil.FakeReplicaState{
+				Configured: true, IOConnecting: true, SQLRunning: true,
+				LastIOErrno: 2003, LastIOError: connectErr,
+				RetrievedGtidSet: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20:app:1-5",
+				ExecutedGtidSet:  "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-20:app:1-3",
+			},
+			onPoll: func(poll int, s *testutil.FakeReplicaState) {
+				if poll >= 2 {
+					s.ExecutedGtidSet = s.RetrievedGtidSet
+				}
+			},
+			timeout:   30 * time.Second,
+			wantPolls: 2,
+		},
+		{
 			name:      "no replication configured returns nil",
 			state:     testutil.FakeReplicaState{},
 			timeout:   30 * time.Second,

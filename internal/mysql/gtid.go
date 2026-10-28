@@ -18,11 +18,23 @@ type Interval struct {
 }
 
 // ParseGTIDSet parses a MySQL GTID set string like "uuid1:1-5,uuid2:1-3:7-9".
-// Multiple UUIDs are separated by commas. Multiple intervals for the same UUID
-// are separated by colons after the initial uuid[:tag]:interval.
-// Supported formats:
-//   - Traditional: uuid:interval[:interval][,uuid:interval[:interval]]...
-//   - Tagged:      uuid:tag:interval[:interval][,uuid:tag:interval[:interval]]...
+// Entries for different UUIDs are separated by commas (or newlines). Within an
+// entry, colons separate the UUID, its intervals, and any tags. The grammar
+// follows MySQL 8.4's GTID set syntax:
+//
+//	entry    = uuid ":" group { ":" group }
+//	group    = interval | tag ":" interval
+//	interval = n | n "-" m
+//	tag      = [a-zA-Z_][a-zA-Z0-9_]{0,31}
+//
+// A tag applies to the intervals that follow it until the next tag. MySQL
+// prints each UUID once, with its untagged intervals first and then one
+// ":tag:intervals" group per tag, for example
+// "uuid:1-100:app:1-5:ops:1-2". The untagged UUID and each uuid:tag are
+// distinct source identifiers and are stored under separate keys ("uuid",
+// "uuid:app", "uuid:ops"). Tags are case-insensitive and stored lower-case,
+// as MySQL normalizes them. Every tag must be followed by at least one
+// interval.
 func ParseGTIDSet(s string) (GTIDSet, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -31,17 +43,7 @@ func ParseGTIDSet(s string) (GTIDSet, error) {
 
 	result := make(GTIDSet)
 
-	// Split by comma to get per-UUID entries. However, a single UUID entry
-	// can look like "uuid:1-5:7-9" (colons separate intervals within one UUID).
-	// With tags, it can look like "uuid:tag:1-5:7-9".
-	// The tricky part: commas separate different UUIDs, and within a UUID entry
-	// colons separate the UUID from its (optional) tag, and the tag/intervals from each other.
-	//
-	// MySQL GTID format: uuid[:tag]:interval[:interval][,uuid[:tag]:interval[:interval]]...
-	// where interval is either "n" or "n-m".
-
-	// Split by comma first to separate UUID groups. But note that newlines
-	// can also separate them in multi-line GTID sets.
+	// Newlines can separate entries in multi-line GTID sets, like commas.
 	s = strings.ReplaceAll(s, "\n", ",")
 	parts := strings.Split(s, ",")
 
@@ -51,7 +53,6 @@ func ParseGTIDSet(s string) (GTIDSet, error) {
 			continue
 		}
 
-		// Split by colon: first element is UUID, second might be tag or interval, rest are intervals.
 		segments := strings.Split(part, ":")
 		if len(segments) < 2 {
 			return nil, fmt.Errorf("invalid GTID entry %q: expected uuid[:tag]:interval", part)
@@ -62,38 +63,50 @@ func ParseGTIDSet(s string) (GTIDSet, error) {
 			return nil, fmt.Errorf("empty UUID in GTID entry %q", part)
 		}
 
-		// Determine if we have a tag (format: uuid:tag:interval) or not (format: uuid:interval).
-		// Use a strict syntactic check: a segment is an interval if it contains only digits with
-		// an optional single hyphen separator. This avoids conflating a malformed interval (e.g.
-		// "5-3" with start>end, or "1-2-3") with a tag, which would silently skip the bad segment.
+		// Walk the segments after the UUID. Intervals belong to the current
+		// source identifier, which starts as the bare UUID and switches to
+		// uuid:tag at each tag. The syntactic interval check comes first so
+		// a malformed interval (e.g. "5-3" or "1-2-3") is reported as such
+		// rather than mistaken for a tag.
 		sid := uuid
-		intervalIndex := 1
-		if len(segments) >= 3 {
-			secondSeg := segments[1]
-			if !isIntervalSegment(secondSeg) {
-				if !isTagSegment(secondSeg) {
-					return nil, fmt.Errorf("invalid segment %q in GTID entry %q: not an interval or valid tag", secondSeg, part)
+		pendingTag := ""
+		hasInterval := false
+		for i, seg := range segments[1:] {
+			// When more segments follow, the one right after the UUID must
+			// be well formed; otherwise space-padded and empty segments are
+			// tolerated, as this parser always has.
+			if i > 0 || len(segments) == 2 {
+				seg = strings.TrimSpace(seg)
+				if seg == "" {
+					continue
 				}
-				// MySQL treats uuid and uuid:tag as distinct source identifiers.
-				// Retain the tag in the map key so set arithmetic cannot merge
-				// transactions from different tagged sources.
-				sid = uuid + ":" + secondSeg
-				intervalIndex = 2
+			}
+			switch {
+			case isIntervalSegment(seg):
+				iv, err := parseInterval(seg)
+				if err != nil {
+					return nil, fmt.Errorf("invalid interval %q in GTID entry %q: %w", seg, part, err)
+				}
+				result[sid] = append(result[sid], iv)
+				hasInterval = true
+				pendingTag = ""
+			case isTagSegment(seg):
+				if pendingTag != "" {
+					return nil, fmt.Errorf("tag %q has no intervals in GTID entry %q", pendingTag, part)
+				}
+				tag := strings.ToLower(seg)
+				// MySQL treats uuid and uuid:tag as distinct source
+				// identifiers. Retain the tag in the map key so set
+				// arithmetic cannot merge transactions from different
+				// tagged sources.
+				sid = uuid + ":" + tag
+				pendingTag = seg
+			default:
+				return nil, fmt.Errorf("invalid segment %q in GTID entry %q: not an interval or valid tag", seg, part)
 			}
 		}
-
-		hasInterval := false
-		for i := intervalIndex; i < len(segments); i++ {
-			seg := strings.TrimSpace(segments[i])
-			if seg == "" {
-				continue
-			}
-			iv, err := parseInterval(seg)
-			if err != nil {
-				return nil, fmt.Errorf("invalid interval %q in GTID entry %q: %w", seg, part, err)
-			}
-			result[sid] = append(result[sid], iv)
-			hasInterval = true
+		if pendingTag != "" {
+			return nil, fmt.Errorf("tag %q has no intervals in GTID entry %q", pendingTag, part)
 		}
 		if !hasInterval {
 			return nil, fmt.Errorf("no intervals found in GTID entry %q", part)
@@ -124,14 +137,20 @@ func isIntervalSegment(s string) bool {
 	return true
 }
 
-// isTagSegment reports whether s could be a valid GTID tag: non-empty and
-// containing only ASCII letters, digits, and underscores.
+// maxGTIDTagLength is MySQL's limit on the length of a GTID tag.
+const maxGTIDTagLength = 32
+
+// isTagSegment reports whether s is a valid GTID tag under MySQL's grammar:
+// 1 to 32 ASCII letters, digits, and underscores, not starting with a digit.
 func isTagSegment(s string) bool {
-	if s == "" {
+	if s == "" || len(s) > maxGTIDTagLength {
 		return false
 	}
-	for _, c := range s {
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+	for i, c := range s {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' {
+			continue
+		}
+		if i > 0 && c >= '0' && c <= '9' {
 			continue
 		}
 		return false
