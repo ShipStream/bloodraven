@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Release calls run the full suite against the tagged SHA.
+  workflow_call:
 
 permissions:
   contents: read

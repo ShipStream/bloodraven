@@ -8,7 +8,7 @@ This directory contains the CI/CD automation for the Bloodraven MySQL operator.
 
 ### `ci.yml` — Continuous Integration
 
-**Triggers:** Push to `main`, pull requests targeting `main`
+**Triggers:** Push to `main`, pull requests targeting `main`, and release calls through `workflow_call`
 
 Superseded PR runs are cancelled. Pushes to `main` and release calls use unique run groups and do not cancel each other.
 
@@ -75,7 +75,7 @@ repository secrets.
 
 Steps:
 
-1. **CI gate** — Runs lint, builds, tests, generate drift checks, chart CRD drift checks, the bloodraven.dev site build, and `llms-full.txt` coverage before any release artifact is published.
+1. **CI gate** — Runs the full `ci.yml` suite through `workflow_call` against the tagged SHA: lint, build, unit, component, envtest, generate and CRD drift checks, license roundtrip, site build and `llms-full.txt` coverage, and course checks. Nothing publishes until the `CI gate` job confirms success.
 2. **Draft release** — Creates a draft GitHub Release with image locations, Helm chart locations, install examples, and auto-generated notes.
 3. **Docker images** — Builds multi-arch (`linux/amd64` + `linux/arm64`) images for both targets:
    - `ghcr.io/shipstream/bloodraven:{version}` and `:latest`
