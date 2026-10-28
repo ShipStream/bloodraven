@@ -8,6 +8,11 @@ permissions:
   contents: read
   security-events: write
 
+# Cancel superseded PR runs; give each non-PR run its own group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   scan:
     name: Scan / ${{ matrix.target }} (${{ matrix.platform }})

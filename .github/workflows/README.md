@@ -150,6 +150,8 @@ The release workflow (`.github/workflows/release.yml`) blocks publishing on both
 
 **Triggers:** Pull requests targeting `main`
 
+Superseded PR runs are cancelled.
+
 **Required permissions:** `security-events: write` (for SARIF upload to the Security tab)
 
 Builds all four image variants (2 targets × 2 architectures) and runs Trivy on each:
