@@ -672,6 +672,8 @@ func TestDragonflyManager_TryEmergencyPromote_Success(t *testing.T) {
 	target := &fakeDragonflyConn{info: dragonfly.ReplicationInfo{Role: "master"}}
 	conn := newFakeConnector()
 	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", target)
+	// The old master answers, so the takeover is attempted.
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{})
 	mgr.SetConnector(conn.connect)
 
 	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
@@ -707,6 +709,8 @@ func TestDragonflyManager_TryEmergencyPromote_TakeoverFailsFallsBack(t *testing.
 	}
 	conn := newFakeConnector()
 	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", target)
+	// The old master answers, so the takeover is attempted.
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{})
 	mgr.SetConnector(conn.connect)
 
 	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
@@ -737,6 +741,9 @@ func TestDragonflyManager_TryEmergencyPromote_BothPathsFailed_StampsFailureEvent
 	c := cb.Build()
 	rec := record.NewFakeRecorder(8)
 	mgr := NewDragonflyManager(c, rec, slog.Default(), key, 50*time.Millisecond)
+	// The failed promotion is confirmed by observing the target, after the
+	// time the server may still be acting on the commands.
+	mgr.emergencySettle = func(time.Duration) time.Duration { return 0 }
 
 	// First conn fails REPLTAKEOVER. Re-dial succeeds; second conn
 	// fails REPLICAOF NO ONE via replicaOfErr.
@@ -750,6 +757,8 @@ func TestDragonflyManager_TryEmergencyPromote_BothPathsFailed_StampsFailureEvent
 	}
 	conn := newFakeConnector()
 	conn.programQueue("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", first, second)
+	// The old master answers, so the takeover is attempted.
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{})
 	mgr.SetConnector(conn.connect)
 
 	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")
@@ -790,6 +799,8 @@ func TestDragonflyManager_TryEmergencyPromote_RedialsAfterTakeoverError(t *testi
 	conn := newFakeConnector()
 	addr := "lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379"
 	conn.programQueue(addr, first, second)
+	// The old master answers, so the takeover is attempted.
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{})
 	mgr.SetConnector(conn.connect)
 
 	mgr.TryEmergencyPromote(context.Background(), "dc2", "dc1")

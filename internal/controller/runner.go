@@ -98,6 +98,14 @@ type TopologyManagerRunner struct {
 	mu            sync.RWMutex
 	leaderContext context.Context
 	managers      map[types.NamespacedName]*managedTopology
+	// dragonflyGates holds each group's Dragonfly ownership gate. Entries
+	// are never removed: a gate must outlive every manager that used it,
+	// including one whose stop timed out, so a recreated group cannot get a
+	// second gate while old work still holds the first.
+	dragonflyGates map[types.NamespacedName]*dragonflyGate
+	// apiReader is the uncached reader the Dragonfly managers use for the
+	// group's authoritative state (see DragonflyManager.SetAuthorityReader).
+	apiReader client.Reader
 }
 
 // NewTopologyManagerRunner creates a new runner.
@@ -202,6 +210,38 @@ func (r *TopologyManagerRunner) plannedFailoverManager(nn types.NamespacedName) 
 		return nil, fmt.Errorf("planned-failover: no topology manager running for %s", nn)
 	}
 	return mt.tm, nil
+}
+
+// SetAPIReader sets the uncached reader the runner's Dragonfly managers read
+// the group through once they hold its gate. Call before Start.
+func (r *TopologyManagerRunner) SetAPIReader(reader client.Reader) {
+	r.apiReader = reader
+}
+
+// dragonflyMaintenanceActive reports whether a planned failover or a
+// Dragonfly snapshot upgrade owns the group's Dragonfly, so its manager
+// must stay paused. Both come from persisted status, so a resync or a
+// manager replacement cannot unpause either.
+func dragonflyMaintenanceActive(fg *v1alpha1.MysqlFailoverGroup) bool {
+	return plannedFailoverInFlight(fg.Status.PlannedFailover) || dragonflyUpgradeInFlight(dragonflyUpgradeStatus(fg))
+}
+
+// DragonflyGate returns the group's stable Dragonfly ownership gate,
+// creating it on first use. Every Dragonfly routing writer for the group
+// (its managers' Run goroutines, planned failover, rollout, the label
+// sweep) acquires this gate; see dragonflyGate.
+func (r *TopologyManagerRunner) DragonflyGate(nn types.NamespacedName) *dragonflyGate {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.dragonflyGates == nil {
+		r.dragonflyGates = make(map[types.NamespacedName]*dragonflyGate)
+	}
+	g, ok := r.dragonflyGates[nn]
+	if !ok {
+		g = newDragonflyGate()
+		r.dragonflyGates[nn] = g
+	}
+	return g
 }
 
 func (r *TopologyManagerRunner) dragonflyManager(nn types.NamespacedName) *DragonflyManager {
@@ -454,7 +494,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
 			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
 			if existing.dragonfly != nil {
-				existing.dragonfly.SetPaused(plannedActive)
+				existing.dragonfly.SetPaused(dragonflyMaintenanceActive(fg))
 			}
 			r.handleRecloneAnnotation(ctx, fg, nn, existing.tm)
 			// Detect spec drift for ordered rolling updates.
@@ -505,7 +545,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			mt.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
 			mt.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
 			if mt.dragonfly != nil {
-				mt.dragonfly.SetPaused(plannedActive)
+				mt.dragonfly.SetPaused(dragonflyMaintenanceActive(fg))
 			}
 			r.handleRecloneAnnotation(ctx, fg, nn, mt.tm)
 		}
@@ -866,21 +906,17 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		if dfPollInterval <= 0 {
 			dfPollInterval = 2 * time.Second
 		}
-		dfMgr = NewDragonflyManager(r.client, r.recorder, r.logger.With("fg", nn.String(), "subsystem", "dragonfly"), nn, dfPollInterval)
-		// Mirror the planned-failover guard so the dragonfly manager
-		// stops issuing REPLICAOF while a planned switchover is in
-		// flight (the state machine handles its own promotion).
-		dfMgr.SetPaused(plannedFailoverInFlight(fg.Status.PlannedFailover))
+		dfMgr = r.newDragonflyManager(fg, nn, dfPollInterval)
 	}
 
 	// Wire the best-effort emergency Dragonfly promotion. Runs only
 	// after MySQL emergency failover Execute has succeeded; failures
-	// here are logged and never propagate back to MySQL.
+	// here are logged and never propagate back to MySQL. The callback only
+	// queues the request: the Dragonfly manager's own Run goroutine
+	// executes it between Ticks, so a stalled old master (a takeover, then
+	// a fallback that waits behind it) never holds up the MySQL poll.
 	if dfMgr != nil {
-		dfMgrLocal := dfMgr
-		tm.EmergencyFailoverCallback = func(emCtx context.Context, target, oldPrimary string) {
-			dfMgrLocal.TryEmergencyPromote(emCtx, target, oldPrimary)
-		}
+		tm.EmergencyFailoverCallback = emergencyDragonflyCallback(dfMgr)
 	}
 
 	siteNames := make([]string, len(fg.Spec.Sites))
@@ -923,6 +959,30 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	}
 
 	return nil
+}
+
+// newDragonflyManager builds a group's Dragonfly manager: it shares the
+// group's stable gate, reads the group through the runner's uncached
+// reader, and starts paused while a planned failover or a snapshot upgrade
+// (each of which drives its own Dragonfly changes) is in flight.
+func (r *TopologyManagerRunner) newDragonflyManager(fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, pollInterval time.Duration) *DragonflyManager {
+	dfMgr := NewDragonflyManager(r.client, r.recorder, r.logger.With("fg", nn.String(), "subsystem", "dragonfly"), nn, pollInterval)
+	dfMgr.SetGate(r.DragonflyGate(nn))
+	if r.apiReader != nil {
+		dfMgr.SetAuthorityReader(r.apiReader)
+	}
+	dfMgr.SetPaused(dragonflyMaintenanceActive(fg))
+	return dfMgr
+}
+
+// emergencyDragonflyCallback returns the TopologyManager callback that asks
+// the Dragonfly manager to follow a MySQL emergency failover. It only
+// queues the request (DragonflyManager.Enqueue, which never blocks), so the
+// MySQL poll never waits for the cache.
+func emergencyDragonflyCallback(dfMgr *DragonflyManager) func(context.Context, string, string) {
+	return func(_ context.Context, target, oldPrimary string) {
+		dfMgr.Enqueue(target, oldPrimary)
+	}
 }
 
 // restoreFailoverState wires the out-of-band anti-flap store and restores
@@ -1105,10 +1165,11 @@ func clearManagedSiteGauges(tm *TopologyManager) {
 // the runner's sync / StopManager / stopAll path forever.
 const managerStopWait = 30 * time.Second
 
-// stopManagedTopology cancels the manager and waits (bounded) for its
-// goroutine to return so a subsequent series delete cannot be undone by
-// an in-flight Poll. A nil done channel (test-injected managers) is a
-// no-op wait.
+// stopManagedTopology closes the Dragonfly manager's admission, cancels the
+// manager and waits (bounded) for its goroutine to return so a subsequent
+// series delete cannot be undone by an in-flight Poll, then joins the
+// Dragonfly manager's Run goroutine within the same bound. A nil done
+// channel (test-injected managers) is a no-op wait.
 func stopManagedTopology(mt *managedTopology) {
 	stopManagedTopologyWait(mt, managerStopWait)
 }
@@ -1117,6 +1178,11 @@ func stopManagedTopologyWait(mt *managedTopology, wait time.Duration) {
 	if mt == nil {
 		return
 	}
+	// Close Dragonfly admission first: from here on the old manager starts
+	// no new request, Tick or promotion step.
+	if mt.dragonfly != nil {
+		mt.dragonfly.BeginStop()
+	}
 	if mt.tm != nil {
 		mt.tm.deploymentTopologyPending()
 		mt.tm.HaltSiteMetrics()
@@ -1124,17 +1190,26 @@ func stopManagedTopologyWait(mt *managedTopology, wait time.Duration) {
 	if mt.cancel != nil {
 		mt.cancel()
 	}
-	if mt.done == nil {
-		return
-	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-mt.done:
-	case <-timer.C:
-		if mt.tm != nil && mt.tm.logger != nil {
-			mt.tm.logger.Warn("timed out waiting for topology manager to stop; dropping site gauges anyway")
+	if mt.done != nil {
+		timer := time.NewTimer(wait)
+		select {
+		case <-mt.done:
+		case <-timer.C:
+			if mt.tm != nil && mt.tm.logger != nil {
+				mt.tm.logger.Warn("timed out waiting for topology manager to stop; dropping site gauges anyway")
+			}
 		}
+		timer.Stop()
+	}
+	// Join the Dragonfly manager's Run goroutine, which owns any promotion
+	// in progress: one that has sent a role-changing command finishes
+	// recording it (labels, status, source cleanup) before Run returns. If
+	// the wait times out, that last unit of work still holds the group's
+	// gate, so a replacement manager or a planned failover waits for it
+	// rather than mutating alongside it.
+	if mt.dragonfly != nil && !mt.dragonfly.Stop(wait) {
+		mt.dragonfly.logger.Warn("timed out waiting for the Dragonfly manager to stop; its last step finishes under the group's Dragonfly gate",
+			"fg", mt.dragonfly.fgKey.String())
 	}
 }
 

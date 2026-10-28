@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	k8sretry "k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,7 +33,29 @@ import (
 // effectiveDragonflyMasterSite, which respects the planned-failover
 // state machine's in-flight promotion target. Replicas are everything
 // else.
+//
+// The sweep holds the group's Dragonfly gate and reads the group after
+// acquiring it, so it never relabels from status that a promotion has just
+// superseded. If another writer holds the gate it skips this pass.
 func (r *MysqlFailoverGroupReconciler) syncDragonflyPodLabels(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
+	if !dragonflyEnabled(fg) {
+		return nil
+	}
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	release, ok := r.tryDragonflyGate(nn)
+	if !ok {
+		log.FromContext(ctx).V(1).Info("dragonfly label sweep skipped: gate busy", "fg", nn)
+		return nil
+	}
+	defer release()
+	fresh, err := r.freshFailoverGroup(ctx, nn)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("re-read failover group for dragonfly label sweep: %w", err)
+	}
+	fg = fresh
 	if !dragonflyEnabled(fg) {
 		return nil
 	}

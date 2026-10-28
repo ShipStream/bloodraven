@@ -109,6 +109,18 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
    ```bash
    kubectl exec -n <ns> <dragonfly-pod> -- redis-cli -p 6379 info replication
    ```
+3. After an emergency failover, find which promotion path ran: `kubectl logs -n bloodraven deploy/bloodraven | grep 'dragonfly emergency'`.
+   - `REPLTAKEOVER succeeded`: sessions were preserved.
+   - `old master unreachable; skipping REPLTAKEOVER`, or `REPLTAKEOVER failed; falling back`, followed by `target promoted via REPLICAOF NO ONE (sessions lost)`: the cache is writable but empty.
+   - `REPLICAOF NO ONE failed` or `re-dial for REPLICAOF NO ONE failed`: an unconfirmed promotion, not the outcome. A takeover can complete on the server after its client gave up, and a timed-out fallback may still have applied. The operator waits for the commands to settle, reads the target's role and logs the result:
+     - `promotion outcome unconfirmed; target observed as master`: recorded as promoted (labels, status), with `DragonflySessionsLost`.
+     - `promotion failed; target not observed as master`: not promoted; the old source's traffic label was restored. The manager's next poll promotes again if MySQL and Dragonfly still disagree.
+     If neither line follows within about 30s, confirm the target's role with `kubectl exec -n <ns> <target-dragonfly-pod> -- redis-cli -p 6379 info replication` and check the active Service's endpoints.
+   - `dragonfly promotion: ... skipping` or `request dropped` (coalesced, manager stopping, yielding to another owner, planned failover in flight, target already promoted): the request was superseded or made unnecessary. Not a failure on its own.
+
+   A fallback after a failed takeover can take up to about 14s, and settling an unconfirmed outcome up to about 13s more. Dragonfly holds the replica's `REPLICAOF` lock until the takeover's own wait ends, so a slow promotion is not by itself a failure.
+4. A planned failover or rollout logging `dragonfly gate busy; retrying` is waiting for the group's Dragonfly gate, held by the Dragonfly manager's current poll or promotion, or by a stopping manager's last step (WARN `timed out waiting for the Dragonfly manager to stop; its last step finishes under the group's Dragonfly gate`). It requeues every second. If it repeats for minutes, capture a goroutine dump of the operator (the holder is stuck in a Dragonfly or API call) before restarting it. A planned failover waiting this way emits Warning `DragonflyPromotionWaiting` and sets `status.plannedFailover.dragonfly.message`; MySQL writes stay paused on the fenced source meanwhile (about 12-13s typically, about 40s worst case).
+5. Snapshot upgrade `status.dragonfly.upgrade.phase=Failed` with `reason=ActiveSiteChanged`: a promotion moved the Dragonfly master off the site the upgrade retained, so the upgrade stopped without touching routing. Confirm `status.dragonfly.activeSite` and the active Service endpoints, then re-annotate to upgrade against the new active site.
 
 ### Safe Remediation Steps
 1. Inspect if network policies are blocking port 6379 or Dragonfly admin port 9999.

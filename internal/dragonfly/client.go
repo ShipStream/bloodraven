@@ -129,8 +129,22 @@ func (c *Client) ReplicaOf(ctx context.Context, host string, port int32) error {
 // ReplicaOfNoOne breaks the replication link and turns this Dragonfly
 // back into a standalone master. Used as a fallback promotion primitive
 // when REPLTAKEOVER is unavailable or fails.
+//
+// Dragonfly serialises REPLICAOF with REPLTAKEOVER on the replica, and a
+// takeover holds that lock for up to ReplTakeoverServerHold after the
+// client that sent it has given up. So a fallback sent after a failed
+// takeover may legitimately wait that long. When ctx has a deadline, the
+// read deadline is ctx's (the caller sizes the wait), not the client's
+// default IOTimeout.
 func (c *Client) ReplicaOfNoOne(ctx context.Context) error {
-	return c.exec(ctx, "REPLICAOF", "NO", "ONE")
+	ioTimeout := c.cfg.IOTimeout
+	if d, ok := ctx.Deadline(); ok {
+		if until := time.Until(d); until > ioTimeout {
+			ioTimeout = until
+		}
+	}
+	_, err := c.execReplyWithIOTimeout(ctx, ioTimeout, "REPLICAOF", "NO", "ONE")
+	return err
 }
 
 // ReplTakeover atomically promotes this replica to master, waiting up
@@ -178,6 +192,22 @@ func replTakeoverSeconds(timeout time.Duration) int64 {
 		secs = math.MaxInt32
 	}
 	return secs
+}
+
+// ReplTakeoverWireBudget is the budget a REPLTAKEOVER carrying timeout
+// actually gives the server: timeout rounded up to whole seconds, at least
+// one second.
+func ReplTakeoverWireBudget(timeout time.Duration) time.Duration {
+	return time.Duration(replTakeoverSeconds(timeout)) * time.Second
+}
+
+// ReplTakeoverServerHold is the longest a replica can stay busy with a
+// REPLTAKEOVER carrying timeout: the whole-second budget plus the slack
+// the replica allows its master. Dragonfly holds the replica's REPLICAOF
+// lock for this long, so a REPLICAOF NO ONE sent after a failed takeover
+// can block until it passes.
+func ReplTakeoverServerHold(timeout time.Duration) time.Duration {
+	return ReplTakeoverWireBudget(timeout) + replTakeoverServerSlack
 }
 
 // replTakeoverIOTimeout is the client read deadline for a REPLTAKEOVER

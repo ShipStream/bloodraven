@@ -34,8 +34,31 @@ func dragonflyUpgradeInFlight(s *v1alpha1.DragonflyUpgradeStatus) bool {
 func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
 	if r.Runner != nil {
-		r.Runner.SetPlannedFailoverActive(nn, dragonflyUpgradeInFlight(dragonflyUpgradeStatus(fg)))
+		r.Runner.SetPlannedFailoverActive(nn, dragonflyMaintenanceActive(fg))
 	}
+
+	_, hasAnnotation := fg.GetAnnotations()[DragonflySnapshotUpgradeAnnotation]
+	if !hasAnnotation && !dragonflyUpgradeInFlight(dragonflyUpgradeStatus(fg)) {
+		return 0, nil
+	}
+	// Every step below changes Dragonfly routing (traffic and role labels,
+	// REPLICAOF, pod deletion) or status.dragonfly.upgrade, so it runs under
+	// the group's Dragonfly gate and on a read made after acquiring it. A
+	// promotion already on the wire finishes and records first; the
+	// upgrade then revalidates against it.
+	release, ok := r.acquireDragonflyGate(ctx, nn)
+	if !ok {
+		return dragonflyGateRetry, nil
+	}
+	defer release()
+	fresh, err := r.freshFailoverGroup(ctx, nn)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	fg = fresh
 
 	raw, hasAnnotation := fg.GetAnnotations()[DragonflySnapshotUpgradeAnnotation]
 	cur := dragonflyUpgradeStatus(fg)
@@ -51,6 +74,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDragonflySnapshotUpgrade(ctx con
 	}
 	if !dragonflyUpgradeInFlight(cur) {
 		return 0, nil
+	}
+	if why := dragonflyUpgradeSuperseded(fg, cur); why != "" {
+		return r.abandonDragonflyUpgrade(ctx, fg, cur, why)
 	}
 
 	switch cur.Phase {
@@ -269,6 +295,45 @@ func (r *MysqlFailoverGroupReconciler) dragonflyUpgradeReattachReplicas(ctx cont
 	}
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyUpgradeCompleted,
 		"Dragonfly snapshot-restore upgrade completed on image %s", cur.TargetImage)
+	return 0, nil
+}
+
+// dragonflyUpgradeSuperseded returns why an in-flight upgrade no longer
+// matches the group's Dragonfly authority, or "". The upgrade restarts and
+// restores its retained active site and re-attaches every other site to
+// it; once a promotion stamped at or after the upgrade started has moved
+// the Dragonfly master elsewhere (an emergency promotion that was already
+// running when the upgrade started), continuing would demote the new
+// master.
+func dragonflyUpgradeSuperseded(fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus) string {
+	df := fg.Status.Dragonfly
+	if df == nil || df.ActiveSite == "" || df.ActiveSite == cur.ActiveSite || df.LastPromotionTime == nil {
+		return ""
+	}
+	if cur.StartTime != nil && df.LastPromotionTime.Time.Before(cur.StartTime.Time) {
+		// Dragonfly already disagreed with MySQL when the upgrade started;
+		// no promotion has moved it since.
+		return ""
+	}
+	return fmt.Sprintf("active Dragonfly site moved to %q while the upgrade retained %q", df.ActiveSite, cur.ActiveSite)
+}
+
+// abandonDragonflyUpgrade fails a superseded upgrade without touching the
+// routing labels: they belong to the promotion that superseded it.
+func (r *MysqlFailoverGroupReconciler) abandonDragonflyUpgrade(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.DragonflyUpgradeStatus, why string) (time.Duration, error) {
+	now := metav1.Now()
+	next := copyDragonflyUpgradeStatus(cur)
+	next.Phase = v1alpha1.DragonflyUpgradePhaseFailed
+	next.CompletionTime = &now
+	next.Reason = "ActiveSiteChanged"
+	next.Message = why + "; upgrade abandoned, retry it against the new active site"
+	if err := r.setDragonflyUpgradeStatus(ctx, fg, next); err != nil {
+		return 0, err
+	}
+	if r.Runner != nil {
+		r.Runner.SetPlannedFailoverActive(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, plannedFailoverInFlight(fg.Status.PlannedFailover))
+	}
+	r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyUpgradeFailed, "ActiveSiteChanged: %s", next.Message)
 	return 0, nil
 }
 

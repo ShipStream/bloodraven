@@ -491,3 +491,30 @@ func equalSlices(a, b []string) bool {
 	}
 	return true
 }
+
+// REPLICAOF NO ONE after a failed takeover waits behind the replica's
+// REPLICAOF lock, which the takeover holds past the client's IOTimeout.
+// A caller-sized context deadline must govern that wait.
+func TestClientReplicaOfNoOneWaitsForContextDeadline(t *testing.T) {
+	srv := newFakeServer(t)
+	srv.delay("REPLICAOF", 400*time.Millisecond)
+	c, err := New(context.Background(), Config{Addr: srv.addr(), DialTimeout: time.Second, IOTimeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := c.ReplicaOfNoOne(ctx); err != nil {
+		t.Fatalf("ReplicaOfNoOne waited only IOTimeout, not the context deadline: %v", err)
+	}
+}
+
+func TestReplTakeoverServerHold(t *testing.T) {
+	if got, want := ReplTakeoverServerHold(1500*time.Millisecond), 12*time.Second; got != want {
+		t.Errorf("ReplTakeoverServerHold(1.5s) = %s, want %s (2s budget + 10s replica slack)", got, want)
+	}
+	if got, want := ReplTakeoverWireBudget(0), time.Second; got != want {
+		t.Errorf("ReplTakeoverWireBudget(0) = %s, want %s", got, want)
+	}
+}

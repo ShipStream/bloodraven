@@ -197,6 +197,8 @@ func TestDragonflyManager_TryEmergencyPromote_FallbackIsLoud(t *testing.T) {
 	}
 	conn := newFakeConnector()
 	conn.program("lion-dragonfly-dc2.shared-lion.svc.cluster.local:6379", target)
+	// The old master answers, so the takeover is attempted (and fails).
+	conn.program("lion-dragonfly-dc1.shared-lion.svc.cluster.local:6379", &fakeDragonflyConn{})
 	mgr.SetConnector(conn.connect)
 
 	beforeLost := readPromCounter(t, metrics.DragonflyPromotionsTotal.WithLabelValues(fg.Name, "dc2", "sessions_lost"))

@@ -132,6 +132,9 @@ type MysqlFailoverGroupReconciler struct {
 	// scripted fake; production wiring leaves this nil so realDragonflyConnector
 	// is used.
 	dragonflyConnector DragonflyConnector
+	// dragonflyGateWait overrides how long a reconcile waits for the
+	// group's Dragonfly gate (default defaultDragonflyGateWait). Tests shorten it.
+	dragonflyGateWait time.Duration
 
 	// keyringStatus overrides the production sidecar-backed fetcher used
 	// by the encryption-at-rest state machine. Tests inject a scripted
