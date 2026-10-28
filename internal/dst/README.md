@@ -11,7 +11,7 @@ seed.
 ## Running
 
 ```sh
-make test            # includes the quick sweep (TestDST_Quick, ~400 trials)
+make test            # includes the quick sweep (TestDST_Quick, 400 seeds, shared with the 600-seed actor-reachability sweep)
 make dst             # full saturation campaign; report → playground/chaos-results/dst-report.txt
 DST_SEED=61 make dst-repro              # replay one trial with events + operator logs
 DST_SEED=61 DST_SKIP=1,3 make dst-repro # replay with schedule ops 1 and 3 masked out

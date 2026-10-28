@@ -52,6 +52,12 @@ func TestDeterminism(t *testing.T) {
 			if !reflect.DeepEqual(a.FinalFailoverRecord, b.FinalFailoverRecord) {
 				t.Fatalf("seed %d (%s): final failover records differ: %+v vs %+v", seed, tc.name, a.FinalFailoverRecord, b.FinalFailoverRecord)
 			}
+			// Capture only retains the event log; sweepTrial relies on it not
+			// changing behaviour when TestDST_Quick reuses captured trials.
+			c := RunTrial(tc.gen(seed), true, nil)
+			if c.Signature != a.Signature || fmt.Sprint(c.Violations) != fmt.Sprint(a.Violations) || !reflect.DeepEqual(c.SelfFenced, a.SelfFenced) {
+				t.Fatalf("seed %d (%s): capture mode changed behaviour:\n  sig %s vs %s\n  viol %v vs %v\n  self-fenced %v vs %v", seed, tc.name, c.Signature, a.Signature, c.Violations, a.Violations, c.SelfFenced, a.SelfFenced)
+			}
 		}
 	}
 }
@@ -88,6 +94,10 @@ func TestFaultFreeBaseline(t *testing.T) {
 // fixed findings are pinned as component tests (test/component/
 // dst_regression_test.go) and as the hand-built trials in antiflap_test.go,
 // rather than as seeds.
+//
+// Seeds inside the actor-reachability range reuse that sweep's captured
+// trials (sweepTrial) instead of simulating them again; seeds above it
+// (DST_QUICK_TRIALS > actorSweepSeeds) run uncaptured here.
 func TestDST_Quick(t *testing.T) {
 	trials := 400
 	if s := os.Getenv("DST_QUICK_TRIALS"); s != "" {
@@ -98,12 +108,17 @@ func TestDST_Quick(t *testing.T) {
 	failures := map[string]uint64{}
 	counts := map[string]int{}
 	for seed := uint64(1); seed <= uint64(trials); seed++ {
-		r := RunTrial(GenerateTrial(seed), false, nil)
-		for _, v := range r.Violations {
+		var violations []Violation
+		if seed <= actorSweepSeeds {
+			violations = sweepTrial(seed).violations
+		} else {
+			violations = RunTrial(GenerateTrial(seed), false, nil).Violations
+		}
+		for _, v := range violations {
 			t.Errorf("seed %d: %s", seed, v)
 		}
-		if r.Failed() {
-			fp := fingerprint(r.Violations)
+		if len(violations) > 0 {
+			fp := fingerprint(violations)
 			if _, ok := failures[fp]; !ok {
 				failures[fp] = seed
 			}

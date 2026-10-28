@@ -19,16 +19,30 @@ import (
 // actorSweepSeeds is the fixed range the reachability assertions share.
 const actorSweepSeeds = 600
 
-// actorEventCounts replays actorSweepSeeds trials with full event capture
-// and counts, per event key, how many produced at least one.
-//
-// Computed once for the whole package: replaying the same range in each
-// assertion below would triple the cost of `make test` for identical data.
-var actorEventCounts = sync.OnceValue(func() map[string]int {
-	counts := map[string]int{}
-	for seed := uint64(1); seed <= actorSweepSeeds; seed++ {
+// sweepSummary is what the reachability assertions and TestDST_Quick need
+// from one captured trial. The event log is discarded after summarising so
+// the sweep does not pin actorSweepSeeds full event logs in memory.
+type sweepSummary struct {
+	violations    []Violation
+	eventKeys     []string // distinct kind[:outcome] keys seen in the trial
+	endSelfFenced bool
+}
+
+var (
+	sweepOnce    [actorSweepSeeds]sync.Once
+	sweepResults [actorSweepSeeds]sweepSummary
+)
+
+// sweepTrial runs seed (1..actorSweepSeeds) with full event capture at most
+// once per package and returns its summary. The reachability assertions and
+// TestDST_Quick share it so `make test` does not simulate a seed twice;
+// TestDeterminism pins that capture mode does not change violations.
+func sweepTrial(seed uint64) sweepSummary {
+	i := seed - 1
+	sweepOnce[i].Do(func() {
 		r := RunTrial(GenerateTrial(seed), true, nil)
 		seen := map[string]bool{}
+		var keys []string
 		for _, e := range r.Events {
 			key := string(e.Kind)
 			if e.Outcome != "" {
@@ -36,10 +50,27 @@ var actorEventCounts = sync.OnceValue(func() map[string]int {
 			}
 			if !seen[key] {
 				seen[key] = true
-				counts[key]++
+				keys = append(keys, key)
 			}
 		}
-		if len(r.SelfFenced) > 0 {
+		sweepResults[i] = sweepSummary{violations: r.Violations, eventKeys: keys, endSelfFenced: len(r.SelfFenced) > 0}
+	})
+	return sweepResults[i]
+}
+
+// actorEventCounts counts, per event key, how many of the actorSweepSeeds
+// trials produced at least one.
+//
+// Computed once for the whole package: replaying the same range in each
+// assertion below would triple the cost of `make test` for identical data.
+var actorEventCounts = sync.OnceValue(func() map[string]int {
+	counts := map[string]int{}
+	for seed := uint64(1); seed <= actorSweepSeeds; seed++ {
+		s := sweepTrial(seed)
+		for _, key := range s.eventKeys {
+			counts[key]++
+		}
+		if s.endSelfFenced {
 			counts["<endSelfFenced>"]++
 		}
 	}
