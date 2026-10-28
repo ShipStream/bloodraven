@@ -309,6 +309,35 @@ func TestEvalCrossSite_PromotionBlocked(t *testing.T) {
 			t.Fatalf("alert = %q, want rotation refusal naming pdx", got.Alert)
 		}
 	})
+	t.Run("pending reclone", func(t *testing.T) {
+		got := EvalCrossSite([]SiteObservation{
+			obs("iad", pc, StateUnreachable),
+			{Name: "pdx", Role: pc, State: StateReadOnly, PromotionBlocked: true, PromotionBlockedReason: PromotionBlockedPendingReclone},
+		}, nil)
+		if got.Reason != "NoPrimary" || len(got.PromotionCandidates) != 0 {
+			t.Fatalf("got reason %q candidates %v, want NoPrimary with none", got.Reason, got.PromotionCandidates)
+		}
+		if !strings.Contains(got.Alert, "pending post-restore reclone") || !strings.Contains(got.Alert, "pdx") ||
+			strings.Contains(got.Alert, "UnsealReason=Rotation") {
+			t.Fatalf("alert = %q, want a pending-reclone refusal naming pdx", got.Alert)
+		}
+		// With no writable primary a planned failover (kubectl bloodraven
+		// promote) cannot run; the alert must name the remedies that can.
+		if strings.Contains(got.Alert, "kubectl bloodraven promote") || !strings.Contains(got.Alert, "status.restoreReclones") {
+			t.Fatalf("alert = %q, want the bring-back / remove-status.restoreReclones remedies", got.Alert)
+		}
+	})
+	t.Run("both reasons", func(t *testing.T) {
+		got := EvalCrossSite([]SiteObservation{
+			obs("iad", pc, StateUnreachable),
+			{Name: "pdx", Role: pc, State: StateReadOnly, PromotionBlocked: true},
+			{Name: "fra", Role: pc, State: StateReadOnly, PromotionBlocked: true, PromotionBlockedReason: PromotionBlockedPendingReclone},
+		}, nil)
+		want := "NO PRIMARY: refusing to promote pdx (UnsealReason=Rotation)"
+		if !strings.HasPrefix(got.Alert, want) || !strings.Contains(got.Alert, "refusing to promote fra (pending post-restore reclone") {
+			t.Fatalf("alert = %q, want both refusals", got.Alert)
+		}
+	})
 }
 
 func TestResolveSplitBrain(t *testing.T) {

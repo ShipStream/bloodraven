@@ -7548,6 +7548,105 @@ spec:
                       primary at the moment of preflight).
                     type: string
                 type: object
+              restoreReclones:
+                description: |-
+                  RestoreReclones is the queue of peer sites a full-instance in-place
+                  restore still has to reclone from the restored primary. It lives
+                  outside restoreInPlace because it outlives that restore: it drains
+                  after the restore has succeeded, across later restores and spec
+                  edits. Empty when nothing is queued.
+                properties:
+                  confirmToken:
+                    description: |-
+                      ConfirmToken is the spec.restoreInPlace.confirm value of the
+                      restore that owns this queue.
+                    type: string
+                  failures:
+                    description: |-
+                      Failures holds the latest failed reclone attempt of each pending
+                      site that has one. A site is retried after a short backoff; other
+                      pending sites are recloned in the meantime.
+                    items:
+                      description: RestoreRecloneFailure is the latest failed reclone
+                        attempt of one site.
+                      properties:
+                        message:
+                          description: Message describes the failure.
+                          type: string
+                        site:
+                          description: Site is the pending site whose reclone failed.
+                          type: string
+                        time:
+                          description: Time is when the failure was recorded.
+                          format: date-time
+                          type: string
+                      required:
+                      - message
+                      - site
+                      - time
+                      type: object
+                    type: array
+                  pending:
+                    description: |-
+                      Pending lists the peer sites still to be recloned, in the order
+                      they are recloned (primary-candidate sites first). Pending sites
+                      are never promoted automatically and are removed from the -replica
+                      and read-only Services.
+                    items:
+                      type: string
+                    type: array
+                  phase:
+                    description: |-
+                      Phase is Armed while the owning restore runs and Draining after it
+                      succeeded. Held means a later restore that replaced this queue ran
+                      on the primary and failed, so nothing is cloned from it.
+                    enum:
+                    - Armed
+                    - Draining
+                    - Held
+                    type: string
+                  requested:
+                    description: |-
+                      Requested is the pending site whose reclone the operator has
+                      requested through the reclone annotation and not yet seen finish.
+                    type: string
+                  requestedAt:
+                    description: |-
+                      RequestedAt is when Requested was set. A request whose clone has
+                      not started within a few minutes counts as a failed attempt, so one
+                      site that cannot be cloned does not hold up the others.
+                    format: date-time
+                    type: string
+                  superseded:
+                    description: |-
+                      Superseded is the queue of an earlier restore that this one
+                      replaced when it was accepted. If this restore does not succeed,
+                      the earlier queue is put back, because its sites still hold data
+                      from before the earlier restore. It drains again only if this
+                      restore's Job was never created; otherwise it is put back Held.
+                    properties:
+                      confirmToken:
+                        description: ConfirmToken is the earlier restore's confirm
+                          token.
+                        type: string
+                      held:
+                        description: |-
+                          Held is true when the earlier queue was already Held: the primary
+                          stopped being a trusted donor for it before this restore.
+                        type: boolean
+                      pending:
+                        description: Pending lists the earlier restore's sites not
+                          yet recloned.
+                        items:
+                          type: string
+                        type: array
+                    required:
+                    - confirmToken
+                    type: object
+                required:
+                - confirmToken
+                - phase
+                type: object
               sites:
                 description: Sites is the observed state of each site, parallel to
                   spec.sites.

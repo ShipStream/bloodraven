@@ -1035,7 +1035,9 @@ func TestReconcileInPlaceRestore_PerSchema_ResumingSkipsRecloneAnnotation(t *tes
 	}
 }
 
-func TestReconcileInPlaceRestore_FullInstance_ResumingSetsRecloneAnnotation(t *testing.T) {
+// Resuming releases the peer reclone queue and reports Succeeded at once:
+// the reclones themselves run afterwards (see restore_reclones_test.go).
+func TestReconcileInPlaceRestore_FullInstance_ResumingReleasesRecloneQueue(t *testing.T) {
 	fg := fgInPlaceRestore("")
 	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceResuming,
@@ -1058,8 +1060,8 @@ func TestReconcileInPlaceRestore_FullInstance_ResumingSetsRecloneAnnotation(t *t
 		t.Errorf("want Succeeded, got %s", fresh.Status.RestoreInPlace.Phase)
 	}
 	peerSite := fg.Spec.Sites[1].Name
-	if got := fresh.GetAnnotations()[RecloneAnnotation]; got != peerSite {
-		t.Errorf("full-instance Resuming should set reclone=%s, got %q", peerSite, got)
+	if q := fresh.Status.RestoreReclones; q == nil || q.Phase != v1alpha1.RestoreReclonesDraining || len(q.Pending) != 1 || q.Pending[0] != peerSite {
+		t.Errorf("full-instance Resuming should release a queue holding %s, got %+v", peerSite, q)
 	}
 	if fresh.Status.RestoreInPlace.ConfirmTokenUsed != fg.Spec.RestoreInPlace.Confirm {
 		t.Errorf("want ConfirmTokenUsed=%q, got %q",

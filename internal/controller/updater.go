@@ -65,6 +65,10 @@ type UpdateTarget struct {
 	// It may still receive a Deployment update as a follower, but it
 	// must not be chosen as the handoff target.
 	RotationBlocked bool
+	// ReclonePending is true when an in-place restore has not recloned
+	// the site yet (it holds pre-restore data). Like RotationBlocked, it
+	// excludes the site from the handoff.
+	ReclonePending bool
 }
 
 // NewUpdateController creates a new UpdateController.
@@ -225,13 +229,17 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		processedFollowers[name] = struct{}{}
 	}
 	var handoff *UpdateTarget
-	var rotatingStandby []string
+	var rotatingStandby, pendingStandby []string
 	for i := range followers {
 		if !followers[i].Promotable {
 			continue
 		}
 		if followers[i].RotationBlocked {
 			rotatingStandby = append(rotatingStandby, followers[i].Name)
+			continue
+		}
+		if followers[i].ReclonePending {
+			pendingStandby = append(pendingStandby, followers[i].Name)
 			continue
 		}
 		if followers[i].Drifted {
@@ -247,6 +255,9 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	if handoff == nil {
 		if len(rotatingStandby) > 0 {
 			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted", strings.Join(rotatingStandby, ", "))
+		}
+		if len(pendingStandby) > 0 {
+			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s pending post-restore reclone; wait for status.restoreReclones to drain", strings.Join(pendingStandby, ", "))
 		}
 		return processed, fmt.Errorf("no healthy promotable standby available for active-site update")
 	}

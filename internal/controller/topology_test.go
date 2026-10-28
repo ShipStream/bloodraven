@@ -1636,7 +1636,7 @@ func TestReclone_PreservesPendingRequestUntilKeyringUnsealed(t *testing.T) {
 	gate := &testKeyringGate{}
 	tm.SetKeyringGate(gate)
 	var consumed atomic.Int32
-	tm.RecloneCompleteCallback = func(context.Context, string) error {
+	tm.RecloneCompleteCallback = func(context.Context, string, RecloneOutcome) error {
 		consumed.Add(1)
 		return nil
 	}
@@ -1681,7 +1681,7 @@ func TestReclone_AnnotationCleanupFailureDoesNotRepeatSuccessfulClone(t *testing
 	tm.autoBootstrapSuppressed = true
 	pollN(tm, 2)
 	var cleanupCalls atomic.Int32
-	tm.RecloneCompleteCallback = func(context.Context, string) error {
+	tm.RecloneCompleteCallback = func(context.Context, string, RecloneOutcome) error {
 		if cleanupCalls.Add(1) == 1 {
 			return errors.New("api unavailable")
 		}

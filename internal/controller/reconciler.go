@@ -139,6 +139,12 @@ type MysqlFailoverGroupReconciler struct {
 	// defaultKeyringStatusFetcher is used.
 	keyringStatus keyringStatusFetcher
 
+	// restoreRecloneIdle records, per group, when this process first saw
+	// the restore reclone queue's request not running (see
+	// restoreRecloneStalled).
+	restoreRecloneMu   sync.Mutex
+	restoreRecloneIdle map[types.NamespacedName]restoreRecloneWait
+
 	// Logger is the operational slog stream. Nil is treated as discard
 	// so existing tests that construct the reconciler without a logger
 	// do not panic when license observation runs.
@@ -444,6 +450,15 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		return ctrl.Result{RequeueAfter: inPlaceRequeue}, nil
 	}
+
+	// The peer reclone queue of a full-instance in-place restore drains
+	// after that restore has finished, so it runs on every reconcile and
+	// only contributes a requeue; it never holds up the rest of the pass.
+	reclonesRequeue, err := r.reconcileRestoreReclones(ctx, &fg)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile restore reclone queue: %w", err)
+	}
+	deferredRequeue = minPositiveDuration(deferredRequeue, reclonesRequeue)
 
 	// Drive the planned-failover state machine when
 	// spec / status / annotation indicate a graceful switchover is armed
@@ -2075,6 +2090,11 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 			}
 		} else if si.status.State == "writable" || si.status.State == "read-only" {
 			healthy = "yes"
+		}
+		// A peer the in-place restore has not recloned yet still serves
+		// pre-restore data: keep it out of the reader Services.
+		if si.role != "primary" && restoreReclonePending(fg, si.spec.Name) {
+			healthy = "no"
 		}
 
 		for i := range pods.Items {

@@ -452,6 +452,28 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		return 0, nil
 	}
 
+	// Accepted. A full-instance restore replaces the primary's data, so
+	// fix the set of peers it must reclone now, before anything is
+	// destroyed: from here on they are not promoted automatically.
+	if _, schema := inPlaceRestoreScope(spec); schema == "" {
+		wait, err := r.restoreReclonesReadyForNewRestore(ctx, fg)
+		if err != nil {
+			return 0, fmt.Errorf("prepare in-place restore reclone queue: %w", err)
+		}
+		if wait != "" {
+			cur = fg.Status.RestoreInPlace
+			if cur.Message != wait || cur.TargetSite != target {
+				next := cur.DeepCopy()
+				next.TargetSite, next.Message = target, wait
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+			}
+			return 15 * time.Second, nil
+		}
+		if err := r.armRestoreReclones(ctx, fg, target, spec.Confirm); err != nil {
+			return 0, fmt.Errorf("record in-place restore reclone queue: %w", err)
+		}
+	}
+
 	next := &v1alpha1.RestoreInPlaceStatus{
 		Phase:      v1alpha1.RestoreInPlaceFencing,
 		TargetSite: target,
@@ -683,44 +705,18 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	return 0, nil
 }
 
-// inPlaceResuming lifts the fence: stamps the confirm token, schedules
-// a replica reclone for full-instance restores, and transitions to
+// inPlaceResuming lifts the fence: stamps the confirm token, releases
+// the peer reclone queue for full-instance restores, and transitions to
 // Succeeded. The topology manager unfreezes automatically once the
-// runner next observes the terminal phase.
+// runner next observes the terminal phase. The peers are recloned after
+// Succeeded (reconcileRestoreReclones); Succeeded means the primary has
+// the restored data.
 func (r *MysqlFailoverGroupReconciler) inPlaceResuming(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	spec := fg.Spec.RestoreInPlace
 	cur := fg.Status.RestoreInPlace
 	target := cur.TargetSite
 	_, schema := inPlaceRestoreScope(spec)
 	isFullInstance := schema == ""
-
-	// For full-instance restores the replica is now out-of-sync: its
-	// old GTID state diverges from the freshly-loaded primary. Set the
-	// reclone annotation so the topology manager picks it up via the
-	// existing checkReclone path once the topologyFrozen flag clears.
-	if isFullInstance {
-		replicaSite := ""
-		for i := range fg.Spec.Sites {
-			if fg.Spec.Sites[i].Name != target {
-				replicaSite = fg.Spec.Sites[i].Name
-				break
-			}
-		}
-		if replicaSite != "" {
-			if err := r.setRecloneAnnotation(ctx, fg, replicaSite); err != nil {
-				log.FromContext(ctx).Error(err, "failed to set reclone annotation for replica",
-					"fg", fg.Name, "replicaSite", replicaSite)
-				// Non-fatal: the restore itself succeeded; surface the
-				// issue as an event so the operator can hand-trigger
-				// the reclone.
-				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceRecloneAnnotationFailed",
-					"in-place restore succeeded but failed to schedule replica reclone: %v", err)
-			} else {
-				r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceRecloneScheduled",
-					"scheduled reclone of replica site %s after in-place restore", replicaSite)
-			}
-		}
-	}
 
 	// Stamp the confirm the restore actually ran with. inPlaceRestoring carries
 	// it over from the Job that performed the load; it differs from spec.confirm
@@ -729,6 +725,15 @@ func (r *MysqlFailoverGroupReconciler) inPlaceResuming(ctx context.Context, fg *
 	confirmUsed := cur.ConfirmTokenUsed
 	if confirmUsed == "" {
 		confirmUsed = spec.Confirm
+	}
+
+	// The peers still hold pre-restore data. Release the queue before
+	// Succeeded is written, so a restart between the two cannot leave a
+	// succeeded restore whose queue is discarded as failed.
+	if isFullInstance {
+		if err := r.releaseRestoreReclones(ctx, fg, target, confirmUsed); err != nil {
+			return 0, fmt.Errorf("release in-place restore reclone queue: %w", err)
+		}
 	}
 
 	now := metav1.Now()
@@ -855,25 +860,6 @@ func (r *MysqlFailoverGroupReconciler) rejectInPlaceRestore(ctx context.Context,
 		return
 	}
 	r.stampTerminalFailure(ctx, fg, target, scope, "", msg, "RestoreInPlaceRejected")
-}
-
-// setRecloneAnnotation adds the one-shot reclone annotation to the CR.
-// Mirrors the shape the topology runner expects in removeRecloneAnnotation.
-func (r *MysqlFailoverGroupReconciler) setRecloneAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string) error {
-	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
-		var fresh v1alpha1.MysqlFailoverGroup
-		if err := r.Get(ctx, nn, &fresh); err != nil {
-			return err
-		}
-		annotations := fresh.GetAnnotations()
-		if annotations == nil {
-			annotations = map[string]string{}
-		}
-		annotations[RecloneAnnotation] = site
-		fresh.SetAnnotations(annotations)
-		return r.Update(ctx, &fresh)
-	})
 }
 
 // buildInPlaceRestoreJob constructs the Job used by the in-place

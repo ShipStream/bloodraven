@@ -484,3 +484,33 @@ In-place PITR cannot work against a live primary. The replay keeps the archived 
 1. To restore to the backup itself, remove `pointInTime`; the same `confirm` re-runs.
 2. To reach a point in time, restore into a new failover group with `spec.initFromBackup.pointInTime` (fresh target, so the dump's GTID set is installed and the replay applies). Then move the data or traffic across. For a single tenant schema, dump it from the recovered group with `mysqlsh util.dumpSchemas` and run a per-schema in-place restore from that dump.
 3. Do not try to force replay on the live primary with `RESET BINARY LOGS AND GTIDS` or `mysqlbinlog --skip-gtids`. The first destroys unarchived binlogs and archive continuity. The second re-applies in-dump and cross-site duplicate transactions.
+
+## 20. Peers not yet recloned after a full-instance in-place restore
+
+A full-instance in-place restore replaces the primary's data. The other sites still have the old data until each is recloned from the restored primary. The operator tracks them in `status.restoreReclones`. The queue is `Armed` while the restore runs and `Draining` after it succeeds. It is `Held` when a later restore that replaced it ran on the primary and failed: nothing is cloned from that primary. The operator reclones the sites one at a time through the `reclone-site` annotation and removes each one only after its clone succeeds. `status.restoreInPlace.phase: Succeeded` does not mean the peers are done.
+
+### Symptoms
+- `status.restoreReclones.pending` is non-empty long after the restore succeeded.
+- `RestoreRecloneFailed` events, or `status.restoreReclones.failures` lists a site.
+- `status.restoreReclones.phase: Held` and a `RestoreReclonesHeld` event: a later full-instance restore ran its Job on the primary and failed. The pending sites keep older data, and nothing is cloned. A reclone annotation for a held (or `Armed`) site is refused with `RecloneRejected` and removed.
+- A full-instance restore waits in Preflight with `waiting for the running clone of <site> to finish before restoring`: a clone was running when the restore was accepted. It proceeds once the clone ends.
+- `PromotionRefusedPendingReclone` events, or `Degraded=NoPrimary` with a `pending post-restore reclone` message after the primary failed.
+- Readers return old data from a site that is still queued. A queued site is labelled `shipstream.io/healthy=no`, which takes it out of the `-replica` Service and a read-only site's Service; the per-site Service of a primary-candidate or dr-only site does not select on it, so check for clients that connect there directly.
+
+### Diagnostic steps
+1. Queue state:
+   ```bash
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.status.restoreReclones}' | jq .
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.metadata.annotations.bloodraven\.shipstream\.io/reclone-site}'
+   ```
+   `requested` is the site whose clone is running, and the annotation should name it. If the annotation names a different site, someone else's reclone request is pending. The queue waits for it and never overwrites it.
+2. Clone progress and failures: the `Bootstrapping` condition, and operator logs `msg="starting bootstrap" source="reclone"`, `bootstrap failed`, `bootstrap completed successfully`.
+3. Events: `kubectl get events -n <ns> --field-selector involvedObject.name=<group> | grep -E 'RestoreReclone|PromotionRefusedPendingReclone|RecloneRequested'`.
+
+### Safe remediation
+1. A failing clone: fix the cause (donor reachability, the clone plugin, recipient disk space, a sealed keyring) and let the queue retry. Do not set your own reclone annotation for a queued site. The queue would wait for it, and a clone it did not request does not remove the site.
+2. The primary failed while only queued sites remain: prefer bringing the primary back; the queue then resumes. Promoting a queued site means serving its pre-restore data:
+   - With the primary up: `kubectl bloodraven promote <group> <site>`. Once the site is the primary, the rest of the queue is abandoned (`RestoreReclonesAbandoned`); a planned failover that rolls back leaves the queue in place.
+   - With the primary down: clear the queue with `kubectl patch mfg <group> -n <ns> --subresource=status --type=json -p '[{"op":"remove","path":"/status/restoreReclones"}]'`, after which automatic failover proceeds. Then reclone the remaining sites by hand from whichever primary you keep.
+3. `RestoreReclonesDiscarded` after a failed restore is expected: the peers are not recloned from the broken primary. They are not guaranteed to be intact. The restore's `DROP DATABASE` statements are binlogged, so a peer that was replicating may have dropped the same schemas; check its data before promoting it. If the failed restore had replaced an earlier restore's queue, a `RestoreReclonesRestored` event means that queue is draining again (the failed restore never reached its Job).
+4. A `Held` queue (`RestoreReclonesHeld`): the primary may hold the failed restore's dropped or half-loaded data, and the held sites may be the only intact copies. Do not clone from the primary until its data is checked. Then choose one: run a new full-instance restore (it reclones every peer once it succeeds); set the phase back to `Draining` once the primary's data is good (`kubectl patch mfg <group> -n <ns> --subresource=status --type=merge -p '{"status":{"restoreReclones":{"phase":"Draining"}}}'`); or remove `status.restoreReclones` to keep the held sites' data as it is.

@@ -786,12 +786,13 @@ type RestoreInPlaceSpec struct {
 // observable state.
 //
 // For full-instance restores the post-restore replica reclone is not a
-// dedicated phase: the operator sets the reclone annotation during the
-// transition out of Restoring and hands off to the existing reclone
-// machinery (see internal/controller/topology.go:checkReclone). The
-// in-place restore is considered Succeeded once the primary has the
-// fresh data; the replica catching up runs independently in the
-// background and is observable via the normal bootstrap/reclone status.
+// dedicated phase. When the restore is accepted the operator records
+// every peer site in status.restoreReclones; after the load succeeds it
+// reclones them one at a time from the restored primary through the
+// reclone annotation (see internal/controller/topology.go:checkReclone).
+// The in-place restore is considered Succeeded once the primary has the
+// fresh data; the peers are recloned afterwards, and until then they are
+// excluded from automatic promotion and the reader Services.
 // +kubebuilder:validation:Enum="";Preflight;Fencing;Restoring;Resuming;Succeeded;Failed
 type RestoreInPlacePhase string
 
@@ -817,8 +818,9 @@ const (
 	RestoreInPlaceRestoring RestoreInPlacePhase = "Restoring"
 
 	// RestoreInPlaceResuming means the operator is lifting the fence:
-	// restoring the primary role label, scheduling the replica reclone
-	// (full-instance only), and unfreezing the topology manager.
+	// restoring the primary role label, releasing the peer reclone queue
+	// in status.restoreReclones (full-instance only), and unfreezing the
+	// topology manager.
 	RestoreInPlaceResuming RestoreInPlacePhase = "Resuming"
 
 	// RestoreInPlaceSucceeded is the terminal success state.
@@ -829,6 +831,108 @@ const (
 	// a newer timestamp to re-arm.
 	RestoreInPlaceFailed RestoreInPlacePhase = "Failed"
 )
+
+// RestoreReclonesPhase is the lifecycle of a restore-owned reclone queue.
+// +kubebuilder:validation:Enum=Armed;Draining;Held
+type RestoreReclonesPhase string
+
+const (
+	// RestoreReclonesArmed means the owning full-instance restore was
+	// accepted and is still running. Nothing is recloned yet; the queued
+	// peers are already excluded from promotion and the reader Services.
+	RestoreReclonesArmed RestoreReclonesPhase = "Armed"
+
+	// RestoreReclonesDraining means the owning restore succeeded and the
+	// queued peers are being recloned from the restored primary, one at
+	// a time.
+	RestoreReclonesDraining RestoreReclonesPhase = "Draining"
+
+	// RestoreReclonesHeld means the queue's sites still need recloning
+	// but the primary is no trusted donor: a later full-instance restore
+	// ran its Job on it and failed. The sites stay excluded from
+	// promotion and the reader Services and nothing is cloned until an
+	// administrator sets the phase to Draining (the primary's data is
+	// good again), a new full-instance restore succeeds, or the queue is
+	// removed.
+	RestoreReclonesHeld RestoreReclonesPhase = "Held"
+)
+
+// RestoreReclonesStatus is the queue of peer sites a full-instance
+// in-place restore must reclone from the restored primary. The restore
+// fixes the recipient set when it is accepted, before any destructive
+// work. A site leaves Pending only after its reclone completes
+// successfully; a failed reclone is retried. The queue is cleared once
+// every peer is recloned, or discarded if the owning restore fails.
+type RestoreReclonesStatus struct {
+	// ConfirmToken is the spec.restoreInPlace.confirm value of the
+	// restore that owns this queue.
+	ConfirmToken string `json:"confirmToken"`
+
+	// Phase is Armed while the owning restore runs and Draining after it
+	// succeeded. Held means a later restore that replaced this queue ran
+	// on the primary and failed, so nothing is cloned from it.
+	Phase RestoreReclonesPhase `json:"phase"`
+
+	// Pending lists the peer sites still to be recloned, in the order
+	// they are recloned (primary-candidate sites first). Pending sites
+	// are never promoted automatically and are removed from the -replica
+	// and read-only Services.
+	// +optional
+	Pending []string `json:"pending,omitempty"`
+
+	// Requested is the pending site whose reclone the operator has
+	// requested through the reclone annotation and not yet seen finish.
+	// +optional
+	Requested string `json:"requested,omitempty"`
+
+	// RequestedAt is when Requested was set. A request whose clone has
+	// not started within a few minutes counts as a failed attempt, so one
+	// site that cannot be cloned does not hold up the others.
+	// +optional
+	RequestedAt *metav1.Time `json:"requestedAt,omitempty"`
+
+	// Failures holds the latest failed reclone attempt of each pending
+	// site that has one. A site is retried after a short backoff; other
+	// pending sites are recloned in the meantime.
+	// +optional
+	Failures []RestoreRecloneFailure `json:"failures,omitempty"`
+
+	// Superseded is the queue of an earlier restore that this one
+	// replaced when it was accepted. If this restore does not succeed,
+	// the earlier queue is put back, because its sites still hold data
+	// from before the earlier restore. It drains again only if this
+	// restore's Job was never created; otherwise it is put back Held.
+	// +optional
+	Superseded *RestoreReclonesCarryover `json:"superseded,omitempty"`
+}
+
+// RestoreRecloneFailure is the latest failed reclone attempt of one site.
+type RestoreRecloneFailure struct {
+	// Site is the pending site whose reclone failed.
+	Site string `json:"site"`
+
+	// Message describes the failure.
+	Message string `json:"message"`
+
+	// Time is when the failure was recorded.
+	Time metav1.Time `json:"time"`
+}
+
+// RestoreReclonesCarryover is the part of an earlier restore's reclone
+// queue a later restore keeps until it succeeds.
+type RestoreReclonesCarryover struct {
+	// ConfirmToken is the earlier restore's confirm token.
+	ConfirmToken string `json:"confirmToken"`
+
+	// Pending lists the earlier restore's sites not yet recloned.
+	// +optional
+	Pending []string `json:"pending,omitempty"`
+
+	// Held is true when the earlier queue was already Held: the primary
+	// stopped being a trusted donor for it before this restore.
+	// +optional
+	Held bool `json:"held,omitempty"`
+}
 
 // RestoreInPlaceStatus tracks an in-flight or completed in-place
 // restore.

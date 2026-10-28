@@ -596,6 +596,14 @@ type MysqlFailoverGroupStatus struct {
 	// +optional
 	RestoreInPlace *RestoreInPlaceStatus `json:"restoreInPlace,omitempty"`
 
+	// RestoreReclones is the queue of peer sites a full-instance in-place
+	// restore still has to reclone from the restored primary. It lives
+	// outside restoreInPlace because it outlives that restore: it drains
+	// after the restore has succeeded, across later restores and spec
+	// edits. Empty when nothing is queued.
+	// +optional
+	RestoreReclones *RestoreReclonesStatus `json:"restoreReclones,omitempty"`
+
 	// BackupSchedules is a per-schedule rollup of the most recent backup
 	// activity for each entry in spec.backup.schedules.
 	// +optional

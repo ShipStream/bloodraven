@@ -199,6 +199,12 @@ type TopologySnapshot struct {
 	// on the CR.
 	KeyringPromotionSkipped []string
 	KeyringPromotionRefused []string
+
+	// RestoreReclonePromotionRefused names promotion candidates the last
+	// decision refused because an in-place restore has not recloned them
+	// yet (status.restoreReclones.pending). Used by the runner to emit
+	// Events; not persisted on the CR.
+	RestoreReclonePromotionRefused []string
 }
 
 // siteTracker tracks debounce counters and current state for one site.
@@ -437,10 +443,14 @@ type TopologyManager struct {
 	// left behind by a finished bootstrap is inert. Protected by mu.
 	bootstrapRecipient string
 
-	// reclonePendingSite is set by the runner when an admin annotation
+	// reclonePendingSite is set by the runner when the reclone annotation
 	// requests a reclone of a specific site. Processed during the next
-	// poll cycle then cleared. Protected by mu.
-	reclonePendingSite string
+	// poll cycle then cleared. reclonePendingOwner names the restore-owned
+	// queue (status.restoreReclones.confirmToken) that requested it, or is
+	// empty for an administrator's request; the clone carries it to
+	// RecloneCompleteCallback. Protected by mu.
+	reclonePendingSite  string
+	reclonePendingOwner string
 
 	// keyringGate, when set, is consulted before every clone into a
 	// site. Encryption-at-rest sites normally run with a read-only
@@ -487,6 +497,20 @@ type TopologyManager struct {
 	keyringRotationBlocked      []string
 	keyringRotationBlockedDirty bool
 
+	// restoreReclonePending is the set of sites an in-place restore still
+	// has to reclone (status.restoreReclones.pending). They hold pre-restore
+	// data, so they must not be promoted automatically. A change arms
+	// keyringRotationBlockedDirty, which re-runs applyCrossSiteAction for
+	// any change to the promotion-blocked set. Protected by mu.
+	restoreReclonePending          []string
+	restoreReclonePromotionRefused []string
+
+	// restoreRecloneBlocked is the set of pending sites that must not be
+	// cloned now: their queue is Armed (its restore runs) or Held (the
+	// primary is no trusted donor). checkReclone refuses them whoever
+	// asked. Protected by mu.
+	restoreRecloneBlocked []string
+
 	// crossSiteRetry is armed when applyCrossSiteAction deferred a decision
 	// because an update, bootstrap, planned failover or in-place restore
 	// held the cross-site path, the anti-flap cooldown refused a promotion,
@@ -508,7 +532,8 @@ type TopologyManager struct {
 	// recloneCompletedSite prevents an annotation-cleanup outage from
 	// repeating an already-successful destructive clone. Poll retries
 	// only the durable annotation removal while this is set.
-	recloneCompletedSite string
+	recloneCompletedSite  string
+	recloneCompletedOwner string
 
 	// cloneHoldReleaseSite retries NotifyCloneComplete after a finished
 	// bootstrap whose release write failed. Poll retries only the
@@ -528,8 +553,10 @@ type TopologyManager struct {
 
 	// RecloneCompleteCallback durably consumes the reclone annotation
 	// after the requested bootstrap attempt completes. Keeping it until
-	// then lets an operator restart retry an interrupted attempt.
-	RecloneCompleteCallback func(ctx context.Context, site string) error
+	// then lets an operator restart retry an interrupted attempt. outcome
+	// reports whether the clone succeeded and which restore-owned queue,
+	// if any, requested it.
+	RecloneCompleteCallback func(ctx context.Context, site string, outcome RecloneOutcome) error
 
 	// EmergencyFailoverCallback is invoked synchronously after a
 	// successful emergency failover Execute, on the same goroutine that
@@ -1713,7 +1740,11 @@ func (tm *TopologyManager) observations() []state.SiteObservation {
 	out := make([]state.SiteObservation, len(tm.sites))
 	for i := range tm.sites {
 		obs := tm.sites[i].observation()
-		_, obs.PromotionBlocked = blocked[tm.sites[i].name]
+		if _, rotating := blocked[tm.sites[i].name]; rotating {
+			obs.PromotionBlocked, obs.PromotionBlockedReason = true, state.PromotionBlockedRotation
+		} else if tm.restoreReclonePendingLocked(tm.sites[i].name) {
+			obs.PromotionBlocked, obs.PromotionBlockedReason = true, state.PromotionBlockedPendingReclone
+		}
 		out[i] = obs
 	}
 	return out
@@ -1781,6 +1812,8 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		PromotionGtidExecuted:   tm.promotionGtidExecuted,
 		KeyringPromotionSkipped: append([]string(nil), tm.keyringPromotionSkipped...),
 		KeyringPromotionRefused: append([]string(nil), tm.keyringPromotionRefused...),
+
+		RestoreReclonePromotionRefused: append([]string(nil), tm.restoreReclonePromotionRefused...),
 	}
 	if tm.deploymentChanging > 0 || tm.deploymentAwaitingObservation {
 		snap.DeploymentEpoch = 0
@@ -2051,12 +2084,20 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		if winner != "" {
 			tm.mu.RLock()
 			winnerBlocked := tm.keyringRotationBlockedLocked(winner)
+			winnerPending := tm.restoreReclonePendingLocked(winner)
 			tm.mu.RUnlock()
 			if winnerBlocked {
 				tm.logger.Warn("promotion refused: split-brain winner is mid-keyring-rotation",
 					"site", winner, "unsealReason", "Rotation")
 				tm.recordKeyringPromotionDecision(nil, []string{winner})
 				tm.incrementKeyringPromotionBlocked([]string{winner}, "refused")
+				tm.clearKeyringRotationBlockedDirty()
+				return
+			}
+			if winnerPending {
+				tm.logger.Warn("promotion refused: candidate is pending a post-restore reclone",
+					"sites", []string{winner})
+				tm.recordRestoreReclonePromotionRefused([]string{winner})
 				tm.clearKeyringRotationBlockedDirty()
 				return
 			}
@@ -2088,6 +2129,13 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 	}
 
+	if promote == "" && action.Reason == "NoPrimary" {
+		if refused := tm.restoreReclonePendingCandidates(); len(refused) > 0 {
+			tm.logger.Warn("promotion refused: candidate is pending a post-restore reclone",
+				"sites", refused)
+			tm.recordRestoreReclonePromotionRefused(refused)
+		}
+	}
 	if promote == "" && (strings.Contains(action.Alert, "UnsealReason=Rotation") || len(tm.rotationBlockedCandidates()) > 0 && action.Reason == "NoPrimary") {
 		refused := tm.rotationBlockedCandidates()
 		if len(refused) > 0 {
@@ -2159,6 +2207,7 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		} else {
 			tm.recordKeyringPromotionDecision(nil, nil)
 		}
+		tm.recordRestoreReclonePromotionRefused(nil)
 		tm.clearKeyringRotationBlockedDirty()
 
 		// Pick an old primary for fencing: prefer the last failover
@@ -2330,7 +2379,7 @@ func (tm *TopologyManager) fenceReturningOldPrimary(ctx context.Context, action 
 			return false
 		}
 		tm.mu.RLock()
-		winnerBlocked := tm.keyringRotationBlockedLocked(winner)
+		winnerBlocked := tm.keyringRotationBlockedLocked(winner) || tm.restoreReclonePendingLocked(winner)
 		tm.mu.RUnlock()
 		if winnerBlocked {
 			return false
@@ -2786,12 +2835,30 @@ func (tm *TopologyManager) getKeyringGate() KeyringGate {
 // primary. Called by the runner when it detects the reclone annotation.
 // The topology manager processes this during the next poll cycle.
 func (tm *TopologyManager) SetRecloneSite(site string) bool {
+	return tm.SetRecloneSiteFor(site, "")
+}
+
+// SetRecloneSiteFor is SetRecloneSite for a request owned by a restore
+// reclone queue (owner = its confirm token; "" for an administrator). A
+// repeated request for the same site adopts the owner only while that
+// site's clone has not started: a clone already running began before the
+// owner asked, so it must not count as the owner's reclone.
+func (tm *TopologyManager) SetRecloneSiteFor(site, owner string) bool {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	if tm.reclonePendingSite == site || tm.recloneCompletedSite == site {
+	if tm.recloneCompletedSite == site {
+		return false
+	}
+	if tm.reclonePendingSite == site {
+		running := tm.bootstrapRecipient == site &&
+			(tm.bootstrapPhase == BootstrapPhaseCloning || tm.bootstrapPhase == BootstrapPhaseRestarting || tm.bootstrapPhase == BootstrapPhaseSetupRepl)
+		if owner != "" && tm.reclonePendingOwner == "" && !running {
+			tm.reclonePendingOwner = owner
+		}
 		return false
 	}
 	tm.reclonePendingSite = site
+	tm.reclonePendingOwner = owner
 	return true
 }
 
@@ -2963,11 +3030,12 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 		}
 		tm.mu.RLock()
 		rotationBlocked := tm.keyringRotationBlockedLocked(site.name)
+		reclonePending := tm.restoreReclonePendingLocked(site.name)
 		tm.mu.RUnlock()
 		followers = append(followers, UpdateTarget{
 			Name: site.name, Host: site.host, Checker: site.mysql, Promotable: site.isPromotable(),
 			Drifted: drifted[site.name], ExpectedSource: activeSite.host,
-			RotationBlocked: rotationBlocked,
+			RotationBlocked: rotationBlocked, ReclonePending: reclonePending,
 		})
 	}
 	if drifted[activeName] {
@@ -2983,7 +3051,7 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 				continue
 			}
 			tm.mu.RLock()
-			blocked := tm.keyringRotationBlockedLocked(tm.sites[i].name)
+			blocked := tm.keyringRotationBlockedLocked(tm.sites[i].name) || tm.restoreReclonePendingLocked(tm.sites[i].name)
 			tm.mu.RUnlock()
 			if blocked {
 				continue
@@ -3586,6 +3654,10 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		}
 	}
 	tm.mu.Lock()
+	recloneOwner := ""
+	if source == "reclone" && tm.reclonePendingSite == recipient {
+		recloneOwner = tm.reclonePendingOwner
+	}
 	tm.bootstrapPhase = BootstrapPhaseCloning
 	tm.bootstrapErr = nil
 	tm.bootstrapSource = source
@@ -3633,7 +3705,8 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		}
 		var recloneCallbackErr error
 		if source == "reclone" && tm.RecloneCompleteCallback != nil {
-			if callbackErr := tm.RecloneCompleteCallback(ctx, recipient); callbackErr != nil {
+			outcome := RecloneOutcome{Owner: recloneOwner, Err: err}
+			if callbackErr := tm.RecloneCompleteCallback(ctx, recipient, outcome); callbackErr != nil {
 				tm.logger.Error("could not consume reclone annotation after bootstrap attempt",
 					"recipient", recipient, "error", callbackErr)
 				recloneCallbackErr = callbackErr
@@ -3645,6 +3718,7 @@ func (tm *TopologyManager) startBootstrapByName(ctx context.Context, donor, reci
 		}
 		if source == "reclone" && err == nil && recloneCallbackErr != nil {
 			tm.recloneCompletedSite = recipient
+			tm.recloneCompletedOwner = recloneOwner
 		}
 		if err != nil {
 			tm.bootstrapPhase = BootstrapPhaseFailed
@@ -4115,11 +4189,18 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	}
 	tm.mu.RLock()
 	targetBlocked := tm.keyringRotationBlockedLocked(target)
+	targetPending := tm.restoreReclonePendingLocked(target)
 	tm.mu.RUnlock()
 	if targetBlocked {
 		tm.logger.Warn("primary re-assert refused: target is mid-keyring-rotation",
 			"site", target, "unsealReason", "Rotation")
 		tm.incrementKeyringPromotionBlocked([]string{target}, "refused")
+		return false
+	}
+	if targetPending {
+		tm.logger.Warn("promotion refused: candidate is pending a post-restore reclone",
+			"sites", []string{target})
+		tm.recordRestoreReclonePromotionRefused([]string{target})
 		return false
 	}
 
@@ -4691,12 +4772,13 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 	tm.mu.RLock()
 	site := tm.reclonePendingSite
 	completedSite := tm.recloneCompletedSite
+	completedOwner := tm.recloneCompletedOwner
 	tm.mu.RUnlock()
 	if completedSite != "" {
 		if tm.RecloneCompleteCallback == nil {
 			return false
 		}
-		if err := tm.RecloneCompleteCallback(ctx, completedSite); err != nil {
+		if err := tm.RecloneCompleteCallback(ctx, completedSite, RecloneOutcome{Owner: completedOwner}); err != nil {
 			tm.logger.Error("reclone complete; annotation cleanup will retry",
 				"site", completedSite, "error", err)
 			return false
@@ -4704,6 +4786,7 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 		tm.mu.Lock()
 		if tm.recloneCompletedSite == completedSite {
 			tm.recloneCompletedSite = ""
+			tm.recloneCompletedOwner = ""
 		}
 		tm.mu.Unlock()
 		return false
@@ -4720,6 +4803,19 @@ func (tm *TopologyManager) checkReclone(ctx context.Context) bool {
 
 	if tm.isTopologyFrozen() {
 		tm.logger.Info("reclone request deferred, in-place restore in progress", "site", site)
+		return false
+	}
+
+	if tm.restoreRecloneBlockedSite(site) {
+		// A request that predates the queue's Armed or Held state (an
+		// annotation consumed earlier, or one re-read after a restart)
+		// must not clone from a primary the queue does not trust.
+		tm.logger.Warn("reclone request dropped: the site awaits its post-restore reclone and its queue clones nothing now", "site", site)
+		tm.mu.Lock()
+		if tm.reclonePendingSite == site {
+			tm.reclonePendingSite, tm.reclonePendingOwner = "", ""
+		}
+		tm.mu.Unlock()
 		return false
 	}
 
