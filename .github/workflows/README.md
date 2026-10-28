@@ -148,15 +148,16 @@ The release workflow (`.github/workflows/release.yml`) blocks publishing on both
 
 ### `scan.yml` — Trivy Security Scan
 
-**Triggers:** Pull requests targeting `main`
+**Triggers:** Pull requests targeting `main` unless all changes are under `site/`, `course/`, `proposals/`, `skills/`, or `.agents/` (trees excluded from the image context); daily at 06:17 UTC on `main`; manual dispatch
 
 Superseded PR runs are cancelled.
 
 **Required permissions:** `security-events: write` (for SARIF upload to the Security tab)
 
 Builds all four image variants (2 targets × 2 architectures) and runs Trivy on each:
-- Fails the job on any `CRITICAL` or `HIGH` unfixed CVEs
-- Uploads SARIF results to the GitHub Security tab for tracking
+
+- Fails the job on any `CRITICAL` or `HIGH` fixable CVEs
+- Uploads SARIF results to the GitHub Security tab for same-repository PRs and non-PR runs, including scheduled scans on `main`
 
 ---
 
