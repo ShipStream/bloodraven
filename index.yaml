@@ -5,8 +5,35 @@ entries:
       artifacthub.io/license: BUSL-1.1
       category: Database
     apiVersion: v2
+    appVersion: 1.5.0
+    created: "2026-10-28T07:04:37.515794174Z"
+    description: Bloodraven MySQL operator - automated cross-DC MySQL replication
+      and failover
+    digest: 4302f1abac9fba1c13c9d815669a58f6cb5aa50af617894213de6c33477c3d89
+    home: https://github.com/shipstream/bloodraven
+    keywords:
+    - mysql
+    - operator
+    - replication
+    - failover
+    - kubernetes
+    kubeVersion: '>=1.26.0'
+    maintainers:
+    - name: ShipStream
+      url: https://github.com/shipstream
+    name: bloodraven
+    sources:
+    - https://github.com/shipstream/bloodraven
+    type: application
+    urls:
+    - https://raw.githubusercontent.com/ShipStream/bloodraven/gh-pages/charts/bloodraven-1.5.0.tgz
+    version: 1.5.0
+  - annotations:
+      artifacthub.io/license: BUSL-1.1
+      category: Database
+    apiVersion: v2
     appVersion: 1.4.0
-    created: "2026-10-16T21:51:41.611328127Z"
+    created: "2026-10-28T07:04:37.511589441Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 035f6451d7b09ab48d960fe70108e47b877c0a31e72e9f1a8becb47e13c6ea62
@@ -33,7 +60,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 1.3.4
-    created: "2026-10-16T21:51:41.608639769Z"
+    created: "2026-10-28T07:04:37.506509795Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: b29e4a80f04e0ddbcbdcad74d1efb5eafaa6534535b1f0f950d52bc028a0df15
@@ -60,7 +87,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 1.3.2
-    created: "2026-10-16T21:51:41.605497096Z"
+    created: "2026-10-28T07:04:37.501437529Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 17adf7cee5ca773ecccac5f091644bfc52b22899b76ddd796def4e18fd0b71ce
@@ -87,7 +114,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 1.3.1
-    created: "2026-10-16T21:51:41.602467062Z"
+    created: "2026-10-28T07:04:37.497424767Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: c28e5d3b3db4ed227af32a29b109a64e070b375d104ed3bb4c79513134ee6b5e
@@ -114,7 +141,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 1.3.0
-    created: "2026-10-16T21:51:41.597547904Z"
+    created: "2026-10-28T07:04:37.492795121Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 80b527a84a520ecedf4c30785d67f6385e27db9b6cd728790334aecfb2b1cde7
@@ -141,7 +168,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 1.2.0
-    created: "2026-10-16T21:51:41.593780671Z"
+    created: "2026-10-28T07:04:37.489003205Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 31cec6b1e4a3e8282fb6ac94a9144d55a2f34e632e013d8b79f250f5e05a0567
@@ -168,7 +195,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 1.1.0
-    created: "2026-10-16T21:51:41.58974976Z"
+    created: "2026-10-28T07:04:37.484481292Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 5e52cb68b1a6ac0c69028afb762d38672abe9e288a2739aa6e2a41223f5901c1
@@ -195,7 +222,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 1.0.0
-    created: "2026-10-16T21:51:41.586111841Z"
+    created: "2026-10-28T07:04:37.480904029Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 4cc49db5940bbb4bed1581ec4845003c2c073e3ee5349dbf72dd676c6ba300f0
@@ -221,7 +248,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.9.1
-    created: "2026-10-16T21:51:41.583643404Z"
+    created: "2026-10-28T07:04:37.476259223Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: c52742dda13c05a9e8f7fdb564cc8803782352ca35d22e5516ac6575a91f152c
@@ -247,7 +274,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.9.0
-    created: "2026-10-16T21:51:41.580768164Z"
+    created: "2026-10-28T07:04:37.472369733Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: fa5ec83d66a40188a3eee29634741e32c76756b7c1c5d236a591d195721c5047
@@ -273,7 +300,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.8.0
-    created: "2026-10-16T21:51:41.578307198Z"
+    created: "2026-10-28T07:04:37.468008064Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 36cc0c4652fb0bef6250a4aa93c30a07688b021ae7dd4378a6dfd57a12cf23ed
@@ -299,7 +326,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.7.0
-    created: "2026-10-16T21:51:41.575253759Z"
+    created: "2026-10-28T07:04:37.463417715Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 7f5a53cda4f715500833cbb3ba73ace9c502305e91f5c40c5fb1d65b8c944f11
@@ -325,7 +352,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.6.2
-    created: "2026-10-16T21:51:41.572585706Z"
+    created: "2026-10-28T07:04:37.46000898Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: a516507948df41d31e20b6edbb5292ed11f2aba062f11463c3db0fb9f03c7e55
@@ -351,7 +378,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.6.1
-    created: "2026-10-16T21:51:41.570052366Z"
+    created: "2026-10-28T07:04:37.45558496Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: bbe535150df760a7b2b793c047a0f92686150beeeef4fe00531f48373308447b
@@ -377,7 +404,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.6.0
-    created: "2026-10-16T21:51:41.567344498Z"
+    created: "2026-10-28T07:04:37.452281013Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 8267245b5d9b66fbd0a1ba8cf7d0c06bf481f3c6b0a0f6e1ac127396b5112be7
@@ -403,7 +430,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.5.2
-    created: "2026-10-16T21:51:41.565083363Z"
+    created: "2026-10-28T07:04:37.447858647Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 8e4ed0c97cd5b45b1696a445a4ad0a4f0a243e7d5262228a7bb421900bc7658b
@@ -429,7 +456,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.5.1
-    created: "2026-10-16T21:51:41.562485129Z"
+    created: "2026-10-28T07:04:37.444470381Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 7dea2a90c76877a40c22bb8aca627393c14fba715f9ccec462e31ad37b52c046
@@ -455,7 +482,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.4.0
-    created: "2026-10-16T21:51:41.56024153Z"
+    created: "2026-10-28T07:04:37.440150874Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 99cb39d40093ce3fae2f60ef0d97249438c53cc51500ba8061be4a116cb68d17
@@ -481,7 +508,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.3.0
-    created: "2026-10-16T21:51:41.558482551Z"
+    created: "2026-10-28T07:04:37.43789049Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 5707b7274b243e3ada60ed9abb4184b1002fe428f3edc4e629d5ad6991fab70f
@@ -507,7 +534,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.2.0
-    created: "2026-10-16T21:51:41.557295423Z"
+    created: "2026-10-28T07:04:37.435895666Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: 1d82cf3a185ef45f68f9d7d42e966a0da45d49770ac62d8e442ce65da9931a17
@@ -533,7 +560,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.1.6
-    created: "2026-10-16T21:51:41.556156698Z"
+    created: "2026-10-28T07:04:37.433254636Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: c2219008f7d88ed13a5246d91e7c049e0a3832c3c92259e1212a741ca66addf5
@@ -559,7 +586,7 @@ entries:
       category: Database
     apiVersion: v2
     appVersion: 0.1.5
-    created: "2026-10-16T21:51:41.555801954Z"
+    created: "2026-10-28T07:04:37.432670426Z"
     description: Bloodraven MySQL operator - automated cross-DC MySQL replication
       and failover
     digest: ac9498a877e9e22d21846fad42c52a3b626dd5dfea706b6e738b1f1cd13b31d5
@@ -581,4 +608,4 @@ entries:
     urls:
     - https://raw.githubusercontent.com/ShipStream/bloodraven/gh-pages/charts/bloodraven-0.1.5.tgz
     version: 0.1.5
-generated: "2026-10-16T21:51:41.555275471Z"
+generated: "2026-10-28T07:04:37.431947776Z"
