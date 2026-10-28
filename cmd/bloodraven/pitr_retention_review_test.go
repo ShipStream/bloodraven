@@ -1,17 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/platform"
+	"github.com/shipstream/bloodraven/internal/sidecar"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -92,3 +100,98 @@ func TestReviewPITRCutoffIncludesAllGroupProfilesAndInFlightBackups(t *testing.T
 		})
 	}
 }
+func TestReviewRunningBackupKeepsReplayWindowThroughCompletion(t *testing.T) {
+	start := time.Date(2026, 4, 19, 0, 0, 0, 0, time.UTC)
+	recent := retentionBoundaryBackup("recent", retentionTestSID+":1-20", start.Add(-48*time.Hour))
+	running := retentionBoundaryBackup("overlapping", "", start.Add(-96*time.Hour))
+	running.Status.Phase = v1alpha1.BackupPhaseRunning
+	running.Status.CompletionTime = nil
+	c := retentionReviewClient(t, recent, running)
+	ctx := context.Background()
+	store, err := sidecar.NewArchiveStore(ctx, &sidecar.PITRConfig{StorageType: "PVC", PVC: &sidecar.PITRPVCConfig{MountPath: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(filepath.Join("../../internal/sidecar/testdata", "incarnation-a.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(payload)
+	id := hex.EncodeToString(hash[:])
+	name := "mysql-bin.000001"
+	key := "binlogs/iad/" + name + "." + id
+	if err := store.Put(ctx, key, bytes.NewReader(payload), int64(len(payload))); err != nil {
+		t.Fatal(err)
+	}
+	row := sidecar.ManifestEntry{Name: name, ID: id, LastEventTime: start.Add(-72 * time.Hour), GTIDCoverage: &sidecar.BinlogGTIDCoverage{Complete: true, GTIDs: retentionTestSID + ":11"}}
+	data, _ := json.Marshal(sidecar.Manifest{Version: 1, Site: "iad", Files: []sidecar.ManifestEntry{row}})
+	if err := store.Put(ctx, sidecar.ManifestKey("binlogs", "iad"), bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatal(err)
+	}
+	sweep := func() {
+		// A new handler models expiry of safe deferrals between hourly sweeps.
+		server := httptest.NewServer(newAuxMux(nil, platform.NewHub(slog.Default()), c))
+		defer server.Close()
+		runCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		mysql, err := sidecar.NewLiveMysqlFromDSN("unused@tcp(127.0.0.1:1)/?timeout=1ms")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer mysql.Close()
+		observed := &retentionMaintenanceStore{ArchiveStore: store, cancel: cancel}
+		a := sidecar.NewBinlogArchiver(&sidecar.PITRConfig{ManifestPrefix: "binlogs", BinlogDir: t.TempDir(), PollInterval: time.Hour}, "iad", retentionReplica{mysql}, observed, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		a.SetRetentionClient(strings.TrimPrefix(server.URL, "http://"), "ns", "fg", "p", time.Hour)
+		done := make(chan struct{})
+		go func() { defer close(done); a.Run(runCtx) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			cancel()
+			<-done
+			t.Fatal("ordinary archiver maintenance did not complete")
+		}
+		if observed.reads < 3 {
+			t.Fatal("retention was not reached through Run")
+		}
+		if _, exists, err := store.Get(ctx, key); err != nil || !exists {
+			t.Fatalf("transaction 11 needed by overlapping backup was retired: exists=%t, %v", exists, err)
+		}
+	}
+	sweep()
+	running.Status.Phase = v1alpha1.BackupPhaseSucceeded
+	running.Status.GtidExecuted = retentionTestSID + ":1-10"
+	if err := c.Status().Update(ctx, running); err != nil {
+		t.Fatal(err)
+	}
+	sweep()
+}
+
+// Embed the real adapter for the package-private connectability interface;
+// read-only maintenance calls only these overrides and never dials MySQL.
+type retentionReplica struct{ *sidecar.LiveMysql }
+
+func (retentionReplica) IsReadOnly(context.Context) (bool, error) { return true, nil }
+func (retentionReplica) BinlogState(context.Context) (string, string, error) {
+	return retentionTestSID, retentionTestSID + ":1-100", nil
+}
+
+type retentionMaintenanceStore struct {
+	sidecar.ArchiveStore
+	cancel context.CancelFunc
+	reads  int
+}
+
+func (s *retentionMaintenanceStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	data, exists, err := s.ArchiveStore.Get(ctx, key)
+	if key == sidecar.ManifestKey("binlogs", "iad") {
+		s.reads++
+		// audit, retention, then the aggregate refresh after the sweep has finished.
+		if s.reads == 3 {
+			s.cancel()
+		}
+	}
+	return data, exists, err
+}
+
+func (retentionReplica) BinlogHistoryReady(context.Context) (bool, error) { return true, nil }

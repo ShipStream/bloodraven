@@ -3,8 +3,13 @@ package sidecar
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 )
 
+// retryPrunedDeletes executes previously persisted retirement decisions, even
+// when the operator cannot provide a new retention proof. Acknowledged records
+// retain the retired content identity.
 func (a *BinlogArchiver) retryPrunedDeletes(ctx context.Context, m *Manifest) (int, error) {
 	liveKeys := make(map[string]struct{}, len(m.Files))
 	for _, entry := range m.Files {
@@ -54,8 +59,22 @@ func (a *BinlogArchiver) retryPrunedDeletes(ctx context.Context, m *Manifest) (i
 	return deleted, nil
 }
 
+// retiredBinlogIdentities includes both pending and acknowledged retirements.
 func (a *BinlogArchiver) retiredBinlogIdentities(m *Manifest) map[binlogIdentity]struct{} {
-	retired := make(map[binlogIdentity]struct{}, len(m.Quarantined))
+	retired := make(map[binlogIdentity]struct{}, len(m.Pruned))
+	for _, p := range m.Pruned {
+		id := p.ID
+		if id == "" {
+			id = p.ContentID
+		}
+		if id == "" {
+			continue
+		}
+		if _, err := ArchiveEntryKey(a.cfg.ManifestPrefix, a.site, ManifestEntry{Name: p.Name, ID: id}); err != nil {
+			continue
+		}
+		retired[binlogIdentity{Name: p.Name, ID: id}] = struct{}{}
+	}
 	for _, q := range m.Quarantined {
 		id := q.Entry.ID
 		if id == "" {
@@ -68,6 +87,7 @@ func (a *BinlogArchiver) retiredBinlogIdentities(m *Manifest) map[binlogIdentity
 	return retired
 }
 
+// maintainArchive runs on every site, including scans that cannot upload.
 func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
@@ -90,9 +110,52 @@ func (a *BinlogArchiver) maintainArchive(ctx context.Context) {
 		// An unreadable manifest cannot establish that the prior failure resolved.
 		a.setError(a.historyAuditError)
 	}
+	a.maybeRunRetention(ctx)
 	m, err := loadManifest(ctx, a.store, a.cfg.ManifestPrefix, a.site)
 	if err != nil {
 		return
 	}
+	a.compactRetirementRecords(ctx, m)
 	a.updateManifestAggregates(m.Files)
+}
+
+// compactRetirementRecords forgets acknowledged records only after their local
+// file is absent from both a readable index and the filesystem.
+func (a *BinlogArchiver) compactRetirementRecords(ctx context.Context, m *Manifest) {
+	if len(m.Pruned) == 0 {
+		return
+	}
+	indexPath := filepath.Join(a.cfg.BinlogDir, a.cfg.BinlogIndex)
+	info, err := os.Stat(indexPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	entries, err := readBinlogIndex(indexPath)
+	if err != nil {
+		return
+	}
+	indexed := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		indexed[filepath.Base(entry)] = struct{}{}
+	}
+	kept := m.Pruned[:0]
+	removed := false
+	for _, p := range m.Pruned {
+		_, listed := indexed[p.Name]
+		if p.Deleted && !listed && isPlainFileName(p.Name) {
+			_, err := os.Lstat(filepath.Join(a.cfg.BinlogDir, p.Name))
+			if os.IsNotExist(err) {
+				removed = true
+				continue
+			}
+		}
+		kept = append(kept, p)
+	}
+	if !removed {
+		return
+	}
+	m.Pruned = kept
+	if err := saveManifest(ctx, a.store, a.cfg.ManifestPrefix, m); err != nil {
+		a.logger.Warn("retention: compact retirement records", "error", err)
+	}
 }

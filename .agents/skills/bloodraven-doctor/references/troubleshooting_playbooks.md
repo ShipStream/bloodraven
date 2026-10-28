@@ -737,3 +737,19 @@ Preserve files until coverage is proved. Repair missing backup metadata only fro
 
 ### Safe remediation
 Restore archive delete/write access and let the sweeper retry. Do not clear retirement records, toggle `deleted`, purge local binlogs, or remove live manifest rows to force cleanup. Stored `key` and `RemotePath` fields are not deletion authority: the sidecar derives the target from validated identity fields under its configured prefix/site. An already retired object can be deleted without a fresh backup proof; that does not authorize new retirements while coverage is unknown.
+
+## 30. Retired local binlogs or growing retirement metadata
+
+### Symptoms
+- Older sidecars upload the same local bytes after a sweep retires them, wasting bandwidth and storage. Retirement-aware sidecars leave those bytes retired across restart and operator outages.
+- Acknowledged retirement records remain while local files are still indexed/present, or `retention: compact retirement records` reports a manifest save failure.
+
+### Diagnostic steps
+1. Compare the local file's content identity (SHA-256 for plaintext storage; passphrase-keyed HMAC-SHA256 for encrypted storage) with the site's retirement record: `id` for new archive keys, `contentId` for legacy keys. Both pending and acknowledged records suppress matching bytes. A different content ID under the same name is new data and must remain eligible for archival; header timestamps or previous GTIDs alone are insufficient.
+2. Inspect `/archiver/status` and the live `files` list. Retired records do not count toward backlog, active file count, bytes, or coverage timestamps. Zero backlog is expected for retired local bytes and still does not prove all historical coverage (playbook 27).
+3. Verify the site's sidecar is running and can access its archive. Retention is independent of primary/replica status, role-query success, or sealed-file availability. A removed site without a sidecar has no remaining owner to maintain its archive.
+4. Before expecting compaction, check `deleted: true`, a readable local binlog index without the name, and physical absence of the file. An unindexed file still on disk protects the record. Missing/unreadable indexes or filesystem errors defer compaction; pending deletes remain durable regardless of local-file state.
+5. For a compaction save warning, check manifest write access and sidecar logs. The old durable records remain and a later scan retries the update. Existing support-bundle logs and archiver probes capture the relevant status; they do not expose a retirement-record count.
+
+### Safe remediation
+Upgrade older sidecars that ignore retirement records, restore archive access or local-index readability, and let maintenance retry. Do not clear records or issue `PURGE BINARY LOGS` to make bookkeeping disappear: local files support replication catch-up. The operator defaults local expiry to 14 days; remote retention can be shorter. Preserve a separate archive-lifecycle plan before removing the last sidecar for a site.

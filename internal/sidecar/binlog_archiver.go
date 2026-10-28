@@ -329,7 +329,6 @@ func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	if !hadFileError {
 		a.setError("")
 	}
-	a.maybeRunRetention(ctx)
 }
 
 // maybeRunRetention resumes durable pending deletes, then queries /pitr-cutoff and,
