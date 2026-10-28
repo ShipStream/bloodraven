@@ -199,8 +199,8 @@ func storageConfigFromEnv(storageType, outputURL string) (*sidecar.PITRConfig, s
 		// "orders/<backup>/"). Strip trailing slashes when
 		// resolving the per-file key.
 		prefix := strings.TrimSuffix(outputURL, "/")
-		display := fmt.Sprintf("s3://%s/%s/", bucket, prefix)
-		return cfg, prefix, display, nil
+		display, err := backupmeta.DisplayLocation(storageType, bucket, outputURL, true)
+		return cfg, prefix, display, err
 	case "PVC":
 		mount := os.Getenv("BLOODRAVEN_PVC_MOUNT_PATH")
 		if mount == "" {
@@ -215,7 +215,8 @@ func storageConfigFromEnv(storageType, outputURL string) (*sidecar.PITRConfig, s
 			return nil, "", "", fmt.Errorf("outputURL %q is not under PVC mount %q", outputURL, mount)
 		}
 		prefix := strings.TrimSuffix(filepath.ToSlash(rel), "/")
-		return cfg, prefix, outputURL, nil
+		display, displayErr := backupmeta.DisplayLocation(storageType, "", outputURL, true)
+		return cfg, prefix, display, displayErr
 	default:
 		return nil, "", "", fmt.Errorf("unknown storage type %q", storageType)
 	}
