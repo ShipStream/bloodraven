@@ -589,3 +589,27 @@ With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first
    - Confirm its `@@GLOBAL.gtid_executed` is a subset of the active site's: `SELECT GTID_SUBSET('<standby set>', '<active set>')` on the active site returns 1.
    - If it is, run on the standby: `CHANGE REPLICATION SOURCE TO SOURCE_HOST='<active internal host>', SOURCE_USER='<repl user>', SOURCE_PASSWORD='<repl password>', SOURCE_AUTO_POSITION=1; START REPLICA;`. Add `SOURCE_SSL=1, SOURCE_SSL_CA='/etc/mysql/tls/ca.crt'` when `spec.tls` is set, otherwise `GET_SOURCE_PUBLIC_KEY=1`.
    - If it is not a subset, the standby has errant transactions: reclone it (`kubectl bloodraven reclone <group> -n <ns> --target=<site>`) instead.
+
+## 24. One group stopped updating (no running topology manager)
+
+A healthy operator pod does not guarantee that every group has a live topology manager. The runner restarts a group's manager when its spec or connection material changes. If the restart fails, the group has no manager, and so no polling, no status writes and no failover, until the runner's 30s retry succeeds.
+
+### Symptoms
+- One group's `status.sites[]` and conditions stop changing while other groups keep updating.
+- Losing the primary does not trigger failover.
+- Operator log: ERROR `failed to start topology manager` for that `fg`, repeating every 30s.
+
+### Diagnostic steps
+1. Read the error:
+   ```bash
+   kubectl logs -n bloodraven deploy/bloodraven | grep -E 'failed to start topology manager|topology manager exited|connection material unreadable' | grep '<ns>/<group>'
+   ```
+2. Typical causes:
+   - The operator Secret is missing (`get operator secret ... not found`).
+   - It has no `dsn` key (DSN mode).
+   - The `spec.tls.secretName` Secret is missing or its material does not load.
+3. A WARN `connection material unreadable; keeping the running topology manager` is not this failure. The manager is still running on its existing connections while the Secret is being replaced.
+
+### Safe remediation
+1. Restore or fix the Secret named in the error. The next sync starts a fresh manager. You do not need to restart the operator.
+2. Do not promote by hand while the group has no manager unless the primary is actually down. Once the manager is back, it re-evaluates topology on its first poll.

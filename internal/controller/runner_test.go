@@ -1097,18 +1097,18 @@ func TestConnectionMaterialHash_TLSAdoptionAndRotationRestart(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(opSecret, tlsSecret).Build()
 	ctx := context.Background()
 
-	plain := connectionMaterialHash(ctx, c, fg)
+	plain := mustConnectionMaterialHash(t, ctx, c, fg)
 	if plain == "" {
 		t.Fatal("plaintext group with operator secret must have a connection hash")
 	}
 
 	fg.Spec.CloneTimeout = 120
-	if connectionMaterialHash(ctx, c, fg) != plain {
+	if mustConnectionMaterialHash(t, ctx, c, fg) != plain {
 		t.Fatal("cloneTimeout must not change the connection hash (it is live-updated)")
 	}
 
 	fg.Spec.TLS = &v1alpha1.TLSSpec{SecretName: "mysql-tls"}
-	withTLS := connectionMaterialHash(ctx, c, fg)
+	withTLS := mustConnectionMaterialHash(t, ctx, c, fg)
 	if withTLS == "" || withTLS == plain {
 		t.Fatalf("adopting TLS must change the connection hash: plain=%q tls=%q", plain, withTLS)
 	}
@@ -1117,13 +1117,19 @@ func TestConnectionMaterialHash_TLSAdoptionAndRotationRestart(t *testing.T) {
 	if err := c.Update(ctx, tlsSecret); err != nil {
 		t.Fatalf("rotate TLS secret: %v", err)
 	}
-	rotated := connectionMaterialHash(ctx, c, fg)
+	rotated := mustConnectionMaterialHash(t, ctx, c, fg)
 	if rotated == withTLS {
 		t.Fatal("rotating the TLS secret must change the connection hash")
 	}
 
 	fg.Spec.TLS.SecretName = "other-tls"
-	if connectionMaterialHash(ctx, c, fg) == rotated {
+	if err := c.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "other-tls", Namespace: fg.Namespace},
+		Data:       map[string][]byte{"ca.crt": []byte("new-ca")},
+	}); err != nil {
+		t.Fatalf("create other TLS secret: %v", err)
+	}
+	if mustConnectionMaterialHash(t, ctx, c, fg) == rotated {
 		t.Fatal("changing spec.tls.secretName must change the connection hash")
 	}
 }

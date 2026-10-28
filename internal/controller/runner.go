@@ -68,6 +68,11 @@ type managedTopology struct {
 	// lastRestoreReclonePromotionRefused is the same for promotions
 	// refused because the candidates await their post-restore reclone.
 	lastRestoreReclonePromotionRefused []string
+
+	// materialUnreadable is set while sync keeps this manager running
+	// because its connection secrets cannot be read, so the warning is
+	// logged once per episode. Read and written only by sync.
+	materialUnreadable bool
 }
 
 // DeploymentReconciler is the subset of the reconciler that the runner needs
@@ -326,36 +331,56 @@ func cloneTimeoutFromSpec(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
 // bounce every manager. TLS-on groups also mix the TLS secret name and
 // bytes so adoption, secretName edits, and cert rotation restart the
 // manager with new connections.
-func connectionMaterialHash(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup) string {
+//
+// A secret that cannot be read (deleted, not yet recreated, API error)
+// returns an error rather than a hash: its content is unknown, not
+// changed, and must not be mistaken for a rotation.
+func connectionMaterialHash(ctx context.Context, c client.Client, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
 	if fg == nil || c == nil {
-		return ""
+		return "", nil
 	}
 	h := sha256.New()
 	wrote := false
 
 	if name := fg.Spec.EffectiveOperatorSecretName(); name != "" {
 		var secret corev1.Secret
-		if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &secret); err == nil {
-			writeSecretDataHash(h, secret.Data)
-			wrote = true
+		nn := types.NamespacedName{Namespace: fg.Namespace, Name: name}
+		if err := c.Get(ctx, nn, &secret); err != nil {
+			return "", fmt.Errorf("get operator secret %s: %w", nn, err)
 		}
+		writeSecretDataHash(h, secret.Data)
+		wrote = true
 	}
 
 	if fg.Spec.TLS != nil && fg.Spec.TLS.SecretName != "" {
 		fmt.Fprintf(h, "tls.secret=%s\n", fg.Spec.TLS.SecretName)
 		var secret corev1.Secret
-		if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.TLS.SecretName}, &secret); err == nil {
-			writeSecretDataHash(h, secret.Data)
-		} else {
-			fmt.Fprintf(h, "tls.missing=1\n")
+		nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.TLS.SecretName}
+		if err := c.Get(ctx, nn, &secret); err != nil {
+			return "", fmt.Errorf("get TLS secret %s: %w", nn, err)
 		}
+		writeSecretDataHash(h, secret.Data)
 		wrote = true
 	}
 
 	if !wrote {
-		return ""
+		return "", nil
 	}
-	return hex.EncodeToString(h.Sum(nil))[:16]
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
+}
+
+// managerRunning reports whether mt's Run goroutine is still running. A nil
+// done channel (a test-injected manager) counts as running.
+func managerRunning(mt *managedTopology) bool {
+	if mt.done == nil {
+		return true
+	}
+	select {
+	case <-mt.done:
+		return false
+	default:
+		return true
+	}
 }
 
 func writeSecretDataHash(h interface{ Write([]byte) (int, error) }, data map[string][]byte) {
@@ -390,17 +415,35 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		// cert rotation (or TLS adoption) restarts the manager with
 		// new MySQL connections. cloneTimeout is live-updated below
 		// and must not be part of this hash.
-		cfg.CredentialHash = connectionMaterialHash(ctx, r.client, fg)
+		credentialHash, materialErr := connectionMaterialHash(ctx, r.client, fg)
+		cfg.CredentialHash = credentialHash
 
 		r.mu.RLock()
 		existing, ok := r.managers[nn]
 		r.mu.RUnlock()
+		// A manager whose Run has returned is registered but dead; it
+		// never polls again, so it must be replaced, not updated.
+		live := ok && managerRunning(existing)
+
+		if live && materialErr != nil {
+			// Unreadable material is unknown, not changed: the running
+			// manager's pools still hold working credentials, and a
+			// restart could not read the secret either. Keep it unless the
+			// topology itself changed.
+			cfg.CredentialHash = existing.cfg.CredentialHash
+			if existing.cfg.Equal(cfg) && !existing.materialUnreadable {
+				r.logger.Warn("connection material unreadable; keeping the running topology manager", "fg", nn, "error", materialErr)
+			}
+			existing.materialUnreadable = true
+		} else if live {
+			existing.materialUnreadable = false
+		}
 
 		suppress := restoreInFlight(fg)
 		frozen := inPlaceRestoreFreezesTopology(fg)
 		plannedActive := plannedFailoverInFlight(fg.Status.PlannedFailover)
 
-		if ok && existing.cfg.Equal(cfg) {
+		if live && existing.cfg.Equal(cfg) {
 			existing.tm.SetAutoBootstrapSuppressed(suppress)
 			existing.tm.SetTopologyFrozen(frozen)
 			existing.tm.SetPlannedFailoverActive(plannedActive)
@@ -420,13 +463,30 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 		}
 
 		if ok {
-			r.logger.Info("config changed, restarting topology manager", "fg", nn)
+			if live {
+				r.logger.Info("config changed, restarting topology manager", "fg", nn)
+			} else {
+				r.logger.Warn("topology manager exited; restarting", "fg", nn)
+			}
+			// Unregister before stopping, as for a deleted CR: if the
+			// replacement fails to start, no stopped manager is left for
+			// a later matching config to mistake for a live one, and the
+			// next sync retries the start.
+			r.mu.Lock()
+			if r.managers[nn] == existing {
+				delete(r.managers, nn)
+			}
+			r.mu.Unlock()
 			// Wait for the old poll loop to exit before dropping its
 			// series, otherwise an in-flight Poll can resurrect them.
 			stopManagedTopology(existing)
 			clearManagedSiteGauges(existing.tm)
 		}
 
+		if materialErr != nil {
+			r.logger.Error("failed to start topology manager", "fg", nn, "error", materialErr)
+			continue
+		}
 		if err := r.startManager(ctx, fg, cfg); err != nil {
 			r.logger.Error("failed to start topology manager", "fg", nn, "error", err)
 			continue
