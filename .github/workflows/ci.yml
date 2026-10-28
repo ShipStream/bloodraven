@@ -59,10 +59,26 @@ jobs:
         with:
           flavor: lint
           extra-paths: ~/.cache/golangci-lint
+      - id: lint-key
+        run: echo "key=golangci-lint-${{ runner.os }}-${{ runner.arch }}-$(go env GOVERSION)-$(make -s --no-print-directory golangci-lint-version)" >> "$GITHUB_OUTPUT"
+      - id: lint-bin
+        uses: actions/cache/restore@v6
+        with:
+          path: bin/golangci-lint
+          key: ${{ steps.lint-key.outputs.key }}
       - name: Install golangci-lint
+        if: steps.lint-bin.outputs.cache-hit != 'true'
         run: make install-lint
+      - name: Print golangci-lint version
+        run: ./bin/golangci-lint version
       - name: Run golangci-lint
         run: make lint
+      - name: Save golangci-lint (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.lint-bin.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: bin/golangci-lint
+          key: ${{ steps.lint-key.outputs.key }}
       - name: Save Go build cache (main only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gocache.outputs.build-hit != 'true'
         uses: actions/cache/save@v6

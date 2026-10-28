@@ -17,7 +17,7 @@ Pull requests run jobs for the areas they touch: Go jobs for Go-related source a
 | Job | Description |
 |---|---|
 | `changes` | Classifies changed paths and selects the affected jobs |
-| `lint` | Runs `golangci-lint` (installed via `go install`) |
+| `lint` | Runs `golangci-lint`, source-built with the repo's Go toolchain through `go install` (pinned in `Makefile`); binary cached by OS, architecture, Go version, and linter version |
 | `build` | Compiles `cmd/bloodraven` and `cmd/sidecar` |
 | `test-unit` | `make test-unit` — unit tests under `./internal/...` |
 | `test-component` | `make test-component` — component tests under `./test/component/` |
