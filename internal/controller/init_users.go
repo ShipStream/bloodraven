@@ -120,8 +120,8 @@ REPL_PASS=$(escape_sql "$MYSQL_REPLICATION_PASSWORD")
 
 echo "bloodraven-init: creating replication user '${REPL_USER}'"
 run_mysql <<EOSQL
-CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';
-ALTER USER '${REPL_USER}'@'%' IDENTIFIED BY '${REPL_PASS}';
+CREATE USER IF NOT EXISTS '${REPL_USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${REPL_PASS}';
+ALTER USER '${REPL_USER}'@'%' IDENTIFIED WITH caching_sha2_password BY '${REPL_PASS}';
 GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '${REPL_USER}'@'%';
 FLUSH PRIVILEGES;
 EOSQL
@@ -162,8 +162,8 @@ create_user_with_grants() {
     grants="${2//__USER__/$user}"
     echo "bloodraven-init: creating $1 user '${user}'"
     run_mysql <<EOSQL
-CREATE USER IF NOT EXISTS '${user}'@'%' IDENTIFIED BY '${pass}';
-ALTER USER '${user}'@'%' IDENTIFIED BY '${pass}';
+CREATE USER IF NOT EXISTS '${user}'@'%' IDENTIFIED WITH caching_sha2_password BY '${pass}';
+ALTER USER '${user}'@'%' IDENTIFIED WITH caching_sha2_password BY '${pass}';
 ${grants}
 FLUSH PRIVILEGES;
 EOSQL

@@ -54,6 +54,30 @@ func TestInitUsersScriptUsesExplicitSocket(t *testing.T) {
 	}
 }
 
+// TestInitUsersScriptNamesTheAuthPlugin: every account the init script
+// creates or alters names caching_sha2_password rather than inheriting the
+// server default, which on MySQL 8.0 can be mysql_native_password.
+func TestInitUsersScriptNamesTheAuthPlugin(t *testing.T) {
+	for name, script := range initScriptVariants() {
+		t.Run(name, func(t *testing.T) {
+			n := 0
+			for _, line := range strings.Split(script, "\n") {
+				upper := strings.ToUpper(line)
+				if !strings.Contains(upper, "CREATE USER") && !strings.Contains(upper, "ALTER USER") {
+					continue
+				}
+				n++
+				if !strings.Contains(line, "IDENTIFIED WITH caching_sha2_password BY") {
+					t.Errorf("account statement does not name caching_sha2_password: %q", strings.TrimSpace(line))
+				}
+			}
+			if n == 0 {
+				t.Fatal("no CREATE/ALTER USER statements found")
+			}
+		})
+	}
+}
+
 func TestInitUsersScriptIsValidBash(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {

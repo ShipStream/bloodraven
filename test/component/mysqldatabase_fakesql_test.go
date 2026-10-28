@@ -495,11 +495,14 @@ var (
 	reDropDatabase   = regexp.MustCompile("^DROP DATABASE IF EXISTS `([^`]+)`$")
 	reDropUser       = regexp.MustCompile(`^DROP USER IF EXISTS (.+)$`)
 
-	// reAccountAuth matches one `'user'@'host' IDENTIFIED BY 'password'`
-	// element of a CREATE USER / ALTER USER account list; reAccount one
-	// bare `'user'@'host'` of a GRANT / REVOKE / DROP USER list. Passwords
-	// may contain the escaped forms escapeSingleQuotes produces.
-	reAccountAuth = regexp.MustCompile(`'([^']*)'@'([^']*)' IDENTIFIED BY '((?:[^'\\]|\\.|'')*)'`)
+	// reAccountAuth matches one `'user'@'host' IDENTIFIED WITH
+	// caching_sha2_password BY 'password'` element of a CREATE USER / ALTER
+	// USER account list; reAccount one bare `'user'@'host'` of a GRANT /
+	// REVOKE / DROP USER list. The plugin is required, not optional: an
+	// account rendered without it takes the server default, which may be
+	// mysql_native_password (removed in MySQL 9). Passwords may contain the
+	// escaped forms escapeSingleQuotes produces.
+	reAccountAuth = regexp.MustCompile(`'([^']*)'@'([^']*)' IDENTIFIED WITH caching_sha2_password BY '((?:[^'\\]|\\.|'')*)'`)
 	reAccount     = regexp.MustCompile(`'([^']*)'@'([^']*)'`)
 )
 
@@ -511,7 +514,7 @@ type fakeAccount struct{ user, host, password string }
 func parseAccountAuthList(list string) ([]fakeAccount, error) {
 	matches := reAccountAuth.FindAllStringSubmatch(list, -1)
 	if len(matches) == 0 || len(matches) != len(reAccount.FindAllString(list, -1)) {
-		return nil, fmt.Errorf("fake mysql: account list %q is not 'user'@'host' IDENTIFIED BY '...' per account", list)
+		return nil, fmt.Errorf("fake mysql: account list %q is not 'user'@'host' IDENTIFIED WITH caching_sha2_password BY '...' per account", list)
 	}
 	out := make([]fakeAccount, 0, len(matches))
 	for _, m := range matches {

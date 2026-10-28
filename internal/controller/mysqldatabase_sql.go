@@ -153,9 +153,18 @@ func quoteAccountList(kind, username string, hosts []string) (string, error) {
 	return strings.Join(parts, ", "), nil
 }
 
-// quoteAccountsIdentifiedBy renders `'u'@'h1' IDENTIFIED BY 'p', 'u'@'h2'
-// IDENTIFIED BY 'p', …` — the per-account auth clause CREATE USER and ALTER
-// USER require when more than one account is named.
+// userAuthPlugin is named explicitly on every CREATE USER / ALTER USER rather
+// than left to the server's default: on a server whose default is
+// mysql_native_password, an account would otherwise get a plugin MySQL 9
+// removed. Naming it in ALTER USER also converts an existing native account
+// whenever its statements next run (Secret rotation, spec change, or the
+// one-time re-apply a databaseRenderVersion / credentialGrantsVersion bump
+// triggers).
+const userAuthPlugin = "caching_sha2_password"
+
+// quoteAccountsIdentifiedBy renders `'u'@'h1' IDENTIFIED WITH caching_sha2_password
+// BY 'p', 'u'@'h2' IDENTIFIED WITH … BY 'p', …` — the per-account auth clause
+// CREATE USER and ALTER USER require when more than one account is named.
 func quoteAccountsIdentifiedBy(kind, username string, hosts []string, escapedPassword string) (string, error) {
 	if len(hosts) == 0 {
 		return "", fmt.Errorf("%s: no hosts to render", kind)
@@ -166,7 +175,7 @@ func quoteAccountsIdentifiedBy(kind, username string, hosts []string, escapedPas
 		if err != nil {
 			return "", err
 		}
-		parts = append(parts, fmt.Sprintf("%s IDENTIFIED BY '%s'", acct, escapedPassword))
+		parts = append(parts, fmt.Sprintf("%s IDENTIFIED WITH %s BY '%s'", acct, userAuthPlugin, escapedPassword))
 	}
 	return strings.Join(parts, ", "), nil
 }

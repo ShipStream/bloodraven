@@ -37,6 +37,23 @@ func TestCredentialStatementErrorLabelRedactsPasswords(t *testing.T) {
 	}
 }
 
+func TestCredentialStatementErrorLabelRedactsExplicitPluginClauses(t *testing.T) {
+	password := "super-secret-password"
+	for _, stmt := range []string{
+		"ALTER USER 'app'@'%' IDENTIFIED WITH caching_sha2_password BY '" + password + "'",
+		"CREATE USER IF NOT EXISTS 'app'@'%' identified with caching_sha2_password by '" + password + "'",
+		"ALTER USER 'app'@'%' IDENTIFIED WITH caching_sha2_password AS '" + password + "'",
+	} {
+		label := credentialStatementErrorLabel("app", stmt)
+		if strings.Contains(label, password) {
+			t.Fatalf("label leaked password for %q: %q", stmt, label)
+		}
+		if !strings.Contains(label, "app credential statement") {
+			t.Fatalf("label = %q, want role context", label)
+		}
+	}
+}
+
 func TestCredentialStatementErrorLabelKeepsNonSensitiveContext(t *testing.T) {
 	stmt := "GRANT SELECT ON *.* TO 'app'@'%'"
 
@@ -354,6 +371,31 @@ func TestReconcileAppRoleNarrowsGrant(t *testing.T) {
 				t.Fatalf("revoke must precede the grant; stmts=%q", fake.stmts)
 			}
 		})
+	}
+}
+
+// TestReconcileRoleNamesTheAuthPlugin pins caching_sha2_password on both
+// statements: left implicit, an account takes the server default, which on a
+// MySQL 8.0 server can be mysql_native_password (removed in MySQL 9).
+func TestReconcileRoleNamesTheAuthPlugin(t *testing.T) {
+	fake := &credGrantDB{}
+	db := sql.OpenDB(fake)
+	defer db.Close()
+	role := credentialRole{name: "ro", secretName: "ro\x00pw"}
+	if err := reconcileRole(context.Background(), db, role); err != nil {
+		t.Fatalf("reconcileRole: %v", err)
+	}
+	want := []string{
+		"CREATE USER IF NOT EXISTS 'ro'@'%' IDENTIFIED WITH caching_sha2_password BY 'pw'",
+		"ALTER USER 'ro'@'%' IDENTIFIED WITH caching_sha2_password BY 'pw'",
+	}
+	if len(fake.stmts) < len(want) {
+		t.Fatalf("stmts = %q, want prefix %q", fake.stmts, want)
+	}
+	for i, w := range want {
+		if fake.stmts[i] != w {
+			t.Fatalf("stmt %d = %q, want %q", i, fake.stmts[i], w)
+		}
 	}
 }
 

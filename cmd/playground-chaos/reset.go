@@ -749,7 +749,7 @@ func (r *resetter) loadReplicationCredentials(ctx context.Context) (struct{ root
 }
 
 func (r *resetter) createReplicationUser(ctx context.Context, db *sql.DB, replUser, replPassword string) error {
-	stmt := fmt.Sprintf("SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '%s'; GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '%s'@'%%'; FLUSH PRIVILEGES;",
+	stmt := fmt.Sprintf("SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED WITH caching_sha2_password BY '%s'; GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '%s'@'%%'; FLUSH PRIVILEGES;",
 		escapeSQLString(replUser), escapeSQLString(replPassword), escapeSQLString(replUser))
 	_, err := db.ExecContext(ctx, stmt)
 	return err

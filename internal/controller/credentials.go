@@ -29,9 +29,12 @@ const credentialHashAnnotation = "shipstream.io/credential-hash"
 const systemSchemaRestrictionAnnotation = "shipstream.io/system-schema-restriction"
 
 // credentialGrantsVersion is mixed into the credential hash so a change to
-// the role grant sets re-runs credential reconciliation once on upgrade,
-// even when no Secret changed. Bump it whenever a role's grants change.
-const credentialGrantsVersion = "3"
+// the role grant sets or the rendered account SQL re-runs credential
+// reconciliation once on upgrade, even when no Secret changed. Bump it
+// whenever a role's grants or its CREATE/ALTER USER statements change.
+// 4: accounts name caching_sha2_password explicitly (converts any
+// mysql_native_password account on the next reconcile).
+const credentialGrantsVersion = "4"
 
 // appGlobalPrivileges is the app role's grant: data and schema
 // privileges on every database, without the administrative privileges
@@ -283,10 +286,10 @@ func reconcileRole(ctx context.Context, db *sql.DB, role credentialRole) error {
 
 	// CREATE USER IF NOT EXISTS + ALTER USER to set password idempotently.
 	stmts := []string{
-		fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '%s'",
-			escapeSingleQuotes(username), escapeSingleQuotes(password)),
-		fmt.Sprintf("ALTER USER '%s'@'%%' IDENTIFIED BY '%s'",
-			escapeSingleQuotes(username), escapeSingleQuotes(password)),
+		fmt.Sprintf("CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED WITH %s BY '%s'",
+			escapeSingleQuotes(username), userAuthPlugin, escapeSingleQuotes(password)),
+		fmt.Sprintf("ALTER USER '%s'@'%%' IDENTIFIED WITH %s BY '%s'",
+			escapeSingleQuotes(username), userAuthPlugin, escapeSingleQuotes(password)),
 	}
 
 	if role.resetAdminPrivileges {
@@ -352,7 +355,10 @@ func restrictSystemSchema(ctx context.Context, db *sql.DB, roles []credentialRol
 
 func credentialStatementErrorLabel(roleName, stmt string) string {
 	upper := strings.ToUpper(stmt)
-	if strings.Contains(upper, "IDENTIFIED BY") {
+	// Any IDENTIFIED clause carries a credential: `IDENTIFIED BY`, and also
+	// `IDENTIFIED WITH <plugin> BY|AS`, which a substring match on
+	// "IDENTIFIED BY" would miss and leak into errors, conditions and events.
+	if strings.Contains(upper, "IDENTIFIED") {
 		return fmt.Sprintf("%s credential statement", roleName)
 	}
 	return fmt.Sprintf("%s statement %q", roleName, truncateSQL(stmt))

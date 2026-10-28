@@ -2455,7 +2455,9 @@ func groupFenced(fg *v1alpha1.MysqlFailoverGroup) (reason, message string, fence
 // databaseRenderVersion is mixed into computeDatabaseHash so a change to
 // the rendered grant/revoke SQL re-applies every Ready MysqlDatabase once
 // after an operator upgrade. Bump it whenever that SQL changes.
-const databaseRenderVersion = "3"
+// 4: CREATE/ALTER USER name caching_sha2_password explicitly, so the one
+// re-apply converts any mysql_native_password account.
+const databaseRenderVersion = "4"
 
 func computeDatabaseHash(mdb *v1alpha1.MysqlDatabase, ownerSecret *corev1.Secret, users []tenantUserInput, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
 	h := sha256.New()

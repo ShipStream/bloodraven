@@ -61,8 +61,8 @@ func TestRenderOwnerUserStatementsMatchesReconcileRolePattern(t *testing.T) {
 		t.Fatalf("renderOwnerUserStatements(, defaultHosts) error = %v", err)
 	}
 	want := []string{
-		"CREATE USER IF NOT EXISTS 'acme_app'@'%' IDENTIFIED BY 's3cr3t'",
-		"ALTER USER 'acme_app'@'%' IDENTIFIED BY 's3cr3t'",
+		"CREATE USER IF NOT EXISTS 'acme_app'@'%' IDENTIFIED WITH caching_sha2_password BY 's3cr3t'",
+		"ALTER USER 'acme_app'@'%' IDENTIFIED WITH caching_sha2_password BY 's3cr3t'",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("renderOwnerUserStatements(, defaultHosts) = %v, want %v", got, want)
@@ -98,7 +98,7 @@ func TestRenderOwnerUserStatementsEscapesPassword(t *testing.T) {
 		t.Fatalf("renderOwnerUserStatements(, defaultHosts) error = %v", err)
 	}
 	for _, stmt := range got {
-		if !strings.HasSuffix(stmt, `IDENTIFIED BY 'p\\'`) {
+		if !strings.HasSuffix(stmt, `IDENTIFIED WITH caching_sha2_password BY 'p\\'`) {
 			t.Fatalf("statement %q did not escape the trailing backslash; the literal can be broken out of", stmt)
 		}
 	}
@@ -508,8 +508,8 @@ func TestRenderMultiHostPrincipal(t *testing.T) {
 		t.Fatalf("renderTenantUserStatements() error = %v", err)
 	}
 	want := []string{
-		"CREATE USER IF NOT EXISTS 'acme_support'@'35.1.2.3' IDENTIFIED BY 'pw', 'acme_support'@'35.4.5.6' IDENTIFIED BY 'pw', 'acme_support'@'2001:db8::1' IDENTIFIED BY 'pw'",
-		"ALTER USER 'acme_support'@'35.1.2.3' IDENTIFIED BY 'pw', 'acme_support'@'35.4.5.6' IDENTIFIED BY 'pw', 'acme_support'@'2001:db8::1' IDENTIFIED BY 'pw' WITH MAX_USER_CONNECTIONS 5 MAX_QUERIES_PER_HOUR 0",
+		"CREATE USER IF NOT EXISTS 'acme_support'@'35.1.2.3' IDENTIFIED WITH caching_sha2_password BY 'pw', 'acme_support'@'35.4.5.6' IDENTIFIED WITH caching_sha2_password BY 'pw', 'acme_support'@'2001:db8::1' IDENTIFIED WITH caching_sha2_password BY 'pw'",
+		"ALTER USER 'acme_support'@'35.1.2.3' IDENTIFIED WITH caching_sha2_password BY 'pw', 'acme_support'@'35.4.5.6' IDENTIFIED WITH caching_sha2_password BY 'pw', 'acme_support'@'2001:db8::1' IDENTIFIED WITH caching_sha2_password BY 'pw' WITH MAX_USER_CONNECTIONS 5 MAX_QUERIES_PER_HOUR 0",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("renderTenantUserStatements() =\n%q\nwant\n%q", got, want)
