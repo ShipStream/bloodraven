@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupcrypto"
 )
 
 // operatorImageFromEnv is overridden by the main reconciler constructor
@@ -25,10 +26,6 @@ import (
 // reused.
 var operatorImageFromEnv = ""
 
-// operatorServiceAccountFromEnv is the ServiceAccount used by schedule
-// CronJobs. Defaults to the operator's own ServiceAccount.
-var operatorServiceAccountFromEnv = ""
-
 // defaultScheduleTimeZone is the timezone used when a BackupSchedule
 // does not set TimeZone. We default to UTC rather than the
 // kube-controller-manager local timezone for reproducibility across
@@ -36,12 +33,12 @@ var operatorServiceAccountFromEnv = ""
 const defaultScheduleTimeZone = "Etc/UTC"
 
 // SetOperatorImageDefaults is called from cmd/bloodraven/main.go so the
-// schedule reconciler knows what image and ServiceAccount to run inside
-// the scheduled CronJob pods. It is a package-level setter to keep the
-// reconciler struct stable.
-func SetOperatorImageDefaults(image, serviceAccount string) {
+// schedule reconciler knows what image to run inside the scheduled
+// CronJob pods. It is a package-level setter to keep the reconciler
+// struct stable. The second argument is ignored: schedule pods run
+// under the group's schedule trigger ServiceAccount, not the operator's.
+func SetOperatorImageDefaults(image, _ string) {
 	operatorImageFromEnv = image
-	operatorServiceAccountFromEnv = serviceAccount
 }
 
 // reconcileBackupAssets provisions the shared scripts ConfigMap and any
@@ -153,6 +150,12 @@ func (r *MysqlFailoverGroupReconciler) validateEncryptionSecret(ctx context.Cont
 	}
 	if len(data) == 0 {
 		return fmt.Errorf("Secret %q key %q is empty", ref.Name, key)
+	}
+	// Warn-only: backups still run, so existing groups with a short
+	// passphrase keep their backups and PITR archive.
+	if len(data) < backupcrypto.MinPassphraseLength {
+		return fmt.Errorf("Secret %q key %q holds a %d-byte passphrase; use at least %d random bytes, since the backup key is derived without key stretching",
+			ref.Name, key, len(data), backupcrypto.MinPassphraseLength)
 	}
 	return nil
 }
@@ -280,7 +283,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileBackupSchedules(ctx context.Cont
 
 // reconcileOneSchedule creates or updates a single CronJob for a
 // schedule entry. The CronJob's pod runs `bloodraven trigger-backup`
-// against the operator's own ServiceAccount to create a MysqlBackup CR.
+// under the group's schedule trigger ServiceAccount (see
+// reconcileScheduleTriggerRBAC) to create a MysqlBackup CR.
 func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sched v1alpha1.BackupSchedule) error {
 	// Validate the profile exists. If it doesn't, still create the
 	// CronJob but emit a warning — the scheduled pod will fail fast
@@ -293,13 +297,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 	image := operatorImageFromEnv
 	if image == "" {
 		image = "bloodraven:latest"
-	}
-	sa := operatorServiceAccountFromEnv
-	if sa == "" {
-		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupScheduleServiceAccountMissing",
-			"operator ServiceAccount not configured (set BLOODRAVEN_OPERATOR_SA env var on the operator deployment); falling back to %q",
-			"bloodraven")
-		sa = "bloodraven"
 	}
 
 	tz := sched.TimeZone
@@ -361,7 +358,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileOneSchedule(ctx context.Context,
 					ObjectMeta: metav1.ObjectMeta{Labels: labels},
 					Spec: corev1.PodSpec{
 						RestartPolicy:      corev1.RestartPolicyOnFailure,
-						ServiceAccountName: sa,
+						ServiceAccountName: scheduleTriggerName(fg.Name),
 						Tolerations:        groupReadOnlyTolerations(fg.Name),
 						Containers: []corev1.Container{
 							{

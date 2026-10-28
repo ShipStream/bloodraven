@@ -132,7 +132,10 @@ Consult [references/troubleshooting_playbooks.md](./references/troubleshooting_p
   ```bash
   kubectl get mysqlbackups.shipstream.io -n <namespace> --sort-by=.metadata.creationTimestamp
   kubectl get mysqlbackupverifications.shipstream.io -n <namespace>
+  kubectl get mysqlfailovergroup <group-name> -n <namespace> \
+    -o jsonpath='{.status.conditions[?(@.type=="S3CredentialsReady")]}'
   ```
+  `S3CredentialsReady=False` means an S3 `credentialsSecret` lacks `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`; Jobs fail instead of using ambient credentials. Fix the Secret before re-running anything.
 - **Action**: Trigger on-demand backup or verification:
   ```bash
   kubectl bloodraven backup <group-name> -n <namespace>
@@ -214,7 +217,7 @@ When reporting findings to the operator, structure your analysis as follows:
 
 ## Phase 5: Support & Post-Mortem Bundle
 
-If the issue requires escalation or post-incident analysis, generate a sanitized support bundle:
+If the issue requires escalation or post-incident analysis, generate a support bundle:
 
 ```bash
 ./.agents/skills/bloodraven-doctor/scripts/support-bundle.sh -n <namespace> [-o <bundle.tar.gz>] <group-name>
@@ -222,4 +225,4 @@ If the issue requires escalation or post-incident analysis, generate a sanitized
 
 `-o` is the path of the tarball to write (`.tar.gz` is appended if missing); it defaults to `./bloodraven-bundle-<timestamp>.tar.gz`. The script collects into a private `mktemp -d` staging directory, removes only that directory, and refuses to overwrite an existing output path.
 
-This captures redacted CR specs, status snapshots, sidecar metrics, and operator logs without leaking sensitive credentials or table data.
+This captures the MFG spec and status (with obvious `password`/`secret`/`key`/`token` fields redacted), resources, events, the deployment-probe output, and operator and MySQL pod container logs. Events and logs are collected raw, not redacted, so review the bundle before sharing it outside your team.

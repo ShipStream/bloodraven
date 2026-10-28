@@ -284,3 +284,50 @@ func TestEscrowHandler_RetryIsIdempotent(t *testing.T) {
 		t.Errorf("retry created version %d after %d", b.Version, a.Version)
 	}
 }
+
+func TestEscrowHandler_RejectsSealedSite(t *testing.T) {
+	// The token Secret survives sealing; a copy taken during an unseal
+	// window must not be replayable once the site is sealed.
+	for _, tc := range []struct {
+		name   string
+		phase  v1alpha1.SiteKeyringPhase
+		secret string
+		reason v1alpha1.KeyringUnsealReason
+		want   int
+	}{
+		{name: "sealed", phase: v1alpha1.KeyringPhaseSealed, secret: "mysql-lion-dc1-keyring-v1", want: http.StatusForbidden},
+		{name: "escrowed", phase: v1alpha1.KeyringPhaseEscrowed, secret: "mysql-lion-dc1-keyring-v1", want: http.StatusForbidden},
+		{name: "failed while sealed", phase: v1alpha1.KeyringPhaseFailed, secret: "mysql-lion-dc1-keyring-v1", want: http.StatusForbidden},
+		{name: "unsealed for rotation", phase: v1alpha1.KeyringPhaseUnsealed, secret: "mysql-lion-dc1-keyring-v1", reason: v1alpha1.UnsealReasonRotation, want: http.StatusOK},
+		{name: "failed during rotation", phase: v1alpha1.KeyringPhaseFailed, secret: "mysql-lion-dc1-keyring-v1", reason: v1alpha1.UnsealReasonRotation, want: http.StatusOK},
+		{name: "pending", phase: v1alpha1.KeyringPhasePending, want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := encTestFG()
+			setSitePhase(fg, "dc1", tc.phase, tc.secret)
+			fg.Status.EncryptionAtRest.Sites[0].UnsealReason = tc.reason
+			r, c := newReconciler(fg)
+			ctx := context.Background()
+			if err := r.ensureEscrowToken(ctx, fg, "dc1"); err != nil {
+				t.Fatalf("mint: %v", err)
+			}
+			var sec corev1.Secret
+			if err := c.Get(ctx, types.NamespacedName{
+				Namespace: fg.Namespace, Name: v1alpha1.KeyringTokenSecretName(fg.Name, "dc1"),
+			}, &sec); err != nil {
+				t.Fatalf("get token: %v", err)
+			}
+			h := &escrowHarness{
+				handler: NewKeyringEscrowHandler(c, slog.New(slog.NewTextHandler(io.Discard, nil))),
+				client:  c,
+				token:   string(sec.Data[v1alpha1.KeyringTokenKey]),
+				fg:      fg,
+			}
+			raw := []byte("replayed-keyring")
+			rec := h.post(t, h.token, h.req(raw, keyringDigest(raw)))
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tc.want, rec.Body)
+			}
+		})
+	}
+}

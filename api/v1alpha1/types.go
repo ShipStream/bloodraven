@@ -336,9 +336,12 @@ const (
 type SiteSpec struct {
 	// Name is the site identifier (e.g. "iad", "pdx", "lhr").
 	// Must be unique within spec.sites. MaxLength caps the CEL cost
-	// of the spec-level uniqueness and priority-membership rules.
+	// of the spec-level uniqueness and priority-membership rules. The
+	// pattern matches what the per-site Service names already require,
+	// and keeps the name safe to use in object-storage keys.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9-]+$`
 	Name string `json:"name"`
 
 	// Role governs whether this site can be auto-promoted on failover.
@@ -522,7 +525,11 @@ type CredentialsSpec struct {
 
 	// AppSecret references the Secret for application read-write connections.
 	// Required keys: username, password.
-	// Grants: ALL PRIVILEGES (no GRANT OPTION, no SUPER).
+	// Grants on *.*: data and schema privileges (SELECT, INSERT, UPDATE,
+	// DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, CREATE TEMPORARY
+	// TABLES, LOCK TABLES, EXECUTE, CREATE/SHOW VIEW, CREATE/ALTER ROUTINE,
+	// EVENT, TRIGGER, SHOW DATABASES). No GRANT OPTION, SUPER, CREATE USER,
+	// or other administrative privileges.
 	// +optional
 	AppSecret string `json:"appSecret,omitempty"`
 

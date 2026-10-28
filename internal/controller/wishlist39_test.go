@@ -769,14 +769,14 @@ func TestComputeSpecHash_IncludesSecurityContexts(t *testing.T) {
 	fg := newTestFG()
 	site := fg.Spec.Sites[0]
 
-	hNil := ComputeSpecHash(fg, site, nil, nil)
+	hNil := ComputeSpecHash(fg, site, "")
 
 	fg2 := fg.DeepCopy()
 	fg2.Spec.PodSecurityContext = &corev1.PodSecurityContext{
 		RunAsNonRoot: &t1,
 		RunAsUser:    &uid1,
 	}
-	hPod := ComputeSpecHash(fg2, site, nil, nil)
+	hPod := ComputeSpecHash(fg2, site, "")
 	if hPod == hNil {
 		t.Errorf("hash must change when PodSecurityContext goes nil->set; got %q == %q", hPod, hNil)
 	}
@@ -786,7 +786,7 @@ func TestComputeSpecHash_IncludesSecurityContexts(t *testing.T) {
 		RunAsNonRoot: &t1,
 		RunAsUser:    &uid1,
 	}
-	hBoth := ComputeSpecHash(fg3, site, nil, nil)
+	hBoth := ComputeSpecHash(fg3, site, "")
 	if hBoth == hPod {
 		t.Errorf("hash must change when ContainerSecurityContext goes nil->set; got %q == %q", hBoth, hPod)
 	}
@@ -794,7 +794,7 @@ func TestComputeSpecHash_IncludesSecurityContexts(t *testing.T) {
 	// Different value in the same field must also produce a new hash.
 	fg4 := fg3.DeepCopy()
 	fg4.Spec.ContainerSecurityContext.RunAsUser = &uid2
-	hBoth2 := ComputeSpecHash(fg4, site, nil, nil)
+	hBoth2 := ComputeSpecHash(fg4, site, "")
 	if hBoth2 == hBoth {
 		t.Errorf("hash must change when ContainerSecurityContext.RunAsUser changes; got %q == %q", hBoth2, hBoth)
 	}

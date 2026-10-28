@@ -103,3 +103,23 @@ func TestHub_ClientDisconnect(t *testing.T) {
 
 	waitForClientCount(t, hub, 0)
 }
+
+func TestHub_OversizedClientMessageDisconnects(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	hub := NewHub(logger)
+
+	srv := httptest.NewServer(http.HandlerFunc(hub.HandleWS))
+	defer srv.Close()
+
+	c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	waitForClientCount(t, hub, 1)
+
+	if err := c.WriteMessage(websocket.TextMessage, make([]byte, wsMaxReadBytes+1)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	waitForClientCount(t, hub, 0)
+}

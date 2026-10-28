@@ -766,6 +766,8 @@ spec:
                                   description: |-
                                     SubPath inside the PVC to use. Each backup lands under
                                     "<subPath>/<mysqlbackup-name>/".
+                                    A ".." segment is rejected so the path cannot leave the PVC.
+                                  pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                                   type: string
                               type: object
                             s3:
@@ -789,7 +791,9 @@ spec:
                                 endpointURL:
                                   description: |-
                                     EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
-                                    Passed to mysqlsh as s3EndpointOverride.
+                                    Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
+                                    or https:// URL without credentials, a query or a fragment.
+                                  pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                                   type: string
                                 prefix:
                                   description: |-
@@ -1417,7 +1421,11 @@ spec:
                     description: |-
                       AppSecret references the Secret for application read-write connections.
                       Required keys: username, password.
-                      Grants: ALL PRIVILEGES (no GRANT OPTION, no SUPER).
+                      Grants on *.*: data and schema privileges (SELECT, INSERT, UPDATE,
+                      DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, CREATE TEMPORARY
+                      TABLES, LOCK TABLES, EXECUTE, CREATE/SHOW VIEW, CREATE/ALTER ROUTINE,
+                      EVENT, TRIGGER, SHOW DATABASES). No GRANT OPTION, SUPER, CREATE USER,
+                      or other administrative privileges.
                     type: string
                   backupSecret:
                     description: |-
@@ -2209,7 +2217,7 @@ spec:
                           path is NOT inside the data directory. Admission rejects the
                           default /var/lib/mysql datadir and its descendants; custom-image
                           datadirs must be checked manually.
-                        pattern: ^/[^\0]*[^/]$
+                        pattern: ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$
                         type: string
                       escrowTimeoutSeconds:
                         default: 600
@@ -2228,7 +2236,7 @@ spec:
                           MysqldDir is the directory containing the mysqld binary. MySQL
                           only reads its global component manifest from there, so the
                           operator mounts `mysqld.my` into this directory.
-                        pattern: ^/[^\0]*[^/]$
+                        pattern: ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$
                         type: string
                       pluginDir:
                         default: /usr/lib64/mysql/plugin
@@ -2236,7 +2244,7 @@ spec:
                           PluginDir is MySQL's plugin_dir. MySQL only reads the global
                           `component_keyring_file.cnf` from there, so the operator mounts
                           the generated config into this directory.
-                        pattern: ^/[^\0]*[^/]$
+                        pattern: ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$
                         type: string
                       retainVersions:
                         default: 5
@@ -5581,8 +5589,10 @@ spec:
                             minLength: 1
                             type: string
                           subPath:
-                            description: SubPath inside the PVC where the dump is
-                              located. Optional.
+                            description: |-
+                              SubPath inside the PVC where the dump is located. Optional.
+                              A ".." segment is rejected so the path cannot leave the PVC.
+                            pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                             type: string
                         required:
                         - claimName
@@ -5608,7 +5618,9 @@ spec:
                           endpointURL:
                             description: |-
                               EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
-                              Passed to mysqlsh as s3EndpointOverride.
+                              Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
+                              or https:// URL without credentials, a query or a fragment.
+                            pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                             type: string
                           prefix:
                             description: |-
@@ -6139,8 +6151,10 @@ spec:
                             minLength: 1
                             type: string
                           subPath:
-                            description: SubPath inside the PVC where the dump is
-                              located. Optional.
+                            description: |-
+                              SubPath inside the PVC where the dump is located. Optional.
+                              A ".." segment is rejected so the path cannot leave the PVC.
+                            pattern: ^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$
                             type: string
                         required:
                         - claimName
@@ -6166,7 +6180,9 @@ spec:
                           endpointURL:
                             description: |-
                               EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
-                              Passed to mysqlsh as s3EndpointOverride.
+                              Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
+                              or https:// URL without credentials, a query or a fragment.
+                            pattern: ^https?://[^\s/?#@]+(/[^\s?#]*)?$
                             type: string
                           prefix:
                             description: |-
@@ -6355,9 +6371,12 @@ spec:
                       description: |-
                         Name is the site identifier (e.g. "iad", "pdx", "lhr").
                         Must be unique within spec.sites. MaxLength caps the CEL cost
-                        of the spec-level uniqueness and priority-membership rules.
+                        of the spec-level uniqueness and priority-membership rules. The
+                        pattern matches what the per-site Service names already require,
+                        and keeps the name safe to use in object-storage keys.
                       maxLength: 253
                       minLength: 1
+                      pattern: ^[a-z0-9-]+$
                       type: string
                     resources:
                       description: Resources defines the compute resources for the

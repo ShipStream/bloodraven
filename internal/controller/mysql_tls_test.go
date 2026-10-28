@@ -1,6 +1,10 @@
 package controller
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/shipstream/bloodraven/internal/mysql"
+)
 
 func TestMySQLTLSConfigNameDeterministicAndRotates(t *testing.T) {
 	data := map[string][]byte{
@@ -30,5 +34,13 @@ func TestMySQLServiceHosts(t *testing.T) {
 	}
 	if got, want := internalSiteServiceHost("orders", "iad", "shop"), "mysql-orders-iad-internal.shop.svc.cluster.local"; got != want {
 		t.Fatalf("internalSiteServiceHost() = %q, want %q", got, want)
+	}
+}
+
+// Replication channels name the CA by its path inside the replica's mysql
+// container; it must stay where the operator mounts spec.tls.
+func TestReplicationSourceCAFileMatchesTLSMount(t *testing.T) {
+	if want := mysqlTLSMountPath + "/ca.crt"; mysql.ReplicationSourceCAFile != want {
+		t.Fatalf("mysql.ReplicationSourceCAFile = %q, want %q", mysql.ReplicationSourceCAFile, want)
 	}
 }

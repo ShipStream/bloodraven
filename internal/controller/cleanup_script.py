@@ -36,7 +36,18 @@ def _read_cred_file(dirpath, key):
         return None
 
 
+def _aws_creds_failed(msg):
+    print("BLOODRAVEN_CLEANUP_FAILED: {}".format(msg), file=sys.stderr, flush=True)
+    sys.exit(2)
+
+
 def _configure_aws_creds_dir():
+    """When BLOODRAVEN_AWS_CREDS_DIR is set, read the AWS_* files out of
+    it and assemble a standard ~/.aws/credentials file so the AWS SDK
+    inside mysqlsh's S3 client picks them up. The reconciler mounts the
+    required credentialsSecret here, so a missing key or an unwritable
+    credentials file fails the job rather than letting the SDK fall back
+    to ambient (instance profile / IRSA) credentials."""
     aws_dir = os.environ.get("BLOODRAVEN_AWS_CREDS_DIR")
     if not aws_dir:
         return
@@ -45,13 +56,15 @@ def _configure_aws_creds_dir():
     session = _read_cred_file(aws_dir, "AWS_SESSION_TOKEN")
     region = _read_cred_file(aws_dir, "AWS_REGION")
     if not access_key or not secret_key:
-        return
+        _aws_creds_failed(
+            "S3 credentials Secret mounted at {} must contain non-empty "
+            "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY".format(aws_dir))
     home = os.environ.get("HOME", "/tmp")
     aws_conf_dir = os.path.join(home, ".aws")
     try:
         os.makedirs(aws_conf_dir, exist_ok=True)
-    except OSError:
-        return
+    except OSError as e:
+        _aws_creds_failed("could not create {}: {}".format(aws_conf_dir, e))
     creds_path = os.path.join(aws_conf_dir, "credentials")
     lines = [
         "[default]",
@@ -64,8 +77,8 @@ def _configure_aws_creds_dir():
         with open(creds_path, "w") as f:
             f.write("\n".join(lines) + "\n")
         os.chmod(creds_path, 0o600)
-    except OSError:
-        return
+    except OSError as e:
+        _aws_creds_failed("could not write {}: {}".format(creds_path, e))
     os.environ["AWS_SHARED_CREDENTIALS_FILE"] = creds_path
     if region and not os.environ.get("AWS_REGION"):
         os.environ["AWS_REGION"] = region

@@ -95,6 +95,20 @@ func (m *checker) EnsureClonePlugin(ctx context.Context) error {
 	return nil
 }
 
+func (m *checker) EnsurePartialRevokes(ctx context.Context) error {
+	var on int
+	if err := m.db.QueryRowContext(ctx, "SELECT @@GLOBAL.partial_revokes").Scan(&on); err != nil {
+		return fmt.Errorf("read partial_revokes: %w", err)
+	}
+	if on != 0 {
+		return nil
+	}
+	if _, err := m.db.ExecContext(ctx, "SET GLOBAL partial_revokes = ON"); err != nil {
+		return fmt.Errorf("set partial_revokes=ON: %w", err)
+	}
+	return nil
+}
+
 // Clone states reported by performance_schema.clone_status.
 const (
 	CloneStateCompleted = "Completed"

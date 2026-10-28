@@ -37,6 +37,11 @@ type Checker interface {
 	// CloneStatus returns the recipient's most recent clone outcome, or nil
 	// when the server has none (or no clone plugin tables).
 	CloneStatus(ctx context.Context) (*CloneStatus, error)
+
+	// EnsurePartialRevokes turns @@GLOBAL.partial_revokes ON if it is
+	// OFF. A replica with it OFF stops its SQL thread on a replicated
+	// partial revoke, so the operator confirms it on every site first.
+	EnsurePartialRevokes(ctx context.Context) error
 }
 
 type checker struct {

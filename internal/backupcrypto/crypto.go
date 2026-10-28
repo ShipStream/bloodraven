@@ -153,14 +153,20 @@ var ErrCounterExhausted = errors.New("backupcrypto: plaintext exceeds single-fil
 // "empty Secret value passes silently" footgun.
 var ErrEmptyPassphrase = errors.New("backupcrypto: passphrase is empty")
 
+// MinPassphraseLength is the recommended minimum passphrase length in
+// bytes. HKDF adds no work factor, so a passphrase is only as strong as
+// its own entropy; 32 random bytes is the documented requirement.
+const MinPassphraseLength = 32
+
 // Encrypt copies src into dst, wrapping it in the BRV1 wire format
 // using passphrase as key material. It returns the number of plaintext
 // bytes consumed.
 //
-// Passphrases shorter than 16 bytes are still accepted (HKDF doesn't
-// care) but are flagged as "low entropy" in the caller's validation.
-// The tooling preceding Encrypt is the source of truth for policy; this
-// package just refuses the empty case.
+// The key is derived with HKDF, which is not a password-hardening KDF:
+// the passphrase must already be high-entropy random material (see
+// MinPassphraseLength). This package refuses only the empty case so
+// existing short passphrases keep encrypting and decrypting; the
+// operator warns about them through validateEncryptionSecret.
 func Encrypt(dst io.Writer, src io.Reader, passphrase []byte) (int64, error) {
 	if len(passphrase) == 0 {
 		return 0, ErrEmptyPassphrase

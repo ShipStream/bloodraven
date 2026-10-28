@@ -219,16 +219,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Tell the schedule reconciler which operator image and ServiceAccount
-	// to embed into the CronJob pods it creates. These can be overridden
-	// via env vars to support kind/k3d playground runs where the operator
-	// image tag is something like "bloodraven:playground".
+	// Tell the schedule reconciler which operator image to embed into the
+	// CronJob pods it creates. This can be overridden via env var to
+	// support kind/k3d playground runs where the operator image tag is
+	// something like "bloodraven:playground".
 	operatorImage := os.Getenv("BLOODRAVEN_OPERATOR_IMAGE")
 	if operatorImage == "" {
 		operatorImage = "bloodraven:latest"
 	}
-	operatorSA := os.Getenv("BLOODRAVEN_OPERATOR_SA")
-	controller.SetOperatorImageDefaults(operatorImage, operatorSA)
+	controller.SetOperatorImageDefaults(operatorImage, "")
 
 	if err := mgr.Add(runner); err != nil {
 		logger.Error("unable to add topology manager runner", "error", err)
@@ -479,10 +478,27 @@ func (c *pitrCutoffCache) get(ns, group, profile string) (map[string]any, bool) 
 	return e.value, true
 }
 
+// pitrCutoffCacheMaxEntries caps the cache. Keys come from unauthenticated
+// query parameters, so without a cap arbitrary triples grow it without
+// bound. Real deployments need one entry per (group, profile).
+const pitrCutoffCacheMaxEntries = 1024
+
 func (c *pitrCutoffCache) set(ns, group, profile string, value map[string]any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.data[c.key(ns, group, profile)] = pitrCutoffEntry{value: value, at: time.Now()}
+	now := time.Now()
+	key := c.key(ns, group, profile)
+	if _, exists := c.data[key]; !exists && len(c.data) >= pitrCutoffCacheMaxEntries {
+		for k, e := range c.data {
+			if now.Sub(e.at) > c.ttl {
+				delete(c.data, k)
+			}
+		}
+		if len(c.data) >= pitrCutoffCacheMaxEntries {
+			return
+		}
+	}
+	c.data[key] = pitrCutoffEntry{value: value, at: now}
 }
 
 func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Client) *http.ServeMux {

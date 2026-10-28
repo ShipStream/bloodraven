@@ -115,6 +115,9 @@ type EncryptionCoverageSpec struct {
 // different MySQL image, verify them with:
 //
 //	docker run --rm --entrypoint sh <image> -c 'command -v mysqld; mysqld --verbose --help | grep plugin_dir'
+//
+// The three paths are limited to the characters [A-Za-z0-9._/-]: the
+// operator embeds them in the mysqld launcher shell script.
 type KeyringSpec struct {
 	// DataFileDir is the in-container directory holding the keyring data
 	// file. It is backed by a Secret volume when sealed and by a
@@ -123,7 +126,7 @@ type KeyringSpec struct {
 	// default /var/lib/mysql datadir and its descendants; custom-image
 	// datadirs must be checked manually.
 	// +kubebuilder:default="/run/mysql-keyring"
-	// +kubebuilder:validation:Pattern=`^/[^\0]*[^/]$`
+	// +kubebuilder:validation:Pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$`
 	// +optional
 	DataFileDir string `json:"dataFileDir,omitempty"`
 
@@ -131,7 +134,7 @@ type KeyringSpec struct {
 	// only reads its global component manifest from there, so the
 	// operator mounts `mysqld.my` into this directory.
 	// +kubebuilder:default="/usr/sbin"
-	// +kubebuilder:validation:Pattern=`^/[^\0]*[^/]$`
+	// +kubebuilder:validation:Pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$`
 	// +optional
 	MysqldDir string `json:"mysqldDir,omitempty"`
 
@@ -139,7 +142,7 @@ type KeyringSpec struct {
 	// `component_keyring_file.cnf` from there, so the operator mounts
 	// the generated config into this directory.
 	// +kubebuilder:default="/usr/lib64/mysql/plugin"
-	// +kubebuilder:validation:Pattern=`^/[^\0]*[^/]$`
+	// +kubebuilder:validation:Pattern=`^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$`
 	// +optional
 	PluginDir string `json:"pluginDir,omitempty"`
 

@@ -39,8 +39,14 @@ type fakeSQLServer struct {
 	users map[string]string
 	// databases maps schema name to "charset/collation".
 	databases map[string]string
-	// grants maps schema name to "user@host" to the granted privilege list.
+	// grants maps the database of a grant row, exactly as GRANT spelled
+	// it (`acme\_wms` and `acme_wms` are different rows), to "user@host"
+	// to the granted privilege list.
 	grants map[string]map[string][]string
+	// partialRevokes is @@GLOBAL.partial_revokes. Off, as on a default
+	// server, `_` in a grant row is a wildcard and a schema's own row is
+	// spelled with `\_`.
+	partialRevokes bool
 	// resourceLimits maps "user@host" to "maxUserConnections/maxQueriesPerHour"
 	// as last applied via ALTER USER ... WITH.
 	resourceLimits map[string]string
@@ -236,7 +242,39 @@ func (s *fakeSQLServer) grantsFor(database, username string) ([]string, bool) {
 func (s *fakeSQLServer) grantsForAccount(database, username, host string) ([]string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	byUser, ok := s.grants[database]
+	return s.grantRowLocked(s.grantRowKey(database), username, host)
+}
+
+// grantRowKey is the grant-row spelling that matches exactly the schema
+// named database on this server.
+func (s *fakeSQLServer) grantRowKey(database string) string {
+	if s.partialRevokes {
+		return database
+	}
+	return strings.ReplaceAll(database, "_", `\_`)
+}
+
+// grantRow returns the grants of one account on a grant row spelled
+// exactly as rowKey; host "" means "the '%' account, else any".
+func (s *fakeSQLServer) grantRow(rowKey, username, host string) ([]string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.grantRowLocked(rowKey, username, host)
+}
+
+// seedGrantRow pre-seeds a grant row spelled exactly as rowKey, as an
+// earlier release would have left it.
+func (s *fakeSQLServer) seedGrantRow(rowKey, username, host string, privs ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.grants[rowKey] == nil {
+		s.grants[rowKey] = map[string][]string{}
+	}
+	s.grants[rowKey][accountKey(username, host)] = privs
+}
+
+func (s *fakeSQLServer) grantRowLocked(rowKey, username, host string) ([]string, bool) {
+	byUser, ok := s.grants[rowKey]
 	if !ok {
 		return nil, false
 	}
@@ -397,6 +435,16 @@ func (c *fakeSQLConn) QueryContext(_ context.Context, query string, args []drive
 		}
 		return rows, nil
 
+	case "SELECT @@GLOBAL.partial_revokes":
+		c.server.mu.Lock()
+		on := c.server.partialRevokes
+		c.server.mu.Unlock()
+		rows := &fakeSQLRows{remaining: 1}
+		if !on {
+			rows.value = new(int64)
+		}
+		return rows, nil
+
 	case "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?":
 		if len(args) != 1 {
 			return nil, fmt.Errorf("fake mysql: schema-existence query wants 1 arg, got %d", len(args))
@@ -413,6 +461,8 @@ func (c *fakeSQLConn) QueryContext(_ context.Context, query string, args []drive
 
 type fakeSQLRows struct {
 	remaining int
+	// value, when set, replaces the 1 each row answers.
+	value *int64
 }
 
 func (r *fakeSQLRows) Columns() []string { return []string{"1"} }
@@ -423,6 +473,9 @@ func (r *fakeSQLRows) Next(dest []driver.Value) error {
 	}
 	r.remaining--
 	dest[0] = int64(1)
+	if r.value != nil {
+		dest[0] = *r.value
+	}
 	return nil
 }
 
@@ -479,13 +532,15 @@ func parseAccountList(list string) ([]fakeAccount, error) {
 	return out, nil
 }
 
-// fakeSQLAllPrivileges is what ALL PRIVILEGES expands to on a schema: the
-// concrete privilege list the reconciler's allowlist permits. Revoking a
+// fakeSQLAllPrivileges is what ALL PRIVILEGES expands to on a schema: every
+// database-level privilege except GRANT OPTION, including the routine
+// privileges the reconciler's allowlist cannot name. Revoking a
 // named privilege from an account that holds ALL must leave the rest,
 // exactly as the real server does.
 var fakeSQLAllPrivileges = []string{
 	"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
 	"INDEX", "REFERENCES", "LOCK TABLES", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE",
+	"CREATE TEMPORARY TABLES", "CREATE VIEW", "CREATE ROUTINE", "ALTER ROUTINE",
 }
 
 func (s *fakeSQLServer) apply(stmt string) error {
@@ -512,6 +567,10 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 
 	switch {
 	case stmt == "FLUSH PRIVILEGES":
+		return nil
+
+	case stmt == "SET GLOBAL partial_revokes = ON":
+		s.partialRevokes = true
 		return nil
 
 	case reCreateDatabase.MatchString(stmt):
@@ -584,8 +643,14 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 		if err != nil {
 			return err
 		}
-		if _, exists := s.databases[database]; !exists {
-			return fmt.Errorf("fake mysql: GRANT on nonexistent database %q", database)
+		// A grant row must match exactly one existing schema: with
+		// partial_revokes OFF an unescaped `_` is a wildcard over others.
+		exact := false
+		for name := range s.databases {
+			exact = exact || s.grantRowKey(name) == database
+		}
+		if !exact {
+			return fmt.Errorf("fake mysql: GRANT on %q, which is not the exact grant row of an existing database", database)
 		}
 		for _, a := range accounts {
 			key := accountKey(a.user, a.host)
@@ -675,6 +740,7 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 		m := reDropDatabase.FindStringSubmatch(stmt)
 		delete(s.databases, m[1])
 		delete(s.grants, m[1])
+		delete(s.grants, s.grantRowKey(m[1]))
 		return nil
 
 	case reDropUser.MatchString(stmt):

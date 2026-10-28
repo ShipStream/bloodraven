@@ -2,6 +2,7 @@ package component
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"testing"
@@ -1002,5 +1003,98 @@ func TestMysqlDatabaseOwnerSecondRotationDropsUnresolvedTargetFirst(t *testing.T
 	}
 	if mdb.Status.OwnerUser != next || mdb.Status.PendingOwnerUser != "" {
 		t.Fatalf("owner record = %q/%q, want %q settled", mdb.Status.OwnerUser, mdb.Status.PendingOwnerUser, next)
+	}
+}
+
+// TestMysqlDatabaseGrantRowIsLiteral: a server still running with
+// partial_revokes OFF (the MySQL default, and what an older my.cnf leaves)
+// treats an unescaped `_` in a database-level grant as a wildcard, so
+// `acme_wms` would also grant on `acmeXwms`, or `my_ql` on `mysql`. The
+// reconciler turns partial_revokes ON before granting, which makes the
+// unescaped grant literal and keeps it valid once the group reconcile turns
+// it ON everywhere. Rows in either spelling from earlier applies converge
+// on the unescaped one.
+func TestMysqlDatabaseGrantRowIsLiteral(t *testing.T) {
+	cr := mdbCR(func(m *v1alpha1.MysqlDatabase) {
+		m.Spec.Grants = []v1alpha1.MysqlDatabaseGrant{
+			{Username: "maester", Privileges: []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}},
+		}
+	})
+	h := newMdbHarness(t, cr, mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.server.addUser("maester", "maester-pw")
+	h.server.seedGrantRow(mdbDatabase, mdbOwnerUser, "%", "ALL PRIVILEGES")
+	h.server.seedGrantRow(`acme\_wms`, "maester", "%", "SELECT", "DELETE")
+
+	h.reconcile()
+	h.requireReady()
+
+	if !h.server.partialRevokes {
+		t.Fatal("reconciler granted without turning partial_revokes ON")
+	}
+	stmts := h.server.statementsSince(0)
+	if len(stmts) == 0 || stmts[0] != "SET GLOBAL partial_revokes = ON" {
+		t.Fatalf("first statement = %q, want partial_revokes turned ON before any grant", stmts)
+	}
+	if privs, ok := h.server.grantRow(mdbDatabase, mdbOwnerUser, "%"); !ok || strings.Join(privs, ",") != "ALL PRIVILEGES" {
+		t.Fatalf("owner grants on `acme_wms` = %v (present=%v), want [ALL PRIVILEGES]", privs, ok)
+	}
+	if privs, ok := h.server.grantRow(mdbDatabase, "maester", "%"); !ok || strings.Join(privs, ",") != "SELECT" {
+		t.Fatalf("maester grants on `acme_wms` = %v (present=%v), want [SELECT]", privs, ok)
+	}
+	for _, user := range []string{mdbOwnerUser, "maester"} {
+		if privs, ok := h.server.grantRow(`acme\_wms`, user, "%"); ok {
+			t.Fatalf("%s still holds the escaped grant row, which matches no schema once partial_revokes is ON: %v", user, privs)
+		}
+	}
+}
+
+// TestMysqlDatabaseGrantRowPartialRevokes: with partial_revokes ON, `_` is
+// already literal and an escaped `\_` would match nothing, so every GRANT
+// names the schema unescaped and nothing is changed globally.
+func TestMysqlDatabaseGrantRowPartialRevokes(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.server.partialRevokes = true
+
+	h.reconcile()
+	h.requireReady()
+
+	if privs, ok := h.server.grantRow(mdbDatabase, mdbOwnerUser, "%"); !ok || strings.Join(privs, ",") != "ALL PRIVILEGES" {
+		t.Fatalf("owner grants on `acme_wms` = %v (present=%v), want [ALL PRIVILEGES]", privs, ok)
+	}
+	for _, stmt := range h.server.statementsSince(0) {
+		if strings.HasPrefix(stmt, "GRANT ") && strings.Contains(stmt, `\_`) {
+			t.Fatalf("partial_revokes ON but the reconciler granted on the escaped schema name: %q", stmt)
+		}
+		if strings.HasPrefix(stmt, "SET GLOBAL") {
+			t.Fatalf("partial_revokes already ON, but the reconciler ran %q", stmt)
+		}
+	}
+}
+
+// TestMysqlDatabaseGrantRowEscapedWhenPartialRevokesRefused: if the server
+// refuses to turn partial_revokes ON, the grant falls back to the escaped
+// spelling, which is literal while it is OFF, and the wildcard row earlier
+// releases granted is revoked.
+func TestMysqlDatabaseGrantRowEscapedWhenPartialRevokesRefused(t *testing.T) {
+	h := newMdbHarness(t, mdbCR(), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret())
+	h.server.seedGrantRow(mdbDatabase, mdbOwnerUser, "%", "ALL PRIVILEGES")
+	h.server.statementFault = func(stmt string) (bool, error) {
+		if strings.HasPrefix(stmt, "SET GLOBAL partial_revokes") {
+			return false, errors.New("Access denied; you need the SYSTEM_VARIABLES_ADMIN privilege")
+		}
+		return false, nil
+	}
+
+	h.reconcile()
+	h.requireReady()
+
+	if h.server.partialRevokes {
+		t.Fatal("test setup: partial_revokes turned ON despite the refusal")
+	}
+	if privs, ok := h.server.grantRow(`acme\_wms`, mdbOwnerUser, "%"); !ok || strings.Join(privs, ",") != "ALL PRIVILEGES" {
+		t.Fatalf("owner grants on `acme\\_wms` = %v (present=%v), want [ALL PRIVILEGES]", privs, ok)
+	}
+	if privs, ok := h.server.grantRow(mdbDatabase, mdbOwnerUser, "%"); ok {
+		t.Fatalf("owner still holds the wildcard grant row `acme_wms`: %v", privs)
 	}
 }

@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -22,11 +22,61 @@ import (
 
 const credentialHashAnnotation = "shipstream.io/credential-hash"
 
+// systemSchemaRestrictionAnnotation records the credential hash for which
+// appSystemSchemaRevoke last succeeded. The restriction is tracked apart
+// from credentialHashAnnotation because it can wait on a site that is
+// down; retrying it must not re-run every role's ALTER USER and GRANT.
+const systemSchemaRestrictionAnnotation = "shipstream.io/system-schema-restriction"
+
+// credentialGrantsVersion is mixed into the credential hash so a change to
+// the role grant sets re-runs credential reconciliation once on upgrade,
+// even when no Secret changed. Bump it whenever a role's grants change.
+const credentialGrantsVersion = "3"
+
+// appGlobalPrivileges is the app role's grant: data and schema
+// privileges on every database, without the administrative privileges
+// (SUPER, CONNECTION_ADMIN, CREATE USER, SHUTDOWN, FILE, replication,
+// ...) that GRANT ALL would include. Holding SUPER or CONNECTION_ADMIN
+// would let app sessions write through read_only.
+const appGlobalPrivileges = "SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, REFERENCES, INDEX, ALTER, " +
+	"CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, " +
+	"CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER, SHOW DATABASES"
+
+// appSystemSchemaRevoke is the partial revoke that keeps the app role from
+// writing the mysql schema. appGlobalPrivileges is granted ON *.*, which
+// includes mysql.user and mysql.global_grants: an app session could write
+// itself SUPER or CONNECTION_ADMIN there and hold it from the next restart
+// or FLUSH PRIVILEGES. It lists every schema-level write and DDL privilege
+// in appGlobalPrivileges. It needs partial_revokes=ON, and a GRANT on *.*
+// drops it again, so it runs after every app GRANT.
+const appSystemSchemaRevoke = "REVOKE INSERT, UPDATE, DELETE, CREATE, DROP, REFERENCES, INDEX, ALTER, " +
+	"CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, " +
+	"CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON mysql.* FROM '%s'@'%%'"
+
+// appAdminPrivilegeQuery counts the administrative global privileges an
+// account holds: any dynamic privilege, or a static one outside
+// appGlobalPrivileges. App accounts created before the grant was narrowed
+// hold GRANT ALL and need their global privileges reset.
+const appAdminPrivilegeQuery = `SELECT
+	(SELECT COUNT(*) FROM mysql.global_grants WHERE USER = ? AND HOST = '%') +
+	(SELECT COUNT(*) FROM mysql.user WHERE User = ? AND Host = '%' AND (
+		Super_priv = 'Y' OR Create_user_priv = 'Y' OR Shutdown_priv = 'Y' OR
+		File_priv = 'Y' OR Process_priv = 'Y' OR Reload_priv = 'Y' OR
+		Repl_slave_priv = 'Y' OR Repl_client_priv = 'Y' OR
+		Create_tablespace_priv = 'Y' OR Create_role_priv = 'Y' OR Drop_role_priv = 'Y'))`
+
 // credentialRole defines a MySQL user role with its expected privileges.
 type credentialRole struct {
 	name       string
 	secretName string
 	grants     []string
+	// resetAdminPrivileges revokes every global privilege before the
+	// grants run when the account holds administrative ones, so an
+	// account provisioned with a broader grant converges to grants.
+	resetAdminPrivileges bool
+	// restrictSystemSchema applies appSystemSchemaRevoke after the grants;
+	// see restrictSystemSchema.
+	restrictSystemSchema bool
 }
 
 // reconcileCredentials ensures MySQL users exist on the primary with
@@ -46,8 +96,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 		return fmt.Errorf("compute credential hash: %w", err)
 	}
 
-	// Check if credentials have changed since last reconciliation.
-	if fg.Annotations != nil && fg.Annotations[credentialHashAnnotation] == currentHash {
+	// Check if credentials have changed since last reconciliation, and
+	// whether the app role's mysql schema restriction still has to land.
+	rolesCurrent := fg.Annotations[credentialHashAnnotation] == currentHash
+	restrictionCurrent := fg.Spec.Credentials.AppSecret == "" ||
+		fg.Annotations[systemSchemaRestrictionAnnotation] == currentHash
+	if rolesCurrent && restrictionCurrent {
 		return nil
 	}
 
@@ -81,15 +135,33 @@ func (r *MysqlFailoverGroupReconciler) reconcileCredentials(ctx context.Context,
 	}
 	defer db.Close()
 
-	for _, role := range roles {
-		if err := reconcileRole(ctx, db, role); err != nil {
-			return fmt.Errorf("reconcile %s user: %w", role.name, err)
+	if !rolesCurrent {
+		for _, role := range roles {
+			if err := reconcileRole(ctx, db, role); err != nil {
+				return fmt.Errorf("reconcile %s user: %w", role.name, err)
+			}
+			logger.Info("reconciled MySQL user", "role", role.name)
 		}
-		logger.Info("reconciled MySQL user", "role", role.name)
+		if err := r.setCredentialAnnotation(ctx, fg, credentialHashAnnotation, currentHash); err != nil {
+			return err
+		}
 	}
 
-	// Update the credential hash annotation.
-	return r.setCredentialHash(ctx, fg, currentHash)
+	// A GRANT on *.* drops the restriction, so it follows every role pass.
+	// On failure only this step is retried.
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	ensure := func(ctx context.Context) error {
+		if r.Runner == nil {
+			return errors.New("no topology manager to confirm partial_revokes on every site")
+		}
+		ctx, cancel := context.WithTimeout(ctx, partialRevokesConfirmTimeout)
+		defer cancel()
+		return r.Runner.EnsurePartialRevokes(ctx, nn)
+	}
+	if err := restrictSystemSchema(ctx, db, roles, ensure); err != nil {
+		return err
+	}
+	return r.setCredentialAnnotation(ctx, fg, systemSchemaRestrictionAnnotation, currentHash)
 }
 
 // tenantClaimedUsernames returns the MySQL usernames owned by live
@@ -151,7 +223,10 @@ func (r *MysqlFailoverGroupReconciler) buildRoles(ctx context.Context, fg *v1alp
 		roles = append(roles, credentialRole{
 			name:       "app",
 			secretName: fg.Spec.Credentials.AppSecret,
-			grants:     []string{"GRANT ALL PRIVILEGES ON *.* TO '%s'@'%%'"},
+			grants:     []string{"GRANT " + appGlobalPrivileges + " ON *.* TO '%s'@'%%'"},
+
+			resetAdminPrivileges: true,
+			restrictSystemSchema: true,
 		})
 	}
 
@@ -214,6 +289,18 @@ func reconcileRole(ctx context.Context, db *sql.DB, role credentialRole) error {
 			escapeSingleQuotes(username), escapeSingleQuotes(password)),
 	}
 
+	if role.resetAdminPrivileges {
+		var adminPrivs int
+		if err := db.QueryRowContext(ctx, appAdminPrivilegeQuery, username, username).Scan(&adminPrivs); err != nil {
+			return fmt.Errorf("check %s admin privileges: %w", role.name, err)
+		}
+		if adminPrivs > 0 {
+			// REVOKE ALL ON *.* also drops dynamic privileges; the grants
+			// below restore the role's set straight after.
+			stmts = append(stmts, fmt.Sprintf("REVOKE ALL PRIVILEGES ON *.* FROM '%s'@'%%'", escapeSingleQuotes(username)))
+		}
+	}
+
 	for _, grant := range role.grants {
 		stmts = append(stmts, fmt.Sprintf(grant, escapeSingleQuotes(username)))
 	}
@@ -221,6 +308,41 @@ func reconcileRole(ctx context.Context, db *sql.DB, role credentialRole) error {
 	stmts = append(stmts, "FLUSH PRIVILEGES")
 
 	for _, stmt := range stmts {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("exec %s: %w", credentialStatementErrorLabel(role.name, stmt), err)
+		}
+	}
+	return nil
+}
+
+// credentialRetryInterval is how soon a failed credential reconcile is
+// retried.
+const credentialRetryInterval = time.Minute
+
+// partialRevokesConfirmTimeout bounds the per-site partial_revokes check.
+const partialRevokesConfirmTimeout = 15 * time.Second
+
+// restrictSystemSchema applies appSystemSchemaRevoke to every role that asks
+// for it. ensure must first confirm partial_revokes=ON on every site: the
+// revoke replicates, and a replica with partial_revokes OFF stops its SQL
+// thread on it.
+func restrictSystemSchema(ctx context.Context, db *sql.DB, roles []credentialRole, ensure func(context.Context) error) error {
+	var restricted []credentialRole
+	for _, role := range roles {
+		if role.restrictSystemSchema {
+			restricted = append(restricted, role)
+		}
+	}
+	if len(restricted) == 0 {
+		return nil
+	}
+	if err := ensure(ctx); err != nil {
+		return fmt.Errorf("restrict %s user on the mysql schema: partial_revokes not confirmed on every site: %w",
+			restricted[0].name, err)
+	}
+	for _, role := range restricted {
+		username, _, _ := strings.Cut(role.secretName, "\x00")
+		stmt := fmt.Sprintf(appSystemSchemaRevoke, escapeSingleQuotes(username))
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("exec %s: %w", credentialStatementErrorLabel(role.name, stmt), err)
 		}
@@ -236,28 +358,30 @@ func credentialStatementErrorLabel(roleName, stmt string) string {
 	return fmt.Sprintf("%s statement %q", roleName, truncateSQL(stmt))
 }
 
+// computeCredentialHash fingerprints the referenced Secrets' contents with
+// the group's digest key (see secret_digest.go): the result is published in
+// an annotation on the group, readable by principals denied Secret access,
+// so an unkeyed digest would let them verify password guesses offline.
 func (r *MysqlFailoverGroupReconciler) computeCredentialHash(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
-	h := sha256.New()
-	names := fg.Spec.AllReferencedSecretNames()
-	sort.Strings(names)
-	for _, name := range names {
+	key, err := ensureDigestKey(ctx, r.Client, r.APIReader, r.Scheme, fg)
+	if err != nil {
+		return "", err
+	}
+	secrets := make(map[string]map[string][]byte)
+	for _, name := range fg.Spec.AllReferencedSecretNames() {
 		var s corev1.Secret
 		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err != nil {
 			return "", fmt.Errorf("get secret %s: %w", name, err)
 		}
-		keys := make([]string, 0, len(s.Data))
-		for k := range s.Data {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(h, "%s/%s=%x\n", name, k, sha256.Sum256(s.Data[k]))
-		}
+		secrets[name] = s.Data
 	}
+	h := sha256.New()
+	fmt.Fprintf(h, "grants=%s\n", credentialGrantsVersion)
+	fmt.Fprintf(h, "secrets=%s\n", secretContentDigest(key, secrets))
 	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 
-func (r *MysqlFailoverGroupReconciler) setCredentialHash(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, hash string) error {
+func (r *MysqlFailoverGroupReconciler) setCredentialAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, key, hash string) error {
 	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		var fresh v1alpha1.MysqlFailoverGroup
 		if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &fresh); err != nil {
@@ -266,7 +390,7 @@ func (r *MysqlFailoverGroupReconciler) setCredentialHash(ctx context.Context, fg
 		if fresh.Annotations == nil {
 			fresh.Annotations = make(map[string]string)
 		}
-		fresh.Annotations[credentialHashAnnotation] = hash
+		fresh.Annotations[key] = hash
 		return r.Update(ctx, &fresh)
 	})
 }

@@ -687,6 +687,15 @@ func TestValidateSanityQuery(t *testing.T) {
 		{name: "multi-statement", in: "SELECT 1; DELETE FROM t", wantErr: true},
 		{name: "newline rejected", in: "SELECT\n1", wantErr: true},
 		{name: "carriage return rejected", in: "SELECT\r1", wantErr: true},
+		{name: "lowercase select", in: "select 1", want: "select 1"},
+		{name: "cte", in: "WITH x AS (SELECT 1) SELECT * FROM x", want: "WITH x AS (SELECT 1) SELECT * FROM x"},
+		{name: "parenthesized", in: "(SELECT 1)", want: "(SELECT 1)"},
+		{name: "shell escape command", in: "SELECT 1 \\! id", wantErr: true},
+		{name: "leading shell escape", in: "\\! id", wantErr: true},
+		{name: "system command", in: "system id", wantErr: true},
+		{name: "source command", in: "source /etc/passwd", wantErr: true},
+		{name: "selector prefix is not select", in: "selectx 1", wantErr: true},
+		{name: "non-select statement", in: "DROP DATABASE orders", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

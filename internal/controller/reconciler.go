@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,7 +64,7 @@ const (
 	// Bump when the rendered MySQL Deployment pod spec changes without a
 	// corresponding user-facing spec field change, so existing pods roll
 	// forward to the new safe defaults.
-	deploymentPodRenderVersion = "deployment-pod-render-v5-mysqld-boots-read-only"
+	deploymentPodRenderVersion = "deployment-pod-render-v7-prestop-mysql-pwd"
 
 	// sidecarLivenessPath is the sidecar's liveness probe target. It must
 	// not depend on MySQL: the sidecar fences MySQL when MySQL misbehaves,
@@ -270,6 +273,12 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	r.warnOnSidecarVersionSkew(ctx, &fg)
 
+	// The runner's drift check only reads the digest key, so it must exist
+	// even when every Deployment is deferred to the ordered update.
+	if _, err := ensureDigestKey(ctx, r.Client, r.APIReader, r.Scheme, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensure secret digest key: %w", err)
+	}
+
 	// Encryption-at-rest must settle before anything renders: both the
 	// per-site ConfigMap (which carries "read_only" for the keyring
 	// component) and the Deployment (which picks a Secret projection or
@@ -394,6 +403,9 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 			logger.Error(err, "credential reconciliation failed, will retry")
 			r.Recorder.Eventf(&fg, corev1.EventTypeWarning, "CredentialReconcileFailed",
 				"failed to reconcile MySQL users: %v", err)
+			// Nothing else wakes this up: the step can be waiting on a
+			// site that comes back without touching the CR.
+			deferredRequeue = minPositiveDuration(deferredRequeue, credentialRetryInterval)
 		}
 	}
 
@@ -449,6 +461,29 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: pfRequeue}, nil
 	}
 
+	// Sync pod labels based on status
+	if err := r.syncPodLabels(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
+	}
+
+	// Mirror the same sweep for Dragonfly pods so the active service
+	// selector follows the active site (or the in-flight planned-
+	// failover target). No-op when spec.dragonfly is disabled.
+	if err := r.syncDragonflyPodLabels(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("sync dragonfly pod labels: %w", err)
+	}
+
+	// Backup work runs after the label syncs above: those labels route the
+	// primary and replica Services, so a failing backup step must not
+	// leave them stale.
+	if err := r.reconcileS3CredentialsCondition(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("check S3 credentials secrets: %w", err)
+	}
+
+	if err := r.reconcileScheduleTriggerRBAC(ctx, &fg); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile schedule trigger rbac: %w", err)
+	}
+
 	// Reconcile scheduled backups (one CronJob per schedule entry).
 	if err := r.reconcileBackupSchedules(ctx, &fg); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile backup schedules: %w", err)
@@ -467,18 +502,6 @@ func (r *MysqlFailoverGroupReconciler) Reconcile(ctx context.Context, req ctrl.R
 	backupRequeue, err := r.updateBackupStatus(ctx, &fg)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("update backup status: %w", err)
-	}
-
-	// Sync pod labels based on status
-	if err := r.syncPodLabels(ctx, &fg); err != nil {
-		return ctrl.Result{}, fmt.Errorf("sync pod labels: %w", err)
-	}
-
-	// Mirror the same sweep for Dragonfly pods so the active service
-	// selector follows the active site (or the in-flight planned-
-	// failover target). No-op when spec.dragonfly is disabled.
-	if err := r.syncDragonflyPodLabels(ctx, &fg); err != nil {
-		return ctrl.Result{}, fmt.Errorf("sync dragonfly pod labels: %w", err)
 	}
 
 	deferredRequeue = minPositiveDuration(deferredRequeue, backupRequeue)
@@ -700,32 +723,13 @@ func siteConfigMapName(group, site string) string {
 	return fmt.Sprintf("mysql-%s-%s-config", group, site)
 }
 
-// mysqlSecurityContext returns the mysql container security context.
-// When encryption is enabled, AppArmor and seccomp are set Unconfined:
-// GHA kind runners otherwise surface "Can't find error-message file"
-// for a path that exists and fail to load component_keyring_file
-// (MY-013712) despite valid global and local manifests. User-supplied
-// containerSecurityContext is still honored and only these two fields
-// are filled in when unset.
+// mysqlSecurityContext returns the mysql container security context:
+// spec.containerSecurityContext as given. Encryption used to default
+// AppArmor and seccomp to Unconfined for GHA kind runners; the private
+// mysqld copy (see mysqlRuntimeBinDir) is what avoids the host AppArmor
+// profile, so a cluster that still needs Unconfined sets it explicitly.
 func mysqlSecurityContext(fg *v1alpha1.MysqlFailoverGroup) *corev1.SecurityContext {
-	sc := fg.Spec.ContainerSecurityContext.DeepCopy()
-	if !fg.Spec.EncryptionEnabled() {
-		return sc
-	}
-	if sc == nil {
-		sc = &corev1.SecurityContext{}
-	}
-	if sc.AppArmorProfile == nil {
-		sc.AppArmorProfile = &corev1.AppArmorProfile{
-			Type: corev1.AppArmorProfileTypeUnconfined,
-		}
-	}
-	if sc.SeccompProfile == nil {
-		sc.SeccompProfile = &corev1.SeccompProfile{
-			Type: corev1.SeccompProfileTypeUnconfined,
-		}
-	}
-	return sc
+	return fg.Spec.ContainerSecurityContext.DeepCopy()
 }
 
 // configInitScript copies the operator-managed my.cnf fragments into the
@@ -797,6 +801,16 @@ func desiredSiteConfigMapName(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.Sit
 
 func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMaps(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) error {
 	for _, site := range fg.Spec.Sites {
+		if keys := unsafeMySQLConfKeys(fg, site); len(keys) > 0 && r.Recorder != nil {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "MysqlConfIgnored",
+				"site %s: ignoring mysqlConf keys %s: keys must match [A-Za-z0-9_.-]+ and values must not contain line breaks",
+				site.Name, strings.Join(keys, ", "))
+		}
+		if keys := shadowedMySQLConfKeys(fg, site); len(keys) > 0 && r.Recorder != nil {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "MysqlConfIgnored",
+				"site %s: ignoring mysqlConf keys %s: they override an operator-owned setting",
+				site.Name, strings.Join(keys, ", "))
+		}
 		if err := r.reconcileSiteConfigMap(ctx, fg, site); err != nil {
 			return err
 		}
@@ -834,6 +848,31 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteConfigMap(ctx context.Contex
 	return err
 }
 
+// mysqlOptionKeyPattern is the shape of a my.cnf option name.
+var mysqlOptionKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// unsafeMySQLSetting reports a spec.mysqlConf entry that cannot be written
+// as one my.cnf line: a line break in the key or value would inject further
+// directives or [section] headers, overriding operator-owned settings.
+func unsafeMySQLSetting(key, value string) bool {
+	return !mysqlOptionKeyPattern.MatchString(key) || strings.ContainsAny(value, "\r\n\x00")
+}
+
+// unsafeMySQLConfKeys lists the spec.mysqlConf keys, group-level then the
+// site's, that generateMyCnf drops as unsafe.
+func unsafeMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) []string {
+	var out []string
+	for _, raw := range []map[string]string{fg.Spec.MysqlConf, site.MysqlConf} {
+		for k, v := range raw {
+			if unsafeMySQLSetting(k, v) {
+				out = append(out, strconv.Quote(k))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func normalizedMySQLSettings(raw map[string]string) map[string]string {
 	keys := make([]string, 0, len(raw))
 	for key := range raw {
@@ -842,9 +881,90 @@ func normalizedMySQLSettings(raw map[string]string) map[string]string {
 	sort.Strings(keys)
 	out := make(map[string]string, len(raw))
 	for _, key := range keys {
+		if unsafeMySQLSetting(key, raw[key]) {
+			continue
+		}
 		out[strings.ReplaceAll(key, "_", "-")] = raw[key]
 	}
 	return out
+}
+
+// mysqlOptionPrefixes are the modifiers MySQL accepts in front of an option
+// name: loose- ignores an unknown option, skip-/disable-/enable- set a
+// boolean, maximum- caps a variable.
+var mysqlOptionPrefixes = []string{"loose-", "skip-", "disable-", "enable-", "maximum-"}
+
+// shadowsOwnedSetting reports whether key is a prefixed spelling of an
+// operator-owned option (loose-gtid-mode, skip-log-bin, ...). The rendered
+// my.cnf is sorted and MySQL honours the last occurrence, so such a key
+// could override the owned value.
+//
+// loose-plugin-load-add is exempt: plugin-load-add appends to the plugin
+// list rather than replacing it, so it cannot remove mysql_clone.so, and the
+// loose- spelling is how a group loads extra plugins next to the owned one.
+func shadowsOwnedSetting(key string, owned map[string]string) bool {
+	if _, ok := owned[key]; ok {
+		return false
+	}
+	if key == "loose-plugin-load-add" {
+		return false
+	}
+	for k := key; ; {
+		trimmed := k
+		for _, p := range mysqlOptionPrefixes {
+			trimmed = strings.TrimPrefix(trimmed, p)
+			if trimmed != k {
+				break
+			}
+		}
+		if trimmed == k {
+			return false
+		}
+		if _, ok := owned[trimmed]; ok {
+			return true
+		}
+		k = trimmed
+	}
+}
+
+// ownedMySQLSettings returns the my.cnf settings that group and site
+// mysqlConf overrides cannot change.
+func ownedMySQLSettings(fg *v1alpha1.MysqlFailoverGroup) map[string]string {
+	// These settings are operator-owned safety invariants and cannot be
+	// weakened by group or site overrides.
+	owned := map[string]string{
+		"gtid-mode": "ON", "enforce-gtid-consistency": "ON",
+		"log-bin": "/var/lib/mysql/mysql-bin", "log-replica-updates": "ON",
+		"skip-replica-start": "ON", "plugin-load-add": "mysql_clone.so",
+		// Grant names treat `_` and `%` literally, and the app role's
+		// mysql schema revoke can replicate; see appSystemSchemaRevoke.
+		"partial-revokes": "ON",
+	}
+
+	// Encryption coverage is likewise operator-owned: the security claim
+	// depends on these settings being exactly what spec.encryptionAtRest
+	// asked for, so a spec.mysqlConf override for the same keys must not
+	// be able to silently downgrade a site to plaintext redo logs.
+	for k, v := range encryptionMySQLSettings(fg) {
+		owned[k] = v
+	}
+	return owned
+}
+
+// shadowedMySQLConfKeys lists the spec.mysqlConf keys, group-level then the
+// site's, that generateMyCnf drops as prefixed spellings of an owned option.
+func shadowedMySQLConfKeys(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) []string {
+	owned := ownedMySQLSettings(fg)
+	var out []string
+	for _, raw := range []map[string]string{fg.Spec.MysqlConf, site.MysqlConf} {
+		for k := range normalizedMySQLSettings(raw) {
+			if shadowsOwnedSetting(k, owned) {
+				out = append(out, strconv.Quote(k))
+			}
+		}
+	}
+	sort.Strings(out)
+	return slices.Compact(out)
 }
 
 func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) string {
@@ -905,31 +1025,21 @@ func generateMyCnf(fg *v1alpha1.MysqlFailoverGroup, sites ...v1alpha1.SiteSpec) 
 		}
 	}
 
-	// These settings are operator-owned safety invariants and cannot be
-	// weakened by group or site overrides.
-	for k, v := range map[string]string{
-		"gtid-mode": "ON", "enforce-gtid-consistency": "ON",
-		"log-bin": "/var/lib/mysql/mysql-bin", "log-replica-updates": "ON",
-		"skip-replica-start": "ON", "plugin-load-add": "mysql_clone.so",
-	} {
+	owned := ownedMySQLSettings(fg)
+
+	// Prefixed spellings of an owned option (skip-log-bin, disable-log-bin,
+	// loose-innodb-redo-log-encrypt, ...; underscore spellings are already
+	// normalized to hyphens) would sort after the owned key, and MySQL
+	// honors the last occurrence. Strip them so group or site overrides
+	// cannot reintroduce them.
+	for k := range settings {
+		if shadowsOwnedSetting(k, owned) {
+			delete(settings, k)
+		}
+	}
+	for k, v := range owned {
 		settings[k] = v
 	}
-
-	// Encryption coverage is likewise operator-owned: the security claim
-	// depends on these settings being exactly what spec.encryptionAtRest
-	// asked for, so a spec.mysqlConf override for the same keys must not
-	// be able to silently downgrade a site to plaintext redo logs.
-	for k, v := range encryptionMySQLSettings(fg) {
-		settings[k] = v
-	}
-
-	// skip-log-bin / disable-log-bin (underscore spellings are normalized to
-	// hyphens by normalizedMySQLSettings) would silently defeat the enforced
-	// log-bin invariant: the sorted render places them after log-bin and
-	// MySQL honors the last occurrence. Strip both aliases outright so group
-	// or site overrides cannot reintroduce them.
-	delete(settings, "skip-log-bin")
-	delete(settings, "disable-log-bin")
 
 	// Build sorted output for deterministic ConfigMap content
 	keys := make([]string, 0, len(settings))
@@ -991,31 +1101,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		},
 	}
 
-	// Fetch TLS Secret data so certificate changes are reflected in the spec hash.
-	var tlsSecretData map[string][]byte
-	if fg.Spec.TLS != nil {
-		var tlsSecret corev1.Secret
-		tlsSecretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.TLS.SecretName}
-		if err := r.Get(ctx, tlsSecretKey, &tlsSecret); err != nil {
-			if !errors.IsNotFound(err) {
-				return fmt.Errorf("get TLS secret %s: %w", fg.Spec.TLS.SecretName, err)
-			}
-			log.FromContext(ctx).Info("TLS secret not found yet, skipping TLS hash", "secret", fg.Spec.TLS.SecretName)
-		} else {
-			tlsSecretData = tlsSecret.Data
-		}
+	// Secret contents enter the spec hash as a keyed digest so password
+	// and certificate changes roll the pods (see secret_digest.go).
+	digestKey, err := ensureDigestKey(ctx, r.Client, r.APIReader, r.Scheme, fg)
+	if err != nil {
+		return err
 	}
-
-	// Fetch credential secret data so password changes trigger rolling restart.
-	var credSecretData map[string]map[string][]byte
-	if fg.Spec.UsesCredentials() {
-		credSecretData = make(map[string]map[string][]byte)
-		for _, name := range fg.Spec.AllReferencedSecretNames() {
-			var s corev1.Secret
-			if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err == nil {
-				credSecretData[name] = s.Data
-			}
-		}
+	secretInputs, err := specSecretInputs(ctx, r.Client, fg)
+	if err != nil {
+		return err
 	}
 	// Encryption-at-rest rendering is driven by the site's observed
 	// keyring phase, not by the spec alone: a site is only rendered
@@ -1029,9 +1123,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		siteKeyringRotating(fg, site.Name),
 	)
 
-	specHash := ComputeSpecHash(fg, site, tlsSecretData, credSecretData)
+	specHash := ComputeSpecHash(fg, site, secretContentDigest(digestKey, secretInputs))
 
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		if err := controllerutil.SetControllerReference(fg, deploy, r.Scheme); err != nil {
 			return err
 		}
@@ -1193,9 +1287,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			// DeepCopy so each container has an independent pointer
 			// (the cached spec pointer must not be shared across
 			// containers in the rendered PodSpec).
-			// Encryption additionally unconfines AppArmor/seccomp so the
-			// keyring component can load on hosts whose runtime defaults
-			// block mysqld from reading errmsg.sys / loading components.
 			SecurityContext: mysqlSecurityContext(fg),
 		}
 		// Encryption: copy component files onto image-owned paths, then
@@ -1237,9 +1328,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 			mysqlContainer.Lifecycle = &corev1.Lifecycle{
 				PreStop: &corev1.LifecycleHandler{
 					Exec: &corev1.ExecAction{
+						// MYSQL_PWD keeps the password off argv, as in
+						// the legacy branch below.
 						Command: []string{
 							"sh", "-c",
-							`mysql -u "$(cat /etc/mysql/creds/operator/username)" -p"$(cat /etc/mysql/creds/operator/password)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
+							`MYSQL_PWD="$(cat /etc/mysql/creds/operator/password)" mysql -u "$(cat /etc/mysql/creds/operator/username)" -e 'SET GLOBAL super_read_only=ON' 2>/dev/null || true`,
 						},
 					},
 				},
@@ -1265,20 +1358,16 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 				appendCredVolume("backup")
 			}
 
+			// Files rather than MYSQL_USER/MYSQL_PASSWORD env so the
+			// operator password stays out of the pod spec's env and
+			// /proc/<pid>/environ. Rotation still rolls the pod through
+			// the spec hash, and the sidecar re-reads the files on start.
 			sidecarEnv = append([]corev1.EnvVar{
-				{Name: "MYSQL_USER", ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-						Key:                  "username",
-					},
-				}},
-				{Name: "MYSQL_PASSWORD", ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: operatorSecretName},
-						Key:                  "password",
-					},
-				}},
+				{Name: "MYSQL_CREDS_DIR", Value: "/etc/mysql/creds/operator"},
 			}, sidecarEnv...)
+			sidecarVolumeMounts = append(sidecarVolumeMounts, corev1.VolumeMount{
+				Name: "creds-operator", MountPath: "/etc/mysql/creds/operator", ReadOnly: true,
+			})
 		} else {
 			mysqlContainer.EnvFrom = []corev1.EnvFromSource{
 				{
@@ -1557,9 +1646,22 @@ func (r *MysqlFailoverGroupReconciler) reconcileDeployment(ctx context.Context, 
 		if fg.Spec.TerminationGracePeriodSeconds != nil {
 			deploy.Spec.Template.Spec.TerminationGracePeriodSeconds = fg.Spec.TerminationGracePeriodSeconds
 		}
+		deploy.Spec.Template.Spec.AutomountServiceAccountToken = mysqlPodAutomountToken(fg)
 		return nil
 	})
 	return err
+}
+
+// mysqlPodAutomountToken keeps the namespace's default ServiceAccount
+// token out of MySQL pods: neither mysqld nor the sidecar talks to the
+// Kubernetes API. User-supplied extra containers may (a log shipper
+// enriching with pod metadata), so pods that carry any keep the
+// Kubernetes default.
+func mysqlPodAutomountToken(fg *v1alpha1.MysqlFailoverGroup) *bool {
+	if len(fg.Spec.ExtraContainers) > 0 || len(fg.Spec.ExtraInitContainers) > 0 {
+		return nil
+	}
+	return boolPtr(false)
 }
 
 func (r *MysqlFailoverGroupReconciler) reconcileSiteService(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec) error {
@@ -2021,9 +2123,8 @@ func (r *MysqlFailoverGroupReconciler) syncPodLabels(ctx context.Context, fg *v1
 }
 
 // ComputeSpecHash returns a short hash of the spec fields that should trigger a deployment update.
-// tlsSecretData is the raw data from the TLS Secret (nil when TLS is not configured).
-// credSecretData is a map of secret-name→data for credential secrets (nil in legacy mode).
-func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tlsSecretData map[string][]byte, credSecretData map[string]map[string][]byte) string {
+// secretDigest is secretContentDigest over specSecretInputs ("" when no Secret is referenced).
+func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, secretDigest string) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "deploymentPodRenderVersion=%s\n", deploymentPodRenderVersion)
 	fmt.Fprintf(h, "image=%s\n", fg.Spec.Image)
@@ -2106,36 +2207,11 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, tl
 			keyringComponentConfigJSON(fg.Spec.KeyringDataFilePath(), sealed))
 	}
 
-	// Include TLS certificate data so cert rotation triggers a rolling update.
-	if len(tlsSecretData) > 0 {
-		tlsKeys := make([]string, 0, len(tlsSecretData))
-		for k := range tlsSecretData {
-			tlsKeys = append(tlsKeys, k)
-		}
-		sort.Strings(tlsKeys)
-		for _, k := range tlsKeys {
-			fmt.Fprintf(h, "tls.%s=%x\n", k, sha256.Sum256(tlsSecretData[k]))
-		}
-	}
-	// Include credential secret data so password rotation triggers pod rolling restart.
-	if len(credSecretData) > 0 {
-		credNames := make([]string, 0, len(credSecretData))
-		for name := range credSecretData {
-			credNames = append(credNames, name)
-		}
-		sort.Strings(credNames)
-		for _, name := range credNames {
-			data := credSecretData[name]
-			dataKeys := make([]string, 0, len(data))
-			for k := range data {
-				dataKeys = append(dataKeys, k)
-			}
-			sort.Strings(dataKeys)
-			for _, k := range dataKeys {
-				fmt.Fprintf(h, "cred.%s.%s=%x\n", name, k, sha256.Sum256(data[k]))
-			}
-		}
-	}
+	// Secret contents (TLS material and, in credentials mode, every
+	// referenced credential Secret) enter only as a keyed digest, so
+	// rotating a password or certificate rolls the pods while the
+	// published hash cannot be used to check password guesses.
+	fmt.Fprintf(h, "secrets=%s\n", secretDigest)
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 

@@ -87,3 +87,23 @@ func TestUnappliedRelayLog(t *testing.T) {
 		})
 	}
 }
+
+func TestChangeReplicationSourceSQL(t *testing.T) {
+	base := "CHANGE REPLICATION SOURCE TO SOURCE_HOST='h', SOURCE_USER='u', SOURCE_PASSWORD='p''w', SOURCE_AUTO_POSITION=1"
+	tests := []struct {
+		name string
+		ssl  bool
+		want string
+	}{
+		{"tls verifies the source against the group CA", true, base + ", SOURCE_SSL=1, SOURCE_SSL_CA='/etc/mysql/tls/ca.crt'"},
+		{"plaintext fetches the source public key", false, base + ", GET_SOURCE_PUBLIC_KEY=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := changeReplicationSourceSQL(ReplicationSourceOpts{Host: "h", User: "u", Password: "p'w", UseSSL: tt.ssl})
+			if got != tt.want {
+				t.Fatalf("got  %s\nwant %s", got, tt.want)
+			}
+		})
+	}
+}

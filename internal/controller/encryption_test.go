@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -92,6 +93,82 @@ func TestEncryptionSettingsOverrideUserConf(t *testing.T) {
 	} {
 		if !strings.Contains(cnf, want) {
 			t.Errorf("generated my.cnf must contain %q despite a user override:\n%s", want, cnf)
+		}
+	}
+}
+
+// TestEncryptionSettingsResistPrefixedAndInjectedOverrides covers the
+// spellings an exact-key override misses: MySQL option prefixes, which
+// sort after the owned key and win as the last occurrence, and a line
+// break in a value, which would write a directive of its own.
+func TestEncryptionSettingsResistPrefixedAndInjectedOverrides(t *testing.T) {
+	fg := encTestFG()
+	fg.Spec.MysqlConf = map[string]string{
+		"loose_innodb_redo_log_encrypt":        "OFF",
+		"skip-binlog-encryption":               "",
+		"disable-default-table-encryption":     "",
+		"max_connections":                      "777\ninnodb-undo-log-encrypt=OFF",
+		"x\n[mysqld]\ninnodb-undo-log-encrypt": "OFF",
+	}
+	fg.Spec.Sites[0].MysqlConf = map[string]string{"loose-skip-binlog-encryption": ""}
+	cnf := generateMyCnf(fg, fg.Spec.Sites[0])
+	for _, forbidden := range []string{
+		"loose-innodb-redo-log-encrypt", "skip-binlog-encryption", "disable-default-table-encryption",
+		"innodb-undo-log-encrypt=OFF", "max-connections=777",
+	} {
+		if strings.Contains(cnf, forbidden) {
+			t.Errorf("generated my.cnf must not contain %q:\n%s", forbidden, cnf)
+		}
+	}
+	if strings.Count(cnf, "[mysqld]") != 1 {
+		t.Errorf("generated my.cnf must have exactly one section header:\n%s", cnf)
+	}
+	if got := unsafeMySQLConfKeys(fg, fg.Spec.Sites[0]); len(got) != 2 {
+		t.Errorf("unsafeMySQLConfKeys = %v, want the two line-break entries", got)
+	}
+	wantShadowed := []string{
+		`"disable-default-table-encryption"`, `"loose-innodb-redo-log-encrypt"`,
+		`"loose-skip-binlog-encryption"`, `"skip-binlog-encryption"`,
+	}
+	if got := shadowedMySQLConfKeys(fg, fg.Spec.Sites[0]); !slices.Equal(got, wantShadowed) {
+		t.Errorf("shadowedMySQLConfKeys = %v, want %v", got, wantShadowed)
+	}
+}
+
+// plugin-load-add appends rather than replaces, so the loose- spelling a
+// group uses to load extra plugins must survive next to mysql_clone.so.
+func TestGenerateMyCnf_KeepsLoosePluginLoadAdd(t *testing.T) {
+	fg := encTestFG()
+	fg.Spec.MysqlConf = map[string]string{"loose_plugin_load_add": "auth_socket.so"}
+	cnf := generateMyCnf(fg, fg.Spec.Sites[0])
+	for _, want := range []string{"loose-plugin-load-add=auth_socket.so\n", "plugin-load-add=mysql_clone.so\n"} {
+		if !strings.Contains(cnf, want) {
+			t.Errorf("generated my.cnf must contain %q:\n%s", want, cnf)
+		}
+	}
+	if got := shadowedMySQLConfKeys(fg, fg.Spec.Sites[0]); len(got) != 0 {
+		t.Errorf("shadowedMySQLConfKeys = %v, want none", got)
+	}
+}
+
+func TestShadowsOwnedSetting(t *testing.T) {
+	owned := map[string]string{"log-bin": "x", "skip-replica-start": "ON", "gtid-mode": "ON", "plugin-load-add": "mysql_clone.so"}
+	for key, want := range map[string]bool{
+		"log-bin":                         false,
+		"skip-log-bin":                    true,
+		"disable-log-bin":                 true,
+		"loose-skip-log-bin":              true,
+		"loose-gtid-mode":                 true,
+		"skip-replica-start":              false,
+		"skip-skip-replica-start":         true,
+		"log-bin-trust-function-creators": false,
+		"loose-log-bin-index":             false,
+		"max-connections":                 false,
+		"loose-plugin-load-add":           false,
+		"skip-plugin-load-add":            true,
+	} {
+		if got := shadowsOwnedSetting(key, owned); got != want {
+			t.Errorf("shadowsOwnedSetting(%q) = %v, want %v", key, got, want)
 		}
 	}
 }
@@ -482,11 +559,11 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 	// running a writable keyring.
 	base := encTestFG()
 	setSitePhase(base, "dc1", v1alpha1.KeyringPhaseUnsealed, "")
-	unsealed := ComputeSpecHash(base, base.Spec.Sites[0], nil, nil)
+	unsealed := ComputeSpecHash(base, base.Spec.Sites[0], "")
 
 	sealed := encTestFG()
 	setSitePhase(sealed, "dc1", v1alpha1.KeyringPhaseSealed, "mysql-lion-dc1-keyring-v1")
-	sealedHash := ComputeSpecHash(sealed, sealed.Spec.Sites[0], nil, nil)
+	sealedHash := ComputeSpecHash(sealed, sealed.Spec.Sites[0], "")
 
 	if unsealed == sealedHash {
 		t.Fatal("spec hash must change when a site is sealed")
@@ -496,7 +573,7 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 	// the pod keeps projecting the old Secret.
 	v2 := encTestFG()
 	setSitePhase(v2, "dc1", v1alpha1.KeyringPhaseSealed, "mysql-lion-dc1-keyring-v2")
-	if ComputeSpecHash(v2, v2.Spec.Sites[0], nil, nil) == sealedHash {
+	if ComputeSpecHash(v2, v2.Spec.Sites[0], "") == sealedHash {
 		t.Fatal("spec hash must change when the escrow version changes")
 	}
 }
@@ -504,8 +581,8 @@ func TestComputeSpecHash_SealTransitionRollsPod(t *testing.T) {
 func TestComputeSpecHash_UnchangedWhenEncryptionDisabled(t *testing.T) {
 	// Existing unencrypted clusters must not roll just because the
 	// operator learned about encryption.
-	a := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], nil, nil)
-	b := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], nil, nil)
+	a := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], "")
+	b := ComputeSpecHash(newTestFG(), newTestFG().Spec.Sites[0], "")
 	if a != b {
 		t.Fatal("hash must be stable")
 	}
@@ -517,9 +594,9 @@ func TestComputeSpecHash_UnchangedWhenEncryptionDisabled(t *testing.T) {
 func TestComputeSpecHash_EscrowURLChangeRollsEncryptedPods(t *testing.T) {
 	fg := encTestFG()
 	t.Setenv("BLOODRAVEN_DEFAULT_ESCROW_URL", "https://old.example/keyring/escrow")
-	oldHash := ComputeSpecHash(fg, fg.Spec.Sites[0], nil, nil)
+	oldHash := ComputeSpecHash(fg, fg.Spec.Sites[0], "")
 	t.Setenv("BLOODRAVEN_DEFAULT_ESCROW_URL", "https://new.example/keyring/escrow")
-	if newHash := ComputeSpecHash(fg, fg.Spec.Sites[0], nil, nil); newHash == oldHash {
+	if newHash := ComputeSpecHash(fg, fg.Spec.Sites[0], ""); newHash == oldHash {
 		t.Fatal("changing the escrow endpoint must roll encrypted sidecars")
 	}
 }

@@ -446,11 +446,12 @@ func TestMysqlDatabaseUsersSecretRenameTransfersAccount(t *testing.T) {
 	h.reconcile()
 	mdb := h.requireReady() // not Failed/PreExistingUser
 
-	// The ordinary apply (GRANT + surplus REVOKE of undeclared privileges)
-	// is expected; the removal pass's REVOKE ALL and DROP USER are not.
+	// The ordinary apply (GRANT + surplus REVOKE of undeclared privileges
+	// and of the legacy wildcard grant row) is expected; the removal
+	// pass's REVOKE ALL on the schema's own grant row and DROP USER are not.
 	for _, stmt := range h.server.statementsSince(before) {
 		if strings.HasPrefix(stmt, "DROP USER") ||
-			(strings.HasPrefix(stmt, "REVOKE") && strings.Contains(stmt, "ALL PRIVILEGES ON")) {
+			(strings.HasPrefix(stmt, "REVOKE") && strings.Contains(stmt, "ALL PRIVILEGES ON `"+h.server.grantRowKey(mdbDatabase)+"`")) {
 			t.Fatalf("secretName rename ran %q; the account is current desired state under the new key", stmt)
 		}
 	}

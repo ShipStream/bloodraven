@@ -226,3 +226,27 @@ For an isolated writable site, probe `/status` (`self_fenced`) and `/peer/active
 1. Do not restart the sidecar to "re-run the safety net". The monitor applies the same rule on its own once MySQL answers, and a restart only adds a window with no fencing agent.
 2. If a non-active site is writable and the sidecar logs show no pending `safety net:` work and no topology view, fence it by hand (playbook 1, step 1) and investigate why neither the operator nor a peer reported an active site.
 3. A short stall (under 30s) does not re-arm the safety net, by design: a slow query on the active primary must not fence it. A `mysqld` that restarts that quickly comes back `read_only=ON` (every `mysqld` is started with `--read-only=ON`), so application users cannot write; it is super-fenced by the topology-mismatch rule only if someone makes it writable, and the operator re-asserts it if it was the primary. A pod still on a pre-`--read-only` spec (mid-upgrade) comes back writable and is fenced only by the topology-mismatch rule or the operator.
+
+## 9. `app` user's mysql schema restriction pending, or a replica stopped on a partial revoke
+
+The operator partially revokes the `app` user's write and DDL privileges on the `mysql` system schema. That needs `partial_revokes=ON`, and the revoke replicates, so the operator first turns it ON on every site and applies the revoke only once all of them confirm.
+
+### Symptoms
+- `CredentialReconcileFailed` events containing `partial_revokes not confirmed on every site`, naming a site.
+- Or, on a replica: `Replica_SQL_Running: No` with the failed transaction being `REVOKE ... ON mysql.* FROM 'app'@'%'`. This happens only when a site was switched back to `partial_revokes=OFF` by hand, or a site outside the group's spec replicates from it.
+
+### Diagnostic steps
+1. Check each site:
+   ```bash
+   kubectl exec -n <ns> <pod> -c mysql -- mysql -N -e "SELECT @@GLOBAL.partial_revokes"
+   ```
+2. Check whether the restriction landed on the primary:
+   ```bash
+   kubectl exec -n <ns> <primary-pod> -c mysql -- mysql -N -e \
+     "SELECT User_attributes FROM mysql.user WHERE User='<app-user>'"
+   ```
+   It should list a `Restrictions` entry for `"Database": "mysql"`. The group's `shipstream.io/system-schema-restriction` annotation equals `shipstream.io/credential-hash` once it has.
+
+### Safe remediation
+1. Pending restriction: bring the named site back. The operator retries every minute and turns `partial_revokes` ON itself. Nothing to run by hand.
+2. Stopped replica: `SET GLOBAL partial_revokes = ON; START REPLICA;` on that replica. Do not skip the transaction; skipping it leaves the replica without the restriction, so after a failover the `app` user could write the grant tables there.

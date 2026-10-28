@@ -54,11 +54,12 @@ const (
 
 	dragonflyContainerName = "dragonfly"
 
-	// DragonflyAuthEnvVar is the env var name into which the operator
-	// projects the Dragonfly auth password. Used to render --requirepass
-	// and --masterauth from a Secret without exposing the value in the
-	// pod spec.
-	DragonflyAuthEnvVar = "DRAGONFLY_PASSWORD"
+	// DragonflyAuthEnvVar and DragonflyMasterAuthEnvVar set Dragonfly's
+	// --requirepass and --masterauth through its DFLY_<flag> env
+	// mechanism, so the password is neither in the pod spec nor in the
+	// process argv.
+	DragonflyAuthEnvVar       = "DFLY_requirepass"
+	DragonflyMasterAuthEnvVar = "DFLY_masterauth"
 )
 
 // dragonflyStatefulSetName returns the deterministic StatefulSet name
@@ -293,22 +294,8 @@ func buildDragonflyArgs(spec *v1alpha1.DragonflySpec, port, adminPort int32) []s
 			args = append(args, "--s3_sign_payload="+strconv.FormatBool(*spec.Snapshot.S3SignPayload))
 		}
 	}
-	// Auth flags emitted only when a usable Secret reference exists; an
-	// empty SecretName would cause the pod to fail to start with a
-	// secret-not-found event rather than a clean reconcile error.
-	//
-	// --masterauth must match --requirepass: REPLICAOF authenticates to
-	// the master with masterauth. Without it, password-protected masters
-	// reject the replica PING with NOAUTH and Dragonfly surfaces
-	// "ERR replication cancelled", leaving non-active sites as stale
-	// masters forever.
-	if spec.Auth != nil && spec.Auth.SecretName != "" {
-		// $(VAR) syntax is expanded by the kubelet from the env block.
-		args = append(args,
-			"--requirepass=$("+DragonflyAuthEnvVar+")",
-			"--masterauth=$("+DragonflyAuthEnvVar+")",
-		)
-	}
+	// Auth (--requirepass/--masterauth) is set through env in
+	// buildDragonflyEnv, not here, so the password stays off argv.
 	args = append(args, filterDragonflyUserArgs(spec.Args)...)
 	return args
 }
@@ -388,16 +375,25 @@ func buildDragonflyEnv(spec *v1alpha1.DragonflySpec) []corev1.EnvVar {
 	if key == "" {
 		key = "password"
 	}
-	env := []corev1.EnvVar{
-		{
-			Name: DragonflyAuthEnvVar,
+	secretRef := func(name string) corev1.EnvVar {
+		return corev1.EnvVar{
+			Name: name,
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: spec.Auth.SecretName},
 					Key:                  key,
 				},
 			},
-		},
+		}
+	}
+	// --masterauth must match --requirepass: REPLICAOF authenticates to
+	// the master with masterauth. Without it, password-protected masters
+	// reject the replica PING with NOAUTH and Dragonfly surfaces
+	// "ERR replication cancelled", leaving non-active sites as stale
+	// masters forever.
+	env := []corev1.EnvVar{
+		secretRef(DragonflyAuthEnvVar),
+		secretRef(DragonflyMasterAuthEnvVar),
 	}
 	return append(env, buildDragonflySnapshotEnv(spec)...)
 }

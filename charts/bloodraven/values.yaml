@@ -22,7 +22,9 @@ serviceAccount:
   create: true
   # -- Annotations to add to the ServiceAccount
   annotations: {}
-  # -- Override the ServiceAccount name (defaults to fullname)
+  # -- Override the ServiceAccount name (defaults to fullname). Required when
+  # create is false: the chart binds the operator ClusterRole to this account
+  # and refuses to fall back to the namespace's default ServiceAccount.
   name: ""
 
 # -- Pod-level annotations
@@ -187,10 +189,11 @@ auxiliary:
     # -- Annotations for the auxiliary service
     annotations: {}
     # -- Comma-separated allowlist of Origin headers permitted on the
-    # /ws/status WebSocket upgrade. Default "*" (wildcard) matches the
-    # pre-hardening behavior — a narrower list is strongly recommended
-    # for production (e.g. "https://dashboard.example.com").
-    wsAllowedOrigins: "*"
+    # /ws/status WebSocket upgrade (e.g. "https://dashboard.example.com").
+    # Empty (default) allows same-origin browsers and clients that send no
+    # Origin. "*" accepts any origin, so any web page a user visits can
+    # read cluster topology through their browser; avoid it.
+    wsAllowedOrigins: ""
     # -- Cap on concurrent WebSocket clients connected to /ws/status.
     # Beyond this limit, additional upgrades are rejected with 429.
     # Defends against an attacker pinning the hub's clients map.

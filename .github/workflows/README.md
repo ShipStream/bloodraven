@@ -64,7 +64,7 @@ repository secrets.
 
 **Triggers:** Push of a semver tag matching `v*.*.*`
 
-**Required permissions:** `contents: write`, `packages: write`, `id-token: write` (for cosign OIDC signing)
+**Permissions:** `contents: read` by default. Write scopes are granted per job: `contents: write` for the draft/publish release jobs and the Helm job (`gh-pages` push), `packages: write` for the image and Helm OCI pushes, and `id-token: write` only for the image job (cosign OIDC signing).
 
 Steps:
 
@@ -74,7 +74,7 @@ Steps:
    - `ghcr.io/shipstream/bloodraven:{version}` and `:latest`
    - `ghcr.io/shipstream/bloodraven-sidecar:{version}` and `:latest`
 4. **Cosign image signing** — Keyless OIDC signing via Sigstore (no secrets required).
-5. **Helm chart** — Updates `Chart.yaml` `version`/`appVersion` from the tag, packages the chart, then publishes it to both GitHub Pages and GHCR OCI.
+5. **Helm chart** — Updates `Chart.yaml` `version`/`appVersion` from the tag, packages the chart, then publishes it to both GitHub Pages and GHCR OCI. The chart is not signed; only the images are.
 6. **Publish release** — After Docker and Helm jobs both succeed, the draft release is published. If either fails, the release remains in draft state.
 
 Release output locations:

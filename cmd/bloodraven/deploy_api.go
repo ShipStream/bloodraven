@@ -17,6 +17,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/controller"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	authv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -211,8 +212,8 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		deployError(w, err)
 		return
 	}
-	groupNamespace := ""
-	instances := []string{}
+	var namespaces []string
+	instancesByNamespace := map[string][]string{}
 	for _, db := range databases.Items {
 		if !db.DeletionTimestamp.IsZero() || db.Spec.GroupRef.Name != group || (instance != "" && db.Name != instance) {
 			continue
@@ -221,30 +222,55 @@ func (h *deployAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if caller.Namespace != identity.namespace || caller.ServiceAccount != identity.serviceAccount {
 				continue
 			}
-			if groupNamespace != "" && groupNamespace != db.Namespace {
-				deployJSON(w, 403, map[string]string{"error": "forbidden"})
-				return
+			if _, seen := instancesByNamespace[db.Namespace]; !seen {
+				namespaces = append(namespaces, db.Namespace)
 			}
-			groupNamespace = db.Namespace
-			instances = append(instances, db.Name)
+			instancesByNamespace[db.Namespace] = append(instancesByNamespace[db.Namespace], db.Name)
 		}
 	}
-	if len(instances) == 0 {
+	if len(namespaces) == 0 {
 		if handler == "grant" {
 			metrics.DeployLeaseGrantsTotal.WithLabelValues("", kind, "unauthorized").Inc()
 		}
 		deployJSON(w, 403, map[string]string{"error": "forbidden"})
 		return
 	}
+	var fg *v1alpha1.MysqlFailoverGroup
+	groupNamespace := ""
+	if len(namespaces) == 1 {
+		groupNamespace = namespaces[0]
+		fg = &v1alpha1.MysqlFailoverGroup{}
+		if err := h.reader.Get(ctx, types.NamespacedName{Namespace: groupNamespace, Name: group}, fg); err != nil {
+			deployError(w, err)
+			return
+		}
+	} else {
+		// A MysqlDatabase can name any group, so a database in a namespace
+		// without that group must not make the caller's real one ambiguous.
+		for _, ns := range namespaces {
+			candidate := &v1alpha1.MysqlFailoverGroup{}
+			if err := h.reader.Get(ctx, types.NamespacedName{Namespace: ns, Name: group}, candidate); apierrors.IsNotFound(err) {
+				continue
+			} else if err != nil {
+				deployError(w, err)
+				return
+			}
+			if fg != nil {
+				deployJSON(w, 403, map[string]string{"error": "forbidden"})
+				return
+			}
+			fg, groupNamespace = candidate, ns
+		}
+		if fg == nil {
+			deployJSON(w, 403, map[string]string{"error": "forbidden"})
+			return
+		}
+	}
+	instances := instancesByNamespace[groupNamespace]
 	if len(instances) == 1 {
 		instance = instances[0]
 	}
 	namespace = groupNamespace
-	fg := &v1alpha1.MysqlFailoverGroup{}
-	if err := h.reader.Get(ctx, types.NamespacedName{Namespace: groupNamespace, Name: group}, fg); err != nil {
-		deployError(w, err)
-		return
-	}
 	if !h.leader() {
 		deployJSON(w, 503, map[string]string{"error": "not_leader"})
 		return

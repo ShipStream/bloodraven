@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,7 +110,25 @@ type s3Store struct {
 	bucket   string
 }
 
+// validateS3EndpointURL requires an absolute http(s) URL with a host. The
+// CRD enforces the same shape; this covers objects stored before it did.
+func validateS3EndpointURL(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("s3 endpoint URL %q: %w", endpoint, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+		return fmt.Errorf("s3 endpoint URL %q must be an absolute http:// or https:// URL", endpoint)
+	}
+	return nil
+}
+
 func newS3Store(ctx context.Context, cfg *PITRS3Config) (*s3Store, error) {
+	if cfg.EndpointURL != "" {
+		if err := validateS3EndpointURL(cfg.EndpointURL); err != nil {
+			return nil, err
+		}
+	}
 	// Mirror the credential-file layout the backup/restore Python
 	// scripts expect: read AWS_* from files under AWSCredsDir if
 	// provided, otherwise fall through to the default SDK chain
@@ -506,6 +525,16 @@ func readTrimFile(path string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// readCredentialFile returns a mounted Secret key's bytes unmodified, for
+// values that must match exactly what the operator wrote into MySQL.
+func readCredentialFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // readOptionalTrimFile is like readTrimFile but treats a missing file

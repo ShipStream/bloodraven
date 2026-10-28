@@ -67,7 +67,7 @@ spec:
           effect: NoExecute
       containers:
         - name: rustfs
-          image: rustfs/rustfs:latest
+          image: rustfs/rustfs:1.0.4
           imagePullPolicy: IfNotPresent
           args:
             - /data

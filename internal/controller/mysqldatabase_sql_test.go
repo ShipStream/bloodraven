@@ -372,12 +372,13 @@ func TestRenderRevokeSurplus(t *testing.T) {
 		t.Fatalf("renderRevokeSurplus(, defaultHosts) error = %v", err)
 	}
 	want := "REVOKE IF EXISTS INSERT, UPDATE, DELETE, CREATE, CREATE TEMPORARY TABLES, CREATE VIEW, DROP, ALTER, INDEX, REFERENCES, " +
-		"LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, EXECUTE ON `acme_wms`.* FROM 'acme_app'@'%' IGNORE UNKNOWN USER"
+		"LOCK TABLES, SHOW VIEW, TRIGGER, EVENT, EXECUTE, CREATE ROUTINE, ALTER ROUTINE ON `acme_wms`.* FROM 'acme_app'@'%' IGNORE UNKNOWN USER"
 	if got != want {
 		t.Fatalf("renderRevokeSurplus(, defaultHosts) = %q, want %q", got, want)
 	}
 
-	// Every concrete privilege desired: nothing left to revoke.
+	// Every concrete privilege desired: only the routine privileges an
+	// earlier ALL PRIVILEGES grant would have conferred remain to revoke.
 	full := make([]v1alpha1.MysqlPrivilege, 0)
 	for _, name := range v1alpha1.AllowedPrivilegeNames() {
 		if name != string(v1alpha1.PrivilegeAllPrivileges) {
@@ -388,8 +389,9 @@ func TestRenderRevokeSurplus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderRevokeSurplus(, defaultHosts) error = %v", err)
 	}
-	if got != "" {
-		t.Fatalf("renderRevokeSurplus(full set, defaultHosts) = %q, want no statement", got)
+	want = "REVOKE IF EXISTS CREATE ROUTINE, ALTER ROUTINE ON `acme_wms`.* FROM 'acme_app'@'%' IGNORE UNKNOWN USER"
+	if got != want {
+		t.Fatalf("renderRevokeSurplus(full set, defaultHosts) = %q, want %q", got, want)
 	}
 
 	if _, err := renderRevokeSurplus("spec.owner secret username",
@@ -553,5 +555,55 @@ func TestHostSetHelpers(t *testing.T) {
 	}
 	if got := ledgerHosts(v1alpha1.MysqlDatabaseUserState{Username: "x"}); !reflect.DeepEqual(got, []string{"%"}) {
 		t.Fatalf("ledgerHosts(legacy) = %v", got)
+	}
+}
+
+func TestGrantDatabaseForms(t *testing.T) {
+	cases := []struct {
+		name           string
+		partialRevokes bool
+		want           []string
+	}{
+		{name: "acme_wms", want: []string{`acme\_wms`, "acme_wms"}},
+		{name: "acmewms", want: []string{"acmewms"}},
+		{name: "acme_wms", partialRevokes: true, want: []string{"acme_wms", `acme\_wms`}},
+		{name: "acmewms", partialRevokes: true, want: []string{"acmewms"}},
+		// No escaped grant over MySQL's limit can exist, so none is revoked.
+		{name: strings.Repeat("a_", 5) + strings.Repeat("b", 54), partialRevokes: true, want: []string{strings.Repeat("a_", 5) + strings.Repeat("b", 54)}},
+	}
+	for _, tc := range cases {
+		got := grantDatabaseFormsFor(tc.name, tc.partialRevokes)
+		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+			t.Errorf("grantDatabaseFormsFor(%q, %v) = %q, want %q", tc.name, tc.partialRevokes, got, tc.want)
+		}
+	}
+
+	grant, err := renderGrant("spec.owner.privileges", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, `my\_ql`, "acme_app", defaultHosts)
+	if err != nil {
+		t.Fatalf("renderGrant(escaped) error = %v", err)
+	}
+	if want := "GRANT SELECT ON `my\\_ql`.* TO 'acme_app'@'%'"; grant != want {
+		t.Fatalf("renderGrant(escaped) = %q, want %q", grant, want)
+	}
+	for _, bad := range []string{`acme\wms`, `acme\\_wms`, "acme%wms", "acme`wms"} {
+		if _, err := renderGrant("spec.owner.privileges", []v1alpha1.MysqlPrivilege{v1alpha1.PrivilegeSelect}, bad, "acme_app", defaultHosts); err == nil {
+			t.Errorf("renderGrant(%q) accepted a malformed grant database", bad)
+		}
+	}
+}
+
+// MySQL rejects a GRANT whose escaped schema name exceeds 64 characters
+// (ERROR 1059), even though the unescaped name is valid.
+func TestQuoteGrantDatabaseRejectsOverlongEscapedName(t *testing.T) {
+	name := strings.Repeat("a_", 5) + strings.Repeat("b", 54)
+	forms := grantDatabaseFormsFor(name, false)
+	if _, err := quoteGrantDatabase(forms[0]); err == nil || !strings.Contains(err.Error(), "64-character") {
+		t.Fatalf("quoteGrantDatabase(%q) error = %v, want the length limit", forms[0], err)
+	}
+	if _, err := quoteGrantDatabase(forms[1]); err != nil {
+		t.Fatalf("quoteGrantDatabase(%q) error = %v, want the unescaped legacy form accepted", forms[1], err)
+	}
+	if _, err := quoteGrantDatabase(grantDatabaseFormsFor(name, true)[0]); err != nil {
+		t.Fatalf("quoteGrantDatabase with partial_revokes ON error = %v", err)
 	}
 }

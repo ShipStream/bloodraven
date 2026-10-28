@@ -33,3 +33,16 @@ func TestPVCStore_FullPath_Sanitizes(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateS3EndpointURL(t *testing.T) {
+	for _, ok := range []string{"http://minio.bloodraven-playground:9000", "https://s3.example.com", "https://minio.minio.svc.cluster.local:9000/"} {
+		if err := validateS3EndpointURL(ok); err != nil {
+			t.Errorf("validateS3EndpointURL(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"minio:9000", "file:///etc/passwd", "ftp://host", "http://", "https://user:pw@host", "://x"} {
+		if err := validateS3EndpointURL(bad); err == nil {
+			t.Errorf("validateS3EndpointURL(%q) = nil, want error", bad)
+		}
+	}
+}

@@ -84,14 +84,10 @@ func TestReconcile_EncryptedFreshDeployRendersUnsealed(t *testing.T) {
 		t.Fatal("sanity: data mount missing")
 	}
 
-	// Encrypted mysqld needs AppArmor/seccomp unconfined on hosts whose
-	// default container profile blocks component loading (GHA kind).
-	mysqlSC := mysqlC.SecurityContext
-	if mysqlSC == nil || mysqlSC.AppArmorProfile == nil || mysqlSC.AppArmorProfile.Type != corev1.AppArmorProfileTypeUnconfined {
-		t.Errorf("mysql AppArmorProfile = %+v, want Unconfined", mysqlSC)
-	}
-	if mysqlSC == nil || mysqlSC.SeccompProfile == nil || mysqlSC.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
-		t.Errorf("mysql SeccompProfile = %+v, want Unconfined", mysqlSC)
+	// Encryption must not loosen the runtime's default AppArmor/seccomp
+	// confinement; only spec.containerSecurityContext sets it.
+	if mysqlSC := mysqlC.SecurityContext; mysqlSC != nil {
+		t.Errorf("mysql SecurityContext = %+v, want unset without spec.containerSecurityContext", mysqlSC)
 	}
 
 	// Launcher copies component files onto image paths, then execs the

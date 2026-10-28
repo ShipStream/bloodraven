@@ -918,6 +918,9 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 				"%s.source.pvc.claimName is required; the restore source PVC must be created out of band and populated with the dump",
 				fp)
 		}
+		if err := checkPVCSubPath(src.PVC.SubPath); err != nil {
+			return nil, fmt.Errorf("%s.source.pvc: %w", fp, err)
+		}
 		mountPath := "/restore"
 		sub := strings.TrimLeft(src.PVC.SubPath, "/")
 		inputURL = mountPath

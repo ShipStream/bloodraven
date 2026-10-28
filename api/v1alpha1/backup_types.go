@@ -426,7 +426,9 @@ type S3Storage struct {
 	Region string `json:"region,omitempty"`
 
 	// EndpointURL overrides the S3 endpoint (e.g. MinIO, Ceph, Wasabi).
-	// Passed to mysqlsh as s3EndpointOverride.
+	// Passed to mysqlsh as s3EndpointOverride. Must be an absolute http://
+	// or https:// URL without credentials, a query or a fragment.
+	// +kubebuilder:validation:Pattern=`^https?://[^\s/?#@]+(/[^\s?#]*)?$`
 	EndpointURL string `json:"endpointURL,omitempty"`
 
 	// CredentialsSecret references a Secret whose keys provide AWS
@@ -459,6 +461,8 @@ type PVCStorage struct {
 
 	// SubPath inside the PVC to use. Each backup lands under
 	// "<subPath>/<mysqlbackup-name>/".
+	// A ".." segment is rejected so the path cannot leave the PVC.
+	// +kubebuilder:validation:Pattern=`^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$`
 	SubPath string `json:"subPath,omitempty"`
 }
 
@@ -611,7 +615,9 @@ type InitFromBackupPVCSource struct {
 	ClaimName string `json:"claimName"`
 
 	// SubPath inside the PVC where the dump is located. Optional.
+	// A ".." segment is rejected so the path cannot leave the PVC.
 	// +optional
+	// +kubebuilder:validation:Pattern=`^/*((?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)/+)*(?:[^/.][^/]*|\.|\.[^/.][^/]*|\.\.[^/]+)?$`
 	SubPath string `json:"subPath,omitempty"`
 }
 

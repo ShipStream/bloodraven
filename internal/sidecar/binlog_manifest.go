@@ -74,8 +74,8 @@ func SiteFromManifestKey(key string) string {
 }
 
 // manifestKey returns the storage-relative key for a site's manifest.
-// Site names are a-z0-9 plus dashes (enforced by the CRD), so no
-// escaping is needed.
+// Site names are a-z0-9 plus dashes (enforced by the CRD pattern on
+// spec.sites[].name), so no escaping is needed.
 func manifestKey(prefix, site string) string {
 	return path.Join(prefix, fmt.Sprintf("manifest-%s.json", site))
 }
@@ -103,13 +103,14 @@ func loadManifest(ctx context.Context, store ArchiveStore, prefix, site string) 
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("decode manifest %s: %w", manifestKey(prefix, site), err)
 	}
-	// Enforce Version/Site invariants even on legacy writes.
+	// Enforce the Version invariant even on legacy writes.
 	if m.Version == 0 {
 		m.Version = ManifestVersion
 	}
-	if m.Site == "" {
-		m.Site = site
-	}
+	// The site always comes from the caller, never the stored document:
+	// saveManifest writes back to manifestKey(prefix, m.Site), so a
+	// tampered "site" field could otherwise redirect that write.
+	m.Site = site
 	return &m, nil
 }
 
@@ -151,10 +152,13 @@ func appendManifestEntry(ctx context.Context, store ArchiveStore, prefix, site s
 	return saveManifest(ctx, store, prefix, m)
 }
 
-// pruneManifest removes entries whose Name is in drop. Returns the set
-// of remote object keys that were referenced by the removed entries so
-// the caller can issue Delete calls. The manifest is only rewritten if
-// at least one entry was removed.
+// pruneManifest removes entries whose Name is in drop. Returns the
+// remote object keys of the removed entries so the caller can issue
+// Delete calls. Keys are rebuilt from prefix/site/Name rather than
+// taken from the manifest's RemotePath, so a tampered manifest cannot
+// steer deletes outside this site's archive; entries whose Name is not
+// a plain file name are dropped from the manifest but not deleted. The
+// manifest is only rewritten if at least one entry was removed.
 func pruneManifest(ctx context.Context, store ArchiveStore, prefix, site string, drop map[string]struct{}) ([]string, error) {
 	m, err := loadManifest(ctx, store, prefix, site)
 	if err != nil {
@@ -164,15 +168,19 @@ func pruneManifest(ctx context.Context, store ArchiveStore, prefix, site string,
 		return nil, nil
 	}
 	var removed []string
+	pruned := 0
 	kept := m.Files[:0]
 	for _, f := range m.Files {
 		if _, d := drop[f.Name]; d {
-			removed = append(removed, f.RemotePath)
+			pruned++
+			if isPlainFileName(f.Name) {
+				removed = append(removed, binlogObjectKey(prefix, site, f.Name))
+			}
 			continue
 		}
 		kept = append(kept, f)
 	}
-	if len(removed) == 0 {
+	if pruned == 0 {
 		return nil, nil
 	}
 	m.Files = kept
@@ -180,4 +188,11 @@ func pruneManifest(ctx context.Context, store ArchiveStore, prefix, site string,
 		return nil, err
 	}
 	return removed, nil
+}
+
+// isPlainFileName reports whether name is a single path element that
+// cannot escape the directory it is joined onto.
+func isPlainFileName(name string) bool {
+	return name != "" && name != "." && name != ".." &&
+		!strings.ContainsAny(name, "/\\")
 }

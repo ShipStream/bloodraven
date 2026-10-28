@@ -161,7 +161,9 @@ log "starting ephemeral mysqld"
 # discards the identity needed to dedup, double-applying in-dump and
 # cross-site duplicate transactions. MySQL 8.0 starts gtid_mode=ON with
 # binary logging disabled, so --skip-log-bin is retained alongside the
-# GTID flags.
+# GTID flags. partial_revokes matches the group's servers: the replayed
+# binlogs carry the app role's partial revoke on the mysql schema, which a
+# server with it OFF rejects.
 "${MYSQLD[@]}" \
     --datadir="$DATA_DIR" \
     --bind-address=127.0.0.1 \
@@ -172,6 +174,7 @@ log "starting ephemeral mysqld"
     --skip-log-bin \
     --gtid-mode=ON \
     --enforce-gtid-consistency=ON \
+    --partial-revokes=ON \
     --skip-replica-start \
     --skip-name-resolve \
     --local-infile=1 &

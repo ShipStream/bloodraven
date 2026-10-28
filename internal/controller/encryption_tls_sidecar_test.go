@@ -371,6 +371,16 @@ func sidecarDSNFromRenderedEnv(t *testing.T, c *corev1.Container) string {
 			}
 			// tls.crt / tls.key are optional client-auth material and are
 			// left unset so the optional path is exercised too.
+		case e.Name == "MYSQL_CREDS_DIR":
+			// The rendered path only exists inside a real pod; stand in
+			// a directory with the same Secret-projected layout.
+			dir := t.TempDir()
+			for name, v := range map[string]string{"username": "bloodraven", "password": "pw"} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(v), 0o600); err != nil {
+					t.Fatalf("write stub %s: %v", name, err)
+				}
+			}
+			t.Setenv(e.Name, dir)
 		case e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil:
 			if e.ValueFrom.SecretKeyRef.Key == "dsn" {
 				// Shape-accurate stand-in for the legacy DSN secret.

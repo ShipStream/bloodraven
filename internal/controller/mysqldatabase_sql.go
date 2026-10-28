@@ -1,8 +1,12 @@
 package controller
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"strings"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
@@ -45,6 +49,77 @@ var defaultHosts = []string{tenantUserHost}
 func quoteIdentifier(kind, name string) (string, error) {
 	if err := v1alpha1.ValidateMysqlIdentifier(kind, name); err != nil {
 		return "", err
+	}
+	return "`" + name + "`", nil
+}
+
+// partialRevokesQuery reads how the server interprets `_` and `%` in a
+// database-level GRANT: literally when partial_revokes is ON, as wildcards
+// when it is OFF. An escaped `\_` matches literally only when it is OFF,
+// so the grant spelling has to follow the setting.
+const partialRevokesQuery = "SELECT @@GLOBAL.partial_revokes"
+
+// grantDatabaseForms returns the spellings of schema name that GRANT and
+// REVOKE use on this server; see grantDatabaseFormsFor.
+//
+// Bloodraven runs MySQL with partial_revokes=ON, but a server started from
+// an older my.cnf can still have it OFF. It is turned ON here before any
+// grant is written: a grant in the OFF-only escaped spelling stops matching
+// the moment the group's own reconcile turns it ON, and nothing would
+// rewrite it. Replicas follow through that reconcile, and the escaped
+// spellings are only used if the server refuses the change.
+func grantDatabaseForms(ctx context.Context, db *sql.DB, name string) ([]string, error) {
+	var partialRevokes int
+	if err := db.QueryRowContext(ctx, partialRevokesQuery).Scan(&partialRevokes); err != nil {
+		return nil, fmt.Errorf("read partial_revokes: %w", err)
+	}
+	if partialRevokes == 0 {
+		if _, err := db.ExecContext(ctx, "SET GLOBAL partial_revokes = ON"); err == nil {
+			partialRevokes = 1
+		} else {
+			log.FromContext(ctx).Info("could not turn partial_revokes ON; escaping wildcards in grant names", "error", err.Error())
+		}
+	}
+	return grantDatabaseFormsFor(name, partialRevokes != 0), nil
+}
+
+// grantDatabaseFormsFor returns the database-level grant spellings of a
+// schema name. forms[0] matches only that schema and is what GRANT uses;
+// any further form is only ever revoked. With partial_revokes ON that is
+// the escaped spelling a server with it OFF was granted, which now matches
+// no schema. With it OFF, an unescaped `_` would be a wildcard (`my_ql`
+// matches `mysql`), so forms[0] escapes it and forms[1] is the unescaped
+// wildcard spelling earlier releases granted.
+func grantDatabaseFormsFor(name string, partialRevokes bool) []string {
+	escaped := strings.NewReplacer(`_`, `\_`, `%`, `\%`).Replace(name)
+	if escaped == name {
+		return []string{name}
+	}
+	if partialRevokes {
+		// MySQL refused any escaped spelling over its identifier limit,
+		// so no grant row in that spelling can exist to revoke.
+		if len(escaped) > maxGrantDatabaseLen {
+			return []string{name}
+		}
+		return []string{name, escaped}
+	}
+	return []string{escaped, name}
+}
+
+// maxGrantDatabaseLen is MySQL's identifier length limit, which GRANT and
+// REVOKE apply to the schema name as written, escapes included.
+const maxGrantDatabaseLen = 64
+
+// quoteGrantDatabase is quoteIdentifier for a grantDatabaseFormsFor
+// spelling: the schema name with `_` optionally escaped as `\_`.
+func quoteGrantDatabase(name string) (string, error) {
+	if err := v1alpha1.ValidateMysqlIdentifier("spec.databaseName", strings.ReplaceAll(name, `\_`, `_`)); err != nil {
+		return "", err
+	}
+	if len(name) > maxGrantDatabaseLen {
+		return "", fmt.Errorf("spec.databaseName: the grant spelling %q is %d characters, over MySQL's %d-character limit; "+
+			"partial_revokes is OFF, so each '_' is escaped as '\\_'; set partial_revokes=ON, or shorten the name or use fewer underscores",
+			name, len(name), maxGrantDatabaseLen)
 	}
 	return "`" + name + "`", nil
 }
@@ -198,7 +273,7 @@ func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, us
 	if err != nil {
 		return "", err
 	}
-	dbIdent, err := quoteIdentifier("spec.databaseName", database)
+	dbIdent, err := quoteGrantDatabase(database)
 	if err != nil {
 		return "", err
 	}
@@ -209,9 +284,16 @@ func renderGrant(kind string, privileges []v1alpha1.MysqlPrivilege, database, us
 	return fmt.Sprintf("GRANT %s ON %s.* TO %s", strings.Join(privSQL, ", "), dbIdent, accounts), nil
 }
 
+// allPrivilegesOutsideAllowlist are the database-level privileges a
+// schema-level ALL PRIVILEGES grant confers that the allowlist cannot
+// name. They are always surplus, so moving a principal off ALL PRIVILEGES
+// revokes them too instead of leaving routine DDL behind.
+var allPrivilegesOutsideAllowlist = []string{"CREATE ROUTINE", "ALTER ROUTINE"}
+
 // renderRevokeSurplus builds the REVOKE that removes every allowlist
 // privilege a principal holds on this database but the spec no longer
-// declares — or "" when there is no surplus to revoke.
+// declares, plus allPrivilegesOutsideAllowlist — or "" when there is no
+// surplus to revoke.
 //
 // It is the second half of grant-then-revoke: the desired set is GRANTed
 // first, so a failure between the two statements leaves the principal with
@@ -244,11 +326,12 @@ func renderRevokeSurplus(kind string, desired []v1alpha1.MysqlPrivilege, databas
 			surplus = append(surplus, name)
 		}
 	}
+	surplus = append(surplus, allPrivilegesOutsideAllowlist...)
 	if len(surplus) == 0 {
 		return "", nil
 	}
 
-	dbIdent, err := quoteIdentifier("spec.databaseName", database)
+	dbIdent, err := quoteGrantDatabase(database)
 	if err != nil {
 		return "", err
 	}
@@ -270,7 +353,7 @@ func renderRevokeSurplus(kind string, desired []v1alpha1.MysqlPrivilege, databas
 // Verified against MySQL 9.7: IF EXISTS alone does not cover a missing
 // account, only a missing grant.
 func renderRevokeAll(kind, database, username string, hosts []string) (string, error) {
-	dbIdent, err := quoteIdentifier("spec.databaseName", database)
+	dbIdent, err := quoteGrantDatabase(database)
 	if err != nil {
 		return "", err
 	}
@@ -279,6 +362,20 @@ func renderRevokeAll(kind, database, username string, hosts []string) (string, e
 		return "", err
 	}
 	return fmt.Sprintf("REVOKE IF EXISTS ALL PRIVILEGES ON %s.* FROM %s IGNORE UNKNOWN USER", dbIdent, accounts), nil
+}
+
+// renderRevokeAllForms is renderRevokeAll over every grantDatabaseForms
+// spelling, so a revoke also removes a legacy wildcard grant row.
+func renderRevokeAllForms(kind string, forms []string, username string, hosts []string) ([]string, error) {
+	stmts := make([]string, 0, len(forms))
+	for _, form := range forms {
+		stmt, err := renderRevokeAll(kind, form, username, hosts)
+		if err != nil {
+			return nil, err
+		}
+		stmts = append(stmts, stmt)
+	}
+	return stmts, nil
 }
 
 // renderDropDatabase builds the DROP DATABASE statement. Only ever reached

@@ -656,6 +656,9 @@ func resolveBackupStorage(fg *v1alpha1.MysqlFailoverGroup, profile v1alpha1.Back
 			claim = ownedBackupPVCName(fg.Name, profile.Name)
 		}
 		sub := pvc.SubPath
+		if err := checkPVCSubPath(sub); err != nil {
+			return "", nil, nil, nil, fmt.Errorf("profile %q storage.pvc: %w", profile.Name, err)
+		}
 		outputPath := fmt.Sprintf("%s/%s", backupPVCMountPath, backupName)
 		if sub != "" {
 			outputPath = fmt.Sprintf("%s/%s/%s", backupPVCMountPath, sub, backupName)

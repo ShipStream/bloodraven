@@ -85,7 +85,7 @@ grant set it will not let you widen:
 | Field | Purpose | Grants the operator issues |
 |---|---|---|
 | `operatorSecret` *(required)* | operator and sidecar connections | `ALL PRIVILEGES ON *.*` **WITH GRANT OPTION** |
-| `appSecret` | application read-write | `ALL PRIVILEGES ON *.*` — no `GRANT OPTION`, no `SUPER` |
+| `appSecret` | application read-write | DML and DDL on `*.*` — no `GRANT OPTION`, no `SUPER` or other admin privileges |
 | `readOnlySecret` | application read-only | `SELECT, SHOW VIEW, SHOW DATABASES, PROCESS` |
 | `monitorSecret` | Prometheus exporter | `PROCESS, REPLICATION CLIENT`, plus `SELECT` on `performance_schema` |
 | `backupSecret` | backup and restore jobs | `SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD, BACKUP_ADMIN, REPLICATION CLIENT` |

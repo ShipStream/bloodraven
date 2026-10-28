@@ -3,6 +3,7 @@
 package envtest
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -100,6 +101,38 @@ func TestKeyringDataFileDirRejectedInsideDataDir(t *testing.T) {
 		if !strings.Contains(err.Error(), "data directory") {
 			t.Errorf("dataFileDir %q rejected for the wrong reason: %v", bad, err)
 		}
+	}
+}
+
+// TestKeyringPathsRejectShellMetacharacters: the keyring paths are
+// embedded in the mysqld launcher's bash script, so admission must refuse
+// anything that bash would expand inside double quotes.
+func TestKeyringPathsRejectShellMetacharacters(t *testing.T) {
+	ns := createNamespace(t, "enc-paths")
+
+	for i, bad := range []string{"/usr/$(id)", "/usr/`id`", `/usr/"x`, "/usr/a b", `/usr/a\b`} {
+		for j, set := range []func(*v1alpha1.KeyringSpec){
+			func(k *v1alpha1.KeyringSpec) { k.DataFileDir = bad },
+			func(k *v1alpha1.KeyringSpec) { k.MysqldDir = bad },
+			func(k *v1alpha1.KeyringSpec) { k.PluginDir = bad },
+		} {
+			fg := newEncryptionFG(ns, fmt.Sprintf("bad-path-%d-%d", i, j))
+			kr := &v1alpha1.KeyringSpec{}
+			set(kr)
+			fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{Enabled: true, Keyring: kr}
+			if err := k8sClient.Create(ctx, fg); err == nil {
+				t.Errorf("API server accepted keyring path %q (field %d)", bad, j)
+			}
+		}
+	}
+
+	fg := newEncryptionFG(ns, "custom-paths")
+	fg.Spec.EncryptionAtRest = &v1alpha1.EncryptionAtRestSpec{
+		Enabled: true,
+		Keyring: &v1alpha1.KeyringSpec{DataFileDir: "/run/my_keyring-1.0", MysqldDir: "/opt/mysql/bin", PluginDir: "/opt/mysql/lib/plugin"},
+	}
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Errorf("API server rejected ordinary custom keyring paths: %v", err)
 	}
 }
 

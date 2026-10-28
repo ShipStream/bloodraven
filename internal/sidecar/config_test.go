@@ -1,6 +1,8 @@
 package sidecar
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -84,6 +86,28 @@ func TestConfigFromEnv_MYSQL_USER_PASSWORD(t *testing.T) {
 	}
 	if cfg.MysqlDSN != "operator:secret@tcp(127.0.0.1:3306)/" {
 		t.Errorf("unexpected DSN: %s", cfg.MysqlDSN)
+	}
+}
+
+// The operator sets the MySQL password to the Secret's exact bytes, so the
+// mounted files must not be trimmed on the way into the DSN.
+func TestConfigFromEnv_MYSQL_CREDS_DIRKeepsExactBytes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "username"), []byte("operator"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "password"), []byte(" secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MYSQL_DSN", "")
+	t.Setenv("MYSQL_CREDS_DIR", dir)
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MysqlDSN != "operator: secret\n@tcp(127.0.0.1:3306)/" {
+		t.Errorf("unexpected DSN: %q", cfg.MysqlDSN)
 	}
 }
 

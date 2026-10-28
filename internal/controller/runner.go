@@ -234,6 +234,18 @@ func (r *TopologyManagerRunner) PlannedFailoverGtidExecuted(ctx context.Context,
 	return tm.GetSiteGtidExecuted(ctx, site)
 }
 
+// EnsurePartialRevokes turns partial_revokes ON on every site of the group;
+// see TopologyManager.EnsurePartialRevokes.
+func (r *TopologyManagerRunner) EnsurePartialRevokes(ctx context.Context, nn types.NamespacedName) error {
+	r.mu.RLock()
+	mt, ok := r.managers[nn]
+	r.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("no topology manager running for %s", nn)
+	}
+	return mt.tm.EnsurePartialRevokes(ctx)
+}
+
 // PlannedFailoverDrainConnections kills non-replication connections on
 // the named site and returns the count killed. Polled by the Draining
 // state until it returns zero (clean drain) or the drainTimeout budget
@@ -521,29 +533,25 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 		return
 	}
 
-	// Fetch TLS/credential secret data for spec hash computation.
-	var tlsSecretData map[string][]byte
-	if fg.Spec.TLS != nil {
-		var tlsSecret corev1.Secret
-		tlsSecretKey := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Spec.TLS.SecretName}
-		if err := r.client.Get(ctx, tlsSecretKey, &tlsSecret); err == nil {
-			tlsSecretData = tlsSecret.Data
+	// The reconciler creates the digest key before the first Deployment;
+	// until it exists no live hash can match, so keep the current set.
+	digestKey, err := readDigestKey(ctx, r.client, fg)
+	if err != nil {
+		if err != errDigestKeyMissing {
+			r.logger.Warn("failed to read secret digest key; preserving current drift set", "error", err)
 		}
+		return
 	}
-	var credSecretData map[string]map[string][]byte
-	if fg.Spec.UsesCredentials() {
-		credSecretData = make(map[string]map[string][]byte)
-		for _, name := range fg.Spec.AllReferencedSecretNames() {
-			var s corev1.Secret
-			if err := r.client.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: name}, &s); err == nil {
-				credSecretData[name] = s.Data
-			}
-		}
+	secretInputs, err := specSecretInputs(ctx, r.client, fg)
+	if err != nil {
+		r.logger.Warn("failed to read spec secrets; preserving current drift set", "error", err)
+		return
 	}
+	secretDigest := secretContentDigest(digestKey, secretInputs)
 
 	var driftSites []string
 	for _, site := range fg.Spec.Sites {
-		desiredHash := ComputeSpecHash(fg, site, tlsSecretData, credSecretData)
+		desiredHash := ComputeSpecHash(fg, site, secretDigest)
 
 		var deploy appsv1.Deployment
 		deployNN := types.NamespacedName{
@@ -1295,7 +1303,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// gone. Clobbering Dragonfly status drops capability probes and
 		// lastPromotion* stamps written on the other goroutine.
 		encryption := fresh.Status.EncryptionAtRest
-		encryptionCond := apimeta.FindStatusCondition(fresh.Status.Conditions, conditionEncryptionReady)
+		reconcilerConds := make([]*metav1.Condition, len(reconcilerOwnedConditions))
+		for i, t := range reconcilerOwnedConditions {
+			reconcilerConds[i] = apimeta.FindStatusCondition(fresh.Status.Conditions, t)
+		}
 		dragonfly := fresh.Status.Dragonfly
 		planned := fresh.Status.PlannedFailover
 		initialRestore := fresh.Status.Restore
@@ -1306,10 +1317,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		fresh.Status.RestoreInPlace = restore
 		fresh.Status.EncryptionAtRest = encryption
 		fresh.Status.Dragonfly = dragonfly
-		if encryptionCond != nil {
-			setCondition(&fresh.Status.Conditions, *encryptionCond)
-		} else {
-			removeCondition(&fresh.Status.Conditions, conditionEncryptionReady)
+		for i, c := range reconcilerConds {
+			if c != nil {
+				setCondition(&fresh.Status.Conditions, *c)
+			} else {
+				removeCondition(&fresh.Status.Conditions, reconcilerOwnedConditions[i])
+			}
 		}
 		if err := r.client.Status().Update(ctx, &fresh); err != nil {
 			return err
@@ -1744,6 +1757,11 @@ func conditionBool(v bool) metav1.ConditionStatus {
 
 // setCondition sets or updates a condition in the slice, preserving LastTransitionTime
 // if the status has not changed.
+// reconcilerOwnedConditions are the condition types the group reconciler
+// writes. updateCRStatus re-reads them instead of replaying its snapshot's
+// copy, which would undo a concurrent reconciler write.
+var reconcilerOwnedConditions = []string{conditionEncryptionReady, conditionS3CredentialsReady}
+
 func setCondition(conditions *[]metav1.Condition, c metav1.Condition) {
 	for i, existing := range *conditions {
 		if existing.Type == c.Type {

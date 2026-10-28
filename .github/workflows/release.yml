@@ -5,10 +5,10 @@ on:
     tags:
       - 'v*.*.*'
 
+# Read-only by default; each publishing job grants only the write scopes it
+# uses, so the ci-gate (which runs `npm ci`) and E2E jobs never hold them.
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
 
 env:
   OPERATOR_IMAGE_REPOSITORY: ghcr.io/shipstream/bloodraven
@@ -26,7 +26,7 @@ jobs:
   # ci-gate mirrors the core checks from .github/workflows/ci.yml so a
   # tag push is subject to the same bar as a main-branch merge. Without
   # this, `git tag v0.2.0 <dirty-SHA>` would happily ship signed images
-  # and a signed Helm chart from a SHA whose CI run failed (AUDIT H3).
+  # and a Helm chart from a SHA whose CI run failed (AUDIT H3).
   ci-gate:
     name: CI gate
     runs-on: ubuntu-latest
@@ -110,6 +110,8 @@ jobs:
   draft-release:
     name: Create Draft Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     needs: [ci-gate, e2e-gate, e2e-encryption-gate]
     steps:
       - uses: actions/checkout@v7
@@ -150,6 +152,10 @@ jobs:
   docker:
     name: Build and Push Docker Images
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     needs: [ci-gate, e2e-gate, draft-release]
     strategy:
       matrix:
@@ -209,6 +215,9 @@ jobs:
   helm:
     name: Publish Helm Chart
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
     needs: docker
     steps:
       - uses: actions/checkout@v7
@@ -269,6 +278,8 @@ jobs:
   publish-release:
     name: Publish Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     needs: [docker, helm]
     steps:
       - name: Publish GitHub Release

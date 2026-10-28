@@ -91,6 +91,75 @@ func TestManifestRoundTripPVC(t *testing.T) {
 	}
 }
 
+// TestPruneManifestIgnoresRemotePath pins that retention deletes keys
+// derived from prefix/site/Name, never a manifest-supplied RemotePath
+// that could point at unrelated objects in the bucket.
+func TestPruneManifestIgnoresRemotePath(t *testing.T) {
+	store, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("newPVCStore: %v", err)
+	}
+	ctx := context.Background()
+	prefix, site := "binlogs", "us-east-1a"
+	now := time.Now().UTC()
+	for _, e := range []ManifestEntry{
+		{Name: "mysql-bin.000001", RemotePath: "backups/full-2026.tar", LastEventTime: now, ArchivedAt: now},
+		{Name: "../../backups/full-2026.tar", RemotePath: "backups/full-2026.tar", LastEventTime: now, ArchivedAt: now},
+	} {
+		if err := appendManifestEntry(ctx, store, prefix, site, e); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	removed, err := pruneManifest(ctx, store, prefix, site, map[string]struct{}{
+		"mysql-bin.000001":            {},
+		"../../backups/full-2026.tar": {},
+	})
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != "binlogs/us-east-1a/mysql-bin.000001" {
+		t.Errorf("want removed=[binlogs/us-east-1a/mysql-bin.000001], got %v", removed)
+	}
+	m, err := loadManifest(ctx, store, prefix, site)
+	if err != nil {
+		t.Fatalf("loadManifest: %v", err)
+	}
+	if len(m.Files) != 0 {
+		t.Errorf("want both entries pruned from manifest, got %+v", m.Files)
+	}
+}
+
+// TestLoadManifestForcesSite pins that a stored "site" field cannot
+// redirect the next manifest write to another key.
+func TestLoadManifestForcesSite(t *testing.T) {
+	tmp := t.TempDir()
+	store, err := newPVCStore(&PITRPVCConfig{MountPath: tmp})
+	if err != nil {
+		t.Fatalf("newPVCStore: %v", err)
+	}
+	ctx := context.Background()
+	if err := os.MkdirAll(tmp+"/binlogs", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	forged := `{"version":1,"site":"x/../../victim","files":[]}`
+	if err := os.WriteFile(tmp+"/binlogs/manifest-iad.json", []byte(forged), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := loadManifest(ctx, store, "binlogs", "iad")
+	if err != nil {
+		t.Fatalf("loadManifest: %v", err)
+	}
+	if m.Site != "iad" {
+		t.Fatalf("want site iad, got %q", m.Site)
+	}
+	if err := appendManifestEntry(ctx, store, "binlogs", "iad", ManifestEntry{Name: "mysql-bin.000001"}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if _, err := os.Stat(tmp + "/victim.json"); !os.IsNotExist(err) {
+		t.Errorf("manifest write escaped to forged site key: %v", err)
+	}
+}
+
 // TestReadBinlogIndex covers the "drop last entry is active, sort the
 // rest" behavior of readBinlogIndex against a synthetic index file.
 func TestReadBinlogIndex(t *testing.T) {
