@@ -233,6 +233,11 @@ func (m *mockMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
 	return nil, nil
 }
 
+// PinSession returns a Session over this fake's own methods.
+func (m *mockMySQL) PinSession(context.Context) (mysql.Session, error) {
+	return mysql.CheckerSession(m), nil
+}
+
 func (m *mockMySQL) EnsurePartialRevokes(_ context.Context) error { return nil }
 
 func (m *mockMySQL) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {

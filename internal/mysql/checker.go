@@ -30,6 +30,10 @@ type Checker interface {
 	// GTID methods:
 	GetGtidExecuted(ctx context.Context) (string, error)
 
+	// PinSession holds one server connection for statements that must all
+	// reach the same server; see Session.
+	PinSession(ctx context.Context) (Session, error)
+
 	// Clone plugin methods:
 	EnsureClonePlugin(ctx context.Context) error
 	SetCloneDonorList(ctx context.Context, donor string) error

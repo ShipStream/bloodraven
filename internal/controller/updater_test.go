@@ -928,6 +928,11 @@ func (f *flappingChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, er
 	return nil, nil
 }
 
+// PinSession returns a Session over this fake's own methods.
+func (f *flappingChecker) PinSession(context.Context) (mysql.Session, error) {
+	return mysql.CheckerSession(f), nil
+}
+
 func (f *flappingChecker) EnsurePartialRevokes(_ context.Context) error { return nil }
 
 func (f *flappingChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
@@ -983,6 +988,11 @@ func (s *startableReplicaChecker) CloneStatus(_ context.Context) (*mysql.CloneSt
 	return nil, nil
 }
 
+// PinSession returns a Session over this fake's own methods.
+func (s *startableReplicaChecker) PinSession(context.Context) (mysql.Session, error) {
+	return mysql.CheckerSession(s), nil
+}
+
 func (s *startableReplicaChecker) EnsurePartialRevokes(_ context.Context) error { return nil }
 
 func (s *startableReplicaChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {
@@ -1025,6 +1035,11 @@ func (r *replicaStatusErrorChecker) GetGtidExecuted(_ context.Context) (string, 
 func (r *replicaStatusErrorChecker) KillAppConnections(_ context.Context) (int, error) { return 0, nil }
 func (r *replicaStatusErrorChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
 	return nil, nil
+}
+
+// PinSession returns a Session over this fake's own methods.
+func (r *replicaStatusErrorChecker) PinSession(context.Context) (mysql.Session, error) {
+	return mysql.CheckerSession(r), nil
 }
 
 func (r *replicaStatusErrorChecker) EnsurePartialRevokes(_ context.Context) error { return nil }

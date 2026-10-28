@@ -132,6 +132,11 @@ func (b *bootstrapMock) CloneStatus(_ context.Context) (*mysql.CloneStatus, erro
 	return nil, nil
 }
 
+// PinSession returns a Session over this fake's own methods.
+func (b *bootstrapMock) PinSession(context.Context) (mysql.Session, error) {
+	return mysql.CheckerSession(b), nil
+}
+
 func (b *bootstrapMock) EnsurePartialRevokes(_ context.Context) error { return nil }
 
 func (b *bootstrapMock) CloneInstance(_ context.Context, _, _, _ string, _ bool, cloneTimeoutSec int) error {

@@ -46,15 +46,7 @@ type ReplicationSourceOpts struct {
 }
 
 func (m *checker) SetSuperReadOnly(ctx context.Context, on bool) error {
-	val := "OFF"
-	if on {
-		val = "ON"
-	}
-	_, err := m.db.ExecContext(ctx, "SET GLOBAL super_read_only = "+val)
-	if err != nil {
-		return fmt.Errorf("set super_read_only=%s: %w", val, err)
-	}
-	return nil
+	return setSuperReadOnly(ctx, m.db, on)
 }
 
 func (m *checker) KillAppConnections(ctx context.Context) (int, error) {
@@ -82,31 +74,15 @@ func (m *checker) KillAppConnections(ctx context.Context) (int, error) {
 }
 
 func (m *checker) StopReplica(ctx context.Context) error {
-	_, err := m.db.ExecContext(ctx, "STOP REPLICA")
-	if err != nil {
-		return fmt.Errorf("stop replica: %w", err)
-	}
-	return nil
+	return stopReplica(ctx, m.db)
 }
 
 func (m *checker) ResetReplicaAll(ctx context.Context) error {
-	_, err := m.db.ExecContext(ctx, "RESET REPLICA ALL")
-	if err != nil {
-		return fmt.Errorf("reset replica all: %w", err)
-	}
-	return nil
+	return resetReplicaAll(ctx, m.db)
 }
 
 func (m *checker) SetReadOnly(ctx context.Context, on bool) error {
-	val := "OFF"
-	if on {
-		val = "ON"
-	}
-	_, err := m.db.ExecContext(ctx, "SET GLOBAL read_only = "+val)
-	if err != nil {
-		return fmt.Errorf("set read_only=%s: %w", val, err)
-	}
-	return nil
+	return setReadOnly(ctx, m.db, on)
 }
 
 func (m *checker) ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error) {
@@ -218,12 +194,7 @@ func (m *checker) ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error)
 }
 
 func (m *checker) GetGtidExecuted(ctx context.Context) (string, error) {
-	var gtid string
-	err := m.db.QueryRowContext(ctx, "SELECT @@global.gtid_executed").Scan(&gtid)
-	if err != nil {
-		return "", fmt.Errorf("query gtid_executed: %w", err)
-	}
-	return strings.TrimSpace(gtid), nil
+	return getGtidExecuted(ctx, m.db)
 }
 
 func (m *checker) HasUserSchemas(ctx context.Context) (bool, error) {

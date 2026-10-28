@@ -140,6 +140,19 @@ func (c *fakeReplicaConn) ExecContext(_ context.Context, query string, args []dr
 		}
 		// Starting the applier clears its last error.
 		s.SQLRunning, s.LastSQLErrno, s.LastSQLError = true, 0, ""
+	case query == "START REPLICA":
+		if !s.Configured {
+			return nil, errors.New("Error 3080: replica is not configured")
+		}
+		s.IORunning, s.SQLRunning, s.LastSQLErrno, s.LastSQLError = true, true, 0, ""
+	case strings.HasPrefix(query, "CHANGE REPLICATION SOURCE TO "):
+		if s.IORunning || s.IOConnecting || s.SQLRunning {
+			return nil, errors.New("Error 3021: replica threads must be stopped before CHANGE REPLICATION SOURCE")
+		}
+		s.Configured = true
+		if _, rest, ok := strings.Cut(query, "SOURCE_HOST='"); ok {
+			s.SourceHost, _, _ = strings.Cut(rest, "'")
+		}
 	case query == "STOP REPLICA":
 		s.IORunning, s.IOConnecting, s.SQLRunning = false, false, false
 	case query == "RESET REPLICA ALL":

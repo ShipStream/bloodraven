@@ -45,6 +45,10 @@ type UpdateController struct {
 	// during a follower wait before the ordered update aborts.
 	primaryLossWindow time.Duration
 
+	// handoff bounds the maintenance handoff of the active site. Zero
+	// values use the ExecuteHandoff defaults; tests shorten them.
+	handoff HandoffOptions
+
 	mu       sync.Mutex
 	phase    UpdatePhase
 	updating bool
@@ -154,10 +158,10 @@ func (u *UpdateController) Execute(ctx context.Context,
 		return fmt.Errorf("wait for standby ready: %w", err)
 	}
 
-	// Phase 3: Failover to the (now-updated) standby
+	// Phase 3: Hand off to the (now-updated) standby
 	u.setPhase(UpdatePhaseFailover)
 	u.logger.Info("ordered update: failing over to updated standby", "site", standbySiteName)
-	if _, err := u.failover.Execute(ctx, standbyChecker, activeChecker, standbySiteName); err != nil {
+	if _, err := u.failover.ExecuteHandoff(ctx, standbyChecker, activeChecker, standbySiteName, u.handoffOptions()); err != nil {
 		return fmt.Errorf("failover during update: %w", err)
 	}
 
@@ -266,11 +270,19 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	}
 
 	u.setPhase(UpdatePhaseFailover)
-	promotionGTID, err := u.failover.Execute(ctx, handoff.Checker, active.Checker, handoff.Name)
+	// The active site is healthy, so this is a maintenance handoff, not an
+	// emergency: promote only a standby that provably holds every
+	// transaction the fenced source committed. On failure the source has its
+	// writes back and the active drift stays queued for a later attempt.
+	opts := u.handoffOptions()
+	opts.RestoreReplication = mysql.ReplicationSourceOpts{
+		Host: handoff.ExpectedSource, User: active.ReplUser, Password: active.ReplPassword, UseSSL: active.UseSSL,
+	}
+	promotionGTID, err := u.failover.ExecuteHandoff(ctx, handoff.Checker, active.Checker, handoff.Name, opts)
 	if err != nil {
 		return processed, fmt.Errorf("failover during update: %w", err)
 	}
-	// failover.Execute has already moved MySQL authority. Record that change
+	// ExecuteHandoff has already moved MySQL authority. Record that change
 	// before the confirmation probe so a transient probe failure cannot leave
 	// controller status pointing at the old primary.
 	if onPromoted != nil {
@@ -297,6 +309,16 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	processed = append(processed, active.Name)
 	u.setPhase(UpdatePhaseComplete)
 	return processed, nil
+}
+
+// handoffOptions returns the handoff budgets, watching the source with
+// the same loss window as the follower waits.
+func (u *UpdateController) handoffOptions() HandoffOptions {
+	opts := u.handoff
+	if opts.SourceLossWindow <= 0 {
+		opts.SourceLossWindow = u.primaryLossWindow
+	}
+	return opts
 }
 
 func (u *UpdateController) requireDirectReplica(ctx context.Context, target UpdateTarget) error {
