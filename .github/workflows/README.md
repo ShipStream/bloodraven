@@ -23,8 +23,8 @@ Pull requests run jobs for the areas they touch: Go jobs for Go-related source a
 | `test-component` | `make test-component` — component tests under `./test/component/` |
 | `test-envtest` | `make test-envtest` — controller tests using envtest (real API server) |
 | `generate-check` | Runs `make generate && make manifests` and fails if files are stale |
-| `license-roundtrip` | Runs Node license tests and the cross-language license roundtrip |
-| `docs-build` | Builds the bloodraven.dev site under `site/` and verifies `llms-full.txt` includes every docs page |
+| `license-roundtrip` | Go verifier round-trips a token signed by `site/scripts/sign-license-token.mjs` (no `node_modules` needed) |
+| `docs-build` | Runs the site Node tests (`npm test`), builds the bloodraven.dev site under `site/`, and verifies `llms-full.txt` includes every docs page |
 | `course-check` | Verifies course content, rebuilds the course site, and checks committed output for drift |
 | `all-checks` | Summary job — accepts skipped jobs and fails on any failure or cancellation, including `changes`; use this as the single branch-protection required status check |
 
