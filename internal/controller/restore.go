@@ -712,8 +712,7 @@ type restoreJobInputs struct {
 	FieldPath string
 	// ExtraEnv is appended to the container env verbatim. Used by
 	// in-place restore to inject BLOODRAVEN_DROP_ALL_USER_SCHEMAS,
-	// BLOODRAVEN_DROP_SCHEMAS, BLOODRAVEN_RESET_REPLICATION, and
-	// BLOODRAVEN_PITR_FILTER_DATABASE.
+	// BLOODRAVEN_DROP_SCHEMAS and BLOODRAVEN_RESET_REPLICATION.
 	ExtraEnv []corev1.EnvVar
 	// FreshTarget marks a restore into an empty instance with no GTID
 	// history of its own (bootstrap). Only then may the load install the

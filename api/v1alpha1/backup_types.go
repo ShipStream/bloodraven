@@ -758,8 +758,14 @@ type RestoreInPlaceSpec struct {
 	// +optional
 	LoadOptions *LoadOptions `json:"loadOptions,omitempty"`
 
-	// PointInTime, when set, enables post-load binlog replay to recover
-	// the restored data to a specific target timestamp.
+	// PointInTime is not supported for in-place restores yet; the
+	// operator rejects a restore that sets it (RestoreInPlaceRejected)
+	// before fencing anything, without consuming confirm. The replayed
+	// binlogs carry GTIDs the live primary has already executed, so the
+	// replay would be skipped and the restore would stop at the backup.
+	// To recover to a point in time, restore into a new failover group
+	// with initFromBackup.pointInTime. The field is kept so existing
+	// objects still validate.
 	// +optional
 	PointInTime *PointInTimeSpec `json:"pointInTime,omitempty"`
 

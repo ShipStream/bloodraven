@@ -27,6 +27,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -235,15 +236,34 @@ func inPlaceRestoreScope(spec *v1alpha1.RestoreInPlaceSpec) (string, string) {
 	return "schema:" + name, name
 }
 
+// errInPlacePointInTimeUnsupported rejects in-place PITR. The replay
+// pipes archived binlogs with their original GTIDs into the live
+// primary, whose gtid_executed already holds them (it ran or replicated
+// those transactions), so MySQL skips every one and the restore would
+// report success with the data left at the backup. Installing the dump's
+// GTID set cannot fix that on a live server. Doing it safely needs the
+// replay to run against a staging instance first; until then the spec is
+// refused.
+var errInPlacePointInTimeUnsupported = errors.New(
+	"restoreInPlace.pointInTime is not supported: the archived binlogs carry GTIDs the live primary has " +
+		"already executed, so the replay would be skipped and the restore would stop at the backup; " +
+		"remove pointInTime to restore to the backup, or restore to a point in time into a new failover " +
+		"group with initFromBackup.pointInTime")
+
 // validateInPlaceRestoreSpec enforces invariants that cannot be (or are
 // awkward to) encode as CEL rules. Returns a human-readable error
-// suitable for stamping into status.message.
+// suitable for stamping into status.message. These checks run at
+// reconcile time rather than admission so an already-stored object with
+// an unsupported spec still accepts unrelated updates.
 func validateInPlaceRestoreSpec(spec *v1alpha1.RestoreInPlaceSpec) error {
 	if spec == nil {
 		return fmt.Errorf("restoreInPlace is nil")
 	}
 	if _, err := parseConfirmTimestamp(spec.Confirm); err != nil {
 		return err
+	}
+	if spec.PointInTime != nil {
+		return errInPlacePointInTimeUnsupported
 	}
 	if spec.LoadOptions != nil && len(spec.LoadOptions.IncludeSchemas) > 1 {
 		return fmt.Errorf("restoreInPlace.loadOptions.includeSchemas supports at most one schema (got %d); use a full-instance restore instead",
@@ -286,6 +306,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 
 	spec := fg.Spec.RestoreInPlace
 	cur := fg.Status.RestoreInPlace
+	prev := cur
 
 	// Terminal states hold until the user advances spec.confirm past
 	// status.confirmTokenUsed. Note: terminal status stays in place
@@ -319,7 +340,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 			// consume the confirm (empty confirmUsed preserves the
 			// invalid-timestamp behavior and lets the user fix the spec
 			// and retry with the same confirm).
-			r.stampTerminalFailure(ctx, fg, "", "", "", err.Error(), "RestoreInPlaceRejected")
+			r.rejectInPlaceRestore(ctx, fg, prev, "", "", err.Error())
 			return 0, nil
 		}
 		scope, _ := inPlaceRestoreScope(spec)
@@ -360,6 +381,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	spec := fg.Spec.RestoreInPlace
 	cur := fg.Status.RestoreInPlace
+	// An invalid spec (a stored object, or one edited mid-Preflight) is
+	// rejected before the deployment-hold and writable-primary waits
+	// below, which could otherwise hold the rejection back indefinitely.
+	// Nothing has been fenced yet, so the confirm is not consumed.
+	if err := validateInPlaceRestoreSpec(spec); err != nil {
+		r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed, err.Error(), "RestoreInPlaceRejected")
+		return 0, nil
+	}
 	if m := r.deploymentLeaseManager(); m != nil {
 		hold, err := m.BeginPlanned(ctx, fg, "RestoreInPlace")
 		if err != nil {
@@ -419,7 +448,7 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 	if err := validateInPlaceRestoreSpec(spec); err != nil {
 		// Validation rejection (see stampTerminalFailure): leave
 		// confirmUsed empty so a fixed spec can retry on the same confirm.
-		r.stampTerminalFailure(ctx, fg, target, cur.Scope, "", err.Error(), "RestoreInPlaceRejected")
+		r.rejectInPlaceRestore(ctx, fg, cur, target, cur.Scope, err.Error())
 		return 0, nil
 	}
 
@@ -815,6 +844,19 @@ func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context,
 	}
 }
 
+// rejectInPlaceRestore stamps a validation rejection: Failed with an empty
+// confirmTokenUsed, so a fixed spec can run on the same confirm. Because
+// the confirm is not consumed, every later reconcile re-validates the
+// same spec; when prev already records this exact rejection it is left
+// alone. Re-stamping would bump completionTime, and that status write
+// would trigger the next reconcile, a hot loop of writes and events.
+func (r *MysqlFailoverGroupReconciler) rejectInPlaceRestore(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, prev *v1alpha1.RestoreInPlaceStatus, target, scope, msg string) {
+	if prev != nil && prev.Phase == v1alpha1.RestoreInPlaceFailed && prev.ConfirmTokenUsed == "" && prev.Message == msg {
+		return
+	}
+	r.stampTerminalFailure(ctx, fg, target, scope, "", msg, "RestoreInPlaceRejected")
+}
+
 // setRecloneAnnotation adds the one-shot reclone annotation to the CR.
 // Mirrors the shape the topology runner expects in removeRecloneAnnotation.
 func (r *MysqlFailoverGroupReconciler) setRecloneAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string) error {
@@ -840,14 +882,20 @@ func (r *MysqlFailoverGroupReconciler) setRecloneAnnotation(ctx context.Context,
 //
 //   - Full-instance: BLOODRAVEN_DROP_ALL_USER_SCHEMAS=1,
 //     BLOODRAVEN_RESET_REPLICATION=1.
-//   - Per-schema: BLOODRAVEN_DROP_SCHEMAS=<schema>,
-//     BLOODRAVEN_PITR_FILTER_DATABASE=<schema> (when PITR is enabled).
+//   - Per-schema: BLOODRAVEN_DROP_SCHEMAS=<schema>.
 //
 // For per-schema restores it also forces LoadOptions.SkipBinlog=false
 // so the DROP+load flows through the primary's binlog to the replica
 // and the replica resyncs via normal replication.
+//
+// It refuses spec.pointInTime (see errInPlacePointInTimeUnsupported):
+// validateInPlaceRestoreSpec rejects it before Fencing, and this check
+// keeps a spec that got past an older operator from building a Job.
 func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, targetSite, credsName string, isFullInstance bool, schema string) (*batchv1.Job, error) {
 	spec := fg.Spec.RestoreInPlace
+	if spec.PointInTime != nil {
+		return nil, errInPlacePointInTimeUnsupported
+	}
 
 	// Copy LoadOptions so we can force skipBinlog=false for per-schema
 	// without mutating the user-supplied spec.
@@ -875,11 +923,6 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 		extraEnv = append(extraEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_DROP_SCHEMAS", Value: schema},
 		)
-		if spec.PointInTime != nil {
-			extraEnv = append(extraEnv,
-				corev1.EnvVar{Name: "BLOODRAVEN_PITR_FILTER_DATABASE", Value: schema},
-			)
-		}
 	}
 
 	// FreshTarget stays false: the target is the live primary, whose own
@@ -890,7 +933,6 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 		CredsName:   credsName,
 		Source:      spec.Source,
 		LoadOptions: loadOpts,
-		PointInTime: spec.PointInTime,
 		Decryption:  spec.Decryption,
 		FieldPath:   "restoreInPlace",
 		ExtraEnv:    extraEnv,

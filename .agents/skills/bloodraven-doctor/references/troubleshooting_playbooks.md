@@ -467,3 +467,20 @@ A PITR replay pipes archived binlogs, with their original GTIDs, into the new pr
    - Delete the failed restore Job (`kubectl delete job -n <ns> <restore-job>`). While it exists the reconciler keeps reporting `Failed` instead of rebuilding it.
 3. Error 1146 or 1049 during replay rather than 1062/1032 means the replay touched a schema the dump or load left out (`dumpSchemas`, `loadOptions.includeSchemas`/`excludeSchemas`). Restore from an instance dump, without load-time schema filters.
 4. Do not work around it with `pointInTime.excludeGtids` set to the dump's GTID set. That skips the in-dump transactions but leaves `gtid_purged` without the dump's history.
+
+## 19. In-place restore with `pointInTime` rejected, or an earlier one stopped at the backup
+
+In-place PITR cannot work against a live primary. The replay keeps the archived transactions' original GTIDs, and the primary has already executed every one of them, so MySQL skips them all. Current operators reject `spec.restoreInPlace.pointInTime` in Preflight. Earlier operators ran the replay anyway, logged `BLOODRAVEN_PITR_COMPLETE` and reported `Succeeded`, with the data left at the backup.
+
+### Symptoms
+- `status.restoreInPlace.phase: Failed`, `confirmTokenUsed` empty, message `restoreInPlace.pointInTime is not supported: ...`, and a `RestoreInPlaceRejected` warning event. No Job exists and nothing was fenced.
+- Or, after an older operator ran in-place PITR: rows written between the backup and `stopDatetime` are missing, although the restore reported success.
+
+### Diagnostic steps
+1. Confirm the spec: `kubectl get mfg <group> -n <ns> -o jsonpath='{.spec.restoreInPlace.pointInTime}'`.
+2. For a past run, compare the expected post-backup rows with what the primary holds. `status.restoreInPlace.pitrReplayedBinlogCount > 0` does not mean anything was applied.
+
+### Safe remediation
+1. To restore to the backup itself, remove `pointInTime`; the same `confirm` re-runs.
+2. To reach a point in time, restore into a new failover group with `spec.initFromBackup.pointInTime` (fresh target, so the dump's GTID set is installed and the replay applies). Then move the data or traffic across. For a single tenant schema, dump it from the recovered group with `mysqlsh util.dumpSchemas` and run a per-schema in-place restore from that dump.
+3. Do not try to force replay on the live primary with `RESET BINARY LOGS AND GTIDS` or `mysqlbinlog --skip-gtids`. The first destroys unarchived binlogs and archive continuity. The second re-applies in-dump and cross-site duplicate transactions.

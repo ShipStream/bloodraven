@@ -46,10 +46,10 @@
 #                                     this script just globs them and
 #                                     pipes through mysqlbinlog | mysql.
 #   BLOODRAVEN_PITR_FILTER_DATABASE   when set, add mysqlbinlog --database=<x>
-#                                     to the replay pipeline. Used by
-#                                     in-place per-schema restore so PITR
-#                                     replay only applies events for the
-#                                     target schema. NOTE: --database
+#                                     to the replay pipeline. The operator
+#                                     does not set it today: in-place
+#                                     restores, the only per-schema PITR
+#                                     user, reject pointInTime. NOTE: --database
 #                                     filters on the session's default
 #                                     database at log time, not on the
 #                                     actually-referenced schemas — not

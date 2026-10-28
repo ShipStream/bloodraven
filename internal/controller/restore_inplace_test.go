@@ -1134,3 +1134,110 @@ func TestReconcileInPlaceRestore_EncryptedRefMissingProfile_BuildFailed(t *testi
 		t.Errorf("no restore Job may be created for an unresolvable source, got err=%v", err)
 	}
 }
+
+// In-place PITR cannot work yet: the live primary's own gtid_executed
+// already holds every archived GTID, so the replay is skipped and the
+// restore would report success with data at the dump point. Until a
+// staging design lands, a spec with pointInTime is rejected at reconcile
+// time, before the deployment lease, the fence or the topology-generation
+// bump, and without consuming the confirm. The rejection must also be
+// stable: the next reconcile neither rewrites status nor re-emits the
+// event (a rewrite would itself trigger another reconcile).
+func TestReconcileInPlaceRestore_PointInTimeRejected(t *testing.T) {
+	pit := &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
+	for _, tc := range []struct {
+		name           string
+		schema         string
+		phase          v1alpha1.RestoreInPlacePhase // "" = not started yet
+		primaryBlocked bool                         // active site not writable: Preflight would wait
+	}{
+		{name: "full-instance, new request"},
+		{name: "per-schema, new request", schema: "orders"},
+		{name: "full-instance, stored mid-preflight", phase: v1alpha1.RestoreInPlacePreflight},
+		{name: "stored mid-preflight, primary not writable", phase: v1alpha1.RestoreInPlacePreflight, primaryBlocked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := fgInPlaceRestore(tc.schema)
+			fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+			fg.Spec.RestoreInPlace.PointInTime = pit
+			if tc.phase != "" {
+				fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{
+					Phase: tc.phase, Scope: "full", StartTime: ptrTime(time.Now()),
+				}
+			}
+			if tc.primaryBlocked {
+				// The rejection must not wait behind Preflight's waits.
+				fg.Status.Sites[0].State = "read-only"
+			}
+			gen := fg.Status.TopologyGeneration
+			r, c := newReconciler(fg, succeededSeedBackup(), dsnSecret())
+			rec := r.Recorder.(*record.FakeRecorder)
+
+			if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			st := fg.Status.RestoreInPlace
+			if st == nil || st.Phase != v1alpha1.RestoreInPlaceFailed {
+				t.Fatalf("want Failed, got %+v", st)
+			}
+			if !strings.Contains(st.Message, "restoreInPlace.pointInTime is not supported") {
+				t.Errorf("status message should explain the rejection, got %q", st.Message)
+			}
+			if st.ConfirmTokenUsed != "" {
+				t.Errorf("a rejection must not consume the confirm, confirmTokenUsed=%q", st.ConfirmTokenUsed)
+			}
+			if fg.Status.TopologyGeneration != gen {
+				t.Errorf("topologyGeneration bumped %d -> %d; the restore must never reach Fencing", gen, fg.Status.TopologyGeneration)
+			}
+			var job batchv1.Job
+			if err := c.Get(context.Background(), types.NamespacedName{
+				Name: inPlaceRestoreJobName(fg.Name, fg.Spec.Sites[0].Name), Namespace: fg.Namespace}, &job); !apierrors.IsNotFound(err) {
+				t.Errorf("no restore Job may be created, got err=%v", err)
+			}
+			events := drainEvents(rec)
+			if len(events) != 1 || !strings.Contains(events[0], "Warning RestoreInPlaceRejected") {
+				t.Errorf("want one RestoreInPlaceRejected warning, got %q", events)
+			}
+
+			rv := fg.ResourceVersion
+			if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
+				t.Fatalf("second reconcile: %v", err)
+			}
+			if fg.ResourceVersion != rv {
+				t.Errorf("an unchanged rejection must not rewrite status (resourceVersion %s -> %s)", rv, fg.ResourceVersion)
+			}
+			if again := drainEvents(rec); len(again) != 0 {
+				t.Errorf("an unchanged rejection must not re-emit events, got %q", again)
+			}
+
+			// The confirm was not consumed: dropping pointInTime lets the
+			// same confirm start a restore to the backup.
+			fg.Spec.RestoreInPlace.PointInTime = nil
+			if err := c.Update(context.Background(), fg); err != nil {
+				t.Fatalf("update spec: %v", err)
+			}
+			if _, err := r.reconcileInPlaceRestore(context.Background(), fg); err != nil {
+				t.Fatalf("reconcile after fix: %v", err)
+			}
+			if got := fg.Status.RestoreInPlace.Phase; got != v1alpha1.RestoreInPlacePreflight {
+				t.Errorf("after removing pointInTime the same confirm should start the restore; phase=%s", got)
+			}
+		})
+	}
+}
+
+// Defence in depth: even if a pointInTime spec reached the Job builder
+// (for example an object accepted by an older operator and resumed at
+// Restoring), it must refuse to build a replaying Job.
+func TestBuildInPlaceRestoreJob_RefusesPointInTime(t *testing.T) {
+	SetOperatorImageDefaults("bloodraven:test", "bloodraven")
+	defer SetOperatorImageDefaults("", "")
+	fg := fgInPlaceRestore("orders")
+	fg.Spec.Backup.PITR = &v1alpha1.PITRSpec{Enabled: true, ProfileName: "nightly-s3"}
+	fg.Spec.RestoreInPlace.PointInTime = &v1alpha1.PointInTimeSpec{StopDatetime: "2026-04-15T09:30:00Z"}
+	r, _ := newReconciler(fg, succeededSeedBackup())
+	_, err := r.buildInPlaceRestoreJob(context.Background(), fg, fg.Spec.Sites[0].Name, "creds", false, "orders")
+	if err == nil || !strings.Contains(err.Error(), "pointInTime") {
+		t.Fatalf("want a pointInTime refusal, got %v", err)
+	}
+}
