@@ -2205,6 +2205,13 @@ func ComputeSpecHash(fg *v1alpha1.MysqlFailoverGroup, site v1alpha1.SiteSpec, se
 		fmt.Fprintf(h, "pitr.podRenderVersion=%s\n", pitrPodRenderVersion)
 		if p.Enabled {
 			if profile := findProfile(fg, p.ProfileName); profile != nil {
+				fmt.Fprintf(h, "pitr.profile.encryption.enabled=%t\n", profile.EncryptionEnabled())
+				if profile.EncryptionEnabled() {
+					enc := profile.Encryption
+					fmt.Fprintf(h, "pitr.profile.encryption.algorithm=%s\n", enc.AlgorithmOrDefault())
+					fmt.Fprintf(h, "pitr.profile.encryption.secret=%s\n", enc.PassphraseSecret.Name)
+					fmt.Fprintf(h, "pitr.profile.encryption.key=%s\n", enc.PassphraseSecret.PassphraseSecretKeyOrDefault())
+				}
 				fmt.Fprintf(h, "pitr.profile.storage.type=%s\n", profile.Storage.Type)
 				if s3 := profile.Storage.S3; s3 != nil {
 					fmt.Fprintf(h, "pitr.profile.s3.bucket=%s\n", s3.Bucket)

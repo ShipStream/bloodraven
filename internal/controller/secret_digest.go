@@ -149,8 +149,9 @@ func secretContentDigest(key []byte, secrets map[string]map[string][]byte) strin
 }
 
 // specSecretInputs collects the Secret contents a site's pod template
-// depends on: the TLS Secret, and every referenced credential Secret in
-// credentials mode. A Secret that does not exist yet is skipped.
+// depends on: TLS, the active PITR passphrase in either credential mode,
+// and every referenced credential Secret in credentials mode. A Secret
+// that does not exist yet is skipped.
 func specSecretInputs(ctx context.Context, r client.Reader, fg *v1alpha1.MysqlFailoverGroup) (map[string]map[string][]byte, error) {
 	secrets := make(map[string]map[string][]byte)
 	if fg.Spec.TLS != nil {
@@ -161,6 +162,20 @@ func specSecretInputs(ctx context.Context, r client.Reader, fg *v1alpha1.MysqlFa
 			secrets["tls"] = s.Data
 		case !apierrors.IsNotFound(err):
 			return nil, fmt.Errorf("get TLS secret %s: %w", fg.Spec.TLS.SecretName, err)
+		}
+	}
+	if backup := fg.Spec.Backup; backup != nil && backup.PITR != nil && backup.PITR.Enabled {
+		if profile := findProfile(fg, backup.PITR.ProfileName); profile.EncryptionEnabled() {
+			ref := profile.Encryption.PassphraseSecret
+			var s corev1.Secret
+			err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: ref.Name}, &s)
+			switch {
+			case err == nil:
+				key := ref.PassphraseSecretKeyOrDefault()
+				secrets["pitr.passphrase"] = map[string][]byte{key: s.Data[key]}
+			case !apierrors.IsNotFound(err):
+				return nil, fmt.Errorf("get PITR passphrase secret %s: %w", ref.Name, err)
+			}
 		}
 	}
 	if fg.Spec.UsesCredentials() {

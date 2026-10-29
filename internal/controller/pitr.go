@@ -22,7 +22,7 @@ const (
 	// field change. ComputeSpecHash includes this value so already-enabled
 	// PITR pods roll forward to pick up render-only fixes such as Secret
 	// volume modes.
-	pitrPodRenderVersion = "pitr-pod-render-v3-sidecar-mysql-uid"
+	pitrPodRenderVersion = "pitr-pod-render-v4-readable-passphrase"
 
 	// Official MySQL container images own /var/lib/mysql as uid/gid 999.
 	// PITR sidecars must read mysql-bin.index and sealed binlog files from
@@ -218,12 +218,14 @@ func buildPITRSidecarFragments(fg *v1alpha1.MysqlFailoverGroup) (pitrSidecarFrag
 	// from the encryptedStore that sidecar.NewArchiveStore chooses.
 	if profile.EncryptionEnabled() {
 		ref := profile.Encryption.PassphraseSecret
+		// Match the S3 credentials projection: the non-root sidecar
+		// must be able to read this file even without a pod fsGroup.
 		out.PodVolumes = append(out.PodVolumes, corev1.Volume{
 			Name: "pitr-passphrase",
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName:  ref.Name,
-					DefaultMode: ptr32(0o400),
+					DefaultMode: ptr32(0o444),
 					Items: []corev1.KeyToPath{
 						{
 							Key:  ref.PassphraseSecretKeyOrDefault(),

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -474,41 +475,55 @@ func (p *pvcStore) GetFile(_ context.Context, key, dst string) error {
 	return os.Rename(tmp, dst)
 }
 
-// List walks the on-disk tree under prefix and returns every file key
-// (relative to the PVC root), matching the S3 semantics.
+// List matches storage-relative keys by string prefix, including partial
+// filenames and directory names. An empty prefix lists the whole PVC.
 func (p *pvcStore) List(_ context.Context, prefix string) ([]string, error) {
-	root, err := p.fullPath(prefix)
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Stat(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+	normalizedPrefix := ""
+	if prefix != "" {
+		full, err := p.fullPath(prefix)
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("stat %s: %w", root, err)
+		rel, err := filepath.Rel(p.root, full)
+		if err != nil {
+			return nil, fmt.Errorf("resolve list prefix %q: %w", prefix, err)
+		}
+		normalizedPrefix = filepath.ToSlash(rel)
+		if strings.HasSuffix(prefix, "/") || strings.HasSuffix(prefix, string(filepath.Separator)) {
+			normalizedPrefix += "/"
+		}
 	}
+	// Walk from the storage root and prune branches that cannot match.
+	root := filepath.Clean(p.root)
 	var out []string
-	if !info.IsDir() {
-		// Caller passed a full key; mirror S3 behavior and return it
-		// if it exists.
-		out = append(out, prefix)
-		return out, nil
-	}
-	err = filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
+	err := filepath.WalkDir(root, func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if filePath == root && os.IsNotExist(walkErr) {
+				return nil
+			}
+			return walkErr
+		}
+		if filePath == root && !entry.IsDir() {
+			return fmt.Errorf("PVC archive root %s is not a directory", root)
+		}
+		rel, err := filepath.Rel(p.root, filePath)
 		if err != nil {
 			return err
 		}
-		if fi.IsDir() {
+		key := filepath.ToSlash(rel)
+		if entry.IsDir() {
+			if key == "." || strings.HasPrefix(key, normalizedPrefix) || strings.HasPrefix(normalizedPrefix, key+"/") {
+				return nil
+			}
+			return filepath.SkipDir
+		}
+		// PVC writes become visible only after their temporary file is renamed.
+		if strings.HasSuffix(key, ".tmp") || strings.HasSuffix(key, ".part") {
 			return nil
 		}
-		rel, err := filepath.Rel(p.root, path)
-		if err != nil {
-			return err
+		if strings.HasPrefix(key, normalizedPrefix) {
+			out = append(out, key)
 		}
-		// Normalize to forward slashes so callers building keys with
-		// path.Join (which uses /) match regardless of GOOS.
-		out = append(out, filepath.ToSlash(rel))
 		return nil
 	})
 	if err != nil {

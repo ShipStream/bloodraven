@@ -135,6 +135,8 @@ Consult [references/troubleshooting_playbooks.md](./references/troubleshooting_p
 
 ### 5. Backups, PITR Archiver & Verification
 - **Symptom**: `BloodravenBackupStale`, failed backup Job, or stale backup verification.
+- **Encrypted PITR startup failure**: `failed to init archive store` with `permission denied` for the passphrase file means the sidecar cannot start HTTP or fencing. Check previous sidecar logs and the pod's `pitr-passphrase` Secret projection mode. It must be `0444` for a non-root sidecar without fsGroup, matching PITR S3 credentials. See [playbook 25](./references/troubleshooting_playbooks.md#25-encrypted-pitr-sidecar-fails-to-init-archive-store).
+- **PITR encryption drift or incompatible archive**: encryption settings and selected passphrase bytes trigger ordered updates in both credential modes. After a change, compare the desired reference/key with the rendered sidecar mount and rollout state; a manifest-read/authentication error can mean the existing archive uses the old encryption settings. Preserve the old passphrase and archive; rollout does not migrate them. See [playbook 26](./references/troubleshooting_playbooks.md#26-pitr-archival-stops-after-an-encryption-change).
 - **Probe**:
   ```bash
   kubectl get mysqlbackups.shipstream.io -n <namespace> --sort-by=.metadata.creationTimestamp

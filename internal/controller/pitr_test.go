@@ -1,12 +1,97 @@
 package controller
 
 import (
+	"os"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
+
+func TestReconcileDeployment_PITRPassphraseReadableBySidecar(t *testing.T) {
+	for _, storageType := range []v1alpha1.BackupStorageType{v1alpha1.BackupStorageS3, v1alpha1.BackupStoragePVC} {
+		for _, contextName := range []string{"default", "explicit non-root", "fsGroup"} {
+			t.Run(string(storageType)+"/"+contextName, func(t *testing.T) {
+				fg := newTestFG()
+				storage := v1alpha1.BackupStorage{Type: storageType}
+				if storageType == v1alpha1.BackupStorageS3 {
+					storage.S3 = &v1alpha1.S3Storage{Bucket: "backups", CredentialsSecret: "aws-creds"}
+				} else {
+					storage.PVC = &v1alpha1.PVCStorage{ClaimName: "backups"}
+				}
+				fg.Spec.Backup = &v1alpha1.BackupSpec{
+					PITR: &v1alpha1.PITRSpec{Enabled: true, ProfileName: "encrypted"},
+					Profiles: []v1alpha1.BackupProfile{{
+						Name: "encrypted", Storage: storage,
+						Encryption: &v1alpha1.BackupEncryptionSpec{
+							PassphraseSecret: v1alpha1.PassphraseSecretRef{Name: "archive-key", Key: "selected-key"},
+						},
+					}},
+				}
+				uid, gid := int64(1234), int64(2345)
+				switch contextName {
+				case "explicit non-root":
+					fg.Spec.ContainerSecurityContext = &corev1.SecurityContext{RunAsUser: &uid, RunAsGroup: &gid}
+				case "fsGroup":
+					fg.Spec.PodSecurityContext = &corev1.PodSecurityContext{FSGroup: &gid}
+				}
+				r, _ := newReconciler(fg)
+				reconcileOnce(t, r)
+				pod := getDeployment(t, r, "dc1").Spec.Template.Spec
+				sidecar := containerByName(pod.Containers, "sidecar")
+				if sidecar == nil || sidecar.SecurityContext == nil || sidecar.SecurityContext.RunAsUser == nil {
+					t.Fatal("expected a sidecar with an explicit non-root UID")
+				}
+				wantUID := mysqlDataUID
+				if contextName == "explicit non-root" {
+					wantUID = uid
+				}
+				if got := *sidecar.SecurityContext.RunAsUser; got != wantUID {
+					t.Fatalf("sidecar UID: got %d, want %d", got, wantUID)
+				}
+				if contextName != "fsGroup" && pod.SecurityContext != nil && pod.SecurityContext.FSGroup != nil {
+					t.Fatal("PITR must not inject an fsGroup onto the MySQL PVC")
+				}
+				vol := findVolume(pod.Volumes, "pitr-passphrase")
+				if vol == nil || vol.Secret == nil || vol.Secret.DefaultMode == nil {
+					t.Fatal("expected passphrase Secret with an explicit projection mode")
+				}
+				if vol.Secret.SecretName != "archive-key" || len(vol.Secret.Items) != 1 ||
+					vol.Secret.Items[0].Key != "selected-key" || vol.Secret.Items[0].Path != backupPassphraseFileName {
+					t.Fatalf("unexpected passphrase projection: %+v", vol.Secret)
+				}
+				mode := os.FileMode(*vol.Secret.DefaultMode)
+				if (pod.SecurityContext == nil || pod.SecurityContext.FSGroup == nil) && mode&0o004 == 0 {
+					t.Errorf("root-owned passphrase mode %#o is unreadable by sidecar UID %d without fsGroup", mode, wantUID)
+				}
+				if mode != 0o444 {
+					t.Errorf("passphrase mode: got %#o, want 0444 to match PITR S3 credentials", mode)
+				}
+				var mounted bool
+				for _, mount := range sidecar.VolumeMounts {
+					if mount.Name == vol.Name && mount.ReadOnly && mount.MountPath == backupPassphraseMountPath {
+						mounted = true
+					}
+				}
+				if !mounted {
+					t.Fatal("sidecar must mount the passphrase read-only at the configured path")
+				}
+				for _, container := range pod.Containers {
+					if container.Name == "sidecar" {
+						continue
+					}
+					for _, mount := range container.VolumeMounts {
+						if mount.Name == vol.Name {
+							t.Errorf("passphrase must only be mounted in the sidecar, found in %s", container.Name)
+						}
+					}
+				}
+				assertEnvEquals(t, sidecar.Env, "BLOODRAVEN_PITR_PASSPHRASE_FILE", backupPassphraseMountPath+"/"+backupPassphraseFileName)
+			})
+		}
+	}
+}
 
 // TestBuildPITRSidecarFragments_Disabled asserts that the whole helper
 // is a no-op when PITR isn't enabled — every field returns the zero
