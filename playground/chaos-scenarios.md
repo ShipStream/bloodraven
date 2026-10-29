@@ -1150,6 +1150,8 @@ Note the coverage consequence: only the sidecar's fence kills connections, so th
 
 **Cleanup**: The scenario reconciles the errant transactions by committing them as empty transactions on the active primary (refusing if the errant set carries any UUID other than the reader's — that demands `kubectl bloodraven reclone`), waits for the convergence invariant to restart the reader, then drops the scenario database through the primary so replication removes the errant row itself.
 
+The replica GTID audit also reports the errant write: within one audit interval (30s) the reader shows `recoveryState=RecoveryBlocked` with `divergenceDetectedBy=ReplicaAudit` and the errant set in `divergentGtid`, and `Degraded` is `True` with reason `DivergentTransactions` while `Ready` stays `True`. The empty-transaction reconcile is exactly what clears it: the next audit proves the primary contains the set and logs `divergence cleared: replica holds no transactions the primary lacks`, which the run-all baseline (no `RecoveryBlocked` site) then sees.
+
 ---
 
 ### 44. Reader Source Convergence Invariant {#44-reader-source-convergence-invariant}

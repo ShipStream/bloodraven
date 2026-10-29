@@ -35,7 +35,7 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
    - If divergent transactions exist on the loser, evaluate if they need manual data extraction (via `mysqldump` or binlog inspection).
 4. **Reclone Loser**:
    ```bash
-   kubectl bloodraven reclone <group> -n <ns> --target=<loser-site>
+   kubectl bloodraven reclone <group> <loser-site> -n <ns>
    ```
 
 ---
@@ -43,9 +43,10 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
 ## 2. Divergent Transactions & Errant GTID on Replica
 
 ### Symptoms
-- Old primary fails to rejoin as replica after emergency failover.
+- Old primary fails to rejoin as replica after emergency failover (`status.sites[].divergenceDetectedBy=OldPrimaryRecovery`, Event `DataLossDetected`).
 - `BloodravenDivergentTransactions` alert firing.
 - `SHOW REPLICA STATUS` shows replication stopped with GTID error (e.g. error 1236).
+- A replica that is still replicating normally can be divergent too (`divergenceDetectedBy=ReplicaAudit`): use playbook 33.
 
 ### Diagnostic Steps
 1. Inspect GTID executed sets:
@@ -60,7 +61,7 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
    - Any transactions committed *only* to the old primary will be lost.
 2. **Execute Reclone**:
    ```bash
-   kubectl bloodraven reclone <group> -n <ns> --target=<divergent-site>
+   kubectl bloodraven reclone <group> <divergent-site> -n <ns>
    ```
 3. **Monitor Reclone Progress**:
    ```bash
@@ -582,6 +583,8 @@ With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first
    - `did not reach the fenced source GTID set ... N transactions missing`: the standby is still behind after the 30s fenced budget.
    - `active primary became unreachable during ordered update`: the active site stopped answering. Emergency failover takes over; see the failover runbooks.
    - `no longer contains the fenced source set` (after `STOP REPLICA` or `RESET REPLICA ALL`): the standby's server lost history after the catch-up proof, for example a replaced pod. Treat it as a suspect replica and compare its data before anything else.
+   - `transactions the source lacks` (on WARN `maintenance handoff refused; candidate has transactions the source lacks`, or in an `aborted` error after `STOP REPLICA` / `RESET REPLICA ALL`): the standby is divergent. Never promote it to get the update through: use playbook 33.
+   - `is divergent (N transactions the primary lacks); reclone or reconcile before the active site can be updated` (on `ordered update failed`, or WARN `ordered update: active-site update stalled; standby is divergent`): the operator has recorded the divergence and does not pick the standby. Playbook 33.
    - `candidate SQL thread error`: the applier stopped.
    - `unparseable GTID set`, or a read error.
 2. Compare the sets. The standby's set should contain the active site's:
@@ -600,7 +603,7 @@ With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first
    - Confirm the standby is read-only.
    - Confirm its `@@GLOBAL.gtid_executed` is a subset of the active site's: `SELECT GTID_SUBSET('<standby set>', '<active set>')` on the active site returns 1.
    - If it is, run on the standby: `CHANGE REPLICATION SOURCE TO SOURCE_HOST='<active internal host>', SOURCE_USER='<repl user>', SOURCE_PASSWORD='<repl password>', SOURCE_AUTO_POSITION=1; START REPLICA;`. Add `SOURCE_SSL=1, SOURCE_SSL_CA='/etc/mysql/tls/ca.crt'` when `spec.tls` is set, otherwise `GET_SOURCE_PUBLIC_KEY=1`.
-   - If it is not a subset, the standby has errant transactions: reclone it (`kubectl bloodraven reclone <group> -n <ns> --target=<site>`) instead.
+   - If it is not a subset, the standby has errant transactions: reclone it (`kubectl bloodraven reclone <group> <site> -n <ns>`) instead, or see playbook 33.
 
 ## 24. One group stopped updating (no running topology manager)
 
@@ -797,3 +800,63 @@ A PVC volume left out of the pod spec does not fail store construction (only an 
 - `ArchiverDisabled`: if it persists after the rollout, check that `spec.backup.pitr.profileName` names an existing profile (look for a `BackupPITRInvalid` Event). With an empty or unknown profile the operator renders no PITR configuration into the sidecar, so it reports archiving disabled indefinitely.
 - `SidecarUnreachable` on an older sidecar image: upgrade the sidecar image; the operator rolls it through the ordered update. The ordered update waits only on MySQL replication, so watch `PITRArchiveReady` site by site instead of assuming a finished rollout means archiving works.
 - Recovery to `True` needs 2 consecutive clean poll rounds (about a minute) and emits a Normal `PITRArchiveReady` Event. Binlogs sealed during the outage are uploaded once the archiver runs, as long as MySQL still has them; check `backlogFiles` and the coverage fields afterwards.
+
+---
+
+## 33. A healthy replica reports divergent transactions, or an ordered update/planned failover refuses a divergent target
+
+A replica can apply every new transaction from the primary while holding transactions the primary never had: an earlier lossy promotion (issue #202, v1.5.0 ordered updates), a write made on the replica without `sql_log_bin=0`, a split-brain loser repointed by hand, or a restore of stale history. Its IO and SQL threads stay healthy until a conflicting row stops it. Since v1.6.0 the operator audits every read-only follower with a replication channel against the confirmed primary (follower read first, then the primary; about every 30s and on the first poll after start or a primary change), records the extra set, and will not promote that site in an ordered update or a planned failover. Emergency failover is never refused: it ranks divergent sites last and promotes one only when no other candidate remains.
+
+### Symptoms
+- `Degraded=True`, reason `DivergentTransactions`, message naming the site, count and set; `Ready` stays `True` and the deployment API keeps granting leases (an old primary's divergence, `divergenceDetectedBy=OldPrimaryRecovery`, still makes it answer `423 unstable`).
+- `status.sites[<site>]`: `recoveryState=RecoveryBlocked`, `divergenceDetectedBy=ReplicaAudit`, `divergentGtid`, `divergentTransactionCount`, `divergenceComparedTo=<primary>`; `replicating` often `true`.
+- Warning Event `DivergentReplicaDetected`; WARN `divergence detected` with `detectedBy=ReplicaAudit`; `bloodraven_divergent_transactions{site} > 0`.
+- Ordered update: `ordered update failed` with `<site> is divergent (N transactions the primary lacks); reclone or reconcile before the active site can be updated`, WARN `ordered update: active-site update stalled; standby is divergent`, or WARN `maintenance handoff refused; candidate has transactions the source lacks`. The active site keeps serving, unfenced, with its old spec. During the v1.6.0 upgrade itself this stall is expected on installs damaged by #202.
+- Planned failover: `status.plannedFailover.reason=DivergentTarget`.
+- After an emergency: `DivergentPromotion=True` condition and Warning Event `DivergentSitePromoted` (a divergent site is now primary).
+
+### Diagnostic steps
+1. Confirm the set independently, follower first:
+   ```bash
+   ./.agents/skills/bloodraven-doctor/scripts/gtid-audit.sh -n <ns> <group>   # exit 2 = DIVERGENT, 3 = UNKNOWN
+   ```
+   It reads the follower's `@@GLOBAL.gtid_executed`, then runs `SELECT GTID_SUBTRACT('<follower set>', @@GLOBAL.gtid_executed)` on the confirmed primary, and reports UNKNOWN (not clean) on any failed read, a non-writable primary, or a `server_uuid` change between the reads.
+2. Decode what the transactions are, on the divergent replica, before anything destroys them:
+   ```bash
+   kubectl exec -n <ns> <replica-pod> -c mysql -- sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N -e "SHOW BINARY LOGS"'
+   kubectl exec -n <ns> <replica-pod> -c mysql -- sh -c 'mysqlbinlog --include-gtids="<divergentGtid>" --base64-output=DECODE-ROWS -vv /var/lib/mysql/<binlog files>' > errant-<site>.sql
+   ```
+   Keep `errant-<site>.sql` with the incident. A GTID UUID equal to the replica's own `@@server_uuid` means a local write on the replica; the old primary's UUID means writes the primary lost in a promotion (#202).
+3. Ask the data owner which outcome is right. Treat the transactions as real data until proven otherwise: a GTID set cannot tell a stray `CREATE USER` from an order.
+
+### Safe remediation
+Pick one. Both end with the audit clearing the block on its own (INFO `divergence cleared: replica holds no transactions the primary lacks`, Event `DivergenceResolved`, `Degraded` back to `Healthy`) within about 30s, and a stalled ordered update then resumes without further action. Re-annotate a refused planned failover.
+
+1. **Discard** (the transactions are not needed, or have been re-applied by hand): reclone the replica from the primary. The plugin fills in the required `divergentGtid` prefix:
+   ```bash
+   kubectl bloodraven reclone <group> <site> -n <ns>
+   # equivalent annotation: bloodraven.shipstream.io/reclone-site=<site>:<first 8+ characters of divergentGtid>
+   ```
+   (`reclone-site=<site>:confirm=<group>` is the cold form for a site with no recorded `divergentGtid`.) The replica is unavailable for the clone and the group has one copy less until it finishes.
+2. **Keep** (the transactions belong in the primary's history): make the primary contain the set. Either replay the decoded events on the primary (review for conflicts first), or, when the transactions must not change the primary's data, commit one empty transaction per GTID on the primary:
+   ```sql
+   SET GTID_NEXT='<uuid>:<n>'; BEGIN; COMMIT;
+   -- repeat for every GTID in divergentGtid, then:
+   SET GTID_NEXT='AUTOMATIC';
+   ```
+   Empty transactions make the sets agree without moving the rows: the replica keeps rows the primary lacks. Use them only for transactions whose effects are absent from both, harmless, or already reconciled.
+
+If an emergency failover promoted a clean site over a divergent one and the new primary was then fenced back by its own sidecar, the operator re-asserts it without holding the divergent peer's recorded `divergentGtid` against it (those transactions stay on the peer, which keeps its report). Anything the peer holds beyond its recorded set still blocks the re-assert: compare with `gtid-audit.sh` and resolve as above.
+
+Do not:
+- Force the update or the planned failover through (for example by editing status or repointing replication by hand): promoting the replica would make its extra history authoritative and the primary's newer writes collide with it.
+- Expect replication restarts to fix it: thread health does not clear the block, and there is no setting to ignore divergence.
+- Run maintenance on a replica with binlogging on. Use `SET SESSION sql_log_bin=0` for replica-local work.
+
+### After an emergency promotion of a divergent site (`DivergentPromotion=True`)
+The site was the only candidate left, and its extras are now the primary's history. A later divergent promotion is appended to the same condition (one record per line, newest last, the five newest kept); each also has its own `DivergentSitePromoted` Event. Review every set named in the condition with the data owner (step 2 above, on the new primary), then remove the condition:
+```bash
+kubectl get mysqlfailovergroup <group> -n <ns> -o json | jq '.status.conditions | map(.type) | index("DivergentPromotion")'
+kubectl patch mysqlfailovergroup <group> -n <ns> --subresource=status --type=json -p '[{"op":"remove","path":"/status/conditions/<index>"}]'
+```
+The operator does not set it again for the same promotion.

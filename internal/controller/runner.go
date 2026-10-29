@@ -864,9 +864,10 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		if site.DivergentTransactionCount != nil {
 			count = *site.DivergentTransactionCount
 		}
-		tm.SetRecoveryBlocked(site.Name, site.DivergentGtid, count)
+		tm.SetRecoveryBlockedFrom(site.Name, site.DivergentGtid, count, site.DivergenceDetectedBy, site.DivergenceComparedTo)
 		r.logger.Info("restored recovery blocked state from CR status",
-			"fg", nn, "site", site.Name, "divergentGtid", site.DivergentGtid, "divergentTransactionCount", count)
+			"fg", nn, "site", site.Name, "divergentGtid", site.DivergentGtid, "divergentTransactionCount", count,
+			"detectedBy", site.DivergenceDetectedBy, "comparedTo", site.DivergenceComparedTo)
 	}
 
 	tmCtx, cancel := context.WithCancel(ctx)
@@ -1177,6 +1178,12 @@ func (r *TopologyManagerRunner) SetManagerForTest(nn types.NamespacedName, tm *T
 	r.managers[nn] = &managedTopology{tm: tm}
 }
 
+// WriteStatusForTest writes snap to the CR status the way a running
+// manager's status callback does. Not for production use.
+func (r *TopologyManagerRunner) WriteStatusForTest(ctx context.Context, nn types.NamespacedName, snap TopologySnapshot) error {
+	return r.updateCRStatus(ctx, nn, snap)
+}
+
 // StopManager stops and removes the topology manager for the given NamespacedName.
 // This is called from the reconciler's finalizer handling when a CR is being deleted.
 func (r *TopologyManagerRunner) StopManager(nn types.NamespacedName) {
@@ -1326,6 +1333,12 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		} else {
 			freshFG.Status.Sites[i].DivergentTransactionCount = nil
 		}
+		freshFG.Status.Sites[i].DivergenceDetectedBy = ""
+		freshFG.Status.Sites[i].DivergenceComparedTo = ""
+		if s.RecoveryState == recoveryStateBlocked {
+			freshFG.Status.Sites[i].DivergenceDetectedBy = s.DivergenceDetectedBy
+			freshFG.Status.Sites[i].DivergenceComparedTo = s.DivergenceComparedTo
+		}
 	}
 
 	// Evaluate replication health.
@@ -1438,6 +1451,45 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		}
 	}
 
+	// A divergence block outranks the per-site replication reasons above,
+	// which are last-writer-wins: a lagging or broken replica must not hide
+	// that a site holds transactions the primary lacks. Topology alerts
+	// (split brain, no primary, total loss) still win. Ready is untouched:
+	// the group serves, and Ready gates application rollouts.
+	if reason == "Healthy" {
+		if msg := divergenceDegradedMessage(snap); msg != "" {
+			setCondition(&freshFG.Status.Conditions, metav1.Condition{
+				Type: "Degraded", Status: metav1.ConditionTrue,
+				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
+				Reason:  "DivergentTransactions",
+				Message: msg,
+			})
+		}
+	}
+
+	// A promotion of a divergent site is recorded once and kept until an
+	// administrator removes the condition after reviewing the transactions.
+	newDivergentPromotion := false
+	if note := snap.DivergentPromotion; note != nil {
+		msg := divergentPromotionMessage(*note)
+		existing := apimeta.FindStatusCondition(freshFG.Status.Conditions, divergentPromotionCondition)
+		if existing == nil || !strings.Contains(existing.Message, msg) {
+			newDivergentPromotion = true
+			// Earlier promotions an administrator has not reviewed (and
+			// removed) stay in the record; the newest is last.
+			combined := msg
+			if existing != nil && existing.Status == metav1.ConditionTrue && existing.Message != "" {
+				combined = appendDivergentPromotion(existing.Message, msg)
+			}
+			setCondition(&freshFG.Status.Conditions, metav1.Condition{
+				Type: divergentPromotionCondition, Status: metav1.ConditionTrue,
+				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
+				Reason:  "DivergentSitePromoted",
+				Message: combined,
+			})
+		}
+	}
+
 	// Bootstrapping condition reflects fresh-deploy bootstrap progress.
 	setBootstrappingCondition(&freshFG.Status.Conditions, freshFG.Generation, now, snap.BootstrapPhase, snap.BootstrapError, snap.BootstrapSource)
 
@@ -1474,13 +1526,18 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			Message:            fmt.Sprintf("Old primary %s is being reconfigured as a replica", snap.RecoverySite),
 		})
 	} else if snap.RecoveryState == recoveryStateBlocked {
+		msg := fmt.Sprintf("Old primary %s has %d divergent transactions — annotate with bloodraven.shipstream.io/reclone-site=%s to recover", snap.RecoverySite, snap.DivergentTxnCount, snap.RecoverySite)
+		if snap.DivergenceDetectedBy == divergenceDetectedByAudit {
+			msg = fmt.Sprintf("Replica %s has %d transactions the primary%s lacks — reclone it (kubectl bloodraven reclone %s %s) or make the primary contain them",
+				snap.RecoverySite, snap.DivergentTxnCount, comparedToSuffix(snap.DivergenceComparedTo), freshFG.Name, snap.RecoverySite)
+		}
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               "RecoveryPending",
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: freshFG.Generation,
 			LastTransitionTime: now,
 			Reason:             "DivergentTransactions",
-			Message:            fmt.Sprintf("Old primary %s has %d divergent transactions — annotate with bloodraven.shipstream.io/reclone-site=%s to recover", snap.RecoverySite, snap.DivergentTxnCount, snap.RecoverySite),
+			Message:            msg,
 		})
 	} else {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
@@ -1509,6 +1566,9 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		if r.deploymentLeases != nil {
 			r.deploymentLeases.confirmTopology(&freshFG, snap.DeploymentEpoch)
 		}
+		// Unchanged includes the DivergentPromotion condition already
+		// carrying this note.
+		r.ackDivergentPromotion(nn, snap)
 		return nil
 	}
 
@@ -1558,7 +1618,24 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		reclones := fresh.Status.RestoreReclones
 		offlineFence := fresh.Status.RestoreOfflineFence
 		pitr := fresh.Status.PITR
+		// Only an administrator removes DivergentPromotion; unless this
+		// write records a new note, keep whatever is live so a removal
+		// that raced this write is not undone.
+		var liveDivergentPromotion *metav1.Condition
+		if !newDivergentPromotion {
+			if c := apimeta.FindStatusCondition(fresh.Status.Conditions, divergentPromotionCondition); c != nil {
+				cp := *c
+				liveDivergentPromotion = &cp
+			}
+		}
 		fresh.Status = *freshFG.Status.DeepCopy()
+		if !newDivergentPromotion {
+			if liveDivergentPromotion != nil {
+				setCondition(&fresh.Status.Conditions, *liveDivergentPromotion)
+			} else {
+				removeCondition(&fresh.Status.Conditions, divergentPromotionCondition)
+			}
+		}
 		fresh.Status.PlannedFailover = planned
 		fresh.Status.Restore = initialRestore
 		fresh.Status.RestoreInPlace = restore
@@ -1601,6 +1678,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	// so events are not emitted for transitions that failed to persist.
 	if superseded {
 		return nil
+	}
+	r.ackDivergentPromotion(nn, snap)
+	if newDivergentPromotion && r.recorder != nil {
+		r.recorder.Eventf(&freshFG, corev1.EventTypeWarning, "DivergentSitePromoted", "%s", divergentPromotionMessage(*snap.DivergentPromotion))
 	}
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
 	r.emitPITRArchiveEvents(&freshFG, pitrArchivePrev)
@@ -1773,8 +1854,13 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 	// sites can be in recovery at once.
 	oldState := make(map[string]string, len(existingStatus.Sites))
 	oldDivergentCount := make(map[string]int64, len(existingStatus.Sites))
+	oldDetectedBy := make(map[string]string, len(existingStatus.Sites))
+	oldSet := make(map[string]string, len(existingStatus.Sites))
+	oldComparedTo := make(map[string]string, len(existingStatus.Sites))
 	for _, s := range existingStatus.Sites {
 		oldState[s.Name] = s.RecoveryState
+		oldDetectedBy[s.Name] = s.DivergenceDetectedBy
+		oldSet[s.Name], oldComparedTo[s.Name] = s.DivergentGtid, s.DivergenceComparedTo
 		if s.DivergentTransactionCount != nil {
 			oldDivergentCount[s.Name] = *s.DivergentTransactionCount
 		}
@@ -1795,19 +1881,40 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 		if prev, ok := oldDivergentCount[s.Name]; ok && prev != s.DivergentTxnCount {
 			countChanged = true
 		}
+		// The same count can hide a different set (one extra reconciled
+		// while another appeared) or a comparison against another primary;
+		// both are new evidence. A field the old status never recorded
+		// (written before provenance existed) is not.
+		evidenceChanged := oldState[s.Name] == recoveryStateBlocked &&
+			((oldSet[s.Name] != "" && oldSet[s.Name] != s.DivergentGtid) ||
+				(oldComparedTo[s.Name] != "" && s.DivergenceComparedTo != "" && oldComparedTo[s.Name] != s.DivergenceComparedTo))
 		if s.RecoveryState == recoveryStateBlocked &&
-			(oldState[s.Name] != recoveryStateBlocked || countChanged) {
-			r.recorder.Eventf(fg, corev1.EventTypeWarning, "DataLossDetected",
-				"%d divergent transactions on %s did not replicate before failover",
-				s.DivergentTxnCount, s.Name)
+			(oldState[s.Name] != recoveryStateBlocked || countChanged || evidenceChanged) {
+			if s.DivergenceDetectedBy == divergenceDetectedByAudit {
+				// A replica, usually replicating normally, holds history
+				// the primary lacks; "did not replicate before failover"
+				// would send the reader to the wrong playbook.
+				r.recorder.Eventf(fg, corev1.EventTypeWarning, "DivergentReplicaDetected",
+					"%d transactions on %s are missing from the primary%s (%s); ordered updates and planned failovers will not promote it. Reclone it or make the primary contain them",
+					s.DivergentTxnCount, s.Name, comparedToSuffix(s.DivergenceComparedTo), truncateGtidHint(s.DivergentGtid))
+			} else {
+				r.recorder.Eventf(fg, corev1.EventTypeWarning, "DataLossDetected",
+					"%d divergent transactions on %s did not replicate before failover",
+					s.DivergentTxnCount, s.Name)
+			}
 		}
 		// Recovery complete: RecoveryInProgress/RecoveryBlocked cleared. A
 		// marker cleared because the site became WRITABLE (promotion or
 		// re-assert) is not a recovery completion — the site did not rejoin
 		// as a replica — so no Normal event is emitted for it.
 		if recoveryActive(oldState[s.Name]) && !recoveryActive(s.RecoveryState) && s.State != state.StateWritable {
-			r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecoveryComplete",
-				"Old primary %s recovered and is now replicating", s.Name)
+			if oldState[s.Name] == recoveryStateBlocked && oldDetectedBy[s.Name] == divergenceDetectedByAudit {
+				r.recorder.Eventf(fg, corev1.EventTypeNormal, "DivergenceResolved",
+					"Replica %s no longer holds transactions the primary lacks", s.Name)
+			} else {
+				r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecoveryComplete",
+					"Old primary %s recovered and is now replicating", s.Name)
+			}
 		}
 	}
 }
@@ -1944,6 +2051,83 @@ func degradedReason(snap TopologySnapshot) string {
 		return "NoPrimary"
 	}
 	return "Alert"
+}
+
+// divergentPromotionCondition records that a site holding transactions its
+// former primary lacked was promoted. Set by the operator, removed only by
+// an administrator.
+const divergentPromotionCondition = "DivergentPromotion"
+
+// divergenceDegradedMessage describes every site carrying a divergence
+// block, or returns "" when none does.
+func divergenceDegradedMessage(snap TopologySnapshot) string {
+	var parts []string
+	for _, s := range snap.Sites {
+		if s.RecoveryState != recoveryStateBlocked {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s holds %d transactions the primary%s lacks (%s)",
+			s.Name, s.DivergentTxnCount, comparedToSuffix(s.DivergenceComparedTo), truncateGtidHint(s.DivergentGtid)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "; ") +
+		". Replication may still be running. Ordered updates and planned failovers will not promote it: reclone it (kubectl bloodraven reclone) to discard the transactions, or make the primary contain them to keep them."
+}
+
+func divergentPromotionMessage(note DivergentPromotion) string {
+	return fmt.Sprintf("%s was promoted while holding %d transactions the primary%s lacked (%s); they are now part of the primary's history. Review them, then remove this condition",
+		note.Site, note.DivergentTransactions, comparedToSuffix(note.ComparedTo), truncateGtidSet(note.DivergentGtid))
+}
+
+// maxDivergentPromotionRecords bounds the DivergentPromotion condition:
+// the newest records are kept, and the Event stream and operator log hold
+// every one.
+const maxDivergentPromotionRecords = 5
+
+const divergentPromotionOmitted = "(earlier divergent promotions omitted; see DivergentSitePromoted Events and the operator log)"
+
+// appendDivergentPromotion adds record to the newline-separated records in
+// existing, keeping the newest maxDivergentPromotionRecords.
+func appendDivergentPromotion(existing, record string) string {
+	var records []string
+	for _, line := range strings.Split(existing, "\n") {
+		if line != "" && line != divergentPromotionOmitted {
+			records = append(records, line)
+		}
+	}
+	omitted := strings.Contains(existing, divergentPromotionOmitted)
+	records = append(records, record)
+	if len(records) > maxDivergentPromotionRecords {
+		records = records[len(records)-maxDivergentPromotionRecords:]
+		omitted = true
+	}
+	if omitted {
+		records = append([]string{divergentPromotionOmitted}, records...)
+	}
+	return strings.Join(records, "\n")
+}
+
+func comparedToSuffix(site string) string {
+	if site == "" {
+		return ""
+	}
+	return " " + site
+}
+
+// ackDivergentPromotion tells the manager its pending divergent-promotion
+// note is persisted.
+func (r *TopologyManagerRunner) ackDivergentPromotion(nn types.NamespacedName, snap TopologySnapshot) {
+	if snap.DivergentPromotion == nil {
+		return
+	}
+	r.mu.RLock()
+	mt := r.managers[nn]
+	r.mu.RUnlock()
+	if mt != nil && mt.tm != nil {
+		mt.tm.AckDivergentPromotion(*snap.DivergentPromotion)
+	}
 }
 
 // setBootstrappingCondition writes the Bootstrapping condition based on the

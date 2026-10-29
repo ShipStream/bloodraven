@@ -648,6 +648,15 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverWaitingForLag(ctx context.
 				cmpErr, cur.SourcePrimary), "failed_other")
 	}
 
+	// The source is fenced, so the target can only gain transactions from
+	// SourceGtidAtFence. Anything else on it is history the source never
+	// had; promoting it would make that history authoritative.
+	if extra := gtidExtras(targetGtid, cur.SourceGtidAtFence); !extra.IsEmpty() {
+		return r.plannedFailoverRollback(ctx, fg, nn, "DivergentTarget",
+			fmt.Sprintf("planned-failover: target %q has %d transactions the fenced source %q lacks (%s); reclone it or make the source contain them; source unfenced",
+				cur.Target, extra.TransactionCount(), cur.SourcePrimary, truncateGtidSet(extra.String())), "rejected")
+	}
+
 	if caughtUp {
 		next := cur.DeepCopy()
 		// Insert the Dragonfly sync/promote phases between MySQL lag-OK
@@ -699,6 +708,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 			return r.plannedFailoverRollback(ctx, fg, nn, "KeyringRotation",
 				fmt.Sprintf("planned-failover: site %q is mid-keyring-rotation (UnsealReason=Rotation); finish the rotation before this site can be promoted",
 					cur.Target),
+				"rejected")
+		}
+		if errors.Is(err, errDivergentTarget) {
+			return r.plannedFailoverRollback(ctx, fg, nn, "DivergentTarget",
+				fmt.Sprintf("%v; reclone it or make the primary contain the set before it can be promoted; source %q unfenced",
+					err, cur.SourcePrimary),
 				"rejected")
 		}
 		return r.plannedFailoverFail(ctx, fg, "ExecuteFailed",
@@ -978,6 +993,20 @@ func gtidContains(superGtid, subGtid string) (bool, error) {
 		return false, fmt.Errorf("parse sub gtid: %w", err)
 	}
 	return super.Contains(sub), nil
+}
+
+// gtidExtras returns haveGtid − wantGtid, or an empty set when either fails
+// to parse (gtidContains has already reported that case).
+func gtidExtras(haveGtid, wantGtid string) internalmysql.GTIDSet {
+	have, err := internalmysql.ParseGTIDSet(haveGtid)
+	if err != nil {
+		return internalmysql.GTIDSet{}
+	}
+	want, err := internalmysql.ParseGTIDSet(wantGtid)
+	if err != nil {
+		return internalmysql.GTIDSet{}
+	}
+	return have.Subtract(want)
 }
 
 // truncateGtidHint returns a short prefix of a GTID set suitable for

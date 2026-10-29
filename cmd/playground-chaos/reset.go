@@ -748,8 +748,13 @@ func (r *resetter) loadReplicationCredentials(ctx context.Context) (struct{ root
 	return creds, nil
 }
 
+// createReplicationUser creates the replication user on one site with
+// sql_log_bin=0. Binlogged, the statements would give the site a local GTID
+// no other site has, which the operator's replica GTID audit reports as
+// divergence (and which blocks ordered updates). The multi-statement Exec
+// runs on one connection, so the session setting covers every statement.
 func (r *resetter) createReplicationUser(ctx context.Context, db *sql.DB, replUser, replPassword string) error {
-	stmt := fmt.Sprintf("SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '%s'; GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '%s'@'%%'; FLUSH PRIVILEGES;",
+	stmt := fmt.Sprintf("SET GLOBAL super_read_only=OFF; SET GLOBAL read_only=OFF; SET SESSION sql_log_bin=0; CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '%s'; GRANT REPLICATION SLAVE, REPLICATION CLIENT, BACKUP_ADMIN, CLONE_ADMIN ON *.* TO '%s'@'%%'; FLUSH PRIVILEGES; SET SESSION sql_log_bin=1;",
 		escapeSQLString(replUser), escapeSQLString(replPassword), escapeSQLString(replUser))
 	_, err := db.ExecContext(ctx, stmt)
 	return err

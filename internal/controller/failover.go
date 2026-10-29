@@ -103,8 +103,9 @@ func (f *FailoverController) promote(ctx context.Context, candidate mysql.Checke
 // cannot silently move to another server, so the server that passed the
 // proof is the one made writable; if the connection breaks (the candidate
 // restarted or its address now reaches a different pod), the next
-// statement fails and the promotion stops. An unreadable, unparseable or
-// smaller GTID set also stops it.
+// statement fails and the promotion stops. An unreadable or unparseable
+// set, a set missing fenced transactions, or one holding transactions the
+// fenced source lacks (a *DivergentCandidateError) also stops it.
 func (f *FailoverController) promoteVerified(ctx context.Context, candidate mysql.Checker, candidateSite string, require mysql.GTIDSet) (string, promoteStage, error) {
 	sess, err := candidate.PinSession(ctx)
 	if err != nil {
@@ -115,13 +116,13 @@ func (f *FailoverController) promoteVerified(ctx context.Context, candidate mysq
 	if err := sess.StopReplica(ctx); err != nil {
 		return "", promoteStageReplicaStopped, err
 	}
-	if _, err := requireCandidateGTIDs(ctx, sess, require); err != nil {
+	if _, err := requireCandidateGTIDs(ctx, sess, candidateSite, require); err != nil {
 		return "", promoteStageReplicaStopped, fmt.Errorf("after STOP REPLICA: %w", err)
 	}
 	if err := sess.ResetReplicaAll(ctx); err != nil {
 		return "", promoteStageReplicaReset, err
 	}
-	promotionGtid, err := requireCandidateGTIDs(ctx, sess, require)
+	promotionGtid, err := requireCandidateGTIDs(ctx, sess, candidateSite, require)
 	if err != nil {
 		return "", promoteStageReplicaReset, fmt.Errorf("after RESET REPLICA ALL: %w", err)
 	}
@@ -136,8 +137,9 @@ func (f *FailoverController) promoteVerified(ctx context.Context, candidate mysq
 }
 
 // requireCandidateGTIDs reads the candidate's GTID_EXECUTED and fails
-// unless it contains want. It returns the raw set on success.
-func requireCandidateGTIDs(ctx context.Context, candidate gtidExecutedReader, want mysql.GTIDSet) (string, error) {
+// unless it equals want: it must contain every fenced source transaction
+// and hold none the source lacks. It returns the raw set on success.
+func requireCandidateGTIDs(ctx context.Context, candidate gtidExecutedReader, candidateSite string, want mysql.GTIDSet) (string, error) {
 	raw, have, err := readGTIDSetRaw(ctx, candidate)
 	if err != nil {
 		return "", fmt.Errorf("read candidate GTID set: %w", err)
@@ -146,6 +148,9 @@ func requireCandidateGTIDs(ctx context.Context, candidate gtidExecutedReader, wa
 		missing := want.Subtract(have)
 		return "", fmt.Errorf("candidate GTID set no longer contains the fenced source set: %d transactions missing (%s)",
 			missing.TransactionCount(), truncateGtidHint(missing.String()))
+	}
+	if extra := have.Subtract(want); !extra.IsEmpty() {
+		return "", newDivergentCandidateError(candidateSite, extra)
 	}
 	return raw, nil
 }
