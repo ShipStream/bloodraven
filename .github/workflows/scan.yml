@@ -3,10 +3,28 @@ name: Trivy Security Scan
 on:
   pull_request:
     branches: [main]
+    # Main has no required status checks (verified 2026-10-28); if scans become
+    # required, use job-level filtering to avoid leaving required checks pending.
+    # Keep this a strict subset of .dockerignore trees; scan *.md and .github/**.
+    paths-ignore:
+      - 'site/**'
+      - 'course/**'
+      - 'proposals/**'
+      - 'skills/**'
+      - '.agents/**'
+  # Catch new CVEs and mutable base-image updates even without image changes.
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
   security-events: write
+
+# Cancel superseded PR runs; give each non-PR run its own group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   scan:
@@ -34,10 +52,6 @@ jobs:
             arch: arm64
     steps:
       - uses: actions/checkout@v7
-
-      - name: Set up QEMU
-        if: matrix.arch != 'amd64'
-        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -73,7 +87,10 @@ jobs:
           severity: 'CRITICAL,HIGH'
 
       - name: Upload SARIF to GitHub Security tab
-        if: always() && github.event.pull_request.head.repo.full_name == github.repository
+        if: >-
+          always() &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository)
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-${{ matrix.image }}-${{ matrix.arch }}.sarif

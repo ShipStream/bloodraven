@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -101,6 +102,55 @@ func TestDeploymentPollHonorsCancellationAndErrors(t *testing.T) {
 	want := errors.New("assertion failed")
 	if err := deployPoll(context.Background(), time.Hour, func() (bool, error) { return false, want }); !errors.Is(err, want) {
 		t.Fatalf("expected immediate assertion failure: %v", err)
+	}
+}
+
+func TestDeploymentLeaseSettleWait(t *testing.T) {
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		state deployScenarioState
+		want  time.Duration
+	}{
+		{"revoked", deployScenarioState{leaseTTL: 120 * time.Second, leasesRevoked: true}, 0},
+		{"grant expiries passed", deployScenarioState{leaseTTL: 30 * time.Second, lastGrantExpiry: now.Add(-10 * time.Second)}, 0},
+		{"grant expiry within skew", deployScenarioState{leaseTTL: 30 * time.Second, lastGrantExpiry: now.Add(-time.Second)}, time.Second},
+		{"grant expiry pending", deployScenarioState{leaseTTL: 30 * time.Second, lastGrantExpiry: now.Add(10 * time.Second)}, 12 * time.Second},
+		{"no evidence", deployScenarioState{leaseTTL: 30 * time.Second}, 31 * time.Second},
+		{"no evidence emergency TTL", deployScenarioState{leaseTTL: 120 * time.Second}, 121 * time.Second},
+		{"revoked wins over pending grant expiry", deployScenarioState{leaseTTL: 30 * time.Second, leasesRevoked: true, lastGrantExpiry: now.Add(10 * time.Second)}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.state.leaseSettleWait(now); got != tc.want {
+				t.Fatalf("leaseSettleWait=%s want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDeploymentCleanupWaitsOnlyWithoutLeaseEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		revoked  bool
+		wantWait bool
+	}{
+		{"revoked leases skip the TTL", true, false},
+		{"missing evidence waits the TTL", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := metav1.ObjectMeta{Name: "fixture", Namespace: "sandbox"}
+			kube := k8sfake.NewClientset(&corev1.Pod{ObjectMeta: meta})
+			state := &deployScenarioState{name: meta.Name, podCreated: true, leaseTTL: 120 * time.Second, leasesRevoked: tc.revoked}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			err := state.cleanup(ctx, &runner.Env{Namespace: meta.Namespace, Kube: &pgkube.Client{Kubernetes: kube}})
+			if got := errors.Is(err, context.DeadlineExceeded); got != tc.wantWait {
+				t.Fatalf("cleanup error=%v; want TTL wait=%v", err, tc.wantWait)
+			}
+			if _, err := kube.CoreV1().Pods(meta.Namespace).Get(context.Background(), meta.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("lease owner Pod must be deleted before any wait: %v", err)
+			}
+		})
 	}
 }
 

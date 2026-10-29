@@ -8,20 +8,27 @@ This directory contains the CI/CD automation for the Bloodraven MySQL operator.
 
 ### `ci.yml` — Continuous Integration
 
-**Triggers:** Push to `main`, pull requests targeting `main`
+**Triggers:** Push to `main`, pull requests targeting `main`, and release calls through `workflow_call`
 
-Runs the full PR gate suite in parallel:
+Superseded PR runs are cancelled. Pushes to `main` and release calls use unique run groups and do not cancel each other.
+
+Pull requests run jobs for the areas they touch: Go jobs for Go-related source and configuration, docs-build for `site/`, course-check for `course/` or `site/public/courses/`, and license-roundtrip for either Go or site changes. Changes to `ci.yml`, shared CI actions or scripts, or `Makefile` select all jobs. Unknown paths, empty diffs, and diff failures also select all jobs. Pushes to `main` and release calls run everything.
 
 | Job | Description |
 |---|---|
-| `lint` | Runs `golangci-lint` (installed via `go install`) |
+| `changes` | Classifies changed paths and selects the affected jobs |
+| `lint` | Runs `golangci-lint`, source-built with the repo's Go toolchain through `go install` (pinned in `Makefile`); binary cached by OS, architecture, Go version, and linter version |
 | `build` | Compiles `cmd/bloodraven` and `cmd/sidecar` |
 | `test-unit` | `make test-unit` — unit tests under `./internal/...` |
 | `test-component` | `make test-component` — component tests under `./test/component/` |
-| `test-envtest` | `make test-envtest` — controller tests using envtest (real API server) |
+| `test-envtest` | `make test-envtest` — controller tests using envtest (real API server); setup-envtest and the 1.37.x assets are cached weekly from main |
 | `generate-check` | Runs `make generate && make manifests` and fails if files are stale |
-| `docs-build` | Builds the bloodraven.dev site under `site/` and verifies `llms-full.txt` includes every docs page |
-| `all-checks` | Summary job — use this as the single branch-protection required status check |
+| `license-roundtrip` | Go verifier round-trips a token signed by `site/scripts/sign-license-token.mjs` (no `node_modules` needed) |
+| `docs-build` | Runs the site Node tests (`npm test`), builds the bloodraven.dev site under `site/`, and verifies `llms-full.txt` includes every docs page |
+| `course-check` | Builds the course once, verifies and tests that build, then checks committed output for drift |
+| `all-checks` | Summary job — accepts skipped jobs and fails on any failure or cancellation, including `changes`; use this as the single branch-protection required status check |
+
+Go jobs restore a shared module cache and separate `race`, `plain`, `codegen`, and `lint` build caches. Only pushes to `main` save caches: test-unit owns `race`, build owns `plain` and modules, generate-check owns `codegen`, and lint owns `lint` (including golangci-lint's analysis cache). Build cache snapshots refresh weekly. Test jobs use `GOFLAGS=-count=1` so restored caches cannot reuse test results. PRs and release calls restore caches without saving them.
 
 **Permissions:** `contents: read` (default)
 
@@ -66,9 +73,11 @@ repository secrets.
 
 **Permissions:** `contents: read` by default. Write scopes are granted per job: `contents: write` for the draft/publish release jobs and the Helm job (`gh-pages` push), `packages: write` for the image and Helm OCI pushes, and `id-token: write` only for the image job (cosign OIDC signing).
 
+CI and the shared E2E image build start in parallel. Both E2E gates consume those images, and the draft release waits for all three gates to pass.
+
 Steps:
 
-1. **CI gate** — Runs lint, builds, tests, generate drift checks, chart CRD drift checks, the bloodraven.dev site build, and `llms-full.txt` coverage before any release artifact is published.
+1. **CI gate** — Runs the full `ci.yml` suite through `workflow_call` against the tagged SHA: lint, build, unit, component, envtest, generate and CRD drift checks, license roundtrip, site build and `llms-full.txt` coverage, and course checks. Nothing publishes until the `CI gate` job confirms success.
 2. **Draft release** — Creates a draft GitHub Release with image locations, Helm chart locations, install examples, and auto-generated notes.
 3. **Docker images** — Builds multi-arch (`linux/amd64` + `linux/arm64`) images for both targets:
    - `ghcr.io/shipstream/bloodraven:{version}` and `:latest`
@@ -124,14 +133,17 @@ The chart repo is served directly off the `gh-pages` branch via `raw.githubuserc
 
 ---
 
-### `e2e.yml` / `_e2e.yml` — Real-Cluster E2E
+### `e2e.yml` / `_e2e.yml` / `_e2e-images.yml` — Real-Cluster E2E
 
 **Triggers:**
+
 - Nightly schedule (release profile plus dedicated encryption scenario)
 - Manual dispatch with profile selection (smoke / release / full) plus encryption
-- Pull requests with the `e2e` label (smoke profile plus encryption)
+- Pull requests while the `e2e` label is present (smoke profile plus encryption; re-runs on push, adding other labels does not re-trigger)
 
 The reusable workflow (`_e2e.yml`) creates a kind cluster with Calico CNI and deploys the playground. Normal jobs run `playground-chaos run-all` with the selected profile. The dedicated encryption job creates the group with MySQL and escrow TLS from its first generation, adopts encryption with `playground/enable-encryption.sh`, and runs `48-keyring-seal-and-rotation` explicitly. This covers adoption, sealing, key placement, replica rotation, pod replacement, and post-rotation reads against real MySQL without overlapping a separate live TLS rollout. Jobs upload JUnit results where available, chaos forensics, setup logs, and kind logs as artifacts.
+
+The reusable image producer (`_e2e-images.yml`) builds the five playground images once per workflow run and shares an `e2e-images` artifact retained for seven days. Both E2E jobs and all three release E2E jobs load that artifact. If it is unavailable or cannot be loaded, each consumer warns and rebuilds locally with `make e2e-images`; callers that omit `images-artifact` also build locally.
 
 Profiles:
 | Profile | Scenarios | Use case |
@@ -148,13 +160,16 @@ The release workflow (`.github/workflows/release.yml`) blocks publishing on both
 
 ### `scan.yml` — Trivy Security Scan
 
-**Triggers:** Pull requests targeting `main`
+**Triggers:** Pull requests targeting `main` unless all changes are under `site/`, `course/`, `proposals/`, `skills/`, or `.agents/` (trees excluded from the image context); daily at 06:17 UTC on `main`; manual dispatch
+
+Superseded PR runs are cancelled.
 
 **Required permissions:** `security-events: write` (for SARIF upload to the Security tab)
 
 Builds all four image variants (2 targets × 2 architectures) and runs Trivy on each:
-- Fails the job on any `CRITICAL` or `HIGH` unfixed CVEs
-- Uploads SARIF results to the GitHub Security tab for tracking
+
+- Fails the job on any `CRITICAL` or `HIGH` fixable CVEs
+- Uploads SARIF results to the GitHub Security tab for same-repository PRs and non-PR runs, including scheduled scans on `main`
 
 ---
 
