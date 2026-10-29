@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 // ---------------------------------------------------------------------------
@@ -42,7 +45,10 @@ type fakeSQLServer struct {
 	// grants maps the database of a grant row, exactly as GRANT spelled
 	// it (`acme\_wms` and `acme_wms` are different rows), to "user@host"
 	// to the granted privilege list.
-	grants map[string]map[string][]string
+	grants           map[string]map[string][]string
+	globalPrivileges map[string][]string
+	restrictions     map[string]map[string][]string
+	grantOptions     map[string]map[string]bool
 	// partialRevokes is @@GLOBAL.partial_revokes. Off, as on a default
 	// server, `_` in a grant row is a wildcard and a schema's own row is
 	// spelled with `\_`.
@@ -108,14 +114,17 @@ func (s *fakeSQLServer) clearFaults() {
 
 func newFakeSQLServer() *fakeSQLServer {
 	return &fakeSQLServer{
-		users:     map[string]string{},
-		databases: map[string]string{},
-		grants:    map[string]map[string][]string{},
+		users:            map[string]string{},
+		databases:        map[string]string{},
+		grants:           map[string]map[string][]string{},
+		globalPrivileges: map[string][]string{},
+		restrictions:     map[string]map[string][]string{},
+		grantOptions:     map[string]map[string]bool{},
 	}
 }
 
 // accountKey is how the model keys one 'user'@'host' account.
-func accountKey(username, host string) string { return username + "@" + host }
+func accountKey(username, host string) string { return username + "@" + strings.ToLower(host) }
 
 // addUser pre-seeds an account on '%', the host every pre-hosts test means.
 func (s *fakeSQLServer) addUser(username, password string) {
@@ -388,11 +397,12 @@ func (fakeSQLDriver) Open(dsn string) (driver.Conn, error) {
 		server.mu.Unlock()
 		return nil, fmt.Errorf("fake mysql: access denied for user %q", user)
 	}
-	return &fakeSQLConn{server: server}, nil
+	return &fakeSQLConn{server: server, username: user}, nil
 }
 
 type fakeSQLConn struct {
-	server *fakeSQLServer
+	username string
+	server   *fakeSQLServer
 }
 
 func (c *fakeSQLConn) Prepare(string) (driver.Stmt, error) {
@@ -406,6 +416,9 @@ func (c *fakeSQLConn) Begin() (driver.Tx, error) {
 func (c *fakeSQLConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	if len(args) != 0 {
 		return nil, fmt.Errorf("fake mysql: unexpected args on exec %q", query)
+	}
+	if err := c.server.checkGrantor(c.username, query); err != nil {
+		return nil, err
 	}
 	if err := c.server.apply(query); err != nil {
 		return nil, err
@@ -422,6 +435,65 @@ func (c *fakeSQLConn) QueryContext(_ context.Context, query string, args []drive
 			return nil, err
 		}
 	}
+	if strings.HasPrefix(query, "SELECT User, Host, COALESCE(JSON_EXTRACT(User_attributes, '$.Restrictions')") {
+		c.server.mu.Lock()
+		defer c.server.mu.Unlock()
+		raw, err := c.server.restrictionsJSONLocked(c.username, "%")
+		if err != nil {
+			return nil, err
+		}
+		return &fakeSQLValueRows{columns: []string{"User", "Host", "Restrictions"}, values: [][]driver.Value{{c.username, "%", raw}}}, nil
+	}
+	if strings.HasPrefix(query, "SELECT COALESCE(JSON_EXTRACT(User_attributes, '$.Restrictions')") {
+		if len(args) != 2 {
+			return nil, fmt.Errorf("restrictions query wants 2 args")
+		}
+		username, _ := args[0].Value.(string)
+		host, _ := args[1].Value.(string)
+		rows := &fakeSQLValueRows{columns: []string{"Restrictions", "self"}}
+		if !c.server.hasAccount(username, host) {
+			return rows, nil
+		}
+		c.server.mu.Lock()
+		defer c.server.mu.Unlock()
+		raw, err := c.server.restrictionsJSONLocked(username, host)
+		if err != nil {
+			return nil, err
+		}
+		rows.values = [][]driver.Value{{raw, username == c.username && host == "%"}}
+		return rows, nil
+	}
+	if strings.HasPrefix(query, "SELECT PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES ") {
+		if len(args) != 3 {
+			return nil, fmt.Errorf("schema grants query wants 3 args")
+		}
+		account, _ := args[0].Value.(string)
+		database, _ := args[1].Value.(string)
+		accounts, err := parseAccountList(account)
+		if err != nil || len(accounts) != 1 {
+			return nil, fmt.Errorf("invalid schema-grants account %q", account)
+		}
+		rows := &fakeSQLValueRows{columns: []string{"PRIVILEGE_TYPE"}}
+		// GRANTEE is compared as binary text, unlike MySQL's account-name
+		// matching. Hosts in the metadata are always stored lowercased.
+		if accounts[0].host != strings.ToLower(accounts[0].host) {
+			return rows, nil
+		}
+		privileges, _ := c.server.grantRow(database, accounts[0].user, accounts[0].host)
+		if slices.Contains(privileges, "ALL PRIVILEGES") {
+			privileges = fakeSQLAllPrivileges
+		}
+		c.server.mu.Lock()
+		grantOption := c.server.grantOptions[database][accountKey(accounts[0].user, accounts[0].host)]
+		c.server.mu.Unlock()
+		if len(privileges) == 0 && grantOption {
+			privileges = []string{"USAGE"}
+		}
+		for _, privilege := range privileges {
+			rows.values = append(rows.values, []driver.Value{privilege})
+		}
+		return rows, nil
+	}
 	switch query {
 	case "SELECT 1 FROM mysql.user WHERE user = ? AND host = ?":
 		if len(args) != 2 {
@@ -434,6 +506,9 @@ func (c *fakeSQLConn) QueryContext(_ context.Context, query string, args []drive
 			rows.remaining = 1
 		}
 		return rows, nil
+
+	case "SELECT @@GLOBAL.lower_case_table_names":
+		return &fakeSQLRows{remaining: 1, value: new(int64)}, nil
 
 	case "SELECT @@GLOBAL.partial_revokes":
 		c.server.mu.Lock()
@@ -459,6 +534,21 @@ func (c *fakeSQLConn) QueryContext(_ context.Context, query string, args []drive
 	return nil, fmt.Errorf("fake mysql: unmodelled query %q", query)
 }
 
+func (s *fakeSQLServer) restrictionsJSONLocked(username, host string) ([]byte, error) {
+	var databases []string
+	for database := range s.restrictions {
+		databases = append(databases, database)
+	}
+	slices.Sort(databases)
+	var restrictions []map[string]any
+	for _, database := range databases {
+		if privileges := s.restrictions[database][accountKey(username, host)]; len(privileges) > 0 {
+			restrictions = append(restrictions, map[string]any{"Database": database, "Privileges": privileges})
+		}
+	}
+	return json.Marshal(restrictions)
+}
+
 type fakeSQLRows struct {
 	remaining int
 	// value, when set, replaces the 1 each row answers.
@@ -479,6 +569,22 @@ func (r *fakeSQLRows) Next(dest []driver.Value) error {
 	return nil
 }
 
+type fakeSQLValueRows struct {
+	columns []string
+	values  [][]driver.Value
+}
+
+func (r *fakeSQLValueRows) Columns() []string { return r.columns }
+func (r *fakeSQLValueRows) Close() error      { return nil }
+func (r *fakeSQLValueRows) Next(dest []driver.Value) error {
+	if len(r.values) == 0 {
+		return io.EOF
+	}
+	copy(dest, r.values[0])
+	r.values = r.values[1:]
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Statement interpretation
 // ---------------------------------------------------------------------------
@@ -490,7 +596,6 @@ var (
 	reAlterUserWith  = regexp.MustCompile(`^ALTER USER (.+?) WITH MAX_USER_CONNECTIONS (\d+) MAX_QUERIES_PER_HOUR (\d+)$`)
 	reAlterUser      = regexp.MustCompile(`^ALTER USER (.+)$`)
 	reGrant          = regexp.MustCompile("^GRANT (.+) ON `([^`]+)`\\.\\* TO (.+)$")
-	reRevoke         = regexp.MustCompile("^REVOKE IF EXISTS ALL PRIVILEGES ON `([^`]+)`\\.\\* FROM (.+?)( IGNORE UNKNOWN USER)?$")
 	reRevokePartial  = regexp.MustCompile("^REVOKE IF EXISTS (.+) ON `([^`]+)`\\.\\* FROM (.+?)( IGNORE UNKNOWN USER)?$")
 	reDropDatabase   = regexp.MustCompile("^DROP DATABASE IF EXISTS `([^`]+)`$")
 	reDropUser       = regexp.MustCompile(`^DROP USER IF EXISTS (.+)$`)
@@ -541,6 +646,32 @@ var fakeSQLAllPrivileges = []string{
 	"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
 	"INDEX", "REFERENCES", "LOCK TABLES", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE",
 	"CREATE TEMPORARY TABLES", "CREATE VIEW", "CREATE ROUTINE", "ALTER ROUTINE",
+}
+
+// A grantor's partial restriction also limits the GRANTs and REVOKEs it can
+// execute. The fake otherwise assumes the admin has the required privileges.
+func (s *fakeSQLServer) checkGrantor(username, stmt string) error {
+	var match []string
+	if match = reGrant.FindStringSubmatch(stmt); match == nil {
+		match = reRevokePartial.FindStringSubmatch(stmt)
+	}
+	if match == nil {
+		return nil
+	}
+	privileges := strings.Split(match[1], ", ")
+	if match[1] == "ALL PRIVILEGES" {
+		privileges = fakeSQLAllPrivileges
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.partialRevokes {
+		for _, privilege := range privileges {
+			if slices.Contains(s.restrictions[match[2]][accountKey(username, "%")], privilege) {
+				return &mysqldriver.MySQLError{Number: 1044, Message: fmt.Sprintf("access denied for grantor %s on %s", username, match[2])}
+			}
+		}
+	}
+	return nil
 }
 
 func (s *fakeSQLServer) apply(stmt string) error {
@@ -649,7 +780,7 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 		for name := range s.databases {
 			exact = exact || s.grantRowKey(name) == database
 		}
-		if !exact {
+		if !exact && len(s.restrictions[database]) == 0 {
 			return fmt.Errorf("fake mysql: GRANT on %q, which is not the exact grant row of an existing database", database)
 		}
 		for _, a := range accounts {
@@ -667,37 +798,28 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 			// revoking — the model must not be more forgiving than the
 			// server.
 			existing := s.grants[database][key]
-			for _, p := range strings.Split(privs, ", ") {
-				if !slices.Contains(existing, p) {
-					existing = append(existing, p)
+			requested := strings.Split(privs, ", ")
+			if privs == "ALL PRIVILEGES" && len(s.restrictions[database][key]) == 0 {
+				s.grants[database][key] = []string{"ALL PRIVILEGES"}
+				continue
+			}
+			if privs == "ALL PRIVILEGES" {
+				requested = fakeSQLAllPrivileges
+			}
+			for _, privilege := range requested {
+				if s.partialRevokes && slices.Contains(s.restrictions[database][key], privilege) {
+					s.restrictions[database][key] = slices.DeleteFunc(s.restrictions[database][key], func(p string) bool { return p == privilege })
+					continue
+				}
+				if !slices.Contains(existing, privilege) {
+					existing = append(existing, privilege)
 				}
 			}
 			if slices.Contains(existing, "ALL PRIVILEGES") {
 				existing = []string{"ALL PRIVILEGES"}
 			}
-			s.grants[database][key] = existing
-		}
-		return nil
-
-	case reRevoke.MatchString(stmt):
-		m := reRevoke.FindStringSubmatch(stmt)
-		database, ignoreUnknown := m[1], m[3] != ""
-		accounts, err := parseAccountList(m[2])
-		if err != nil {
-			return err
-		}
-		for _, a := range accounts {
-			key := accountKey(a.user, a.host)
-			if _, exists := s.users[key]; !exists && !ignoreUnknown {
-				// Mirrors real MySQL (ERROR 1141, verified on 9.7): IF
-				// EXISTS only tolerates a missing grant; a missing
-				// *account* errors unless IGNORE UNKNOWN USER is present.
-				// This is the exact wedge the delete path had, so the
-				// model must not be more forgiving than the server.
-				return fmt.Errorf("fake mysql: REVOKE from nonexistent account %q without IGNORE UNKNOWN USER", key)
-			}
-			if byUser, ok := s.grants[database]; ok {
-				delete(byUser, key)
+			if len(existing) > 0 {
+				s.grants[database][key] = existing
 			}
 		}
 		return nil
@@ -709,29 +831,37 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 		if err != nil {
 			return err
 		}
+		requested := strings.Split(privs, ", ")
+		if privs == "ALL PRIVILEGES" {
+			requested = fakeSQLAllPrivileges
+		}
 		for _, a := range accounts {
 			key := accountKey(a.user, a.host)
-			if _, exists := s.users[key]; !exists && !ignoreUnknown {
-				return fmt.Errorf("fake mysql: REVOKE from nonexistent account %q without IGNORE UNKNOWN USER", key)
-			}
-			byUser, ok := s.grants[database]
-			if !ok {
+			if _, exists := s.users[key]; !exists {
+				if !ignoreUnknown {
+					return fmt.Errorf("fake mysql: REVOKE from nonexistent account %q without IGNORE UNKNOWN USER", key)
+				}
 				continue
 			}
-			current, ok := byUser[key]
-			if !ok {
-				continue
-			}
-			if len(current) == 1 && current[0] == "ALL PRIVILEGES" {
+			current := append([]string(nil), s.grants[database][key]...)
+			if slices.Contains(current, "ALL PRIVILEGES") {
 				current = append([]string(nil), fakeSQLAllPrivileges...)
 			}
-			for _, p := range strings.Split(privs, ", ") {
-				current = slices.DeleteFunc(current, func(x string) bool { return x == p })
+			for _, privilege := range requested {
+				if s.partialRevokes && slices.Contains(s.globalPrivileges[key], privilege) && !slices.Contains(current, privilege) {
+					if s.restrictions[database] == nil {
+						s.restrictions[database] = map[string][]string{}
+					}
+					if !slices.Contains(s.restrictions[database][key], privilege) {
+						s.restrictions[database][key] = append(s.restrictions[database][key], privilege)
+					}
+				}
+				current = slices.DeleteFunc(current, func(p string) bool { return p == privilege })
 			}
 			if len(current) == 0 {
-				delete(byUser, key)
+				delete(s.grants[database], key)
 			} else {
-				byUser[key] = current
+				s.grants[database][key] = current
 			}
 		}
 		return nil
@@ -739,8 +869,6 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 	case reDropDatabase.MatchString(stmt):
 		m := reDropDatabase.FindStringSubmatch(stmt)
 		delete(s.databases, m[1])
-		delete(s.grants, m[1])
-		delete(s.grants, s.grantRowKey(m[1]))
 		return nil
 
 	case reDropUser.MatchString(stmt):
@@ -753,6 +881,13 @@ func (s *fakeSQLServer) applyStatement(stmt string) error {
 			key := accountKey(a.user, a.host)
 			delete(s.users, key)
 			delete(s.resourceLimits, key)
+			delete(s.globalPrivileges, key)
+			for _, accounts := range s.grantOptions {
+				delete(accounts, key)
+			}
+			for _, accounts := range s.restrictions {
+				delete(accounts, key)
+			}
 			for _, byUser := range s.grants {
 				delete(byUser, key)
 			}

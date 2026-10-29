@@ -250,3 +250,37 @@ The operator partially revokes the `app` user's write and DDL privileges on the 
 ### Safe remediation
 1. Pending restriction: bring the named site back. The operator retries every minute and turns `partial_revokes` ON itself. Nothing to run by hand.
 2. Stopped replica: `SET GLOBAL partial_revokes = ON; START REPLICA;` on that replica. Do not skip the transaction; skipping it leaves the replica without the restriction, so after a failover the `app` user could write the grant tables there.
+
+### Tenant Pending with `PartialRevokesOff`, or Ready with escaped grants
+
+**Symptom:** a `MysqlDatabase` is `Pending` with Ready reason `PartialRevokesOff` and a Warning event. Its message identifies a failed setting read or a refused `SET GLOBAL partial_revokes = ON` on the primary. Transient connection errors instead use `PrimaryUnavailable` and retry. Tenant SQL and the write-ahead stamp have not run; existing grants and accounts remain intact. Cleanup and Delete-policy deletion do not wait on this setting.
+
+1. Read the tenant status and events without reading its credential Secrets:
+   ```bash
+   kubectl describe mysqldatabase <name> -n <namespace>
+   ```
+2. Discover the primary's MySQL container and query `SELECT @@GLOBAL.partial_revokes` through the approved admin connection. Check the operator account's ability to read that variable and its `SYSTEM_VARIABLES_ADMIN` privilege. Use the event's error to distinguish missing privileges from connectivity problems.
+3. With approval, restore the operator's setting access. The controller retries automatically, enables the setting and applies literal schema grants. Do not work around this by disabling partial revokes; the group's `app` restriction on `mysql.*` depends on it.
+
+**Older false-Ready state:** intermediate development builds and the former SET-refused escaped fallback could leave an escaped row such as `acme\_wms` after the mode became ON. That spelling then matches no schema. Through an approved admin connection, inspect `SELECT Host, Db, User FROM mysql.db WHERE User = '<tenant-user>'` and compare the exact stored spellings. Upgrading to a release containing the escaped-grant reapplication fix reapplies affected Ready tenants once and restores the literal row before removing the escaped row. Ordinary v1.4.0 → v1.5.0 release upgrades already invalidated tenant hashes and are not this unchanged-hash case. If the setting was changed manually after migration, make an approved spec edit to reapply; restarting the operator or editing metadata alone does not invalidate an unchanged Ready hash. Never patch status to manufacture ownership or clear the applied hash.
+
+
+## 10. Shared principal loses global access to a tenant schema
+
+**Symptom:** a principal listed in `grants[]` loses global DDL, INSERT, SHOW VIEW or backup access on one tenant schema. Older tenant surplus/removal/deletion revokes could create partial restrictions instead of only removing explicit grant rows. If the principal is the operator account, subsequent tenant apply or deletion can fail too. Restrictions can persist after the CR is deleted or return through restore/PITR.
+
+1. Through an approved admin connection, inspect restrictions without collecting passwords or password hashes:
+   ```sql
+   SELECT User, Host, JSON_EXTRACT(User_attributes, '$.Restrictions') AS Restrictions
+   FROM mysql.user
+   WHERE JSON_LENGTH(JSON_EXTRACT(User_attributes, '$.Restrictions')) > 0;
+   ```
+   Compare them with the affected account's explicit schema grants in `information_schema.SCHEMA_PRIVILEGES`. Independent global privileges and role grants are a separate source of access. The `app` account's restriction on `mysql` is intentional; other entries require investigation, not automatic removal.
+2. Upgrade to the row-derived tenant revoke fix. Narrowing, removal, retirement and Delete-policy cleanup then revoke only privileges present in each schema grant row, including on retry. Ready objects reapply once. `PartialRevokeLifted` records repair of restrictions on impossible escaped schema names for accounts already recorded by the CR. `TenantPrivilegeRestriction` reports real-schema restrictions, a restricted connecting grantor, or a repair error. Escaped-name repair is best-effort and does not gate normal apply/deletion. If the connecting grantor is restricted on an escaped spelling, repair for every principal on that spelling is skipped; the warning names the grantor and this playbook. These escaped restrictions are inert and can remain until an unrestricted administrator lifts them. Grant-only schema rows (`USAGE` with `IS_GRANTABLE=YES`) retain independently managed GRANT OPTION and do not block cleanup retries.
+3. Ask the privilege owner to confirm which real-schema restrictions were accidental. Their JSON contains no provenance. Desired tenant GRANTs can lift restrictions on their own requested privileges, but the operator does not grant surplus privileges on a real schema merely to clear a restriction.
+4. After approval, use an unrestricted administrator to lift only the confirmed accidental privileges. For example, to restore an independently granted global INSERT on `acme_wms` for `cdc`:
+   ```sql
+   GRANT INSERT ON `acme_wms`.* TO 'cdc'@'%';
+   ```
+   If the operator account restricted itself, use a separate administrator such as root; do not retry the repair through the restricted operator account. Group credential reapplication can restore an authoritative group role's global set, but it must also retain/reapply the intended `app` restriction on `mysql.*`. Avoid broad global re-grants for external/shared principals whose intended policy is unknown.
+5. Check the remaining restriction JSON and explicit schema rows, then verify the intended operation through a fresh connection as the affected principal. Retry the tenant reconcile/delete after admin recovery. Do not patch status, skip replicated transactions, disable partial revokes, or remove finalizers to hide a remaining access failure.

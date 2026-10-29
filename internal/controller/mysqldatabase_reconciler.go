@@ -443,6 +443,17 @@ func (r *MysqlDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	defer db.Close()
 
+	if err := requirePartialRevokes(sqlCtx, db); err != nil {
+		if transientSQLError(err) {
+			return r.pending(ctx, &mdb, "PrimaryUnavailable",
+				fmt.Sprintf("transient MySQL error checking partial_revokes on the primary of group %q: %v", fg.Name, err))
+		}
+		message := fmt.Sprintf("cannot confirm partial_revokes=ON on the primary of group %q; tenant changes are deferred: %v", fg.Name, err)
+		r.Recorder.Event(&mdb, corev1.EventTypeWarning, "PartialRevokesOff", message)
+		return r.pending(ctx, &mdb, "PartialRevokesOff", message)
+	}
+	r.repairTenantRestrictions(sqlCtx, db, &mdb)
+
 	// Every username this CR's current spec declares, and on which surface.
 	// Every drop below consults it: a name that is still desired — even on
 	// a different surface than the record being retired — is never dropped.
@@ -847,6 +858,9 @@ func (r *MysqlDatabaseReconciler) reconcileDelete(ctx context.Context, mdb *v1al
 	}
 	defer db.Close()
 
+	if dropDB {
+		r.repairTenantRestrictions(sqlCtx, db, mdb)
+	}
 	if err := dropDatabase(sqlCtx, db, mdb, dropDB, dropOwners); err != nil {
 		if transientSQLError(err) {
 			r.Recorder.Eventf(mdb, corev1.EventTypeWarning, "DatabaseDropDeferred",
@@ -1926,20 +1940,20 @@ func withdrawRemovedLedgerEntries(st *v1alpha1.MysqlDatabaseStatus, spec *v1alph
 	st.AppliedUsers = kept
 }
 
-// revokeAllOnDatabase revokes every privilege username holds on database
-// over hosts, in every grantDatabaseForms spelling. renderErr reports a
+// revokeAllOnDatabase revokes username's explicit schema grants on database
+// over hosts, in every grantDatabaseSpellings spelling. renderErr reports a
 // value that does not render, before any revoke ran; err a MySQL failure.
 func revokeAllOnDatabase(ctx context.Context, db *sql.DB, kind, database, username string, hosts []string) (renderErr, err error) {
-	forms, err := grantDatabaseForms(ctx, db, database)
-	if err != nil {
-		return nil, err
-	}
-	stmts, rerr := renderRevokeAllForms(kind, forms, username, hosts)
+	forms := grantDatabaseSpellings(database)
+	plans, rerr := planSchemaRevokes(kind, forms, username, hosts, nil)
 	if rerr != nil {
 		return rerr, nil
 	}
-	for _, stmt := range stmts {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+	for _, plan := range plans {
+		if err := plan.run(ctx, db, func(stmt string) error {
+			_, err := db.ExecContext(ctx, stmt)
+			return err
+		}); err != nil {
 			return nil, err
 		}
 	}
@@ -1950,8 +1964,9 @@ func revokeAllOnDatabase(ctx context.Context, db *sql.DB, kind, database, userna
 // connection and returns the usernames granted, owner first, plus which
 // principals had a statement execute (see withdrawUnexecuted).
 //
-// Every statement is rendered — and therefore validated — before any of them
-// executes, so a bad identifier cannot produce a partially-applied tenant.
+// Every identifier and desired privilege set is validated before SQL executes.
+// The actual privileges to revoke are read after GRANT, per account and on
+// each retry, so revocation never substitutes for a missing explicit row.
 // The adoption gates ran in preflightAdoption, before the write-ahead stamp;
 // the one deliberately interleaved check left is each spec.grants[] check
 // immediately before that user's GRANT, which must abort rather than fall
@@ -1979,41 +1994,24 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	}
 	// GRANT and the surplus REVOKE name the schema by forms[0]; any
 	// further form is a stale spelling of the grant row, revoked outright.
-	forms, err := grantDatabaseForms(ctx, db, spec.DatabaseName)
-	if err != nil {
-		return nil, progress, err
-	}
+	forms := grantDatabaseSpellings(spec.DatabaseName)
 	grantDB := forms[0]
-	// renderRevokes is the surplus REVOKE (if any) plus the legacy-form
-	// revokes for one principal.
-	renderRevokes := func(kind string, privs []v1alpha1.MysqlPrivilege, username string, hosts []string) ([]string, error) {
-		var out []string
-		surplus, err := renderRevokeSurplus(kind, privs, grantDB, username, hosts)
-		if err != nil {
-			return nil, err
-		}
-		if surplus != "" {
-			out = append(out, surplus)
-		}
-		legacy, err := renderRevokeAllForms(kind, forms[1:], username, hosts)
-		if err != nil {
-			return nil, err
-		}
-		return append(out, legacy...), nil
+	planRevokes := func(kind string, privs []v1alpha1.MysqlPrivilege, username string, hosts []string) ([]schemaRevokePlan, error) {
+		return planSchemaRevokes(kind, forms, username, hosts, privs)
 	}
 	ownerPrivs := spec.EffectiveOwnerPrivileges()
 	ownerGrant, err := renderGrant("spec.owner.privileges", ownerPrivs, grantDB, ownerUser, ownerHosts)
 	if err != nil {
 		return nil, progress, err
 	}
-	ownerSurplus, err := renderRevokes("spec.owner secret username", ownerPrivs, ownerUser, ownerHosts)
+	ownerSurplus, err := planRevokes("spec.owner secret username", ownerPrivs, ownerUser, ownerHosts)
 	if err != nil {
 		return nil, progress, err
 	}
 	type renderedTenantUser struct {
 		stmts   []string
 		grant   string
-		surplus []string
+		surplus []schemaRevokePlan
 	}
 	renderedUsers := make([]renderedTenantUser, len(users))
 	for i, u := range users {
@@ -2026,21 +2024,21 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 		if err != nil {
 			return nil, progress, err
 		}
-		surplus, err := renderRevokes(kind, u.entry.Privileges, u.username, u.hosts)
+		surplus, err := planRevokes(kind, u.entry.Privileges, u.username, u.hosts)
 		if err != nil {
 			return nil, progress, err
 		}
 		renderedUsers[i] = renderedTenantUser{stmts: stmts, grant: grant, surplus: surplus}
 	}
 	grantStmts := make([]string, len(spec.Grants))
-	grantSurplus := make([][]string, len(spec.Grants))
+	grantSurplus := make([][]schemaRevokePlan, len(spec.Grants))
 	for i, g := range spec.Grants {
 		stmt, err := renderGrant(fmt.Sprintf("spec.grants[%d].privileges", i), g.Privileges, grantDB, g.Username, defaultHosts)
 		if err != nil {
 			return nil, progress, err
 		}
 		grantStmts[i] = stmt
-		surplus, err := renderRevokes(fmt.Sprintf("spec.grants[%d].username", i), g.Privileges, g.Username, defaultHosts)
+		surplus, err := planRevokes(fmt.Sprintf("spec.grants[%d].username", i), g.Privileges, g.Username, defaultHosts)
 		if err != nil {
 			return nil, progress, err
 		}
@@ -2068,7 +2066,7 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 			percentCovered[u.username] = true
 		}
 	}
-	var removedRevokes []string
+	var removedRevokes []schemaRevokePlan
 	for _, user := range prior.AppliedGrants {
 		// The previously recorded owner is appliedGrants[0], not a grants[]
 		// entry: its accounts live on its recorded hosts, and the owner
@@ -2077,11 +2075,11 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 		if user == prior.OwnerUser || percentCovered[user] || ownAccountAttributed(prior, user, tenantUserHost) {
 			continue
 		}
-		stmts, err := renderRevokeAllForms("status.appliedGrants entry", forms, user, defaultHosts)
+		plans, err := planSchemaRevokes("status.appliedGrants entry", forms, user, defaultHosts, nil)
 		if err != nil {
 			return nil, progress, err
 		}
-		removedRevokes = append(removedRevokes, stmts...)
+		removedRevokes = append(removedRevokes, plans...)
 	}
 
 	// exec runs one statement and marks its principal's step as executed
@@ -2119,8 +2117,8 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 	if err := exec(&progress.owner, ownerGrant); err != nil {
 		return nil, progress, err
 	}
-	for _, stmt := range ownerSurplus {
-		if err := exec(&progress.owner, stmt); err != nil {
+	for _, plan := range ownerSurplus {
+		if err := plan.run(ctx, db, func(stmt string) error { return exec(&progress.owner, stmt) }); err != nil {
 			return nil, progress, err
 		}
 	}
@@ -2140,8 +2138,8 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 		if err := run(renderedUsers[i].grant); err != nil {
 			return nil, progress, err
 		}
-		for _, stmt := range renderedUsers[i].surplus {
-			if err := run(stmt); err != nil {
+		for _, plan := range renderedUsers[i].surplus {
+			if err := plan.run(ctx, db, run); err != nil {
 				return nil, progress, err
 			}
 		}
@@ -2159,16 +2157,16 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 		if err := exec(nil, grantStmts[i]); err != nil {
 			return nil, progress, err
 		}
-		for _, stmt := range grantSurplus[i] {
-			if err := exec(nil, stmt); err != nil {
+		for _, plan := range grantSurplus[i] {
+			if err := plan.run(ctx, db, func(stmt string) error { return exec(nil, stmt) }); err != nil {
 				return nil, progress, err
 			}
 		}
 		applied = append(applied, g.Username)
 	}
 
-	for _, stmt := range removedRevokes {
-		if err := exec(nil, stmt); err != nil {
+	for _, plan := range removedRevokes {
+		if err := plan.run(ctx, db, func(stmt string) error { return exec(nil, stmt) }); err != nil {
 			return nil, progress, err
 		}
 	}
@@ -2185,16 +2183,14 @@ func applyDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase,
 func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, dropDB bool, dropOwners []managedPrincipal) error {
 	spec := &mdb.Spec
 
-	stmts := make([]string, 0, len(spec.Grants)+len(mdb.Status.AppliedGrants)+len(dropOwners)+2)
+	stmts := make([]string, 0, len(dropOwners)+1)
+	var revokes []schemaRevokePlan
 	if dropDB {
 		// Revoke the union of the grants currently declared and the ones
 		// recorded by earlier applies: an entry removed from spec.grants[]
 		// must not survive the delete as a lingering mysql.db row that
 		// reactivates if the schema name is ever recreated.
-		forms, err := grantDatabaseForms(ctx, db, spec.DatabaseName)
-		if err != nil {
-			return err
-		}
+		forms := grantDatabaseSpellings(spec.DatabaseName)
 		revoked := make(map[mysqlAccount]bool)
 		revokeFor := func(kind, username string, hosts []string) error {
 			var pending []string
@@ -2209,11 +2205,11 @@ func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, 
 			if len(pending) == 0 {
 				return nil
 			}
-			revokes, err := renderRevokeAllForms(kind, forms, username, pending)
+			plans, err := planSchemaRevokes(kind, forms, username, pending, nil)
 			if err != nil {
 				return err
 			}
-			stmts = append(stmts, revokes...)
+			revokes = append(revokes, plans...)
 			return nil
 		}
 		for i, g := range spec.Grants {
@@ -2266,6 +2262,15 @@ func dropDatabase(ctx context.Context, db *sql.DB, mdb *v1alpha1.MysqlDatabase, 
 			return err
 		}
 		stmts = append(stmts, dropUser)
+	}
+
+	for _, plan := range revokes {
+		if err := plan.run(ctx, db, func(stmt string) error {
+			_, err := db.ExecContext(ctx, stmt)
+			return err
+		}); err != nil {
+			return fmt.Errorf("revoke tenant schema grants: %w", err)
+		}
 	}
 
 	for _, stmt := range stmts {
@@ -2455,7 +2460,7 @@ func groupFenced(fg *v1alpha1.MysqlFailoverGroup) (reason, message string, fence
 // databaseRenderVersion is mixed into computeDatabaseHash so a change to
 // the rendered grant/revoke SQL re-applies every Ready MysqlDatabase once
 // after an operator upgrade. Bump it whenever that SQL changes.
-const databaseRenderVersion = "3"
+const databaseRenderVersion = "5"
 
 func computeDatabaseHash(mdb *v1alpha1.MysqlDatabase, ownerSecret *corev1.Secret, users []tenantUserInput, fg *v1alpha1.MysqlFailoverGroup) (string, error) {
 	h := sha256.New()

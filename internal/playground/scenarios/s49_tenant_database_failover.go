@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -230,18 +229,16 @@ func s49VerifyOnPrimary(stage string) runner.Step {
 }
 
 // s49GrantDatabaseName is the schema name as mysql.db stores it for the
-// operator's grants. With partial_revokes OFF (the MySQL default) the
-// operator escapes `_` so it is not a wildcard, and the row keeps the
-// escaped spelling.
+// operator's grants. Ready requires partial_revokes ON, so `_` is literal.
 func s49GrantDatabaseName(ctx context.Context, client *pgmysql.SiteClient) (string, error) {
 	partialRevokes, err := client.ScalarInt(ctx, "SELECT @@GLOBAL.partial_revokes")
 	if err != nil {
 		return "", err
 	}
-	if partialRevokes != 0 {
-		return s49DatabaseName, nil
+	if partialRevokes == 0 {
+		return "", fmt.Errorf("Ready tenant requires partial_revokes=ON on the primary")
 	}
-	return strings.ReplaceAll(s49DatabaseName, "_", `\_`), nil
+	return s49DatabaseName, nil
 }
 
 func s49AssertMySQLState(ctx context.Context, client *pgmysql.SiteClient, site string) error {
