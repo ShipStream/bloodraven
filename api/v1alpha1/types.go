@@ -545,7 +545,9 @@ type CredentialsSpec struct {
 	// +optional
 	MonitorSecret string `json:"monitorSecret,omitempty"`
 
-	// BackupSecret references the Secret for backup and restore connections.
+	// BackupSecret references the Secret for backup connections. Restore
+	// Jobs run as the operator account instead: they need DDL, SET GLOBAL
+	// and CONNECTION_ADMIN, which this role does not have.
 	// Required keys: username, password.
 	// Grants: SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD,
 	// BACKUP_ADMIN, REPLICATION CLIENT.
@@ -592,9 +594,25 @@ type MysqlFailoverGroupStatus struct {
 	// RestoreInPlace tracks an in-flight or completed in-place restore
 	// (spec.restoreInPlace). The consumed confirm token is stamped here
 	// on success so subsequent reconciles can distinguish "restore
-	// already done" from "new restore requested".
+	// already done" from "new restore requested". Once a run is accepted
+	// this status, not the spec, drives it: removing spec.restoreInPlace
+	// while its Job runs keeps the fence until the Job finishes.
 	// +optional
 	RestoreInPlace *RestoreInPlaceStatus `json:"restoreInPlace,omitempty"`
+
+	// RestoreReclones is the queue of peer sites a full-instance in-place
+	// restore still has to reclone from the restored primary. It lives
+	// outside restoreInPlace because it outlives that restore: it drains
+	// after the restore has succeeded, across later restores and spec
+	// edits. Empty when nothing is queued.
+	// +optional
+	RestoreReclones *RestoreReclonesStatus `json:"restoreReclones,omitempty"`
+
+	// RestoreOfflineFence is the offline_mode fence a full-instance
+	// in-place restore holds on its target primary. It is cleared once the
+	// restore has finished and the prior offline_mode is back.
+	// +optional
+	RestoreOfflineFence *RestoreOfflineFenceStatus `json:"restoreOfflineFence,omitempty"`
 
 	// BackupSchedules is a per-schedule rollup of the most recent backup
 	// activity for each entry in spec.backup.schedules.

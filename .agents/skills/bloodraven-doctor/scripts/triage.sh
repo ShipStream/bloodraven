@@ -85,6 +85,14 @@ TOPOLOGY_GENERATION=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{
 echo "Active Primary Site: ${ACTIVE_SITE:-Unknown}"
 echo "Last Failover:       ${LAST_FAILOVER:-None}"
 echo "Topology generation: ${TOPOLOGY_GENERATION:-unavailable}"
+RESTORE_RECLONES=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreReclones.phase}{" pending=["}{.status.restoreReclones.pending[*]}{"] requested="}{.status.restoreReclones.requested}{" failures="}{.status.restoreReclones.failures[*].message}' 2>/dev/null || true)
+if [[ "$RESTORE_RECLONES" != " pending=[] requested= failures=" && -n "$RESTORE_RECLONES" ]]; then
+    echo "Post-restore reclones: $RESTORE_RECLONES (pending sites are not promoted automatically and are out of the -replica and read-only Services; Held = nothing is cloned)"
+fi
+RESTORE_FENCE=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreOfflineFence.site}{" priorOfflineMode="}{.status.restoreOfflineFence.priorOfflineMode}{" sessionsEvicted="}{.status.restoreOfflineFence.sessionsEvicted}' 2>/dev/null || true)
+if [[ -n "$RESTORE_FENCE" && "$RESTORE_FENCE" != " priorOfflineMode= sessionsEvicted=" ]]; then
+    echo "Restore offline_mode fence: $RESTORE_FENCE (applications without CONNECTION_ADMIN cannot connect to that site)"
+fi
 
 echo ""
 echo "--- 2. Sites & Replication Summary ---"

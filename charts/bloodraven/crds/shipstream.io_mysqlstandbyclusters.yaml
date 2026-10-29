@@ -1678,7 +1678,9 @@ spec:
                             type: string
                           backupSecret:
                             description: |-
-                              BackupSecret references the Secret for backup and restore connections.
+                              BackupSecret references the Secret for backup connections. Restore
+                              Jobs run as the operator account instead: they need DDL, SET GLOBAL
+                              and CONNECTION_ADMIN, which this role does not have.
                               Required keys: username, password.
                               Grants: SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD,
                               BACKUP_ADMIN, REPLICATION CLIENT.
@@ -5797,8 +5799,12 @@ spec:
                                 type: boolean
                               resetProgress:
                                 default: true
-                                description: ResetProgress clears previous loadDump
-                                  progress tracking.
+                                description: |-
+                                  ResetProgress clears previous loadDump progress tracking. Restore
+                                  and verification Jobs disable progress tracking (local dump sources
+                                  are mounted read-only, and restore state is kept out of backup
+                                  storage), so this field currently has no effect and is kept for
+                                  compatibility.
                                 type: boolean
                               skipBinlog:
                                 default: true
@@ -6366,8 +6372,12 @@ spec:
                                 type: boolean
                               resetProgress:
                                 default: true
-                                description: ResetProgress clears previous loadDump
-                                  progress tracking.
+                                description: |-
+                                  ResetProgress clears previous loadDump progress tracking. Restore
+                                  and verification Jobs disable progress tracking (local dump sources
+                                  are mounted read-only, and restore state is kept out of backup
+                                  storage), so this field currently has no effect and is kept for
+                                  compatibility.
                                 type: boolean
                               skipBinlog:
                                 default: true
@@ -6388,8 +6398,14 @@ spec:
                             type: object
                           pointInTime:
                             description: |-
-                              PointInTime, when set, enables post-load binlog replay to recover
-                              the restored data to a specific target timestamp.
+                              PointInTime is not supported for in-place restores yet; the
+                              operator rejects a restore that sets it (RestoreInPlaceRejected)
+                              before fencing anything, without consuming confirm. The replayed
+                              binlogs carry GTIDs the live primary has already executed, so the
+                              replay would be skipped and the restore would stop at the backup.
+                              To recover to a point in time, restore into a new failover group
+                              with initFromBackup.pointInTime. The field is kept so existing
+                              objects still validate.
                             properties:
                               excludeGtids:
                                 description: |-

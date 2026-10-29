@@ -27,6 +27,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	k8sretry "k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -44,18 +46,19 @@ import (
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
 
-// inPlaceRestoreInFlight reports whether spec.restoreInPlace is set and
-// the currently-observed status is in a non-terminal phase. The runner
-// calls this to set the topology-frozen gate on every sync.
+// inPlaceRestoreInFlight reports whether an in-place restore run is
+// active. Once a run is observed its status decides, whatever the spec
+// says now: removing or editing spec.restoreInPlace does not stop a
+// destructive Job that may already be running, so the guards must hold
+// until the run reaches a terminal phase. Before the first observation a
+// set spec counts as in flight. The runner calls this to set the
+// topology-frozen gate on every sync.
 func inPlaceRestoreInFlight(fg *v1alpha1.MysqlFailoverGroup) bool {
-	if fg.Spec.RestoreInPlace == nil {
-		return false
-	}
 	if fg.Status.RestoreInPlace == nil {
 		// Spec is set but we have not yet observed it; treat as in-flight
 		// so the next reconcile does preflight before any cross-site
 		// action can fire.
-		return true
+		return fg.Spec.RestoreInPlace != nil
 	}
 	switch fg.Status.RestoreInPlace.Phase {
 	case v1alpha1.RestoreInPlaceSucceeded, v1alpha1.RestoreInPlaceFailed, v1alpha1.RestoreInPlaceNone:
@@ -75,21 +78,22 @@ func inPlaceRestoreFreezesTopology(fg *v1alpha1.MysqlFailoverGroup) bool {
 // primary role label on the active site (and thus drain the -primary
 // Service). True for full-instance restores in Fencing, Restoring, or
 // Resuming phases; false for per-schema restores (other tenants keep
-// writing) and when no in-place restore is in flight.
+// writing) and when no in-place restore is in flight. The scope is the
+// one the run was accepted with (see inPlaceRunScope), not the spec's.
 func inPlaceRestoreFencesPrimaryService(fg *v1alpha1.MysqlFailoverGroup) bool {
-	if fg.Spec.RestoreInPlace == nil {
-		return false
-	}
-	_, schema := inPlaceRestoreScope(fg.Spec.RestoreInPlace)
-	if schema != "" {
-		// Per-schema: Service stays up.
-		return false
-	}
 	if fg.Status.RestoreInPlace == nil {
 		// Spec set but not yet observed — be conservative and fence
 		// starting with the next reconcile. Safer than letting a
 		// restore-in-progress Service flip flap.
-		return true
+		if fg.Spec.RestoreInPlace == nil {
+			return false
+		}
+		_, schema := inPlaceRestoreScope(fg.Spec.RestoreInPlace)
+		return schema == ""
+	}
+	if _, schema := inPlaceRunScope(fg); schema != "" {
+		// Per-schema: Service stays up.
+		return false
 	}
 	switch fg.Status.RestoreInPlace.Phase {
 	case v1alpha1.RestoreInPlaceFencing,
@@ -156,6 +160,10 @@ func inPlaceRestoreJobIsForConfirm(job *batchv1.Job, confirm string) bool {
 //   - The Job carries the current spec.confirm — the normal case: we created it
 //     for exactly this request. (Also covers a crash between Create and the
 //     status patch, where the status does not yet name the Job.)
+//   - The Job carries the run's own confirm (status runConfirm), which it is
+//     built with. That covers the same crash window after the user changed
+//     spec.confirm to a value that does not advance past runConfirm, where
+//     the Job keeps the run's confirm.
 //   - The observed status names the Job while Restoring — this run created it,
 //     whatever token it carries. That is the case when the user changes
 //     spec.confirm while the Job is running (the run stays bound to the confirm
@@ -170,6 +178,9 @@ func inPlaceRestoreJobAccepted(job *batchv1.Job, cur *v1alpha1.RestoreInPlaceSta
 		return false
 	}
 	if inPlaceRestoreJobIsForConfirm(job, specConfirm) {
+		return true
+	}
+	if cur != nil && inPlaceRestoreJobIsForConfirm(job, cur.RunConfirm) {
 		return true
 	}
 	return cur != nil && cur.JobName == job.Name && cur.Phase == v1alpha1.RestoreInPlaceRestoring
@@ -235,15 +246,47 @@ func inPlaceRestoreScope(spec *v1alpha1.RestoreInPlaceSpec) (string, string) {
 	return "schema:" + name, name
 }
 
+// inPlaceRunScope returns the scope of the observed run: the one recorded
+// in status at Preflight, which later spec edits do not change. It falls
+// back to the spec only for a status that predates the Scope field.
+func inPlaceRunScope(fg *v1alpha1.MysqlFailoverGroup) (string, string) {
+	if cur := fg.Status.RestoreInPlace; cur != nil && cur.Scope != "" {
+		if name, ok := strings.CutPrefix(cur.Scope, "schema:"); ok {
+			return cur.Scope, name
+		}
+		return "full", ""
+	}
+	return inPlaceRestoreScope(fg.Spec.RestoreInPlace)
+}
+
+// errInPlacePointInTimeUnsupported rejects in-place PITR. The replay
+// pipes archived binlogs with their original GTIDs into the live
+// primary, whose gtid_executed already holds them (it ran or replicated
+// those transactions), so MySQL skips every one and the restore would
+// report success with the data left at the backup. Installing the dump's
+// GTID set cannot fix that on a live server. Doing it safely needs the
+// replay to run against a staging instance first; until then the spec is
+// refused.
+var errInPlacePointInTimeUnsupported = errors.New(
+	"restoreInPlace.pointInTime is not supported: the archived binlogs carry GTIDs the live primary has " +
+		"already executed, so the replay would be skipped and the restore would stop at the backup; " +
+		"remove pointInTime to restore to the backup, or restore to a point in time into a new failover " +
+		"group with initFromBackup.pointInTime")
+
 // validateInPlaceRestoreSpec enforces invariants that cannot be (or are
 // awkward to) encode as CEL rules. Returns a human-readable error
-// suitable for stamping into status.message.
+// suitable for stamping into status.message. These checks run at
+// reconcile time rather than admission so an already-stored object with
+// an unsupported spec still accepts unrelated updates.
 func validateInPlaceRestoreSpec(spec *v1alpha1.RestoreInPlaceSpec) error {
 	if spec == nil {
 		return fmt.Errorf("restoreInPlace is nil")
 	}
 	if _, err := parseConfirmTimestamp(spec.Confirm); err != nil {
 		return err
+	}
+	if spec.PointInTime != nil {
+		return errInPlacePointInTimeUnsupported
 	}
 	if spec.LoadOptions != nil && len(spec.LoadOptions.IncludeSchemas) > 1 {
 		return fmt.Errorf("restoreInPlace.loadOptions.includeSchemas supports at most one schema (got %d); use a full-instance restore instead",
@@ -276,16 +319,13 @@ func validateInPlaceRestoreSpec(spec *v1alpha1.RestoreInPlaceSpec) error {
 // error when it has already stamped a terminal status (i.e. the
 // reconciler should not crash-loop on a user-recoverable error).
 func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
-	// No spec: clear stale status and return.
 	if fg.Spec.RestoreInPlace == nil {
-		if fg.Status.RestoreInPlace != nil {
-			r.setInPlaceRestoreStatus(ctx, fg, nil)
-		}
-		return 0, nil
+		return r.reconcileInPlaceRestoreWithoutSpec(ctx, fg)
 	}
 
 	spec := fg.Spec.RestoreInPlace
 	cur := fg.Status.RestoreInPlace
+	prev := cur
 
 	// Terminal states hold until the user advances spec.confirm past
 	// status.confirmTokenUsed. Note: terminal status stays in place
@@ -316,25 +356,62 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 	if cur == nil {
 		if err := validateInPlaceRestoreSpec(spec); err != nil {
 			// Pure validation rejection: nothing executed, so do not
-			// consume the confirm (empty confirmUsed preserves the
-			// invalid-timestamp behavior and lets the user fix the spec
+			// consume the confirm (keeping the last executed one preserves
+			// the invalid-timestamp behavior and lets the user fix the spec
 			// and retry with the same confirm).
-			r.stampTerminalFailure(ctx, fg, "", "", "", err.Error(), "RestoreInPlaceRejected")
+			r.rejectInPlaceRestore(ctx, fg, prev, lastConsumedConfirm(prev), "", "", err.Error())
+			return 0, nil
+		}
+		// The same privilege rejection inPlacePreflight applies, checked
+		// here too so a repeated rejection is a no-op instead of cycling
+		// through Preflight on every reconcile. The check queries MySQL,
+		// so a standing rejection repeats it at most once a minute.
+		if !r.restorePrivilegeRecheckDue(fg, prev, spec) {
+			return 0, nil
+		}
+		msg, _ := r.inPlaceFencePrivilegeRejection(ctx, fg, spec, fg.Status.ActiveSite)
+		r.noteRestorePrivilegeCheck(fg, spec, msg != "")
+		if msg != "" {
+			r.rejectInPlaceRestore(ctx, fg, prev, lastConsumedConfirm(prev), "", "", msg)
 			return 0, nil
 		}
 		scope, _ := inPlaceRestoreScope(spec)
 		now := metav1.Now()
 		next := &v1alpha1.RestoreInPlaceStatus{
-			Phase:     v1alpha1.RestoreInPlacePreflight,
-			Scope:     scope,
-			StartTime: &now,
-			Message:   "validating preconditions",
+			Phase: v1alpha1.RestoreInPlacePreflight,
+			Scope: scope,
+			// Keep the last executed confirm until this run executes its
+			// own: if this request is cancelled or rejected, an older
+			// manifest must still be unable to run its restore again.
+			ConfirmTokenUsed: lastConsumedConfirm(prev),
+			RunConfirm:       spec.Confirm,
+			RunID:            string(uuid.NewUUID()),
+			StartTime:        &now,
+			Message:          "validating preconditions",
 		}
 		applyRestoreMetadataToInPlaceStatus(next, r.restoreSourceMetadata(ctx, fg, spec.Source))
 		r.setInPlaceRestoreStatus(ctx, fg, next)
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceStarted",
 			"starting in-place restore (scope=%s, confirm=%s)", scope, spec.Confirm)
 		return 5 * time.Second, nil
+	}
+
+	// A confirm that does not advance past the run's own before its Job
+	// exists cancels the run. That is how a GitOps revert to the previous,
+	// already executed manifest looks: building the Job from that spec
+	// would restore what the revert was meant to undo. Nothing has run,
+	// so the last executed confirm is kept. An advancing confirm is
+	// rebound to the run before the Job is built (inPlaceRestoring).
+	if cur.RunConfirm != "" && spec.Confirm != cur.RunConfirm && cur.JobName == "" && !cur.JobCreating {
+		switch cur.Phase {
+		case v1alpha1.RestoreInPlacePreflight, v1alpha1.RestoreInPlaceFencing, v1alpha1.RestoreInPlaceRestoring:
+			if advances, err := confirmAdvances(spec.Confirm, cur.RunConfirm); err != nil || !advances {
+				r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed,
+					fmt.Sprintf("cancelled: spec.restoreInPlace.confirm changed from %s to %s, which does not advance past it, before the restore Job was created; nothing was restored",
+						cur.RunConfirm, spec.Confirm), "RestoreInPlaceCancelled")
+				return 0, nil
+			}
+		}
 	}
 
 	switch cur.Phase {
@@ -360,6 +437,14 @@ func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestore(ctx context.Conte
 func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	spec := fg.Spec.RestoreInPlace
 	cur := fg.Status.RestoreInPlace
+	// An invalid spec (a stored object, or one edited mid-Preflight) is
+	// rejected before the deployment-hold and writable-primary waits
+	// below, which could otherwise hold the rejection back indefinitely.
+	// Nothing has been fenced yet, so the confirm is not consumed.
+	if err := validateInPlaceRestoreSpec(spec); err != nil {
+		r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed, err.Error(), "RestoreInPlaceRejected")
+		return 0, nil
+	}
 	if m := r.deploymentLeaseManager(); m != nil {
 		hold, err := m.BeginPlanned(ctx, fg, "RestoreInPlace")
 		if err != nil {
@@ -376,10 +461,13 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 
 	if fg.Status.ActiveSite == "" {
 		next := &v1alpha1.RestoreInPlaceStatus{
-			Phase:     v1alpha1.RestoreInPlacePreflight,
-			Scope:     cur.Scope,
-			StartTime: cur.StartTime,
-			Message:   "waiting for status.activeSite to be populated",
+			Phase:            v1alpha1.RestoreInPlacePreflight,
+			Scope:            cur.Scope,
+			ConfirmTokenUsed: cur.ConfirmTokenUsed,
+			RunConfirm:       cur.RunConfirm,
+			RunID:            cur.RunID,
+			StartTime:        cur.StartTime,
+			Message:          "waiting for status.activeSite to be populated",
 		}
 		applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
 		r.setInPlaceRestoreStatus(ctx, fg, next)
@@ -404,10 +492,13 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 			observedState = activeStatus.State
 		}
 		next := &v1alpha1.RestoreInPlaceStatus{
-			Phase:      v1alpha1.RestoreInPlacePreflight,
-			TargetSite: target,
-			Scope:      cur.Scope,
-			StartTime:  cur.StartTime,
+			Phase:            v1alpha1.RestoreInPlacePreflight,
+			TargetSite:       target,
+			Scope:            cur.Scope,
+			ConfirmTokenUsed: cur.ConfirmTokenUsed,
+			RunConfirm:       cur.RunConfirm,
+			RunID:            cur.RunID,
+			StartTime:        cur.StartTime,
 			Message: fmt.Sprintf("waiting for active site %q to be writable (observed: %s)",
 				target, observedState),
 		}
@@ -416,19 +507,77 @@ func (r *MysqlFailoverGroupReconciler) inPlacePreflight(ctx context.Context, fg 
 		return 15 * time.Second, nil
 	}
 
-	if err := validateInPlaceRestoreSpec(spec); err != nil {
-		// Validation rejection (see stampTerminalFailure): leave
-		// confirmUsed empty so a fixed spec can retry on the same confirm.
-		r.stampTerminalFailure(ctx, fg, target, cur.Scope, "", err.Error(), "RestoreInPlaceRejected")
-		return 0, nil
+	_, schema := inPlaceRestoreScope(spec)
+	if schema == "" {
+		// A full-instance restore fences application sessions with
+		// offline_mode, which only works if the operator account itself
+		// is exempt. No fallback to the label-only fence.
+		msg, waitErr := r.inPlaceFencePrivilegeRejection(ctx, fg, spec, target)
+		if msg != "" {
+			r.noteRestorePrivilegeCheck(fg, spec, true)
+			r.rejectInPlaceRestore(ctx, fg, cur, cur.ConfirmTokenUsed, target, cur.Scope, msg)
+			return 0, nil
+		}
+		if q := fg.Status.RestoreOfflineFence; q != nil && (q.Site != target || fenceOwner(q) != restoreRunOwner(fg)) {
+			// An earlier restore's fence that has not been released yet
+			// (its run is no longer active, so this releases it now).
+			if _, err := r.reconcileRestoreOfflineFence(ctx, fg); err != nil {
+				return 0, err
+			}
+		}
+		if q := fg.Status.RestoreOfflineFence; q != nil && (q.Site != target || fenceOwner(q) != restoreRunOwner(fg)) && waitErr == nil {
+			waitErr = errPreviousRestoreFence
+		}
+		if waitErr != nil {
+			wait := fmt.Sprintf("waiting to verify the operator account's privileges on %s: %v", target, waitErr)
+			if errors.Is(waitErr, errPreviousRestoreFence) {
+				wait = fmt.Sprintf("waiting for the offline_mode fence of the previous restore on %s to be released",
+					fg.Status.RestoreOfflineFence.Site)
+			}
+			next := cur.DeepCopy()
+			next.TargetSite, next.Message = target, wait
+			if cur.Message != wait {
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+			}
+			return 15 * time.Second, nil
+		}
+	}
+
+	// Accepted. A full-instance restore replaces the primary's data, so
+	// fix the set of peers it must reclone now, before anything is
+	// destroyed: from here on they are not promoted automatically. Its
+	// offline_mode fence is recorded before anything touches offline_mode.
+	if schema == "" {
+		wait, err := r.restoreReclonesReadyForNewRestore(ctx, fg)
+		if err != nil {
+			return 0, fmt.Errorf("prepare in-place restore reclone queue: %w", err)
+		}
+		if wait != "" {
+			cur = fg.Status.RestoreInPlace
+			if cur.Message != wait || cur.TargetSite != target {
+				next := cur.DeepCopy()
+				next.TargetSite, next.Message = target, wait
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+			}
+			return 15 * time.Second, nil
+		}
+		if err := r.armRestoreReclones(ctx, fg, target, spec.Confirm); err != nil {
+			return 0, fmt.Errorf("record in-place restore reclone queue: %w", err)
+		}
+		if err := r.recordRestoreOfflineFence(ctx, fg, target, spec.Confirm, cur.RunID); err != nil {
+			return 0, fmt.Errorf("record in-place restore offline_mode fence: %w", err)
+		}
 	}
 
 	next := &v1alpha1.RestoreInPlaceStatus{
-		Phase:      v1alpha1.RestoreInPlaceFencing,
-		TargetSite: target,
-		Scope:      cur.Scope,
-		StartTime:  cur.StartTime,
-		Message:    "applying pre-restore fence",
+		Phase:            v1alpha1.RestoreInPlaceFencing,
+		TargetSite:       target,
+		Scope:            cur.Scope,
+		ConfirmTokenUsed: cur.ConfirmTokenUsed,
+		RunConfirm:       cur.RunConfirm,
+		RunID:            cur.RunID,
+		StartTime:        cur.StartTime,
+		Message:          "applying pre-restore fence",
 	}
 	applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
 	r.setInPlaceRestoreStatus(ctx, fg, next)
@@ -450,18 +599,43 @@ func (r *MysqlFailoverGroupReconciler) inPlaceFencing(ctx context.Context, fg *v
 	// Ensure pod labels reflect the fenced state before we advance. If
 	// syncPodLabels has not yet run for this phase (reconciler just
 	// entered Fencing this tick), requeue briefly.
-	_, schema := inPlaceRestoreScope(fg.Spec.RestoreInPlace)
+	_, schema := inPlaceRunScope(fg)
 	isFullInstance := schema == ""
 	if isFullInstance && !r.primaryPodLabelFenced(ctx, fg) {
 		return 2 * time.Second, nil
 	}
+	// The label fence only stops new connections through the -primary
+	// Service. Nothing destructive starts until offline_mode is on and no
+	// application session from before it remains.
+	if isFullInstance {
+		wait, err := r.enforceRestoreOfflineFence(ctx, fg)
+		if errors.Is(err, errInPlaceRunEnded) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if wait != "" {
+			cur = fg.Status.RestoreInPlace
+			if cur.Message != wait {
+				next := cur.DeepCopy()
+				next.Message = wait
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+			}
+			return 2 * time.Second, nil
+		}
+		cur = fg.Status.RestoreInPlace
+	}
 
 	next := &v1alpha1.RestoreInPlaceStatus{
-		Phase:      v1alpha1.RestoreInPlaceRestoring,
-		TargetSite: cur.TargetSite,
-		Scope:      cur.Scope,
-		StartTime:  cur.StartTime,
-		Message:    "creating restore Job",
+		Phase:            v1alpha1.RestoreInPlaceRestoring,
+		TargetSite:       cur.TargetSite,
+		Scope:            cur.Scope,
+		ConfirmTokenUsed: cur.ConfirmTokenUsed,
+		RunConfirm:       cur.RunConfirm,
+		RunID:            cur.RunID,
+		StartTime:        cur.StartTime,
+		Message:          "creating restore Job",
 	}
 	applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
 	r.setInPlaceRestoreStatus(ctx, fg, next)
@@ -474,8 +648,14 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	spec := fg.Spec.RestoreInPlace
 	cur := fg.Status.RestoreInPlace
 	target := cur.TargetSite
-	_, schema := inPlaceRestoreScope(spec)
+	_, schema := inPlaceRunScope(fg)
 	isFullInstance := schema == ""
+	// specConfirm is the current request's confirm, or "" once the spec
+	// was removed: the run then only finishes the Job it already owns.
+	specConfirm := ""
+	if spec != nil {
+		specConfirm = spec.Confirm
+	}
 
 	credsName := restoreCredsSecretName(fg.Name)
 
@@ -483,7 +663,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	jobExists := true
 	jobName := inPlaceRestoreJobName(fg.Name, target)
 	jobKey := types.NamespacedName{Namespace: fg.Namespace, Name: jobName}
-	if err := r.Get(ctx, jobKey, &job); err != nil {
+	if err := r.inPlaceJobReader().Get(ctx, jobKey, &job); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return 0, fmt.Errorf("get in-place restore job: %w", err)
 		}
@@ -495,10 +675,53 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	// while no Job exists: once one does, nothing destructive may be aborted by
 	// a transient API error on a Secret its pod already holds. Failing the run
 	// there would also unfreeze the topology underneath a live DROP/load.
+	if !jobExists && spec == nil {
+		// Callers only get here without a spec when a Job exists; never
+		// build a destructive Job for a request that is gone.
+		return 0, fmt.Errorf("in-place restore Job %s is missing and spec.restoreInPlace was removed", jobName)
+	}
+	if !jobExists && (cur.JobName != "" || cur.JobCreating) {
+		// This run created its Job (or recorded that it was about to)
+		// and the Job is gone. It may have run: never build a second one.
+		r.stampInPlaceJobLost(ctx, fg, "")
+		return 0, nil
+	}
+	if !jobExists {
+		// The fence was applied for the scope accepted at Preflight. A Job
+		// for a different scope would drop what the fence does not cover
+		// (or keep a whole-instance fence for a single schema), so an edit
+		// that lands before the Job exists ends this run instead.
+		if specScope, _ := inPlaceRestoreScope(spec); specScope != cur.Scope && cur.Scope != "" {
+			r.stampTerminalFailure(ctx, fg, target, cur.Scope, cur.ConfirmTokenUsed,
+				fmt.Sprintf("spec.restoreInPlace scope changed from %s to %s after the restore was accepted; nothing was restored. Bump confirm to restore with the new scope",
+					cur.Scope, specScope), "RestoreInPlaceRejected")
+			return 0, nil
+		}
+		// A confirm bumped before the Job exists re-authorizes this run:
+		// the Job is built from the current spec, so it runs under the new
+		// confirm. Bind it durably before Create, so the Job's annotation,
+		// a JobLost and the terminal status all record the confirm the Job
+		// actually ran with, and the new confirm does not start a second
+		// restore after this one.
+		if cur.RunConfirm != "" && spec.Confirm != cur.RunConfirm {
+			if advances, err := confirmAdvances(spec.Confirm, cur.RunConfirm); err == nil && advances {
+				if err := r.rebindRestoreReclones(ctx, fg, cur.RunConfirm, spec.Confirm); err != nil {
+					return 0, fmt.Errorf("rebind in-place restore reclone queue: %w", err)
+				}
+				next := cur.DeepCopy()
+				next.RunConfirm = spec.Confirm
+				next.Message = fmt.Sprintf("spec.restoreInPlace.confirm changed from %s to %s before the restore Job was created; the Job runs under %s",
+					cur.RunConfirm, spec.Confirm, spec.Confirm)
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+				r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceConfirmRebound", "%s", next.Message)
+				return 2 * time.Second, nil
+			}
+		}
+	}
 	if err := r.ensureRestoreCredsSecret(ctx, fg, credsName); err != nil {
 		if !jobExists {
 			// Nothing has executed: a clean terminal for this confirm.
-			r.stampTerminalFailure(ctx, fg, target, cur.Scope, spec.Confirm,
+			r.stampTerminalFailure(ctx, fg, target, cur.Scope, inPlaceRunConfirm(cur, spec),
 				fmt.Sprintf("ensure restore creds: %v", err), "RestoreInPlaceBuildFailed")
 			return 0, nil
 		}
@@ -510,23 +733,50 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	if !jobExists {
 		built, err := r.buildInPlaceRestoreJob(ctx, fg, target, credsName, isFullInstance, schema)
 		if err != nil {
-			r.stampTerminalFailure(ctx, fg, target, cur.Scope, spec.Confirm, err.Error(), "RestoreInPlaceBuildFailed")
+			r.stampTerminalFailure(ctx, fg, target, cur.Scope, inPlaceRunConfirm(cur, spec), err.Error(), "RestoreInPlaceBuildFailed")
 			return 0, nil
 		}
 		if err := controllerutil.SetControllerReference(fg, built, r.Scheme); err != nil {
 			return 0, fmt.Errorf("set in-place restore job owner ref: %w", err)
 		}
+		// Write-ahead: record that the Job may start, with the confirm it
+		// is built with, before it exists. A crash or a lost status write
+		// right after Create then still shows that this run may have
+		// executed. No Job is created unless the write succeeded.
+		intent := cur.DeepCopy()
+		intent.JobCreating = true
+		intent.RunConfirm = inPlaceRestoreJobConfirm(built)
+		intent.Message = "creating restore Job"
+		if !r.setInPlaceRestoreStatus(ctx, fg, intent) {
+			return 0, fmt.Errorf("record in-place restore Job creation before creating Job %s", built.Name)
+		}
 		if err := r.Create(ctx, built); err != nil {
+			if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err) {
+				// The API server refused the Job outright, so none was
+				// created: withdraw the write-ahead so a retry stays a
+				// run that never executed.
+				undo := fg.Status.RestoreInPlace.DeepCopy()
+				undo.JobCreating = false
+				r.setInPlaceRestoreStatus(ctx, fg, undo)
+			}
+			// Any other error leaves JobCreating: the Job may exist. If it
+			// does not on the next pass the run ends JobLost.
 			return 0, fmt.Errorf("create in-place restore job: %w", err)
 		}
 		next := &v1alpha1.RestoreInPlaceStatus{
-			Phase:      v1alpha1.RestoreInPlaceRestoring,
-			JobName:    built.Name,
-			TargetSite: target,
-			Scope:      cur.Scope,
-			StartTime:  cur.StartTime,
-			Message:    "restore Job created",
+			Phase:            v1alpha1.RestoreInPlaceRestoring,
+			JobName:          built.Name,
+			JobCreating:      true,
+			TargetSite:       target,
+			Scope:            cur.Scope,
+			ConfirmTokenUsed: cur.ConfirmTokenUsed,
+			RunConfirm:       cur.RunConfirm,
+			RunID:            cur.RunID,
+			StartTime:        cur.StartTime,
+			Message:          "restore Job created",
 		}
+		// The confirm the Job runs with (a JobLost consumes it).
+		next.RunConfirm = inPlaceRestoreJobConfirm(built)
 		applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
 		r.setInPlaceRestoreStatus(ctx, fg, next)
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceJobCreated",
@@ -539,8 +789,8 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	// two things before touching it: whether it has finished, and whether it
 	// belongs to this request.
 	phase, message := jobPhase(&job, "in-place restore")
-	accepted := inPlaceRestoreJobAccepted(&job, cur, spec.Confirm)
-	acceptedConfirm := inPlaceRestoreAcceptedConfirm(&job, spec.Confirm)
+	accepted := inPlaceRestoreJobAccepted(&job, cur, specConfirm)
+	acceptedConfirm := inPlaceRestoreAcceptedConfirm(&job, specConfirm)
 
 	if !accepted {
 		// A Job from some other request under the fixed name. If it is still
@@ -551,7 +801,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		if phase == "" {
 			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceJobBusy",
 				"in-place restore Job %s from an earlier request is still running; waiting for it to finish before starting confirm=%s",
-				job.Name, spec.Confirm)
+				job.Name, specConfirm)
 			return 15 * time.Second, nil
 		}
 
@@ -561,6 +811,9 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		// confirmed request ends up Failed without ever running. Delete it
 		// (background propagation drops its pods too) and requeue; once it is
 		// gone the create branch above builds a clean Job for this request.
+		if spec == nil {
+			return 0, fmt.Errorf("in-place restore Job %s does not belong to the run and spec.restoreInPlace was removed", job.Name)
+		}
 		if job.GetDeletionTimestamp() == nil {
 			bg := metav1.DeletePropagationBackground
 			if err := r.Delete(ctx, &job, &client.DeleteOptions{PropagationPolicy: &bg}); err != nil && !apierrors.IsNotFound(err) {
@@ -578,20 +831,39 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	// destructive Job is never interrupted, and the newer confirm re-arms its
 	// own run once this one is terminal. Say so on the CR.
 	if phase == "" {
+		if spec == nil {
+			waitMsg := fmt.Sprintf("spec.restoreInPlace was removed; holding the fence until restore Job %s (confirm=%s) finishes",
+				job.Name, acceptedConfirm)
+			if cur.Message != waitMsg {
+				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceSpecRemoved",
+					"%s: a running restore Job is never interrupted", waitMsg)
+				next := cur.DeepCopy()
+				next.JobName, next.Message = job.Name, waitMsg
+				r.setInPlaceRestoreStatus(ctx, fg, next)
+			}
+			return 15 * time.Second, nil
+		}
 		if acceptedConfirm != spec.Confirm {
-			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceConfirmDeferred",
-				"spec.restoreInPlace.confirm=%s cannot start while the in-flight restore Job %s (confirm=%s) is running; it will start once the running restore finishes",
-				spec.Confirm, job.Name, acceptedConfirm)
 			waitMsg := fmt.Sprintf("in-flight restore Job %s is running under confirm=%s; confirm=%s starts a new run once it finishes",
 				job.Name, acceptedConfirm, spec.Confirm)
+			if advances, err := confirmAdvances(spec.Confirm, acceptedConfirm); err != nil || !advances {
+				waitMsg = fmt.Sprintf("in-flight restore Job %s is running under confirm=%s; confirm=%s does not advance past it and starts nothing",
+					job.Name, acceptedConfirm, spec.Confirm)
+			}
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceConfirmDeferred",
+				"spec.restoreInPlace.confirm=%s changed while the restore Job %s (confirm=%s) is running, which is never interrupted: %s",
+				spec.Confirm, job.Name, acceptedConfirm, waitMsg)
 			if cur.Message != waitMsg {
 				next := &v1alpha1.RestoreInPlaceStatus{
-					Phase:      v1alpha1.RestoreInPlaceRestoring,
-					JobName:    job.Name,
-					TargetSite: target,
-					Scope:      cur.Scope,
-					StartTime:  cur.StartTime,
-					Message:    waitMsg,
+					Phase:            v1alpha1.RestoreInPlaceRestoring,
+					JobName:          job.Name,
+					TargetSite:       target,
+					Scope:            cur.Scope,
+					ConfirmTokenUsed: cur.ConfirmTokenUsed,
+					RunConfirm:       cur.RunConfirm,
+					RunID:            cur.RunID,
+					StartTime:        cur.StartTime,
+					Message:          waitMsg,
 				}
 				applyRestoreMetadataToInPlaceStatus(next, restoreMetadataFromInPlaceStatus(cur))
 				r.setInPlaceRestoreStatus(ctx, fg, next)
@@ -602,10 +874,10 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 
 	if phase == v1alpha1.BackupPhaseSucceeded {
 		now := metav1.Now()
-		meta := r.restoreSourceMetadata(ctx, fg, spec.Source)
 		curMeta := restoreMetadataFromInPlaceStatus(cur)
-		if curMeta.SourceSizeBytes > 0 || curMeta.SourceGtidExecuted != "" || curMeta.SourceBinlogFile != "" || curMeta.SourceBinlogPos > 0 {
-			meta = curMeta
+		meta := curMeta
+		if spec != nil && curMeta.SourceSizeBytes == 0 && curMeta.SourceGtidExecuted == "" && curMeta.SourceBinlogFile == "" && curMeta.SourceBinlogPos == 0 {
+			meta = r.restoreSourceMetadata(ctx, fg, spec.Source)
 		}
 		if parsed, ok := r.tailRestoreCompletion(ctx, &job); ok {
 			meta = parsed
@@ -630,6 +902,8 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 			// not be marked consumed by a run it never requested — it re-arms
 			// its own run once this one is terminal.
 			ConfirmTokenUsed: acceptedConfirm,
+			RunConfirm:       cur.RunConfirm,
+			RunID:            cur.RunID,
 			StartTime:        cur.StartTime,
 			Message:          "load complete; lifting fence",
 		}
@@ -654,52 +928,35 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 	return 0, nil
 }
 
-// inPlaceResuming lifts the fence: stamps the confirm token, schedules
-// a replica reclone for full-instance restores, and transitions to
+// inPlaceResuming lifts the fence: stamps the confirm token, releases
+// the peer reclone queue for full-instance restores, and transitions to
 // Succeeded. The topology manager unfreezes automatically once the
-// runner next observes the terminal phase.
+// runner next observes the terminal phase. The peers are recloned after
+// Succeeded (reconcileRestoreReclones); Succeeded means the primary has
+// the restored data.
 func (r *MysqlFailoverGroupReconciler) inPlaceResuming(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
 	spec := fg.Spec.RestoreInPlace
 	cur := fg.Status.RestoreInPlace
 	target := cur.TargetSite
-	_, schema := inPlaceRestoreScope(spec)
+	_, schema := inPlaceRunScope(fg)
 	isFullInstance := schema == ""
-
-	// For full-instance restores the replica is now out-of-sync: its
-	// old GTID state diverges from the freshly-loaded primary. Set the
-	// reclone annotation so the topology manager picks it up via the
-	// existing checkReclone path once the topologyFrozen flag clears.
-	if isFullInstance {
-		replicaSite := ""
-		for i := range fg.Spec.Sites {
-			if fg.Spec.Sites[i].Name != target {
-				replicaSite = fg.Spec.Sites[i].Name
-				break
-			}
-		}
-		if replicaSite != "" {
-			if err := r.setRecloneAnnotation(ctx, fg, replicaSite); err != nil {
-				log.FromContext(ctx).Error(err, "failed to set reclone annotation for replica",
-					"fg", fg.Name, "replicaSite", replicaSite)
-				// Non-fatal: the restore itself succeeded; surface the
-				// issue as an event so the operator can hand-trigger
-				// the reclone.
-				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreInPlaceRecloneAnnotationFailed",
-					"in-place restore succeeded but failed to schedule replica reclone: %v", err)
-			} else {
-				r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreInPlaceRecloneScheduled",
-					"scheduled reclone of replica site %s after in-place restore", replicaSite)
-			}
-		}
-	}
 
 	// Stamp the confirm the restore actually ran with. inPlaceRestoring carries
 	// it over from the Job that performed the load; it differs from spec.confirm
 	// only when the user changed confirm mid-run, and in that case the new
 	// confirm must NOT be consumed here — it re-arms its own run.
 	confirmUsed := cur.ConfirmTokenUsed
-	if confirmUsed == "" {
+	if confirmUsed == "" && spec != nil {
 		confirmUsed = spec.Confirm
+	}
+
+	// The peers still hold pre-restore data. Release the queue before
+	// Succeeded is written, so a restart between the two cannot leave a
+	// succeeded restore whose queue is discarded as failed.
+	if isFullInstance {
+		if err := r.releaseRestoreReclones(ctx, fg, target, confirmUsed); err != nil {
+			return 0, fmt.Errorf("release in-place restore reclone queue: %w", err)
+		}
 	}
 
 	now := metav1.Now()
@@ -780,12 +1037,13 @@ func (r *MysqlFailoverGroupReconciler) setInPlaceRestoreStatus(ctx context.Conte
 // same confirm, so the reconciler does not silently re-arm and re-run
 // the destructive restore — a user must bump confirm to a strictly
 // newer RFC 3339 timestamp to retry (matching the RestoreInPlaceFailed
-// and ConfirmTokenUsed contract). It MUST be empty ("") for a pure
-// validation rejection (a malformed confirm/spec that never executed):
-// leaving it empty preserves the invalid-timestamp behavior (the still-
-// invalid spec.Confirm keeps failing confirmAdvances, so the status
-// holds) while letting the user fix the spec and retry with the same
-// confirm once it parses.
+// and ConfirmTokenUsed contract). For a run that never executed (a
+// validation rejection, a cancellation) it MUST be the last confirm that
+// did execute (lastConsumedConfirm, "" when none), never the rejected
+// one: that keeps the rejected confirm usable once the spec is fixed,
+// keeps the invalid-timestamp behavior (a still-invalid spec.Confirm keeps
+// failing confirmAdvances, so the status holds), and still stops an older
+// manifest from re-running the restore it already ran.
 func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target, scope, confirmUsed, msg, eventReason string) {
 	now := metav1.Now()
 	cur := fg.Status.RestoreInPlace
@@ -798,9 +1056,11 @@ func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context,
 	if start == nil {
 		start = &now
 	}
+	jobCreating := cur != nil && cur.JobCreating
 	next := &v1alpha1.RestoreInPlaceStatus{
 		Phase:            v1alpha1.RestoreInPlaceFailed,
 		JobName:          jobName,
+		JobCreating:      jobCreating,
 		TargetSite:       target,
 		Scope:            scope,
 		ConfirmTokenUsed: confirmUsed,
@@ -815,23 +1075,246 @@ func (r *MysqlFailoverGroupReconciler) stampTerminalFailure(ctx context.Context,
 	}
 }
 
-// setRecloneAnnotation adds the one-shot reclone annotation to the CR.
-// Mirrors the shape the topology runner expects in removeRecloneAnnotation.
-func (r *MysqlFailoverGroupReconciler) setRecloneAnnotation(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, site string) error {
-	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	return k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
-		var fresh v1alpha1.MysqlFailoverGroup
-		if err := r.Get(ctx, nn, &fresh); err != nil {
-			return err
+// rejectInPlaceRestore stamps a validation rejection: Failed, keeping the
+// last executed confirm (keepConfirm) rather than consuming the rejected
+// one, so a fixed spec can run on the same confirm. Because the confirm is
+// not consumed, every later reconcile re-validates the same spec; when
+// prev already records this exact rejection it is left alone. Re-stamping
+// would bump completionTime, and that status write would trigger the next
+// reconcile, a hot loop of writes and events.
+func (r *MysqlFailoverGroupReconciler) rejectInPlaceRestore(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, prev *v1alpha1.RestoreInPlaceStatus, keepConfirm, target, scope, msg string) {
+	if prev != nil && prev.Phase == v1alpha1.RestoreInPlaceFailed && prev.ConfirmTokenUsed == keepConfirm && prev.Message == msg {
+		return
+	}
+	r.stampTerminalFailure(ctx, fg, target, scope, keepConfirm, msg, "RestoreInPlaceRejected")
+}
+
+// errPreviousRestoreFence holds Preflight while an earlier restore's
+// offline_mode fence is still recorded (its release keeps retrying).
+var errPreviousRestoreFence = errors.New("an earlier restore's offline_mode fence is not released yet")
+
+// inPlaceFencePrivilegeRejection returns the rejection message for a
+// full-instance restore whose operator account lacks one of
+// mysql.RestoreFencePrivileges on target, or the error that kept the check
+// from completing.
+func (r *MysqlFailoverGroupReconciler) inPlaceFencePrivilegeRejection(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, spec *v1alpha1.RestoreInPlaceSpec, target string) (string, error) {
+	if _, schema := inPlaceRestoreScope(spec); schema != "" || target == "" {
+		return "", nil
+	}
+	err := r.Runner.RestoreFencePrivileges(ctx, client.ObjectKeyFromObject(fg), target)
+	if errors.Is(err, errRestoreFenceNoPrivilege) {
+		return fmt.Sprintf("%s%v on %s. A full-instance restore disconnects application sessions with offline_mode and kills the ones "+
+			"that remain, and the operator account must keep working under it; grant these ON *.* to the operator account (%s). "+
+			"The restore is retried with the same confirm about once a minute",
+			restorePrivilegeRejectionPrefix, strings.TrimPrefix(err.Error(), errRestoreFenceNoPrivilege.Error()+" "), target,
+			fg.Spec.EffectiveOperatorSecretName()), nil
+	}
+	return "", err
+}
+
+// restorePrivilegeRejectionPrefix starts the status message of a
+// full-instance restore rejected for missing operator privileges.
+var restorePrivilegeRejectionPrefix = "restoreInPlace rejected: " + errRestoreFenceNoPrivilege.Error() + " "
+
+// restorePrivilegeRecheck bounds how often a standing privilege rejection
+// re-checks the grants. The rejection does not consume the confirm, so
+// every reconcile would otherwise query MySQL again (and wait out the
+// safety timeout when the primary is unreachable).
+const restorePrivilegeRecheck = time.Minute
+
+type restorePrivilegeCheck struct {
+	confirm    string
+	generation int64
+	at         time.Time
+}
+
+// restorePrivilegeRecheckDue reports whether the privileges must be
+// checked now. They are, unless prev is a privilege rejection that this
+// operator recorded for the same confirm and generation less than
+// restorePrivilegeRecheck ago.
+func (r *MysqlFailoverGroupReconciler) restorePrivilegeRecheckDue(fg *v1alpha1.MysqlFailoverGroup, prev *v1alpha1.RestoreInPlaceStatus, spec *v1alpha1.RestoreInPlaceSpec) bool {
+	if prev == nil || prev.Phase != v1alpha1.RestoreInPlaceFailed || !strings.HasPrefix(prev.Message, restorePrivilegeRejectionPrefix) {
+		return true
+	}
+	r.restorePrivMu.Lock()
+	defer r.restorePrivMu.Unlock()
+	last, ok := r.restorePrivRejected[client.ObjectKeyFromObject(fg)]
+	return !ok || last.confirm != spec.Confirm || last.generation != fg.Generation || time.Since(last.at) >= restorePrivilegeRecheck
+}
+
+// restorePrivilegeRecheckRequeue is when Reconcile must run again to
+// re-check a standing privilege rejection (0 when there is none): the
+// rejection does not consume the confirm, so the restore starts by itself
+// once the grant is in place, but only if a reconcile happens.
+func (r *MysqlFailoverGroupReconciler) restorePrivilegeRecheckRequeue(fg *v1alpha1.MysqlFailoverGroup) time.Duration {
+	spec, rip := fg.Spec.RestoreInPlace, fg.Status.RestoreInPlace
+	if spec == nil || rip == nil || rip.Phase != v1alpha1.RestoreInPlaceFailed || !strings.HasPrefix(rip.Message, restorePrivilegeRejectionPrefix) {
+		return 0
+	}
+	if advances, err := confirmAdvances(spec.Confirm, rip.ConfirmTokenUsed); err != nil || !advances {
+		return 0
+	}
+	r.restorePrivMu.Lock()
+	defer r.restorePrivMu.Unlock()
+	last, ok := r.restorePrivRejected[client.ObjectKeyFromObject(fg)]
+	if !ok || last.confirm != spec.Confirm || last.generation != fg.Generation {
+		return time.Second
+	}
+	return max(time.Second, restorePrivilegeRecheck-time.Since(last.at)+time.Millisecond)
+}
+
+// noteRestorePrivilegeCheck records the outcome of a privilege check.
+func (r *MysqlFailoverGroupReconciler) noteRestorePrivilegeCheck(fg *v1alpha1.MysqlFailoverGroup, spec *v1alpha1.RestoreInPlaceSpec, rejected bool) {
+	r.restorePrivMu.Lock()
+	defer r.restorePrivMu.Unlock()
+	nn := client.ObjectKeyFromObject(fg)
+	if !rejected {
+		delete(r.restorePrivRejected, nn)
+		return
+	}
+	if r.restorePrivRejected == nil {
+		r.restorePrivRejected = map[types.NamespacedName]restorePrivilegeCheck{}
+	}
+	r.restorePrivRejected[nn] = restorePrivilegeCheck{confirm: spec.Confirm, generation: fg.Generation, at: time.Now()}
+}
+
+// lastConsumedConfirm is the confirm of the most recent restore that
+// executed, as recorded on the previous status (nil when there was none).
+func lastConsumedConfirm(prev *v1alpha1.RestoreInPlaceStatus) string {
+	if prev == nil {
+		return ""
+	}
+	return prev.ConfirmTokenUsed
+}
+
+// reconcileInPlaceRestoreWithoutSpec handles a removed spec.restoreInPlace.
+// Removal is not a cancel button for destructive work: a run whose Job
+// exists keeps its guards and finishes normally from status and the Job
+// alone. A run with no Job yet has not touched any data, so it is
+// cancelled. A terminal status is kept, so its confirmTokenUsed still
+// blocks a re-applied older manifest.
+func (r *MysqlFailoverGroupReconciler) reconcileInPlaceRestoreWithoutSpec(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (time.Duration, error) {
+	cur := fg.Status.RestoreInPlace
+	if cur == nil || inPlaceRestoreTerminal(cur) {
+		return 0, nil
+	}
+	switch cur.Phase {
+	case v1alpha1.RestoreInPlaceResuming:
+		return r.inPlaceResuming(ctx, fg)
+	case v1alpha1.RestoreInPlaceRestoring:
+		job, ours, err := r.inPlaceRunJob(ctx, fg)
+		if err != nil {
+			return 0, err
 		}
-		annotations := fresh.GetAnnotations()
-		if annotations == nil {
-			annotations = map[string]string{}
+		if ours {
+			return r.inPlaceRestoring(ctx, fg)
 		}
-		annotations[RecloneAnnotation] = site
-		fresh.SetAnnotations(annotations)
-		return r.Update(ctx, &fresh)
-	})
+		if job != nil {
+			if phase, _ := jobPhase(job, "in-place restore"); phase == "" {
+				// Some restore Job is still running on the target. Keep
+				// the guards up until it stops, whoever started it.
+				return 15 * time.Second, nil
+			}
+		}
+		if cur.JobName != "" || cur.JobCreating {
+			// The run created a Job (or was about to, and may have: the
+			// write-ahead JobCreating) that is now gone. Its outcome is
+			// unknown; do not report success and never load again.
+			r.stampInPlaceJobLost(ctx, fg, "spec.restoreInPlace was removed and ")
+			return 0, nil
+		}
+	}
+	// Preflight, Fencing, or Restoring before the Job was created.
+	r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, cur.ConfirmTokenUsed,
+		fmt.Sprintf("cancelled: spec.restoreInPlace was removed in phase %s, before the restore Job started; nothing was restored", cur.Phase),
+		"RestoreInPlaceCancelled")
+	return 0, nil
+}
+
+// inPlaceJobReader reads the in-place restore Job. A missing Job ends a
+// run as JobLost and releases every guard, so the lookup must be
+// authoritative: right after Create (and the status write that records
+// it) the Job informer may not have seen the Job yet, and a cache miss
+// would end the run under a Job that is running. It uses the uncached
+// APIReader when there is one (SetupWithManager always sets it); a read
+// error is returned, so the guards stay up and the reconcile retries.
+func (r *MysqlFailoverGroupReconciler) inPlaceJobReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+// inPlaceRunConfirm is the confirm the run's Job is built with: the
+// run's bound confirm, or the spec's for a run that predates runConfirm.
+func inPlaceRunConfirm(cur *v1alpha1.RestoreInPlaceStatus, spec *v1alpha1.RestoreInPlaceSpec) string {
+	if cur != nil && cur.RunConfirm != "" {
+		return cur.RunConfirm
+	}
+	return spec.Confirm
+}
+
+// stampInPlaceJobLost ends a run whose restore Job is gone before its
+// outcome was seen. The Job may have run, so the confirm it was bound to
+// is consumed: re-applying its manifest must not run the restore again.
+// The terminal status keeps JobName/JobCreating, which tells the reclone
+// queue settlement that the primary may have changed.
+func (r *MysqlFailoverGroupReconciler) stampInPlaceJobLost(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, why string) {
+	cur := fg.Status.RestoreInPlace
+	confirm := cur.RunConfirm
+	switch {
+	case confirm != "":
+	case fg.Spec.RestoreInPlace != nil:
+		// A run started by an operator that predates runConfirm built its
+		// Job from the spec's confirm.
+		confirm = fg.Spec.RestoreInPlace.Confirm
+	default:
+		confirm = cur.ConfirmTokenUsed
+	}
+	jobName := cur.JobName
+	if jobName == "" {
+		jobName = inPlaceRestoreJobName(fg.Name, cur.TargetSite)
+	}
+	r.stampTerminalFailure(ctx, fg, cur.TargetSite, cur.Scope, confirm,
+		fmt.Sprintf("%srestore Job %s no longer exists; the restore outcome is unknown. Check the target's data before using it", why, jobName),
+		"RestoreInPlaceJobLost")
+}
+
+// inPlaceRunJob returns the Job under the run's fixed name (nil when there
+// is none) and whether it is this run's. The status names the Job once it
+// is created; a Job made just before a crash that lost that status write
+// is recognised by the write-ahead (jobCreating with the Job's confirm) or
+// by having been created after the run started (a leftover from an
+// earlier run predates it) and is recorded on the status here. The lookup
+// is authoritative (inPlaceJobReader).
+func (r *MysqlFailoverGroupReconciler) inPlaceRunJob(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup) (*batchv1.Job, bool, error) {
+	cur := fg.Status.RestoreInPlace
+	var job batchv1.Job
+	key := types.NamespacedName{Namespace: fg.Namespace, Name: inPlaceRestoreJobName(fg.Name, cur.TargetSite)}
+	if err := r.inPlaceJobReader().Get(ctx, key, &job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("get in-place restore job: %w", err)
+	}
+	if cur.JobName == job.Name {
+		return &job, true, nil
+	}
+	// The write-ahead names the confirm the run's Job is built with, which
+	// identifies the Job without relying on timestamps.
+	byIntent := cur.JobCreating && cur.RunConfirm != "" && inPlaceRestoreJobIsForConfirm(&job, cur.RunConfirm)
+	byTime := cur.StartTime != nil && !job.CreationTimestamp.Before(cur.StartTime)
+	if cur.JobName != "" || (!byIntent && !byTime) {
+		return &job, false, nil
+	}
+	next := cur.DeepCopy()
+	next.JobName = job.Name
+	if c := inPlaceRestoreJobConfirm(&job); c != "" {
+		// The Job's confirm is the one it runs with (a JobLost consumes it).
+		next.RunConfirm = c
+	}
+	r.setInPlaceRestoreStatus(ctx, fg, next)
+	return &job, true, nil
 }
 
 // buildInPlaceRestoreJob constructs the Job used by the in-place
@@ -839,15 +1322,21 @@ func (r *MysqlFailoverGroupReconciler) setRecloneAnnotation(ctx context.Context,
 // preflight env vars the restore script consumes:
 //
 //   - Full-instance: BLOODRAVEN_DROP_ALL_USER_SCHEMAS=1,
-//     BLOODRAVEN_RESET_REPLICATION=1.
-//   - Per-schema: BLOODRAVEN_DROP_SCHEMAS=<schema>,
-//     BLOODRAVEN_PITR_FILTER_DATABASE=<schema> (when PITR is enabled).
+//     BLOODRAVEN_RESET_REPLICATION=1, BLOODRAVEN_REQUIRE_OFFLINE_MODE=1.
+//   - Per-schema: BLOODRAVEN_DROP_SCHEMAS=<schema>.
 //
 // For per-schema restores it also forces LoadOptions.SkipBinlog=false
 // so the DROP+load flows through the primary's binlog to the replica
 // and the replica resyncs via normal replication.
+//
+// It refuses spec.pointInTime (see errInPlacePointInTimeUnsupported):
+// validateInPlaceRestoreSpec rejects it before Fencing, and this check
+// keeps a spec that got past an older operator from building a Job.
 func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, targetSite, credsName string, isFullInstance bool, schema string) (*batchv1.Job, error) {
 	spec := fg.Spec.RestoreInPlace
+	if spec.PointInTime != nil {
+		return nil, errInPlacePointInTimeUnsupported
+	}
 
 	// Copy LoadOptions so we can force skipBinlog=false for per-schema
 	// without mutating the user-supplied spec.
@@ -870,25 +1359,24 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 		extraEnv = append(extraEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_DROP_ALL_USER_SCHEMAS", Value: "1"},
 			corev1.EnvVar{Name: "BLOODRAVEN_RESET_REPLICATION", Value: "1"},
+			// The operator applies the offline_mode fence before it creates
+			// this Job; the script refuses to drop anything without it.
+			corev1.EnvVar{Name: "BLOODRAVEN_REQUIRE_OFFLINE_MODE", Value: "1"},
 		)
 	} else {
 		extraEnv = append(extraEnv,
 			corev1.EnvVar{Name: "BLOODRAVEN_DROP_SCHEMAS", Value: schema},
 		)
-		if spec.PointInTime != nil {
-			extraEnv = append(extraEnv,
-				corev1.EnvVar{Name: "BLOODRAVEN_PITR_FILTER_DATABASE", Value: schema},
-			)
-		}
 	}
 
+	// FreshTarget stays false: the target is the live primary, whose own
+	// GTID history rules out installing the dump's GTID set.
 	job, err := r.buildRestoreJobSpec(ctx, fg, restoreJobInputs{
 		JobName:     inPlaceRestoreJobName(fg.Name, targetSite),
 		TargetSite:  targetSite,
 		CredsName:   credsName,
 		Source:      spec.Source,
 		LoadOptions: loadOpts,
-		PointInTime: spec.PointInTime,
 		Decryption:  spec.Decryption,
 		FieldPath:   "restoreInPlace",
 		ExtraEnv:    extraEnv,
@@ -897,11 +1385,18 @@ func (r *MysqlFailoverGroupReconciler) buildInPlaceRestoreJob(ctx context.Contex
 		return nil, err
 	}
 	// Stamp the confirm token so inPlaceRestoring can distinguish this
-	// request's Job from a leftover Job that shares the fixed name.
+	// request's Job from a leftover Job that shares the fixed name. It is
+	// the run's durable confirm (inPlaceRestoring binds a confirm bumped
+	// before the Job exists into it first); a run from before runConfirm
+	// uses the spec's.
+	confirm := spec.Confirm
+	if cur := fg.Status.RestoreInPlace; cur != nil && cur.RunConfirm != "" {
+		confirm = cur.RunConfirm
+	}
 	if job.Annotations == nil {
 		job.Annotations = map[string]string{}
 	}
-	job.Annotations[restoreInPlaceConfirmAnnotation] = spec.Confirm
+	job.Annotations[restoreInPlaceConfirmAnnotation] = confirm
 	return job, nil
 }
 

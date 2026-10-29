@@ -1429,7 +1429,9 @@ spec:
                     type: string
                   backupSecret:
                     description: |-
-                      BackupSecret references the Secret for backup and restore connections.
+                      BackupSecret references the Secret for backup connections. Restore
+                      Jobs run as the operator account instead: they need DDL, SET GLOBAL
+                      and CONNECTION_ADMIN, which this role does not have.
                       Required keys: username, password.
                       Grants: SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, RELOAD,
                       BACKUP_ADMIN, REPLICATION CLIENT.
@@ -5513,8 +5515,12 @@ spec:
                         type: boolean
                       resetProgress:
                         default: true
-                        description: ResetProgress clears previous loadDump progress
-                          tracking.
+                        description: |-
+                          ResetProgress clears previous loadDump progress tracking. Restore
+                          and verification Jobs disable progress tracking (local dump sources
+                          are mounted read-only, and restore state is kept out of backup
+                          storage), so this field currently has no effect and is kept for
+                          compatibility.
                         type: boolean
                       skipBinlog:
                         default: true
@@ -6078,8 +6084,12 @@ spec:
                         type: boolean
                       resetProgress:
                         default: true
-                        description: ResetProgress clears previous loadDump progress
-                          tracking.
+                        description: |-
+                          ResetProgress clears previous loadDump progress tracking. Restore
+                          and verification Jobs disable progress tracking (local dump sources
+                          are mounted read-only, and restore state is kept out of backup
+                          storage), so this field currently has no effect and is kept for
+                          compatibility.
                         type: boolean
                       skipBinlog:
                         default: true
@@ -6099,8 +6109,14 @@ spec:
                     type: object
                   pointInTime:
                     description: |-
-                      PointInTime, when set, enables post-load binlog replay to recover
-                      the restored data to a specific target timestamp.
+                      PointInTime is not supported for in-place restores yet; the
+                      operator rejects a restore that sets it (RestoreInPlaceRejected)
+                      before fencing anything, without consuming confirm. The replayed
+                      binlogs carry GTIDs the live primary has already executed, so the
+                      replay would be skipped and the restore would stop at the backup.
+                      To recover to a point in time, restore into a new failover group
+                      with initFromBackup.pointInTime. The field is kept so existing
+                      objects still validate.
                     properties:
                       excludeGtids:
                         description: |-
@@ -7442,7 +7458,9 @@ spec:
                   RestoreInPlace tracks an in-flight or completed in-place restore
                   (spec.restoreInPlace). The consumed confirm token is stamped here
                   on success so subsequent reconciles can distinguish "restore
-                  already done" from "new restore requested".
+                  already done" from "new restore requested". Once a run is accepted
+                  this status, not the spec, drives it: removing spec.restoreInPlace
+                  while its Job runs keeps the fence until the Job finishes.
                 properties:
                   completionTime:
                     description: CompletionTime is when the restore reached a terminal
@@ -7454,8 +7472,21 @@ spec:
                       ConfirmTokenUsed records the spec.restoreInPlace.confirm value of
                       the most recent executed restore. Subsequent reconciles ignore
                       any spec.confirm <= this value; a new restore requires a strictly
-                      greater RFC 3339 timestamp.
+                      greater RFC 3339 timestamp. It carries over unchanged while a newer
+                      request is running and when that request is rejected or cancelled,
+                      and it is kept when spec.restoreInPlace is removed. A run whose Job
+                      disappeared after spec.restoreInPlace was removed (JobLost) may
+                      have executed, so it records that run's confirm (RunConfirm).
                     type: string
+                  jobCreating:
+                    description: |-
+                      JobCreating is set, with RunConfirm bound, before the restore Job
+                      is created, and the Job is created only once that write succeeded.
+                      From then on the run may have executed even if JobName was never
+                      recorded (a crash or a lost status write right after Create): a
+                      Job that disappears counts as lost (its confirm is consumed), not
+                      as a run that never started. It is kept on the terminal status.
+                    type: boolean
                   jobName:
                     description: JobName is the name of the batchv1.Job performing
                       the load.
@@ -7486,6 +7517,22 @@ spec:
                   pitrStopDatetime:
                     description: PitrStopDatetime is the normalized mysqlbinlog --stop-datetime
                       used for PITR.
+                    type: string
+                  runConfirm:
+                    description: |-
+                      RunConfirm is the spec.restoreInPlace.confirm of the run in
+                      flight, recorded when it enters Preflight. A confirm that advances
+                      before the restore Job is created is bound into it first, so it is
+                      always the confirm the Job runs with. It identifies the run after
+                      spec.restoreInPlace is removed. Empty once the run is terminal;
+                      ConfirmTokenUsed then records what executed.
+                    type: string
+                  runID:
+                    description: |-
+                      RunID identifies the run in flight, set with RunConfirm. A request
+                      that is cancelled or rejected and then applied again with the same
+                      confirm starts a new run with a new RunID. Empty once the run is
+                      terminal.
                     type: string
                   scope:
                     description: |-
@@ -7533,6 +7580,141 @@ spec:
                       TargetSite is the site that received the load (always the active
                       primary at the moment of preflight).
                     type: string
+                type: object
+              restoreOfflineFence:
+                description: |-
+                  RestoreOfflineFence is the offline_mode fence a full-instance
+                  in-place restore holds on its target primary. It is cleared once the
+                  restore has finished and the prior offline_mode is back.
+                properties:
+                  confirmToken:
+                    description: |-
+                      ConfirmToken is the spec.restoreInPlace.confirm value of the
+                      restore that owns the fence.
+                    type: string
+                  priorOfflineMode:
+                    description: |-
+                      PriorOfflineMode is @@GLOBAL.offline_mode on Site before the
+                      operator enabled it; it is restored on release. Unset until read.
+                    type: boolean
+                  runID:
+                    description: |-
+                      RunID is status.restoreInPlace.runID of the run that owns the
+                      fence. A request re-applied with the same confirm after a
+                      cancellation is a new run, so it does not inherit a fence the
+                      earlier run already released.
+                    type: string
+                  sessionsEvicted:
+                    description: |-
+                      SessionsEvicted is true once the operator verified that no client
+                      session from before the fence remains on Site. Destructive work
+                      starts only after that.
+                    type: boolean
+                  site:
+                    description: Site is the primary the fence applies to.
+                    type: string
+                required:
+                - confirmToken
+                - site
+                type: object
+              restoreReclones:
+                description: |-
+                  RestoreReclones is the queue of peer sites a full-instance in-place
+                  restore still has to reclone from the restored primary. It lives
+                  outside restoreInPlace because it outlives that restore: it drains
+                  after the restore has succeeded, across later restores and spec
+                  edits. Empty when nothing is queued.
+                properties:
+                  confirmToken:
+                    description: |-
+                      ConfirmToken is the spec.restoreInPlace.confirm value of the
+                      restore that owns this queue.
+                    type: string
+                  failures:
+                    description: |-
+                      Failures holds the latest failed reclone attempt of each pending
+                      site that has one. A site is retried after a short backoff; other
+                      pending sites are recloned in the meantime.
+                    items:
+                      description: RestoreRecloneFailure is the latest failed reclone
+                        attempt of one site.
+                      properties:
+                        message:
+                          description: Message describes the failure.
+                          type: string
+                        site:
+                          description: Site is the pending site whose reclone failed.
+                          type: string
+                        time:
+                          description: Time is when the failure was recorded.
+                          format: date-time
+                          type: string
+                      required:
+                      - message
+                      - site
+                      - time
+                      type: object
+                    type: array
+                  pending:
+                    description: |-
+                      Pending lists the peer sites still to be recloned, in the order
+                      they are recloned (primary-candidate sites first). Pending sites
+                      are never promoted automatically and are removed from the -replica
+                      and read-only Services.
+                    items:
+                      type: string
+                    type: array
+                  phase:
+                    description: |-
+                      Phase is Armed while the owning restore runs and Draining after it
+                      succeeded. Held means a later restore that replaced this queue ran
+                      on the primary and failed, so nothing is cloned from it.
+                    enum:
+                    - Armed
+                    - Draining
+                    - Held
+                    type: string
+                  requested:
+                    description: |-
+                      Requested is the pending site whose reclone the operator has
+                      requested through the reclone annotation and not yet seen finish.
+                    type: string
+                  requestedAt:
+                    description: |-
+                      RequestedAt is when Requested was set. A request whose clone has
+                      not started within a few minutes counts as a failed attempt, so one
+                      site that cannot be cloned does not hold up the others.
+                    format: date-time
+                    type: string
+                  superseded:
+                    description: |-
+                      Superseded is the queue of an earlier restore that this one
+                      replaced when it was accepted. If this restore does not succeed,
+                      the earlier queue is put back, because its sites still hold data
+                      from before the earlier restore. It drains again only if this
+                      restore's Job was never created; otherwise it is put back Held.
+                    properties:
+                      confirmToken:
+                        description: ConfirmToken is the earlier restore's confirm
+                          token.
+                        type: string
+                      held:
+                        description: |-
+                          Held is true when the earlier queue was already Held: the primary
+                          stopped being a trusted donor for it before this restore.
+                        type: boolean
+                      pending:
+                        description: Pending lists the earlier restore's sites not
+                          yet recloned.
+                        items:
+                          type: string
+                        type: array
+                    required:
+                    - confirmToken
+                    type: object
+                required:
+                - confirmToken
+                - phase
                 type: object
               sites:
                 description: Sites is the observed state of each site, parallel to

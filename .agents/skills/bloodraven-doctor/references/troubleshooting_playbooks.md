@@ -421,3 +421,137 @@ The operator partially revokes the `app` user's write and DDL privileges on the 
 1. For a running Job whose original source is still recorded, allow it to finish. Newer backups or edits to `spec.backupRef` do not change its execution identity. Create another verification to test the newer backup.
 2. If the pinned source disappeared or its UID changed before launch, create a new verification for the intended source. The operator does not silently re-pin the old run, even when its spec requested latest selection.
 3. For identity mismatch, preserve the recorded reference and Job inputs for investigation, then start a new verification with an explicit intended source. Do not patch the audit record to make a different backup appear verified. Pinning identifies the source but does not hold stored artifacts against retention or external deletion.
+
+## 17. Restore Job failed on `Read-only file system` / `load-progress`
+
+Restore Jobs mount the dump read-only: source PVCs at `/restore` or `/backups`, and decrypted encrypted backups at `/restore-decrypted`. Operators built before load-progress tracking was disabled for restores let mysqlsh try to write `load-progress.<uuid>.json` next to the dump. Every PVC-sourced or encrypted restore then failed.
+
+### Symptoms
+- Restore Job logs show `BLOODRAVEN_LOAD_FAILED` mentioning `load-progress` and `Read-only file system` (EROFS).
+- For an in-place restore, the Job logs `BLOODRAVEN_DROP_SCHEMA` / `BLOODRAVEN_DROP_ALL_USER_SCHEMAS_DONE` before the load failure, so the target schemas are already gone. `status.restoreInPlace.phase` is `Failed`.
+
+### Diagnostic steps
+1. Confirm the Job's main container disables progress tracking. On a fixed operator the variable is present with an empty value:
+   ```bash
+   kubectl get job -n <ns> <restore-job> -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="BLOODRAVEN_LOAD_PROGRESS_FILE")]}'
+   ```
+   No output means the Job was built by an older operator.
+2. For in-place, list what survived on the primary: `SHOW DATABASES`.
+
+### Safe remediation
+1. Upgrade the operator. `loadOptions.resetProgress` has no effect on restores, and changing it does not help.
+2. Bootstrap: delete the failed restore Job; the reconciler rebuilds it. Restore Jobs no longer resume a partial load. If the failed Job's log shows `BLOODRAVEN_LOAD_START`, empty the target first (delete the new group's MySQL PVCs, or `./playground/reset-mysql.sh`), or the reload stops on objects the first attempt created.
+3. In-place: bump `spec.restoreInPlace.confirm` to a newer RFC 3339 timestamp to re-run the restore. It drops and reloads the same scope, which is what is needed when the earlier attempt dropped the schemas and never loaded them.
+
+## 18. Bootstrap PITR restore fails with duplicate-key or missing-row errors
+
+A PITR replay pipes archived binlogs, with their original GTIDs, into the new primary. The archive includes transactions the dump already contains. MySQL skips them only when the dump's GTID set is in the target's `gtid_purged`. The operator loads bootstrap PITR restores with `updateGtidSet: "replace"` and `skipBinlog: true` to install that set. Operators built before that change did not, so replay re-executed pre-dump transactions.
+
+### Symptoms
+- Restore Job logs `BLOODRAVEN_LOAD_COMPLETE`, then `BLOODRAVEN_PITR_FAILED` with MySQL error 1062 (duplicate entry), 1032 (row not found), 1050 (table exists) or 1396 (user exists).
+- `status.restore.phase` is `Failed`.
+
+### Diagnostic steps
+1. Check the Job's load options:
+   ```bash
+   kubectl get job -n <ns> <restore-job> -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="BLOODRAVEN_LOAD_OPTIONS")].value}'
+   ```
+   A fixed operator shows `"updateGtidSet":"replace"` and `"skipBinlog":true` when `initFromBackup.pointInTime` is set.
+2. On the target, compare `SELECT @@GLOBAL.gtid_purged` with the dump's `gtidExecuted` (`@.json` in the backup, or `status.gtidExecuted` on the MysqlBackup). After a fixed load they match.
+
+### Safe remediation
+1. Upgrade the operator.
+2. The target was fresh, so nothing outside it was changed. Reset it and run the restore again:
+   - Playground: `./playground/reset-mysql.sh`.
+   - Production: scale the new group's MySQL Deployments to 0 (or delete their pods), then delete their PVCs, or recreate the group.
+   - Delete the failed restore Job (`kubectl delete job -n <ns> <restore-job>`). While it exists the reconciler keeps reporting `Failed` instead of rebuilding it.
+3. Error 1146 or 1049 during replay rather than 1062/1032 means the replay touched a schema the dump or load left out (`dumpSchemas`, `loadOptions.includeSchemas`/`excludeSchemas`). Restore from an instance dump, without load-time schema filters.
+4. Do not work around it with `pointInTime.excludeGtids` set to the dump's GTID set. That skips the in-dump transactions but leaves `gtid_purged` without the dump's history.
+
+## 19. In-place restore with `pointInTime` rejected, or an earlier one stopped at the backup
+
+In-place PITR cannot work against a live primary. The replay keeps the archived transactions' original GTIDs, and the primary has already executed every one of them, so MySQL skips them all. Current operators reject `spec.restoreInPlace.pointInTime` in Preflight. Earlier operators ran the replay anyway, logged `BLOODRAVEN_PITR_COMPLETE` and reported `Succeeded`, with the data left at the backup.
+
+### Symptoms
+- `status.restoreInPlace.phase: Failed`, `confirmTokenUsed` unchanged (the confirm of the last restore that ran, empty if none), message `restoreInPlace.pointInTime is not supported: ...`, and a `RestoreInPlaceRejected` warning event. No Job exists and nothing was fenced.
+- Or, after an older operator ran in-place PITR: rows written between the backup and `stopDatetime` are missing, although the restore reported success.
+
+### Diagnostic steps
+1. Confirm the spec: `kubectl get mfg <group> -n <ns> -o jsonpath='{.spec.restoreInPlace.pointInTime}'`.
+2. For a past run, compare the expected post-backup rows with what the primary holds. `status.restoreInPlace.pitrReplayedBinlogCount > 0` does not mean anything was applied.
+
+### Safe remediation
+1. To restore to the backup itself, remove `pointInTime`; the same `confirm` re-runs.
+2. To reach a point in time, restore into a new failover group with `spec.initFromBackup.pointInTime` (fresh target, so the dump's GTID set is installed and the replay applies). Then move the data or traffic across. For a single tenant schema, dump it from the recovered group with `mysqlsh util.dumpSchemas` and run a per-schema in-place restore from that dump.
+3. Do not try to force replay on the live primary with `RESET BINARY LOGS AND GTIDS` or `mysqlbinlog --skip-gtids`. The first destroys unarchived binlogs and archive continuity. The second re-applies in-dump and cross-site duplicate transactions.
+
+## 20. Peers not yet recloned after a full-instance in-place restore
+
+A full-instance in-place restore replaces the primary's data. The other sites still have the old data until each is recloned from the restored primary. The operator tracks them in `status.restoreReclones`. The queue is `Armed` while the restore runs and `Draining` after it succeeds. It is `Held` when a later restore that replaced it ran on the primary and failed: nothing is cloned from that primary. The operator reclones the sites one at a time through the `reclone-site` annotation and removes each one only after its clone succeeds. `status.restoreInPlace.phase: Succeeded` does not mean the peers are done.
+
+### Symptoms
+- `status.restoreReclones.pending` is non-empty long after the restore succeeded.
+- `RestoreRecloneFailed` events, or `status.restoreReclones.failures` lists a site.
+- `status.restoreReclones.phase: Held` and a `RestoreReclonesHeld` event: a later full-instance restore ran its Job on the primary and failed. The pending sites keep older data, and nothing is cloned. A reclone annotation for a held (or `Armed`) site is refused with `RecloneRejected` and removed.
+- A full-instance restore waits in Preflight with `waiting for the running clone of <site> to finish before restoring`: a clone was running when the restore was accepted. It proceeds once the clone ends.
+- `PromotionRefusedPendingReclone` events, or `Degraded=NoPrimary` with a `pending post-restore reclone` message after the primary failed.
+- Readers return old data from a site that is still queued. A queued site is labelled `shipstream.io/healthy=no`, which takes it out of the `-replica` Service and a read-only site's Service; the per-site Service of a primary-candidate or dr-only site does not select on it, so check for clients that connect there directly.
+
+### Diagnostic steps
+1. Queue state:
+   ```bash
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.status.restoreReclones}' | jq .
+   kubectl get mfg <group> -n <ns> -o jsonpath='{.metadata.annotations.bloodraven\.shipstream\.io/reclone-site}'
+   ```
+   `requested` is the site whose clone is running, and the annotation should name it. If the annotation names a different site, someone else's reclone request is pending. The queue waits for it and never overwrites it.
+2. Clone progress and failures: the `Bootstrapping` condition, and operator logs `msg="starting bootstrap" source="reclone"`, `bootstrap failed`, `bootstrap completed successfully`.
+3. Events: `kubectl get events -n <ns> --field-selector involvedObject.name=<group> | grep -E 'RestoreReclone|PromotionRefusedPendingReclone|RecloneRequested'`.
+
+### Safe remediation
+1. A failing clone: fix the cause (donor reachability, the clone plugin, recipient disk space, a sealed keyring) and let the queue retry. Do not set your own reclone annotation for a queued site. The queue would wait for it, and a clone it did not request does not remove the site.
+2. The primary failed while only queued sites remain: prefer bringing the primary back; the queue then resumes. Promoting a queued site means serving its pre-restore data:
+   - With the primary up: `kubectl bloodraven promote <group> <site>`. Once the site is the primary, the rest of the queue is abandoned (`RestoreReclonesAbandoned`); a planned failover that rolls back leaves the queue in place.
+   - With the primary down: clear the queue with `kubectl patch mfg <group> -n <ns> --subresource=status --type=json -p '[{"op":"remove","path":"/status/restoreReclones"}]'`, after which automatic failover proceeds. Then reclone the remaining sites by hand from whichever primary you keep.
+3. `RestoreReclonesDiscarded` after a failed restore is expected: the peers are not recloned from the broken primary. They are not guaranteed to be intact. The restore's `DROP DATABASE` statements are binlogged, so a peer that was replicating may have dropped the same schemas; check its data before promoting it. If the failed restore had replaced an earlier restore's queue, a `RestoreReclonesRestored` event means that queue is draining again (the failed restore never reached its Job).
+4. A `Held` queue (`RestoreReclonesHeld`): the primary may hold the failed restore's dropped or half-loaded data, and the held sites may be the only intact copies. Do not clone from the primary until its data is checked. Then choose one: run a new full-instance restore (it reclones every peer once it succeeds); set the phase back to `Draining` once the primary's data is good (`kubectl patch mfg <group> -n <ns> --subresource=status --type=merge -p '{"status":{"restoreReclones":{"phase":"Draining"}}}'`); or remove `status.restoreReclones` to keep the held sites' data as it is.
+
+## 21. In-place restore stays fenced after `spec.restoreInPlace` was removed, or ends "cancelled"
+
+Once a restore is accepted, `status.restoreInPlace` drives it, not the spec. Removing the field never interrupts a running restore Job. The `-primary` Service fence, the topology freeze (no failover or reclone), and the planned-failover, deployment and `MysqlDatabase` guards stay up until that Job finishes. A run removed before its Job existed is cancelled.
+
+### Symptoms
+- `spec.restoreInPlace` is gone, but `status.restoreInPlace.phase` is still `Restoring` and the message reads `spec.restoreInPlace was removed; holding the fence until restore Job ... finishes`. There is a `RestoreInPlaceSpecRemoved` event.
+- Or `phase: Failed` with `cancelled: spec.restoreInPlace was removed ...` (`RestoreInPlaceCancelled`): nothing was restored.
+- Or `phase: Failed` with `RestoreInPlaceJobLost`: the run's Job vanished before its outcome was seen. `confirmTokenUsed` is that run's confirm, because its Job may have run. This also applies when `jobName` is empty but `jobCreating: true`: the operator had started creating the Job when its status write or the process was lost.
+
+### Diagnostic steps
+1. `kubectl get mfg <group> -n <ns> -o jsonpath='{.status.restoreInPlace}' | jq .` for the phase, `jobName`, `scope`, `confirmTokenUsed` and, while a run is in flight, `runConfirm` (that run's confirm).
+2. `kubectl get job -n <ns> <jobName>` and its pod logs (`BLOODRAVEN_DROP_*`, `BLOODRAVEN_LOAD_*` sentinels) show how far the restore got.
+
+### Safe remediation
+1. A held fence clears by itself when the Job finishes; the run then completes as `Succeeded` or `Failed`. Do not delete the Job to "unstick" it: that kills the loader mid-DROP or mid-load and leaves a partially restored primary.
+2. After `RestoreInPlaceJobLost`, verify the primary's data (the restore may have partly run) before relying on it. Then re-run the restore with a newer `confirm`, or restore from backup.
+3. Do not edit `status.restoreInPlace` to clear it. `confirmTokenUsed` is what stops an old manifest from re-running a restore that already ran.
+
+## 22. Full-instance restore stuck in Fencing, or applications locked out after a restore (`offline_mode`)
+
+A full-instance in-place restore fences the primary with `SET GLOBAL offline_mode = ON`. MySQL then disconnects and refuses every session without `CONNECTION_ADMIN`/`SUPER`, with error 3032 `ER_SERVER_OFFLINE_MODE`. The fence is recorded in `status.restoreOfflineFence` (`site`, `confirmToken`, `runID`, `priorOfflineMode`, `sessionsEvicted`). The restore Job starts only after no client session from before the fence remains. The operator puts the prior value back when the restore ends.
+
+### Symptoms
+- `Failed` with `restoreInPlace rejected: the operator MySQL account lacks <privileges>` (any of `CONNECTION_ADMIN`, `SYSTEM_VARIABLES_ADMIN`, `PROCESS`, `REPLICATION_SLAVE_ADMIN`): preflight refused the restore (nothing fenced, confirm not consumed).
+- Stuck in `Fencing` with a message such as `waiting to read offline_mode`, `waiting to apply the offline_mode fence`, or `offline_mode is ON on <site>; waiting for N application session(s) to disconnect`.
+- After the restore, applications get `ERROR 3032 ... offline mode`, with `RestoreOfflineFenceReleaseFailed` events and `status.restoreOfflineFence` still set.
+- During the restore, replicas whose replication user lacks `CONNECTION_ADMIN` (legacy `secretName` installs) show their IO thread failing against the primary, and non-admin monitoring has gaps. Both are expected. With `spec.credentials` the replicator is the exempt operator account and keeps replicating.
+- A `RestoreOfflineFenceSessionsKept` Warning: the operator account lacks `SYSTEM_USER` and left the named accounts' sessions connected.
+
+### Diagnostic steps
+1. `kubectl get mfg <group> -n <ns> -o jsonpath='{.status.restoreOfflineFence}{"\n"}{.status.restoreInPlace.phase} {.status.restoreInPlace.message}'`
+2. On the primary: `SELECT @@GLOBAL.offline_mode;` and `SELECT ID, USER, HOST, COMMAND, TIME FROM information_schema.PROCESSLIST;`. Sessions that keep coming back belong to accounts with `CONNECTION_ADMIN`/`SUPER`; they are not fenced and do not block the wait. A session that will not die (still `Query` after KILL) does block it.
+3. Operator account privileges: `SHOW GRANTS FOR '<operator-user>'@'%';` must include `ALL PRIVILEGES ON *.*`, or `CONNECTION_ADMIN`, `SYSTEM_VARIABLES_ADMIN`, `PROCESS` and `REPLICATION_SLAVE_ADMIN` (`SUPER` stands in for all but `PROCESS`).
+
+### Safe remediation
+1. Missing privilege: grant the ones the message names, e.g. `GRANT CONNECTION_ADMIN, SYSTEM_VARIABLES_ADMIN, PROCESS, REPLICATION_SLAVE_ADMIN ON *.* TO '<operator-user>'@'%';` (the restore also needs DDL and DML). The operator re-checks about once a minute with the same `confirm`; nothing else is needed.
+2. Fencing waits on a stuck session: find it in the processlist and `KILL <id>`. Do not lift `offline_mode` while the restore is in `Fencing`, `Restoring` or `Resuming`; the operator re-asserts it every poll anyway.
+3. Locked out after a terminal restore because the release keeps failing: fix operator reachability to the primary. If applications must come back now, run `SET GLOBAL offline_mode = OFF;` on the primary. If `priorOfflineMode` was `true`, the primary was already in offline mode before the restore; leave it ON. The operator clears the record once its release succeeds.
+4. Applications running as accounts with `CONNECTION_ADMIN`/`SUPER` are not fenced at all. Remove those privileges from application accounts.
+5. After an operator downgrade during a full-instance restore, nothing releases the fence (older operators do not know `status.restoreOfflineFence`). Once the restore is terminal, run `SET GLOBAL offline_mode = OFF;` on the primary unless `priorOfflineMode` was `true`.

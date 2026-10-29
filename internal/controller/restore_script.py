@@ -28,6 +28,10 @@
 #                                     user data. System schemas (mysql,
 #                                     information_schema, performance_schema,
 #                                     sys) are never dropped.
+#   BLOODRAVEN_REQUIRE_OFFLINE_MODE=1 refuse to run the destructive preflight
+#                                     unless @@GLOBAL.offline_mode is ON. The
+#                                     operator sets it to fence application
+#                                     sessions during a full-instance restore.
 #   BLOODRAVEN_RESET_REPLICATION=1    run STOP REPLICA; RESET REPLICA ALL
 #                                     before loading. Used by in-place
 #                                     full-instance restore on the active
@@ -46,10 +50,10 @@
 #                                     this script just globs them and
 #                                     pipes through mysqlbinlog | mysql.
 #   BLOODRAVEN_PITR_FILTER_DATABASE   when set, add mysqlbinlog --database=<x>
-#                                     to the replay pipeline. Used by
-#                                     in-place per-schema restore so PITR
-#                                     replay only applies events for the
-#                                     target schema. NOTE: --database
+#                                     to the replay pipeline. The operator
+#                                     does not set it today: in-place
+#                                     restores, the only per-schema PITR
+#                                     user, reject pointInTime. NOTE: --database
 #                                     filters on the session's default
 #                                     database at log time, not on the
 #                                     actually-referenced schemas — not
@@ -336,11 +340,20 @@ def _maybe_preflight_drops(session):
 #   └── us-east-1b/
 #       └── mysql-bin.000001
 #
-# All this script has to do is glob them in deterministic order and
-# pipe `mysqlbinlog --stop-datetime=<target>` through `mysql
-# --binary-mode` to the target instance. GTID dedup on the server
-# skips transactions already present from the dump load, so the order
-# across sites doesn't matter for correctness.
+# This script globs them in deterministic order (site, then file) and
+# pipes one `mysqlbinlog --stop-datetime=<target>` run over all of them
+# through `mysql --binary-mode` to the target instance. GTID dedup on the
+# server skips transactions already present from the dump load and copies
+# archived by more than one site. That dedup needs the dump's GTID set in
+# gtid_purged first: the operator passes updateGtidSet:"replace" (with
+# skipBinlog:true) in BLOODRAVEN_LOAD_OPTIONS for bootstrap PITR restores.
+#
+# Known limitation: the order across sites DOES matter. mysqlbinlog stops
+# the whole run at the first event past the stop time, so once one site's
+# files reach past it, later sites' files are not read. If a site was
+# primary again after another site (a failback inside the window), the
+# other site's transactions in between are silently skipped. Fixing it
+# needs chronological per-site replay (tracked as a follow-up).
 
 
 def _parse_pitr_target(s):
@@ -513,6 +526,27 @@ def _prepare_local_infile(session, state):
     return prev
 
 
+def _require_offline_mode(session):
+    """Exit(2), with nothing dropped, when BLOODRAVEN_REQUIRE_OFFLINE_MODE is
+    set and @@GLOBAL.offline_mode is not ON: the operator's application fence
+    is missing, so connected applications would race the DROP and load."""
+    if not _bool("BLOODRAVEN_REQUIRE_OFFLINE_MODE"):
+        return
+    try:
+        row = session.run_sql("SELECT @@GLOBAL.offline_mode").fetch_one()
+        on = bool(row) and str(row[0]).strip().upper() in ("1", "ON", "TRUE")
+    except Exception as e:  # noqa: BLE001
+        print("BLOODRAVEN_OFFLINE_FENCE_MISSING: cannot read "
+              "@@GLOBAL.offline_mode: {}".format(e), file=sys.stderr, flush=True)
+        sys.exit(2)
+    if not on:
+        print("BLOODRAVEN_OFFLINE_FENCE_MISSING: @@GLOBAL.offline_mode is OFF; "
+              "refusing to drop schemas while application sessions can connect",
+              file=sys.stderr, flush=True)
+        sys.exit(2)
+    print("BLOODRAVEN_OFFLINE_FENCE_OK", flush=True)
+
+
 def _restore_local_infile(session, prev):
     """Restore @@GLOBAL.local_infile to the value _prepare_local_infile
     captured. No-op when prev is None (unchanged / already ON)."""
@@ -586,10 +620,10 @@ def main():
     if endpoint:
         opts["s3EndpointOverride"] = endpoint
 
-    # Verification runs mount the backup source read-only, so mysqlsh
-    # can't write its default `load-progress.<uid>.json` alongside the
-    # dump. When BLOODRAVEN_LOAD_PROGRESS_FILE is set the caller takes
-    # over progressFile selection; an empty value disables tracking.
+    # mysqlsh writes its default `load-progress.<uid>.json` beside the dump:
+    # impossible on the read-only local mounts, and unwanted in an S3 backup
+    # prefix. Both Job builders set BLOODRAVEN_LOAD_PROGRESS_FILE="" to
+    # disable tracking; when the variable is set the caller owns progressFile.
     progress_file = os.environ.get("BLOODRAVEN_LOAD_PROGRESS_FILE")
     if progress_file is not None:
         opts["progressFile"] = progress_file
@@ -627,6 +661,7 @@ def main():
         # Destructive preflight for in-place restore. The bootstrap restore
         # path does not set any of the triggering env vars, so these are
         # no-ops outside of spec.restoreInPlace.
+        _require_offline_mode(session)
         try:
             _maybe_reset_replication(session)
             _maybe_preflight_drops(session)

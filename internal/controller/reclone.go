@@ -15,17 +15,18 @@ import (
 const minRecloneGtidPrefix = 8
 
 // RecloneRequest is the parsed form of the
-// bloodraven.shipstream.io/reclone-site annotation value. An admin
-// writes either:
+// bloodraven.shipstream.io/reclone-site annotation value, which is one
+// of:
 //
-//	reclone-site=<siteName>
+//	reclone-site=<siteName>:confirm=<groupName>
 //	reclone-site=<siteName>:<divergentGtidPrefix>
 //
-// The second form is required when the target site has a non-empty
-// status.sites[i].divergentGtid — matching the prefix against the
-// already-observed divergent GTID proves the admin is acting on the
-// state they think they are. See validateRecloneRequest for the full
-// rule set.
+// The first form is the cold reclone of a site with no recorded
+// divergence. The second is required when the site has a non-empty
+// status.sites[i].divergentGtid: matching the prefix against the
+// observed divergent GTID proves the requester is acting on the state
+// they think they are. See validateRecloneRequest for the full rule set
+// and recloneAnnotationValue for the operator's own requests.
 type RecloneRequest struct {
 	Site       string
 	GtidPrefix string
@@ -55,9 +56,8 @@ func parseRecloneAnnotation(raw string) RecloneRequest {
 //  2. If the target site has a non-empty divergentGtid in status, the
 //     admin MUST include a prefix of at least minRecloneGtidPrefix
 //     characters, and that prefix must match the observed GTID.
-//  3. When divergentGtid is empty, either the bare site form or
-//     site:prefix is accepted (there is nothing irrecoverable to
-//     protect against yet; a cold reclone is always allowed).
+//  3. When divergentGtid is empty, the value must be
+//     site:confirm=<group>: a cold reclone still wipes the datadir.
 func validateRecloneRequest(fg *v1alpha1.MysqlFailoverGroup, req RecloneRequest) error {
 	if req.Site == "" {
 		return fmt.Errorf("reclone annotation is empty; expected <site> or <site>:<divergentGtid-prefix>")
@@ -132,4 +132,24 @@ func truncateForHint(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// recloneAnnotationValue is the reclone-site annotation value the
+// operator writes for its own reclone requests (the in-place restore's
+// peer queue). It satisfies validateRecloneRequest for the site's current
+// status: the first entry of the recorded divergent GTID set when there
+// is one (a set may span lines, which an annotation should not), otherwise
+// the cold-reclone confirmation.
+func recloneAnnotationValue(fg *v1alpha1.MysqlFailoverGroup, site string) string {
+	for _, s := range fg.Status.Sites {
+		if s.Name != site || s.DivergentGtid == "" {
+			continue
+		}
+		prefix := s.DivergentGtid
+		if i := strings.IndexAny(prefix, ", \t\r\n"); i >= minRecloneGtidPrefix {
+			prefix = prefix[:i]
+		}
+		return site + ":" + prefix
+	}
+	return site + ":confirm=" + fg.Name
 }

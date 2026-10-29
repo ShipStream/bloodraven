@@ -412,6 +412,7 @@ func TestDeploymentLeaseRestoreWaitAndSameSiteInvalidation(t *testing.T) {
 	runner := NewTopologyManagerRunner(m.client, nil, nil, nil, testLogger())
 	runner.SetDeploymentLeases(m)
 	r := &MysqlFailoverGroupReconciler{Client: m.client, Recorder: record.NewFakeRecorder(100), Runner: runner}
+	withFenceRunner(r, m.client, fg)
 	if _, err := r.inPlacePreflight(context.Background(), fg); err != nil {
 		t.Fatal(err)
 	}

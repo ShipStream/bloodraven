@@ -25,11 +25,21 @@ type SiteObservation struct {
 	Role  SiteRole
 	State SiteState
 	// PromotionBlocked excludes a primary-candidate from auto-promotion
-	// without changing its role. Used for mid-keyring-rotation sites:
-	// they stay in the topology tallies but must not become the sole
-	// authoritative copy. Default false keeps existing fixtures valid.
+	// without changing its role. Used for mid-keyring-rotation sites and
+	// for sites an in-place restore has not recloned yet: they stay in the
+	// topology tallies but must not become the sole authoritative copy.
+	// Default false keeps existing fixtures valid.
 	PromotionBlocked bool
+	// PromotionBlockedReason says why PromotionBlocked is set; it only
+	// selects the alert wording. Empty means PromotionBlockedRotation.
+	PromotionBlockedReason string
 }
+
+// Reasons for SiteObservation.PromotionBlocked.
+const (
+	PromotionBlockedRotation       = "Rotation"
+	PromotionBlockedPendingReclone = "PendingReclone"
+)
 
 // CrossSiteAction describes the cross-site action implied by a poll
 // cycle of observations.
@@ -147,10 +157,21 @@ func EvalCrossSite(observations []SiteObservation, sitePriorities []string) Cros
 				action.Reason = "Degraded"
 				return action
 			}
-			if blocked := rotationBlockedNames(readOnly); len(blocked) > 0 {
-				action.Alert = fmt.Sprintf(
-					"NO PRIMARY: refusing to promote %s (UnsealReason=Rotation); finish the rotation before this site can be promoted",
-					strings.Join(blocked, ", "))
+			rotating, pendingReclone := blockedCandidateNames(readOnly)
+			var refusals []string
+			if len(rotating) > 0 {
+				refusals = append(refusals, fmt.Sprintf(
+					"refusing to promote %s (UnsealReason=Rotation); finish the rotation before this site can be promoted",
+					strings.Join(rotating, ", ")))
+			}
+			if len(pendingReclone) > 0 {
+				refusals = append(refusals, fmt.Sprintf(
+					"refusing to promote %s (pending post-restore reclone; holds pre-restore data); "+
+						"bring the primary back, or remove status.restoreReclones (kubectl patch --subresource=status) to accept that data",
+					strings.Join(pendingReclone, ", ")))
+			}
+			if len(refusals) > 0 {
+				action.Alert = "NO PRIMARY: " + strings.Join(refusals, "; ")
 				action.Reason = "NoPrimary"
 				return action
 			}
@@ -209,14 +230,20 @@ func RankPromotionCandidates(obs []SiteObservation, sitePriorities []string) []s
 	return out
 }
 
-func rotationBlockedNames(obs []SiteObservation) []string {
-	var out []string
+// blockedCandidateNames splits the promotion-blocked primary-candidates
+// by reason.
+func blockedCandidateNames(obs []SiteObservation) (rotating, pendingReclone []string) {
 	for _, c := range obs {
-		if c.Role == SiteRolePrimaryCandidate && c.PromotionBlocked {
-			out = append(out, c.Name)
+		if c.Role != SiteRolePrimaryCandidate || !c.PromotionBlocked {
+			continue
+		}
+		if c.PromotionBlockedReason == PromotionBlockedPendingReclone {
+			pendingReclone = append(pendingReclone, c.Name)
+		} else {
+			rotating = append(rotating, c.Name)
 		}
 	}
-	return out
+	return rotating, pendingReclone
 }
 
 // ResolveSplitBrain picks the winner and losers from a writable set

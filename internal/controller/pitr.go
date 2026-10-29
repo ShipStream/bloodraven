@@ -302,18 +302,21 @@ type restorePITRFragments struct {
 // PITR replay is configured purely from the failover group's archive
 // settings: the backup profile named by fg.Spec.Backup.PITR tells the
 // init container where to fetch archived binlogs and manifests from.
-// util.loadDump() sets @@GLOBAL.gtid_purged from the dump's recorded
-// state, and mysqlbinlog's server-side GTID dedup then skips
-// already-applied transactions during replay — no per-MysqlBackup
-// metadata plumbing needed here.
+// The downloaded binlogs keep their original GTIDs and include
+// transactions the dump already contains. On a fresh bootstrap target the
+// load installs the dump's gtidExecuted into @@GLOBAL.gtid_purged
+// (updateGtidSet:"replace", see restoreLoadOptionsJSON), so MySQL skips
+// those transactions and any GTID archived by more than one site — no
+// per-MysqlBackup metadata plumbing needed here. That baseline cannot be
+// installed on a live primary, whose own gtid_executed already holds the
+// archived GTIDs, so in-place restores reject pointInTime
+// (errInPlacePointInTimeUnsupported).
 //
 // The verification path reuses this same builder (buildRestorePITRFragmentsFor)
 // against an EPHEMERAL verify mysqld, which is why that mysqld is started
-// gtid_mode=ON (verify_script.sh) and its load restores gtid_purged via
-// updateGtidSet:"replace" (marshalVerificationLoadOptions): the verify path
-// must mirror this restore-path server-side dedup so raw replay of
-// cross-site archived binlogs does not double-apply in-dump or duplicated
-// GTIDs (#101).
+// gtid_mode=ON (verify_script.sh) and loads with the same baseline
+// (marshalVerificationLoadOptions), so raw replay of cross-site archived
+// binlogs does not double-apply in-dump or duplicated GTIDs (#101).
 func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFragments, error) {
 	if fg.Spec.InitFromBackup == nil {
 		return restorePITRFragments{}, nil
@@ -322,9 +325,8 @@ func buildRestorePITRFragments(fg *v1alpha1.MysqlFailoverGroup) (restorePITRFrag
 }
 
 // buildRestorePITRFragmentsFor is the parameterized variant that lets
-// both the bootstrap restore (spec.initFromBackup.pointInTime) and the
-// in-place restore (spec.restoreInPlace.pointInTime) share the PITR
-// init-container wiring. A nil pit is a no-op: callers get an empty
+// the bootstrap restore (spec.initFromBackup.pointInTime) and backup
+// verification share the PITR init-container wiring. A nil pit is a no-op: callers get an empty
 // fragments struct and skip the init container entirely.
 func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1.PointInTimeSpec) (restorePITRFragments, error) {
 	var out restorePITRFragments

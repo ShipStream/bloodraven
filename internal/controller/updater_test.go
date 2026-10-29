@@ -153,6 +153,26 @@ func TestUpdateController_ExecuteTargetsRefusesWhenOnlyStandbyRotating(t *testin
 	}
 }
 
+func TestUpdateController_ExecuteTargetsSkipsReclonePendingHandoff(t *testing.T) {
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	active := &testutil.FakeMySQL{ReadOnlyVal: false}
+	pending := &testutil.FakeMySQL{ReadOnlyVal: true, ReplicaStatusVal: &mysql.ReplicaStatus{
+		IORunning: true, SQLRunning: true, SourceHost: "primary-internal",
+	}}
+	_, err := uc.ExecuteTargets(context.Background(), UpdateTarget{
+		Name: "primary", Checker: active, Drifted: true,
+	}, []UpdateTarget{
+		{Name: "pending", Host: "pending-internal", Checker: pending, Promotable: true, ReclonePending: true, Drifted: true, ExpectedSource: "primary-internal"},
+	}, func(context.Context, string) error { return nil }, nil)
+	if err == nil || !strings.Contains(err.Error(), "pending post-restore reclone") {
+		t.Fatalf("err = %v, want pending-reclone reason", err)
+	}
+	if pending.ReadOnlyVal == false {
+		t.Fatal("a standby that still holds pre-restore data must not be promoted")
+	}
+}
+
 func TestUpdateController_ExecuteTargetsSkipsUnhealthyReader(t *testing.T) {
 	logger := testutil.TestLogger()
 	uc := NewUpdateController(NewFailoverController(logger), logger)

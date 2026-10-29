@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -64,6 +65,9 @@ type managedTopology struct {
 	// restart is expected and wanted.
 	lastKeyringPromotionSkipped []string
 	lastKeyringPromotionRefused []string
+	// lastRestoreReclonePromotionRefused is the same for promotions
+	// refused because the candidates await their post-restore reclone.
+	lastRestoreReclonePromotionRefused []string
 }
 
 // DeploymentReconciler is the subset of the reconciler that the runner needs
@@ -401,6 +405,9 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			existing.tm.SetTopologyFrozen(frozen)
 			existing.tm.SetPlannedFailoverActive(plannedActive)
 			existing.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
+			existing.tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
+			existing.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
+			existing.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
 			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
 			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
 			if existing.dragonfly != nil {
@@ -434,6 +441,9 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			mt.tm.SetTopologyFrozen(frozen)
 			mt.tm.SetPlannedFailoverActive(plannedActive)
 			mt.tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
+			mt.tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
+			mt.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
+			mt.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
 			if mt.dragonfly != nil {
 				mt.dragonfly.SetPaused(plannedActive)
 			}
@@ -482,9 +492,35 @@ func (r *TopologyManagerRunner) handleRecloneAnnotation(ctx context.Context, fg 
 		r.removeRecloneAnnotation(ctx, nn)
 		return
 	}
-	if tm.SetRecloneSite(req.Site) && r.recorder != nil {
-		r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecloneRequested",
-			"admin requested CLONE INSTANCE of site %q", req.Site)
+	if slices.Contains(restoreRecloneBlockedSites(fg), req.Site) {
+		// The site awaits its post-restore reclone and its queue clones
+		// nothing now: Armed while its restore runs, Held while the
+		// primary is no trusted donor. That includes a request the queue
+		// itself wrote before it was superseded.
+		msg := fmt.Sprintf("reclone of %s refused: it awaits its post-restore reclone and status.restoreReclones is %s, so nothing is cloned to it now. "+
+			"Once the primary's data is good, set status.restoreReclones.phase to Draining instead", req.Site, fg.Status.RestoreReclones.Phase)
+		r.logger.Warn("reclone annotation rejected", "fg", nn, "value", raw, "error", msg)
+		if r.recorder != nil {
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, "RecloneRejected", "%s", msg)
+		}
+		tm.cancelPendingReclone(req.Site)
+		r.removeRecloneAnnotation(ctx, nn)
+		return
+	}
+	// The restore queue records Requested before it writes the
+	// annotation, so a request for its Requested site is the queue's.
+	owner := ""
+	if q := fg.Status.RestoreReclones; q != nil && q.Requested == req.Site {
+		owner = q.ConfirmToken
+	}
+	if tm.SetRecloneSiteFor(req.Site, owner) && r.recorder != nil {
+		if owner != "" {
+			r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecloneRequested",
+				"in-place restore (confirm=%s) requested CLONE INSTANCE of site %q", owner, req.Site)
+		} else {
+			r.recorder.Eventf(fg, corev1.EventTypeNormal, "RecloneRequested",
+				"admin requested CLONE INSTANCE of site %q", req.Site)
+		}
 	}
 }
 
@@ -697,6 +733,9 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	// Must land before Run: the first Poll otherwise sees an empty
 	// blocked set and can promote a mid-rotation replica.
 	tm.SetKeyringRotationBlocked(rotationBlockedSites(fg))
+	tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
+	tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
+	tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
 
 	r.restoreFailoverState(tm, fg, nn)
 	for _, site := range fg.Status.Sites {
@@ -744,7 +783,12 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	tm.BootstrapStatusCallback = func(phase, errMsg, source string) {
 		r.updateBootstrappingCondition(ctx, nn, phase, errMsg, source)
 	}
-	tm.RecloneCompleteCallback = func(completeCtx context.Context, site string) error {
+	tm.RecloneCompleteCallback = func(completeCtx context.Context, site string, outcome RecloneOutcome) error {
+		// Record the outcome on the restore queue first: once the
+		// annotation is gone the queue may already request its next clone.
+		if err := r.recordRestoreRecloneOutcome(completeCtx, nn, site, outcome); err != nil {
+			return err
+		}
 		return r.removeRecloneAnnotationForSite(completeCtx, nn, site)
 	}
 
@@ -1301,7 +1345,14 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		// Escrowed/Sealed advance re-renders the site unsealed and rolls
 		// the pod, and losing a Failed hides a site whose key custody is
 		// gone. Clobbering Dragonfly status drops capability probes and
-		// lastPromotion* stamps written on the other goroutine.
+		// lastPromotion* stamps written on the other goroutine. The
+		// post-restore reclone queue is the reconciler's too: a stale copy
+		// would undo its phase changes (a succeeded restore's queue
+		// written back as Armed is discarded, a Draining one written over
+		// a newer Armed one clones from the new restore's primary) and
+		// revert an administrator's status patch. Likewise the restore's
+		// offline_mode fence record: a copy without the prior value makes
+		// the release leave offline_mode ON.
 		encryption := fresh.Status.EncryptionAtRest
 		reconcilerConds := make([]*metav1.Condition, len(reconcilerOwnedConditions))
 		for i, t := range reconcilerOwnedConditions {
@@ -1311,10 +1362,14 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		planned := fresh.Status.PlannedFailover
 		initialRestore := fresh.Status.Restore
 		restore := fresh.Status.RestoreInPlace
+		reclones := fresh.Status.RestoreReclones
+		offlineFence := fresh.Status.RestoreOfflineFence
 		fresh.Status = freshFG.Status
 		fresh.Status.PlannedFailover = planned
 		fresh.Status.Restore = initialRestore
 		fresh.Status.RestoreInPlace = restore
+		fresh.Status.RestoreReclones = reclones
+		fresh.Status.RestoreOfflineFence = offlineFence
 		fresh.Status.EncryptionAtRest = encryption
 		fresh.Status.Dragonfly = dragonfly
 		for i, c := range reconcilerConds {
@@ -1553,6 +1608,16 @@ func (r *TopologyManagerRunner) emitKeyringPromotionEvents(fg *v1alpha1.MysqlFai
 		}
 		mt.lastKeyringPromotionRefused = append([]string(nil), snap.KeyringPromotionRefused...)
 	}
+	if !stringSlicesEqual(snap.RestoreReclonePromotionRefused, mt.lastRestoreReclonePromotionRefused) {
+		if len(snap.RestoreReclonePromotionRefused) > 0 {
+			r.recorder.Eventf(fg, corev1.EventTypeWarning, "PromotionRefusedPendingReclone",
+				"automatic promotion refused: %s not yet recloned after the in-place restore and hold pre-restore data; "+
+					"bring the primary back, or accept that data by removing status.restoreReclones "+
+					"(kubectl patch mfg <group> --subresource=status --type=json -p '[{\"op\":\"remove\",\"path\":\"/status/restoreReclones\"}]')",
+				strings.Join(snap.RestoreReclonePromotionRefused, ", "))
+		}
+		mt.lastRestoreReclonePromotionRefused = append([]string(nil), snap.RestoreReclonePromotionRefused...)
+	}
 }
 
 // emitDegradedTransitionEvents fires Kubernetes Events when the topology-level
@@ -1584,10 +1649,11 @@ func (r *TopologyManagerRunner) emitDegradedTransitionEvents(fg *v1alpha1.MysqlF
 		r.recorder.Eventf(fg, corev1.EventTypeWarning, "SplitBrainDetected",
 			"Both sites are writable: %s", snap.Alert)
 	case "NoPrimary":
-		if strings.Contains(snap.Alert, "UnsealReason=Rotation") {
-			// KeyringPromotionRefused is the specific Event; the generic
-			// "Both sites are read-only" wording is wrong for this shape
-			// (usually one unreachable primary + one rotating replica).
+		if strings.Contains(snap.Alert, "UnsealReason=Rotation") || strings.Contains(snap.Alert, "pending post-restore reclone") {
+			// KeyringPromotionRefused / PromotionRefusedPendingReclone is
+			// the specific Event; the generic "Both sites are read-only"
+			// wording is wrong for this shape (usually one unreachable
+			// primary + one rotating or not-yet-recloned replica).
 			break
 		}
 		r.recorder.Eventf(fg, corev1.EventTypeWarning, "NoPrimaryDetected",

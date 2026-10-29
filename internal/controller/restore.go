@@ -3,9 +3,11 @@ package controller
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -627,12 +629,15 @@ func (r *MysqlFailoverGroupReconciler) setRestoreStatus(ctx context.Context, fg 
 }
 
 // ensureRestoreCredsSecret creates or updates the derived Secret used by
-// the restore Job. In credentials mode, reads from the effective backup
-// secret. In legacy mode, parses the DSN secret.
+// the restore Job. Restore Jobs run as the operator account, not the
+// backup role: they DROP and CREATE schemas, set global variables
+// (local_infile) and, for a full-instance in-place restore, must keep
+// working under the offline_mode fence, none of which the backup role's
+// grants allow. In legacy mode the DSN secret is parsed.
 func (r *MysqlFailoverGroupReconciler) ensureRestoreCredsSecret(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, secretName string) error {
 	var user, password string
 
-	backupSecretName := fg.Spec.EffectiveBackupSecretName()
+	backupSecretName := fg.Spec.EffectiveOperatorSecretName()
 	var srcSecret corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: backupSecretName}, &srcSecret); err != nil {
 		return fmt.Errorf("get credential secret %s: %w", backupSecretName, err)
@@ -710,9 +715,14 @@ type restoreJobInputs struct {
 	FieldPath string
 	// ExtraEnv is appended to the container env verbatim. Used by
 	// in-place restore to inject BLOODRAVEN_DROP_ALL_USER_SCHEMAS,
-	// BLOODRAVEN_DROP_SCHEMAS, BLOODRAVEN_RESET_REPLICATION, and
-	// BLOODRAVEN_PITR_FILTER_DATABASE.
+	// BLOODRAVEN_DROP_SCHEMAS, BLOODRAVEN_RESET_REPLICATION and
+	// BLOODRAVEN_REQUIRE_OFFLINE_MODE.
 	ExtraEnv []corev1.EnvVar
+	// FreshTarget marks a restore into an empty instance with no GTID
+	// history of its own (bootstrap). Only then may the load install the
+	// dump's GTID set (see dumpGtidBaselineLoadOptions). In-place restores
+	// target a live primary and must leave it false.
+	FreshTarget bool
 }
 
 // buildRestoreJob resolves the initFromBackup source and constructs the
@@ -731,7 +741,78 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJob(ctx context.Context, fg *
 		LoadOptions: fg.Spec.InitFromBackup.LoadOptions,
 		PointInTime: fg.Spec.InitFromBackup.PointInTime,
 		Decryption:  fg.Spec.InitFromBackup.Decryption,
+		FreshTarget: true,
 	})
+}
+
+// backupRefProfileStorageError reports why a mysqlBackupRef's profile can
+// no longer locate the backup's artifact on the backend it was written to
+// (want), or returns nil when profile.Storage carries that backend's
+// configuration. A non-nil profile with a nil error guarantees the
+// matching profile.Storage.S3 / profile.Storage.PVC pointer is non-nil.
+func backupRefProfileStorageError(fp string, ref *v1alpha1.MysqlBackup, profile *v1alpha1.BackupProfile, want v1alpha1.BackupStorageType) error {
+	kind, field := "an S3", "s3"
+	if want == v1alpha1.BackupStoragePVC {
+		kind, field = "a PVC", "pvc"
+	}
+	switch {
+	case profile == nil:
+		return fmt.Errorf(
+			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q is missing from spec.backup.profiles; "+
+				"either restore the profile or set %s.source.%s explicitly",
+			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, fp, field)
+	case profile.Storage.Type != want:
+		return fmt.Errorf(
+			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q now stores to %s; "+
+				"either restore the profile's %s storage or set %s.source.%s explicitly",
+			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, profile.Storage.Type, want, fp, field)
+	case want == v1alpha1.BackupStorageS3 && profile.Storage.S3 == nil,
+		want == v1alpha1.BackupStoragePVC && profile.Storage.PVC == nil:
+		return fmt.Errorf(
+			"%s.source.mysqlBackupRef=%q resolves to %s location (%q) but profile %q has no storage.%s configuration; "+
+				"either restore the profile's %s storage or set %s.source.%s explicitly",
+			fp, ref.Name, kind, ref.Status.Location, ref.Spec.ProfileName, field, want, fp, field)
+	}
+	return nil
+}
+
+// inPlacePreflightEnv lists the destructive restore.py preflight switches
+// only an in-place restore of a live primary sets.
+var inPlacePreflightEnv = []string{
+	"BLOODRAVEN_DROP_SCHEMAS",
+	"BLOODRAVEN_DROP_ALL_USER_SCHEMAS",
+	"BLOODRAVEN_RESET_REPLICATION",
+}
+
+// restoreLoadOptionsJSON returns the util.loadDump() options for a
+// restore Job. A PITR restore into a fresh target installs the dump's
+// GTID set first (marshalDumpGtidBaselineLoadOptions): the archived
+// binlogs replayed afterwards keep their original GTIDs and include
+// transactions the dump already contains, which MySQL skips only when
+// their GTIDs are already in gtid_executed. Every other restore keeps
+// the plain serialization. A live target (in-place) never gets the
+// baseline: its own executed history already holds those GTIDs, and
+// "replace" requires the dump set to be disjoint from it.
+func restoreLoadOptionsJSON(fp string, in restoreJobInputs) (string, error) {
+	if in.FreshTarget {
+		for _, e := range in.ExtraEnv {
+			if slices.Contains(inPlacePreflightEnv, e.Name) {
+				return "", fmt.Errorf("internal error: fresh-target restore Job carries in-place preflight %s", e.Name)
+			}
+		}
+	}
+	if !in.FreshTarget || in.PointInTime == nil {
+		return marshalLoadOptions(in.LoadOptions)
+	}
+	opts, err := marshalDumpGtidBaselineLoadOptions(in.LoadOptions)
+	if errors.Is(err, errDumpGtidBaselineNeedsSkipBinlog) {
+		return "", fmt.Errorf(
+			"%s.loadOptions.skipBinlog=false is incompatible with %s.pointInTime: the binlog replay needs the dump's "+
+				"GTID set installed on the target, and MySQL Shell pairs that with an unlogged load (a logged load would "+
+				"also binlog and archive the whole dump under new local GTIDs); remove skipBinlog or set it to true",
+			fp, fp)
+	}
+	return opts, err
 }
 
 // buildRestoreJobSpec is the shared core of both bootstrap and in-place
@@ -796,7 +877,31 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			inputURL = mysqlShellDumpInput(ref.Status.Location, v1alpha1.BackupStoragePVC)
 		}
 
+		// Resolve the backend the backup was written to from the profile
+		// before anything reads its storage block: the profile may have
+		// been deleted or moved to the other backend since the backup ran,
+		// and an explicit decryption Secret must not bypass that check.
 		profile := findProfile(fg, ref.Spec.ProfileName)
+		var (
+			profileS3       *v1alpha1.S3Storage
+			profilePVCClaim string
+		)
+		switch {
+		case wantsS3:
+			if err := backupRefProfileStorageError(fp, &ref, profile, v1alpha1.BackupStorageS3); err != nil {
+				return nil, err
+			}
+			profileS3 = profile.Storage.S3
+		case wantsPVC:
+			if err := backupRefProfileStorageError(fp, &ref, profile, v1alpha1.BackupStoragePVC); err != nil {
+				return nil, err
+			}
+			profilePVCClaim = profile.Storage.PVC.ClaimName
+			if profilePVCClaim == "" {
+				profilePVCClaim = ownedBackupPVCName(fg.Name, profile.Name)
+			}
+		}
+
 		if ref.Status.Encrypted {
 			switch {
 			case in.Decryption != nil && in.Decryption.PassphraseSecret.Name != "":
@@ -811,26 +916,20 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 						"set %s.decryption.passphraseSecret or restore the profile's encryption.passphraseSecret",
 					fp, ref.Name, fp)
 			}
-			if wantsS3 {
-				s3 := profile.Storage.S3
+			if profileS3 != nil {
 				decryptSourceKind = "S3"
-				decryptS3Bucket = s3.Bucket
-				decryptS3EndpointOverride = s3.EndpointURL
-				decryptS3Region = s3.Region
+				decryptS3Bucket = profileS3.Bucket
+				decryptS3EndpointOverride = profileS3.EndpointURL
+				decryptS3Region = profileS3.Region
 				var locBucket string
 				locBucket, decryptS3Prefix = splitS3Location(ref.Status.Location)
 				if locBucket != "" {
 					decryptS3Bucket = locBucket
 				}
-				decryptAWSCredsSecret = s3.CredentialsSecret
-			} else if wantsPVC {
-				pvc := profile.Storage.PVC
-				claim := pvc.ClaimName
-				if claim == "" {
-					claim = ownedBackupPVCName(fg.Name, profile.Name)
-				}
+				decryptAWSCredsSecret = profileS3.CredentialsSecret
+			} else if profilePVCClaim != "" {
 				decryptSourceKind = "PVC"
-				decryptPVCClaim = claim
+				decryptPVCClaim = profilePVCClaim
 				// inputURL is the in-pod absolute path the backup
 				// wrote to (e.g. "/backups/<backup-name>"). Derive a
 				// storage-relative prefix from the PVC mount path
@@ -838,36 +937,20 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 				decryptPVCPrefix = strings.TrimSuffix(strings.TrimPrefix(inputURL, backupPVCMountPath+"/"), "/")
 			}
 		}
-		if wantsS3 && (profile == nil || profile.Storage.Type != v1alpha1.BackupStorageS3 || profile.Storage.S3 == nil) {
-			return nil, fmt.Errorf(
-				"%s.source.mysqlBackupRef=%q resolves to an S3 location (%q) but profile %q is missing from spec.backup.profiles; "+
-					"either restore the profile or set %s.source.s3 explicitly",
-				fp, ref.Name, ref.Status.Location, ref.Spec.ProfileName, fp)
-		}
-		if wantsPVC && (profile == nil || profile.Storage.Type != v1alpha1.BackupStoragePVC || profile.Storage.PVC == nil) {
-			return nil, fmt.Errorf(
-				"%s.source.mysqlBackupRef=%q resolves to a PVC location (%q) but profile %q is missing from spec.backup.profiles; "+
-					"either restore the profile or set %s.source.pvc explicitly",
-				fp, ref.Name, ref.Status.Location, ref.Spec.ProfileName, fp)
-		}
-		if wantsS3 && profile != nil && profile.Storage.Type == v1alpha1.BackupStorageS3 && profile.Storage.S3 != nil {
+		if profileS3 != nil {
 			extraEnv = append(extraEnv,
-				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: profile.Storage.S3.Bucket},
+				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: profileS3.Bucket},
 			)
-			if profile.Storage.S3.EndpointURL != "" {
+			if profileS3.EndpointURL != "" {
 				extraEnv = append(extraEnv, corev1.EnvVar{
-					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: profile.Storage.S3.EndpointURL,
+					Name: "BLOODRAVEN_S3_ENDPOINT_OVERRIDE", Value: profileS3.EndpointURL,
 				})
 			}
-			if profile.Storage.S3.Region != "" {
-				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: profile.Storage.S3.Region})
+			if profileS3.Region != "" {
+				extraEnv = append(extraEnv, corev1.EnvVar{Name: "AWS_REGION", Value: profileS3.Region})
 			}
-			awsCredsSecret = profile.Storage.S3.CredentialsSecret
-		} else if wantsPVC && profile != nil && profile.Storage.Type == v1alpha1.BackupStoragePVC && profile.Storage.PVC != nil {
-			claim := profile.Storage.PVC.ClaimName
-			if claim == "" {
-				claim = ownedBackupPVCName(fg.Name, profile.Name)
-			}
+			awsCredsSecret = profileS3.CredentialsSecret
+		} else if profilePVCClaim != "" {
 			// MysqlBackup.status.location stores the in-pod dump path that the
 			// backup Job used. For PVC-backed backups that path lives under
 			// /backups, so the restore Job must mount the same claim there.
@@ -875,7 +958,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 				Name: "restore-src",
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: claim,
+						ClaimName: profilePVCClaim,
 						ReadOnly:  true,
 					},
 				},
@@ -952,7 +1035,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		return nil, fmt.Errorf("%s.source must set mysqlBackupRef, s3, or pvc", fp)
 	}
 
-	loadOptsJSON, err := marshalLoadOptions(in.LoadOptions)
+	loadOptsJSON, err := restoreLoadOptionsJSON(fp, in)
 	if err != nil {
 		return nil, err
 	}
@@ -983,6 +1066,16 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		{Name: "BLOODRAVEN_MYSQL_HOST", Value: backupMySQLHost(fg, targetSite)},
 		{Name: "BLOODRAVEN_INPUT_URL", Value: literalArtifactEnvValue(inputURL)},
 		{Name: "BLOODRAVEN_LOAD_OPTIONS", Value: loadOptsJSON},
+		// Disable mysqlsh load-progress tracking. Its default progressFile
+		// is written beside the dump: that fails on every read-only local
+		// source (source PVCs and the decrypted staging dir), and for an
+		// unencrypted S3 source it puts restore state into the backup
+		// prefix, where a later load of the same dump would resume from
+		// it and skip data an in-place restore has just dropped. Keeping
+		// restore state out of backup storage costs resume: a bootstrap
+		// restore that fails part-way loads the whole dump again, so its
+		// target has to be emptied first (documented on the restore page).
+		{Name: "BLOODRAVEN_LOAD_PROGRESS_FILE", Value: ""},
 		{Name: "BLOODRAVEN_MYSQL_CREDS_DIR", Value: backupCredsMountPath},
 		{Name: "BLOODRAVEN_SOURCE_SIZE_BYTES", Value: strconv.FormatInt(sourceMeta.SourceSizeBytes, 10)},
 		{Name: "BLOODRAVEN_SOURCE_GTID_EXECUTED", Value: sourceMeta.SourceGtidExecuted},
