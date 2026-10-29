@@ -70,7 +70,7 @@ fi
 
 echo ""
 echo "--- 1. MySQLFailoverGroup CR Status ---"
-CR_JSON=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o json 2>/dev/null || true)
+CR_JSON=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o json 2>/dev/null || true)
 if [[ -z "$CR_JSON" ]]; then
     echo "❌ Failed to retrieve MySQLFailoverGroup '$MFG_NAME' in namespace '$NAMESPACE'."
     exit 1
@@ -78,39 +78,49 @@ fi
 
 # kubectl -o jsonpath tolerates missing keys: an unset field yields an empty
 # string with exit 0, so the || fallbacks below never fire on their own.
-ACTIVE_SITE=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.activeSite}' 2>/dev/null || true)
-LAST_FAILOVER=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover}' 2>/dev/null || true)
-TOPOLOGY_GENERATION=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.topologyGeneration}' 2>/dev/null || true)
+ACTIVE_SITE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.activeSite}' 2>/dev/null || true)
+LAST_FAILOVER=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.lastFailover}' 2>/dev/null || true)
+TOPOLOGY_GENERATION=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.topologyGeneration}' 2>/dev/null || true)
 
 echo "Active Primary Site: ${ACTIVE_SITE:-Unknown}"
 echo "Last Failover:       ${LAST_FAILOVER:-None}"
 echo "Topology generation: ${TOPOLOGY_GENERATION:-unavailable}"
-RESTORE_RECLONES=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreReclones.phase}{" pending=["}{.status.restoreReclones.pending[*]}{"] requested="}{.status.restoreReclones.requested}{" failures="}{.status.restoreReclones.failures[*].message}' 2>/dev/null || true)
+RESTORE_RECLONES=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreReclones.phase}{" pending=["}{.status.restoreReclones.pending[*]}{"] requested="}{.status.restoreReclones.requested}{" failures="}{.status.restoreReclones.failures[*].message}' 2>/dev/null || true)
 if [[ "$RESTORE_RECLONES" != " pending=[] requested= failures=" && -n "$RESTORE_RECLONES" ]]; then
     echo "Post-restore reclones: $RESTORE_RECLONES (pending sites are not promoted automatically and are out of the -replica and read-only Services; Held = nothing is cloned)"
 fi
-PITR_ARCHIVE=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="PITRArchiveReady")]}{.status}{" "}{.reason}{": "}{.message}{end}' 2>/dev/null || true)
+PITR_ARCHIVE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="PITRArchiveReady")]}{.status}{" "}{.reason}{": "}{.message}{end}' 2>/dev/null || true)
 if [[ -n "$PITR_ARCHIVE" ]]; then
     echo "PITRArchiveReady:    $PITR_ARCHIVE (archiving state only; never affects pod readiness)"
 fi
-RESTORE_FENCE=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreOfflineFence.site}{" priorOfflineMode="}{.status.restoreOfflineFence.priorOfflineMode}{" sessionsEvicted="}{.status.restoreOfflineFence.sessionsEvicted}' 2>/dev/null || true)
+RESTORE_FENCE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreOfflineFence.site}{" priorOfflineMode="}{.status.restoreOfflineFence.priorOfflineMode}{" sessionsEvicted="}{.status.restoreOfflineFence.sessionsEvicted}' 2>/dev/null || true)
 if [[ -n "$RESTORE_FENCE" && "$RESTORE_FENCE" != " priorOfflineMode= sessionsEvicted=" ]]; then
     echo "Restore offline_mode fence: $RESTORE_FENCE (applications without CONNECTION_ADMIN cannot connect to that site)"
 fi
 
 echo ""
 echo "--- 2. Sites & Replication Summary ---"
-kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.sites[*]}Site: {.name}{"\n"}  Role: {.role}{"\n"}  Reachable: {.reachable}{"\n"}  ReadOnly: {.readOnly}{"\n"}  Replicating: {.replicating}{"\n"}  SecondsBehindSource: {.secondsBehindSource}{"\n"}  ReplicationError: {.replicationError}{"\n\n"}{end}' 2>/dev/null || echo "Could not parse site status."
+kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.sites[*]}Site: {.name}{"\n"}  Role: {.role}{"\n"}  Reachable: {.reachable}{"\n"}  ReadOnly: {.readOnly}{"\n"}  Replicating: {.replicating}{"\n"}  SecondsBehindSource: {.secondsBehindSource}{"\n"}  ReplicationError: {.replicationError}{"\n"}  RecoveryState: {.recoveryState}{"\n"}  Divergence: {.divergenceDetectedBy}{" vs "}{.divergenceComparedTo}{" "}{.divergentTransactionCount}{" "}{.divergentGtid}{"\n\n"}{end}' 2>/dev/null || echo "Could not parse site status."
+DEGRADED=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Degraded")].status}{" "}{.status.conditions[?(@.type=="Degraded")].reason}{": "}{.status.conditions[?(@.type=="Degraded")].message}' 2>/dev/null || true)
+echo "Degraded: ${DEGRADED:-unavailable}"
+if [[ "$DEGRADED" == *DivergentTransactions* ]]; then
+    echo "  A site holds transactions the primary lacks (replication may still be running). Ordered updates and planned failovers will not promote it: run gtid-audit.sh and see playbook 33."
+fi
+DIVERGENT_PROMOTION=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="DivergentPromotion")].message}' 2>/dev/null || true)
+if [[ -n "$DIVERGENT_PROMOTION" ]]; then
+    echo "DivergentPromotion: $DIVERGENT_PROMOTION (see playbook 33)"
+fi
+echo ""
 
 echo "--- 3. Dragonfly Cache Subsystem ---"
-DF_PHASE=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.dragonfly.phase}' 2>/dev/null || echo "N/A")
-DF_TAKEOVER=$(kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.dragonfly.replTakeoverSupported}' 2>/dev/null || echo "N/A")
+DF_PHASE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.dragonfly.phase}' 2>/dev/null || echo "N/A")
+DF_TAKEOVER=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.dragonfly.replTakeoverSupported}' 2>/dev/null || echo "N/A")
 echo "Dragonfly Phase:              $DF_PHASE"
 echo "Replication Takeover Ready:   $DF_TAKEOVER"
 
 echo ""
 echo "--- 4. Encryption-at-Rest Keyring ---"
-kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.encryptionAtRest.sites[*]}Site: {.name} -> Phase: {.phase}, Message: {.message}{"\n"}{end}' 2>/dev/null || echo "Encryption status not available."
+kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.encryptionAtRest.sites[*]}Site: {.name} -> Phase: {.phase}, Message: {.message}{"\n"}{end}' 2>/dev/null || echo "Encryption status not available."
 
 echo ""
 echo "--- 5. Pod Health & Restarts ---"
@@ -126,7 +136,7 @@ bash "$(dirname "${BASH_SOURCE[0]}")/deployment-probe.sh" "$NAMESPACE" "$MFG_NAM
 
 echo ""
 echo "--- 8. Backup Completion Metadata ---"
-kubectl get mfg "$MFG_NAME" -n "$NAMESPACE" -o 'jsonpath={range .status.backupSchedules[*]}Schedule: {.name}{"\t"}RetryConflict: {.retryConflict}{"\n"}{end}' 2>/dev/null || echo "Backup schedule status unavailable."
+kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o 'jsonpath={range .status.backupSchedules[*]}Schedule: {.name}{"\t"}RetryConflict: {.retryConflict}{"\n"}{end}' 2>/dev/null || echo "Backup schedule status unavailable."
 # Project public fields only; never dump credential or passphrase env/volumes.
 kubectl get mysqlbackups -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME" -o 'custom-columns=NAME:.metadata.name,UID:.metadata.uid,PHASE:.status.phase,ATTEMPT:.status.attempt,LAUNCH_ATTEMPT:.metadata.annotations.shipstream\.io/backup-attempt,RETRY_OF:.metadata.labels.shipstream\.io/backup-retry-of,ROOT:.metadata.annotations.shipstream\.io/backup-retry-root,ROOT_UID:.metadata.annotations.shipstream\.io/backup-retry-root-uid,JOB:.status.jobName,LOCATION:.status.location,METADATA:.status.conditions[?(@.type=="MetadataComplete")].status,REASON:.status.conditions[?(@.type=="MetadataComplete")].reason' 2>/dev/null || echo "Backup status unavailable."
 kubectl get jobs -n "$NAMESPACE" -l "shipstream.io/failover-group=$MFG_NAME,shipstream.io/resource=backup" -o 'custom-columns=NAME:.metadata.name,OWNER_UID:.metadata.ownerReferences[*].uid,SUCCEEDED:.status.succeeded,CONTAINERS:.spec.template.spec.containers[*].name,STORAGE:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_STORAGE_TYPE")].value,OUTPUT:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_OUTPUT_URL")].value,BUCKET:.spec.template.spec.containers[*].env[?(@.name=="BLOODRAVEN_S3_BUCKET")].value' 2>/dev/null || echo "Backup Job inputs unavailable."

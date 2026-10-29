@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -682,5 +683,216 @@ func TestExecuteHandoff_PreFenceRefusalIsLogged(t *testing.T) {
 	if !strings.Contains(out, `msg="maintenance handoff refused; source not fenced"`) ||
 		!strings.Contains(out, "did not reach the source GTID set before fencing") {
 		t.Fatalf("refusal not logged with its reason; logs:\n%s", out)
+	}
+}
+
+// --- #202: candidate extras ----------------------------------------------
+
+// errantUUID is a server the source never replicated from: transactions
+// under it on the candidate are history the source lacks.
+const errantUUID = "d1240b6c-71ca-11f0-9e33-c80aa9429563"
+
+// Equal sets are the normal handoff: the candidate holds exactly what the
+// fenced source committed.
+func TestExecuteTargets_HandoffPromotesCandidateWithEqualSet(t *testing.T) {
+	src := &testutil.FakeMySQL{ReadOnlyVal: false, GtidExecutedVal: handoffUUID + ":1-100"}
+	candidate := handoffCandidate(handoffUUID + ":1-100")
+	src.ReplicaStatusVal = &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "standby-internal"}
+
+	run := runHandoff(t, src, candidate.Checker())
+
+	if run.err != nil {
+		t.Fatalf("ExecuteTargets() error = %v", run.err)
+	}
+	if run.promoted != "standby" || candidate.State().ReadOnly {
+		t.Fatalf("promoted=%q candidate read_only=%v, want standby promoted", run.promoted, candidate.State().ReadOnly)
+	}
+}
+
+// A caught-up replica that also holds transactions the source never
+// committed (issue #202's demoted site) is a strict superset of the source.
+// Containment alone would promote it and make its errant history
+// authoritative. The handoff refuses before fencing, so no write pauses and
+// the next attempt costs nothing.
+func TestExecuteTargets_HandoffRefusesSupersetCandidateBeforeFencing(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	src := &testutil.FakeMySQL{ReadOnlyVal: false, GtidExecutedVal: handoffUUID + ":1-100"}
+	candidate := handoffCandidate(handoffUUID + ":1-100," + errantUUID + ":1-221")
+
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = time.Millisecond
+	uc.handoff = HandoffOptions{PreFenceCatchUp: 100 * time.Millisecond, CatchUp: 100 * time.Millisecond, PollInterval: time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var run handoffRun
+	run.processed, run.err = uc.ExecuteTargets(ctx,
+		UpdateTarget{Name: "primary", Host: "primary-internal", Checker: src, Drifted: true},
+		[]UpdateTarget{{Name: "standby", Host: "standby-internal", Checker: candidate.Checker(), Promotable: true, ExpectedSource: "primary-internal"}},
+		func(_ context.Context, name string) error { run.applied = append(run.applied, name); return nil },
+		func(site, gtid string) { run.promoted, run.gtid = site, gtid })
+
+	assertHandoffAborted(t, run, src, candidate, false)
+	var divergent *DivergentCandidateError
+	if !errors.As(run.err, &divergent) {
+		t.Fatalf("error = %v, want a DivergentCandidateError", run.err)
+	}
+	if divergent.Candidate != "standby" || divergent.Transactions != 221 || divergent.Gtid != errantUUID+":1-221" {
+		t.Errorf("DivergentCandidateError = %+v, want standby with 221 transactions %s:1-221", divergent, errantUUID)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `msg="maintenance handoff refused; candidate has transactions the source lacks"`) ||
+		!strings.Contains(out, "extraTransactions=221") || !strings.Contains(out, "extraGtid="+errantUUID+":1-221") {
+		t.Errorf("refusal not logged with the extra set; logs:\n%s", out)
+	}
+}
+
+// The pre-fence check can miss extras that appear later (it reads a live
+// replica). The pinned proof after STOP REPLICA requires equality with the
+// fenced source: on extras the handoff aborts, restarts the candidate's
+// replication, gives the source its writes back, and never enables writes.
+func TestExecuteTargets_HandoffAbortsOnExtrasAfterStopReplica(t *testing.T) {
+	src := &testutil.FakeMySQL{ReadOnlyVal: false, GtidExecutedVal: handoffUUID + ":1-100"}
+	replica := handoffCandidate(handoffUUID + ":1-100")
+	endpoint := testutil.NewFakeEndpoint(replica)
+	endpoint.OnStatement(func(q string) {
+		if q == "STOP REPLICA" {
+			replica.Mutate(func(s *testutil.FakeReplicaState) {
+				s.ExecutedGtidSet = handoffUUID + ":1-100," + errantUUID + ":1-3"
+			})
+		}
+	})
+
+	run := runHandoff(t, src, endpoint.Checker())
+
+	var divergent *DivergentCandidateError
+	if !errors.As(run.err, &divergent) || divergent.Transactions != 3 {
+		t.Fatalf("ExecuteTargets() error = %v, want a DivergentCandidateError naming 3 transactions", run.err)
+	}
+	if !strings.Contains(run.err.Error(), "after STOP REPLICA") {
+		t.Errorf("error = %v, want the post-STOP proof named", run.err)
+	}
+	if slices.Contains(replica.Statements(), "RESET REPLICA ALL") {
+		t.Error("RESET REPLICA ALL ran after the post-STOP proof failed")
+	}
+	if st := replica.State(); !st.IORunning || !st.SQLRunning || !st.Configured {
+		t.Errorf("candidate replication not restarted: io=%v sql=%v configured=%v", st.IORunning, st.SQLRunning, st.Configured)
+	}
+	assertCandidateNotWritable(t, replica)
+	assertSourceUnfenced(t, src)
+	if run.promoted != "" {
+		t.Errorf("authority callback ran for %q", run.promoted)
+	}
+}
+
+// Extras seen only after RESET REPLICA ALL: the channel is gone, so the
+// abort re-creates it towards the source before restarting replication.
+func TestExecuteTargets_HandoffAbortsOnExtrasAfterReset(t *testing.T) {
+	src := &testutil.FakeMySQL{ReadOnlyVal: false, GtidExecutedVal: handoffUUID + ":1-100"}
+	replica := handoffCandidate(handoffUUID + ":1-100")
+	endpoint := testutil.NewFakeEndpoint(replica)
+	endpoint.OnStatement(func(q string) {
+		if q == "RESET REPLICA ALL" {
+			replica.Mutate(func(s *testutil.FakeReplicaState) {
+				s.ExecutedGtidSet = handoffUUID + ":1-100," + errantUUID + ":7"
+			})
+		}
+	})
+
+	run := runHandoff(t, src, endpoint.Checker())
+
+	var divergent *DivergentCandidateError
+	if !errors.As(run.err, &divergent) || divergent.Transactions != 1 {
+		t.Fatalf("ExecuteTargets() error = %v, want a DivergentCandidateError naming 1 transaction", run.err)
+	}
+	if !strings.Contains(run.err.Error(), "after RESET REPLICA ALL") {
+		t.Errorf("error = %v, want the post-RESET proof named", run.err)
+	}
+	st := replica.State()
+	if !st.Configured || st.SourceHost != "primary-internal" || !st.IORunning || !st.SQLRunning {
+		t.Errorf("channel not re-created: configured=%v source=%q io=%v sql=%v", st.Configured, st.SourceHost, st.IORunning, st.SQLRunning)
+	}
+	assertCandidateNotWritable(t, replica)
+	assertSourceUnfenced(t, src)
+}
+
+// A standby with recorded divergence is not a handoff target: the active
+// update stalls with a message that names the set, and nothing is fenced.
+func TestExecuteTargets_SkipsDivergentStandbyAsHandoffTarget(t *testing.T) {
+	src := &testutil.FakeMySQL{ReadOnlyVal: false, GtidExecutedVal: handoffUUID + ":1-100"}
+	candidate := handoffCandidate(handoffUUID + ":1-100," + errantUUID + ":1-221")
+	logger := testutil.TestLogger()
+	uc := NewUpdateController(NewFailoverController(logger), logger)
+	uc.tickInterval = time.Millisecond
+	uc.handoff = HandoffOptions{PreFenceCatchUp: 100 * time.Millisecond, CatchUp: 100 * time.Millisecond, PollInterval: time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	processed, err := uc.ExecuteTargets(ctx,
+		UpdateTarget{Name: "primary", Host: "primary-internal", Checker: src, Drifted: true},
+		[]UpdateTarget{{
+			Name: "standby", Host: "standby-internal", Checker: candidate.Checker(),
+			Promotable: true, ExpectedSource: "primary-internal",
+			DivergenceBlocked: true, DivergentTransactions: 221, DivergentGtid: errantUUID + ":1-221",
+		}},
+		func(context.Context, string) error { return nil }, nil)
+
+	if err == nil {
+		t.Fatal("ExecuteTargets() = nil error, want the divergent standby refused")
+	}
+	want := "standby is divergent (221 transactions the primary lacks); reclone or reconcile before the active site can be updated"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
+	}
+	if slices.Contains(processed, "primary") {
+		t.Errorf("active drift cleared: processed=%v", processed)
+	}
+	if slices.Contains(src.GetCalls(), "SetSuperReadOnly(ON)") {
+		t.Error("source fenced for a divergent standby")
+	}
+	assertCandidateNotWritable(t, candidate)
+}
+
+// slowFirstReadCandidate answers its first gtid_executed read after
+// delay, and reports a lagging set throughout.
+type slowFirstReadCandidate struct {
+	*testutil.FakeMySQL
+	delay time.Duration
+	reads atomic.Int32
+}
+
+func (c *slowFirstReadCandidate) GetGtidExecuted(ctx context.Context) (string, error) {
+	if c.reads.Add(1) == 1 {
+		select {
+		case <-time.After(c.delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	return c.FakeMySQL.GetGtidExecuted(ctx)
+}
+
+// Everything before the fence shares one PreFenceCatchUp budget: a slow
+// candidate read followed by a lagging wait cannot hold the update (and
+// the emergency failover it holds off) for twice that.
+func TestExecuteHandoff_PreFencePhaseSharesOneBudget(t *testing.T) {
+	src := &testutil.FakeMySQL{ReadOnlyVal: false, GtidExecutedVal: handoffUUID + ":1-100"}
+	const budget = 300 * time.Millisecond
+	candidate := &slowFirstReadCandidate{delay: budget - 50*time.Millisecond, FakeMySQL: &testutil.FakeMySQL{ReadOnlyVal: true, GtidExecutedVal: handoffUUID + ":1-90",
+		ReplicaStatusVal: &mysql.ReplicaStatus{IORunning: true, SQLRunning: true, SourceHost: "primary-internal"}}}
+
+	start := time.Now()
+	_, err := NewFailoverController(testutil.TestLogger()).ExecuteHandoff(context.Background(), candidate, src, "standby",
+		HandoffOptions{PreFenceCatchUp: budget, CatchUp: budget, PollInterval: time.Millisecond})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("ExecuteHandoff() = nil error, want the pre-fence phase to time out")
+	}
+	if elapsed > budget+budget/2 {
+		t.Fatalf("pre-fence phase took %s, want it bounded by one %s budget", elapsed, budget)
+	}
+	if slices.Contains(src.GetCalls(), "SetSuperReadOnly(ON)") {
+		t.Error("source fenced")
 	}
 }

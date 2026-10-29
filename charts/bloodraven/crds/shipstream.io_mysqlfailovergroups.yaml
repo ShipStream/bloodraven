@@ -8,9 +8,15 @@ metadata:
 spec:
   group: shipstream.io
   names:
+    categories:
+    - bloodraven
+    - mysql
     kind: MysqlFailoverGroup
     listKind: MysqlFailoverGroupList
     plural: mysqlfailovergroups
+    shortNames:
+    - mfg
+    - mfgs
     singular: mysqlfailovergroup
   scope: Namespaced
   versions:
@@ -7728,11 +7734,29 @@ spec:
                   description: SiteStatus describes the observed state of a single
                     site.
                   properties:
+                    divergenceComparedTo:
+                      description: |-
+                        DivergenceComparedTo is the site whose GTID set DivergentGtid was
+                        computed against: the primary at the time of the comparison.
+                        Populated when RecoveryState is RecoveryBlocked.
+                      type: string
+                    divergenceDetectedBy:
+                      description: |-
+                        DivergenceDetectedBy names the check that recorded DivergentGtid:
+                        OldPrimaryRecovery (a returning former primary was compared with
+                        the new primary) or ReplicaAudit (a replica, possibly replicating
+                        normally, was found to hold transactions the primary lacks).
+                        Populated when RecoveryState is RecoveryBlocked.
+                      enum:
+                      - ""
+                      - OldPrimaryRecovery
+                      - ReplicaAudit
+                      type: string
                     divergentGtid:
                       description: |-
                         DivergentGtid is the GTID set of transactions on this site that
-                        diverge from the current primary. Populated when RecoveryState is
-                        RecoveryBlocked.
+                        the primary named by DivergenceComparedTo lacks. Populated when
+                        RecoveryState is RecoveryBlocked.
                       type: string
                     divergentTransactionCount:
                       description: DivergentTransactionCount is the number of divergent
@@ -7757,8 +7781,10 @@ spec:
                         RecoveryState tracks old-primary recovery progress after failover.
                         Empty when no recovery is needed. RecoveryInProgress means the site is
                         being reconfigured, or is stabilizing, as a replica of the current primary.
-                        RecoveryBlocked means divergent transactions were detected and the site
-                        must be re-cloned.
+                        RecoveryBlocked means the site holds transactions the primary lacks
+                        (see DivergenceDetectedBy): it is not promoted by an ordered update or
+                        a planned failover, and it must be recloned or the primary made to
+                        contain the set. Replication may still be running.
                       enum:
                       - ""
                       - RecoveryInProgress

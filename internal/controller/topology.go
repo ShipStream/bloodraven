@@ -139,6 +139,11 @@ type SiteSnapshot struct {
 	RecoveryState     string
 	DivergentGtid     string
 	DivergentTxnCount int64
+	// DivergenceDetectedBy and DivergenceComparedTo describe a
+	// RecoveryBlocked report: which check recorded it and which primary the
+	// set was computed against.
+	DivergenceDetectedBy string
+	DivergenceComparedTo string
 }
 
 // SourceConvergenceState is the topology manager's internal representation of
@@ -187,10 +192,16 @@ type TopologySnapshot struct {
 	// these fields. The authoritative per-site recovery data lives in
 	// Sites[].RecoveryState/DivergentGtid/DivergentTxnCount — consult those
 	// when more than one site can be in recovery at once.
-	RecoverySite      string
-	RecoveryState     string // "", "RecoveryInProgress", or "RecoveryBlocked"
-	DivergentGtid     string
-	DivergentTxnCount int64
+	RecoverySite         string
+	RecoveryState        string // "", "RecoveryInProgress", or "RecoveryBlocked"
+	DivergentGtid        string
+	DivergentTxnCount    int64
+	DivergenceDetectedBy string
+	DivergenceComparedTo string
+
+	// DivergentPromotion is set while a promotion of a divergent site has
+	// not yet been persisted as the DivergentPromotion condition.
+	DivergentPromotion *DivergentPromotion
 
 	// KeyringPromotionSkipped / KeyringPromotionRefused name sites the
 	// last applyCrossSiteAction decision skipped or refused because they
@@ -367,6 +378,14 @@ type TopologyManager struct {
 	// Protected by mu.
 	authorityEpoch uint64
 
+	// authorityChanges counts completed authority changes only: a recorded
+	// promotion (emergency, planned or handoff), a successful primary
+	// re-assert, a fresh-deploy seed. Unlike authorityEpoch it does not move
+	// when an ordered update merely claims the mutation window, so the
+	// replica GTID audit can force a pass on it without a failing rollout
+	// forcing one every poll. Protected by mu.
+	authorityChanges uint64
+
 	// DNS steering state. reconcileDNS drives the record to the CURRENT
 	// active site on every poll; these two fields only memoize what this
 	// process knows about the record so a converged cluster does not
@@ -404,6 +423,25 @@ type TopologyManager struct {
 	// overwrite another's, silently under-reporting lost transactions.
 	// Protected by mu.
 	recovery map[string]*siteRecovery
+
+	// gtidAudit is the replica GTID audit's per-site schedule, and
+	// gtidAuditPrimary/gtidAuditPrimaryUUID/gtidAuditAuthority the primary
+	// and authorityChanges value its last pass compared against: a
+	// different primary, or a recorded authority change, forces a pass over
+	// every follower. gtidAuditSourceUUID is
+	// each follower's last reported Source_UUID; a change for a follower of
+	// the active host means the primary was replaced under the same name,
+	// which also forces a pass. pendingDivergentPromotion is a promotion of a divergent
+	// site not yet persisted as the DivergentPromotion condition.
+	// lastDivergentStallLog rate-limits the ordered update's stall warning.
+	// All protected by mu.
+	gtidAudit                 map[string]*gtidAuditSchedule
+	gtidAuditPrimary          string
+	gtidAuditPrimaryUUID      string
+	gtidAuditAuthority        uint64
+	gtidAuditSourceUUID       map[string]string
+	pendingDivergentPromotion *DivergentPromotion
+	lastDivergentStallLog     time.Time
 
 	// lastReassert is when checkPrimaryReassert last restored (or attempted
 	// to restore) writability on a fenced promoted primary. Rate-limits the
@@ -608,6 +646,8 @@ type SiteStatusEntry struct {
 	RecoveryState             string `json:"recoveryState,omitempty"`
 	DivergentGtid             string `json:"divergentGtid,omitempty"`
 	DivergentTransactionCount *int64 `json:"divergentTransactionCount,omitempty"`
+	DivergenceDetectedBy      string `json:"divergenceDetectedBy,omitempty"`
+	DivergenceComparedTo      string `json:"divergenceComparedTo,omitempty"`
 }
 
 // StatusResponse is returned by the /status endpoint.
@@ -638,6 +678,13 @@ type siteRecovery struct {
 	retryAfter     time.Time
 	divergentGtid  string
 	divergentCount int64
+	// detectedBy names the check that recorded the divergence
+	// (divergenceDetectedByRecovery or divergenceDetectedByAudit) and
+	// comparedTo the primary the set was computed against. Both are set
+	// only while state is recoveryStateBlocked; comparedTo may be empty for
+	// a block restored from a status written before it was recorded.
+	detectedBy     string
+	comparedTo     string
 	drainStartedAt time.Time
 	drainComplete  bool
 }
@@ -675,20 +722,22 @@ func NewTopologyManagerWithClock(cfg TopologyConfig, siteCheckers []mysql.Checke
 		}
 	}
 	return &TopologyManager{
-		cfg:              cfg,
-		sites:            sites,
-		failover:         failover,
-		failoverCooldown: cooldown,
-		updater:          updater,
-		bootstrap:        bootstrap,
-		bootstrapCfg:     bootstrapCfg,
-		tainter:          tainter,
-		hub:              hub,
-		dns:              dns,
-		logger:           logger,
-		clock:            clk,
-		sleep:            time.Sleep,
-		recovery:         make(map[string]*siteRecovery),
+		cfg:                 cfg,
+		sites:               sites,
+		failover:            failover,
+		failoverCooldown:    cooldown,
+		updater:             updater,
+		bootstrap:           bootstrap,
+		bootstrapCfg:        bootstrapCfg,
+		tainter:             tainter,
+		hub:                 hub,
+		dns:                 dns,
+		logger:              logger,
+		clock:               clk,
+		sleep:               time.Sleep,
+		recovery:            make(map[string]*siteRecovery),
+		gtidAudit:           make(map[string]*gtidAuditSchedule),
+		gtidAuditSourceUUID: make(map[string]string),
 	}
 }
 
@@ -736,6 +785,7 @@ func (tm *TopologyManager) recordFailover(ctx context.Context, now time.Time, ta
 
 	tm.mu.Lock()
 	tm.authorityEpoch++
+	tm.authorityChanges++
 	tm.lastActiveSite, tm.lastActiveSiteNamed = target, true
 	tm.deploymentAuthorityLocked(target)
 	tm.promotionGtidExecuted = promotionGtid
@@ -852,12 +902,24 @@ func (tm *TopologyManager) flushFailoverState(ctx context.Context, wait bool) {
 // zero retry timestamp makes the restarted process re-verify the divergence
 // report on its first qualifying poll.
 func (tm *TopologyManager) SetRecoveryBlocked(site, divergentGtid string, divergentCount int64) {
+	tm.SetRecoveryBlockedFrom(site, divergentGtid, divergentCount, "", "")
+}
+
+// SetRecoveryBlockedFrom is SetRecoveryBlocked with the report's
+// provenance: the check that recorded it and the primary it was compared
+// against. The restored block is evidence, not a fresh proof: only a new
+// containment check against a confirmed primary clears it, and a site that
+// is itself the primary when the block is restored is recorded as a
+// divergent promotion rather than compared with itself.
+func (tm *TopologyManager) SetRecoveryBlockedFrom(site, divergentGtid string, divergentCount int64, detectedBy, comparedTo string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.recovery[site] = &siteRecovery{
 		state:          recoveryStateBlocked,
 		divergentGtid:  divergentGtid,
 		divergentCount: divergentCount,
+		detectedBy:     detectedBy,
+		comparedTo:     comparedTo,
 	}
 }
 
@@ -942,6 +1004,8 @@ func (tm *TopologyManager) Status() StatusResponse {
 					c := rec.divergentCount
 					sites[i].DivergentTransactionCount = &c
 				}
+				sites[i].DivergenceDetectedBy = rec.detectedBy
+				sites[i].DivergenceComparedTo = rec.comparedTo
 			}
 		}
 	}
@@ -1372,8 +1436,13 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	}
 	convergenceChanged = convergenceChanged || sourceProbeChanged
 
+	// Audit followers for transactions the primary lacks, whatever their
+	// thread health. After failure handling and bounded, so it cannot delay
+	// emergency detection by more than one probe timeout.
+	auditChanged := tm.auditFollowerDivergence(ctx, siteRepl, replicaProbeFailed)
+
 	// Check if old primary recovery is needed.
-	recoveryChanged := tm.checkRecoveryWithConvergence(ctx, siteRepl, handledConvergence)
+	recoveryChanged := tm.checkRecoveryWithConvergence(ctx, siteRepl, handledConvergence) || auditChanged
 
 	// Restore writability on the promoted primary if its sidecar fenced
 	// it back to read-only and no writable site remains (poll-driven so
@@ -1485,6 +1554,13 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 				}
 				snapshot.BootstrapPhase = string(tm.bootstrapPhase)
 				snapshot.BootstrapSource = tm.bootstrapSource
+				// A note acknowledged since the snapshot was built must not
+				// be written again: an administrator may have removed it.
+				snapshot.DivergentPromotion = nil
+				if p := tm.pendingDivergentPromotion; p != nil {
+					note := *p
+					snapshot.DivergentPromotion = &note
+				}
 				snapshot.BootstrapError = ""
 				if tm.bootstrapErr != nil {
 					snapshot.BootstrapError = tm.bootstrapErr.Error()
@@ -1735,6 +1811,16 @@ func (tm *TopologyManager) cloneTimeout() time.Duration {
 	return tm.bootstrapCfg.CloneTimeout
 }
 
+// AckDivergentPromotion drops the pending divergent-promotion note once the
+// runner has persisted it. A newer note recorded meanwhile is kept.
+func (tm *TopologyManager) AckDivergentPromotion(note DivergentPromotion) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if p := tm.pendingDivergentPromotion; p != nil && *p == note {
+		tm.pendingDivergentPromotion = nil
+	}
+}
+
 // MarkStatusWriteResult records whether the most recent CR /status write
 // succeeded. A failed write (err != nil) arms a per-poll retry so a
 // transiently-denied status update self-heals once the write is permitted
@@ -1805,6 +1891,8 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 			if rec.state == recoveryStateBlocked {
 				sites[i].DivergentGtid = rec.divergentGtid
 				sites[i].DivergentTxnCount = rec.divergentCount
+				sites[i].DivergenceDetectedBy = rec.detectedBy
+				sites[i].DivergenceComparedTo = rec.comparedTo
 			}
 		}
 	}
@@ -1841,16 +1929,34 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 	// RecoveryInProgress one regardless of declared order: blocked means
 	// divergent transactions await a human, and the RecoveryPending
 	// condition's reason must not mask that behind a routine rejoin.
-	for i := range sites {
-		if sites[i].RecoveryState == "" {
-			continue
+	// An old primary's block outranks a replica-audit block: it is the one
+	// that also gates the deployment API, so the condition names it.
+	rank := func(s SiteSnapshot) int {
+		switch {
+		case s.RecoveryState == recoveryStateBlocked && s.DivergenceDetectedBy != divergenceDetectedByAudit:
+			return 3
+		case s.RecoveryState == recoveryStateBlocked:
+			return 2
+		case s.RecoveryState != "":
+			return 1
 		}
-		if snap.RecoveryState == "" || (sites[i].RecoveryState == recoveryStateBlocked && snap.RecoveryState != recoveryStateBlocked) {
+		return 0
+	}
+	best := 0
+	for i := range sites {
+		if r := rank(sites[i]); r > best {
+			best = r
 			snap.RecoverySite = sites[i].Name
 			snap.RecoveryState = sites[i].RecoveryState
 			snap.DivergentGtid = sites[i].DivergentGtid
 			snap.DivergentTxnCount = sites[i].DivergentTxnCount
+			snap.DivergenceDetectedBy = sites[i].DivergenceDetectedBy
+			snap.DivergenceComparedTo = sites[i].DivergenceComparedTo
 		}
+	}
+	if p := tm.pendingDivergentPromotion; p != nil {
+		note := *p
+		snap.DivergentPromotion = &note
 	}
 	if tm.bootstrapErr != nil {
 		snap.BootstrapError = tm.bootstrapErr.Error()
@@ -2558,20 +2664,49 @@ func (tm *TopologyManager) pickFreshestCandidate(ctx context.Context, candidates
 		}
 	}
 
-	best := -1
+	// A candidate with a recorded divergence block holds transactions the
+	// primary it was compared against lacks. Freshness alone would prefer
+	// it whenever it is a superset, which is exactly when its extras are in
+	// question, so candidates are partitioned: the freshest clean candidate
+	// wins, and a divergent one is promoted only when no clean candidate
+	// remains. Emergency failover is never refused for divergence.
+	divergent := make([]*siteRecovery, len(infos))
+	tm.mu.RLock()
 	for i := range infos {
-		if !infos[i].ok {
-			continue
+		if rec := tm.recovery[infos[i].name]; rec != nil && rec.state == recoveryStateBlocked {
+			copied := *rec
+			divergent[i] = &copied
 		}
-		if best < 0 {
-			best = i
-			continue
+	}
+	tm.mu.RUnlock()
+	freshest := func(wantDivergent bool) int {
+		best := -1
+		for i := range infos {
+			if !infos[i].ok || (divergent[i] != nil) != wantDivergent {
+				continue
+			}
+			if best < 0 {
+				best = i
+				continue
+			}
+			// A strictly-newer GTID set wins over the current best;
+			// otherwise keep the earlier (higher-priority) candidate.
+			if infos[i].gtid.Contains(infos[best].gtid) && !infos[best].gtid.Contains(infos[i].gtid) {
+				best = i
+			}
 		}
-		// A strictly-newer GTID set wins over the current best;
-		// otherwise keep the earlier (higher-priority) candidate.
-		if infos[i].gtid.Contains(infos[best].gtid) && !infos[best].gtid.Contains(infos[i].gtid) {
-			best = i
-		}
+		return best
+	}
+	best := freshest(false)
+	if skipped := freshest(true); best >= 0 && skipped >= 0 {
+		tm.logger.Warn("failover picker: skipping divergent candidate",
+			"site", infos[skipped].name, "divergentTransactions", divergent[skipped].divergentCount,
+			"divergentGtid", truncateGtidSet(divergent[skipped].divergentGtid), "selected", infos[best].name)
+	} else if best < 0 && skipped >= 0 {
+		best = skipped
+		tm.logger.Error("failover picker: promoting a divergent candidate; no other candidate remains",
+			"site", infos[best].name, "divergentTransactions", divergent[best].divergentCount,
+			"divergentGtid", truncateGtidSet(divergent[best].divergentGtid), "comparedTo", divergent[best].comparedTo)
 	}
 	if best < 0 {
 		return ""
@@ -2773,9 +2908,17 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	}
 	tm.mu.RLock()
 	blocked := tm.keyringRotationBlockedLocked(target)
+	var divergence siteRecovery
+	if rec := tm.recovery[target]; rec != nil && rec.state == recoveryStateBlocked {
+		divergence = *rec
+	}
 	tm.mu.RUnlock()
 	if blocked {
 		return "", fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
+	}
+	if divergence.state == recoveryStateBlocked {
+		return "", fmt.Errorf("%w: site %q has %d transactions the primary lacks (%s)",
+			errDivergentTarget, target, divergence.divergentCount, truncateGtidSet(divergence.divergentGtid))
 	}
 
 	var sourceChecker mysql.Checker
@@ -2819,6 +2962,11 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 // decide whether to retry (transient lookup failure is impossible — the
 // topology manager only forgets sites when it restarts).
 var errSiteNotFound = fmt.Errorf("planned-failover: site not found in topology manager")
+
+// errDivergentTarget is returned by PlannedPromote for a target holding
+// transactions the primary lacks; promoting it would make them
+// authoritative.
+var errDivergentTarget = errors.New("planned-failover: target is divergent")
 
 // KeyringGate is consulted before a clone into a site that may be
 // running encryption-at-rest. RequestKeyringUnseal returns true when the
@@ -3049,11 +3197,17 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 		tm.mu.RLock()
 		rotationBlocked := tm.keyringRotationBlockedLocked(site.name)
 		reclonePending := tm.restoreReclonePendingLocked(site.name)
+		var divergence siteRecovery
+		if rec := tm.recovery[site.name]; rec != nil && rec.state == recoveryStateBlocked {
+			divergence = *rec
+		}
 		tm.mu.RUnlock()
 		followers = append(followers, UpdateTarget{
 			Name: site.name, Host: site.host, Checker: site.mysql, Promotable: site.isPromotable(),
 			Drifted: drifted[site.name], ExpectedSource: activeSite.host,
 			RotationBlocked: rotationBlocked, ReclonePending: reclonePending,
+			DivergenceBlocked:     divergence.state == recoveryStateBlocked,
+			DivergentTransactions: divergence.divergentCount, DivergentGtid: divergence.divergentGtid,
 		})
 	}
 	if drifted[activeName] {
@@ -3061,6 +3215,7 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 			return false
 		}
 		haveStandby := false
+		var divergentStandbys []UpdateTarget
 		for i := range tm.sites {
 			if tm.sites[i].name == activeName || !tm.sites[i].isPromotable() || !tm.sites[i].isHealthyReplica() {
 				continue
@@ -3074,8 +3229,15 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 			if blocked {
 				continue
 			}
+			if target := followerTarget(followers, tm.sites[i].name); target != nil && target.DivergenceBlocked {
+				divergentStandbys = append(divergentStandbys, *target)
+				continue
+			}
 			haveStandby = true
 			break
+		}
+		if !haveStandby && len(divergentStandbys) > 0 {
+			tm.warnDivergentUpdateStall(activeName, divergentStandbys)
 		}
 		if !haveStandby {
 			// A drifted follower that is not a healthy replica (divergent,
@@ -3160,6 +3322,13 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 		})
 		if err != nil {
 			tm.logger.Error("ordered update failed", "error", err)
+			// Only the audit records divergence; let it look at the
+			// refused candidate on the next poll instead of after its
+			// interval, so the update stops retrying a doomed handoff.
+			var divergent *DivergentCandidateError
+			if errors.As(err, &divergent) {
+				tm.wakeGTIDAudit(divergent.Candidate)
+			}
 		}
 		tm.mu.Lock()
 		completed := make(map[string]bool, len(processed))
@@ -3181,6 +3350,36 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 	}()
 
 	return true
+}
+
+func followerTarget(followers []UpdateTarget, name string) *UpdateTarget {
+	for i := range followers {
+		if followers[i].Name == name {
+			return &followers[i]
+		}
+	}
+	return nil
+}
+
+// warnDivergentUpdateStall reports, at most once per recoveryRetryDelay,
+// that the active site's update waits because every otherwise eligible
+// standby is divergent. The stall is intended: the update resumes once the
+// standby is recloned or the primary contains its extra transactions.
+func (tm *TopologyManager) warnDivergentUpdateStall(active string, standbys []UpdateTarget) {
+	tm.mu.Lock()
+	quiet := !tm.lastDivergentStallLog.IsZero() && tm.clock.Since(tm.lastDivergentStallLog) < recoveryRetryDelay
+	if !quiet {
+		tm.lastDivergentStallLog = tm.clock.Now()
+	}
+	tm.mu.Unlock()
+	if quiet {
+		return
+	}
+	for _, s := range standbys {
+		tm.logger.Warn("ordered update: active-site update stalled; standby is divergent",
+			"active", active, "site", s.Name, "divergentTransactions", s.DivergentTransactions,
+			"divergentGtid", truncateGtidSet(s.DivergentGtid), "reason", divergentStandbyMessage(s))
+	}
 }
 
 // emitStatusSnapshot sends a TopologySnapshot through the status callback
@@ -3609,6 +3808,7 @@ func (tm *TopologyManager) startBootstrap(ctx context.Context) {
 	// checkPrimaryReassert restore the seed if a fence lands anyway.
 	tm.mu.Lock()
 	tm.authorityEpoch++
+	tm.authorityChanges++
 	tm.lastActiveSite, tm.lastActiveSiteNamed = seed, true
 	tm.deploymentAuthorityLocked(seed)
 	tm.promotedSite = seed
@@ -4307,6 +4507,23 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 			tm.logger.Warn("primary re-assert: failed to parse peer GTID_EXECUTED", "site", s.name, "error", gerr)
 			return false
 		}
+		// A peer's recorded divergence is already reported and stays on the
+		// peer, which keeps its block and is re-audited against the
+		// re-asserted primary. Holding it against the target would wedge a
+		// group whose emergency failover deliberately chose a clean
+		// candidate over that peer. Anything beyond the recorded set still
+		// refuses.
+		tm.mu.RLock()
+		var recorded string
+		if rec := tm.recovery[s.name]; rec != nil && rec.state == recoveryStateBlocked {
+			recorded = rec.divergentGtid
+		}
+		tm.mu.RUnlock()
+		if recorded != "" {
+			if set, perr := mysql.ParseGTIDSet(recorded); perr == nil {
+				peerGtid = peerGtid.Subtract(set)
+			}
+		}
 		if !targetGtid.Contains(peerGtid) {
 			tm.logger.Warn("primary re-assert refused: peer has transactions the target lacks — divergence needs human review",
 				"site", s.name, "peerGtid", peerGtidStr, "targetGtid", targetGtidStr)
@@ -4345,6 +4562,9 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 		return true
 	}
 	metrics.PrimaryReassertTotal.WithLabelValues(target).Inc()
+	tm.mu.Lock()
+	tm.authorityChanges++
+	tm.mu.Unlock()
 
 	// Best-effort DNS flip: idempotent when DNS already points at the
 	// target, and heals the case where the original promotion recorded
@@ -4391,7 +4611,10 @@ func (tm *TopologyManager) bootReadOnlyOnly(ctx context.Context, site *siteTrack
 // writable or is a healthy, source-converged replica. Before a recovered
 // replica is marked done, the operator performs the post-fence drain that
 // closes stale sessions surviving the sidecar's best-effort eviction. This
-// also covers RecoveryInProgress restored after an operator restart.
+// also covers RecoveryInProgress restored after an operator restart. A
+// RecoveryBlocked marker on a read-only site is never cleared here: thread
+// health is not a containment proof. On the confirmed primary it becomes a
+// DivergentPromotion note.
 func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRepl []*mysql.ReplicaStatus) bool {
 	cleared := false
 	for i := range tm.sites {
@@ -4420,6 +4643,18 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 					tm.mu.Unlock()
 					continue
 				}
+				// The divergent site is the primary now: its extra
+				// transactions are authoritative history. The block no
+				// longer applies (there is nothing to compare it with but
+				// itself), so record the fact durably instead of dropping it.
+				tm.mu.Lock()
+				note := DivergentPromotion{Site: name, DivergentGtid: rec.divergentGtid,
+					DivergentTransactions: rec.divergentCount, ComparedTo: rec.comparedTo}
+				tm.pendingDivergentPromotion = &note
+				tm.mu.Unlock()
+				tm.logger.Error("divergent site promoted; its extra transactions are now part of the primary's history",
+					"site", name, "divergentTransactions", note.DivergentTransactions,
+					"divergentGtid", truncateGtidSet(note.DivergentGtid), "comparedTo", note.ComparedTo)
 			}
 			tm.mu.Lock()
 			delete(tm.recovery, name)
@@ -4430,6 +4665,14 @@ func (tm *TopologyManager) clearHealthyRecoverySites(ctx context.Context, siteRe
 			continue
 		}
 		if tm.sites[i].state != state.StateReadOnly {
+			continue
+		}
+		if recState == recoveryStateBlocked {
+			// Healthy threads do not prove the site holds nothing the
+			// primary lacks: #202's demoted site replicated normally with
+			// 221 extra transactions. Only a fresh containment proof clears
+			// a block (the replica audit, or old-primary recovery's own
+			// re-check for a site without a channel).
 			continue
 		}
 		if i >= len(siteRepl) || !replicaStatusHealthy(siteRepl[i]) {
@@ -4694,6 +4937,7 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 		rec.retryAfter = tm.clock.Now().Add(recoveryRetryDelay)
 		rec.divergentGtid = ""
 		rec.divergentCount = 0
+		rec.detectedBy, rec.comparedTo = "", ""
 		tm.mu.Unlock()
 		metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(0)
 		// Persist RecoveryInProgress before RecoverOldPrimary starts. The
@@ -4727,7 +4971,9 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 			"divergentTransactions", count,
 			"divergentGtid", divergent.String(),
 			"oldPrimaryGtid", oldGtidStr,
-			"newPrimaryGtid", newGtidStr)
+			"newPrimaryGtid", newGtidStr,
+			"detectedBy", divergenceDetectedByRecovery,
+			"primary", newPrimary.name)
 	}
 
 	tm.mu.Lock()
@@ -4743,6 +4989,8 @@ func (tm *TopologyManager) initiateRecovery(ctx context.Context, oldPrimaryIdx, 
 	rec.retryAfter = tm.clock.Now().Add(recoveryRetryDelay)
 	rec.divergentGtid = divergent.String()
 	rec.divergentCount = count
+	rec.detectedBy = divergenceDetectedByRecovery
+	rec.comparedTo = newPrimary.name
 	tm.mu.Unlock()
 
 	metrics.DivergentTransactions.WithLabelValues(oldPrimary.name).Set(float64(count))

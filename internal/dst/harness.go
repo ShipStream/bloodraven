@@ -304,7 +304,7 @@ func (r *trialRunner) buildManager() {
 			case "RecoveryInProgress":
 				tm.SetRecoveryInProgress(site.Name)
 			case "RecoveryBlocked":
-				tm.SetRecoveryBlocked(site.Name, site.DivergentGtid, site.DivergentTxnCount)
+				tm.SetRecoveryBlockedFrom(site.Name, site.DivergentGtid, site.DivergentTxnCount, site.DivergenceDetectedBy, site.DivergenceComparedTo)
 			}
 		}
 	}

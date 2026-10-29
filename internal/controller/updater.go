@@ -73,6 +73,14 @@ type UpdateTarget struct {
 	// the site yet (it holds pre-restore data). Like RotationBlocked, it
 	// excludes the site from the handoff.
 	ReclonePending bool
+	// DivergenceBlocked is true when the site holds transactions the
+	// primary lacks (status.sites[].divergentGtid). Promoting it would make
+	// that history authoritative, so it is not a handoff target until it
+	// is recloned or the primary contains the set. DivergentTransactions
+	// and DivergentGtid describe the recorded set for the refusal message.
+	DivergenceBlocked     bool
+	DivergentTransactions int64
+	DivergentGtid         string
 }
 
 // NewUpdateController creates a new UpdateController.
@@ -233,7 +241,7 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		processedFollowers[name] = struct{}{}
 	}
 	var handoff *UpdateTarget
-	var rotatingStandby, pendingStandby []string
+	var rotatingStandby, pendingStandby, divergentStandby []string
 	for i := range followers {
 		if !followers[i].Promotable {
 			continue
@@ -244,6 +252,10 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		}
 		if followers[i].ReclonePending {
 			pendingStandby = append(pendingStandby, followers[i].Name)
+			continue
+		}
+		if followers[i].DivergenceBlocked {
+			divergentStandby = append(divergentStandby, divergentStandbyMessage(followers[i]))
 			continue
 		}
 		if followers[i].Drifted {
@@ -262,6 +274,9 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 		}
 		if len(pendingStandby) > 0 {
 			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s pending post-restore reclone; wait for status.restoreReclones to drain", strings.Join(pendingStandby, ", "))
+		}
+		if len(divergentStandby) > 0 {
+			return processed, fmt.Errorf("no healthy promotable standby available for active-site update: %s", strings.Join(divergentStandby, "; "))
 		}
 		return processed, fmt.Errorf("no healthy promotable standby available for active-site update")
 	}
@@ -309,6 +324,13 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	processed = append(processed, active.Name)
 	u.setPhase(UpdatePhaseComplete)
 	return processed, nil
+}
+
+// divergentStandbyMessage explains why a standby with recorded divergence
+// cannot take the active site's role.
+func divergentStandbyMessage(t UpdateTarget) string {
+	return fmt.Sprintf("%s is divergent (%d transactions the primary lacks); reclone or reconcile before the active site can be updated",
+		t.Name, t.DivergentTransactions)
 }
 
 // handoffOptions returns the handoff budgets, watching the source with

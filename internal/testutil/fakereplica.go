@@ -54,6 +54,11 @@ type FakeReplicaState struct {
 	ExecutedGtidSet  string
 	ReadOnly         bool
 	SuperReadOnly    bool
+	// ServerUUID is reported as @@server_uuid.
+	ServerUUID string
+	// SourceUUID is reported as Source_UUID: the server_uuid of the source
+	// the receiver last connected to.
+	SourceUUID string
 	// Discarded accumulates the retrieved-but-unexecuted transactions that
 	// RESET REPLICA ALL deleted with the relay log.
 	Discarded string
@@ -76,6 +81,14 @@ func (f *FakeReplica) OnPoll(fn func(poll int, s *FakeReplicaState)) {
 // Checker returns a real mysql.Checker connected to this fake.
 func (f *FakeReplica) Checker() mysql.Checker {
 	return mysql.NewCheckerFromPools(sql.OpenDB(f), sql.OpenDB(f))
+}
+
+// Mutate applies fn to the replica state under its lock, for a test that
+// changes the server between statements.
+func (f *FakeReplica) Mutate(fn func(s *FakeReplicaState)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(&f.state)
 }
 
 // State returns a copy of the current state.
@@ -169,6 +182,7 @@ func (c *fakeReplicaConn) ExecContext(_ context.Context, query string, args []dr
 		*s = FakeReplicaState{
 			ExecutedGtidSet: s.ExecutedGtidSet, ReadOnly: s.ReadOnly,
 			SuperReadOnly: s.SuperReadOnly, Discarded: s.Discarded,
+			ServerUUID: s.ServerUUID,
 		}
 	case strings.HasPrefix(query, "SET GLOBAL super_read_only = "):
 		on := strings.TrimPrefix(query, "SET GLOBAL super_read_only = ") == "ON"
@@ -210,6 +224,8 @@ func (c *fakeReplicaConn) QueryContext(_ context.Context, query string, args []d
 		return &fakeRows{cols: replicaStatusColumns, rows: [][]driver.Value{replicaStatusRow(s)}}, nil
 	case "SELECT @@global.gtid_executed":
 		return &fakeRows{cols: []string{"@@global.gtid_executed"}, rows: [][]driver.Value{{s.ExecutedGtidSet}}}, nil
+	case "SELECT @@server_uuid, @@global.gtid_executed":
+		return &fakeRows{cols: []string{"@@server_uuid", "@@global.gtid_executed"}, rows: [][]driver.Value{{s.ServerUUID, s.ExecutedGtidSet}}}, nil
 	case "SELECT @@read_only":
 		v := int64(0)
 		if s.ReadOnly {
@@ -224,7 +240,7 @@ var replicaStatusColumns = []string{
 	"Source_Host", "Replica_IO_Running", "Replica_SQL_Running",
 	"Last_Errno", "Last_Error", "Seconds_Behind_Source",
 	"Last_IO_Errno", "Last_IO_Error", "Last_SQL_Errno", "Last_SQL_Error",
-	"Retrieved_Gtid_Set", "Executed_Gtid_Set",
+	"Retrieved_Gtid_Set", "Executed_Gtid_Set", "Source_UUID",
 }
 
 func replicaStatusRow(s *FakeReplicaState) []driver.Value {
@@ -247,7 +263,7 @@ func replicaStatusRow(s *FakeReplicaState) []driver.Value {
 		s.SourceHost, io, sqlRunning,
 		strconv.Itoa(s.LastSQLErrno), s.LastSQLError, sbs,
 		strconv.Itoa(s.LastIOErrno), s.LastIOError, strconv.Itoa(s.LastSQLErrno), s.LastSQLError,
-		s.RetrievedGtidSet, s.ExecutedGtidSet,
+		s.RetrievedGtidSet, s.ExecutedGtidSet, s.SourceUUID,
 	}
 }
 

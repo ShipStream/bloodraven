@@ -212,6 +212,26 @@ func (m *checker) CheckSuperReadOnly(ctx context.Context) (bool, error) {
 	return superReadOnly == 1, nil
 }
 
+// ReadGTIDSnapshot reads @@server_uuid and @@global.gtid_executed in one
+// statement, so the set is known to belong to the server that reported
+// the identity.
+func (m *checker) ReadGTIDSnapshot(ctx context.Context) (GTIDSnapshot, error) {
+	var snap GTIDSnapshot
+	if err := m.db.QueryRowContext(ctx, "SELECT @@server_uuid, @@global.gtid_executed").Scan(&snap.ServerUUID, &snap.GtidExecuted); err != nil {
+		return GTIDSnapshot{}, fmt.Errorf("query server_uuid and gtid_executed: %w", err)
+	}
+	snap.ServerUUID = strings.TrimSpace(snap.ServerUUID)
+	snap.GtidExecuted = strings.TrimSpace(snap.GtidExecuted)
+	return snap, nil
+}
+
+// GTIDSnapshot is one server's identity and executed GTID set, read
+// together.
+type GTIDSnapshot struct {
+	ServerUUID   string
+	GtidExecuted string
+}
+
 func (m *checker) Promote(ctx context.Context) error {
 	stmts := []string{
 		"STOP REPLICA",

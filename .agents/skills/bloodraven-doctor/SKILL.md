@@ -25,6 +25,7 @@ When an operator or developer encounters issues with a cluster, replication, fai
    - State the **Data Loss Risk (RPO / RTO)**.
    - Present the exact command and seek user confirmation.
 4. **Dynamic Container Resolution**: Never assume fixed container names (e.g. `sidecar` vs `bloodraven-sidecar`). Always discover container names dynamically from `.spec.containers[*].name`. Helper scripts in `scripts/` handle this automatically.
+5. **Resource name**: the `mfg` short name exists only once the v1.6.0 CRD is applied. If `kubectl get mfg` reports "the server doesn't have a resource type", use `mysqlfailovergroup` (or `mysqlfailovergroups.shipstream.io`); the helper scripts already do.
 
 ---
 
@@ -95,18 +96,20 @@ Consult [references/troubleshooting_playbooks.md](./references/troubleshooting_p
 - **Action**: Refer to [Split-Brain Recovery Playbook](./references/troubleshooting_playbooks.md#split-brain--dual-writable-recovery).
 
 ### 2. Replication & GTID Divergence
-- **Symptom**: High replication lag, `SecondsBehindSource > 0`, replication stopped, or `DivergentTransactionsDetected`.
+- **Symptom**: High replication lag, `SecondsBehindSource > 0`, replication stopped, `Degraded=True` with reason `DivergentTransactions`, Events `DataLossDetected` / `DivergentReplicaDetected`, or an ordered update / planned failover refusing a divergent target.
 - **Probe**:
   ```bash
-  # Run GTID audit script
+  # Follower-first audit: reads each follower, then GTID_SUBTRACT on the primary.
+  # Exit 0 all CLEAN, 2 a follower DIVERGENT, 3 a follower UNKNOWN (UNKNOWN is not clean).
   ./.agents/skills/bloodraven-doctor/scripts/gtid-audit.sh -n <namespace> <group-name>
+  # What the operator recorded (divergenceDetectedBy is OldPrimaryRecovery or ReplicaAudit):
+  kubectl get mysqlfailovergroup <group-name> -n <namespace> -o jsonpath='{range .status.sites[*]}{.name}{": "}{.recoveryState}{" by="}{.divergenceDetectedBy}{" vs="}{.divergenceComparedTo}{" "}{.divergentGtid}{"\n"}{end}'
   ```
+- **Key fact**: a divergent replica can keep replicating with healthy IO/SQL threads. Thread health never proves the replica holds nothing the primary lacks (issue #202). Since v1.6.0 the operator audits replicas every ~30s, keeps the block until a fresh containment proof, and refuses to promote a divergent site in ordered updates and planned failovers; emergency failover only ranks it last.
 - **Action**:
   - If replica simply stopped or lagged due to network, restart replication or wait for sync.
-  - If GTIDs diverged (errant transactions on old primary): execute safe reclone:
-    ```bash
-    kubectl bloodraven reclone <group-name> -n <namespace> --target=<divergent-site>
-    ```
+  - If GTIDs diverged on an old primary: [playbook 2](./references/troubleshooting_playbooks.md#2-divergent-transactions--errant-gtid-on-replica).
+  - If a replicating replica is divergent, or an update / planned failover refuses one: [playbook 33](./references/troubleshooting_playbooks.md#33-a-healthy-replica-reports-divergent-transactions-or-an-ordered-updateplanned-failover-refuses-a-divergent-target). Preserve the errant events, then discard them (`kubectl bloodraven reclone <group-name> <site> -n <namespace>`) or keep them by making the primary contain the set. There is no ignore setting.
 
 ### 3. Keyring & Data-at-Rest Encryption
 - **Symptom**: `KeyringNotSealed`, `KeyringEscrowMissing`, or `KeyringEscrowCorrupt`.
