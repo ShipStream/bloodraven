@@ -296,6 +296,9 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	if err := applyUpdate(ctx, active.Name); err != nil {
 		return processed, fmt.Errorf("update old active %s: %w", active.Name, err)
 	}
+	if err := u.requireOldActiveContained(ctx, active, *handoff); err != nil {
+		return processed, err
+	}
 	if err := u.failover.RecoverOldPrimary(ctx, active.Checker, handoff.Host, active.ReplUser, active.ReplPassword, active.UseSSL); err != nil {
 		return processed, fmt.Errorf("configure old active %s as replica of %s: %w", active.Name, handoff.Name, err)
 	}
@@ -309,6 +312,37 @@ func (u *UpdateController) ExecuteTargets(ctx context.Context, active UpdateTarg
 	processed = append(processed, active.Name)
 	u.setPhase(UpdatePhaseComplete)
 	return processed, nil
+}
+
+// requireOldActiveContained refuses to repoint the old active at the new
+// primary unless the new primary has executed every transaction the old
+// active holds. ExecuteHandoff already proved that on the fenced set before
+// promoting, so this is defense in depth for the step that issue #202 shows
+// is otherwise silent: CHANGE REPLICATION SOURCE on a site with transactions
+// its new source lacks leaves them as errant GTIDs on a replica that looks
+// healthy, and no later check reports them. Left fenced and unconfigured,
+// the site is picked up by old-primary recovery instead, which compares the
+// sets and reports any divergence (status.sites[].divergentGtid). A GTID set
+// that cannot be read or parsed also refuses, for the same reason.
+func (u *UpdateController) requireOldActiveContained(ctx context.Context, active, handoff UpdateTarget) error {
+	oldRaw, oldSet, err := readGTIDSetRaw(ctx, active.Checker)
+	if err != nil {
+		return fmt.Errorf("read old active %s GTID set before repointing it at %s: %w", active.Name, handoff.Name, err)
+	}
+	_, newSet, err := readGTIDSetRaw(ctx, handoff.Checker)
+	if err != nil {
+		return fmt.Errorf("read new primary %s GTID set before repointing %s: %w", handoff.Name, active.Name, err)
+	}
+	if divergent := oldSet.Subtract(newSet); !divergent.IsEmpty() {
+		u.logger.Error("ordered update: old active has transactions the new primary lacks; not repointing it",
+			"site", active.Name, "newPrimary", handoff.Name,
+			"divergentTransactions", divergent.TransactionCount(),
+			"divergentGtid", truncateGtidHint(divergent.String()),
+			"oldPrimaryGtid", truncateGtidHint(oldRaw))
+		return fmt.Errorf("old active %s has %d transactions new primary %s lacks (%s); left fenced for old-primary recovery to report",
+			active.Name, divergent.TransactionCount(), handoff.Name, truncateGtidHint(divergent.String()))
+	}
+	return nil
 }
 
 // handoffOptions returns the handoff budgets, watching the source with
