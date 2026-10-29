@@ -629,25 +629,26 @@ A healthy operator pod does not guarantee that every group has a live topology m
 ## 25. Encrypted PITR sidecar fails to init archive store
 
 ### Symptoms
-- The sidecar crash-loops with `failed to init archive store` and `permission denied` for the passphrase file.
-- Sidecar HTTP probes fail, pods are unready, and archival and sidecar fencing are unavailable.
+- Sidecar logs repeat `failed to init archive store` with `permission denied` for the passphrase file.
+- Current sidecar images keep running: the pod stays Ready and in its Services, HTTP and self-fencing work, and `/archiver/status` reports `enabled:true`, `storeReady:false`, `lastError: archive store init: ... permission denied`. The group shows `PITRArchiveReady=False` with reason `ArchiveStoreInitFailed` and one Warning `PITRArchiveNotReady` Event. Archival is stopped on that site.
+- Sidecar images that predate that behaviour exit instead: the container crash-loops, HTTP probes fail, the pod is unready, and archival and sidecar fencing are unavailable. The operator then reports `SidecarUnreachable`.
 
 ### Cause
-Older operators project `pitr-passphrase` as root-owned mode `0400`, but PITR sidecars default to UID 999 and MySQL pods have no fsGroup by default. The sidecar exits during archive-store initialization, before starting its HTTP server or fencing monitor.
+Older operators project `pitr-passphrase` as root-owned mode `0400`, but PITR sidecars default to UID 999 and MySQL pods have no fsGroup by default. Archive-store initialization cannot read the file. A current sidecar retries it with backoff (5 s doubling to 5 min) and keeps every other service running; an older sidecar exits before starting its HTTP server or fencing monitor.
 
 ### Diagnostic steps
-1. Read the previous sidecar startup log:
+1. Read the sidecar log (add `--previous` for an older, crash-looping image):
    ```bash
-   kubectl logs -n <ns> <pod> -c sidecar --previous --tail=100
+   kubectl logs -n <ns> <pod> -c sidecar --tail=100 | grep 'archive store'
    ```
 2. Inspect the pod's Secret mode and security contexts without reading Secret contents:
    ```bash
    kubectl get pod -n <ns> <pod> -o jsonpath='{.spec.volumes[?(@.name=="pitr-passphrase")].secret.defaultMode}{"\n"}{.spec.securityContext}{"\n"}{.spec.containers[?(@.name=="sidecar")].securityContext}{"\n"}'
    ```
-   JSON reports decimal modes: `256` is `0400`; `292` is `0444`. Without fsGroup, a non-root UID cannot read the root-owned `0400` projection. An unavailable `/archiver/status` is expected when initialization fails; use logs to establish the cause.
+   JSON reports decimal modes: `256` is `0400`; `292` is `0444`. Without fsGroup, a non-root UID cannot read the root-owned `0400` projection. On a current sidecar `/archiver/status` names the cause in `lastError`; on an older one it is unavailable while the container crash-loops, so use logs.
 
 ### Safe remediation
-Upgrade to the operator that projects the live sidecar passphrase as `0444`, matching PITR S3 credentials. Its PITR render-version change triggers ordered updates for existing deployments. Verify the new pod's projection mode, readiness, and `/archiver/status` after the rollout. Backup and restore Job projections keep their separate fsGroup-based permissions. Preserve the existing passphrase; adding fsGroup to an existing MySQL PVC can trigger a recursive ownership change and is unnecessary for this fix.
+Upgrade to the operator that projects the live sidecar passphrase as `0444`, matching PITR S3 credentials. Its PITR render-version change triggers ordered updates for existing deployments. Verify the new pod's projection mode, readiness, and `/archiver/status` (`storeReady:true`) after the rollout, and that `PITRArchiveReady` returns to `True`. Backup and restore Job projections keep their separate fsGroup-based permissions. Preserve the existing passphrase; adding fsGroup to an existing MySQL PVC can trigger a recursive ownership change and is unnecessary for this fix.
 
 ## 26. PITR archival stops after an encryption change
 
@@ -753,3 +754,46 @@ Restore archive delete/write access and let the sweeper retry. Do not clear reti
 
 ### Safe remediation
 Upgrade older sidecars that ignore retirement records, restore archive access or local-index readability, and let maintenance retry. Do not clear records or issue `PURGE BINARY LOGS` to make bookkeeping disappear: local files support replication catch-up. The operator defaults local expiry to 14 days; remote retention can be shorter. Preserve a separate archive-lifecycle plan before removing the last sidecar for a site.
+
+## 31. PITR enabled, pods Ready, `PITRArchiveReady=False`
+
+### Symptoms
+- `kubectl describe mfg <group>` shows `PITRArchiveReady=False` and a Warning `PITRArchiveNotReady` Event, while `Ready=True`, every MySQL pod is Ready, and applications are unaffected.
+- `status.pitr.message` lists one or more `site: error` entries; `lastArchivedTime` / `newestArchivedTime` stop advancing for that site.
+
+### Cause
+Binlog archiving has stopped on at least one site. Archiving state is deliberately not coupled to pod readiness or liveness: an archive problem never removes a pod from Services or stops self-fencing. The condition reason names the class:
+- `ArchiveStoreInitFailed`: the sidecar cannot build its archive store (unreadable passphrase or S3 credentials file, invalid S3 endpoint URL, empty PVC mount path). Immediate; the sidecar retries on its own with backoff from 5 s up to 5 min.
+- `ArchiverError`: the store is up but uploads or manifest reads fail on 2 consecutive archiver scans (`consecutiveFailedScans` ≥ 2 in `/archiver/status`), or the same error stays for 10 minutes without a scan completing. A single failed scan never sets it.
+- `ArchiverDisabled`: the sidecar reports PITR disabled on 2 consecutive polls while the spec enables it, and no ordered update is pending for the site, or the PITR spec cannot render an archiver (empty or unknown `profileName`), or the rollout has been pending for 30 minutes. While a valid rollout is pending, for up to 30 minutes, the condition is `Unknown`/`AwaitingRollout` instead, with no Event; the same applies for the first sync after a topology manager starts, before its drift set is computed.
+- `SidecarUnreachable`: the operator's poll of `/archiver/status` failed 3 times over at least 60 s, or over at least 5 minutes for a sidecar that has not answered since the operator process started. With a sidecar image older than this behaviour, this is how an archive init crash loop shows up.
+
+When sites disagree, the reason is the first that applies in that order; the message lists every affected site.
+
+Expected, self-clearing Warning `PITRArchiveNotReady` → Normal `PITRArchiveReady` pairs (no action unless the Normal never follows):
+- a pod taking more than 60 s to come back in a rollout or node move (`SidecarUnreachable`);
+- a new group or bootstrapped site taking more than 5 minutes to answer (`SidecarUnreachable`);
+- enabling PITR with `updateStrategy: Recreate` (`ArchiverDisabled` until the pods restart);
+- two failed scans in a row followed by a good one (`ArchiverError`);
+- MySQL taking more than about a minute to accept connections after a pod start, for example a long InnoDB crash recovery (`ArchiverError` with `role check: ...`);
+- a valid ordered update that is still progressing 30 minutes after a site first reported archiving disabled, for example a slow multi-site rollout after enabling PITR (`ArchiverDisabled` with `ordered update still pending after 30m`, then a Normal once the site rolls).
+
+A PVC volume left out of the pod spec does not fail store construction (only an empty mount path does): the archiver then writes to the container filesystem without error, so `PITRArchiveReady` can be `True` while nothing is on the PVC, or it fails later as `ArchiverError` if that path is not writable. A declared volume whose claim cannot be bound or mounted leaves the pod Pending, which shows as `SidecarUnreachable`. `PITRArchiveReady=True` does not prove the archive is on a PVC: check the pod's actual volumes and mounts.
+
+### Diagnostic steps
+1. Read the condition and the per-site message:
+   ```bash
+   kubectl get mfg <group> -n <ns> -o jsonpath='{range .status.conditions[?(@.type=="PITRArchiveReady")]}{.status} {.reason}: {.message}{"\n"}{end}{.status.pitr.message}{"\n"}'
+   ```
+2. Probe the sidecars: `scripts/sidecar-probe.sh -n <ns> <group> archiver`. `storeReady:false` with `lastError: archive store init: ...` confirms `ArchiveStoreInitFailed`; `uploadFailures` rises once per failed attempt. For `ArchiverError`, `consecutiveFailedScans` and `lastScanAt` show whether scans keep failing or have stopped completing.
+3. Read the sidecar log for `failed to init archive store` (ERROR when the cause changes, WARN while it repeats, with `attempt` and `retryIn`) or `archive binlog` errors.
+4. If `PITRArchiveReady` does not change while `status.pitr.message` does, look for the operator log `PITR archive condition read failed; leaving the condition as persisted`: the operator cannot read the group uncached and keeps the persisted condition until it can.
+5. For `SidecarUnreachable`, check `kubectl get pod <pod> -n <ns>` restart counts and `kubectl logs <pod> -c sidecar --previous`, and the sidecar image tag.
+
+### Safe remediation
+- `ArchiveStoreInitFailed`: fix what the error names (Secret projection mode or content, endpoint URL, PVC mount path). The next retry picks it up; look for `archive store initialized after retries`. No pod restart is needed. For passphrase `permission denied`, see playbook 25. Do not change an existing archive's passphrase to make the error go away; see playbook 26.
+- `ArchiverError`: follow the error text (storage reachability, credentials, playbook 26 for authentication or BRV1 errors).
+- `AwaitingRollout`: let the ordered update finish; check `status.updatePhase`. If it stays, the update is blocked (operator log `ordered update: deferring active-site update`, for example no healthy promotable standby). After 30 minutes the condition turns `False`/`ArchiverDisabled` with `ordered update still pending after 30m`; unblock the update (restore the standby) rather than restarting pods by hand.
+- `ArchiverDisabled`: if it persists after the rollout, check that `spec.backup.pitr.profileName` names an existing profile (look for a `BackupPITRInvalid` Event). With an empty or unknown profile the operator renders no PITR configuration into the sidecar, so it reports archiving disabled indefinitely.
+- `SidecarUnreachable` on an older sidecar image: upgrade the sidecar image; the operator rolls it through the ordered update. The ordered update waits only on MySQL replication, so watch `PITRArchiveReady` site by site instead of assuming a finished rollout means archiving works.
+- Recovery to `True` needs 2 consecutive clean poll rounds (about a minute) and emits a Normal `PITRArchiveReady` Event. Binlogs sealed during the outage are uploaded once the archiver runs, as long as MySQL still has them; check `backlogFiles` and the coverage fields afterwards.

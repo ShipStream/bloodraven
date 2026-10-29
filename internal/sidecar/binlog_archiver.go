@@ -85,6 +85,10 @@ type BinlogArchiver struct {
 	// lastUploadAt is the wall-clock time of the most recent successful
 	// archive (ManifestEntry appended). Zero until the first success.
 	lastUploadAt time.Time
+	// failedScans is the number of consecutive scan cycles (scan plus
+	// its maintenance pass) that ended with lastError set. Reset by a
+	// cycle that ends clean.
+	failedScans int64
 	// backlogFiles is the count of sealed index entries that were
 	// missing from the manifest at the end of the most recent scan.
 	// Reset every cycle. >0 means the archiver hasn't caught up yet.
@@ -262,6 +266,8 @@ func (a *BinlogArchiver) runPollOnly(ctx context.Context) {
 // is serialized by the single goroutine that owns this archiver.
 func (a *BinlogArchiver) scanAndArchive(ctx context.Context) {
 	a.setScan(time.Now())
+	// Registered first so it runs last, after maintainArchive.
+	defer a.finishScan()
 	a.historyScanBusy = false
 	defer a.maintainArchive(ctx)
 
@@ -584,7 +590,13 @@ func (a *BinlogArchiver) fetchRetentionCutoff(ctx context.Context) (retentionCov
 // surface. Exposed via /archiver/status so kubectl describe / operator
 // polling / humans can tell at a glance whether archival is running.
 type Status struct {
-	Enabled        bool      `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// StoreReady reports whether the archive store has been constructed.
+	// false means archival is configured but stopped, and LastError says
+	// why. Absent when PITR is not configured, and from sidecars that
+	// predate the field, which exit instead of serving while the store is
+	// down; readers must treat absent as "not reported", not as false.
+	StoreReady     *bool     `json:"storeReady,omitempty"`
 	Primary        bool      `json:"primary"`
 	LastScanAt     time.Time `json:"lastScanAt"`
 	FilesArchived  int64     `json:"filesArchived"`
@@ -593,9 +605,16 @@ type Status struct {
 	ManifestPrefix string    `json:"manifestPrefix"`
 	Site           string    `json:"site"`
 	// UploadFailures is the cumulative count of archive-attempt errors
-	// since sidecar start (role check, index read, manifest I/O, or
-	// per-file upload). Monotonic except across restarts.
+	// since sidecar start (archive store construction, role check, index
+	// read, manifest I/O, or per-file upload). Monotonic except across
+	// restarts.
 	UploadFailures int64 `json:"uploadFailures"`
+	// ConsecutiveFailedScans is how many archiver scans in a row ended
+	// with LastError set; 0 after a clean scan. LastError survives until
+	// the next scan, so the operator debounces on this rather than on
+	// how many of its polls saw the error. Always present, so absent
+	// means a sidecar that predates the field.
+	ConsecutiveFailedScans int64 `json:"consecutiveFailedScans"`
 	// LastUploadAt is the time of the most recent successful archive.
 	// Omitted until the archiver has appended at least one manifest
 	// entry in this process lifetime.
@@ -628,21 +647,22 @@ func (a *BinlogArchiver) Snapshot(ctx context.Context) Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return Status{
-		Enabled:            true,
-		Primary:            primary,
-		LastScanAt:         a.lastScanAt,
-		FilesArchived:      a.filesArchiv,
-		LastError:          a.lastError,
-		StorageType:        a.cfg.StorageType,
-		ManifestPrefix:     a.cfg.ManifestPrefix,
-		Site:               a.site,
-		UploadFailures:     a.uploadFailures,
-		LastUploadAt:       a.lastUploadAt,
-		BacklogFiles:       a.backlogFiles,
-		ManifestFileCount:  a.manifestFileCount,
-		ManifestBytes:      a.manifestBytes,
-		OldestArchivedTime: a.oldestArchivedTime,
-		NewestArchivedTime: a.newestArchivedTime,
+		Enabled:                true,
+		Primary:                primary,
+		LastScanAt:             a.lastScanAt,
+		FilesArchived:          a.filesArchiv,
+		LastError:              a.lastError,
+		StorageType:            a.cfg.StorageType,
+		ManifestPrefix:         a.cfg.ManifestPrefix,
+		Site:                   a.site,
+		UploadFailures:         a.uploadFailures,
+		ConsecutiveFailedScans: a.failedScans,
+		LastUploadAt:           a.lastUploadAt,
+		BacklogFiles:           a.backlogFiles,
+		ManifestFileCount:      a.manifestFileCount,
+		ManifestBytes:          a.manifestBytes,
+		OldestArchivedTime:     a.oldestArchivedTime,
+		NewestArchivedTime:     a.newestArchivedTime,
 	}
 }
 
@@ -650,6 +670,17 @@ func (a *BinlogArchiver) setScan(t time.Time) {
 	a.mu.Lock()
 	a.lastScanAt = t
 	a.mu.Unlock()
+}
+
+// finishScan counts the cycle that just ended as failed or clean.
+func (a *BinlogArchiver) finishScan() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.lastError != "" {
+		a.failedScans++
+	} else {
+		a.failedScans = 0
+	}
 }
 
 func (a *BinlogArchiver) setError(s string) {

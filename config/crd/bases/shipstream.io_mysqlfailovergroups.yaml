@@ -7132,11 +7132,12 @@ spec:
                 type: string
               pitr:
                 description: |-
-                  PITR is the API surface for surfacing a summary of the
-                  continuous binary-log archive (oldest/newest archived events,
-                  count, bytes). Reserved: the v1alpha1 controller does not yet
-                  populate this field. Live archiver health is exposed via the
-                  sidecar's /archiver/status endpoint in the meantime.
+                  PITR summarizes the continuous binary-log archive (oldest/newest
+                  archived events, count, bytes, per-site errors). The operator
+                  populates it from its periodic polls of each sidecar's
+                  /archiver/status endpoint while spec.backup.pitr.enabled is true.
+                  Whether archiving is currently running is reported by the
+                  PITRArchiveReady condition.
                 properties:
                   archivedBytes:
                     description: ArchivedBytes is the total size of archived binlog
@@ -7163,8 +7164,10 @@ spec:
                     type: string
                   message:
                     description: |-
-                      Message is a human-readable status string (e.g. a parse error
-                      from the last manifest read). Empty on the happy path.
+                      Message lists per-site problems as "site: error" joined with "; "
+                      (for example an archive store that cannot be initialized, a
+                      manifest read error, or an unreachable sidecar, in which case the
+                      coverage fields are last-known). Empty on the happy path.
                     type: string
                   newestArchivedTime:
                     description: |-

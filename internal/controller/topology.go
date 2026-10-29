@@ -538,6 +538,8 @@ type TopologyManager struct {
 	// from the desired hash. Set by the runner, consumed by checkUpdate.
 	// Protected by mu.
 	specDriftSites []string
+	// specDriftKnown is set once the runner has computed specDriftSites.
+	specDriftKnown bool
 
 	// recloneCompletedSite prevents an annotation-cleanup outage from
 	// repeating an already-successful destructive clone. Poll retries
@@ -3201,12 +3203,35 @@ func (tm *TopologyManager) emitStatusSnapshot() {
 	tm.StatusCallback(tm.buildSnapshot(siteRepl))
 }
 
+// SpecDriftSites returns the sites whose ordered update is still
+// pending: their Deployment spec-hash differed from the desired one and
+// the updater has not processed them yet.
+func (tm *TopologyManager) SpecDriftSites() []string {
+	sites, _ := tm.SpecDriftView()
+	return sites
+}
+
+// SpecDriftView is SpecDriftSites plus whether the runner has computed
+// the set yet; a new manager learns it at the runner's next sync.
+func (tm *TopologyManager) SpecDriftView() (sites []string, known bool) {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return append([]string(nil), tm.specDriftSites...), tm.specDriftKnown
+}
+
+// specDriftComputed reports whether the runner has computed the drift set.
+func (tm *TopologyManager) specDriftComputed() bool {
+	_, known := tm.SpecDriftView()
+	return known
+}
+
 // SetSpecDriftSites records which sites have spec drift (Deployment hash != desired hash).
 // Called by the runner after detecting drift.
 func (tm *TopologyManager) SetSpecDriftSites(sites []string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.specDriftSites = sites
+	tm.specDriftKnown = true
 }
 
 // maybeStartFreshDeployBootstrap starts the fresh-deploy bootstrap when no
