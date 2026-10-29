@@ -695,6 +695,11 @@ type BackupScheduleStatus struct {
 	// create a retry CR for a Failed latest attempt. Used by the
 	// scheduler loop to wake up at exactly the right moment.
 	NextRetryTime *metav1.Time `json:"nextRetryTime,omitempty"`
+
+	// RetryConflict names the existing MysqlBackup whose lineage blocks
+	// the next retry. Cleared when the conflict is no longer observed.
+	// +optional
+	RetryConflict string `json:"retryConflict,omitempty"`
 }
 
 // RestoreInPlaceSpec configures a re-runnable in-place restore that loads

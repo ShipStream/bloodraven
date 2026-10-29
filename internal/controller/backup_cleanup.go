@@ -67,7 +67,7 @@ func buildCleanupJob(in cleanupJobInputs) (*batchv1.Job, error) {
 
 	envVars := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_STORAGE_TYPE", Value: string(storageType)},
-		{Name: "BLOODRAVEN_OUTPUT_URL", Value: backup.Status.Location},
+		{Name: "BLOODRAVEN_OUTPUT_URL", Value: literalArtifactEnvValue(backup.Status.Location)},
 		{Name: "HOME", Value: mysqlshHomeMountPath},
 	}
 

@@ -284,3 +284,140 @@ The operator partially revokes the `app` user's write and DDL privileges on the 
    ```
    If the operator account restricted itself, use a separate administrator such as root; do not retry the repair through the restricted operator account. Group credential reapplication can restore an authoritative group role's global set, but it must also retain/reapply the intended `app` restriction on `mysql.*`. Avoid broad global re-grants for external/shared principals whose intended policy is unknown.
 5. Check the remaining restriction JSON and explicit schema rows, then verify the intended operation through a fresh connection as the affected principal. Retry the tenant reconcile/delete after admin recovery. Do not patch status, skip replicated transactions, disable partial revokes, or remove finalizers to hide a remaining access failure.
+
+---
+
+## 11. Restore or verification reports missing BRV1 magic
+
+### Symptoms
+
+- Restore or verification fails with `ciphertext tamper/downgrade detected` and `missing BRV1 magic` after profile encryption changed.
+- A completed backup has `EncryptionAttributionCorrected` in Events.
+
+### Diagnostic steps
+
+1. Read the backup's recorded encryption choice and producing Job name:
+   ```bash
+   kubectl get mysqlbackup <backup> -n <ns> -o jsonpath='{.status.jobName}{" encrypted="}{.status.encrypted}{" algorithm="}{.status.encryptionAlgorithm}{"\n"}'
+   ```
+2. Inspect that Job's owner reference, `shipstream.io/backup-encrypted` label, container names, and the uploader's `BLOODRAVEN_ENCRYPTION_ALGORITHM`. The `backup-encrypt-upload` main container identifies an encrypted launch. A `mysqlsh` main container without the encryption label identifies a plaintext launch. Use the original Job configuration rather than today's profile. Do not collect Secret contents or passphrases.
+3. If the owned Job is gone, preserve the audit record and verify the artifact's format through an approved storage inspection. Missing BRV1 magic on an encrypted launch can indicate tampering or a wrong source location.
+
+### Safe remediation
+
+1. Run an operator containing the attribution fix. On reconciliation it repairs completed backups from their owned Jobs and emits `EncryptionAttributionCorrected` once per correction. Profile edits affect newly created Jobs.
+2. Confirm the corrected status, then retry restore or verification. Keep the original passphrase Secret for backups whose Jobs actually encrypted them.
+3. If status and Job already agree, investigate storage identity and artifact integrity. Do not enable plaintext fallback to hide an unexplained mismatch.
+
+---
+
+## 12. Backup or restore reports Access denied with valid credentials
+
+### Symptoms
+
+- A backup or restore Job reports MySQL `Access denied` while the operator connects successfully.
+- The password includes surrounding spaces, tabs, or line endings, often from a Secret created with `--from-file`.
+
+### Diagnostic steps
+
+1. Confirm the Job mounts the intended derived MySQL credential Secret and uses the expected backup scripts ConfigMap. Check the group's credential references without decoding or collecting password contents.
+2. Inspect the `dump.py` or `restore.py` code in that ConfigMap. Fixed scripts use `_read_mysql_cred_file` to read bytes and decode UTF-8 without stripping or newline translation. Older scripts call the whitespace-normalizing `_read_cred_file` for MySQL credentials. The Go credential producer already preserves those contents.
+3. Check file presence and readability without printing values. A readable empty password file intentionally overrides the legacy environment password. A readable empty username fails validation. Missing or unreadable files can use the legacy environment fallback.
+
+### Safe remediation
+
+1. Upgrade to an operator containing the reader fix and confirm it has refreshed the shared scripts ConfigMap before retrying the Job. Do not trim or rotate valid credentials to compensate for the old reader.
+2. Retry a failed backup with `kubectl bloodraven backup <group> -n <ns>`. For a failed restore, follow the relevant restore runbook and its data handling precautions before retrying.
+3. If authentication still fails with the corrected scripts, investigate the selected MySQL user, host grants, and Secret references. Preserve intended whitespace; AWS configuration normalization is separate from MySQL credentials.
+
+---
+
+## 13. Succeeded backup cannot be found at its recorded location
+
+### Symptoms
+
+- Restore or verification cannot load a dump from a Succeeded MysqlBackup.
+- An older backup's `status.location` contains spaces where the storage prefix used underscores, or recorded binlog names and GTID tags lost underscores.
+- Cleanup reports an artifact absent while the original objects remain in storage.
+
+### Diagnostic steps
+
+1. Compare the backup's recorded location with the producing Job's main-container `BLOODRAVEN_OUTPUT_URL` and `BLOODRAVEN_STORAGE_TYPE`. Use `mysqlsh` for plaintext Jobs and `backup-encrypt-upload` for encrypted Jobs; the encrypted dump init container points at temporary staging, not the stored artifact. Do not consult today's mutable profile to reconstruct an older destination.
+2. Account for the S3 display convention: plaintext Jobs record a bucket-relative key; encrypted Jobs record `s3://<BLOODRAVEN_S3_BUCKET>/<output-prefix>/`. PVC Jobs record the original absolute output path.
+3. Inspect the completion log format. `v=2` percent-encodes token values and preserves underscores, percent signs, and whitespace. Unversioned logs used the same underscore for both original spaces and literal underscores, so the original value cannot be recovered from that log alone. Legacy tagged GTID and binlog metadata may also be damaged in already-stored status.
+
+### Safe remediation
+
+1. Upgrade to an operator and dump scripts containing the versioned codec for future completions. Older encrypted operator images can still finish with legacy lines; the fixed parser preserves their literal identity fields but cannot infer originally encoded spaces.
+2. Establish the actual artifact using the original Job inputs and storage inspection. If those are unavailable, take a replacement backup. Keep old artifacts until their identity is verified; do not release cleanup finalizers based on a guessed path.
+3. Do not globally substitute spaces and underscores in persisted status or infer original GTID tags. Future correct parsing does not reconstruct metadata already corrupted by an older controller.
+
+---
+
+## 14. Backup completed with incomplete metadata
+
+### Symptoms
+
+- `BackupMetadataIncomplete` Event or `MetadataComplete=False` on a MysqlBackup.
+- A Succeeded backup has a location but missing size, GTID, or binlog observations.
+- An older Succeeded record has an empty or underscore-damaged location.
+
+### Diagnostic steps
+
+1. Run `triage.sh` or collect `support-bundle.sh`. Their backup projections include phase, producing Job, location and metadata condition; Job projections include the owner UID and main-container storage/output fields. They do not collect credential or passphrase contents.
+2. Inspect `MetadataComplete`: `SentinelUnavailable` means a pod-list, missing completed Pod, log-stream, scanner, or bounded-read failure; `SentinelMissing` means readable logs lacked a usable completion sentinel. Check access to the completed Pod's main-container logs and API/kubelet availability. `LocationMismatch` means the Job destination was used instead of a different sentinel value.
+3. Compare `status.location` with the owned Job's effective main-container output using playbook 13's S3/PVC conventions. Kubernetes expands `$(NAME)` from earlier known environment values and reduces `$$` once; a raw env template may differ from the producer's path. Runtime Secret/ConfigMap, downward-API and service values unavailable from the Job cannot be inferred; a valid producer-reported location is retained instead. A legacy record without `MetadataComplete` keeps its producer-reported path, even if it contains literal `$(NAME)`. Only a recorded Job fallback permits raw-template repair. Consumer Jobs double literal dollars in their env values, so apply one kubelet expansion before comparing their paths with status. Do not collect those Secrets or use encrypted staging paths or a changed profile to guess a destination.
+4. `DestinationUnavailable` leaves `Ready=False`. On first completion it returns a reconcile error; on an already-Succeeded record it records a terminal repair outcome without error so retention can continue. Successful metadata repair preserves a True Ready condition; cleanup-only location recovery does not make a Running or Failed backup ready. Deletion of an unrecoverable record emits `ArtifactCleanupSkipped` naming the Job and releases the finalizer; inspect storage separately for any unlocated artifact.
+5. Deferred positive size observations can refresh the last-size gauge when the repaired backup is not older than the latest observed success. They do not repeat terminal counters, completion timestamps or Events, and older repairs do not replace newer sizes.
+
+### Safe remediation
+
+1. Restore pod-log reachability while the operator retries every 15 seconds for up to ten minutes from completion. The recovery state is persisted, so restarting the operator does not lose the retry. An empty GTID or zero size in a collected sentinel is valid and does not trigger repeated collection.
+2. If logs are gone permanently, use the recorded Job-derived location for restore or verification. Optional observations can remain absent; the backup's successful phase still reflects its completed Job and known artifact destination. Repeated repairs do not repeat terminal counters or completion Events.
+3. For historical missing or underscore-damaged locations, reconcile with the fixed operator while the original owned Job is retained. The operator verifies the original destination and repairs the record, including before deletion. If that Job is gone, establish the artifact through approved storage inspection or take a replacement backup. Never invent location substitutions or remove a cleanup finalizer based on a guessed path.
+
+---
+
+## 15. Scheduled backup fails without the expected retry
+
+### Symptoms
+
+- A scheduled MysqlBackup failed with configured retry attempts remaining, but no successor appears.
+- A retry's `status.attempt` is temporarily zero or lower than its launch attempt after a failed status patch.
+- `BackupRetryConflict` warns that an existing retry backup has different lineage.
+
+### Diagnostic steps
+
+1. Check `spec.backup.retry.maxAttempts`, the failed run's completion time, and `status.backupSchedules[].nextRetryTime`. Backoff doubles per attempt up to the configured cap; ad-hoc backups do not participate.
+2. Use the backup projections in `triage.sh` or `support-bundle.sh`. Match the failed run's UID to a successor's `shipstream.io/backup-retry-of` label. The root name/UID annotations identify the original scheduled run, and `shipstream.io/backup-attempt` is durable launch metadata. A retained higher attempt from another run does not prove that this run has a successor.
+3. Compare status and launch attempts. Retry limits use the greater value; a lost status patch does not reset a chain to attempt 1. The backup reconciler restores status from the annotation before launch or terminal observation.
+4. New names use `backup-retry-<predecessor UID hash>-r<N>`. Repeated reconciles and stale lists reuse that name and verify predecessor, root, attempt, schedule, group and profile. `BackupRetryConflict` means a name collision or altered metadata; inspect those public fields without changing credential Secrets. `status.backupSchedules[].retryConflict` names the blocking object. The operator emits the warning and log when that persisted marker changes, clears it when the conflict is no longer observed, and warns again if a resolved conflict recurs. Reconciles and operator restarts do not repeat an unchanged conflict warning. Only that retry is skipped; other schedules and group status rollups continue. An AlreadyExists/cache-NotFound race requests a five-second wake-up instead of group-wide error backoff; genuine API read failures still propagate.
+
+### Safe remediation
+
+1. If running an affected older operator, upgrade to the per-run lineage fix. Do not delete successful or failed history to make retries work; each new run receives its own chain.
+2. If backoff is pending, allow the scheduled wake-up. If a legitimate successor exists, investigate that backup's own phase and Job instead of forcing another retry of its predecessor.
+3. For a conflicting identity, establish the source of the conflicting object or metadata edit before acting. Do not rewrite lineage annotations or attempt counters to bypass `maxAttempts`. If an immediate backup is needed, use `kubectl bloodraven backup <group> -n <ns>` for an explicit new run.
+
+---
+
+## 16. Verification source does not match the expected backup
+
+### Symptoms
+
+- A newer successful backup appears while a verification is still running.
+- `BackupNotAvailable` after a selected source was deleted or recreated before Job launch.
+- `BackupIdentityMismatch` on a running legacy verification, or disagreement between status and the Job's source.
+
+### Diagnostic steps
+
+1. Collect the verification name, phase, Job name and `status.backupRef` name/UID/location/storage type. The triage and support-bundle projections include these public fields. Compare the selected UID rather than relying on a reused backup name or today's latest successful backup.
+2. Inspect the producing Job's pod-template `shipstream.io/verification-backup` JSON annotation. New Jobs pin the same tuple in immutable Job spec; the operator checks it against the source env and restores missing or drifted status from it. Existing Jobs are observed without re-fetching the source CR or current profile/derived credentials.
+3. For plaintext, compare the main container's `BLOODRAVEN_INPUT_URL` with the pinned location using the normal S3/PVC trailing-slash convention. For encrypted sources, inspect `decrypt-download` storage, bucket and `BLOODRAVEN_SOURCE_PREFIX`; its target and the main input are temporary decrypted paths. Do not collect passphrases, Secrets or arbitrary env.
+4. A legacy Job without the snapshot can continue only with a complete status reference matching its source inputs. If the status claims a different location, or its identity is incomplete, the fixed operator fails it with `BackupIdentityMismatch` instead of certifying another backup. Historical terminal records produced by an older operator still require comparison with retained Job evidence.
+
+### Safe remediation
+
+1. For a running Job whose original source is still recorded, allow it to finish. Newer backups or edits to `spec.backupRef` do not change its execution identity. Create another verification to test the newer backup.
+2. If the pinned source disappeared or its UID changed before launch, create a new verification for the intended source. The operator does not silently re-pin the old run, even when its spec requested latest selection.
+3. For identity mismatch, preserve the recorded reference and Job inputs for investigation, then start a new verification with an explicit intended source. Do not patch the audit record to make a different backup appear verified. Pinning identifies the source but does not hold stored artifacts against retention or external deletion.

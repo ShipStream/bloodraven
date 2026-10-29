@@ -981,7 +981,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 
 	env := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_MYSQL_HOST", Value: backupMySQLHost(fg, targetSite)},
-		{Name: "BLOODRAVEN_INPUT_URL", Value: inputURL},
+		{Name: "BLOODRAVEN_INPUT_URL", Value: literalArtifactEnvValue(inputURL)},
 		{Name: "BLOODRAVEN_LOAD_OPTIONS", Value: loadOptsJSON},
 		{Name: "BLOODRAVEN_MYSQL_CREDS_DIR", Value: backupCredsMountPath},
 		{Name: "BLOODRAVEN_SOURCE_SIZE_BYTES", Value: strconv.FormatInt(sourceMeta.SourceSizeBytes, 10)},
@@ -1139,7 +1139,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		switch decryptSourceKind {
 		case "S3":
 			decEnv = append(decEnv,
-				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: decryptS3Prefix},
+				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: literalArtifactEnvValue(decryptS3Prefix)},
 				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: decryptS3Bucket},
 			)
 			if decryptS3EndpointOverride != "" {
@@ -1183,7 +1183,7 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 			})
 			decEnv = append(decEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_PVC_MOUNT_PATH", Value: decPVCMount},
-				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: decryptPVCPrefix},
+				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: literalArtifactEnvValue(decryptPVCPrefix)},
 			)
 		default:
 			return nil, fmt.Errorf("%s: decryption is set but source storage kind is empty", fp)

@@ -6715,6 +6715,11 @@ spec:
                         scheduler loop to wake up at exactly the right moment.
                       format: date-time
                       type: string
+                    retryConflict:
+                      description: |-
+                        RetryConflict names the existing MysqlBackup whose lineage blocks
+                        the next retry. Cleared when the conflict is no longer observed.
+                      type: string
                   required:
                   - name
                   type: object

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
+	"github.com/shipstream/bloodraven/internal/backupmeta"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 	"github.com/shipstream/bloodraven/internal/util"
 )
@@ -33,9 +34,9 @@ import (
 //
 // The terminal BLOODRAVEN_DUMP_COMPLETE sentinel is identical to what
 // the unencrypted dump script emits, so the operator's log-tail
-// reconcile path works unchanged. The "location" field intentionally
-// points at the encrypted ciphertext prefix — that's where the
-// artifact actually lives on disk.
+// reconcile path works unchanged. Version 2 percent-encodes token values.
+// The "location" field points at the encrypted ciphertext prefix, where
+// the artifact actually lives on disk.
 //
 // Env contract (inputs):
 //
@@ -53,7 +54,7 @@ import (
 //
 // Env contract (outputs to stdout):
 //
-//	BLOODRAVEN_DUMP_COMPLETE location=<url> sizeBytes=<int> size=<human> \
+//	BLOODRAVEN_DUMP_COMPLETE v=2 location=<url> sizeBytes=<int> size=<human> \
 //	                         gtidExecuted=... binlogFile=... binlogPos=...
 //
 // Exit codes:
@@ -164,20 +165,11 @@ func runEncryptUpload(args []string) {
 		os.Exit(2)
 	}
 
-	human := humanBytes(totalPlaintext)
-	tokens := []string{
-		"location=" + escapeToken(locationDisplay),
-		fmt.Sprintf("sizeBytes=%d", totalPlaintext),
-		"size=" + escapeToken(human),
-		"gtidExecuted=" + escapeToken(meta.GTIDExecuted),
-		"binlogFile=" + escapeToken(meta.BinlogFile),
-		fmt.Sprintf("binlogPos=%d", meta.BinlogPos),
-		fmt.Sprintf("ciphertextBytes=%d", totalCiphertext),
-		fmt.Sprintf("files=%d", files),
-		"encrypted=true",
-		"algorithm=" + escapeToken(algorithm),
-	}
-	printlnf("BLOODRAVEN_DUMP_COMPLETE %s", strings.Join(tokens, " "))
+	printlnf("%s", backupmeta.FormatDumpComplete(backupmeta.DumpComplete{
+		Location: locationDisplay, SizeBytes: totalPlaintext, Size: humanBytes(totalPlaintext),
+		GtidExecuted: meta.GTIDExecuted, BinlogFile: meta.BinlogFile, BinlogPos: meta.BinlogPos,
+		CiphertextBytes: totalCiphertext, Files: files, Encrypted: true, EncryptionAlgorithm: algorithm,
+	}))
 }
 
 // storageConfigFromEnv translates the BLOODRAVEN_STORAGE_* env vars into
@@ -207,8 +199,8 @@ func storageConfigFromEnv(storageType, outputURL string) (*sidecar.PITRConfig, s
 		// "orders/<backup>/"). Strip trailing slashes when
 		// resolving the per-file key.
 		prefix := strings.TrimSuffix(outputURL, "/")
-		display := fmt.Sprintf("s3://%s/%s/", bucket, prefix)
-		return cfg, prefix, display, nil
+		display, err := backupmeta.DisplayLocation(storageType, bucket, outputURL, true)
+		return cfg, prefix, display, err
 	case "PVC":
 		mount := os.Getenv("BLOODRAVEN_PVC_MOUNT_PATH")
 		if mount == "" {
@@ -223,7 +215,8 @@ func storageConfigFromEnv(storageType, outputURL string) (*sidecar.PITRConfig, s
 			return nil, "", "", fmt.Errorf("outputURL %q is not under PVC mount %q", outputURL, mount)
 		}
 		prefix := strings.TrimSuffix(filepath.ToSlash(rel), "/")
-		return cfg, prefix, outputURL, nil
+		display, displayErr := backupmeta.DisplayLocation(storageType, "", outputURL, true)
+		return cfg, prefix, display, displayErr
 	default:
 		return nil, "", "", fmt.Errorf("unknown storage type %q", storageType)
 	}
@@ -747,16 +740,6 @@ func readDumpMeta(path string) dumpMeta {
 // -----------------------------------------------------------------------
 // Small helpers
 // -----------------------------------------------------------------------
-
-// escapeToken mirrors backup_script.py's _escape_token: whitespace is
-// replaced with underscores so the whitespace-splitting Go parser can
-// round-trip multi-word values (e.g. "1.4 GiB").
-func escapeToken(s string) string {
-	if s == "" {
-		return ""
-	}
-	return strings.ReplaceAll(s, " ", "_")
-}
 
 // humanBytes proxies to util.HumanBytes so the reconciler's .status.size
 // and the encrypt-upload sentinel agree (AUDIT L8).

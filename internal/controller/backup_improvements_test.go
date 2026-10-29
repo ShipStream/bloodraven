@@ -538,7 +538,7 @@ func TestMaybeScheduleRetry_CreatesRetryCRWhenBackoffElapsed(t *testing.T) {
 	completed := metav1.NewTime(time.Now().Add(-10 * time.Second))
 	failed := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "lion-nightly-r1", Namespace: "ns",
+			Name: "lion-nightly-r1", Namespace: "ns", UID: "failed-backup-uid",
 			Labels: map[string]string{
 				labelFailoverGroup:  "lion",
 				labelBackupSchedule: sched.Name,
@@ -555,7 +555,7 @@ func TestMaybeScheduleRetry_CreatesRetryCRWhenBackoffElapsed(t *testing.T) {
 		},
 	}
 	r, c := newReconciler(fg, failed)
-	next, wait, err := r.maybeScheduleRetry(context.Background(), fg, sched, failed)
+	next, wait, _, err := r.maybeScheduleRetry(context.Background(), fg, sched, failed)
 	if err != nil {
 		t.Fatalf("maybeScheduleRetry: %v", err)
 	}
@@ -589,7 +589,7 @@ func TestMaybeScheduleRetry_NoRetryWhenMaxAttemptsReached(t *testing.T) {
 		},
 	}
 	r, c := newReconciler(fg, failed)
-	next, wait, err := r.maybeScheduleRetry(context.Background(), fg, sched, failed)
+	next, wait, _, err := r.maybeScheduleRetry(context.Background(), fg, sched, failed)
 	if err != nil {
 		t.Fatalf("maybeScheduleRetry: %v", err)
 	}
@@ -623,7 +623,7 @@ func TestMaybeScheduleRetry_ReturnsWaitWhenBackoffPending(t *testing.T) {
 		},
 	}
 	r, _ := newReconciler(fg, failed)
-	next, wait, err := r.maybeScheduleRetry(context.Background(), fg, sched, failed)
+	next, wait, _, err := r.maybeScheduleRetry(context.Background(), fg, sched, failed)
 	if err != nil {
 		t.Fatalf("maybeScheduleRetry: %v", err)
 	}

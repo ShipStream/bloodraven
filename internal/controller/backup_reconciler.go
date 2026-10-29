@@ -3,11 +3,10 @@ package controller
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -15,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 )
 
@@ -111,12 +112,30 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Terminal states: retention pruning only, then stop reconciling.
+	// Retry launch metadata is persisted with Create, before any status write.
+	if backup.Annotations[annotationBackupAttempt] != "" && backup.Status.Attempt != effectiveBackupAttempt(&backup) {
+		patch := client.MergeFrom(backup.DeepCopy())
+		backup.Status.Attempt = effectiveBackupAttempt(&backup)
+		if err := r.Status().Patch(ctx, &backup, patch); err != nil {
+			return ctrl.Result{}, fmt.Errorf("restore retry attempt: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Recover completion metadata before retention pruning.
 	if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded || backup.Status.Phase == v1alpha1.BackupPhaseFailed {
+		var recovery ctrl.Result
+		if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded {
+			var err error
+			recovery, err = r.repairTerminalAttribution(ctx, &backup)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		if err := r.pruneRetention(ctx, &backup); err != nil {
 			logger.Error(err, "retention prune")
 		}
-		return ctrl.Result{}, nil
+		return recovery, nil
 	}
 
 	// Resolve the referenced failover group.
@@ -162,8 +181,7 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, fmt.Errorf("get job: %w", jobErr)
 	}
 
-	// The live profile is needed to launch a Job and is useful for
-	// best-effort status backfills after completion. An existing Job remains
+	// The live profile is needed to launch a Job. An existing Job remains
 	// observable even if the profile changes or is removed while it runs.
 	profile := findProfile(&fg, backup.Spec.ProfileName)
 
@@ -227,18 +245,8 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		backup.Status.StorageType = profile.Storage.Type
 		backup.Status.MysqlImage = mysqlImageFor(&fg)
 		backup.Status.ActiveSiteAtStart = fg.Status.ActiveSite
-		if profile.EncryptionEnabled() {
-			// Stamp encryption attribution at Job-creation time so the
-			// CR is self-describing even before the log-tail metadata
-			// parse lands. The algorithm default drifts forward with
-			// new releases via AlgorithmOrDefault(); keep both
-			// populated for easy compliance auditing.
-			backup.Status.Encrypted = true
-			backup.Status.EncryptionAlgorithm = profile.Encryption.AlgorithmOrDefault()
-		}
-		if backup.Status.Attempt == 0 {
-			backup.Status.Attempt = 1
-		}
+		backup.Status.Encrypted, backup.Status.EncryptionAlgorithm = backupJobEncryption(built)
+		backup.Status.Attempt = effectiveBackupAttempt(&backup)
 		backup.Status.Message = fmt.Sprintf("running (source=%s, reason=%s)", sourceSite, reason)
 		backup.Status.ObservedGeneration = backup.Generation
 		setCondition(&backup.Status.Conditions, metav1.Condition{
@@ -310,48 +318,15 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	next.ObservedGeneration = backup.Generation
 
+	var metadataResult ctrl.Result
 	if phase == v1alpha1.BackupPhaseSucceeded {
-		if meta, ok := r.tailJobCompletion(ctx, &backup, &job); ok {
-			if meta.Location != "" {
-				next.Location = meta.Location
-			}
-			if meta.Size != "" {
-				next.Size = meta.Size
-			}
-			if meta.SizeBytes > 0 {
-				next.SizeBytes = meta.SizeBytes
-			}
-			if meta.GtidExecuted != "" {
-				next.GtidExecuted = meta.GtidExecuted
-			}
-			if meta.BinlogFile != "" {
-				next.BinlogFile = meta.BinlogFile
-			}
-			if meta.BinlogPos > 0 {
-				next.BinlogPos = meta.BinlogPos
-			}
-			if meta.Encrypted {
-				next.Encrypted = true
-			}
-			if meta.EncryptionAlgorithm != "" {
-				next.EncryptionAlgorithm = meta.EncryptionAlgorithm
-			}
+		var err error
+		metadataResult, err = r.collectBackupCompletion(ctx, &backup, &job, &next)
+		if err != nil {
+			next.Phase = backup.Status.Phase
+			return ctrl.Result{}, r.persistBackupMetadataFailure(ctx, &backup, &next, err)
 		}
-		// Backfill the encryption fields from the profile spec even when
-		// the log tail couldn't be parsed — this covers fake-client
-		// tests and any transient log-tail failure.
-		if profile != nil && profile.EncryptionEnabled() && !next.Encrypted {
-			next.Encrypted = true
-			if next.EncryptionAlgorithm == "" {
-				next.EncryptionAlgorithm = profile.Encryption.AlgorithmOrDefault()
-			}
-		}
-		// If the dump didn't report bytes but did report a size string
-		// (pure local case), derive a display string from the Go
-		// helper so it's consistent across code paths.
-		if next.Size == "" && next.SizeBytes > 0 {
-			next.Size = humanBytes(next.SizeBytes)
-		}
+		next.Encrypted, next.EncryptionAlgorithm = backupJobEncryption(&job)
 		setCondition(&next.Conditions, metav1.Condition{
 			Type:               ConditionBackupReady,
 			Status:             metav1.ConditionTrue,
@@ -377,15 +352,22 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if err := r.pruneRetention(ctx, &backup); err != nil {
 			logger.Error(err, "retention prune after terminal state")
 		}
-		return ctrl.Result{}, nil
+		return metadataResult, nil
 	}
 
+	previous := backup.Status.DeepCopy()
+	correctedEncryption := backup.Status.Encrypted && !next.Encrypted
 	patch := client.MergeFrom(backup.DeepCopy())
 	backup.Status = next
 	if err := r.Status().Patch(ctx, &backup, patch); err != nil {
 		return ctrl.Result{}, fmt.Errorf("patch final status: %w", err)
 	}
+	if correctedEncryption {
+		r.Recorder.Event(&backup, corev1.EventTypeWarning, "EncryptionAttributionCorrected",
+			"corrected backup encryption attribution from its producing Job")
+	}
 
+	r.recordIncompleteBackupMetadata(&backup, previous)
 	r.emitTerminalMetrics(&backup, &job)
 
 	if phase == v1alpha1.BackupPhaseSucceeded {
@@ -400,7 +382,86 @@ func (r *MysqlBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		logger.Error(err, "retention prune after terminal state")
 	}
 
-	return ctrl.Result{}, nil
+	return metadataResult, nil
+}
+
+// backupJobEncryption reads the launch-time encryption choice. The label also
+// covers older Jobs; the uploader layout and its env pin the algorithm.
+func backupJobEncryption(job *batchv1.Job) (bool, string) {
+	encrypted := job.Labels[labelBackupEncrypted] == "true"
+	algorithm := ""
+	for _, container := range job.Spec.Template.Spec.Containers {
+		if container.Name != backupEncryptUploadContainerName {
+			continue
+		}
+		encrypted = true
+		for _, env := range container.Env {
+			if env.Name == "BLOODRAVEN_ENCRYPTION_ALGORITHM" {
+				algorithm = env.Value
+			}
+		}
+	}
+	if !encrypted {
+		return false, ""
+	}
+	return true, (&v1alpha1.BackupEncryptionSpec{Algorithm: algorithm}).AlgorithmOrDefault()
+}
+
+func (r *MysqlBackupReconciler) repairTerminalAttribution(ctx context.Context, backup *v1alpha1.MysqlBackup) (ctrl.Result, error) {
+	var job batchv1.Job
+	if err := r.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: backupJobName(backup.Name)}, &job); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(&job, backup) {
+		return ctrl.Result{}, nil
+	}
+	phase, _ := jobPhase(&job, "backup")
+	if backup.Status.Phase != v1alpha1.BackupPhaseSucceeded && phase != v1alpha1.BackupPhaseSucceeded {
+		return ctrl.Result{}, nil
+	}
+	next := *backup.Status.DeepCopy()
+	next.Encrypted, next.EncryptionAlgorithm = backupJobEncryption(&job)
+	_, expected, destinationErr := backupJobDestination(&job)
+	_, raw, _ := backupJobRawDestination(&job)
+	unexpanded := raw != "" && next.Location == raw && (destinationErr != nil || raw != expected) &&
+		backupLocationFromJobFallback(&next)
+	var recovery ctrl.Result
+	if metadataLocationNeedsRepair(next.Location, expected) || unexpanded || r.Clientset != nil && completionMetadataRetryable(&next) {
+		if next.CompletionTime == nil {
+			next.CompletionTime = stableJobCompletionTime(&job)
+		}
+		var err error
+		recovery, err = r.collectBackupCompletion(ctx, backup, &job, &next)
+		if err != nil {
+			if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded && errors.Is(err, errBackupDestinationUnavailable) {
+				return ctrl.Result{}, r.persistBackupMetadataStatus(ctx, backup, &next, err)
+			}
+			return ctrl.Result{}, r.persistBackupMetadataFailure(ctx, backup, &next, err)
+		}
+		if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded && !apiMeta.IsStatusConditionTrue(next.Conditions, ConditionBackupReady) {
+			setCondition(&next.Conditions, metav1.Condition{
+				Type: ConditionBackupReady, Status: metav1.ConditionTrue,
+				ObservedGeneration: backup.Generation, LastTransitionTime: metav1.Now(),
+				Reason: "Succeeded", Message: "backup artifact destination available",
+			})
+		}
+	}
+	if equality.Semantic.DeepEqual(&backup.Status, &next) {
+		return recovery, nil
+	}
+	previous := backup.Status.DeepCopy()
+	patch := client.MergeFrom(backup.DeepCopy())
+	backup.Status = next
+	if err := r.Status().Patch(ctx, backup, patch); err != nil {
+		return ctrl.Result{}, fmt.Errorf("repair backup completion metadata: %w", err)
+	}
+	if previous.Encrypted != next.Encrypted || previous.EncryptionAlgorithm != next.EncryptionAlgorithm {
+		r.Recorder.Event(backup, corev1.EventTypeWarning, "EncryptionAttributionCorrected",
+			"corrected backup encryption attribution from its producing Job")
+	}
+	updateRecoveredBackupSize(backup, previous)
+	r.recordIncompleteBackupMetadata(backup, previous)
+	return recovery, nil
 }
 
 // SetupWithManager registers the reconciler with the manager.
@@ -423,8 +484,17 @@ func (r *MysqlBackupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // ArtifactCleanupSkipped warning event and release the finalizer
 // immediately — there's nothing we can do without a bucket/claim.
 func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.MysqlBackup) (bool, error) {
-	// No location recorded — nothing to clean up.
+	// Recover successful artifacts before an empty-location finalizer can
+	// release them. Failed Jobs never acquire a planned cleanup destination.
+	if _, err := r.repairTerminalAttribution(ctx, backup); err != nil && !errors.Is(err, errBackupDestinationUnavailable) {
+		return false, err
+	}
 	if backup.Status.Location == "" {
+		condition := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionBackupMetadataComplete)
+		if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded || condition != nil && condition.Reason == "DestinationUnavailable" {
+			r.Recorder.Eventf(backup, corev1.EventTypeWarning, "ArtifactCleanupSkipped",
+				"no recorded artifact destination (producing Job %q); skipping cleanup", backupJobName(backup.Name))
+		}
 		return true, nil
 	}
 
@@ -736,146 +806,69 @@ func stableJobCompletionTime(job *batchv1.Job) *metav1.Time {
 // dumpCompletionMetadata is the parsed shape of the BLOODRAVEN_DUMP_COMPLETE
 // sentinel line emitted by backup_script.py (unencrypted flow) or
 // `bloodraven encrypt-upload` (encrypted flow) on success.
-type dumpCompletionMetadata struct {
-	Location            string
-	Size                string
-	SizeBytes           int64
-	GtidExecuted        string
-	BinlogFile          string
-	BinlogPos           int64
-	Encrypted           bool
-	EncryptionAlgorithm string
-}
+type dumpCompletionMetadata = backupmeta.DumpComplete
 
-// parseDumpCompleteLine parses a single `BLOODRAVEN_DUMP_COMPLETE k=v ...`
-// sentinel line emitted by backup_script.py. Returns (meta, true) on a
-// well-formed sentinel and (zero, false) on a prefix mismatch. Unknown
-// keys are tolerated (forward-compatible). Malformed numerics leave
-// the corresponding field at zero.
-//
-// Space-bearing values (e.g. "1.4 GiB") are round-tripped through an
-// underscore escape so this whitespace-splitting parser can recover them.
 func parseDumpCompleteLine(line string) (dumpCompletionMetadata, bool) {
-	const prefix = "BLOODRAVEN_DUMP_COMPLETE"
-	if !strings.HasPrefix(line, prefix) {
-		return dumpCompletionMetadata{}, false
-	}
-	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
-	fields := strings.Fields(rest)
-	var meta dumpCompletionMetadata
-	for _, f := range fields {
-		eq := strings.IndexByte(f, '=')
-		if eq <= 0 {
-			continue
-		}
-		key := f[:eq]
-		val := strings.ReplaceAll(f[eq+1:], "_", " ")
-		switch key {
-		case "location":
-			meta.Location = val
-		case "size":
-			meta.Size = val
-		case "sizeBytes":
-			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-				meta.SizeBytes = n
-			}
-		case "gtidExecuted":
-			meta.GtidExecuted = strings.ReplaceAll(val, " ", "")
-		case "binlogFile":
-			meta.BinlogFile = val
-		case "binlogPos":
-			if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-				meta.BinlogPos = n
-			}
-		case "encrypted":
-			meta.Encrypted = val == "true" || val == "1"
-		case "algorithm":
-			meta.EncryptionAlgorithm = val
-		}
-	}
-	return meta, true
+	return backupmeta.ParseDumpComplete(line)
 }
 
-// tailJobCompletion tails the Job pod log and parses the trailing
-// BLOODRAVEN_DUMP_COMPLETE sentinel into dumpCompletionMetadata.
-// Returns (zero, false) on any failure so the caller can cleanly leave
-// the existing status untouched. Requires a real clientset (nil in
-// fake-client tests).
-//
-// Encrypted backup Jobs run the sentinel-emitting `bloodraven
-// encrypt-upload` step in a main container named
-// backupEncryptUploadContainerName; unencrypted Jobs emit it from the
-// mysqlsh main container. We try both container names and fall back to
-// the pod's first container so future container renames don't silently
-// drop metadata.
-func (r *MysqlBackupReconciler) tailJobCompletion(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job) (dumpCompletionMetadata, bool) {
+// tailJobCompletion distinguishes unavailable logs from a successfully read
+// log without a usable sentinel. Only the producing main container is read.
+func (r *MysqlBackupReconciler) tailJobCompletion(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job) (dumpCompletionMetadata, bool, error) {
 	if r.Clientset == nil {
-		return dumpCompletionMetadata{}, false
+		return dumpCompletionMetadata{}, false, fmt.Errorf("pod log client unavailable")
 	}
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(job.Namespace),
 		client.MatchingLabels{labelMysqlBackup: backup.Name},
 	); err != nil {
-		return dumpCompletionMetadata{}, false
+		return dumpCompletionMetadata{}, false, fmt.Errorf("list backup pods: %w", err)
 	}
-	var pod *corev1.Pod
 	for i := range pods.Items {
-		p := &pods.Items[i]
-		if p.Status.Phase == corev1.PodSucceeded {
-			pod = p
-			break
+		pod := &pods.Items[i]
+		if pod.Status.Phase != corev1.PodSucceeded {
+			continue
+		}
+		container := backupJobMainContainer(job)
+		if container != nil {
+			return r.tailOneContainer(ctx, job.Namespace, pod.Name, container.Name)
+		}
+		if len(pod.Spec.Containers) > 0 {
+			return r.tailOneContainer(ctx, job.Namespace, pod.Name, pod.Spec.Containers[0].Name)
 		}
 	}
-	if pod == nil {
-		return dumpCompletionMetadata{}, false
-	}
-
-	candidates := []string{backupJobContainerName, backupEncryptUploadContainerName}
-	if len(pod.Spec.Containers) > 0 {
-		// Include the pod's actual main container name as a fallback
-		// for forward compatibility.
-		name := pod.Spec.Containers[0].Name
-		if name != "" && name != backupJobContainerName && name != backupEncryptUploadContainerName {
-			candidates = append(candidates, name)
-		}
-	}
-
-	for _, container := range candidates {
-		meta, ok := r.tailOneContainer(ctx, job.Namespace, pod.Name, container)
-		if ok {
-			return meta, true
-		}
-	}
-	return dumpCompletionMetadata{}, false
+	return dumpCompletionMetadata{}, false, fmt.Errorf("completed backup pod not visible")
 }
 
-// tailOneContainer tails a single pod container log for the
-// BLOODRAVEN_DUMP_COMPLETE sentinel. Separate helper so tailJobCompletion
-// can try multiple container names in order.
-func (r *MysqlBackupReconciler) tailOneContainer(ctx context.Context, namespace, podName, container string) (dumpCompletionMetadata, bool) {
+func (r *MysqlBackupReconciler) tailOneContainer(ctx context.Context, namespace, podName, container string) (dumpCompletionMetadata, bool, error) {
 	req := r.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
 		Container: container,
 		TailLines: ptr64(50),
 	})
 	stream, err := req.Stream(ctx)
 	if err != nil {
-		return dumpCompletionMetadata{}, false
+		return dumpCompletionMetadata{}, false, fmt.Errorf("read backup completion logs: %w", err)
 	}
 	defer func() { _ = stream.Close() }()
-
-	var (
-		last dumpCompletionMetadata
-		ok   bool
-	)
-	sc := bufio.NewScanner(io.LimitReader(stream, 64*1024))
+	var last dumpCompletionMetadata
+	found := false
+	bounded := &io.LimitedReader{R: stream, N: 64*1024 + 1}
+	sc := bufio.NewScanner(bounded)
+	sc.Buffer(make([]byte, 4096), 64*1024+1)
 	for sc.Scan() {
 		if meta, hit := parseDumpCompleteLine(sc.Text()); hit {
 			last = meta
-			ok = true
+			found = true
 		}
 	}
-	return last, ok
+	if err := sc.Err(); err != nil {
+		return dumpCompletionMetadata{}, false, fmt.Errorf("scan backup completion logs: %w", err)
+	}
+	if bounded.N == 0 {
+		return dumpCompletionMetadata{}, false, fmt.Errorf("backup completion logs exceeded read limit")
+	}
+	return last, found, nil
 }
 
 func ptr64(v int64) *int64 { return &v }

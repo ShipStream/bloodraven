@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -14,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
@@ -453,7 +455,7 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 				entry.LastBackupPhase = string(ru.latest.Status.Phase)
 				entry.LastSuccessfulTime = ru.lastOK
 				entry.LastSuccessfulBackupName = ru.lastOKName
-				entry.LastRetryAttempt = ru.latest.Status.Attempt
+				entry.LastRetryAttempt = effectiveBackupAttempt(&ru.latest)
 				if ru.lastOK != nil && (overallLastOK == nil || ru.lastOK.After(overallLastOK.Time)) {
 					overallLastOK = ru.lastOK
 				}
@@ -461,13 +463,14 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 				// in Failed and the schedule has a Retry spec, consider
 				// materializing a fresh CR.
 				if ru.latest.Status.Phase == v1alpha1.BackupPhaseFailed {
-					next, wait, err := r.maybeScheduleRetry(ctx, fg, s, &ru.latest)
+					next, wait, conflict, err := r.maybeScheduleRetry(ctx, fg, s, &ru.latest)
 					if err != nil {
 						return 0, err
 					}
 					if next != nil {
 						entry.NextRetryTime = next
 					}
+					entry.RetryConflict = conflict
 					if wait > 0 && (minRequeue == 0 || wait < minRequeue) {
 						minRequeue = wait
 					}
@@ -501,56 +504,68 @@ func (r *MysqlFailoverGroupReconciler) updateBackupStatus(ctx context.Context, f
 		return minRequeue, nil
 	}
 
-	patchBase := fg.DeepCopy()
-	fg.Status.BackupSchedules = schedules
-	fg.Status.LastBackupTime = overallLastOK
-	if err := r.Status().Patch(ctx, fg, client.MergeFrom(patchBase)); err != nil {
+	// Earlier reconciliation steps may already have written status. Refresh
+	// before the optimistic patch, also avoiding duplicate warnings from cache lag.
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	var latest v1alpha1.MysqlFailoverGroup
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(fg), &latest); err != nil {
+		return 0, fmt.Errorf("refresh backup status rollup: %w", err)
+	}
+	if latest.UID != fg.UID || latest.Generation != fg.Generation {
+		return 0, apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("mysqlfailovergroups").GroupResource(), fg.Name, fmt.Errorf("group changed during backup rollup"))
+	}
+	if equality.Semantic.DeepEqual(schedules, latest.Status.BackupSchedules) && equality.Semantic.DeepEqual(overallLastOK, latest.Status.LastBackupTime) {
+		fg.Status, fg.ResourceVersion = latest.Status, latest.ResourceVersion
+		return minRequeue, nil
+	}
+	patchBase := latest.DeepCopy()
+	latest.Status.BackupSchedules = schedules
+	latest.Status.LastBackupTime = overallLastOK
+	if err := r.Status().Patch(ctx, &latest, client.MergeFromWithOptions(patchBase, client.MergeFromWithOptimisticLock{})); err != nil {
 		return 0, fmt.Errorf("patch backup status rollup: %w", err)
+	}
+	fg.Status, fg.ResourceVersion = latest.Status, latest.ResourceVersion
+	previousConflicts := make(map[string]string)
+	for _, entry := range patchBase.Status.BackupSchedules {
+		previousConflicts[entry.Name] = entry.RetryConflict
+	}
+	for _, entry := range schedules {
+		if entry.RetryConflict == "" || entry.RetryConflict == previousConflicts[entry.Name] {
+			continue
+		}
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "BackupRetryConflict",
+			"retry backup %q already exists with different lineage (failed backup=%s, schedule=%s); skipping this retry",
+			entry.RetryConflict, entry.LastBackupName, entry.Name)
+		log.FromContext(ctx).Info("backup retry lineage conflict",
+			"group", fg.Name, "schedule", entry.Name, "backup", entry.LastBackupName, "retryBackup", entry.RetryConflict)
 	}
 	return minRequeue, nil
 }
 
 // maybeScheduleRetry considers materializing a retry MysqlBackup for a
-// Failed latest attempt on a scheduled CR. Returns (next, wait, err):
+// Failed latest attempt on a scheduled CR. Returns (next, wait, conflict, err):
 //
 //	next  — populates entry.NextRetryTime when non-nil
 //	wait  — contributes to the reconciler's RequeueAfter
-//	err   — fatal error (list / create failures)
+//	conflict — name of a retry blocked by different lineage
+//	err   — fatal error
 //
-// A no-op result is (nil, 0, nil): no retry pending, no wake-up needed.
-func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sched v1alpha1.BackupSchedule, failed *v1alpha1.MysqlBackup) (*metav1.Time, time.Duration, error) {
+// A no-op result is (nil, 0, "", nil): no retry pending, no wake-up needed.
+func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, sched v1alpha1.BackupSchedule, failed *v1alpha1.MysqlBackup) (*metav1.Time, time.Duration, string, error) {
 	if fg.Spec.Backup == nil || fg.Spec.Backup.Retry == nil {
-		return nil, 0, nil
+		return nil, 0, "", nil
 	}
 	retry := fg.Spec.Backup.Retry
 	if retry.MaxAttempts <= 1 {
-		return nil, 0, nil
+		return nil, 0, "", nil
 	}
 
-	current := failed.Status.Attempt
-	if current < 1 {
-		current = 1
-	}
+	current := effectiveBackupAttempt(failed)
 	if current >= retry.MaxAttempts {
-		return nil, 0, nil
-	}
-
-	// Check if a later attempt already exists (same schedule, higher
-	// Attempt counter). If so, the retry has already been materialized.
-	var siblings v1alpha1.MysqlBackupList
-	if err := r.List(ctx, &siblings,
-		client.InNamespace(fg.Namespace),
-		client.MatchingLabels{
-			labelFailoverGroup:  fg.Name,
-			labelBackupSchedule: sched.Name,
-		},
-	); err != nil {
-		return nil, 0, fmt.Errorf("list retry siblings: %w", err)
-	}
-	for i := range siblings.Items {
-		if siblings.Items[i].Status.Attempt > current {
-			return nil, 0, nil
-		}
+		return nil, 0, "", nil
 	}
 
 	initial := retry.InitialBackoffSeconds
@@ -585,16 +600,29 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 	if when.After(now) {
 		wait := when.Sub(now)
 		next := metav1.NewTime(when)
-		return &next, wait, nil
+		return &next, wait, "", nil
 	}
 
 	// Backoff elapsed — create the retry CR.
+	if failed.UID == "" {
+		return nil, 0, "", fmt.Errorf("cannot retry backup %q without its UID", failed.Name)
+	}
 	nextAttempt := current + 1
+	rootUID, rootName := failed.Annotations[annotationBackupRetryRootUID], failed.Annotations[annotationBackupRetryRoot]
+	if rootUID == "" {
+		rootUID, rootName = string(failed.UID), failed.Name
+	}
 	retryCR := &v1alpha1.MysqlBackup{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: fmt.Sprintf("%s-%s-r%d-", fg.Name, sched.ProfileName, nextAttempt),
-			Namespace:    fg.Namespace,
+			Name:      retryBackupName(failed, nextAttempt),
+			Namespace: fg.Namespace,
+			Annotations: map[string]string{
+				annotationBackupRetryRoot:    rootName,
+				annotationBackupRetryRootUID: rootUID,
+				annotationBackupAttempt:      strconv.FormatInt(int64(nextAttempt), 10),
+			},
 			Labels: map[string]string{
+				labelBackupRetryOf:  string(failed.UID),
 				labelFailoverGroup:  fg.Name,
 				labelBackupProfile:  sched.ProfileName,
 				labelBackupSchedule: sched.Name,
@@ -608,12 +636,25 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 		},
 	}
 	if err := r.Create(ctx, retryCR); err != nil {
-		return nil, 0, fmt.Errorf("create retry backup: %w", err)
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, 0, "", fmt.Errorf("create retry backup: %w", err)
+		}
+		var existing v1alpha1.MysqlBackup
+		if err := r.Get(ctx, client.ObjectKeyFromObject(retryCR), &existing); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Create saw the object before the cache did. Keep the same
+				// deterministic name and check again without blocking rollups.
+				return nil, 5 * time.Second, "", nil
+			}
+			return nil, 0, "", fmt.Errorf("verify existing retry backup: %w", err)
+		}
+		if !retryBackupMatches(&existing, retryCR) {
+			return nil, 0, retryCR.Name, nil
+		}
+		return nil, 0, "", nil
 	}
-	// Best-effort status patch to record the attempt number. Missing
-	// this doesn't break anything — the reconciler will default
-	// Attempt=1 on the next pass — but it helps siblings loop detect
-	// the retry on the very next reconcile of the parent CR.
+	// The launch annotation is durable; this status patch only accelerates
+	// observation by clients that display status.attempt.
 	freshPatch := client.MergeFrom(retryCR.DeepCopy())
 	retryCR.Status.Attempt = nextAttempt
 	_ = r.Status().Patch(ctx, retryCR, freshPatch)
@@ -622,7 +663,7 @@ func (r *MysqlFailoverGroupReconciler) maybeScheduleRetry(ctx context.Context, f
 		"scheduled retry #%d for failed backup %s (schedule=%s)",
 		nextAttempt, failed.Name, sched.Name)
 
-	return nil, 0, nil
+	return nil, 0, "", nil
 }
 
 // startAfter returns true if a was scheduled after b. Prefers the CR

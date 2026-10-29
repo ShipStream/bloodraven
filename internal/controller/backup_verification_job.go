@@ -153,7 +153,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 		{Name: "BLOODRAVEN_DATA_DIR", Value: verificationDataMountPath},
 		{Name: "BLOODRAVEN_RUN_DIR", Value: verificationRunMountPath},
 		{Name: "BLOODRAVEN_SCRIPTS_DIR", Value: backupScriptsMountPath},
-		{Name: "BLOODRAVEN_INPUT_URL", Value: inputURL},
+		{Name: "BLOODRAVEN_INPUT_URL", Value: literalArtifactEnvValue(inputURL)},
 		{Name: "BLOODRAVEN_LOAD_OPTIONS", Value: loadOptsJSON},
 		// mysqlsh's default progressFile lives next to the dump, but the
 		// backup source is mounted read-only on verification Jobs, so
@@ -381,7 +381,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 				bucket = in.Profile.Storage.S3.Bucket
 			}
 			decEnv = append(decEnv,
-				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: prefix},
+				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: literalArtifactEnvValue(prefix)},
 				corev1.EnvVar{Name: "BLOODRAVEN_S3_BUCKET", Value: bucket},
 			)
 			if in.Profile.Storage.S3.EndpointURL != "" {
@@ -449,7 +449,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			prefix = strings.TrimSuffix(prefix, "/")
 			decEnv = append(decEnv,
 				corev1.EnvVar{Name: "BLOODRAVEN_PVC_MOUNT_PATH", Value: decPVCMount},
-				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: prefix},
+				corev1.EnvVar{Name: "BLOODRAVEN_SOURCE_PREFIX", Value: literalArtifactEnvValue(prefix)},
 			)
 			// Point the mysqlsh INPUT_URL at the decrypted staging
 			// dir instead of the in-pod backup path.
@@ -507,6 +507,11 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 	}
 	podSC, containerSC := mergeSecurityContexts(userPod, userCont)
 
+	sourceSnapshot, err := json.Marshal(verificationBackupSnapshot(backup))
+	if err != nil {
+		return nil, fmt.Errorf("encode verification source snapshot: %w", err)
+	}
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      verificationJobName(v.Name),
@@ -517,7 +522,7 @@ func buildVerificationJob(in verificationJobInputs) (*batchv1.Job, error) {
 			ActiveDeadlineSeconds: &activeDeadline,
 			BackoffLimit:          &backoff,
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: map[string]string{annotationVerificationBackup: string(sourceSnapshot)}},
 				Spec: corev1.PodSpec{
 					RestartPolicy:    corev1.RestartPolicyNever,
 					ImagePullSecrets: pullSecrets,
