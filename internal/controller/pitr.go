@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"path"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -362,17 +363,17 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	initMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir}
 	mainMount := corev1.VolumeMount{Name: "pitr-binlogs", MountPath: restorePITRLocalDir, ReadOnly: true}
 
-	// Build a comma-separated site list from the spec so the init
-	// container can skip a List call in the common case. The init
-	// container falls back to listing the manifest prefix when this
-	// env var is empty.
-	var siteNames []string
-	for _, s := range fg.Spec.Sites {
-		siteNames = append(siteNames, s.Name)
+	siteNames := append([]string(nil), pit.Sites...)
+	if len(siteNames) == 0 {
+		for _, s := range fg.Spec.Sites {
+			siteNames = append(siteNames, s.Name)
+		}
 	}
 
 	initEnv := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
+		{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(pit.AllowPartial)},
+		{Name: "BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE", Value: strconv.FormatBool(pit.AllowUnverifiedCrossSite)},
 		{Name: "BLOODRAVEN_PITR_STORAGE_TYPE", Value: string(profile.Storage.Type)},
 		{Name: "BLOODRAVEN_PITR_OUTPUT_DIR", Value: restorePITRLocalDir},
 		{Name: "BLOODRAVEN_PITR_SITES", Value: joinComma(siteNames)},
@@ -518,19 +519,22 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 	}
 	initResources := effectiveBackupResources(initBackupSrc, defaultInitContainerResources())
 	init := corev1.Container{
-		Name:            restorePITRInitContainerName,
-		Image:           image,
-		Command:         operatorCommand("pitr-download"),
-		Env:             initEnv,
-		Resources:       initResources,
-		VolumeMounts:    initMounts,
-		SecurityContext: initSC,
+		Name:                     restorePITRInitContainerName,
+		TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		Image:                    image,
+		Command:                  operatorCommand("pitr-download"),
+		Env:                      initEnv,
+		Resources:                initResources,
+		VolumeMounts:             initMounts,
+		SecurityContext:          initSC,
 	}
 
 	mainEnv := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_PITR_LOCAL_DIR", Value: restorePITRLocalDir},
 		{Name: "TZ", Value: "UTC"},
 		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
+		{Name: "BLOODRAVEN_PITR_ALLOW_PARTIAL", Value: strconv.FormatBool(pit.AllowPartial)},
+		{Name: "BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE", Value: strconv.FormatBool(pit.AllowUnverifiedCrossSite)},
 	}
 	if pit.ExcludeGtids != "" {
 		mainEnv = append(mainEnv, corev1.EnvVar{

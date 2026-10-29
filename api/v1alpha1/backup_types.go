@@ -198,6 +198,28 @@ type PITRStatus struct {
 // failover group's spec.backup.pitr block to have been enabled at the
 // time of the full dump, otherwise no binlog archive exists to replay.
 type PointInTimeSpec struct {
+	// Sites are the archive site names to replay. Defaults to this group's sites.
+	// Set when the source archive's sites differ, or to include a removed site.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9-]+$`
+	Sites []string `json:"sites,omitempty"`
+
+	// AllowPartial permits restoring to the newest archived point when the target
+	// is not covered. It never bypasses archive safety or site omission checks.
+	// +optional
+	// +kubebuilder:default=false
+	AllowPartial bool `json:"allowPartial,omitempty"`
+
+	// AllowUnverifiedCrossSite permits overlapping site streams without proving
+	// cross-site completeness. Failback, reclone, or inverted replica clocks can
+	// skip transactions. This never bypasses archive or coverage safety checks.
+	// +optional
+	// +kubebuilder:default=false
+	AllowUnverifiedCrossSite bool `json:"allowUnverifiedCrossSite,omitempty"`
+
 	// StopDatetime is the MySQL-style datetime at which to stop
 	// replaying binlog events (forwarded to mysqlbinlog
 	// --stop-datetime). Accepts RFC 3339 ("2026-04-15T09:30:00Z") or
@@ -1071,6 +1093,32 @@ type RestoreInPlaceStatus struct {
 
 // RestoreStatus tracks an in-flight or completed initFromBackup run.
 type RestoreStatus struct {
+	// JobUID identifies the producing Job across retries using the same name.
+	// +optional
+	JobUID string `json:"jobUID,omitempty"`
+	// FailureDetailLastAttemptTime bounds retries of unresolved Job failure logs.
+	// +optional
+	FailureDetailLastAttemptTime *metav1.Time `json:"failureDetailLastAttemptTime,omitempty"`
+	// FailureDetailResolved means failure logs were read or enrichment ended.
+	// +optional
+	FailureDetailResolved bool `json:"failureDetailResolved,omitempty"`
+	// PitrCrossSiteUnverified reports explicit replay without cross-site proof.
+	// +optional
+	PitrCrossSiteUnverified bool `json:"pitrCrossSiteUnverified,omitempty"`
+	// PitrReplaySites names the staged sites in replay order.
+	// +optional
+	PitrReplaySites []string `json:"pitrReplaySites,omitempty"`
+	// Reason distinguishes partial and unverified PITR outcomes and failures.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// PitrNewestEventTime is the newest verified event in the replayed prefix.
+	// Empty means no archived event was replayed; never the requested stop time.
+	// +optional
+	PitrNewestEventTime string `json:"pitrNewestEventTime,omitempty"`
+	// PitrPartial reports that allowPartial relaxed target coverage.
+	// +optional
+	PitrPartial bool `json:"pitrPartial,omitempty"`
+
 	// Phase of the restore Job.
 	Phase BackupPhase `json:"phase,omitempty"`
 

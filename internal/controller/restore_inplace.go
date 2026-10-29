@@ -879,7 +879,7 @@ func (r *MysqlFailoverGroupReconciler) inPlaceRestoring(ctx context.Context, fg 
 		if spec != nil && curMeta.SourceSizeBytes == 0 && curMeta.SourceGtidExecuted == "" && curMeta.SourceBinlogFile == "" && curMeta.SourceBinlogPos == 0 {
 			meta = r.restoreSourceMetadata(ctx, fg, spec.Source)
 		}
-		if parsed, ok := r.tailRestoreCompletion(ctx, &job); ok {
+		if parsed, ok, _ := r.tailRestoreCompletion(ctx, &job); ok {
 			meta = parsed
 		}
 		jobStart := job.Status.StartTime

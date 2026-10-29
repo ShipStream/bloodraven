@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/shipstream/bloodraven/internal/backupmeta"
+	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 	"github.com/shipstream/bloodraven/internal/sidecar"
 	"github.com/shipstream/bloodraven/internal/util"
 )
@@ -57,11 +62,6 @@ func runPITRDownload(args []string) {
 		os.Exit(2)
 	}
 
-	// Sites list comes from the operator (fg.Spec.Sites). Used as a
-	// fast path to skip the list call for small clusters; when empty
-	// we fall back to listing the manifest prefix and harvesting site
-	// names from filenames (which also catches decommissioned sites
-	// that still have binlogs in the archive).
 	var sites []string
 	if v := os.Getenv("BLOODRAVEN_PITR_SITES"); v != "" {
 		for _, s := range strings.Split(v, ",") {
@@ -93,35 +93,22 @@ func runPITRDownload(args []string) {
 		os.Exit(2)
 	}
 
-	stopTime, err := parsePITRStopTime(stopDT)
+	stopTime, err := backupmeta.ParsePITRStopTime(stopDT)
 	if err != nil {
 		logger.Error("parse stop-datetime", "value", stopDT, "error", err)
 		os.Exit(2)
 	}
 
-	// Discover sites when the operator didn't pass them explicitly.
-	if len(sites) == 0 {
-		discovered, err := discoverSites(ctx, store, prefix)
-		if err != nil {
-			logger.Error("list site manifests", "prefix", prefix, "error", err)
-			os.Exit(2)
-		}
-		sites = discovered
+	result, err := downloadPITRArchive(ctx, store, prefix, sites, stopTime, outDir, os.Getenv("BLOODRAVEN_PITR_START_GTIDS"), os.Getenv("BLOODRAVEN_PITR_ALLOW_PARTIAL") == "true", os.Getenv("BLOODRAVEN_PITR_ALLOW_UNVERIFIED_CROSS_SITE") == "true", os.Getenv("BLOODRAVEN_PITR_MODE"), logger)
+	if err != nil {
+		// Kubernetes retains this reason even when the main container never starts.
+		_ = os.WriteFile("/dev/termination-log", []byte(err.Error()), 0644)
+		logger.Error("download site binlogs", "error", err)
+		os.Exit(2)
 	}
-	if len(sites) == 0 {
-		logger.Warn("no site manifests found under prefix; nothing to replay",
-			"prefix", prefix)
-		os.Exit(0)
-	}
-
 	totalDownloaded := 0
-	for _, site := range sites {
-		n, err := downloadSiteBinlogs(ctx, store, prefix, site, stopTime, outDir, logger)
-		if err != nil {
-			logger.Error("download site binlogs", "site", site, "error", err)
-			os.Exit(2)
-		}
-		totalDownloaded += n
+	for _, site := range result.Sites {
+		totalDownloaded += len(site.Staged)
 	}
 	logger.Info("pitr-download complete", "files", totalDownloaded, "sites", len(sites))
 }
@@ -170,70 +157,6 @@ func pitrDownloadConfigFromEnv() (*sidecar.PITRConfig, error) {
 	return cfg, nil
 }
 
-// parsePITRStopTime normalizes the user-provided stop datetime. We
-// accept both RFC 3339 ("2026-04-15T09:30:00Z", "…+00:00") and the
-// MySQL-native form ("2026-04-15 09:30:00") so operators can paste
-// either without mental conversion. The returned time is UTC; all
-// manifest timestamps are also UTC, so comparisons are direct.
-func parsePITRStopTime(s string) (time.Time, error) {
-	s = strings.TrimSpace(s)
-	layouts := []string{
-		time.RFC3339,
-		time.RFC3339Nano,
-		"2006-01-02 15:04:05",
-	}
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.UTC(), nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("unrecognized datetime: %q", s)
-}
-
-// discoverSites lists the manifest prefix and returns the set of site
-// names corresponding to manifest-<site>.json objects. Used when the
-// operator didn't pass an explicit site list — this makes the
-// download robust against decommissioned sites whose binlogs are
-// still in the archive.
-func discoverSites(ctx context.Context, store sidecar.ArchiveStore, prefix string) ([]string, error) {
-	keys, err := store.List(ctx, sidecar.ManifestKeyPrefix(prefix))
-	if err != nil {
-		return nil, err
-	}
-	seen := map[string]struct{}{}
-	var sites []string
-	for _, k := range keys {
-		site := sidecar.SiteFromManifestKey(k)
-		if site == "" {
-			continue
-		}
-		if _, dup := seen[site]; dup {
-			continue
-		}
-		seen[site] = struct{}{}
-		sites = append(sites, site)
-	}
-	return sites, nil
-}
-
-// downloadSiteBinlogs validates one site's causal replay window and stages its
-// prefix through a confirmed stop barrier under unique ordinal names. Metadata
-// hints never independently omit a file; START_GTIDS optionally supplies the
-// trusted backup lower bound. Every selected stream is checked before publication.
-func downloadSiteBinlogs(
-	ctx context.Context,
-	store sidecar.ArchiveStore,
-	prefix, site string,
-	stopTime time.Time,
-	outDir string,
-	logger *slog.Logger,
-) (int, error) {
-	if !isSafeBasename(site) {
-		return 0, fmt.Errorf("reject unsafe site name %q", site)
-	}
-	return downloadPITRWindow(ctx, store, prefix, site, stopTime, outDir, os.Getenv("BLOODRAVEN_PITR_START_GTIDS"), logger)
-}
-
 // isSafeBasename rejects names with path separators, parent references,
 // or NUL / control bytes. Manifest entries should always be plain
 // basenames (the archiver writes `mysql-bin.000123`-style names); a
@@ -251,4 +174,307 @@ func isSafeBasename(name string) bool {
 		}
 	}
 	return true
+}
+
+// Version 1 is shared with restore_script.py. Only authenticated stream evidence
+// enters this file; manifest timestamps are never coverage evidence.
+type pitrStagedFile struct {
+	Path                      string    `json:"path"`
+	Digest                    string    `json:"sha256"`
+	FirstEventTime            time.Time `json:"firstEventTime"`
+	LastEventTime             time.Time `json:"lastEventTime"`
+	FirstTransactionEventTime time.Time `json:"firstTransactionEventTime"`
+	LastTransactionEventTime  time.Time `json:"lastTransactionEventTime"`
+	TimestampsComplete        bool      `json:"timestampsComplete"`
+}
+type pitrSiteCoverage struct {
+	replayPrefix          internalmysql.GTIDSet
+	lowerGTIDs            internalmysql.GTIDSet
+	unverifiableGTIDs     internalmysql.GTIDSet
+	replayRefusal         string
+	AnchorReason          string `json:"anchorReason,omitempty"`
+	CheckpointGTIDs       string `json:"checkpointGTIDs"`
+	InWindowGTIDs         string `json:"inWindowGTIDs"`
+	checkpoint            internalmysql.GTIDSet
+	window                internalmysql.GTIDSet
+	Site                  string           `json:"site"`
+	StopReached           bool             `json:"stopReached"`
+	Anchored              bool             `json:"anchored"`
+	StagedStopReached     bool             `json:"stagedStopReached"`
+	NewestEventTime       time.Time        `json:"newestEventTime"`
+	NewestReplayEventTime time.Time        `json:"newestReplayEventTime"`
+	HasReplayTransactions bool             `json:"hasReplayTransactions"`
+	Staged                []pitrStagedFile `json:"staged"`
+}
+type pitrCoverage struct {
+	AllowUnverifiedCrossSite bool               `json:"allowUnverifiedCrossSite"`
+	CrossSiteUnverified      bool               `json:"crossSiteUnverified"`
+	Version                  int                `json:"version"`
+	RefusalReason            string             `json:"refusalReason,omitempty"`
+	Mode                     string             `json:"mode"`
+	StopDatetime             string             `json:"stopDatetime"`
+	AllowPartial             bool               `json:"allowPartial"`
+	TargetCovered            bool               `json:"targetCovered"`
+	Partial                  bool               `json:"partial"`
+	Sites                    []pitrSiteCoverage `json:"sites"`
+}
+
+func downloadPITRArchive(ctx context.Context, store sidecar.ArchiveStore, prefix string, sites []string, stop time.Time, outDir, start string, allowPartial, allowUnverifiedCrossSite bool, mode string, logger *slog.Logger) (pitrCoverage, error) {
+	if mode == "" {
+		mode = "timestamp"
+	}
+	if mode != "timestamp" && mode != "latest" {
+		return pitrCoverage{}, fmt.Errorf("invalid PITR mode %q", mode)
+	}
+	if mode == "latest" && (allowPartial || allowUnverifiedCrossSite) {
+		return pitrCoverage{}, fmt.Errorf("allowPartial and allowUnverifiedCrossSite are not supported for latest verification")
+	}
+	result := pitrCoverage{Version: 1, Mode: mode, AllowUnverifiedCrossSite: allowUnverifiedCrossSite, StopDatetime: stop.UTC().Format(time.RFC3339Nano), AllowPartial: allowPartial, Sites: []pitrSiteCoverage{}}
+	// Always preflight the entire prefix, even with an explicit replay set.
+	keys, err := store.List(ctx, sidecar.ManifestKeyPrefix(prefix))
+	if err != nil {
+		return result, fmt.Errorf("PITRArchiveListFailed: list site manifests under %q: %w; restore needs list permission on the prefix (S3 ListObjectsV2)", prefix, err)
+	}
+	selected := make(map[string]bool)
+	for _, site := range sites {
+		selected[site] = true
+	}
+	var omitted []string
+	for _, key := range keys {
+		if site := sidecar.SiteFromManifestKey(key); site != "" && !selected[site] {
+			omitted = append(omitted, key)
+		}
+	}
+	sort.Strings(omitted)
+	if len(omitted) > 0 {
+		return result, fmt.Errorf("PITRArchiveSiteOmitted: omitted manifest keys %v; replay set %v; add the source site to pointInTime.sites for replay validation, or move a foreign archive to its own prefix", omitted, sites)
+	}
+	if strings.TrimSpace(start) == "" && !allowPartial {
+		return result, fmt.Errorf("PITRBackupBoundUnknown: pointInTime requires a non-empty trusted source GTID bound; use a mysqlBackupRef whose backup has status.gtidExecuted, or set pointInTime.allowPartial for a restore")
+	}
+	planStop := stop
+	if mode == "latest" {
+		planStop = time.Time{}
+	}
+	hasTransactions := false
+	var newest []string
+	replaySites := append([]string(nil), sites...)
+	sort.Strings(replaySites)
+	for _, site := range replaySites {
+		coverage, err := planPITRWindow(ctx, store, prefix, site, planStop, outDir, start, logger)
+		if err != nil {
+			if coverage.AnchorReason != "" {
+				result.Sites = append(result.Sites, coverage)
+			}
+			return result, err
+		}
+		result.Sites = append(result.Sites, coverage)
+		result.TargetCovered = result.TargetCovered || (coverage.StopReached && coverage.Anchored)
+		hasTransactions = hasTransactions || coverage.HasReplayTransactions
+		ts := "none"
+		if !coverage.NewestEventTime.IsZero() {
+			ts = coverage.NewestEventTime.Format(time.RFC3339)
+		}
+		newest = append(newest, site+"="+ts)
+	}
+	baseline, err := internalmysql.ParseGTIDSet(start)
+	if err != nil {
+		return result, err
+	}
+	refusal := validatePITRPayloadReplay(&result)
+	if refusal == nil {
+		refusal = validatePITRLowerEdge(&result, baseline, false)
+	}
+	orderErr := validatePITRCrossSiteOrder(result.Sites)
+	if refusal == nil && orderErr != nil {
+		if allowUnverifiedCrossSite {
+			refusal = validatePITRLowerEdge(&result, baseline, true)
+			if refusal == nil {
+				result.CrossSiteUnverified = true
+			}
+		} else {
+			refusal = orderErr
+		}
+	}
+	if refusal == nil && orderErr == nil {
+		refusal = validatePITRLowerEdge(&result, baseline, true)
+	}
+	if coverageErr := validatePITRCoveringHistory(&result, baseline); refusal == nil {
+		refusal = coverageErr
+	}
+	result.TargetCovered = false
+	for _, site := range result.Sites {
+		result.TargetCovered = result.TargetCovered || (site.StopReached && site.Anchored)
+	}
+	if refusal == nil && mode == "latest" && !hasTransactions {
+		refusal = fmt.Errorf("PITRNoArchivedReplay: no archived binlog after the backup to replay; sites searched %v; rotate the active binlog on the source (FLUSH BINARY LOGS)", sites)
+	}
+	if mode != "latest" && !result.TargetCovered {
+		if allowPartial && refusal == nil {
+			result.Partial = true
+		} else if refusal == nil {
+			refusal = fmt.Errorf("PITRTargetNotCovered: requested %s; newest verified archived event per site [%s]; sites searched %v; no verified stop barrier on a backup-anchored chain covering the replay history; the active binlog is archived only after rotation (FLUSH BINARY LOGS on the source), or allowPartial restores to the newest archived point", result.StopDatetime, strings.Join(newest, ", "), sites)
+		}
+	}
+	if refusal != nil {
+		result.RefusalReason = strings.SplitN(refusal.Error(), ":", 2)[0]
+	}
+
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return result, err
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return result, err
+	}
+	tmp := filepath.Join(outDir, "coverage.json.part")
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return result, err
+	}
+	if err := os.Rename(tmp, filepath.Join(outDir, "coverage.json")); err != nil {
+		return result, err
+	}
+	return result, refusal
+}
+
+// Disjoint all-event ranges prove that the single mysqlbinlog invocation cannot
+// encounter a barrier before an earlier event from a later replay site.
+func validatePITRCrossSiteOrder(sites []pitrSiteCoverage) error {
+	type segment struct {
+		site                         string
+		first, last, txFirst, txLast time.Time
+		complete                     bool
+	}
+	var segments []segment
+	for _, site := range sites {
+		if len(site.Staged) == 0 {
+			continue
+		}
+		seg := segment{site: site.Site, complete: true}
+		for _, file := range site.Staged {
+			if !file.TimestampsComplete || file.FirstEventTime.IsZero() || file.LastEventTime.IsZero() || file.LastEventTime.Before(file.FirstEventTime) {
+				seg.complete = false
+			}
+			if seg.first.IsZero() || file.FirstEventTime.Before(seg.first) {
+				seg.first = file.FirstEventTime
+			}
+			if file.LastEventTime.After(seg.last) {
+				seg.last = file.LastEventTime
+			}
+			if !file.FirstTransactionEventTime.IsZero() && (seg.txFirst.IsZero() || file.FirstTransactionEventTime.Before(seg.txFirst)) {
+				seg.txFirst = file.FirstTransactionEventTime
+			}
+			if file.LastTransactionEventTime.After(seg.txLast) {
+				seg.txLast = file.LastTransactionEventTime
+			}
+		}
+		segments = append(segments, seg)
+	}
+	if len(segments) < 2 {
+		return nil
+	}
+	var details []string
+	valid := true
+	stamp := func(t time.Time) string {
+		if t.IsZero() {
+			return "none"
+		}
+		return t.Format(time.RFC3339)
+	}
+	for i, seg := range segments {
+		details = append(details, fmt.Sprintf("%s events=[%s,%s] transaction events=[%s,%s] timestampsComplete=%t", seg.site, stamp(seg.first), stamp(seg.last), stamp(seg.txFirst), stamp(seg.txLast), seg.complete))
+		if !seg.complete || (i > 0 && !segments[i-1].last.Before(seg.first)) {
+			valid = false
+		}
+	}
+	if !valid {
+		return fmt.Errorf("PITRCrossSiteOrder: staged site streams overlap, lack complete event-time evidence, or are not chronological in replay order: %s; for targets after the failover, use a full backup taken after the failover and before the target for a single-site window; for targets before the failover, the only restore option is pointInTime.allowUnverifiedCrossSite (correct when the first-sorted site holds the complete pre-target history); cross-site completeness is not verified with that opt-in, and verification cannot cover these pre-failover windows until #206; clock skew can cause conservative refusals", strings.Join(details, "; "))
+	}
+	return nil
+}
+
+// Lower-edge history must exist in the dump or in complete staged prefixes.
+// A GTID announcement inside a stop file alone cannot supply missing bytes.
+func validatePITRLowerEdge(result *pitrCoverage, baseline internalmysql.GTIDSet, globalStop bool) error {
+	if baseline.IsEmpty() {
+		return nil
+	}
+	available := sidecar.UnionBinlogGTIDs(baseline)
+	unverifiable := make(internalmysql.GTIDSet)
+	for _, site := range result.Sites {
+		unverifiable = sidecar.UnionBinlogGTIDs(unverifiable, site.unverifiableGTIDs)
+		available = sidecar.UnionBinlogGTIDs(available, site.lowerGTIDs)
+		if globalStop && site.StagedStopReached {
+			break
+		}
+	}
+	var refusal error
+	for i := range result.Sites {
+		site := &result.Sites[i]
+		if !site.Anchored && !site.HasReplayTransactions {
+			continue
+		}
+		if !available.Contains(site.checkpoint) {
+			site.Anchored = false
+			site.AnchorReason = "archive does not contain transactions between the backup bound and " + site.checkpoint.String()
+			if unverifiable.Contains(site.checkpoint.Subtract(available)) {
+				site.AnchorReason = pitrUnverifiableAnchorReason
+			}
+			if refusal == nil {
+				refusal = fmt.Errorf("PITRTargetNotCovered: site %s: %s", site.Site, site.AnchorReason)
+			}
+		}
+	}
+	return refusal
+}
+
+// With every replay site retained, a stop may certify only history that includes
+// all staged writers. This is containment evidence, not cross-site replay proof.
+func validatePITRCoveringHistory(result *pitrCoverage, baseline internalmysql.GTIDSet) error {
+	var refusal error
+	for i := range result.Sites {
+		site := &result.Sites[i]
+		if !site.StopReached {
+			continue
+		}
+		history := sidecar.UnionBinlogGTIDs(site.checkpoint, site.replayPrefix)
+		for j, other := range result.Sites {
+			if i == j {
+				continue
+			}
+			if !history.Contains(other.window.Subtract(baseline)) {
+				site.Anchored = false
+				if site.AnchorReason == "" {
+					site.AnchorReason = "stop history does not contain other sites' in-window GTIDs"
+					if site.unverifiableGTIDs.Contains(other.window.Subtract(baseline).Subtract(history)) {
+						site.AnchorReason = pitrUnverifiableAnchorReason
+					}
+				}
+				if refusal == nil {
+					refusal = fmt.Errorf("PITRTargetNotCovered: site %s: %s; use a full backup that covers the required history and precedes the target; allowUnverifiedCrossSite does not bypass missing or unverifiable coverage", site.Site, site.AnchorReason)
+				}
+			}
+		}
+	}
+	return refusal
+}
+
+const pitrUnverifiableAnchorReason = "archived file lacks verifiable transaction evidence (XA/checksum-off/unsupported encoding)"
+
+func validatePITRPayloadReplay(result *pitrCoverage) error {
+	var refusal error
+	for i := range result.Sites {
+		site := &result.Sites[i]
+		if site.replayRefusal != "" {
+			site.Anchored = false
+			site.AnchorReason = site.replayRefusal
+			if refusal == nil {
+				refusal = fmt.Errorf("PITRTargetNotCovered: site %s: %s", site.Site, site.AnchorReason)
+			}
+		}
+		if site.StagedStopReached {
+			break
+		}
+	}
+	return refusal
 }
