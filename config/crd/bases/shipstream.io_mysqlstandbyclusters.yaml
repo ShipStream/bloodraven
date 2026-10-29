@@ -1124,10 +1124,21 @@ spec:
                                           - latest
                                           - timestamp
                                           type: string
+                                        sites:
+                                          description: |-
+                                            Sites are the archive site names to replay. Defaults to this group's sites.
+                                            Set when the source archive's sites differ, or to include a removed site.
+                                          items:
+                                            maxLength: 253
+                                            minLength: 1
+                                            pattern: ^[a-z0-9-]+$
+                                            type: string
+                                          type: array
+                                          x-kubernetes-list-type: set
                                         timestamp:
                                           description: |-
                                             Timestamp is an RFC3339 instant; replay stops just before the
-                                            first binlog event after this time. Required when Mode=timestamp;
+                                            first binlog event at or after this time. Required when Mode=timestamp;
                                             ignored otherwise.
                                           type: string
                                       type: object
@@ -5833,6 +5844,19 @@ spec:
                               enabled at the time of the full dump. Omit for a plain dump-only
                               restore.
                             properties:
+                              allowPartial:
+                                default: false
+                                description: |-
+                                  AllowPartial permits restoring to the newest archived point when the target
+                                  is not covered. It never bypasses archive safety or site omission checks.
+                                type: boolean
+                              allowUnverifiedCrossSite:
+                                default: false
+                                description: |-
+                                  AllowUnverifiedCrossSite permits overlapping site streams without proving
+                                  cross-site completeness. Failback, reclone, or inverted replica clocks can
+                                  skip transactions. This never bypasses archive or coverage safety checks.
+                                type: boolean
                               excludeGtids:
                                 description: |-
                                   ExcludeGtids is an optional GTID set passed verbatim to
@@ -5840,6 +5864,17 @@ spec:
                                   known-bad transaction (e.g. an accidental DROP TABLE) while
                                   replaying everything else.
                                 type: string
+                              sites:
+                                description: |-
+                                  Sites are the archive site names to replay. Defaults to this group's sites.
+                                  Set when the source archive's sites differ, or to include a removed site.
+                                items:
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9-]+$
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: set
                               stopDatetime:
                                 description: |-
                                   StopDatetime is the MySQL-style datetime at which to stop
@@ -6409,6 +6444,19 @@ spec:
                               with initFromBackup.pointInTime. The field is kept so existing
                               objects still validate.
                             properties:
+                              allowPartial:
+                                default: false
+                                description: |-
+                                  AllowPartial permits restoring to the newest archived point when the target
+                                  is not covered. It never bypasses archive safety or site omission checks.
+                                type: boolean
+                              allowUnverifiedCrossSite:
+                                default: false
+                                description: |-
+                                  AllowUnverifiedCrossSite permits overlapping site streams without proving
+                                  cross-site completeness. Failback, reclone, or inverted replica clocks can
+                                  skip transactions. This never bypasses archive or coverage safety checks.
+                                type: boolean
                               excludeGtids:
                                 description: |-
                                   ExcludeGtids is an optional GTID set passed verbatim to
@@ -6416,6 +6464,17 @@ spec:
                                   known-bad transaction (e.g. an accidental DROP TABLE) while
                                   replaying everything else.
                                 type: string
+                              sites:
+                                description: |-
+                                  Sites are the archive site names to replay. Defaults to this group's sites.
+                                  Set when the source archive's sites differ, or to include a removed site.
+                                items:
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9-]+$
+                                  type: string
+                                type: array
+                                x-kubernetes-list-type: set
                               stopDatetime:
                                 description: |-
                                   StopDatetime is the MySQL-style datetime at which to stop

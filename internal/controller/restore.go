@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	"github.com/shipstream/bloodraven/internal/backupmeta"
 	bmetrics "github.com/shipstream/bloodraven/internal/metrics"
 )
 
@@ -135,6 +136,12 @@ type restoreCompletionMetadata struct {
 	TargetGtidExecuted      string
 	TargetBinlogFile        string
 	TargetBinlogPos         int64
+	PitrNewestEventTime     string
+	PitrPartial             bool
+	PitrCrossSiteUnverified bool
+	PitrReplaySites         []string
+	PitrCoverageVersion     int
+	PitrTargetCovered       bool
 	PitrStopDatetime        string
 	PitrReplayedBinlogFile  string
 	PitrReplayedBinlogCount int32
@@ -173,6 +180,16 @@ func applyRestoreMetadataToStatus(rs *v1alpha1.RestoreStatus, meta restoreComple
 	rs.PitrStopDatetime = meta.PitrStopDatetime
 	rs.PitrReplayedBinlogFile = meta.PitrReplayedBinlogFile
 	rs.PitrReplayedBinlogCount = meta.PitrReplayedBinlogCount
+	rs.PitrNewestEventTime = meta.PitrNewestEventTime
+	rs.PitrPartial = meta.PitrPartial
+	rs.PitrCrossSiteUnverified = meta.PitrCrossSiteUnverified
+	rs.PitrReplaySites = meta.PitrReplaySites
+	if meta.PitrPartial {
+		rs.Reason = "PointInTimePartial"
+	}
+	if meta.PitrCrossSiteUnverified {
+		rs.Reason = "PointInTimeCrossSiteUnverified"
+	}
 }
 
 func applyRestoreMetadataToInPlaceStatus(rs *v1alpha1.RestoreInPlaceStatus, meta restoreCompletionMetadata) {
@@ -248,6 +265,20 @@ func parseRestoreCompleteLine(line string) (restoreCompletionMetadata, bool) {
 			if n, err := strconv.ParseInt(rawVal, 10, 64); err == nil {
 				meta.TargetBinlogPos = n
 			}
+		case "pitrCrossSiteUnverified":
+			meta.PitrCrossSiteUnverified = rawVal == "true"
+		case "pitrReplaySites":
+			if sites, ok := decodeRestoreToken(rawVal); ok && sites != "" {
+				meta.PitrReplaySites = strings.Split(sites, ",")
+			}
+		case "pitrTargetCovered":
+			meta.PitrTargetCovered = rawVal == "true"
+		case "pitrCoverageVersion":
+			meta.PitrCoverageVersion, _ = strconv.Atoi(rawVal)
+		case "pitrNewestEventTime":
+			meta.PitrNewestEventTime, _ = decodeRestoreToken(rawVal)
+		case "pitrPartial":
+			meta.PitrPartial = rawVal == "true"
 		case "pitrStopDatetime":
 			if val, ok := decodeRestoreToken(rawVal); ok {
 				meta.PitrStopDatetime = val
@@ -273,14 +304,17 @@ func decodeRestoreToken(raw string) (string, bool) {
 	return val, true
 }
 
-func (r *MysqlFailoverGroupReconciler) tailRestoreCompletion(ctx context.Context, job *batchv1.Job) (restoreCompletionMetadata, bool) {
-	if r.Clientset == nil {
-		return restoreCompletionMetadata{}, false
-	}
+func (r *MysqlFailoverGroupReconciler) tailRestoreCompletion(ctx context.Context, job *batchv1.Job) (restoreCompletionMetadata, bool, completionLogState) {
 	var pod *corev1.Pod
-	pods, ok := r.restoreJobPods(ctx, job)
-	if !ok {
-		return restoreCompletionMetadata{}, false
+	pods, err := restoreJobPods(ctx, r.Client, job)
+	if err != nil {
+		return restoreCompletionMetadata{}, false, completionLogsTransient
+	}
+	if len(pods) == 0 {
+		return restoreCompletionMetadata{}, false, completionLogsNoPod
+	}
+	if r.Clientset == nil {
+		return restoreCompletionMetadata{}, false, completionLogsTransient
 	}
 	for i := range pods {
 		p := &pods[i]
@@ -290,24 +324,29 @@ func (r *MysqlFailoverGroupReconciler) tailRestoreCompletion(ctx context.Context
 		}
 	}
 	if pod == nil {
-		return restoreCompletionMetadata{}, false
+		return restoreCompletionMetadata{}, false, completionLogsTransient
 	}
 	candidates := []string{backupJobContainerName}
 	if len(pod.Spec.Containers) > 0 && pod.Spec.Containers[0].Name != backupJobContainerName {
 		candidates = append(candidates, pod.Spec.Containers[0].Name)
 	}
+	logsRead := false
 	for _, container := range candidates {
-		meta, ok := r.tailRestoreContainer(ctx, job.Namespace, pod.Name, container)
+		meta, ok, read := r.tailRestoreContainer(ctx, job.Namespace, pod.Name, container)
+		logsRead = logsRead || read
 		if ok {
-			return meta, true
+			return meta, true, completionLogsRead
 		}
 	}
-	return restoreCompletionMetadata{}, false
+	if logsRead {
+		return restoreCompletionMetadata{}, false, completionLogsRead
+	}
+	return restoreCompletionMetadata{}, false, completionLogsTransient
 }
 
-func (r *MysqlFailoverGroupReconciler) restoreJobPods(ctx context.Context, job *batchv1.Job) ([]corev1.Pod, bool) {
+func restoreJobPods(ctx context.Context, c client.Client, job *batchv1.Job) ([]corev1.Pod, error) {
 	if job == nil {
-		return nil, false
+		return nil, nil
 	}
 	var out []corev1.Pod
 	selectors := []client.MatchingLabels{
@@ -316,18 +355,24 @@ func (r *MysqlFailoverGroupReconciler) restoreJobPods(ctx context.Context, job *
 	}
 	for _, selector := range selectors {
 		var pods corev1.PodList
-		if err := r.List(ctx, &pods, client.InNamespace(job.Namespace), selector); err != nil {
-			return nil, false
+		if err := c.List(ctx, &pods, client.InNamespace(job.Namespace), selector); err != nil {
+			return nil, err
 		}
 		out = append(out, pods.Items...)
 	}
-	return out, len(out) > 0
+	return out, nil
 }
 
 func podBelongsToJob(pod *corev1.Pod, job *batchv1.Job) bool {
 	if pod == nil || job == nil {
 		return false
 	}
+	for _, owner := range pod.OwnerReferences {
+		if owner.Kind == "Job" && owner.UID != "" && job.UID != "" {
+			return owner.UID == job.UID
+		}
+	}
+
 	if pod.Labels["batch.kubernetes.io/job-name"] == job.Name || pod.Labels["job-name"] == job.Name {
 		return true
 	}
@@ -339,14 +384,14 @@ func podBelongsToJob(pod *corev1.Pod, job *batchv1.Job) bool {
 	return false
 }
 
-func (r *MysqlFailoverGroupReconciler) tailRestoreContainer(ctx context.Context, namespace, podName, container string) (restoreCompletionMetadata, bool) {
+func (r *MysqlFailoverGroupReconciler) tailRestoreContainer(ctx context.Context, namespace, podName, container string) (restoreCompletionMetadata, bool, bool) {
 	req := r.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
 		Container: container,
 		TailLines: ptr64(50),
 	})
 	stream, err := req.Stream(ctx)
 	if err != nil {
-		return restoreCompletionMetadata{}, false
+		return restoreCompletionMetadata{}, false, false
 	}
 	defer func() { _ = stream.Close() }()
 
@@ -364,9 +409,9 @@ func (r *MysqlFailoverGroupReconciler) tailRestoreContainer(ctx context.Context,
 	}
 	if err := sc.Err(); err != nil && err != io.EOF {
 		log.FromContext(ctx).Error(err, "tail restore completion log", "pod", podName, "container", container)
-		return restoreCompletionMetadata{}, false
+		return restoreCompletionMetadata{}, false, false
 	}
-	return last, ok
+	return last, ok, true
 }
 
 func emitRestoreSuccessMetrics(fg *v1alpha1.MysqlFailoverGroup, restoreKind, targetSite string, sourceSizeBytes int64, start *metav1.Time, completion metav1.Time) {
@@ -531,6 +576,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		running := &v1alpha1.RestoreStatus{
 			Phase:      v1alpha1.BackupPhaseRunning,
 			JobName:    built.Name,
+			JobUID:     string(built.UID),
 			TargetSite: targetSite,
 			StartTime:  &now,
 			Message:    "restore Job created",
@@ -548,23 +594,112 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		return 15 * time.Second, nil
 	}
 
+	previous := fg.Status.Restore
+	sameFailure := previous != nil && previous.Phase == v1alpha1.BackupPhaseFailed && sameRestoreJob(previous, &job)
+	if sameFailure {
+		if previous.FailureDetailResolved || pitrFailureReason(previous.Message) != "" || !jobHasPITR(&job) {
+			return 0, nil
+		}
+		if !completionLogsExpired(&job, time.Now()) && previous.FailureDetailLastAttemptTime != nil {
+			remaining := 30*time.Second - time.Since(previous.FailureDetailLastAttemptTime.Time)
+			if remaining > 0 {
+				return remaining, nil
+			}
+		}
+	}
+	failureResolved := false
+	if phase == v1alpha1.BackupPhaseFailed && jobHasPITR(&job) {
+		if sameFailure {
+			message = previous.Message
+		}
+		if sameFailure && completionLogsExpired(&job, time.Now()) {
+			failureResolved = true
+		} else {
+			lookupCtx := ctx
+			if sameFailure {
+				if deadline, known := completionLogDeadline(&job); known {
+					var cancel context.CancelFunc
+					lookupCtx, cancel = context.WithDeadline(ctx, deadline)
+					defer cancel()
+				}
+			}
+			detail, resolved := pitrJobFailure(lookupCtx, r.Client, r.Clientset, &job)
+			failureResolved = resolved || completionLogsExpired(&job, time.Now())
+			if detail != "" {
+				message = detail
+			}
+		}
+	}
+
 	now := metav1.Now()
 	meta := r.restoreSourceMetadata(ctx, fg, fg.Spec.InitFromBackup.Source)
 	if phase == v1alpha1.BackupPhaseSucceeded {
-		if parsed, ok := r.tailRestoreCompletion(ctx, &job); ok {
+		parsed, ok, logsRead := r.tailRestoreCompletion(ctx, &job)
+		if ok {
 			meta = parsed
+		}
+		for _, init := range job.Spec.Template.Spec.InitContainers {
+			if init.Name == restorePITRInitContainerName && logsRead != completionLogsRead {
+				if logsRead == completionLogsNoPod || completionLogsExpired(&job, time.Now()) {
+					phase = v1alpha1.BackupPhaseFailed
+					message = "PITRCoverageInvalid: completion logs unavailable"
+					break
+				}
+				entering := fg.Status.Restore == nil || !sameRestoreJob(fg.Status.Restore, &job) || fg.Status.Restore.Reason != "CompletionLogsPending"
+				running := &v1alpha1.RestoreStatus{Phase: v1alpha1.BackupPhaseRunning, JobName: job.Name, JobUID: string(job.UID), Reason: "CompletionLogsPending", TargetSite: targetSite, StartTime: job.Status.StartTime, Message: "waiting to read PITR completion logs (up to ten minutes after Job completion)"}
+				if running.StartTime == nil && previous != nil {
+					running.StartTime = previous.StartTime
+				}
+				applyRestoreMetadataToStatus(running, meta)
+				if r.setRestoreStatus(ctx, fg, running) && entering {
+					r.Recorder.Eventf(fg, corev1.EventTypeNormal, "CompletionLogsPending", "%s", running.Message)
+				}
+				return 15 * time.Second, nil
+			}
+			if init.Name == restorePITRInitContainerName && (!ok || meta.PitrCoverageVersion != 1) {
+				phase = v1alpha1.BackupPhaseFailed
+				message = "PITRCoverageInvalid: PITR Job completed without version 1 coverage metadata"
+				meta = r.restoreSourceMetadata(ctx, fg, fg.Spec.InitFromBackup.Source)
+			}
 		}
 	}
 
 	rs := &v1alpha1.RestoreStatus{
 		Phase:          phase,
 		JobName:        job.Name,
+		JobUID:         string(job.UID),
 		TargetSite:     targetSite,
 		StartTime:      job.Status.StartTime,
 		CompletionTime: &now,
 		Message:        message,
 	}
 	applyRestoreMetadataToStatus(rs, meta)
+	if phase == v1alpha1.BackupPhaseFailed {
+		rs.Reason = pitrFailureReason(message)
+		if jobHasPITR(&job) {
+			rs.FailureDetailLastAttemptTime = &now
+			rs.FailureDetailResolved = failureResolved
+		}
+		if sameFailure {
+			rs.CompletionTime = previous.CompletionTime
+		}
+	}
+	if meta.PitrPartial {
+		newest := meta.PitrNewestEventTime
+		if newest == "" {
+			newest = "none"
+		}
+		rs.Message = fmt.Sprintf("PointInTimePartial: requested %s; newest replayed event %s", meta.PitrStopDatetime, newest)
+	}
+
+	if meta.PitrCrossSiteUnverified {
+		warning := fmt.Sprintf("PointInTimeCrossSiteUnverified: staged sites in replay order [%s]; cross-site completeness was not verified", strings.Join(meta.PitrReplaySites, ", "))
+		if meta.PitrPartial {
+			rs.Message += "; " + warning
+		} else {
+			rs.Message = warning
+		}
+	}
 	if rs.StartTime == nil {
 		if fg.Status.Restore != nil && fg.Status.Restore.StartTime != nil {
 			rs.StartTime = fg.Status.Restore.StartTime
@@ -578,13 +713,27 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreJob(ctx context.Context, 
 		if patched {
 			emitRestoreSuccessMetrics(fg, "init_from_backup", targetSite, rs.SourceSizeBytes, rs.StartTime, now)
 		}
+		if meta.PitrPartial {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PointInTimePartial", "%s", rs.Message)
+		}
+		if meta.PitrCrossSiteUnverified {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "PointInTimeCrossSiteUnverified", "%s", rs.Message)
+		}
+		if meta.PitrPartial || meta.PitrCrossSiteUnverified {
+			return 0, nil
+		}
 		r.Recorder.Eventf(fg, corev1.EventTypeNormal, "RestoreSucceeded",
 			"restore Job %s completed: %s", job.Name, message)
 		return 0, nil
 	}
 
-	r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreFailed",
-		"restore Job %s failed: %s", job.Name, message)
+	if !sameFailure {
+		r.Recorder.Eventf(fg, corev1.EventTypeWarning, "RestoreFailed",
+			"restore Job %s failed: %s", job.Name, message)
+	}
+	if jobHasPITR(&job) && rs.Reason == "" && !rs.FailureDetailResolved {
+		return 30 * time.Second, nil
+	}
 	// No automatic retry. Operator must delete the Job to re-trigger.
 	return 0, nil
 }
@@ -860,6 +1009,9 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		if ref.Status.Phase != v1alpha1.BackupPhaseSucceeded || ref.Status.Location == "" {
 			return nil, fmt.Errorf("referenced mysqlbackup %s is not Succeeded or has no location", ref.Name)
 		}
+		if err := validatePITRBackupStart(in.PointInTime, ref.Status.StartTime); err != nil {
+			return nil, err
+		}
 		sourceMeta = restoreMetadataFromBackupStatus(ref.Status)
 
 		// Prefer the structured StorageType set by the backup
@@ -1045,6 +1197,9 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 	// S3/PVC into a shared emptyDir) and the main container
 	// (restore.py, runs mysqlbinlog | mysql on the downloaded files).
 	// See buildRestorePITRFragments for the shape.
+	if err := validatePITRBackupBound(in.PointInTime, sourceMeta.SourceGtidExecuted, false); err != nil {
+		return nil, err
+	}
 	pitrFrags, err := buildRestorePITRFragmentsFor(fg, in.PointInTime)
 	if err != nil {
 		return nil, err
@@ -1395,4 +1550,40 @@ func (r *MysqlFailoverGroupReconciler) buildRestoreJobSpec(ctx context.Context, 
 		},
 	}
 	return job, nil
+}
+
+// A dump cannot be un-applied to reach a time preceding its start.
+func validatePITRBackupStart(pit *v1alpha1.PointInTimeSpec, start *metav1.Time) error {
+	if pit == nil {
+		return nil
+	}
+	stop, err := backupmeta.ParsePITRStopTime(pit.StopDatetime)
+	if err != nil {
+		return fmt.Errorf("invalid pointInTime.stopDatetime: %w", err)
+	}
+	if start != nil && stop.Before(start.Time) {
+		return fmt.Errorf("pointInTime.stopDatetime %s is earlier than backup start time %s; the dump cannot be un-applied", pit.StopDatetime, start.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+func sameRestoreJob(previous *v1alpha1.RestoreStatus, job *batchv1.Job) bool {
+	if previous == nil || previous.JobName != job.Name {
+		return false
+	}
+	if previous.JobUID != "" && job.UID != "" {
+		return previous.JobUID == string(job.UID)
+	}
+	return job.CreationTimestamp.IsZero() || (previous.CompletionTime != nil && !job.CreationTimestamp.After(previous.CompletionTime.Time))
+}
+
+func validatePITRBackupBound(pit *v1alpha1.PointInTimeSpec, bound string, verification bool) error {
+	if pit == nil || pit.AllowPartial || strings.TrimSpace(bound) != "" {
+		return nil
+	}
+	remedy := "use a mysqlBackupRef whose backup has status.gtidExecuted, or set pointInTime.allowPartial"
+	if verification {
+		remedy = "use a referenced backup with trustworthy status.gtidExecuted; verification does not allow partial recovery"
+	}
+	return fmt.Errorf("PITRBackupBoundUnknown: pointInTime requires a non-empty trusted source GTID bound; %s", remedy)
 }

@@ -85,6 +85,7 @@ func (f *FailoverController) promote(ctx context.Context, candidate mysql.Checke
 	if err != nil {
 		f.logger.Warn("failed to record promotion GTID", "error", err)
 	}
+	f.rotatePromotionBinlog(ctx, candidate, candidateSite)
 	// Clear super_read_only (may have been set by sidecar fencing or previous state).
 	if err := candidate.SetSuperReadOnly(ctx, false); err != nil {
 		return "", err
@@ -126,6 +127,7 @@ func (f *FailoverController) promoteVerified(ctx context.Context, candidate mysq
 	if err != nil {
 		return "", promoteStageReplicaReset, fmt.Errorf("after RESET REPLICA ALL: %w", err)
 	}
+	f.rotatePromotionBinlog(ctx, candidate, candidateSite)
 	if err := sess.SetSuperReadOnly(ctx, false); err != nil {
 		return "", promoteStageReplicaReset, err
 	}

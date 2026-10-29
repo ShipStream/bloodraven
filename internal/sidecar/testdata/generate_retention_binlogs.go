@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/binary"
+	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/klauspost/compress/zstd"
 	"hash/crc32"
 	"os"
@@ -44,10 +45,15 @@ func main() {
 	}
 	payload := enc.EncodeAll(inner, nil)
 	enc.Close()
-	body := []byte{1, 8}
-	body = binary.LittleEndian.AppendUint64(body, uint64(len(payload)))
-	body = append(body, 2, 1, 0, 3, 8)
-	body = binary.LittleEndian.AppendUint64(body, uint64(len(inner)))
+	body := []byte{}
+	for _, field := range []struct {
+		key   byte
+		value uint64
+	}{{1, uint64(len(payload))}, {2, 0}, {3, uint64(len(inner))}} {
+		value := mysql.PutLengthEncodedInt(field.value)
+		body = append(body, field.key, byte(len(value)))
+		body = append(body, value...)
+	}
 	body = append(body, 0)
 	body = append(body, payload...)
 	compressed := append(append([]byte{}, prefix...), events[2]...)

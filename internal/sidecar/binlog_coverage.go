@@ -63,8 +63,8 @@ func (c *binlogCoverageCollector) observe(e *replication.BinlogEvent) {
 			gtid = &tagged.GTIDEvent
 		}
 	case replication.TRANSACTION_PAYLOAD_EVENT:
-		payload, ok := e.Event.(*replication.TransactionPayloadEvent)
-		if !payloadAllowed || !ok || payload == nil {
+		payload, err := decodedTransactionPayload(e)
+		if !payloadAllowed || err != nil {
 			c.valid = false
 			break
 		}

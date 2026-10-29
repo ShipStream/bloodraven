@@ -93,6 +93,7 @@ func successfulBackup(name, fg, profile string) *v1alpha1.MysqlBackup {
 		},
 		Status: v1alpha1.MysqlBackupStatus{
 			Phase:          v1alpha1.BackupPhaseSucceeded,
+			GtidExecuted:   "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-10",
 			CompletionTime: &metav1.Time{Time: time.Now()},
 			Location:       "lion/nightly/name/",
 			StorageType:    v1alpha1.BackupStorageS3,

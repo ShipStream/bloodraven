@@ -250,18 +250,24 @@ fi
 # ---- PITR replay -----------------------------------------------------
 # restore.py owns PITR replay for both restore and verification jobs.
 # Bridge its BLOODRAVEN_RESTORE_COMPLETE metadata into the verification
-# sentinel consumed by the reconciler. The restore sentinel does not
-# include exact replay position/timestamp, but a non-empty replay mark
-# still records that PITR replay ran and which archived binlog was last
-# reported by restore.py; the sanity query below proves target semantics.
+# sentinel consumed by the reconciler, including the newest verified event in
+# the prefix passed through replay (never the requested stop time).
 PITR_MODE="${BLOODRAVEN_VERIFY_PITR_MODE:-none}"
 if [[ "$PITR_MODE" != "none" && "$PITR_MODE" != "" ]]; then
     RESTORE_COMPLETE="$(grep 'BLOODRAVEN_RESTORE_COMPLETE' "$RESTORE_LOG" | tail -n 1 || true)"
     LAST_FILE=""
     REPLAY_COUNT=""
+    NEWEST_EVENT=""
+    COVERAGE_VERSION=""
+    TARGET_COVERED="false"
+    PARTIAL="false"
     for f in $RESTORE_COMPLETE; do
         case "$f" in
             pitrReplayedBinlogFile=*) LAST_FILE="${f#pitrReplayedBinlogFile=}" ;;
+            pitrCoverageVersion=*) COVERAGE_VERSION="${f#pitrCoverageVersion=}" ;;
+            pitrTargetCovered=*) TARGET_COVERED="${f#pitrTargetCovered=}" ;;
+            pitrPartial=*) PARTIAL="${f#pitrPartial=}" ;;
+            pitrNewestEventTime=*) NEWEST_EVENT="${f#pitrNewestEventTime=}" ;;
             pitrReplayedBinlogCount=*) REPLAY_COUNT="${f#pitrReplayedBinlogCount=}" ;;
         esac
     done
@@ -273,8 +279,8 @@ if [[ "$PITR_MODE" != "none" && "$PITR_MODE" != "" ]]; then
         log "PITR mode=$PITR_MODE but restore.py did not report replayed binlogs"
         exit 1
     fi
-    printf 'BLOODRAVEN_VERIFY_REPLAY_COMPLETE file=%s position=%s timestamp=%s\n' \
-        "$LAST_FILE" "0" ""
+    printf 'BLOODRAVEN_VERIFY_REPLAY_COMPLETE coverage=%s mode=%s targetCovered=%s partial=%s files=%s file=%s position=%s timestamp=%s\n' \
+        "$COVERAGE_VERSION" "$PITR_MODE" "$TARGET_COVERED" "$PARTIAL" "$REPLAY_COUNT" "$LAST_FILE" "0" "$NEWEST_EVENT"
 fi
 
 # ---- Sanity check ----------------------------------------------------

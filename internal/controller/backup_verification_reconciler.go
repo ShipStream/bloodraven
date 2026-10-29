@@ -259,6 +259,7 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	}
 	// Observe the Job. Status translation reuses the backup helper.
 	phase, message := jobPhase(job, "verification")
+	jobFailed := phase == v1alpha1.BackupPhaseFailed
 	if phase == "" {
 		return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 	}
@@ -275,8 +276,8 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 	}
 
 	// Parse the verify.sh log sentinels for PITR replay + sanity check
-	// details. Nil sentinels (missing Clientset, older Jobs) leave the
-	// status fields at zero value and do not fail the reconcile.
+	// details. PITR certificates distinguish a covered idle window from a
+	// missing sentinel; unreadable logs are retried before deciding success.
 	sentinels := r.tailVerificationSentinels(ctx, v, job)
 	if sentinels.Replay != nil {
 		next.ReplayedThroughBinlog = sentinels.Replay
@@ -285,12 +286,53 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 		next.SanityCheck = sentinels.Sanity
 	}
 
+	for _, init := range job.Spec.Template.Spec.InitContainers {
+		if init.Name != restorePITRInitContainerName || phase != v1alpha1.BackupPhaseSucceeded {
+			continue
+		}
+		if !sentinels.LogsRead {
+			if sentinels.NoPod || completionLogsExpired(job, time.Now()) {
+				phase = v1alpha1.BackupPhaseFailed
+				message = "PITRCoverageInvalid: completion logs unavailable"
+				break
+			}
+			entering := !strings.HasPrefix(v.Status.Message, "waiting to read PITR verification completion logs")
+			patch := client.MergeFrom(v.DeepCopy())
+			v.Status.Message = "waiting to read PITR verification completion logs (up to ten minutes after Job completion)"
+			if err := r.Status().Patch(ctx, v, patch); err != nil {
+				return ctrl.Result{}, err
+			}
+			if entering {
+				r.Recorder.Eventf(v, corev1.EventTypeNormal, "CompletionLogsPending", "%s", v.Status.Message)
+			}
+			return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+		}
+		mode := "timestamp"
+		for _, env := range init.Env {
+			if env.Name == "BLOODRAVEN_PITR_MODE" {
+				mode = env.Value
+			}
+		}
+		valid := sentinels.CoverageVersion == 1 && sentinels.Mode == mode && !sentinels.Partial && sentinels.Replay != nil
+		if mode == "timestamp" {
+			valid = valid && sentinels.TargetCovered
+		} else {
+			valid = valid && sentinels.Files > 0 && sentinels.Replay != nil && sentinels.Replay.Timestamp != nil
+		}
+		if !valid {
+			phase = v1alpha1.BackupPhaseFailed
+			message = "PITRCoverageInvalid: PITR verification completed without valid version 1 coverage metadata"
+		}
+	}
 	reason := "Succeeded"
 	if phase == v1alpha1.BackupPhaseSucceeded {
 		next.Phase = v1alpha1.VerificationPhaseSucceeded
 	} else {
 		next.Phase = v1alpha1.VerificationPhaseFailed
 		reason = "Failed"
+		if pitrReason := pitrFailureReason(message); pitrReason != "" {
+			reason = pitrReason
+		}
 		// Attribute the failure to the sanity-check phase when the
 		// sentinel tells us that's where we stopped. Operators get a
 		// distinct reason they can filter on (SanityCheckFailed vs the
@@ -300,6 +342,14 @@ func (r *MysqlBackupVerificationReconciler) observeVerificationJob(ctx context.C
 				reason = "SanityCheckTimeout"
 			} else {
 				reason = "SanityCheckFailed"
+			}
+		}
+	}
+	if jobFailed {
+		if detail, _ := pitrJobFailure(ctx, r.Client, r.Clientset, job); detail != "" {
+			message = detail
+			if pitrReason := pitrFailureReason(detail); pitrReason != "" {
+				reason = pitrReason
 			}
 		}
 	}
@@ -708,24 +758,27 @@ func (r *MysqlBackupVerificationReconciler) emitTerminalMetrics(v *v1alpha1.Mysq
 }
 
 // verifySentinels bundles the parsed output of the verify.sh post-load
-// sentinels. Either field may be nil when the corresponding phase did
-// not run (no pointInTime, no sanityCheck) or when log tailing is
-// unavailable (no Clientset).
+// sentinels. LogsRead distinguishes unavailable logs from missing metadata.
 type verifySentinels struct {
-	Replay *v1alpha1.BinlogReplayMark
-	Sanity *v1alpha1.SanityCheckResult
+	CoverageVersion int
+	TargetCovered   bool
+	Partial         bool
+	Mode            string
+	Files           int
+	LogsRead        bool
+	NoPod           bool
+	Replay          *v1alpha1.BinlogReplayMark
+	Sanity          *v1alpha1.SanityCheckResult
 }
 
 // tailVerificationSentinels reads the verification Job pod's logs and
 // parses the trailing BLOODRAVEN_VERIFY_REPLAY_COMPLETE and
 // BLOODRAVEN_VERIFY_SANITY_COMPLETE sentinels into structured status
-// fragments. Returns zero-value sentinels on any failure path so the
-// caller cleanly leaves status at its existing values.
+// fragments. LogsRead is true only after the complete bounded log scan;
+// a read failure cannot certify either present or absent completion metadata.
 func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx context.Context, v *v1alpha1.MysqlBackupVerification, job *batchv1.Job) verifySentinels {
 	out := verifySentinels{}
-	if r.Clientset == nil {
-		return out
-	}
+
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(job.Namespace),
@@ -736,8 +789,13 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 	// Prefer the Succeeded pod; on Failed runs the pod phase is Failed
 	// but we still want its tail. Take the most recent terminal pod.
 	var chosen *corev1.Pod
+	matching := 0
 	for i := range pods.Items {
 		p := &pods.Items[i]
+		if job.UID != "" && !podBelongsToJob(p, job) {
+			continue
+		}
+		matching++
 		if p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
 			continue
 		}
@@ -746,6 +804,10 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 		}
 	}
 	if chosen == nil {
+		out.NoPod = matching == 0
+		return out
+	}
+	if r.Clientset == nil {
 		return out
 	}
 
@@ -764,6 +826,12 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 		line := sc.Text()
 		if mark, ok := parseReplaySentinel(line); ok {
 			out.Replay = mark
+			tokens, _ := backupmeta.ParseTokens(line, "BLOODRAVEN_VERIFY_REPLAY_COMPLETE")
+			out.CoverageVersion, _ = strconv.Atoi(tokens["coverage"])
+			out.TargetCovered = tokens["targetCovered"] == "true"
+			out.Partial = tokens["partial"] == "true"
+			out.Mode = tokens["mode"]
+			out.Files, _ = strconv.Atoi(tokens["files"])
 			continue
 		}
 		if sanity, ok := parseSanitySentinel(line); ok {
@@ -773,6 +841,8 @@ func (r *MysqlBackupVerificationReconciler) tailVerificationSentinels(ctx contex
 	if err := sc.Err(); err != nil {
 		log.FromContext(ctx).Error(err, "failed to scan verification sentinel log output",
 			"pod", chosen.Name, "namespace", job.Namespace, "job", job.Name)
+	} else {
+		out.LogsRead = true
 	}
 	return out
 }
@@ -794,7 +864,10 @@ func parseReplaySentinel(line string) (*v1alpha1.BinlogReplayMark, bool) {
 			continue
 		}
 		key := f[:eq]
-		val := f[eq+1:]
+		val, valid := decodeRestoreToken(f[eq+1:])
+		if !valid {
+			continue
+		}
 		switch key {
 		case "file":
 			mark.File = val

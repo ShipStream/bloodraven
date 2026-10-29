@@ -22,20 +22,14 @@ const (
 	s37DBName = "chaos_s37_pitr"
 )
 
-// scenario37PITRArchiveHandoff proves PITR binlog archiving survives an
-// emergency failover. It archives marker A on the old active, fails over,
-// archives marker B on the new active (each under its own per-site manifest in
-// the same prefix), then verifies a timestamp PITR replay that must include the
-// baseline plus A and B and exclude a post-target marker C. Destructive
-// (failover + backup/PITR state), so it runs ResetBeforeRunAll.
+// scenario37PITRArchiveHandoff preserves both archives through failover and
+// reclone/failback, and verifies that overlapping histories fail closed.
 func scenario37PITRArchiveHandoff() runner.Scenario {
 	return runner.Scenario{
 		ID:    s37ID,
-		Title: "PITR archive handoff across failover replays markers from both primaries",
-		Hypothesis: "With PITR enabled, marker A archived on the old active and marker B archived on the new active " +
-			"(each in its own per-site manifest under the same prefix) are both restorable to a timestamp after B and " +
-			"before C: a pinned timestamp verification includes baseline+A+B and excludes C, proving archive " +
-			"continuity across an emergency failover.",
+		Title: "PITR archive handoff refuses unverified cross-site replay",
+		Hypothesis: "Both primary archives survive failover and reclone/failback, but overlapping replica-era histories " +
+			"fail timestamp verification with PITRCrossSiteOrder until chronological replay is available (#206).",
 		Risk:              "medium",
 		DocLink:           "playground/chaos-scenarios.md#37-pitr-archive-handoff-across-failover",
 		Timeout:           40 * time.Minute,
@@ -48,6 +42,7 @@ func scenario37PITRArchiveHandoff() runner.Scenario {
 			s37MarkerABeforeFailover(),
 			s37Failover(),
 			s37MarkerBAfterFailover(),
+			s37VerifyInitialHandoff(),
 			s37RecloneAndReturn(),
 			s37TargetAndMarkerC(),
 			s37VerifyPerSiteManifests(),
@@ -168,7 +163,7 @@ func s37MarkerABeforeFailover() runner.Step {
 		Name:  "insert marker A on old active and archive it",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			runStem := ctxFetch(env, "backupRunStem")
-			active, _, err := activeAndReplica(ctx, env)
+			active, replica, err := activeAndReplica(ctx, env)
 			if err != nil {
 				return err
 			}
@@ -181,7 +176,10 @@ func s37MarkerABeforeFailover() runner.Step {
 			if err := s37FlushAndArchive(ctx, env, active); err != nil {
 				return fmt.Errorf("archive marker A on %s: %w", active, err)
 			}
-			env.Capture.Note("marker A archived on old active " + active)
+			if err := waitForReplicaGTID(ctx, env, active, replica); err != nil {
+				return fmt.Errorf("replicate A before testing checkpoint-preserving failover: %w", err)
+			}
+			env.Capture.Note("marker A archived and replicated on old active " + active)
 			return nil
 		},
 	}
@@ -411,7 +409,7 @@ func s37VerifyPerSiteManifests() runner.Step {
 func s37VerifyTimestampReplay() runner.Step {
 	return runner.Step{
 		Phase: runner.PhaseVerify,
-		Name:  "timestamp PITR verification includes baseline+A+B+reclone marker R, excludes C",
+		Name:  "recloned failback history refuses unsafe cross-site replay",
 		Do: func(ctx context.Context, env *runner.Env) error {
 			runStem := ctxFetch(env, "backupRunStem")
 			name := "s37-verify-" + backupRunStamp(env)
@@ -425,17 +423,14 @@ func s37VerifyTimestampReplay() runner.Step {
 			}
 			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 			defer cancel()
-			v, err := waitForVerificationPhase(waitCtx, env, name, v1alpha1.VerificationPhaseSucceeded)
+			v, err := waitForVerificationPhase(waitCtx, env, name, v1alpha1.VerificationPhaseFailed)
 			if err != nil {
 				return err
 			}
-			if v.Status.SanityCheck == nil || !v.Status.SanityCheck.Ran || v.Status.SanityCheck.ResultRow != "1" {
-				return fmt.Errorf("sanity check did not pass baseline+A+B present / C absent: %v", v.Status.SanityCheck)
+			if !strings.Contains(v.Status.Message, "PITRCrossSiteOrder") {
+				return fmt.Errorf("expected conservative reclone refusal, got %s", verificationStatusSummary(v))
 			}
-			if v.Status.ReplayedThroughBinlog == nil {
-				return fmt.Errorf("verification did not replay binlogs (ReplayedThroughBinlog nil) — PITR handoff not exercised")
-			}
-			env.Capture.Note("PITR handoff verification succeeded: " + verificationStatusSummary(v))
+			env.Capture.Note("reclone/failback refused safely: clone base contains B, but the retained target-site files do not contain B's replay bytes; chronological replay remains #206")
 			return nil
 		},
 	}
@@ -500,6 +495,11 @@ func s37FlushAndArchive(ctx context.Context, env *runner.Env, site string) error
 
 func s37Cleanup(ctx context.Context, env *runner.Env) error {
 	var errs []error
+	if name := ctxFetch(env, "initialVerificationName"); name != "" {
+		if err := deleteBackupCRs(ctx, env, "", name); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if err := deleteBackupCRs(ctx, env, ctxFetch(env, "backupName"), ctxFetch(env, "verificationName")); err != nil {
 		errs = append(errs, err)
 	}
@@ -541,4 +541,45 @@ func s37Cleanup(ctx context.Context, env *runner.Env) error {
 		return fmt.Errorf("s37 cleanup: %v", errs)
 	}
 	return nil
+}
+
+func s37VerifyInitialHandoff() runner.Step {
+	return runner.Step{Phase: runner.PhaseVerify, Name: "verify ordinary failover refuses overlapping replica-era streams", Do: func(ctx context.Context, env *runner.Env) error {
+		primary, err := pgmysql.Open(ctx, env.Kube, env.Namespace, env.FG, ctxFetch(env, "newActive"), env.Creds)
+		if err != nil {
+			return err
+		}
+		defer primary.Close()
+		target, err := primary.ScalarString(ctx, "SELECT DATE_FORMAT(UTC_TIMESTAMP(6), '%Y-%m-%dT%H:%i:%s.%fZ')")
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+		if err := s37FlushAndArchive(ctx, env, ctxFetch(env, "newActive")); err != nil {
+			return err
+		}
+		name := "s37-first-verify-" + backupRunStamp(env)
+		if err := ctxStash(ctx, env, "initialVerificationName", name); err != nil {
+			return err
+		}
+		pit := &v1alpha1.PointInTimeVerificationSpec{Mode: "timestamp", Timestamp: target}
+		if err := createMysqlBackupVerification(ctx, env, name, ctxFetch(env, "backupName"), s37ID, pit, pitrHandoffSanityQuery(s37DBName, ctxFetch(env, "backupRunStem")), 1); err != nil {
+			return err
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
+		defer cancel()
+		v, err := waitForVerificationPhase(waitCtx, env, name, v1alpha1.VerificationPhaseFailed)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(v.Status.Message, "PITRCrossSiteOrder") {
+			return fmt.Errorf("initial failover did not refuse unverified cross-site order: %s", verificationStatusSummary(v))
+		}
+		env.Capture.Note("initial failover verification safely refused overlapping replica-era streams")
+		return nil
+	}}
 }
