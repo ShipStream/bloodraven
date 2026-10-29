@@ -467,3 +467,170 @@ func TestParseGTIDSet_MalformedIntervalNotTreatedAsTag(t *testing.T) {
 		}
 	}
 }
+
+// MySQL 8.4+ prints each server UUID once, followed by its untagged
+// intervals and then a ":tag:intervals" group per tag (Gtid_set::to_string),
+// so @@gtid_executed and the replica status sets use this compact form.
+func TestParseGTIDSet_TaggedGroupsWithinOneUUIDEntry(t *testing.T) {
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	tests := []struct {
+		name  string
+		input string
+		want  GTIDSet
+	}{
+		{
+			name:  "untagged then two tags",
+			input: u + ":1-5:domain_1:11-18:domain_2:20-24",
+			want: GTIDSet{
+				u:               {{1, 5}},
+				u + ":domain_1": {{11, 18}},
+				u + ":domain_2": {{20, 24}},
+			},
+		},
+		{
+			name:  "two tags without untagged intervals",
+			input: u + ":blue:1-5:green:1-3",
+			want: GTIDSet{
+				u + ":blue":  {{1, 5}},
+				u + ":green": {{1, 3}},
+			},
+		},
+		{
+			name:  "several intervals per tag",
+			input: u + ":1-100:200:app:1-5:7:9-12:_ops:3",
+			want: GTIDSet{
+				u:           {{1, 100}, {200, 200}},
+				u + ":app":  {{1, 5}, {7, 7}, {9, 12}},
+				u + ":_ops": {{3, 3}},
+			},
+		},
+		{
+			name:  "tags are case-insensitive and stored lower-case",
+			input: u + ":1-10:Tag:3",
+			want: GTIDSet{
+				u:          {{1, 10}},
+				u + ":tag": {{3, 3}},
+			},
+		},
+		{
+			name:  "compact entries across several UUIDs",
+			input: u + ":1-100:app:1-5,\n" + "4a4c58b8-8d9e-11ef-a0d1-0242ac120003:1-7:app:1",
+			want: GTIDSet{
+				u:                                      {{1, 100}},
+				u + ":app":                             {{1, 5}},
+				"4a4c58b8-8d9e-11ef-a0d1-0242ac120003": {{1, 7}},
+				"4a4c58b8-8d9e-11ef-a0d1-0242ac120003:app": {{1, 1}},
+			},
+		},
+		{
+			name:  "same tag repeated across comma entries",
+			input: u + ":app:1-5," + u + ":1-3:app:7",
+			want: GTIDSet{
+				u:          {{1, 3}},
+				u + ":app": {{1, 5}, {7, 7}},
+			},
+		},
+		{
+			name:  "32-character tag",
+			input: u + ":1:abcdefghijklmnopqrstuvwxyz_01234:2",
+			want: GTIDSet{
+				u:                                       {{1, 1}},
+				u + ":abcdefghijklmnopqrstuvwxyz_01234": {{2, 2}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gs, err := ParseGTIDSet(tt.input)
+			if err != nil {
+				t.Fatalf("ParseGTIDSet(%q) error: %v", tt.input, err)
+			}
+			if !gtidSetsEqual(gs, tt.want) {
+				t.Fatalf("ParseGTIDSet(%q) = %#v, want %#v", tt.input, gs, tt.want)
+			}
+			// String() emits one comma entry per source identifier, which
+			// MySQL also accepts; it must parse back to the same set.
+			again, err := ParseGTIDSet(gs.String())
+			if err != nil {
+				t.Fatalf("re-parse String() %q: %v", gs.String(), err)
+			}
+			if !again.Contains(gs) || !gs.Contains(again) {
+				t.Fatalf("round trip changed the set: %q -> %q", tt.input, again.String())
+			}
+		})
+	}
+}
+
+func TestParseGTIDSet_TaggedGroupsRejectMalformed(t *testing.T) {
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	tests := []string{
+		u + ":1-5:tag",     // dangling tag
+		u + ":t1:t2:1",     // tag without intervals
+		u + ":1-5:9tag:1",  // tags cannot start with a digit
+		u + ":1-5:tag-x:1", // invalid tag character
+		u + ":1-5:abcdefghijklmnopqrstuvwxyz_012345:1", // 33-character tag
+		u + ":1-5:app:5-3",   // start > end after a tag
+		u + ":1-5:app:1-2-3", // malformed interval after a tag
+	}
+	for _, input := range tests {
+		if gs, err := ParseGTIDSet(input); err == nil {
+			t.Errorf("ParseGTIDSet(%q) = %q, want error", input, gs.String())
+		}
+	}
+}
+
+// Containment and subtraction must keep each tag's transactions apart when
+// the sets come from MySQL's compact tagged form.
+func TestGTIDSet_CompactTaggedArithmetic(t *testing.T) {
+	const u = "3e11fa47-71ca-11e1-9e33-c80aa9429562"
+	source, err := ParseGTIDSet(u + ":1-100:app:1-5:ops:1-2")
+	if err != nil {
+		t.Fatalf("parse source: %v", err)
+	}
+	caughtUp, err := ParseGTIDSet(u + ":1-100:app:1-5:ops:1-2")
+	if err != nil {
+		t.Fatalf("parse caught-up: %v", err)
+	}
+	missingTagged, err := ParseGTIDSet(u + ":1-100:app:1-4:ops:1-2")
+	if err != nil {
+		t.Fatalf("parse missing-tagged: %v", err)
+	}
+	untaggedOnly, err := ParseGTIDSet(u + ":1-107")
+	if err != nil {
+		t.Fatalf("parse untagged-only: %v", err)
+	}
+
+	if !caughtUp.Contains(source) {
+		t.Error("identical compact tagged sets should contain each other")
+	}
+	if missingTagged.Contains(source) {
+		t.Error("set missing app:5 unexpectedly contains the source")
+	}
+	if got, want := source.Subtract(missingTagged).String(), u+":app:5"; got != want {
+		t.Errorf("Subtract() = %q, want %q", got, want)
+	}
+	if untaggedOnly.Contains(source) {
+		t.Error("untagged intervals must not stand in for tagged transactions")
+	}
+	if got, want := source.TransactionCount(), int64(100+5+2); got != want {
+		t.Errorf("TransactionCount() = %d, want %d", got, want)
+	}
+}
+
+func gtidSetsEqual(a, b GTIDSet) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for sid, av := range a {
+		bv, ok := b[sid]
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+	}
+	return true
+}

@@ -42,6 +42,10 @@ type FakeMySQL struct {
 	ReplicaStatusVal *mysql.ReplicaStatus
 	ReplicaStatusErr error
 
+	// GtidExecutedVal and GtidExecutedErr are returned by GetGtidExecuted.
+	GtidExecutedVal string
+	GtidExecutedErr error
+
 	// Error injection per method
 	FenceErr        error
 	DrainErr        error
@@ -207,7 +211,7 @@ func (m *FakeMySQL) GetGtidExecuted(_ context.Context) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.record("GetGtidExecuted")
-	return "", nil
+	return m.GtidExecutedVal, m.GtidExecutedErr
 }
 
 func (m *FakeMySQL) KillAppConnections(_ context.Context) (int, error) {
@@ -219,6 +223,11 @@ func (m *FakeMySQL) KillAppConnections(_ context.Context) (int, error) {
 
 func (m *FakeMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
 	return nil, nil
+}
+
+// PinSession returns a Session over this fake's own methods.
+func (m *FakeMySQL) PinSession(context.Context) (mysql.Session, error) {
+	return mysql.CheckerSession(m), nil
 }
 
 func (m *FakeMySQL) EnsurePartialRevokes(_ context.Context) error {

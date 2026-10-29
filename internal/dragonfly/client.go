@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"math"
 	"net"
 	"strconv"
 	"time"
@@ -128,29 +129,91 @@ func (c *Client) ReplicaOf(ctx context.Context, host string, port int32) error {
 // ReplicaOfNoOne breaks the replication link and turns this Dragonfly
 // back into a standalone master. Used as a fallback promotion primitive
 // when REPLTAKEOVER is unavailable or fails.
+//
+// Dragonfly serialises REPLICAOF with REPLTAKEOVER on the replica, and a
+// takeover holds that lock for up to ReplTakeoverServerHold after the
+// client that sent it has given up. So a fallback sent after a failed
+// takeover may legitimately wait that long. When ctx has a deadline, the
+// read deadline is ctx's (the caller sizes the wait), not the client's
+// default IOTimeout.
 func (c *Client) ReplicaOfNoOne(ctx context.Context) error {
-	return c.exec(ctx, "REPLICAOF", "NO", "ONE")
+	ioTimeout := c.cfg.IOTimeout
+	if d, ok := ctx.Deadline(); ok {
+		if until := time.Until(d); until > ioTimeout {
+			ioTimeout = until
+		}
+	}
+	_, err := c.execReplyWithIOTimeout(ctx, ioTimeout, "REPLICAOF", "NO", "ONE")
+	return err
 }
 
 // ReplTakeover atomically promotes this replica to master, waiting up
 // to `timeout` for the replication stream to drain before promoting.
 // This is the canonical planned-promotion primitive on Dragonfly v1.x+.
 //
-// timeout is rounded up to the next millisecond and clamped to a
-// non-zero positive value (Dragonfly rejects 0).
+// Dragonfly reads the REPLTAKEOVER argument as integer seconds
+// (`REPLTAKEOVER <seconds> [SAVE]`); it accepts neither fractions nor a
+// finer unit. timeout is therefore rounded up to whole seconds, with a
+// 1-second minimum (Dragonfly accepts 0, but only as a test hook) and the
+// server's signed 32-bit maximum.
 //
-// The per-call client read deadline is set to timeout + 5s so that the
-// client does not time out before the server has used its full drain
-// budget. Otherwise the client could give up while the server is still
-// (or has just) accepted the takeover, leaving the connection in an
-// unknown state and the caller unsure whether promotion happened.
+// The per-call client read deadline covers the server's worst case: the
+// replica forwards DFLY TAKEOVER to its master with a socket timeout of
+// the budget plus 10s, then replies. See replTakeoverIOTimeout. Giving up
+// earlier would leave the connection in an unknown state and the caller
+// unsure whether promotion happened. ctx still bounds the call.
 func (c *Client) ReplTakeover(ctx context.Context, timeout time.Duration) error {
-	ms := timeout.Milliseconds()
-	if ms <= 0 {
-		ms = 1
-	}
-	_, err := c.execReplyWithIOTimeout(ctx, timeout+5*time.Second, "REPLTAKEOVER", strconv.FormatInt(ms, 10))
+	secs := replTakeoverSeconds(timeout)
+	_, err := c.execReplyWithIOTimeout(ctx, replTakeoverIOTimeout(secs), "REPLTAKEOVER", strconv.FormatInt(secs, 10))
 	return err
+}
+
+const (
+	// replTakeoverServerSlack is the time Dragonfly's replica allows past
+	// the takeover budget for its DFLY TAKEOVER call to the master
+	// (replica.cc sets the master socket timeout to (seconds+10)*1000ms).
+	replTakeoverServerSlack = 10 * time.Second
+	// replTakeoverClientGrace is the extra wait for the reply to arrive
+	// once the server has used its full budget and slack.
+	replTakeoverClientGrace = 2 * time.Second
+)
+
+// replTakeoverSeconds converts a takeover budget to the whole seconds
+// sent on the wire: rounded up, at least 1, at most math.MaxInt32.
+func replTakeoverSeconds(timeout time.Duration) int64 {
+	if timeout <= 0 {
+		return 1
+	}
+	secs := int64(timeout / time.Second)
+	if timeout%time.Second != 0 {
+		secs++
+	}
+	if secs > math.MaxInt32 {
+		secs = math.MaxInt32
+	}
+	return secs
+}
+
+// ReplTakeoverWireBudget is the budget a REPLTAKEOVER carrying timeout
+// actually gives the server: timeout rounded up to whole seconds, at least
+// one second.
+func ReplTakeoverWireBudget(timeout time.Duration) time.Duration {
+	return time.Duration(replTakeoverSeconds(timeout)) * time.Second
+}
+
+// ReplTakeoverServerHold is the longest a replica can stay busy with a
+// REPLTAKEOVER carrying timeout: the whole-second budget plus the slack
+// the replica allows its master. Dragonfly holds the replica's REPLICAOF
+// lock for this long, so a REPLICAOF NO ONE sent after a failed takeover
+// can block until it passes.
+func ReplTakeoverServerHold(timeout time.Duration) time.Duration {
+	return ReplTakeoverWireBudget(timeout) + replTakeoverServerSlack
+}
+
+// replTakeoverIOTimeout is the client read deadline for a REPLTAKEOVER
+// carrying secs: the server's budget plus its slack plus a small grace.
+func replTakeoverIOTimeout(secs int64) time.Duration {
+	return time.Duration(secs)*time.Second + replTakeoverServerSlack + replTakeoverClientGrace
 }
 
 // ClientKillType issues `CLIENT KILL TYPE <kind>` against the connected

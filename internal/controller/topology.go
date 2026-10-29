@@ -570,10 +570,12 @@ type TopologyManager struct {
 
 	// EmergencyFailoverCallback is invoked synchronously after a
 	// successful emergency failover Execute, on the same goroutine that
-	// drove the failover. The runner wires this to a best-effort
-	// DragonflyManager.TryEmergencyPromote so the cache subsystem
-	// follows the durable promotion. The callback must not return errors
-	// — emergency MySQL failover safety is unconditional.
+	// drove the failover. The runner wires this to
+	// DragonflyManager.Enqueue, which only queues a best-effort Dragonfly
+	// promotion for the Dragonfly manager's own Run goroutine, so the cache
+	// subsystem follows the durable promotion. The callback
+	// must not return errors or block — emergency MySQL failover safety
+	// is unconditional.
 	EmergencyFailoverCallback func(ctx context.Context, target, oldPrimary string)
 
 	// sleep is time.Sleep in production. The deterministic simulation
@@ -2278,8 +2280,8 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 
 		// Best-effort: ask the Dragonfly subsystem (when wired) to
-		// follow the MySQL promotion. The callback enforces its own
-		// budget and never blocks the topology poll.
+		// follow the MySQL promotion. The callback hands the work to its
+		// own goroutine and never blocks the topology poll.
 		if tm.EmergencyFailoverCallback != nil {
 			tm.EmergencyFailoverCallback(ctx, candidate.name, oldPrimaryName)
 		}

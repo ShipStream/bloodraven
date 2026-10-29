@@ -379,6 +379,11 @@ func (m *simChecker) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) 
 	return nil, nil
 }
 
+// PinSession returns a Session over this fake's own methods.
+func (m *simChecker) PinSession(context.Context) (mysql.Session, error) {
+	return mysql.CheckerSession(m), nil
+}
+
 func (m *simChecker) EnsurePartialRevokes(_ context.Context) error { return nil }
 
 func (m *simChecker) CloneInstance(_ context.Context, _, _, _ string, _ bool, _ int) error {

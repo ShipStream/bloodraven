@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -286,16 +287,57 @@ func TestClientReplicaOfNoOne(t *testing.T) {
 	}
 }
 
+// Dragonfly parses the REPLTAKEOVER argument as integer seconds
+// (server_family.cc: `REPLTAKEOVER <seconds> [SAVE]`, parser.Next<int>()),
+// so the budget must go on the wire as whole seconds, rounded up so the
+// server never gets less time than asked for, and never fractional.
 func TestClientReplTakeover(t *testing.T) {
-	srv := newFakeServer(t)
-	c := mustNewClient(t, srv.addr(), "")
-	defer c.Close()
-	if err := c.ReplTakeover(context.Background(), 30*time.Second); err != nil {
-		t.Fatalf("ReplTakeover: %v", err)
+	tests := []struct {
+		timeout time.Duration
+		want    string
+	}{
+		{30 * time.Second, "30"},
+		{15 * time.Second, "15"},
+		{1500 * time.Millisecond, "2"},
+		{time.Second + time.Nanosecond, "2"},
+		{250 * time.Millisecond, "1"},
+		{time.Nanosecond, "1"},
+		{0, "1"},
+		{-time.Second, "1"},
+		{time.Duration(math.MaxInt64), strconv.Itoa(math.MaxInt32)},
 	}
-	got := <-srv.commandsCh
-	if want := []string{"REPLTAKEOVER", "30000"}; !equalSlices(got, want) {
-		t.Errorf("got command %v, want %v", got, want)
+	for _, tt := range tests {
+		t.Run(tt.timeout.String(), func(t *testing.T) {
+			srv := newFakeServer(t)
+			c := mustNewClient(t, srv.addr(), "")
+			defer c.Close()
+			if err := c.ReplTakeover(context.Background(), tt.timeout); err != nil {
+				t.Fatalf("ReplTakeover(%s): %v", tt.timeout, err)
+			}
+			got := <-srv.commandsCh
+			if want := []string{"REPLTAKEOVER", tt.want}; !equalSlices(got, want) {
+				t.Errorf("ReplTakeover(%s) sent %v, want %v", tt.timeout, got, want)
+			}
+			if strings.Contains(got[1], ".") {
+				t.Errorf("ReplTakeover(%s) sent fractional seconds %q", tt.timeout, got[1])
+			}
+		})
+	}
+}
+
+// The replica answers REPLTAKEOVER only after its own DFLY TAKEOVER round
+// trip to the master, whose socket timeout is (seconds+10)s. The client
+// must wait at least that long past the whole-second budget it sent.
+func TestReplTakeoverIOTimeoutCoversServerBudget(t *testing.T) {
+	for _, secs := range []int64{1, 15, 30} {
+		got := replTakeoverIOTimeout(secs)
+		serverMax := time.Duration(secs+10) * time.Second
+		if got <= serverMax {
+			t.Errorf("replTakeoverIOTimeout(%d) = %s, want more than the server's %s", secs, got, serverMax)
+		}
+		if got > serverMax+5*time.Second {
+			t.Errorf("replTakeoverIOTimeout(%d) = %s, want a small grace over %s", secs, got, serverMax)
+		}
 	}
 }
 
@@ -329,13 +371,13 @@ func TestClientKillType(t *testing.T) {
 // timeout+5s, so the call succeeds. Without it, the call times out.
 func TestClientReplTakeoverHonorsServerDrainBudget(t *testing.T) {
 	const (
-		ioTimeout    = 200 * time.Millisecond
-		serverDelay  = 400 * time.Millisecond
-		drainBudget  = 1 * time.Second
+		ioTimeout   = 200 * time.Millisecond
+		serverDelay = 400 * time.Millisecond
+		drainBudget = 1 * time.Second
 	)
 	srv := newFakeServer(t)
 	srv.delay("REPLTAKEOVER", serverDelay)
-	srv.reply("REPLTAKEOVER 1000", "+OK\r\n")
+	srv.reply("REPLTAKEOVER 1", "+OK\r\n")
 	c, err := New(context.Background(), Config{Addr: srv.addr(), DialTimeout: time.Second, IOTimeout: ioTimeout})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -358,8 +400,8 @@ func TestClientReplTakeoverClampsZero(t *testing.T) {
 		t.Fatalf("ReplTakeover(0): %v", err)
 	}
 	got := <-srv.commandsCh
-	if got[1] == "0" {
-		t.Errorf("ReplTakeover(0) sent %q, want positive ms", got[1])
+	if got[1] != "1" {
+		t.Errorf("ReplTakeover(0) sent %q, want the 1-second minimum", got[1])
 	}
 }
 
@@ -448,4 +490,31 @@ func equalSlices(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// REPLICAOF NO ONE after a failed takeover waits behind the replica's
+// REPLICAOF lock, which the takeover holds past the client's IOTimeout.
+// A caller-sized context deadline must govern that wait.
+func TestClientReplicaOfNoOneWaitsForContextDeadline(t *testing.T) {
+	srv := newFakeServer(t)
+	srv.delay("REPLICAOF", 400*time.Millisecond)
+	c, err := New(context.Background(), Config{Addr: srv.addr(), DialTimeout: time.Second, IOTimeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := c.ReplicaOfNoOne(ctx); err != nil {
+		t.Fatalf("ReplicaOfNoOne waited only IOTimeout, not the context deadline: %v", err)
+	}
+}
+
+func TestReplTakeoverServerHold(t *testing.T) {
+	if got, want := ReplTakeoverServerHold(1500*time.Millisecond), 12*time.Second; got != want {
+		t.Errorf("ReplTakeoverServerHold(1.5s) = %s, want %s (2s budget + 10s replica slack)", got, want)
+	}
+	if got, want := ReplTakeoverWireBudget(0), time.Second; got != want {
+		t.Errorf("ReplTakeoverWireBudget(0) = %s, want %s", got, want)
+	}
 }

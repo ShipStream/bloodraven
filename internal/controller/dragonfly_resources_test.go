@@ -556,10 +556,15 @@ func TestReconcileDragonflyResources_UsesUncachedStatefulSetForActiveDrift(t *te
 		t.Fatalf("get dc2 StatefulSet: %v", err)
 	}
 	actualActive.Spec.Template.Spec.Containers[0].Image = "docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0"
-	r.APIReader = fake.NewClientBuilder().
-		WithScheme(testScheme()).
-		WithObjects(actualReplica.DeepCopy(), actualActive.DeepCopy()).
-		Build()
+	// The uncached view differs from the cache only in the StatefulSets;
+	// everything else (the group itself) reads the same.
+	r.APIReader = statefulSetOverrideReader{
+		Reader: c,
+		sts: fake.NewClientBuilder().
+			WithScheme(testScheme()).
+			WithObjects(actualReplica.DeepCopy(), actualActive.DeepCopy()).
+			Build(),
+	}
 
 	requeue, err := r.reconcileDragonflyResources(ctx, fg)
 	if err != nil {
@@ -726,4 +731,18 @@ func markDragonflyStatefulSetRolledOutForTest(t *testing.T, c client.Client, sit
 	if !dragonflyStatefulSetRolloutComplete(&sts) {
 		t.Fatalf("StatefulSet %s was not marked rolled out: status=%+v generation=%d replicas=%v", site, sts.Status, sts.Generation, sts.Spec.Replicas)
 	}
+}
+
+// statefulSetOverrideReader serves StatefulSets from sts and everything else
+// from Reader.
+type statefulSetOverrideReader struct {
+	client.Reader
+	sts client.Reader
+}
+
+func (r statefulSetOverrideReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, ok := obj.(*appsv1.StatefulSet); ok {
+		return r.sts.Get(ctx, key, obj, opts...)
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
 }

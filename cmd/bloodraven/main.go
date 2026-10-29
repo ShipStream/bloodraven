@@ -137,6 +137,9 @@ func main() {
 	// This is leader-election-aware: polling and failover only run on the leader.
 	recorder := mgr.GetEventRecorderFor("bloodraven")
 	runner := controller.NewTopologyManagerRunner(mgr.GetClient(), clientset, hub, recorder, logger)
+	// Dragonfly managers read the group they act on uncached: the informer
+	// cache can lag the previous Dragonfly gate holder's writes.
+	runner.SetAPIReader(mgr.GetAPIReader())
 	deploymentLeases := controller.NewDeploymentLeaseManager(mgr.GetClient(), mgr.GetAPIReader(), recorder)
 	runner.SetDeploymentLeases(deploymentLeases)
 

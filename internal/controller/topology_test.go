@@ -408,6 +408,11 @@ func (m *mockMySQL) CloneStatus(_ context.Context) (*mysql.CloneStatus, error) {
 	return &mysql.CloneStatus{State: mysql.CloneStateCompleted, BeginTime: fmt.Sprintf("clone-%d", m.cloneCalls)}, nil
 }
 
+// PinSession returns a Session over this fake's own methods.
+func (m *mockMySQL) PinSession(context.Context) (mysql.Session, error) {
+	return mysql.CheckerSession(m), nil
+}
+
 func (m *mockMySQL) EnsurePartialRevokes(_ context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -109,6 +109,18 @@ Step-by-step diagnostic and remediation playbooks for common Bloodraven failure 
    ```bash
    kubectl exec -n <ns> <dragonfly-pod> -- redis-cli -p 6379 info replication
    ```
+3. After an emergency failover, find which promotion path ran: `kubectl logs -n bloodraven deploy/bloodraven | grep 'dragonfly emergency'`.
+   - `REPLTAKEOVER succeeded`: sessions were preserved.
+   - `old master unreachable; skipping REPLTAKEOVER`, or `REPLTAKEOVER failed; falling back`, followed by `target promoted via REPLICAOF NO ONE (sessions lost)`: the cache is writable but empty.
+   - `REPLICAOF NO ONE failed` or `re-dial for REPLICAOF NO ONE failed`: an unconfirmed promotion, not the outcome. A takeover can complete on the server after its client gave up, and a timed-out fallback may still have applied. The operator waits for the commands to settle, reads the target's role and logs the result:
+     - `promotion outcome unconfirmed; target observed as master`: recorded as promoted (labels, status), with `DragonflySessionsLost`.
+     - `promotion failed; target not observed as master`: not promoted; the old source's traffic label was restored. The manager's next poll promotes again if MySQL and Dragonfly still disagree.
+     If neither line follows within about 30s, confirm the target's role with `kubectl exec -n <ns> <target-dragonfly-pod> -- redis-cli -p 6379 info replication` and check the active Service's endpoints.
+   - `dragonfly promotion: ... skipping` or `request dropped` (coalesced, manager stopping, yielding to another owner, planned failover in flight, target already promoted): the request was superseded or made unnecessary. Not a failure on its own.
+
+   A fallback after a failed takeover can take up to about 14s, and settling an unconfirmed outcome up to about 13s more. Dragonfly holds the replica's `REPLICAOF` lock until the takeover's own wait ends, so a slow promotion is not by itself a failure.
+4. A planned failover or rollout logging `dragonfly gate busy; retrying` is waiting for the group's Dragonfly gate, held by the Dragonfly manager's current poll or promotion, or by a stopping manager's last step (WARN `timed out waiting for the Dragonfly manager to stop; its last step finishes under the group's Dragonfly gate`). It requeues every second. If it repeats for minutes, capture a goroutine dump of the operator (the holder is stuck in a Dragonfly or API call) before restarting it. A planned failover waiting this way emits Warning `DragonflyPromotionWaiting` and sets `status.plannedFailover.dragonfly.message`; MySQL writes stay paused on the fenced source meanwhile (about 12-13s typically, about 40s worst case).
+5. Snapshot upgrade `status.dragonfly.upgrade.phase=Failed` with `reason=ActiveSiteChanged`: a promotion moved the Dragonfly master off the site the upgrade retained, so the upgrade stopped without touching routing. Confirm `status.dragonfly.activeSite` and the active Service endpoints, then re-annotate to upgrade against the new active site.
 
 ### Safe Remediation Steps
 1. Inspect if network policies are blocking port 6379 or Dragonfly admin port 9999.
@@ -555,3 +567,61 @@ A full-instance in-place restore fences the primary with `SET GLOBAL offline_mod
 3. Locked out after a terminal restore because the release keeps failing: fix operator reachability to the primary. If applications must come back now, run `SET GLOBAL offline_mode = OFF;` on the primary. If `priorOfflineMode` was `true`, the primary was already in offline mode before the restore; leave it ON. The operator clears the record once its release succeeds.
 4. Applications running as accounts with `CONNECTION_ADMIN`/`SUPER` are not fenced at all. Remove those privileges from application accounts.
 5. After an operator downgrade during a full-instance restore, nothing releases the fence (older operators do not know `status.restoreOfflineFence`). Once the restore is terminal, run `SET GLOBAL offline_mode = OFF;` on the primary unless `priorOfflineMode` was `true`.
+
+## 23. Ordered update stalls on the active site (`maintenance handoff aborted`)
+
+With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first. It then hands the primary role to a healthy standby, and only after that rolls the old active site. The handoff promotes the standby only once its `GTID_EXECUTED` contains everything the fenced active site committed. If that cannot be proven, the handoff aborts. Nothing is lost when it aborts, but the active site keeps its old spec until a later attempt succeeds.
+
+### Symptoms
+- Operator log: WARN `maintenance handoff refused; source not fenced` (refused before any write pause, usually a lagging standby) or `maintenance handoff aborted; source unfenced` (aborted after the fence), followed by `ordered update failed`, repeating on later reconciles. The active site's Deployment hash stays stale.
+- Or ERROR `maintenance handoff: rollback failed: source may be left read-only`: the abort could not give the active site its writes back.
+
+### Diagnostic steps
+1. Read the reason from the `error` field:
+   - `did not reach the source GTID set before fencing` (on the `refused` line): the standby is lagging; no write pause happened.
+   - `did not reach the fenced source GTID set ... N transactions missing`: the standby is still behind after the 30s fenced budget.
+   - `active primary became unreachable during ordered update`: the active site stopped answering. Emergency failover takes over; see the failover runbooks.
+   - `no longer contains the fenced source set` (after `STOP REPLICA` or `RESET REPLICA ALL`): the standby's server lost history after the catch-up proof, for example a replaced pod. Treat it as a suspect replica and compare its data before anything else.
+   - `candidate SQL thread error`: the applier stopped.
+   - `unparseable GTID set`, or a read error.
+2. Compare the sets. The standby's set should contain the active site's:
+   ```bash
+   kubectl exec -n <ns> <active-pod> -c mysql -- mysql -N -e "SELECT @@GLOBAL.gtid_executed"
+   kubectl exec -n <ns> <standby-pod> -c mysql -- mysql -N -e "SHOW REPLICA STATUS\G" | grep -E 'Running|Seconds_Behind|Last_.*Error|Gtid_Set'
+   ```
+   `scripts/gtid-audit.sh -n <ns> <group>` prints every site's set in one pass.
+3. After a rollback failure, check the active site: `SELECT @@GLOBAL.super_read_only, @@GLOBAL.read_only`.
+
+### Safe remediation
+1. Lagging standby: let it catch up. Reduce the write load or fix the receiver's network path. The handoff retries on its own, and nothing needs to be run.
+2. Applier error: treat it as a broken replica (playbook 2). Do not skip transactions to make the handoff pass.
+3. Rollback failed and the active site is read-only, and no other site is writable: clear the fence on the active site only (`SET GLOBAL read_only = OFF;`, which also clears `super_read_only`). Before you do, confirm that the standby is still read-only and still replicating from the active site.
+4. Standby left without replication after the abort (WARN `failed to restore candidate replication channel after abort` or `failed to restart replication on candidate after abort`; `SHOW REPLICA STATUS` empty or threads stopped). Nothing re-points it automatically.
+   - Confirm the standby is read-only.
+   - Confirm its `@@GLOBAL.gtid_executed` is a subset of the active site's: `SELECT GTID_SUBSET('<standby set>', '<active set>')` on the active site returns 1.
+   - If it is, run on the standby: `CHANGE REPLICATION SOURCE TO SOURCE_HOST='<active internal host>', SOURCE_USER='<repl user>', SOURCE_PASSWORD='<repl password>', SOURCE_AUTO_POSITION=1; START REPLICA;`. Add `SOURCE_SSL=1, SOURCE_SSL_CA='/etc/mysql/tls/ca.crt'` when `spec.tls` is set, otherwise `GET_SOURCE_PUBLIC_KEY=1`.
+   - If it is not a subset, the standby has errant transactions: reclone it (`kubectl bloodraven reclone <group> -n <ns> --target=<site>`) instead.
+
+## 24. One group stopped updating (no running topology manager)
+
+A healthy operator pod does not guarantee that every group has a live topology manager. The runner restarts a group's manager when its spec or connection material changes. If the restart fails, the group has no manager, and so no polling, no status writes and no failover, until the runner's 30s retry succeeds.
+
+### Symptoms
+- One group's `status.sites[]` and conditions stop changing while other groups keep updating.
+- Losing the primary does not trigger failover.
+- Operator log: ERROR `failed to start topology manager` for that `fg`, repeating every 30s.
+
+### Diagnostic steps
+1. Read the error:
+   ```bash
+   kubectl logs -n bloodraven deploy/bloodraven | grep -E 'failed to start topology manager|topology manager exited|connection material unreadable' | grep '<ns>/<group>'
+   ```
+2. Typical causes:
+   - The operator Secret is missing (`get operator secret ... not found`).
+   - It has no `dsn` key (DSN mode).
+   - The `spec.tls.secretName` Secret is missing or its material does not load.
+3. A WARN `connection material unreadable; keeping the running topology manager` is not this failure. The manager is still running on its existing connections while the Secret is being replaced.
+
+### Safe remediation
+1. Restore or fix the Secret named in the error. The next sync starts a fresh manager. You do not need to restart the operator.
+2. Do not promote by hand while the group has no manager unless the primary is actually down. Once the manager is back, it re-evaluates topology on its first poll.

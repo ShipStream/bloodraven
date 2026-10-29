@@ -311,6 +311,25 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromotingDragonfly(ctx con
 		return r.advancePastDragonflyPhases(ctx, fg, cur, "", "skipped: dragonfly not enabled")
 	}
 
+	// Own the group's Dragonfly gate for the rest of this phase. The
+	// Dragonfly manager yields at its next safe point; a promotion that has
+	// already sent a role-changing command finishes recording it first, so
+	// the state read below includes it. Busy: retry shortly.
+	release, ok := r.acquireDragonflyGate(ctx, nn)
+	if !ok {
+		r.notePlannedDragonflyGateWait(ctx, fg, cur)
+		return dragonflyGateRetry, nil
+	}
+	defer release()
+	if fresh, err := r.freshFailoverGroup(ctx, nn); err != nil {
+		return 0, err
+	} else if fresh.Status.PlannedFailover == nil || fresh.Status.PlannedFailover.Phase != v1alpha1.PlannedFailoverPhasePromotingDragonfly {
+		return dragonflyGateRetry, nil
+	} else {
+		*fg = *fresh
+		cur = fg.Status.PlannedFailover
+	}
+
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyPromotionStarted,
 		"promoting Dragonfly target %q via REPLTAKEOVER", cur.Target)
 
@@ -424,6 +443,32 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromotingDragonfly(ctx con
 	r.Recorder.Eventf(fg, corev1.EventTypeNormal, ReasonDragonflyPromotionCompleted,
 		"Dragonfly target %q promoted via REPLTAKEOVER (sessions_preserved=%t)", cur.Target, preservedFinal)
 	return 1 * time.Second, nil
+}
+
+// plannedDragonflyGateWaitMessage is status.plannedFailover.dragonfly.message
+// while the Dragonfly phase waits for the group's Dragonfly gate.
+const plannedDragonflyGateWaitMessage = "waiting for an in-progress Dragonfly promotion to finish before promoting; " +
+	"the MySQL source stays fenced meanwhile (at most about 40s)"
+
+// notePlannedDragonflyGateWait makes a gate wait visible: writes stay
+// paused on the fenced source while the planned phase waits, so the
+// reason goes into status.plannedFailover.dragonfly.message and a Warning
+// Event, once per wait.
+func (r *MysqlFailoverGroupReconciler) notePlannedDragonflyGateWait(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cur *v1alpha1.PlannedFailoverStatus) {
+	if cur == nil || (cur.Dragonfly != nil && cur.Dragonfly.Message == plannedDragonflyGateWaitMessage) {
+		return
+	}
+	next := cur.DeepCopy()
+	if next.Dragonfly == nil {
+		next.Dragonfly = &v1alpha1.PlannedFailoverDragonflyStatus{Enabled: true}
+	}
+	next.Dragonfly.Message = plannedDragonflyGateWaitMessage
+	if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+		return
+	}
+	r.Recorder.Eventf(fg, corev1.EventTypeWarning, ReasonDragonflyPromotionWaiting,
+		"planned failover to %q is waiting for an in-progress Dragonfly promotion to finish; MySQL writes stay paused on %q until it does (at most about 40s)",
+		cur.Target, cur.SourcePrimary)
 }
 
 // bestEffortRestoreSourceTraffic restores the source pod's traffic
@@ -543,7 +588,7 @@ func (r *MysqlFailoverGroupReconciler) advancePastDragonflyPhases(ctx context.Co
 // doesn't silently drop the planned-failover promotion stamp.
 func (r *MysqlFailoverGroupReconciler) stampDragonflyLastPromotion(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, target string, when metav1.Time) {
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	if err := stampDragonflyPromotionStatus(ctx, r.Client, nn, target, when, true); err != nil {
+	if err := stampDragonflyPromotionStatus(ctx, r.authorityReader(), r.Client, nn, target, when, true); err != nil {
 		log.FromContext(ctx).Error(err, "stampDragonflyLastPromotion: status patch")
 	}
 }

@@ -456,11 +456,14 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverValidating(ctx context.Con
 // plannedFailoverDraining runs a two-step flow inside the Draining
 // phase:
 //
-//  1. First entry (SourceGtidAtFence == ""): fence the source with
+//  1. First entry (DrainStartTime unset): fence the source with
 //     super_read_only=ON and record its GTID_EXECUTED. The primary
 //     role label will be stripped by syncPodLabels at the end of the
 //     reconcile. Stamp DrainStartTime and requeue fast for the drain
-//     loop.
+//     loop. DrainStartTime, not SourceGtidAtFence, marks the fence as
+//     done: an empty GTID_EXECUTED (a source that has never binlogged
+//     a transaction) is a valid snapshot, and treating it as "not yet
+//     fenced" would re-fence and restart the drain on every reconcile.
 //
 //  2. Subsequent entries: call KillAppConnections on the source.
 //     Advance to WaitingForLag when the last call returned zero
@@ -490,7 +493,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDraining(ctx context.Conte
 	}
 
 	// Step 1: first entry into Draining — fence and record GTID.
-	if cur.SourceGtidAtFence == "" {
+	if cur.DrainStartTime == nil {
 		fenceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		gtid, err := r.Runner.PlannedFailoverFence(fenceCtx, nn, cur.SourcePrimary)
 		cancel()
@@ -511,8 +514,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDraining(ctx context.Conte
 		next := cur.DeepCopy()
 		next.SourceGtidAtFence = gtid
 		next.DrainStartTime = &now
-		next.Message = fmt.Sprintf("source fenced at gtid %s; draining connections on %q",
-			truncateGtidHint(gtid), cur.SourcePrimary)
+		fencedAt := "gtid " + truncateGtidHint(gtid)
+		if gtid == "" {
+			fencedAt = "an empty gtid set"
+		}
+		next.Message = fmt.Sprintf("source fenced at %s; draining connections on %q",
+			fencedAt, cur.SourcePrimary)
 		if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
 			return 0, err
 		}
@@ -525,12 +532,8 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverDraining(ctx context.Conte
 	// Step 2: drain loop. Kill stragglers; advance when idle or budget
 	// exhausted.
 	drainTimeout := effectiveDrainTimeoutFromStatus(cur)
-	var drainStart time.Time
-	if cur.DrainStartTime != nil {
-		drainStart = cur.DrainStartTime.Time
-	}
-	elapsed := time.Since(drainStart)
-	budgetExceeded := !drainStart.IsZero() && elapsed >= drainTimeout
+	elapsed := time.Since(cur.DrainStartTime.Time)
+	budgetExceeded := elapsed >= drainTimeout
 
 	killCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	killed, killErr := r.Runner.PlannedFailoverDrainConnections(killCtx, nn, cur.SourcePrimary)

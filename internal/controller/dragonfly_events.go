@@ -29,4 +29,9 @@ const (
 	// ReasonDragonflySessionsLost fires when emergency promotion
 	// fell back to REPLICAOF NO ONE after REPLTAKEOVER failed.
 	ReasonDragonflySessionsLost = "DragonflySessionsLost"
+	// ReasonDragonflyPromotionWaiting fires when a planned failover's
+	// Dragonfly phase finds the group's Dragonfly gate held (usually an
+	// emergency promotion that already sent its role change) and waits
+	// for it while the MySQL source stays fenced.
+	ReasonDragonflyPromotionWaiting = "DragonflyPromotionWaiting"
 )
