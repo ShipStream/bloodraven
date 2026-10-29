@@ -144,21 +144,23 @@ func (p *Probe) Status(ctx context.Context) (*StatusResponse, error) {
 // ArchiverStatusResponse mirrors internal/sidecar.Status. Duplicated here to
 // keep the playground probe decoupled from the sidecar implementation package.
 type ArchiverStatusResponse struct {
-	Enabled            bool      `json:"enabled"`
-	Primary            bool      `json:"primary"`
-	LastScanAt         time.Time `json:"lastScanAt"`
-	FilesArchived      int64     `json:"filesArchived"`
-	LastError          string    `json:"lastError"`
-	StorageType        string    `json:"storageType"`
-	ManifestPrefix     string    `json:"manifestPrefix"`
-	Site               string    `json:"site"`
-	UploadFailures     int64     `json:"uploadFailures"`
-	LastUploadAt       time.Time `json:"lastUploadAt"`
-	BacklogFiles       int64     `json:"backlogFiles"`
-	ManifestFileCount  int64     `json:"manifestFileCount"`
-	ManifestBytes      int64     `json:"manifestBytes"`
-	OldestArchivedTime time.Time `json:"oldestArchivedTime"`
-	NewestArchivedTime time.Time `json:"newestArchivedTime"`
+	Enabled                bool      `json:"enabled"`
+	StoreReady             *bool     `json:"storeReady,omitempty"`
+	Primary                bool      `json:"primary"`
+	LastScanAt             time.Time `json:"lastScanAt"`
+	FilesArchived          int64     `json:"filesArchived"`
+	LastError              string    `json:"lastError"`
+	StorageType            string    `json:"storageType"`
+	ManifestPrefix         string    `json:"manifestPrefix"`
+	Site                   string    `json:"site"`
+	UploadFailures         int64     `json:"uploadFailures"`
+	ConsecutiveFailedScans *int64    `json:"consecutiveFailedScans,omitempty"`
+	LastUploadAt           time.Time `json:"lastUploadAt"`
+	BacklogFiles           int64     `json:"backlogFiles"`
+	ManifestFileCount      int64     `json:"manifestFileCount"`
+	ManifestBytes          int64     `json:"manifestBytes"`
+	OldestArchivedTime     time.Time `json:"oldestArchivedTime"`
+	NewestArchivedTime     time.Time `json:"newestArchivedTime"`
 }
 
 // ArchiverStatus calls GET /archiver/status and decodes the JSON response.

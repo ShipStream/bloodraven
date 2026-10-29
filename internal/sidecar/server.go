@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -16,7 +17,7 @@ type Server struct {
 	mysql      mysqlQuerier
 	logger     *slog.Logger
 	httpServer *http.Server
-	archiver   *BinlogArchiver
+	archiver   ArchiverStatusSource
 	topology   *TopologyCache
 	keyring    *KeyringAgent
 	fencing    *FencingMonitor
@@ -79,17 +80,38 @@ func (r *sidecarStatusRecorder) WriteHeader(code int) {
 // 204 No Content, which peers treat as "no view available".
 func (s *Server) SetTopology(c *TopologyCache) { s.topology = c }
 
-// SetArchiver wires a BinlogArchiver into the server so its state can
-// be exposed through /archiver/status. Optional: when unset, the
-// endpoint returns a disabled payload.
-func (s *Server) SetArchiver(a *BinlogArchiver) { s.archiver = a }
+// ArchiverStatusSource is what /archiver/status reads: an
+// ArchiverSupervisor in the sidecar, or a bare BinlogArchiver in tests.
+type ArchiverStatusSource interface {
+	Snapshot(ctx context.Context) Status
+}
+
+// SetArchiver wires the archiver status source into the server so its
+// state can be exposed through /archiver/status. Optional: when unset,
+// the endpoint returns a disabled payload. Call once before Run;
+// handlers read the field unsynchronized, so the source itself must be
+// safe for concurrent use and must not be replaced afterwards.
+func (s *Server) SetArchiver(a ArchiverStatusSource) { s.archiver = a }
 
 // Run starts the HTTP server and blocks until the context is cancelled.
 func (s *Server) Run(ctx context.Context) error {
+	addr := s.httpServer.Addr
+	if addr == "" {
+		addr = ":http"
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return s.Serve(ctx, ln)
+}
+
+// Serve is Run on an existing listener. It takes ownership of ln.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	errCh := make(chan error, 1)
 	go func() {
 		s.logger.Info("sidecar HTTP server starting", "addr", s.httpServer.Addr)
-		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 		close(errCh)
@@ -210,10 +232,11 @@ func (s *Server) handlePeerActiveSite(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(snap)
 }
 
-// handleArchiverStatus returns the BinlogArchiver's Snapshot. When the
-// archiver is disabled (PITR not configured for this failover group)
-// we still return 200 + enabled:false so polling callers can tell
-// "no archiver" apart from "archiver crashed".
+// handleArchiverStatus returns the archiver's Snapshot. When PITR is
+// not configured for this failover group we still return 200 +
+// enabled:false so polling callers can tell "no archiver" apart from
+// "archiver crashed". A configured archiver whose store is not built yet
+// reports enabled:true with storeReady:false, never enabled:false.
 func (s *Server) handleArchiverStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if s.archiver == nil {

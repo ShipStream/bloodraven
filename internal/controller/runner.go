@@ -46,6 +46,9 @@ type managedTopology struct {
 	// the latest snapshot for updateCRStatus to copy into status.pitr.
 	// nil only if the runner hasn't finished wiring yet.
 	archiver *archiverPoller
+	// archiverDone is closed when the poller's Run returns. nil in tests
+	// that inject a poller without starting Run.
+	archiverDone chan struct{}
 
 	// dragonfly observes per-site Dragonfly state and reconciles
 	// replication wiring. nil when spec.dragonfly is disabled at start
@@ -527,7 +530,12 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			r.logger.Error("failed to start topology manager", "fg", nn, "error", materialErr)
 			continue
 		}
-		if err := r.startManager(ctx, fg, cfg); err != nil {
+		// A stopped manager passes its PITR archive history on.
+		var prev *managedTopology
+		if ok {
+			prev = existing
+		}
+		if err := r.startManager(ctx, fg, cfg, prev); err != nil {
 			r.logger.Error("failed to start topology manager", "fg", nn, "error", err)
 			continue
 		}
@@ -710,8 +718,10 @@ func (r *TopologyManagerRunner) checkSpecDrift(ctx context.Context, fg *v1alpha1
 	tm.SetSpecDriftSites(driftSites)
 }
 
-// startManager creates and starts a TopologyManager for a single MysqlFailoverGroup.
-func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cfg TopologyConfig) error {
+// startManager creates and starts a TopologyManager for a single
+// MysqlFailoverGroup. prev is the manager it replaces, already stopped,
+// or nil.
+func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, cfg TopologyConfig, prev *managedTopology) error {
 	nn := FailoverGroupNamespacedName(fg)
 
 	// Read the operator credentials secret.
@@ -919,22 +929,21 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		tm.EmergencyFailoverCallback = emergencyDragonflyCallback(dfMgr)
 	}
 
-	siteNames := make([]string, len(fg.Spec.Sites))
-	for i, s := range fg.Spec.Sites {
-		siteNames[i] = s.Name
-	}
-	archiver := newArchiverPoller(fg.Namespace, fg.Name, siteNames, buildSidecarClients(fg),
-		r.logger.With("fg", nn.String()))
+	archiver := r.newPITRArchiverPoller(ctx, fg, nn, buildSidecarClients(fg), prev)
+	archiver.awaitingRollout = tm.SpecDriftSites
+	archiver.rolloutKnown = tm.specDriftComputed
 
 	done := make(chan struct{})
+	archiverDone := make(chan struct{})
 	r.mu.Lock()
 	r.managers[nn] = &managedTopology{
-		tm:        tm,
-		cancel:    cancel,
-		done:      done,
-		cfg:       cfg,
-		archiver:  archiver,
-		dragonfly: dfMgr,
+		tm:           tm,
+		cancel:       cancel,
+		done:         done,
+		cfg:          cfg,
+		archiver:     archiver,
+		archiverDone: archiverDone,
+		dragonfly:    dfMgr,
 	}
 	r.mu.Unlock()
 
@@ -948,7 +957,10 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		r.logger.Info("topology manager stopped", "fg", nn)
 	}()
 
-	go archiver.Run(tmCtx)
+	go func() {
+		defer close(archiverDone)
+		archiver.Run(tmCtx)
+	}()
 
 	if dfMgr != nil {
 		go func() {
@@ -973,6 +985,39 @@ func (r *TopologyManagerRunner) newDragonflyManager(fg *v1alpha1.MysqlFailoverGr
 	}
 	dfMgr.SetPaused(dragonflyMaintenanceActive(fg))
 	return dfMgr
+}
+
+// newPITRArchiverPoller builds the group's archiver poller, seeded by
+// seedPITRArchiveTracker (prev is the stopped manager it replaces, or
+// nil), and wired to write PITR status after every completed poll round
+// while it is this group's current poller. clients is aligned with
+// fg.Spec.Sites.
+func (r *TopologyManagerRunner) newPITRArchiverPoller(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName, clients []*internalmysql.SidecarClient, prev *managedTopology) *archiverPoller {
+	siteNames := make([]string, len(fg.Spec.Sites))
+	for i, s := range fg.Spec.Sites {
+		siteNames[i] = s.Name
+	}
+	tracker, lastGood, readErr := r.seedPITRArchiveTracker(ctx, fg, nn, siteNames, prev)
+	tracker.scanInterval = pitrArchiveScanInterval(fg)
+	p := newArchiverPoller(fg.Namespace, fg.Name, siteNames, clients, tracker, r.logger.With("fg", nn.String()))
+	if readErr != nil {
+		r.notePITRArchiveReadFailed(nn, p, readErr)
+	}
+	p.uid = fg.UID
+	p.rolloutRenders = pitrSpecRendersArchiver(fg)
+	for site, st := range lastGood {
+		p.lastGood[site] = st
+	}
+	p.onRound = func(ctx context.Context) {
+		r.mu.RLock()
+		current := r.managers[nn]
+		r.mu.RUnlock()
+		if current == nil || current.archiver != p {
+			return
+		}
+		_ = r.updatePITRArchiveStatus(ctx, nn)
+	}
+	return p
 }
 
 // emergencyDragonflyCallback returns the TopologyManager callback that asks
@@ -1198,6 +1243,17 @@ func stopManagedTopologyWait(mt *managedTopology, wait time.Duration) {
 			if mt.tm != nil && mt.tm.logger != nil {
 				mt.tm.logger.Warn("timed out waiting for topology manager to stop; dropping site gauges anyway")
 			}
+		}
+		timer.Stop()
+	}
+	// Join the archiver poller too, so its last status write lands before
+	// a replacement reads its history (seedPITRArchiveTracker). A poller
+	// that does not stop in time is not handed over.
+	if mt.archiverDone != nil {
+		timer := time.NewTimer(wait)
+		select {
+		case <-mt.archiverDone:
+		case <-timer.C:
 		}
 		timer.Stop()
 	}
@@ -1437,11 +1493,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		})
 	}
 
-	// Populate status.pitr from the archiver poller's cache. Done here
-	// (rather than on every reconcile) so the topology callback is the
-	// single writer of freshFG.Status and we stay on one resource
-	// version.
-	r.populatePITRStatus(nn, &freshFG)
+	// Populate status.pitr and PITRArchiveReady from the archiver
+	// poller's cache. The poller's own writer (updatePITRArchiveStatus)
+	// also sets them after every poll round; both derive them from the
+	// poller's current state rather than from a snapshot copy.
+	r.applyPITRArchiveStatus(nn, &freshFG)
 
 	// Skip no-op writes to avoid bumping resourceVersion unnecessarily.
 	// Keyring promotion Events compare in-memory last-seen, so they must
@@ -1457,12 +1513,14 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 	}
 
 	superseded := false
+	var pitrArchivePrev *metav1.Condition
 	if err := k8sretry.RetryOnConflict(k8sretry.DefaultRetry, func() error {
 		// Re-fetch the CR to get the latest resource version.
 		var fresh v1alpha1.MysqlFailoverGroup
 		if err := r.client.Get(ctx, nn, &fresh); err != nil {
 			return err
 		}
+		pitrArchivePrev = pitrArchiveCondition(&fresh.Status)
 		if fresh.Status.TopologyGeneration > snap.TopologyGeneration {
 			superseded = true
 			r.hydrateDeploymentGeneration(&fresh)
@@ -1499,7 +1557,8 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		restore := fresh.Status.RestoreInPlace
 		reclones := fresh.Status.RestoreReclones
 		offlineFence := fresh.Status.RestoreOfflineFence
-		fresh.Status = freshFG.Status
+		pitr := fresh.Status.PITR
+		fresh.Status = *freshFG.Status.DeepCopy()
 		fresh.Status.PlannedFailover = planned
 		fresh.Status.Restore = initialRestore
 		fresh.Status.RestoreInPlace = restore
@@ -1514,6 +1573,16 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				removeCondition(&fresh.Status.Conditions, reconcilerOwnedConditions[i])
 			}
 		}
+		// status.pitr and PITRArchiveReady are re-derived on the fetched
+		// object: the poller's writer may have advanced them since
+		// freshFG was read.
+		fresh.Status.PITR = pitr
+		if pitrArchivePrev != nil {
+			setCondition(&fresh.Status.Conditions, *pitrArchivePrev)
+		} else {
+			removeCondition(&fresh.Status.Conditions, conditionPITRArchiveReady)
+		}
+		r.applyPITRArchiveStatus(nn, &fresh)
 		if err := r.client.Status().Update(ctx, &fresh); err != nil {
 			return err
 		}
@@ -1534,6 +1603,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		return nil
 	}
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
+	r.emitPITRArchiveEvents(&freshFG, pitrArchivePrev)
 	r.emitKeyringPromotionEvents(&freshFG, snap)
 	r.emitDegradedTransitionEvents(&freshFG, nn, snap)
 	if r.deploymentLeases != nil {
@@ -1570,13 +1640,18 @@ func validSnapshotActiveSite(snap TopologySnapshot) string {
 // count/bytes, and latest upload timestamp — values the user cares
 // about are coverage bounds, not per-site breakdowns.
 //
-// No-ops when PITR is disabled in spec or when no archiver snapshot
-// has been observed yet (e.g. the poller just started and both sites
-// are unreachable). In that case we clear stale data so a disabled
-// flip doesn't keep showing bounds from a previous configuration.
+// A site whose latest poll failed contributes its last successful
+// snapshot, so coverage stays last-known rather than dropping that site.
+// While a site has not answered at all in this process (after an
+// operator restart, say), the persisted count, bytes and oldest time are
+// kept, since aggregating the other sites alone would understate them,
+// while the newest and last archived times still advance with the
+// answering sites. The message names the sites
+// either way. Clears the field when PITR is disabled in spec, so a
+// disabled flip doesn't keep showing bounds from a previous
+// configuration. Before the first poll round the field is left alone.
 func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *v1alpha1.MysqlFailoverGroup) {
-	enabled := fg.Spec.Backup != nil && fg.Spec.Backup.PITR != nil && fg.Spec.Backup.PITR.Enabled
-	if !enabled {
+	if !pitrEnabled(fg) {
 		fg.Status.PITR = nil
 		return
 	}
@@ -1588,34 +1663,39 @@ func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *
 		return
 	}
 
-	profileName := ""
-	if fg.Spec.Backup.PITR.ProfileName != "" {
-		profileName = fg.Spec.Backup.PITR.ProfileName
-	}
-
 	out := &v1alpha1.PITRStatus{
 		Enabled:     true,
-		ProfileName: profileName,
+		ProfileName: fg.Spec.Backup.PITR.ProfileName,
 	}
 	// Iterate in site-name order so the derived Message (and any future
 	// order-sensitive field) is reproducible across reconciles — map
 	// iteration in Go is randomized, which would otherwise flap the
 	// CR status on every poll when multiple sites report LastError.
-	snaps := mt.archiver.Snapshots()
-	sites := make([]string, 0, len(snaps))
-	for name := range snaps {
-		sites = append(sites, name)
-	}
-	sort.Strings(sites)
+	snaps, lastGood, pollErrors := mt.archiver.view()
+	sites := mt.archiver.siteNames()
 
 	var (
 		haveAny   bool
+		lastKnown []string
+		missing   []string
 		errorMsgs []string
 	)
 	for _, name := range sites {
 		s := snaps[name]
 		if s == nil {
-			continue
+			if perr, failed := pollErrors[name]; failed {
+				errorMsgs = append(errorMsgs, fmt.Sprintf("%s: archiver status unavailable: %s", name, perr))
+			}
+			// The last good snapshot's lastError is not current, so
+			// only its coverage is used.
+			s = lastGood[name]
+			if s == nil {
+				missing = append(missing, name)
+				continue
+			}
+			lastKnown = append(lastKnown, name)
+		} else if s.LastError != "" {
+			errorMsgs = append(errorMsgs, fmt.Sprintf("%s: %s", name, s.LastError))
 		}
 		haveAny = true
 		// ArchivedFileCount and ArchivedBytes sum across sites: each
@@ -1639,14 +1719,34 @@ func (r *TopologyManagerRunner) populatePITRStatus(nn types.NamespacedName, fg *
 			t := metav1.NewTime(s.LastUploadAt)
 			out.LastArchivedTime = &t
 		}
-		if s.LastError != "" {
-			errorMsgs = append(errorMsgs, fmt.Sprintf("%s: %s", name, s.LastError))
-		}
 	}
-	if !haveAny {
-		// No sidecar has responded yet; keep existing status to avoid
-		// flapping between populated and empty while polls warm up.
+	if !haveAny && len(pollErrors) == 0 {
+		// Nothing observed in this process yet.
 		return
+	}
+	switch {
+	case len(missing) > 0 && fg.Status.PITR != nil:
+		// Counts, bytes and the oldest time cannot be split per site, so
+		// they keep their recorded values. The newest and last archived
+		// times are maxima: the answering sites can only move them
+		// forward, and a stale value would read as a stopped archive.
+		kept := fg.Status.PITR.DeepCopy()
+		kept.Enabled, kept.ProfileName = true, fg.Spec.Backup.PITR.ProfileName
+		if out.NewestArchivedTime != nil && (kept.NewestArchivedTime == nil || out.NewestArchivedTime.After(kept.NewestArchivedTime.Time)) {
+			kept.NewestArchivedTime = out.NewestArchivedTime
+		}
+		if out.LastArchivedTime != nil && (kept.LastArchivedTime == nil || out.LastArchivedTime.After(kept.LastArchivedTime.Time)) {
+			kept.LastArchivedTime = out.LastArchivedTime
+		}
+		out = kept
+		errorMsgs = append(errorMsgs, fmt.Sprintf("file count, bytes and oldest archived time keep their last recorded values until every site answers (no status yet from: %s)", strings.Join(missing, ", ")))
+	default:
+		if len(missing) > 0 {
+			errorMsgs = append(errorMsgs, fmt.Sprintf("coverage fields exclude: %s (no status yet)", strings.Join(missing, ", ")))
+		}
+		if len(lastKnown) > 0 {
+			errorMsgs = append(errorMsgs, fmt.Sprintf("coverage fields are last-known for: %s", strings.Join(lastKnown, ", ")))
+		}
 	}
 	// Join all per-site errors so nothing is silently dropped. Empty
 	// when every site is clean.

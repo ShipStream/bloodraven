@@ -14,21 +14,29 @@ import (
 // polls this periodically to emit PITR metrics and populate
 // MysqlFailoverGroup.status.pitr.
 type ArchiverStatus struct {
-	Enabled            bool      `json:"enabled"`
-	Primary            bool      `json:"primary"`
-	LastScanAt         time.Time `json:"lastScanAt"`
-	FilesArchived      int64     `json:"filesArchived"`
-	LastError          string    `json:"lastError,omitempty"`
-	StorageType        string    `json:"storageType"`
-	ManifestPrefix     string    `json:"manifestPrefix"`
-	Site               string    `json:"site"`
-	UploadFailures     int64     `json:"uploadFailures"`
-	LastUploadAt       time.Time `json:"lastUploadAt,omitempty"`
-	BacklogFiles       int64     `json:"backlogFiles"`
-	ManifestFileCount  int64     `json:"manifestFileCount"`
-	ManifestBytes      int64     `json:"manifestBytes"`
-	OldestArchivedTime time.Time `json:"oldestArchivedTime,omitempty"`
-	NewestArchivedTime time.Time `json:"newestArchivedTime,omitempty"`
+	Enabled bool `json:"enabled"`
+	// StoreReady is false while a configured archiver's store cannot be
+	// built (LastError says why). nil when the sidecar did not report it:
+	// PITR is not configured, or the sidecar predates the field. nil is
+	// not false.
+	StoreReady     *bool     `json:"storeReady,omitempty"`
+	Primary        bool      `json:"primary"`
+	LastScanAt     time.Time `json:"lastScanAt"`
+	FilesArchived  int64     `json:"filesArchived"`
+	LastError      string    `json:"lastError,omitempty"`
+	StorageType    string    `json:"storageType"`
+	ManifestPrefix string    `json:"manifestPrefix"`
+	Site           string    `json:"site"`
+	UploadFailures int64     `json:"uploadFailures"`
+	// ConsecutiveFailedScans counts archiver scans in a row that ended
+	// with LastError. nil from a sidecar that predates the field.
+	ConsecutiveFailedScans *int64    `json:"consecutiveFailedScans,omitempty"`
+	LastUploadAt           time.Time `json:"lastUploadAt,omitempty"`
+	BacklogFiles           int64     `json:"backlogFiles"`
+	ManifestFileCount      int64     `json:"manifestFileCount"`
+	ManifestBytes          int64     `json:"manifestBytes"`
+	OldestArchivedTime     time.Time `json:"oldestArchivedTime,omitempty"`
+	NewestArchivedTime     time.Time `json:"newestArchivedTime,omitempty"`
 }
 
 // KeyringComponentStatus mirrors the sidecar's view of
