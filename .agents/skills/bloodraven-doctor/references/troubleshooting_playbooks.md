@@ -575,6 +575,7 @@ With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first
 ### Symptoms
 - Operator log: WARN `maintenance handoff refused; source not fenced` (refused before any write pause, usually a lagging standby) or `maintenance handoff aborted; source unfenced` (aborted after the fence), followed by `ordered update failed`, repeating on later reconciles. The active site's Deployment hash stays stale.
 - Or ERROR `maintenance handoff: rollback failed: source may be left read-only`: the abort could not give the active site its writes back.
+- Or, after a successful handoff, ERROR `ordered update: old active has transactions the new primary lacks; not repointing it`, or an `ordered update failed` error containing `before repointing`. The new primary is serving; the old active stays fenced and is not replicating.
 
 ### Diagnostic steps
 1. Read the reason from the `error` field:
@@ -601,6 +602,7 @@ With `updateStrategy: OrderedUpdate`, the operator rolls drifted followers first
    - Confirm its `@@GLOBAL.gtid_executed` is a subset of the active site's: `SELECT GTID_SUBSET('<standby set>', '<active set>')` on the active site returns 1.
    - If it is, run on the standby: `CHANGE REPLICATION SOURCE TO SOURCE_HOST='<active internal host>', SOURCE_USER='<repl user>', SOURCE_PASSWORD='<repl password>', SOURCE_AUTO_POSITION=1; START REPLICA;`. Add `SOURCE_SSL=1, SOURCE_SSL_CA='/etc/mysql/tls/ca.crt'` when `spec.tls` is set, otherwise `GET_SOURCE_PUBLIC_KEY=1`.
    - If it is not a subset, the standby has errant transactions: reclone it (`kubectl bloodraven reclone <group> -n <ns> --target=<site>`) instead.
+5. Old active not repointed after the handoff (`not repointing it` or `before repointing`). Leave it fenced and do not run `CHANGE REPLICATION SOURCE` on it by hand. Old-primary recovery picks it up on a later poll. If the sets were only unreadable, the site rejoins as a replica. If it really holds transactions the new primary lacks, recovery reports them in `status.sites[].divergentGtid` and blocks: follow playbook 2 to extract or replay them before recloning the site.
 
 ## 24. One group stopped updating (no running topology manager)
 
