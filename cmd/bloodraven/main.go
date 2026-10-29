@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -33,6 +35,7 @@ import (
 	"github.com/shipstream/bloodraven/internal/license"
 	"github.com/shipstream/bloodraven/internal/metrics"
 	"github.com/shipstream/bloodraven/internal/platform"
+	"github.com/shipstream/bloodraven/internal/sidecar"
 	"github.com/shipstream/bloodraven/internal/util"
 )
 
@@ -47,6 +50,12 @@ func main() {
 			// Invoked by scheduled CronJob pods to POST a MysqlBackup
 			// CR. See trigger.go.
 			runTriggerBackup(os.Args[2:])
+			return
+		case "pitr-quarantine":
+			if err := pitrQuarantine(context.Background(), os.Args[2:], os.Stdout, os.Stderr); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
 			return
 		case "pitr-download":
 			// Invoked by restore Job init containers to download
@@ -450,65 +459,11 @@ func (r *statusRecorder) ReadFrom(src io.Reader) (int64, error) {
 	return io.Copy(r.ResponseWriter, src)
 }
 
-// pitrCutoffCache is a tiny TTL cache in front of the /pitr-cutoff
-// handler. Keyed by (namespace, group, profile). Concurrent-safe.
-type pitrCutoffCache struct {
-	ttl  time.Duration
-	mu   sync.Mutex
-	data map[string]pitrCutoffEntry
-}
-
-type pitrCutoffEntry struct {
-	value map[string]any
-	at    time.Time
-}
-
-func newPITRCutoffCache(ttl time.Duration) *pitrCutoffCache {
-	return &pitrCutoffCache{ttl: ttl, data: make(map[string]pitrCutoffEntry)}
-}
-
-func (c *pitrCutoffCache) key(ns, group, profile string) string {
-	return ns + "/" + group + "/" + profile
-}
-
-func (c *pitrCutoffCache) get(ns, group, profile string) (map[string]any, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	e, ok := c.data[c.key(ns, group, profile)]
-	if !ok || time.Since(e.at) > c.ttl {
-		return nil, false
-	}
-	return e.value, true
-}
-
-// pitrCutoffCacheMaxEntries caps the cache. Keys come from unauthenticated
-// query parameters, so without a cap arbitrary triples grow it without
-// bound. Real deployments need one entry per (group, profile).
-const pitrCutoffCacheMaxEntries = 1024
-
-func (c *pitrCutoffCache) set(ns, group, profile string, value map[string]any) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	now := time.Now()
-	key := c.key(ns, group, profile)
-	if _, exists := c.data[key]; !exists && len(c.data) >= pitrCutoffCacheMaxEntries {
-		for k, e := range c.data {
-			if now.Sub(e.at) > c.ttl {
-				delete(c.data, k)
-			}
-		}
-		if len(c.data) >= pitrCutoffCacheMaxEntries {
-			return
-		}
-	}
-	c.data[key] = pitrCutoffEntry{value: value, at: now}
-}
-
-func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Client) *http.ServeMux {
+func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Reader) *http.ServeMux {
 	return newAuxMuxWithLogger(runner, hub, k8sClient, slog.Default())
 }
 
-func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Client, logger *slog.Logger) *http.ServeMux {
+func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Reader, logger *slog.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", auxLoggingMiddleware(logger, "healthz", http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -554,20 +509,15 @@ func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform
 			"activeSite": status.ActiveSite,
 		})
 	})))
-	// /pitr-cutoff is consumed by the sidecar's binlog archiver.
-	// Given a (namespace, group, profile) triple it returns the
-	// completion time of the OLDEST successful MysqlBackup retained
-	// for that profile. Anything older than this cutoff is safe to
-	// purge from the PITR archive — its replay window is already
-	// covered by the oldest-surviving full dump. The archiver runs
-	// this lookup on its own cadence and handles the actual deletes
-	// (it has storage credentials; the operator pod does not).
-	// /pitr-cutoff is a hot path — the sidecar archiver polls it from
-	// every primary. A per-(ns, group, profile) TTL cache keeps the
-	// operator's client from List'ing the whole namespace on every
-	// call, which also bounds the DoS surface on the unauthenticated
-	// endpoint (AUDIT H2).
+	// Retention requires GTID lower bounds from every retained backup. Legacy
+	// clients receive no cutoff, preventing unsafe time-only deletion during skew.
+	// AUDIT H2: informer reads, bounded deferral caching and singleflight avoid
+	// live API LISTs. Validate the PITR group before applying a per-caller IP
+	// limit: query keys cannot reserve another site's admission. Never cache
+	// positive delete authority, which could hide a newly observed older backup.
 	pitrCache := newPITRCutoffCache(30 * time.Second)
+	pitrCallers := newPITRCallerLimiter(30 * time.Second)
+	var pitrLookups singleflight.Group
 	mux.Handle("/pitr-cutoff", auxLoggingMiddleware(logger, "pitr-cutoff", http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.Header().Set("Content-Type", "application/json")
 		ns := r.URL.Query().Get("namespace")
@@ -586,62 +536,60 @@ func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform
 			json.NewEncoder(rw).Encode(map[string]string{"error": "operator k8s client not configured"})
 			return
 		}
+		if r.URL.Query().Get("coverage") != sidecar.PITRGTIDCoverageProtocol {
+			_ = json.NewEncoder(rw).Encode(map[string]any{"namespace": ns, "group": group, "profile": profile})
+			return
+		}
+		// The informer GET rejects junk keys without allocating reservations or
+		// scanning backups. A profile must actually be active on this group.
+		groupCtx, groupCancel := context.WithTimeout(r.Context(), 5*time.Second)
+		var mfg v1alpha1.MysqlFailoverGroup
+		groupErr := k8sClient.Get(groupCtx, types.NamespacedName{Namespace: ns, Name: group}, &mfg)
+		groupCancel()
+		if groupErr != nil {
+			status := http.StatusInternalServerError
+			if apierrors.IsNotFound(groupErr) {
+				status = http.StatusNotFound
+			}
+			rw.WriteHeader(status)
+			_ = json.NewEncoder(rw).Encode(map[string]any{"error": "PITR group unavailable"})
+			return
+		}
+		if mfg.Spec.Backup == nil || mfg.Spec.Backup.PITR == nil || !mfg.Spec.Backup.PITR.Enabled || mfg.Spec.Backup.PITR.ProfileName != profile {
+			rw.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(rw).Encode(map[string]any{"error": "PITR profile is not active on this group"})
+			return
+		}
 		if cached, ok := pitrCache.get(ns, group, profile); ok {
 			_ = json.NewEncoder(rw).Encode(cached)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-
-		var list v1alpha1.MysqlBackupList
-		// Scope the List by our well-known labels so the API server
-		// filters for us; falls back to full-namespace only when
-		// labels are absent (handled in the filter loop below).
-		if err := k8sClient.List(ctx, &list, client.InNamespace(ns), client.MatchingLabels{
-			"shipstream.io/failover-group": group,
-			"shipstream.io/backup-profile": profile,
-		}); err != nil {
-			rw.WriteHeader(http.StatusInternalServerError)
-			// Don't echo raw API errors to unauthenticated callers.
-			json.NewEncoder(rw).Encode(map[string]string{"error": "internal error resolving PITR cutoff"})
+		if !pitrCallers.admit(r.RemoteAddr) {
+			rw.Header().Set("Retry-After", "30")
+			rw.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(rw).Encode(map[string]any{"error": "PITR cutoff caller rate limited"})
 			return
 		}
-
-		// Minimum CompletionTime across successful, non-deleting
-		// MysqlBackups that match (group, profile). Entries without a
-		// CompletionTime are ignored (they can't establish a cutoff
-		// anyway). If there are no retained backups we return empty
-		// so the archiver treats "nothing to prune yet".
-		var cutoff *time.Time
-		for i := range list.Items {
-			b := &list.Items[i]
-			if !b.DeletionTimestamp.IsZero() {
-				continue
+		result, _, _ := pitrLookups.Do(pitrCache.key(ns, group, profile), func() (any, error) {
+			if cached, ok := pitrCache.get(ns, group, profile); ok {
+				return pitrLookupResult{http.StatusOK, cached}, nil
 			}
-			if b.Spec.FailoverGroupRef.Name != group {
-				continue
+			// One caller disconnecting must not cancel a shared lookup used by
+			// another site. The lookup retains its own bounded deadline.
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+			defer cancel()
+			resp, err := resolvePITRCutoff(ctx, k8sClient, ns, group, profile)
+			if err != nil {
+				return pitrLookupResult{http.StatusInternalServerError, map[string]any{"error": "internal error resolving PITR cutoff"}}, nil
 			}
-			if b.Spec.ProfileName != profile {
-				continue
+			if resp["cutoffTime"] == nil {
+				pitrCache.set(ns, group, profile, resp)
 			}
-			if b.Status.Phase != v1alpha1.BackupPhaseSucceeded {
-				continue
-			}
-			if b.Status.CompletionTime == nil {
-				continue
-			}
-			t := b.Status.CompletionTime.Time
-			if cutoff == nil || t.Before(*cutoff) {
-				c := t
-				cutoff = &c
-			}
-		}
-		resp := map[string]any{"namespace": ns, "group": group, "profile": profile}
-		if cutoff != nil {
-			resp["cutoffTime"] = cutoff.UTC().Format(time.RFC3339)
-		}
-		pitrCache.set(ns, group, profile, resp)
-		json.NewEncoder(rw).Encode(resp)
+			return pitrLookupResult{http.StatusOK, resp}, nil
+		})
+		lookup := result.(pitrLookupResult)
+		rw.WriteHeader(lookup.status)
+		json.NewEncoder(rw).Encode(lookup.body)
 	})))
 	mux.Handle("/ws/status", auxLoggingMiddleware(logger, "ws-status", http.HandlerFunc(hub.HandleWS)))
 	mux.Handle("/", auxLoggingMiddleware(logger, "notfound", http.NotFoundHandler()))

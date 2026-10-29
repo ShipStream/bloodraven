@@ -3,6 +3,7 @@ package sidecar
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -70,7 +71,7 @@ func TestManifestRoundTripPVC(t *testing.T) {
 	// Prune drops e1, returns its remote path for delete, and leaves
 	// the on-disk manifest with just e2.
 	removed, err := pruneManifest(ctx, store, prefix, site,
-		map[string]struct{}{"mysql-bin.000001": {}})
+		map[binlogIdentity]string{{Name: "mysql-bin.000001"}: strings.Repeat("a", 64)})
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
@@ -110,9 +111,9 @@ func TestPruneManifestIgnoresRemotePath(t *testing.T) {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	removed, err := pruneManifest(ctx, store, prefix, site, map[string]struct{}{
-		"mysql-bin.000001":            {},
-		"../../backups/full-2026.tar": {},
+	removed, err := pruneManifest(ctx, store, prefix, site, map[binlogIdentity]string{
+		{Name: "mysql-bin.000001"}:            strings.Repeat("a", 64),
+		{Name: "../../backups/full-2026.tar"}: strings.Repeat("a", 64),
 	})
 	if err != nil {
 		t.Fatalf("prune: %v", err)

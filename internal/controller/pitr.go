@@ -529,6 +529,7 @@ func buildRestorePITRFragmentsFor(fg *v1alpha1.MysqlFailoverGroup, pit *v1alpha1
 
 	mainEnv := []corev1.EnvVar{
 		{Name: "BLOODRAVEN_PITR_LOCAL_DIR", Value: restorePITRLocalDir},
+		{Name: "TZ", Value: "UTC"},
 		{Name: "BLOODRAVEN_PITR_STOP_DATETIME", Value: pit.StopDatetime},
 	}
 	if pit.ExcludeGtids != "" {

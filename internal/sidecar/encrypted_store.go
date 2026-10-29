@@ -1,13 +1,15 @@
 package sidecar
 
 import (
-	"bytes"
+	"bufio"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/shipstream/bloodraven/internal/backupcrypto"
 )
@@ -48,6 +50,13 @@ type encryptedStore struct {
 	allowPlaintext bool
 }
 
+func (e *encryptedStore) BinlogContentID(digest string) string {
+	h := hmac.New(sha256.New, e.passphrase)
+	_, _ = h.Write([]byte("bloodraven-binlog-content-id-v1\x00"))
+	_, _ = h.Write([]byte(digest))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // WrapWithEncryption returns a new ArchiveStore that transparently
 // encrypts puts and decrypts gets using the supplied passphrase. A
 // zero-length passphrase returns inner unchanged so callers can
@@ -72,170 +81,82 @@ func WrapWithEncryptionOptions(inner ArchiveStore, passphrase []byte, allowPlain
 	return &encryptedStore{inner: inner, passphrase: passphrase, allowPlaintext: allowPlaintext}
 }
 
-// Put streams r through the backupcrypto encrypter, writes the
-// ciphertext into a tmp file on disk, and forwards it to the
-// underlying store via PutFile. We do not buffer the full plaintext in
-// memory because callers are free to pass streams of arbitrary size;
-// the old "bytes.Buffer everything" path was a latent OOM bug the day
-// anything other than the small manifest JSON started using Put.
-func (e *encryptedStore) Put(ctx context.Context, key string, r io.Reader, _ int64) error {
-	tmp, err := os.CreateTemp("", "bloodraven-enc-put-*")
+// Put encrypts through a bounded pipe into the existing streaming uploader.
+func (e *encryptedStore) Put(ctx context.Context, key string, source io.Reader, _ int64) error {
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		_, err := backupcrypto.Encrypt(writer, source, e.passphrase)
+		_ = writer.CloseWithError(err)
+		done <- err
+	}()
+	err := e.inner.Put(ctx, key, reader, -1)
+	_ = reader.CloseWithError(err)
+	encryptErr := <-done
 	if err != nil {
-		return fmt.Errorf("encrypted store: create temp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := backupcrypto.Encrypt(tmp, r, e.passphrase); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("encrypt %s: %w", key, err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("encrypted store: sync: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("encrypted store: close temp: %w", err)
-	}
-	return e.inner.PutFile(ctx, key, tmpPath)
-}
-
-// PutFile streams the file at path through backupcrypto and uploads
-// the ciphertext. We write the ciphertext to a tmp file instead of
-// buffering in memory because archived binlog files can be hundreds
-// of MB and the sidecar container's memory limit is typically
-// smaller than a single binlog. The tmp file is always removed on
-// exit.
-func (e *encryptedStore) PutFile(ctx context.Context, key, path string) error {
-	tmp, err := os.CreateTemp("", "bloodraven-enc-*")
-	if err != nil {
-		return fmt.Errorf("encrypted store: create temp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-
-	in, err := os.Open(path)
-	if err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("encrypted store: open %s: %w", path, err)
-	}
-	defer in.Close()
-
-	if _, err := backupcrypto.Encrypt(tmp, in, e.passphrase); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("encrypted store: encrypt %s: %w", path, err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("encrypted store: sync temp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("encrypted store: close temp: %w", err)
-	}
-	return e.inner.PutFile(ctx, key, tmpPath)
-}
-
-// Get reads the underlying object and decrypts it into memory. Like
-// Put, we buffer because the manifest load path consumes the whole
-// slice. Callers that need streaming decryption for very large
-// objects should use GetFile.
-func (e *encryptedStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
-	data, ok, err := e.inner.Get(ctx, key)
-	if err != nil || !ok {
-		return data, ok, err
-	}
-	if !backupcrypto.LooksEncrypted(data) {
-		if e.allowPlaintext {
-			return data, true, nil
-		}
-		return nil, false, fmt.Errorf("%w: key=%s", ErrTamperedOrDowngrade, key)
-	}
-	var buf bytes.Buffer
-	if _, err := backupcrypto.Decrypt(&buf, bytes.NewReader(data), e.passphrase); err != nil {
-		if errors.Is(err, backupcrypto.ErrMagicMismatch) {
-			// LooksEncrypted returned true but Decrypt disagreed
-			// (short object, truncated header). Under strict mode
-			// treat this as tampering; in legacy mode, fall through
-			// to the raw bytes as the old behaviour.
-			if e.allowPlaintext {
-				return data, true, nil
-			}
-			return nil, false, fmt.Errorf("%w: key=%s", ErrTamperedOrDowngrade, key)
-		}
-		return nil, false, fmt.Errorf("decrypt %s: %w", key, err)
-	}
-	return buf.Bytes(), true, nil
-}
-
-// GetFile streams the ciphertext into a tmp file, decrypts it to
-// dst, and removes the tmp on exit. We write the plaintext into a
-// sibling ".decpart" file and rename so readers (mysqlbinlog,
-// loadDump) never see a partial plaintext object.
-func (e *encryptedStore) GetFile(ctx context.Context, key, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return fmt.Errorf("encrypted store: mkdir: %w", err)
-	}
-	tmp, err := os.CreateTemp("", "bloodraven-dec-*")
-	if err != nil {
-		return fmt.Errorf("encrypted store: create temp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	_ = tmp.Close()
-	defer os.Remove(tmpPath)
-
-	if err := e.inner.GetFile(ctx, key, tmpPath); err != nil {
 		return err
 	}
-	in, err := os.Open(tmpPath)
+	return encryptErr
+}
+func (e *encryptedStore) PutFile(ctx context.Context, key, path string) error {
+	file, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("encrypted store: open ciphertext: %w", err)
+		return err
 	}
-	defer in.Close()
+	defer file.Close()
+	return e.Put(ctx, key, file, -1)
+}
 
-	plainPart := dst + ".decpart"
-	out, err := os.OpenFile(plainPart, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+type archiveReadCloser struct {
+	io.Reader
+	close func() error
+}
+
+func (r *archiveReadCloser) Close() error { return r.close() }
+
+// Open decrypts incrementally. EOF, including final-chunk authentication, is
+// mandatory before a caller may publish bytes or observations from the stream.
+func (e *encryptedStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	source, err := e.inner.Open(ctx, key)
 	if err != nil {
-		return fmt.Errorf("encrypted store: create plaintext: %w", err)
+		return nil, err
 	}
-	if _, err := backupcrypto.Decrypt(out, in, e.passphrase); err != nil {
-		_ = out.Close()
-		_ = os.Remove(plainPart)
-		if errors.Is(err, backupcrypto.ErrMagicMismatch) {
-			if !e.allowPlaintext {
-				return fmt.Errorf("%w: key=%s", ErrTamperedOrDowngrade, key)
-			}
-			// Explicit mixed-encryption opt-in: copy bytes through
-			// verbatim.
-			if _, err := in.Seek(0, io.SeekStart); err != nil {
-				return fmt.Errorf("encrypted store: rewind for plaintext passthrough: %w", err)
-			}
-			out, err := os.OpenFile(plainPart, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-			if err != nil {
-				return fmt.Errorf("encrypted store: create plaintext passthrough: %w", err)
-			}
-			if _, err := io.Copy(out, in); err != nil {
-				_ = out.Close()
-				_ = os.Remove(plainPart)
-				return fmt.Errorf("encrypted store: copy plaintext passthrough: %w", err)
-			}
-			if err := out.Close(); err != nil {
-				_ = os.Remove(plainPart)
-				return fmt.Errorf("encrypted store: close plaintext passthrough: %w", err)
-			}
-			return os.Rename(plainPart, dst)
+	buffered := bufio.NewReader(source)
+	prefix, _ := buffered.Peek(4)
+	if !backupcrypto.LooksEncrypted(prefix) {
+		if e.allowPlaintext {
+			return &archiveReadCloser{Reader: buffered, close: source.Close}, nil
 		}
-		return fmt.Errorf("encrypted store: decrypt %s: %w", key, err)
+		_ = source.Close()
+		return nil, fmt.Errorf("%w: key=%s", ErrTamperedOrDowngrade, key)
 	}
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		_ = os.Remove(plainPart)
-		return fmt.Errorf("encrypted store: sync: %w", err)
+	reader, writer := io.Pipe()
+	go func() {
+		_, err := backupcrypto.Decrypt(writer, buffered, e.passphrase)
+		_ = source.Close()
+		_ = writer.CloseWithError(err)
+	}()
+	return &archiveReadCloser{Reader: reader, close: func() error { _ = reader.Close(); return source.Close() }}, nil
+}
+func (e *encryptedStore) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	reader, err := e.Open(ctx, key)
+	if errors.Is(err, os.ErrNotExist) || isS3NotFound(err) {
+		return nil, false, nil
 	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(plainPart)
-		return fmt.Errorf("encrypted store: close: %w", err)
+	if err != nil {
+		return nil, false, err
 	}
-	return os.Rename(plainPart, dst)
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	return data, err == nil, err
+}
+func (e *encryptedStore) GetFile(ctx context.Context, key, dst string) error {
+	reader, err := e.Open(ctx, key)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	return writeArchiveFile(reader, dst)
 }
 
 // Delete passes through; delete needs no plaintext.

@@ -28,6 +28,11 @@ import (
 // pitr-download subcommand all program against this — so adding a
 // third backend (GCS, Azure) later is localized to this file.
 type ArchiveStore interface {
+	// Open returns a streaming reader; callers must read to EOF for integrity and close it.
+	Open(ctx context.Context, key string) (io.ReadCloser, error)
+	// BinlogContentID binds a plaintext SHA-256 digest to this store's identity
+	// policy. Encryption wrappers key it so object names reveal no plaintext hash.
+	BinlogContentID(plaintextSHA256 string) string
 	// Put writes data under key. Overwrites are OK: the archiver treats
 	// the write as idempotent by key.
 	Put(ctx context.Context, key string, r io.Reader, size int64) error
@@ -57,6 +62,31 @@ type ArchiveStore interface {
 	// returned relative to the storage root (matching the same form
 	// used by Put/Get).
 	List(ctx context.Context, prefix string) ([]string, error)
+}
+
+func (s *s3Store) BinlogContentID(digest string) string  { return digest }
+func (p *pvcStore) BinlogContentID(digest string) string { return digest }
+
+// writeArchiveFile publishes only a complete stream on the destination volume.
+func writeArchiveFile(reader io.Reader, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	part := dst + ".part"
+	out, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(part)
+	_, copyErr := io.Copy(out, reader)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(part, dst)
 }
 
 // NewArchiveStore constructs the backend matching cfg. It is called
@@ -221,6 +251,10 @@ func (s *s3Store) PutFile(ctx context.Context, key, path string) error {
 		return fmt.Errorf("stat %s: %w", path, err)
 	}
 	return s.Put(ctx, key, f, fi.Size())
+}
+
+func (s *s3Store) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	return s.openResumable(ctx, key)
 }
 
 func (s *s3Store) Get(ctx context.Context, key string) ([]byte, bool, error) {
@@ -412,6 +446,14 @@ func (p *pvcStore) PutFile(ctx context.Context, key, path string) error {
 		return fmt.Errorf("stat %s: %w", path, err)
 	}
 	return p.Put(ctx, key, f, fi.Size())
+}
+
+func (p *pvcStore) Open(_ context.Context, key string) (io.ReadCloser, error) {
+	file, err := p.fullPath(key)
+	if err != nil {
+		return nil, err
+	}
+	return os.Open(file)
 }
 
 func (p *pvcStore) Get(_ context.Context, key string) ([]byte, bool, error) {

@@ -50,11 +50,16 @@ type memStore struct {
 	putFileErr map[string]error
 }
 
+func (m *memStore) BinlogContentID(digest string) string { return digest }
+
 func newMemStore() *memStore {
 	return &memStore{objects: map[string][]byte{}, putFileErr: map[string]error{}}
 }
 
 func (m *memStore) Put(_ context.Context, key string, r io.Reader, _ int64) error {
+	if err := m.putFileErr[key]; err != nil {
+		return err
+	}
 	b, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -75,7 +80,30 @@ func (m *memStore) Get(_ context.Context, key string) ([]byte, bool, error) {
 	return append([]byte(nil), b...), true, nil
 }
 
-func (m *memStore) GetFile(_ context.Context, _, _ string) error { return errors.New("not used") }
+func (m *memStore) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	data, ok, err := m.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func (m *memStore) GetFile(ctx context.Context, key, dst string) error {
+	data, ok, err := m.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return os.ErrNotExist
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o600)
+}
 
 func (m *memStore) Delete(_ context.Context, key string) error {
 	m.mu.Lock()
@@ -313,9 +341,13 @@ func TestSnapshotExposesSeededManifestAggregates(t *testing.T) {
 	a := NewBinlogArchiver(cfg, "dc1", checker, store, slog.Default())
 
 	t0 := time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC)
+	id, err := fileContentID(filepath.Join(dir, "mysql-bin.000001"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	seedArchiverWithManifest(t, a, []ManifestEntry{
-		{Name: "mysql-bin.000001", Size: 100, FirstEventTime: t0, LastEventTime: t0.Add(time.Minute), ArchivedAt: t0},
-		{Name: "mysql-bin.000002", Size: 200, FirstEventTime: t0.Add(time.Minute), LastEventTime: t0.Add(2 * time.Minute), ArchivedAt: t0},
+		{ID: id, Name: "mysql-bin.000001", Size: 100, FirstEventTime: t0, LastEventTime: t0.Add(time.Minute), ArchivedAt: t0},
+		{ID: id, Name: "mysql-bin.000002", Size: 200, FirstEventTime: t0.Add(time.Minute), LastEventTime: t0.Add(2 * time.Minute), ArchivedAt: t0},
 	})
 
 	a.scanAndArchive(context.Background())
@@ -354,7 +386,7 @@ func TestRetentionCutoffIsBounded(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-				_ = json.NewEncoder(rw).Encode(pitrCutoffResponse{CutoffTime: tc.cutoff.Format(time.RFC3339)})
+				_ = json.NewEncoder(rw).Encode(pitrCutoffResponse{CutoffTime: tc.cutoff.Format(time.RFC3339), Coverage: PITRGTIDCoverageProtocol, RetainedGTIDs: []string{coverageTestSID + ":1-11"}})
 			}))
 			defer srv.Close()
 
@@ -363,11 +395,26 @@ func TestRetentionCutoffIsBounded(t *testing.T) {
 			cfg := &PITRConfig{ManifestPrefix: "binlogs"}
 			a := NewBinlogArchiver(cfg, "dc1", &stubRoleChecker{}, store, slog.Default())
 			a.SetRetentionClient(strings.TrimPrefix(srv.URL, "http://"), "ns", "fg", "p", time.Hour)
+			payload, err := os.ReadFile("testdata/incarnation-a.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := fileContentID("testdata/incarnation-a.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
 			for _, e := range []ManifestEntry{
-				{Name: "mysql-bin.000001", LastEventTime: now.Add(-48 * time.Hour)},
-				{Name: "mysql-bin.000002", LastEventTime: now.Add(-2 * time.Hour)},
-				{Name: "mysql-bin.000003", LastEventTime: now.Add(-time.Minute)},
+				{ID: id, Name: "mysql-bin.000001", LastEventTime: now.Add(-48 * time.Hour), GTIDCoverage: &BinlogGTIDCoverage{Complete: true, GTIDs: coverageTestSID + ":11", ContentID: id}},
+				{ID: id, Name: "mysql-bin.000002", LastEventTime: now.Add(-2 * time.Hour), GTIDCoverage: &BinlogGTIDCoverage{Complete: true, GTIDs: coverageTestSID + ":11", ContentID: id}},
+				{ID: id, Name: "mysql-bin.000003", LastEventTime: now.Add(-time.Minute), GTIDCoverage: &BinlogGTIDCoverage{Complete: true, GTIDs: coverageTestSID + ":11", ContentID: id}},
 			} {
+				key, err := ArchiveEntryKey("binlogs", "dc1", e)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Put(ctx, key, bytes.NewReader(payload), int64(len(payload))); err != nil {
+					t.Fatal(err)
+				}
 				if err := appendManifestEntry(ctx, store, "binlogs", "dc1", e); err != nil {
 					t.Fatalf("append: %v", err)
 				}

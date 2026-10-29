@@ -668,3 +668,88 @@ The sidecar loads its passphrase at startup. The deployment fingerprint includes
 
 ### Safe remediation
 Preserve the archive and its original passphrase. Restore access to the original settings and key before attempting to use that recovery history. Do not delete the manifest, overwrite old objects, or enable plaintext fallback as a drift repair. Automatic archive migration and multiple key generations are unsupported; plan any encryption transition separately. For a stale rendered configuration, use the operator with encryption-aware drift detection and verify the normal ordered rollout completes.
+
+## 27. PITR history after a site reclone or data rebuild
+
+### Symptoms
+- A former primary is rebuilt, becomes primary again, and reuses `mysql-bin.000001` or other retained binlog names.
+- Older archivers may report `backlogFiles=0` while missing the new files, because they recognized only the basename.
+
+### Diagnostic steps
+1. Record sidecar, operator, and backup/restore image versions. Confirm all archive readers and writers understand the additive manifest `id` field before using new archives with older images.
+2. Inspect `/archiver/status`, upload logs, and the relevant site manifest through the configured archive reader. New rows use `(name, id)` where `id` is a SHA-256 of sealed plaintext bytes for plaintext stores, or a passphrase-keyed HMAC-SHA256 digest for encrypted stores, and new keys end in `<name>.<id>`. Two rows may share a name. Legacy rows without IDs retain plain keys and persist a verified `contentId` after archive inspection. A surviving rollback-stripped row recovers its ID only from an exact confined `remotePath` key.
+3. Check that sealed files created after rebuild have corresponding objects and rows. New/changed rotations preempt historical work, including known names. A newest-first cursor yields after 64 MiB/two seconds, including mid-file. Verified legacy IDs survive restart; local fingerprints do not persist. Inspection/encryption/upload need no full-file scratch space. Inspect `archive binlog` errors, backlog and actual storage throughput if it cannot catch up.
+4. Verify an isolated restore with application markers written before and after rebuild. A successful upload count or zero backlog cannot prove history that an older writer already omitted.
+
+### Safe remediation
+Preserve old manifests, objects, and encryption material. Do not delete a site manifest, purge local binlogs, or overwrite retained objects to make names appear new. Use compatible ID-aware readers and writers. If an older archiver already missed files, preserve any surviving local binlogs and investigate the recovery gap before declaring PITR coverage restored. Older writers discard IDs, coverage, purged bases, quarantine/reset guards and pending deletes on rewrite; their pruning can drop every same-name row. Re-upgrade repairs surviving stripped IDs but cannot recover lost rows or pending records. Stop the older writer and restore preserved manifests with compatible recovery images, then verify coverage. All rows use GTID predecessor order, including unique-name numbering resets. Empty frontiers/rotations are valid; XA, LOAD DATA and checksum-off logs use observed ordering GTIDs independently of strict retention coverage. Clone `baseGtids` bridges donor GTIDs missing from the first log header. Divergent boundaries fail before SQL. For missing objects with unknown digests or abandoned tails, follow [Repair PITR history safely](../../../../site/content/docs/7.backup-and-restore/7.pitr-history-repair.md): pause writers, preserve objects/manifests, verify a canonical full backup, quarantine the exact row with a reason/resume bound, then verify replay. Quarantine never deletes data and can be undone. Divergence is evaluated only with established server history: empty execution, running clone and read-only/no-channel bootstrap cannot flag the archive. Eligible audits clear recovered foreign-source flags. Known loss from the current server UUID remains unresolved on numeric return; verify recovery or explicitly acknowledge a canonical backup, or quarantine the abandoned row. Surviving flags block affected transactions, including last rows and discovered aliases. Legacy overlap verification runs even without retention; unresolved issuance blocks unsafe compatibility and retirement. A true reuse guard compares conflicting issuance of the same GTIDs; names, retries and publication order are not evidence. Verified reuse still requires a new generation even after quarantine. For an obsolete upload-order guard, `pitr-quarantine --acknowledge-history` verifies every active stream is covered by a canonical full-backup bound, compares overlapping issuance and records prior evidence; it removes no rows and adds no global backup cutoff. Quarantine bounds restrict only windows needing excluded rows; earlier windows with a proven stop before them remain available. Prefer a new unused selected profile `storage.s3.prefix`/`storage.pvc.subPath` and full backup after RESET. Follow the repair guide for the exact procedure.
+
+### Known limitations
+
+- PITR can refuse ambiguous forks/empty stop frontiers, missing or corrupt
+  objects, and unknown issuance provenance. Preserve evidence; recover exact
+  bytes or use the canonical acknowledgement/quarantine procedure. Verified
+  reuse requires a new prefix/full backup. Same-UUID numeric return cannot
+  clear known loss before replacement bytes are sealed and verified.
+- Original commit stamps or usable statement Query events are needed for
+  issuance proof; missing observations and unrecorded historical reuse cannot
+  always be reconstructed. Statement rewrites can trigger a conservative
+  guard. Per-site planning does not prove cross-site completeness; verify all
+  required sites rather than dropping a failing site without evidence.
+- Older writers may already have lost rows, clone bases or recovery provenance.
+  Preserve manifests, objects, original passphrases, compatible images and
+  generation/backup pairing. Downgrades can discard those fields again; use
+  the documented compatible recovery images or a new prefix/full backup.
+- Legacy streaming costs storage reads/S3 egress. Restarts rebuild in-memory
+  comparisons and cooldowns, repeating I/O and deferring pruning. Scheduling
+  budgets do not bound network latency; reverse-ordered GTID histories still
+  incur quadratic interval-index insertion. Watch archive capacity while any
+  unresolved issuance blocks site-wide retirement.
+
+## 28. PITR retention deferred because GTID coverage is unknown
+
+### Symptoms
+- `retention deferred` warnings with `backupMetadataUnknown`, `backupGTIDCoverageUnknown` or `binlogGTIDCoverageUnknown`, or `retention: coverage unavailable` with a read/identity error.
+- Archive storage grows while uploads and restores can remain healthy. Unresolved issuance can pause all new retirements for the site; `archiveIssuanceUnverified` at WARN names the failed row and remedy, and `lastError` retains the failure during cooldown.
+
+### Diagnostic steps
+1. Inspect every successful, non-deleting backup matching the group's spec, across all profiles, including CRs without labels. Read `status.startTime` and `status.gtidExecuted`; the latter must be a trustworthy pre-dump lower bound. Completion time alone is not a replay boundary. A newer replica backup may cover fewer GTIDs than the oldest backup. Pending, Running, or unknown-phase group backups pause new retirements, including overlapping dumps with older snapshots.
+2. From the protected pod network, inspect `/pitr-cutoff?namespace=<ns>&group=<group>&profile=<profile>&coverage=gtid-v1`. A proof includes the matching `coverage` marker, `retainedGTIDs` for all backups, and `cutoffTime` from the minimum known start. Missing metadata yields no cutoff and `retentionDeferredReason`. `noRetainedBackups` and `backupInFlight` are normal Info waits. The informer-backed handler validates the active PITR group/profile, coalesces lookups and permits one uncached lookup per transport source IP per 30 seconds. Junk query keys allocate no admission state. HTTP 429 carries no cutoff, logs `fetch retention cutoff` at Warn and retries after 30 seconds. Use direct Service access preserving pod source IPs; proxy/NAT callers share a limit and forwarding headers are ignored. Safe deferrals alone are cached; positive proofs and failed lookups are not. Older requests deliberately receive no cutoff; a new sidecar also rejects time-only responses from older operators.
+3. Inspect affected manifest rows' `gtidCoverage.complete` and `gtidCoverage.gtids`. Every file transaction must be contained in every backup bound. Previous GTIDs and same-name successor files do not establish coverage. Anonymous transactions, truncation, disabled checksums, and unknown events remain retained. Complete empty files and valid ZSTD payloads immediately after GTIDs are supported.
+4. The proof's `gtidCoverage.contentId` must match the row's ID or verified legacy `contentId`. Older/unbound proofs are re-inspected from streamed archived plaintext; both ID-aware and verified legacy rows must match their content ID. Each batch reads at most eight objects, with soft 64 MiB/two-second limits, persists IDs/proofs together, and retries eligible remaining work after 30 seconds with Info progress logs. Failed identities retry only after the normal interval (one hour by default); their process-local cooldown cannot delay unrelated backfill and clears on identity change/removal or sidecar restart. Actual failed attempts and incomplete unsupported coverage remain Warn. Check archive read access and the original passphrase; no full-file inspection scratch is used. Unknown/unreadable objects remain retained. Capture `support-bundle.sh`; `backups.json` contains projected backup names, profiles, phases, times, and GTID bounds without reading Secrets.
+
+5. Distinguish coverage backfill from issuance verification. A healthy pending issuance batch logs `archiveIssuanceUnverified` at Info. A failed row logs that reason at Warn with `error`, site/name/ID and the repair/quarantine remedy; `lastError` stays set throughout cooldown. One unresolved legacy identity can defer all new retirements for that site even while unrelated coverage backfill progresses. Repair its archive access/original bytes and allow verification to succeed, or preserve it and explicitly quarantine the exact identity behind a verified canonical backup. Do not leave a growing PVC unattended; observe free space. An unreadable manifest must retry on normal scan triggers, without a completed job causing an immediate scan loop.
+
+### Safe remediation
+Preserve files until coverage is proved. Repair missing backup metadata only from the original dump's trustworthy metadata; never invent GTIDs or replace the lower bound with an after-dump sample. Upgrade the operator before sidecars to suppress old time-only retention during rollout. Resolve archive-read failures, then allow the next sweep to retry. Unsupported or incomplete files remain retained; do not delete backups, manifests, or local binlogs to force cleanup.
+
+## 29. Retention object deletion or acknowledgement keeps failing
+
+### Symptoms
+- Repeated `retention: delete object` warnings, or `retention: save delete acknowledgements` after a successful object delete.
+- An object's live `files` row is absent while a `pruned` retirement record has `deleted: false`. The object may still exist, or may already be absent after an acknowledgement failure.
+
+### Diagnostic steps
+1. Read sidecar logs and inspect the site manifest through the configured archive reader. Active `files` rows are used for restore; `pruned` rows are retired and excluded. Pending records retain their name, original archive ID/key, and header metadata. Legacy records also capture a verified `contentId` (keyed on encrypted stores) before deletion.
+2. Check delete permissions/backend errors for `retention: delete object`, and manifest write access for `retention: save delete acknowledgements`. The support bundle already captures sidecar logs. The existing `sidecar-probe.sh ... archiver` reports active archival status, not a pending-delete count.
+3. A pending record retries at the next retention sweep, including after process restart and before querying the operator. A successful retry writes `deleted: true`; deleting a missing object is idempotent. If a live `files` row still references the same key, the sweeper refuses physical deletion until a new proof retires that live reference.
+4. Inspect compatible sidecar versions before a downgrade. Older writers drop retirement records on manifest rewrite. A missing pending record from an older release cannot be recovered by this retry mechanism; preserve evidence before considering any separate orphan audit.
+
+### Safe remediation
+Restore archive delete/write access and let the sweeper retry. Do not clear retirement records, toggle `deleted`, purge local binlogs, or remove live manifest rows to force cleanup. Stored `key` and `RemotePath` fields are not deletion authority: the sidecar derives the target from validated identity fields under its configured prefix/site. An already retired object can be deleted without a fresh backup proof; that does not authorize new retirements while coverage is unknown.
+
+## 30. Retired local binlogs or growing retirement metadata
+
+### Symptoms
+- Older sidecars upload the same local bytes after a sweep retires them, wasting bandwidth and storage. Retirement-aware sidecars leave those bytes retired across restart and operator outages.
+- Acknowledged retirement records remain while local files are still indexed/present, or `retention: compact retirement records` reports a manifest save failure.
+
+### Diagnostic steps
+1. Compare the local file's content identity (SHA-256 for plaintext storage; passphrase-keyed HMAC-SHA256 for encrypted storage) with the site's retirement record: `id` for new archive keys, `contentId` for legacy keys. Both pending and acknowledged records suppress matching bytes. A different content ID under the same name is new data and must remain eligible for archival; header timestamps or previous GTIDs alone are insufficient.
+2. Inspect `/archiver/status` and the live `files` list. Retired records do not count toward backlog, active file count, bytes, or coverage timestamps. Zero backlog is expected for retired local bytes and still does not prove all historical coverage (playbook 27).
+3. Verify the site's sidecar is running and can access its archive. Retention is independent of primary/replica status, role-query success, or sealed-file availability. A removed site without a sidecar has no remaining owner to maintain its archive.
+4. Before expecting compaction, check `deleted: true`, a readable local binlog index without the name, and physical absence of the file. An unindexed file still on disk protects the record. Missing/unreadable indexes or filesystem errors defer compaction; pending deletes remain durable regardless of local-file state.
+5. For a compaction save warning, check manifest write access and sidecar logs. The old durable records remain and a later scan retries the update. Existing support-bundle logs and archiver probes capture the relevant status; they do not expose a retirement-record count.
+
+### Safe remediation
+Upgrade older sidecars that ignore retirement records, restore archive access or local-index readability, and let maintenance retry. Do not clear records or issue `PURGE BINARY LOGS` to make bookkeeping disappear: local files support replication catch-up. The operator defaults local expiry to 14 days; remote retention can be shorter. Preserve a separate archive-lifecycle plan before removing the last sidecar for a site.
