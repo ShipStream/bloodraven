@@ -368,10 +368,10 @@ type pvcStore struct {
 }
 
 // newPVCStore verifies that cfg.MountPath is a mounted volume and, for
-// writers, that the store can create objects under its write prefix
-// (cfg.WritePrefix, else defaultWritePrefix). Put creates the directory
-// tree below the verified root lazily. The checks run once here; they do
-// not detect a later unmount.
+// writers, that the store can create objects under cfg.WritePrefix and
+// defaultWritePrefix (the manifest prefix), or under the root when both
+// are empty. Put creates the directory tree below the verified root
+// lazily. The checks run once here; they do not detect a later unmount.
 func newPVCStore(cfg *PITRPVCConfig, defaultWritePrefix string) (*pvcStore, error) {
 	if cfg.MountPath == "" {
 		return nil, fmt.Errorf("pvc archive store: empty mount path")
@@ -384,12 +384,16 @@ func newPVCStore(cfg *PITRPVCConfig, defaultWritePrefix string) (*pvcStore, erro
 		return nil, err
 	}
 	if cfg.Writable {
-		prefix := cfg.WritePrefix
-		if prefix == "" {
-			prefix = defaultWritePrefix
+		prefixes := []string{cfg.WritePrefix}
+		if cfg.WritePrefix == "" {
+			prefixes[0] = defaultWritePrefix
+		} else if defaultWritePrefix != "" && defaultWritePrefix != cfg.WritePrefix {
+			prefixes = append(prefixes, defaultWritePrefix)
 		}
-		if err := probePVCWritable(cfg.MountPath, prefix); err != nil {
-			return nil, err
+		for _, prefix := range prefixes {
+			if err := probePVCWritable(cfg.MountPath, prefix); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return &pvcStore{root: cfg.MountPath}, nil

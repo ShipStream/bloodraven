@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math/rand/v2"
+	"path"
 	"sync"
 	"time"
 )
@@ -65,6 +66,16 @@ type ArchiverSupervisor struct {
 func NewArchiverSupervisor(cfg *PITRConfig, site string, mysql roleChecker, newStore ArchiveStoreFactory, logger *slog.Logger) *ArchiverSupervisor {
 	if newStore == nil {
 		newStore = NewArchiveStore
+	}
+	// The archiver writes binlog objects under <ManifestPrefix>/<site>,
+	// so a writable PVC store must prove it can write there too, not just
+	// next to the manifests.
+	if cfg != nil && cfg.PVC != nil && cfg.PVC.Writable && cfg.PVC.WritePrefix == "" && site != "" {
+		withSite := *cfg
+		pvc := *cfg.PVC
+		pvc.WritePrefix = path.Join(cfg.ManifestPrefix, site)
+		withSite.PVC = &pvc
+		cfg = &withSite
 	}
 	return &ArchiverSupervisor{
 		cfg:         cfg,

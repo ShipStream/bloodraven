@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -522,4 +524,50 @@ func TestArchiverSupervisorPVCNotMountedThenMounted(t *testing.T) {
 	if n := verifies.Load(); n != 2 {
 		t.Fatalf("mount verified %d times, want 2", n)
 	}
+}
+
+// The archiver writes binlogs under <ManifestPrefix>/<site>, so a site
+// directory the sidecar cannot write must fail store init even when the
+// manifest prefix above it is writable.
+func TestArchiverSupervisorProbesSiteDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	cfg := storeInitPITRConfig(t)
+	cfg.PVC.Writable = true
+	siteDir := filepath.Join(cfg.PVC.MountPath, cfg.ManifestPrefix, "iad")
+	if err := os.MkdirAll(siteDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(siteDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(siteDir, 0o755) })
+
+	backoff := newStoreInitBackoff()
+	archivers := newStoreInitArchivers()
+	sup := NewArchiverSupervisor(cfg, "iad", &stubRoleChecker{readOnly: true}, NewArchiveStore, testLogger())
+	sup.wait = backoff.wait
+	sup.runArchiver = archivers.run
+	if cfg.PVC.WritePrefix != "" {
+		t.Fatalf("supervisor mutated the caller's config: WritePrefix = %q", cfg.PVC.WritePrefix)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sup.Run(ctx)
+	}()
+	recvWithin(t, backoff.delays, "backoff wait")
+	st := sup.Snapshot(ctx)
+	want := "archive store init: pvc archive store: " + siteDir + " is not writable: permission denied"
+	if st.LastError != want {
+		t.Fatalf("lastError = %q, want %q", st.LastError, want)
+	}
+	if archivers.count.Load() != 0 {
+		t.Fatal("archiver started with an unwritable site directory")
+	}
+	cancel()
+	recvWithin(t, done, "supervisor exit")
 }

@@ -147,8 +147,9 @@ type PITRPVCConfig struct {
 	Writable bool
 
 	// WritePrefix is the storage-relative directory the caller writes
-	// under. The probe runs in its deepest existing directory. Empty
-	// means PITRConfig.ManifestPrefix.
+	// objects under. The probe runs in its deepest existing directory,
+	// and also in PITRConfig.ManifestPrefix's when that is set (manifests
+	// live there). The archiver sets it to <ManifestPrefix>/<site>.
 	WritePrefix string
 
 	// MountVerifier replaces the /proc/self/mountinfo mount check. For

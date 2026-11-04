@@ -23,7 +23,7 @@ const procSelfMountInfo = "/proc/self/mountinfo"
 func verifyPVCMountPoint(path string) error {
 	f, err := os.Open(procSelfMountInfo)
 	if err != nil {
-		return fmt.Errorf("cannot verify mount: %w", err)
+		return fmt.Errorf("pvc archive store: cannot verify mount: %w", err)
 	}
 	defer f.Close()
 	return checkMountPoint(path, f)
@@ -65,7 +65,7 @@ func checkMountPoint(path string, mountinfo io.Reader) error {
 	}
 	mounts, err := parseMountInfo(mountinfo)
 	if err != nil {
-		return fmt.Errorf("cannot verify mount: %w", err)
+		return fmt.Errorf("pvc archive store: cannot verify mount: %w", err)
 	}
 	var parent *mountInfoEntry
 	for i := range mounts {
@@ -226,19 +226,32 @@ func probePVCWritable(root, prefix string) error {
 	if !pathWithin(resolvedRoot, resolvedDir) {
 		return fmt.Errorf("pvc archive store: %s resolves to %s, outside the archive volume %s", dir, resolvedDir, resolvedRoot)
 	}
+	// Errors carry the directory, never the random probe name, so a
+	// persistent failure reads the same on every retry (the supervisor's
+	// log level and the operator's condition message key on the text).
 	f, err := os.CreateTemp(resolvedDir, ".bloodraven-write-probe-*.part")
 	if err != nil {
-		return fmt.Errorf("pvc archive store: %s is not writable: %w", dir, err)
+		return fmt.Errorf("pvc archive store: %s is not writable: %w", dir, withoutPath(err))
 	}
 	name := f.Name()
 	_, writeErr := f.Write([]byte{0})
 	closeErr := f.Close()
 	removeErr := os.Remove(name)
-	if err := errors.Join(writeErr, closeErr); err != nil {
+	if err := errors.Join(withoutPath(writeErr), withoutPath(closeErr)); err != nil {
 		return fmt.Errorf("pvc archive store: %s is not writable: %w", dir, err)
 	}
 	if removeErr != nil {
-		return fmt.Errorf("pvc archive store: remove write probe %s: %w", name, removeErr)
+		return fmt.Errorf("pvc archive store: remove write probe in %s: %w", dir, withoutPath(removeErr))
 	}
 	return nil
+}
+
+// withoutPath strips the *fs.PathError wrapper, whose path is the random
+// probe file name.
+func withoutPath(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }

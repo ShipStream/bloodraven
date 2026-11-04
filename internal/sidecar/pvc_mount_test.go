@@ -76,9 +76,9 @@ func TestCheckMountPoint(t *testing.T) {
 		{name: "relative path", path: "archive", mountinfo: root, wantErr: []string{"not absolute"}},
 		{name: "missing path", path: filepath.Join(base, "absent"), mountinfo: root, wantErr: []string{"does not exist"}},
 		{name: "regular file", path: file, mountinfo: root, wantErr: []string{"is not a directory"}},
-		{name: "malformed line", path: mount, mountinfo: "36 25 0:32 / " + mount + " rw", wantErr: []string{"malformed mountinfo line"}},
-		{name: "missing separator", path: mount, mountinfo: "36 25 0:32 / " + mount + " rw shared:1 ext4 /dev/sda1 rw", wantErr: []string{"malformed mountinfo line"}},
-		{name: "empty mountinfo", path: mount, mountinfo: "", wantErr: []string{"mountinfo lists no mounts"}},
+		{name: "malformed line", path: mount, mountinfo: "36 25 0:32 / " + mount + " rw", wantErr: []string{"pvc archive store: cannot verify mount: malformed mountinfo line"}},
+		{name: "missing separator", path: mount, mountinfo: "36 25 0:32 / " + mount + " rw shared:1 ext4 /dev/sda1 rw", wantErr: []string{"pvc archive store: cannot verify mount: malformed mountinfo line"}},
+		{name: "empty mountinfo", path: mount, mountinfo: "", wantErr: []string{"pvc archive store: cannot verify mount: mountinfo lists no mounts"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -182,9 +182,6 @@ func TestNewArchiveStoreRealVerifier(t *testing.T) {
 }
 
 func TestPVCWriteProbe(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
 	acceptAll := func(string) error { return nil }
 	type setup func(t *testing.T, root string) (prefix string)
 	mkdir := func(t *testing.T, path string, mode os.FileMode) {
@@ -209,11 +206,14 @@ func TestPVCWriteProbe(t *testing.T) {
 		manifest string
 		setup    setup
 		wantErr  string
+		// nonRoot marks rows that rely on directory permissions, which
+		// root ignores; the structural rows run as root too.
+		nonRoot bool
 	}{
 		{name: "writable root", writable: true, setup: func(*testing.T, string) string { return "" }},
 		{name: "missing prefix probes the root", writable: true, setup: func(*testing.T, string) string { return "orders/binlogs" }},
 		{
-			name: "default prefix is the manifest prefix", writable: true, manifest: "orders/binlogs",
+			name: "default prefix is the manifest prefix", nonRoot: true, writable: true, manifest: "orders/binlogs",
 			setup: func(t *testing.T, root string) string {
 				mkdir(t, filepath.Join(root, "orders"), 0o755)
 				mkdir(t, root, 0o555)
@@ -221,11 +221,11 @@ func TestPVCWriteProbe(t *testing.T) {
 			},
 		},
 		{
-			name: "read-only root", writable: true, wantErr: "is not writable",
+			name: "read-only root", nonRoot: true, writable: true, wantErr: "is not writable",
 			setup: func(t *testing.T, root string) string { mkdir(t, root, 0o555); return "orders" },
 		},
 		{
-			name: "read-only root with writable prefix directory", writable: true,
+			name: "read-only root with writable prefix directory", nonRoot: true, writable: true,
 			setup: func(t *testing.T, root string) string {
 				mkdir(t, filepath.Join(root, "orders"), 0o755)
 				mkdir(t, root, 0o555)
@@ -233,8 +233,25 @@ func TestPVCWriteProbe(t *testing.T) {
 			},
 		},
 		{
-			name: "reader skips the probe", writable: false,
+			name: "reader skips the probe", nonRoot: true, writable: false,
 			setup: func(t *testing.T, root string) string { mkdir(t, root, 0o555); return "orders" },
+		},
+		{
+			name: "unwritable site directory under a writable manifest prefix", nonRoot: true, writable: true,
+			manifest: "orders/binlogs", wantErr: "is not writable",
+			setup: func(t *testing.T, root string) string {
+				mkdir(t, filepath.Join(root, "orders", "binlogs", "iad"), 0o555)
+				return "orders/binlogs/iad"
+			},
+		},
+		{
+			name: "unwritable manifest prefix with a writable site directory", nonRoot: true, writable: true,
+			manifest: "orders/binlogs", wantErr: "is not writable",
+			setup: func(t *testing.T, root string) string {
+				mkdir(t, filepath.Join(root, "orders", "binlogs", "iad"), 0o755)
+				mkdir(t, filepath.Join(root, "orders", "binlogs"), 0o555)
+				return "orders/binlogs/iad"
+			},
 		},
 		{name: "prefix escapes the root", writable: true, wantErr: "escapes", setup: func(*testing.T, string) string { return "../x" }},
 		{
@@ -278,6 +295,9 @@ func TestPVCWriteProbe(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.nonRoot && os.Geteuid() == 0 {
+				t.Skip("root ignores directory permissions")
+			}
 			root := t.TempDir()
 			prefix := tt.setup(t, root)
 			store, err := newPVCStore(&PITRPVCConfig{
@@ -310,6 +330,36 @@ func TestPVCWriteProbe(t *testing.T) {
 				t.Fatalf("write probe left behind: %v", leftover)
 			}
 		})
+	}
+}
+
+// A persistent write failure must read the same on every retry: the
+// supervisor logs ERROR only when the text changes, and the operator's
+// condition message would churn on a random probe file name.
+func TestPVCWriteProbeErrorIsStable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+	cfg := &PITRPVCConfig{MountPath: root, Writable: true, MountVerifier: func(string) error { return nil }}
+	_, first := newPVCStore(cfg, "")
+	_, second := newPVCStore(cfg, "")
+	if first == nil || second == nil {
+		t.Fatalf("newPVCStore = %v, %v; want both to fail", first, second)
+	}
+	if first.Error() != second.Error() {
+		t.Fatalf("retry errors differ:\n%s\n%s", first, second)
+	}
+	if strings.Contains(first.Error(), "write-probe") {
+		t.Fatalf("error %q names the random probe file", first)
+	}
+	want := "pvc archive store: " + root + " is not writable: permission denied"
+	if first.Error() != want {
+		t.Fatalf("error = %q, want %q", first, want)
 	}
 }
 
