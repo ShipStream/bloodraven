@@ -182,6 +182,7 @@ type TopologySnapshot struct {
 	Alert              string // non-empty if a cross-site alert fired this cycle
 	DegradedReason     string // one of "Healthy", "Degraded", "SplitBrain", "NoPrimary", "TotalLoss", "Initializing", or ""
 	UpdatePhase        string // non-empty if an ordered update is in progress
+	UpdateStalled      string // why the ordered update is stopped on a pod that is not Ready (PodNotReadyError), or ""
 	BootstrapPhase     string // non-empty if a fresh-deploy bootstrap is in progress or finished
 	BootstrapError     string // non-empty if bootstrap failed
 	BootstrapSource    string // "fresh-deploy", "auto-clone", or "reclone"
@@ -491,6 +492,26 @@ type TopologyManager struct {
 	// site's Deployment to match the desired spec. The topology manager calls
 	// this from the UpdateController when a rolling update is in progress.
 	ApplyUpdate func(ctx context.Context, siteName string) error
+
+	// PodReady is a callback provided by the runner, wired together with
+	// ApplyUpdate, that reports whether a site's pod for its current pod
+	// template is Ready, and has been for podStableFor (see PodReadiness).
+	// The ordered update gates every roll and handoff on it (see
+	// UpdateTarget.PodReady). Nil turns that gate off; only tests leave it
+	// nil.
+	PodReady func(ctx context.Context, siteName string) (PodReadiness, error)
+
+	// updateStall is why the ordered update last stopped on a pod that is
+	// not Ready, empty when it is not stalled, and updateStallSite the site
+	// it stopped on. updateStallRetryAt is when checkUpdate may try again.
+	// updateStallGen moves on every record or clear, so a background
+	// recheck only clears the stall it checked; updateStallChecking marks
+	// one in flight. Protected by mu.
+	updateStall         string
+	updateStallSite     string
+	updateStallRetryAt  time.Time
+	updateStallGen      uint64
+	updateStallChecking bool
 
 	// Bootstrap orchestration. When bootstrap is nil or bootstrapCfg.ReplUser is
 	// empty, auto-bootstrap is disabled. bootstrapPhase/bootstrapErr are protected by mu.
@@ -1594,6 +1615,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 				if tm.updater != nil {
 					snapshot.UpdatePhase = string(tm.updater.Phase())
 				}
+				snapshot.UpdateStalled = tm.updateStall
 				snapshot.BootstrapPhase = string(tm.bootstrapPhase)
 				snapshot.BootstrapSource = tm.bootstrapSource
 				// A note acknowledged since the snapshot was built must not
@@ -1958,6 +1980,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 		Alert:                   alert,
 		DegradedReason:          degradedReason,
 		UpdatePhase:             updatePhase,
+		UpdateStalled:           tm.updateStall,
 		BootstrapPhase:          string(tm.bootstrapPhase),
 		BootstrapSource:         tm.bootstrapSource,
 		PromotionGtidExecuted:   tm.promotionGtidExecuted,
@@ -3224,6 +3247,14 @@ func (tm *TopologyManager) crossSiteRetryReady() bool {
 // one at a time, and the active site is updated last (after a planned
 // handoff — currently still pending in the non-active rollout set).
 func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
+	if tm.startUpdate(ctx) {
+		return true
+	}
+	tm.recheckUpdateStall(ctx)
+	return false
+}
+
+func (tm *TopologyManager) startUpdate(ctx context.Context) bool {
 	if tm.updater == nil || tm.ApplyUpdate == nil {
 		return false
 	}
@@ -3235,11 +3266,15 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 	activeName := tm.activeSiteLocked()
 	updateAuthorityEpoch := tm.authorityEpoch
 	driftSites := append([]string(nil), tm.specDriftSites...)
+	stallRetryAt := tm.updateStallRetryAt
 	tm.mu.RUnlock()
 	if activeName == "" {
 		return false
 	}
 	if len(driftSites) == 0 {
+		return false
+	}
+	if tm.clock.Now().Before(stallRetryAt) {
 		return false
 	}
 	drifted := make(map[string]bool, len(driftSites))
@@ -3250,6 +3285,7 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 	active := UpdateTarget{
 		Name: activeName, Host: activeSite.host, Checker: activeSite.mysql, Promotable: true, Drifted: drifted[activeName],
 		ReplUser: tm.bootstrapCfg.ReplUser, ReplPassword: tm.bootstrapCfg.ReplPassword, UseSSL: tm.bootstrapCfg.UseSSL,
+		PodReady: tm.podReadyProbe(activeName),
 	}
 	followers := make([]UpdateTarget, 0, len(tm.sites)-1)
 	for i := range tm.sites {
@@ -3271,6 +3307,7 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 			RotationBlocked: rotationBlocked, ReclonePending: reclonePending,
 			DivergenceBlocked:     divergence.state == recoveryStateBlocked,
 			DivergentTransactions: divergence.divergentCount, DivergentGtid: divergence.divergentGtid,
+			PodReady: tm.podReadyProbe(site.name),
 		})
 	}
 	if drifted[activeName] {
@@ -3348,6 +3385,17 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 			tm.deploymentUpdatePending = false
 			tm.mu.Unlock()
 		}()
+		// A site already on the new template whose pod is not Ready stops
+		// the update before anything is rolled. Checked here, off the poll
+		// loop (it reads the API server) and before lease admission, so a
+		// stall that persists costs one probe per retry and nothing else.
+		if err := tm.updater.requireUpdatedPodsReady(ctx, active, followers); err != nil {
+			var stall *PodNotReadyError
+			if errors.As(err, &stall) && tm.recordUpdateStall(stall, err) {
+				tm.emitStatusSnapshot()
+			}
+			return
+		}
 		// Lease admission may wait for the API server, but the emergency poll
 		// loop must remain free to observe a primary failure in the meantime.
 		endDeploymentUpdate, allowed := tm.beginDeploymentUpdate(ctx)
@@ -3393,11 +3441,24 @@ func (tm *TopologyManager) checkUpdate(ctx context.Context) bool {
 				tm.wakeGTIDAudit(divergent.Candidate)
 			}
 		}
-		tm.mu.Lock()
-		completed := make(map[string]bool, len(processed))
+		completed := make(map[string]bool, len(processed)+1)
 		for _, name := range processed {
 			completed[name] = true
 		}
+		var stall *PodNotReadyError
+		if errors.As(err, &stall) {
+			tm.recordUpdateStall(stall, err)
+			if stall.Rolled {
+				// Its Deployment carries the new template, as the runner's
+				// next drift check will also find. Left queued, the next
+				// attempt would roll it again and sit out the rollout
+				// wait instead of stopping on its pod at once.
+				completed[stall.Site] = true
+			}
+		} else {
+			tm.clearUpdateStall()
+		}
+		tm.mu.Lock()
 		remaining := tm.specDriftSites[:0]
 		for _, name := range tm.specDriftSites {
 			if !completed[name] {
@@ -3422,6 +3483,106 @@ func followerTarget(followers []UpdateTarget, name string) *UpdateTarget {
 		}
 	}
 	return nil
+}
+
+// orderedUpdateStallRetry is how long checkUpdate waits after the ordered
+// update stopped on a pod that is not Ready before it tries again.
+const orderedUpdateStallRetry = 30 * time.Second
+
+// podReadyProbe returns the UpdateTarget.PodReady probe for site, or nil
+// when the runner wired none.
+func (tm *TopologyManager) podReadyProbe(site string) func(context.Context) (PodReadiness, error) {
+	probe := tm.PodReady
+	if probe == nil {
+		return nil
+	}
+	return func(ctx context.Context) (PodReadiness, error) { return probe(ctx, site) }
+}
+
+// recordUpdateStall records that the ordered update stopped on a pod that
+// is not Ready and holds off the next attempt for orderedUpdateStallRetry.
+// It reports whether the stall's text changed.
+func (tm *TopologyManager) recordUpdateStall(stall *PodNotReadyError, err error) bool {
+	msg := stall.Error()
+	tm.mu.Lock()
+	changed := tm.updateStall != msg
+	tm.updateStall, tm.updateStallSite = msg, stall.Site
+	tm.updateStallRetryAt = tm.clock.Now().Add(orderedUpdateStallRetry)
+	tm.updateStallGen++
+	tm.mu.Unlock()
+	tm.logger.Warn("ordered update: stalled; site pod not Ready",
+		"site", stall.Site, "pod", stall.Pod, "reason", stall.Reason, "error", err)
+	return changed
+}
+
+// clearUpdateStall drops a recorded pod stall and reports whether there
+// was one.
+func (tm *TopologyManager) clearUpdateStall() bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.clearUpdateStallLocked()
+}
+
+func (tm *TopologyManager) clearUpdateStallLocked() bool {
+	had := tm.updateStall != ""
+	tm.updateStall, tm.updateStallSite = "", ""
+	tm.updateStallRetryAt = time.Time{}
+	tm.updateStallGen++
+	return had
+}
+
+// recheckUpdateStall clears a recorded stall once the site it names has a
+// Ready pod again, when no update attempt will do so: the stalled site may
+// have been the last one to roll (nothing drifts any more), or another
+// precondition keeps checkUpdate from starting. Without it the Updating
+// condition would keep reporting a stall that has resolved itself, for
+// example after a Secret the sidecar needed was fixed. Ready is the probe's
+// verdict, Ready continuously for podStableFor, so a crash-looping pod
+// caught between crashes does not clear the stall. A probe that is not
+// Ready leaves the recorded stall text alone. It probes off the poll loop,
+// at most once per orderedUpdateStallRetry.
+func (tm *TopologyManager) recheckUpdateStall(ctx context.Context) {
+	tm.mu.Lock()
+	site, gen := tm.updateStallSite, tm.updateStallGen
+	due := tm.updateStall != "" && !tm.updateStallChecking && !tm.deploymentUpdatePending &&
+		!tm.clock.Now().Before(tm.updateStallRetryAt)
+	if due {
+		tm.updateStallChecking = true
+	}
+	probe := tm.PodReady
+	tm.mu.Unlock()
+	if !due || tm.isUpdating() {
+		if due {
+			tm.mu.Lock()
+			tm.updateStallChecking = false
+			tm.mu.Unlock()
+		}
+		return
+	}
+	go func() {
+		ready := probe == nil
+		if probe != nil {
+			probeCtx, cancel := context.WithTimeout(ctx, podReadinessProbeTimeout)
+			pr, err := probe(probeCtx, site)
+			cancel()
+			ready = err == nil && pr.Ready
+		}
+		tm.mu.Lock()
+		tm.updateStallChecking = false
+		cleared := false
+		if tm.updateStallGen == gen {
+			if ready {
+				cleared = tm.clearUpdateStallLocked()
+			} else {
+				tm.updateStallRetryAt = tm.clock.Now().Add(orderedUpdateStallRetry)
+			}
+		}
+		tm.mu.Unlock()
+		if cleared {
+			tm.logger.Info("ordered update: stalled site pod is Ready", "site", site)
+			tm.emitStatusSnapshot()
+		}
+	}()
 }
 
 // warnDivergentUpdateStall reports, at most once per recoveryRetryDelay,

@@ -101,6 +101,13 @@ RESTORE_FENCE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$N
 if [[ -n "$RESTORE_FENCE" && "$RESTORE_FENCE" != " priorOfflineMode= sessionsEvicted=" ]]; then
     echo "Restore offline_mode fence: $RESTORE_FENCE (applications without CONNECTION_ADMIN cannot connect to that site)"
 fi
+UPDATING=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="Updating")]}{.status}{" "}{.reason}{": "}{.message}{end}' 2>/dev/null || true)
+if [[ -n "$UPDATING" ]]; then
+    echo "Updating:            $UPDATING"
+    if [[ "$UPDATING" == *OrderedUpdateStalled* ]]; then
+        echo "  The ordered update stopped on a site whose pod is not Ready and rolls nothing else until it is: see playbook 34."
+    fi
+fi
 
 echo ""
 echo "--- 2. Sites & Replication Summary ---"

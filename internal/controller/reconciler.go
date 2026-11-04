@@ -2502,7 +2502,10 @@ func (r *MysqlFailoverGroupReconciler) ReconcileSiteDeployment(ctx context.Conte
 		return fmt.Errorf("site %q not found in CR %s", siteName, fgName)
 	}
 	deployName := types.NamespacedName{Namespace: fgName.Namespace, Name: resourceName(fgName.Name, siteName)}
-	return r.waitForDeploymentRollout(ctx, deployName, 5*time.Minute)
+	if err := r.waitForDeploymentRollout(ctx, deployName, 5*time.Minute); err != nil {
+		return &RolloutIncompleteError{Site: siteName, Err: err}
+	}
+	return nil
 }
 
 // waitForDeploymentRollout polls a Deployment until its rollout is complete or

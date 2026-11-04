@@ -238,6 +238,33 @@ func TestPrintGroupStatus(t *testing.T) {
 	}
 }
 
+func TestPrintGroupStatus_ShowsOrderedUpdateStall(t *testing.T) {
+	msg := "Ordered update stalled: site pdx was updated but its pod mysql-orders-pdx-1 is not Ready (sidecar not ready: crash looping, last exit code 1 (Error))"
+	fg := &v1alpha1.MysqlFailoverGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
+		Spec:       v1alpha1.MysqlFailoverGroupSpec{Sites: []v1alpha1.SiteSpec{{Name: "iad"}, {Name: "pdx"}}},
+		Status: v1alpha1.MysqlFailoverGroupStatus{Conditions: []metav1.Condition{{
+			Type: "Updating", Status: metav1.ConditionFalse, Reason: "OrderedUpdateStalled", Message: msg,
+		}}},
+	}
+	var buf bytes.Buffer
+	if err := printGroupStatus(&buf, fg, "table"); err != nil {
+		t.Fatalf("printGroupStatus: %v", err)
+	}
+	if !strings.Contains(buf.String(), "  Update stalled: "+msg+"\n") {
+		t.Errorf("stalled update not shown:\n%s", buf.String())
+	}
+
+	fg.Status.Conditions[0].Reason, fg.Status.Conditions[0].Message = "NotUpdating", "No update in progress"
+	buf.Reset()
+	if err := printGroupStatus(&buf, fg, "table"); err != nil {
+		t.Fatalf("printGroupStatus: %v", err)
+	}
+	if strings.Contains(buf.String(), "Update stalled") {
+		t.Errorf("idle update shown as stalled:\n%s", buf.String())
+	}
+}
+
 // TestPrintGroupStatus_EmptyActiveRendersDash verifies the "-"
 // fallback so a freshly-deployed group with no active site doesn't
 // produce a confusing blank row mid-table.

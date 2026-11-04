@@ -79,9 +79,12 @@ type managedTopology struct {
 }
 
 // DeploymentReconciler is the subset of the reconciler that the runner needs
-// for ordered updates — specifically, reconciling a single site's Deployment.
+// for ordered updates: reconciling a single site's Deployment, and reporting
+// whether that site's pod is Ready. They come as a pair so an ordered update
+// can never roll sites without its pod-readiness gate.
 type DeploymentReconciler interface {
 	ReconcileSiteDeployment(ctx context.Context, fgName types.NamespacedName, siteName string) error
+	SitePodReadiness(ctx context.Context, fgName types.NamespacedName, siteName string) (PodReadiness, error)
 }
 
 // TopologyManagerRunner manages TopologyManager instances for all MysqlFailoverGroup resources.
@@ -903,11 +906,14 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 		return r.removeRecloneAnnotationForSite(completeCtx, nn, site)
 	}
 
-	// Wire the ordered update callback so the UpdateController can reconcile
-	// one site's Deployment at a time.
+	// Wire the ordered update callbacks so the UpdateController can reconcile
+	// one site's Deployment at a time and wait for its pod to be Ready.
 	if r.deployReconciler != nil {
 		tm.ApplyUpdate = func(applyCtx context.Context, siteName string) error {
 			return r.deployReconciler.ReconcileSiteDeployment(applyCtx, nn, siteName)
+		}
+		tm.PodReady = func(probeCtx context.Context, siteName string) (PodReadiness, error) {
+			return r.deployReconciler.SitePodReadiness(probeCtx, nn, siteName)
 		}
 	}
 
@@ -1504,6 +1510,15 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 			Reason:             snap.UpdatePhase,
 			Message:            fmt.Sprintf("Ordered update in progress: %s", snap.UpdatePhase),
 		})
+	} else if snap.UpdateStalled != "" {
+		setCondition(&freshFG.Status.Conditions, metav1.Condition{
+			Type:               "Updating",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: freshFG.Generation,
+			LastTransitionTime: now,
+			Reason:             ReasonOrderedUpdateStalled,
+			Message:            orderedUpdateStalledMessage(snap.UpdateStalled),
+		})
 	} else {
 		setCondition(&freshFG.Status.Conditions, metav1.Condition{
 			Type:               "Updating",
@@ -1684,6 +1699,7 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		r.recorder.Eventf(&freshFG, corev1.EventTypeWarning, "DivergentSitePromoted", "%s", divergentPromotionMessage(*snap.DivergentPromotion))
 	}
 	r.emitFailoverEvents(&freshFG, existingStatus, snap)
+	r.emitOrderedUpdateStallEvent(&freshFG, existingStatus)
 	r.emitPITRArchiveEvents(&freshFG, pitrArchivePrev)
 	r.emitKeyringPromotionEvents(&freshFG, snap)
 	r.emitDegradedTransitionEvents(&freshFG, nn, snap)
@@ -1917,6 +1933,37 @@ func (r *TopologyManagerRunner) emitFailoverEvents(fg *v1alpha1.MysqlFailoverGro
 			}
 		}
 	}
+}
+
+// ReasonOrderedUpdateStalled is the Updating condition reason, and the
+// Warning Event reason, for an ordered update stopped on a site whose pod
+// is not Ready.
+const ReasonOrderedUpdateStalled = "OrderedUpdateStalled"
+
+func orderedUpdateStalledMessage(stall string) string {
+	return fmt.Sprintf("Ordered update stalled: %s. No other site is rolled and the active site is not handed off until that pod has been Ready for %s; the update retries every %s",
+		stall, podStableFor, orderedUpdateStallRetry)
+}
+
+// emitOrderedUpdateStallEvent fires a Warning Event when the Updating
+// condition just written reports a stall that the previous status did not:
+// a new stall, or one with a different cause. A retry that finds the same
+// cause writes nothing and fires nothing. The pod-readiness reasons are
+// worded to stay the same while the cause does (a crash loop reads the same
+// in every phase of the loop), which is what keeps this to one Event per
+// stall.
+func (r *TopologyManagerRunner) emitOrderedUpdateStallEvent(fg *v1alpha1.MysqlFailoverGroup, existingStatus *v1alpha1.MysqlFailoverGroupStatus) {
+	if r.recorder == nil {
+		return
+	}
+	cur := apimeta.FindStatusCondition(fg.Status.Conditions, "Updating")
+	if cur == nil || cur.Reason != ReasonOrderedUpdateStalled {
+		return
+	}
+	if prev := apimeta.FindStatusCondition(existingStatus.Conditions, "Updating"); prev != nil && prev.Reason == cur.Reason && prev.Message == cur.Message {
+		return
+	}
+	r.recorder.Eventf(fg, corev1.EventTypeWarning, ReasonOrderedUpdateStalled, "%s", cur.Message)
 }
 
 // emitKeyringPromotionEvents fires Warning Events when the promotion
