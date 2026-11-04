@@ -91,7 +91,13 @@ if [[ -n "$RESTORE_STATUS" ]]; then
 fi
 RESTORE_RECLONES=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreReclones.phase}{" pending=["}{.status.restoreReclones.pending[*]}{"] requested="}{.status.restoreReclones.requested}{" failures="}{.status.restoreReclones.failures[*].message}' 2>/dev/null || true)
 if [[ "$RESTORE_RECLONES" != " pending=[] requested= failures=" && -n "$RESTORE_RECLONES" ]]; then
-    echo "Post-restore reclones: $RESTORE_RECLONES (pending sites are not promoted automatically and are out of the -replica and read-only Services; Held = nothing is cloned)"
+    echo "Post-restore reclones: $RESTORE_RECLONES (pending sites are not promoted automatically and are out of the -replica and read-only Services; their replication receiver is stopped until their reclone; Held = nothing is cloned or replicated into them after a failed restore)"
+    # Replication state of the queued sites as the operator last saw it. A
+    # stopped IO thread (sourceConvergenceReason RestorePeerHold) is by design.
+    for site in $(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{.status.restoreReclones.pending[*]}' 2>/dev/null || true); do
+        SITE_REPL=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath="{range .status.sites[?(@.name==\"$site\")]}replicating={.replicating} source={.sourceConvergenceState}/{.sourceConvergenceReason}{end}" 2>/dev/null || true)
+        echo "  queued $site: ${SITE_REPL:-not observed} (do not START REPLICA on a queued site)"
+    done
 fi
 PITR_ARCHIVE=$(kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jsonpath='{range .status.conditions[?(@.type=="PITRArchiveReady")]}{.status}{" "}{.reason}{": "}{.message}{end}' 2>/dev/null || true)
 if [[ -n "$PITR_ARCHIVE" ]]; then

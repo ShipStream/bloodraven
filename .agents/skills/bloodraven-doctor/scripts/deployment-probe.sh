@@ -18,8 +18,12 @@ kubectl get mysqlfailovergroups.shipstream.io "$MFG_NAME" -n "$NAMESPACE" -o jso
     activeSite: .status.activeSite, topologyGeneration: .status.topologyGeneration,
     plannedFailover: .status.plannedFailover, updatePhase: .status.updatePhase,
     restoreInPlace: .status.restoreInPlace, dragonflyUpgrade: .status.dragonfly.upgrade,
+    restoreReclones: (.status.restoreReclones // null | if . == null then null else {phase, pending} end),
+    degraded: ([.status.conditions[]? | select(.type == "Degraded") | {status, reason}] | first),
     revokeRequested: (.metadata.annotations | has("bloodraven.shipstream.io/revoke-deployment-leases"))
 }'
+
+echo "Degraded reason RestoreReclonePending (restoreReclones.pending non-empty) keeps the deployment API unstable until the post-restore reclones finish or a Held queue is resolved (playbook 20)."
 
 echo "--- Declared deployment callers ---"
 kubectl get mysqldatabases.shipstream.io -n "$NAMESPACE" -o json | jq --arg group "$MFG_NAME" '
