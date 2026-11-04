@@ -283,3 +283,57 @@ func TestArtifactCleanup_VerdictAndExitCode(t *testing.T) {
 		})
 	}
 }
+
+// cleanupPagedStore lists in pages of three keys, like a paginated
+// ListObjectsV2, and records how many pages it served.
+type cleanupPagedStore struct {
+	*cleanupMemoryStore
+	pages int
+}
+
+func (s *cleanupPagedStore) ListPages(ctx context.Context, prefix string, fn func([]string) error) error {
+	keys, err := s.List(ctx, prefix)
+	if err != nil {
+		return err
+	}
+	for i := 0; i < len(keys); i += 3 {
+		s.pages++
+		if err := fn(keys[i:min(i+3, len(keys))]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestCleanupS3_DeletesPageByPage(t *testing.T) {
+	keys := map[string]bool{"p/backup-10/x": true}
+	for i := range 10 {
+		keys["p/backup-1/"+string(rune('a'+i))] = true
+	}
+	store := &cleanupPagedStore{cleanupMemoryStore: &cleanupMemoryStore{keys: keys}}
+	n, err := cleanupS3(context.Background(), store, "p/backup-1/")
+	if err != nil || n != 10 {
+		t.Fatalf("deleted %d, err %v", n, err)
+	}
+	if store.pages != 4 {
+		t.Fatalf("served %d pages, want 4 (page-by-page)", store.pages)
+	}
+	if !store.keys["p/backup-10/x"] || len(store.keys) != 1 {
+		t.Fatalf("remaining keys %v", store.keys)
+	}
+
+	foreign := &cleanupPagedStore{cleanupMemoryStore: &cleanupMemoryStore{keys: map[string]bool{"p/backup-1/a": true}, extra: "q/other"}}
+	if _, err := cleanupS3(context.Background(), foreign, "p/backup-1/"); err == nil || err.code != backupmeta.CleanupExitRejected {
+		t.Fatalf("a foreign key in a page was not refused: %v", err)
+	}
+}
+
+func TestCleanupExitCodesAvoidRuntimeCodes(t *testing.T) {
+	// os.Exit(1) paths and unrecovered panics (exit 2) must never read as a
+	// refusal or a classified transient failure.
+	for _, code := range []int{backupmeta.CleanupExitRejected, backupmeta.CleanupExitTransient} {
+		if code == 1 || code == 2 {
+			t.Fatalf("cleanup exit code %d collides with the Go runtime", code)
+		}
+	}
+}

@@ -28,6 +28,8 @@ const (
 	cleanupReasonOperatorImageUnset    = "OperatorImageUnset"
 	cleanupReasonJobConflict           = "CleanupJobConflict"
 	cleanupReasonHeldByVerification    = "HeldByVerification"
+	cleanupReasonPending               = "CleanupPending"
+	cleanupReasonForegroundDeletion    = "ForegroundDeletion"
 )
 
 const (
@@ -291,7 +293,11 @@ func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, 
 		}
 		return entry.value, nil
 	}
-	storage := &v1alpha1.BackupArtifactStorage{}
+	_, location, err := backupJobDestination(job)
+	if err != nil {
+		return nil, fmt.Errorf("artifact location: %w", err)
+	}
+	storage := &v1alpha1.BackupArtifactStorage{Location: location}
 	switch v1alpha1.BackupStorageType(env["BLOODRAVEN_STORAGE_TYPE"].value) {
 	case v1alpha1.BackupStorageS3:
 		var err error
@@ -322,11 +328,18 @@ func artifactStorageFromJob(job *batchv1.Job) (*v1alpha1.BackupArtifactStorage, 
 	return storage, nil
 }
 
-// artifactIdentityProblem returns a non-empty reason when status.location
-// cannot be proven to name this backup's own artifact in the recorded
-// destination. producer is the backup's own Job, or nil when it is gone.
+// artifactIdentityProblem returns a non-empty reason when status.location is
+// not exactly the location the producing Job wrote, as recorded in
+// status.artifactStorage. Name, bucket and mount checks are kept as a second
+// line of defence. producer is the backup's own Job, or nil when it is gone.
 func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, storage *v1alpha1.BackupArtifactStorage, producer *batchv1.Job) string {
 	location := backup.Status.Location
+	if storage.Location == "" {
+		return "no recorded artifact location"
+	}
+	if location != storage.Location {
+		return fmt.Sprintf("location %q differs from the recorded artifact location %q", location, storage.Location)
+	}
 	if name := backupmeta.CleanupArtifactName(location); name != backup.Name {
 		return fmt.Sprintf("location %q does not end in the backup name %q", location, backup.Name)
 	}
@@ -346,6 +359,25 @@ func artifactIdentityProblem(backup *v1alpha1.MysqlBackup, storage *v1alpha1.Bac
 		if _, expected, err := backupJobDestination(producer); err == nil && expected != location {
 			return fmt.Sprintf("location %q differs from the producing Job's destination %q", location, expected)
 		}
+	}
+	return ""
+}
+
+// cleanupPodWaiting returns why the cleanup container has not started, for
+// reasons that need attention (image pull, configuration), or "".
+func cleanupPodWaiting(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		w := status.State.Waiting
+		if w == nil || w.Reason == "" || w.Reason == "ContainerCreating" || w.Reason == "PodInitializing" {
+			continue
+		}
+		if w.Message != "" {
+			return fmt.Sprintf("container %s is waiting: %s: %s", status.Name, w.Reason, w.Message)
+		}
+		return fmt.Sprintf("container %s is waiting: %s", status.Name, w.Reason)
 	}
 	return ""
 }

@@ -846,7 +846,7 @@ func TestFinalize_CreatesCleanupJobAndWaits(t *testing.T) {
 	b := backupCR("done", "lion", "nightly-s3")
 	b.Status.Location = "lion/done/"
 	b.Status.StorageType = v1alpha1.BackupStorageS3
-	b.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{Bucket: "bloodraven-backups"}
+	b.Status.ArtifactStorage = &v1alpha1.BackupArtifactStorage{Location: "lion/done/", Bucket: "bloodraven-backups"}
 	// No MySQL credentials Secret: cleanup only talks to storage.
 	r, c := newBackupReconciler(t, fg, b)
 

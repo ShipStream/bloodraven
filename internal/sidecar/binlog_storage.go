@@ -154,6 +154,11 @@ func validateS3EndpointURL(endpoint string) error {
 	return nil
 }
 
+// defaultS3CompatibleRegion signs requests to an S3-compatible endpoint
+// when no region is configured anywhere. The SDK refuses to sign without a
+// region; MinIO, RustFS, Ceph and similar accept us-east-1.
+const defaultS3CompatibleRegion = "us-east-1"
+
 func newS3Store(ctx context.Context, cfg *PITRS3Config) (*s3Store, error) {
 	if cfg.EndpointURL != "" {
 		if err := validateS3EndpointURL(cfg.EndpointURL); err != nil {
@@ -209,6 +214,9 @@ func newS3Store(ctx context.Context, cfg *PITRS3Config) (*s3Store, error) {
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
+	}
+	if awsCfg.Region == "" && cfg.EndpointURL != "" {
+		awsCfg.Region = defaultS3CompatibleRegion
 	}
 
 	clientOpts := []func(*s3.Options){}
@@ -315,6 +323,16 @@ func (s *s3Store) GetFile(ctx context.Context, key, dst string) error {
 // ListObjectsV2 under the hood so large archives aren't truncated.
 func (s *s3Store) List(ctx context.Context, prefix string) ([]string, error) {
 	var out []string
+	err := s.ListPages(ctx, prefix, func(keys []string) error {
+		out = append(out, keys...)
+		return nil
+	})
+	return out, err
+}
+
+// ListPages calls fn with each ListObjectsV2 page of keys under prefix, so
+// a caller can act on a large prefix without holding every key in memory.
+func (s *s3Store) ListPages(ctx context.Context, prefix string, fn func(keys []string) error) error {
 	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.bucket),
 		Prefix: aws.String(prefix),
@@ -322,15 +340,19 @@ func (s *s3Store) List(ctx context.Context, prefix string) ([]string, error) {
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("s3 list %s: %w", prefix, err)
+			return fmt.Errorf("s3 list %s: %w", prefix, err)
 		}
+		keys := make([]string, 0, len(page.Contents))
 		for _, obj := range page.Contents {
 			if obj.Key != nil {
-				out = append(out, *obj.Key)
+				keys = append(keys, *obj.Key)
 			}
 		}
+		if err := fn(keys); err != nil {
+			return err
+		}
 	}
-	return out, nil
+	return nil
 }
 
 func (s *s3Store) Delete(ctx context.Context, key string) error {

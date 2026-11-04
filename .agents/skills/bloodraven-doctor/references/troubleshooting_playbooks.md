@@ -941,7 +941,7 @@ Do not:
 ### Symptoms
 - A `MysqlBackup` deleted by hand or by retention stays Terminating with the `shipstream.io/mysqlbackup` finalizer.
 - `ArtifactCleanupFailed` or `ArtifactCleanupBlocked` Warning Events; `bloodraven_backup_artifact_cleanup_failures_total` rising.
-- After an upgrade from an operator whose cleanup ran `cleanup.py`: old Terminating S3 backups with Failed `mysqlbackup-<name>-cleanup` Jobs. That script needed `util.rmdump`, which MySQL Shell does not have, so S3 cleanup never worked. The new operator replaces those Jobs on its own; let it.
+- After an upgrade from an operator whose cleanup ran `cleanup.py`: old Terminating S3 backups with Failed `mysqlbackup-<name>-cleanup` Jobs (new cleanup Jobs are named `mysqlcleanup-<name>`; an old-named Job counts only if the backup owns it). That script needed `util.rmdump`, which MySQL Shell does not have, so S3 cleanup never worked. The new operator replaces those Jobs on its own; let it.
 
 ### Diagnostic steps
 1. Read the cause and the recorded destination (`scripts/triage.sh` section 8 prints both):
@@ -951,13 +951,15 @@ Do not:
      -o jsonpath='{range .items[*]}{.metadata.name}{" exit="}{.status.containerStatuses[0].state.terminated.exitCode}{" "}{.status.containerStatuses[0].state.terminated.message}{"\n"}{end}'
    ```
 2. Reasons:
-   - `CleanupFailed`: exit 3 (storage error), deadline, eviction or no recorded exit. A new Job runs 5 minutes after the failure.
-   - `CleanupRejected`: exit 2. The message says why: missing credential keys, a refused path, a cross-bucket location, an invalid endpoint. A new Job runs 30 minutes after the failure.
+   - `CleanupFailed`: exit 75 (storage error), a crash, deadline, eviction or no recorded exit. A new Job runs 5 minutes after the failure.
+   - `CleanupRejected`: exit 64. The message says why: missing credential keys, a refused path, a cross-bucket location, an invalid endpoint. A new Job runs 30 minutes after the failure.
+   - `CleanupPending`: the container cannot start; the message carries the waiting reason (`ImagePullBackOff`: the operator image must be pullable in the backup namespace with `spec.backup.imagePullSecrets`).
+   - `ForegroundDeletion`: deleted with `--cascade=foreground` (Argo CD's default prune); cleanup starts once the garbage collector has removed the backup's dependents.
    - `CredentialsUnavailable`: the profile no longer has an S3 `credentialsSecret`.
    - `OperatorImageUnset`: the operator cannot name its own image; check its Deployment.
-   - `DestinationUnverified`: no `status.artifactStorage` (a backup from an older operator) and its producing Job is gone, so the bucket/claim the backup used is unknown.
-   - `DestinationMismatch`: `status.location` does not end in the backup name, is outside the recorded bucket or `/backups`, or differs from the producing Job's destination.
-   - `CleanupJobConflict`: a Job named `mysqlbackup-<name>-cleanup` exists but is not owned by this backup.
+   - `DestinationUnverified`: no recorded `status.artifactStorage.location` (a backup from an older operator) and it cannot be recovered from the producing Job (gone, owned by something else, or its destination depends on runtime-only values), so the exact artifact is unknown.
+   - `DestinationMismatch`: `status.location` is not exactly `status.artifactStorage.location`, does not end in the backup name, is outside the recorded bucket or `/backups`, or differs from the producing Job's destination.
+   - `CleanupJobConflict`: a Job named `mysqlcleanup-<name>` exists but is not owned by this backup.
    - `HeldByVerification`: a verification is still reading the artifact; see [playbook 36](#36-backup-kept-past-retention-or-deletion-waiting-on-a-verification).
 3. Cleanup deletes from `status.artifactStorage` (captured when the backup ran), never from the live profile. A changed profile bucket, endpoint or claim does not move the delete; only credentials come from the current profile.
 

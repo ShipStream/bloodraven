@@ -266,7 +266,7 @@ func main() {
 
 	// Start a separate HTTP server for websocket and status on :8082
 	// (controller-runtime handles metrics on :8080 and probes on :8081)
-	mux := newAuxMuxWithLogger(runner, hub, mgr.GetClient(), logger)
+	mux := newAuxMuxWithLogger(runner, hub, mgr.GetClient(), mgr.GetAPIReader(), logger)
 
 	auxSrv := &http.Server{
 		Addr:              ":8082",
@@ -468,10 +468,16 @@ func (r *statusRecorder) ReadFrom(src io.Reader) (int64, error) {
 }
 
 func newAuxMux(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Reader) *http.ServeMux {
-	return newAuxMuxWithLogger(runner, hub, k8sClient, slog.Default())
+	return newAuxMuxWithLogger(runner, hub, k8sClient, k8sClient, slog.Default())
 }
 
-func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient client.Reader, logger *slog.Logger) *http.ServeMux {
+// newAuxMuxWithLogger serves the auxiliary endpoints. apiReader is an
+// uncached reader for decisions that must not trust the informer cache
+// (verification readers of a backup being deleted); nil uses k8sClient.
+func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform.Hub, k8sClient, apiReader client.Reader, logger *slog.Logger) *http.ServeMux {
+	if apiReader == nil {
+		apiReader = k8sClient
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", auxLoggingMiddleware(logger, "healthz", http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		rw.WriteHeader(http.StatusOK)
@@ -586,7 +592,7 @@ func newAuxMuxWithLogger(runner *controller.TopologyManagerRunner, hub *platform
 			// another site. The lookup retains its own bounded deadline.
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 			defer cancel()
-			resp, err := resolvePITRCutoff(ctx, k8sClient, ns, group, profile)
+			resp, err := resolvePITRCutoff(ctx, k8sClient, apiReader, ns, group, profile)
 			if err != nil {
 				return pitrLookupResult{http.StatusInternalServerError, map[string]any{"error": "internal error resolving PITR cutoff"}}, nil
 			}

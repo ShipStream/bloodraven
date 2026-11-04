@@ -42,7 +42,7 @@ func createHeldTestBackup(t *testing.T, ns, fgName, name string, completed time.
 	b.Status = v1alpha1.MysqlBackupStatus{
 		Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &done, StartTime: &done,
 		StorageType: v1alpha1.BackupStorageS3, Location: "lion/" + name,
-		ArtifactStorage: &v1alpha1.BackupArtifactStorage{Bucket: "bloodraven"},
+		ArtifactStorage: &v1alpha1.BackupArtifactStorage{Location: "lion/" + name, Bucket: "bloodraven"},
 	}
 	if err := k8sClient.Status().Update(ctx, b); err != nil {
 		t.Fatal(err)
@@ -121,7 +121,7 @@ func TestEnvtest_VerificationHoldLifecycle(t *testing.T) {
 			t.Fatalf("verification reconcile: %v", err)
 		}
 	}
-	cleanupKey := client.ObjectKey{Namespace: ns, Name: "mysqlbackup-" + backup.Name + "-cleanup"}
+	cleanupKey := client.ObjectKey{Namespace: ns, Name: "mysqlcleanup-" + backup.Name}
 
 	reconcileUntil(t, vr, vKey, func() bool {
 		if err := k8sClient.Get(ctx, vKey, v); err != nil {
@@ -263,5 +263,99 @@ func TestEnvtest_RetentionHoldsUnstampedRun(t *testing.T) {
 	}
 	if err := k8sClient.Get(ctx, oKey, older); err != nil || !hasHold(older) {
 		t.Fatalf("observe did not stamp the hold: %v %v", err, older.Annotations)
+	}
+}
+
+// TestEnvtest_VerificationDeletionWaitsForForegroundJobDeletion pins that a
+// Job under foreground deletion is not "stopped": the Job controller may
+// still have a pod creation in flight. The verification keeps its finalizer
+// and its hold until the Job is gone.
+func TestEnvtest_VerificationDeletionWaitsForForegroundJobDeletion(t *testing.T) {
+	ns := createNamespace(t, "verification-hold-foreground")
+	ensureSecret(t, ns)
+	fg := newVerificationFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	backup := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-fg", time.Now())
+	v := &v1alpha1.MysqlBackupVerification{ObjectMeta: metav1.ObjectMeta{Name: "deleting", Namespace: ns}, Spec: v1alpha1.MysqlBackupVerificationSpec{
+		FailoverGroupRef: v1alpha1.LocalGroupRef{Name: fg.Name}, ProfileName: "nightly-s3",
+		BackupRef: &corev1.LocalObjectReference{Name: backup.Name},
+	}}
+	if err := k8sClient.Create(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	vr := &controller.MysqlBackupVerificationReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(50)}
+	vKey, bKey := client.ObjectKeyFromObject(v), client.ObjectKeyFromObject(backup)
+	reconcileUntil(t, vr, vKey, func() bool {
+		if err := k8sClient.Get(ctx, vKey, v); err != nil {
+			t.Fatal(err)
+		}
+		return v.Status.Phase == v1alpha1.VerificationPhaseRestoring
+	})
+	jobKey := client.ObjectKey{Namespace: ns, Name: v.Status.JobName}
+
+	if err := k8sClient.Delete(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	// No GC runs in envtest: the foreground-deleted Job keeps its
+	// foregroundDeletion finalizer, nonterminal and with no pods visible.
+	for range 3 {
+		if _, err := vr.Reconcile(ctx, ctrl.Request{NamespacedName: vKey}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var job batchv1.Job
+	if err := k8sClient.Get(ctx, jobKey, &job); err != nil || job.DeletionTimestamp == nil {
+		t.Fatalf("expected the Job to be pending foreground deletion: %v", err)
+	}
+	if err := k8sClient.Get(ctx, vKey, v); err != nil {
+		t.Fatalf("verification finalizer released while its Job is still being deleted: %v", err)
+	}
+	if err := k8sClient.Get(ctx, bKey, backup); err != nil || !hasHold(backup) {
+		t.Fatalf("hold released while the Job is still being deleted: %v", err)
+	}
+
+	// The garbage collector finishes: the Job is gone.
+	job.Finalizers = nil
+	if err := k8sClient.Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vr.Reconcile(ctx, ctrl.Request{NamespacedName: vKey}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k8sClient.Get(ctx, bKey, backup); err != nil || hasHold(backup) {
+		t.Fatalf("hold not released after the Job was gone: %v %v", err, backup.Annotations)
+	}
+	if err := k8sClient.Get(ctx, vKey, v); !apierrors.IsNotFound(err) {
+		t.Fatalf("verification not released after the Job was gone: %v", err)
+	}
+}
+
+// TestEnvtest_ArtifactStorageImmutable pins the CEL rules: once the
+// artifact location is recorded, status.artifactStorage cannot be edited
+// or removed, so a status writer cannot redirect a recursive delete.
+func TestEnvtest_ArtifactStorageImmutable(t *testing.T) {
+	ns := createNamespace(t, "artifact-storage-immutable")
+	fg := newVerificationFG(ns)
+	if err := k8sClient.Create(ctx, fg); err != nil {
+		t.Fatal(err)
+	}
+	b := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-cel", time.Now())
+	moved := b.DeepCopy()
+	moved.Status.ArtifactStorage.Location = "elsewhere/" + b.Name
+	moved.Status.Location = "elsewhere/" + b.Name
+	if err := k8sClient.Status().Update(ctx, moved); err == nil {
+		t.Fatal("API server allowed the recorded artifact location to change")
+	}
+	removed := b.DeepCopy()
+	removed.Status.ArtifactStorage = nil
+	if err := k8sClient.Status().Update(ctx, removed); err == nil {
+		t.Fatal("API server allowed status.artifactStorage to be removed")
+	}
+	// Unrelated status changes still go through.
+	b.Status.Message = "still writable"
+	if err := k8sClient.Status().Update(ctx, b); err != nil {
+		t.Fatalf("unrelated status update rejected: %v", err)
 	}
 }

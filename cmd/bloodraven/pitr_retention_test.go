@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,10 @@ import (
 	"github.com/shipstream/bloodraven/internal/platform"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const retentionTestSID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -127,23 +131,39 @@ func TestPITRCutoffDoesNotCachePositiveCoverage(t *testing.T) {
 
 // TestPITRCutoffKeepsHeldTerminatingBackup pins #211: a backup deleted
 // while a verification reads it keeps its artifact until the run stops, so
-// it must keep bounding binlog retention for that long too.
+// it must keep bounding binlog retention for that long too, including for a
+// run started by an operator that did not stamp holds.
 func TestPITRCutoffKeepsHeldTerminatingBackup(t *testing.T) {
 	start := time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC)
+	reading := &v1alpha1.MysqlBackupVerification{
+		ObjectMeta: metav1.ObjectMeta{Name: "v", Namespace: "ns", UID: "uid-v"},
+		Spec:       v1alpha1.MysqlBackupVerificationSpec{FailoverGroupRef: v1alpha1.LocalGroupRef{Name: "fg"}, ProfileName: "p"},
+		Status: v1alpha1.MysqlBackupVerificationStatus{Phase: v1alpha1.VerificationPhaseRestoring,
+			BackupRef: &v1alpha1.VerificationBackupRef{Name: "deleting", UID: "uid-deleting", Location: "x/deleting", StorageType: v1alpha1.BackupStorageS3}},
+	}
 	for _, tc := range []struct {
-		name   string
-		held   bool
-		cutoff time.Time
+		name      string
+		held      bool
+		reader    bool
+		listError bool
+		cutoff    time.Time
+		wantErr   bool
 	}{
-		{name: "held", held: true, cutoff: start},
-		{name: "not held", held: false, cutoff: start.Add(time.Hour)},
+		{name: "stamped hold", held: true, cutoff: start},
+		{name: "unstamped, verification still reading", reader: true, cutoff: start},
+		{name: "not read", cutoff: start.Add(time.Hour)},
+		{name: "reader lookup fails closed", listError: true, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
+			if err := clientgoscheme.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
 			if err := v1alpha1.AddToScheme(scheme); err != nil {
 				t.Fatal(err)
 			}
 			deleting := retentionBoundaryBackup("deleting", retentionTestSID+":1-10", start)
+			deleting.UID = "uid-deleting"
 			now := metav1.Now()
 			deleting.DeletionTimestamp = &now
 			deleting.Finalizers = []string{"shipstream.io/mysqlbackup"}
@@ -151,8 +171,29 @@ func TestPITRCutoffKeepsHeldTerminatingBackup(t *testing.T) {
 				deleting.Annotations = map[string]string{"hold.verification.shipstream.io/uid-v": "v"}
 			}
 			kept := retentionBoundaryBackup("kept", retentionTestSID+":1-20", start.Add(time.Hour))
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(deleting, kept).Build()
-			resp, err := resolvePITRCutoff(context.Background(), c, "ns", "fg", "p")
+			objs := []client.Object{deleting, kept}
+			if tc.reader {
+				objs = append(objs, reading)
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+			var holdReader client.Reader = c
+			if tc.listError {
+				holdReader = interceptor.NewClient(c, interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := list.(*v1alpha1.MysqlBackupVerificationList); ok {
+							return errors.New("injected")
+						}
+						return c.List(ctx, list, opts...)
+					},
+				})
+			}
+			resp, err := resolvePITRCutoff(context.Background(), c, holdReader, "ns", "fg", "p")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("an unknown reader set produced a cutoff: %v", resp)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

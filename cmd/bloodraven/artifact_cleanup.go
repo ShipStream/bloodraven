@@ -83,8 +83,8 @@ func transient(format string, args ...any) *cleanupError {
 // exactly one backup artifact: every object under "<prefix>/<name>/" in S3,
 // or the "<mount>/[<subPath>/]<name>" tree on a PVC.
 //
-// Exit codes: 0 done (including nothing found), 2 refused or misconfigured,
-// 3 transient storage error. The verdict is written to the termination log:
+// Exit codes: 0 done (including nothing found), 64 refused or misconfigured,
+// 75 transient storage error (backupmeta.CleanupExit*). A crash exits 2. The verdict is written to the termination log:
 // "BLOODRAVEN_CLEANUP_COMPLETE objects=<n>" or "BLOODRAVEN_CLEANUP_FAILED: <reason>".
 func runArtifactCleanup(_ []string) {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -215,16 +215,57 @@ func checkArtifactSegments(key, name string) error {
 	return nil
 }
 
+// pagedLister is implemented by the S3 store: it hands over one
+// ListObjectsV2 page at a time, so a prefix with millions of objects is
+// deleted without first holding every key in memory.
+type pagedLister interface {
+	ListPages(ctx context.Context, prefix string, fn func(keys []string) error) error
+}
+
 func cleanupS3(ctx context.Context, store cleanupStore, prefix string) (int, *cleanupError) {
-	keys, err := store.List(ctx, prefix)
-	if err != nil {
-		return 0, transient("list %s: %v", prefix, err)
+	deleted := 0
+	visit := func(keys []string) error {
+		for _, key := range keys {
+			if !strings.HasPrefix(key, prefix) {
+				return rejected("store listed key %q outside prefix %q", key, prefix)
+			}
+		}
+		n, err := deleteKeys(ctx, store, keys)
+		deleted += n
+		if err != nil {
+			return transient("delete under %s: %v", prefix, err)
+		}
+		return nil
 	}
-	for _, key := range keys {
-		if !strings.HasPrefix(key, prefix) {
-			return 0, rejected("store listed key %q outside prefix %q", key, prefix)
+	var err error
+	if pl, ok := store.(pagedLister); ok {
+		err = pl.ListPages(ctx, prefix, visit)
+	} else {
+		var keys []string
+		if keys, err = store.List(ctx, prefix); err == nil {
+			err = visit(keys)
 		}
 	}
+	var cerr *cleanupError
+	if errors.As(err, &cerr) {
+		return deleted, cerr
+	}
+	if err != nil {
+		return deleted, transient("list %s: %v", prefix, err)
+	}
+	remaining, err := store.List(ctx, prefix)
+	if err != nil {
+		return deleted, transient("re-list %s: %v", prefix, err)
+	}
+	if len(remaining) > 0 {
+		return deleted, transient("%d objects remain under %s after delete", len(remaining), prefix)
+	}
+	return deleted, nil
+}
+
+// deleteKeys deletes keys with up to cleanupDeleteWorkers concurrent
+// DeleteObject calls and returns how many succeeded and the first error.
+func deleteKeys(ctx context.Context, store cleanupStore, keys []string) (int, error) {
 	work := make(chan string)
 	var (
 		wg       sync.WaitGroup
@@ -255,17 +296,7 @@ func cleanupS3(ctx context.Context, store cleanupStore, prefix string) (int, *cl
 	}
 	close(work)
 	wg.Wait()
-	if firstErr != nil {
-		return deleted, transient("delete under %s: %v", prefix, firstErr)
-	}
-	remaining, err := store.List(ctx, prefix)
-	if err != nil {
-		return deleted, transient("re-list %s: %v", prefix, err)
-	}
-	if len(remaining) > 0 {
-		return deleted, transient("%d objects remain under %s after delete", len(remaining), prefix)
-	}
-	return deleted, nil
+	return deleted, firstErr
 }
 
 // cleanupPVC removes rel through an os.Root anchored at the mount, so every

@@ -40,7 +40,7 @@ func TestEnvtest_ArtifactCleanupRetriesFailedJob(t *testing.T) {
 	backup.Status = v1alpha1.MysqlBackupStatus{
 		Phase: v1alpha1.BackupPhaseSucceeded, CompletionTime: &now,
 		StorageType: v1alpha1.BackupStorageS3, Location: "lion/" + backup.Name,
-		ArtifactStorage: &v1alpha1.BackupArtifactStorage{Bucket: "bloodraven"},
+		ArtifactStorage: &v1alpha1.BackupArtifactStorage{Location: "lion/" + backup.Name, Bucket: "bloodraven"},
 	}
 	if err := k8sClient.Status().Update(ctx, backup); err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestEnvtest_ArtifactCleanupRetriesFailedJob(t *testing.T) {
 
 	r := &controller.MysqlBackupReconciler{Client: k8sClient, Scheme: scheme, Recorder: record.NewFakeRecorder(50)}
 	key := client.ObjectKeyFromObject(backup)
-	jobKey := client.ObjectKey{Namespace: ns, Name: "mysqlbackup-" + backup.Name + "-cleanup"}
+	jobKey := client.ObjectKey{Namespace: ns, Name: "mysqlcleanup-" + backup.Name}
 	reconcile := func() ctrl.Result {
 		t.Helper()
 		res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})

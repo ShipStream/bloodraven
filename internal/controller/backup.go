@@ -74,8 +74,16 @@ func backupJobName(backupName string) string {
 }
 
 // cleanupJobName returns the Job name for the artifact-cleanup Job
-// attached to the MysqlBackup finalizer.
+// attached to the MysqlBackup finalizer. The prefix differs from
+// backupJobName's so that no backup's Job can take the name: the legacy
+// "mysqlbackup-<name>-cleanup" was also backupJobName("<name>-cleanup").
 func cleanupJobName(backupName string) string {
+	return truncateDNS1123(fmt.Sprintf("mysqlcleanup-%s", backupName))
+}
+
+// legacyCleanupJobName is the cleanup Job name used by earlier operators.
+// It is only trusted when the Job is controlled by the backup.
+func legacyCleanupJobName(backupName string) string {
 	return truncateDNS1123(fmt.Sprintf("mysqlbackup-%s-cleanup", backupName))
 }
 

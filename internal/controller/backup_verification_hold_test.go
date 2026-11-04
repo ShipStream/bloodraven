@@ -9,10 +9,13 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -356,5 +359,79 @@ func TestFinalize_DefersWhileVerificationReads(t *testing.T) {
 	f.finalize(t)
 	if _, ok := f.cleanupJob(t); !ok {
 		t.Fatal("cleanup did not start after the verification finished")
+	}
+}
+
+// A crash after the pin was persisted but before the hold was stamped: the
+// next pass stamps the same pinned backup before launching.
+func TestVerificationHold_StampedAfterCrashBetweenPinAndStamp(t *testing.T) {
+	ctx := context.Background()
+	fg := verifyFG()
+	pinned := successfulBackup("backup-a", fg.Name, "nightly-s3")
+	newer := successfulBackup("backup-b", fg.Name, "nightly-s3")
+	newer.Status.CompletionTime = &metav1.Time{Time: pinned.Status.CompletionTime.Add(time.Hour)}
+	v := verifyCR("crashed", fg.Name, "nightly-s3")
+	v.UID = "uid-crashed"
+	v.Status.Phase = v1alpha1.VerificationPhaseProvisioning
+	v.Status.BackupRef = verificationBackupSnapshot(pinned)
+	r, c := newVerificationReconciler(t, fg, pinned, newer, v, dsnSecret())
+	reconcileVerifUntilStable(t, r, v.Name)
+	for _, b := range []*v1alpha1.MysqlBackup{pinned, newer} {
+		if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pinned.Annotations[verificationHoldKey(v)] != v.Name || newer.Annotations[verificationHoldKey(v)] != "" {
+		t.Fatalf("hold not on the pinned backup: pinned=%v newer=%v", pinned.Annotations, newer.Annotations)
+	}
+}
+
+// A release that loses a resourceVersion race is retried, not dropped.
+func TestVerificationHold_ReleaseConflictIsRetried(t *testing.T) {
+	ctx := context.Background()
+	fg := verifyFG()
+	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
+	v := verifyCR("conflict", fg.Name, "nightly-s3")
+	v.UID = "uid-conflict"
+	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	reconcileVerifUntilStable(t, r, v.Name)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
+		t.Fatal(err)
+	}
+	var job batchv1.Job
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "ns", Name: verificationJobName(v.Name)}, &job); err != nil {
+		t.Fatal(err)
+	}
+	job.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()}}
+	if err := c.Status().Update(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	conflicts := 1
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*v1alpha1.MysqlBackup); ok && conflicts > 0 {
+				conflicts--
+				return apierrors.NewConflict(schema.GroupResource{Resource: "mysqlbackups"}, obj.GetName(), errors.New("injected"))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+	r.APIReader = c
+	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(v)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
+		t.Fatal(err)
+	}
+	if _, held := b.Annotations[verificationHoldKey(v)]; !held || res.RequeueAfter == 0 {
+		t.Fatalf("conflicting release: held=%v requeue=%s", held, res.RequeueAfter)
+	}
+	reconcileVerifUntilStable(t, r, v.Name)
+	if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
+		t.Fatal(err)
+	}
+	if _, held := b.Annotations[verificationHoldKey(v)]; held {
+		t.Fatal("release was not retried after a conflict")
 	}
 }

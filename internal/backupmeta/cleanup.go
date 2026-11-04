@@ -9,11 +9,15 @@ import (
 
 // Artifact-cleanup exit codes shared by `bloodraven artifact-cleanup` and the
 // MysqlBackup finalizer.
+//
+// The values avoid 1 and 2, which the Go runtime uses for os.Exit(1) paths
+// and unrecovered panics, so a crash is never read as a refusal.
 const (
-	// CleanupExitRejected is a permanent refusal or configuration error.
-	CleanupExitRejected = 2
-	// CleanupExitTransient is a storage error worth retrying.
-	CleanupExitTransient = 3
+	// CleanupExitRejected is a permanent refusal or configuration error
+	// (EX_USAGE).
+	CleanupExitRejected = 64
+	// CleanupExitTransient is a storage error worth retrying (EX_TEMPFAIL).
+	CleanupExitTransient = 75
 )
 
 const (

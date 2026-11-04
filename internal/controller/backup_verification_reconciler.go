@@ -100,7 +100,7 @@ func (r *MysqlBackupVerificationReconciler) Reconcile(ctx context.Context, req c
 			if err != nil {
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, fmt.Errorf("release verification hold: %w", err)
 			}
-			if stopped, err := verificationExecutionStopped(ctx, r.apiReader(), v.Namespace, v.Name); err != nil {
+			if stopped, err := verificationExecutionStopped(ctx, r.apiReader(), v.Namespace, v.Name, true); err != nil {
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, err
 			} else if !released || !stopped {
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil

@@ -50,21 +50,23 @@ func BackupHasVerificationHold(b *v1alpha1.MysqlBackup) bool {
 }
 
 // verificationExecutionStopped reports whether nothing of the verification
-// named name can still read its backup: its Job is gone or finished (or
-// being deleted, which never starts pods) and no pod labelled with the
-// verification is pending or running. Pods are checked directly because
-// Job status counters are updated asynchronously.
-func verificationExecutionStopped(ctx context.Context, reader client.Reader, namespace, name string) (bool, error) {
+// named name can still read its backup, and no pod labelled with the
+// verification is pending or running. Pods are checked directly because Job
+// status counters are updated asynchronously.
+//
+// With requireGone (a verification being deleted) the Job must be gone: a
+// Job under foreground deletion can still have a pod creation in flight.
+// Otherwise the Job may remain if it carries an explicit Complete or Failed
+// condition, after which the Job controller starts no pods.
+func verificationExecutionStopped(ctx context.Context, reader client.Reader, namespace, name string, requireGone bool) (bool, error) {
 	var job batchv1.Job
 	jobErr := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: verificationJobName(name)}, &job)
 	switch {
 	case apierrors.IsNotFound(jobErr):
 	case jobErr != nil:
 		return false, fmt.Errorf("get verification job: %w", jobErr)
-	default:
-		if phase, _ := jobPhase(&job, "verification"); phase == "" && job.DeletionTimestamp == nil {
-			return false, nil
-		}
+	case requireGone || !jobFinished(&job):
+		return false, nil
 	}
 	var pods corev1.PodList
 	if err := reader.List(ctx, &pods, client.InNamespace(namespace), client.MatchingLabels{labelMysqlBackupVerification: name}); err != nil {
@@ -78,6 +80,17 @@ func verificationExecutionStopped(ctx context.Context, reader client.Reader, nam
 	return true, nil
 }
 
+// jobFinished reports an explicit terminal Job condition. The counter
+// fallback in jobPhase is not enough to know no pod will start.
+func jobFinished(job *batchv1.Job) bool {
+	for _, c := range job.Status.Conditions {
+		if (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
+}
+
 // verificationReading reports whether v may still read its backup. A live,
 // non-terminal verification always may, even before its Job exists; a
 // terminal or deleted one may until its execution has stopped.
@@ -85,7 +98,7 @@ func verificationReading(ctx context.Context, reader client.Reader, v *v1alpha1.
 	if v.DeletionTimestamp.IsZero() && !verificationTerminal(v.Status.Phase) {
 		return true, nil
 	}
-	stopped, err := verificationExecutionStopped(ctx, reader, v.Namespace, v.Name)
+	stopped, err := verificationExecutionStopped(ctx, reader, v.Namespace, v.Name, !v.DeletionTimestamp.IsZero())
 	return !stopped, err
 }
 
@@ -119,7 +132,7 @@ func artifactReaders(ctx context.Context, reader client.Reader, backup *v1alpha1
 		case err == nil || apierrors.IsNotFound(err):
 			// The holder is gone (or replaced by a same-name successor):
 			// only pods running under that name can still read.
-			stopped, serr := verificationExecutionStopped(ctx, reader, backup.Namespace, name)
+			stopped, serr := verificationExecutionStopped(ctx, reader, backup.Namespace, name, false)
 			if serr != nil {
 				return nil, serr
 			}
@@ -163,6 +176,14 @@ func artifactReaders(ctx context.Context, reader client.Reader, backup *v1alpha1
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// BackupBeingRead reports whether any verification may still be reading the
+// backup's artifact, through the given (uncached) reader. An API error is
+// returned so that callers fail closed.
+func BackupBeingRead(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) (bool, error) {
+	readers, err := artifactReaders(ctx, reader, backup)
+	return len(readers) > 0, err
 }
 
 // stampVerificationHold records v's hold on its pinned backup. The patch
@@ -247,7 +268,7 @@ func (r *MysqlBackupVerificationReconciler) releaseVerificationHold(ctx context.
 	if _, held := backup.Annotations[key]; !held {
 		return true, nil
 	}
-	stopped, err := verificationExecutionStopped(ctx, r.apiReader(), v.Namespace, v.Name)
+	stopped, err := verificationExecutionStopped(ctx, r.apiReader(), v.Namespace, v.Name, !v.DeletionTimestamp.IsZero())
 	if err != nil || !stopped {
 		return false, err
 	}

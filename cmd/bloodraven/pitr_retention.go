@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -17,7 +18,10 @@ type pitrLookupResult struct {
 	body   map[string]any
 }
 
-func resolvePITRCutoff(ctx context.Context, reader client.Reader, namespace, group, profile string) (map[string]any, error) {
+// resolvePITRCutoff computes the binlog retention cutoff. holdReader is an
+// uncached reader used only to decide whether a backup being deleted is
+// still read by a verification.
+func resolvePITRCutoff(ctx context.Context, reader, holdReader client.Reader, namespace, group, profile string) (map[string]any, error) {
 	var list v1alpha1.MysqlBackupList
 	// Specs are authoritative: labels and the PITR profile do not delimit which
 	// group backups may later be used as PITR restore sources.
@@ -30,11 +34,22 @@ func resolvePITRCutoff(ctx context.Context, reader client.Reader, namespace, gro
 	unknown, inFlight := false, false
 	for i := range list.Items {
 		b := &list.Items[i]
-		// A backup being deleted no longer bounds retention, unless a
-		// verification holds it: its artifact is kept until that run
-		// stops, and so must be the binlogs a PITR replay reads after it.
-		if !b.DeletionTimestamp.IsZero() && !controller.BackupHasVerificationHold(b) || b.Spec.FailoverGroupRef.Name != group {
+		if b.Spec.FailoverGroupRef.Name != group {
 			continue
+		}
+		// A backup being deleted no longer bounds retention, unless a
+		// verification may be reading it: its artifact is kept until that
+		// run stops, and so must be the binlogs a PITR replay reads after
+		// it. A stamped hold is enough; otherwise (a run started by an
+		// older operator) ask the API server, and fail closed on errors.
+		if !b.DeletionTimestamp.IsZero() && !controller.BackupHasVerificationHold(b) {
+			read, err := controller.BackupBeingRead(ctx, holdReader, b)
+			if err != nil {
+				return nil, fmt.Errorf("check verification readers of backup %s: %w", b.Name, err)
+			}
+			if !read {
+				continue
+			}
 		}
 		switch b.Status.Phase {
 		case v1alpha1.BackupPhaseFailed:

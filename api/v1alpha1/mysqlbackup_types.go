@@ -80,6 +80,7 @@ const (
 )
 
 // MysqlBackupStatus tracks the observed state of a MysqlBackup.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.artifactStorage) || has(self.artifactStorage)",message="status.artifactStorage cannot be removed once recorded"
 type MysqlBackupStatus struct {
 	// Phase is the lifecycle phase of this backup run.
 	Phase BackupPhase `json:"phase,omitempty"`
@@ -108,11 +109,13 @@ type MysqlBackupStatus struct {
 	StorageType BackupStorageType `json:"storageType,omitempty"`
 
 	// ArtifactStorage records the storage destination the producing Job
-	// wrote to (bucket, endpoint and region for S3; claim for PVC). It is
-	// captured from the Job when the Job is created and never follows later
-	// profile edits, so artifact cleanup cannot be redirected to another
-	// bucket or claim. Credentials are deliberately not recorded: cleanup
-	// reads them from the profile's current credentialsSecret.
+	// wrote to: the exact artifact location, plus bucket, endpoint and
+	// region for S3 or the claim for PVC. It is captured from the Job when
+	// the Job is created and never follows later profile edits, so artifact
+	// cleanup cannot be redirected to another bucket, claim or prefix. Once
+	// its location is recorded it is immutable. Credentials are
+	// deliberately not recorded: cleanup reads them from the profile's
+	// current credentialsSecret.
 	// +optional
 	ArtifactStorage *BackupArtifactStorage `json:"artifactStorage,omitempty"`
 
@@ -186,8 +189,14 @@ type MysqlBackupStatus struct {
 }
 
 // BackupArtifactStorage is the immutable storage destination of a backup
-// artifact. The artifact path itself is MysqlBackupStatus.Location.
+// artifact.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.location) || self == oldSelf",message="artifactStorage is immutable once its location is recorded"
 type BackupArtifactStorage struct {
+	// Location is the artifact location the producing Job wrote, in the
+	// form of MysqlBackupStatus.Location. Cleanup refuses to run unless the
+	// two are identical.
+	// +optional
+	Location string `json:"location,omitempty"`
 	// Bucket is the S3 bucket the artifact was written to.
 	// +optional
 	Bucket string `json:"bucket,omitempty"`

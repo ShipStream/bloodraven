@@ -115,11 +115,13 @@ spec:
               artifactStorage:
                 description: |-
                   ArtifactStorage records the storage destination the producing Job
-                  wrote to (bucket, endpoint and region for S3; claim for PVC). It is
-                  captured from the Job when the Job is created and never follows later
-                  profile edits, so artifact cleanup cannot be redirected to another
-                  bucket or claim. Credentials are deliberately not recorded: cleanup
-                  reads them from the profile's current credentialsSecret.
+                  wrote to: the exact artifact location, plus bucket, endpoint and
+                  region for S3 or the claim for PVC. It is captured from the Job when
+                  the Job is created and never follows later profile edits, so artifact
+                  cleanup cannot be redirected to another bucket, claim or prefix. Once
+                  its location is recorded it is immutable. Credentials are
+                  deliberately not recorded: cleanup reads them from the profile's
+                  current credentialsSecret.
                 properties:
                   bucket:
                     description: Bucket is the S3 bucket the artifact was written
@@ -134,11 +136,20 @@ spec:
                       EndpointURL is the S3 endpoint override in effect for the producing
                       Job, empty for the AWS default endpoint.
                     type: string
+                  location:
+                    description: |-
+                      Location is the artifact location the producing Job wrote, in the
+                      form of MysqlBackupStatus.Location. Cleanup refuses to run unless the
+                      two are identical.
+                    type: string
                   region:
                     description: Region is the S3 region in effect for the producing
                       Job.
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: artifactStorage is immutable once its location is recorded
+                  rule: '!has(oldSelf.location) || self == oldSelf'
               attempt:
                 description: |-
                   Attempt is the retry attempt number for scheduled CRs: 1 for the
@@ -309,6 +320,9 @@ spec:
                 - PVC
                 type: string
             type: object
+            x-kubernetes-validations:
+            - message: status.artifactStorage cannot be removed once recorded
+              rule: '!has(oldSelf.artifactStorage) || has(self.artifactStorage)'
         type: object
     served: true
     storage: true
