@@ -2987,23 +2987,44 @@ func (tm *TopologyManager) UnfenceSite(ctx context.Context, name string) error {
 // WritablePeers probes every site other than except and returns those
 // observed writable and those whose probe failed. A rollback must not give
 // the source its writes back while another site already accepts them.
+//
+// The probes run concurrently: probed one after another under the caller's
+// single deadline, a hung peer earlier in site order would use up the budget
+// and push a writable peer behind it into unknown, which the rollback does
+// not stop on.
 func (tm *TopologyManager) WritablePeers(ctx context.Context, except string) (writable, unknown []string) {
+	type probeResult struct {
+		probed   bool
+		readOnly bool
+		err      error
+	}
+	results := make([]probeResult, len(tm.sites))
+	var wg sync.WaitGroup
 	for i := range tm.sites {
 		site := &tm.sites[i]
 		if site.name == except {
 			continue
 		}
-		var ro bool
-		err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
-			var err error
-			ro, err = site.mysql.CheckReadOnly(probeCtx)
-			return err
-		})
+		wg.Add(1)
+		go func(i int, site *siteTracker) {
+			defer wg.Done()
+			var ro bool
+			err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+				var err error
+				ro, err = site.mysql.CheckReadOnly(probeCtx)
+				return err
+			})
+			results[i] = probeResult{probed: true, readOnly: ro, err: err}
+		}(i, site)
+	}
+	wg.Wait()
+	for i, res := range results {
 		switch {
-		case err != nil:
-			unknown = append(unknown, site.name)
-		case !ro:
-			writable = append(writable, site.name)
+		case !res.probed:
+		case res.err != nil:
+			unknown = append(unknown, tm.sites[i].name)
+		case !res.readOnly:
+			writable = append(writable, tm.sites[i].name)
 		}
 	}
 	return writable, unknown
@@ -3685,10 +3706,6 @@ func (tm *TopologyManager) recheckUpdateStall(ctx context.Context) {
 	}()
 }
 
-// warnDivergentUpdateStall reports, at most once per recoveryRetryDelay,
-// that the active site's update waits because every otherwise eligible
-// standby is divergent. The stall is intended: the update resumes once the
-// standby is recloned or the primary contains its extra transactions.
 // noteFollowerDriftDeferred logs, at most every recoveryRetryDelay, that
 // follower-only drift waits because no drifted follower is a healthy
 // direct replica of the active site.
@@ -3705,6 +3722,10 @@ func (tm *TopologyManager) noteFollowerDriftDeferred(active string, driftSites [
 	}
 }
 
+// warnDivergentUpdateStall reports, at most once per recoveryRetryDelay,
+// that the active site's update waits because every otherwise eligible
+// standby is divergent. The stall is intended: the update resumes once the
+// standby is recloned or the primary contains its extra transactions.
 func (tm *TopologyManager) warnDivergentUpdateStall(active string, standbys []UpdateTarget) {
 	tm.mu.Lock()
 	quiet := !tm.lastDivergentStallLog.IsZero() && tm.clock.Since(tm.lastDivergentStallLog) < recoveryRetryDelay

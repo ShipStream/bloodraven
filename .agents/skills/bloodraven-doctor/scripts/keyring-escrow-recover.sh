@@ -199,14 +199,16 @@ kubectl label secret "$SECRET" -n "$NAMESPACE" \
     app.kubernetes.io/name=mysql-keyring \
     app.kubernetes.io/managed-by=bloodraven \
     "shipstream.io/failover-group=$GROUP" "shipstream.io/site=$SITE" \
-    "shipstream.io/keyring-version=$VERSION"
-kubectl annotate secret "$SECRET" -n "$NAMESPACE" "shipstream.io/keyring-digest=$DIGEST"
+    "shipstream.io/keyring-version=$VERSION" \
+    || die "created $SECRET (digest verified) but could not label it; label it by hand as above, do not delete it"
+kubectl annotate secret "$SECRET" -n "$NAMESPACE" "shipstream.io/keyring-digest=$DIGEST" \
+    || die "created $SECRET (digest verified) but could not annotate it; add shipstream.io/keyring-digest=$DIGEST by hand, do not delete it"
 kubectl patch secret "$SECRET" -n "$NAMESPACE" --type=merge -p="{
   \"metadata\":{\"ownerReferences\":[{
     \"apiVersion\":\"shipstream.io/v1alpha1\",\"kind\":\"MysqlFailoverGroup\",
     \"name\":\"$GROUP\",\"uid\":\"$FG_UID\",\"controller\":true,\"blockOwnerDeletion\":true
   }]},\"immutable\":true
-}"
+}" || die "created $SECRET (digest verified) but could not set its owner reference and immutability; patch it by hand, do not delete it"
 
 # 4. The operator, not this script, returns the site to Sealed: it re-checks
 # the Secret against the digest and needs MySQL to confirm the same keyring.

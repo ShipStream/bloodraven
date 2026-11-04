@@ -1,6 +1,9 @@
 package controller
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // handoffBlock says why a standby must not receive an ordered-update
 // handoff. The update's snapshot, its active-site precheck and the live
@@ -33,8 +36,7 @@ func (b handoffBlock) err(site string) error {
 	case b.reclonePending:
 		return fmt.Errorf("%s pending post-restore reclone; wait for status.restoreReclones to drain", site)
 	case b.divergence.state == recoveryStateBlocked:
-		return fmt.Errorf("%s is divergent (%d transactions the primary lacks); reclone or reconcile before the active site can be updated",
-			site, b.divergence.divergentCount)
+		return errors.New(divergentStandbyMessage(UpdateTarget{Name: site, DivergentTransactions: b.divergence.divergentCount}))
 	}
 	return nil
 }
