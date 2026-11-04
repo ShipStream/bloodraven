@@ -638,10 +638,9 @@ func parseAccountList(list string) ([]fakeAccount, error) {
 }
 
 // fakeSQLAllPrivileges is what ALL PRIVILEGES expands to on a schema: every
-// database-level privilege except GRANT OPTION, including the routine
-// privileges the reconciler's allowlist cannot name. Revoking a
-// named privilege from an account that holds ALL must leave the rest,
-// exactly as the real server does.
+// database-level privilege except GRANT OPTION. Revoking a named privilege
+// from an account that holds ALL must leave the rest, exactly as the real
+// server does.
 var fakeSQLAllPrivileges = []string{
 	"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
 	"INDEX", "REFERENCES", "LOCK TABLES", "SHOW VIEW", "TRIGGER", "EVENT", "EXECUTE",
