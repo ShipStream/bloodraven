@@ -71,7 +71,7 @@ func TestArchiverPreservesReusedBinlogNames(t *testing.T) {
 				ctx := context.Background()
 				local := t.TempDir()
 				cfg := &PITRConfig{StorageType: "PVC", BinlogDir: local, BinlogIndex: "mysql-bin.index", ManifestPrefix: "binlogs", PollInterval: time.Hour}
-				pvc, err := newPVCStore(&PITRPVCConfig{MountPath: t.TempDir()})
+				pvc, err := newPVCStore(testPVCConfig(t.TempDir()), "")
 				if err != nil {
 					t.Fatal(err)
 				}

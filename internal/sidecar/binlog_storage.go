@@ -112,7 +112,7 @@ func NewArchiveStore(ctx context.Context, cfg *PITRConfig) (ArchiveStore, error)
 		if cfg.PVC == nil {
 			return nil, fmt.Errorf("archive store: PVC config is nil")
 		}
-		s, err := newPVCStore(cfg.PVC)
+		s, err := newPVCStore(cfg.PVC, cfg.ManifestPrefix)
 		if err != nil {
 			return nil, err
 		}
@@ -367,13 +367,31 @@ type pvcStore struct {
 	root string
 }
 
-func newPVCStore(cfg *PITRPVCConfig) (*pvcStore, error) {
+// newPVCStore verifies that cfg.MountPath is a mounted volume and, for
+// writers, that the store can create objects under its write prefix
+// (cfg.WritePrefix, else defaultWritePrefix). Put creates the directory
+// tree below the verified root lazily. The checks run once here; they do
+// not detect a later unmount.
+func newPVCStore(cfg *PITRPVCConfig, defaultWritePrefix string) (*pvcStore, error) {
 	if cfg.MountPath == "" {
 		return nil, fmt.Errorf("pvc archive store: empty mount path")
 	}
-	// MountPath is the PVC mount root; binlog objects live under
-	// <mount>/binlogs/. We lazily create the directory tree on each
-	// Put, so no work needed here.
+	verify := cfg.MountVerifier
+	if verify == nil {
+		verify = verifyPVCMountPoint
+	}
+	if err := verify(cfg.MountPath); err != nil {
+		return nil, err
+	}
+	if cfg.Writable {
+		prefix := cfg.WritePrefix
+		if prefix == "" {
+			prefix = defaultWritePrefix
+		}
+		if err := probePVCWritable(cfg.MountPath, prefix); err != nil {
+			return nil, err
+		}
+	}
 	return &pvcStore{root: cfg.MountPath}, nil
 }
 

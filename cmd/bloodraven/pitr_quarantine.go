@@ -44,7 +44,7 @@ func pitrQuarantine(ctx context.Context, args []string, out, errOut io.Writer) e
 	if *id == "legacy" {
 		*id = ""
 	}
-	cfg, err := pitrDownloadConfigFromEnv()
+	cfg, err := pitrQuarantineStoreConfig()
 	if err != nil {
 		return err
 	}
@@ -52,7 +52,7 @@ func pitrQuarantine(ctx context.Context, args []string, out, errOut io.Writer) e
 	if prefix == "" {
 		return fmt.Errorf("BLOODRAVEN_PITR_MANIFEST_PREFIX is required")
 	}
-	store, err := sidecar.NewArchiveStore(ctx, cfg)
+	store, err := newArchiveStore(ctx, cfg)
 	if err != nil {
 		return err
 	}

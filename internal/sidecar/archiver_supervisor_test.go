@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -79,7 +80,7 @@ func storeInitPITRConfig(t *testing.T) *PITRConfig {
 	t.Helper()
 	return &PITRConfig{
 		StorageType:    "PVC",
-		PVC:            &PITRPVCConfig{MountPath: t.TempDir()},
+		PVC:            testPVCConfig(t.TempDir()),
 		ManifestPrefix: "pitr/orders",
 		BinlogDir:      t.TempDir(),
 		BinlogIndex:    "mysql-bin.index",
@@ -463,5 +464,62 @@ func TestRunDaemonRejectsBadRetentionInterval(t *testing.T) {
 	}
 	if called {
 		t.Fatal("runDaemon started services before rejecting operator-rendered configuration")
+	}
+}
+
+// TestArchiverSupervisorPVCNotMountedThenMounted drives the production
+// store factory: an archive volume missing from the pod is reported as
+// an init failure (ArchiveStoreInitFailed on the operator side) without
+// starting an archiver, and the next attempt after the volume appears
+// starts exactly one.
+func TestArchiverSupervisorPVCNotMountedThenMounted(t *testing.T) {
+	cfg := storeInitPITRConfig(t)
+	cfg.PVC.Writable = true
+	var verifies atomic.Int32
+	cfg.PVC.MountVerifier = func(path string) error {
+		if verifies.Add(1) == 1 {
+			return checkMountPoint(path, strings.NewReader("36 25 0:32 / / rw shared:1 - overlay overlay rw"))
+		}
+		return nil
+	}
+	backoff := newStoreInitBackoff()
+	archivers := newStoreInitArchivers()
+	sup := NewArchiverSupervisor(cfg, "iad", &stubRoleChecker{readOnly: true}, NewArchiveStore, testLogger())
+	sup.wait = backoff.wait
+	sup.runArchiver = archivers.run
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sup.Run(ctx)
+	}()
+
+	recvWithin(t, backoff.delays, "backoff wait")
+	st := sup.Snapshot(ctx)
+	if !st.Enabled || st.StoreReady == nil || *st.StoreReady {
+		t.Fatalf("after the failed attempt: %+v, want enabled with storeReady=false", st)
+	}
+	if !strings.HasPrefix(st.LastError, "archive store init: pvc archive store: ") ||
+		!strings.Contains(st.LastError, "is not a mount point") {
+		t.Fatalf("lastError = %q, want the mount check failure", st.LastError)
+	}
+	if archivers.count.Load() != 0 {
+		t.Fatal("archiver started on an unmounted archive volume")
+	}
+
+	backoff.release <- struct{}{}
+	recvWithin(t, archivers.started, "archiver start")
+	st = sup.Snapshot(ctx)
+	if st.StoreReady == nil || !*st.StoreReady || st.LastError != "" {
+		t.Fatalf("after the volume appeared: storeReady=%v lastError=%q", st.StoreReady, st.LastError)
+	}
+	cancel()
+	recvWithin(t, done, "supervisor exit")
+	if n := archivers.count.Load(); n != 1 {
+		t.Fatalf("archiver started %d times, want exactly 1", n)
+	}
+	if n := verifies.Load(); n != 2 {
+		t.Fatalf("mount verified %d times, want 2", n)
 	}
 }

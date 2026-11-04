@@ -71,7 +71,7 @@ func runPITRDownload(args []string) {
 		}
 	}
 
-	cfg, err := pitrDownloadConfigFromEnv()
+	cfg, err := pitrDownloadStoreConfig()
 	if err != nil {
 		logger.Error("invalid archive config", "error", err)
 		os.Exit(2)
@@ -87,7 +87,7 @@ func runPITRDownload(args []string) {
 		cancel()
 	}()
 
-	store, err := sidecar.NewArchiveStore(ctx, cfg)
+	store, err := newArchiveStore(ctx, cfg)
 	if err != nil {
 		logger.Error("init archive store", "error", err)
 		os.Exit(2)
@@ -122,6 +122,31 @@ func runPITRDownload(args []string) {
 		totalDownloaded += len(site.Staged)
 	}
 	logger.Info("pitr-download complete", "files", totalDownloaded, "sites", len(sites))
+}
+
+// newArchiveStore builds every subcommand's archive store. Tests that
+// cannot pass a PVC mount verifier through the environment (re-executed
+// subcommands) wrap it; production never replaces it.
+var newArchiveStore = sidecar.NewArchiveStore
+
+// pitrDownloadStoreConfig is the archive config for pitr-download. It
+// only reads (the restore mounts the PVC read-only), so the PVC store
+// verifies the mount but does not probe write access.
+func pitrDownloadStoreConfig() (*sidecar.PITRConfig, error) {
+	return pitrDownloadConfigFromEnv()
+}
+
+// pitrQuarantineStoreConfig is the archive config for pitr-quarantine,
+// which rewrites manifests under BLOODRAVEN_PITR_MANIFEST_PREFIX.
+func pitrQuarantineStoreConfig() (*sidecar.PITRConfig, error) {
+	cfg, err := pitrDownloadConfigFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	if cfg.PVC != nil {
+		cfg.PVC.Writable = true
+	}
+	return cfg, nil
 }
 
 // pitrDownloadConfigFromEnv builds a sidecar.PITRConfig from the same

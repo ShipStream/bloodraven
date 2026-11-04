@@ -16,7 +16,7 @@ import (
 // caller sees plaintext; the underlying files on disk are ciphertext.
 func TestEncryptedStore_RoundTrip(t *testing.T) {
 	tmp := t.TempDir()
-	inner, err := newPVCStore(&PITRPVCConfig{MountPath: tmp})
+	inner, err := newPVCStore(testPVCConfig(tmp), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestEncryptedStore_RoundTrip(t *testing.T) {
 
 func TestEncryptedStore_PutFile_GetFile(t *testing.T) {
 	tmp := t.TempDir()
-	inner, err := newPVCStore(&PITRPVCConfig{MountPath: tmp})
+	inner, err := newPVCStore(testPVCConfig(tmp), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestEncryptedStore_PutFile_GetFile(t *testing.T) {
 // defeats AES-GCM's authenticity guarantee.
 func TestEncryptedStore_PlaintextRejectedByDefault(t *testing.T) {
 	tmp := t.TempDir()
-	inner, err := newPVCStore(&PITRPVCConfig{MountPath: tmp})
+	inner, err := newPVCStore(testPVCConfig(tmp), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestEncryptedStore_PlaintextRejectedByDefault(t *testing.T) {
 // encryption can still read previously-written plaintext.
 func TestEncryptedStore_PlaintextPassthroughOptIn(t *testing.T) {
 	tmp := t.TempDir()
-	inner, err := newPVCStore(&PITRPVCConfig{MountPath: tmp})
+	inner, err := newPVCStore(testPVCConfig(tmp), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestEncryptedStore_PlaintextPassthroughOptIn(t *testing.T) {
 
 func TestWrapWithEncryption_EmptyPassphraseReturnsInner(t *testing.T) {
 	tmp := t.TempDir()
-	inner, err := newPVCStore(&PITRPVCConfig{MountPath: tmp})
+	inner, err := newPVCStore(testPVCConfig(tmp), "")
 	if err != nil {
 		t.Fatal(err)
 	}
