@@ -9,6 +9,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	"github.com/shipstream/bloodraven/internal/clock"
@@ -537,45 +538,18 @@ func TestPlannedFailover_DefersToPredecessorUpdate(t *testing.T) {
 			t.Fatal("source fenced although the predecessor's update was still running")
 		}
 	})
-	t.Run("promoting rolls back", func(t *testing.T) {
-		fg := plannedFailoverFG("")
-		fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
-			Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
-		}
-		nn := fgNN(fg)
-		iad := &mockMySQL{readOnly: true, superReadOnly: true}
-		pdx := &mockMySQL{readOnly: true, superReadOnly: true}
-		r, _ := newReconciler(fg)
-		r.Runner = plannedDrainRunner(nn, iad, pdx)
-		tm, err := r.Runner.plannedFailoverManager(nn)
-		if err != nil {
-			t.Fatal(err)
-		}
-		tm.setPredecessorUpdateInFlight(true)
-		if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
-			t.Fatalf("reconcile: %v", err)
-		}
-		pf := fetchFG(t, r, nn).Status.PlannedFailover
-		if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "ConcurrentOperation" {
-			t.Fatalf("phase=%q reason=%q (%s), want Failed/ConcurrentOperation", pf.Phase, pf.Reason, pf.Message)
-		}
-		if iad.superReadOnly || iad.readOnly || !pdx.readOnly {
-			t.Errorf("iad super_read_only=%v read_only=%v, pdx read_only=%v; want iad unfenced and pdx untouched",
-				iad.superReadOnly, iad.readOnly, pdx.readOnly)
-		}
-	})
 }
 
-// A rollback never unfences the source while another site is writable. The
-// predecessor's update may already have promoted the target; and in any
-// rollback a writable peer means unfencing would make a split brain.
+// A rollback never unfences the source while another site is writable:
+// unfencing would make a split brain. A peer that merely cannot be probed
+// does not block an ordinary rollback (a down third site must not keep
+// writes out); the predecessor case is stricter, see below.
 func TestPlannedFailoverRollback_LeavesSourceFencedWhenPeerWritable(t *testing.T) {
 	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
 	for _, tc := range []struct {
 		name  string
 		setup func(tm *TopologyManager)
 	}{
-		{"predecessor update promoted the target", func(tm *TopologyManager) { tm.setPredecessorUpdateInFlight(true) }},
 		{"rotation refusal rollback", func(tm *TopologyManager) { tm.restoreKeyringRotationReservations([]string{"pdx"}) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -608,4 +582,135 @@ func TestPlannedFailoverRollback_LeavesSourceFencedWhenPeerWritable(t *testing.T
 			}
 		})
 	}
+}
+
+func TestPlannedFailoverRollback_UnreadablePeerStillUnfences(t *testing.T) {
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fg := plannedFailoverFG("")
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+	}
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true}
+	pdx := &mockMySQL{readOnly: true, err: errors.New("probe timeout")}
+	r, _ := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	tm, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm.restoreKeyringRotationReservations([]string{"pdx"})
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "KeyringRotation" {
+		t.Fatalf("phase=%q reason=%q (%s), want Failed/KeyringRotation", pf.Phase, pf.Reason, pf.Message)
+	}
+	iad.mu.Lock()
+	unfenced := !iad.superReadOnly && !iad.readOnly
+	iad.mu.Unlock()
+	if !unfenced {
+		t.Fatal("an unreadable peer kept an ordinary rollback from unfencing the source")
+	}
+}
+
+// GPT round 7: while a replaced manager's ordered update still runs, a
+// Promoting planned failover neither probes nor unfences: the update may
+// complete a promotion after any probe. It waits for the update to exit,
+// then decides from what is left, never promoting.
+func TestPlannedFailoverPromoting_AwaitsPredecessorUpdate(t *testing.T) {
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	setup := func(t *testing.T, pdx *mockMySQL) (*MysqlFailoverGroupReconciler, types.NamespacedName, *TopologyManager, *mockMySQL) {
+		t.Helper()
+		fg := plannedFailoverFG("")
+		fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+			Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+		}
+		nn := fgNN(fg)
+		iad := &mockMySQL{readOnly: true, superReadOnly: true}
+		r, _ := newReconciler(fg)
+		r.Runner = plannedDrainRunner(nn, iad, pdx)
+		tm, err := r.Runner.plannedFailoverManager(nn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tm.setPredecessorUpdateInFlight(true)
+		return r, nn, tm, iad
+	}
+	reconcile := func(t *testing.T, r *MysqlFailoverGroupReconciler, nn types.NamespacedName) *v1alpha1.PlannedFailoverStatus {
+		t.Helper()
+		if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		return fetchFG(t, r, nn).Status.PlannedFailover
+	}
+	fenced := func(m *mockMySQL) bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.superReadOnly && m.readOnly
+	}
+
+	t.Run("promotion completing after the wait began leaves the source fenced", func(t *testing.T) {
+		pdx := &mockMySQL{readOnly: true, superReadOnly: true}
+		r, nn, tm, iad := setup(t, pdx)
+		pf := reconcile(t, r, nn)
+		if pf.Phase != v1alpha1.PlannedFailoverPhasePromoting || pf.Reason != plannedFailoverReasonPredecessorUpdate || !fenced(iad) {
+			t.Fatalf("phase=%q reason=%q (%s), source fenced=%v; want Promoting, waiting, fenced", pf.Phase, pf.Reason, pf.Message, fenced(iad))
+		}
+		if pdx.checkReadOnlyCalls != 0 {
+			t.Fatalf("probed peers while the predecessor's update was still running (%d probes)", pdx.checkReadOnlyCalls)
+		}
+		// The predecessor's in-flight promotion lands, then it exits.
+		pdx.setReadOnly(false)
+		tm.setPredecessorUpdateInFlight(false)
+		pf = reconcile(t, r, nn)
+		if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || !strings.Contains(pf.Message, "left fenced") || strings.Contains(pf.Message, "<nil>") {
+			t.Fatalf("phase=%q (%s), want Failed with the source left fenced", pf.Phase, pf.Message)
+		}
+		if !fenced(iad) {
+			t.Fatal("source unfenced beside the predecessor's newly promoted primary")
+		}
+	})
+
+	t.Run("exit with every peer read-only unfences without promoting", func(t *testing.T) {
+		pdx := &mockMySQL{readOnly: true, superReadOnly: true}
+		r, nn, tm, iad := setup(t, pdx)
+		reconcile(t, r, nn)
+		tm.setPredecessorUpdateInFlight(false)
+		pf := reconcile(t, r, nn)
+		if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "ConcurrentOperation" || fenced(iad) {
+			t.Fatalf("phase=%q reason=%q (%s), source fenced=%v; want Failed/ConcurrentOperation, unfenced", pf.Phase, pf.Reason, pf.Message, fenced(iad))
+		}
+		if pdx.promoted {
+			t.Fatal("promoted after a predecessor's update ran; its lag proof may be stale")
+		}
+	})
+
+	t.Run("an unreadable peer after exit leaves the source fenced", func(t *testing.T) {
+		pdx := &mockMySQL{readOnly: true, superReadOnly: true}
+		r, nn, tm, iad := setup(t, pdx)
+		reconcile(t, r, nn)
+		pdx.setError(errors.New("unreachable"))
+		tm.setPredecessorUpdateInFlight(false)
+		pf := reconcile(t, r, nn)
+		if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || !strings.Contains(pf.Message, "unreadable: [pdx]") || !fenced(iad) {
+			t.Fatalf("phase=%q (%s), source fenced=%v; want Failed naming pdx unreadable, source fenced", pf.Phase, pf.Message, fenced(iad))
+		}
+	})
+
+	t.Run("a predecessor that never exits ends the wait with the source fenced", func(t *testing.T) {
+		pdx := &mockMySQL{readOnly: true, superReadOnly: true}
+		r, nn, _, iad := setup(t, pdx)
+		reconcile(t, r, nn)
+		fg := fetchFG(t, r, nn)
+		past := metav1.NewTime(time.Now().Add(-time.Second))
+		fg.Status.PlannedFailover.RetryAfter = &past
+		if err := r.Status().Update(context.Background(), fg); err != nil {
+			t.Fatal(err)
+		}
+		pf := reconcile(t, r, nn)
+		if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || !strings.Contains(pf.Message, "did not exit") || !fenced(iad) {
+			t.Fatalf("phase=%q (%s), source fenced=%v; want Failed, source fenced", pf.Phase, pf.Message, fenced(iad))
+		}
+	})
 }

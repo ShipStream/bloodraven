@@ -319,6 +319,24 @@ func TestKeyringEscrowRecover(t *testing.T) {
 		}
 	})
 
+	t.Run("--pod accepts a terminating pod, with a warning", func(t *testing.T) {
+		e := newEscrowEnv(t, keys, nil)
+		e.pods(t, "mysql-lion-dc2-0\t2026-01-01T00:00:00Z\tfalse\n")
+		if out, err := e.run(t, recorded); err == nil {
+			t.Fatalf("auto-selection picked a terminating pod:\n%s", out)
+		}
+		out, err := e.run(t, recorded, "--pod", "mysql-lion-dc2-0")
+		if err != nil {
+			t.Fatalf("script failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "WARNING") || !strings.Contains(out, "terminating") {
+			t.Errorf("no warning for a terminating pod:\n%s", out)
+		}
+		if got := e.secret(t); string(got) != string(keys) {
+			t.Fatalf("escrow Secret = %q, want the terminating pod's keyring", got)
+		}
+	})
+
 	t.Run("pod keyring not matching status writes nothing", func(t *testing.T) {
 		e := newEscrowEnv(t, []byte("diverged"), nil)
 		if out, err := e.run(t, recorded); err == nil {

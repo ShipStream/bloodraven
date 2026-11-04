@@ -710,6 +710,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 			"failed_other")
 	}
 
+	// A replaced manager's ordered update ran, or still runs, during this
+	// planned failover: wait for it, then decide from what it left.
+	if cur.Reason == plannedFailoverReasonPredecessorUpdate || r.Runner.OrderedUpdateUnwinding(nn) {
+		return r.plannedFailoverAwaitPredecessor(ctx, fg, nn)
+	}
+
 	promoteCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	promotionGtid, err := r.Runner.PlannedFailoverPromote(promoteCtx, nn, cur.Target, cur.SourcePrimary)
 	cancel()
@@ -721,22 +727,7 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 				"rejected")
 		}
 		if errors.Is(err, errPredecessorUpdateInFlight) {
-			// The replaced manager's update may itself be fencing or
-			// promoting these sites, so an unreadable peer is as
-			// disqualifying as a writable one: leave the source fenced.
-			probeCtx, cancelProbe := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			writable, unknown, probeErr := r.Runner.PlannedFailoverWritablePeers(probeCtx, nn, cur.SourcePrimary)
-			cancelProbe()
-			if probeErr != nil || len(writable)+len(unknown) > 0 {
-				return r.plannedFailoverFail(ctx, fg, "ConcurrentOperation",
-					fmt.Sprintf("%v; source %q left fenced: writable %v, unreadable %v (probe error: %v); manual recovery required",
-						err, cur.SourcePrimary, writable, unknown, probeErr),
-					"failed_other")
-			}
-			return r.plannedFailoverRollback(ctx, fg, nn, "ConcurrentOperation",
-				fmt.Sprintf("%v; nothing was sent to %q; source %q unfenced, re-annotate to retry",
-					err, cur.Target, cur.SourcePrimary),
-				"rejected")
+			return r.plannedFailoverAwaitPredecessor(ctx, fg, nn)
 		}
 		if errors.Is(err, errHandoffNotAdmitted) {
 			return r.plannedFailoverRollback(ctx, fg, nn, "RecoveryInFlight",
@@ -766,6 +757,71 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 		return 0, err
 	}
 	return 1 * time.Second, nil
+}
+
+// plannedFailoverReasonPredecessorUpdate marks, in a Promoting status, that
+// a replaced topology manager's ordered update was seen during this planned
+// failover. It survives the update exiting, so the decision stays "do not
+// promote": that update may have handed off, or unfenced the source and let
+// it take writes after the lag proof.
+const plannedFailoverReasonPredecessorUpdate = "PredecessorUpdateInFlight"
+
+// plannedFailoverPredecessorWait bounds how long Promoting waits, with the
+// source fenced, for a replaced manager's ordered update to exit. Its
+// context is cancelled, so it normally takes seconds.
+const plannedFailoverPredecessorWait = 2 * time.Minute
+
+// plannedFailoverAwaitPredecessor holds a planned failover in Promoting
+// while a replaced manager's ordered update is still unwinding on the
+// sites, and decides only once it has exited. Probing peers while it still
+// runs would race a promotion it has already issued, so nothing is probed,
+// promoted or unfenced meanwhile. Afterwards nothing is promoted either;
+// the source is unfenced only if every other site is confirmed read-only.
+// A writable peer, an unreadable one (the update may have promoted a site
+// this manager cannot reach), or a wait past plannedFailoverPredecessorWait
+// leaves the source fenced for a human: the safe choice when the outcome
+// cannot be established.
+func (r *MysqlFailoverGroupReconciler) plannedFailoverAwaitPredecessor(ctx context.Context, fg *v1alpha1.MysqlFailoverGroup, nn types.NamespacedName) (time.Duration, error) {
+	cur := fg.Status.PlannedFailover
+	now := time.Now()
+	if r.Runner.OrderedUpdateUnwinding(nn) {
+		if cur.Reason != plannedFailoverReasonPredecessorUpdate || cur.RetryAfter == nil {
+			next := cur.DeepCopy()
+			next.Reason = plannedFailoverReasonPredecessorUpdate
+			deadline := metav1.NewTime(now.Add(plannedFailoverPredecessorWait))
+			next.RetryAfter = &deadline
+			next.Message = fmt.Sprintf("waiting for a replaced topology manager's ordered update to exit; source %q stays fenced", cur.SourcePrimary)
+			if err := r.setPlannedFailoverStatus(ctx, fg, next); err != nil {
+				return 0, err
+			}
+			return 2 * time.Second, nil
+		}
+		if now.Before(cur.RetryAfter.Time) {
+			return 2 * time.Second, nil
+		}
+		return r.plannedFailoverFail(ctx, fg, "ConcurrentOperation",
+			fmt.Sprintf("planned-failover: a replaced topology manager's ordered update did not exit within %s; source %q left fenced because what it did to the sites cannot be established; manual recovery required",
+				plannedFailoverPredecessorWait, cur.SourcePrimary),
+			"failed_other")
+	}
+
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	writable, unknown, probeErr := r.Runner.PlannedFailoverWritablePeers(probeCtx, nn, cur.SourcePrimary)
+	cancel()
+	if probeErr != nil || len(writable)+len(unknown) > 0 {
+		detail := fmt.Sprintf("writable: %v, unreadable: %v", writable, unknown)
+		if probeErr != nil {
+			detail = fmt.Sprintf("peers could not be probed: %v", probeErr)
+		}
+		return r.plannedFailoverFail(ctx, fg, "ConcurrentOperation",
+			fmt.Sprintf("planned-failover: a replaced topology manager's ordered update ran during this planned failover; source %q left fenced (%s); manual recovery required",
+				cur.SourcePrimary, detail),
+			"failed_other")
+	}
+	return r.plannedFailoverRollback(ctx, fg, nn, "ConcurrentOperation",
+		fmt.Sprintf("planned-failover: a replaced topology manager's ordered update ran during this planned failover; nothing was promoted and every other site is read-only; source %q unfenced, re-annotate to retry",
+			cur.SourcePrimary),
+		"rejected")
 }
 
 // plannedFailoverResuming writes the shared lastFailover/

@@ -1532,3 +1532,66 @@ func TestReconcileEncryption_DeferralNoteClearsWithRequest(t *testing.T) {
 		t.Fatalf("re-annotated request under the same block raised %d refusal events, want 1", events)
 	}
 }
+
+// GPT round 7: a deferred request survives an escrow failure, and the
+// repair (Failed back to Sealed, without rotating) must not consume it
+// either. Once the block clears, the rotation starts without re-annotating.
+func TestReconcileEncryption_DeferredRotationSurvivesEscrowRepair(t *testing.T) {
+	ctx := context.Background()
+	fg := sealedGroupWithActive("dc1")
+	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	digest := siteStatus(fg, "dc2").KeyringDigest
+	r, c := encReconciler(t, scriptedKeyring(map[string]*internalmysql.KeyringStatus{
+		"dc1": liveKeyring(digest, true), "dc2": liveKeyring(digest, true),
+	}), fg)
+	seedEscrow(t, c, fg)
+	tm := rotationRunner(r, c)
+	tm.mu.Lock()
+	tm.deploymentUpdatePending = true
+	tm.mu.Unlock()
+	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
+	pass := func() *v1alpha1.MysqlFailoverGroup {
+		t.Helper()
+		var latest v1alpha1.MysqlFailoverGroup
+		if err := c.Get(ctx, nn, &latest); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.reconcileEncryptionAtRest(ctx, &latest); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+		if err := c.Get(ctx, nn, &latest); err != nil {
+			t.Fatal(err)
+		}
+		if latest.Annotations[RotateKeyringAnnotation] != "dc2" {
+			t.Fatalf("rotation request consumed; dc2 = %+v", siteStatus(&latest, "dc2"))
+		}
+		return &latest
+	}
+
+	escrowName := siteStatus(fg, "dc2").KeyringSecret
+	var escrow corev1.Secret
+	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: escrowName}, &escrow); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(ctx, escrow.DeepCopy()); err != nil {
+		t.Fatal(err)
+	}
+	if s := siteStatus(pass(), "dc2"); s.Phase != v1alpha1.KeyringPhaseFailed {
+		t.Fatalf("dc2 = %+v, want Failed on the missing escrow", s)
+	}
+
+	escrow.ResourceVersion = ""
+	if err := c.Create(ctx, &escrow); err != nil {
+		t.Fatalf("restore escrow: %v", err)
+	}
+	if s := siteStatus(pass(), "dc2"); s.Phase != v1alpha1.KeyringPhaseSealed {
+		t.Fatalf("dc2 = %+v, want Sealed after the escrow repair", s)
+	}
+
+	tm.mu.Lock()
+	tm.deploymentUpdatePending = false
+	tm.mu.Unlock()
+	if s := siteStatus(pass(), "dc2"); s.Phase != v1alpha1.KeyringPhaseUnsealed || s.UnsealReason != v1alpha1.UnsealReasonRotation {
+		t.Fatalf("dc2 = %+v: the kept request did not start the rotation once unblocked", s)
+	}
+}

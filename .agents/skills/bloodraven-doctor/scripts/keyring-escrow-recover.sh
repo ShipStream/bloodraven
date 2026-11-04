@@ -23,8 +23,11 @@ Usage: keyring-escrow-recover.sh -n <namespace> <mysql-failover-group> <site> [-
 
   The site's MySQL pod is the one Running, not terminating, with a Ready
   "mysql" container, selected exactly as its Deployment selects it. If there
-  is not exactly one, the script refuses; --pod <pod> names it explicitly
-  (it must still be that site's MySQL pod with a running "mysql" container).
+  is not exactly one, the script refuses; --pod <pod> names it explicitly.
+  The named pod must be a Running MySQL pod of that site; it may be
+  terminating (with Recreate, a pod in its grace period can hold the last
+  copy of the keyring), which is reported as a warning. The digest check
+  still runs before anything is written.
 
   Without --replace-corrupt: recreate the site's missing escrow Secret from
   the running pod's keyring. Refuses if the Secret exists.
@@ -105,15 +108,18 @@ PODS=$(kubectl get pod -n "$NAMESPACE" -l "$SELECTOR" --field-selector=status.ph
     -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\t"}{.status.containerStatuses[?(@.name=="mysql")].ready}{"\n"}{end}') \
     || die "cannot list the site's pods"
 if [[ -n "$POD" ]]; then
-    printf '%s\n' "$PODS" | awk -F'\t' -v p="$POD" '$1 == p && $2 == "" {found=1} END {exit !found}' \
-        || die "--pod $POD is not a Running, non-terminating MySQL pod of site $SITE"
+    DELETING=$(printf '%s\n' "$PODS" | awk -F'\t' -v p="$POD" '$1 == p {print ($2 == "" ? "no" : "yes"); found=1} END {exit !found}') \
+        || die "--pod $POD is not a Running MySQL pod of site $SITE"
+    if [[ "$DELETING" == "yes" ]]; then
+        echo "keyring-escrow-recover: WARNING: $POD is terminating; reading its keyring before its grace period ends. It may be the last copy." >&2
+    fi
 else
     READY=$(printf '%s\n' "$PODS" | awk -F'\t' 'NF && $2 == "" && $3 == "true" {print $1}')
     COUNT=$(printf '%s\n' "$READY" | grep -c . || true)
     if [[ "$COUNT" -ne 1 ]]; then
         echo "keyring-escrow-recover: site $SITE has $COUNT Ready MySQL pods; Running pods (name, deleting, mysql ready):" >&2
         printf '%s\n' "$PODS" >&2
-        die "refusing to guess. If exactly one of them still holds the keyring, re-run with --pod <name>; if none runs, the keyring is gone: follow the reclone step of the runbook"
+        die "refusing to guess. If one of them still holds the keyring, re-run now with --pod <name>; a terminating pod is accepted that way and must be read before its grace period ends. If none runs, the keyring is gone: follow the reclone step of the runbook"
     fi
     POD=$READY
 fi

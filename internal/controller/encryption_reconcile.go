@@ -139,9 +139,12 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 
 	requeue := time.Duration(0)
 	allSealed := true
-	// rotationDeferred: the requested rotation was refused for now and is
-	// retried, so its annotation must survive this pass.
-	rotationDeferred := false
+	// rotation records what this pass did with the rotate-keyring request.
+	// The annotation is removed only when the request was consumed: the
+	// rotation completed, or it was refused for good. Anything else, a
+	// deferral, a site that recovered from Failed without rotating, keeps
+	// it for a later pass.
+	var rotation rotationRequestOutcome
 
 	// A rotation admitted this pass holds a reservation that blocks its
 	// promotion until an authoritative view of the status lacks it. A pass
@@ -159,7 +162,11 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 		site := &st.Sites[i]
 		before := *site
 
-		wantRequeue, err := r.reconcileSiteKeyring(ctx, fg, site, store, fetch, rotateTarget, &rotationDeferred)
+		wantRequeue, err := r.reconcileSiteKeyring(ctx, fg, site, store, fetch, rotateTarget, &rotation)
+		if site.Name == rotateTarget && before.Phase == v1alpha1.KeyringPhaseEscrowed &&
+			before.UnsealReason == v1alpha1.UnsealReasonRotation && site.Phase == v1alpha1.KeyringPhaseSealed {
+			rotation.consumed = true
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -203,9 +210,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 
 	// Clear a consumed rotation annotation once the target site is back
 	// to Sealed, as persisted, so the admin can trigger the next rotation
-	// without having to remove the annotation by hand. A deferred request
-	// has not been consumed.
-	if rotateTarget != "" && !rotationDeferred {
+	// without having to remove the annotation by hand.
+	if rotateTarget != "" && rotation.consumed && !rotation.deferred {
 		if s := written.SiteEncryptionStatusByName(rotateTarget); s != nil && s.Phase == v1alpha1.KeyringPhaseSealed && s.UnsealReason == "" {
 			if err := r.clearRotateAnnotation(ctx, fg); err != nil {
 				logger.Error(err, "failed to clear rotate-keyring annotation")
@@ -251,7 +257,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 	store *keyringEscrowStore,
 	fetch keyringStatusFetcher,
 	rotateTarget string,
-	rotationDeferred *bool,
+	rotation *rotationRequestOutcome,
 ) (bool, error) {
 	now := metav1.Now()
 
@@ -287,6 +293,9 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringRotationRefused",
 				"refusing to rotate keyring on site %s: %s", site.Name, why)
 			site.Message = why
+			if rotation != nil {
+				rotation.consumed = true
+			}
 			return false, nil
 		}
 		if !ok {
@@ -297,8 +306,8 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 			// Sealed, so its drift check runs as on any other pass: a
 			// deferred rotation must not silence a missing or diverged
 			// escrow. One event per reason.
-			if rotationDeferred != nil {
-				*rotationDeferred = true
+			if rotation != nil {
+				rotation.deferred = true
 			}
 			deferred := rotationDeferredNote + why
 			if !strings.Contains(site.Message, deferred) {
@@ -1016,6 +1025,14 @@ func setEncryptionCondition(fg *v1alpha1.MysqlFailoverGroup) {
 // with its requeue, and Reconcile must stop before rendering anything: the
 // ConfigMaps and Deployments are driven by the discarded keyring state.
 var errEncryptionStatusMoved = errors.New("encryption status changed since this reconcile read it")
+
+// rotationRequestOutcome is what a reconcile pass did with the
+// rotate-keyring request: deferred it (kept, retried), or consumed it
+// (rotation completed, or refused for good: the annotation is removed).
+type rotationRequestOutcome struct {
+	deferred bool
+	consumed bool
+}
 
 // rotationDeferredNote prefixes the reason in a Sealed site's message while
 // its requested rotation waits.
