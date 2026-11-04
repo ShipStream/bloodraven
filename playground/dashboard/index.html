@@ -135,6 +135,11 @@ function renderSites(msg) {
   if (writableCount > 1) {
     healthClass = 'critical';
     healthText = 'SPLIT BRAIN \u2014 multiple sites writable';
+  } else if (writableCount === 0 && sites.some(s => (s.state || 'unknown') === 'unknown' && s.role !== 'read-only' && s.role !== 'dr-only')) {
+    // The operator reports Initializing, not NoPrimary, until it has
+    // classified every primary-candidate since it started.
+    healthClass = 'warning';
+    healthText = 'INITIALIZING \u2014 classifying sites after operator start';
   } else if (writableCount === 0 && sites.length > 0) {
     healthClass = 'critical';
     healthText = 'NO PRIMARY \u2014 no writable site';

@@ -132,6 +132,8 @@ type SiteSnapshot struct {
 	SourceConvergenceReason string
 	ServingHealthy          bool
 	ReplicationHealthy      bool
+	// PendingWritable mirrors state.SiteObservation.PendingWritable.
+	PendingWritable bool
 
 	// Per-site old-primary recovery state ("", RecoveryInProgress, or
 	// RecoveryBlocked) with the divergence report when blocked. Multiple
@@ -176,7 +178,7 @@ type TopologySnapshot struct {
 	LastFailover       time.Time
 	LastFailoverTarget string
 	Alert              string // non-empty if a cross-site alert fired this cycle
-	DegradedReason     string // one of "Healthy", "Degraded", "SplitBrain", "NoPrimary", "TotalLoss", or ""
+	DegradedReason     string // one of "Healthy", "Degraded", "SplitBrain", "NoPrimary", "TotalLoss", "Initializing", or ""
 	UpdatePhase        string // non-empty if an ordered update is in progress
 	BootstrapPhase     string // non-empty if a fresh-deploy bootstrap is in progress or finished
 	BootstrapError     string // non-empty if bootstrap failed
@@ -230,7 +232,11 @@ type siteTracker struct {
 	state         state.SiteState
 	failCount     int
 	recoveryCount int
-	lastSeen      time.Time // last successful poll
+	// lastAnswerWritable is whether the latest successful probe answered
+	// read_only=0. A failed probe leaves it unchanged, as it leaves state.
+	// Protected by TopologyManager.mu.
+	lastAnswerWritable bool
+	lastSeen           time.Time // last successful poll
 	// nextProbe is when an unreachable site is next probed. Backoff is
 	// per site: a site that stays down is probed less often, and the
 	// other sites keep the base cadence. Zero means probe every poll.
@@ -268,7 +274,15 @@ func (t *siteTracker) isPromotable() bool {
 // observation returns this tracker's current state as a SiteObservation
 // suitable for feeding EvalCrossSite. Caller must hold tm.mu (read).
 func (t *siteTracker) observation() state.SiteObservation {
-	return state.SiteObservation{Name: t.name, Role: t.role, State: t.state}
+	return state.SiteObservation{Name: t.name, Role: t.role, State: t.state, PendingWritable: t.pendingWritable()}
+}
+
+// pendingWritable reports whether a site not yet classified since the
+// operator started last answered writable. Every way out of this (a
+// confirmed state, or a read-only answer) is a state transition, so a
+// cross-site decision it holds back is re-evaluated without a retry.
+func (t *siteTracker) pendingWritable() bool {
+	return t.state == state.StateUnknown && t.lastAnswerWritable
 }
 
 // siteMetricLabels returns the identity labels for site-scoped gauges.
@@ -1264,6 +1278,7 @@ func (tm *TopologyManager) poll(ctx context.Context, backoff bool) {
 	for i := range tm.sites {
 		if results[i].err == nil {
 			tm.sites[i].lastSeen = now
+			tm.sites[i].lastAnswerWritable = !results[i].readOnly
 		}
 		tm.sites[i].probeFailed = results[i].err != nil
 		prevStates[i] = tm.sites[i].state
@@ -1885,6 +1900,7 @@ func (tm *TopologyManager) buildSnapshot(siteRepl []*mysql.ReplicaStatus) Topolo
 			SourceConvergenceReason: tm.sites[i].sourceConvergenceReason,
 			ServingHealthy:          tm.sites[i].servingHealthy,
 			ReplicationHealthy:      tm.sites[i].replicating,
+			PendingWritable:         tm.sites[i].pendingWritable(),
 		}
 		if rec := tm.recovery[tm.sites[i].name]; rec != nil {
 			sites[i].RecoveryState = rec.state

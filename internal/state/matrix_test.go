@@ -60,8 +60,7 @@ func TestEvalCrossSite_TwoSite(t *testing.T) {
 		{
 			name:         "all unknown candidates are not healthy",
 			observations: []SiteObservation{obs("iad", pc, StateUnknown), obs("pdx", pc, StateUnknown)},
-			wantAlert:    true,
-			wantReason:   "NoPrimary",
+			wantReason:   "Initializing",
 		},
 	}
 
@@ -232,6 +231,122 @@ func TestEvalCrossSite_ReadOnlyReaderIsolation(t *testing.T) {
 			}
 			if len(got.FenceSites) > 0 && len(got.PromotionCandidates) > 0 {
 				t.Fatalf("fencing and promotion must not be emitted together: %+v", got)
+			}
+		})
+	}
+}
+
+func pendingObs(name string) SiteObservation {
+	return SiteObservation{Name: name, Role: SiteRolePrimaryCandidate, State: StateUnknown, PendingWritable: true}
+}
+
+// Unknown is the state every site starts in after an operator start, until
+// the debounce classifies it (issue #216).
+func TestEvalCrossSite_Unclassified(t *testing.T) {
+	pc := SiteRolePrimaryCandidate
+	dr := SiteRoleDROnly
+	reader := SiteRoleReadOnly
+	tests := []struct {
+		name           string
+		obs            []SiteObservation
+		wantReason     string
+		wantAlert      string // substring; "" means no alert
+		wantCandidates []string
+		wantFence      []string
+	}{
+		{
+			name:       "first poll: writable primary awaiting confirmation, read-only standby",
+			obs:        []SiteObservation{pendingObs("iad"), obs("pdx", pc, StateReadOnly)},
+			wantReason: "Initializing",
+		},
+		{
+			name:       "candidate whose probes have only failed so far",
+			obs:        []SiteObservation{obs("iad", pc, StateUnknown), obs("pdx", pc, StateReadOnly)},
+			wantReason: "Initializing",
+		},
+		{
+			name:       "genuine all read-only is still NoPrimary",
+			obs:        []SiteObservation{obs("iad", pc, StateReadOnly), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateUnknown)},
+			wantReason: "NoPrimary",
+			wantAlert:  "NO PRIMARY: both sites are read-only",
+		},
+		{
+			name:       "PendingWritable is ignored once a site is classified",
+			obs:        []SiteObservation{{Name: "iad", Role: pc, State: StateReadOnly, PendingWritable: true}, obs("pdx", pc, StateReadOnly)},
+			wantReason: "NoPrimary",
+			wantAlert:  "NO PRIMARY",
+		},
+		{
+			name:       "an unclassified dr-only site cannot be the primary",
+			obs:        []SiteObservation{obs("iad", pc, StateReadOnly), obs("pdx", pc, StateReadOnly), obs("lhr", dr, StateUnknown)},
+			wantReason: "NoPrimary",
+			wantAlert:  "NO PRIMARY",
+		},
+		{
+			name:       "no site is promoted over a writable answer",
+			obs:        []SiteObservation{pendingObs("iad"), obs("pdx", pc, StateUnreachable), obs("fra", pc, StateReadOnly)},
+			wantReason: "Initializing",
+		},
+		{
+			name:           "an unclassified site that never answered does not delay failover",
+			obs:            []SiteObservation{obs("iad", pc, StateUnreachable), obs("pdx", pc, StateReadOnly), obs("fra", pc, StateUnknown)},
+			wantReason:     "Degraded",
+			wantCandidates: []string{"pdx"},
+		},
+		{
+			name:       "threshold-confirmed total loss is unaffected",
+			obs:        []SiteObservation{obs("iad", pc, StateUnreachable), obs("pdx", pc, StateUnreachable)},
+			wantReason: "TotalLoss",
+			wantAlert:  "TOTAL LOSS",
+		},
+		{
+			name:       "writable answer while the peer is confirmed unreachable",
+			obs:        []SiteObservation{pendingObs("iad"), obs("pdx", pc, StateUnreachable)},
+			wantReason: "Initializing",
+		},
+		{
+			name:       "confirmed writable plus a writable answer is not hidden",
+			obs:        []SiteObservation{obs("iad", pc, StateWritable), pendingObs("pdx")},
+			wantReason: "SplitBrain",
+			wantAlert:  "SPLIT BRAIN: 2 sites are writable (iad, pdx); pdx not yet confirmed",
+		},
+		{
+			name:       "two writable answers before either is confirmed",
+			obs:        []SiteObservation{pendingObs("iad"), pendingObs("pdx"), obs("fra", pc, StateReadOnly)},
+			wantReason: "SplitBrain",
+			wantAlert:  "SPLIT BRAIN: 2 sites are writable (iad, pdx); iad, pdx not yet confirmed",
+		},
+		{
+			name:       "confirmed primary with a peer that never answered stays healthy",
+			obs:        []SiteObservation{obs("iad", pc, StateWritable), obs("pdx", pc, StateUnknown)},
+			wantReason: "Healthy",
+		},
+		{
+			name:       "writable reader is still fenced first",
+			obs:        []SiteObservation{pendingObs("iad"), obs("pdx", pc, StateReadOnly), obs("reader", reader, StateWritable)},
+			wantReason: "Degraded",
+			wantAlert:  "requires fencing (reader)",
+			wantFence:  []string{"reader"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EvalCrossSite(tt.obs, nil)
+			if got.Reason != tt.wantReason {
+				t.Fatalf("reason = %q, want %q (%+v)", got.Reason, tt.wantReason, got)
+			}
+			if tt.wantAlert == "" && got.Alert != "" || !strings.Contains(got.Alert, tt.wantAlert) {
+				t.Fatalf("alert = %q, want %q", got.Alert, tt.wantAlert)
+			}
+			if !equalStrings(got.PromotionCandidates, tt.wantCandidates) {
+				t.Fatalf("candidates = %v, want %v", got.PromotionCandidates, tt.wantCandidates)
+			}
+			if !equalStrings(got.FenceSites, tt.wantFence) {
+				t.Fatalf("fence = %v, want %v", got.FenceSites, tt.wantFence)
+			}
+			// Only confirmed states may drive split-brain fencing or resolution.
+			if got.SplitBrain {
+				t.Fatal("SplitBrain set without two confirmed writable sites")
 			}
 		})
 	}

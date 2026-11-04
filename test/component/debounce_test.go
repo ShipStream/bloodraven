@@ -1,6 +1,10 @@
 package component
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/shipstream/bloodraven/internal/controller"
+)
 
 func TestDebounce_SingleBlipNoFailover(t *testing.T) {
 	h := newTestHarness(t) // DC1 writable, DC2 read-only
@@ -136,5 +140,28 @@ func TestDebounce_IntermittentErrors(t *testing.T) {
 	// DC2 should still be read-only (not promoted).
 	if !h.dc2MySQL.isReadOnly() {
 		t.Error("dc2 should not have been promoted from intermittent errors")
+	}
+}
+
+// Issue #216: the first poll after an operator start sees the primary's
+// writable answer before the recovery threshold confirms it. That is an
+// unclassified topology, not a missing primary, and it must not be acted on.
+func TestDebounce_FirstPollAfterStartIsInitializing(t *testing.T) {
+	h := newTestHarness(t) // DC1 writable, DC2 read-only
+	var snap controller.TopologySnapshot
+	h.tm.StatusCallback = func(s controller.TopologySnapshot) { snap = s }
+
+	h.pollN(1)
+	if snap.DegradedReason != "Initializing" || snap.Alert != "" || snap.ActiveSite != "" {
+		t.Fatalf("first poll: reason=%q alert=%q active=%q, want Initializing with no alert or active site",
+			snap.DegradedReason, snap.Alert, snap.ActiveSite)
+	}
+	if h.dns.getCalls() != 0 || !h.dc2MySQL.isReadOnly() {
+		t.Fatal("first poll acted on an unconfirmed writable answer")
+	}
+
+	h.pollN(1)
+	if snap.DegradedReason != "Healthy" || snap.ActiveSite != "dc1" {
+		t.Fatalf("second poll: reason=%q active=%q, want Healthy with dc1 active", snap.DegradedReason, snap.ActiveSite)
 	}
 }
