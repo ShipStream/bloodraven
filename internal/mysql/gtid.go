@@ -282,15 +282,28 @@ func subtractInterval(a, b Interval) []Interval {
 	return result
 }
 
-// HasCommonUUIDs returns true if the two sets share at least one source
-// identifier. For tagged GTIDs, the identifier includes the tag.
+// HasCommonUUIDs returns true if the two sets share at least one server
+// UUID. Tags are ignored: "uuid", "uuid:a" and "uuid:b" all name history
+// written by the same server, and a tag does not change which server's
+// history a transaction belongs to. Contains and Subtract stay tag-exact.
 func (g GTIDSet) HasCommonUUIDs(other GTIDSet) bool {
-	for uuid := range g {
-		if _, ok := other[uuid]; ok {
+	uuids := make(map[string]struct{}, len(other))
+	for sid := range other {
+		uuids[sourceUUID(sid)] = struct{}{}
+	}
+	for sid := range g {
+		if _, ok := uuids[sourceUUID(sid)]; ok {
 			return true
 		}
 	}
 	return false
+}
+
+// sourceUUID returns the server UUID of a source identifier, dropping any
+// ":tag" suffix.
+func sourceUUID(sid string) string {
+	uuid, _, _ := strings.Cut(sid, ":")
+	return uuid
 }
 
 // TransactionCount returns the total number of transactions in the set.

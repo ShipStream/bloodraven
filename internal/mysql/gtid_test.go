@@ -278,8 +278,10 @@ func TestGTIDSet_TaggedSourceArithmetic(t *testing.T) {
 			if blue.Contains(other) {
 				t.Fatal("tagged set unexpectedly contains a distinct source identifier")
 			}
-			if blue.HasCommonUUIDs(other) {
-				t.Fatal("distinct tagged source identifiers unexpectedly overlap")
+			// The same server wrote both, so they share history even
+			// though their transactions stay distinct above and below.
+			if !blue.HasCommonUUIDs(other) {
+				t.Fatal("same server UUID under a different tag must count as shared history")
 			}
 			if got := blue.Subtract(other).String(); got != "uuid1:blue:1-5" {
 				t.Fatalf("Subtract() = %q, want tagged transactions preserved", got)
@@ -435,6 +437,11 @@ func TestGTIDSet_HasCommonUUIDs(t *testing.T) {
 		{name: "empty a", a: "", b: "uuid1:1-5", want: false},
 		{name: "empty b", a: "uuid1:1-5", b: "", want: false},
 		{name: "both empty", a: "", b: "", want: false},
+		{name: "untagged vs tagged same uuid", a: "uuid1:1-5", b: "uuid1:app:1-3", want: true},
+		{name: "tagged vs untagged same uuid", a: "uuid1:app:1-3", b: "uuid1:1-5", want: true},
+		{name: "different tags same uuid", a: "uuid1:app:1-3", b: "uuid1:ops:1-3", want: true},
+		{name: "tag case is normalized", a: "uuid1:App:1-3", b: "uuid1:app:7-9", want: true},
+		{name: "tagged vs different uuid", a: "uuid1:app:1-3", b: "uuid2:app:1-3,uuid2:1-5", want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
