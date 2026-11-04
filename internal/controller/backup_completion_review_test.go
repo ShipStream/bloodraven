@@ -186,7 +186,7 @@ func TestBackupMetadataReview_RuntimeExpandedDestinations(t *testing.T) {
 						want = "s3://bloodraven-backups/" + want + "/"
 					}
 					if logs {
-						pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "runtime", Namespace: mb.Namespace, Labels: map[string]string{labelMysqlBackup: mb.Name}}, Spec: job.Spec.Template.Spec, Status: corev1.PodStatus{Phase: corev1.PodSucceeded}}
+						pod := backupJobPod("runtime", mb, &job, corev1.PodSucceeded)
 						if err := c.Create(context.Background(), pod); err != nil {
 							t.Fatal(err)
 						}

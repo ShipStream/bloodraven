@@ -813,7 +813,9 @@ func parseDumpCompleteLine(line string) (dumpCompletionMetadata, bool) {
 }
 
 // tailJobCompletion distinguishes unavailable logs from a successfully read
-// log without a usable sentinel. Only the producing main container is read.
+// log without a usable sentinel. Only the producing main container of the
+// newest Succeeded pod owned by job is read: the backup label is shared by the
+// artifact-cleanup Job's pods and by a recreated same-name backup's pods.
 func (r *MysqlBackupReconciler) tailJobCompletion(ctx context.Context, backup *v1alpha1.MysqlBackup, job *batchv1.Job) (dumpCompletionMetadata, bool, error) {
 	if r.Clientset == nil {
 		return dumpCompletionMetadata{}, false, fmt.Errorf("pod log client unavailable")
@@ -825,20 +827,33 @@ func (r *MysqlBackupReconciler) tailJobCompletion(ctx context.Context, backup *v
 	); err != nil {
 		return dumpCompletionMetadata{}, false, fmt.Errorf("list backup pods: %w", err)
 	}
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		if pod.Status.Phase != corev1.PodSucceeded {
+	pod := newestSucceededJobPod(pods.Items, job)
+	if pod == nil {
+		return dumpCompletionMetadata{}, false, fmt.Errorf("completed backup pod not visible")
+	}
+	if container := backupJobMainContainer(job); container != nil {
+		return r.tailOneContainer(ctx, job.Namespace, pod.Name, container.Name)
+	}
+	if len(pod.Spec.Containers) > 0 {
+		return r.tailOneContainer(ctx, job.Namespace, pod.Name, pod.Spec.Containers[0].Name)
+	}
+	return dumpCompletionMetadata{}, false, fmt.Errorf("completed backup pod has no containers")
+}
+
+// newestSucceededJobPod returns the most recently created Succeeded pod that
+// job owns, or nil.
+func newestSucceededJobPod(pods []corev1.Pod, job *batchv1.Job) *corev1.Pod {
+	var chosen *corev1.Pod
+	for i := range pods {
+		p := &pods[i]
+		if p.Status.Phase != corev1.PodSucceeded || !podBelongsToJob(p, job) {
 			continue
 		}
-		container := backupJobMainContainer(job)
-		if container != nil {
-			return r.tailOneContainer(ctx, job.Namespace, pod.Name, container.Name)
-		}
-		if len(pod.Spec.Containers) > 0 {
-			return r.tailOneContainer(ctx, job.Namespace, pod.Name, pod.Spec.Containers[0].Name)
+		if chosen == nil || p.CreationTimestamp.After(chosen.CreationTimestamp.Time) {
+			chosen = p
 		}
 	}
-	return dumpCompletionMetadata{}, false, fmt.Errorf("completed backup pod not visible")
+	return chosen
 }
 
 func (r *MysqlBackupReconciler) tailOneContainer(ctx context.Context, namespace, podName, container string) (dumpCompletionMetadata, bool, error) {
