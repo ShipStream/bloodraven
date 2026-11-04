@@ -81,7 +81,7 @@ var claimants = []struct {
 	{"PProm", func(t *testing.T, f *claimFixture) claimOutcome {
 		// PlannedPromote runs only under its planned failover's claim.
 		f.tm.SetPlannedFailoverActive(true)
-		err := f.tm.claimPlannedPromotion(shortCtx(t), "dc2")
+		_, err := f.tm.claimPlannedPromotion(shortCtx(t), "dc2")
 		switch {
 		case err == nil:
 			return claimAllowed
@@ -157,7 +157,18 @@ func TestTopologyClaimMatrix(t *testing.T) {
 			if ok, why, _ := f.r.ClaimPlannedFailover(f.nn, "dc1", "dc2"); !ok {
 				t.Fatalf("setup: %s", why)
 			}
-			if err := f.tm.claimPlannedPromotion(ctx, "dc2"); err != nil {
+			if _, err := f.tm.claimPlannedPromotion(ctx, "dc2"); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+		}},
+		// The same planned failover re-runs Promoting after its Resuming
+		// write was lost: its own completed promotion is recognised, not
+		// refused as an unobserved one.
+		{"own planned promotion completed", "RAWRRRR", func(t *testing.T, f *claimFixture) {
+			if ok, why, _ := f.r.ClaimPlannedFailover(f.nn, "dc1", "dc2"); !ok {
+				t.Fatalf("setup: %s", why)
+			}
+			if _, err := f.tm.PlannedPromote(ctx, "dc2", "dc1"); err != nil {
 				t.Fatalf("setup: %v", err)
 			}
 		}},

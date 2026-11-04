@@ -1265,3 +1265,108 @@ func TestPlannedFailoverPreFence_SourceNoLongerPrimaryRefuses(t *testing.T) {
 		})
 	}
 }
+
+// Opus round 12, Major 1: PlannedPromote succeeds but the Resuming status
+// write is lost, so Promoting runs again while the promotion is still
+// unobserved. The re-run recognises its own completed promotion and
+// confirms it: the run reaches Succeeded, nothing is executed twice, and
+// the source is never unfenced.
+func TestPlannedFailoverPromoting_RerunAfterLostResumingWriteSucceeds(t *testing.T) {
+	fg := plannedFailoverFG("")
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+		DrainStartTime: &start, SourceGtidAtFence: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-9",
+	}
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-9"}
+	pdx := &mockMySQL{readOnly: true, superReadOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-9"}
+	r, c := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	lost := false
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, cl client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if pf := obj.(*v1alpha1.MysqlFailoverGroup).Status.PlannedFailover; !lost && pf != nil && pf.Phase == v1alpha1.PlannedFailoverPhaseResuming {
+				lost = true
+				return apierrors.NewServiceUnavailable("api server unavailable")
+			}
+			return cl.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+	})
+	sourceFenced := func() bool {
+		iad.mu.Lock()
+		defer iad.mu.Unlock()
+		return iad.readOnly && iad.superReadOnly
+	}
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err == nil || !lost {
+		t.Fatalf("setup: err=%v lost=%v; want the Resuming write to fail after the promotion", err, lost)
+	}
+	pdx.mu.Lock()
+	promoted, stops := !pdx.readOnly, pdx.stopReplicaCalls
+	pdx.mu.Unlock()
+	if !promoted || !sourceFenced() {
+		t.Fatalf("setup: pdx writable=%v, iad fenced=%v", promoted, sourceFenced())
+	}
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhasePromoting {
+		t.Fatalf("setup: phase=%q, want Promoting still persisted", pf.Phase)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+			t.Fatalf("reconcile %d: %v", i, err)
+		}
+		if !sourceFenced() {
+			t.Fatal("source unfenced beside the promoted target")
+		}
+		if fetchFG(t, r, nn).Status.PlannedFailover.Phase == v1alpha1.PlannedFailoverPhaseSucceeded {
+			break
+		}
+	}
+	if pf := fetchFG(t, r, nn).Status.PlannedFailover; pf.Phase != v1alpha1.PlannedFailoverPhaseSucceeded {
+		t.Fatalf("phase=%q reason=%q (%s); want Succeeded: the switchover happened", pf.Phase, pf.Reason, pf.Message)
+	}
+	pdx.mu.Lock()
+	again := pdx.stopReplicaCalls != stops
+	pdx.mu.Unlock()
+	if again {
+		t.Fatal("the re-run executed the promotion again")
+	}
+}
+
+// Opus round 12, Major 1: a promotion claim the topology manager refuses
+// sent nothing to the target, so the run rolls back (reason
+// PromotionRefused) instead of reporting a failed promotion.
+func TestPlannedFailoverPromoting_ClaimRefusedRollsBack(t *testing.T) {
+	fg := plannedFailoverFG("")
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+		Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+		DrainStartTime: &start,
+	}
+	nn := fgNN(fg)
+	iad := &mockMySQL{readOnly: true, superReadOnly: true}
+	pdx := &mockMySQL{readOnly: true, superReadOnly: true}
+	r, _ := newReconciler(fg)
+	r.Runner = plannedDrainRunner(nn, iad, pdx)
+	tm, err := r.Runner.plannedFailoverManager(nn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm.SetTopologyFrozen(true)
+	if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	pf := fetchFG(t, r, nn).Status.PlannedFailover
+	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != plannedFailoverReasonPromotionRefused || !strings.Contains(pf.Message, "in-place restore") {
+		t.Fatalf("phase=%q reason=%q (%s); want Failed/PromotionRefused naming the holder", pf.Phase, pf.Reason, pf.Message)
+	}
+	iad.mu.Lock()
+	unfenced := !iad.readOnly && !iad.superReadOnly
+	iad.mu.Unlock()
+	pdx.mu.Lock()
+	untouched := pdx.readOnly && !pdx.promoted
+	pdx.mu.Unlock()
+	if !unfenced || !untouched {
+		t.Fatalf("iad unfenced=%v, pdx untouched=%v; want a rollback with nothing sent to the target", unfenced, untouched)
+	}
+}

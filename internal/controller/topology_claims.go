@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -36,6 +37,7 @@ import (
 //	held \ claimant              Auto PProm PF  Upd Rot Fol Boot
 //	Auto promotion               R    R     W   R   R   R   R
 //	PlannedPromote               R    R     W   R   R   R   R
+//	own planned promotion done   R    A8    W   R   R   R   R
 //	promotion not yet observed   R    R     W   R   R   R   A1
 //	planned failover             R    A     A   R   R   R   R
 //	ordered update claimed       R    R     R   R   R   R   R
@@ -61,6 +63,9 @@ import (
 //	A5 Both run on the poll goroutine, one after the other.
 //	A6 The fence touches only the source; PlannedPromote then waits at the
 //	   follower-mutation gate.
+//	A8 The same planned failover re-running Promoting (its Resuming write
+//	   was lost) gets its own completed promotion back to confirm, instead
+//	   of a refusal as an unobserved promotion (ownPlannedPromotion).
 //	W7 A retired manager is unregistered; the runner sees no manager (Rot
 //	   is refused for the same reason).
 //
@@ -131,53 +136,92 @@ func (tm *TopologyManager) beginAutoPromotionOf(target string) (began, rotationB
 	return tm.beginDeploymentTopologyChangeLocked(), false
 }
 
+// plannedPromotionRecord is a planned failover's completed promotion, kept
+// while that planned failover still holds its claim.
+type plannedPromotionRecord struct {
+	target string
+	gtid   string
+}
+
+// ownPlannedPromotion returns the promotion of target this manager already
+// completed for the planned failover that still holds its claim, or nil.
+// A re-run of Promoting (its Resuming status write was lost) finds it and
+// confirms instead of claiming again: no other actor can have promoted
+// since, because the planned failover's claim kept them all out.
+func (tm *TopologyManager) ownPlannedPromotion(target string) *plannedPromotionRecord {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	if !tm.plannedFailoverActive || tm.plannedPromotion == nil || tm.plannedPromotion.target != target {
+		return nil
+	}
+	rec := *tm.plannedPromotion
+	return &rec
+}
+
 // beginPlannedPromotionOf claims the topology-change window for a planned
 // failover's promotion of target. The planned failover must hold its own
 // claim (plannedFailoverActive), which kept every other actor out since its
-// fence; this refuses what that claim does not cover.
-func (tm *TopologyManager) beginPlannedPromotionOf(target string) (began, rotationBlocked bool) {
+// fence; this refuses what that claim does not cover, and returns why.
+func (tm *TopologyManager) beginPlannedPromotionOf(target string) (why string, rotationBlocked bool) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.keyringRotationBlockedLocked(target) {
 		tm.keyringRotationBlockedDirty = true
-		return false, true
+		return "", true
 	}
-	if tm.retired || !tm.plannedFailoverActive || tm.topologyFrozen || tm.promotionUnobservedLocked() || !bootstrapIdlePhase(tm.bootstrapPhase) {
-		return false, false
+	switch {
+	case tm.retired:
+		return "the topology manager is stopping", false
+	case !tm.plannedFailoverActive:
+		return "the planned failover no longer holds its claim on the sites", false
+	case tm.topologyFrozen:
+		return "an in-place restore is in progress", false
+	case !bootstrapIdlePhase(tm.bootstrapPhase):
+		return "a bootstrap clone is running", false
+	case tm.promotionUnobservedLocked():
+		return "another promotion has not been observed yet", false
+	case !tm.beginDeploymentTopologyChangeLocked():
+		return "another topology change is in progress", false
 	}
-	return tm.beginDeploymentTopologyChangeLocked(), false
+	return "", false
 }
 
-// claimPlannedPromotion takes PlannedPromote's claim. It waits, until ctx
-// ends, for a predecessor still changing the sites, then publishes the claim
-// at the follower-mutation barrier, so a recovery step admitted before the
-// planned failover's flag was set has finished before Execute starts.
-func (tm *TopologyManager) claimPlannedPromotion(ctx context.Context, target string) error {
+// claimPlannedPromotion takes PlannedPromote's claim, or returns the
+// promotion of target it already completed (see ownPlannedPromotion). It
+// waits, until ctx ends, for a predecessor still changing the sites, then
+// publishes the claim at the follower-mutation barrier, so a recovery step
+// admitted before the planned failover's flag was set has finished before
+// Execute starts.
+func (tm *TopologyManager) claimPlannedPromotion(ctx context.Context, target string) (*plannedPromotionRecord, error) {
+	if rec := tm.ownPlannedPromotion(target); rec != nil {
+		return rec, nil
+	}
 	for tm.predecessorMutating() {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("%w: %v", errHandoffNotAdmitted, ctx.Err())
+			return nil, fmt.Errorf("%w: %v", errHandoffNotAdmitted, ctx.Err())
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	var began, rotationBlocked bool
-	if err := tm.admitTopologyHandoff(ctx, func() { began, rotationBlocked = tm.beginPlannedPromotionOf(target) }); err != nil {
-		return fmt.Errorf("%w: %v", errHandoffNotAdmitted, err)
+	var why string
+	var rotationBlocked bool
+	if err := tm.admitTopologyHandoff(ctx, func() { why, rotationBlocked = tm.beginPlannedPromotionOf(target) }); err != nil {
+		return nil, fmt.Errorf("%w: %v", errHandoffNotAdmitted, err)
 	}
 	switch {
 	case rotationBlocked:
-		return fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
-	case !began && tm.predecessorUpdateUnwinding():
-		return errPredecessorUpdateInFlight
-	case !began:
-		return errPlannedPromotionRefused
+		return nil, fmt.Errorf("%w: site %q", errKeyringRotationBlocked, target)
+	case why != "" && tm.predecessorUpdateUnwinding():
+		return nil, errPredecessorUpdateInFlight
+	case why != "":
+		return nil, fmt.Errorf("%w: %s", errPlannedPromotionRefused, why)
 	}
-	return nil
+	return nil, nil
 }
 
-// errPlannedPromotionRefused is returned by PlannedPromote when another
-// actor holds the sites. Nothing has been sent to the target.
-var errPlannedPromotionRefused = fmt.Errorf("planned promote: another topology change holds the sites")
+// errPlannedPromotionRefused is returned by PlannedPromote when its claim
+// on the sites is refused. Nothing has been sent to the target.
+var errPlannedPromotionRefused = errors.New("planned promote: the topology manager refused the promotion")
 
 // orderedUpdateClaimRefusedLocked reports whether an ordered update planned
 // at authority epoch against active may not claim now. Must hold tm.mu.

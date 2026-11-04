@@ -99,14 +99,14 @@ Before treating a site stuck in `RecoveryInProgress` (or an old primary that has
 ### Safe Remediation Steps
 The only surviving copy of a sealed site's keys is the keyring file in its running pod's `mysql` container (`$KEYRING_DIR/keyring`; `KEYRING_DIR` is `spec.encryptionAtRest.keyring.dataFileDir`, default `/run/mysql-keyring`). Do not delete, restart, evict or drain that pod, and do not force an unseal or rollout.
 
-1. `KeyringEscrowMissing` (the Secret is gone): recreate it from the running pod with the helper. It reads the pod's keyring and checks it against `status…keyringDigest` before writing anything, refuses if the Secret exists, never deletes a Secret, then adds the labels (including `shipstream.io/keyring-version`), the digest annotation, the ownerReference and `immutable: true`, and sets the site's phase back to `Sealed`:
+1. `KeyringEscrowMissing` (the Secret is gone): recreate it from the running pod with the helper. It runs only on a site that is `Sealed` or `Failed` with no `unsealReason` (a rotation, bootstrap or clone in progress owns its Secret). It reads the pod's keyring and checks it against `status…keyringDigest` before writing anything, refuses if the Secret exists, never deletes a Secret, and re-reads the group before writing, stopping if its UID or the site's phase, unseal reason, Secret, version or digest changed. It then adds the labels (including `shipstream.io/keyring-version`), the digest annotation, the ownerReference and `immutable: true`. It never writes the group's status: the operator returns the site to `Sealed` itself once MySQL confirms it runs that keyring (Event `KeyringRecovered`), and the script waits up to `KEYRING_RECOVER_WAIT` seconds (default 120) to report it:
    ```bash
    ./.agents/skills/bloodraven-doctor/scripts/keyring-escrow-recover.sh -n <ns> <group> <site>
    ```
    It reads from the site's one Running, Ready MySQL pod, selected as its Deployment selects it, and refuses if there is not exactly one; `--pod <name>` names it explicitly, and also accepts a terminating pod (with a warning): with Recreate, a pod in its grace period may hold the last copy, so read it before the grace period ends. It runs with GNU or macOS/BSD tools (`sha256sum` or `shasum`).
 2. `KeyringEscrowCorrupt` (the Secret exists but no longer hashes to the recorded digest): the helper refuses by default and changes nothing. Replacing the Secret is a separate, explicit step: re-run it with `--replace-corrupt <secret-name>`, repeating the exact Secret name. It then confirms the existing Secret really fails the digest check and the pod's keyring passes it, writes a backup to `./keyring-escrow-backup-<secret>-<timestamp>.yaml`, and only then deletes and recreates that one Secret. Get the human operator's go-ahead before passing `--replace-corrupt`.
    The canonical procedure is "Keyring escrow lost" in `site/content/docs/6.operations/4.runbooks.md` (also "Disaster recovery" in `site/content/docs/4.configuration/8.encryption-at-rest.md`).
-3. Verify the site stays `Sealed` and the `KeyringEscrowMissing` / `KeyringEscrowCorrupt` events stop.
+3. Verify the operator returns the site to `Sealed` (Event `KeyringRecovered`) and the `KeyringEscrowMissing` / `KeyringEscrowCorrupt` events stop. Do not patch the phase by hand: a rotation started meanwhile would be overwritten.
 
 ---
 

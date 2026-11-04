@@ -15,7 +15,11 @@ import (
 // lives in $STATE: live-keyring (the MySQL pod's file; absent = exec
 // fails), secret (the escrow Secret's bytes; absent = NotFound), pods (the
 // Running MySQL pods: name<TAB>deletionTimestamp<TAB>mysql-ready; default
-// one ready pod), log (every call). A pod listing with any other selector
+// one ready pod), site (the site's status as
+// phase|unsealReason|keyringSecret|keyringVersion|keyringDigest; default
+// Failed with the recorded Secret and digest), after-exec and after-create
+// (a site line that replaces site once the keyring was read or the Secret
+// created: the operator moving on meanwhile), log (every call). A pod listing with any other selector
 // returns the site's Dragonfly pod, which has no keyring, the way the old
 // selector matched it. Only POSIX tools, so it runs on macOS as well.
 const fakeKubectl = `#!/usr/bin/env bash
@@ -29,12 +33,10 @@ get)
   mysqlfailovergroup)
     expr=$(printf '%s\n' "$@" | sed -n 's/^jsonpath=//p')
     case "$expr" in
-      *keyringSecret*) printf '%s' "$SECRET_NAME" ;;
-      *keyringVersion*) printf '2' ;;
-      *keyringDigest*) printf '%s' "$RECORDED_DIGEST" ;;
+      *unsealReason*)
+        if [[ -f "$STATE/site" ]]; then site=$(cat "$STATE/site"); else site="Failed||$SECRET_NAME|2|$RECORDED_DIGEST"; fi
+        printf 'uid-1|%s' "$site" ;;
       *dataFileDir*) ;;
-      *metadata.uid*) printf 'uid-1' ;;
-      *'sites[*].name'*) printf 'dc1 dc2' ;;
     esac ;;
   pod)
     if [[ "$*" == *"-l app.kubernetes.io/name=mysql,app.kubernetes.io/instance=lion,shipstream.io/site=dc2 "* &&
@@ -57,11 +59,13 @@ exec)
   pod=$3
   [[ "$pod" == mysql-lion-dc2-* ]] || { echo "container mysql not found in pod $pod" >&2; exit 1; }
   [[ -f "$STATE/live-keyring" ]] || { echo "pod unavailable" >&2; exit 1; }
-  cat "$STATE/live-keyring" ;;
+  cat "$STATE/live-keyring"
+  if [[ -f "$STATE/after-exec" ]]; then cp "$STATE/after-exec" "$STATE/site"; rm -f "$STATE/after-exec"; fi ;;
 create)
   [[ -f "$STATE/secret" ]] && { echo "AlreadyExists" >&2; exit 1; }
   src=$(printf '%s\n' "$@" | sed -n 's/^--from-file=keyring=//p')
-  cp "$src" "$STATE/secret" ;;
+  cp "$src" "$STATE/secret"
+  if [[ -f "$STATE/after-create" ]]; then cp "$STATE/after-create" "$STATE/site"; rm -f "$STATE/after-create"; fi ;;
 delete)
   rm -f "$STATE/secret" ;;
 label|annotate|patch) ;;
@@ -117,9 +121,18 @@ func (e escrowEnv) runWithPath(t *testing.T, path, recorded string, args ...stri
 	cmd.Dir = filepath.Dir(e.state)
 	cmd.Env = append(os.Environ(),
 		"PATH="+path,
-		"STATE="+e.state, "SECRET_NAME=mysql-lion-dc2-keyring-v2", "RECORDED_DIGEST="+recorded)
+		"STATE="+e.state, "SECRET_NAME=mysql-lion-dc2-keyring-v2", "RECORDED_DIGEST="+recorded,
+		"KEYRING_RECOVER_WAIT=0")
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// writeState writes one of the fake's state files.
+func (e escrowEnv) writeState(t *testing.T, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(e.state, name), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (e escrowEnv) pods(t *testing.T, lines string) {
@@ -179,13 +192,97 @@ func TestKeyringEscrowRecover(t *testing.T) {
 			t.Fatalf("escrow Secret = %q, want the pod's keyring", got)
 		}
 		log := e.calls(t)
-		for _, want := range []string{"label secret mysql-lion-dc2-keyring-v2", "annotate secret", "patch mysqlfailovergroup lion -n orders --subresource=status"} {
+		for _, want := range []string{"label secret mysql-lion-dc2-keyring-v2", "annotate secret", "patch secret mysql-lion-dc2-keyring-v2"} {
 			if !strings.Contains(log, want) {
 				t.Errorf("missing call %q in:\n%s", want, log)
 			}
 		}
 		if strings.Contains(log, "delete ") {
 			t.Errorf("recreating a missing Secret deleted something:\n%s", log)
+		}
+		// The operator re-seals the site; the script never writes status.
+		if strings.Contains(log, "patch mysqlfailovergroup") {
+			t.Errorf("the script wrote the failover group:\n%s", log)
+		}
+		if !strings.Contains(out, "not Sealed yet") {
+			t.Errorf("no hand-off to the operator reported:\n%s", out)
+		}
+	})
+
+	t.Run("reports the operator's re-seal", func(t *testing.T) {
+		e := newEscrowEnv(t, keys, nil)
+		e.writeState(t, "after-create", "Sealed||mysql-lion-dc2-keyring-v2|2|"+recorded)
+		out, err := e.run(t, recorded)
+		if err != nil || !strings.Contains(out, "reports site dc2 Sealed again") {
+			t.Fatalf("err=%v, want the re-seal reported:\n%s", err, out)
+		}
+	})
+
+	t.Run("refuses a site that is not in a sealed-recovery state", func(t *testing.T) {
+		for _, site := range []string{
+			"Unsealed|Rotation|mysql-lion-dc2-keyring-v2|2|" + recorded,
+			"Failed|Rotation|mysql-lion-dc2-keyring-v2|2|" + recorded,
+			"Escrowed|Rotation|mysql-lion-dc2-keyring-v2|2|" + recorded,
+			"Unsealed|Clone|mysql-lion-dc2-keyring-v2|2|" + recorded,
+		} {
+			e := newEscrowEnv(t, keys, nil)
+			e.writeState(t, "site", site)
+			if out, err := e.run(t, recorded); err == nil {
+				t.Fatalf("site %q: script ran:\n%s", site, out)
+			}
+			if log := e.calls(t); strings.Contains(log, "exec ") || len(mutatingCalls(log)) != 0 {
+				t.Fatalf("site %q: read the pod or wrote something:\n%s", site, log)
+			}
+		}
+	})
+
+	// GPT round 12: a rotation that starts while the script runs owns the
+	// site. Started before the Secret is written, the script stops; started
+	// after, the script still never writes status, so the rotation's
+	// Unsealed/Rotation cannot be overwritten with Sealed.
+	t.Run("rotation started after the keyring was read: stops before writing", func(t *testing.T) {
+		e := newEscrowEnv(t, keys, nil)
+		e.writeState(t, "after-exec", "Unsealed|Rotation|mysql-lion-dc2-keyring-v2|2|"+recorded)
+		out, err := e.run(t, recorded)
+		if err == nil || !strings.Contains(out, "changed since this script read it") {
+			t.Fatalf("err=%v, want a stop on the changed site:\n%s", err, out)
+		}
+		if muts := mutatingCalls(e.calls(t)); len(muts) != 0 {
+			t.Fatalf("wrote after the site moved on: %v", muts)
+		}
+	})
+
+	t.Run("rotation started after the Secret was recreated: not overwritten", func(t *testing.T) {
+		e := newEscrowEnv(t, keys, nil)
+		rotating := "Unsealed|Rotation|mysql-lion-dc2-keyring-v2|2|" + recorded
+		e.writeState(t, "after-create", rotating)
+		out, err := e.run(t, recorded)
+		if err != nil {
+			t.Fatalf("script failed: %v\n%s", err, out)
+		}
+		if log := e.calls(t); strings.Contains(log, "mysqlfailovergroup lion -n orders --subresource") || strings.Contains(log, "patch mysqlfailovergroup") {
+			t.Fatalf("the script wrote the failover group's status:\n%s", log)
+		}
+		b, err := os.ReadFile(filepath.Join(e.state, "site"))
+		if err != nil || string(b) != rotating {
+			t.Fatalf("site = %q (%v), want the rotation left as it is", b, err)
+		}
+		if !strings.Contains(out, "moved to Unsealed (Rotation)") {
+			t.Errorf("did not report that the operator owns the site:\n%s", out)
+		}
+	})
+
+	t.Run("confirmed replacement stops if the site moved before the delete", func(t *testing.T) {
+		e := newEscrowEnv(t, keys, []byte("tampered"))
+		e.writeState(t, "after-exec", "Unsealed|Rotation|mysql-lion-dc2-keyring-v3|3|sha256:new")
+		if out, err := e.run(t, recorded, "--replace-corrupt", "mysql-lion-dc2-keyring-v2"); err == nil {
+			t.Fatalf("script replaced a Secret of a site that moved on:\n%s", out)
+		}
+		if log := e.calls(t); strings.Contains(log, "delete ") || strings.Contains(log, "create ") {
+			t.Fatalf("deleted or created after the site moved on:\n%s", log)
+		}
+		if string(e.secret(t)) != "tampered" {
+			t.Fatal("the existing Secret changed")
 		}
 	})
 

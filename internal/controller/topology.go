@@ -606,6 +606,12 @@ type TopologyManager struct {
 	// their beginAutoPromotionOf claim.
 	beforePromotionClaim func(target string)
 
+	// plannedPromotion is the promotion PlannedPromote completed for the
+	// planned failover still holding its claim (see ownPlannedPromotion).
+	// Cleared when that claim is released or another change is claimed.
+	// Protected by mu.
+	plannedPromotion *plannedPromotionRecord
+
 	// predecessorBusy, set by the runner when this manager replaced
 	// another, reports whether a replaced manager is still changing the
 	// sites (see predecessorMutating). Protected by mu.
@@ -2919,6 +2925,9 @@ func (tm *TopologyManager) isTopologyFrozen() bool {
 func (tm *TopologyManager) SetPlannedFailoverActive(v bool) {
 	tm.mu.Lock()
 	tm.plannedFailoverActive = v
+	if !v {
+		tm.plannedPromotion = nil
+	}
 	tm.mu.Unlock()
 }
 
@@ -3078,6 +3087,11 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	if !targetSite.isPromotable() {
 		return "", fmt.Errorf("planned promote: site %q has role %q; only primary-candidate sites may be promoted", target, targetSite.role)
 	}
+	// A re-run after this planned failover's promotion already succeeded
+	// (its Resuming status write was lost) confirms it instead.
+	if rec := tm.ownPlannedPromotion(target); rec != nil {
+		return tm.reconfirmPlannedPromotion(ctx, targetSite, *rec)
+	}
 	tm.mu.RLock()
 	blocked := tm.keyringRotationBlockedLocked(target)
 	var divergence siteRecovery
@@ -3104,8 +3118,10 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	// recovery drain pass admitted before the planned-failover flag was
 	// set may still be killing sessions on the target, and Execute must
 	// not start until it has finished.
-	if err := tm.claimPlannedPromotion(ctx, target); err != nil {
+	if rec, err := tm.claimPlannedPromotion(ctx, target); err != nil {
 		return "", err
+	} else if rec != nil {
+		return tm.reconfirmPlannedPromotion(ctx, targetSite, *rec)
 	}
 	defer tm.finishDeploymentTopologyChange()
 	promotionGtid, err := tm.failover.Execute(ctx, targetSite.mysql, sourceChecker, target)
@@ -3125,12 +3141,29 @@ func (tm *TopologyManager) PlannedPromote(ctx context.Context, target, source st
 	// can surface what was promoted rather than mistaking a stale-DNS
 	// condition for a failed promotion.
 	tm.recordFailover(ctx, tm.clock.Now(), target, promotionGtid)
+	tm.mu.Lock()
+	tm.plannedPromotion = &plannedPromotionRecord{target: target, gtid: promotionGtid}
+	tm.mu.Unlock()
 
 	if err := tm.applyDNS(ctx, target, targetSite.lbIP); err != nil {
 		return promotionGtid, fmt.Errorf("DNS flip failed after successful promotion: %w", err)
 	}
 
 	return promotionGtid, nil
+}
+
+// reconfirmPlannedPromotion answers a re-run of PlannedPromote for a
+// promotion it already completed: nothing is executed again; the target is
+// confirmed still writable, DNS is re-applied (idempotent), and the
+// recorded promotion GTID is returned.
+func (tm *TopologyManager) reconfirmPlannedPromotion(ctx context.Context, targetSite *siteTracker, rec plannedPromotionRecord) (string, error) {
+	if err := tm.confirmWritable(ctx, targetSite); err != nil {
+		return "", fmt.Errorf("promotion succeeded but writable confirmation failed: %w", err)
+	}
+	if err := tm.applyDNS(ctx, rec.target, targetSite.lbIP); err != nil {
+		return rec.gtid, fmt.Errorf("DNS flip failed after successful promotion: %w", err)
+	}
+	return rec.gtid, nil
 }
 
 // errSiteNotFound is returned by the planned-failover primitives when a

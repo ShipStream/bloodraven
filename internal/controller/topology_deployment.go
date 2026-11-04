@@ -58,6 +58,7 @@ func (tm *TopologyManager) beginDeploymentTopologyChangeLocked() bool {
 	}
 	tm.authorityEpoch++
 	tm.deploymentChanging++
+	tm.plannedPromotion = nil
 	tm.deploymentTopologyPendingLocked()
 	return true
 }

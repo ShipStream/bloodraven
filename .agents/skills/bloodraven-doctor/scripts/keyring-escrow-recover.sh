@@ -14,6 +14,14 @@
 #   - A Secret this script just created is never deleted automatically.
 #   - It never restarts, evicts or rolls the pod: that pod holds the only
 #     surviving copy of the keys.
+#   - It runs only on a site in a sealed-recovery state (Sealed, or Failed
+#     with no unseal reason) and re-reads the group before every write,
+#     stopping if the group's UID or the site's phase, unseal reason,
+#     Secret, version or digest changed: a rotation or reseal started
+#     meanwhile owns the site.
+#   - It never writes the failover group's status. The operator returns the
+#     site to Sealed itself once the Secret hashes to the recorded digest
+#     and MySQL confirms it runs that keyring (Event KeyringRecovered).
 #
 set -euo pipefail
 
@@ -37,6 +45,9 @@ Usage: keyring-escrow-recover.sh -n <namespace> <mysql-failover-group> <site> [-
   ./keyring-escrow-backup-<secret-name>-<timestamp>.yaml, delete it and
   recreate it from the running pod. <secret-name> must repeat the exact
   Secret name as confirmation.
+
+  Afterwards it waits up to KEYRING_RECOVER_WAIT seconds (default 120) for
+  the operator to report the site Sealed again.
 EOF
     exit 64
 }
@@ -83,8 +94,18 @@ b64_decode() { base64 "$B64_DECODE"; }
 fg_jsonpath() {
     kubectl get mysqlfailovergroup "$GROUP" -n "$NAMESPACE" -o "jsonpath=$1"
 }
-site_field() {
-    fg_jsonpath "{.status.encryptionAtRest.sites[?(@.name==\"$SITE\")].$1}"
+# One read of everything the recovery depends on, so it cannot mix two
+# versions of the object: uid|phase|unsealReason|keyringSecret|keyringVersion|keyringDigest.
+site_state() {
+    local s="{.status.encryptionAtRest.sites[?(@.name==\"$SITE\")]"
+    fg_jsonpath "{.metadata.uid}|${s}.phase}|${s}.unsealReason}|${s}.keyringSecret}|${s}.keyringVersion}|${s}.keyringDigest}"
+}
+# Stop before a write if the group or the site moved since SNAPSHOT was read.
+require_unchanged() {
+    local now
+    now=$(site_state) || die "cannot re-read the failover group before $1; nothing further was changed"
+    [[ "$now" == "$SNAPSHOT" ]] \
+        || die "the failover group changed since this script read it (was $SNAPSHOT, now $now); not going on to $1. The operator owns the site now; re-run once it is Failed again"
 }
 secret_digest() {
     local data
@@ -92,13 +113,18 @@ secret_digest() {
     echo "sha256:$(printf '%s' "$data" | b64_decode | sha256_of)"
 }
 
-SECRET=$(site_field keyringSecret) || die "cannot read the failover group"
-VERSION=$(site_field keyringVersion)
-DIGEST=$(site_field keyringDigest)
+SNAPSHOT=$(site_state) || die "cannot read the failover group"
+IFS='|' read -r FG_UID PHASE UNSEAL_REASON SECRET VERSION DIGEST <<<"$SNAPSHOT"
 KEYRING_DIR=$(fg_jsonpath '{.spec.encryptionAtRest.keyring.dataFileDir}')
 KEYRING_DIR=${KEYRING_DIR:-/run/mysql-keyring}
-FG_UID=$(fg_jsonpath '{.metadata.uid}')
 [[ -n "$SECRET" && -n "$DIGEST" && -n "$FG_UID" ]] || die "site $SITE has no keyringSecret/keyringDigest in status"
+# Only a site that renders sealed against SECRET can be recovered from its
+# pod: Sealed (the operator has not noticed yet), or Failed with no unseal
+# reason (KeyringEscrowMissing / KeyringEscrowCorrupt). Anything else is a
+# lifecycle in progress (rotation, bootstrap, clone) that owns the Secret.
+if [[ "$PHASE" != "Sealed" && ! ( "$PHASE" == "Failed" && -z "$UNSEAL_REASON" ) ]]; then
+    die "site $SITE is ${PHASE:-<none>}${UNSEAL_REASON:+ ($UNSEAL_REASON)}, not a sealed site whose escrow was lost; nothing was changed"
+fi
 
 # The site's MySQL pod, selected as its Deployment selects it (Dragonfly and
 # backup Job pods carry the site label too). One line per Running pod:
@@ -152,6 +178,9 @@ if kubectl get secret "$SECRET" -n "$NAMESPACE" -o name >/dev/null 2>&1; then
         || die "could not back up $SECRET; nothing was changed"
     [[ -s "$BACKUP" ]] || die "backup of $SECRET is empty; nothing was changed"
     echo "backed up $SECRET to $BACKUP"
+    # Delete and recreate are one step: checked once, here.
+    require_unchanged "replace $SECRET"
+    CHECKED=1
     kubectl delete secret "$SECRET" -n "$NAMESPACE" \
         || die "could not delete $SECRET; its backup is $BACKUP"
 elif [[ -n "$REPLACE" ]]; then
@@ -159,6 +188,7 @@ elif [[ -n "$REPLACE" ]]; then
 fi
 
 # 3. Recreate from the verified keyring.
+[[ -n "${CHECKED:-}" ]] || require_unchanged "create $SECRET"
 kubectl create secret generic "$SECRET" -n "$NAMESPACE" --from-file="keyring=$TMP" \
     || die "could not create $SECRET; the running pod still holds the keyring, do not restart it"
 CREATED=$(secret_digest "$SECRET") || die "created $SECRET but cannot read it back; check it by hand, do not delete it blindly"
@@ -178,15 +208,23 @@ kubectl patch secret "$SECRET" -n "$NAMESPACE" --type=merge -p="{
   }]},\"immutable\":true
 }"
 
-# 4. Return the site to Sealed (the JSON patch test guards the index).
-read -r -a NAMES <<<"$(fg_jsonpath '{.status.encryptionAtRest.sites[*].name}')"
-INDEX=-1
-for i in "${!NAMES[@]}"; do
-    if [[ "${NAMES[$i]}" == "$SITE" ]]; then INDEX=$i; fi
+# 4. The operator, not this script, returns the site to Sealed: it re-checks
+# the Secret against the digest and needs MySQL to confirm the same keyring.
+# Writing status here could overwrite a rotation started meanwhile.
+WAIT=${KEYRING_RECOVER_WAIT:-120}
+deadline=$((SECONDS + WAIT))
+while :; do
+    NOW=$(site_state) || NOW=""
+    IFS='|' read -r NOW_UID NOW_PHASE NOW_REASON NOW_SECRET _ _ <<<"$NOW"
+    if [[ "$NOW_UID" == "$FG_UID" && "$NOW_PHASE" == "Sealed" && -z "$NOW_REASON" && "$NOW_SECRET" == "$SECRET" ]]; then
+        echo "escrow Secret $SECRET recreated from $POD; the operator reports site $SITE Sealed again"
+        exit 0
+    fi
+    if [[ -n "$NOW" && "$NOW" != "$SNAPSHOT" && "$NOW_PHASE" != "Failed" ]]; then
+        echo "escrow Secret $SECRET recreated from $POD; site $SITE has since moved to ${NOW_PHASE:-<none>}${NOW_REASON:+ ($NOW_REASON)} and the operator owns it. Nothing else was changed"
+        exit 0
+    fi
+    [[ $SECONDS -lt $deadline ]] || break
+    sleep 5
 done
-[[ "$INDEX" -ge 0 ]] || die "site $SITE not found in status; set its phase to Sealed by hand"
-kubectl patch mysqlfailovergroup "$GROUP" -n "$NAMESPACE" --subresource=status --type=json -p="[
-  {\"op\":\"test\",\"path\":\"/status/encryptionAtRest/sites/$INDEX/name\",\"value\":\"$SITE\"},
-  {\"op\":\"replace\",\"path\":\"/status/encryptionAtRest/sites/$INDEX/phase\",\"value\":\"Sealed\"}
-]"
-echo "escrow Secret $SECRET recreated from $POD and site $SITE set back to Sealed; verify it stays Sealed"
+echo "escrow Secret $SECRET recreated from $POD. Site $SITE is not Sealed yet: the operator re-seals it once MySQL confirms it runs that keyring (Event KeyringRecovered). Check the site's message; do not restart the pod"

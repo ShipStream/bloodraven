@@ -146,7 +146,7 @@ type PlannedFailoverStatus struct {
 	// Reason is a machine-readable tag on Failed outcomes. Examples:
 	// "CooldownActive", "LagTimeout", "InvalidGTID", "SourceCrashed",
 	// "ExecuteFailed", "InvalidAnnotation", "ConcurrentOperation",
-	// "TopologyManagerUnavailable", "UnknownSite".
+	// "TopologyManagerUnavailable", "PromotionRefused", "UnknownSite".
 	Reason string `json:"reason,omitempty"`
 
 	// Message is a human-readable status line suitable for

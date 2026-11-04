@@ -811,6 +811,14 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 					err, cur.Target, cur.SourcePrimary),
 				"failed_other")
 		}
+		if errors.Is(err, errPlannedPromotionRefused) {
+			// Refused at the claim: nothing was sent to the target. The
+			// rollback unfences the source only if no other site is
+			// writable.
+			return r.plannedFailoverRollback(ctx, fg, nn, plannedFailoverReasonPromotionRefused,
+				fmt.Sprintf("%v; nothing was sent to %q", err, cur.Target),
+				"failed_other")
+		}
 		if errors.Is(err, errDivergentTarget) {
 			return r.plannedFailoverRollback(ctx, fg, nn, "DivergentTarget",
 				fmt.Sprintf("%v; reclone it or make the primary contain the set before it can be promoted; source %q unfenced",
@@ -841,6 +849,12 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 // stays "do not promote": that update may have handed off, or unfenced the
 // source and let it take writes after the lag proof.
 const plannedFailoverReasonPredecessorUpdate = "PredecessorUpdateInFlight"
+
+// plannedFailoverReasonPromotionRefused marks a planned failover whose
+// promotion claim the topology manager refused (another actor held the
+// sites, or the planned failover's own claim was gone): nothing was sent to
+// the target, so it rolls back like any other pre-promotion failure.
+const plannedFailoverReasonPromotionRefused = "PromotionRefused"
 
 // plannedFailoverPredecessorWait bounds how long a post-fence phase waits,
 // with the source fenced, for a replaced manager's ordered update to exit. Its
