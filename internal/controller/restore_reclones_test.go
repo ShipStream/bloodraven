@@ -458,31 +458,42 @@ func TestRestoreReclone_LostRequestIsRetried(t *testing.T) {
 // Cloning from a primary whose restore failed would destroy the peers'
 // copies, which are then the only intact data.
 func TestRestoreReclone_DiscardedWhenRestoreFails(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		rip  *v1alpha1.RestoreInPlaceStatus
-	}{
-		{name: "restore failed", rip: &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, ConfirmTokenUsed: testRestoreConfirm}},
-		{name: "restore status gone"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fg := fgThreeSiteRestore()
-			fg.Status.RestoreInPlace = tc.rip
-			fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
-				ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"pdx", "sea"},
-			}
-			r, c := newReconciler(fg, dsnSecret())
-			if _, err := r.reconcileRestoreReclones(context.Background(), fg); err != nil {
-				t.Fatal(err)
-			}
-			fresh := getFG(t, c, fg)
-			if fresh.Status.RestoreReclones != nil || fresh.GetAnnotations()[RecloneAnnotation] != "" {
-				t.Fatalf("queue must be discarded without recloning, got %+v annotations %v", fresh.Status.RestoreReclones, fresh.GetAnnotations())
-			}
-			if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreReclonesDiscarded") {
-				t.Error("want a RestoreReclonesDiscarded event")
-			}
-		})
+	fg := fgThreeSiteRestore()
+	// Failed before its Job was created: the primary is unchanged.
+	fg.Status.RestoreInPlace = &v1alpha1.RestoreInPlaceStatus{Phase: v1alpha1.RestoreInPlaceFailed, ConfirmTokenUsed: testRestoreConfirm}
+	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
+		ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"pdx", "sea"},
+	}
+	r, c := newReconciler(fg, dsnSecret())
+	if _, err := r.reconcileRestoreReclones(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	fresh := getFG(t, c, fg)
+	if fresh.Status.RestoreReclones != nil || fresh.GetAnnotations()[RecloneAnnotation] != "" {
+		t.Fatalf("queue must be discarded without recloning, got %+v annotations %v", fresh.Status.RestoreReclones, fresh.GetAnnotations())
+	}
+	if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreReclonesDiscarded") {
+		t.Error("want a RestoreReclonesDiscarded event")
+	}
+}
+
+// Without a restore status the run's Job cannot be ruled out, so the
+// peers are held rather than resumed (#212).
+func TestRestoreReclone_HeldWhenRestoreStatusGone(t *testing.T) {
+	fg := fgThreeSiteRestore()
+	fg.Status.RestoreReclones = &v1alpha1.RestoreReclonesStatus{
+		ConfirmToken: testRestoreConfirm, Phase: v1alpha1.RestoreReclonesArmed, Pending: []string{"pdx", "sea"},
+	}
+	r, c := newReconciler(fg, dsnSecret())
+	if _, err := r.reconcileRestoreReclones(context.Background(), fg); err != nil {
+		t.Fatal(err)
+	}
+	q := getFG(t, c, fg).Status.RestoreReclones
+	if q == nil || q.Phase != v1alpha1.RestoreReclonesHeld || !slices.Equal(q.Pending, []string{"pdx", "sea"}) {
+		t.Fatalf("queue = %+v, want Held with every peer", q)
+	}
+	if !strings.Contains(strings.Join(drainEvents(r.Recorder.(*record.FakeRecorder)), "\n"), "RestoreReclonesHeld") {
+		t.Error("want a RestoreReclonesHeld event")
 	}
 }
 

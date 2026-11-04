@@ -432,6 +432,11 @@ func stepFullRestore(t *testing.T, r *MysqlFailoverGroupReconciler, c client.Cli
 		t.Fatal(err)
 	}
 	*fg = *getFG(t, c, fg)
+	// A full run emits more events than the fake recorder buffers; none
+	// of the callers assert on them.
+	if rec, ok := r.Recorder.(*record.FakeRecorder); ok {
+		drainEvents(rec)
+	}
 }
 
 // A full restore cancelled after its fence went up keeps its confirm

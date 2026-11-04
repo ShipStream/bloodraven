@@ -62,6 +62,9 @@ type FakeReplicaState struct {
 	// Discarded accumulates the retrieved-but-unexecuted transactions that
 	// RESET REPLICA ALL deleted with the relay log.
 	Discarded string
+	// Grants are the SHOW GRANTS lines. Empty reports
+	// "GRANT ALL PRIVILEGES ON *.* TO `operator`@`%`".
+	Grants []string
 }
 
 // NewFakeReplica returns a fake replica in the given state.
@@ -168,6 +171,10 @@ func (c *fakeReplicaConn) ExecContext(_ context.Context, query string, args []dr
 		}
 	case query == "STOP REPLICA":
 		s.IORunning, s.IOConnecting, s.SQLRunning = false, false, false
+	case query == "STOP REPLICA IO_THREAD":
+		// Only the receiver stops; the applier keeps applying the relay
+		// log it already has.
+		s.IORunning, s.IOConnecting = false, false
 	case query == "RESET REPLICA ALL":
 		if s.IORunning || s.IOConnecting || s.SQLRunning {
 			return nil, errors.New("Error 3081: replica threads must be stopped before RESET REPLICA ALL")
@@ -226,6 +233,16 @@ func (c *fakeReplicaConn) QueryContext(_ context.Context, query string, args []d
 		return &fakeRows{cols: []string{"@@global.gtid_executed"}, rows: [][]driver.Value{{s.ExecutedGtidSet}}}, nil
 	case "SELECT @@server_uuid, @@global.gtid_executed":
 		return &fakeRows{cols: []string{"@@server_uuid", "@@global.gtid_executed"}, rows: [][]driver.Value{{s.ServerUUID, s.ExecutedGtidSet}}}, nil
+	case "SHOW GRANTS":
+		grants := s.Grants
+		if len(grants) == 0 {
+			grants = []string{"GRANT ALL PRIVILEGES ON *.* TO `operator`@`%`"}
+		}
+		rows := make([][]driver.Value, 0, len(grants))
+		for _, g := range grants {
+			rows = append(rows, []driver.Value{g})
+		}
+		return &fakeRows{cols: []string{"Grants for operator@%"}, rows: rows}, nil
 	case "SELECT @@read_only":
 		v := int64(0)
 		if s.ReadOnly {

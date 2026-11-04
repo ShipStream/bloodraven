@@ -497,6 +497,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			existing.tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 			existing.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
 			existing.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
+			r.applyRestorePeerHold(ctx, existing.tm, fg, false)
 			existing.tm.SetDNSRecordSpec(fg.Spec.DNS.Hostname, fg.Spec.DNS.TTL, fg.Generation)
 			existing.tm.SetCloneTimeout(cloneTimeoutFromSpec(fg))
 			if existing.dragonfly != nil {
@@ -555,6 +556,7 @@ func (r *TopologyManagerRunner) sync(ctx context.Context) error {
 			mt.tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 			mt.tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
 			mt.tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
+			r.applyRestorePeerHold(ctx, mt.tm, fg, false)
 			if mt.dragonfly != nil {
 				mt.dragonfly.SetPaused(dragonflyMaintenanceActive(fg))
 			}
@@ -849,6 +851,9 @@ func (r *TopologyManagerRunner) startManager(ctx context.Context, fg *v1alpha1.M
 	tm.SetRestoreRecloneBlocked(restoreRecloneBlockedSites(fg))
 	tm.SetRestoreReclonePending(restoreReclonePendingSites(fg))
 	tm.SetRestoreOfflineFence(restoreOfflineFenceSite(fg))
+	// Must land before Run, like the sets above: a held peer's stopped
+	// receiver must not be restarted by the first poll.
+	r.applyRestorePeerHold(ctx, tm, fg, false)
 
 	r.restoreFailoverState(tm, fg, nn)
 	for _, site := range fg.Status.Sites {
@@ -1216,6 +1221,7 @@ func clearManagedSiteGauges(tm *TopologyManager) {
 	for i := range tm.sites {
 		metrics.DeleteSiteGauges(tm.cfg.Namespace, tm.cfg.Name, tm.sites[i].name)
 	}
+	metrics.SetRestoreReclonePending(tm.cfg.Namespace, tm.cfg.Name, "", nil)
 }
 
 // managerStopWait bounds how long stopManagedTopology waits for Run to
@@ -1369,6 +1375,10 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 		readyMessage = "No site is writable"
 	} else if !replicationHealthy {
 		readyMessage = "Replication is not healthy"
+		if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 {
+			readyMessage = fmt.Sprintf("Replication is not healthy; %s await their post-restore reclone with replication stopped",
+				strings.Join(q.Pending, ", "))
+		}
 	}
 	degradedStatus, degradedMessage := metav1.ConditionTrue, snap.Alert
 	switch reason {
@@ -1402,6 +1412,11 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 
 	for _, s := range snap.Sites {
 		if s.Role == state.SiteRoleReadOnly {
+			continue
+		}
+		if restoreReclonePending(&freshFG, s.Name) {
+			// Awaiting its post-restore reclone with replication held
+			// stopped by design; RestoreReclonePending below reports it.
 			continue
 		}
 		// Evaluate source convergence before the nil-replication guard: a
@@ -1452,6 +1467,22 @@ func (r *TopologyManagerRunner) updateCRStatus(ctx context.Context, nn types.Nam
 				LastTransitionTime: now,
 				Reason:             "ReplicationError",
 				Message:            fmt.Sprintf("Replication error on %s: %s", siteName, repl.LastError),
+			})
+		}
+	}
+
+	// Sites awaiting their post-restore reclone hold pre-restore data,
+	// are never promoted automatically and do not replicate until they
+	// are recloned, so the group runs without them as failover targets.
+	// Any other problem reported above takes precedence.
+	if q := freshFG.Status.RestoreReclones; q != nil && len(q.Pending) > 0 && (reason == "Healthy" || reason == "Initializing") {
+		if degraded := apimeta.FindStatusCondition(freshFG.Status.Conditions, "Degraded"); degraded == nil || degraded.Status != metav1.ConditionTrue {
+			setCondition(&freshFG.Status.Conditions, metav1.Condition{
+				Type: "Degraded", Status: metav1.ConditionTrue,
+				ObservedGeneration: freshFG.Generation, LastTransitionTime: now,
+				Reason: "RestoreReclonePending",
+				Message: fmt.Sprintf("%s await their post-restore reclone (status.restoreReclones phase %s); their replication is stopped until then",
+					strings.Join(q.Pending, ", "), q.Phase),
 			})
 		}
 	}

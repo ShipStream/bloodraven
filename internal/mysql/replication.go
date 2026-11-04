@@ -12,7 +12,11 @@ import (
 
 // ReplicaStatus holds key fields from SHOW REPLICA STATUS.
 type ReplicaStatus struct {
-	IORunning           bool
+	IORunning bool
+	// IOConnecting reports Replica_IO_Running=Connecting: the receiver
+	// thread is alive and retrying its connection to the source. It is
+	// not IORunning, but it will stream events once it connects.
+	IOConnecting        bool
 	SQLRunning          bool
 	SecondsBehindSource *int64
 	// LastError is the first non-empty of Last_Error, Last_IO_Error and
@@ -126,10 +130,12 @@ func (m *checker) ShowReplicaStatus(ctx context.Context) (*ReplicaStatus, error)
 
 	if v, ok := colMap["Replica_IO_Running"]; ok {
 		rs.IORunning = v.Valid && v.String == "Yes"
+		rs.IOConnecting = v.Valid && v.String == "Connecting"
 	}
 	// Also check the older column name.
 	if v, ok := colMap["Slave_IO_Running"]; ok && !rs.IORunning {
 		rs.IORunning = v.Valid && v.String == "Yes"
+		rs.IOConnecting = rs.IOConnecting || (v.Valid && v.String == "Connecting")
 	}
 
 	if v, ok := colMap["Replica_SQL_Running"]; ok {

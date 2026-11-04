@@ -346,6 +346,11 @@ func DeploymentUnstableReason(fg *v1alpha1.MysqlFailoverGroup) string {
 		if s.Name != fg.Status.ActiveSite && s.State != "read-only" {
 			return "SiteNotReady"
 		}
+		if s.Name != fg.Status.ActiveSite && restoreReclonePending(fg, s.Name) {
+			// Held out of failover and replication until its
+			// post-restore reclone.
+			return "RestoreReclonePending"
+		}
 		if s.RecoveryState != "" && !(s.RecoveryState == recoveryStateBlocked && s.DivergenceDetectedBy == divergenceDetectedByAudit) {
 			return s.RecoveryState
 		}

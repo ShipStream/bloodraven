@@ -171,6 +171,12 @@ type MysqlFailoverGroupReconciler struct {
 
 	restorePrivMu       sync.Mutex
 	restorePrivRejected map[types.NamespacedName]restorePrivilegeCheck
+
+	// restorePeerStopStart records, per group, when this process first
+	// tried to stop the peers' replication receivers for a restore run
+	// (see stopRestorePeerReplication).
+	restorePeerStopMu    sync.Mutex
+	restorePeerStopStart map[types.NamespacedName]restorePeerStopWait
 }
 
 type dragonflyRolloutKey struct {

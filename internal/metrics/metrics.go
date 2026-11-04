@@ -521,6 +521,7 @@ func Register(reg prometheus.Registerer) {
 		DeployLeaseRevocationsTotal, DeployLeaseAgeSeconds, PlannedFailoversDeferredTotal,
 		SplitBrainAutoResolveTotal, PrimaryReassertTotal,
 		ReplicationLag, ReplicationRunning, ReplicationSourceState, SiteState, DivergentTransactions, RecloneOperations,
+		RestoreReclonePending,
 		BackupRunsTotal, BackupDurationSeconds,
 		BackupLastSuccessTimestamp, BackupLastAttemptTimestamp, BackupLastSizeBytes,
 		BackupVerifiedTimestamp, BackupVerificationLastAttemptTimestamp,

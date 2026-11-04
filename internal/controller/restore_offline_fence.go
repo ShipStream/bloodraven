@@ -454,6 +454,18 @@ func (r *MysqlFailoverGroupReconciler) reconcileRestoreOfflineFence(ctx context.
 	if q == nil || restoreOfflineFenceWanted(fg) {
 		return 0, nil
 	}
+	// Settle the finished restore's reclone queue while the fence still
+	// keeps application writes out: whether the peers resume or are held
+	// depends on the primary's gtid_executed being what it was when their
+	// receivers were stopped.
+	if rq := fg.Status.RestoreReclones; rq != nil && rq.Phase == v1alpha1.RestoreReclonesArmed {
+		if err := r.settleArmedRestoreReclones(ctx, fg); err != nil {
+			return 0, fmt.Errorf("settle the in-place restore reclone queue before releasing its fence: %w", err)
+		}
+		if q = fg.Status.RestoreOfflineFence; q == nil || restoreOfflineFenceWanted(fg) {
+			return 0, nil
+		}
+	}
 	restoreOff := q.PriorOfflineMode != nil && !*q.PriorOfflineMode
 	if q.PriorOfflineMode == nil {
 		// offline_mode was never touched; just make sure the topology
