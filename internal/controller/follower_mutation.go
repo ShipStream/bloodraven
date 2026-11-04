@@ -212,6 +212,15 @@ func (tm *TopologyManager) orderedUpdateInFlight() bool {
 	return tm.deploymentUpdatePending || tm.deploymentUpdateRunning
 }
 
+// mutationInFlight reports whether this manager has an ordered update
+// pending or running, or a promotion claimed. A retiring manager's Run can
+// still be inside a promotion until it notices its cancelled context.
+func (tm *TopologyManager) mutationInFlight() bool {
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	return tm.deploymentUpdatePending || tm.deploymentUpdateRunning || tm.deploymentChanging > 0
+}
+
 // waitUpdateWorkers blocks until every ordered-update goroutine has exited.
 // Only meaningful on a retired manager, which adds no further worker.
 func (tm *TopologyManager) waitUpdateWorkers() {

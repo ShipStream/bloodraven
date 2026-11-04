@@ -600,6 +600,11 @@ type TopologyManager struct {
 	// it when the goroutine exits. Protected by mu.
 	predecessorUpdateInFlight bool
 
+	// beforePromotionClaim, when set (tests only), runs between the
+	// emergency failover's or primary re-assert's eligibility checks and
+	// their beginPromotionOf claim.
+	beforePromotionClaim func(target string)
+
 	// recoveryDeferred records that old-primary recovery is standing down
 	// for a handoff, so the deferral is logged once per transition.
 	// Protected by mu.
@@ -2449,6 +2454,9 @@ func (tm *TopologyManager) applyCrossSiteAction(ctx context.Context, action stat
 		}
 
 		tm.logger.Info("initiating failover", "candidate", candidate.name, "oldPrimary", oldPrimaryName)
+		if tm.beforePromotionClaim != nil {
+			tm.beforePromotionClaim(candidate.name)
+		}
 		began, rotationBlocked := tm.beginPromotionOf(candidate.name)
 		if rotationBlocked {
 			// A rotation was admitted after the eligibility check above;
@@ -3249,10 +3257,13 @@ func (tm *TopologyManager) cloningReaderSite() string {
 	return recipient
 }
 
-// isUpdating reports whether an ordered update is currently running.
+// isUpdating reports whether an ordered update is currently running,
+// including a replaced manager's that is still unwinding: cross-site
+// actions (failover, fencing, re-assert) must not act on sites it may be
+// between fencing and promoting.
 func (tm *TopologyManager) isUpdating() bool {
 	tm.mu.RLock()
-	running := tm.deploymentUpdateRunning
+	running := tm.deploymentUpdateRunning || tm.predecessorUpdateInFlight
 	tm.mu.RUnlock()
 	return running || tm.updater != nil && tm.updater.IsUpdating()
 }
@@ -4881,6 +4892,9 @@ func (tm *TopologyManager) checkPrimaryReassert(ctx context.Context) bool {
 	// block the next poll for failoverCooldown without an attempt having run.
 	// It re-checks the rotation block in the same critical section as the
 	// claim (see beginPromotionOf).
+	if tm.beforePromotionClaim != nil {
+		tm.beforePromotionClaim(target)
+	}
 	began, rotationBlocked := tm.beginPromotionOf(target)
 	if rotationBlocked {
 		tm.logger.Warn("primary re-assert refused: target is mid-keyring-rotation",

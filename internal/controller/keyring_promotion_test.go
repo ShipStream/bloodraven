@@ -108,7 +108,7 @@ func TestReserveKeyringRotation_BlocksPromotionUntilStampedOrReleased(t *testing
 
 	// A reservation whose stamp never persisted is released explicitly.
 	tm.ReserveKeyringRotation("dc2")
-	tm.ReleaseKeyringRotationReservations([]string{"dc2"})
+	tm.PublishKeyringRotationBlocked(nil)
 	if err := tm.liveHandoffRefusal("dc2")(); err != nil {
 		t.Fatalf("released reservation still blocks the handoff: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestBeginPromotionOf_ExcludesRotationAdmission(t *testing.T) {
 	if began, blocked := tm.beginPromotionOf("dc2"); began || !blocked {
 		t.Fatalf("beginPromotionOf after a reservation = began %v, blocked %v; want refused", began, blocked)
 	}
-	tm.ReleaseKeyringRotationReservations([]string{"dc2"})
+	tm.PublishKeyringRotationBlocked(nil)
 
 	began, blocked := tm.beginPromotionOf("dc2")
 	if !began || blocked {
@@ -244,6 +244,12 @@ func TestPlannedPromote_RotationAdmittedBeforeClaimStopsPromotion(t *testing.T) 
 		}
 		time.Sleep(time.Millisecond)
 	}
+	if ok, _ := tm.ReserveKeyringRotation("dc2"); ok {
+		t.Fatal("rotation admitted while the planned-failover flag is set")
+	}
+	// The runner's planned-failover sync and the Dragonfly upgrade write
+	// the same flag, so it can flap off; the claim is the last line.
+	tm.SetPlannedFailoverActive(false)
 	if ok, why := tm.ReserveKeyringRotation("dc2"); !ok {
 		t.Fatalf("rotation refused before any claim: %s", why)
 	}
@@ -298,5 +304,100 @@ func TestReserveKeyringRotation_StaleStatusAfterRestartRefusesRealPrimary(t *tes
 	}
 	if ok, why := tm.ReserveKeyringRotation("dc1"); !ok {
 		t.Fatalf("rotation of the actual replica refused: %s", why)
+	}
+}
+
+// A reservation that slips in between the emergency failover's eligibility
+// check and its claim stops the promotion: no Execute, and the dirty bit is
+// re-armed so the next poll re-decides without the candidate.
+func TestEmergencyFailover_ReservationBeforeClaimStopsPromotion(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	pollN(tm, 2)
+	tm.beforePromotionClaim = func(target string) {
+		tm.restoreKeyringRotationReservations([]string{target})
+	}
+	site0.setError(errors.New("connection refused"))
+	pollN(tm, 3)
+
+	site1.mu.Lock()
+	promoted, readOnly := site1.promoted, site1.readOnly
+	site1.mu.Unlock()
+	if promoted || !readOnly {
+		t.Fatal("emergency failover promoted a site whose rotation was admitted before the claim")
+	}
+	tm.mu.RLock()
+	changing := tm.deploymentChanging
+	tm.mu.RUnlock()
+	if changing != 0 {
+		t.Fatalf("refused claim left deploymentChanging=%d", changing)
+	}
+}
+
+// The same at the primary re-assert: no unfence, no cooldown charged, and
+// the dirty bit re-armed.
+func TestPrimaryReassert_ReservationBeforeClaimStopsUnfence(t *testing.T) {
+	site0 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"}
+	site1 := &mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-8"}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	setWedgedTopology(tm, "dc1")
+	tm.beforePromotionClaim = func(target string) {
+		tm.restoreKeyringRotationReservations([]string{target})
+	}
+	tm.clearKeyringRotationBlockedDirty()
+
+	if tm.checkPrimaryReassert(context.Background()) {
+		t.Fatal("re-assert ran against a site whose rotation was admitted before the claim")
+	}
+	site0.mu.Lock()
+	readOnly := site0.readOnly
+	site0.mu.Unlock()
+	tm.mu.RLock()
+	stamped, dirty := tm.lastReassert, tm.keyringRotationBlockedDirty
+	tm.mu.RUnlock()
+	if !readOnly {
+		t.Fatal("re-assert unfenced a site mid-keyring-rotation")
+	}
+	if !stamped.IsZero() {
+		t.Fatal("a refused claim charged the re-assert cooldown")
+	}
+	if !dirty {
+		t.Fatal("refused claim did not re-arm the cross-site dirty bit")
+	}
+}
+
+// While a replaced manager's update is still unwinding, the replacement
+// takes no cross-site action: no failover, no re-assert.
+func TestPredecessorUpdateHoldsCrossSiteActions(t *testing.T) {
+	site0 := &mockMySQL{readOnly: false}
+	site1 := &mockMySQL{readOnly: true}
+	tm, _, _ := newTestTopologyManager(site0, site1)
+	pollN(tm, 2)
+	tm.setPredecessorUpdateInFlight(true)
+	site0.setError(errors.New("connection refused"))
+	pollN(tm, 4)
+	site1.mu.Lock()
+	readOnly := site1.readOnly
+	site1.mu.Unlock()
+	if !readOnly {
+		t.Fatal("replacement failed over while its predecessor's update was in flight")
+	}
+
+	wedged, _, _ := newTestTopologyManager(&mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-10"},
+		&mockMySQL{readOnly: true, gtidExecuted: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa:1-8"})
+	setWedgedTopology(wedged, "dc1")
+	wedged.setPredecessorUpdateInFlight(true)
+	if wedged.checkPrimaryReassert(context.Background()) {
+		t.Fatal("replacement re-asserted while its predecessor's update was in flight")
+	}
+
+	tm.setPredecessorUpdateInFlight(false)
+	pollN(tm, 3)
+	site1.mu.Lock()
+	readOnly = site1.readOnly
+	site1.mu.Unlock()
+	if readOnly {
+		t.Fatal("failover did not resume once the predecessor's update ended")
 	}
 }

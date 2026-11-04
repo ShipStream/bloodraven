@@ -1218,18 +1218,26 @@ func (r *TopologyManagerRunner) retireManagerLocked(nn types.NamespacedName, mt 
 		r.retiring = make(map[types.NamespacedName][]*managedTopology)
 	}
 	r.retiring[nn] = append(r.retiring[nn], mt)
-	// A retired manager adds no update worker, so the wait ends when the
-	// last one exits, whether or not its Run has returned.
+	// A retired manager adds no update worker, so the first wait ends when
+	// the last one exits, whether or not its Run has returned; that
+	// releases the replacement's predecessor guard. The entry itself stays
+	// until Run has returned too, so rotation admission still sees a
+	// promotion the old Run may be finishing (mutationInFlight).
 	go func() {
 		mt.tm.waitUpdateWorkers()
+		r.mu.Lock()
+		if cur := r.managers[nn]; cur != nil && !r.retiringUpdateInFlightLocked(nn) {
+			cur.tm.setPredecessorUpdateInFlight(false)
+		}
+		r.mu.Unlock()
+		if mt.done != nil {
+			<-mt.done
+		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		r.retiring[nn] = slices.DeleteFunc(r.retiring[nn], func(m *managedTopology) bool { return m == mt })
 		if len(r.retiring[nn]) == 0 {
 			delete(r.retiring, nn)
-		}
-		if cur := r.managers[nn]; cur != nil && !r.retiringUpdateInFlightLocked(nn) {
-			cur.tm.setPredecessorUpdateInFlight(false)
 		}
 	}()
 }

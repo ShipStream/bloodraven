@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,11 +13,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
+	"github.com/shipstream/bloodraven/internal/state"
 )
 
 // scriptedKeyring returns a fetcher that serves a fixed status per site.
@@ -590,7 +593,7 @@ func TestReconcileEncryption_RefusesRotationWhileUpdatePendingLive(t *testing.T)
 	if s.Phase != v1alpha1.KeyringPhaseSealed || s.UnsealReason != "" {
 		t.Fatalf("site = %+v: rotation admitted while an ordered update was pending", s)
 	}
-	if s.Message != "an ordered update is in progress" {
+	if !strings.Contains(s.Message, "rotation deferred: an ordered update is in progress") {
 		t.Errorf("message = %q", s.Message)
 	}
 }
@@ -656,7 +659,10 @@ func TestReconcileEncryption_AmbiguousStatusWriteSettlesReservation(t *testing.T
 		{"committed then timed out", true, timeout, false, true},
 		{"timed out without committing", false, timeout, false, false},
 		{"timed out and the re-read failed", false, timeout, true, true},
-		{"rejected", false, forbidden, true, false},
+		// A rejection is settled by the read too: the same site may hold
+		// an earlier, possibly persisted stamp.
+		{"rejected", false, forbidden, false, false},
+		{"rejected and the re-read failed", false, forbidden, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fg := sealedGroupWithActive("dc1")
@@ -1232,5 +1238,142 @@ func TestReconcileEncryption_RetryableRefusalKeepsRotationRequest(t *testing.T) 
 				t.Fatalf("dc2 = %+v: the kept request did not start the rotation once unblocked", s)
 			}
 		})
+	}
+}
+
+// GPT round 4: a stale pass must not drop an earlier hold. Pass 1's write
+// commits but times out and its re-read fails (held, fail closed). Pass 2
+// starts from the stale Sealed snapshot, re-reserves the same site and has
+// its write rejected. Only an uncached read may end the hold, and it shows
+// the stamp persisted, so dc2 stays blocked.
+func TestReconcileEncryption_StaleRejectedPassKeepsEarlierPersistedHold(t *testing.T) {
+	ctx := context.Background()
+	fg := sealedGroupWithActive("dc1")
+	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	stale := fg.DeepCopy()
+	r, c := encReconciler(t, scriptedKeyring(nil), fg)
+	seedEscrow(t, c, fg)
+	base := c.(client.WithWatch)
+	tm := rotationRunner(r, c)
+	blocked := func() bool {
+		tm.mu.RLock()
+		defer tm.mu.RUnlock()
+		return tm.keyringRotationBlockedLocked("dc2")
+	}
+
+	readFails := true
+	r.APIReader = interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if readFails {
+				return errors.New("api server unreachable")
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if err := cl.SubResource(sub).Update(ctx, obj, opts...); err != nil {
+				return err
+			}
+			return apierrors.NewTimeoutError("status write timed out", 1)
+		},
+	})
+	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err == nil {
+		t.Fatal("pass 1: want the timeout")
+	}
+	if !blocked() {
+		t.Fatal("pass 1: a possibly persisted stamp must keep dc2 blocked")
+	}
+
+	for _, read := range []bool{false, true} {
+		readFails = !read
+		r.Client = interceptor.NewClient(base, interceptor.Funcs{
+			SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+				return apierrors.NewConflict(v1alpha1.GroupVersion.WithResource("mysqlfailovergroups").GroupResource(), "lion", errors.New("stale"))
+			},
+		})
+		if _, err := r.reconcileEncryptionAtRest(ctx, stale.DeepCopy()); err == nil {
+			t.Fatal("pass 2: want the rejected write")
+		}
+		if !blocked() {
+			t.Fatalf("pass 2 (re-read ok=%v) dropped the hold on a persisted rotation", read)
+		}
+	}
+}
+
+// A deferred rotation must not switch off the sealed-site drift check: a
+// deleted escrow Secret still fails the site loudly, and the request stays.
+func TestReconcileEncryption_DeferredRotationStillVerifiesSealedSite(t *testing.T) {
+	ctx := context.Background()
+	fg := sealedGroupWithActive("dc1")
+	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	r, c := encReconciler(t, scriptedKeyring(nil), fg)
+	seedEscrow(t, c, fg)
+	tm := rotationRunner(r, c)
+	tm.mu.Lock()
+	tm.deploymentUpdatePending = true
+	tm.mu.Unlock()
+	recorder := record.NewFakeRecorder(50)
+	r.Recorder = recorder
+
+	escrow := siteStatus(fg, "dc2").KeyringSecret
+	if err := c.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: fg.Namespace, Name: escrow}}); err != nil {
+		t.Fatalf("delete escrow: %v", err)
+	}
+	if _, err := r.reconcileEncryptionAtRest(ctx, fg); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if s := siteStatus(fg, "dc2"); s.Phase != v1alpha1.KeyringPhaseFailed {
+		t.Fatalf("dc2 = %+v: a deferred rotation hid the missing escrow", s)
+	}
+	close(recorder.Events)
+	missing := false
+	for e := range recorder.Events {
+		if strings.Contains(e, "KeyringEscrowMissing") {
+			missing = true
+		}
+	}
+	if !missing {
+		t.Error("no KeyringEscrowMissing event")
+	}
+	var latest v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &latest); err != nil {
+		t.Fatal(err)
+	}
+	if latest.Annotations[RotateKeyringAnnotation] != "dc2" {
+		t.Error("the deferred rotation request was consumed")
+	}
+}
+
+// The manager observing the target as the writable primary (status still
+// naming another site) refuses like the status check does: the request is
+// consumed, not retried forever.
+func TestReconcileEncryption_LiveActivePrimaryRefusalConsumesRequest(t *testing.T) {
+	ctx := context.Background()
+	fg := sealedGroupWithActive("dc1")
+	fg.Annotations = map[string]string{RotateKeyringAnnotation: "dc2"}
+	r, c := encReconciler(t, scriptedKeyring(nil), fg)
+	seedEscrow(t, c, fg)
+	tm := rotationRunner(r, c)
+	tm.mu.Lock()
+	tm.sites[0].state, tm.sites[1].state = state.StateReadOnly, state.StateWritable
+	tm.mu.Unlock()
+
+	requeue, err := r.reconcileEncryptionAtRest(ctx, fg)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if s := siteStatus(fg, "dc2"); s.Phase != v1alpha1.KeyringPhaseSealed || s.Message != rotationRefusedActivePrimary {
+		t.Fatalf("dc2 = %+v, want Sealed with the active-primary refusal", s)
+	}
+	if requeue != 0 {
+		t.Error("an active-primary refusal requeued")
+	}
+	var latest v1alpha1.MysqlFailoverGroup
+	if err := c.Get(ctx, types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, &latest); err != nil {
+		t.Fatal(err)
+	}
+	if _, kept := latest.Annotations[RotateKeyringAnnotation]; kept {
+		t.Error("an active-primary request was kept for retry")
 	}
 }

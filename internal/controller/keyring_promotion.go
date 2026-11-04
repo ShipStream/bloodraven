@@ -94,7 +94,8 @@ func (tm *TopologyManager) setKeyringRotationBlockedLocked(sorted []string) {
 // same standby can never both be admitted), while a promotion is claimed,
 // in flight or not yet observed (beginPromotionOf decides the other side
 // under the same lock), and unless this manager currently observes a
-// unique writable primary other than site with site read-only:
+// unique writable primary other than site with site read-only, and while a
+// planned failover is in flight:
 // status.activeSite, which rotationAllowed reads, lags a promotion and an
 // operator restart. Once granted, the site is promotion-blocked at once,
 // exactly like a durable stamp, until an authoritative view lacks it or it
@@ -106,10 +107,16 @@ func (tm *TopologyManager) ReserveKeyringRotation(site string) (bool, string) {
 	switch {
 	case tm.deploymentUpdatePending || tm.deploymentUpdateRunning:
 		return false, "an ordered update is in progress"
+	case tm.plannedFailoverActive:
+		// Set from Validating on, before status.plannedFailover reaches
+		// the cache rotationAllowed reads; admitting a rotation of the
+		// target now would roll back a failover that already fenced the
+		// source.
+		return false, rotationRefusedPlannedFailover
 	case tm.deploymentChanging > 0 || tm.promotedSite != "" || tm.deploymentAwaitingObservation:
 		return false, rotationRefusedPromotionInFlight
 	case active == site:
-		return false, "site is the active primary; rotate replicas first, then run a planned failover and rotate this site once it is a replica"
+		return false, rotationRefusedActivePrimary
 	case active == "" || !tm.siteObservedReadOnlyLocked(site):
 		// A manager that has not yet observed one writable primary and
 		// the target read-only (just started, or authority unsettled)
@@ -146,24 +153,6 @@ func (tm *TopologyManager) addKeyringRotationReservationsLocked(sites []string) 
 		}
 	}
 	sort.Strings(tm.keyringRotationReserved)
-}
-
-// ReleaseKeyringRotationReservations drops reservations whose stamp was
-// definitely not persisted, so a rejected status write does not keep a
-// site promotion-blocked.
-func (tm *TopologyManager) ReleaseKeyringRotationReservations(sites []string) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	kept := tm.keyringRotationReserved[:0]
-	for _, name := range tm.keyringRotationReserved {
-		if !slices.Contains(sites, name) {
-			kept = append(kept, name)
-		}
-	}
-	if len(kept) != len(tm.keyringRotationReserved) {
-		tm.keyringRotationBlockedDirty = true
-	}
-	tm.keyringRotationReserved = kept
 }
 
 func (tm *TopologyManager) peekKeyringRotationBlockedDirty() bool {
@@ -237,10 +226,40 @@ func (r *TopologyManagerRunner) SetKeyringRotationBlocked(nn types.NamespacedNam
 // Rotation reservations are group-scoped on the runner as well as held by
 // the group's current manager: a manager started or replaced between a
 // reservation and the status write that persists it receives the pending
-// reservations before its Run begins (startManager), so no manager can
+// reservations before its Run begins (registerManager), so no manager can
 // admit an ordered update onto a site whose rotation was already admitted.
 // reservationMu orders reservation changes against manager registration;
 // it is taken before r.mu and before any manager's mu.
+//
+// Lifecycle of one site's reservation. Invariant: whenever a rotation stamp
+// may be durable, the running manager treats the site as blocked (durable
+// set ∪ reservations), so promotion cannot proceed (no fail-open). There
+// is a single "held" state: whether a hold is new, inherited from an
+// earlier pass or manager, or covers a write of unknown outcome changes
+// nothing, because only an authoritative view of the status ends it.
+//
+//	state  event                                        result
+//	none   reserve admitted (stable authority; no       held; blocked at once
+//	       update, planned failover or promotion; no
+//	       busy retiring manager)
+//	none   reserve refused                              none; request kept and retried,
+//	                                                    except for the active primary
+//	held   status write ok, view carries the stamp      held (also durable)
+//	held   status write ok, view lacks it               none (never stamped, or done)
+//	held   pass ends without a successful write,        as the two rows above, with
+//	       uncached read ok                             the read as the view
+//	held   ... uncached read fails                      held (fail closed)
+//	held   stale cache push (runner sync, start)        held; only the durable set moves
+//	held   manager replaced or retired                  copied to the replacement before
+//	                                                    its Run; retired managers start
+//	                                                    no update
+//	held   promotion claim (beginPromotionOf)           claim refused; dirty bit re-armed
+//	any    claim taken / promotion unobserved           reserve refused until observed
+//	held   encryption disabled / group deleted          none
+//
+// The only way a hold outlives its need (fail-stuck) is every encryption
+// pass failing while every uncached read also fails, i.e. the API server
+// being unreachable; the first pass that reaches it settles the hold.
 
 // ReserveKeyringRotation admits a rotation for nn's site. The group's
 // running manager decides (see TopologyManager.ReserveKeyringRotation).
@@ -259,7 +278,7 @@ func (r *TopologyManagerRunner) ReserveKeyringRotation(nn types.NamespacedName, 
 	retiring := append([]*managedTopology(nil), r.retiring[nn]...)
 	r.mu.RUnlock()
 	for _, old := range retiring {
-		if old.tm.orderedUpdateInFlight() {
+		if old.tm.mutationInFlight() {
 			return false, rotationRefusedManagerRestarting
 		}
 	}
@@ -275,12 +294,18 @@ func (r *TopologyManagerRunner) ReserveKeyringRotation(nn types.NamespacedName, 
 	return true, ""
 }
 
+// rotationRefusedActivePrimary is the one live refusal that does not clear
+// on its own: the request is consumed, as rotationAllowed's status-based
+// refusal of the active primary is.
+const rotationRefusedActivePrimary = "site is the active primary; rotate replicas first, then run a planned failover and rotate this site once it is a replica"
+
 // Live rotation refusals that clear on their own; the encryption reconciler
-// requeues on them.
+// keeps the request and requeues on them.
 const (
+	rotationRefusedPlannedFailover    = "a planned failover is in progress; retrying"
 	rotationRefusedPromotionInFlight  = "a promotion is in flight; retrying once the new primary is observed"
 	rotationRefusedAuthorityUnsettled = "the operator has not yet observed a unique writable primary with this site read-only; retrying"
-	rotationRefusedManagerRestarting  = "the topology manager is restarting with an ordered update still in flight; retrying"
+	rotationRefusedManagerRestarting  = "the topology manager is restarting with an ordered update or promotion still in flight; retrying"
 	rotationRefusedNoManager          = "no topology manager is running for the group yet; retrying"
 )
 
@@ -292,21 +317,6 @@ func (r *TopologyManagerRunner) PendingKeyringRotationReservations(nn types.Name
 	r.reservationMu.Lock()
 	defer r.reservationMu.Unlock()
 	return r.pendingKeyringRotationReservations(nn)
-}
-
-// ReleaseKeyringRotationReservations drops nn's reservations for sites.
-func (r *TopologyManagerRunner) ReleaseKeyringRotationReservations(nn types.NamespacedName, sites []string) {
-	if r == nil || len(sites) == 0 {
-		return
-	}
-	r.reservationMu.Lock()
-	defer r.reservationMu.Unlock()
-	r.setPendingKeyringRotationReservations(nn, slices.DeleteFunc(r.pendingKeyringRotationReservations(nn), func(s string) bool {
-		return slices.Contains(sites, s)
-	}))
-	if mt := r.registered(nn); mt != nil {
-		mt.tm.ReleaseKeyringRotationReservations(sites)
-	}
 }
 
 // PublishKeyringRotationBlocked pushes an authoritative rotation-blocked

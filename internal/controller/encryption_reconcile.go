@@ -128,18 +128,15 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	// retried, so its annotation must survive this pass.
 	rotationDeferred := false
 
-	// Rotations admitted this pass hold a reservation that blocks their
-	// promotion until an authoritative view of the status lacks them. If
-	// the stamp never reaches the API server it is released; if the write
-	// outcome is unknown, an uncached read decides (see
-	// settleKeyringRotationReservations).
+	// A rotation admitted this pass holds a reservation that blocks its
+	// promotion until an authoritative view of the status lacks it. A pass
+	// that ends without a successful status write settles every held
+	// reservation against an uncached read (settleKeyringRotationReservations).
 	nn := types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}
-	var reserved []string
 	persisted := false
-	var writeErr error
 	defer func() {
 		if !persisted {
-			r.settleKeyringRotationReservations(ctx, nn, reserved, writeErr)
+			r.settleKeyringRotationReservations(ctx, nn)
 		}
 	}()
 
@@ -148,9 +145,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 		before := *site
 
 		wantRequeue, err := r.reconcileSiteKeyring(ctx, fg, site, store, fetch, rotateTarget, &rotationDeferred)
-		if before.UnsealReason != v1alpha1.UnsealReasonRotation && site.UnsealReason == v1alpha1.UnsealReasonRotation {
-			reserved = append(reserved, site.Name)
-		}
 		if err != nil {
 			return 0, err
 		}
@@ -186,7 +180,6 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 
 	setEncryptionCondition(fg)
 	if err := r.patchEncryptionStatus(ctx, fg); err != nil {
-		writeErr = err
 		return 0, err
 	}
 	persisted = true
@@ -199,20 +192,17 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	return requeue, nil
 }
 
-// settleKeyringRotationReservations resolves reservations when a pass's
-// status write did not succeed. This pass's reservations are released when
-// nothing was written or the API server rejected the write. Any reservation
-// the runner still holds for the group after that (this pass's after an
-// ambiguous error such as a timeout, or an earlier pass's left by a failed
-// re-read) is settled against an uncached read, published as the
-// authoritative view; if that read fails too, they stay (fail closed) and
-// the requeued pass tries again.
-func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx context.Context, nn types.NamespacedName, reserved []string, writeErr error) {
+// settleKeyringRotationReservations resolves the reservations the runner
+// holds for the group when a pass ends without a successful status write:
+// nothing written, a rejected write, or one whose outcome is unknown (a
+// timeout may have committed). Which of these happened does not matter. A
+// reservation is never dropped on the strength of this pass's own failure,
+// because the same site may hold an earlier, possibly persisted stamp; an
+// uncached read decides, published as the authoritative view. If that read
+// fails, everything stays held (fail closed) and the requeued pass retries.
+func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx context.Context, nn types.NamespacedName) {
 	if r.Runner == nil {
 		return
-	}
-	if writeErr == nil || statusWriteRejected(writeErr) {
-		r.Runner.ReleaseKeyringRotationReservations(nn, reserved)
 	}
 	held := r.Runner.PendingKeyringRotationReservations(nn)
 	if len(held) == 0 {
@@ -227,14 +217,6 @@ func (r *MysqlFailoverGroupReconciler) settleKeyringRotationReservations(ctx con
 		return
 	}
 	r.Runner.PublishKeyringRotationBlocked(nn, rotationBlockedSites(&latest))
-}
-
-// statusWriteRejected reports whether err proves the API server did not
-// apply the write.
-func statusWriteRejected(err error) bool {
-	return apierrors.IsConflict(err) || apierrors.IsInvalid(err) || apierrors.IsForbidden(err) ||
-		apierrors.IsUnauthorized(err) || apierrors.IsBadRequest(err) || apierrors.IsNotFound(err) ||
-		apierrors.IsMethodNotSupported(err) || apierrors.IsRequestEntityTooLargeError(err)
 }
 
 // reconcileSiteKeyring advances one site. Returns true when the site is
@@ -273,24 +255,40 @@ func (r *MysqlFailoverGroupReconciler) reconcileSiteKeyring(
 			// snapshot, so an update that has just started is invisible
 			// above. The reservation is decided live against the update's
 			// claim and blocks promotion of the site from here on. Every
-			// live refusal clears on its own.
+			// live refusal clears on its own except one for the primary
+			// the manager observes, which is consumed like the status one.
 			ok, why = r.Runner.ReserveKeyringRotation(types.NamespacedName{Namespace: fg.Namespace, Name: fg.Name}, site.Name)
-			retry = !ok
+			retry = !ok && why != rotationRefusedActivePrimary
+		}
+		if !ok && !retry {
+			r.Recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringRotationRefused",
+				"refusing to rotate keyring on site %s: %s", site.Name, why)
+			site.Message = why
+			return false, nil
 		}
 		if !ok {
 			// A retryable refusal keeps the request: the annotation stays
 			// and the rotation is retried on the encryption requeue, since
 			// what clears it (an update, failover or manager restart
-			// ending) need not wake the reconciler. One event per reason.
-			if !retry || site.Message != why {
+			// ending) need not wake the reconciler. The site is still
+			// Sealed, so its drift check runs as on any other pass: a
+			// deferred rotation must not silence a missing or diverged
+			// escrow. One event per reason.
+			if rotationDeferred != nil {
+				*rotationDeferred = true
+			}
+			deferred := "rotation deferred: " + why
+			if !strings.Contains(site.Message, deferred) {
 				r.Recorder.Eventf(fg, corev1.EventTypeWarning, "KeyringRotationRefused",
 					"refusing to rotate keyring on site %s: %s", site.Name, why)
 			}
-			site.Message = why
-			if retry && rotationDeferred != nil {
-				*rotationDeferred = true
+			if _, err := r.verifySealedSite(ctx, fg, site, store, fetch); err != nil {
+				return true, err
 			}
-			return retry, nil
+			if site.Phase == v1alpha1.KeyringPhaseSealed {
+				site.Message = fmt.Sprintf("sealed against %s; %s", site.KeyringSecret, deferred)
+			}
+			return true, nil
 		}
 		site.Phase = v1alpha1.KeyringPhaseUnsealed
 		site.UnsealReason = v1alpha1.UnsealReasonRotation
