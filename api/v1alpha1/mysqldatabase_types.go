@@ -121,7 +121,8 @@ const (
 	// PrivilegeCreateRoutine is CREATE ROUTINE.
 	PrivilegeCreateRoutine MysqlPrivilege = "CREATE ROUTINE"
 	// PrivilegeAlterRoutine is ALTER ROUTINE, which also covers DROP
-	// PROCEDURE and DROP FUNCTION.
+	// PROCEDURE and DROP FUNCTION. It applies to routines other accounts
+	// defined, including changing their SQL SECURITY to DEFINER.
 	PrivilegeAlterRoutine MysqlPrivilege = "ALTER ROUTINE"
 )
 

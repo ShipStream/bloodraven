@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 
@@ -62,12 +63,16 @@ func TestMysqlDatabaseRoutinePrivilegesMySQL(t *testing.T) {
 	if addr == "" {
 		t.Skip("set BLOODRAVEN_TENANT_TEST_ADDR to a disposable MySQL server")
 	}
-	connect := func(user, password string) *sql.DB {
-		t.Helper()
+	open := func(user, password string) (*sql.DB, error) {
 		cfg := mysqldriver.NewConfig()
 		cfg.User, cfg.Passwd, cfg.Net, cfg.Addr = user, password, "tcp", addr
 		cfg.AllowNativePasswords = true
-		db, err := sql.Open("mysql", cfg.FormatDSN())
+		cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = 5*time.Second, 5*time.Second, 5*time.Second
+		return sql.Open("mysql", cfg.FormatDSN())
+	}
+	connect := func(user, password string) *sql.DB {
+		t.Helper()
+		db, err := open(user, password)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -104,7 +109,7 @@ func TestMysqlDatabaseRoutinePrivilegesMySQL(t *testing.T) {
 	})
 
 	h := newMdbHarness(t, mdbCR(withDeployUser(deployPrivileges)), mdbGroup("dc1"), mdbOperatorSecret(), mdbOwnerSecret(), mdbSupportSecret())
-	h.r.OpenDB = func(user, password, _, _ string) (*sql.DB, error) { return connect(user, password), nil }
+	h.r.OpenDB = func(user, password, _, _ string) (*sql.DB, error) { return open(user, password) }
 	h.reconcile()
 	h.requireReady()
 
@@ -142,5 +147,5 @@ func TestMysqlDatabaseRoutinePrivilegesMySQL(t *testing.T) {
 }
 
 func sameSet(got, want []string) bool {
-	return len(got) == len(want) && !slices.ContainsFunc(want, func(p string) bool { return !slices.Contains(got, p) })
+	return slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(want)))
 }
