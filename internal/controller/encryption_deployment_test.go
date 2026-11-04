@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -12,8 +13,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
+	internalmysql "github.com/shipstream/bloodraven/internal/mysql"
 )
 
 type failDeploymentUpdateClient struct {
@@ -361,4 +364,106 @@ func containerByName(cs []corev1.Container, name string) *corev1.Container {
 		}
 	}
 	return nil
+}
+
+// keyringWiring names how a Deployment wires its keyring volume: the escrow
+// Secret it projects (sealed) or "emptyDir" (writable, unsealed).
+func keyringWiring(t *testing.T, r *MysqlFailoverGroupReconciler, site string) string {
+	t.Helper()
+	vol := findVolume(getDeployment(t, r, site).Spec.Template.Spec.Volumes, keyringVolumeName)
+	switch {
+	case vol == nil:
+		return "none"
+	case vol.Secret != nil:
+		return "secret:" + vol.Secret.SecretName
+	case vol.EmptyDir != nil:
+		return "emptyDir"
+	}
+	return "other"
+}
+
+// A pass whose baseline moved is discarded, and Reconcile must not render
+// from it: under Recreate the stale keyring state would otherwise re-wire
+// the Deployment against the durable lifecycle. Both directions: a stale
+// Sealed snapshot over a persisted rotation (would seal a site mid-rotation)
+// and a stale rotation over a persisted Sealed (would unseal a sealed site).
+func TestReconcile_MovedEncryptionBaselineRendersNothing(t *testing.T) {
+	digest := keyringDigest([]byte("k"))
+	sealed := v1alpha1.SiteEncryptionStatus{Name: "dc2", Phase: v1alpha1.KeyringPhaseSealed,
+		KeyringSecret: "mysql-lion-dc2-keyring-v1", KeyringVersion: 1, KeyringDigest: digest}
+	rotating := sealed
+	rotating.Phase, rotating.UnsealReason = v1alpha1.KeyringPhaseUnsealed, v1alpha1.UnsealReasonRotation
+	for _, tc := range []struct {
+		name             string
+		persisted, stale v1alpha1.SiteEncryptionStatus
+		deployment       func(fg *v1alpha1.MysqlFailoverGroup) *appsv1.Deployment
+	}{
+		{"stale sealed over persisted rotation", rotating, sealed,
+			func(fg *v1alpha1.MysqlFailoverGroup) *appsv1.Deployment { return unsealedDeployment(fg, "dc2") }},
+		{"stale rotation over persisted sealed", sealed, rotating,
+			func(fg *v1alpha1.MysqlFailoverGroup) *appsv1.Deployment {
+				return sealedDeployment(fg, "dc2", "mysql-lion-dc2-keyring-v1")
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fg := encTestFG()
+			fg.Spec.UpdateStrategy = "Recreate"
+			fg.Finalizers = []string{finalizerName}
+			fg.Status.ActiveSite = "dc1"
+			dc1 := v1alpha1.SiteEncryptionStatus{Name: "dc1", Phase: v1alpha1.KeyringPhaseSealed,
+				KeyringSecret: "mysql-lion-dc1-keyring-v1", KeyringVersion: 1, KeyringDigest: digest}
+			fg.Status.EncryptionAtRest = &v1alpha1.EncryptionAtRestStatus{Sites: []v1alpha1.SiteEncryptionStatus{dc1, tc.persisted}}
+			staleStatus := &v1alpha1.EncryptionAtRestStatus{Sites: []v1alpha1.SiteEncryptionStatus{dc1, tc.stale}}
+
+			r, c := encReconciler(t, nil, fg,
+				sealedDeployment(fg, "dc1", "mysql-lion-dc1-keyring-v1"), tc.deployment(fg))
+			store := &keyringEscrowStore{client: c, scheme: c.Scheme()}
+			for _, s := range []string{"dc1", "dc2"} {
+				if _, err := store.put(ctx, fg, s, []byte("k")); err != nil {
+					t.Fatalf("seed escrow: %v", err)
+				}
+			}
+			before := keyringWiring(t, r, "dc2")
+
+			// Serve the stale snapshot to Reconcile's own read; the first
+			// sidecar probe (during the keyring pass) ends the lag, so the
+			// pass's conditioned write sees the newer persisted state.
+			var lagging atomic.Bool
+			lagging.Store(true)
+			r.keyringStatus = func(context.Context, *v1alpha1.MysqlFailoverGroup, string) (*internalmysql.KeyringStatus, error) {
+				lagging.Store(false)
+				return nil, errors.New("sidecar unreachable")
+			}
+			r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+				Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if err := cl.Get(ctx, key, obj, opts...); err != nil {
+						return err
+					}
+					if mfg, ok := obj.(*v1alpha1.MysqlFailoverGroup); ok && lagging.Load() {
+						mfg.Status.EncryptionAtRest = staleStatus.DeepCopy()
+					}
+					return nil
+				},
+			})
+
+			res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "lion", Namespace: "shared-lion"}})
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if res.RequeueAfter == 0 {
+				t.Error("a discarded pass did not requeue")
+			}
+			if after := keyringWiring(t, r, "dc2"); after != before {
+				t.Fatalf("dc2 keyring wiring changed from %s to %s on a discarded pass", before, after)
+			}
+			var stored v1alpha1.MysqlFailoverGroup
+			if err := c.Get(ctx, client.ObjectKeyFromObject(fg), &stored); err != nil {
+				t.Fatal(err)
+			}
+			if got := stored.Status.EncryptionAtRest.SiteEncryptionStatusByName("dc2"); got.Phase != tc.persisted.Phase || got.UnsealReason != tc.persisted.UnsealReason {
+				t.Fatalf("persisted dc2 = %+v, want it unchanged", got)
+			}
+		})
+	}
 }

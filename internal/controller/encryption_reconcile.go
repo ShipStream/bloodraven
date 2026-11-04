@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -96,7 +98,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 		setEncryptionRefusedCondition(fg)
 		if _, err := r.patchEncryptionStatus(ctx, fg, nil, false); err != nil {
 			if errors.Is(err, errEncryptionStatusMoved) {
-				return encryptionMovedRequeue, nil
+				return encryptionMovedRequeue, err
 			}
 			return 0, err
 		}
@@ -184,7 +186,7 @@ func (r *MysqlFailoverGroupReconciler) reconcileEncryptionAtRest(
 	if errors.Is(err, errEncryptionStatusMoved) {
 		// Not persisted: the deferred settle publishes what is.
 		logger.V(1).Info("encryption status changed since this pass read it; recomputing")
-		return encryptionMovedRequeue, nil
+		return encryptionMovedRequeue, err
 	}
 	if err != nil {
 		return 0, err
@@ -1010,7 +1012,9 @@ func setEncryptionCondition(fg *v1alpha1.MysqlFailoverGroup) {
 // errEncryptionStatusMoved means the persisted encryption lifecycle
 // changed after the reconcile read its baseline, by a write other than the
 // clone gate's: the pass's decisions are stale and must be recomputed from
-// the new state, never copied over it.
+// the new state, never copied over it. reconcileEncryptionAtRest returns it
+// with its requeue, and Reconcile must stop before rendering anything: the
+// ConfigMaps and Deployments are driven by the discarded keyring state.
 var errEncryptionStatusMoved = errors.New("encryption status changed since this reconcile read it")
 
 // rotationDeferredNote prefixes the reason in a Sealed site's message while
@@ -1067,6 +1071,18 @@ func (r *MysqlFailoverGroupReconciler) patchEncryptionStatus(
 	return written, err
 }
 
+// sameSiteEncryptionStatus compares two site states as the API server
+// stores them: a baseline that never round-tripped carries sub-second
+// timestamps the stored copy has already lost.
+func sameSiteEncryptionStatus(a, b v1alpha1.SiteEncryptionStatus) bool {
+	aj, aerr := json.Marshal(a)
+	bj, berr := json.Marshal(b)
+	if aerr != nil || berr != nil {
+		return reflect.DeepEqual(a, b)
+	}
+	return bytes.Equal(aj, bj)
+}
+
 // encryptionStatusMoved reports whether latest's per-site lifecycle differs
 // from baseline in any way other than a clone-gate hold or release.
 func encryptionStatusMoved(baseline, latest *v1alpha1.EncryptionAtRestStatus) bool {
@@ -1085,7 +1101,7 @@ func encryptionStatusMoved(baseline, latest *v1alpha1.EncryptionAtRestStatus) bo
 		if live == nil {
 			return true
 		}
-		if reflect.DeepEqual(b[i], *live) {
+		if sameSiteEncryptionStatus(b[i], *live) {
 			continue
 		}
 		// The clone gate writes these through mutateSiteEncryption;

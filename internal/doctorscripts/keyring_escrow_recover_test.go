@@ -12,8 +12,12 @@ import (
 )
 
 // fakeKubectl serves just the calls keyring-escrow-recover.sh makes. State
-// lives in $STATE: live-keyring (the pod's file; absent = exec fails),
-// secret (the escrow Secret's bytes; absent = NotFound), log (every call).
+// lives in $STATE: live-keyring (the MySQL pod's file; absent = exec
+// fails), secret (the escrow Secret's bytes; absent = NotFound), pods (the
+// Running MySQL pods: name<TAB>deletionTimestamp<TAB>mysql-ready; default
+// one ready pod), log (every call). A pod listing with any other selector
+// returns the site's Dragonfly pod, which has no keyring, the way the old
+// selector matched it. Only POSIX tools, so it runs on macOS as well.
 const fakeKubectl = `#!/usr/bin/env bash
 set -u
 echo "$*" >>"$STATE/log"
@@ -32,16 +36,26 @@ get)
       *metadata.uid*) printf 'uid-1' ;;
       *'sites[*].name'*) printf 'dc1 dc2' ;;
     esac ;;
-  pod) printf 'mysql-lion-dc2-0' ;;
+  pod)
+    if [[ "$*" == *"-l app.kubernetes.io/name=mysql,app.kubernetes.io/instance=lion,shipstream.io/site=dc2 "* &&
+          "$*" == *"--field-selector=status.phase=Running"* ]]; then
+      if [[ -f "$STATE/pods" ]]; then cat "$STATE/pods"; else printf 'mysql-lion-dc2-0		true
+'; fi
+    else
+      printf 'lion-dragonfly-dc2-0		true
+'
+    fi ;;
   secret)
     [[ -f "$STATE/secret" ]] || { echo "NotFound" >&2; exit 1; }
     case "$*" in
-      *jsonpath=*) base64 -w0 "$STATE/secret" ;;
-      *yaml*) echo "kind: Secret"; echo "data: {keyring: $(base64 -w0 "$STATE/secret")}" ;;
+      *jsonpath=*) base64 <"$STATE/secret" | tr -d '\n' ;;
+      *yaml*) echo "kind: Secret"; echo "data: {keyring: $(base64 <"$STATE/secret" | tr -d '\n')}" ;;
       *) echo "secret/$SECRET_NAME" ;;
     esac ;;
   esac ;;
 exec)
+  pod=$3
+  [[ "$pod" == mysql-lion-dc2-* ]] || { echo "container mysql not found in pod $pod" >&2; exit 1; }
   [[ -f "$STATE/live-keyring" ]] || { echo "pod unavailable" >&2; exit 1; }
   cat "$STATE/live-keyring" ;;
 create)
@@ -92,15 +106,27 @@ func newEscrowEnv(t *testing.T, live, existing []byte) escrowEnv {
 
 func (e escrowEnv) run(t *testing.T, recorded string, args ...string) (string, error) {
 	t.Helper()
+	return e.runWithPath(t, filepath.Join(filepath.Dir(e.state), "bin")+":"+os.Getenv("PATH"), recorded, args...)
+}
+
+func (e escrowEnv) runWithPath(t *testing.T, path, recorded string, args ...string) (string, error) {
+	t.Helper()
 	_, file, _, _ := runtime.Caller(0)
 	script := filepath.Join(filepath.Dir(file), "..", "..", ".agents", "skills", "bloodraven-doctor", "scripts", "keyring-escrow-recover.sh")
 	cmd := exec.Command("bash", append([]string{script, "-n", "orders", "lion", "dc2"}, args...)...)
 	cmd.Dir = filepath.Dir(e.state)
 	cmd.Env = append(os.Environ(),
-		"PATH="+filepath.Join(filepath.Dir(e.state), "bin")+":"+os.Getenv("PATH"),
+		"PATH="+path,
 		"STATE="+e.state, "SECRET_NAME=mysql-lion-dc2-keyring-v2", "RECORDED_DIGEST="+recorded)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+func (e escrowEnv) pods(t *testing.T, lines string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(e.state, "pods"), []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (e escrowEnv) calls(t *testing.T) string {
@@ -228,6 +254,68 @@ func TestKeyringEscrowRecover(t *testing.T) {
 		}
 		if muts := mutatingCalls(e.calls(t)); len(muts) != 0 {
 			t.Fatalf("mutating calls without a readable keyring: %v", muts)
+		}
+	})
+
+	t.Run("selects the site's MySQL pod, not Dragonfly, a terminating or an unready one", func(t *testing.T) {
+		e := newEscrowEnv(t, keys, nil)
+		e.pods(t, "mysql-lion-dc2-old\t2026-01-01T00:00:00Z\ttrue\nmysql-lion-dc2-starting\t\tfalse\nmysql-lion-dc2-new\t\ttrue\n")
+		out, err := e.run(t, recorded)
+		if err != nil {
+			t.Fatalf("script failed: %v\n%s", err, out)
+		}
+		if log := e.calls(t); !strings.Contains(log, "exec -n orders mysql-lion-dc2-new -c mysql") {
+			t.Fatalf("did not read the keyring from the one Ready, non-terminating MySQL pod:\n%s", log)
+		}
+	})
+
+	t.Run("two Ready MySQL pods: refuses to guess, writes nothing", func(t *testing.T) {
+		e := newEscrowEnv(t, keys, nil)
+		e.pods(t, "mysql-lion-dc2-a\t\ttrue\nmysql-lion-dc2-b\t\ttrue\n")
+		out, err := e.run(t, recorded)
+		if err == nil || !strings.Contains(out, "--pod") {
+			t.Fatalf("script did not refuse an ambiguous pod choice (err=%v):\n%s", err, out)
+		}
+		if strings.Contains(e.calls(t), "exec ") || len(mutatingCalls(e.calls(t))) != 0 {
+			t.Fatalf("touched a pod or the API on an ambiguous choice:\n%s", e.calls(t))
+		}
+	})
+
+	t.Run("--pod names the pod explicitly when the choice is ambiguous", func(t *testing.T) {
+		e := newEscrowEnv(t, keys, nil)
+		e.pods(t, "mysql-lion-dc2-a\t\ttrue\nmysql-lion-dc2-b\t\tfalse\nmysql-lion-dc2-c\t\ttrue\n")
+		out, err := e.run(t, recorded, "--pod", "mysql-lion-dc2-b")
+		if err != nil {
+			t.Fatalf("script failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(e.calls(t), "exec -n orders mysql-lion-dc2-b -c mysql") {
+			t.Fatalf("did not use the named pod:\n%s", e.calls(t))
+		}
+		if out, err := newEscrowEnv(t, keys, nil).run(t, recorded, "--pod", "lion-dragonfly-dc2-0"); err == nil {
+			t.Fatalf("accepted a --pod that is not the site's MySQL pod:\n%s", out)
+		}
+	})
+
+	// macOS and BSD have no sha256sum; the script falls back to shasum.
+	t.Run("works without GNU sha256sum", func(t *testing.T) {
+		tools := []string{"bash", "cut", "base64", "awk", "grep", "mktemp", "rm", "date", "cat", "sed", "tr", "cp", "shasum", "perl"}
+		e := newEscrowEnv(t, keys, nil)
+		bin := filepath.Join(filepath.Dir(e.state), "bin")
+		for _, tool := range tools {
+			p, err := exec.LookPath(tool)
+			if err != nil {
+				t.Skipf("%s not available", tool)
+			}
+			if err := os.Symlink(p, filepath.Join(bin, tool)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out, err := e.runWithPath(t, bin, recorded)
+		if err != nil {
+			t.Fatalf("script failed without sha256sum: %v\n%s", err, out)
+		}
+		if got := e.secret(t); string(got) != string(keys) {
+			t.Fatalf("escrow Secret = %q, want the pod's keyring", got)
 		}
 	})
 

@@ -19,7 +19,12 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: keyring-escrow-recover.sh -n <namespace> <mysql-failover-group> <site> [--replace-corrupt <secret-name>]
+Usage: keyring-escrow-recover.sh -n <namespace> <mysql-failover-group> <site> [--pod <pod>] [--replace-corrupt <secret-name>]
+
+  The site's MySQL pod is the one Running, not terminating, with a Ready
+  "mysql" container, selected exactly as its Deployment selects it. If there
+  is not exactly one, the script refuses; --pod <pod> names it explicitly
+  (it must still be that site's MySQL pod with a running "mysql" container).
 
   Without --replace-corrupt: recreate the site's missing escrow Secret from
   the running pod's keyring. Refuses if the Secret exists.
@@ -37,9 +42,11 @@ NAMESPACE=""
 GROUP=""
 SITE=""
 REPLACE=""
+POD=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -n|--namespace) NAMESPACE="${2:-}"; shift 2 ;;
+        --pod) POD="${2:-}"; [[ -n "$POD" ]] || usage; shift 2 ;;
         --replace-corrupt) REPLACE="${2:-}"; [[ -n "$REPLACE" ]] || usage; shift 2 ;;
         -h|--help) usage ;;
         -*) usage ;;
@@ -55,6 +62,21 @@ done
 
 die() { echo "keyring-escrow-recover: $*" >&2; exit 1; }
 
+# Portable digest and base64 decode (GNU coreutils, macOS and BSD).
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256_of() { sha256sum "$@" | cut -d' ' -f1; }
+elif command -v shasum >/dev/null 2>&1; then
+    sha256_of() { shasum -a 256 "$@" | cut -d' ' -f1; }
+else
+    die "neither sha256sum nor shasum is installed"
+fi
+B64_DECODE=""
+for flag in --decode -d -D; do
+    if [[ "$(printf 'YQ==' | base64 "$flag" 2>/dev/null)" == "a" ]]; then B64_DECODE=$flag; break; fi
+done
+[[ -n "$B64_DECODE" ]] || die "this base64 cannot decode (tried --decode, -d, -D)"
+b64_decode() { base64 "$B64_DECODE"; }
+
 fg_jsonpath() {
     kubectl get mysqlfailovergroup "$GROUP" -n "$NAMESPACE" -o "jsonpath=$1"
 }
@@ -64,7 +86,7 @@ site_field() {
 secret_digest() {
     local data
     data=$(kubectl get secret "$1" -n "$NAMESPACE" -o 'jsonpath={.data.keyring}') || return 1
-    echo "sha256:$(printf '%s' "$data" | base64 -d | sha256sum | cut -d' ' -f1)"
+    echo "sha256:$(printf '%s' "$data" | b64_decode | sha256_of)"
 }
 
 SECRET=$(site_field keyringSecret) || die "cannot read the failover group"
@@ -75,10 +97,26 @@ KEYRING_DIR=${KEYRING_DIR:-/run/mysql-keyring}
 FG_UID=$(fg_jsonpath '{.metadata.uid}')
 [[ -n "$SECRET" && -n "$DIGEST" && -n "$FG_UID" ]] || die "site $SITE has no keyringSecret/keyringDigest in status"
 
-POD=$(kubectl get pod -n "$NAMESPACE" \
-    -l "shipstream.io/failover-group=$GROUP,shipstream.io/site=$SITE" \
-    -o 'jsonpath={.items[0].metadata.name}') || die "cannot list the site's pod"
-[[ -n "$POD" ]] || die "no running pod for site $SITE: its keyring is gone; follow the reclone step of the runbook"
+# The site's MySQL pod, selected as its Deployment selects it (Dragonfly and
+# backup Job pods carry the site label too). One line per Running pod:
+# name, deletionTimestamp, the mysql container's ready flag.
+SELECTOR="app.kubernetes.io/name=mysql,app.kubernetes.io/instance=$GROUP,shipstream.io/site=$SITE"
+PODS=$(kubectl get pod -n "$NAMESPACE" -l "$SELECTOR" --field-selector=status.phase=Running \
+    -o 'jsonpath={range .items[*]}{.metadata.name}{"\t"}{.metadata.deletionTimestamp}{"\t"}{.status.containerStatuses[?(@.name=="mysql")].ready}{"\n"}{end}') \
+    || die "cannot list the site's pods"
+if [[ -n "$POD" ]]; then
+    printf '%s\n' "$PODS" | awk -F'\t' -v p="$POD" '$1 == p && $2 == "" {found=1} END {exit !found}' \
+        || die "--pod $POD is not a Running, non-terminating MySQL pod of site $SITE"
+else
+    READY=$(printf '%s\n' "$PODS" | awk -F'\t' 'NF && $2 == "" && $3 == "true" {print $1}')
+    COUNT=$(printf '%s\n' "$READY" | grep -c . || true)
+    if [[ "$COUNT" -ne 1 ]]; then
+        echo "keyring-escrow-recover: site $SITE has $COUNT Ready MySQL pods; Running pods (name, deleting, mysql ready):" >&2
+        printf '%s\n' "$PODS" >&2
+        die "refusing to guess. If exactly one of them still holds the keyring, re-run with --pod <name>; if none runs, the keyring is gone: follow the reclone step of the runbook"
+    fi
+    POD=$READY
+fi
 
 # 1. Read and verify the live keyring. Nothing is written before this passes.
 umask 077
@@ -87,7 +125,7 @@ trap 'rm -f "$TMP"' EXIT
 kubectl exec -n "$NAMESPACE" "$POD" -c mysql -- cat "$KEYRING_DIR/keyring" >"$TMP" \
     || die "could not read $KEYRING_DIR/keyring from $POD; nothing was changed"
 [[ -s "$TMP" ]] || die "the keyring read from $POD is empty; nothing was changed"
-LIVE="sha256:$(sha256sum "$TMP" | cut -d' ' -f1)"
+LIVE="sha256:$(sha256_of "$TMP")"
 [[ "$LIVE" == "$DIGEST" ]] \
     || die "the running keyring ($LIVE) does not match status ($DIGEST); nothing was changed"
 

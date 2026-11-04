@@ -2976,6 +2976,31 @@ func (tm *TopologyManager) UnfenceSite(ctx context.Context, name string) error {
 	return nil
 }
 
+// WritablePeers probes every site other than except and returns those
+// observed writable and those whose probe failed. A rollback must not give
+// the source its writes back while another site already accepts them.
+func (tm *TopologyManager) WritablePeers(ctx context.Context, except string) (writable, unknown []string) {
+	for i := range tm.sites {
+		site := &tm.sites[i]
+		if site.name == except {
+			continue
+		}
+		var ro bool
+		err := withMySQLSafetyTimeout(ctx, func(probeCtx context.Context) error {
+			var err error
+			ro, err = site.mysql.CheckReadOnly(probeCtx)
+			return err
+		})
+		switch {
+		case err != nil:
+			unknown = append(unknown, site.name)
+		case !ro:
+			writable = append(writable, site.name)
+		}
+	}
+	return writable, unknown
+}
+
 // unfenceSite undoes a FenceSite fence. super_read_only=ON also sets
 // read_only=ON and clearing super_read_only alone leaves it set, so both
 // are cleared, super_read_only first. read_only=OFF is attempted even when

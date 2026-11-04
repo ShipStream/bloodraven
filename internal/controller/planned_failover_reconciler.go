@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -720,6 +721,18 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverPromoting(ctx context.Cont
 				"rejected")
 		}
 		if errors.Is(err, errPredecessorUpdateInFlight) {
+			// The replaced manager's update may itself be fencing or
+			// promoting these sites, so an unreadable peer is as
+			// disqualifying as a writable one: leave the source fenced.
+			probeCtx, cancelProbe := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			writable, unknown, probeErr := r.Runner.PlannedFailoverWritablePeers(probeCtx, nn, cur.SourcePrimary)
+			cancelProbe()
+			if probeErr != nil || len(writable)+len(unknown) > 0 {
+				return r.plannedFailoverFail(ctx, fg, "ConcurrentOperation",
+					fmt.Sprintf("%v; source %q left fenced: writable %v, unreadable %v (probe error: %v); manual recovery required",
+						err, cur.SourcePrimary, writable, unknown, probeErr),
+					"failed_other")
+			}
 			return r.plannedFailoverRollback(ctx, fg, nn, "ConcurrentOperation",
 				fmt.Sprintf("%v; nothing was sent to %q; source %q unfenced, re-annotate to retry",
 					err, cur.Target, cur.SourcePrimary),
@@ -834,6 +847,17 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverRollback(ctx context.Conte
 	// carries the warning. The unfence is detached from ctx's cancellation
 	// so an operator shutdown mid-rollback does not abandon it.
 	if cur != nil && cur.SourcePrimary != "" && r.Runner != nil {
+		// Never hand the source its writes back while another site
+		// already accepts them: that is a split brain, not a rollback.
+		probeCtx, cancelProbe := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		writable, _, probeErr := r.Runner.PlannedFailoverWritablePeers(probeCtx, nn, cur.SourcePrimary)
+		cancelProbe()
+		if probeErr == nil && len(writable) > 0 {
+			return r.plannedFailoverFail(ctx, fg, reason,
+				fmt.Sprintf("%s (source %q left fenced: %s already writable; manual recovery required)",
+					msg, cur.SourcePrimary, strings.Join(writable, ", ")),
+				metricResult)
+		}
 		unfenceCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		if err := r.Runner.PlannedFailoverUnfence(unfenceCtx, nn, cur.SourcePrimary); err != nil {
 			log.FromContext(ctx).Error(err, "planned-failover: unfence after rollback",

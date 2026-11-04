@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -563,4 +564,48 @@ func TestPlannedFailover_DefersToPredecessorUpdate(t *testing.T) {
 				iad.superReadOnly, iad.readOnly, pdx.readOnly)
 		}
 	})
+}
+
+// A rollback never unfences the source while another site is writable. The
+// predecessor's update may already have promoted the target; and in any
+// rollback a writable peer means unfencing would make a split brain.
+func TestPlannedFailoverRollback_LeavesSourceFencedWhenPeerWritable(t *testing.T) {
+	start := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	for _, tc := range []struct {
+		name  string
+		setup func(tm *TopologyManager)
+	}{
+		{"predecessor update promoted the target", func(tm *TopologyManager) { tm.setPredecessorUpdateInFlight(true) }},
+		{"rotation refusal rollback", func(tm *TopologyManager) { tm.restoreKeyringRotationReservations([]string{"pdx"}) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fg := plannedFailoverFG("")
+			fg.Status.PlannedFailover = &v1alpha1.PlannedFailoverStatus{
+				Phase: v1alpha1.PlannedFailoverPhasePromoting, Target: "pdx", SourcePrimary: "iad", StartTime: &start,
+			}
+			nn := fgNN(fg)
+			iad := &mockMySQL{readOnly: true, superReadOnly: true}
+			pdx := &mockMySQL{readOnly: false}
+			r, _ := newReconciler(fg)
+			r.Runner = plannedDrainRunner(nn, iad, pdx)
+			tm, err := r.Runner.plannedFailoverManager(nn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(tm)
+			if _, err := r.reconcilePlannedFailover(context.Background(), fetchFG(t, r, nn)); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			pf := fetchFG(t, r, nn).Status.PlannedFailover
+			if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || !strings.Contains(pf.Message, "manual recovery required") {
+				t.Fatalf("phase=%q (%s), want Failed asking for manual recovery", pf.Phase, pf.Message)
+			}
+			iad.mu.Lock()
+			fenced := iad.superReadOnly && iad.readOnly
+			iad.mu.Unlock()
+			if !fenced {
+				t.Fatal("source unfenced while pdx is writable: two writable primaries")
+			}
+		})
+	}
 }

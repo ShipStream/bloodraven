@@ -289,6 +289,17 @@ func (r *TopologyManagerRunner) PlannedFailoverUnfence(ctx context.Context, nn t
 	return tm.UnfenceSite(ctx, site)
 }
 
+// PlannedFailoverWritablePeers probes every site but except (see
+// TopologyManager.WritablePeers).
+func (r *TopologyManagerRunner) PlannedFailoverWritablePeers(ctx context.Context, nn types.NamespacedName, except string) (writable, unknown []string, err error) {
+	tm, err := r.plannedFailoverManager(nn)
+	if err != nil {
+		return nil, nil, err
+	}
+	writable, unknown = tm.WritablePeers(ctx, except)
+	return writable, unknown, nil
+}
+
 // PlannedFailoverGtidExecuted returns the named site's current
 // GTID_EXECUTED. Used to poll the target during the zero-lag gate.
 func (r *TopologyManagerRunner) PlannedFailoverGtidExecuted(ctx context.Context, nn types.NamespacedName, site string) (string, error) {

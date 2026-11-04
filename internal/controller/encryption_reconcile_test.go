@@ -1410,8 +1410,8 @@ func TestReconcileEncryption_StaleSuccessfulPassKeepsPersistedRotation(t *testin
 	tm.mu.Lock()
 	tm.deploymentUpdatePending = true
 	tm.mu.Unlock()
-	if _, err := r.reconcileEncryptionAtRest(ctx, stale.DeepCopy()); err != nil {
-		t.Fatalf("pass 2: %v", err)
+	if _, err := r.reconcileEncryptionAtRest(ctx, stale.DeepCopy()); !errors.Is(err, errEncryptionStatusMoved) {
+		t.Fatalf("pass 2 = %v, want errEncryptionStatusMoved", err)
 	}
 
 	var after v1alpha1.MysqlFailoverGroup

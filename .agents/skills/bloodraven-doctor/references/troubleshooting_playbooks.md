@@ -103,6 +103,7 @@ The only surviving copy of a sealed site's keys is the keyring file in its runni
    ```bash
    ./.agents/skills/bloodraven-doctor/scripts/keyring-escrow-recover.sh -n <ns> <group> <site>
    ```
+   It reads from the site's one Running, Ready MySQL pod, selected as its Deployment selects it, and refuses if there is not exactly one; `--pod <name>` names it explicitly. It runs with GNU or macOS/BSD tools (`sha256sum` or `shasum`).
 2. `KeyringEscrowCorrupt` (the Secret exists but no longer hashes to the recorded digest): the helper refuses by default and changes nothing. Replacing the Secret is a separate, explicit step: re-run it with `--replace-corrupt <secret-name>`, repeating the exact Secret name. It then confirms the existing Secret really fails the digest check and the pod's keyring passes it, writes a backup to `./keyring-escrow-backup-<secret>-<timestamp>.yaml`, and only then deletes and recreates that one Secret. Get the human operator's go-ahead before passing `--replace-corrupt`.
    The canonical procedure is "Keyring escrow lost" in `site/content/docs/6.operations/4.runbooks.md` (also "Disaster recovery" in `site/content/docs/4.configuration/8.encryption-at-rest.md`).
 3. Verify the site stays `Sealed` and the `KeyringEscrowMissing` / `KeyringEscrowCorrupt` events stop.
