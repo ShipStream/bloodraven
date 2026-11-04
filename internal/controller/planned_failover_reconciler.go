@@ -806,10 +806,10 @@ func (r *MysqlFailoverGroupReconciler) plannedFailoverRollback(ctx context.Conte
 	cur := fg.Status.PlannedFailover
 
 	// Best-effort unfence of the source primary. If this fails the
-	// cluster is still consistent — the source has super_read_only=ON
-	// but the topology manager will notice on its next poll and clear
-	// the flag via its returning-primary logic once the planned-
-	// failover guard is released.
+	// cluster is still consistent but has no writable site. The topology
+	// manager re-asserts a super_read_only fence only on the recorded last
+	// failover target and otherwise leaves it for a human, so the Failed
+	// message carries the warning.
 	if cur != nil && cur.SourcePrimary != "" && r.Runner != nil {
 		unfenceCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := r.Runner.PlannedFailoverUnfence(unfenceCtx, nn, cur.SourcePrimary); err != nil {

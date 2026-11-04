@@ -2807,9 +2807,9 @@ func (tm *TopologyManager) isPlannedFailoverActive() bool {
 //
 // Transactional: if the GTID read fails after the fence succeeded, the
 // site is best-effort unfenced before the error is returned. Leaving a
-// healthy primary stuck in super_read_only on a transient metadata
-// read is worse than failing the whole operation — the caller can
-// retry and the site stays writable in the meantime.
+// healthy primary stuck read-only on a transient metadata read is worse
+// than failing the whole operation — the caller can retry and the site
+// stays writable in the meantime.
 func (tm *TopologyManager) FenceSite(ctx context.Context, name string) (string, error) {
 	site := tm.getSite(name)
 	if site == nil {
@@ -2823,8 +2823,8 @@ func (tm *TopologyManager) FenceSite(ctx context.Context, name string) (string, 
 		// Best-effort unfence using a fresh short-lived context so a
 		// cancelled parent ctx doesn't block the rollback attempt.
 		unfenceCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if unfenceErr := site.mysql.SetSuperReadOnly(unfenceCtx, false); unfenceErr != nil {
-			tm.logger.Error("fence rollback failed: site left super_read_only=ON", "site", name, "error", unfenceErr)
+		if unfenceErr := unfenceSite(unfenceCtx, site.mysql); unfenceErr != nil {
+			tm.logger.Error("fence rollback failed: site left read-only", "site", name, "error", unfenceErr)
 		}
 		cancel()
 		return "", fmt.Errorf("read GTID_EXECUTED on %q after fence: %w", name, err)
@@ -2832,17 +2832,25 @@ func (tm *TopologyManager) FenceSite(ctx context.Context, name string) (string, 
 	return gtid, nil
 }
 
-// UnfenceSite clears super_read_only on the named site. Used by the
+// UnfenceSite gives the named site its writes back. Used by the
 // planned-failover rollback path when the target fails to catch up.
 func (tm *TopologyManager) UnfenceSite(ctx context.Context, name string) error {
 	site := tm.getSite(name)
 	if site == nil {
 		return errSiteNotFound
 	}
-	if err := site.mysql.SetSuperReadOnly(ctx, false); err != nil {
-		return fmt.Errorf("set super_read_only=OFF on %q: %w", name, err)
+	if err := unfenceSite(ctx, site.mysql); err != nil {
+		return fmt.Errorf("unfence %q: %w", name, err)
 	}
 	return nil
+}
+
+// unfenceSite undoes a FenceSite fence. super_read_only=ON also sets
+// read_only=ON and clearing super_read_only alone leaves it set, so both
+// are cleared, super_read_only first. read_only=OFF is attempted even when
+// the first statement fails, because it clears super_read_only too.
+func unfenceSite(ctx context.Context, m mysql.Checker) error {
+	return errors.Join(m.SetSuperReadOnly(ctx, false), m.SetReadOnly(ctx, false))
 }
 
 // GetSiteGtidExecuted returns the named site's current GTID_EXECUTED.

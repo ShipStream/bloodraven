@@ -266,8 +266,8 @@ func (r *TopologyManagerRunner) PlannedFailoverFence(ctx context.Context, nn typ
 	return tm.FenceSite(ctx, site)
 }
 
-// PlannedFailoverUnfence clears super_read_only on the named site.
-// Used by the rollback path when the target fails to catch up.
+// PlannedFailoverUnfence clears super_read_only and read_only on the named
+// site. Used by the rollback path when the target fails to catch up.
 func (r *TopologyManagerRunner) PlannedFailoverUnfence(ctx context.Context, nn types.NamespacedName, site string) error {
 	tm, err := r.plannedFailoverManager(nn)
 	if err != nil {

@@ -64,8 +64,8 @@ func TestPlannedFailoverWaitingForLag_RollsBackOnTargetExtras(t *testing.T) {
 	if !strings.Contains(pf.Message, "221") {
 		t.Errorf("message = %q, want the extra count", pf.Message)
 	}
-	if iad.superReadOnly {
-		t.Error("source left fenced after the rollback")
+	if iad.superReadOnly || iad.readOnly {
+		t.Errorf("after rollback iad super_read_only=%v read_only=%v; want the source writable", iad.superReadOnly, iad.readOnly)
 	}
 	if !pdx.readOnly {
 		t.Error("divergent target was promoted")
@@ -103,7 +103,8 @@ func TestPlannedFailoverPromoting_RollsBackDivergentTarget(t *testing.T) {
 	if pf.Phase != v1alpha1.PlannedFailoverPhaseFailed || pf.Reason != "DivergentTarget" {
 		t.Fatalf("phase=%q reason=%q (%s), want Failed/DivergentTarget", pf.Phase, pf.Reason, pf.Message)
 	}
-	if iad.superReadOnly || !pdx.readOnly {
-		t.Errorf("after rollback iad super_read_only=%v, pdx read_only=%v; want iad unfenced and pdx not promoted", iad.superReadOnly, pdx.readOnly)
+	if iad.superReadOnly || iad.readOnly || !pdx.readOnly {
+		t.Errorf("after rollback iad super_read_only=%v read_only=%v, pdx read_only=%v; want iad writable and pdx not promoted",
+			iad.superReadOnly, iad.readOnly, pdx.readOnly)
 	}
 }
