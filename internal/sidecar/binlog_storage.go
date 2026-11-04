@@ -215,8 +215,13 @@ func newS3Store(ctx context.Context, cfg *PITRS3Config) (*s3Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
-	if awsCfg.Region == "" && cfg.EndpointURL != "" {
-		awsCfg.Region = defaultS3CompatibleRegion
+	if awsCfg.Region == "" {
+		switch {
+		case cfg.DefaultRegion != "":
+			awsCfg.Region = cfg.DefaultRegion
+		case cfg.EndpointURL != "":
+			awsCfg.Region = defaultS3CompatibleRegion
+		}
 	}
 
 	clientOpts := []func(*s3.Options){}

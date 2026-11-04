@@ -129,6 +129,11 @@ type PITRS3Config struct {
 	// mount layout. When empty the archiver falls back to the default
 	// AWS SDK credential chain (IRSA, instance profile, env vars).
 	AWSCredsDir string
+	// DefaultRegion signs requests when no region is configured anywhere.
+	// Only artifact cleanup sets it ("us-east-1", what mysqlsh assumes),
+	// so a plain-AWS profile without a region keeps working there; the
+	// sidecar keeps the SDK's behaviour.
+	DefaultRegion string
 }
 
 // PITRPVCConfig is the local-disk archiver config.

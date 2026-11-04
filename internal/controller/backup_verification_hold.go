@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
@@ -102,15 +103,65 @@ func verificationReading(ctx context.Context, reader client.Reader, v *v1alpha1.
 	return !stopped, err
 }
 
-// artifactReaders returns the verifications that may still be reading the
-// backup's artifact, read through the uncached reader. Any API error is
-// returned so that callers fail closed.
+// artifactReader identifies a verification that may still read a backup.
+type artifactReader struct {
+	Name string
+	UID  string
+}
+
+// holdLive reports whether the hold recorded for verification name/uid
+// still protects the backup. A holder that exists is live while it may be
+// reading; a holder that is gone (or was replaced by a same-name successor)
+// is live only while pods under that name still run.
+func holdLive(ctx context.Context, reader client.Reader, namespace, uid, name string) (bool, error) {
+	var v v1alpha1.MysqlBackupVerification
+	err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &v)
+	switch {
+	case err == nil && string(v.UID) == uid:
+		return verificationReading(ctx, reader, &v)
+	case err == nil || apierrors.IsNotFound(err):
+		stopped, serr := verificationExecutionStopped(ctx, reader, namespace, name, false)
+		return !stopped, serr
+	default:
+		return false, fmt.Errorf("get verification %s: %w", name, err)
+	}
+}
+
+// artifactReaders returns the names of the verifications that may still be
+// reading the backup's artifact. See artifactReaderRefs.
+func artifactReaders(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]string, error) {
+	refs, err := artifactReaderRefs(ctx, reader, backup)
+	if err != nil {
+		return nil, err
+	}
+	return readerNames(refs), nil
+}
+
+func readerNames(refs []artifactReader) []string {
+	names := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		names = append(names, ref.Name)
+	}
+	return names
+}
+
+func readerUIDs(refs []artifactReader) []string {
+	uids := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		uids = append(uids, ref.UID)
+	}
+	return uids
+}
+
+// artifactReaderRefs returns the verifications that may still be reading
+// the backup's artifact, read through the uncached reader, sorted by name.
+// Any API error is returned so that callers fail closed.
 //
 // It honours stamped holds and also scans verifications directly, which
 // covers verifications started by an operator that did not stamp holds and
 // the window before a new one stamps.
-func artifactReaders(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]string, error) {
-	readers := map[string]bool{}
+func artifactReaderRefs(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]artifactReader, error) {
+	readers := map[string]string{}
 	seen := map[types.UID]bool{}
 	for key, name := range backup.Annotations {
 		uid, ok := strings.CutPrefix(key, annotationVerificationHoldPrefix)
@@ -118,29 +169,12 @@ func artifactReaders(ctx context.Context, reader client.Reader, backup *v1alpha1
 			continue
 		}
 		seen[types.UID(uid)] = true
-		var v v1alpha1.MysqlBackupVerification
-		err := reader.Get(ctx, types.NamespacedName{Namespace: backup.Namespace, Name: name}, &v)
-		switch {
-		case err == nil && string(v.UID) == uid:
-			reading, rerr := verificationReading(ctx, reader, &v)
-			if rerr != nil {
-				return nil, rerr
-			}
-			if reading {
-				readers[name] = true
-			}
-		case err == nil || apierrors.IsNotFound(err):
-			// The holder is gone (or replaced by a same-name successor):
-			// only pods running under that name can still read.
-			stopped, serr := verificationExecutionStopped(ctx, reader, backup.Namespace, name, false)
-			if serr != nil {
-				return nil, serr
-			}
-			if !stopped {
-				readers[name] = true
-			}
-		default:
-			return nil, fmt.Errorf("get verification %s: %w", name, err)
+		live, err := holdLive(ctx, reader, backup.Namespace, uid, name)
+		if err != nil {
+			return nil, err
+		}
+		if live {
+			readers[name] = uid
 		}
 	}
 
@@ -150,7 +184,7 @@ func artifactReaders(ctx context.Context, reader client.Reader, backup *v1alpha1
 	}
 	for i := range list.Items {
 		v := &list.Items[i]
-		if seen[v.UID] || readers[v.Name] {
+		if _, found := readers[v.Name]; found || seen[v.UID] {
 			continue
 		}
 		switch ref := v.Status.BackupRef; {
@@ -160,22 +194,66 @@ func artifactReaders(ctx context.Context, reader client.Reader, backup *v1alpha1
 				return nil, err
 			}
 			if reading {
-				readers[v.Name] = true
+				readers[v.Name] = string(v.UID)
 			}
 		case ref == nil && v.DeletionTimestamp.IsZero() && !verificationTerminal(v.Status.Phase) &&
 			v.Spec.FailoverGroupRef.Name == backup.Spec.FailoverGroupRef.Name &&
 			v.Spec.ProfileName == backup.Spec.ProfileName &&
 			(v.Spec.BackupRef == nil || v.Spec.BackupRef.Name == "" || v.Spec.BackupRef.Name == backup.Name):
 			// Not yet pinned: it may pick this backup.
-			readers[v.Name] = true
+			readers[v.Name] = string(v.UID)
 		}
 	}
-	names := make([]string, 0, len(readers))
-	for name := range readers {
-		names = append(names, name)
+	out := make([]artifactReader, 0, len(readers))
+	for name, uid := range readers {
+		out = append(out, artifactReader{Name: name, UID: uid})
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// deadHoldKeys returns the hold annotations on the backup whose holder can
+// no longer read it (for example a verification whose finalizer was
+// removed by hand). They would otherwise keep the PITR cutoff pinned.
+func deadHoldKeys(ctx context.Context, reader client.Reader, backup *v1alpha1.MysqlBackup) ([]string, error) {
+	var dead []string
+	for key, name := range backup.Annotations {
+		uid, ok := strings.CutPrefix(key, annotationVerificationHoldPrefix)
+		if !ok {
+			continue
+		}
+		live, err := holdLive(ctx, reader, backup.Namespace, uid, name)
+		if err != nil {
+			return nil, err
+		}
+		if !live {
+			dead = append(dead, key)
+		}
+	}
+	sort.Strings(dead)
+	return dead, nil
+}
+
+// stripDeadHolds removes dead holds from a backup being deleted, with an
+// optimistic lock so a hold stamped concurrently is never dropped. done is
+// false when the patch lost a race and the caller should look again.
+func (r *MysqlBackupReconciler) stripDeadHolds(ctx context.Context, backup *v1alpha1.MysqlBackup) (done bool, err error) {
+	dead, err := deadHoldKeys(ctx, r.apiReader(), backup)
+	if err != nil || len(dead) == 0 {
+		return err == nil, err
+	}
+	patch := client.MergeFromWithOptions(backup.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	for _, key := range dead {
+		delete(backup.Annotations, key)
+	}
+	if err := r.Patch(ctx, backup, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("remove dead verification holds: %w", err)
+	}
+	log.FromContext(ctx).Info("removed dead verification holds", "namespace", backup.Namespace, "backup", backup.Name, "holds", dead)
+	return true, nil
 }
 
 // BackupBeingRead reports whether any verification may still be reading the
@@ -306,13 +384,17 @@ func (r *MysqlBackupReconciler) deleteUnreadBackup(ctx context.Context, victim *
 	if fresh.UID != victim.UID || !fresh.DeletionTimestamp.IsZero() || fresh.Status.Phase != v1alpha1.BackupPhaseSucceeded {
 		return nil
 	}
-	readers, err := artifactReaders(ctx, r.apiReader(), &fresh)
+	readers, err := artifactReaderRefs(ctx, r.apiReader(), &fresh)
 	if err != nil {
 		return fmt.Errorf("check readers of backup %s: %w", fresh.Name, err)
 	}
 	if len(readers) > 0 {
+		log.FromContext(ctx).Info("backup prune held by verification",
+			"namespace", fresh.Namespace, "backup", fresh.Name, "backupUID", string(fresh.UID),
+			"fg", fresh.Spec.FailoverGroupRef.Name, "profile", fresh.Spec.ProfileName,
+			"verifications", readerNames(readers), "verificationUIDs", readerUIDs(readers))
 		r.Recorder.Eventf(&fresh, corev1.EventTypeNormal, "RetentionDeferred",
-			"retention keeps this backup while verification %s may be reading it", strings.Join(readers, ", "))
+			"retention keeps this backup while verification %s may be reading it", strings.Join(readerNames(readers), ", "))
 		return nil
 	}
 	uid, rv := fresh.UID, fresh.ResourceVersion

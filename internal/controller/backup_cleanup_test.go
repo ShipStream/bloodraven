@@ -518,6 +518,13 @@ func TestFinalize_BlockedCleanup(t *testing.T) {
 			wantReason: cleanupReasonDestinationUnverified,
 		},
 		{
+			name: "recorded destination cannot become a Job",
+			setup: func(t *testing.T, f *cleanupFixture) {
+				f.mb.Status.ArtifactStorage.Bucket = ""
+			},
+			wantReason: cleanupReasonJobInvalid,
+		},
+		{
 			name: "same name under another prefix, producer gone",
 			setup: func(t *testing.T, f *cleanupFixture) {
 				f.mb.Status.Location = "team-b/art"
@@ -641,31 +648,174 @@ func TestParseCleanupVerdictRoundTrip(t *testing.T) {
 	}
 }
 
-func TestFinalize_WaitsOutForegroundDeletion(t *testing.T) {
+func TestFinalize_WaitsOutGarbageCollectorPropagation(t *testing.T) {
+	for _, tc := range []struct {
+		finalizer, reason string
+	}{
+		{metav1.FinalizerDeleteDependents, cleanupReasonForegroundDeletion},
+		{metav1.FinalizerOrphanDependents, cleanupReasonOrphanDeletion},
+	} {
+		t.Run(tc.finalizer, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+				t.Fatal(err)
+			}
+			f.mb.Finalizers = append(f.mb.Finalizers, tc.finalizer)
+			if err := f.c.Update(context.Background(), f.mb); err != nil {
+				t.Fatal(err)
+			}
+			if done, requeue := f.finalize(t); done || requeue != 10*time.Second {
+				t.Fatalf("done=%v requeue=%s", done, requeue)
+			}
+			if _, ok := f.cleanupJob(t); ok {
+				t.Fatal("a cleanup Job was created while the garbage collector processes dependents")
+			}
+			if cond := cleanupCondition(t, f); cond == nil || cond.Reason != tc.reason {
+				t.Fatalf("condition %+v, want %s", cond, tc.reason)
+			}
+			f.mb.Finalizers = []string{mysqlBackupFinalizer}
+			if err := f.c.Update(context.Background(), f.mb); err != nil {
+				t.Fatal(err)
+			}
+			f.finalize(t)
+			if job, ok := f.cleanupJob(t); !ok || !metav1.IsControlledBy(job, f.mb) {
+				t.Fatal("cleanup did not start (owned) after the garbage collector finished")
+			}
+		})
+	}
+}
+
+func TestFinalize_ReportsPodStuckCreating(t *testing.T) {
 	f := newCleanupFixture(t)
-	if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
-		t.Fatal(err)
-	}
-	f.mb.Finalizers = append(f.mb.Finalizers, metav1.FinalizerDeleteDependents)
-	if err := f.c.Update(context.Background(), f.mb); err != nil {
-		t.Fatal(err)
-	}
-	if done, requeue := f.finalize(t); done || requeue != 10*time.Second {
-		t.Fatalf("done=%v requeue=%s", done, requeue)
-	}
-	if _, ok := f.cleanupJob(t); ok {
-		t.Fatal("a cleanup Job was created for the garbage collector to delete")
-	}
-	if cond := cleanupCondition(t, f); cond == nil || cond.Reason != cleanupReasonForegroundDeletion {
-		t.Fatalf("condition %+v", cond)
-	}
-	f.mb.Finalizers = []string{mysqlBackupFinalizer}
-	if err := f.c.Update(context.Background(), f.mb); err != nil {
+	f.finalize(t)
+	job, _ := f.cleanupJob(t)
+	job.UID = "cleanup-creating"
+	pod := cleanupPodFor(job, corev1.PodPending, 0, "")
+	pod.CreationTimestamp = metav1.NewTime(time.Now().Add(-3 * time.Minute))
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: cleanupContainerName, State: corev1.ContainerState{
+		Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"},
+	}}}
+	if err := f.c.Create(context.Background(), pod); err != nil {
 		t.Fatal(err)
 	}
 	f.finalize(t)
-	if _, ok := f.cleanupJob(t); !ok {
-		t.Fatal("cleanup did not start after the garbage collector finished")
+	cond := cleanupCondition(t, f)
+	if cond == nil || cond.Reason != cleanupReasonPending || !strings.Contains(cond.Message, "ContainerCreating after 3m") ||
+		!strings.Contains(cond.Message, "FailedMount") {
+		t.Fatalf("condition %+v", cond)
+	}
+}
+
+func TestCleanupPodStuck(t *testing.T) {
+	now := time.Now()
+	pending := func(age time.Duration, mutate func(*corev1.Pod)) *corev1.Pod {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", CreationTimestamp: metav1.NewTime(now.Add(-age))},
+			Status: corev1.PodStatus{Phase: corev1.PodPending}}
+		if mutate != nil {
+			mutate(p)
+		}
+		return p
+	}
+	creating := func(p *corev1.Pod) {
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}}}
+	}
+	for _, tc := range []struct {
+		name string
+		pod  *corev1.Pod
+		want string
+	}{
+		{name: "creating within the grace", pod: pending(30*time.Second, creating), want: ""},
+		{name: "creating past the grace", pod: pending(2*time.Minute, creating), want: "still ContainerCreating after 2m"},
+		{name: "unschedulable", pod: pending(2*time.Minute, func(p *corev1.Pod) {
+			p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "Unschedulable", Message: "volume node affinity conflict"}}
+		}), want: "not scheduled for 2m0s: Unschedulable: volume node affinity conflict"},
+		{name: "image pull, immediately", pod: pending(time.Second, func(p *corev1.Pod) {
+			p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "c", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ErrImagePull"}}}}
+		}), want: "waiting: ErrImagePull"},
+		{name: "running", pod: &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}}, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cleanupPodStuck(tc.pod, now)
+			if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFinalize_StripsDeadHoldsKeepsLiveOnes(t *testing.T) {
+	ctx := context.Background()
+	f := newCleanupFixture(t)
+	live := verifyCR("live", "lion", "nightly-s3")
+	live.UID = "uid-live"
+	live.Status.Phase = v1alpha1.VerificationPhaseRestoring
+	if err := f.c.Create(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	// Cleanup is blocked, so the CR stays Terminating: the case where a
+	// dead hold would pin the PITR cutoff indefinitely.
+	f.mb.Status.ArtifactStorage = nil
+	if err := f.c.Status().Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	f.mb.Annotations = map[string]string{
+		annotationVerificationHoldPrefix + "uid-gone": "gone",
+		annotationVerificationHoldPrefix + "uid-live": "live",
+	}
+	if err := f.c.Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if done, _ := f.finalize(t); done {
+		t.Fatal("released a blocked cleanup")
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if _, kept := f.mb.Annotations[annotationVerificationHoldPrefix+"uid-gone"]; kept {
+		t.Fatal("dead hold not removed")
+	}
+	if f.mb.Annotations[annotationVerificationHoldPrefix+"uid-live"] != "live" {
+		t.Fatal("live hold removed")
+	}
+	if !BackupHasVerificationHold(f.mb) {
+		t.Fatal("PITR would no longer see the live hold")
+	}
+}
+
+func TestRepairTerminalAttribution_BackfillsArtifactStorage(t *testing.T) {
+	ctx := context.Background()
+	f := newCleanupFixture(t)
+	producer, err := BuildBackupJob(BackupJobInputs{FailoverGroup: f.fg, Profile: f.fg.Spec.Backup.Profiles[0], Backup: f.mb,
+		SourceSite: "pdx", CredsSecretName: "creds", ScriptsConfigMapName: "scripts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controllerutil.SetControllerReference(f.mb, producer, f.r.Scheme); err != nil {
+		t.Fatal(err)
+	}
+	producer.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobComplete, Status: corev1.ConditionTrue}}
+	if err := f.c.Create(ctx, producer); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	// A backup that succeeded before status.artifactStorage existed.
+	f.mb.Status.ArtifactStorage = nil
+	if err := f.c.Status().Update(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.r.repairTerminalAttribution(ctx, f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(f.mb), f.mb); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.mb.Status.ArtifactStorage; s == nil || s.Location != "lion/art" || s.Bucket != "bloodraven-backups" {
+		t.Fatalf("artifactStorage not backfilled before deletion: %+v", s)
 	}
 }
 

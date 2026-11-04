@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -19,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/shipstream/bloodraven/api/v1alpha1"
 )
@@ -434,4 +436,68 @@ func TestVerificationHold_ReleaseConflictIsRetried(t *testing.T) {
 	if _, held := b.Annotations[verificationHoldKey(v)]; held {
 		t.Fatal("release was not retried after a conflict")
 	}
+}
+
+// A crash after the verification Job was created but before status.jobName
+// and the phase were written: the observe path stamps the hold on the next
+// pass, before anything else could prune the backup.
+func TestVerificationHold_StampedOnObserveAfterCrash(t *testing.T) {
+	ctx := context.Background()
+	fg := verifyFG()
+	b := successfulBackup("backup-a", fg.Name, "nightly-s3")
+	v := verifyCR("observe", fg.Name, "nightly-s3")
+	v.UID = "uid-observe"
+	r, c := newVerificationReconciler(t, fg, b, v, dsnSecret())
+	reconcileVerifUntilStable(t, r, v.Name)
+	// Rewind to the crash point: Job exists, status and hold do not.
+	if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
+		t.Fatal(err)
+	}
+	b.Annotations = nil
+	if err := c.Update(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil {
+		t.Fatal(err)
+	}
+	v.Status.JobName, v.Status.Phase = "", v1alpha1.VerificationPhaseProvisioning
+	if err := c.Status().Update(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(v)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
+		t.Fatal(err)
+	}
+	if b.Annotations[verificationHoldKey(v)] != v.Name {
+		t.Fatalf("observe path did not stamp the hold: %v", b.Annotations)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(v), v); err != nil || v.Status.JobName == "" || v.Status.Phase != v1alpha1.VerificationPhaseRestoring {
+		t.Fatalf("status not recovered: %+v %v", v.Status, err)
+	}
+}
+
+func TestPruneSuccessful_LogsHeldBackup(t *testing.T) {
+	now := time.Now()
+	backups := makeBackups(t, now, 0, time.Hour)
+	for i := range backups {
+		backups[i].UID = types.UID("uid-" + backups[i].Name)
+	}
+	reader := holdVerification("reader", v1alpha1.VerificationPhaseRestoring, "uid-b-b")
+	r, _ := newBackupReconciler(t, append(asClientObjects(backups), reader)...)
+	var lines []string
+	logger := funcr.New(func(prefix, args string) { lines = append(lines, args) }, funcr.Options{})
+	ctx := log.IntoContext(context.Background(), logger)
+	if err := r.pruneSuccessful(ctx, backups, 1, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range lines {
+		if strings.Contains(line, `"msg"="backup prune held by verification"`) &&
+			strings.Contains(line, `"backup"="b-b"`) && strings.Contains(line, `"backupUID"="uid-b-b"`) &&
+			strings.Contains(line, `"verifications"=["reader"]`) && strings.Contains(line, `"verificationUIDs"=["uid-reader"]`) {
+			return
+		}
+	}
+	t.Fatalf("missing structured log line; got %q", lines)
 }

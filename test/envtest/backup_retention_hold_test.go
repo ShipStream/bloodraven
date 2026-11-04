@@ -14,6 +14,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -332,9 +333,10 @@ func TestEnvtest_VerificationDeletionWaitsForForegroundJobDeletion(t *testing.T)
 	}
 }
 
-// TestEnvtest_ArtifactStorageImmutable pins the CEL rules: once the
-// artifact location is recorded, status.artifactStorage cannot be edited
-// or removed, so a status writer cannot redirect a recursive delete.
+// TestEnvtest_ArtifactStorageImmutable pins the CEL rule on the MysqlBackup
+// root: once the artifact location is recorded, status.artifactStorage cannot
+// be edited or removed, including by removing or nulling the whole status
+// through the status subresource and then writing a different destination.
 func TestEnvtest_ArtifactStorageImmutable(t *testing.T) {
 	ns := createNamespace(t, "artifact-storage-immutable")
 	fg := newVerificationFG(ns)
@@ -342,6 +344,9 @@ func TestEnvtest_ArtifactStorageImmutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := createHeldTestBackup(t, ns, fg.Name, "lion-nightly-cel", time.Now())
+	key := client.ObjectKeyFromObject(b)
+	recorded := *b.Status.ArtifactStorage
+
 	moved := b.DeepCopy()
 	moved.Status.ArtifactStorage.Location = "elsewhere/" + b.Name
 	moved.Status.Location = "elsewhere/" + b.Name
@@ -353,7 +358,32 @@ func TestEnvtest_ArtifactStorageImmutable(t *testing.T) {
 	if err := k8sClient.Status().Update(ctx, removed); err == nil {
 		t.Fatal("API server allowed status.artifactStorage to be removed")
 	}
+	for _, p := range []client.Patch{
+		client.RawPatch(types.JSONPatchType, []byte(`[{"op":"remove","path":"/status"}]`)),
+		client.RawPatch(types.MergePatchType, []byte(`{"status":null}`)),
+		client.RawPatch(types.MergePatchType, []byte(`{"status":{"artifactStorage":null}}`)),
+		client.RawPatch(types.MergePatchType, []byte(`{"status":{"artifactStorage":{"location":"team-b/`+b.Name+`","bucket":"other"}}}`)),
+	} {
+		target := &v1alpha1.MysqlBackup{ObjectMeta: metav1.ObjectMeta{Name: b.Name, Namespace: ns}}
+		err := k8sClient.Status().Patch(ctx, target, p)
+		if err == nil {
+			t.Fatalf("API server accepted status patch %T that drops or replaces the recorded destination", p)
+		}
+		if !strings.Contains(err.Error(), "status.artifactStorage cannot be changed or removed") {
+			t.Fatalf("status patch rejected for another reason: %v", err)
+		}
+		var got v1alpha1.MysqlBackup
+		if err := k8sClient.Get(ctx, key, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status.ArtifactStorage == nil || *got.Status.ArtifactStorage != recorded {
+			t.Fatalf("recorded destination changed: %+v", got.Status.ArtifactStorage)
+		}
+	}
 	// Unrelated status changes still go through.
+	if err := k8sClient.Get(ctx, key, b); err != nil {
+		t.Fatal(err)
+	}
 	b.Status.Message = "still writable"
 	if err := k8sClient.Status().Update(ctx, b); err != nil {
 		t.Fatalf("unrelated status update rejected: %v", err)

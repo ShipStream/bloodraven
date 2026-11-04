@@ -140,6 +140,9 @@ func runCleanupRequest(ctx context.Context, req artifactCleanupRequest, newStore
 		}
 		store, err := newStore(ctx, &sidecar.PITRConfig{StorageType: "S3", S3: &sidecar.PITRS3Config{
 			Bucket: req.Bucket, Region: req.Region, EndpointURL: req.Endpoint, AWSCredsDir: req.Creds,
+			// mysqlsh, which wrote the artifact, assumes us-east-1 when no
+			// region is configured; the Go SDK refuses to sign without one.
+			DefaultRegion: "us-east-1",
 		}})
 		if err != nil {
 			return 0, rejected("init S3 store: %v", err)
@@ -321,11 +324,24 @@ func cleanupPVC(mount, rel string) (int, *cleanupError) {
 	if errors.Is(walkErr, fs.ErrNotExist) {
 		return 0, nil
 	}
+	if pathEscapes(walkErr) {
+		return 0, rejected("refusing to delete %s: %v", rel, walkErr)
+	}
 	if walkErr != nil {
 		return 0, transient("inspect %s: %v", rel, walkErr)
 	}
 	if err := root.RemoveAll(rel); err != nil {
+		if pathEscapes(err) {
+			return 0, rejected("refusing to delete %s: %v", rel, err)
+		}
 		return 0, transient("remove %s: %v", rel, err)
 	}
 	return files, nil
+}
+
+// pathEscapes reports os.Root's refusal to follow a path out of the mount.
+// It is a refusal, not a storage error: retrying cannot make it succeed.
+// os does not export the sentinel, so match its text.
+func pathEscapes(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "path escapes from parent")
 }

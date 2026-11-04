@@ -30,6 +30,8 @@ const (
 	cleanupReasonHeldByVerification    = "HeldByVerification"
 	cleanupReasonPending               = "CleanupPending"
 	cleanupReasonForegroundDeletion    = "ForegroundDeletion"
+	cleanupReasonOrphanDeletion        = "OrphanDeletion"
+	cleanupReasonJobInvalid            = "CleanupJobInvalid"
 )
 
 const (
@@ -380,6 +382,37 @@ func cleanupPodWaiting(pod *corev1.Pod) string {
 		return fmt.Sprintf("container %s is waiting: %s", status.Name, w.Reason)
 	}
 	return ""
+}
+
+// cleanupStartGrace is how long a pod may sit unscheduled or creating its
+// container (pulling the image, mounting volumes) before it is reported.
+const cleanupStartGrace = time.Minute
+
+// cleanupPodStuck explains a cleanup pod that cannot start: a waiting
+// reason that needs attention, or a pod still unscheduled or creating its
+// container after cleanupStartGrace (a missing Secret volume, an unbound
+// claim, or a ReadWriteOnce claim attached on another node). "" otherwise.
+func cleanupPodStuck(pod *corev1.Pod, now time.Time) string {
+	if waiting := cleanupPodWaiting(pod); waiting != "" || pod == nil {
+		return waiting
+	}
+	elapsed := now.Sub(pod.CreationTimestamp.Time)
+	if pod.Status.Phase != corev1.PodPending || pod.CreationTimestamp.IsZero() || elapsed < cleanupStartGrace {
+		return ""
+	}
+	elapsed = elapsed.Truncate(time.Second)
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse {
+			return fmt.Sprintf("pod %s not scheduled for %s: %s: %s", pod.Name, elapsed, c.Reason, c.Message)
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if w := status.State.Waiting; w != nil {
+			return fmt.Sprintf("container %s still %s after %s; check the pod's FailedMount/FailedAttachVolume events (kubectl describe pod %s)",
+				status.Name, w.Reason, elapsed, pod.Name)
+		}
+	}
+	return fmt.Sprintf("pod %s still Pending after %s; check its events (kubectl describe pod %s)", pod.Name, elapsed, pod.Name)
 }
 
 // cleanupPodVerdict returns the exit code and termination message of the

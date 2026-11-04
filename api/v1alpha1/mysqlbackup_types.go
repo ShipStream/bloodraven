@@ -14,6 +14,7 @@ import (
 // +kubebuilder:printcolumn:name="Location",type=string,JSONPath=`.status.location`,priority=1
 // +kubebuilder:printcolumn:name="Size",type=string,JSONPath=`.status.size`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location) || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage == oldSelf.status.artifactStorage)",message="status.artifactStorage cannot be changed or removed once its location is recorded"
 
 // MysqlBackup represents a single backup run against a MysqlFailoverGroup.
 // It may be created directly by an operator (one-off backup) or indirectly
@@ -80,7 +81,6 @@ const (
 )
 
 // MysqlBackupStatus tracks the observed state of a MysqlBackup.
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.artifactStorage) || has(self.artifactStorage)",message="status.artifactStorage cannot be removed once recorded"
 type MysqlBackupStatus struct {
 	// Phase is the lifecycle phase of this backup run.
 	Phase BackupPhase `json:"phase,omitempty"`
@@ -189,8 +189,8 @@ type MysqlBackupStatus struct {
 }
 
 // BackupArtifactStorage is the immutable storage destination of a backup
-// artifact.
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.location) || self == oldSelf",message="artifactStorage is immutable once its location is recorded"
+// artifact. Immutability is enforced from the MysqlBackup root, so removing
+// the whole status does not bypass it.
 type BackupArtifactStorage struct {
 	// Location is the artifact location the producing Job wrote, in the
 	// form of MysqlBackupStatus.Location. Cleanup refuses to run unless the

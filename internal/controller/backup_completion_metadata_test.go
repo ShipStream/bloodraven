@@ -505,3 +505,54 @@ func TestTailJobCompletion_ReadsOnlyOwnedPods(t *testing.T) {
 		})
 	}
 }
+
+// TestFinalize_DoesNotAdoptCleanupPodLog drives the deletion path that
+// triggered #211 item 3: while completion metadata is still retryable,
+// finalize re-tails the backup Job's log, and a Succeeded cleanup pod carries
+// the same backup label. Only the producing Job's own pod may be read.
+func TestFinalize_DoesNotAdoptCleanupPodLog(t *testing.T) {
+	ctx := context.Background()
+	r, c, _, mb, job := backupMetadataFixture(t, false)
+	if err := c.Delete(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "metadata-pod", Namespace: mb.Namespace}}); err != nil {
+		t.Fatal(err)
+	}
+	_, location, err := backupJobDestination(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(mb), mb); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.Now()
+	mb.Status.Phase, mb.Status.Location, mb.Status.CompletionTime = v1alpha1.BackupPhaseSucceeded, location, &now
+	setCondition(&mb.Status.Conditions, metav1.Condition{Type: ConditionBackupMetadataComplete, Status: metav1.ConditionFalse,
+		Reason: "SentinelUnavailable", Message: "logs not read yet", LastTransitionTime: now})
+	if err := c.Status().Update(ctx, mb); err != nil {
+		t.Fatal(err)
+	}
+	cleanupJob := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: cleanupJobName(mb.Name), Namespace: mb.Namespace, UID: "cleanup-uid"}}
+	cleanupJob.Spec.Template.Spec = job.Spec.Template.Spec
+	if err := c.Create(ctx, backupJobPod("cleanup-pod", mb, cleanupJob, corev1.PodSucceeded)); err != nil {
+		t.Fatal(err)
+	}
+	var read []string
+	backupMetadataLogs(t, r, func(w http.ResponseWriter, req *http.Request) {
+		parts := strings.Split(req.URL.Path, "/")
+		read = append(read, parts[len(parts)-2])
+		_, _ = fmt.Fprintln(w, backupmeta.FormatDumpComplete(backupmeta.DumpComplete{Location: "foreign/cleanup"}))
+	})
+	if _, _, err := r.finalize(ctx, mb); err != nil {
+		t.Fatal(err)
+	}
+	for _, pod := range read {
+		if pod == "cleanup-pod" {
+			t.Fatal("finalize read the cleanup pod's log as backup completion metadata")
+		}
+	}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(mb), mb); err != nil {
+		t.Fatal(err)
+	}
+	if mb.Status.Location != location {
+		t.Fatalf("location changed to %q", mb.Status.Location)
+	}
+}

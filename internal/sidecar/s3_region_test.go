@@ -123,3 +123,27 @@ func TestS3StoreListPagesVisitsEachPage(t *testing.T) {
 		t.Fatalf("pages = %v", pages)
 	}
 }
+
+// TestS3StoreDefaultRegionOnlyWhenAsked pins the region fallback: artifact
+// cleanup asks for us-east-1 (matching mysqlsh) for a plain-AWS profile with
+// no region; the sidecar, which does not ask, keeps the SDK's behaviour.
+func TestS3StoreDefaultRegionOnlyWhenAsked(t *testing.T) {
+	for _, tc := range []struct {
+		name, defaultRegion, configured, want string
+	}{
+		{name: "cleanup, nothing configured", defaultRegion: "us-east-1", want: "us-east-1"},
+		{name: "cleanup, configured region wins", defaultRegion: "us-east-1", configured: "ap-south-1", want: "ap-south-1"},
+		{name: "sidecar, nothing configured", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateAWSEnv(t)
+			store, err := newS3Store(context.Background(), &PITRS3Config{Bucket: "b", Region: tc.configured, DefaultRegion: tc.defaultRegion, AWSCredsDir: s3TestCreds(t)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := store.client.Options().Region; got != tc.want {
+				t.Fatalf("region %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

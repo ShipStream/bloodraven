@@ -470,6 +470,15 @@ func (r *MysqlBackupReconciler) repairTerminalAttribution(ctx context.Context, b
 			})
 		}
 	}
+	if backup.Status.Phase == v1alpha1.BackupPhaseSucceeded && (next.ArtifactStorage == nil || next.ArtifactStorage.Location == "") {
+		// Backups that succeeded before status.artifactStorage existed get
+		// their destination now, while the producing Job certainly exists,
+		// rather than at deletion, when a foreground cascade may already
+		// have removed it.
+		if storage, err := artifactStorageFromJob(&job); err == nil {
+			next.ArtifactStorage = storage
+		}
+	}
 	if equality.Semantic.DeepEqual(&backup.Status, &next) {
 		return recovery, nil
 	}
@@ -517,6 +526,14 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 	// release them. Failed Jobs never acquire a planned cleanup destination.
 	if _, err := r.repairTerminalAttribution(ctx, backup); err != nil && !errors.Is(err, errBackupDestinationUnavailable) {
 		return false, 0, err
+	}
+	// A hold whose verification can no longer read (its finalizer was
+	// removed by hand, say) would keep the PITR cutoff pinned for as long
+	// as cleanup stays blocked. Drop it first.
+	if stripped, err := r.stripDeadHolds(ctx, backup); err != nil {
+		return false, 0, err
+	} else if !stripped {
+		return false, 2 * time.Second, nil
 	}
 	if backup.Status.Location == "" {
 		condition := apiMeta.FindStatusCondition(backup.Status.Conditions, ConditionBackupMetadataComplete)
@@ -584,9 +601,19 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		// Foreground deletion makes the garbage collector delete every
 		// dependent, including a cleanup Job created now. Wait until it
 		// has finished that phase and dropped its finalizer.
-		if controllerutil.ContainsFinalizer(backup, metav1.FinalizerDeleteDependents) {
+		// Orphan deletion has the same window: a Job created before the
+		// collector strips owner references would lose its owner and
+		// block cleanup as somebody else's Job.
+		switch {
+		case controllerutil.ContainsFinalizer(backup, metav1.FinalizerDeleteDependents):
 			if err := r.setArtifactCleanupCondition(ctx, backup, cleanupReasonForegroundDeletion,
 				"deleted with propagationPolicy=Foreground; cleanup starts after the garbage collector has removed this backup's dependents"); err != nil {
+				return false, 0, err
+			}
+			return false, 10 * time.Second, nil
+		case controllerutil.ContainsFinalizer(backup, metav1.FinalizerOrphanDependents):
+			if err := r.setArtifactCleanupCondition(ctx, backup, cleanupReasonOrphanDeletion,
+				"deleted with propagationPolicy=Orphan; cleanup starts after the garbage collector has released this backup's dependents"); err != nil {
 				return false, 0, err
 			}
 			return false, 10 * time.Second, nil
@@ -628,7 +655,9 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 			return r.blockArtifactCleanup(ctx, backup, cleanupReasonCredentialsMissing,
 				fmt.Sprintf("profile %q: %v", profile.Name, err), 5*time.Minute)
 		case err != nil:
-			return r.blockArtifactCleanup(ctx, backup, cleanupReasonRejected, err.Error(), cleanupRetryAfterRejection)
+			// The recorded destination or storage type cannot be turned
+			// into a Job (unknown type, snapshot without bucket or claim).
+			return r.blockArtifactCleanup(ctx, backup, cleanupReasonJobInvalid, err.Error(), cleanupRetryAfterRejection)
 		}
 		if err := controllerutil.SetControllerReference(backup, built, r.Scheme); err != nil {
 			return false, 0, fmt.Errorf("set cleanup job owner ref: %w", err)
@@ -681,7 +710,7 @@ func (r *MysqlBackupReconciler) finalize(ctx context.Context, backup *v1alpha1.M
 		if err != nil {
 			return false, 0, fmt.Errorf("read cleanup pod: %w", err)
 		}
-		if waiting := cleanupPodWaiting(pod); waiting != "" {
+		if waiting := cleanupPodStuck(pod, time.Now()); waiting != "" {
 			if err := r.setArtifactCleanupCondition(ctx, backup, cleanupReasonPending,
 				fmt.Sprintf("cleanup Job %s: %s", cleanupJob.Name, waiting)); err != nil {
 				return false, 0, err
@@ -732,7 +761,7 @@ func (r *MysqlBackupReconciler) retryFailedCleanup(ctx context.Context, backup *
 	}
 	detail := strings.TrimSpace(strings.TrimPrefix(message, backupmeta.CleanupFailedPrefix))
 	if detail == "" {
-		detail = cleanupPodWaiting(pod)
+		detail = cleanupPodStuck(pod, time.Now())
 	}
 	if detail == "" {
 		_, detail = jobPhase(job, "cleanup")

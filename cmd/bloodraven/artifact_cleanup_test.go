@@ -207,8 +207,8 @@ func TestCleanupPVC(t *testing.T) {
 		if err := os.Symlink(outside, filepath.Join(mount, "sub")); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cleanupPVC(mount, "sub/backup-1"); err == nil {
-			t.Fatal("cleanup followed a symlink out of the mount")
+		if _, err := cleanupPVC(mount, "sub/backup-1"); err == nil || err.code != backupmeta.CleanupExitRejected {
+			t.Fatalf("symlink escape: %v, want a refusal (exit %d)", err, backupmeta.CleanupExitRejected)
 		}
 		if _, err := os.Stat(filepath.Join(outside, "backup-1", "keep")); err != nil {
 			t.Fatalf("file outside the mount was deleted: %v", err)
@@ -276,7 +276,7 @@ func TestArtifactCleanup_VerdictAndExitCode(t *testing.T) {
 					t.Fatalf("verdict does not parse: %q", msg)
 				}
 				// Deleting by key never needs the backup passphrase.
-				if gotCfg == nil || gotCfg.PassphraseFile != "" || gotCfg.S3 == nil || gotCfg.S3.AWSCredsDir != "/creds" {
+				if gotCfg == nil || gotCfg.PassphraseFile != "" || gotCfg.S3 == nil || gotCfg.S3.AWSCredsDir != "/creds" || gotCfg.S3.DefaultRegion != "us-east-1" {
 					t.Fatalf("unexpected store config %+v", gotCfg)
 				}
 			}

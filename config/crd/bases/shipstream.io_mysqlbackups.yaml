@@ -147,9 +147,6 @@ spec:
                       Job.
                     type: string
                 type: object
-                x-kubernetes-validations:
-                - message: artifactStorage is immutable once its location is recorded
-                  rule: '!has(oldSelf.location) || self == oldSelf'
               attempt:
                 description: |-
                   Attempt is the retry attempt number for scheduled CRs: 1 for the
@@ -320,10 +317,13 @@ spec:
                 - PVC
                 type: string
             type: object
-            x-kubernetes-validations:
-            - message: status.artifactStorage cannot be removed once recorded
-              rule: '!has(oldSelf.artifactStorage) || has(self.artifactStorage)'
         type: object
+        x-kubernetes-validations:
+        - message: status.artifactStorage cannot be changed or removed once its location
+            is recorded
+          rule: '!has(oldSelf.status) || !has(oldSelf.status.artifactStorage) || !has(oldSelf.status.artifactStorage.location)
+            || (has(self.status) && has(self.status.artifactStorage) && self.status.artifactStorage
+            == oldSelf.status.artifactStorage)'
     served: true
     storage: true
     subresources:

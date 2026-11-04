@@ -953,8 +953,9 @@ Do not:
 2. Reasons:
    - `CleanupFailed`: exit 75 (storage error), a crash, deadline, eviction or no recorded exit. A new Job runs 5 minutes after the failure.
    - `CleanupRejected`: exit 64. The message says why: missing credential keys, a refused path, a cross-bucket location, an invalid endpoint. A new Job runs 30 minutes after the failure.
-   - `CleanupPending`: the container cannot start; the message carries the waiting reason (`ImagePullBackOff`: the operator image must be pullable in the backup namespace with `spec.backup.imagePullSecrets`).
-   - `ForegroundDeletion`: deleted with `--cascade=foreground` (Argo CD's default prune); cleanup starts once the garbage collector has removed the backup's dependents.
+   - `CleanupPending`: the pod cannot start; the message carries the waiting reason (`ImagePullBackOff`: the operator image must be pullable in the backup namespace with `spec.backup.imagePullSecrets`), or how long it has been unscheduled or `ContainerCreating` (check `kubectl describe pod` for `FailedMount`/`FailedAttachVolume`, typically a ReadWriteOnce claim attached on another node).
+   - `ForegroundDeletion` / `OrphanDeletion`: deleted with `--cascade=foreground` (Argo CD's default prune) or `--cascade=orphan`; cleanup starts once the garbage collector has processed the backup's dependents.
+   - `CleanupJobInvalid`: the recorded destination cannot be turned into a Job (unknown storage type, no bucket or claim recorded). No Job ran; treat like `DestinationUnverified`.
    - `CredentialsUnavailable`: the profile no longer has an S3 `credentialsSecret`.
    - `OperatorImageUnset`: the operator cannot name its own image; check its Deployment.
    - `DestinationUnverified`: no recorded `status.artifactStorage.location` (a backup from an older operator) and it cannot be recovered from the producing Job (gone, owned by something else, or its destination depends on runtime-only values), so the exact artifact is unknown.
